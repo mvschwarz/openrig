@@ -59,9 +59,13 @@ for (const shell of ["bash", "zsh", "dash", "ksh"]) {
           fs.writeFileSync(path.join(bin, "claude"), shadow, { mode: 0o755 });
           fs.writeFileSync(path.join(root, "claude"), shadow, { mode: 0o755 });
         }
-        const prompt = "printf '%s\\n' \"$?\" > " + quote(status) + "\n"
+        // The hook keeps the exit status first and writes its file last, so a complete status file means the parent
+        // and lookup files are complete too.
+        const prompt = "_fixture_status=$?\n"
           + "printf '%s|%s|%s' \"$$\" \"$OPENRIG_NODE_ID\" \"$CLAUDE_CONFIG_DIR\" > " + quote(parent) + "\n"
-          + "command -v claude > " + quote(lookup);
+          + "command -v claude > " + quote(lookup) + "\n"
+          + "printf '%s\\n' \"$_fixture_status\" > " + quote(status);
+        const statusWritten = () => fs.existsSync(status) && fs.readFileSync(status, "utf8").endsWith("\n");
         fs.writeFileSync(rc, [
           "export PATH=" + quote(bin + ":" + env.PATH) + " MARKER=" + quote(marker),
           "export OPENRIG_NODE_ID=parent-node OPENRIG_HOME=parent-home CLAUDE_CONFIG_DIR=parent-config",
@@ -82,7 +86,7 @@ for (const shell of ["bash", "zsh", "dash", "ksh"]) {
           const shellCommand = shell === "zsh" ? "zsh -d -i" : shell === "bash" ? "bash --noprofile --rcfile " + quote(rc) + " -i"
             : "ENV=" + quote(rc) + " " + shell + " -i";
           await tm(["new-session", "-d", "-s", "seat", "-c", root, shellCommand]);
-          await expect.poll(() => fs.existsSync(status) && fs.existsSync(parent) && fs.existsSync(lookup), { timeout: 5000 }).toBe(true);
+          await expect.poll(statusWritten, { timeout: 5000 }).toBe(true);
           const before = fs.readFileSync(parent, "utf8"), beforeLookup = fs.readFileSync(lookup, "utf8");
           const parentPid = Number(before.split("|")[0]);
           fs.unlinkSync(status);
@@ -126,7 +130,7 @@ for (const shell of ["bash", "zsh", "dash", "ksh"]) {
           } else expect(got.wrapper).toBe("function");
           process.kill(got.pid, "SIGTERM");
           if (shell === "dash" || shell === "ksh") await tm(["send-keys", "-t", "seat", "fixture_hook", "Enter"]);
-          await expect.poll(() => fs.existsSync(status), { timeout: 5000 }).toBe(true);
+          await expect.poll(statusWritten, { timeout: 5000 }).toBe(true);
           expect(Number(fs.readFileSync(status, "utf8").trim())).toBe(0);
           expect(fs.readFileSync(parent, "utf8")).toBe(before);
           expect(fs.readFileSync(lookup, "utf8")).toBe(beforeLookup);
