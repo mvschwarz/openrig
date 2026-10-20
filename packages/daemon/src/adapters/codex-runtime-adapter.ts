@@ -1106,13 +1106,15 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const extendedSleepMs = RESUME_EXTENDED_SLEEP_MS;
     // #1524 (b): a managed resume of a known conversation is proven from Codex's own records, inside one wall-clock
     // deadline for the whole existing window. Why it is still unproven, for the attention text at the bound.
-    // With a conversation to prove, no new poll, sleep or proof read starts at or after the deadline, and no value that
-    // arrives after it is used. Work already started isn't cancelled: a capture in flight, a synchronous record read,
-    // or the one-shot update-prompt step can finish late, read-only apart from that step's one key.
+    // With a conversation to prove, the deadline prevents acceptance of late wrapped poll or proof values, or of a late
+    // match or mismatch. Ordinary poll sleeps request at most the remaining time. Work already started is not cancelled,
+    // and scheduling or synchronous work can delay return. The existing update-prompt helper has its own reads,
+    // reporting and guarded one-key behaviour outside this deadline.
     const resumeToken = opts?.resumeToken;
     const deadline = Date.now() + this.resumeProofWindowMs;
     let unproven: string | null = null;
-    // A sleep between polls never runs past the deadline when proving; false once no time is left.
+    // Ordinary poll sleeps request at most the remaining time; scheduling can delay their completion. False once no time
+    // is left.
     const pause = async (ms: number): Promise<boolean> => {
       if (!resumeToken) { await this.sleep(ms); return true; }
       const left = deadline - Date.now();
