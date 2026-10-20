@@ -606,9 +606,16 @@ export function multipartUnfinished(opts: SubsystemSlackDeliveryOpts, decision: 
   return !opts.delivered.load().has(decision.decisionId) && opts.attempted.load().has(`${decision.decisionId}:part:1`);
 }
 
+/** Whether any attempt of this decision was made (its single message or its first part). No Slack read. */
+export function wasAttempted(opts: SubsystemSlackDeliveryOpts, decision: OutboundDecision): boolean {
+  const attempted = opts.attempted.load();
+  return attempted.has(decision.decisionId) || attempted.has(`${decision.decisionId}:part:1`);
+}
+
 export type SubsystemSlackDeliverFn = SubsystemDeliverFn & {
   landing: (decision: OutboundDecision) => ReturnType<typeof deliveryLanding>;
   unfinished: (decision: OutboundDecision) => boolean;
+  attempted: (decision: OutboundDecision) => boolean;
 };
 
 export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): SubsystemSlackDeliverFn {
@@ -744,5 +751,6 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
   return Object.assign(fn, {
     landing: (decision: OutboundDecision) => deliveryLanding(opts, decision),
     unfinished: (decision: OutboundDecision) => multipartUnfinished(opts, decision),
+    attempted: (decision: OutboundDecision) => wasAttempted(opts, decision),
   });
 }

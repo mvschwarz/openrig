@@ -778,6 +778,28 @@ describe("after QA: changed circumstances and a second person", () => {
     finishedAsContinuation(row); // the post that already started is finished, not dropped by the raised dial
   });
 
+  it("review 6b: a failed quiet read on a partly posted ask's replay retains it; once reads recover it's held, then finished once", async () => {
+    const { row, first } = await partlyPosted({ humanIntent: "update" });
+    quietOnFor("other");
+    saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-OWNER", secretsEnvFile: join(home, "slack.env"), minimumLevelThatPosts: "ALERT" }, home);
+    const read = vi.spyOn(HumanQuietStore.prototype, "quietStateFor").mockImplementation(() => { throw new Error("disk I/O error (test)"); });
+    let w: ReturnType<typeof wire>;
+    try {
+      w = restart(first); // the replay can't decide: quiet hours can't be read
+      await settle();
+    } finally { read.mockRestore(); }
+    expect(posts, "nothing posts on that pass").toHaveLength(1);
+    expect(new DispatchBuffer(home).pending(), "the attempted original is retained, not acked").toHaveLength(1);
+    w = restart(w); // reads recover: the replay holds it as a continuation
+    await settle();
+    expect(posts).toHaveLength(1);
+    expect(notes(row).some((n) => n.startsWith("delivery-decision: quiet-hold "))).toBe(true);
+    expect(notes(row).some((n) => n.startsWith("quiet-hold-continuation "))).toBe(true);
+    quiet.end("other", { endedBy: "t", now: new Date() });
+    await release();
+    finishedAsContinuation(row); // part 2 once, in the thread; part 1 never again
+  });
+
   it("review 6 (F2): a release whose history read fails posts nothing; once history reads, the original's own part posts once", async () => {
     const row = await ask({ destinationSession: "other@external", humanDetail: "The full supplemental detail for this decision." });
     const first = wire();

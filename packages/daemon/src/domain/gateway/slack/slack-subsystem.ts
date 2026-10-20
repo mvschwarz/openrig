@@ -897,6 +897,13 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
     try {
       ruled = p.qitemId ? decideForPayload(p) : null;
     } catch (error) {
+      // An attempted decision (it may be partly or wholly in Slack) is retained and nothing posts: acking it would drop
+      // the post's missing parts and let the sweep offer the ask again under a new id, posting it from the start. Its
+      // replay decides again once the quiet state reads. A store check only: no Slack read on a failure path.
+      if ("attempted" in deliver && (deliver as { attempted: (d: typeof decision) => boolean }).attempted(decision)) {
+        log(`delivery decision for attempted ${decision.decisionId} couldn't be made; retained: ${(error as Error).message}`);
+        return { ok: false as const, class: "quiet-unreadable", detail: (error as Error).message };
+      }
       // The decision couldn't be made (for example the person's quiet hours couldn't be read): post nothing and record
       // nothing. Releasing the in-flight guard lets the outbound sweep offer this still-unseen ask again and decide afresh.
       log(`delivery decision for ${p.qitemId} deferred: ${(error as Error).message}`);
