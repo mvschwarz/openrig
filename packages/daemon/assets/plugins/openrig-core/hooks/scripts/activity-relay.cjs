@@ -46,7 +46,9 @@ function firstString(...values) {
   return null;
 }
 
-function buildOpenRigPayload(providerPayload, env = process.env, now = () => new Date()) {
+// The route this run reports by, so the daemon can count one event once per route: "plugin" for the plugin's hook
+// (started with --from-plugin), "managed" for the settings or managed hook copy.
+function buildOpenRigPayload(providerPayload, env = process.env, now = () => new Date(), argv = process.argv) {
   const sessionName = firstString(env.OPENRIG_SESSION_NAME, env.RIGGED_SESSION_NAME);
   const nodeId = firstString(env.OPENRIG_NODE_ID, env.RIGGED_NODE_ID);
   const runtime = firstString(env.OPENRIG_RUNTIME, env.RIGGED_RUNTIME);
@@ -80,6 +82,7 @@ function buildOpenRigPayload(providerPayload, env = process.env, now = () => new
     subtype,
     turnId: firstString(providerPayload.turn_id, providerPayload.turnId),
     occurredAt: now().toISOString(),
+    relayRoute: argv.includes("--from-plugin") ? "plugin" : "managed",
   };
 }
 

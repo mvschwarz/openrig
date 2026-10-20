@@ -7,6 +7,7 @@ import type {
   ActivityValue,
   AdapterRungInventory,
   ArbitratedSeatState,
+  EvidenceRoute,
   EvidenceRungId,
   RungHealthEvent,
   RungTrust,
@@ -523,29 +524,34 @@ export class SeatActivityService {
   /** AM-2: a TRIAL rung's evidence is measured against the current authoritative
    *  CANDIDATE value (raw ladder decision, pre-debounce) — evidence against evidence,
    *  never against the debounced display. Enough agreements over at least the minimum
-   *  window promote the rung to authoritative, visibly. */
+   *  window promote the rung to authoritative, visibly.
+   *
+   *  Agreements are counted per relay route, because one event can be posted by more than one route; one route must
+   *  reach the bar on its own, over its own window. A disagreement from any route resets every route's run. */
   private measureTrialAgreement(seat: SeatLadderState, evidence: ActivityEvidence): void {
     if (evidence.activity === undefined) return;
     if (this.rungTrust(seat, evidence.rung) !== "trial") return;
     const authority = this.rawCandidate(seat, { excludeRung: evidence.rung });
     if (!authority || authority.activity === undefined) return;
-    const entry = seat.promotion.get(evidence.rung) ?? { agreements: 0, firstAgreementAtMs: null };
-    if (authority.activity === evidence.activity) {
-      entry.agreements += 1;
-      if (entry.firstAgreementAtMs === null) entry.firstAgreementAtMs = this.now().getTime();
-      const spanMs = this.now().getTime() - (entry.firstAgreementAtMs ?? 0);
-      if (entry.agreements >= RUNG_PROMOTION_AGREEMENT_COUNT && spanMs >= RUNG_PROMOTION_MIN_WINDOW_MS) {
-        seat.trust.set(evidence.rung, "authoritative");
-        this.emitRungHealth(seat, evidence.rung, evidence.sourceId, "trial", "authoritative",
-          `promoted: ${entry.agreements} agreeing observations over ${Math.round(spanMs / 60000)}min (threshold ${RUNG_PROMOTION_AGREEMENT_COUNT} over ${Math.round(RUNG_PROMOTION_MIN_WINDOW_MS / 60000)}min)`);
-        seat.promotion.delete(evidence.rung);
-        return;
-      }
-    } else {
-      entry.agreements = 0; // agreement must be consecutive within the measured window
-      entry.firstAgreementAtMs = null;
+    const routes = seat.promotion.get(evidence.rung) ?? new Map<EvidenceRoute | "untagged", PromotionRun>();
+    if (authority.activity !== evidence.activity) {
+      seat.promotion.delete(evidence.rung); // agreement must be consecutive within the measured window, on every route
+      return;
     }
-    seat.promotion.set(evidence.rung, entry);
+    const route = evidence.route ?? "untagged";
+    const entry = routes.get(route) ?? { agreements: 0, firstAgreementAtMs: null };
+    entry.agreements += 1;
+    if (entry.firstAgreementAtMs === null) entry.firstAgreementAtMs = this.now().getTime();
+    const spanMs = this.now().getTime() - entry.firstAgreementAtMs;
+    if (entry.agreements >= RUNG_PROMOTION_AGREEMENT_COUNT && spanMs >= RUNG_PROMOTION_MIN_WINDOW_MS) {
+      seat.trust.set(evidence.rung, "authoritative");
+      this.emitRungHealth(seat, evidence.rung, evidence.sourceId, "trial", "authoritative",
+        `promoted: ${entry.agreements} agreeing observations over ${Math.round(spanMs / 60000)}min (threshold ${RUNG_PROMOTION_AGREEMENT_COUNT} over ${Math.round(RUNG_PROMOTION_MIN_WINDOW_MS / 60000)}min)`);
+      seat.promotion.delete(evidence.rung);
+      return;
+    }
+    routes.set(route, entry);
+    seat.promotion.set(evidence.rung, routes);
   }
 
   /** The raw ladder decision for working/idle: highest authoritative rung with usable,
@@ -754,6 +760,12 @@ interface NeedsInputShape {
   reason: string | null;
 }
 
+/** One relay route's consecutive agreements toward promoting a trial rung. */
+interface PromotionRun {
+  agreements: number;
+  firstAgreementAtMs: number | null;
+}
+
 interface SeatLadderState {
   permissions: Map<string, { sinceMs: number; confirmed: boolean; nextCheckMs: number }>;
   permissionRevision: number;
@@ -763,7 +775,7 @@ interface SeatLadderState {
   inventory: AdapterRungInventory | null;
   sources: Map<string, { latest: ActivityEvidence; latestActivity: ActivityEvidence | null }>;
   trust: Map<EvidenceRungId, RungTrust>;
-  promotion: Map<EvidenceRungId, { agreements: number; firstAgreementAtMs: number | null }>;
+  promotion: Map<EvidenceRungId, Map<EvidenceRoute | "untagged", PromotionRun>>;
   contradictionSinceMs: number | null;
   pendingIdle: { sinceMs: number; ticks: number; lastSeq: number } | null;
   waiters: SeatWaiter[];

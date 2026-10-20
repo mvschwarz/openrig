@@ -125,7 +125,13 @@ export interface ActivityEvidence {
   activity?: ActivityValue;
   needsInput?: NeedsInput;
   permissionRequest?: { id: string };
+  /** Which relay route posted hook evidence, when it said. One event can arrive by more than one route (a Codex seat's
+   *  plugin hook and its managed hook), so promotion counts agreements per route. Absent for an untagged post. */
+  route?: EvidenceRoute;
 }
+
+/** The bounded set of relay routes. "unrecognised" stands for any other label, so a post can never add a new key. */
+export type EvidenceRoute = "plugin" | "managed" | "unrecognised";
 
 /** A visible rung-health transition (AM-1): arbitration can never make a silently-dead
  *  source authoritative, and the degradation itself must be observable. */

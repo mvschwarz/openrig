@@ -5,7 +5,7 @@ import type { AgentActivityStore } from "../domain/agent-activity-store.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
 import type { EventBus } from "../domain/event-bus.js";
 import { verifyStartupProof } from "../domain/startup-proof.js";
-import type { ActivityEvidence } from "../domain/activity-taxonomy.js";
+import type { ActivityEvidence, EvidenceRoute } from "../domain/activity-taxonomy.js";
 import type { AgentActivity } from "../domain/types.js";
 import * as parkedQuery from "../domain/parked-query.js";
 import { runtimeRungInventory } from "../domain/activity-taxonomy.js";
@@ -31,6 +31,7 @@ export function evidenceFromHookActivity(input: {
   runtime: string | null;
   activity: AgentActivity;
   seq: number;
+  route?: EvidenceRoute;
 }): ActivityEvidence | null {
   const base = {
     seatNodeId: input.seatNodeId,
@@ -39,6 +40,7 @@ export function evidenceFromHookActivity(input: {
     sourceId: `${input.runtime ?? "unknown-runtime"}:hooks`,
     seq: input.seq,
     observedAt: input.activity.eventAt ?? input.activity.sampledAt,
+    ...(input.route ? { route: input.route } : {}),
   };
   if (input.activity.reason === "permission_request_pending") {
     return { ...base, permissionRequest: { id: input.activity.turnId ?? "uncorrelated" } };
@@ -53,6 +55,13 @@ export function evidenceFromHookActivity(input: {
     default:
       return null; // unknown = noise, never evidence
   }
+}
+
+/** The relay route a hook post names: "plugin" or "managed". An untagged post (an older relay) stays untagged; any
+ *  other value is "unrecognised", so a poster can't add promotion keys of its own. */
+export function hookRelayRoute(value: unknown): EvidenceRoute | undefined {
+  if (value === undefined || value === null) return undefined;
+  return value === "plugin" || value === "managed" ? value : "unrecognised";
 }
 
 // Per-source monotonic seq for ingested hook evidence (the relay does not mint one).
@@ -430,6 +439,7 @@ activityRoutes.post("/hooks", async (c) => {
       runtime,
       activity: result.activity,
       seq: nextHookSeq(`${emitted.nodeId}:${runtime ?? "unknown-runtime"}:hooks`),
+      route: hookRelayRoute(body.relayRoute),
     });
     if (evidence) oracle.reportEvidence(evidence);
   }
