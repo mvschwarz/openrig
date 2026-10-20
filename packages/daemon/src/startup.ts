@@ -619,7 +619,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const tmuxOptionSettings = new ContextPackSettingsStore();
   tmuxAdapter.launchEnvironment = () => ({
     inheritTmuxEnvironment: tmuxOptionSettings.resolveOne("terminal.inherit_tmux_environment").value === true,
-    env: { ...process.env, ...launchSessionEnv },
+    // Reuse the selected auth/endpoint channel, not every daemon credential.
+    // Ordinary shell/config roots remain daemon-selected; seat overrides are merged by the adapter.
+    env: { ...Object.fromEntries(["LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "CLAUDE_CONFIG_DIR"]
+      .map(key => [key, process.env[key]])), ...launchSessionEnv },
   });
   const tmuxOptionDefaults = new TmuxOptionDefaultsApplier({
     tmuxAdapter,

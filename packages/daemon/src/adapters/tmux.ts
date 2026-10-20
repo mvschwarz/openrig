@@ -365,7 +365,7 @@ export class TmuxAdapter {
       const values = Object.entries({ ...baseline, ...seatEnv })
         .filter((entry): entry is [string,string] => entry[1] !== undefined)
         .map(([key,value]) => shellQuote(`${key}=${value}`));
-      const reset = `exec /usr/bin/env -i ${values.join(" ")} TMUX="$TMUX" TMUX_PANE="$TMUX_PANE" TERM="$TERM" SHELL="$SHELL" "$@"`;
+      const reset = `exec /usr/bin/env -i -- ${values.join(" ")} TMUX="$TMUX" TMUX_PANE="$TMUX_PANE" TERM="$TERM" SHELL="$SHELL" "$@"`;
       return ["/bin/sh", "-c", reset, "sh", shell, ...(command ? ["-c", command] : ["-l"])];
     } catch {
       // Keep the working launch, with a diagnostic; this option is not a new admission gate.
