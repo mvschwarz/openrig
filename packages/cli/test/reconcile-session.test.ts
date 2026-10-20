@@ -57,6 +57,7 @@ describe("rig reconcile-session", () => {
   let server: http.Server;
   let port: number;
   let lastBody: Record<string, unknown> | null = null;
+  const requests: string[] = [];
 
   beforeAll(async () => {
     server = http.createServer((req, res) => {
@@ -64,6 +65,13 @@ describe("rig reconcile-session", () => {
       let body = "";
       req.on("data", (c: Buffer) => { body += c; });
       req.on("end", () => {
+        requests.push(url);
+        if (url.endsWith("/repair-missing-pane") && !url.includes("old-daemon")) {
+          lastBody = JSON.parse(body || "{}");
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, result: { ...OK_RESPONSE.result, mode: "repair-missing-pane", pane: "%1" } }));
+          return;
+        }
         if (req.method === "POST" && url.includes("/reconcile")) {
           lastBody = JSON.parse(body || "{}");
           if (url.includes("dead-session")) {
@@ -74,7 +82,7 @@ describe("rig reconcile-session", () => {
             res.end(JSON.stringify(OK_RESPONSE));
           }
         } else {
-          res.writeHead(404).end();
+          res.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: false, error: "Not found" }));
         }
       });
     });
@@ -101,7 +109,7 @@ describe("rig reconcile-session", () => {
   function makeCmd(): Command {
     const prog = new Command();
     prog.exitOverride();
-    prog.addCommand(reconcileSessionCommand(runningDeps()));
+    prog.addCommand(reconcileSessionCommand(runningDeps()).exitOverride());
     return prog;
   }
 
@@ -158,5 +166,35 @@ describe("rig reconcile-session", () => {
   it("wired via createProgram", async () => {
     const program = createProgram();
     expect(program.commands.find((c) => c.name() === "reconcile-session")).toBeDefined();
+  });
+
+  it("uses only the distinct repair endpoint and reports the retained session", async () => {
+    requests.length = 0;
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "reconcile-session", "dev-impl@my-rig", "--repair-missing-pane", "--no-launch"]);
+    });
+    expect(requests).toEqual(["/api/sessions/dev-impl@my-rig/repair-missing-pane"]);
+    expect(lastBody).toEqual({});
+    expect(logs.join("\n")).toContain("Repaired missing pane %1");
+    expect(logs.join("\n")).toContain("session sess-2 retained");
+    expect(logs.join("\n")).not.toContain("Reconciled");
+    expect(exitCode).toBeUndefined();
+  });
+  it("requires explicit --no-launch for missing-pane repair before any request", async () => {
+    requests.length = 0;
+    const { exitCode, logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "reconcile-session", "dev-impl@my-rig", "--repair-missing-pane"]);
+    });
+    expect(exitCode).toBe(1);
+    expect(logs.join("\n")).toContain("--repair-missing-pane requires --no-launch");
+    expect(requests).toEqual([]);
+  });
+  it("gets 404 from an old daemon without retrying the adoption endpoint", async () => {
+    requests.length = 0;
+    const { exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "reconcile-session", "old-daemon@my-rig", "--repair-missing-pane", "--no-launch", "--json"]);
+    });
+    expect(exitCode).toBe(1);
+    expect(requests).toEqual(["/api/sessions/old-daemon@my-rig/repair-missing-pane"]);
   });
 });
