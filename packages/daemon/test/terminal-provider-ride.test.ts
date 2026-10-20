@@ -192,11 +192,13 @@ describe("view-composer partition vectors", () => {
     expect(() => chunkPanes([], 0)).toThrow();
   });
 
-  it("carries live Claude and Codex runtimes into Herdr tile hints but leaves terminal seats unchanged", () => {
+  it("carries known runtimes into Herdr tile hints but leaves terminal and unknown seats unchanged", () => {
     const members = deriveViewMembers([
       { canonicalSessionName: "claude@rig", attachmentType: "tmux", runtime: "claude-code" },
       { canonicalSessionName: "codex@rig", attachmentType: "tmux", runtime: "codex" },
+      { canonicalSessionName: "pi@rig", attachmentType: "tmux", runtime: "pi" },
       { canonicalSessionName: "operator@rig", attachmentType: "tmux", runtime: "terminal" },
+      { canonicalSessionName: "unknown@rig", attachmentType: "tmux", runtime: "unknown" },
     ]);
     const view = composeView("rig:rig", members, ctxWith([]));
     const grid = buildGridRoot(view.opened).root;
@@ -210,7 +212,9 @@ describe("view-composer partition vectors", () => {
     expect(panes.filter((pane) => pane.label).map((pane) => pane.command)).toEqual([
       ["sh", "-c", "env HERDR_AGENT=claude tmux attach -t 'claude@rig'"],
       ["sh", "-c", "env HERDR_AGENT=codex tmux attach -t 'codex@rig'"],
+      ["sh", "-c", "env HERDR_AGENT=pi tmux attach -t 'pi@rig'"],
       ["sh", "-c", "tmux attach -t 'operator@rig'"],
+      ["sh", "-c", "tmux attach -t 'unknown@rig'"],
     ]);
     expect(panes.at(-1)?.command).toEqual(["sh"]);
   });

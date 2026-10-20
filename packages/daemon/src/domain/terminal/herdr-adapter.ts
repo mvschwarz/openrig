@@ -28,7 +28,7 @@
 //    to shell anyway).
 //  - The composer's `paneCommand` is a SHELL string (`tmux attach -r -t 's'`,
 //    `ssh 'dest' tmux attach …`); the pane node's `command` is an ARGV array —
-//    it is carried through `sh -c` with Herdr's fixed Claude/Codex detection
+//    it is carried through `sh -c` with Herdr's fixed Claude/Codex/Pi detection
 //    hint when the live runtime is known, without re-parsing shell quoting.
 //  - Liveness/availability = the socket `ping` (is the multiplexer's OWN
 //    control socket answering — NOT a daemon server ping; HERDR-FINDINGS #3's
@@ -203,7 +203,7 @@ function blankPane(): HerdrPaneNode {
 }
 
 function herdrPaneCommand(pane: ComposedPane): string {
-  const agent = pane.runtime === "claude-code" ? "claude" : pane.runtime === "codex" ? "codex" : null;
+  const agent = pane.runtime === "claude-code" ? "claude" : pane.runtime === "codex" ? "codex" : pane.runtime === "pi" ? "pi" : null;
   return agent ? `env HERDR_AGENT=${agent} ${pane.paneCommand}` : pane.paneCommand;
 }
 
@@ -215,7 +215,7 @@ function herdrPaneCommand(pane: ComposedPane): string {
  * every cell is the same size; blanks are layout filler only — they are never
  * reported as opened seats. Each real leaf runs the composer's shell
  * `paneCommand` via `["sh","-c",…]` so the composed quoting (read-only `-r`,
- * ssh-wrap) is preserved; a known Claude/Codex runtime adds Herdr's detection
+ * ssh-wrap) is preserved; a known Claude/Codex/Pi runtime adds Herdr's detection
  * hint. Rows are built as equal `right` strips,
  * then combined with equal `down` strips.
  */
