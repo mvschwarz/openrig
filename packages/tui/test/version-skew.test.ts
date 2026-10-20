@@ -65,7 +65,7 @@ describe("a mismatch stops the background refresh", () => {
     await live.refresh();
     expect(hydrate).toHaveBeenCalledTimes(2);
     expect(vi.getTimerCount()).toBe(0);
-    expect(live.load().skew).toContain("restart rig tui");
+    expect(live.load().skew).toContain("Restart rig tui");
     live.close();
   });
 
