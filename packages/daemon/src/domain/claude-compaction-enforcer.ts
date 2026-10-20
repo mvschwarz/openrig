@@ -51,7 +51,7 @@ export const POST_COMPACT_RESTORE_COOLDOWN_MS_DEFAULT = 10 * 60_000;
 // artifact and idle wait before it sends /compact. Existing request ceiling:
 // writing the restore map can take a minute+; the wait returns as soon as the
 // seat is idle, so this only bounds a pathological never-idle case.
-export const MANUAL_PREP_WAIT_MS_DEFAULT = 120_000;
+export const MANUAL_PREP_WAIT_MS_DEFAULT = 180_000;
 // Operational ceiling, not a measured optimum. Existing context polls advance auto preparation.
 export const AUTO_PREP_WAIT_MS_DEFAULT = 25 * 60_000;
 const PREP_SEND_ATTEMPTS_MAX = 3;
@@ -770,7 +770,7 @@ export class ClaudeCompactionEnforcer {
    *
    * - SAME prompt builders + SAME configured messages (`resolveClaudeCompactionPolicy`).
    * - Wait for this attempt's map, then the existing idle observation, within one
-   *   120-second budget. Neither wait holds the seat input lease. Final writes
+   *   180-second budget. Neither wait holds the seat input lease. Final writes
    *   recheck the attempt, policy and occupant; marker presence is not map quality.
    * - Seeds the EXISTING `pendingPostCompactRestore` back-half state machine,
    *   drained by the same ContextMonitor poll loop as an auto-compact — there is
@@ -820,15 +820,19 @@ export class ClaudeCompactionEnforcer {
       await this.sleep(Math.min(250, Math.max(1, attempt.deadlineAt! - this.now())));
     }
     if (attempt.status !== "waiting") return failed(attempt.reason ?? "preparation_incomplete");
-    // Same transport idle classifier (including its UNKNOWN behavior), outside the input lease.
-    const remaining = attempt.deadlineAt! - this.now();
-    if (remaining <= 0) {
-      return failed("preparation_incomplete");
-    }
+    // Manual preparation can pause for an ordinary approval after the map is complete.
+    // Keep the same classifier/deadline and wait outside the input lease; never answer it.
     let idle;
-    try { idle = await this.sessionTransport.waitUntilIdle(input.sessionName, remaining, attempt.controller.signal); }
-    catch { idle = { ok: false, reason: "transport_unavailable" }; }
-    this.reconcilePreparations();
+    do {
+      const remaining = attempt.deadlineAt! - this.now();
+      if (remaining <= 0) return failed("preparation_incomplete");
+      try { idle = await this.sessionTransport.waitUntilIdle(input.sessionName, remaining, attempt.controller.signal); }
+      catch { idle = { ok: false, reason: "transport_unavailable" }; }
+      this.reconcilePreparations();
+      if (idle.ok || idle.reason !== "target_needs_input" || attempt.status !== "waiting") break;
+      await this.sleep(Math.min(250, Math.max(1, attempt.deadlineAt! - this.now())));
+      this.reconcilePreparations();
+    } while (attempt.status === "waiting");
     if (!idle.ok || attempt.status !== "waiting") {
       const reason = attempt.reason ?? (!idle.ok ? idle.reason : "preparation_incomplete");
       return failed(reason);

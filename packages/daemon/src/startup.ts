@@ -46,6 +46,7 @@ import { codexDaemonSupportProbe } from "./domain/codex-daemon-support.js";
 import { codexNetworkDefaultReader } from "./domain/codex-network-default.js";
 import { codexUsageReader } from "./domain/provider/codex-usage-reader.js";
 import { CodexUsageWindows } from "./domain/provider/codex-usage-windows.js";
+import { ProviderAccountReadingsStore } from "./domain/provider/provider-account-readings.js";
 import { claudeAuthStatusReader } from "./domain/provider/claude-auth-status-reader.js";
 import { ClaudeUsageWindows, latestClaudeWindowSamples } from "./domain/provider/claude-usage-windows.js";
 import { prepareCodexTeamWorkspace } from "./domain/codex-team-workspace.js";
@@ -101,7 +102,7 @@ import { probeSessionActivity, SessionTransport } from "./domain/session-transpo
 import { AgentActivityStore } from "./domain/agent-activity-store.js";
 import { HistoryQuery } from "./domain/history-query.js";
 import { AskService } from "./domain/ask-service.js";
-import { WakeResolveService } from "./domain/wake-resolve-service.js";
+import { WakeResolveService, WAKE_SESSIONS_SQL } from "./domain/wake-resolve-service.js";
 import type { WakeSessionRow } from "./domain/wake-resolver.js";
 import { ChatRepository } from "./domain/chat-repository.js";
 import { StreamStore } from "./domain/stream-store.js";
@@ -1316,7 +1317,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // samples (usage_samples), read on every view.
       usageWindows: {
         enabled: () => new ContextPackSettingsStore().resolveOne("provider.usage_windows").value === true,
-        windows: new CodexUsageWindows({ read: codexUsageReader({ launchPath: process.env.PATH, home: daemonHome, codexHome }) }),
+        windows: new CodexUsageWindows({ read: codexUsageReader({ launchPath: process.env.PATH, home: daemonHome, codexHome }),
+          store: new ProviderAccountReadingsStore(db) }),
         claude: new ClaudeUsageWindows({
           readIdentity: claudeAuthStatusReader({ launchPath: process.env.PATH, home: daemonHome, claudeConfigDir: process.env.CLAUDE_CONFIG_DIR }),
           listSamples: () => latestClaudeWindowSamples(db),
@@ -1422,10 +1424,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       listSessionsBySeat: (seat: string) =>
         db
           .prepare(
-            `SELECT s.id AS id, s.session_name AS sessionName, s.resume_token AS resumeToken,
-                    n.runtime AS runtime, s.created_at AS createdAt
-               FROM sessions s JOIN nodes n ON s.node_id = n.id
-              WHERE s.session_name = ? ORDER BY s.id DESC`,
+            WAKE_SESSIONS_SQL,
           )
           .all(seat) as WakeSessionRow[],
     }),

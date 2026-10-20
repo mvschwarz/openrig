@@ -250,4 +250,45 @@ describe("rig ask --wake (L3 CLI)", () => {
     expect(out).toMatch(/no resume token/); // gen 2 flagged token-absent
     expect(exitCode).toBe(2);
   });
+
+  it.each(["pi", "custom", ""])("does not run a raw-ID wake as Claude for --runtime %j", async (runtime) => {
+    const runner: WakeRunner = vi.fn(async () => ({ stdout: "wrong runtime", stderr: "", code: 0, timedOut: false }));
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd(tokenDeps(runner)).parseAsync(["node", "rig", "ask", "my-rig", "q", "--wake", "fixture-token", "--runtime", runtime]);
+    });
+    expect(runner).not.toHaveBeenCalled();
+    expect(exitCode).toBe(1);
+    expect(logs.join("\n")).toMatch(/runtime .*not supported/i);
+  });
+
+  it.each([["claude", "claude"], ["claude-code", "claude"], ["codex", "codex"]])("preserves raw-ID runtime %s", async (runtime, binary) => {
+    const runner: WakeRunner = vi.fn(async () => ({ stdout: "answer", stderr: "", code: 0, timedOut: false }));
+    const { exitCode } = await captureLogs(async () => {
+      await makeCmd(tokenDeps(runner)).parseAsync(["node", "rig", "ask", "my-rig", "q", "--wake", "fixture-token", "--runtime", runtime]);
+    });
+    expect(runner).toHaveBeenCalledWith(binary, expect.arrayContaining(["fixture-token"]), expect.any(Object));
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("keeps the seat-resolved runtime authoritative over an unused raw-ID runtime option", async () => {
+    const runner: WakeRunner = vi.fn(async () => ({ stdout: "answer", stderr: "", code: 0, timedOut: false }));
+    const deps = seatDeps(runner, { resolved: true, token: "resolved-token", runtime: "codex", sessionId: 7 });
+    const { exitCode } = await captureLogs(async () => {
+      await makeCmd(deps).parseAsync(["node", "rig", "ask", "my-rig", "q", "--wake", "dev@my-rig", "--runtime", "pi"]);
+    });
+    expect(runner).toHaveBeenCalledWith("codex", expect.arrayContaining(["resolved-token"]), expect.any(Object));
+    expect(exitCode).toBeUndefined();
+  });
+
+  it.each(["pi", "custom"])("does not execute an unsupported runtime %s returned by a daemon", async (runtime) => {
+    const runner: WakeRunner = vi.fn(async () => ({ stdout: "wrong runtime", stderr: "", code: 0, timedOut: false }));
+    const deps = seatDeps(runner, { resolved: true, token: "unsupported-token", runtime, sessionId: 7 });
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd(deps).parseAsync(["node", "rig", "ask", "my-rig", "q", "--wake", "dev@my-rig"]);
+    });
+    expect(runner).not.toHaveBeenCalled();
+    expect(exitCode).toBe(1);
+    expect(logs.join("\n")).toMatch(/runtime .*not supported/i);
+  });
+
 });

@@ -281,6 +281,8 @@ export class ClaudeUsageWindows {
         latestFromSource: true,
         lastRefresh: this.lastRefresh,
         currentAvailability: "unknown",
+        // No sample-time link from a seat's reading to an account: each window is its seat's own.
+        accountHistory: "unknown",
         signIn: claudeSignIn(this.lastRefresh, current?.at ?? null),
         unavailableReason: unreadable ?? NO_SEAT,
       });
@@ -299,6 +301,8 @@ export class ClaudeUsageWindows {
         lastRefresh: this.lastRefresh,
         // Never "known" from this join: see CLAUDE_NO_SAMPLE_BINDING. The windows below are each seat's own readings.
         currentAvailability: "unknown",
+        // No sample-time link from a seat's reading to an account: each window is its seat's own.
+        accountHistory: "unknown",
         signIn: claudeSignIn(this.lastRefresh, current?.at ?? null),
         unavailableReason: current ? CLAUDE_NO_SAMPLE_BINDING : CLAUDE_NO_SAMPLE_BINDING_UNREAD,
         identityNote: current
@@ -328,6 +332,8 @@ export class ClaudeUsageWindows {
         latestFromSource: false,
         lastRefresh: this.lastRefresh,
         currentAvailability: "unknown",
+        // No sample-time link from a seat's reading to an account: each window is its seat's own.
+        accountHistory: "unknown",
         signIn: { state: "unknown", at: null, evidence: s.identity.source === "unresolved"
           // An unresolved earlier identity can't be matched, so it may be this same login.
           ? "an earlier read not matched to the latest one (possibly this same login)"

@@ -161,10 +161,10 @@ it("missing generation disarms automatic preparation; public reconcile requires 
   expect(compacts(f)).toHaveLength(1);
 });
 
-it("explicit skip-map still works without a generation and uses the existing 120-second budget", async () => {
+it("explicit skip-map still works without a generation and uses the manual 180-second budget", async () => {
   const f = fixture(), requestAt = f.clock();
   expect(await f.req(trigger, { session: seat, skipMap: true })).toMatchObject({ status: 200, body: { ok: true } });
-  expect(f.enforcer.getPreparationState(seat)).toMatchObject({ occupantGeneration: null, deadlineAt: requestAt + 120000 });
+  expect(f.enforcer.getPreparationState(seat)).toMatchObject({ occupantGeneration: null, deadlineAt: requestAt + 180000 });
   expect(f.writes).toHaveLength(2);
   expect(compacts(f)).toHaveLength(1);
 });

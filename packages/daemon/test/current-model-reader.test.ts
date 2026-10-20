@@ -126,6 +126,49 @@ it("reports Pi response evidence without consulting its pin or models comparator
 });
 
 
+it("selects the current Pi runner and its session file for the effort report, and refuses another occupant's session", async () => {
+  const f = fixture("pi");
+  expect(await f.reader.currentPiRecord(f.node.id, "editor@studio")).toMatchObject({
+    ok: true, path: f.path, launchId: "launch", pid: 20, startedAt: f.processRows[1]!.startedAt, command: f.processRows[1]!.command,
+  });
+  vi.spyOn(f.sessions, "currentOccupantGenerationForSession").mockReturnValue("replacement");
+  expect(await f.reader.currentPiRecord(f.node.id, "editor@studio")).toMatchObject({ ok: false });
+});
+
+it("the Pi effort record carries the runner's newest own turn when the occupant is unchanged", async () => {
+  const f = fixture("pi");
+  const record = await f.reader.currentPiRecord(f.node.id, "editor@studio");
+  expect(record).toMatchObject({ ok: true, pid: 20, observation: { ok: true, model: "example/response-model", observedAt: f.stamp } });
+  expect(f.getPanePid).toHaveBeenLastCalledWith("%1");
+});
+
+it("the Pi effort record is refused when a handover lands during the pending process lookup", async () => {
+  const f = fixture("pi");
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const rows = f.processRows;
+  f.list.mockImplementationOnce(async () => { await pending; return rows; });
+  const read = f.reader.currentPiRecord(f.node.id, "editor@studio");
+  await vi.waitFor(() => expect(f.list).toHaveBeenCalled());
+  f.sessions.mintOccupantTenure(f.node.id, "replacement");
+  release();
+  expect(await read).toEqual({ ok: false, reason: "the occupant changed during the read" });
+});
+
+it.each(["generation", "binding"])("the Pi effort record is refused on a same-PID %s change at the final pane lookup", async (kind) => {
+  const f = fixture("pi");
+  const calls = f.getPanePid.mock.calls;
+  f.getPanePid.mockImplementation(async () => {
+    if (calls.length === 3) {
+      if (kind === "generation") f.sessions.mintOccupantTenure(f.node.id, "replacement");
+      else f.sessions.updateBinding(f.node.id, { tmuxSession: "editor@studio", tmuxPane: "%2" });
+    }
+    return 10;
+  });
+  expect(await f.reader.currentPiRecord(f.node.id, "editor@studio")).toEqual({ ok: false, reason: "the occupant changed during the read" });
+  expect(f.getPanePid).toHaveBeenCalledTimes(3);
+});
+
 it.each(["generation", "binding", "name-generation"])("r2: rejects %s turnover on the final PID await even with the same PID", async (kind) => {
   const f = fixture();
   f.getPanePid.mockImplementation(async () => {

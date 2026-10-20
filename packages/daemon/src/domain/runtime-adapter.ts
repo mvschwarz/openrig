@@ -193,7 +193,9 @@ export interface RuntimeAdapter {
    */
   launchHarness(
     binding: NodeBinding,
-    opts: { name: string; resumeToken?: string; forkSource?: ForkSource },
+    opts: { name: string; resumeToken?: string; forkSource?: ForkSource;
+      /** Fresh successor in the retired occupant's pane; not an adopt, resume or fork. */
+      freshInPlace?: boolean },
   ): Promise<HarnessLaunchResult>;
 
   /** Observe an already launched fork without sending input or starting another process. */

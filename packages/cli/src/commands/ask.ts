@@ -145,7 +145,7 @@ Exit codes:
       }
 
       let token = target;
-      let runtime: "claude" | "codex" = opts.runtime === "codex" ? "codex" : "claude";
+      let runtime = opts.runtime ?? "claude";
 
       if (target.includes("@")) {
         const status = await getDaemonStatus(deps.lifecycleDeps);
@@ -177,6 +177,13 @@ Exit codes:
         }
         token = resolution.token;
         runtime = resolution.runtime;
+      }
+
+      if (runtime === "claude-code") runtime = "claude";
+      if (runtime !== "claude" && runtime !== "codex") {
+        console.error(`Wake runtime '${runtime || "unknown"}' is not supported. Supported runtimes are claude and codex.`);
+        process.exitCode = 1;
+        return;
       }
 
       const runner = deps.wakeRunner ?? defaultWakeRunner;

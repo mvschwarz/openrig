@@ -475,9 +475,8 @@ exit 1
     expect(publicText).not.toMatch(/v-openrig-build|release-0\.5\.5|qitem-/i);
   });
 
-  // One fire used to start 7 rig processes on a typed slice: queue whoami, two config gets,
-  // whoami, and one resolver call per level. The hook now reads both roots with one config read
-  // and the script takes a canonical seat from OPENRIG_SESSION_NAME, which leaves 5.
+  // A typed fire uses queue whoami and one config read. Notes resolve locally,
+  // and a canonical OPENRIG_SESSION_NAME avoids a separate identity process.
   describe("rig processes per fire", () => {
     const typed = (workNodePath: string) =>
       JSON.stringify({ currentWork: { workNodePath }, currentWorkBasis: "one typed in-progress work node" });
@@ -524,10 +523,7 @@ exit 1
       return { ...result, context, calls: f.calls() };
     }
 
-    const resolverCalls = (f: ReturnType<typeof fixture>, nodes: string[]) =>
-      nodes.map((node) => `scope resolve-notes ${join(realpathSync(f.workspace), node)} --json`);
-
-    it("spends 5 rig processes on a typed fire and 3 on the no-baton fallback", () => {
+    it("spends 2 rig processes on both typed and no-baton fires", () => {
       const f = fixture();
       const typedFire = hook(f);
       expect(typedFire.status).toBe(0);
@@ -539,15 +535,24 @@ exit 1
       expect(typedFire.calls).toEqual([
         "queue whoami --json",
         "config --json",
-        ...resolverCalls(f, ["", "missions/release", "missions/release/slices/feature"]),
       ]);
 
       const fallback = hook(f, { RIG_QUEUE_WHOAMI_STDOUT: JSON.stringify({ currentWork: null, currentWorkBasis: NO_BATON }) });
       expect(fallback.status).toBe(0);
       expect(fallback.context).toContain(`FALLBACK — no current typed baton (${NO_BATON})`);
       expect(fallback.context).toContain("Builder learned");
-      expect(fallback.calls).toEqual(["queue whoami --json", "config --json", ...resolverCalls(f, [""])]);
+      expect(fallback.calls).toEqual(["queue whoami --json", "config --json"]);
     });
+
+    it("local notes avoid a delayed CLI inside the unchanged default trace cap", () => {
+      const f = fixture();
+      const result = hook(f, { RIG_SLOW_RESOLVE: "3", OPENRIG_REFOCUS_BUDGET_MS: "" });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.context).toContain("Deliver refocus");
+      expect(result.context).toContain("NOTES · NOTES.md");
+      expect(result.context).not.toContain("TRACE GAP");
+      expect(result.calls.filter(call => call.startsWith("scope resolve-notes"))).toEqual([]);
+    }, 15_000);
 
     it("sets no root from a failed or malformed config read, so the script's own lookup runs as before", () => {
       const f = fixture();

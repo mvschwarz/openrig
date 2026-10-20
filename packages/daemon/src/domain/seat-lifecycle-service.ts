@@ -1,10 +1,12 @@
 import type { NativeProcessLister } from "./native-process-lineage.js";
+import type { CurrentModelReader } from "./model-divergence/current-model-reader.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import type { TmuxAdapter, SessionProbe } from "../adapters/tmux.js";
 import { shellQuote } from "../adapters/shell-quote.js";
+import { EFFORT_SHAPE, piThinkingValue } from "../adapters/pi-runner-protocol.js";
 import type { NodeInventoryEntry, PersistedEvent } from "./types.js";
 import { deriveCanonicalFromEntry, getNodeInventory } from "./node-inventory.js";
 import { deriveSessionName, parseSessionName } from "./session-name.js";
@@ -83,6 +85,8 @@ export interface SeatLifecycleDeps {
   inPlaceRestartDaemonStartedAt?: Date;
   /** Where a session's native transcript is (the context-usage store); without it native effort is NOT VERIFIED. */
   transcripts?: { readSidecar(sessionName: string): { ok: true; data: { transcript_path?: string | null; session_id?: string | null } } | { ok: false }; readCodexTranscriptPath(threadId: string): string | null };
+  /** The identity-verified current Pi runner and its own session file; without it a Pi seat's launch and native effort are unknown. */
+  piRecords?: Pick<CurrentModelReader, "currentPiRecord">;
 }
 
 interface ResolvedSeat {
@@ -275,6 +279,7 @@ export class SeatLifecycleService {
   private readonly inPlaceRestartTiming?: Partial<PaneCutoverTiming>;
   private readonly inPlaceRestartDaemonStartedAt?: Date;
   private readonly transcripts: SeatLifecycleDeps["transcripts"] | null;
+  private readonly piRecords: SeatLifecycleDeps["piRecords"] | null;
 
   constructor(deps: SeatLifecycleDeps) {
     if (deps.db !== deps.rigRepo.db) throw new Error("SeatLifecycleService: rigRepo must share the same db handle");
@@ -295,6 +300,7 @@ export class SeatLifecycleService {
     this.inPlaceRestartTiming = deps.inPlaceRestartTiming;
     this.inPlaceRestartDaemonStartedAt = deps.inPlaceRestartDaemonStartedAt;
     this.transcripts = deps.transcripts ?? null;
+    this.piRecords = deps.piRecords ?? null;
   }
 
   async setModel(input: { seatRef: string; model: string; reason: string; operator?: string | null }): Promise<SetModelResult> {
@@ -451,7 +457,7 @@ export class SeatLifecycleService {
     if (requested !== null) {
       if (!requested) return { ok: false, code: "missing_effort", message: "An effort level is required (--effort <level>), or pass --clear." };
       // Levels are the runtime's own (they differ by model and client), so only the shape is checked here.
-      if (!/^[A-Za-z][A-Za-z0-9_-]{0,31}$/.test(requested)) {
+      if (!EFFORT_SHAPE.test(requested)) {
         return { ok: false, code: "invalid_effort", message: `"${requested}" isn't an effort level: use the runtime's level name, such as low, medium or high.` };
       }
     }
@@ -459,8 +465,8 @@ export class SeatLifecycleService {
     if ("code" in resolved) return resolved;
     const seat = this.describe(resolved);
     const runtime = resolved.entry.runtime ?? "unknown";
-    if (runtime !== "claude-code" && runtime !== "codex") {
-      return { ok: false, code: "effort_unsupported_runtime", message: `Seat "${input.seatRef}" runs ${runtime}; reasoning effort applies to claude-code and codex seats only.` };
+    if (runtime !== "claude-code" && runtime !== "codex" && runtime !== "pi") {
+      return { ok: false, code: "effort_unsupported_runtime", message: `Seat "${input.seatRef}" runs ${runtime}; reasoning effort applies to claude-code, codex and pi seats only.` };
     }
 
     const from = this.readEffort(seat.nodeId);
@@ -509,8 +515,8 @@ export class SeatLifecycleService {
     if ("code" in resolved) return resolved;
     const seat = this.describe(resolved);
     const runtime = resolved.entry.runtime ?? "unknown";
-    if (runtime !== "claude-code" && runtime !== "codex") {
-      return { ok: false, code: "effort_unsupported_runtime", message: `Seat "${seatRef}" runs ${runtime}; reasoning effort applies to claude-code and codex seats only.` };
+    if (runtime !== "claude-code" && runtime !== "codex" && runtime !== "pi") {
+      return { ok: false, code: "effort_unsupported_runtime", message: `Seat "${seatRef}" runs ${runtime}; reasoning effort applies to claude-code, codex and pi seats only.` };
     }
     const saved = this.readEffort(seat.nodeId);
     if (!saved) {
@@ -527,6 +533,8 @@ export class SeatLifecycleService {
     if (!session || TERMINAL_SESSION_STATUSES.has(session.status) || !target) {
       emitted = { state: "unknown", detail: "The seat has no running session, so no launch to read." };
       observed = { state: "not_verified", detail: "The seat has no running session." };
+    } else if (runtime === "pi") {
+      ({ emitted, observed } = await this.piEffort(seat.nodeId, session.session_name, saved));
     } else {
       const observe = runtime === "claude-code" ? observeClaudePaneRuntime : observeCodexPaneProcess;
       const process = (await observe({ target, tmux: this.tmuxAdapter, ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) }))?.process;
@@ -544,7 +552,55 @@ export class SeatLifecycleService {
         observed = native.state === "observed" ? { ...native, matchesEmitted: native.value === value } : native;
       }
     }
-    return { ok: true, seat, runtime, requested, saved, emitted, observed, precedence, summary: effortSummary(saved, emitted, observed) };
+    return { ok: true, seat, runtime, requested, saved, emitted, observed, precedence, summary: effortSummary(saved, emitted, observed, runtime) };
+  }
+
+  /** A Pi seat's launch flag and native level, both from the identity-verified current runner: its
+   *  own command line, and the newest assistant record of this launch in its own session file. */
+  private async piEffort(nodeId: string, sessionName: string, saved: EffortResolution): Promise<Pick<EffortReport, "emitted" | "observed">> {
+    if (!this.piRecords) {
+      return {
+        emitted: { state: "unknown", detail: "The seat's Pi runner can't be read here." },
+        observed: { state: "not_verified", detail: "The seat's Pi runner can't be read here, so no turn can be tied to its launch." },
+      };
+    }
+    let selection: Awaited<ReturnType<CurrentModelReader["currentPiRecord"]>>;
+    try {
+      selection = await this.piRecords.currentPiRecord(nodeId, sessionName);
+    } catch {
+      selection = { ok: false, reason: "the pane's processes could not be read" };
+    }
+    if (!selection.ok) {
+      return {
+        emitted: { state: "unknown", detail: `No verified Pi runner for this seat: ${selection.reason}.` },
+        observed: { state: "not_verified", detail: `No verified Pi runner for this seat, so no turn can be tied to its launch: ${selection.reason}.` },
+      };
+    }
+    const tokens = processArgv(selection.command);
+    const flag = emittedEffortFromArgv("pi", tokens);
+    const value = flag.flag === "present" ? flag.value : null;
+    // ps joins argv with spaces: a bare word after the value may be the rest of a value with whitespace.
+    // Scanned as emittedEffortFromArgv does, so a value is never taken for the flag.
+    let after: string | undefined;
+    for (let index = 1; index < tokens.length; index += 1) {
+      if (tokens[index] === "--thinking") { after = tokens[index + 2]; index += 1; }
+      else if (tokens[index]!.startsWith("--thinking=")) after = tokens[index + 1];
+    }
+    const emitted: EffortReport["emitted"] = value !== null && after !== undefined && !after.startsWith("--")
+      ? { state: "unknown", detail: "The launch command's --thinking value can't be read unambiguously (it contains whitespace)." }
+      // Compared with what the launch guard sends for the saved value, not the saved value itself.
+      : { state: "observed", value, pid: selection.pid, startedAt: selection.startedAt, matchesSaved: value === (piThinkingValue(saved.effective) ?? null) };
+    const read = selection.observation;
+    if (!read.ok) return { emitted, observed: { state: "not_verified", detail: `No Pi turn from this launch can be read: ${read.reason}.` } };
+    if (!read.thinkingLevel) {
+      return { emitted, observed: { state: "not_verified", detail: "This Pi doesn't record the thinking level on its turns (Pi 0.99.0 and later do), so the level it ran at can't be shown." } };
+    }
+    // No flag sent: Pi's level comes from the model suffix or its default, so there is nothing to mismatch.
+    return { emitted, observed: {
+      state: "observed", value: read.thinkingLevel, at: read.observedAt ?? "unknown time", source: "Pi session (latest successful assistant turn; error and aborted turns are skipped)", outcome: "recorded",
+      detail: "Pi recorded this level with the turn's request: the session's level after Pi's own cap, not proof the provider applied it.",
+      ...(emitted.state === "observed" && value !== null ? { matchesEmitted: read.thinkingLevel === value } : {}),
+    } };
   }
 
   private lastRequestedEffort(nodeId: string): EffortReport["requested"] {
@@ -1904,19 +1960,26 @@ function isStringArrayOf<T extends string>(value: unknown, allowed: readonly T[]
 }
 
 /** One line naming where the four values agree, and where they can't be seen. */
-function effortSummary(saved: EffortResolution, emitted: EffortReport["emitted"], observed: EffortReport["observed"]): string {
+function effortSummary(saved: EffortResolution, emitted: EffortReport["emitted"], observed: EffortReport["observed"], runtime: string): string {
   const savedText = saved.effective ? `${saved.effective} (${saved.source === "seat_choice" ? "seat choice" : "authored"})` : "no flag (the runtime's own default)";
-  if (emitted.state !== "observed") return `Saved: ${savedText}. Launch: unknown (${emitted.detail}) Native effort: NOT VERIFIED.`;
+  if (emitted.state !== "observed") {
+    // Only a Pi launch value that can't be read back unambiguously leaves the native turn readable.
+    const native = observed.state === "observed" ? `${observed.value} (${observed.source}, ${observed.at})` : "NOT VERIFIED";
+    return `Saved: ${savedText}. Launch: unknown (${emitted.detail}) Native effort: ${native}.`;
+  }
   const launch = emitted.value ?? "no flag";
-  const launchNote = emitted.matchesSaved ? "" : " This differs from the saved value: it applies at the seat's next managed continuation.";
+  // A Pi saved value the launch guard leaves out never applies, so it isn't reported as pending.
+  const launchNote = runtime === "pi" && saved.effective && !piThinkingValue(saved.effective) ? " The saved value isn't sent: it doesn't pass the check set-effort uses (a letter, then up to 31 letters, digits, - or _)."
+    : emitted.matchesSaved ? "" : " This differs from the saved value: it applies at the seat's next managed continuation.";
   if (observed.state !== "observed") return `Saved: ${savedText}. Launch sent: ${launch}.${launchNote} Native effort: NOT VERIFIED (${observed.detail})`;
-  const sent = observed.matchesEmitted === false
-    ? `${observed.value}, not the ${launch} the launch sent (changed or overridden inside the session)`
-    : observed.value;
+  const sent = observed.matchesEmitted !== false ? observed.value
+    : runtime === "pi" ? `${observed.value}, not the ${launch} sent at launch (Pi caps a level the model doesn't offer, ignores one it doesn't know, and the level can change inside the session)`
+    : `${observed.value}, not the ${launch} the launch sent (changed or overridden inside the session)`;
   const verdict = observed.outcome === "accepted" ? "accepted by the service for that turn"
     : observed.outcome === "rejected" ? `REJECTED (${observed.detail})`
     : observed.outcome === "failed" || observed.outcome === "interrupted" ? (observed.detail ?? "not judged").replace(/\.$/, "")
     : observed.outcome === "pending" ? "its turn hasn't finished, so not yet known whether it was taken"
+    : runtime === "pi" ? "applied level NOT VERIFIED (Pi records the level it requested, not what the provider ran)"
     : "applied level NOT VERIFIED (whether this is after any model fallback isn't shown)";
   return `Saved: ${savedText}. Launch sent: ${launch}.${launchNote} The session sent ${sent} with its latest turn (${observed.source}, ${observed.at}): ${verdict}.`;
 }

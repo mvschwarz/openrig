@@ -53,11 +53,24 @@ export function signInText(r: Row): string | null {
   return `sign-in: ${state} (${str(s["evidence"])}${s["at"] ? `; as of ${str(s["at"])}` : ""})`;
 }
 
+/** The row's retained history: last observed exhaustion, the account link, and an inactive account's profile. */
+function historyLines(r: Row): ContentLine[] {
+  const lines: ContentLine[] = [];
+  const ex = r["lastObservedExhausted"] as Row | null | undefined;
+  if (ex) lines.push({ text: `    last observed exhausted at ${str(ex["at"])} (${ex["window"] ? str(ex["window"]) : "account-level"}: ${str(ex["evidence"])})` });
+  if (r["accountHistory"] === "unknown") lines.push({ text: "    account history unknown" });
+  if (r["savedProfile"] === "not linked") lines.push({ text: "    saved profile: not linked (OpenRig doesn't record which saved profile was active at this read)" });
+  return lines;
+}
+
 export function allowanceLines(r: Row): ContentLine[] {
   const lines: ContentLine[] = [];
   const id = r["identity"] as Row | null | undefined;
   if (!id) {
     lines.push({ text: `  ${str(r["provider"])}  unavailable: ${str(r["unavailableReason"], "no reading")}` });
+    // A row with no identity yet can still carry history (Claude's before its first identity refresh): before sign-in,
+    // as on an identified row.
+    lines.push(...historyLines(r));
     const last = r["lastRefresh"] as Row | null | undefined;
     if (last?.["outcome"] === "failed") lines.push({ text: `    refresh failed at ${str(last["at"])}: ${failureText(last)}` });
     const signIn = signInText(r);
@@ -67,6 +80,7 @@ export function allowanceLines(r: Row): ContentLine[] {
   const labels = [identityLabel(id), `bucket ${str(id["limitId"])}`, id["email"] ?? "email not reported", id["planType"], id["subscriptionType"], `seats ${str(r["seats"])}`]
     .filter((x) => x !== null && x !== undefined);
   const earlier = r["latestFromSource"] ? ""
+    : r["retained"] === "before_restart" ? "  [kept from before the daemon restarted; not a current reading]"
     : id["source"] === "unresolved" ? "  [from an earlier read; possibly this same login]"
       : "  [from an earlier read; the latest read didn't match this row]";
   lines.push({ text: `  ${str(r["provider"])}  ${labels.join(" · ")}${earlier}` });
@@ -89,7 +103,10 @@ export function allowanceLines(r: Row): ContentLine[] {
     for (const d of (w["disagreeingSeats"] as Row[] | undefined) ?? []) {
       lines.push({ text: `      seat ${str(d["seatSession"])} reports ${str(d["usedPercent"])}% used · resets ${str(d["resetsAt"])} · observed ${str(d["observedAt"])}` });
     }
+    const expect = w["expectation"] as Row | undefined;
+    if (expect) lines.push({ text: `      expected full since ${str(expect["expectedFullSince"])}, not yet observed (${str(expect["note"])})` });
   }
+  lines.push(...historyLines(r));
   // Whenever availability is unknown, say why (with windows too).
   if ((((r["windows"] as unknown[] | undefined) ?? []).length === 0 || r["currentAvailability"] === "unknown") && r["unavailableReason"]) lines.push({ text: `    ${r["unavailableReason"]}` });
   if (r["limitEvidence"]) lines.push({ text: `    limit evidence: ${r["limitEvidence"]}` });

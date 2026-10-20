@@ -10,6 +10,7 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { SessionTransport, classifyPaneActivity } from "../src/domain/session-transport.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
+import { RunnerCore } from "../src/adapters/pi-runner.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -123,6 +124,124 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     const rows = db.prepare("SELECT payload FROM events WHERE type = 'transport.prompt_override' ORDER BY seq").all() as Array<{ payload: string }>;
     return rows.map((r) => JSON.parse(r.payload) as Record<string, unknown>);
   }
+
+  // Real runner -> real hook normalization/store -> real ordinary-send guard.
+  it.each([
+    [529, false, true], [429, false, true], [503, false, true],
+    [401, false, false], [403, false, false], [400, false, false],
+    [undefined, false, false], ["529", false, false],
+    [529, true, false],
+  ] as const)("OMP completed failure status %s approval=%s permits retry=%s", async (errorStatus, approval, retryAllowed) => {
+    const seat = "omp-worker@my-rig";
+    const node = rigRepo.addNode(rigId, "omp.worker", { role: "worker", runtime: "omp" });
+    const session = sessionRegistry.registerSession(node.id, seat);
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: seat });
+    const mirror: string[] = [];
+    const core = new RunnerCore({
+      sendRpc: () => {}, mirrorLine: line => { mirror.push(line); }, mirrorAppend: () => {},
+      writeSidecar: () => {}, now: () => new Date().toISOString(),
+      postActivity: payload => {
+        if (!payload.eventFamily) agentActivityStore.recordHookEvent({
+          runtime: "omp", sessionName: seat, hookEvent: String(payload.hookEvent),
+          subtype: payload.subtype as string | null,
+        });
+      },
+    }, { sessionName: seat, nodeId: node.id, launchId: "attempt-1" }, { runtime: "omp" });
+    const emit = (event: Record<string, unknown>) => core.handlePiLine(JSON.stringify(event));
+    emit({ type: "agent_start" });
+    if (approval) emit({ type: "extension_ui_request", id: "approval-1", method: "confirm" });
+    // Identical diagnostic text across statuses proves that prose cannot
+    // authorize a retry (including when the typed status is auth failure).
+    emit({ type: "turn_end", message: { role: "assistant", stopReason: "error", errorStatus, errorMessage: "529 overloaded" } });
+    const { sendText, sendKeys } = spies();
+    const transport = makeTransport(mockTmux({ sendText, sendKeys }));
+    expect((await transport.send(seat, "premature retry")).reason).toBe("target_needs_input");
+    emit({ type: "agent_end" });
+    const latest = agentActivityStore.getLatestForNode({ nodeId: node.id, sessionName: seat });
+    expect(latest?.state).toBe(retryAllowed ? "idle" : "needs_input");
+    const result = await transport.send(seat, "try again");
+    expect(result.ok).toBe(retryAllowed);
+    if (retryAllowed) expect(sendText).toHaveBeenCalledTimes(1);
+    else {
+      expect(result.reason).toBe("target_needs_input");
+      expect(sendText).not.toHaveBeenCalled();
+      expect(sendKeys).not.toHaveBeenCalled();
+    }
+    expect(mirror).toContain("[omp-runner] ERROR 529 overloaded");
+  });
+
+  // Source-derived OMP v18.2.11 (e4151593), turn-recovery.ts exhaustion
+  // branch + agent-session.ts public lifecycle. No external /tmp fixture needed.
+  it.each([
+    ["exhaustion", true], ["duplicate-summary", true],
+    ["auth", false], ["approval", false], ["unknown", false],
+    ["wrong-attempt", false], ["different-error", false],
+    ["no-retry-start", false], ["new-message", false],
+    ["untyped-followup", false], ["nonterminal", false],
+    ["summary-auth", false], ["new-success", false], ["post-summary-error", false],
+  ] as const)("OMP native retry sequence %s allows ordinary send=%s", async (sequence, allowed) => {
+    const seat = "omp-retry@my-rig";
+    const node = rigRepo.addNode(rigId, "omp.retry", { role: "worker", runtime: "omp" });
+    const session = sessionRegistry.registerSession(node.id, seat);
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: seat });
+    const mirror: string[] = [];
+    const core = new RunnerCore({
+      sendRpc: () => {}, mirrorLine: line => { mirror.push(line); }, mirrorAppend: () => {},
+      writeSidecar: () => {}, now: () => new Date().toISOString(),
+      postActivity: payload => {
+        if (!payload.eventFamily) agentActivityStore.recordHookEvent({
+          runtime: "omp", sessionName: seat, hookEvent: String(payload.hookEvent),
+          subtype: payload.subtype as string | null,
+        });
+      },
+    }, { sessionName: seat, nodeId: node.id, launchId: "retry-run" }, { runtime: "omp" });
+    const emit = (event: Record<string, unknown>) => core.handlePiLine(JSON.stringify(event));
+    const failure = (errorStatus: number | null = 529) => {
+      const message = { role: "assistant", stopReason: "error", errorStatus, errorMessage: "529 overloaded" };
+      emit({ type: "message_end", message });
+      emit({ type: "turn_end", message });
+    };
+    const { sendText, sendKeys } = spies();
+    const transport = makeTransport(mockTmux({ sendText, sendKeys }));
+    emit({ type: "agent_start" });
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      failure();
+      if (sequence !== "no-retry-start") emit({ type: "auto_retry_start", attempt, maxAttempts: 3, delayMs: 0, errorMessage: "529 overloaded" });
+      emit({ type: "agent_end", isTerminal: false });
+      // Nonterminal settles must never advertise readiness.
+      expect(agentActivityStore.getLatestForNode({ nodeId: node.id, sessionName: seat })?.state).not.toBe("idle");
+      emit({ type: "agent_start" });
+      emit({ type: "turn_start" });
+      emit({ type: "message_start", message: { role: "assistant", content: [] } });
+    }
+    failure(sequence === "auth" ? 401 : sequence === "unknown" ? null : 529);
+    if (sequence === "approval") emit({ type: "extension_ui_request", id: "approval-1", method: "confirm" });
+    if (sequence === "new-message") emit({ type: "message_start", message: { role: "assistant", content: [] } });
+    if (sequence === "new-success") emit({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: [] } });
+    if (sequence === "untyped-followup") emit({ type: "turn_end", message: { role: "assistant", stopReason: "error", errorMessage: "new unknown failure" } });
+    expect((await transport.send(seat, "too early")).reason).toBe("target_needs_input");
+    const summary = { type: "auto_retry_end", success: false, attempt: sequence === "wrong-attempt" ? 2 : 3,
+      finalError: sequence === "different-error" ? "new failure" : "529 overloaded", retryErrors: [],
+      ...(sequence === "summary-auth" ? { error: "401 authentication failed" } : {}) };
+    emit(summary);
+    if (sequence === "duplicate-summary") emit(summary);
+    if (sequence === "post-summary-error") emit({ type: "turn_end", message: { role: "assistant", stopReason: "error", errorStatus: 401, errorMessage: "new auth failure" } });
+    emit({ type: "agent_end", isTerminal: false });
+    expect((await transport.send(seat, "still too early")).reason).toBe("target_needs_input");
+    if (sequence !== "nonterminal") emit({ type: "agent_end", isTerminal: true });
+    expect(agentActivityStore.getLatestForNode({ nodeId: node.id, sessionName: seat })?.state).toBe(allowed ? "idle" : "needs_input");
+    const result = await transport.send(seat, "try again");
+    expect(result.ok).toBe(allowed);
+    if (allowed) expect(sendText).toHaveBeenCalledTimes(1);
+    else {
+      expect(result.reason).toBe("target_needs_input");
+      expect(sendText).not.toHaveBeenCalled();
+      expect(sendKeys).not.toHaveBeenCalled();
+    }
+    expect(mirror).toContain("[omp-runner] ERROR 529 overloaded");
+  });
 
   // K-1: default send to a pane at an interactive prompt → refused, nothing typed/submitted.
   it("K-1: default send to an AskUserQuestion refuses (target_needs_input) and never types or submits", async () => {

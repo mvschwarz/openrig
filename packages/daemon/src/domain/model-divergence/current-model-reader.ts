@@ -7,12 +7,12 @@ import { ProcessCensus } from "../process-census.js";
 import {
   resolveIdentityVerifiedClaudeRecord, resolveIdentityVerifiedPiRecord,
   resolveLiveCodexThreadId, readCurrentPiOccupantModel,
-  type CurrentGenerationDeps, type PiOccupantRecordInput,
+  type CurrentGenerationDeps, type PiOccupantRecordInput, type PiRecordSelection,
 } from "./current-generation-record.js";
 import {
   readClaudeEffectiveModel, readCodexEffectiveModel,
   readClaudeModelObservation, readCodexModelObservation, readPiModelObservation,
-  type NativeModelObservation,
+  type NativeModelObservation, type PiModelObservation,
 } from "./effective-model-readers.js";
 import type { EffectiveModelRead, PinnedSeat } from "./model-divergence-monitor.js";
 
@@ -45,6 +45,9 @@ interface Deps {
 type InventoryNode = { nodeId: string; canonicalSessionName: string | null; runtime: string | null; sessionStatus: string | null };
 type PendingObservation = { pane: string; finish: (pid: number | null, unavailableReason?: string) => ModelObservation };
 type Selection = { ok: true; path: string; notBeforeMs?: number } | { ok: false; reason: string };
+type Binding = { tmuxSession: string | null; tmuxPane: string | null };
+/** The verified current Pi runner plus its newest own turn, read with the occupant unchanged throughout. */
+export type CurrentPiRecord = (PiRecordSelection & { ok: true; observation: PiModelObservation }) | { ok: false; reason: string };
 
 /** One current-record path for reporting and the existing divergence monitor. Reporting never
  * needs a configured pin, alias or comparator. Both share the same coalescing process census. */
@@ -60,24 +63,65 @@ export class CurrentModelReader {
       const path = this.deps.codexRollout(live.id, seat.sessionName, reporting);
       return path ? { ok: true, path } : { ok: false, reason: "no readable rollout for the live thread" };
     }
+    if (seat.runtime === "claude-code") {
+      const sidecar = this.deps.context.readSidecar(seat.sessionName);
+      return resolveIdentityVerifiedClaudeRecord({ ...this.occupant(seat),
+        identity: this.deps.identities.getForNode(seat.nodeId), sidecar: sidecar.ok ? sidecar.data : null,
+      }, native, (path) => { try { return statSync(path).isFile(); } catch { return false; } });
+    }
+    if (seat.runtime === "pi") return this.selectPi(seat, native);
+    return { ok: false, reason: "runtime has no supported native model reader" };
+  }
+
+  private occupant(seat: Seat) {
     const binding = this.deps.sessions.getBindingForNode(seat.nodeId);
-    const common = {
+    return {
       sessionName: seat.sessionName, generation: seat.generation,
       occupantBootAt: this.deps.sessions.currentOccupantTenure(seat.nodeId)?.bootAt ?? null,
       binding: binding ? { tmuxSession: binding.tmuxSession, tmuxPane: binding.tmuxPane } : null,
     };
-    if (seat.runtime === "claude-code") {
-      const sidecar = this.deps.context.readSidecar(seat.sessionName);
-      return resolveIdentityVerifiedClaudeRecord({ ...common,
-        identity: this.deps.identities.getForNode(seat.nodeId), sidecar: sidecar.ok ? sidecar.data : null,
-      }, native, (path) => { try { return statSync(path).isFile(); } catch { return false; } });
+  }
+
+  private selectPi(seat: Seat, native: CurrentGenerationDeps): Promise<PiRecordSelection> {
+    return resolveIdentityVerifiedPiRecord({ ...this.occupant(seat), runner: this.deps.piRunner(seat.sessionName) }, native,
+      (path) => { try { return realpathSync(path); } catch { return null; } });
+  }
+
+  /** The identity-verified current Pi runner of a seat and its own session file, selected the same
+   *  way the model observation selects it, and its newest own turn read before the final pane
+   *  lookup and occupant recheck. Never cached: each call re-reads the pane and processes. */
+  async currentPiRecord(nodeId: string, sessionName: string): Promise<CurrentPiRecord> {
+    const tenure = this.deps.sessions.currentOccupantTenure(nodeId);
+    const generation = tenure?.generationUuid ?? null;
+    const boot = tenure ? parseSqliteUtcMs(tenure.bootAt) : NaN;
+    if (!generation || !Number.isFinite(boot) || this.deps.sessions.currentOccupantGenerationForSession(sessionName) !== generation) {
+      return { ok: false, reason: `the occupant of ${sessionName} is not the seat's current occupant` };
     }
-    if (seat.runtime === "pi") {
-      const selection = await resolveIdentityVerifiedPiRecord({ ...common, runner: this.deps.piRunner(seat.sessionName) }, native,
-        (path) => { try { return realpathSync(path); } catch { return null; } });
-      return selection;
-    }
-    return { ok: false, reason: "runtime has no supported native model reader" };
+    const binding = this.deps.sessions.getBindingForNode(nodeId);
+    if (!binding?.tmuxPane || binding.tmuxSession !== sessionName) return { ok: false, reason: "the seat's pane is unknown" };
+    const native = { ...this.deps.native, listProcesses: this.processCensus.cycleLister() };
+    let pid: number | null, selection: PiRecordSelection;
+    try {
+      pid = await native.getPanePid(binding.tmuxPane);
+      if (!pid) return { ok: false, reason: "the seat's pane could not be read" };
+      selection = await this.selectPi({ nodeId, sessionName, runtime: "pi", generation }, native);
+    } catch { return { ok: false, reason: "the pane's processes could not be read" }; }
+    if (!selection.ok) return selection;
+    const observation = readPiModelObservation(selection.path, { notBeforeMs: selection.notBeforeMs });
+    let finalPid: number | null;
+    try { finalPid = await this.deps.native.getPanePid(binding.tmuxPane); } catch { return { ok: false, reason: "the seat's pane could not be read" }; }
+    // No await after this point.
+    if (!this.occupantUnchanged(nodeId, sessionName, generation, binding, pid, finalPid)) return { ok: false, reason: "the occupant changed during the read" };
+    if (finalPid === null) return { ok: false, reason: "the seat's pane could not be read" };
+    return { ...selection, observation };
+  }
+
+  /** Sampled synchronously AFTER the final PID lookup; a null final PID is unavailable, not turnover. */
+  private occupantUnchanged(nodeId: string, sessionName: string, generation: string, binding: Binding, pid: number, finalPid: number | null): boolean {
+    const current = this.deps.sessions.currentOccupantTenure(nodeId);
+    const currentBinding = this.deps.sessions.getBindingForNode(nodeId);
+    return !(current?.generationUuid !== generation || this.deps.sessions.currentOccupantGenerationForSession(sessionName) !== generation || currentBinding?.tmuxPane !== binding.tmuxPane
+      || currentBinding?.tmuxSession !== binding.tmuxSession || (finalPid !== null && finalPid !== pid));
   }
 
   /** Preserve the monitor's established read/comparison behavior, including Pi pin readings. */
@@ -174,10 +218,7 @@ export class CurrentModelReader {
       const fact = this.readFact(node, generation, pid, selected);
       return { pane: binding.tmuxPane, finish: (finalPid, unavailableReason = "pane-unavailable") => {
         // No await after this point: tenure/name/binding are sampled AFTER the final PID lookup.
-        const current = this.deps.sessions.currentOccupantTenure(node.nodeId);
-        const currentBinding = this.deps.sessions.getBindingForNode(node.nodeId);
-        if (current?.generationUuid !== generation || this.deps.sessions.currentOccupantGenerationForSession(sessionName) !== generation || currentBinding?.tmuxPane !== binding.tmuxPane
-          || currentBinding?.tmuxSession !== binding.tmuxSession || (finalPid !== null && finalPid !== pid)) return unknown("occupant-changed-during-read");
+        if (!this.occupantUnchanged(node.nodeId, sessionName, generation, binding, pid, finalPid)) return unknown("occupant-changed-during-read");
         if (finalPid === null) return unknown(unavailableReason);
         if (!fact || !("model" in fact)) return unknown("model-record-unavailable");
         // Copy only a model identifier, never arbitrary record text or a diagnostic containing paths.

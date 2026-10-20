@@ -25,9 +25,6 @@ tie. Feel free to coordinate on the issue first.
 
 ## Agents and runtimes
 
-- **Codex seats that can reach the local daemon by default** (#275), with an easy opt-out.
-- **Custom Codex providers such as Bedrock** (#194): accept providers that authenticate with an environment key, and
-  forward their token.
 - **Operator recovery for Pi and Oh My Pi seats** (#41).
 - **More harnesses:** we're working out one way for any coding-agent CLI to plug into OpenRig. More on this soon
   (design discussion: #43).
@@ -39,8 +36,6 @@ tie. Feel free to coordinate on the issue first.
 
 ## Reliability and everyday use
 
-- **A configurable readiness window for fresh launches** (#182), so seats under load don't time out at a fixed 30
-  seconds.
 - **Draft-aware delivery** (#48): automated sends wait while someone is typing in a seat, or a seat can be set to
   inbox-only.
 - **A host-aware resource budget for seats** (#80).
