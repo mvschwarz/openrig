@@ -156,6 +156,18 @@ describe("custody of asks held for quiet hours", () => {
     bare.close();
   });
 
+  it("an ordinary row whose custody read fails isn't reported held: it reads exactly as without quiet hours", async () => {
+    const row = await ask(); // never held
+    const prepare = db.prepare.bind(db);
+    const spy = vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
+      if (sql.includes("FROM queue_transitions WHERE qitem_id = ? ORDER BY transition_id")) throw new Error("database is locked (test)");
+      return prepare(sql);
+    }) as typeof db.prepare);
+    try {
+      expect(quietHoldCustody(db, row.qitemId)).toBeNull();
+    } finally { spy.mockRestore(); }
+  });
+
   it("a release turned back because quiet came on again reads as held", async () => {
     const row = await held();
     quiet.end("person", { endedBy: "t", now: new Date() });

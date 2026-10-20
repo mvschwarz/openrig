@@ -23,10 +23,12 @@ const token = (note: string, prefix: string, key: string) =>
   note.startsWith(`${prefix} `) && note.split(/\s+/).includes(`notification_key=${key}`);
 
 export function quietHoldCustody(db: Database.Database, qitemId: string, now: Date = new Date()): QuietHoldCustody | null {
+  let sawHold = false;
   try {
     const notes = (db.prepare("SELECT transition_note AS note FROM queue_transitions WHERE qitem_id = ? ORDER BY transition_id")
       .all(qitemId) as Array<{ note: string | null }>).map((r) => r.note ?? "");
     if (!notes.some((n) => n.startsWith("delivery-decision: quiet-hold "))) return null;
+    sawHold = true;
     // The current notification's key: the latest owner notification, else the row itself (as the gateway keys it).
     const owner = db.prepare("SELECT transition_id AS id FROM queue_transitions WHERE qitem_id = ? AND owner_notification_level IS NOT NULL ORDER BY transition_id DESC LIMIT 1")
       .get(qitemId) as { id: number } | undefined;
@@ -47,10 +49,11 @@ export function quietHoldCustody(db: Database.Database, qitemId: string, now: Da
     const nextBoundary = entity ? new HumanQuietStore(db).quietStateFor(entity.id, now).nextBoundary?.at ?? null : null;
     return { state: "held", windowId, notificationKey: key, nextBoundary };
   } catch (error) {
-    // A schema without these tables (an older database) has no quiet custody. Any other failure to read it is "can't
-    // tell", which must not read as "no quiet hold": that would let the ladder escalate, and so post, during quiet. It
-    // reads as held for this pass; the ladder and the sweep read it again next time.
-    if (/no such table/.test((error as Error).message)) return null;
+    // A schema without these tables (an older database) has no quiet custody. Once a row is known to carry a quiet hold,
+    // any other failure to read its custody is "can't tell", which must not read as "no quiet hold": that would let the
+    // ladder escalate, and so post, during quiet. It reads as held for this pass; the ladder and sweep read it again.
+    // Before a quiet-hold note has been seen, the row is ordinary as far as quiet hours know: it reads exactly as before.
+    if (!sawHold || /no such table/.test((error as Error).message)) return null;
     return { state: "held", windowId: "unknown", notificationKey: qitemId, nextBoundary: null };
   }
 }
