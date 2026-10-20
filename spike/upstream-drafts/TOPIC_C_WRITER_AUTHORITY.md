@@ -11,7 +11,7 @@
 
 ## Ship set
 
-1. Migration `118_writer_authority_leases` (fork used `085`; upstream already shipped a different `085`)
+1. Migration `119_writer_authority_leases` (fork used `085`; upstream already shipped a different `085`)
 2. `WriterAuthority` — acquire / renew / release / revoke / transfer + `assertHolder` / `withProtectedMutation`
 3. Lease lifecycle events (`writer.acquired|released|revoked|transferred`)
 4. Call site: `FencedPublishTarget.publish` (needs clean `BoundAcceptance`)

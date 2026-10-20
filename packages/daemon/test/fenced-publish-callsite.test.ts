@@ -11,7 +11,7 @@ import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
-import { writerAuthorityLeasesSchema } from "../src/db/migrations/118_writer_authority_leases.js";
+import { writerAuthorityLeasesSchema } from "../src/db/migrations/119_writer_authority_leases.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { WriterAuthority, WriterAuthorityError } from "../src/domain/writer-authority.js";
 import { FencedPublishTarget, FencedPublishError } from "../src/domain/fenced-publish-target.js";
