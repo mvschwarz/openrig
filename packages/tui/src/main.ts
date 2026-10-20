@@ -23,6 +23,7 @@ import { hydrateSnapshot } from "./hydrate.js";
 import { createLiveRefresh } from "./live.js";
 import { resolvePendingAddress } from "./pending-address.js";
 import { subscribeActivityEvents } from "./live-events.js";
+import { checkVersionSkew, parseCliIdentity } from "./version-skew.js";
 import { execFile } from "node:child_process";
 import { helperCwd } from "./helper-cwd.js";
 import { probeCrashCart, type CrashCartRenderOpts } from "./crash-cart/from-emit.js";
@@ -139,10 +140,29 @@ async function run(): Promise<void> {
   let drawnSettled = false;
   let previousPage: { state: ReturnType<typeof view.get>; snapshot: FleetSnapshot } | undefined;
   let activityEvents: ReturnType<typeof subscribeActivityEvents> | null = null;
+  // A daemon upgraded or restarted under this TUI: on the first connect and every reconnect, compare
+  // builds; on a mismatch stop the background reads (event-driven and quiet) until the TUI restarts.
+  const tuiBuild = parseCliIdentity(process.env["OPENRIG_TUI_CLI_IDENTITY"]);
+  let buildMismatch = false;
+  let eventsDropped = false;
+  function checkDaemonBuild(): void {
+    if (!live || !client || buildMismatch) return;
+    void checkVersionSkew(tuiBuild, () => client.health()).then((skew) => {
+      if (skew.state !== "mismatch" || buildMismatch) return;
+      buildMismatch = true;
+      activityEvents?.close();
+      live.stopBackground(skew.message);
+    });
+  }
   function enableLive(): boolean {
     if (!live || !client || startup?.state.connection !== "up") return false;
+    if (!liveEnabled) checkDaemonBuild();
     liveEnabled = true;
-    activityEvents ??= subscribeActivityEvents({ open: () => client.openActivityEvents(), onEvent: (event) => { if (event.type.startsWith("proof.")) reviewCache.clear(); void live.invalidate(); }, onStatus: (status) => live.connectionStatus(status) });
+    if (!buildMismatch) activityEvents ??= subscribeActivityEvents({ open: () => client.openActivityEvents(), onEvent: (event) => { if (event.type.startsWith("proof.")) reviewCache.clear(); void live.invalidate(); }, onStatus: (status) => {
+      if (status === "dropped") eventsDropped = true;
+      else if (status === "connected" && eventsDropped) { eventsDropped = false; checkDaemonBuild(); }
+      live.connectionStatus(status);
+    } });
     return true;
   }
   function commandContext() {

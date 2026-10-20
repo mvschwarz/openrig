@@ -671,6 +671,8 @@ export interface LoadState {
   /** Known change or lost authority contact; quiet elapsed time alone never sets this. */
   stale?: boolean;
   connection?: "connected" | "dropped" | "reconnecting" | "unavailable";
+  /** this TUI's build differs from the daemon's; background refresh has stopped */
+  skew?: string;
   /** a hydrate refresh is running right now */
   inFlight: boolean;
   /** at least one refresh has completed (success or failure) */

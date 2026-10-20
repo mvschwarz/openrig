@@ -48,6 +48,9 @@ export interface LiveRefresh {
   flashes: () => RowFlash[];
   /** stop the quiet fallback during TUI shutdown */
   close: () => void;
+  /** stop the quiet fallback for good and say why (the daemon's build differs from this TUI's);
+   *  a refresh the operator asks for still runs */
+  stopBackground: (message: string) => void;
 }
 
 /** walk the snapshot topology and key every agent's served pane-activity
@@ -101,6 +104,7 @@ export function createLiveRefresh(deps: LiveRefreshDeps): LiveRefresh {
   }
   let quietTimer: QuietTimerHandle | null = null;
   let closed = false;
+  let skew: string | undefined;
   let refresh: () => Promise<void>;
   const scheduleTimeout = deps.setTimeout ?? ((callback, delayMs) => setTimeout(callback, delayMs));
   const cancelTimeout = deps.clearTimeout ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
@@ -113,7 +117,7 @@ export function createLiveRefresh(deps: LiveRefreshDeps): LiveRefresh {
 
   function armQuietTimer(): void {
     clearQuietTimer();
-    if (closed) return;
+    if (closed || skew !== undefined) return;
     quietTimer = scheduleTimeout(() => {
       quietTimer = null;
       void refresh();
@@ -178,16 +182,21 @@ export function createLiveRefresh(deps: LiveRefreshDeps): LiveRefresh {
     connectionStatus: (status) => {
       load.connection = status;
       if (status !== "connected") load.stale = true;
-      else void refresh();
+      else if (skew === undefined) void refresh();
       deps.onFrame();
     },
     snapshot: () => { syncScope(); return snapshot; },
-    load: () => { syncScope(); return { ...load, ...(lastConfirmedAt !== null && deps.now() - lastConfirmedAt > 60_000 ? { stale: true } : {}) }; },
+    load: () => { syncScope(); return { ...load, ...(skew !== undefined ? { skew } : {}), ...(lastConfirmedAt !== null && deps.now() - lastConfirmedAt > 60_000 ? { stale: true } : {}) }; },
     flashes: () => [...flashes],
     close: () => {
       closed = true;
       controller.abort();
       clearQuietTimer();
+    },
+    stopBackground: (message) => {
+      skew = message;
+      clearQuietTimer();
+      deps.onFrame();
     },
   };
 }
