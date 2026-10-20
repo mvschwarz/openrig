@@ -6,8 +6,9 @@ import { parse as parseToml } from "smol-toml";
 // write `[plugins."openrig-core@openrig"] enabled = true` into the user config.toml. Before any install or reinstall,
 // OpenRig reads the person's choice and never overrides it:
 // - an explicit `enabled = false` for the plugin keeps it disabled;
-// - with no explicit value for the plugin, a `[plugins._default] enabled = false` keeps it disabled too (Codex applies
-//   that default to an entry without its own `enabled`, and an install would replace it with an explicit true);
+// - with no explicit value for the plugin, an effective `[plugins._default] enabled = false` keeps it disabled too (Codex
+//   applies that default to an entry without its own `enabled`, and an install would replace it with an explicit true);
+//   like Codex, a higher layer's `_default` overrides a lower one's;
 // - an explicit `enabled = true` is the person's choice and allows it;
 // - a layer that exists but can't be read or parsed leaves the answer unknown, so nothing is installed.
 // The layers read are the config files Codex reads at fixed paths: the system config, the user config, and the legacy
@@ -63,7 +64,9 @@ export function codexCorePluginEnablement(layers: CodexConfigLayerRead[]): Codex
       if (!isTable(fallback) || (fallback["enabled"] !== undefined && typeof fallback["enabled"] !== "boolean")) {
         return { decision: "unknown", reason: `${layer.name} has a plugins._default that this reader doesn't recognise` };
       }
+      // Layers come lowest precedence first, as Codex merges them: a higher layer's _default replaces a lower one's.
       if (fallback["enabled"] === false) defaultOff = layer.name;
+      else if (fallback["enabled"] === true) defaultOff = undefined;
     }
   }
   if (explicit) {

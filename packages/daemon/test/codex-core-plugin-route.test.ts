@@ -156,6 +156,11 @@ describe("read before install: the person's choice is never overridden", () => {
     expect(decide(null, "[plugins._default]\nenabled = true\n")).toBe("allow"); // default on
     expect(decide("[plugins._default]\nenabled = false\n", null)).toBe("disabled"); // a layer above the user file
     expect(decide(null, `${KEY}\nenabled = true\n`, `${KEY}\nenabled = false\n`)).toBe("disabled"); // the higher layer's explicit value wins
+    // _default follows Codex's merge: a higher-precedence layer's value wins (system 10 < user 20 < legacy managed 40).
+    expect(decide("[plugins._default]\nenabled = false\n", "[plugins._default]\nenabled = true\n")).toBe("allow");
+    expect(decide("[plugins._default]\nenabled = true\n", "[plugins._default]\nenabled = false\n")).toBe("disabled");
+    expect(decide(null, "[plugins._default]\nenabled = true\n", "[plugins._default]\nenabled = false\n")).toBe("disabled");
+    expect(decide(null, "[plugins._default]\nenabled = false\n", "[plugins._default]\nenabled = true\n")).toBe("allow");
     expect(decide(null, "this is = = not toml")).toBe("unknown");
     expect(decide(null, `${KEY}\nenabled = "yes"\n`)).toBe("unknown");
     expect(codexCorePluginEnablement([{ name: "user config", path: "/u", state: "unreadable", reason: "EACCES" }]).decision).toBe("unknown");
