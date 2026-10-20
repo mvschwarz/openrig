@@ -185,6 +185,7 @@ describe("#822: replies answer only the current posted question", () => {
     { label: "missing reply time", posted: "11.1", messageTs: undefined, expected: "resolved-uncertain" },
     { label: "malformed reply time", posted: "11.1", messageTs: "later", expected: "resolved-uncertain" },
     { label: "equal times", posted: "11.1", messageTs: "11.100000", expected: "not-applicable" },
+    { label: "legacy current receipt without kind", posted: "reconciled", messageTs: "30.1", kind: "", expected: "resolved-uncertain" },
     { label: "reconciled receipt without time", posted: "reconciled", messageTs: "30.1", expected: "resolved-uncertain" },
     { label: "missing receipt time", posted: "", messageTs: "30.1", expected: "resolved-uncertain" },
     { label: "legacy summary digest receipt", posted: "11.1", messageTs: "30.1", digest: "old-summary", expected: "resolved-uncertain" },
@@ -196,7 +197,7 @@ describe("#822: replies answer only the current posted question", () => {
     parkOnPerson(row.qitemId, "Which branch?");
     const park = latestPark(row.qitemId);
     repo.update({ qitemId: row.qitemId, actorSession: "daemon@kernel", transitionNote:
-      `slack-owner-notification-posted notification_key=${episodeKey(row.qitemId, park.transitionId)} kind=human-required message_ts=${posted} thread_ts=5.1${extra.digest ? ` digest=${extra.digest}` : ""}` });
+      `slack-owner-notification-posted notification_key=${episodeKey(row.qitemId, park.transitionId)} ${extra.kind === "" ? "" : "kind=human-required "}message_ts=${posted} thread_ts=5.1${extra.digest ? ` digest=${extra.digest}` : ""}` });
     const contract = new MissionControlWriteContract({ db, eventBus: bus, queueRepo: repo, actionLog: new MissionControlActionLog(db) });
     const resolver = makeHumanReplyResolver(repo, contract, home);
     expect(await resolver({ qitemId: row.qitemId, actorSession: human, decision: "The release branch.", messageTs })).toBe(expected);

@@ -111,7 +111,7 @@ export function makeHumanReplyResolver(
       // A final receipt attests delivery even when reconciliation lost its timestamp.
       // Without one, ONLY a unique exact current-episode primary proves anything.
       const primary = !receipt && home ? pendingPrimaryReceipt(home, input.qitemId, key) : null;
-      if (receipt ? receipt.kind !== "human-required" : !primary) return "not-applicable";
+      if (!receipt && !primary) return "not-applicable";
       const posted = slackMicros(receipt?.messageTs ?? primary?.messageTs);
       const replied = slackMicros(input.messageTs);
       if (posted !== null && replied !== null && replied <= posted) return "not-applicable";
