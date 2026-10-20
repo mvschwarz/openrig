@@ -702,8 +702,31 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       if (d.decisionId.startsWith("quiet-release:") || !carries(d)) continue;
       const landing = "landing" in deliver ? await (deliver as { landing: (x: typeof d) => Promise<unknown> }).landing(d) : "unattempted";
       if (landing === "partial") return d;
+      // Can't tell whether this one is partly in Slack: never treated as "no continuation" (that would post afresh).
+      if (typeof landing === "object" && landing !== null) return { unreadable: (landing as { unreadable: string }).unreadable };
     }
     return undefined;
+  };
+  // One finisher per decision at a time: a second caller (its own replay, a release, another member's release) joins
+  // the first and takes its result, so two callers never both find a part missing and both post it. In-process only;
+  // across processes the marker reconcile applies.
+  const finishing = new Map<string, Promise<Awaited<ReturnType<SubsystemDeliverFn>>>>();
+  const exclusive = (decisionId: string, run: () => Promise<Awaited<ReturnType<SubsystemDeliverFn>>>) => {
+    const current = finishing.get(decisionId);
+    if (current) return current;
+    const running = run().finally(() => finishing.delete(decisionId));
+    finishing.set(decisionId, running);
+    return running;
+  };
+  // A partly posted decision held for quiet: each ask it carries is held, with a continuation note naming it, and the
+  // decision stays retained for the release to finish.
+  const holdAsContinuation = (decision: Parameters<SubsystemDeliverFn>[0], members: Array<{ qitemId: string; notificationKey: string }>,
+    quiet: NonNullable<ReturnType<typeof quietHoldFor>>, recipient: string) => {
+    const jobsRepo = new WatchdogJobsRepository(opts.queueRepo.db);
+    for (const m of members) {
+      holdForQuiet({ queueRepo: opts.queueRepo, jobsRepo, qitemId: m.qitemId, entityId: recipient, hold: { ...quiet, notificationKey: m.notificationKey }, continues: decision.decisionId });
+    }
+    return heldContinuation(decision);
   };
 
   // A partly posted decision is finished only for an ask still owed. Once every ask it carries is resolved (a posted
@@ -763,8 +786,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       // finishes as it is; during quiet its routine members are held and the post stays retained for the release.
       const open = members.filter((m) => !owned(m));
       if (!quiet || open.some(escalation)) return deliver(decision);
-      for (const m of open) holdForQuiet({ queueRepo: opts.queueRepo, jobsRepo, qitemId: m.qitemId, entityId: recipient, hold: { ...quiet, notificationKey: m.notificationKey } });
-      return heldContinuation(decision);
+      return holdAsContinuation(decision, open, quiet, recipient);
     }
     const kept = members.filter((m) => {
       if (owned(m)) return false;
@@ -785,7 +807,8 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
     return res.ok ? { ok: true as const } : { ok: false as const, class: "kept-dispatch-refused", detail: res.error };
   };
 
-  const engineDeliver: SubsystemDeliverFn = async (decision) => {
+  const engineDeliver: SubsystemDeliverFn = (decision) => exclusive(decision.decisionId, () => engineDeliverOnce(decision));
+  const engineDeliverOnce: SubsystemDeliverFn = async (decision) => {
     const p = ((decision as { payload?: unknown }).payload ?? {}) as OutboundPostPayload & { deliveryDeferralFire?: boolean };
     // The decision-resolved notice is written at closure, so a closed row is its normal case.
     if (replayedAtStart.has(decision.decisionId) && p.qitemId && p.ownerNotificationKind !== "human-decision-resolved"
@@ -832,8 +855,15 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         let original: Awaited<ReturnType<typeof retainedContinuation>>;
         try { original = p.qitemId ? await retainedContinuation(p.qitemId, key) : undefined; }
         catch (error) { return { ok: false as const, class: "buffer-unreadable", detail: (error as Error).message }; }
+        if (original && "unreadable" in original) {
+          // Nothing posts now. Acked like a declined release: the window's job (the ask has neither a receipt nor a
+          // disposition) dispatches it again at its next evaluation, which reads history afresh.
+          log(`release ${decision.decisionId} not posted: a retained original for ${key} couldn't be checked: ${original.unreadable}`);
+          releaseRef(p.qitemId!);
+          return { ok: true as const };
+        }
         if (!original) return deliver(decision);
-        const finished = await deliver(original);
+        const finished = await exclusive(original.decisionId, () => deliver(original));
         if (finished.ok) ackRef(original.decisionId);
         return finished;
       }
@@ -874,15 +904,32 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       releaseRef(p.notificationKey ?? p.qitemId!);
       return { ok: true as const };
     }
-    let partial = false;
     if (ruled && (ruled.outcome === "log" || (ruled.outcome === "hold" && ruled.quietHold)
       || ruled.outcome === "digest" || ruled.deferMinutes !== undefined)) {
       const earlier = await resolveEarlierAttempt(decision);
       if ("settled" in earlier) return earlier.settled;
-      partial = earlier.partial;
-      // Part of it is already in Slack: outside quiet it finishes as it is (as on main) rather than being logged,
-      // digested or deferred; held for quiet, it stays retained below.
-      if (partial && !(ruled.outcome === "hold" && ruled.quietHold)) return deliver(decision);
+      if (earlier.partial) {
+        // Part of it is already in Slack. Whether to finish it now is decided from the recipient's actual quiet state,
+        // not from the outcome ("log" is decided before quiet is looked at): outside quiet (or for an escalation) it
+        // finishes as it is, rather than being logged, digested or deferred; during quiet it is held as a continuation;
+        // if quiet can't be read, it is retained and nothing posts.
+        const recipient = (p.destinationSession ?? "").split("@")[0] ?? "";
+        let quiet: ReturnType<typeof quietHoldFor>;
+        try {
+          quiet = ruled.outcome === "hold" && ruled.quietHold ? ruled.quietHold
+            : p.humanIntent !== "update" && isEscalationClass(p.tags) ? null
+              : quietHoldFor(opts.queueRepo.db, recipient, new Date());
+        } catch (error) {
+          return { ok: false as const, class: "quiet-unreadable", detail: (error as Error).message };
+        }
+        if (!quiet) return deliver(decision);
+        const episodeKey = p.notificationKey ?? p.qitemId!;
+        if (ruled.outcome === "hold") recordTerminationOnce(p, ruled);
+        const held = holdAsContinuation(decision, [{ qitemId: p.qitemId!, notificationKey: episodeKey }], quiet, recipient);
+        outboundSeen.mark(episodeKey, "quiet-held");
+        releaseRef(p.qitemId!);
+        return held;
+      }
     }
     if (ruled) {
       recordTerminationOnce(p, ruled);
@@ -903,7 +950,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         });
         outboundSeen.mark(episodeKey, "quiet-held");
         releaseRef(p.qitemId);
-        return partial ? heldContinuation(decision) : { ok: true as const };
+        return { ok: true as const };
       }
       if (ruled.outcome === "digest") {
         // R1 B-4: the MESSAGE-TIME decision is recorded on the row (with the

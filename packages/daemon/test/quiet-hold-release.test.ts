@@ -312,6 +312,8 @@ describe("after QA: changed circumstances and a second person", () => {
   let loseResponses = false; // the post lands in Slack, but its response never reaches the gateway
   let historyIncomplete = false; // the reconciler's history scan stops early (more pages, no cursor): "maybe"
   let failFromPost = 0; // when set, the Nth post and every one after it fail before posting
+  let historyUnreadable = false; // the reconciler's history read fails outright
+  let part2Barrier: Promise<void> | null = null; // when set, a post of any part 2 waits here before it lands
   let registryOk = true;
   const person = (id: string) => ({
     entityId: id, class: "human" as const, displayName: id, address: `${id}@external`,
@@ -332,6 +334,8 @@ describe("after QA: changed circumstances and a second person", () => {
     loseResponses = false;
     historyIncomplete = false;
     failFromPost = 0;
+    historyUnreadable = false;
+    part2Barrier = null;
     registryOk = true;
     const secrets = join(home, "slack.env");
     writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n", { mode: 0o600 });
@@ -345,9 +349,13 @@ describe("after QA: changed circumstances and a second person", () => {
       fetchImpl: async (url, init) => {
         if (String(url).includes("chat.postMessage")) {
           if (failPosts || (failFromPost && posts.length + 1 >= failFromPost)) throw new Error("connector down before the post");
+          if (part2Barrier && String(JSON.parse(String(init?.body ?? "{}")).text ?? "").endsWith(":part:2)")) await part2Barrier;
           posts.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
           if (loseResponses) throw new Error("response lost after the post landed (test)");
           return new Response(JSON.stringify({ ok: true, ts: `1724.${100 + posts.length}` }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        if (historyUnreadable) {
+          return new Response(JSON.stringify({ ok: false, error: "internal_error" }), { status: 200, headers: { "content-type": "application/json" } });
         }
         if (historyIncomplete) {
           return new Response(JSON.stringify({ ok: true, messages: [], has_more: true }), { status: 200, headers: { "content-type": "application/json" } });
@@ -653,8 +661,8 @@ describe("after QA: changed circumstances and a second person", () => {
 
   // A routine two-part ask (primary plus supplemental detail) to a person who is posted to straight away: the primary
   // lands outside quiet, the supplemental part fails, and the decision stays in the buffer.
-  async function partlyPosted() {
-    const row = await ask({ destinationSession: "other@external", humanDetail: "The full supplemental detail for this decision." });
+  async function partlyPosted(extra: Record<string, unknown> = {}) {
+    const row = await ask({ destinationSession: "other@external", humanDetail: "The full supplemental detail for this decision.", ...extra });
     const first = wire();
     failFromPost = 2;
     first.dispatcher.dispatch(OUTBOUND_OP, "other@external", toPayload((await alertFor(row)) as never));
@@ -755,6 +763,90 @@ describe("after QA: changed circumstances and a second person", () => {
     expect(notes(row).some((n) => n.startsWith("quiet-release-disposition "))).toBe(true);
     expect(posts).toHaveLength(1);
     expect(new DispatchBuffer(home).pending(), "both the release and the original are drained").toHaveLength(0);
+  });
+
+  it("review 6 (F1): a partly posted notice replayed into quiet after the posting dial was raised posts nothing; it finishes after quiet", async () => {
+    const { row, first } = await partlyPosted({ humanIntent: "update" });
+    quietOnFor("other");
+    saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-OWNER", secretsEnvFile: join(home, "slack.env"), minimumLevelThatPosts: "ALERT" }, home);
+    restart(first); // the replay re-decides "log" (below the dial) while quiet is on
+    await settle();
+    expect(posts, "nothing posts during quiet").toHaveLength(1);
+    expect(notes(row).some((n) => n.startsWith("slack-owner-notification-posted ")), "no complete receipt").toBe(false);
+    quiet.end("other", { endedBy: "t", now: new Date() });
+    await release();
+    finishedAsContinuation(row); // the post that already started is finished, not dropped by the raised dial
+  });
+
+  it("review 6 (F2): a release whose history read fails posts nothing; once history reads, the original's own part posts once", async () => {
+    const row = await ask({ destinationSession: "other@external", humanDetail: "The full supplemental detail for this decision." });
+    const first = wire();
+    loseResponses = true; // the primary lands, but its response is lost
+    first.dispatcher.dispatch(OUTBOUND_OP, "other@external", toPayload(await alertFor(row)));
+    await settle();
+    loseResponses = false;
+    expect(posts).toHaveLength(1);
+    quietOnFor("other");
+    restart(first); // the replay during quiet finds the primary by its marker: partial, held, retained
+    await settle();
+    expect(posts).toHaveLength(1);
+    expect(notes(row).some((n) => n.startsWith("delivery-decision: quiet-hold "))).toBe(true);
+    quiet.end("other", { endedBy: "t", now: new Date() });
+    historyUnreadable = true; // the primary's landing can't be checked at release time
+    await release();
+    expect(posts, "nothing posts while the original can't be read").toHaveLength(1);
+    expect(notes(row).some((n) => n.startsWith("slack-owner-notification-posted "))).toBe(false);
+    historyUnreadable = false;
+    await release(); // the job's next pass
+    finishedAsContinuation(row);
+  });
+
+  it("review 6 (F3): the original's replay and a retained release can't both post its missing part", async () => {
+    const { row, first } = await partlyPosted();
+    quietOnFor("other");
+    let w = restart(first);
+    await settle();
+    quiet.end("other", { endedBy: "t", now: new Date() });
+    failFromPost = 2;
+    await release(); // the release tries to finish the original; part 2 fails, so both stay buffered
+    failFromPost = 0;
+    expect(posts).toHaveLength(1);
+    expect(new DispatchBuffer(home).pending().length).toBeGreaterThanOrEqual(2);
+    let open!: () => void;
+    part2Barrier = new Promise((resolve) => { open = resolve; });
+    w = restart(w); // the original and the release replay together
+    await settle();
+    open();
+    await settle();
+    finishedAsContinuation(row);
+  });
+
+  it("review 6 (F3): two released members of one partly posted digest finish it once", async () => {
+    const a = await ask({ destinationSession: "other@external" });
+    const b = await ask({ destinationSession: "other@external" });
+    const member = async (r: QueueItem) => ({ qitemId: r.qitemId, notificationKey: (await alertFor(r)).notificationKey!, level: "NOTICE", kind: "human-required" });
+    const memberReceipts = [await member(a), await member(b)];
+    const first = wire();
+    failFromPost = 2;
+    first.dispatcher.dispatch(OUTBOUND_OP, "other@external", {
+      deliveryDigestPost: true, digestId: "agg2", qitemId: a.qitemId, destinationSession: "other@external", humanDetail: "Both items in full.",
+      summary: "Delivery digest (4h) — 2 item(s)", body: `• ${a.summary} [${a.qitemId}]\n• ${b.summary} [${b.qitemId}]`, memberReceipts,
+    }, { decisionId: "digest:agg2-test" } as never);
+    await settle();
+    failFromPost = 0;
+    expect(posts).toHaveLength(1);
+    quietOnFor("other");
+    restart(first); // held, both members, the digest retained
+    await settle();
+    expect(posts).toHaveLength(1);
+    quiet.end("other", { endedBy: "t", now: new Date() });
+    let open!: () => void;
+    part2Barrier = new Promise((resolve) => { open = resolve; });
+    await release(); // two releases, one per member, both reach the retained digest
+    open();
+    await settle();
+    expect(posts.filter((post) => /:part:2\)$/.test(String(post.text)))).toHaveLength(1);
+    for (const r of [a, b]) expect(notes(r).filter((n) => n.startsWith("slack-owner-notification-posted "))).toHaveLength(1);
   });
 
   it("review 5: a two-part release that partly posted, replayed after quiet came back, posts nothing; the next release finishes it", async () => {
