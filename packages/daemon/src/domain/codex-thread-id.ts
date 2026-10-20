@@ -14,6 +14,16 @@ export type CodexCaptureDiagnostic = {
 };
 export type CodexCaptureReporter = (diagnostic: CodexCaptureDiagnostic) => void;
 
+/** A read's thread with whether it met no detected incompleteness: every versioned database found (discovery), and every
+ *  one opened and queried. `incomplete` names which part fell short. Not an atomic snapshot: databases can change during
+ *  the read, and rows inside the process's start second stay excluded by the reuse gate. */
+export interface CodexThreadEvidence {
+  thread?: string;
+  reason?: CodexCaptureDiagnostic["reason"];
+  fullyReadable: boolean;
+  incomplete?: "unreadable" | "discovery";
+}
+
 /** F1 (B12's completion): may return a plain value (test stubs stay sync) or a Promise — every
  *  caller awaits it, and the DEFAULT is async so the per-PID `ps eww` spawn no longer blocks the
  *  event loop (measured live: 28.9s/15min of burst blocking inside the 8-attempt capture loops). */
@@ -152,6 +162,24 @@ export class CodexThreadIdResolver {
     return this.resolveWithDiagnostics(pid, undefined, report);
   }
 
+  /**
+   * {@link resolve} for the explicit `codexHome` read, with whether that read met no detected incompleteness. The thread
+   * and diagnostic are what `resolve` gives for the same home; only the readability is new. For a caller that must tell
+   * a complete read from a partial one (the in-place restart), never a cache or another home.
+   */
+  async resolveWithReadability(pid: number, identity: string): Promise<CodexThreadEvidence> {
+    const diagnostics: CodexCaptureDiagnostic[] = [];
+    const readability: Readability = { complete: true, unreadable: false };
+    const thread = this.opts.codexHome
+      ? readCodexThreadIdFromLogs(pid, "", undefined, lstartToMinTs(identity), this.opts.codexHome,
+        (diagnostic) => diagnostics.push(diagnostic), "exclude", readability)
+      : undefined;
+    if (!this.opts.codexHome) return { reason: "no_log_row", fullyReadable: false, incomplete: "discovery" };
+    const fullyReadable = readability.complete;
+    const incomplete = fullyReadable ? undefined : readability.unreadable ? "unreadable" as const : "discovery" as const;
+    return { ...(thread ? { thread } : { reason: diagnostics[0]?.reason ?? "no_log_row" }), fullyReadable, ...(incomplete ? { incomplete } : {}) };
+  }
+
   private async resolveWithDiagnostics(pid: number, identity: string | undefined, report?: CodexCaptureReporter,
     startSecond: StartSecondRows = "exclude"): Promise<string | undefined> {
     const diagnostics: CodexCaptureDiagnostic[] = [];
@@ -280,6 +308,9 @@ export type StartSecondRows =
    *  second and which writes nothing more until it has work. */
   | "by-process";
 
+/** Whether a read met no detected incompleteness: every database it opened was read, and both discoveries were complete. */
+interface Readability { complete: boolean; unreadable: boolean }
+
 function readCodexThreadIdFromLogs(
   pid: number,
   homeDir: string,
@@ -288,12 +319,21 @@ function readCodexThreadIdFromLogs(
   codexHome?: string,
   report?: CodexCaptureReporter,
   startSecond: StartSecondRows = "exclude",
+  readability?: Readability,
 ): string | undefined {
   let unreadable = false;
+  // Discovery completeness is tracked only when the caller asked for readability; every other caller is unchanged.
+  const logsDiscovery = readability ? { complete: true } : undefined;
+  const stateDiscovery = readability ? { complete: true } : undefined;
+  const settle = () => {
+    if (!readability) return;
+    readability.unreadable = unreadable;
+    readability.complete = !unreadable && logsDiscovery!.complete && stateDiscovery!.complete;
+  };
   const loggedIds = new Set<string>();
   const sameSecond = new Map<string, Set<string>>(); // process_uuid -> thread ids logged in the start second
   const loggedBefore = new Set<string>(); // process_uuids with a row before the start second
-  for (const dbPath of resolveCodexDbPaths(homeDir, "logs", exists, codexHome)) {
+  for (const dbPath of resolveCodexDbPaths(homeDir, "logs", exists, codexHome, logsDiscovery)) {
     try {
       const db = new Database(dbPath, { readonly: true });
       try {
@@ -326,12 +366,13 @@ function readCodexThreadIdFromLogs(
   if (!unreadable && startedInSecond.length === 1) for (const id of sameSecond.get(startedInSecond[0]!)!) loggedIds.add(id);
   if (!loggedIds.size) {
     report?.({ reason: unreadable ? "sqlite_unreadable" : "no_log_row" });
+    settle();
     return undefined;
   }
   // Native title generation logs another thread in the same process. Join only
   // PID-owned IDs to retained CLI conversations; recency cannot identify the TUI.
   const conversations = new Set<string>();
-  for (const dbPath of resolveCodexDbPaths(homeDir, "state", exists, codexHome)) {
+  for (const dbPath of resolveCodexDbPaths(homeDir, "state", exists, codexHome, stateDiscovery)) {
     try {
       const db = new Database(dbPath, { readonly: true });
       try {
@@ -343,6 +384,7 @@ function readCodexThreadIdFromLogs(
     } catch { unreadable = true; }
   }
   // Multiple retained conversations in one process need a stronger native signal.
+  settle();
   if (conversations.size === 1) return [...conversations][0];
   report?.(unreadable ? { reason: "sqlite_unreadable" }
     : conversations.size > 1 ? { reason: "ambiguous_threads", count: conversations.size }
@@ -367,7 +409,13 @@ export function lstartToMinTs(identity: string | undefined): number | undefined 
   return Math.floor(parsed / 1000);
 }
 
-export function resolveCodexDbPaths(homeDir: string, kind: "logs" | "state", exists?: (path: string) => boolean, codexHome?: string): string[] {
+/**
+ * The versioned Codex databases of `kind`, newest first. `discovery`, when passed, is set false when the search may have
+ * missed one: the listing failed, or a listed database was dropped by (or threw in) the existence check. The returned
+ * paths are the same whether or not it's passed, the historical fallback included.
+ */
+export function resolveCodexDbPaths(homeDir: string, kind: "logs" | "state", exists?: (path: string) => boolean, codexHome?: string,
+  discovery?: { complete: boolean }): string[] {
   const codexDir = codexHome || nodePath.join(homeDir, ".codex");
   const discovered: Array<{ version: number; path: string }> = [];
 
@@ -382,8 +430,10 @@ export function resolveCodexDbPaths(homeDir: string, kind: "logs" | "state", exi
     }
   } catch {
     // Best effort only; fall back to the historical filename below.
+    if (discovery) discovery.complete = false;
   }
 
+  const listed = new Set(discovered.map((entry) => entry.path));
   if (discovered.length === 0) {
     discovered.push({ version: kind === "logs" ? 1 : 5, path: nodePath.join(codexDir, kind === "logs" ? "logs_1.sqlite" : "state_5.sqlite") });
   }
@@ -392,5 +442,12 @@ export function resolveCodexDbPaths(homeDir: string, kind: "logs" | "state", exi
     .sort((a, b) => b.version - a.version)
     .map((entry) => entry.path)
     .filter((path, index, paths) => paths.indexOf(path) === index)
-    .filter((path) => (exists ?? fs.existsSync)(path));
+    .filter((path) => {
+      let found: boolean;
+      try { found = (exists ?? fs.existsSync)(path); }
+      catch (error) { if (discovery && listed.has(path)) discovery.complete = false; throw error; }
+      // A database the listing named but the existence check dropped may hold rows: the search is incomplete.
+      if (!found && discovery && listed.has(path)) discovery.complete = false;
+      return found;
+    });
 }

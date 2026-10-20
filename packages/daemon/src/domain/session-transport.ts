@@ -1664,6 +1664,9 @@ export interface SendResult {
   sent?: boolean;
   /** Present only when transport.verify_input_box applied to this send. */
   inputBox?: InputBoxEvidence;
+  /** Context, not a status: the seat was in a managed compaction or restore OpenRig had recorded when this send ran. The
+   *  send's own result (ok, outcome, error) is unchanged by it, and it never says the restore finished. */
+  managedCompaction?: { stage: string; observed: "before_send" | "after_send"; notice: string };
   /** How far the send got toward the seat's input, where that is positively known:
    *  `not_reached` — an idle wait refused the send before any write was attempted;
    *  `attempted` — the text write was issued and reported a failure (it may still have landed);
@@ -2132,7 +2135,28 @@ export class SessionTransport {
   /** Deliver text and Enter to the resolved recipient under the send guards.
    * With verification requested, compare rendered message counts, excluding
    * agent input; a confirmed render does not prove agent consumption. */
+  /** The managed compaction state OpenRig has recorded for a seat (the compaction enforcer's), for the sender's notice. */
+  private compactionObserver?: (sessionName: string) => { stage: string; detail: string } | null;
+  setCompactionObserver(observer: (sessionName: string) => { stage: string; detail: string } | null): void {
+    this.compactionObserver = observer;
+  }
+
+  /**
+   * Deliver as always; when the seat was in a managed compaction or restore OpenRig had recorded, before or after the
+   * send, add a notice saying so. The notice is context beside the send's own result, which it never changes.
+   */
   async send(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
+    const observe = () => { try { return this.compactionObserver?.(sessionName) ?? null; } catch { return null; } };
+    const before = observe();
+    const result = await this.sendWithoutCompactionNotice(sessionName, text, opts);
+    const seen = before ? { observed: "before_send" as const, ...before } : (() => { const after = observe(); return after ? { observed: "after_send" as const, ...after } : null; })();
+    if (!seen) return result;
+    const when = seen.observed === "before_send" ? "when this send started" : "when this send finished";
+    return { ...result, managedCompaction: { stage: seen.stage, observed: seen.observed,
+      notice: `${sessionName} was ${seen.detail} (${when}, as OpenRig's managed compaction recorded it). This doesn't mean the restore has finished; if this message matters, check the reply and follow up.` } };
+  }
+
+  private async sendWithoutCompactionNotice(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     const guard = this.tmuxAdapter.deliveryGuard;
     if (!guard) {
       // No guard, so no recorded delivery to read back: a caller already gone ends the send here.

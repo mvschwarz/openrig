@@ -2,6 +2,8 @@ import { operationalLaunchArg } from "./kernel-authority.js";
 import nodePath from "node:path";
 import fs from "node:fs";
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
+import { createRequire } from "node:module";
 import os from "node:os";
 import Database from "better-sqlite3";
 import { parse as parseToml } from "smol-toml";
@@ -37,6 +39,28 @@ import { shellQuote } from "./shell-quote.js";
 import { runSyncSite } from "../domain/sync-site-wrap.js";
 import { resolveReadinessTimeoutMs } from "../domain/readiness-timeout.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
+import {
+  CODEX_CORE_MARKETPLACE, CODEX_CORE_PLUGIN, CODEX_CORE_PLUGIN_KEY, CODEX_MARKETPLACE_MANIFEST_PATH,
+  codexCoreMarketplaceManifest, codexCorePluginEnablement, codexReadableConfigLayers, recordedMarketplaceSource, userLayerEnablesCorePlugin,
+  type CodexConfigLayerRead,
+} from "../domain/codex-core-plugin-install.js";
+
+/** Runs Codex's own CLI with the daemon's CODEX_HOME; tests inject a recorder. */
+export type CodexCliRunner = (args: string[], env: NodeJS.ProcessEnv) => Promise<{ status: number | null; stdout: string; stderr: string }>;
+
+const defaultCodexCli: CodexCliRunner = (args, env) => new Promise((resolve) => {
+  execFile("codex", args, { env, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
+    const status = error ? (typeof (error as { code?: unknown }).code === "number" ? (error as { code: number }).code : null) : 0;
+    // A spawn failure (ENOENT, EACCES) has no exit code and empty output: keep its message as the reason.
+    const err = String(stderr ?? "");
+    resolve({ status, stdout: String(stdout ?? ""), stderr: err.trim() || !error ? err : error.message });
+  });
+});
+
+// Codex's hook trust recipe (the key and hash Codex records for a trusted hook), kept in one script.
+const codexHookTrust = createRequire(import.meta.url)("../../assets/plugins/openrig-core/hooks/scripts/codex-hook-trust.cjs") as {
+  codexHookHash(eventLabel: string, handler: { command: string; timeoutSec: number; matcher?: string | null; statusMessage?: string | null }): string;
+};
 
 import { listNativeProcesses, observeCodexPaneProcess, observeCodexForkProcess, verifyPaneIdleShell, type NativeProcessRow } from "../domain/native-process-lineage.js";
 
@@ -132,6 +156,15 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   // (FR-A) to write config-layer [hooks] command entries that are cwd-independent and
   // version-matched to the running daemon (NOT ${PLUGIN_ROOT}, NOT a per-cwd copy).
   private activityRelayPath?: string;
+  // The vendored openrig-core plugin directory, resolved when the install step runs (vendoring happens at startup).
+  private resolveCorePluginDir?: () => string | undefined;
+  // Whether a node's resolved plugin selection includes openrig-core (the test that also gives it OPENRIG_SEAT_PROJECT_DIR).
+  private resolveCorePluginSelected?: (nodeId: string) => boolean;
+  private runCodexCli: CodexCliRunner;
+  // One Codex config.toml per adapter: launches, the boot step and resume all write it (and Codex's install writes it too),
+  // so each of those runs its whole setup under this one lock, one after another.
+  private configLock: Promise<unknown> = Promise.resolve();
+  private codexSystemConfigDir: string;
 
   constructor(deps: {
     tmux: TmuxAdapter;
@@ -156,7 +189,18 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     resolveManagedConfigSettings?: () => Promise<{ enabled: boolean; codexVersion?: string }>;
     /** Whether runtime.codex.hooks_enabled is on, without resolving the Codex version. Absent: nothing is stripped. */
     resolveHooksEnabled?: () => Promise<boolean>;
+    /** The vendored openrig-core directory. Absent: the plugin is never installed into Codex. */
+    resolveCorePluginDir?: () => string | undefined;
+    /** Whether the node's resolved plugin selection includes openrig-core. Absent: no launch ever installs it. */
+    resolveCorePluginSelected?: (nodeId: string) => boolean;
+    runCodexCli?: CodexCliRunner;
+    /** Where Codex's system and legacy managed config files live (default /etc/codex). */
+    codexSystemConfigDir?: string;
   }) {
+    this.resolveCorePluginDir = deps.resolveCorePluginDir;
+    this.resolveCorePluginSelected = deps.resolveCorePluginSelected;
+    this.runCodexCli = deps.runCodexCli ?? defaultCodexCli;
+    this.codexSystemConfigDir = deps.codexSystemConfigDir ?? "/etc/codex";
     this.tmux = deps.tmux;
     this.resolveManagedConfigSettings = deps.resolveManagedConfigSettings;
     this.resolveHooksEnabled = deps.resolveHooksEnabled;
@@ -190,16 +234,106 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    * them: a rig with no Codex seat leaves the user's config alone. A failure warns and does
    * not block the launch.
    */
-  async ensureManagedConfig(): Promise<void> {
-    if (!this.resolveManagedConfigSettings) return;
+  async ensureManagedConfig(): Promise<{ hooksEnabled: boolean } | undefined> {
+    return this.withConfigLock(() => this.applyManagedConfig());
+  }
+
+  /** Run `task` after every earlier config setup on this adapter has finished, whatever its outcome. */
+  private withConfigLock<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.configLock.then(task, task);
+    this.configLock = run.catch(() => undefined);
+    return run;
+  }
+
+  private async applyManagedConfig(): Promise<{ hooksEnabled: boolean } | undefined> {
+    if (!this.resolveManagedConfigSettings) return undefined;
     try {
       const { enabled, codexVersion } = await this.resolveManagedConfigSettings();
       this.ensureCodexFeatureFlag(enabled, { codexVersion });
       if (enabled) this.ensureCodexActivityHooks();
       else this.removeCodexActivityHooks();
+      return { hooksEnabled: enabled };
     } catch (err) {
       console.error(`[openrig] runtime setup warning: ${(err as Error).message}`);
+      return undefined;
     }
+  }
+
+  /**
+   * Boot step, run after the plugin is vendored: install openrig-core into Codex only when hooks are enabled and some
+   * Codex seat's resolved selection includes it. A daemon whose Codex seats didn't select it never installs it.
+   */
+  async ensureCodexCorePluginAtBoot(anySeatSelected: boolean): Promise<void> {
+    if (!anySeatSelected || !this.resolveHooksEnabled) return;
+    const resolveHooksEnabled = this.resolveHooksEnabled;
+    await this.withConfigLock(async () => {
+      try {
+        if (await resolveHooksEnabled()) await this.ensureCodexCorePlugin();
+      } catch (err) {
+        console.error(`[openrig] runtime setup warning: ${(err as Error).message}`);
+      }
+    });
+  }
+
+  /**
+   * Install the vendored openrig-core plugin into Codex through Codex's own commands, so a seat that selected it gets its
+   * refocus and activity hooks (each still subject to Codex's exact-hook review). It runs only when the person's config
+   * doesn't disable the plugin (codexCorePluginEnablement), and only when the installed version differs from the vendored
+   * one. It writes nothing into Codex's plugin cache and no hook state or trust; the only file it writes itself is the
+   * marketplace manifest beside the vendored plugin. Returns what it did, for the caller's report.
+   */
+  async ensureCodexCorePlugin(): Promise<{ outcome: "installed" | "current" | "skipped"; reason: string }> {
+    const report = (outcome: "installed" | "current" | "skipped", reason: string) => {
+      if (outcome !== "current") console.error(`[openrig] codex core plugin ${outcome}: ${reason}`);
+      return { outcome, reason };
+    };
+    const pluginDir = this.resolveCorePluginDir?.();
+    if (!pluginDir) return { outcome: "skipped", reason: "the openrig-core plugin isn't vendored" };
+    let version: unknown;
+    try { version = (JSON.parse(this.fs.readFile(nodePath.join(pluginDir, ".codex-plugin", "plugin.json"))) as { version?: unknown }).version; }
+    catch { return report("skipped", "the vendored plugin has no readable Codex manifest"); }
+    if (typeof version !== "string" || !/^[0-9A-Za-z._-]+$/.test(version)) return report("skipped", "the vendored plugin's Codex manifest has no usable version");
+
+    const codexHome = nodePath.dirname(this.resolveCodexConfigPath());
+    const layers: CodexConfigLayerRead[] = codexReadableConfigLayers(codexHome, this.codexSystemConfigDir).map((layer) => {
+      if (!this.fs.exists(layer.path)) return { ...layer, state: "absent" as const };
+      try { return { ...layer, state: "read" as const, content: this.fs.readFile(layer.path) }; }
+      catch (error) { return { ...layer, state: "unreadable" as const, reason: (error as Error).message }; }
+    });
+    const enablement = codexCorePluginEnablement(layers);
+    if (enablement.decision !== "allow") return report("skipped", enablement.reason);
+
+    const pluginsDir = nodePath.dirname(pluginDir);
+    const userLayer = layers.find((layer) => layer.name === "user config");
+    const userConfig = userLayer?.state === "read" ? userLayer.content : null;
+    const recorded = recordedMarketplaceSource(userConfig);
+    // Compared as real paths, so a marketplace recorded through a symlink to the plugins folder is the same source.
+    const canonical = (p: string) => { try { return fs.realpathSync.native(nodePath.resolve(p)); } catch { return nodePath.resolve(p); } };
+    if (recorded !== undefined && (recorded === null || canonical(recorded) !== canonical(pluginsDir))) {
+      return report("skipped", `a marketplace named ${CODEX_CORE_MARKETPLACE} is already configured with another source; it's left alone`);
+    }
+
+    // Current only when Codex would load it: the vendored version is in its store AND the user config still registers it
+    // (our marketplace, and an explicit enabled = true, which Codex's install writes). Codex loads only configured
+    // plugins, so a cache left behind after the entry or the marketplace was removed is installed again.
+    const cached = this.fs.exists(nodePath.join(codexHome, "plugins", "cache", CODEX_CORE_MARKETPLACE, CODEX_CORE_PLUGIN, version));
+    if (cached && recorded !== undefined && userLayerEnablesCorePlugin(userConfig)) {
+      return report("current", `${CODEX_CORE_PLUGIN_KEY} ${version} is installed and registered`);
+    }
+    const manifestPath = nodePath.join(pluginsDir, CODEX_MARKETPLACE_MANIFEST_PATH);
+    const manifest = codexCoreMarketplaceManifest();
+    if (!this.fs.exists(manifestPath) || this.fs.readFile(manifestPath) !== manifest) {
+      this.fs.mkdirp(nodePath.dirname(manifestPath));
+      this.fs.writeFile(manifestPath, manifest);
+    }
+    const env: NodeJS.ProcessEnv = { ...process.env, CODEX_HOME: codexHome, ...(this.launchPath ? { PATH: this.launchPath } : {}) };
+    if (recorded === undefined) {
+      const added = await this.runCodexCli(["plugin", "marketplace", "add", pluginsDir], env);
+      if (added.status !== 0) return report("skipped", `codex plugin marketplace add failed: ${(added.stderr || added.stdout).trim() || `exit ${added.status}`}`);
+    }
+    const installed = await this.runCodexCli(["plugin", "add", CODEX_CORE_PLUGIN_KEY], env);
+    if (installed.status !== 0) return report("skipped", `codex plugin add failed: ${(installed.stderr || installed.stdout).trim() || `exit ${installed.status}`}`);
+    return report("installed", `${CODEX_CORE_PLUGIN_KEY} ${version} through Codex's own install (${enablement.reason})`);
   }
 
   /**
@@ -437,7 +571,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
 
     const updatePrompt: UpdatePromptAttempt = { handled: false };
-    const prepared = await this.prepareLaunch(binding, opts.name);
+    // Only a launch that starts a conversation may install the core plugin; a resume never does.
+    const prepared = await this.prepareLaunch(binding, opts.name, undefined, { installCorePlugin: !opts.resumeToken });
     if (!prepared.ok) return prepared;
     const { modelArg, effortArg, appliedLaunch, postureArg, queueStateDirArg, daemonArg, networkArg } = prepared;
 
@@ -532,7 +667,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     opts: { name: string; resumeToken: string; running?: RunningCodexLaunch },
   ): Promise<{ ok: true; command: string; core: string; appliedLaunch: AppliedLaunchObservation } | { ok: false; error: string }> {
     if (!binding.tmuxSession) return { ok: false, error: "No tmux session bound — cannot build a Codex resume command" };
-    const prepared = await this.prepareLaunch(binding, opts.name, opts.running);
+    // Building a resume command (the in-place restart's) never installs the core plugin.
+    const prepared = await this.prepareLaunch(binding, opts.name, opts.running, { installCorePlugin: false });
     if (!prepared.ok) return prepared;
     const core = this.resumeCore(prepared, opts.resumeToken, binding);
     return { ok: true, command: await this.seatCommand(binding, core), core, appliedLaunch: prepared.appliedLaunch };
@@ -557,8 +693,17 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   /** Launch flags shared by fresh, fork and resume, decided once per launch. With `running`, the probed and
    *  prepared parts come from the running Codex instead, and no Codex process is started to decide them. */
-  private async prepareLaunch(binding: NodeBinding, name: string, running?: RunningCodexLaunch): Promise<PreparedCodexLaunch | { ok: false; error: string }> {
-    await this.ensureManagedConfig();
+  private async prepareLaunch(binding: NodeBinding, name: string, running: RunningCodexLaunch | undefined,
+    opts: { installCorePlugin: boolean }): Promise<PreparedCodexLaunch | { ok: false; error: string }> {
+    // The config write and, for a seat that selected openrig-core, its install run as one step under the config lock, so
+    // concurrent launches never interleave them. An unselected seat's launch never installs.
+    await this.withConfigLock(async () => {
+      const managed = await this.applyManagedConfig();
+      if (opts.installCorePlugin && managed?.hooksEnabled && this.resolveCorePluginSelected?.(binding.nodeId)) {
+        try { await this.ensureCodexCorePlugin(); }
+        catch (err) { console.error(`[openrig] runtime setup warning: ${(err as Error).message}`); }
+      }
+    });
     const model = binding.model?.trim();
     const modelArg = model ? ` -m ${shellQuote(model)}` : "";
     const effort = binding.effort?.trim();
@@ -1259,18 +1404,6 @@ function upsertCodexProjectTrust(content: string, projectPath: string): string {
 //   The KEY's exact key_source canonical form + the positional indices are what the VM
 //   read-back must confirm — PROVISIONAL until then.
 
-/** Recursively sort object keys (mirrors codex-rs fingerprint.rs `canonical_json`). */
-function canonicalizeJsonValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalizeJsonValue);
-  if (value !== null && typeof value === "object") {
-    const src = value as Record<string, unknown>;
-    const out: Record<string, unknown> = {};
-    for (const key of Object.keys(src).sort()) out[key] = canonicalizeJsonValue(src[key]);
-    return out;
-  }
-  return value;
-}
-
 const CODEX_HOOK_EVENT_KEY_LABEL: Record<(typeof OPENRIG_ACTIVITY_HOOK_EVENTS)[number], string> = {
   SessionStart: "session_start",
   UserPromptSubmit: "user_prompt_submit",
@@ -1308,21 +1441,9 @@ export function computeCodexHookTrust(
   const groupIndex = input.groupIndex ?? 0;
   const handlerIndex = input.handlerIndex ?? 0;
   const key = `${input.keySource}:${label}:${groupIndex}:${handlerIndex}`;
-
-  // Build NormalizedHookIdentity exactly as `TomlValue::try_from` would: None fields dropped.
-  const handler: Record<string, unknown> = {
-    type: "command",
-    command: input.command,
-    timeout: input.timeoutSec,
-    async: false,
-  };
-  if (input.statusMessage != null) handler.statusMessage = input.statusMessage;
-  const identity: Record<string, unknown> = { event_name: label, hooks: [handler] };
-  if (input.matcher != null) identity.matcher = input.matcher;
-
-  const serialized = JSON.stringify(canonicalizeJsonValue(identity));
-  const hex = createHash("sha256").update(serialized, "utf8").digest("hex");
-  return { key, hash: `sha256:${hex}` };
+  // NormalizedHookIdentity exactly as `TomlValue::try_from` would build it (None fields dropped), hashed by the shared
+  // recipe in codex-hook-trust.cjs.
+  return { key, hash: codexHookTrust.codexHookHash(label, input) };
 }
 
 /**

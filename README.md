@@ -42,7 +42,7 @@ Already have OpenRig? Use the tag that matches `rig --version`, or upgrade first
 
 Prefer to type the commands yourself? [Install it yourself ↓](#install-it-yourself)
 
-Requires Node.js 22 or 24 and tmux, on macOS or Linux, and one working Claude Code or Codex account: one is enough, since the kernel operator adapts the shipped `starter` team to whichever you have. On Linux, the distribution's own Node.js can be older (Ubuntu 24.04's is 18); install a supported version with [nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`) or NodeSource. On a Mac with Apple silicon, use Node.js 22 ([compatibility history](docs/releases/v0.5.15.md#known-compatibility-limitation)). On a Mac where you aren't an administrator, or where Homebrew belongs to another account (its `brew install` is refused), install Node.js in your own home folder with [nvm](https://github.com/nvm-sh/nvm): run `touch ~/.zshrc` (a new Mac account has none, and nvm's installer only adds itself to a profile file that already exists), then the install command on nvm's page, open a new terminal, and run `nvm install 22`. That needs no administrator password, and `npm install -g` then installs into your nvm folder. On Windows, use WSL2, the Windows route OpenRig supports; native Windows isn't supported. OpenRig's automated tests don't run on WSL2 yet; see [one user's working setup](docs/reference/getting-started.md#wsl2-a-reported-working-setup).
+Requires Node.js 22 or 24 and tmux, on macOS or Linux, and one working Claude Code or Codex account: one is enough, since the kernel operator adapts the shipped `starter` team to whichever you have. On Linux, the distribution's own Node.js can be older (Ubuntu 24.04's is 18); install a supported version with [nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`) or NodeSource. On a Mac with Apple silicon, use Node.js 22 ([compatibility history](docs/releases/v0.5.15.md#known-compatibility-limitation)). On a Mac where you aren't an administrator, or where Homebrew belongs to another account (its `brew install` is refused), install Node.js in your own home folder with [nvm](https://github.com/nvm-sh/nvm): run `touch ~/.zshrc` (a new Mac account has none, and nvm's installer only adds itself to a profile file that already exists), then nvm's install command, for nvm v0.40.8 `curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.8/install.sh | bash` ([nvm's page](https://github.com/nvm-sh/nvm#install--update-script) has the newest), open a new terminal, and run `nvm install 22`. nvm itself needs no administrator password, and `npm install -g` then installs into your nvm folder. If nvm's installer says you need Apple's command line tools, run `xcode-select --install`, then its install command again. On Windows, use WSL2, the Windows route OpenRig supports; native Windows isn't supported. OpenRig's automated tests don't run on WSL2 yet; see [one user's working setup](docs/reference/getting-started.md#wsl2-a-reported-working-setup).
 
 > **What OpenRig changes on your machine**
 > - **Install:** `@openrig/cli` goes in globally with npm.
@@ -106,10 +106,11 @@ to an unused provider.
 ### Your agent opens OpenRig for you
 
 After installing, your agent opens the OpenRig TUI and the operator for you. To get back to them later, ask your
-agent for OpenRig or your agents in any words. After checking the selected login, it runs:
+agent for OpenRig or your agents in any words. After checking the selected login, it starts the daemon if it's stopped
+and opens the view:
 
 ```sh
-rig daemon start  # if stopped
+rig daemon start
 rig terminal open saved:kernel --window
 ```
 

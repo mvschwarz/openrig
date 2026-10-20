@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\"",
+            "command": "test -n \"$OPENRIG_SEAT_PROJECT_DIR\" && test -f \"$OPENRIG_NODE\" && test -x \"$OPENRIG_NODE\" || exit 0; exec \"$OPENRIG_NODE\" \"${PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\" --from-plugin",
             "timeout": 5
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\"",
+            "command": "test -n \"$OPENRIG_SEAT_PROJECT_DIR\" && test -f \"$OPENRIG_NODE\" && test -x \"$OPENRIG_NODE\" || exit 0; exec \"$OPENRIG_NODE\" \"${PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\" --from-plugin",
             "timeout": 5
           }
         ]
@@ -25,7 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/hooks/scripts/refocus.cjs\" --runtime codex",
+            "command": "test -n \"$OPENRIG_SEAT_PROJECT_DIR\" && test -f \"$OPENRIG_NODE\" && test -x \"$OPENRIG_NODE\" || exit 0; exec \"$OPENRIG_NODE\" \"${PLUGIN_ROOT}/hooks/scripts/refocus.cjs\" --runtime codex",
             "timeout": 60
           }
         ]
@@ -36,7 +36,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\"",
+            "command": "test -n \"$OPENRIG_SEAT_PROJECT_DIR\" && test -f \"$OPENRIG_NODE\" && test -x \"$OPENRIG_NODE\" || exit 0; exec \"$OPENRIG_NODE\" \"${PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\" --from-plugin",
             "timeout": 5
           }
         ]
@@ -47,7 +47,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/hooks/scripts/refocus.cjs\" --runtime codex",
+            "command": "test -n \"$OPENRIG_SEAT_PROJECT_DIR\" && test -f \"$OPENRIG_NODE\" && test -x \"$OPENRIG_NODE\" || exit 0; exec \"$OPENRIG_NODE\" \"${PLUGIN_ROOT}/hooks/scripts/refocus.cjs\" --runtime codex",
             "timeout": 60
           }
         ]
@@ -58,7 +58,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\"",
+            "command": "test -n \"$OPENRIG_SEAT_PROJECT_DIR\" && test -f \"$OPENRIG_NODE\" && test -x \"$OPENRIG_NODE\" || exit 0; exec \"$OPENRIG_NODE\" \"${PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\" --from-plugin",
             "timeout": 5
           }
         ]

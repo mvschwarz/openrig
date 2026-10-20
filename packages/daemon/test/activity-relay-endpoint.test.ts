@@ -14,6 +14,7 @@ const relay = require("../assets/plugins/openrig-core/hooks/scripts/activity-rel
     providerPayload: Record<string, unknown>,
     env: Record<string, string | undefined>,
     now?: () => Date,
+    argv?: string[],
   ) => Record<string, unknown> | null;
 };
 
@@ -74,6 +75,14 @@ describe("activity-relay occupant generation carry (W2a producer)", () => {
       () => new Date("2026-08-09T00:00:00.000Z"),
     );
     expect(payload).toMatchObject({ generation: "generation-A" });
+  });
+
+  it("tags the post with the route it ran as: the plugin's hook or the managed one", () => {
+    const at = () => new Date("2026-08-09T00:00:00.000Z");
+    expect(relay.buildOpenRigPayload({ hookEvent: "Stop" }, identity, at, ["node", "activity-relay.cjs", "--from-plugin"]))
+      .toMatchObject({ relayRoute: "plugin" });
+    expect(relay.buildOpenRigPayload({ hookEvent: "Stop" }, identity, at, ["node", "activity-relay.cjs"]))
+      .toMatchObject({ relayRoute: "managed" });
   });
 
   it("emits explicit null when the launch generation is absent", () => {

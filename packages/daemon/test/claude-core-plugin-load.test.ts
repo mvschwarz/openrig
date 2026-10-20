@@ -755,7 +755,7 @@ describe("the plugin's activity relay", () => {
     expect(posts.map((p) => p.url)).toEqual(["/api/activity/hooks"]);
   });
 
-  it("is started with --from-plugin by every Claude manifest entry and by no Codex one", () => {
+  it("is started with --from-plugin by every Claude and every Codex manifest entry", () => {
     const hookRoot = join(relayPath, "..", "..");
     const commands = (file: string): string[] => {
       const hooks = JSON.parse(readFileSync(join(hookRoot, file), "utf8")).hooks as Record<string, Array<{ hooks: Array<{ command: string }> }>>;
@@ -763,7 +763,8 @@ describe("the plugin's activity relay", () => {
     };
     expect(commands("claude.json").length).toBeGreaterThan(0);
     expect(commands("claude.json").every((c) => c.endsWith(" --from-plugin"))).toBe(true);
-    expect(commands("codex.json").some((c) => c.includes("--from-plugin"))).toBe(false);
+    expect(commands("codex.json").length).toBeGreaterThan(0);
+    expect(commands("codex.json").every((c) => c.endsWith(" --from-plugin"))).toBe(true);
   });
 });
 

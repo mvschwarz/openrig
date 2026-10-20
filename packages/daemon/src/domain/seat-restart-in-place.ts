@@ -13,7 +13,7 @@ import {
   codexCommandResumeToken, listNativeProcesses, processArgv, verifyCodexPaneProcess,
   type NativeProcessLister, type NativeProcessRow,
 } from "./native-process-lineage.js";
-import { CodexThreadIdResolver, resolveCodexDbPaths } from "./codex-thread-id.js";
+import { CodexThreadIdResolver, resolveCodexDbPaths, type CodexThreadEvidence } from "./codex-thread-id.js";
 import { isShellForeground } from "./shell-classifier.js";
 import { terminatePaneInPlace, type PaneCutoverTiming } from "./pane-cutover.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
@@ -61,6 +61,8 @@ export interface ProcessFacts {
 export interface InPlaceRestartIo {
   readProcess(pid: number): Promise<ProcessFacts | null>;
   readThreadId(pid: number, startedAt: string, codexHome: string): Promise<string | undefined>;
+  /** The same read as readThreadId, with whether it met no detected incompleteness (discovery, open, query). */
+  readThreadEvidence(pid: number, startedAt: string, codexHome: string): Promise<CodexThreadEvidence>;
   /** `cli_auth_credentials_store` from the home's config.toml: the value, null when unset, undefined when unreadable. */
   readCredentialStore(codexHome: string): string | null | undefined;
   /** stat (never read) of the home's auth.json. */
@@ -123,6 +125,9 @@ export interface InPlaceRestartReport {
   paneShape: PaneShape;
   conversationId: string;
   conversationProof: "argv" | "native_logs";
+  /** When argv proves the stored conversation: what the process's own retained logs show, as a note. "no other
+   *  conversation logged" isn't proof the conversation is current; "not established: …" says why nothing was concluded. */
+  currentConversation?: string;
   activity: { state: "working" | "needs_input" | "idle" | "unknown"; needsInput: number | null; detail: string };
   childProcesses: Array<{ pid: number; name: string }>;
   settings: {
@@ -407,6 +412,29 @@ export class CodexInPlaceRestart {
     else if (argvToken === undefined && startedAt && (await this.io.readThreadId(process.pid, startedAt, codexHome)) === token) conversationProof = "native_logs";
     else return { ok: false, code: "resume_binding_unverified", message: "The running Codex could not be proven to be on the seat's stored conversation (checked: its argv, then its native logs). Nothing was stopped." };
 
+    // Its argv resumes the stored conversation, but its own logs may say it has moved on. Refuse only when a read with no
+    // detected incompleteness (every database found, opened and queried) names only another conversation; anything less
+    // keeps the restart, with a note. Not an atomic snapshot: a switch not yet logged, or rows inside the process's start
+    // second (excluded by the reuse gate), stay invisible.
+    let currentConversation: string | undefined;
+    if (conversationProof === "argv") {
+      let evidence: CodexThreadEvidence;
+      if (!startedAt) evidence = { reason: "no_log_row", fullyReadable: false };
+      else {
+        try { evidence = await this.io.readThreadEvidence(process.pid, startedAt, codexHome); }
+        catch { evidence = { reason: "sqlite_unreadable", fullyReadable: false, incomplete: "unreadable" }; }
+      }
+      if (evidence.fullyReadable && evidence.thread && evidence.thread !== token) {
+        return { ok: false, code: "resume_binding_unverified", detail: { reason: "conflicting retained native-thread evidence", loggedConversation: evidence.thread },
+          message: `Conflicting retained native-thread evidence: the running Codex's command line resumes the seat's stored conversation ${token}, but its own logs, read with no detected incompleteness, name only ${evidence.thread}. Nothing was stopped and nothing was typed.`,
+          guidance: "This doesn't show which conversation is current or that the stored one is gone. Check the seat's conversation (rig seat set-resume-token records one) before restarting it in place." };
+      }
+      currentConversation = evidence.thread === token && evidence.fullyReadable ? "no other conversation logged"
+        : evidence.thread ? (evidence.incomplete === "unreadable" ? "not established: a native database was unreadable"
+          : "not established: the native databases couldn't all be found")
+        : `not established: ${evidence.reason ?? "no_log_row"}`;
+    }
+
     // Pane shape: the pane's root is Codex itself, or a shell whose child chain is Codex.
     const chain = codexChain(rows, process, panePid);
     const top = chain.at(-1)!;
@@ -494,6 +522,7 @@ export class CodexInPlaceRestart {
       billingRoute: { state: "unknown", apiKeyEnvNames: facts.apiKeyEnvNames,
         detail: "Which billing route Codex uses is not observable without reading credentials; API-key variable names alone don't establish it." },
       account: this.accountEvidence(codexHome, startedAt, null),
+      ...(currentConversation ? { currentConversation } : {}),
       peers: await this.peers(seat.nodeId, codexHome),
       oldProcess: { pid: process.pid, startedAt },
       ...history,
@@ -1031,7 +1060,10 @@ export function defaultInPlaceRestartIo(): InPlaceRestartIo {
       }
     },
     async readThreadId(pid, startedAt, codexHome) {
-      return new CodexThreadIdResolver({ codexHome }).resolve(pid, startedAt);
+      return (await new CodexThreadIdResolver({ codexHome }).resolveWithReadability(pid, startedAt)).thread;
+    },
+    async readThreadEvidence(pid, startedAt, codexHome) {
+      return new CodexThreadIdResolver({ codexHome }).resolveWithReadability(pid, startedAt);
     },
     readCredentialStore(codexHome) {
       let text: string;

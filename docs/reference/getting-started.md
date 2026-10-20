@@ -72,12 +72,16 @@ you aren't an administrator, or where Homebrew belongs to another account (its
 `brew install` is refused), install Node.js in your own home folder with
 [nvm](https://github.com/nvm-sh/nvm): run `touch ~/.zshrc` (a new Mac account
 has none, and nvm's installer only adds itself to a profile file that already
-exists), then the install command on nvm's page, open a new terminal, and run
-`nvm install 22`. That needs no administrator password, and `npm install -g`
-then installs into your nvm folder. Native
-Windows isn't supported. On Windows, use WSL2: it's the Windows route OpenRig
-supports, though OpenRig's automated tests don't run on it yet. One user's
-[working setup](#wsl2-a-reported-working-setup) is below. Node 20 and
+exists), then nvm's install command, for nvm v0.40.8
+`curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.8/install.sh | bash`
+([nvm's page](https://github.com/nvm-sh/nvm#install--update-script) has the
+newest), open a new terminal, and run `nvm install 22`. nvm itself needs no
+administrator password, and `npm install -g` then installs into your nvm folder.
+If nvm's installer says you need Apple's command line tools, run
+`xcode-select --install`, then its install command again. Native Windows isn't
+supported. On Windows, use WSL2: it's the Windows route
+OpenRig supports, though OpenRig's automated tests don't run on it yet. One
+user's [working setup](#wsl2-a-reported-working-setup) is below. Node 20 and
 odd-numbered releases (23, 25 and so on) are not supported; Node 26 and later
 even-numbered releases are untested.
 

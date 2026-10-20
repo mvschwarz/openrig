@@ -1,6 +1,6 @@
 import { ulid } from "ulid";
 import { seatEnvLaunchVars, type SeatEnv } from "./seat-env.js";
-import { SEAT_PROJECT_DIR_ENV } from "./claude-core-plugin-env.js";
+import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV } from "./claude-core-plugin-env.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { DiscoveryRepository } from "./discovery-repository.js";
 import type { RuntimeHint } from "./discovery-types.js";
@@ -67,7 +67,8 @@ export interface SuccessorNode {
   /** The seat's declared launch environment (its rig's `env:` with the member's over it). The
    *  successor is the same seat, so it gets the same environment; absent = none declared. */
   seatEnv?: SeatEnv;
-  /** Set when the seat loads the openrig-core plugin: its launch project, handed to the successor as OPENRIG_SEAT_PROJECT_DIR. */
+  /** Set when the seat loads the openrig-core plugin: its launch project, handed to the successor as OPENRIG_SEAT_PROJECT_DIR
+   *  (and, for a Codex seat, with OPENRIG_NODE). */
   seatProjectDir?: string;
 }
 
@@ -190,6 +191,8 @@ export class SuccessorSessionLauncher {
       ...(input.node.runtime ? this.runtimeSessionEnv[input.node.runtime] : undefined),
       ...seatEnvLaunchVars(input.node.seatEnv ?? {}),
       ...(input.node.seatProjectDir ? { [SEAT_PROJECT_DIR_ENV]: input.node.seatProjectDir } : {}),
+      // A Codex seat's plugin hooks run with this explicit interpreter, as at launch (node-launcher.ts).
+      ...(input.node.seatProjectDir && input.node.runtime === "codex" ? { [SEAT_NODE_ENV]: process.execPath } : {}),
       OPENRIG_OCCUPANT_GENERATION: input.occupantGeneration ?? undefined,
     });
     const cwd = input.node.cwd ?? undefined;

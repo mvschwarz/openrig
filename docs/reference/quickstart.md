@@ -30,6 +30,19 @@ Ask your coding agent to help use the toolchain already on your machine. On a Ma
 may belong to another user; do not change its ownership to complete this setup. After correcting PATH or installing
 Node, open a new terminal and check `node --version` and `npx --version` before continuing.
 
+On a Mac where you aren't an administrator, or where another account owns Homebrew, install Node.js in your own home
+folder with [nvm](https://github.com/nvm-sh/nvm); nvm itself needs no administrator password. A new Mac account has no
+`~/.zshrc`, and nvm's installer only adds itself to a profile file that already exists, so create one first:
+
+```sh
+touch ~/.zshrc
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.8/install.sh | bash
+```
+
+Then open a new terminal and run `nvm install 22`. If nvm's installer says you need Apple's command line tools, run
+`xcode-select --install`, then its install command again. That's nvm v0.40.8's install command; [nvm's
+page](https://github.com/nvm-sh/nvm#install--update-script) has the newest.
+
 ## The quick way: let your coding agent do it
 
 In your project folder, add OpenRig's `rigs` skill to the agent you use:
@@ -67,10 +80,10 @@ Node.js and SQLite check was skipped.
 ### 2. Set up the tools around it
 
 ```sh
-rig setup --providers claude   # or codex, or both
+rig setup --providers claude
 ```
 
-Add `--dry-run` first to see the plan without changing anything. Setup does four things:
+Use `codex` or `both` in place of `claude` to match the coding agents you use. Add `--dry-run` first to see the plan without changing anything. Setup does four things:
 - it checks Node.js, tmux and your sign-in;
 - it installs a missing tmux (with Homebrew on macOS, if you have it) or the coding agent you chose;
 - it installs Herdr, a terminal workspace app the OpenRig view can use, unless you add `--no-herdr`;
@@ -132,10 +145,10 @@ Before it starts one, it tells you what starting a team in your folder changes: 
 `CLAUDE.md`, plus the team's skills. Then it waits for your yes. As shipped, `starter` uses both Claude Code and
 Codex. With only one of them, ask the operator to adapt it.
 
-By hand, from your repository:
+By hand, from your repository (the first command shows what it would start, and starts nothing):
 
 ```sh
-rig up starter --cwd . --plan    # check what it would start
+rig up starter --cwd . --plan
 rig up starter --cwd .
 rig ps --nodes --rig starter
 ```
@@ -156,10 +169,10 @@ stops that team. `rig daemon stop` stops the background service and leaves agent
 
 ## The one-command install
 
-Instead of steps 1 and 2:
+Instead of steps 1 and 2 (the first line shows the plan and changes nothing):
 
 ```sh
-curl -fsSL https://openrig.dev/install.sh | sh -s -- --dry-run   # shows the plan and changes nothing
+curl -fsSL https://openrig.dev/install.sh | sh -s -- --dry-run
 curl -fsSL https://openrig.dev/install.sh | sh
 ```
 

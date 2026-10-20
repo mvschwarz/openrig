@@ -41,14 +41,33 @@ This plugin ships dual-manifest packaging — both `.claude-plugin/` and `.codex
   `CLAUDE_PROJECT_DIR` doesn't follow a `cd`. A Claude started in the seat's own project folder is the same project and
   still acts as the seat. A seat launched before this change has no `OPENRIG_SEAT_PROJECT_DIR` until its next launch, restore
   or handover, and behaves as before until then.
-- **Codex CLI** — Codex has no directory option for plugins, so it does not load this plugin. A Codex seat gets only the hooks
-  the daemon writes into Codex's `config.toml` (the activity relay); `hooks/codex.json` is not read.
+- **Codex CLI** — Codex loads a plugin only once it's installed through its own marketplace path and enabled. When the
+  daemon manages Codex seats with `runtime.codex.hooks_enabled` on, it installs this plugin with Codex's own commands
+  (`codex plugin marketplace add` for a local marketplace beside the vendored copy, then `codex plugin add
+  openrig-core@openrig`), under the daemon's `CODEX_HOME`.
+  - **What that writes:** Codex's install writes `[marketplaces.openrig]` and `[plugins."openrig-core@openrig"] enabled = true`
+    into that `config.toml`. Codex makes the plugin's skills available to every Codex session on that home.
+  - **Opting out:** set `enabled = false` for the plugin, or `[plugins._default] enabled = false` with no explicit value for
+    it. OpenRig then never installs or reinstalls it, for both the first install and an upgrade. It reads the system, user
+    and legacy managed config files; it can't see profile, project, session-flag, MDM or cloud-managed config.
+  - **Upgrades:** a new vendored version is reinstalled the same way, and only while the plugin isn't disabled.
+  - **Review:** each of the plugin's hooks still needs Codex's exact-hook review before it runs. OpenRig writes no trust
+    and no hook state for them.
+  - **Selected seats only:** every hook in `hooks/codex.json` starts with a shell guard, `test -n "$OPENRIG_SEAT_PROJECT_DIR"
+    && test -f "$OPENRIG_NODE" && test -x "$OPENRIG_NODE" || exit 0`, before running anything. OpenRig sets both only for a
+    Codex seat whose resolved plugin selection includes this plugin (`OPENRIG_NODE` is the daemon's own absolute Node). So
+    an unselected seat or a personal session is a successful no-op, even with no `node` on its PATH.
+  - **Disclosed limit:** a Codex started from inside a selected seat's shell inherits those variables and acts as the seat.
+  - **Activity can be reported twice, never zero times:** on Codex the plugin's activity relay always reports. Whether
+    Codex also runs the daemon's own managed relay for an event depends on hook state merged from every user layer (a
+    selected profile included) and session flags, which the plugin can't see. So with both active, each activity event
+    (SessionStart, UserPromptSubmit, Stop, PermissionRequest) is reported twice on a selected Codex seat.
 
 Generated Claude settings commands for the activity relay and context collector use the daemon's absolute Node
 executable when its name is recognized (`node` or `node.exe`); other names keep the legacy bare `node` command and
 its PATH requirement. Pinned commands do not require Node on the Claude process's inherited PATH. The executable must
-remain installed; removing or moving it requires normal command refresh from a healthy runtime. This does not change the static plugin
-manifest commands, which still use `node`, or prove that an already-running Claude reloaded changed settings.
+remain installed; removing or moving it requires normal command refresh from a healthy runtime. This does not change the Claude plugin
+manifest's commands, which still use `node` (the Codex manifest's run `$OPENRIG_NODE`, above), or prove that an already-running Claude reloaded changed settings.
 
 One skill targets Claude Code's compaction behavior specifically:
 - `claude-compaction-restore` — used to rebuild a Claude Code agent's working mental model after `/compact`, from JSONL transcripts and touched files
