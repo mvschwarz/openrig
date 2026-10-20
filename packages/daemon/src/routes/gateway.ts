@@ -25,6 +25,8 @@ import { requireSenderIdentity } from "./require-sender-identity.js";
 import { runChannelOperation } from "../domain/gateway/channel-operations.js";
 import { buildSlackAppManifest } from "../domain/gateway/slack/manifest.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
+import type Database from "better-sqlite3";
+import { HumanQuietStore, QuietWindowError, parseDailyRule, resolveUntil } from "../domain/gateway/human-quiet-windows.js";
 
 interface SubsystemHandle {
   restart: () => void;
@@ -39,6 +41,8 @@ export function gatewayRoutes(opts: {
   /** The daemon's auth bearer (OPENRIG_AUTH_BEARER_TOKEN, the one `rig host pair` issues); a relay from a
    *  shared app's hub must carry it. Null: no bearer configured, so the route trusts the bind (loopback or tailnet). */
   relayBearerToken?: string | null;
+  /** The clock quiet hours are resolved against (tests inject one). */
+  now?: () => Date;
 } = {}): Hono {
   const app = new Hono();
 
@@ -91,6 +95,52 @@ export function gatewayRoutes(opts: {
     const readiness = await resolveHumanDeliveryReadiness({ human, config: cfg, gatewayState, botToken });
     return c.json({ ok: true, readiness });
   });
+
+  // Quiet hours for a person: one read, plus set, end ("I'm back") and clear. These store and show the window; no
+  // delivery decision reads it yet.
+  const now = opts.now ?? (() => new Date());
+  const quietRoute = (verb: string, handler: (input: { quiet: HumanQuietStore; entityId: string; actor: string; body: Record<string, unknown>; at: Date }) => unknown) =>
+    async (c: import("hono").Context) => {
+      const entityId = c.req.param("entityId") ?? "";
+      const db = c.get("db" as never) as Database.Database | undefined;
+      if (!db) return c.json({ error: "quiet_hours_unavailable", message: "The daemon's database isn't available to this route." }, 503);
+      const registry = loadHumanRegistry(opts.home ?? OPENRIG_HOME);
+      if (!registry.ok) return c.json({ error: "human_registry_unavailable", message: registry.error }, 503);
+      if (!registry.entities.some((candidate) => candidate.entityId === entityId)) return c.json({ error: "human_not_found", entityId }, 404);
+      const body = c.req.method === "GET" ? {} : ((await c.req.json<Record<string, unknown>>().catch(() => ({}))) ?? {});
+      let actor = "";
+      if (c.req.method !== "GET") {
+        const identity = requireSenderIdentity(c, { verb, bodyClaim: typeof body.actor === "string" ? body.actor : null });
+        if (!identity.ok) return identity.response;
+        actor = identity.session;
+      }
+      const quiet = new HumanQuietStore(db);
+      const at = now();
+      try {
+        const result = handler({ quiet, entityId, actor, body, at });
+        return c.json({ ok: true, entityId, ...(result ?? {}), window: quiet.show(entityId), state: quiet.quietStateFor(entityId, at) });
+      } catch (error) {
+        if (!(error instanceof QuietWindowError)) throw error;
+        const status = error.code === "not_quiet" || error.code === "no_window" ? 409 : 400;
+        return c.json({ error: error.code, message: error.message }, status);
+      }
+    };
+  app.get("/human/:entityId/quiet", quietRoute("reading quiet hours", () => undefined));
+  app.put("/human/:entityId/quiet", quietRoute("setting quiet hours", ({ quiet, entityId, actor, body, at }) => {
+    const timezone = typeof body.timezone === "string" ? body.timezone : "";
+    const daily = typeof body.daily === "string" ? body.daily : undefined;
+    const until = typeof body.until === "string" ? body.until : undefined;
+    if ((daily === undefined) === (until === undefined)) {
+      throw new QuietWindowError("invalid_time", "Give either a daily window (HH:MM-HH:MM) or an until-time, not both and not neither.");
+    }
+    if (daily !== undefined) quiet.setDaily(entityId, { ...parseDailyRule(daily), timezone, setBy: actor, now: at });
+    else quiet.setUntil(entityId, { until: resolveUntil(until!, timezone, at), timezone, setBy: actor, now: at });
+    return undefined;
+  }));
+  app.post("/human/:entityId/quiet/end", quietRoute("ending quiet hours", ({ quiet, entityId, actor, at }) =>
+    ({ ended: quiet.end(entityId, { endedBy: actor, now: at }) })));
+  app.post("/human/:entityId/quiet/clear", quietRoute("clearing quiet hours", ({ quiet, entityId, actor, at }) =>
+    ({ cleared: quiet.clear(entityId, { clearedBy: actor, now: at }) })));
 
   app.post("/slack/:operation", async (c) => {
     const operation = c.req.param("operation");
