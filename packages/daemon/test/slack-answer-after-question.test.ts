@@ -2,7 +2,7 @@
 // Slack HTTP/socket are inert; queue, thread routing and Mission Control resolution are real.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDb } from "../src/db/connection.js";
@@ -18,6 +18,9 @@ import { resolveSlackHandle } from "../src/domain/gateway/human-registry.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
 
+import { DispatchBuffer } from "../src/domain/gateway/dispatch-buffer.js";
+import { SeenStore } from "../src/domain/gateway/slack/state-store.js";
+
 const human = "human-founder@external";
 const registry = { ok: true as const, entities: [{ entityId: "human-founder", class: "human" as const, displayName: "Founder", address: human, connectorBindings: [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "env:SLACK_BOT_TOKEN", role: "primary" as const, handle: "UFOUNDER" }], prefs: { deliveryClass: "A" as const } }] };
 const reply = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
@@ -30,6 +33,8 @@ describe("#822: replies answer only the current posted question", () => {
   let posts: Array<Record<string, unknown>>;
   let wire: ReturnType<typeof buildSlackGatewayWire>;
   let socket: WsLike;
+  let postHook: ((post: Record<string, unknown>) => Promise<Response | undefined>) | undefined;
+  let logs: string[];
   const stops: Array<() => void> = [];
 
   beforeEach(async () => {
@@ -40,17 +45,21 @@ describe("#822: replies answer only the current posted question", () => {
     const secrets = join(home, "fake.env");
     writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\nSLACK_APP_TOKEN=xapp-EXAMPLE-fake\n");
     saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-TEST", secretsEnvFile: secrets, minimumLevelThatInterrupts: "NOTICE" }, home);
-    posts = [];
+    posts = []; postHook = undefined; logs = [];
     const sockets: WsLike[] = [];
     const contract = new MissionControlWriteContract({ db, eventBus: bus, queueRepo: repo, actionLog: new MissionControlActionLog(db) });
     wire = buildSlackGatewayWire({
       home, queueRepo: repo, registry: { loadHumanRegistry: () => registry, resolveSlackHandle },
-      resolveHumanReply: makeHumanReplyResolver(repo, contract),
+      resolveHumanReply: makeHumanReplyResolver(repo, contract, home),
+      log: (message) => logs.push(message),
       wsFactory: () => { const ws: WsLike = { send: () => {}, close: () => {}, onopen: null, onmessage: null, onclose: null, onerror: null }; sockets.push(ws); return ws; },
       inboundMaxConnects: 1,
       fetchImpl: async (url, init) => {
         if (url.endsWith("apps.connections.open")) return reply({ ok: true, url: "wss://fake-slack/ws" });
-        posts.push(JSON.parse(String(init?.body)));
+        const post = JSON.parse(String(init?.body));
+        posts.push(post);
+        const overridden = await postHook?.(post);
+        if (overridden) return overridden;
         return reply({ ok: true, ts: `${10 + posts.length}.1` });
       },
     });
@@ -173,12 +182,12 @@ describe("#822: replies answer only the current posted question", () => {
   });
 
   it.each([
-    { label: "missing reply time", posted: "11.1", messageTs: undefined, expected: "not-applicable" },
-    { label: "malformed reply time", posted: "11.1", messageTs: "later", expected: "not-applicable" },
+    { label: "missing reply time", posted: "11.1", messageTs: undefined, expected: "resolved-uncertain" },
+    { label: "malformed reply time", posted: "11.1", messageTs: "later", expected: "resolved-uncertain" },
     { label: "equal times", posted: "11.1", messageTs: "11.100000", expected: "not-applicable" },
-    { label: "reconciled receipt without time", posted: "reconciled", messageTs: "30.1", expected: "not-applicable" },
-    { label: "missing receipt time", posted: "", messageTs: "30.1", expected: "not-applicable" },
-    { label: "legacy summary digest receipt", posted: "11.1", messageTs: "30.1", digest: "old-summary", expected: "not-applicable" },
+    { label: "reconciled receipt without time", posted: "reconciled", messageTs: "30.1", expected: "resolved-uncertain" },
+    { label: "missing receipt time", posted: "", messageTs: "30.1", expected: "resolved-uncertain" },
+    { label: "legacy summary digest receipt", posted: "11.1", messageTs: "30.1", digest: "old-summary", expected: "resolved-uncertain" },
     { label: "one microsecond earlier", posted: "1800000000.123456", messageTs: "1800000000.123455", expected: "not-applicable" },
     { label: "one microsecond later", posted: "1800000000.123456", messageTs: "1800000000.123457", expected: "resolved" },
   ])("keeps receipt/time uncertainty honest: $label", async ({ posted, messageTs, expected, ...extra }) => {
@@ -189,9 +198,9 @@ describe("#822: replies answer only the current posted question", () => {
     repo.update({ qitemId: row.qitemId, actorSession: "daemon@kernel", transitionNote:
       `slack-owner-notification-posted notification_key=${episodeKey(row.qitemId, park.transitionId)} kind=human-required message_ts=${posted} thread_ts=5.1${extra.digest ? ` digest=${extra.digest}` : ""}` });
     const contract = new MissionControlWriteContract({ db, eventBus: bus, queueRepo: repo, actionLog: new MissionControlActionLog(db) });
-    const resolver = makeHumanReplyResolver(repo, contract);
+    const resolver = makeHumanReplyResolver(repo, contract, home);
     expect(await resolver({ qitemId: row.qitemId, actorSession: human, decision: "The release branch.", messageTs })).toBe(expected);
-    expect(repo.getById(row.qitemId)?.state).toBe(expected === "resolved" ? "in-progress" : "blocked");
+    expect(repo.getById(row.qitemId)?.state).toBe(expected.startsWith("resolved") ? "in-progress" : "blocked");
     if (expected === "resolved") {
       // Replay is absorbed without requiring a new timestamp or another resolve.
       expect(await resolver({ qitemId: row.qitemId, actorSession: human, decision: "The release branch." })).toBe("already-resolved");
@@ -228,4 +237,107 @@ describe("#822: replies answer only the current posted question", () => {
     } finally { read.mockRestore(); }
   });
 
+  it("uses the current primary before the supplemental post finishes, without marking full delivery early", async () => {
+    await say(undefined, "8.1", "Check this build.");
+    const row = inboundRow("8.1")!;
+    parkOnPerson(row.qitemId, "Which branch?");
+    const key = episodeKey(row.qitemId, latestPark(row.qitemId).transitionId);
+    const alert = (await makeQueuePorts(repo, { loadHumanRegistry: () => registry }).listHumanAlerts({})).find((q) => q.qitemId === row.qitemId)!;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    postHook = async (post) => { if (String(post.text).includes("SUPPLEMENTAL-DETAIL")) await held; return undefined; };
+    try {
+      expect(wire.dispatcher.dispatch("post_message", human, { ...alert, humanDetail: "SUPPLEMENTAL-DETAIL" })).toMatchObject({ ok: true });
+      await vi.waitFor(() => expect(posts).toHaveLength(2));
+      const buffer = new DispatchBuffer(home);
+      expect(buffer.pending()).toHaveLength(1);
+      expect(repo.transitionLog.hasOwnerNotificationReceipt(row.qitemId, key)).toBe(false);
+      expect(readFileSync(join(home, "state/slack-attempted-decisions.jsonl"), "utf8")).toContain("::primary-receipt::");
+      await say("8.1", "8.2", "Early context."); // older person-root time is NOT the question time
+      expect(repo.getById(row.qitemId)?.state).toBe("blocked");
+      await say("8.1", "30.1", "Release.");
+      expect(repo.getById(row.qitemId)?.state).toBe("in-progress");
+      expect(resolveNote(row.qitemId)).toBe("Release.");
+      expect(buffer.pending()).toHaveLength(1);
+      expect(repo.transitionLog.hasOwnerNotificationReceipt(row.qitemId, key)).toBe(false);
+      release();
+      await vi.waitFor(() => expect(buffer.pending()).toHaveLength(0));
+      expect(repo.transitionLog.hasOwnerNotificationReceipt(row.qitemId, key)).toBe(true);
+      expect(posts).toHaveLength(2); // no primary replay or uncertainty notice
+    } finally { release(); }
+  });
+
+  it.each(["reconciled", "", "11.1"])("a current degraded/legacy receipt %s resumes with separate agent context and a real human notice", async (posted) => {
+    await say(undefined, "9.1", "Check this build.");
+    const row = inboundRow("9.1")!;
+    parkOnPerson(row.qitemId, "Which branch?");
+    const key = episodeKey(row.qitemId, latestPark(row.qitemId).transitionId);
+    repo.update({ qitemId: row.qitemId, actorSession: "daemon@kernel", transitionNote:
+      `slack-owner-notification-posted notification_key=${key} kind=human-required message_ts=${posted} thread_ts=9.1${posted === "11.1" ? " digest=legacy" : ""}` });
+    await say("9.1", "30.1", "Not approved; investigate first.");
+    expect(repo.getById(row.qitemId)?.state).toBe("in-progress");
+    expect(inboundRow("30.1")?.body).toMatch(/^Not approved; investigate first\./);
+    expect(resolveNote(row.qitemId)).toContain("Not approved; investigate first.");
+    expect(resolveNote(row.qitemId)).toContain("OpenRig timing context");
+    expect(resolveNote(row.qitemId)).toContain("could not be confirmed");
+    expect(posts).toHaveLength(1);
+    expect(posts[0]).toMatchObject({ channel: "C-TEST", thread_ts: "9.1" });
+    expect(posts[0]?.text).toContain("could not verify");
+    await say("9.1", "30.1", "Not approved; investigate first.");
+    expect(posts).toHaveLength(1); // replay does not resolve or acknowledge twice
+    expect(repo.transitionLog.listForQitem(row.qitemId).filter((t) => t.ownerNotificationKind === "human-decision-resolved")).toHaveLength(1);
+  });
+
+  it("a reply before a timed legacy summary is still proven early", async () => {
+    await say(undefined, "10.1", "Check this build.");
+    const row = inboundRow("10.1")!;
+    parkOnPerson(row.qitemId, "Which branch?");
+    const key = episodeKey(row.qitemId, latestPark(row.qitemId).transitionId);
+    repo.update({ qitemId: row.qitemId, actorSession: "daemon@kernel", transitionNote:
+      `slack-owner-notification-posted notification_key=${key} kind=human-required message_ts=20.1 thread_ts=10.1 digest=legacy` });
+    await say("10.1", "15.1", "More context.");
+    expect(repo.getById(row.qitemId)?.state).toBe("blocked");
+    expect(posts).toHaveLength(0);
+  });
+
+  it.each(["older-episode", "qitem-only", "wrong-kind", "conflicting", "malformed", "unreadable"])("does not infer current delivery from %s primary evidence", async (scenario) => {
+    await say(undefined, "12.1", "Check this build.");
+    const row = inboundRow("12.1")!;
+    parkOnPerson(row.qitemId, "Which branch?");
+    const key = episodeKey(row.qitemId, latestPark(row.qitemId).transitionId);
+    const buffer = new DispatchBuffer(home);
+    buffer.enqueue({ kind: "outbound_decision", decisionId: "pending", op: "post_message", entityBindingRef: human, payload: {
+      qitemId: row.qitemId, notificationKey: scenario === "older-episode" ? `${row.qitemId}:0` : scenario === "qitem-only" ? row.qitemId : key,
+      ownerNotificationKind: scenario === "wrong-kind" ? "human-update" : "human-required",
+    } });
+    const attempted = new SeenStore(join(home, "state/slack-attempted-decisions.jsonl"));
+    const mark = (time: string) => attempted.mark(`pending::primary-receipt::${Buffer.from(JSON.stringify({ messageTs: time, threadTs: "12.1" })).toString("base64url")}`, "primary-receipt");
+    mark(scenario === "malformed" ? "not-a-time" : "11.1");
+    if (scenario === "conflicting") mark("13.1");
+    if (scenario === "unreadable") { rmSync(join(home, "state/slack-attempted-decisions.jsonl")); mkdirSync(join(home, "state/slack-attempted-decisions.jsonl")); }
+    await say("12.1", "30.1", "Release.");
+    expect(repo.getById(row.qitemId)?.state).toBe("blocked");
+    expect(inboundRow("30.1")?.replyTo).toBe(row.qitemId);
+    expect(posts).toHaveLength(0);
+  });
+
+  it("a failed uncertainty notice stays failed and a retry never repeats the durable resolve or question", async () => {
+    await say(undefined, "13.1", "Check this build.");
+    const row = inboundRow("13.1")!;
+    parkOnPerson(row.qitemId, "Which branch?");
+    const key = episodeKey(row.qitemId, latestPark(row.qitemId).transitionId);
+    repo.update({ qitemId: row.qitemId, actorSession: "daemon@kernel", transitionNote:
+      `slack-owner-notification-posted notification_key=${key} kind=human-required message_ts=reconciled thread_ts=13.1` });
+    postHook = async () => reply({ ok: false, error: "invalid_auth" });
+    await say("13.1", "30.1", "Investigate first.");
+    expect(repo.getById(row.qitemId)?.state).toBe("in-progress");
+    expect(logs.some((line) => line.includes("acknowledgement not posted"))).toBe(true);
+    expect(new SeenStore(join(home, "state/slack-inbound-seen.jsonl")).load().has("C-TEST:30.1")).toBe(false);
+    expect(readFileSync(join(home, "state/slack-inbound-deadletter.jsonl"), "utf8")).toContain("30.1");
+    postHook = undefined;
+    await say("13.1", "30.1", "Investigate first.");
+    expect(new SeenStore(join(home, "state/slack-inbound-seen.jsonl")).load().has("C-TEST:30.1")).toBe(true);
+    expect(posts).toHaveLength(2); // failed notice then successful notice, no question
+    expect(repo.transitionLog.listForQitem(row.qitemId).filter((t) => t.ownerNotificationKind === "human-decision-resolved")).toHaveLength(1);
+  });
 });
