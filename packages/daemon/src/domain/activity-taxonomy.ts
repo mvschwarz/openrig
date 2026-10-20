@@ -18,6 +18,7 @@
 // display from the count+reason fields via `deriveDisplayActivity` — the one bridge —
 // so no store or transition ever holds "needs-input" as a state. That reconciliation
 // is documented in the reference doc's addendum-mapping section.
+import { communityHarnessOf } from "./built-in-runtimes.js";
 
 /** Activity axis — what a present agent is doing. */
 export type ActivityValue = "working" | "idle-at-prompt" | "unknown";
@@ -88,8 +89,9 @@ export const EVIDENCE_RUNG_RANK: readonly EvidenceRungId[] = [
 /** AM-2 symmetric admission: a rung EARNS authority the way lower rungs retire.
  *  authoritative — consulted for state; trial — admitted by fixture pass, measured for
  *  agreement, NOT consulted; identity-only — usable for identity/resume refs only
- *  (partial-coverage honesty, and the AM-1 degradation target); absent — not staffed. */
-export type RungTrust = "authoritative" | "trial" | "identity-only" | "absent";
+ *  (partial-coverage honesty, and the AM-1 degradation target); positive-only — consulted
+ *  only when it reports working, so its silence is unknown, never idle; absent — not staffed. */
+export type RungTrust = "authoritative" | "trial" | "identity-only" | "positive-only" | "absent";
 
 export interface RungDeclaration {
   rung: EvidenceRungId;
@@ -104,7 +106,7 @@ export interface RungDeclaration {
  *  never inherits its predecessor's rung authority. */
 export interface AdapterRungInventory {
   adapterId: string;
-  runtime: "claude-code" | "codex" | "tmux-generic";
+  runtime: "claude-code" | "codex" | "tmux-generic" | "community-harness";
   rungs: RungDeclaration[];
 }
 
@@ -194,10 +196,20 @@ export const TMUX_GENERIC_RUNG_INVENTORY: AdapterRungInventory = {
   rungs: [{ rung: "window-sampling", lifecycleCoverage: "full", initialTrust: "authoritative" }],
 };
 
+/** A community harness declares no activity signal. A changing screen reads working, decided by window
+ *  sampling; a quiet screen reads unknown, never idle, since an app can sit quietly at a prompt or an approval. */
+export const COMMUNITY_HARNESS_RUNG_INVENTORY: AdapterRungInventory = {
+  adapterId: "community-harness",
+  runtime: "community-harness",
+  rungs: [{ rung: "window-sampling", lifecycleCoverage: "partial", initialTrust: "positive-only" }],
+};
+
 /** Resolve a runtime string to its rung inventory (the ingest auto-declaration path).
- *  Unknown runtimes get the generic floor — partial-coverage honesty by default. */
-export function runtimeRungInventory(runtime: string | null): AdapterRungInventory {
+ *  Unknown runtimes get the generic floor — partial-coverage honesty by default. A seat launched for a community
+ *  community harness (its session's recorded selection, still the node's runtime) gets that app's inventory. */
+export function runtimeRungInventory(runtime: string | null, communityHarness?: string | null): AdapterRungInventory {
   if (runtime === "claude-code") return CLAUDE_ACTIVITY_RUNG_INVENTORY;
   if (runtime === "codex") return CODEX_ACTIVITY_RUNG_INVENTORY;
+  if (communityHarnessOf(communityHarness, runtime)) return COMMUNITY_HARNESS_RUNG_INVENTORY;
   return TMUX_GENERIC_RUNG_INVENTORY;
 }
