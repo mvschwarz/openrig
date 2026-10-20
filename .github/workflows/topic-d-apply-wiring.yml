@@ -16,6 +16,15 @@ jobs:
         with:
           ref: piotr/upstream-accept-receipt-binding
           token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+      - name: Import identical Topic C product files from C tip
+        run: |
+          git fetch origin piotr/upstream-writer-authority
+          git checkout origin/piotr/upstream-writer-authority -- \
+            packages/daemon/src/domain/writer-authority.ts \
+            packages/daemon/src/domain/fenced-publish-target.ts \
+            packages/daemon/src/db/all-migrations.ts \
+            packages/daemon/src/routes/writer.ts
       - name: Apply Topic D staged files + wiring patches
         run: python3 _agent/topic-d/apply.py
       - name: Commit product extract

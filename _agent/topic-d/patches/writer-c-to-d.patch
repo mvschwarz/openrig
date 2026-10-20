@@ -1,0 +1,101 @@
+diff --git a/packages/daemon/src/routes/writer.ts b/packages/daemon/src/routes/writer.ts
+index f52bb9d9..c5dcd532 100644
+--- a/packages/daemon/src/routes/writer.ts
++++ b/packages/daemon/src/routes/writer.ts
+@@ -11,6 +11,10 @@ import {
+   bindAcceptance,
+   type ArtifactIdentity,
+ } from "../domain/artifact-acceptance.js";
++import {
++  OperationPublishError,
++  type OperationPublishService,
++} from "../domain/operation-publish.js";
+ import { requireSenderIdentity } from "./require-sender-identity.js";
+ 
+ /**
+@@ -33,6 +37,14 @@ export function writerRoutes(): Hono {
+     return (c.get("fencedPublishTarget" as never) as FencedPublishTarget | undefined) ?? null;
+   }
+ 
++  function getOperationPublish(c: {
++    get: (key: string) => unknown;
++  }): OperationPublishService | null {
++    return (
++      (c.get("operationPublish" as never) as OperationPublishService | undefined) ?? null
++    );
++  }
++
+   function errorResponse(
+     c: { json: (body: unknown, status?: number) => Response },
+     err: unknown,
+@@ -40,7 +52,8 @@ export function writerRoutes(): Hono {
+     if (
+       err instanceof WriterAuthorityError ||
+       err instanceof FencedPublishError ||
+-      err instanceof ArtifactAcceptanceError
++      err instanceof ArtifactAcceptanceError ||
++      err instanceof OperationPublishError
+     ) {
+       const status =
+         err.code === "writer_held" ||
+@@ -240,6 +253,60 @@ export function writerRoutes(): Hono {
+     }
+   });
+ 
++  /**
++   * Topic D — thin accept↔artifact + receipt↔operation.
++   * Receipt is keyed by operationId (historical), not target latest.
++   */
++  app.post("/accept-publish", async (c) => {
++    const body = await c.req
++      .json<{
++        operationId?: string;
++        holderSession?: string;
++        generation?: number;
++        reason?: string;
++        artifact?: ArtifactIdentity;
++        candidateBody?: string;
++      }>()
++      .catch(() => ({} as never));
++    const identity = requireSenderIdentity(c, {
++      verb: "writer accept-publish",
++      bodyClaim: body.holderSession,
++    });
++    if (!identity.ok) return identity.response;
++    const writers = requireWriters(c);
++    if (writers instanceof Response) return writers;
++    const ops = getOperationPublish(c);
++    if (!ops) {
++      return c.json(
++        {
++          error: "operation_publish_unavailable",
++          message: "OperationPublishService is not wired",
++        },
++        503,
++      );
++    }
++    try {
++      if (typeof body.generation !== "number") {
++        return c.json({ error: "generation_required", message: "generation is required" }, 400);
++      }
++      if (!body.artifact) {
++        return c.json({ error: "artifact_required", message: "artifact is required" }, 400);
++      }
++      const result = ops.acceptAndPublish({
++        operationId: body.operationId ?? "",
++        artifact: body.artifact,
++        body: body.candidateBody,
++        actor: identity.session,
++        reason: body.reason ?? "accept",
++        holderSession: identity.session,
++        generation: body.generation,
++      });
++      return c.json(result, result.replayed ? 200 : 201);
++    } catch (err) {
++      return errorResponse(c, err);
++    }
++  });
++
+   app.get("/active", async (c) => {
+     const writers = requireWriters(c);
+     if (writers instanceof Response) return writers;
