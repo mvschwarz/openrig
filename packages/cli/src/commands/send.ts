@@ -512,8 +512,12 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
         throw err;
       }
 
+      // Context beside the send's own result: the seat was in a managed compaction or restore when it ran.
+      const compactionNotice = (res.data["managedCompaction"] as { notice?: unknown } | undefined)?.notice;
+      const printCompactionNotice = (write: (line: string) => void) => { if (typeof compactionNotice === "string") write(`Notice: ${compactionNotice}`); };
       if (res.data["outcome"] === "retained") {
         console.log(opts.json ? JSON.stringify(res.data) : `Retained, not delivered to ${session}. ${String(res.data["warning"] ?? "")}`);
+        if (!opts.json) printCompactionNotice(console.log);
         return;
       }
 
@@ -543,6 +547,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       if (res.status >= 400) {
         const error = res.data["error"] as string | undefined;
         console.error(error ?? `Send failed (HTTP ${res.status})`);
+        printCompactionNotice(console.error);
         // MH-4 §4 loud-failure hint: the target was 3-part-shaped but its
         // suffix matched no registered host — name the near-miss.
         if (crossHostHint) console.error(`hint: ${crossHostHint}`);
@@ -551,6 +556,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       }
 
       console.log(`Sent to ${session}`);
+      printCompactionNotice(console.log);
       // OPR.0.4.3.28 correction — an `unknown`-telemetry send now PROCEEDS with a non-blocking
       // advisory (was a fail-closed refusal). Surface it on the human output, not only in --json.
       const advisory = res.data["warning"] as string | undefined;

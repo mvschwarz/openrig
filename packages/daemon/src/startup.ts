@@ -2421,6 +2421,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         },
       )
     : undefined;
+  // A send to a seat this enforcer is compacting or restoring is delivered as always, with a notice of what it recorded.
+  if (compactionEnforcer) deps.sessionTransport?.setCompactionObserver((sessionName) => compactionEnforcer.observedCompaction(sessionName));
   // 51-08 A1 — the over-time series rides the SAME 30s tick (PM decision 1):
   // context lane appends beside the existing persist; the provider-window lane
   // drains the same statusline cache directory the read model scans.

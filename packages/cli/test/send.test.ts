@@ -190,6 +190,12 @@ describe("Send CLI", () => {
           } else if (parsed.session === "busy-session") {
             res.writeHead(409, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: false, sessionName: "busy-session", reason: "mid_work", error: "Target pane appears mid-task. Use force: true to send anyway." }));
+          } else if (parsed.session === "restoring-seat" || parsed.session === "restoring-failed") {
+            const managedCompaction = { stage: "restoring", observed: "before_send", notice: "restoring-seat was mid-restore (as recorded). This doesn't mean the restore has finished." };
+            const failed = parsed.session === "restoring-failed";
+            res.writeHead(failed ? 502 : 200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(failed ? { ok: false, sessionName: parsed.session, error: "paste failed", managedCompaction }
+              : { ok: true, sessionName: parsed.session, managedCompaction }));
           } else if (parsed.session === "unknown-advisory") {
             // OPR.0.4.3.28 — unknown telemetry now PROCEEDS with a non-blocking advisory (warning).
             res.writeHead(200, { "Content-Type": "application/json" });
@@ -384,6 +390,16 @@ describe("Send CLI", () => {
 
   // OPR.0.4.3.28 correction — an unknown-telemetry send PROCEEDS and PRINTS the advisory on
   // human output (not only in --json).
+  it("prints the managed compaction notice beside the send's own result, sent or failed", async () => {
+    const sent = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "send", "restoring-seat", "hello"]); });
+    expect(sent.logs.join("\n")).toContain("Sent to restoring-seat\nNotice: restoring-seat was mid-restore (as recorded). This doesn't mean the restore has finished.");
+    const failed = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "send", "restoring-failed", "hello"]); });
+    expect(failed.logs.join("\n")).toContain("paste failed");
+    expect(failed.logs.join("\n")).toContain("Notice: restoring-seat was mid-restore");
+    expect(failed.logs.join("\n")).not.toContain("Sent to");
+    expect(failed.exitCode).toBe(2);
+  });
+
   it("prints the Advisory on an unknown-proceed send (human output)", async () => {
     const { logs, exitCode } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "send", "unknown-advisory", "hello"]);

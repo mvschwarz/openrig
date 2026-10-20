@@ -392,6 +392,12 @@ export function buildPostCompactTurnBoundaryPrompt(): string {
 }
 
 type PendingPostCompactStage = "turn_boundary" | "restore_prompt" | "compliance_prompt";
+
+/** A managed compaction the enforcer has recorded for a seat: the stage, and a phrase that says only what was observed. */
+export interface ObservedCompaction {
+  stage: "preparing" | "compacting" | "compacted" | "restoring";
+  detail: string;
+}
 export interface PreparationState {
   attemptId: string;
   occupantGeneration: string | null;
@@ -499,6 +505,22 @@ export class ClaudeCompactionEnforcer {
   async maybeAutoCompact(input: EnforcerInput): Promise<EnforcerOutcome> {
     this.reconcilePreparations();
     return this.withDeliveryGuard(input, () => this.maybeAutoCompactUnchecked(input));
+  }
+
+  /**
+   * What this enforcer has recorded about a managed compaction of `sessionName`, for a sender's context, or null when
+   * none is under way. Read-only: it reports the enforcer's own state (the preparation attempt and the post-compact
+   * stage still owed), never whether the seat finished compacting or restoring.
+   */
+  observedCompaction(sessionName: string): ObservedCompaction | null {
+    const owed = this.pendingPostCompactRestore.get(sessionName);
+    if (owed === "compliance_prompt") return { stage: "restoring", detail: "mid-restore: the restore request was sent and the post-restore audit is still owed" };
+    if (owed === "restore_prompt") return { stage: "compacted", detail: "compacted, with its restore not yet requested" };
+    if (owed === "turn_boundary") return { stage: "compacting", detail: "being compacted: /compact was submitted and the post-compaction steps haven't started" };
+    const attempt = this.pendingPreCompactPrep.get(sessionName);
+    if (attempt?.status === "sending" || attempt?.status === "waiting") return { stage: "preparing", detail: "preparing for a managed compaction: /compact hasn't been sent yet" };
+    if (attempt?.status === "compact-sent") return { stage: "compacting", detail: "being compacted: /compact was submitted and the post-compaction steps haven't started" };
+    return null;
   }
 
   /** True while a post-compact stage (turn boundary, restore or audit) is still owed to this seat. */
