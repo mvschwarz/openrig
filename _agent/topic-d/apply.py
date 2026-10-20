@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Apply Topic D extract: copy staged files + patch large wiring (MCP-friendly)."""
+"""Apply Topic D extract: reassemble chunks, copy staged files, patch wiring."""
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 import shutil
 import subprocess
 import sys
@@ -11,6 +14,30 @@ ROOT = Path(__file__).resolve().parents[2]
 AGENT = Path(__file__).resolve().parent
 FILES_DIR = AGENT / "files"
 PATCH_DIR = AGENT / "patches"
+CHUNKS_DIR = AGENT / "chunks"
+
+
+def reassemble_chunks() -> int:
+    manifest_path = CHUNKS_DIR / "manifest.json"
+    if not manifest_path.is_file():
+        return 0
+    manifest = json.loads(manifest_path.read_text())
+    n = 0
+    for rel, meta in manifest.items():
+        parts = meta["parts"]
+        b64 = "".join((CHUNKS_DIR / p).read_text().strip() for p in parts)
+        data = base64.b64decode(b64)
+        expect = meta.get("sha256")
+        if expect:
+            got = hashlib.sha256(data).hexdigest()
+            if got != expect:
+                raise SystemExit(f"sha256 mismatch for {rel}: {got} != {expect}")
+        dest = ROOT / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        print(f"chunk {rel} ({len(data)} bytes)")
+        n += 1
+    return n
 
 
 def copy_staged_files() -> int:
@@ -20,7 +47,6 @@ def copy_staged_files() -> int:
     for src in sorted(FILES_DIR.iterdir()):
         if not src.is_file():
             continue
-        # packages__daemon__src__domain__x.ts -> packages/daemon/src/domain/x.ts
         rel = src.name.replace("__", "/")
         dest = ROOT / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -44,10 +70,10 @@ def apply_patches() -> int:
 
 
 def main() -> int:
+    n_chunks = reassemble_chunks()
     n_files = copy_staged_files()
     n_patches = apply_patches()
-    print(f"ok files={n_files} patches={n_patches}")
-    # Exit 0 even when empty so incremental MCP staging does not fail the job.
+    print(f"ok chunks={n_chunks} files={n_files} patches={n_patches}")
     return 0
 
 
