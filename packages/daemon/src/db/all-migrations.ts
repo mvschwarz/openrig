@@ -118,6 +118,7 @@ import { appliedLaunchDaemonOptOutSchema } from "./migrations/113_applied_launch
 import { sessionAgentAppSchema as sessionCommunityHarnessSchema } from "./migrations/114_session_agent_app.js";
 import { threadSeatMapChannelKeySchema } from "./migrations/115_thread_seat_map_channel_key.js";
 import { providerAccountReadingsSchema } from "./migrations/117_provider_account_readings.js";
+import { writerAuthorityLeasesSchema } from "./migrations/118_writer_authority_leases.js";
 
 /** Ordered migrations; numbers may be reserved by independent changes. */
 
@@ -235,4 +236,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   sessionCommunityHarnessSchema,
   threadSeatMapChannelKeySchema,
   providerAccountReadingsSchema,
+  writerAuthorityLeasesSchema,
 ];
