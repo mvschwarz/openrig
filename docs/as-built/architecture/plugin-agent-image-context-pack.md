@@ -309,7 +309,7 @@ over the global extra file, and an extra file that declares a different seat is 
 manually through `/api/compaction/trigger`, `cancel` and `state`, which use the terminal
 bearer-token middleware; it passes every request through when no token is configured.
 `--skip-map` skips the map requirement once, `--cancel` ends the preparation, and `--state`
-shows the attempt, its expected map and its deadline. A manual attempt has 120 seconds for
+shows the attempt, its expected map and its deadline. Ordinary approval prompts during preparation can be answered within that same deadline; OpenRig waits without answering them. A manual attempt has 180 seconds for
 preparation and the idle wait.
 
 The below-threshold continuation checks policy enablement too, except for an explicitly

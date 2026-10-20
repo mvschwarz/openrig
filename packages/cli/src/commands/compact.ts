@@ -3,9 +3,9 @@ import { DaemonClient, terminalAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, type LifecycleDeps } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 
-// Preparation (exact map plus idle wait) shares the existing 120s ceiling. Give the HTTP
+// Preparation (exact map plus idle wait) shares the 180s ceiling. Give the HTTP
 // call generous headroom so the client does not time out mid-sequence.
-const MANUAL_COMPACT_REQUEST_TIMEOUT_MS = 180_000;
+const MANUAL_COMPACT_REQUEST_TIMEOUT_MS = 240_000;
 
 export interface CompactDeps {
   lifecycleDeps: LifecycleDeps;
@@ -38,10 +38,11 @@ NOT a bare /compact and NOT the read-only 'rig compact-plan' triage. Non-Claude
 seats are rejected. Managed /compact waits for the exact attempt/occupant restore
 map named by preparation, published atomically with its completion marker. This
 checks completion identity, not map quality. Manual preparation and idle wait share
-120 seconds; expiry disarms that attempt. --state shows the map/deadline/reason,
+180 seconds; expiry disarms that attempt. --state shows the map/deadline/reason,
 the preparation prompt's delivery, and the /compact result: "submitted, unconfirmed"
 means /compact and Enter reached the seat; OpenRig does not check that compaction
-then ran. Automatic /compact, like manual, is sent only to an idle seat.
+then ran. Ordinary approvals during preparation can be answered within that same deadline;
+OpenRig does not answer them. Automatic /compact, like manual, is sent only to an idle seat.
 --cancel ends preparation. --skip-map skips only the map requirement for this one
 manual request. Cancel an active preparation before retrying or using --skip-map.
 Automatic preparation waits at most 25 minutes from prep delivery, using existing
