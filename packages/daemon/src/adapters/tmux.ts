@@ -359,7 +359,7 @@ export class TmuxAdapter {
       if (process.platform === "win32") throw new Error("POSIX launch boundary unavailable");
       const shell = await this.getDefaultShell();
       if (!shell) throw new Error("Default shell unavailable");
-      if (command === undefined) command = await this.run(["tmux", "show-options", "-gv", "default-command"]);
+      if (command === undefined) command = (await this.run(["tmux", "show-options", "-gv", "default-command"])).replace(/\r?\n$/, "");
       const baseline = { ...policy.env };
       removeParentSessionEnv(baseline);
       const values = Object.entries({ ...baseline, ...seatEnv })
