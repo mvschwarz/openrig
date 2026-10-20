@@ -1,4 +1,5 @@
 import { readWakeLadderBackstop } from "./queue-wake-ladder.js";
+import { quietHoldCustody } from "./quiet-hold-custody.js";
 import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import type { EventBus } from "./event-bus.js";
@@ -4373,6 +4374,16 @@ export class QueueRepository {
       const awaitingHuman = view.state === "pending" && this.humanNotificationPostedThisEpisode(qitemId, listed);
       if (awaitingHuman) {
         view.nextBackstop = { owner: view.owner, mechanism: "none (posted to the human; awaiting their decision)", dueAt: null, intervalSeconds: null };
+      }
+      // Quiet hours: a held ask is owned by its window's release job until it posts.
+      const quiet = awaitingHuman ? null : quietHoldCustody(this.db, qitemId);
+      if (quiet && quiet.state !== "orphaned") {
+        view.nextBackstop = quiet.state === "held"
+          ? { owner: view.owner, mechanism: `quiet-release:${quiet.windowId}`, dueAt: quiet.nextBoundary, intervalSeconds: 60,
+            note: `Held by quiet hours${quiet.nextBoundary ? ` until ${quiet.nextBoundary}` : ""}; the window's release job posts it when quiet ends.` }
+          : { owner: view.owner, mechanism: `quiet-release:${quiet.windowId}`, dueAt: null, intervalSeconds: null,
+            note: "Released when quiet ended; waiting for transport (the post)." };
+        return view;
       }
       const recovery = readWakeLadderBackstop(this.db, qitemId);
       if (recovery) {

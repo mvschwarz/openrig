@@ -1,4 +1,5 @@
 import { findQueueRecovery, recoveryId, recoveryTag } from "./queue-recovery.js";
+import { quietHoldCustody } from "./quiet-hold-custody.js";
 import { queueWaitNotice } from "./queue-wait-backoff.js";
 import { lastMeaningfulTransition, pendingSince } from "./queue-waiting.js";
 import { resolvePickupThresholdMinutes } from "./queue-pickup.js";
@@ -478,13 +479,19 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       // that human; it is not stuck, and a finding would post the human again. Unposted, failed,
       // legacy and non-human rows keep this net.
       if (deps.queueRepo.humanNotificationPostedThisEpisode(row.qitemId)) continue;
+      // Quiet hours: a held ask whose window's release job is live waits on that job, and one already released waits on
+      // its post; neither is stuck. A hold with no live release job is: nothing will ever release it.
+      const quiet = quietHoldCustody(deps.db, row.qitemId, now);
+      if (quiet && quiet.state !== "orphaned") continue;
       candidates.push({
         kind: "unclaimed-obligation",
         row,
         route: resolveOrch(row.destinationSession) ?? row.destinationSession,
         ageMinutes: minutesSince(actionableAt, now),
         evidenceAt: actionableAt,
-        why: `actionable with a destination and unclaimed for ${minutesSince(actionableAt, now)} min (threshold ${ageMinutes})`,
+        why: quiet?.state === "orphaned"
+          ? `held for quiet hours (window ${quiet.windowId}) for ${minutesSince(actionableAt, now)} min, but no release job is live for that window: nothing will release it`
+          : `actionable with a destination and unclaimed for ${minutesSince(actionableAt, now)} min (threshold ${ageMinutes})`,
       });
     }
 

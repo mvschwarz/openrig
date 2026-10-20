@@ -1,4 +1,5 @@
 import type { ArbitratedSeatState } from "./activity-taxonomy.js";
+import { quietHoldCustody } from "./quiet-hold-custody.js";
 import { latestHookMovedOn, latestHookPermissionPending, latestHookWaitsOnPerson } from "./agent-activity-store.js";
 import type { AgentActivity } from "./types.js";
 import type { OperatorDeliveryEngine } from "./gateway/operator-delivery-engine.js";
@@ -347,7 +348,10 @@ function hasPickupEvidence(db: Database.Database, row: Pick<QueueItem, "qitemId"
       // ladder before the resolution pass reads it.
       note.startsWith("slack-owner-notification-") ||
       note.startsWith("delivery-termination:") ||
-      note.startsWith("delivery-deferral-")
+      note.startsWith("delivery-deferral-") ||
+      // Quiet hours: holding an ask and releasing it are delivery machinery too, never someone picking it up.
+      note.startsWith("delivery-decision: quiet-hold ") ||
+      note.startsWith("quiet-release-")
     )
       continue;
     return true;
@@ -760,6 +764,10 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
         if (minutesSince(row.tsCreated, now) < windowMin) continue;
         if (hasPickupEvidence(deps.db, row)) continue;
       }
+      // An ask held for quiet hours (or released and waiting for its post) belongs to its window's release job, which
+      // posts it when quiet ends; escalating it would post to the person during quiet. An orphaned hold isn't owned.
+      const quiet = quietHoldCustody(deps.db, row.qitemId, now);
+      if (quiet && quiet.state !== "orphaned") continue;
       activeLadders += 1;
 
       // Due-ness: the latest ladder marker (or the original nudge attempt) is older than
