@@ -21,10 +21,17 @@ def reassemble_chunks() -> int:
     manifest_path = CHUNKS_DIR / "manifest.json"
     if not manifest_path.is_file():
         return 0
-    manifest = json.loads(manifest_path.read_text())
+    manifest = json.loads(manifest_path.read_text() or "{}")
+    if not manifest:
+        print("chunk manifest empty; skip")
+        return 0
     n = 0
     for rel, meta in manifest.items():
         parts = meta["parts"]
+        missing = [p for p in parts if not (CHUNKS_DIR / p).is_file()]
+        if missing:
+            print(f"skip incomplete chunks for {rel}: {missing}")
+            continue
         b64 = "".join((CHUNKS_DIR / p).read_text().strip() for p in parts)
         data = base64.b64decode(b64)
         expect = meta.get("sha256")
