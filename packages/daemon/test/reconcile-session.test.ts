@@ -19,6 +19,9 @@ import type { NativeProcessRow } from "../src/domain/native-process-lineage.js";
 import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 import * as transcriptCapture from "../src/domain/transcript-capture.js";
 import { TranscriptStore } from "../src/domain/transcript-store.js";
+import { createDb } from "../src/db/connection.js";
+import { migrate } from "../src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 
 /** Fully-instrumented tmux adapter: records every call by method name. */
 function spyTmux(overrides?: Partial<Record<string, unknown>>) {
@@ -325,7 +328,8 @@ describe("binding-only missing-pane repair", () => {
   const sessionName = "worker@repair-fixture";
 
   beforeEach(() => {
-    db = createFullTestDb();
+    db = createDb(":memory:");
+    migrate(db, ALL_MIGRATIONS);
     tmux = spyTmux({
       probeSession: vi.fn(async () => ({ state: "present" })),
       listSessions: vi.fn(async () => [{ name: sessionName, windows: 1, created: "123", attached: false }]),
@@ -342,6 +346,8 @@ describe("binding-only missing-pane repair", () => {
     db.prepare("UPDATE bindings SET updated_at='2000-01-01' WHERE node_id=?").run(nodeId);
     guard = new SeatDeliveryGuard(db, name => resolveGuardTarget(db, name));
     tmux.deliveryGuard = guard;
+    db.prepare(`INSERT INTO queue_items(qitem_id,ts_created,ts_updated,source_session,destination_session,state,body)
+      VALUES ('pending-work','2000-01-01','2000-01-01','sender@repair-fixture',?,'pending','retain obligation')`).run(sessionName);
   });
   afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); db.close(); });
 
@@ -394,6 +400,22 @@ describe("binding-only missing-pane repair", () => {
     expect((await post(body)).status).toBe(400);
     expect(stored()).toEqual(before);
   });
+  it("refuses explicit rig/node mismatch without choosing a different seat", async () => {
+    const before = stored();
+    const res = await post({ rigId: "another-rig", logicalId: "worker" });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ ok: false, code: "node_mismatch" });
+    expect(stored()).toEqual(before);
+  });
+  it("preserves a token refreshed during observation", async () => {
+    tmux.getPanePid = vi.fn(async () => {
+      db.prepare("UPDATE sessions SET resume_token='newer-hook-token' WHERE id=?").run(sessionId);
+      return 4242;
+    });
+    expect(await repair()).toMatchObject({ ok: true, result: { sessionId } });
+    expect(db.prepare("SELECT resume_token, resume_provenance FROM sessions WHERE id=?").get(sessionId))
+      .toEqual({ resume_token: "newer-hook-token", resume_provenance: "hook" });
+  });
 
   it.each(["unavailable", "absent", "no panes", "two panes", "two windows", "no pid", "changed pid", "changed pane", "changed session"])("does not write after %s observation", async mode => {
     if (mode === "unavailable") tmux.probeSession = vi.fn(async () => ({ state: "transport_unavailable", cause: "fixture" }));
@@ -424,7 +446,7 @@ describe("binding-only missing-pane repair", () => {
     expect(await repair()).toMatchObject({ ok: false });
     expect(stored()).toEqual(before);
   });
-  it.each(["binding id", "session", "occupant", "target"])("fences a concurrent %s change at commit", async kind => {
+  it.each(["binding id", "session", "occupant", "target", "name collision"])("fences a concurrent %s change at commit", async kind => {
     let expected: ReturnType<typeof stored>;
     tmux.getPanePid = vi.fn(async () => {
       if (kind === "binding id") db.prepare("UPDATE bindings SET id='replacement-binding' WHERE node_id=?").run(nodeId);
@@ -432,6 +454,10 @@ describe("binding-only missing-pane repair", () => {
       if (kind === "occupant") db.prepare(`INSERT OR IGNORE INTO occupant_tenures(id,node_id,generation_ordinal,generation_uuid,kind)
         VALUES ('replacement',?,99,'new-generation','adopt')`).run(nodeId);
       if (kind === "target") db.prepare("UPDATE bindings SET tmux_session='replacement@repair-fixture' WHERE node_id=?").run(nodeId);
+      if (kind === "name collision" && !db.prepare("SELECT 1 FROM nodes WHERE logical_id='other'").get()) {
+        const other = setup.rigRepo.addNode(setup.rigRepo.listRigs()[0]!.id, "other", { runtime: "terminal", podId: null });
+        setup.sessionRegistry.updateBinding(other.id, { tmuxSession: sessionName });
+      }
       expected = stored(); return 4242;
     });
     expect(await repair()).toMatchObject({ ok: false, code: "guard_target_changed" });
@@ -441,6 +467,19 @@ describe("binding-only missing-pane repair", () => {
     await guard.set(nodeId, { mode }, "person", "retain draft");
     const before = stored();
     expect(await repair()).toMatchObject({ ok: false, code: "typing_guard_enabled" });
+    expect(stored()).toEqual(before);
+  });
+  it.each([[1, 0], [0, 1]])("does not change pending legacy desired/effective protection %j/%j", async (desired, effective) => {
+    db.prepare(`INSERT INTO seat_delivery_guards(node_id,desired,effective,actor,reason,changed_at)
+      VALUES (?,?,?,'person','pending protection','2000-01-01')`).run(nodeId, desired, effective);
+    const before = stored();
+    expect(await repair()).toMatchObject({ ok: false, code: "typing_guard_enabled" });
+    expect(stored()).toEqual(before);
+  });
+  it("does not repair through a degraded adapter with no delivery guard", async () => {
+    tmux.deliveryGuard = undefined;
+    const before = stored();
+    expect(await repair()).toMatchObject({ ok: false });
     expect(stored()).toEqual(before);
   });
   it.each(["human", "automatic", "pending protection"])("does not commit during %s work", async kind => {

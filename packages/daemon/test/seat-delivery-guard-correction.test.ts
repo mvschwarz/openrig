@@ -59,6 +59,7 @@ describe("missing-pane repair through real guard/adapter/transport", () => {
       f.tmux.listSessions = async () => [{ name: "worker@fixture", windows: 1, created: "123", attached: false }];
       f.tmux.getPanePid = async () => 4242;
       const before = f.db.prepare("SELECT * FROM sessions").all();
+      f.outbox.retain({ outboxId: "old-held", senderSession: "sender@fixture", destinationSession: "worker@fixture", body: "held" }, f.guard.target("a"));
       expect(await f.transport.send("worker@fixture", "before", { force: true })).toMatchObject({ ok: false });
       expect(f.commands.some(c => c.includes("paste-buffer") || c.includes("send-keys"))).toBe(false);
       const count = f.commands.length;
@@ -70,6 +71,10 @@ describe("missing-pane repair through real guard/adapter/transport", () => {
       expect((await f.transport.send("worker@fixture", "after", { force: true })).ok).toBe(true);
       expect(f.commands.filter(c => c.includes("paste-buffer"))).toHaveLength(1);
       expect(f.commands.filter(c => c.includes("send-keys"))).toHaveLength(1);
+      const countAfter = f.commands.length;
+      expect(await f.transport.send("worker@fixture", "held", { committedOutboxIds: ["old-held"] })).toMatchObject({ ok: false, reason: "guard_target_changed" });
+      expect(f.outbox.getById("old-held")).toMatchObject({ deliveryState: "retained", guardBinding: { pane: null } });
+      expect(f.commands).toHaveLength(countAfter);
     } finally { f.db.close(); }
   });
 });

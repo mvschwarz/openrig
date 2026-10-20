@@ -23,8 +23,7 @@ function mockLifecycleDeps(): LifecycleDeps {
   };
 }
 
-function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCode: number | undefined }> {
-  return new Promise(async (resolve) => {
+async function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCode: number | undefined }> {
     const logs: string[] = [];
     const origLog = console.log;
     const origErr = console.error;
@@ -32,11 +31,12 @@ function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCod
     process.exitCode = undefined;
     console.log = (...args: unknown[]) => logs.push(args.join(" "));
     console.error = (...args: unknown[]) => logs.push(args.join(" "));
-    try { await fn(); } finally { console.log = origLog; console.error = origErr; }
-    const exitCode = process.exitCode;
-    process.exitCode = origExitCode;
-    resolve({ logs, exitCode });
-  });
+    try {
+      await fn();
+      return { logs, exitCode: process.exitCode };
+    } finally {
+      console.log = origLog; console.error = origErr; process.exitCode = origExitCode;
+    }
 }
 
 const OK_RESPONSE = {
