@@ -14,6 +14,7 @@ export const DEFAULT_BODY_EXCERPT = SLACK_SECTION_CAP;
 
 export interface QitemLike {
   qitemId: string;
+  ownerNotificationKind?: string | null;
   summary?: string | null;
   body?: string | null;
   destinationSession?: string | null;
@@ -383,7 +384,9 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
   if (opts.extraBlocks?.length) {
     throw new HumanMessageShapeError("Extra blocks have no complete accessible fallback. Use mediaRefs for images or author supplemental human detail.");
   }
-  const fallback = (context: string | null) => [headline, context, body, questionParts?.text, attr, evidence ? evidence.text : null, attachmentText, opts.reconcileMarker].filter(Boolean).join("\n");
+  const replyHint = q.ownerNotificationKind === "human-required"
+    ? "Reply in this thread after this question to answer it. Earlier and extra messages still reach the agent as conversation." : null;
+  const fallback = (context: string | null) => [headline, context, body, questionParts?.text, replyHint, attr, evidence ? evidence.text : null, attachmentText, opts.reconcileMarker].filter(Boolean).join("\n");
   // The gate context line is supplementary: when it alone would push the complete fallback over
   // budget, the instance part alone is tried, and the line is left out only when even that
   // doesn't fit, rather than refusing the gate.
@@ -397,6 +400,7 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
   if (shownContext) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: shownContext }] });
   if (body.trim()) blocks.push({ type: "section", text: { type: "mrkdwn", text: body } });
   if (questionParts) blocks.push(...questionParts.blocks);
+  if (replyHint) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: replyHint }] });
   blocks.push(...imageBlocks);
   if (evidence) blocks.push(evidence.block);
   blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: attr }] });

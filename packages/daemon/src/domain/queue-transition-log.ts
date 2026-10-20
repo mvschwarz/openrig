@@ -435,13 +435,24 @@ export class QueueTransitionLog {
   }
 
   hasOwnerNotificationReceipt(qitemId: string, notificationKey: string): boolean {
+    return this.getOwnerNotificationReceipt(qitemId, notificationKey) !== null;
+  }
+
+  getOwnerNotificationReceipt(qitemId: string, notificationKey: string): { messageTs: string | null; threadTs: string | null; digest: string | null } | null {
     const rows = this.db
       .prepare(
         `SELECT transition_note FROM ${this.historySource}
-          WHERE qitem_id = ? AND transition_note LIKE 'slack-owner-notification-posted %'`,
+          WHERE qitem_id = ? AND transition_note LIKE 'slack-owner-notification-posted %'
+          ORDER BY transition_id DESC`,
       )
       .all(qitemId) as Array<{ transition_note: string }>;
-    return rows.some((row) => row.transition_note.split(/\s+/).includes(`notification_key=${notificationKey}`));
+    for (const row of rows) {
+      const fields = row.transition_note.split(/\s+/);
+      if (!fields.includes(`notification_key=${notificationKey}`)) continue;
+      const value = (name: string) => fields.find((field) => field.startsWith(`${name}=`))?.slice(name.length + 1) ?? null;
+      return { messageTs: value("message_ts"), threadTs: value("thread_ts"), digest: value("digest") };
+    }
+    return null;
   }
 
   private rowToTransition(row: QueueTransitionRow): QueueTransition {

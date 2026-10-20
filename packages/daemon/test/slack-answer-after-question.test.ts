@@ -105,6 +105,8 @@ describe("#822: replies answer only the current posted question", () => {
     const posted = notes.at(-1)!;
     expect(field(posted, "kind")).toBe("human-required");
     expect(field(posted, "thread_ts")).toBe("1.1");
+    expect(posts.at(-1)?.text).toContain("Reply in this thread after this question to answer it.");
+    expect(JSON.stringify(posts.at(-1)?.blocks)).toContain("Earlier and extra messages still reach the agent as conversation.");
   });
 
   it("2. a delayed early follow-up stays context despite the existing receipt", async () => {
@@ -169,4 +171,61 @@ describe("#822: replies answer only the current posted question", () => {
     await vi.waitFor(() => expect(repo.getById(row.qitemId)?.state).toBe("in-progress"));
     expect(resolveNote(row.qitemId)).toBe("Yes, tag it.");
   });
+
+  it.each([
+    { label: "missing reply time", posted: "11.1", messageTs: undefined, expected: "not-applicable" },
+    { label: "malformed reply time", posted: "11.1", messageTs: "later", expected: "not-applicable" },
+    { label: "equal times", posted: "11.1", messageTs: "11.100000", expected: "not-applicable" },
+    { label: "reconciled receipt without time", posted: "reconciled", messageTs: "30.1", expected: "not-applicable" },
+    { label: "missing receipt time", posted: "", messageTs: "30.1", expected: "not-applicable" },
+    { label: "legacy summary digest receipt", posted: "11.1", messageTs: "30.1", digest: "old-summary", expected: "not-applicable" },
+    { label: "one microsecond earlier", posted: "1800000000.123456", messageTs: "1800000000.123455", expected: "not-applicable" },
+    { label: "one microsecond later", posted: "1800000000.123456", messageTs: "1800000000.123457", expected: "resolved" },
+  ])("keeps receipt/time uncertainty honest: $label", async ({ posted, messageTs, expected, ...extra }) => {
+    await say(undefined, "5.1", "Check this build.");
+    const row = inboundRow("5.1")!;
+    parkOnPerson(row.qitemId, "Which branch?");
+    const park = latestPark(row.qitemId);
+    repo.update({ qitemId: row.qitemId, actorSession: "daemon@kernel", transitionNote:
+      `slack-owner-notification-posted notification_key=${episodeKey(row.qitemId, park.transitionId)} kind=human-required message_ts=${posted} thread_ts=5.1${extra.digest ? ` digest=${extra.digest}` : ""}` });
+    const contract = new MissionControlWriteContract({ db, eventBus: bus, queueRepo: repo, actionLog: new MissionControlActionLog(db) });
+    const resolver = makeHumanReplyResolver(repo, contract);
+    expect(await resolver({ qitemId: row.qitemId, actorSession: human, decision: "The release branch.", messageTs })).toBe(expected);
+    expect(repo.getById(row.qitemId)?.state).toBe(expected === "resolved" ? "in-progress" : "blocked");
+    if (expected === "resolved") {
+      // Replay is absorbed without requiring a new timestamp or another resolve.
+      expect(await resolver({ qitemId: row.qitemId, actorSession: human, decision: "The release branch." })).toBe("already-resolved");
+    }
+  });
+
+  it("a current digest posts the whole question with its own receipt before the answer", async () => {
+    await say(undefined, "6.1", "Check this build.");
+    const row = inboundRow("6.1")!;
+    parkOnPerson(row.qitemId, "Which branch?");
+    const park = latestPark(row.qitemId);
+    repo.update({ qitemId: row.qitemId, actorSession: "daemon@kernel", transitionNote:
+      `delivery-decision: digest notification_key=${episodeKey(row.qitemId, park.transitionId)} window=4h` });
+    const { runDeliveryDigestFlush } = await import("../src/domain/policies/delivery-digest-flush.js");
+    const result = await runDeliveryDigestFlush({ queueRepo: repo, registry: { loadHumanRegistry: () => registry }, home,
+      window: "4h", dispatch: (...args) => wire.dispatcher.dispatch(...args) });
+    expect(result.dispatched).toBe(1);
+    await vi.waitFor(() => expect(repo.transitionLog.hasOwnerNotificationReceipt(row.qitemId, episodeKey(row.qitemId, park.transitionId))).toBe(true));
+    expect(JSON.stringify(posts.at(-1))).toContain("Which branch?");
+    await say("6.1", "30.1", "Release.");
+    await vi.waitFor(() => expect(repo.getById(row.qitemId)?.state).toBe("in-progress"));
+  });
+
+
+  it("does not resolve when reading the current receipt fails", async () => {
+    await say(undefined, "7.1", "Check this build.");
+    const row = inboundRow("7.1")!;
+    parkOnPerson(row.qitemId, "Which branch?");
+    const read = vi.spyOn(repo.transitionLog, "getOwnerNotificationReceipt").mockImplementation(() => { throw new Error("receipt read unavailable"); });
+    const contract = new MissionControlWriteContract({ db, eventBus: bus, queueRepo: repo, actionLog: new MissionControlActionLog(db) });
+    try {
+      await expect(makeHumanReplyResolver(repo, contract)({ qitemId: row.qitemId, actorSession: human, decision: "Release.", messageTs: "30.1" })).rejects.toThrow("receipt read unavailable");
+      expect(repo.getById(row.qitemId)?.state).toBe("blocked");
+    } finally { read.mockRestore(); }
+  });
+
 });

@@ -23,7 +23,7 @@ import { downloadPrivateFile, isSlackHost, lookupBotApp, postChatMessage } from 
 import { botInboxProblems } from "./bot-inbox.js";
 import { loadConfig } from "./config.js";
 import { resolveSecret } from "./secrets.js";
-import { SeenStore, DeadLetterStore, InboundReceiptStore } from "./state-store.js";
+import { SeenStore, DeadLetterStore, InboundReceiptStore, slackMicros } from "./state-store.js";
 import { makeQueuePorts } from "./queue-access.js";
 import { SlackOutboundDriver, OUTBOUND_OP, type OutboundPostPayload } from "./outbound-driver.js";
 import { abortableSleep, subsystemSlackDeliver } from "./slack-delivery.js";
@@ -42,6 +42,7 @@ import { hasLiveHumanGate, isBlockerLive, type QueueRepository } from "../../que
 import { formatReplyToChoice, REPLY_TO_CHOICE_ACTOR, REPLY_TO_CHAIN_LIMIT, type ReplyToChoice } from "../../reply-to-choice.js";
 import { parseSessionName } from "../../session-name.js";
 import type { FetchImpl } from "./slack-api.js";
+import { isHumanSeatSession } from "../../human-route-enforcer.js";
 import { ownerNotificationLevelAtLeast } from "../../queue-transition-log.js";
 // OPR.0.5.6.1 — the delivery rules engine: ONE decision per message replaces
 // the two dial-reads (the S14 default-decision stub). The legacy dial path
@@ -74,7 +75,7 @@ export interface SlackWireOpts {
   inboundRetryIntervalMs?: number;
   inboundMaxConnects?: number;
   registry?: RegistrySurface;
-  resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string }) => Promise<"resolved" | "already-resolved" | "not-applicable">;
+  resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string; messageTs?: string }) => Promise<"resolved" | "already-resolved" | "not-applicable">;
 }
 
 interface HumanReplyActionPort {
@@ -89,8 +90,19 @@ export function makeHumanReplyResolver(
   contract: HumanReplyActionPort | undefined,
 ): NonNullable<SlackWireOpts["resolveHumanReply"]> {
   return async (input) => {
-    if (queueRepo.getById(input.qitemId)?.humanIntent === "update") return "not-applicable";
+    const source = queueRepo.getById(input.qitemId);
+    if (source?.humanIntent === "update") return "not-applicable";
     if (!contract) return "not-applicable";
+    if (source?.state === "blocked" && isHumanSeatSession(source.blockedOn)) {
+      const episode = queueRepo.transitionLog.listForQitem(input.qitemId)
+        .filter((transition) => transition.ownerNotificationKind === "human-required").at(-1);
+      const receipt = episode && queueRepo.transitionLog.getOwnerNotificationReceipt(input.qitemId, `${input.qitemId}:${episode.transitionId}`);
+      const posted = slackMicros(receipt?.messageTs);
+      const replied = slackMicros(input.messageTs);
+      // An unknown/reconciled time or old summary digest cannot prove the question
+      // was shown first. The correlated inbound row still reaches the agent.
+      if (!receipt || receipt.digest || posted === null || replied === null || replied <= posted) return "not-applicable";
+    }
     try {
       await contract.act({ verb: "resolve", ...input });
       return "resolved";

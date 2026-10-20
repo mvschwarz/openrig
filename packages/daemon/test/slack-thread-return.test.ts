@@ -76,7 +76,7 @@ describe("L2 return path — bare map seats route straight to the queue-accepted
     expect(port.creates[0]!.destination).toBe("orch-lead@v-openrig-build");
     expect(port.creates[0]!.tags).toContain("thread");
     expect(port.creates[0]!.tags).toContain("reply-to:q-root");
-    expect(resolutions).toEqual([{ qitemId: "q-root", actorSession: "human-founder@external", decision: "reply received on mobile" }]);
+    expect(resolutions).toEqual([{ qitemId: "q-root", actorSession: "human-founder@external", decision: "reply received on mobile", messageTs: "200.2" }]);
     expect(dead.readAll()).toHaveLength(0);
   });
 
