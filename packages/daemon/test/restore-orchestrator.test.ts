@@ -1902,6 +1902,8 @@ describe("RestoreOrchestrator", () => {
     };
     const adapter = new CodexRuntimeAdapter({ tmux, listProcesses, sleep: async () => { ticks++; },
       fsOps: { exists: () => false, readFile: () => { throw new Error("absent"); }, writeFile: () => {}, mkdirp: () => {}, homedir: "/fixture/home" },
+      // #1524 (b): Codex's records for the resumed process name the requested conversation.
+      readResumeEvidence: () => ({ threadId: token }),
     });
     const result = await createOrchestrator({ tmux, listProcesses }).restore(snap.id, { adapters: { codex: adapter } });
     expect(result.ok).toBe(true);
