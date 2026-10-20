@@ -47,9 +47,9 @@ describe.skipIf(process.platform !== "linux")("#1178 initial-shell environment p
         const before=await waitFile(initial);
         expect(before.slice(0,3)).toEqual([clean?"absent":"tmux",clean?"daemon":"absent","daemon"]);
         expect(before[3]).toMatch(/^%\d+$/);
-        const command=await new SeatLaunchEnvironment(adapter,selected,home,cli).command("seat","claude",{runtime:"claude-code"});
         // Baseline prototype did not write the session environment. Product integration must bind metadata there too.
         if (clean) for(const [key,value] of Object.entries(selected)) await tmux(["set-environment","-t","=seat",key,value]);
+        const command=await new SeatLaunchEnvironment(adapter,selected,home,cli).command("seat","claude",{runtime:"claude-code"});
         await tmux(["send-keys","-t","=seat:","-l",command]); await tmux(["send-keys","-t","=seat:","Enter"]);
         expect(await waitFile(final)).toEqual([clean?"absent":"tmux",clean?"daemon":"absent","startup","startup"]);
         expect(await tmux(["show-environment","-g","Q1178_SERVER"])).toBe("Q1178_SERVER=tmux");
