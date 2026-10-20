@@ -37,11 +37,12 @@ export function readFreshOccupantRelations(db: Database.Database, rigId: string)
 export function readReadyFreshLaunchFences(db: Database.Database, rigId?: string): Map<string, number> {
   // Indexed: from each node's current tenure into that node's fresh-launch events
   // (idx_events_node_type_seq), not every event of the type. `rig ps` runs this on every call.
+  // CROSS JOIN keeps events the inner table: left to choose, SQLite scans every event first.
   const events = db.prepare(`
     SELECT e.seq AS seq, e.payload AS payload, t.node_id AS nodeId, t.generation_uuid AS generation
     FROM occupant_tenures t
     JOIN nodes n ON n.id = t.node_id
-    JOIN events e ON e.node_id = t.node_id AND e.type = 'seat.fresh_launched'
+    CROSS JOIN events e ON e.node_id = t.node_id AND e.type = 'seat.fresh_launched'
     WHERE t.generation_ordinal =
       (SELECT MAX(t2.generation_ordinal) FROM occupant_tenures t2 WHERE t2.node_id = t.node_id)${rigId ? " AND n.rig_id = ?" : ""}
     ORDER BY e.seq
