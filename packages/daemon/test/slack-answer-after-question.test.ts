@@ -334,8 +334,10 @@ describe("#822: replies answer only the current posted question", () => {
     expect(logs.some((line) => line.includes("acknowledgement not posted"))).toBe(true);
     expect(new SeenStore(join(home, "state/slack-inbound-seen.jsonl")).load().has("C-TEST:30.1")).toBe(false);
     expect(readFileSync(join(home, "state/slack-inbound-deadletter.jsonl"), "utf8")).toContain("30.1");
+    parkOnPerson(row.qitemId, "A new question while the old notice is owed.");
     postHook = undefined;
     await say("13.1", "30.1", "Investigate first.");
+    expect(repo.getById(row.qitemId)?.state).toBe("blocked");
     expect(new SeenStore(join(home, "state/slack-inbound-seen.jsonl")).load().has("C-TEST:30.1")).toBe(true);
     expect(posts).toHaveLength(2); // failed notice then successful notice, no question
     expect(repo.transitionLog.listForQitem(row.qitemId).filter((t) => t.ownerNotificationKind === "human-decision-resolved")).toHaveLength(1);

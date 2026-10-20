@@ -438,7 +438,7 @@ export class QueueTransitionLog {
     return this.getOwnerNotificationReceipt(qitemId, notificationKey) !== null;
   }
 
-  getOwnerNotificationReceipt(qitemId: string, notificationKey: string): { messageTs: string | null; threadTs: string | null; digest: string | null } | null {
+  getOwnerNotificationReceipt(qitemId: string, notificationKey: string): { kind: string | null; messageTs: string | null; threadTs: string | null; digest: string | null } | null {
     const rows = this.db
       .prepare(
         `SELECT transition_note FROM ${this.historySource}
@@ -450,7 +450,7 @@ export class QueueTransitionLog {
       const fields = row.transition_note.split(/\s+/);
       if (!fields.includes(`notification_key=${notificationKey}`)) continue;
       const value = (name: string) => fields.find((field) => field.startsWith(`${name}=`))?.slice(name.length + 1) ?? null;
-      return { messageTs: value("message_ts"), threadTs: value("thread_ts"), digest: value("digest") };
+      return { kind: value("kind"), messageTs: value("message_ts"), threadTs: value("thread_ts"), digest: value("digest") };
     }
     return null;
   }

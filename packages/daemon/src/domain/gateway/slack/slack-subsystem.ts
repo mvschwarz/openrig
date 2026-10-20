@@ -75,7 +75,7 @@ export interface SlackWireOpts {
   inboundRetryIntervalMs?: number;
   inboundMaxConnects?: number;
   registry?: RegistrySurface;
-  resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string; messageTs?: string }) => Promise<"resolved" | "already-resolved" | "not-applicable">;
+  resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string; messageTs?: string }) => Promise<"resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable">;
 }
 
 interface HumanReplyActionPort {
@@ -88,24 +88,39 @@ interface HumanReplyActionPort {
 export function makeHumanReplyResolver(
   queueRepo: QueueRepository,
   contract: HumanReplyActionPort | undefined,
+  home?: string,
 ): NonNullable<SlackWireOpts["resolveHumanReply"]> {
   return async (input) => {
     const source = queueRepo.getById(input.qitemId);
     if (source?.humanIntent === "update") return "not-applicable";
     if (!contract) return "not-applicable";
+    const uncertainDecision = `${input.decision}\n\n---\nOpenRig timing context (Slack reply ${JSON.stringify(input.messageTs ?? null)}): This reply resumed the question, but its ordering against the posted question could not be confirmed. Resuming is not approval; read the person's words in context.`;
+    // An acknowledgement retry must not resolve again. Match this reply's durable
+    // context, not an older episode's generic resolved marker.
+    if (source?.state !== "blocked" && queueRepo.transitionLog.listForQitem(input.qitemId)
+      .some((transition) => transition.ownerNotificationKind === "human-decision-resolved" && transition.transitionNote === uncertainDecision)) {
+      return "resolved-uncertain";
+    }
+    let uncertain = false;
     if (source?.state === "blocked" && isHumanSeatSession(source.blockedOn)) {
       const episode = queueRepo.transitionLog.listForQitem(input.qitemId)
         .filter((transition) => transition.ownerNotificationKind === "human-required").at(-1);
-      const receipt = episode && queueRepo.transitionLog.getOwnerNotificationReceipt(input.qitemId, `${input.qitemId}:${episode.transitionId}`);
-      const posted = slackMicros(receipt?.messageTs);
+      if (!episode) return "not-applicable";
+      const key = `${input.qitemId}:${episode.transitionId}`;
+      const receipt = queueRepo.transitionLog.getOwnerNotificationReceipt(input.qitemId, key);
+      // A final receipt attests delivery even when reconciliation lost its timestamp.
+      // Without one, ONLY a unique exact current-episode primary proves anything.
+      const primary = !receipt && home ? pendingPrimaryReceipt(home, input.qitemId, key) : null;
+      if (receipt ? receipt.kind !== "human-required" : !primary) return "not-applicable";
+      const posted = slackMicros(receipt?.messageTs ?? primary?.messageTs);
       const replied = slackMicros(input.messageTs);
-      // An unknown/reconciled time or old summary digest cannot prove the question
-      // was shown first. The correlated inbound row still reaches the agent.
-      if (!receipt || receipt.digest || posted === null || replied === null || replied <= posted) return "not-applicable";
+      if (posted !== null && replied !== null && replied <= posted) return "not-applicable";
+      uncertain = Boolean(receipt?.digest) || posted === null || replied === null;
     }
+
     try {
-      await contract.act({ verb: "resolve", ...input });
-      return "resolved";
+      await contract.act({ verb: "resolve", ...input, decision: uncertain ? uncertainDecision : input.decision });
+      return uncertain ? "resolved-uncertain" : "resolved";
     } catch (error) {
       if ((error as { code?: string }).code !== "qitem_not_leg1_parked") throw error;
       const alreadyResolved = queueRepo.transitionLog.listForQitem(input.qitemId)
@@ -120,6 +135,24 @@ export function makeHumanReplyResolver(
       return queueRepo.resolveDirectHumanReply(input) ? "resolved" : "not-applicable";
     }
   };
+}
+
+/** Read positive multipart evidence without changing final receipt/ack ownership. */
+function pendingPrimaryReceipt(home: string, qitemId: string, notificationKey: string): { messageTs: string } | null {
+  const pending = new DispatchBuffer(home).pending().filter((decision) => {
+    const p = decision.payload as Partial<OutboundPostPayload> | null;
+    return decision.op === OUTBOUND_OP && p?.qitemId === qitemId
+      && p.notificationKey === notificationKey && p.ownerNotificationKind === "human-required";
+  });
+  if (pending.length !== 1) return null;
+  const prefix = `${pending[0]!.decisionId}::primary-receipt::`;
+  const records = [...new SeenStore(path.join(stateDir(home), "slack-attempted-decisions.jsonl")).load()]
+    .filter((id) => id.startsWith(prefix));
+  if (records.length !== 1) return null;
+  try {
+    const receipt = JSON.parse(Buffer.from(records[0]!.slice(prefix.length), "base64url").toString("utf8"));
+    return slackMicros(receipt?.messageTs) !== null ? { messageTs: receipt.messageTs } : null;
+  } catch { return null; }
 }
 
 /**

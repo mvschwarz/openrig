@@ -2509,7 +2509,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     wire: () => buildSlackGatewayWire({
       home: OPENRIG_HOME,
       queueRepo: queueRepoInstance,
-      resolveHumanReply: makeHumanReplyResolver(queueRepoInstance, deps.missionControlWriteContract),
+      resolveHumanReply: makeHumanReplyResolver(queueRepoInstance, deps.missionControlWriteContract, OPENRIG_HOME),
       log: (m) => console.log(`[gateway] ${m}`),
     }),
     log: (m) => console.log(`[gateway] ${m}`),

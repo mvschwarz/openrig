@@ -176,7 +176,7 @@ export interface InboundDeps {
    *  `--reply-to` reply and later updates land under it. Absent: nothing is minted. */
   mintThread?: (m: { threadTs: string; channel: string; human: string; seat: string; conversationId: string }) => void;
   /** Continue an exact human gate through the existing Mission Control resolve primitive. */
-  resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string; messageTs?: string }) => Promise<"resolved" | "already-resolved" | "not-applicable">;
+  resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string; messageTs?: string }) => Promise<"resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable">;
   /** #193 — record a clicked answer on the decision the clicked message belongs to. */
   recordHumanAnswer?: RecordHumanAnswer;
   /** #193 — clicks whose continuation (reply row + resolve) failed; retried with the event
@@ -272,7 +272,7 @@ export class InboundRouter {
     qitemId?: string;
     reason?: "dup" | "inflight" | "inactive" | "create_failed" | "resolve_failed" | "unregistered";
     correlationQitemId?: string;
-    replyResolution?: "resolved" | "already-resolved" | "not-applicable";
+    replyResolution?: "resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable";
   }> {
     const ts = ev.ts ?? "";
     const eventId = this.inboundEventId(ev);
@@ -339,7 +339,7 @@ export class InboundRouter {
         this.deps.log?.(`qitem create failed ts=${ts}: ${(e as Error).message}`);
         return { landed: false, reason: "create_failed" };
       }
-      let replyResolution: "resolved" | "already-resolved" | "not-applicable" | undefined;
+      let replyResolution: "resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable" | undefined;
       if (route.correlationQitemId && this.deps.resolveHumanReply && !ev.recoveredThreadReply) {
         try {
           replyResolution = await this.deps.resolveHumanReply({
@@ -350,6 +350,18 @@ export class InboundRouter {
           });
         } catch (e) {
           this.deps.log?.(`human reply continuation failed qitem=${route.correlationQitemId} ts=${ts}: ${(e as Error).message}`);
+          return { landed: false, qitemId, reason: "resolve_failed", correlationQitemId: route.correlationQitemId };
+        }
+      }
+      if (replyResolution === "resolved-uncertain") {
+        // The resolve is already durable. A failed notice stays owed on the existing
+        // inbound retry path; its retry recognizes the resolution instead of repeating it.
+        try {
+          const posted = await this.deps.acknowledgeAnswer?.({ channel: ev.channel, threadTs: ev.thread_ts ?? ts,
+            text: "Your reply was sent as the answer. OpenRig could not verify its timing against the question; the agent has that context. Resuming does not imply approval." });
+          if (!this.deps.acknowledgeAnswer || posted === false) throw new Error("uncertainty acknowledgement not posted");
+        } catch (e) {
+          this.deps.log?.(`human reply notice failed qitem=${route.correlationQitemId} ts=${ts}: ${(e as Error).message}`);
           return { landed: false, qitemId, reason: "resolve_failed", correlationQitemId: route.correlationQitemId };
         }
       }
@@ -379,7 +391,7 @@ export class InboundRouter {
     disposition: "accepted" | "ignored" | "refused" | "dead-lettered";
     reason?: string;
     correlationQitemId?: string;
-    replyResolution?: "resolved" | "already-resolved" | "not-applicable";
+    replyResolution?: "resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable";
   }> {
     const r = await this.attemptLand(ev, isCurrent);
     if (!r.landed && (r.reason === "create_failed" || r.reason === "resolve_failed")) {
@@ -467,7 +479,7 @@ export class InboundRouter {
       if (live) await acknowledge(escapeSlackText(redactSecrets(`Recorded: ${just}. Still to answer: ${waiting.join("; ")}`)));
       return { status: "accepted", reason: "answer-recorded" };
     }
-    let resolution: "resolved" | "already-resolved" | "not-applicable" | undefined;
+    let resolution: "resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable" | undefined;
     try {
       await this.deps.queue.createQitem({
         qitemId: `qitem-slack-answers-${createHash("sha256").update(qitemId).digest("hex").slice(0, 20)}`,
