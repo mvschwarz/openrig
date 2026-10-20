@@ -46,10 +46,8 @@ def apply_patches() -> int:
 def main() -> int:
     n_files = copy_staged_files()
     n_patches = apply_patches()
-    if n_files == 0 and n_patches == 0:
-        print("nothing to apply", file=sys.stderr)
-        return 1
     print(f"ok files={n_files} patches={n_patches}")
+    # Exit 0 even when empty so incremental MCP staging does not fail the job.
     return 0
 
 

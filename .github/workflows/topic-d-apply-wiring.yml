@@ -22,20 +22,24 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add \
-            packages/daemon/src/domain/writer-authority.ts \
-            packages/daemon/src/domain/fenced-publish-target.ts \
-            packages/daemon/src/domain/types.ts \
-            packages/daemon/src/routes/writer.ts \
-            packages/daemon/src/db/all-migrations.ts \
-            packages/daemon/src/server.ts \
-            packages/daemon/src/startup.ts \
-            packages/daemon/test/helpers/test-app.ts \
-            packages/daemon/test/writer-authority.test.ts \
-            packages/daemon/test/artifact-acceptance.test.ts \
-            packages/daemon/test/fenced-publish-callsite.test.ts \
-            packages/daemon/test/operation-publish-receipt.test.ts \
+          paths=(
+            packages/daemon/src/domain/writer-authority.ts
+            packages/daemon/src/domain/fenced-publish-target.ts
+            packages/daemon/src/domain/types.ts
+            packages/daemon/src/routes/writer.ts
+            packages/daemon/src/db/all-migrations.ts
+            packages/daemon/src/server.ts
+            packages/daemon/src/startup.ts
+            packages/daemon/test/helpers/test-app.ts
+            packages/daemon/test/writer-authority.test.ts
+            packages/daemon/test/artifact-acceptance.test.ts
+            packages/daemon/test/fenced-publish-callsite.test.ts
+            packages/daemon/test/operation-publish-receipt.test.ts
             packages/daemon/test/fixtures/operation-publish-failpoint-worker.ts
+          )
+          for p in "${paths[@]}"; do
+            if [ -e "$p" ]; then git add "$p"; fi
+          done
           if git diff --cached --quiet; then
             echo "nothing to commit"
             exit 0
