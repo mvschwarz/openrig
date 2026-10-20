@@ -253,12 +253,14 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    * pins `[features].hooks = true` (canonical key; the deprecated `codex_hooks` alias
    * is intentionally NOT used here). Trust is scoped to the exact authored hook
    * hashes below; remaining native review prompts require an operator decision.
-   * The relay inherits the seat's OPENRIG_* env from the tmux session.
+   * The relay inherits the seat identity/URL env from tmux and reads its auth
+   * token from the private activity-endpoint.json file.
    *
    * Fail-safe: skips + warns when the relay asset is missing — never writes a hook that
    * points at a nonexistent script. Verified-firsthand (Codex 0.139, dev1-qa AC-2 proof):
    * on the OpenRig-managed launch path — managed inline hooks + trusted + the relay env
-   * delivered into the seat (OPENRIG_URL + OPENRIG_ACTIVITY_HOOK_TOKEN + session/node/runtime)
+   * delivered into the seat (OPENRIG_URL + session/node/runtime, with auth read from the
+   * private activity-endpoint.json file)
    * — all four events, SessionStart included, deliver as runtime_hook activity. Without the
    * relay env the hooks are still trusted/visible but no activity rows land. (A bare/manual
    * codex TUI launch lacks that context and may not deliver SessionStart — not how OpenRig
