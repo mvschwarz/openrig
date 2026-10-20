@@ -46,7 +46,11 @@ export function quietHoldCustody(db: Database.Database, qitemId: string, now: Da
     const entity = db.prepare("SELECT entity_id AS id FROM human_quiet_windows WHERE window_id = ?").get(windowId) as { id: string } | undefined;
     const nextBoundary = entity ? new HumanQuietStore(db).quietStateFor(entity.id, now).nextBoundary?.at ?? null : null;
     return { state: "held", windowId, notificationKey: key, nextBoundary };
-  } catch {
-    return null; // a schema without these tables (an older test database) has no quiet custody
+  } catch (error) {
+    // A schema without these tables (an older database) has no quiet custody. Any other failure to read it is "can't
+    // tell", which must not read as "no quiet hold": that would let the ladder escalate, and so post, during quiet. It
+    // reads as held for this pass; the ladder and the sweep read it again next time.
+    if (/no such table/.test((error as Error).message)) return null;
+    return { state: "held", windowId: "unknown", notificationKey: qitemId, nextBoundary: null };
   }
 }

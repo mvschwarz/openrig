@@ -3,7 +3,7 @@
 // found; a release turned back because quiet came on again is held; after the post, the row reads as any posted ask.
 // Digest-held and ordinary rows read as before. Real SQLite (all migrations), the real queue and gateway wire with a
 // recording fetch, the real watchdog jobs table. No Slack. Native: NOT RUN.
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -23,6 +23,7 @@ import { HumanQuietStore } from "../src/domain/gateway/human-quiet-windows.js";
 import { confirmReleaseAtPost, QUIET_RELEASE_POLICY, runQuietRelease } from "../src/domain/policies/quiet-release.js";
 import { runStuckSweep } from "../src/domain/queue-stuck-sweep.js";
 import { runWakeLadderTick } from "../src/domain/queue-wake-ladder.js";
+import { quietHoldCustody } from "../src/domain/quiet-hold-custody.js";
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 60));
 const LATER = () => new Date(Date.now() + 2 * 3_600_000); // past every age and window threshold below
@@ -137,6 +138,24 @@ describe("custody of asks held for quiet hours", () => {
     expect(findingWhy(row)).toMatch(/held for quiet hours .* no release job is live/);
   });
 
+  it("a custody read that fails reads as held (never as no quiet), so the ladder doesn't escalate; a missing table is no custody", async () => {
+    const row = await held();
+    asBaton(row);
+    const prepare = db.prepare.bind(db);
+    const spy = vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
+      if (sql.includes("watchdog_jobs") && sql.includes("quiet-release")) throw new Error("database is locked (test)");
+      return prepare(sql);
+    }) as typeof db.prepare);
+    try {
+      expect(quietHoldCustody(db, row.qitemId)).toMatchObject({ state: "held" });
+      await ladder();
+      expect(ladderTouched(row)).toBe(false);
+    } finally { spy.mockRestore(); }
+    const bare = new Database(":memory:");
+    expect(quietHoldCustody(bare, row.qitemId)).toBeNull();
+    bare.close();
+  });
+
   it("a release turned back because quiet came on again reads as held", async () => {
     const row = await held();
     quiet.end("person", { endedBy: "t", now: new Date() });
@@ -147,7 +166,7 @@ describe("custody of asks held for quiet hours", () => {
     quietOn();
     const alert = await alertFor(row);
     expect(await confirmReleaseAtPost({ queueRepo: repo, jobsRepo: new WatchdogJobsRepository(db), home, registry: { loadHumanRegistry: registry as never },
-      entityId: "person", qitemId: row.qitemId, notificationKey: alert.notificationKey ?? row.qitemId })).toBe(false);
+      entityId: "person", qitemId: row.qitemId, notificationKey: alert.notificationKey ?? row.qitemId })).toBe("declined");
     expect(findingFor(await sweep(), row)).toEqual([]);
     expect(String((repo.waitingView(row.qitemId)!.nextBackstop as { note?: string }).note)).toMatch(/^Held by quiet hours/);
   });
