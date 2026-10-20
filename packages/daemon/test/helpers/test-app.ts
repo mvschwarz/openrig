@@ -196,6 +196,7 @@ export const migrationsForFullTestDbExclusions: Record<string, string> = {
   "076_owner_notification_levels.sql": "owner-notification columns extend queue transitions plus the archive table (054 is excluded); focused S14 suites use the canonical full migration list.",
   "078_idle_gate_fired_condition.sql": "idle-gate watchdog extension migrated inline by the idle-gate policy suite.",
   "079_workflow_lifecycle_parallel.sql": "workflow lifecycle identity, frontier, and failure tables — workflow suites migrate the canonical workflow schema inline; the shared core fixture does not read them.",
+  "120_writer_authority_leases.sql": "writer-authority fence table — writer-authority / fenced-publish suites migrate it inline.",
 };
 
 export function createFullTestDb(): Database.Database {
