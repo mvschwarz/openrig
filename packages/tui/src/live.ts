@@ -206,7 +206,13 @@ export function createLiveRefresh(deps: LiveRefreshDeps): LiveRefresh {
       deps.onFrame();
     },
     snapshot: () => { syncScope(); return snapshot; },
-    load: () => { syncScope(); return { ...load, ...(lastConfirmedAt !== null && deps.now() - lastConfirmedAt > 60_000 ? { stale: true } : {}) }; },
+    // A read older than one quiet window plus 30 s is overdue: 60 s without the stream, as before, and 5.5 minutes
+    // while it's connected, so an idle page isn't called stale between its 5-minute reads. A drop marks it stale at once.
+    load: () => {
+      syncScope();
+      const overdueAfter = (load.connection === "connected" ? CONNECTED_QUIET_REFRESH_MS : QUIET_REFRESH_MS) + 30_000;
+      return { ...load, ...(lastConfirmedAt !== null && deps.now() - lastConfirmedAt > overdueAfter ? { stale: true } : {}) };
+    },
     flashes: () => [...flashes],
     close: () => {
       closed = true;

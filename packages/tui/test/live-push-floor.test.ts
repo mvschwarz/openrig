@@ -84,6 +84,32 @@ describe("the quiet fallback", () => {
     live.close();
   });
 
+  it("doesn't call an idle connected page stale between its 5-minute reads; a drop does at once", async () => {
+    const { live, at } = setup();
+    live.connectionStatus("connected");
+    await at(0);
+    await at(61_000);
+    expect(live.load().stale).toBe(false);
+    await at(299_000);
+    expect(live.load().stale).toBe(false);
+    live.connectionStatus("dropped");
+    expect(live.load().stale).toBe(true);
+    live.close();
+  });
+
+  it("calls a page stale past 60 seconds without the stream, as before", async () => {
+    const { at } = setup();
+    let calls = 0;
+    // The first read succeeds; the quiet read at 30 s never finishes, so only the age rule can mark the page stale.
+    const live = createLiveRefresh({ hydrate: () => (++calls === 1 ? Promise.resolve(emptySnapshot()) : new Promise(() => {})), onFrame: () => {}, now: () => Date.now() });
+    await live.refresh();
+    await at(59_000);
+    expect(live.load().stale).toBe(false);
+    await at(61_000);
+    expect(live.load().stale).toBe(true);
+    live.close();
+  });
+
   it("goes back to 30 seconds when the stream drops", async () => {
     const { hydrate, live, at } = setup();
     live.connectionStatus("connected");
