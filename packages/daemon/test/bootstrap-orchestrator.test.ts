@@ -392,6 +392,7 @@ describe("BootstrapOrchestrator", () => {
         } else {
           expect(observed?.status).toBe(singleSeat ? 500 : 200);
           expect(observed?.data.status).toBe(singleSeat ? "failed" : "partial");
+          expect(observed?.data.code).toBe("seat_env_cleanup_failed");
           expect([human.exit, json.exit]).toEqual(singleSeat ? [2, 2] : [1, 1]);
           expect(human.text).toContain("DOCSDESK_ENV_PROBE");
           expect(human.text).toContain(started.find(s => isDevSession(s.session))!.session);

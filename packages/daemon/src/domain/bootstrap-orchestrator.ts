@@ -815,10 +815,13 @@ export class BootstrapOrchestrator {
       const outWarnings = (outcome as { warnings?: string[] }).warnings ?? [];
       stages.push({ stage: "import_rig", status: "failed", detail: { code: outcome.code } });
       this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
-      return withRouting({ runId: run.id, status: "failed", stages, errors: outErrors, warnings: [...warnings, ...outWarnings] });
+      return withRouting({ runId: run.id, status: "failed", stages, errors: outErrors, warnings: [...warnings, ...outWarnings],
+        ...(outcome.code === "instantiate_error" && outcome.envCleanupErrors?.length ? { code: "seat_env_cleanup_failed" as const } : {}),
+      });
     }
 
     const result = outcome.result;
+    const cleanupFailed = Boolean(result.envCleanupErrors?.length);
     const anyFailed = result.nodes.some((n) => n.status === "failed");
     const anyAttention = result.nodes.some((n) => n.status === "attention_required");
 
@@ -873,6 +876,7 @@ export class BootstrapOrchestrator {
       status: finalStatus,
       stages,
       rigId: result.rigId,
+      ...(cleanupFailed ? { code: "seat_env_cleanup_failed" as const } : {}),
       errors: result.nodes.filter((n) => n.error).map((n) => n.error!),
       warnings,
     });
