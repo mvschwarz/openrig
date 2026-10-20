@@ -265,7 +265,7 @@ The most useful next pieces of harness work, roughly in dependency order:
    adapter and managed launch. Package tests such as `claude-interactive-launch.test.ts` and
    the `*-native.test.ts` files already drive the real adapters through tmux against an
    offline recorder; they prove command resolution and arguments.
-   `claude-executable-foreground.test.ts` holds that recorder open in private Bash/zsh panes
+   `claude-executable-foreground.test.ts` holds that recorder open in private Bash, zsh, dash and ksh panes
    to check parent PID, process-group ownership, tmux's pane command and parent-shell
    restoration for unmanaged fresh, fork and resume launches. These fixtures do not prove
    native readiness, history or answers.

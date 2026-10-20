@@ -143,7 +143,9 @@ export class SeatLaunchEnvironment {
       if (target.runtime === "claude-code") {
         const assignments = Object.entries(env).map(([key, value]) => `${key}=${shellQuote(value)}`);
         const launch = `${assignments.join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${command}`;
-        if (!["bash", "zsh", "sh", "dash", "ksh"].includes(shell)) return launch;
+        // ksh calls a function without exporting a leading assignment that isn't already
+        // exported, so it keeps the form above, where every assignment reaches Claude.
+        if (!["bash", "zsh", "sh", "dash"].includes(shell)) return launch;
         // A file command must replace the staging subshell so tmux observes
         // Claude as the foreground process. Keep aliases/functions intact and
         // pass the original leading assignments through a subshell-local function.
