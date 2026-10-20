@@ -572,7 +572,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
 
     const updatePrompt: UpdatePromptAttempt = { handled: false };
-    const prepared = await this.prepareLaunch(binding, opts.name);
+    // Only a launch that starts a conversation may install the core plugin; a resume never does.
+    const prepared = await this.prepareLaunch(binding, opts.name, undefined, { installCorePlugin: !opts.resumeToken });
     if (!prepared.ok) return prepared;
     const { modelArg, effortArg, appliedLaunch, postureArg, queueStateDirArg, daemonArg, networkArg } = prepared;
 
@@ -667,7 +668,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     opts: { name: string; resumeToken: string; running?: RunningCodexLaunch },
   ): Promise<{ ok: true; command: string; core: string; appliedLaunch: AppliedLaunchObservation } | { ok: false; error: string }> {
     if (!binding.tmuxSession) return { ok: false, error: "No tmux session bound — cannot build a Codex resume command" };
-    const prepared = await this.prepareLaunch(binding, opts.name, opts.running);
+    // Building a resume command (the in-place restart's) never installs the core plugin.
+    const prepared = await this.prepareLaunch(binding, opts.name, opts.running, { installCorePlugin: false });
     if (!prepared.ok) return prepared;
     const core = this.resumeCore(prepared, opts.resumeToken, binding);
     return { ok: true, command: await this.seatCommand(binding, core), core, appliedLaunch: prepared.appliedLaunch };
@@ -692,12 +694,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   /** Launch flags shared by fresh, fork and resume, decided once per launch. With `running`, the probed and
    *  prepared parts come from the running Codex instead, and no Codex process is started to decide them. */
-  private async prepareLaunch(binding: NodeBinding, name: string, running?: RunningCodexLaunch): Promise<PreparedCodexLaunch | { ok: false; error: string }> {
+  private async prepareLaunch(binding: NodeBinding, name: string, running: RunningCodexLaunch | undefined,
+    opts: { installCorePlugin: boolean }): Promise<PreparedCodexLaunch | { ok: false; error: string }> {
     // The config write and, for a seat that selected openrig-core, its install run as one step under the config lock, so
     // concurrent launches never interleave them. An unselected seat's launch never installs.
     await this.withConfigLock(async () => {
       const managed = await this.applyManagedConfig();
-      if (managed?.hooksEnabled && this.resolveCorePluginSelected?.(binding.nodeId)) {
+      if (opts.installCorePlugin && managed?.hooksEnabled && this.resolveCorePluginSelected?.(binding.nodeId)) {
         try { await this.ensureCodexCorePlugin(); }
         catch (err) { console.error(`[openrig] runtime setup warning: ${(err as Error).message}`); }
       }

@@ -401,6 +401,16 @@ describe("the install runs only for a seat that selected the plugin", () => {
     expect(events).toEqual([...section, ...section]);
   });
 
+  it("a resume never installs: neither a resume launch nor preparing an in-place resume command", async () => {
+    let s = launchable(() => true);
+    expect((await s.adapter.launchHarness({ nodeId: "selected", tmuxSession: "s@rig", cwd: s.cwd } as never, { name: "s", resumeToken: "conv-1" })).ok).toBe(true);
+    expect(s.calls).toEqual([]);
+    rmSync(root, { recursive: true, force: true }); mkdirSync(root);
+    s = launchable(() => true);
+    expect((await s.adapter.buildResumeCommand({ nodeId: "selected", tmuxSession: "s@rig", cwd: s.cwd } as never, { name: "s", resumeToken: "conv-1" })).ok).toBe(true);
+    expect(s.calls).toEqual([]);
+  });
+
   it("ensureManagedConfig alone (boot, resume) never installs", async () => {
     const s = launchable(() => true);
     await s.adapter.ensureManagedConfig();
