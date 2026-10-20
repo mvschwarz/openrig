@@ -1393,9 +1393,10 @@ or `rig add` (one member) when a seat needs an explicit model, a permission poli
 different agent spec or role profile, per-seat runtime or cwd, or startup files.
 
 Node-granular managed partial restore (v0.3.4+):
-- `rig launch <rig> <nodeRef>` relaunches a single seat by logical id or node id through orchestration. `<rig>` is the
-  rig's name or ID; a name shared by more than one active rig stops with the candidate IDs.
-- `rig launch <rig> --seats <a,b,c>` relaunches a comma-separated subset of seats.
+- `rig launch <rig> <nodeRef>` launches a single seat that isn't running, by logical id or node id, through orchestration.
+  `<rig>` is the rig's name or ID; a name shared by more than one active rig stops with the candidate IDs. A seat that's
+  already running is left as it is; for a fresh occupant there, use `rig seat launch <seat> --fresh --stop --reason <why>`.
+- `rig launch <rig> --seats <a,b,c>` launches a comma-separated subset of seats.
 - `--hold-reason <text>` records a reason for holding non-target seats during the partial launch.
 - This is a SUPPORTED managed path. The prior `pod_aware_launch_unsupported` dead-end is retired; pod-aware narrow launch now goes through this surface rather than ad-hoc rebuilds.
 

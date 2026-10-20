@@ -66,7 +66,9 @@ function refuseAmbiguousRig(handle: string, ids: string[], json: boolean | undef
 
 /** Build the launch command, allowing local launches that start seats a longer wait than previews. */
 export function launchCommand(depsOverride?: StatusDeps): Command {
-  const cmd = new Command("launch").description("Launch or relaunch a node in a running rig");
+  const cmd = new Command("launch")
+    .description("Launch a node in a running rig, unless it's already running")
+    .addHelpText("after", "\nA running node is left as it is. For a fresh occupant in a running seat, use\n`rig seat launch <seat> --fresh --stop --reason <why>` (`--plan` previews it).");
   const getDeps = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
   async function getClient(deps: StatusDeps): Promise<DaemonClient | null> {
@@ -394,6 +396,7 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
       };
       if (res.data.code === "already_running" || (res.data.alreadyRunning && res.data.alreadyRunning.length > 0)) {
         console.log(`Node ${logicalId} is already running in rig ${rigLabel} (not relaunched)`);
+        console.log(`For a fresh occupant: rig seat launch ${res.data.sessionName ?? "<seat>"} --fresh --stop --reason "<why>"`);
         printLaunchWarnings();
         return;
       }
