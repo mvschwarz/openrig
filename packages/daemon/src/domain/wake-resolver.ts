@@ -61,6 +61,13 @@ export function resolveWakeTarget(rows: WakeSessionRow[], input: WakeResolveInpu
   }
 
   const row = rows[gen - 1]!;
+  if (row.runtime !== "claude" && row.runtime !== "claude-code" && row.runtime !== "codex") {
+    return {
+      resolved: false,
+      reason: `Wake runtime '${row.runtime || "unknown"}' for tenure ${gen} of seat '${input.seat}' is not supported. Supported runtimes are claude and codex.`,
+      known,
+    };
+  }
   if (!row.resumeToken) {
     return {
       resolved: false,
