@@ -264,6 +264,13 @@ Targeting: a bare seat (single send), OR one of --to / --pod / --rig (fan-out).
 Fan-out reports per-recipient results + an "N/M delivered" summary; one recipient's
 guard refusal does NOT block the others. Each recipient gets its own From/To envelope.
 
+Sender: the From: line names the seat this shell belongs to; from anywhere else
+a message arrives from <unknown sender>. To say who it's from, send a queue item
+with a declared source (recorded as declared; a registered human in
+rig gateway human list gets a reply route):
+  rig queue create --source <you>@external --destination <seat> --summary "<one line>" --body-file <file>
+or join the team with rig attach --self so your sends carry your name.
+
 The two-step send pattern (paste text, wait, submit Enter) is handled
 automatically. By default a send is REFUSED only on POSITIVE evidence the target
 is at an interactive prompt or permission block (so a message can never

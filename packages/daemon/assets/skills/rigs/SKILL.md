@@ -111,6 +111,9 @@ person needs in their project or home folder and name that path.
   `--node <logicalId>` binds to an existing seat instead. Attach once, and keep the variables it prints
   (`OPENRIG_NODE_ID` and `OPENRIG_SESSION_NAME`). Each command may run in a fresh shell, so put them in front of every
   later `rig` command. Check with `rig whoami --json`.
+  If they decline, a message that must still say who it's from can go as a queue item with a declared source,
+  `rig queue create --source <their id>@external --destination <seat> --summary "<one line>" --body-file <file>`: the
+  seat sees that name, recorded as declared, and can reply to them if they're registered (`rig gateway human list`).
 - **Give the operator the goal:** ask what they want worked on, in which repository and on which branch, unless they've
   said. Find the `operator.agent` row in `rig ps --nodes --rig kernel --json`, take its `canonicalSessionName`
   (never the logical ID or a guessed name) and send:
