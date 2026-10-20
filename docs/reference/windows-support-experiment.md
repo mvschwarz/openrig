@@ -7,6 +7,44 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 RepoStew migration is deferred.
 
+## Current-main rebase and readiness, 2026-10-20
+
+Rebased the 20 experiment commits onto main
+`b57fa8c5d3f52e886e69fb3d1a5ebaa3606970fc`. Conflict resolution keeps main's shared
+Linux `/proc` reader, Claude script-launch observation, Codex resumed-process
+evidence and explicit tmux environment-inheritance fixtures. The native CIM
+branch, launch-only composer repair and session-scoped psmux kill coverage remain.
+The candidate helper introduced by main also receives the selected Windows
+executable, retaining the native exact-executable comparison.
+
+Current local validation:
+
+- Windows full workspace build and lint/typecheck passed.
+- Expanded Windows daemon selection: **663 passed, 9 failed, 23 skipped** across
+  27 files. Actual psmux multiline/argv transport, CIM observation and graceful
+  drain fixtures passed. The nine failures are in `process-table.test.ts`
+  (missing `mkfifo`/`ps`) and `seat-launch-environment-regression.test.ts`
+  (POSIX `/bin/bash`, shebang and colon-separated PATH assumptions). They remain
+  reported failures; no assertions or platform skips were added to hide them.
+- Windows CLI lifecycle selection: **109 passed**. TUI pipes/reading/live-event
+  selection: **65 passed, 12 skipped**.
+- A separate Linux-local WSL2 source tree built all workspaces and passed
+  **592 tests, 1 skipped** in 18 affected files, including the two files above,
+  real tmux draft-aware delivery, process-table reads and Codex resume proof.
+
+There is also a concrete production readiness gap, distinct from fixture
+portability: invoking the built `defaultListProcessesStrict()` from
+`resume-metadata-refresher` on native Windows fails with `ENOENT` / `spawn ps`.
+The native identity reader uses CIM, but the shared resume-metadata census still
+uses the POSIX reader. Until that path and fresh end-to-end native recovery are
+verified, this branch is an isolated experiment rather than a replacement for a
+production coordination service.
+
+These results do not refresh the old live-provider acceptance below. Current
+Claude/Codex/Pi conversations and hooks, kernel/operator, desktop interaction and
+physical reboot/suspend remain unverified. Hosted CI results apply only to the
+exact head displayed by the PR; WSL2 remains the supported Windows route.
+
 ## Design
 
 1. Use psmux as a distinct backend. Its per-session servers reuse local pane

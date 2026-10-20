@@ -651,14 +651,14 @@ export function parseWindowsProcesses(output: string): NativeProcessRow[] {
 }
 
 function nativeProcessCandidates(rows: NativeProcessRow[], panePid: number, runtime: NativeRuntime, selectedExecutable?: string, scriptLaunch?: boolean): NativeProcessObservation[] {
-  const exact = candidatesMatching(rows, panePid, runtime, row => claudeProcess(row, selectedExecutable));
+  const exact = candidatesMatching(rows, panePid, runtime, row => claudeProcess(row, selectedExecutable), selectedExecutable);
   if (exact.length > 0 || runtime !== "claude-code" || !selectedExecutable) return exact;
   // #2341: the native installer's `claude` is a symlink to `versions/<ver>`, and the launch froze its realpath. A Claude
   // spelling argv[0] through the link is that launch when the OS says it runs exactly the frozen file.
-  const linked = candidatesMatching(rows, panePid, runtime, row => runsFrozenFile(row, selectedExecutable));
+  const linked = candidatesMatching(rows, panePid, runtime, row => runsFrozenFile(row, selectedExecutable), selectedExecutable);
   if (linked.length > 0) return linked.map(candidate => ({ ...candidate, afterScript: true as const }));
   if (scriptLaunch !== true) return exact;
-  const named = candidatesMatching(rows, panePid, runtime, claudeProcessAfterScript);
+  const named = candidatesMatching(rows, panePid, runtime, claudeProcessAfterScript, selectedExecutable);
   if (named.length > 0) return named.map(candidate => ({ ...candidate, afterScript: true as const }));
   // #2341: a wrapper that starts Claude without `exec` keeps running the frozen script as the foreground parent, and
   // Claude can run under any name. That script's direct child naming a Claude conversation is the launched runtime;
@@ -667,10 +667,10 @@ function nativeProcessCandidates(rows: NativeProcessRow[], panePid: number, runt
   return candidatesMatching(rows, panePid, runtime, row => {
     const parent = byPid.get(row.ppid);
     return !!parent && runsFrozenScript(parent, selectedExecutable) && claudeSessionToken(tokens(row.command).slice(1)) !== null;
-  }).map(candidate => ({ ...candidate, afterScript: true as const }));
+  }, selectedExecutable).map(candidate => ({ ...candidate, afterScript: true as const }));
 }
 
-function candidatesMatching(rows: NativeProcessRow[], panePid: number, runtime: NativeRuntime, claudeRow: (row: NativeProcessRow) => boolean): NativeProcessObservation[] {
+function candidatesMatching(rows: NativeProcessRow[], panePid: number, runtime: NativeRuntime, claudeRow: (row: NativeProcessRow) => boolean, selectedExecutable?: string): NativeProcessObservation[] {
   const byPid = new Map(rows.map((row) => [row.pid, row]));
   const root = byPid.get(panePid);
   if (root?.platform === "win32") {
