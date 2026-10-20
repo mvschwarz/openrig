@@ -1,3 +1,4 @@
+import { physicalSessionName } from "./session-registry.js";
 import { currentClaudeMcpMenu } from "./claude-mcp-menu.js";
 import stringWidth from "string-width";
 import { CODEX_TURN_STATUS_PATTERN } from "./codex-pane-patterns.js";
@@ -1827,6 +1828,7 @@ export class SessionTransport {
 
   /** Freeze the registration and binding before asking tmux about this name. */
   private absenceProbeTarget(sessionName: string): AbsenceProbeTarget | undefined {
+    sessionName = physicalSessionName(this.db, sessionName);
     return this.db
       .prepare(`
         SELECT s.id AS session_id, n.id AS node_id, s.session_name AS session_name, b.tmux_pane AS tmux_pane
@@ -1862,6 +1864,7 @@ export class SessionTransport {
     runtime: string | null; attachmentType: string | null; nodeId: string | null; pane: string | null; occupant: string | null; resumeToken: string | null;
     rotation: ClaudeResumeRotation | null;
   } {
+    sessionName = physicalSessionName(this.db, sessionName);
     // One existing statement; P2 reads the binding columns it already joins plus the
     // same current-occupant subselect the delivery guard uses. No extra query.
     const row = this.db.prepare(`
@@ -1933,6 +1936,8 @@ export class SessionTransport {
   }
 
   private resolveBySessionName(sessionName: string): ResolveResult {
+    const current = this.sessionRegistry.resolveAddress(sessionName);
+    if (current) return { ok: true, sessions: [{ sessionName, rigName: current.rigName, nodeLogicalId: current.logicalId }] };
     const sessionRows = this.db
       .prepare("SELECT node_id, session_name FROM sessions WHERE session_name = ? ORDER BY id DESC")
       .all(sessionName) as SessionRow[];
@@ -1993,8 +1998,9 @@ export class SessionTransport {
     const sessions: ResolvedTarget[] = [];
     const seen = new Set<string>();
     for (const name of sessionNames) {
-      if (seen.has(name)) continue;
-      seen.add(name);
+      const identity = this.sessionRegistry.resolveAddress(name)?.nodeId ?? name;
+      if (seen.has(identity)) continue;
+      seen.add(identity);
       const resolved = this.resolveBySessionName(name);
       if (!resolved.ok) return resolved;
       sessions.push(...resolved.sessions);
@@ -2337,6 +2343,7 @@ export class SessionTransport {
       if (prePref.effective || prePref.desired || prePref.desiredMode === "draft-aware" || prePref.effectiveMode === "draft-aware") return null;
       meta = this.getSessionMeta(sessionName);
       bound = guard.target(sessionName);
+      sessionName = bound.session;
     } catch {
       return null;
     }
@@ -2438,6 +2445,7 @@ export class SessionTransport {
   }
 
   private async sendUnguarded(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
+    sessionName = physicalSessionName(this.db, sessionName);
     let preVerifyContent: string | null = null;
     const sessionMeta = this.getSessionMeta(sessionName);
     const runtime = sessionMeta.runtime;
@@ -3539,6 +3547,7 @@ export class SessionTransport {
    *  use it: the capture route asks when its request does (`rig capture`, the MCP tool). `inputBoxBudget` is the time
    *  those reads may still take, shared across a fan-out; a single capture gets its own CAPTURE_INPUT_BOX_DEADLINE_MS. */
   async capture(sessionName: string, opts?: { lines?: number; inputBox?: boolean; inputBoxBudget?: InputBoxBudget }): Promise<CaptureResult> {
+    sessionName = physicalSessionName(this.db, sessionName);
     const sessionMeta = this.getSessionMeta(sessionName);
     if (sessionMeta.attachmentType === "external_cli") {
       return {
@@ -3717,6 +3726,7 @@ export class SessionTransport {
    * re-check readiness via the runtime adapter with currentness verification and atomic commit.
    */
   async reconcileStartupReadiness(sessionName: string): Promise<boolean> {
+    sessionName = physicalSessionName(this.db, sessionName);
     const existing = this.inFlightReconciliations.get(sessionName);
     if (existing) return existing;
 

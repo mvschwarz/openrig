@@ -64,6 +64,20 @@ describe("activity pushes refresh at most once per 15 seconds", () => {
     live.close();
   });
 
+  it("a build mismatch cancels a waiting push refresh, and later pushes don't refresh", async () => {
+    const { hydrate, live, at } = setup();
+    live.pushed();
+    await at(0);
+    await at(1_000);
+    live.pushed();
+    live.stopBackground("Restart rig tui: daemon is now 0.6.12 (9e5382dd); auto-refresh off.");
+    await at(PUSH_REFRESH_FLOOR_MS + 5_000);
+    live.pushed();
+    await at(PUSH_REFRESH_FLOOR_MS * 3);
+    expect(hydrate).toHaveBeenCalledTimes(1);
+    live.close();
+  });
+
   it("main sends activity pushes through the floor", () => {
     const main = readFileSync(join(repoRoot, "packages", "tui", "src", "main.ts"), "utf8");
     expect(main).toContain("live.pushed();");

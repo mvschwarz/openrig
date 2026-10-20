@@ -1,3 +1,5 @@
+import { observeSolePane } from "./pane-binding-observation.js";
+import { automaticRestoreOverrides, type AutomaticSeatReplacement } from "./existing-rig-restore.js";
 import { restoreRuntimeCompatibilityError } from "./restore-runtime-compatibility.js";
 import { nonInterruptiveNotice, nonInterruptiveSummary } from "../adapters/non-interruptive.js";
 import { effortPrecedence, readSeatEffort } from "./seat-effort.js";
@@ -259,6 +261,10 @@ export class RestoreOrchestrator {
      * resume-policy seats STOP as `awaiting-decision` instead.
      */
     freshLogicalIds?: string[];
+    /** Internal unattended entry; explicit requests coordinate before taking seat leases. */
+    automatic?: boolean;
+    /** Internal exact occupants selected after the unattended attempt has settled. */
+    automaticReplacements?: AutomaticSeatReplacement[];
     /** Explicit rig launch choice; persisted only after restore preconditions pass. */
     nonInterruptive?: boolean;
     /** Selection evidence from an automatic caller. Direct restore defaults
@@ -271,6 +277,8 @@ export class RestoreOrchestrator {
      * continues in the background.
      */
     onAttemptStarted?: (attemptId: number) => void;
+    /** Told each session this restore launches, as soon as its row is committed. */
+    onSessionLaunched?: (nodeId: string, sessionId: string) => void;
   }): Promise<RestoreOutcome> {
     // 1. Load snapshot
     const snapshot = this.snapshotRepo.getSnapshot(snapshotId);
@@ -283,8 +291,26 @@ export class RestoreOrchestrator {
     if (!rig) {
       return { ok: false, code: "rig_not_found", message: `Rig ${rigId} not found` };
     }
+    if (!opts?.automatic && !opts?.automaticReplacements) {
+      const overrides = await automaticRestoreOverrides({ rigRepo: this.rigRepo, snapshotRepo: this.snapshotRepo }, rigId, opts);
+      if (overrides.refusal) return { ok: false, code: "rig_not_stopped", message: overrides.refusal };
+      opts = { ...opts, automaticReplacements: overrides.replacements };
+    }
+    const replacements = opts?.automaticReplacements ?? [];
+    const selectedIds = new Set(replacements.map(target => target.nodeId));
+    // Only this invocation's resume input changes; historical snapshots remain immutable.
+    if (replacements.length) {
+      snapshot.data = structuredClone(snapshot.data);
+      snapshot.data.topologyRoster = { version: 1, source: "operator_explicit", intendedNodeIds: [...selectedIds] };
+      for (const target of replacements.filter(target => target.corrected)) {
+        const active = resolveActiveSnapshotSession(snapshot.data, target.nodeId);
+        if (active.kind !== "resolved") return { ok: false, code: "restore_error", message: "Corrected seat has no unambiguous snapshot occupant; nothing replaced." };
+        active.session.resumeType = target.resumeType;
+        active.session.resumeToken = target.resumeToken;
+      }
+    }
     const guard = this.tmuxAdapter.deliveryGuard;
-    const guardedIds = rig.nodes.map(node => node.id);
+    const guardedIds = rig.nodes.filter(node => !replacements.length || selectedIds.has(node.id)).map(node => node.id);
     if (guard && guardedIds.some(id => !guard.ownsLifecycle(id))) {
       return guard.lifecycle(guardedIds, () => this.restore(snapshotId, opts));
     }
@@ -296,8 +322,8 @@ export class RestoreOrchestrator {
     // This determines whether the rig is safe to restore before any state
     // changes occur — critical for pre_restore snapshot ordering (snapshot
     // must capture original DB state, not post-reconciliation state).
-    const classification = await this.classifyRunningSessions(rigId);
-    if (classification.live.length > 0 || classification.unknown.length > 0) {
+    const classification = await this.classifyRunningSessions(rigId, replacements.length ? selectedIds : undefined);
+    if (classification.unknown.length > 0 || classification.live.some(id => !replacements.some(target => target.sessionId === id))) {
       return { ok: false, code: "rig_not_stopped", message: `Rig ${rigId} has live sessions. Stop the rig with 'rig down' before restoring, or use the latest auto-pre-down snapshot.` };
     }
 
@@ -366,7 +392,7 @@ export class RestoreOrchestrator {
       }
 
       // 3b. Service gate: boot services before agent restore if this rig has services
-      if (this.serviceOrchestrator) {
+      if (this.serviceOrchestrator && replacements.length === 0) {
         const svcRecord = this.rigRepo.getServicesRecord(rigId);
         if (svcRecord) {
           const bootResult = await this.serviceOrchestrator.boot(rigId);
@@ -392,7 +418,7 @@ export class RestoreOrchestrator {
       }
 
       // 4. Compute restore plan
-      const plan = this.computeRestorePlan(snapshot.data);
+      const plan = this.computeRestorePlan(snapshot.data).filter(entry => !replacements.length || selectedIds.has(entry.node.id));
 
       // 5. Execute restore with compensating pattern per node
       const nodeResults: RestoreNodeResult[] = [];
@@ -400,8 +426,12 @@ export class RestoreOrchestrator {
       if (this.rigRepo.getRigNonInterruptive(rigId)) restoreWarnings.push(nonInterruptiveSummary(true));
       else if (opts?.nonInterruptive === false) restoreWarnings.push(nonInterruptiveSummary(false));
       for (const entry of plan) {
+        const replacement = replacements.find(target => target.nodeId === entry.node.id);
         const result = await this.restoreNodeWithCompensation(entry, rigId, snapshotId, snapshot.data, opts, restoreWarnings);
         nodeResults.push(result);
+        if (replacement && (this.db.prepare("SELECT status FROM sessions WHERE id = ?").get(replacement.sessionId) as { status: string } | undefined)?.status === "exited") {
+          restoreWarnings.push(`Stopped ${entry.node.logicalId}'s startup occupant for explicit replacement; replacement outcome: ${result.status}.`);
+        }
       }
 
       const restoreResult: RestoreResult = {
@@ -691,7 +721,7 @@ export class RestoreOrchestrator {
    * to act on: live sessions block restore, stale sessions get marked detached
    * AFTER the pre_restore snapshot is captured, unknown sessions fail closed.
    */
-  private async classifyRunningSessions(rigId: string): Promise<{
+  private async classifyRunningSessions(rigId: string, selectedIds?: Set<string>): Promise<{
     live: string[];
     stale: string[];
     unknown: string[];
@@ -701,8 +731,16 @@ export class RestoreOrchestrator {
     const unknown: string[] = [];
 
     for (const session of this.sessionRegistry.getSessionsForRig(rigId)) {
-      if (session.status !== "running") continue;
+      if (session.status !== "running" || (selectedIds && !selectedIds.has(session.nodeId))) continue;
       try {
+        // Replacement must preserve unknown transport state before any reconciliation write.
+        if (selectedIds) {
+          const probe = await this.tmuxAdapter.probeSession(session.sessionName);
+          if (probe.state === "present") live.push(session.id);
+          else if (probe.state === "absent") stale.push(session.id);
+          else unknown.push(session.id);
+          continue;
+        }
         const alive = await this.tmuxAdapter.hasSession(session.sessionName);
         if (alive) {
           live.push(session.id);
@@ -716,6 +754,41 @@ export class RestoreOrchestrator {
     }
 
     return { live, stale, unknown };
+  }
+
+  /** Called under a new lifecycle lease, after startup has released its own leases. */
+  private async stopAutomaticOccupant(target: AutomaticSeatReplacement): Promise<string | null> {
+    const current = (stopped = false) => {
+      const row = this.db.prepare(`SELECT s.id, s.status, s.session_name AS name, s.resume_type AS resumeType,
+        s.resume_token AS resumeToken, s.resume_provenance AS provenance, s.origin, b.tmux_session AS bound, b.tmux_pane AS pane
+        FROM sessions s LEFT JOIN bindings b ON b.node_id = s.node_id
+        WHERE s.node_id = ? AND s.status != 'superseded' ORDER BY s.created_at DESC, s.id DESC LIMIT 1`)
+        .get(target.nodeId) as { id: string; status: string; name: string; resumeType: string | null; resumeToken: string | null; provenance: string | null; origin: string; bound: string | null; pane: string | null } | undefined;
+      return row?.id === target.sessionId && row.status === (stopped ? "exited" : "running") && row.origin !== "claimed" && row.bound === row.name
+        && row.resumeType === target.resumeType && row.resumeToken === target.resumeToken
+        && (!target.corrected || row.provenance === "operator") ? row : null;
+    };
+    const row = current();
+    if (!row) return "Startup occupant or correction changed; no replacement attempted.";
+    const probe = await this.tmuxAdapter.probeSession(row.name);
+    if (probe.state !== "present") return "Startup terminal is absent or unknown; no replacement attempted.";
+    const observedPane = await observeSolePane(this.tmuxAdapter, row.name);
+    if (!observedPane.ok || observedPane.pane !== row.pane) return "Startup terminal pane no longer matches its managed binding; nothing replaced.";
+    const afterProbe = current();
+    if (!afterProbe || afterProbe.name !== row.name || afterProbe.pane !== row.pane) return "Startup occupant or correction changed during the terminal probe; no replacement attempted.";
+    this.tmuxAdapter.deliveryGuard?.checkInput(row.name);
+    const killed = await this.tmuxAdapter.killSession(row.name);
+    if (!killed.ok) return "Could not stop the startup occupant; no replacement attempted.";
+    if (!current()) return "Startup occupant changed during stop; no replacement launched.";
+    this.sessionRegistry.updateStatus(target.sessionId, "exited");
+    this.tmuxAdapter.deliveryGuard?.rebindLifecycle(target.nodeId);
+    // Killing the last session ends tmux's server. Reopen an empty server before proving absence.
+    await this.tmuxAdapter.startServer();
+    const absent = await this.tmuxAdapter.probeSession(row.name);
+    if (absent.state !== "absent") return "Startup terminal absence is unconfirmed; no replacement launched.";
+    if (!current(true)) return "Startup occupant changed during stop; no replacement launched.";
+    // Retain the name pin; ordinary restore clears it. Compensation sees an exited predecessor.
+    return null;
   }
 
   private clearStaleState(nodeId: string, rigId: string): void {
@@ -845,7 +918,7 @@ export class RestoreOrchestrator {
     rigId: string,
     snapshotId: string,
     data: SnapshotData,
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[] },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; onSessionLaunched?: (nodeId: string, sessionId: string) => void; automaticReplacements?: AutomaticSeatReplacement[] },
     warnings?: string[],
   ): Promise<RestoreNodeResult> {
     // Compare against the live logical target without changing saved post-launch inputs.
@@ -892,6 +965,9 @@ export class RestoreOrchestrator {
       ).get(node.podId, nodeId) as { status: string } | undefined;
       if (continuityRow) {
         if (continuityRow.status === "restoring") {
+          if (opts?.automaticReplacements?.some(target => target.nodeId === nodeId)) {
+            return { nodeId, logicalId: node.logicalId, status: "awaiting-decision", error: "Continuity recovery owns this seat; its startup occupant was left unchanged." };
+          }
           warnings?.push(`Node ${node.logicalId}: continuity state is 'restoring', skipping`);
           return { nodeId, logicalId: node.logicalId, status: "fresh" };
         }
@@ -942,7 +1018,13 @@ export class RestoreOrchestrator {
       }
     }
 
-    // Capture prior state for compensation
+    // All ordinary per-seat preflight decisions precede the destructive effect.
+    const replacement = opts?.automaticReplacements?.find(target => target.nodeId === nodeId);
+    if (replacement) {
+      const error = await this.stopAutomaticOccupant(replacement);
+      if (error) return { nodeId, logicalId: node.logicalId, status: "failed", error };
+    }
+    // Capture prior state for compensation, including an exited replacement predecessor.
     const priorState = this.captureNodeState(nodeId, rigId);
 
     // Clear stale state so NodeLauncher doesn't see already_bound
@@ -1020,12 +1102,13 @@ export class RestoreOrchestrator {
     }
 
     // Attempt launch — compensate ONLY if launch itself fails
-    // The snapshot's saved startup context says which plugins the seat selected; without one the launcher reads the
-    // node's own saved context.
+    // Preserve the snapshot's selected plugins and record the committed session before launch continues.
     const savedStartup = data.nodeStartupContext?.[nodeId];
+    const onSessionLaunched = opts?.onSessionLaunched;
     const launchResult = await this.nodeLauncher.launchNode(rigId, node.logicalId, {
       ...launchOpts,
       ...(savedStartup ? { pluginPaths: pluginPathsOf(savedStartup.projectionEntries) } : {}),
+      ...(onSessionLaunched ? { onSessionRegistered: (sessionId: string) => onSessionLaunched(nodeId, sessionId) } : {}),
     });
     if (!launchResult.ok) {
       // Launch failed — restore prior state (compensating action)

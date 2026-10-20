@@ -336,12 +336,12 @@ export class OutboxHandler {
     return row ? this.rowToEntry(row) : null;
   }
 
-  listForSender(senderSession: string, limit = 100): OutboxEntry[] {
+  listForSender(senderSession: string, limit = 100, addresses = [senderSession]): OutboxEntry[] {
     const rows = this.db
       .prepare(
-        `SELECT * FROM outbox_entries WHERE sender_session = ? ORDER BY ts_dispatched DESC, rowid DESC LIMIT ?`
+        `SELECT * FROM outbox_entries WHERE sender_session IN (${addresses.map(() => "?").join(",")}) ORDER BY ts_dispatched DESC, rowid DESC LIMIT ?`
       )
-      .all(senderSession, limit) as OutboxEntryRow[];
+      .all(...addresses, limit) as OutboxEntryRow[];
     return rows.map((r) => this.rowToEntry(r));
   }
 

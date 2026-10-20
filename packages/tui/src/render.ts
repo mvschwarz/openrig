@@ -1458,6 +1458,7 @@ function pushExplorerTargets(
 function readStatus(load: import("./types.js").LoadState, zone: string): string {
   const at = load.retainedAt ?? load.lastSuccessAt;
   const basis = at === undefined ? "" : ` · last ${displayTime(new Date(at).toISOString(), zone)}`;
+  if (load.skew) return load.skew;
   if (load.inFlight) return `${load.settled ? "Refreshing" : "Loading"}…${basis} · ? Help`;
   if (load.stale) return `${at === undefined ? "Read failed" : "Could not refresh"}${basis} · refresh to Retry`;
   return `Tab complete · ? help${basis}`;

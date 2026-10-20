@@ -1,3 +1,4 @@
+import { physicalSessionName } from "./session-registry.js";
 import { resolveNodeFile } from "./scope/node-file.js";
 import { belongsToProject } from "./workspace/project-catalog.js";
 import { inspectGraph } from "./workflow-reconciliation.js";
@@ -1218,7 +1219,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     });
 
   // ---- Q6 parallelism health ----
-  const inProgressSeats = new Set(rows.filter((r) => r.state === "in-progress").map((r) => r.destination_session));
+  const inProgressSeats = new Set(rows.filter((r) => r.state === "in-progress").map((r) => physicalSessionName(deps.db, r.destination_session)));
   // Idle capacity: the ROSTER comes from sessions (names only); idleness comes
   // from the ACTIVITY ORACLE — sessions.status is not consulted (it labeled
   // live working lanes `superseded` on the real board).

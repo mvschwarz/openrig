@@ -1,7 +1,7 @@
 import { OutboxHandler } from "./outbox-handler.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
-import type { SessionRegistry } from "./session-registry.js";
+import { SessionAddressConflict, type SessionRegistry } from "./session-registry.js";
 import type { DiscoveryRepository } from "./discovery-repository.js";
 import type { EventBus } from "./event-bus.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
@@ -403,6 +403,7 @@ export class ClaimService {
 
       return { ok: true, nodeId, sessionId };
     } catch (err) {
+      if (err instanceof SessionAddressConflict) return { ok: false, code: "address_conflict", error: err.message };
       return { ok: false, code: "claim_error", error: (err as Error).message };
     }
   }
@@ -618,6 +619,7 @@ export class ClaimService {
         },
       };
     } catch (err) {
+      if (err instanceof SessionAddressConflict) return { ok: false, code: "address_conflict", message: err.message };
       return { ok: false, code: "reconcile_error", message: (err as Error).message };
     }
   }
@@ -832,6 +834,7 @@ export class ClaimService {
 
       return { ok: true, nodeId, sessionId };
     } catch (err) {
+      if (err instanceof SessionAddressConflict) return { ok: false, code: "address_conflict", error: err.message };
       return { ok: false, code: "claim_error", error: (err as Error).message };
     }
   }

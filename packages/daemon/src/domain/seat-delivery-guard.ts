@@ -1,3 +1,4 @@
+import { hasOtherSeatHistory, isStoppedSeatPredecessor, resolveCurrentSessionAddress } from "./session-registry.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
@@ -449,14 +450,29 @@ export function resolveGuardTarget(db: Database.Database, name: string): GuardTa
       coalesce(b.tmux_session, replace(n.logical_id,'.','-') || '@' || r.name) AS session,
       b.tmux_pane AS pane,
       (SELECT generation_uuid FROM occupant_tenures t WHERE t.node_id=n.id ORDER BY generation_ordinal DESC LIMIT 1) AS occupant,
+      b.tmux_session AS physicalName, n.logical_id AS logicalId, r.name AS rigName,
+      (SELECT status FROM sessions WHERE node_id=n.id ORDER BY id DESC LIMIT 1) AS latestStatus,
       r.archived_at AS archivedAt
     FROM nodes n JOIN rigs r ON r.id=n.rig_id LEFT JOIN bindings b ON b.node_id=n.id
     WHERE n.id=? OR b.tmux_session=? OR b.tmux_pane=? OR n.logical_id=?
-      OR (b.tmux_session IS NULL AND replace(n.logical_id,'.','-') || '@' || r.name=?)`)
-    .all(name, name, name, name, name) as Array<GuardTarget & { archivedAt: string | null }>;
-  const unarchived = rows.filter((row) => row.archivedAt === null);
-  const pool = unarchived.length > 0 ? unarchived : rows;
-  if (pool.length !== 1) return null;
-  const { archivedAt: _archivedAt, ...target } = pool[0]!;
+      OR (replace(n.logical_id,'.','-') || '@' || r.name=?
+        AND (b.tmux_session IS NULL OR b.tmux_session=(SELECT session_name FROM sessions WHERE node_id=n.id ORDER BY id DESC LIMIT 1))
+      )`)
+    .all(name, name, name, name, name) as Array<GuardTarget & { archivedAt: string | null; physicalName: string | null; logicalId: string; rigName: string; latestStatus: string | null }>;
+  const eligible = rows.filter(row => row.nodeId === name || row.physicalName === name || row.pane === name || row.logicalId === name
+    || !hasOtherSeatHistory(db, name, row.nodeId));
+  // A stopped same-seat predecessor may retain the exact physical spelling.
+  // Omit only a proven same-seat predecessor. Unrelated/mismatched bindings
+  // still compete, including owners without a current matching session row.
+  // Explicit node/pane lookup and saved-history access remain separate.
+  const current = name.includes("@") ? resolveCurrentSessionAddress(db, name) : null;
+  const named = current ? eligible.filter(row => row.nodeId === current.nodeId || !isStoppedSeatPredecessor(row, current)) : eligible;
+  const unarchived = named.filter((row) => row.archivedAt === null);
+  const active = unarchived.length > 0 ? unarchived : named;
+  const exact = active.filter(row => row.physicalName === name);
+  const pool = exact.length ? exact : active;
+  // An exact physical spelling cannot displace the routed logical recipient.
+  if (pool.length !== 1 || (current && pool[0]!.nodeId !== current.nodeId)) return null;
+  const { archivedAt: _archivedAt, physicalName: _physicalName, logicalId: _logicalId, rigName: _rigName, latestStatus: _latestStatus, ...target } = pool[0]!;
   return target;
 }

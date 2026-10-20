@@ -247,7 +247,8 @@ it('a failed manual trigger reports the /compact result too', async () => {
     c.set('compactionEnforcer' as never, f.e);
     c.set('sessionTransport' as never, f.transport);
     c.set('contextUsageStore' as never, {getForNode: () => ({availability: 'known', usedPercentage: 40})});
-    c.set('db' as never, {prepare: () => ({get: () => ({node_id: 'node-one', runtime: 'claude-code', cwd: null})})});
+    // Canonical-only fixture: no bindings table exists for alias normalization.
+    c.set('db' as never, {prepare: (sql: string) => ({get: () => sql.includes('sqlite_master') ? undefined : ({node_id: 'node-one', runtime: 'claude-code', cwd: null})})});
     await next();
   });
   app.route('/api/compaction', compactionRoutes());

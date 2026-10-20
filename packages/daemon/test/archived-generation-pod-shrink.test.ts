@@ -120,6 +120,13 @@ describe("#141 shrink target members sharing a session name", () => {
   let lifecycle: RigLifecycleService;
   let target: { rigId: string; podId: string };
 
+  // Retained pre-admission state: new joins now refuse a physical name owned by
+  // another member. These controls exercise shrink/queue handling of old ambiguity.
+  function seedLegacySharedSession(nodeId: string) {
+    db.prepare("INSERT INTO sessions(id,node_id,session_name,status) VALUES (?,?,?,'running')").run(nodeId, nodeId, SHARED);
+    sessionRegistry.mintOccupantTenure(nodeId, "initial");
+  }
+
   beforeEach(() => {
     db = createFullTestDb();
     rigRepo = new RigRepository(db);
@@ -135,7 +142,7 @@ describe("#141 shrink target members sharing a session name", () => {
     const pod = new PodRepository(db).createPod(rig.id, "crew", "Crew");
     for (const id of ["crew.a", "crew.b"]) {
       const node = rigRepo.addNode(rig.id, id, { runtime: "claude-code", podId: pod.id });
-      sessionRegistry.updateStatus(sessionRegistry.registerSession(node.id, SHARED).id, "running");
+      seedLegacySharedSession(node.id);
       sessionRegistry.updateBinding(node.id, { tmuxSession: SHARED });
     }
     target = { rigId: rig.id, podId: pod.id };
@@ -174,7 +181,7 @@ describe("#141 shrink target members sharing a session name", () => {
     // The target members' bindings exist first, so a lookup that returned one of them before excluding it would miss this owner.
     const other = rigRepo.addNode(rigRepo.createRig("other-rig").id, "dev.other", { runtime: "claude-code" });
     if (via === "binding") sessionRegistry.updateBinding(other.id, { tmuxSession: SHARED });
-    else sessionRegistry.updateStatus(sessionRegistry.registerSession(other.id, SHARED).id, "running");
+    else seedLegacySharedSession(other.id);
     const work = await openWork();
 
     const result = await lifecycle.shrinkPod(target.rigId, target.podId);

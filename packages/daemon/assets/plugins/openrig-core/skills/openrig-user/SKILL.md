@@ -384,11 +384,19 @@ rig reconcile-session <session>
 rig reconcile-session <session> --rig <rigId> --node <logicalId>
 rig reconcile-session <session> --no-launch
 rig reconcile-session <session> --json
+rig reconcile-session <session> --repair-missing-pane --no-launch
 ```
 
-This is a no-launch, no-input adopt. `--rig`/`--node` disambiguate when the
-canonical session name does not uniquely resolve. `--no-launch` is accepted
-for explicitness (it is the only mode this command has).
+This is a no-launch, no-input adopt: it records a new claimed session row for
+the seat (any running row is superseded); it re-captures the resume token if
+it can, and conversation continuity stays unverified. `--rig`/`--node`
+disambiguate when the canonical session name does not uniquely resolve.
+`--no-launch` is accepted for explicitness.
+
+`--repair-missing-pane --no-launch` is different: for a running launched seat
+whose tmux pane was never recorded, it fills in the pane and keeps the
+session, resume token and generation. It never adopts. Both forms refuse
+while the seat's typing protection is on.
 
 ### Five-term restore status vocabulary
 

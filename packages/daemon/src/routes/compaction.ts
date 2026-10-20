@@ -1,3 +1,4 @@
+import { physicalSessionName } from "../domain/session-registry.js";
 import { Hono } from "hono";
 import { shellQuote } from "../adapters/shell-quote.js";
 import type Database from "better-sqlite3";
@@ -41,7 +42,7 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
       return c.json({ ok: false, error: "Missing required field: session" }, 400);
     }
     if (body.skipMap !== undefined && typeof body.skipMap !== "boolean") return c.json({ ok: false, error: "skipMap must be boolean" }, 400);
-    const sessionName = body.session;
+    const sessionName = physicalSessionName(db, body.session);
 
     // Ambiguity / existence check — mirror /send (409 ambiguous, 404 not found).
     const resolved = await transport.resolveSessions({ session: sessionName });
@@ -173,7 +174,7 @@ function manualReasonMessage(sessionName: string, reason: string): string {
     case "preparation_incomplete":
       return `Preparation (restore map and idle wait) did not finish in time for '${sessionName}'; managed compaction is disarmed. Inspect rig compact ${sessionName} --state, retry explicitly, or use --skip-map once.`;
     case "pane_unknown_protected":
-      return `Refused: '${sessionName}' uses draft-aware input protection, and its tmux pane is not recorded. Input to a protected seat needs a known pane, so no preparation or /compact was sent. For a confirmed live managed seat with one intended pane, run rig reconcile-session ${shellQuote(sessionName)} --no-launch, then check its projection-drift report for unresolved pane observations before explicitly retrying rig compact ${shellQuote(sessionName)}. Reconciliation records a new claimed session row, superseding any running row for the seat; conversation continuity stays unverified. If the intended pane cannot be resolved, use rig context get help for operator recovery. Keep input protection enabled; reconciliation does not restart this attempt.`;
+      return `Refused: '${sessionName}' uses draft-aware input protection, and its tmux pane is not recorded. Input to a protected seat needs a known pane, so no preparation or /compact was sent. Both fixes refuse while protection is on, so with the person's agreement turn it off first (rig seat set-typing-guard ${shellQuote(sessionName)} --mode off --reason "<why>") and back on afterwards (--mode draft-aware). To keep the session and resume token, run rig reconcile-session ${shellQuote(sessionName)} --repair-missing-pane --no-launch. Otherwise rig reconcile-session ${shellQuote(sessionName)} --no-launch adopts: a new session row (any running row for the seat is superseded); it re-captures the resume token if it can, and conversation continuity stays unverified. Then explicitly retry rig compact ${shellQuote(sessionName)}; reconciliation does not restart this attempt. If the intended pane cannot be resolved, use rig context get help for operator recovery.`;
     case "preparation_cancelled":
       return `Preparation for '${sessionName}' was cancelled; no further compact is armed.`;
     case "disabled":

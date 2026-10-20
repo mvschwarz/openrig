@@ -1,3 +1,4 @@
+import { physicalSessionName } from "./session-registry.js";
 import Database from "better-sqlite3";
 import { join } from "node:path";
 import os from "node:os";
@@ -317,6 +318,7 @@ export class ContextUsageStore {
   /** Get context usage for a single node. Session-aware: mismatched session returns unknown. */
   getForNode(nodeId: string, currentSessionName: string | null): ContextUsage {
     if (!currentSessionName) return this.unknownUsage("not_managed");
+    currentSessionName = physicalSessionName(this.db, currentSessionName);
 
     const row = this.db.prepare("SELECT * FROM context_usage WHERE node_id = ?").get(nodeId) as ContextUsageRow | undefined;
     if (!row) return this.unknownUsage("no_data");
@@ -341,6 +343,7 @@ export class ContextUsageStore {
     const result = new Map<string, ContextUsage>();
     if (entries.length === 0) return result;
 
+    entries = entries.map(entry => ({ ...entry, currentSessionName: entry.currentSessionName ? physicalSessionName(this.db, entry.currentSessionName) : null }));
     const nodeIds = entries.map((e) => e.nodeId);
     const sessionMap = new Map(entries.map((e) => [e.nodeId, e.currentSessionName]));
 

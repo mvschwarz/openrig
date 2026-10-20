@@ -31,6 +31,45 @@ export type HumanRowsLookup = (address: string) => Promise<
 export interface GatewayCommandDeps {
   queueRows?: HumanRowsLookup;
   humanReadiness?: HumanReadinessLookup;
+  humanQuiet?: HumanQuietLookup;
+}
+
+/** A person's quiet hours as the daemon resolves them: the window (null when none) and whether it's on now. */
+export interface HumanQuietView {
+  window: null | { kind: "daily" | "until"; timezone: string; start?: string; end?: string; until?: string; source: string;
+    revision: number; setBy: string; setAt: string; ended?: { occurrence: string; by: string; at: string } };
+  state: { active: boolean; occurrence?: string; revision?: number; nextBoundary: null | { kind: "start" | "end"; at: string } };
+}
+
+export type HumanQuietLookup = (entityId: string) => Promise<{ ok: true; quiet: HumanQuietView } | { ok: false; reason: string }>;
+
+export async function daemonHumanQuiet(entityId: string): ReturnType<HumanQuietLookup> {
+  try {
+    const { DaemonClient } = await import("../client.js");
+    const response = await new DaemonClient().get<HumanQuietView & { ok?: boolean; error?: string; message?: string }>(
+      `/api/gateway/human/${encodeURIComponent(entityId)}/quiet`);
+    if (response.status !== 200 || response.data?.ok !== true || !response.data.state) {
+      const detail = [response.data?.error, response.data?.message].filter((value) => typeof value === "string").join(": ");
+      return { ok: false, reason: `HTTP ${response.status}${detail ? `: ${detail}` : ""}` };
+    }
+    return { ok: true, quiet: { window: response.data.window ?? null, state: response.data.state } };
+  } catch (error) {
+    return { ok: false, reason: (error as Error).message };
+  }
+}
+
+/** One line for a person's quiet hours: the rule, where it came from, whether it's on, and the next boundary. */
+export function describeQuiet(view: HumanQuietView): string {
+  const w = view.window;
+  if (!w) return "quiet: none set";
+  const rule = w.kind === "daily" ? `every day ${w.start}-${w.end} ${w.timezone}` : `until ${w.until} (${w.timezone})`;
+  const next = view.state.nextBoundary;
+  const nextText = next ? `; ${next.kind === "end" ? "ends" : "next starts"} ${next.at}` : "";
+  // Name the occurrence that was ended, from the stored record: a daily one by its start date (it stays recorded until the
+  // next revision, so it may not be tonight's); an until-time window has just the one.
+  const endedWhich = w.ended?.occurrence === "until" ? "ended" : `the ${w.ended?.occurrence} occurrence ended`;
+  const ended = w.ended && !view.state.active ? `; ${endedWhich} early by ${w.ended.by}` : "";
+  return `quiet: ${view.state.active ? "on" : "off"} (${rule}; set by ${w.setBy}, ${w.source}, revision ${w.revision}${nextText}${ended})`;
 }
 
 export interface HumanReadinessView {
@@ -125,6 +164,7 @@ export async function daemonQueueRows(address: string): ReturnType<HumanRowsLook
 export function gatewayCommand(deps: GatewayCommandDeps = {}): Command {
   const queueRows: HumanRowsLookup = deps.queueRows ?? daemonQueueRows;
   const humanReadiness: HumanReadinessLookup = deps.humanReadiness ?? daemonHumanReadiness;
+  const humanQuiet: HumanQuietLookup = deps.humanQuiet ?? daemonHumanQuiet;
   const cmd = new Command("gateway").description("Gateway: the human registry + connector surfaces");
   const human = cmd.command("human").description("Manage human specs (file-per-human fragments under gateway/humans/)");
 
@@ -225,16 +265,78 @@ Example:
       const { listHumans } = await import("@openrig/daemon/gateway-human-registry");
       const res = listHumans();
       if (!res.ok) { console.error(`refused: ${res.error}`); process.exitCode = 1; return; }
-      const humans = await Promise.all(res.humans.map(async (record) => ({ ...record, deliveryReadiness: await humanReadiness(record.entityId) })));
+      const humans = await Promise.all(res.humans.map(async (record) => {
+        const quiet = await humanQuiet(record.entityId);
+        return { ...record, deliveryReadiness: await humanReadiness(record.entityId),
+          quiet: quiet.ok ? quiet.quiet : { unknown: `quiet hours could not be read from the daemon: ${quiet.reason}` } };
+      }));
       if (opts.json) { console.log(JSON.stringify({ ok: true, humans, ...(res.advisory ? { advisory: res.advisory } : {}) })); return; }
       if (res.humans.length === 0) { console.log("no human configured yet — register one: rig gateway human add <entityId> --display-name … --binding … --delivery-class …"); return; }
       for (const h of humans) {
         const inbound = h.bindings.inboundResolvable ? "" : "  [outbound-only]";
-        console.log(`${h.entityId}  "${h.displayName}"  class=${h.deliveryClass}  ${h.away ? "away" : "available"}  bindings=${h.bindings.count} (primary ${h.bindings.primary.kind}:${h.bindings.primary.connectorRef})  delivery=${h.deliveryReadiness.state}${inbound}`);
+        console.log(`${h.entityId}  "${h.displayName}"  class=${h.deliveryClass}  ${h.availability}  bindings=${h.bindings.count} (primary ${h.bindings.primary.kind}:${h.bindings.primary.connectorRef})  delivery=${h.deliveryReadiness.state}${inbound}`);
         if (!h.deliveryReadiness.ready) console.log(`  delivery: ${h.deliveryReadiness.reason}${h.deliveryReadiness.nextAction ? `; next: ${h.deliveryReadiness.nextAction}` : ""}`);
+        console.log(`  ${"unknown" in h.quiet ? `quiet: unknown (${h.quiet.unknown})` : describeQuiet(h.quiet)}`);
       }
       if (res.advisory) console.log(`advisory: ${res.advisory}`);
     });
+
+  const quiet = human.command("quiet").description("Quiet hours: routine asks to this person are meant to wait while it's on (stored and shown; delivery doesn't act on it yet)");
+  const quietCall = async (method: "get" | "put" | "post", entityId: string, suffix: string, body: Record<string, unknown> | undefined, json?: boolean) => {
+    const { DaemonClient } = await import("../client.js");
+    const client = new DaemonClient();
+    const path = `/api/gateway/human/${encodeURIComponent(entityId)}/quiet${suffix}`;
+    const res = method === "get" ? await client.get<Record<string, any>>(path)
+      : method === "put" ? await client.put<Record<string, any>>(path, body) : await client.post<Record<string, any>>(path, body);
+    if (json) { console.log(JSON.stringify(res.data)); if (res.status !== 200) process.exitCode = 1; return false; }
+    if (res.status !== 200) {
+      console.error(`refused: ${res.data?.message ?? res.data?.error ?? `HTTP ${res.status}`}`);
+      process.exitCode = 1;
+      return false;
+    }
+    console.log(`${entityId} ${describeQuiet({ window: res.data.window ?? null, state: res.data.state })}`);
+    return true;
+  };
+  const actorBody = (opts: { actor?: string }) => ({ actor: resolveSenderSession() ?? opts.actor ?? SENDER_FALLBACK });
+  quiet
+    .command("set <entityId>")
+    .description("Set quiet hours: every day in a timezone (--daily 22:00-07:00), or from now until a time (--until 07:00 or an ISO time)")
+    .option("--daily <window>", "Every day, local HH:MM-HH:MM; may cross midnight")
+    .option("--until <time>", "Until a time: HH:MM (its next occurrence in --tz) or an ISO time with an offset")
+    .option("--tz <zone>", "IANA timezone, for example Europe/Berlin (default: this machine's zone)")
+    .option("--actor <actor>", "Named operator when outside a managed seat")
+    .option("--json", "The daemon's answer as JSON")
+    .addHelpText("after", `
+Setting again replaces the window and starts a new revision; if the new window covers now, quiet stays on.
+Times that don't exist or happen twice at a daylight-saving change: a skipped time means the next valid minute, a
+repeated time its first occurrence.
+
+Examples:
+  rig gateway human quiet set alice --daily 22:00-07:00 --tz Europe/Berlin
+  rig gateway human quiet set alice --until 09:00 --tz America/New_York`)
+    .action(async (entityId: string, opts: { daily?: string; until?: string; tz?: string; actor?: string; json?: boolean }) => {
+      const timezone = opts.tz ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const ok = await quietCall("put", entityId, "", { ...(opts.daily !== undefined ? { daily: opts.daily } : {}), ...(opts.until !== undefined ? { until: opts.until } : {}), timezone, ...actorBody(opts) }, opts.json);
+      // This machine's zone may not be the person's (an agent on a server setting someone's hours).
+      if (ok && opts.tz === undefined) console.log(`stored in ${timezone}; pass --tz for the person's own zone`);
+    });
+  quiet
+    .command("end <entityId>")
+    .description("\"I'm back\": end the quiet that is on now. A daily rule stays for tomorrow")
+    .option("--actor <actor>", "Named operator when outside a managed seat")
+    .option("--json", "The daemon's answer as JSON")
+    .action(async (entityId: string, opts: { actor?: string; json?: boolean }) => { await quietCall("post", entityId, "/end", actorBody(opts), opts.json); });
+  quiet
+    .command("clear <entityId>")
+    .description("Remove the quiet-hours rule altogether")
+    .option("--actor <actor>", "Named operator when outside a managed seat")
+    .option("--json", "The daemon's answer as JSON")
+    .action(async (entityId: string, opts: { actor?: string; json?: boolean }) => { await quietCall("post", entityId, "/clear", actorBody(opts), opts.json); });
+  quiet
+    .command("show <entityId>")
+    .description("Show the quiet-hours rule, whether it's on now, and the next boundary")
+    .option("--json", "The daemon's answer as JSON")
+    .action(async (entityId: string, opts: { json?: boolean }) => { await quietCall("get", entityId, "", undefined, opts.json); });
 
   human
     .command("show <entityId>")

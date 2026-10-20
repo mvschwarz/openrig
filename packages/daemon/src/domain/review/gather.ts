@@ -1,3 +1,4 @@
+import { physicalSessionName } from "../session-registry.js";
 // Living Notes Packet 2 — the input gatherer (OPR.0.4.4.20).
 //
 // The impure shell around the pure composer: reads slice docs + proof
@@ -577,10 +578,11 @@ export class ReviewGatherer {
         !(missionName !== null && scopes.missions.has(missionName))
       )
         continue;
-      const entry = bySession.get(r.destination_session) ?? { rows: [], slices: new Set<string>() };
+      const owner = physicalSessionName(this.db, r.destination_session);
+      const entry = bySession.get(owner) ?? { rows: [], slices: new Set<string>() };
       entry.rows.push(r);
       for (const s of rowSlices) entry.slices.add(s);
-      bySession.set(r.destination_session, entry);
+      bySession.set(owner, entry);
     }
     return [...bySession.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
@@ -630,7 +632,8 @@ export class ReviewGatherer {
     const recent = new Map<string, { latest: QitemRow; slices: Set<string> }>();
     for (const r of rows) {
       if (isHumanSeatSession(r.destination_session)) continue;
-      if (known.has(r.destination_session)) continue;
+      const owner = physicalSessionName(this.db, r.destination_session);
+      if (known.has(owner)) continue;
       let tags: string[] = [];
       try {
         tags = (JSON.parse(r.tags ?? "[]") as string[]) ?? [];
@@ -639,10 +642,10 @@ export class ReviewGatherer {
       }
       const rowSlices = tags.filter((t) => t.startsWith("slice:")).map((t) => t.slice("slice:".length));
       if (rowSlices.length === 0) continue;
-      const entry = recent.get(r.destination_session) ?? { latest: r, slices: new Set<string>() };
+      const entry = recent.get(owner) ?? { latest: r, slices: new Set<string>() };
       if (r.ts_updated > entry.latest.ts_updated) entry.latest = r;
       for (const s of rowSlices) entry.slices.add(s);
-      recent.set(r.destination_session, entry);
+      recent.set(owner, entry);
     }
     const recentInputs: AgentInput[] = [...recent.entries()]
       .sort(([a], [b]) => a.localeCompare(b))

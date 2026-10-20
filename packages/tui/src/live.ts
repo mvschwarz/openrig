@@ -54,6 +54,9 @@ export interface LiveRefresh {
   flashes: () => RowFlash[];
   /** stop the quiet fallback during TUI shutdown */
   close: () => void;
+  /** stop the quiet fallback for good and say why (the daemon's build differs from this TUI's);
+   *  a refresh the operator asks for still runs */
+  stopBackground: (message: string) => void;
 }
 
 /** walk the snapshot topology and key every agent's served pane-activity
@@ -109,6 +112,7 @@ export function createLiveRefresh(deps: LiveRefreshDeps): LiveRefresh {
   let pushTimer: QuietTimerHandle | null = null;
   let lastReadAt: number | null = null;
   let closed = false;
+  let skew: string | undefined;
   let refresh: () => Promise<void>;
   const scheduleTimeout = deps.setTimeout ?? ((callback, delayMs) => setTimeout(callback, delayMs));
   const cancelTimeout = deps.clearTimeout ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
@@ -121,7 +125,7 @@ export function createLiveRefresh(deps: LiveRefreshDeps): LiveRefresh {
 
   function armQuietTimer(): void {
     clearQuietTimer();
-    if (closed) return;
+    if (closed || skew !== undefined) return;
     quietTimer = scheduleTimeout(() => {
       quietTimer = null;
       void refresh();
@@ -190,7 +194,7 @@ export function createLiveRefresh(deps: LiveRefreshDeps): LiveRefresh {
     invalidate,
     pushed: () => {
       // The page isn't marked stale while it waits: it shows the last read until the trailing refresh runs.
-      if (closed || pushTimer !== null) return;
+      if (closed || skew !== undefined || pushTimer !== null) return;
       const wait = lastReadAt === null ? 0 : lastReadAt + PUSH_REFRESH_FLOOR_MS - deps.now();
       if (wait <= 0) { void invalidate(); return; }
       pushTimer = scheduleTimeout(() => { pushTimer = null; void invalidate(); }, wait);
@@ -202,7 +206,7 @@ export function createLiveRefresh(deps: LiveRefreshDeps): LiveRefresh {
         load.stale = true;
         // Without the stream, the quiet window goes back to 30 s.
         if (quietTimer !== null) armQuietTimer();
-      } else void refresh();
+      } else if (skew === undefined) void refresh();
       deps.onFrame();
     },
     snapshot: () => { syncScope(); return snapshot; },
@@ -211,7 +215,7 @@ export function createLiveRefresh(deps: LiveRefreshDeps): LiveRefresh {
     load: () => {
       syncScope();
       const overdueAfter = (load.connection === "connected" ? CONNECTED_QUIET_REFRESH_MS : QUIET_REFRESH_MS) + 30_000;
-      return { ...load, ...(lastConfirmedAt !== null && deps.now() - lastConfirmedAt > overdueAfter ? { stale: true } : {}) };
+      return { ...load, ...(skew !== undefined ? { skew } : {}), ...(lastConfirmedAt !== null && deps.now() - lastConfirmedAt > overdueAfter ? { stale: true } : {}) };
     },
     flashes: () => [...flashes],
     close: () => {
@@ -219,6 +223,12 @@ export function createLiveRefresh(deps: LiveRefreshDeps): LiveRefresh {
       controller.abort();
       clearQuietTimer();
       if (pushTimer !== null) { cancelTimeout(pushTimer); pushTimer = null; }
+    },
+    stopBackground: (message) => {
+      skew = message;
+      clearQuietTimer();
+      if (pushTimer !== null) { cancelTimeout(pushTimer); pushTimer = null; }
+      deps.onFrame();
     },
   };
 }
