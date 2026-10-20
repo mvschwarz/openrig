@@ -343,6 +343,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     const payload = buildOutboundMessage(
       {
         qitemId: q.qitemId ?? decision.decisionId,
+        ownerNotificationKind: q.ownerNotificationKind,
         summary: q.summary,
         body: q.body,
         humanQuestions: q.humanQuestions,
