@@ -1050,11 +1050,26 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     },
   );
 
+  // Interim toward #43: seed an in-process registry from built-in adapters only
+  // (no prime-agent; OMP already on main via PR #35 — capability row only, not a new adapter).
+  const { TerminalAdapter } = await import("./adapters/terminal-adapter.js");
+  const builtInRuntimeAdapters = {
+    "claude-code": claudeAdapter,
+    "codex": codexAdapter,
+    "pi": piAdapter,
+    "omp": ompAdapter,
+    "stub": stubAdapter,
+    "terminal": new TerminalAdapter(),
+  };
+  const { harnessRegistryFromAdapters } = await import("./domain/harness-registry.js");
+  const harnessRegistryInstance = harnessRegistryFromAdapters(builtInRuntimeAdapters);
+
   const podInstantiator = new PodRigInstantiator({
     db, rigRepo, podRepo,
     sessionRegistry, eventBus, nodeLauncher, startupOrchestrator,
     fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), exists: (p: string) => fs.existsSync(p) },
-    adapters: withCommunityHarnesses({ "claude-code": claudeAdapter, "codex": codexAdapter, "pi": piAdapter, "omp": ompAdapter, "stub": stubAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() }, { tmux: tmuxAdapter, seatLaunchEnvironment }),
+    adapters: withCommunityHarnesses(builtInRuntimeAdapters, { tmux: tmuxAdapter, seatLaunchEnvironment }),
+    harnessRegistry: harnessRegistryInstance,
     tmuxAdapter,
     agentImageLibrary,
     continuityPolicyMaterializer,
@@ -1109,14 +1124,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // observability. The kernel rig is still the only rig the daemon
   // auto-boots; other rigs require explicit operator-initiated
   // `rig up` / `rig restore` per amended IMPL-PRD §16.2.
-  const runtimeAdaptersMap = withCommunityHarnessResolver({
-    "claude-code": claudeAdapter,
-    "codex": codexAdapter,
-    "pi": piAdapter,
-    "omp": ompAdapter,
-    "stub": stubAdapter,
-    "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter(),
-  }, { tmux: tmuxAdapter, seatLaunchEnvironment });
+  const runtimeAdaptersMap = withCommunityHarnessResolver(
+    builtInRuntimeAdapters,
+    { tmux: tmuxAdapter, seatLaunchEnvironment },
+  );
   let kernelBootTracker: import("./domain/kernel-boot-tracker.js").KernelBootTracker | undefined;
   try {
     const { bootKernelIfNeeded } = await import("./domain/kernel-boot.js");
@@ -1388,6 +1399,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     podInstantiator,
     podBundleSourceResolver,
     runtimeAdapters: runtimeAdaptersMap,
+    harnessRegistry: harnessRegistryInstance,
     transcriptStore,
     sessionTransport: (() => {
       const t = new SessionTransport({

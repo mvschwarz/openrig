@@ -155,6 +155,25 @@ import {
 // through the real orchestrator) — admitted at the modern-pod preflight gate alongside the real runtimes.
 const SUPPORTED_RUNTIMES = BUILT_IN_RUNTIMES;
 
+
+// Toward #43: when a HarnessRegistry is provided on PreflightSpecContext, it is the source of truth
+// for built-in admission (registration-without-allowlist); otherwise BUILT_IN_RUNTIMES stands.
+
+function isBuiltInRuntimeAdmitted(
+  runtime: string,
+  registry?: import("./harness-registry.js").HarnessRegistry,
+): boolean {
+  if (registry) {
+    try {
+      registry.requireSupported(runtime, "runtime");
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return SUPPORTED_RUNTIMES.has(runtime);
+}
+
 // Default daemon-shipped asset paths for the managed Claude activity hooks — the SAME files the
 // ClaudeCodeAdapter is wired with in startup.ts (validation is the shared module either way).
 // Overridable via PreflightSpecContext.claudeActivityAssets for fixture-injecting tests.
@@ -175,6 +194,8 @@ export interface RigPreflightInput {
   claudeActivityAssets?: { relayPath?: string; manifestPath?: string };
   inheritedPermissionPolicy?: PreflightSpecContext["inheritedPermissionPolicy"];
   materializeOnly?: PreflightSpecContext["materializeOnly"];
+  /** Optional harness registry forwarded into {@link PreflightSpecContext}. */
+  harnessRegistry?: PreflightSpecContext["harnessRegistry"];
 }
 
 /**
@@ -207,6 +228,13 @@ export interface PreflightSpecContext {
    *  the daemon-shipped assets (same as the ClaudeCodeAdapter); tests inject fixtures. Validated
    *  via the SHARED delivery check so preflight + adapter cannot drift. */
   claudeActivityAssets?: { relayPath?: string; manifestPath?: string };
+  /**
+   * Optional in-process harness registry (interim toward Discussion #43).
+   * When set, built-in runtime admission uses registry.requireSupported("runtime").
+   * When absent, behavior matches today's {@link BUILT_IN_RUNTIMES} allowlist.
+   * Runtimes not admitted as built-in still fall through to community-harness presets.
+   */
+  harnessRegistry?: import("./harness-registry.js").HarnessRegistry;
 }
 
 /**
@@ -279,6 +307,7 @@ export async function rigPreflight(input: RigPreflightInput & { exec?: (cmd: str
     materializeOnly: input.materializeOnly,
     exec: input.exec,
     claudeActivityAssets: input.claudeActivityAssets,
+    harnessRegistry: input.harnessRegistry,
   });
 }
 
@@ -315,7 +344,7 @@ export async function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: 
       // Terminal members: skip agent resolution and profile resolution
       if (member.agentRef === "builtin:terminal") {
         // Only validate runtime and cwd for terminal members
-        if (!SUPPORTED_RUNTIMES.has(member.runtime)) {
+        if (!isBuiltInRuntimeAdmitted(member.runtime, preflightCtx.harnessRegistry)) {
           errors.push(`${pod.id}.${member.id}: unsupported runtime "${member.runtime}"`);
         }
         if (!member.cwd) {
@@ -396,7 +425,7 @@ export async function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: 
       }
 
       // Check runtime: a built-in, or a community harness whose preset is installed and usable.
-      if (!SUPPORTED_RUNTIMES.has(member.runtime)) {
+      if (!isBuiltInRuntimeAdmitted(member.runtime, preflightCtx.harnessRegistry)) {
         const app = loadCommunityHarnessPreset(member.runtime);
         if (!app.ok) {
           errors.push(`${pod.id}.${member.id}: unsupported runtime "${member.runtime}": ${app.kind === "missing" ? "it isn't built in, and " : ""}${app.message}`);

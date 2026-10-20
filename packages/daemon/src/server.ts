@@ -201,6 +201,11 @@ export interface AppDeps {
   podInstantiator: PodRigInstantiator;
   podBundleSourceResolver: PodBundleSourceResolver | null;
   runtimeAdapters?: Record<string, import("./domain/runtime-adapter.js").RuntimeAdapter>;
+  /**
+   * Optional in-process harness registry (interim toward Discussion #43).
+   * Seeded at startup from built-in adapters; optional so test AppDeps stay light.
+   */
+  harnessRegistry?: import("./domain/harness-registry.js").HarnessRegistry;
   transcriptStore?: TranscriptStore;
   sessionTransport?: SessionTransport;
   askService?: AskService;

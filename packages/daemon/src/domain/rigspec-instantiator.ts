@@ -407,6 +407,11 @@ interface PodInstantiatorDeps {
   /** S20 P4 — materializes the selected Claude continuity policy by
    *  registering jobs in the existing watchdog engine after startup succeeds. */
   continuityPolicyMaterializer?: Pick<ContinuityPolicyMaterializer, "arm">;
+  /**
+   * Optional in-process harness registry (interim toward Discussion #43).
+   * Forwarded into preflight; when absent, built-in admission uses BUILT_IN_RUNTIMES.
+   */
+  harnessRegistry?: import("./harness-registry.js").HarnessRegistry;
 }
 
 export interface MaterializeResult {
@@ -575,6 +580,7 @@ export class PodRigInstantiator {
       materializeOnly: true,
       exec: this.deps.exec,
       claudeActivityAssets: this.deps.claudeActivityAssets, // §6: restore main's activity-hook asset threading
+    harnessRegistry: this.deps.harnessRegistry,
     });
     if (!preflight.ready) {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
@@ -626,6 +632,7 @@ export class PodRigInstantiator {
       inheritedPermissionPolicy: this.inheritedPermissionPolicy(opts?.targetRigId),
       exec: this.deps.exec,
       claudeActivityAssets: this.deps.claudeActivityAssets, // §6: restore main's activity-hook asset threading
+    harnessRegistry: this.deps.harnessRegistry,
     });
     if (!preflight.ready) {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
@@ -1068,6 +1075,7 @@ export class PodRigInstantiator {
       rigNameOverride: rig.rig.name,
       inheritedPermissionPolicy: this.inheritedPermissionPolicy(rigId),
       exec: this.deps.exec,
+    harnessRegistry: this.deps.harnessRegistry,
     });
     if (!preflight.ready) {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
@@ -1243,7 +1251,7 @@ export class PodRigInstantiator {
       return refuse("Resolved model, effort, cwd or restore policy differs from the failed first start.");
     }
     const preflight = await preflightValidatedSpec(rigSpec, { rigRoot, fsOps: this.deps.fsOps, skillsRoot: this.resolveSkillsRoot(),
-      ...this.systemWorldResolutionContext(), rigNameOverride: rig.rig.name, inheritedPermissionPolicy: this.inheritedPermissionPolicy(rigId), exec: this.deps.exec });
+      ...this.systemWorldResolutionContext(), rigNameOverride: rig.rig.name, inheritedPermissionPolicy: this.inheritedPermissionPolicy(rigId), exec: this.deps.exec, harnessRegistry: this.deps.harnessRegistry });
     if (!preflight.ready) return refuse(preflight.errors.join("; "));
     const names = new Set([deriveCanonicalSessionName(pod.id, member.id, rig.rig.name),
       ...this.deps.sessionRegistry.getSessionsForRig(rigId).filter(s => s.nodeId === nodeId).map(s => s.sessionName)]);
@@ -1311,7 +1319,7 @@ export class PodRigInstantiator {
     if (!nameGuard.ok) return nameGuard;
 
     // 2. Preflight
-    const preflight = await rigPreflight({ rigSpecYaml, rigRoot, cwdOverride: opts?.cwdOverride, fsOps: this.deps.fsOps, skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext(), exec: this.deps.exec, claudeActivityAssets: this.deps.claudeActivityAssets });
+    const preflight = await rigPreflight({ rigSpecYaml, rigRoot, cwdOverride: opts?.cwdOverride, fsOps: this.deps.fsOps, skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext(), exec: this.deps.exec, claudeActivityAssets: this.deps.claudeActivityAssets, harnessRegistry: this.deps.harnessRegistry });
     if (!preflight.ready) {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
     }
