@@ -95,6 +95,21 @@ describe("rig gateway human quiet", () => {
     ]);
   });
 
+  it("an occurrence ended early is named by its date, not as tonight's, however long ago it was", async () => {
+    reply = { status: 200, body: { ok: true, window: { ...window, ended: { occurrence: "2026-10-19", by: "orch@demo", at: "2026-10-20T02:00:00.000Z" } },
+      state: { active: false, revision: 1, nextBoundary: { kind: "start", at: "2026-10-22T20:00:00.000Z" } } } };
+    await run("quiet", "show", "mike");
+    expect(logs).toEqual(["mike quiet: off (every day 22:00-07:00 Europe/Berlin; set by orch@demo, manual, revision 1; next starts 2026-10-22T20:00:00.000Z; the 2026-10-19 occurrence ended early by orch@demo)"]);
+  });
+
+  it("an until-time window ended early says so without naming a night", async () => {
+    reply = { status: 200, body: { ok: true, window: { kind: "until", timezone: "UTC", until: "2026-10-20T18:00:00.000Z", source: "manual", revision: 1,
+      setBy: "orch@demo", setAt: "2026-10-20T12:00:00.000Z", ended: { occurrence: "until", by: "mike", at: "2026-10-20T13:00:00.000Z" } },
+      state: { active: false, revision: 1, nextBoundary: null } } };
+    await run("quiet", "end", "mike");
+    expect(logs).toEqual(["mike quiet: off (until 2026-10-20T18:00:00.000Z (UTC); set by orch@demo, manual, revision 1; ended early by mike)"]);
+  });
+
   it("a refusal prints the daemon's message and exits nonzero", async () => {
     reply = { status: 400, body: { error: "invalid_timezone", message: 'unknown timezone "Mars/Olympus": use an IANA name, for example Europe/Berlin or America/New_York' } };
     await run("quiet", "set", "mike", "--daily", "22:00-07:00", "--tz", "Mars/Olympus");

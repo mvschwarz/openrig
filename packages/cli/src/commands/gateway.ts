@@ -65,7 +65,10 @@ export function describeQuiet(view: HumanQuietView): string {
   const rule = w.kind === "daily" ? `every day ${w.start}-${w.end} ${w.timezone}` : `until ${w.until} (${w.timezone})`;
   const next = view.state.nextBoundary;
   const nextText = next ? `; ${next.kind === "end" ? "ends" : "next starts"} ${next.at}` : "";
-  const ended = w.ended && !view.state.active ? `; tonight's ended early by ${w.ended.by}` : "";
+  // Name the occurrence that was ended, from the stored record: a daily one by its start date (it stays recorded until the
+  // next revision, so it may not be tonight's); an until-time window has just the one.
+  const endedWhich = w.ended?.occurrence === "until" ? "ended" : `the ${w.ended?.occurrence} occurrence ended`;
+  const ended = w.ended && !view.state.active ? `; ${endedWhich} early by ${w.ended.by}` : "";
   return `quiet: ${view.state.active ? "on" : "off"} (${rule}; set by ${w.setBy}, ${w.source}, revision ${w.revision}${nextText}${ended})`;
 }
 
