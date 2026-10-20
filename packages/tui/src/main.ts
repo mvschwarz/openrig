@@ -145,9 +145,11 @@ async function run(): Promise<void> {
   const tuiBuild = parseCliIdentity(process.env["OPENRIG_TUI_CLI_IDENTITY"]);
   let buildMismatch = false;
   let eventsDropped = false;
-  function checkDaemonBuild(): void {
+  function checkDaemonBuild(attempt = 0): void {
     if (!live || !client || buildMismatch) return;
     void checkVersionSkew(tuiBuild, () => client.health()).then((skew) => {
+      // A loaded daemon can time out a /healthz read; retry twice before waiting for the next reconnect.
+      if (skew.state === "unreadable" && attempt < 2) { setTimeout(() => checkDaemonBuild(attempt + 1), 15_000).unref(); return; }
       if (skew.state !== "mismatch" || buildMismatch) return;
       buildMismatch = true;
       activityEvents?.close();

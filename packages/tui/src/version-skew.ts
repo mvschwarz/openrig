@@ -8,7 +8,8 @@ export interface BuildIdentity {
   commit: string;
 }
 
-export type VersionSkew = { state: "match" } | { state: "unknown" } | { state: "mismatch"; message: string };
+/** `unreadable` is a failed /healthz read, which the caller may retry; `unknown` is an unstamped build on either side. */
+export type VersionSkew = { state: "match" } | { state: "unknown" } | { state: "unreadable" } | { state: "mismatch"; message: string };
 
 /** The launching CLI's build, as `rig tui` passes it in OPENRIG_TUI_CLI_IDENTITY:
  *  "<semver> · <commit>", optionally followed by " · dirty". Unstamped builds read as null. */
@@ -27,19 +28,16 @@ export function compareBuilds(tui: BuildIdentity | null, health: unknown): Versi
   }
   const sameCommit = tui.commit.startsWith(daemon.commit) || daemon.commit.startsWith(tui.commit);
   if (tui.semver === daemon.semver && sameCommit) return { state: "match" };
-  const label = (build: BuildIdentity) => `${build.semver} (${build.commit.slice(0, 8)})`;
-  return {
-    state: "mismatch",
-    message: `This TUI is ${label(tui)}; the daemon is ${label({ semver: daemon.semver, commit: daemon.commit })}. Background refresh stopped; restart rig tui.`,
-  };
+  // The status line is cut at the terminal's width, so the action comes first and the whole line fits 80 columns.
+  return { state: "mismatch", message: `Restart rig tui: daemon is now ${daemon.semver} (${daemon.commit.slice(0, 8)}); auto-refresh off.` };
 }
 
-/** Reads /healthz once and compares. A failed read is unknown. */
+/** Reads /healthz once and compares. A failed read is unreadable. */
 export async function checkVersionSkew(tui: BuildIdentity | null, readHealth: () => Promise<unknown>): Promise<VersionSkew> {
   if (!tui) return { state: "unknown" };
   try {
     return compareBuilds(tui, await readHealth());
   } catch {
-    return { state: "unknown" };
+    return { state: "unreadable" };
   }
 }

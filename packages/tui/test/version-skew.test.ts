@@ -31,12 +31,12 @@ describe("the TUI's build against the daemon's /healthz", () => {
   it("an old TUI against a newer daemon is a mismatch that says what to do", async () => {
     const skew = await checkVersionSkew(OLD, async () => ({ status: "ok", semver: NEW.semver, commit: NEW.commit }));
     expect(skew).toEqual({ state: "mismatch",
-      message: "This TUI is 0.6.10 (3001cc43); the daemon is 0.6.12 (9e5382dd). Background refresh stopped; restart rig tui." });
+      message: "Restart rig tui: daemon is now 0.6.12 (9e5382dd); auto-refresh off." });
     expect(compareBuilds({ semver: NEW.semver, commit: OLD.commit }, NEW)).toMatchObject({ state: "mismatch" });
   });
 
-  it("an unreadable /healthz, or one without a stamp, is unknown, never a mismatch", async () => {
-    expect(await checkVersionSkew(OLD, async () => { throw new Error("daemon read failed: GET /healthz → 503"); })).toEqual({ state: "unknown" });
+  it("a failed /healthz read is unreadable, and one without a stamp is unknown; neither is a mismatch", async () => {
+    expect(await checkVersionSkew(OLD, async () => { throw new Error("daemon read failed: GET /healthz → 503"); })).toEqual({ state: "unreadable" });
     expect(await checkVersionSkew(OLD, async () => ({ status: "ok" }))).toEqual({ state: "unknown" });
     expect(await checkVersionSkew(OLD, async () => null)).toEqual({ state: "unknown" });
     const read = vi.fn(async () => NEW);
@@ -53,7 +53,7 @@ describe("a mismatch stops the background refresh", () => {
     await live.refresh();
     expect(vi.getTimerCount()).toBe(1);
 
-    live.stopBackground("This TUI is 0.6.10 (3001cc43); the daemon is 0.6.12 (9e5382dd). Background refresh stopped; restart rig tui.");
+    live.stopBackground("Restart rig tui: daemon is now 0.6.12 (9e5382dd); auto-refresh off.");
     expect(vi.getTimerCount()).toBe(0);
     await vi.advanceTimersByTimeAsync(QUIET_REFRESH_MS * 3);
     expect(hydrate).toHaveBeenCalledTimes(1);
@@ -69,10 +69,13 @@ describe("a mismatch stops the background refresh", () => {
     live.close();
   });
 
-  it("puts the message on the status line", () => {
-    const message = "This TUI is 0.6.10 (3001cc43); the daemon is 0.6.12 (9e5382dd). Background refresh stopped; restart rig tui.";
-    const screen = renderScreen(createViewState({ instanceId: "t" }).get(), emptySnapshot(), { cols: 160, rows: 24, load: { inFlight: false, settled: true, skew: message } }, "");
-    expect(screen.lines.join("\n")).toContain(message);
+  it("puts the whole message on the status line at 80 columns, action first", () => {
+    const message = (compareBuilds(OLD, NEW) as { message: string }).message;
+    for (const cols of [80, 100, 160]) {
+      const screen = renderScreen(createViewState({ instanceId: "t" }).get(), emptySnapshot(), { cols, rows: 24, load: { inFlight: false, settled: true, skew: message } }, "");
+      expect(screen.lines.some((line) => line.includes(message))).toBe(true);
+    }
+    expect(message.startsWith("Restart rig tui")).toBe(true);
   });
 
   it("main checks on the first connect and on every event-stream reconnect", () => {
@@ -81,5 +84,6 @@ describe("a mismatch stops the background refresh", () => {
     expect(enable).toContain("if (!liveEnabled) checkDaemonBuild();");
     expect(enable).toContain('status === "connected" && eventsDropped');
     expect(main).toContain("live.stopBackground(skew.message)");
+    expect(main).toContain('skew.state === "unreadable" && attempt < 2');
   });
 });
