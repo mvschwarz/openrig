@@ -189,12 +189,18 @@ describe("rig reconcile-session", () => {
     expect(logs.join("\n")).toContain("--repair-missing-pane requires --no-launch");
     expect(requests).toEqual([]);
   });
-  it("gets 404 from an old daemon without retrying the adoption endpoint", async () => {
+  it.each([false, true])("explains an old daemon's 404 without retrying adoption (json=%s)", async json => {
     requests.length = 0;
-    const { exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "reconcile-session", "old-daemon@my-rig", "--repair-missing-pane", "--no-launch", "--json"]);
+    const { exitCode, logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "reconcile-session", "old-daemon@my-rig", "--repair-missing-pane", "--no-launch", ...(json ? ["--json"] : [])]);
     });
     expect(exitCode).toBe(1);
     expect(requests).toEqual(["/api/sessions/old-daemon@my-rig/repair-missing-pane"]);
+    const output = json ? JSON.parse(logs.join("\n")).message : logs.join("\n");
+    expect(output).toBe("This daemon does not support --repair-missing-pane; nothing was changed. Do not use plain reconcile-session for this repair: it adopts the session.");
+    if (json) {
+      expect(JSON.parse(logs.join("\n"))).toMatchObject({ ok: false, code: "repair_missing_pane_unsupported" });
+      expect(JSON.parse(logs.join("\n")).error).toBeUndefined();
+    }
   });
 });
