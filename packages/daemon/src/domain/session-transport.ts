@@ -1,3 +1,4 @@
+import { currentClaudeMcpMenu } from "./claude-mcp-menu.js";
 import stringWidth from "string-width";
 import { CODEX_TURN_STATUS_PATTERN } from "./codex-pane-patterns.js";
 import { randomUUID } from "node:crypto";
@@ -515,14 +516,17 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
     : null;
   const claudeComposer = findClaudeComposer(paneContent, options);
   const oldQuestionEnd = promptScanLines.lastIndexOf(CLAUDE_QUESTION_FOOTER);
+  const permissionPromptEvidence = findPatternEvidence(promptScanLines, PERMISSION_PROMPT_PATTERNS);
   // A complete later empty composer with a recognized Claude bar makes the preceding question history.
   // Keep draft handling and selectors without this dialog boundary unchanged.
   const selectionLines = claudeComposer?.framed &&
       CLAUDE_ANCHORED_MODE_FOOTER.test(claudeComposer.bar) &&
       IDLE_PROMPT_PATTERNS.some(pattern => pattern.test(claudeComposer.text)) &&
       oldQuestionEnd >= 0 && oldQuestionEnd < promptScanLines.length - 1
-    ? promptScanLines.slice(oldQuestionEnd + 1) : promptScanLines;
-  const selectionPromptEvidence = findCurrentClaudeQuestion(paneContent) ??
+    ? promptScanLines.slice(oldQuestionEnd + 1)
+    : options.runtime === "codex" && !permissionPromptEvidence
+      ? codexCurrentSelectionLines(paneContent) ?? promptScanLines : promptScanLines;
+  const selectionPromptEvidence = currentClaudeMcpMenu(paneContent) ?? findCurrentClaudeQuestion(paneContent) ??
     findPatternEvidence(selectionLines, [COMPOSER_SELECTION_SCAN_PATTERN]);
   if (selectionPromptEvidence) {
     return {
@@ -535,7 +539,6 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   // OPR.0.4.1.10 (FR-1c): a permission/confirmation question is attention even when its selector is
   // not in view — checked before the idle short-circuits so a permission block above an idle-looking
   // footer never reads as idle (which would let a default send land on it).
-  const permissionPromptEvidence = findPatternEvidence(promptScanLines, PERMISSION_PROMPT_PATTERNS);
   if (permissionPromptEvidence) {
     return {
       state: "attention",
@@ -1211,6 +1214,19 @@ function boxHoldsText(rows: string[], text: string): "exact" | "ambiguous" | "ot
 function codexTurnStatusAt(box: { lines: string[]; inputAt: number }): number {
   for (let i = box.inputAt - 1; i >= 0; i--) if (CODEX_TURN_STATUS_PATTERN.test(box.lines[i]!)) return i;
   return -1;
+}
+
+/** Codex 0.160.0's parent bottom-pane renderer replaces the normal composer for a modal; inline choices and
+ *  previews follow the running status. Only scope generic selector history at this adjacent normal-frame slot.
+ *  A draft, queued input, different visible version, missing footer or intervening content keeps the full scan.
+ *  Source: openai/codex a956835d, tui/src/bottom_pane/mod.rs:2164-2310. Permission detectors keep their own scan. */
+function codexCurrentSelectionLines(pane: string): string[] | null {
+  if (readInputBox(pane, "codex", "") !== "empty") return null;
+  const box = codexInputBox(pane)!;
+  let status = box.inputAt - 1;
+  while (status >= 0 && !box.lines[status]!.trim()) status--;
+  if (status < 0 || !CODEX_TURN_STATUS_PATTERN.test(box.lines[status]!)) return null;
+  return trimPaneLines(box.lines.slice(status).join("\n"));
 }
 
 /** Whether a Claude Code frame shows a running turn: `esc to interrupt` in the footer under its input box, or a

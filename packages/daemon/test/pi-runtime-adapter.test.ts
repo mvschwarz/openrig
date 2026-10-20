@@ -9,6 +9,8 @@ import { describe, it, expect, vi } from "vitest";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import { PiRuntimeAdapter, type PiAdapterFsOps } from "../src/adapters/pi-runtime-adapter.js";
 import { PiResumeAdapter } from "../src/adapters/pi-resume.js";
+import { OmpResumeAdapter } from "../src/adapters/omp-resume.js";
+import { OmpRuntimeAdapter } from "../src/adapters/omp-runtime-adapter.js";
 import {
   piSeatPaths, buildPiRunnerCommand, buildPiChildArgs, buildPiChildEnv,
   providerFromModel, parsePiRunnerState, buildPendingRunnerState, PI_RUNNER_READY_MARKER,
@@ -277,6 +279,22 @@ describe("PiRuntimeAdapter.launchHarness", () => {
     expect(fs.dirs.has(piSeatPaths(STATE_ROOT, SESSION).sessionsDir)).toBe(true);
   });
 
+  it("passes the seat's effort as --thinking for Pi; no effort => no flag; OMP never", async () => {
+    const run = async (Adapter: typeof PiRuntimeAdapter, effort?: string) => {
+      const fs = memFs();
+      const sendShellCommand = vi.fn(async (_t: string, text: string) => {
+        fs.files[piSeatPaths(STATE_ROOT, SESSION).runnerStatePath] = readyState(SESSION_FILE, launchIdFrom(text));
+        return { ok: true as const };
+      });
+      const adapter = new Adapter({ tmux: mockTmux({ sendShellCommand }), fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER, sleep: async () => {} });
+      expect((await adapter.launchHarness({ ...(binding as object), effort } as never, { name: SESSION })).ok).toBe(true);
+      return sendShellCommand.mock.calls[0]![1] as string;
+    };
+    expect(await run(PiRuntimeAdapter, "high")).toContain("--model 'zai/glm-5.2' --thinking 'high'");
+    expect(await run(PiRuntimeAdapter)).not.toContain("--thinking");
+    expect(await run(OmpRuntimeAdapter as never, "high")).not.toContain("--thinking");
+  });
+
   it("OPR.0.7.0.2: --usage-facts only while usage.pi_cost_facts is on, read at each launch; off by default", async () => {
     let enabled = false;
     const commands: string[] = [];
@@ -494,6 +512,25 @@ describe("PiResumeAdapter", () => {
     const a = resumeAdapter(fs, mockTmux({ sendShellCommand }));
     const result = await a.resume(SESSION, "pi_session_file", SESSION_FILE, "/work");
     expect(result).toEqual({ ok: true, appliedLaunch: PI_FLOOR_EFFECT });
+  });
+
+  it("resume passes effort as --thinking for Pi; none without; OMP never", async () => {
+    const run = async (make: (fs: ReturnType<typeof memFs>, tmux: TmuxAdapter) => PiResumeAdapter, type: string, effort?: string | null) => {
+      const fs = memFs({ [SESSION_FILE]: "jsonl" });
+      const sendShellCommand = vi.fn(async (_t: string, text: string) => {
+        fs.files[piSeatPaths(STATE_ROOT, SESSION).runnerStatePath] = readyState(SESSION_FILE, launchIdFrom(text));
+        return { ok: true as const };
+      });
+      const result = await make(fs, mockTmux({ sendShellCommand })).resume(SESSION, type, SESSION_FILE, "/work", "zai/glm", undefined, effort);
+      expect(result.ok).toBe(true);
+      return sendShellCommand.mock.calls[0]![1] as string;
+    };
+    const omp = (fs: ReturnType<typeof memFs>, tmux: TmuxAdapter) =>
+      new OmpResumeAdapter(tmux, fs, { stateRoot: STATE_ROOT, runnerEntryPath: RUNNER }, { pollMs: 1, maxWaitMs: 5, sleep: async () => {} });
+    expect(await run(resumeAdapter, "pi_session_file", "high")).toContain("--model 'zai/glm' --thinking 'high' --session");
+    expect(await run(resumeAdapter, "pi_session_file")).not.toContain("--thinking");
+    expect(await run(resumeAdapter, "pi_session_file", null)).not.toContain("--thinking");
+    expect(await run(omp, "omp_session_file", "high")).not.toContain("--thinking");
   });
 
   it("fails honestly when the runner reports a DIFFERENT session file than requested", async () => {

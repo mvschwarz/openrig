@@ -1,4 +1,5 @@
-import { resolve } from "node:path";
+import { resolve, isAbsolute, basename } from "node:path";
+import { shellQuote } from "../adapters/shell-quote.js";
 import { getOpenRigHome } from "../openrig-compat.js";
 
 // Single source of truth for whether the OpenRig-managed Claude activity-relay hooks can be
@@ -86,4 +87,18 @@ export function deriveRelayEvents(fs: ActivityHookFsRead, manifestPath: string |
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** The generated command grammar, not a shell parser. Retain bare-node legacy commands;
+ * a quoted absolute Node token can be refreshed without claiming arbitrary user wrappers. */
+export function parseManagedClaudeNodeCommand(command: string): { executable: string; args: string[] } | null {
+  if (/[\r\n]/.test(command)) return null;
+  const match = /^(node|'(?:[^']|'"'"')*')((?:[ \t]+'(?:[^']|'"'"')*')+)$/.exec(command.trim());
+  if (!match) return null;
+  const tokens = [match[1]!, ...match[2]!.match(/'(?:[^']|'"'"')*'/g)!];
+  const decoded = tokens.map(token => token === "node" ? token : token.slice(1, -1).split(`'"'"'`).join("'"));
+  if (tokens.some((token, i) => !(i === 0 && token === "node") && shellQuote(decoded[i]!) !== token)) return null;
+  const executable = decoded[0]!;
+  if (executable !== "node" && (!isAbsolute(executable) || !/^node(?:\.exe)?$/i.test(basename(executable)))) return null;
+  return { executable, args: decoded.slice(1) };
 }

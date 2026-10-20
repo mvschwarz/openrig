@@ -20,10 +20,10 @@ steps:
           state: blocked
           tags: [mission:regression, slice:SCN.1]
   - seed_regression: {class: parked-baton-as-current}
-  - emit: {seat: work-worker@solo-stub, behavior: refocus}
+  - emit: {seat: work-worker@solo-stub, behavior: refocus, packet: true}
   - expect:
       surface: hook_context
       seat: work-worker@solo-stub
       within: 0ms
-      contains: "FALLBACK — no current typed baton (no typed in-progress work (only in-progress rows are considered; a typed row that is pending or blocked is not current work))"
+      contains: "blocked on external:scenario-release — continuation:"
   - down: {}

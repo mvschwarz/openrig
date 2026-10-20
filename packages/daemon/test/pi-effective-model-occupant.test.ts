@@ -7,9 +7,9 @@ import { appendFileSync, mkdirSync, mkdtempSync, rmSync, realpathSync, writeFile
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ModelDivergenceMonitor, type ModelDivergenceMonitorDeps, type PinnedSeat } from "../src/domain/model-divergence/model-divergence-monitor.js";
-import { readCurrentPiOccupantModel, type ProcessRow } from "../src/domain/model-divergence/current-generation-record.js";
+import { readCurrentPiOccupantModel, resolveIdentityVerifiedPiRecord, type ProcessRow } from "../src/domain/model-divergence/current-generation-record.js";
 import { buildPiRunnerCommand } from "../src/adapters/pi-runner-protocol.js";
-import { piPinReadings } from "../src/domain/model-divergence/effective-model-readers.js";
+import { piPinReadings, readPiModelObservation } from "../src/domain/model-divergence/effective-model-readers.js";
 
 const SESSION = "dev-impl@r";
 const PANE = "%7";
@@ -102,10 +102,10 @@ function fixture(lines: string[], overrides: Partial<Omit<Fixture, "sessionsDir"
 
 /** The managed runner command as ps shows it, built by the launch builder itself so the reader's
  *  expected argument order cannot drift from it: argv joined by spaces, shell quoting removed. */
-function runnerCommand(f: Pick<Fixture, "entryPath" | "stateRoot">, launchId: string, opts: { node?: string; entryPath?: string; stateRoot?: string } = {}): string {
+function runnerCommand(f: Pick<Fixture, "entryPath" | "stateRoot">, launchId: string, opts: { node?: string; entryPath?: string; stateRoot?: string; thinking?: string } = {}): string {
   const built = buildPiRunnerCommand({
     runtime: "pi", runnerEntryPath: opts.entryPath ?? f.entryPath, sessionName: SESSION, stateRoot: opts.stateRoot ?? f.stateRoot,
-    cwd: "/p", trust: "approve", model: PIN, launchId,
+    cwd: "/p", trust: "approve", model: PIN, launchId, thinking: opts.thinking,
   });
   const ps = built.replace(/'([^']*)'/g, "$1");
   return opts.node ? ps.replace(/^node /, `${opts.node} `) : ps;
@@ -398,6 +398,20 @@ describe("Pi runner arguments and pane process must be unambiguous", () => {
     }
   });
 
+  it("a runner command carrying --thinking still matches the managed shape", async () => {
+    const command = `${runnerCommand(managed, "L2").replace(`--model ${PIN}`, `--model ${PIN} --thinking high`)}`;
+    expect(command).toContain("--thinking high");
+    expect((await pass(monitorFor(withRunner(command)))).fired).toHaveLength(1);
+  });
+
+  it("an effort shaped like an identity flag is never sent, so the runner still verifies", async () => {
+    for (const thinking of ["--cwd", "high --cwd", "--launch-id", "--runtime"]) {
+      const command = runnerCommand(managed, "L2", { thinking });
+      expect(command).not.toContain("--thinking");
+      expect((await pass(monitorFor(withRunner(command)))).fired).toHaveLength(1);
+    }
+  });
+
   it("a pane whose own process is not a shell stays pending, with the exact runner under it", async () => {
     expect(await pendingReason(withRunner(runnerCommand(managed, "L2"), { paneRoot: "vim notes.md" }))).toMatch(/is not a shell/);
   });
@@ -517,5 +531,49 @@ describe("Pi pin that is itself a model id in the seat's models.json", () => {
     const r = await pass(monitorFor(seat("y", "lab/y", "{ not json")));
     expect(r.fired).toEqual([]);
     expect(r.pending).toEqual([]);
+  });
+});
+
+describe("Pi effort report inputs: the verified runner and its newest own record", () => {
+  function select(f: Fixture) {
+    return resolveIdentityVerifiedPiRecord({
+      sessionName: SESSION, generation: "gen-1", occupantBootAt: sqliteUtc(f.bootAt),
+      binding: { tmuxSession: SESSION, tmuxPane: PANE },
+      runner: { state: f.sidecar, sessionsDir: f.sessionsDir, entryPath: f.entryPath, stateRoot: f.stateRoot },
+    }, { getPanePid: async (target) => (target === PANE ? PANE_PID : null), listProcesses: async () => processes(f) },
+    (path) => { try { return realpathSync(path); } catch { return null; } });
+  }
+  function thinking(atMs: number, level: string | null): string {
+    const record = JSON.parse(assistant(atMs, "claude-fable-5")) as { message: Record<string, unknown> };
+    if (level !== null) record.message.thinkingLevel = level;
+    return JSON.stringify(record);
+  }
+
+  it("the selection carries the verified runner's pid, start time and command", async () => {
+    const f = fixture([header(T0)]);
+    const selection = await select(f);
+    expect(selection).toMatchObject({ ok: true, launchId: "L2", pid: PANE_PID + 1, startedAt: lstart(RUNNER_START), command: runnerCommand(f, "L2") });
+  });
+
+  it("the observation returns thinkingLevel from the newest own record, never one from before this runner", async () => {
+    const f = fixture([header(T0), thinking(RUNNER_START - 60_000, "xhigh"), thinking(RUNNER_START + 5_000, "high")]);
+    const selection = await select(f);
+    if (!selection.ok) throw new Error(selection.reason);
+    expect(readPiModelObservation(selection.path, { notBeforeMs: selection.notBeforeMs })).toMatchObject({ ok: true, model: PIN, thinkingLevel: "high" });
+
+    const old = fixture([header(T0), thinking(RUNNER_START - 60_000, "xhigh")]);
+    const before = await select(old);
+    if (!before.ok) throw new Error(before.reason);
+    const read = readPiModelObservation(before.path, { notBeforeMs: before.notBeforeMs });
+    expect(read).toMatchObject({ ok: false, reason: expect.stringMatching(/predates the current runner/) });
+  });
+
+  it("a record without thinkingLevel (Pi before 0.99.0) still reads its model, with no level", async () => {
+    const f = fixture([header(T0), thinking(RUNNER_START + 5_000, null)]);
+    const selection = await select(f);
+    if (!selection.ok) throw new Error(selection.reason);
+    const read = readPiModelObservation(selection.path, { notBeforeMs: selection.notBeforeMs });
+    expect(read).toMatchObject({ ok: true, model: PIN });
+    expect(read).not.toHaveProperty("thinkingLevel");
   });
 });

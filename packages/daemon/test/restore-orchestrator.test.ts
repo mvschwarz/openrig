@@ -666,6 +666,17 @@ describe("RestoreOrchestrator", () => {
     );
   });
 
+  it("attemptResume forwards the resolved effort to the Pi resume adapter", async () => {
+    const piResume = vi.fn(async () => ({ ok: true as const }));
+    const orch = createOrchestrator({ pi: { canResume: vi.fn(() => true), resume: piResume } as never });
+    const rig = rigRepo.createRig("pi-effort-forward-test");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "pi", cwd: "/work" });
+    (orch as any).claudeResume.canResume = vi.fn(() => false);
+    (orch as any).codexResume.canResume = vi.fn(() => false);
+    await (orch as any).attemptResume(node.id, "pi-session", "pi_session_file", "/s.jsonl", "/work", null, "zai/glm", "floor", "high");
+    expect(piResume).toHaveBeenCalledWith("pi-session", "pi_session_file", "/s.jsonl", "/work", "zai/glm", "floor", "high");
+  });
+
   it("nonexistent snapshot -> { ok: false, code: 'snapshot_not_found' }", async () => {
     const orch = createOrchestrator();
     const result = await orch.restore("nonexistent");

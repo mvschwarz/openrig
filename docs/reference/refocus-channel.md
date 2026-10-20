@@ -125,10 +125,14 @@ reports broken links as gaps rather than following pointers.
 This automatic hook path is additive to one-shot manual injection through
 `rig send --context`; neither mode substitutes for the other.
 
-## The work packet (switched off by default)
+## The work packet (off by default on every runtime, for now)
 
 Set `OPENRIG_REFOCUS_WORK_PACKET=1` in a seat's harness environment so its
 refocus carries the work it is actually doing as text rather than as pointers.
+`=0` (or `off`, `false`, `no`) turns it off. Unset, each runtime's default
+applies. A runtime's default becomes on only after a native run shows the
+packet reaching the agent and leading to the right next action. No runtime has
+been shown that yet, so today both Claude Code and Codex default to off.
 With the switch on:
 
 - The hook asks `rig queue whoami --work-candidates` for labelled evidence.
@@ -154,6 +158,12 @@ With the switch on:
   `OPENRIG_REFOCUS_NOTES_MAX_AGE_DAYS` (default 14) is named with its age, the
   age's source (`updated:` frontmatter, else mtime) and the threshold: a cue
   for judgment, not a staleness verdict.
+- Each field is bounded on its own, with no total cap. A held or next row's
+  summary and continuation are one line each (about 160 characters), with
+  `rig queue show <id>` named when one was shortened. At most 20 held and 10
+  next rows are shown, with how many there are and the `rig queue list` command
+  for the rest. A matched section's body is cut at about 1,500 characters,
+  pointing to `--depth full`.
 
 `trace-to-root.py --packet --work-candidates <path|->` renders the same packet
 by hand.

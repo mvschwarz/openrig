@@ -813,8 +813,8 @@ your circumstances is configuration, and the ones that are not, another agent ca
   permission policy: an explicit flag wins over it, and it wins over the operator default
   `launch.non_interruptive`. The before-install view shows it as
   `posture[].nonInterruptiveDefault`.
-- **Smaller settings worth knowing:** per-seat `effort`, passed to Claude as `--effort` and to
-  Codex as `model_reasoning_effort`; and `runtime.readiness_timeout_seconds` for seats that start
+- **Smaller settings worth knowing:** per-seat `effort`, passed to Claude as `--effort`, to
+  Codex as `model_reasoning_effort` and to Pi as `--thinking`; and `runtime.readiness_timeout_seconds` for seats that start
   slowly.
 - **`rig policy cite` / `defaults`** — what posture the operator is in: how autonomous to be, how
   loudly to report, whether to batch permission questions or block on them. **This declares a

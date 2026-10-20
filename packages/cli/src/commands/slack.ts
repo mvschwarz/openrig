@@ -209,6 +209,10 @@ export function slackCommand(deps: SlackDeps = {}): Command {
           inbound?: InboundDeliveryStatus & { state?: string; generation?: number; lastEventAt?: string };
           recovery?: { state?: string; reason?: string; lastScanAt?: string; acceptedThisProcess?: number; deadLetteredThisProcess?: number;
             coverage?: { coverageStart: string; coveredThrough: string; pending?: { upper: string; nextLatest: string }; nextRetryAt?: number } | null;
+            channels?: Array<{ channel?: string | null; state?: string; reason?: string; lastScanAt?: string;
+              coverage?: { coverageStart: string; coveredThrough: string; nextRetryAt?: number } | null }>;
+            threads?: { state?: string; reason?: string; tracked?: number; scanned?: number; pending?: number; oldestPendingSeconds?: number | null;
+              backoff?: Record<string, number>; incomplete?: Record<string, number> };
             limits?: string[] } } | undefined;
         if (connector) {
           log(`  Socket: ${connector.inbound?.state ?? "unknown"}; generation ${connector.inbound?.generation ?? "unknown"}; last event ${connector.inbound?.lastEventAt ?? "unknown"}`);
@@ -220,6 +224,19 @@ export function slackCommand(deps: SlackDeps = {}): Command {
             log(`  Available history scanned: [${slackTime(coverage.coverageStart)}, ${slackTime(coverage.coveredThrough)}); older history unknown`);
             if (coverage.pending) log(`  Pending interval to ${slackTime(coverage.pending.upper)}; next page before ${slackTime(coverage.pending.nextLatest)}`);
             if (coverage.nextRetryAt) log(`  Retry after: ${new Date(coverage.nextRetryAt).toISOString()}`);
+          }
+          for (const c of recovery?.channels ?? []) {
+            const scanned = c.coverage ? `; scanned [${slackTime(c.coverage.coverageStart)}, ${slackTime(c.coverage.coveredThrough)})` : "";
+            const retry = c.coverage?.nextRetryAt ? `; retry after ${new Date(c.coverage.nextRetryAt).toISOString()}` : "";
+            log(`  Recovery, channel ${c.channel ?? "unknown"}: ${c.state ?? "unknown"}${c.reason ? ` (${c.reason})` : ""}${scanned}${retry}`);
+          }
+          const threads = recovery?.threads;
+          if (threads) {
+            const reasons = (counts?: Record<string, number>) => Object.entries(counts ?? {}).map(([reason, n]) => `${reason} ${n}`).join(", ");
+            const behind = threads.oldestPendingSeconds != null ? ` (oldest ${Math.round(threads.oldestPendingSeconds / 60)} min behind)` : "";
+            log(`  Thread recovery: ${threads.state ?? "unknown"}${threads.reason ? ` (${threads.reason})` : ""}; ${threads.tracked ?? 0} tracked (open, or closed within seven days); `
+              + `${threads.scanned ?? 0} scanned, ${threads.pending ?? 0} waiting their turn${behind}`
+              + `${reasons(threads.backoff) ? `; backing off: ${reasons(threads.backoff)}` : ""}${reasons(threads.incomplete) ? `; incomplete: ${reasons(threads.incomplete)}` : ""}`);
           }
           log(`  Recovery counts since connector start: accepted ${recovery?.acceptedThisProcess ?? "unknown"}; dead-lettered ${recovery?.deadLetteredThisProcess ?? "unknown"} (custody, not delivery)`);
           if (connector.deadLetterBacklogState !== undefined) {
@@ -235,7 +252,7 @@ export function slackCommand(deps: SlackDeps = {}): Command {
           if (connector.configurationDigest) log(`  Observed configuration digest: ${connector.configurationDigest} (local configuration above)`);
           for (const limit of recovery?.limits ?? []) log(`  Limit: ${limit}`);
         }
-        log("Connected/configured alone is not proof of delivery. Recovery covers available top-level channel history only.");
+        log("Connected/configured alone is not proof of delivery. Recovery covers available history in this machine's channels and replies in its tracked threads.");
         if (permWarn) log(`  ⚠ ${permWarn}`);
         if (next) log(`  ${next}`);
       }

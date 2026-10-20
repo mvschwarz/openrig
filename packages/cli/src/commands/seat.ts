@@ -618,7 +618,7 @@ identity remains unverified; a version number alone cannot clear it.
   cmd
     .command("set-effort")
     .argument("<seat>", "Canonical session name or logical seat ref")
-    .option("--effort <level>", "The runtime's own effort level (for example low, medium, high)")
+    .option("--effort <level>", "The runtime's own effort level (for example low, medium, high; Pi also accepts off, minimal, xhigh, max)")
     .option("--clear", "Remove this seat's explicit choice and go back to its authored or default effort")
     .requiredOption("--reason <text>", "Audit reason recorded on the node.effort_changed event")
     .option("--operator <address>", "Operator recorded on the audit event")
@@ -628,6 +628,8 @@ identity remains unverified; a version number alone cannot clear it.
 Only this seat changes; its peers, model and account don't. The running process
 keeps its current effort until the seat's next managed continuation. Whether the
 native session then uses the level is a separate fact this command can't see.
+Works on Claude Code, Codex and Pi seats; Pi gets it as --thinking <level>. Levels
+are the runtime's own and are not translated; an unfamiliar one is saved with a warning.
 Examples:
   rig seat set-effort dev-impl@my-rig --effort high --reason "long refactor"
   rig seat set-effort dev.impl --clear --reason "back to the spec's effort" --json`)
@@ -660,8 +662,10 @@ Examples:
     .addHelpText("after", `
 Read-only. The launch value is the flag on the running process's own command line.
 The native value is the effort the session recorded for a turn since that process
-started (Claude's transcript, Codex's rollout); until the seat takes a turn, or
-where it can't be read, it is NOT VERIFIED, never assumed from the flag.
+started (Claude's transcript, Codex's rollout, Pi's thinkingLevel on its latest
+successful assistant turn: the level after Pi's own cap, recorded by Pi 0.99.0 or
+later); until the seat takes a turn, or where it can't be read, it is NOT VERIFIED,
+never assumed from the flag.
 Examples:
   rig seat effort dev-impl@my-rig
   rig seat effort dev.impl --json`)

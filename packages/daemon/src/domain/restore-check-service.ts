@@ -1,10 +1,9 @@
 import { selectedCorePluginDir, pluginPathsOf } from "./claude-core-plugin-env.js";
-import { deriveRelayEvents } from "./claude-activity-hooks.js";
+import { deriveRelayEvents, parseManagedClaudeNodeCommand } from "./claude-activity-hooks.js";
 import { claudeActivityRelayPath } from "./claude-activity-hooks.js";
 import { existsSync, accessSync, constants } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
-import { shellQuote as quoteShellArgument } from "../adapters/shell-quote.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import { validatePreRestore } from "./restore-preconditions.js";
 import type { CurrentStateRehydrateEligibility } from "./rehydrate-eligibility.js";
@@ -1220,10 +1219,11 @@ export class RestoreCheckService {
         }
         catch { return false; }
       }
-      return entry["hooks"].some((hook) => (
-        isRecord(hook) && hook["type"] === "command" && typeof hook["command"] === "string" &&
-        hook["command"] === `node ${quoteShellArgument(relayPath)}`
-      ));
+      return entry["hooks"].some((hook) => {
+        if (!isRecord(hook) || hook["type"] !== "command" || typeof hook["command"] !== "string") return false;
+        const parsed = parseManagedClaudeNodeCommand(hook["command"]);
+        return parsed?.args.length === 1 && parsed.args[0] === relayPath;
+      });
     }));
   }
 

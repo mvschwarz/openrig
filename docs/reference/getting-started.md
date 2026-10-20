@@ -15,14 +15,20 @@ operator in the OpenRig view.
 
 ## Before you start
 
-You need Node.js 22 or 24 and tmux, on macOS or Linux, and one working Claude Code or
-Codex account: one is enough, since the kernel operator adapts the shipped `starter`
-team to whichever you have. On Linux, the
-distribution's own Node.js can be older (Ubuntu 24.04's is 18); install a
-supported version with [nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`)
-or NodeSource. On a Mac with Apple
-silicon, use Node.js 22 (see the [compatibility
-history](../releases/v0.5.15.md#known-compatibility-limitation)). Native
+You need Node.js 22 or 24 and tmux, on macOS or Linux, and one working Claude
+Code or Codex account: one is enough, since the kernel operator adapts the
+shipped `starter` team to whichever you have. On Linux, the distribution's own
+Node.js can be older (Ubuntu 24.04's is 18); install a supported version with
+[nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`) or NodeSource. On a Mac
+with Apple silicon, use Node.js 22 (see the [compatibility
+history](../releases/v0.5.15.md#known-compatibility-limitation)). On a Mac where
+you aren't an administrator, or where Homebrew belongs to another account (its
+`brew install` is refused), install Node.js in your own home folder with
+[nvm](https://github.com/nvm-sh/nvm): run `touch ~/.zshrc` (a new Mac account
+has none, and nvm's installer only adds itself to a profile file that already
+exists), then the install command on nvm's page, open a new terminal, and run
+`nvm install 22`. That needs no administrator password, and `npm install -g`
+then installs into your nvm folder. Native
 Windows isn't supported. On Windows, use WSL2: it's the Windows route OpenRig
 supports, though OpenRig's automated tests don't run on it yet. One user's
 [working setup](#wsl2-a-reported-working-setup) is below. Node 20 and

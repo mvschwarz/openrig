@@ -556,17 +556,23 @@ describe("#192 channel map through the real Slack wire", () => {
     ]);
   });
 
-  it("history recovery is unchanged: only the default channel is scanned, with today's status shape", async () => {
+  it("history recovery adopts each mapped channel from now, never from a landing; the default channel keeps its seed", async () => {
     const seen = new SeenStore(join(home, "state", "slack-inbound-seen.jsonl"));
     for (const channel of ["C0DEFAULT", "C0EXAMPLE1", "C0EXAMPLE2"]) seen.mark(`${channel}:1000.000001`, "landed");
     rewire(MAP, true);
     await vi.waitFor(() => expect(sockets).toHaveLength(1));
     sockets[0]!.onopen?.();
     await vi.waitFor(() => expect(historyChannels).toContain("C0DEFAULT"), { timeout: 15_000 });
+    // A mapped channel's first interval opens five seconds after adoption; the default channel scans from its landing.
     expect(new Set(historyChannels)).toEqual(new Set(["C0DEFAULT"]));
-    const status = wire.status?.() as { recovery: { channel: string; channels?: unknown } };
-    expect(status.recovery.channel).toBe("C0DEFAULT");
-    expect(status.recovery).not.toHaveProperty("channels");
+    const status = wire.status?.() as { recovery: { channel: string; coverage: { coverageStart: string };
+      channels: Array<{ channel: string; coverage: { coverageStart: string; seedBasis: string } }> } };
+    expect(status.recovery).toMatchObject({ channel: "C0DEFAULT", coverage: { coverageStart: "1000.000001" } });
+    expect(status.recovery.channels.map((c) => c.channel)).toEqual(["C0EXAMPLE1", "C0EXAMPLE2"]);
+    for (const c of status.recovery.channels) {
+      expect(c.coverage.seedBasis).toBe("feature-adoption");
+      expect(c.coverage.coverageStart).not.toBe("1000.000001");
+    }
   });
 
   it("logs, and keeps posting through, a map entry field written by a newer OpenRig", async () => {

@@ -125,11 +125,14 @@ function readConfiguredContent(home) {
 // current work, its basis travels to the trace script, which alone decides how to render it;
 // a failed or unreadable answer is passed as UNKNOWN. Never guess a work node here: a guess
 // would silently re-point the whole trace.
-// OPR.0.7.0.12 — the work packet, switched off by default: the trace receives the daemon's
-// labelled work candidates and carries duties and notes as text. With it off, every path below
-// is unchanged.
+// OPR.0.7.0.12 — the work packet: the trace receives the daemon's labelled work candidates and
+// carries duties and notes as text. OPENRIG_REFOCUS_WORK_PACKET=1 turns it on and =0 off; unset, each
+// runtime's default below applies. A runtime defaults on only once a native run has shown the packet
+// reaching the agent and leading to the right next action; neither has yet. With it off, every path
+// below is unchanged.
+const WORK_PACKET_DEFAULT = { claude: false, codex: false };
 function workPacketEnabled() {
-  return enabled(process.env.OPENRIG_REFOCUS_WORK_PACKET, false);
+  return enabled(process.env.OPENRIG_REFOCUS_WORK_PACKET, WORK_PACKET_DEFAULT[runtime()] === true);
 }
 
 function readQueueWhoami(timeout = lookupTimeout()) {
