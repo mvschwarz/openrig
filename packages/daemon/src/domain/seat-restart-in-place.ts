@@ -37,7 +37,7 @@ import { CODEX_NETWORK_DEFAULT_OVERRIDE } from "./codex-network-default.js";
 export type InPlaceRestartTmux = Pick<TmuxAdapter,
   | "getPanePid" | "getPaneCommand" | "listPanes" | "getSessionEnv" | "signalPid" | "setRemainOnExit"
   | "signalPaneProcess" | "isPaneDead" | "respawnPane" | "getPaneLocalOption" | "restorePaneOption"
-  | "capturePaneHistory">;
+  | "capturePaneHistory" | "capturePaneHistoryParts">;
 
 /** The Codex runtime adapter's resume surface this operation reuses. */
 export interface InPlaceCodexLauncher {
@@ -261,15 +261,16 @@ export class CodexInPlaceRestart {
         message: `The restart stopped with an error during ${progress.stage}; the seat's state was not observed afterwards.`,
       };
     }
-    // The Account lines already in the pane when the restart finished. --verify counts only lines beyond
-    // these, so text that was there before (anywhere in history or on screen) is never evidence.
-    const accountLinesAtRestart = result.outcome === "restarted_account_unverified"
-      ? accountLineCounts(await this.deps.tmux.capturePaneHistory(result.pane).catch(() => null))
+    // Where the pane's text stood when the restart finished: an anchor at the end of its history, and the
+    // Account lines after it. --verify counts only lines beyond these, so text that was there before is never
+    // evidence, however much older history tmux has trimmed since.
+    const accountTextAtRestart = result.outcome === "restarted_account_unverified"
+      ? accountTextMark(await this.deps.tmux.capturePaneHistoryParts(result.pane).catch(() => null))
       : null;
     this.persist({
       type: RESTART_FINISHED, rigId: seat.rigId, nodeId: seat.nodeId, logicalId: seat.logicalId, sessionName,
       outcome: result.outcome!, newPid: result.newProcess?.pid ?? null, newStartedAt: result.newProcess?.startedAt ?? null,
-      codexHome: result.codexHome, paneHeld: result.paneHeld ? true : false, accountLinesAtRestart, finishedAt: this.now().toISOString(),
+      codexHome: result.codexHome, paneHeld: result.paneHeld ? true : false, accountTextAtRestart, finishedAt: this.now().toISOString(),
     });
     return result;
   }
@@ -353,7 +354,7 @@ export class CodexInPlaceRestart {
     const latest = rows[0];
     if (!latest) return { ok: false, code: "no_restart_recorded", message: "This seat has no recorded in-place restart to verify." };
     if (latest.type === RESTART_STARTED) return { ok: false, code: "restart_not_completed", message: "The latest in-place restart of this seat has not finished." };
-    const finished = JSON.parse(latest.payload) as { outcome: string; newPid: number | null; newStartedAt: string | null; codexHome: string; finishedAt: string; accountLinesAtRestart?: Record<string, number> | null };
+    const finished = JSON.parse(latest.payload) as { outcome: string; newPid: number | null; newStartedAt: string | null; codexHome: string; finishedAt: string; accountLinesAtRestart?: Record<string, number> | null; accountTextAtRestart?: AccountTextMark | null };
     if (finished.outcome !== "restarted_account_unverified") {
       return { ok: false, code: "restart_not_completed", message: `The latest in-place restart ended ${finished.outcome}; there is nothing to verify.` };
     }
@@ -363,7 +364,10 @@ export class CodexInPlaceRestart {
     }
     const conversationId = readResumeToken(this.deps.db, target.sessionId);
     const toolTurn = this.readToolTurn(finished.codexHome, conversationId, finished.finishedAt);
-    const accountEvidence = await this.readAccountLine(target.binding.tmuxPane!, finished.accountLinesAtRestart ?? null, input.expectAccount ?? null);
+    // A restart recorded before the anchor existed carries only whole-pane counts; those are still compared as before.
+    const atRestart = finished.accountTextAtRestart !== undefined ? finished.accountTextAtRestart
+      : finished.accountLinesAtRestart != null ? { anchor: null, counts: finished.accountLinesAtRestart } : null;
+    const accountEvidence = await this.readAccountLine(target.binding.tmuxPane!, atRestart, input.expectAccount ?? null);
     const moved = toolTurn.state === "observed" && toolTurn.completed > 0 && toolTurn.errors === 0 && accountEvidence.state === "matched";
     return {
       ok: true, seat: target.seat, outcome: moved ? "moved" : "restarted_account_unverified", toolTurn, accountEvidence,
@@ -770,23 +774,27 @@ export class CodexInPlaceRestart {
 
   /**
    * Account evidence counts only when the line was produced after the restart. A cursor position can't show
-   * that (a TUI rewrites rows above and below the cursor), so this compares occurrences: every Account line
-   * in the pane's whole text when the restart finished was counted, and a line is new only when the same
-   * text now occurs more often than it did then. Text that moved, stayed or was redrawn never counts more
-   * than once; anything that can't be compared is not observed.
+   * that (a TUI rewrites rows above and below the cursor), so this compares occurrences after an anchor: the
+   * last history lines when the restart finished, which no redraw changes once they've scrolled up. Only text
+   * after the anchor's last occurrence is compared, and a line is new only when the same text occurs there more
+   * often than it did after the anchor then. tmux trims the oldest history first, so trimming can't remove
+   * the restart-time lines after the anchor while keeping the anchor, and older copies of a line no longer
+   * hide a new one. Text that moved, stayed or was redrawn never counts more than once; anything that can't
+   * be compared is not observed.
    */
-  private async readAccountLine(pane: string, atRestart: Record<string, number> | null, expectAccount: string | null): Promise<{ state: "matched" | "not_matched" | "not_requested" | "not_observed"; detail: string }> {
+  private async readAccountLine(pane: string, atRestart: { anchor: string[] | null; counts: Record<string, number> } | null, expectAccount: string | null): Promise<{ state: "matched" | "not_matched" | "not_requested" | "not_observed"; detail: string }> {
     if (!expectAccount?.trim()) return { state: "not_requested", detail: "No --expect-account given, so no account-specific evidence was checked." };
     if (atRestart === null) return { state: "not_observed", detail: "The pane's text at the restart was not recorded, so a line produced since can't be told apart from earlier text." };
     const text = await this.deps.tmux.capturePaneHistory(pane).catch(() => null);
     if (text === null) return { state: "not_observed", detail: "The pane's text could not be read." };
+    const compared = atRestart.anchor === null ? text : linesAfterAnchor(paneLines(text), atRestart.anchor).join("\n");
     const seen = new Map<string, number>();
     let newest: string | undefined;
-    for (const line of accountLines(text)) {
-      const key = accountLineKey(line);
+    for (const line of accountLines(compared)) {
+      const key = lineDigest(line);
       const count = (seen.get(key) ?? 0) + 1;
       seen.set(key, count);
-      if (count > (atRestart[key] ?? 0)) newest = line;
+      if (count > (atRestart.counts[key] ?? 0)) newest = line;
     }
     if (!newest) return { state: "not_observed", detail: "No Codex status Account line was produced since the restart (lines already in the pane then don't count); show /status in the seat first." };
     return accountLineNames(newest, expectAccount)
@@ -1017,17 +1025,52 @@ function accountLines(text: string): string[] {
   return text.split("\n").map((line) => line.replace(/^[\s│|]+|[\s│|]+$/g, "")).filter((line) => /^Account:\s*\S/i.test(line));
 }
 
-/** A line's key in the recorded counts: a digest, so the event log holds no account names. */
-function accountLineKey(line: string): string {
+/** A line's key in the recorded anchor and counts: a digest, so the event log holds no pane text or account names. */
+function lineDigest(line: string): string {
   return createHash("sha256").update(line).digest("hex").slice(0, 16);
 }
 
-/** How often each Account line occurs in the pane's text; null when the text couldn't be read. */
-function accountLineCounts(text: string | null): Record<string, number> | null {
-  if (text === null) return null;
+/** How many history lines the anchor holds. */
+const ANCHOR_LINES = 8;
+
+/** Where the pane's text stood at the restart: digests of the last history lines (the anchor) and how often each
+ *  Account line occurs after them. */
+export interface AccountTextMark {
+  anchor: string[];
+  counts: Record<string, number>;
+}
+
+/** The pane's non-empty lines, trailing blanks removed. */
+function paneLines(text: string): string[] {
+  return text.split("\n").map((line) => line.trimEnd()).filter((line) => line.length > 0);
+}
+
+/** The lines after the anchor's last occurrence. When trimming has cut into the anchor, its longest surviving end
+ *  is used; when none of it survives, every line left came after it. The last occurrence is taken, so a repeat of
+ *  the anchor can only shorten what is compared, never reach back before the restart. */
+export function linesAfterAnchor(lines: string[], anchor: string[]): string[] {
+  const keys = lines.map(lineDigest);
+  for (let size = anchor.length; size >= 1; size--) {
+    const tail = anchor.slice(anchor.length - size);
+    for (let at = keys.length - size; at >= 0; at--) {
+      if (tail.every((key, offset) => keys[at + offset] === key)) return lines.slice(at + size);
+    }
+  }
+  return lines;
+}
+
+/** The anchor and post-anchor Account counts from one capture; null when the pane couldn't be read. The last history
+ *  line isn't part of the anchor: it can be the start of a line that wraps onto the screen, and joins its continuation
+ *  once it scrolls up. */
+export function accountTextMark(capture: { history: string; all: string } | null): AccountTextMark | null {
+  if (capture === null) return null;
+  const history = paneLines(capture.history);
+  const anchor = history.slice(Math.max(0, history.length - 1 - ANCHOR_LINES), Math.max(0, history.length - 1)).map(lineDigest);
   const counts: Record<string, number> = {};
-  for (const line of accountLines(text)) counts[accountLineKey(line)] = (counts[accountLineKey(line)] ?? 0) + 1;
-  return counts;
+  for (const line of accountLines(linesAfterAnchor(paneLines(capture.all), anchor).join("\n"))) {
+    counts[lineDigest(line)] = (counts[lineDigest(line)] ?? 0) + 1;
+  }
+  return { anchor, counts };
 }
 
 /** Whether a status `Account:` line names `expected` as a whole value: `bob@corp.com` doesn't match

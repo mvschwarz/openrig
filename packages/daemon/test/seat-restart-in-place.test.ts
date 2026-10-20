@@ -1,5 +1,6 @@
 // OPR.0.7.0.5 — in-place restart of one Codex seat: every gate and every outcome, driven through the
 // public SeatLifecycleService surface against a fake tmux, process table, Codex launcher and OS reads.
+import { createHash } from "node:crypto";
 import { defaultTmuxFileOps, isStagedSendScriptPath } from "../src/adapters/tmux.js";
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import type Database from "better-sqlite3";
@@ -13,7 +14,7 @@ import type { NativeProcessRow } from "../src/domain/native-process-lineage.js";
 import type { HarnessLaunchResult, NodeBinding } from "../src/domain/runtime-adapter.js";
 import type { ArbitratedSeatState } from "../src/domain/activity-taxonomy.js";
 import type { InPlaceRestartIo, ProcessFacts } from "../src/domain/seat-restart-in-place.js";
-import { accountLineNames, parseEffectiveSettings, shellWords } from "../src/domain/seat-restart-in-place.js";
+import { accountLineNames, linesAfterAnchor, parseEffectiveSettings, shellWords } from "../src/domain/seat-restart-in-place.js";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { CodexThreadIdResolver, type CodexThreadEvidence } from "../src/domain/codex-thread-id.js";
 
@@ -62,6 +63,8 @@ interface WorldOptions {
   screen?: string;
   /** Already in the pane before the restart. */
   screenBefore?: string;
+  /** How many of the pane's last lines are its visible screen; the rest is history (default 3). */
+  screenRows?: number;
   throwAt?: "signalPid" | "sendResumeCommand" | "readProcessAfter" | "signalPaneProcess" | "respawnPane" | "verifyResumeInPane" | "restorePaneOption";
   daemonStartedAt?: Date;
   /** Only post-relaunch process observations; preflight and stop retain the existing table. */
@@ -170,6 +173,10 @@ function world(options: WorldOptions = {}) {
     },
     respawnPane: async (_pane: string, command?: string): Promise<TmuxResult> => { calls.push(`respawn ${command}`); maybeThrow("respawnPane"); relaunch(); return { ok: true }; },
     capturePaneHistory: async () => paneLines.join("\n"),
+    capturePaneHistoryParts: async () => {
+      const history = paneLines.slice(0, Math.max(0, paneLines.length - (options.screenRows ?? 3)));
+      return { history: history.join("\n"), all: paneLines.join("\n") };
+    },
   } as unknown as TmuxAdapter;
 
   const launches: Array<{ command: string; resumeToken: string }> = [];
@@ -243,7 +250,9 @@ function world(options: WorldOptions = {}) {
   return { db, service, node, session, calls, launches, builds, events, sessionRegistry, tmux,
     replacementYields, get replacementReads() { return replacementReads; }, get relaunched() { return relaunched; },
     setRows: (next: NativeProcessRow[]) => { rows = next; },
-    print: (text: string) => { paneLines.push(...text.split("\n").filter(Boolean)); } };
+    print: (text: string) => { paneLines.push(...text.split("\n").filter(Boolean)); },
+    /** tmux dropping the oldest history lines once the history is full. */
+    trim: (count: number) => { paneLines.splice(0, count); } };
 }
 
 function state(activity: string, needs = 0): ArbitratedSeatState {
@@ -900,7 +909,7 @@ describe("#1196 round 2: account evidence only from lines produced after the res
   it("no record of the pane's text at the restart means not_observed", async () => {
     const w = world({ rollout });
     await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
-    w.db.prepare("UPDATE events SET payload = json_set(payload, '$.accountLinesAtRestart', NULL) WHERE type = 'seat.restart_in_place_finished'").run();
+    w.db.prepare("UPDATE events SET payload = json_set(payload, '$.accountTextAtRestart', NULL) WHERE type = 'seat.restart_in_place_finished'").run();
     w.print("Account: me@example.com");
     expect(await w.service.verifyRestartInPlace({ seatRef: SEAT, expectAccount: "me@example.com" }))
       .toMatchObject({ outcome: "restarted_account_unverified", accountEvidence: { state: "not_observed" } });
@@ -910,8 +919,85 @@ describe("#1196 round 2: account evidence only from lines produced after the res
     const w = world({ screenBefore: "Account: me@example.com" });
     await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
     const finished = w.events().at(-1)!;
-    expect(Object.values(finished.accountLinesAtRestart)).toEqual([1]);
+    expect(Object.values(finished.accountTextAtRestart.counts)).toEqual([1]);
     expect(JSON.stringify(finished)).not.toContain("example.com");
+  });
+});
+
+// #1264: tmux trims the oldest history once it's full, so the verdict can't depend on how much is kept.
+describe("--verify compares only text after the restart, however much history tmux has trimmed since", () => {
+  const rollout = JSON.stringify({ timestamp: "2099-01-01T00:00:00Z", type: "response_item", payload: { type: "function_call_output" } });
+  const OLD = "  Account:  me@example.com (Pro)";
+  const filler = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => `output line ${from + i}`).join("\n");
+  const verify = (w: ReturnType<typeof world>) => w.service.verifyRestartInPlace({ seatRef: SEAT, expectAccount: "me@example.com" });
+
+  // Two old /status lines, then twelve lines of output; the last three are the visible screen.
+  async function restartedAfterOldStatus() {
+    const w = world({ screenBefore: [OLD, OLD, filler(1, 12)].join("\n"), rollout });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "x" })).toMatchObject({ outcome: "restarted_account_unverified" });
+    return w;
+  }
+
+  it("a new /status line counts after the old copies are trimmed (main reported it unverified)", async () => {
+    const w = await restartedAfterOldStatus();
+    w.print(filler(13, 20));
+    w.trim(2);
+    w.print(OLD);
+    expect(await verify(w)).toMatchObject({ outcome: "moved", accountEvidence: { state: "matched" } });
+  });
+
+  it("still counts it when trimming has cut into the anchor, or removed all of it", async () => {
+    const partly = await restartedAfterOldStatus();
+    partly.trim(5);
+    partly.print(OLD);
+    expect(await verify(partly)).toMatchObject({ outcome: "moved" });
+
+    const whole = await restartedAfterOldStatus();
+    whole.print(filler(13, 20));
+    whole.trim(11);
+    whole.print(OLD);
+    expect(await verify(whole)).toMatchObject({ outcome: "moved" });
+  });
+
+  it("a line from before the restart never counts as new, trimmed or not", async () => {
+    // In history above the anchor, with nothing new printed.
+    const above = await restartedAfterOldStatus();
+    above.print(filler(13, 20));
+    above.trim(1);
+    expect(await verify(above)).toMatchObject({ outcome: "restarted_account_unverified", accountEvidence: { state: "not_observed" } });
+
+    // On the screen at the restart (after the anchor), with the whole anchor trimmed since.
+    const onScreen = world({ screenBefore: [filler(1, 12), OLD].join("\n"), rollout });
+    await onScreen.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    onScreen.print(filler(13, 20));
+    onScreen.trim(12);
+    expect(await verify(onScreen)).toMatchObject({ outcome: "restarted_account_unverified", accountEvidence: { state: "not_observed" } });
+
+    // Inside the anchor itself, with the anchor's start trimmed.
+    const inAnchor = world({ screenBefore: [filler(1, 4), OLD, filler(5, 12)].join("\n"), rollout });
+    await inAnchor.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    inAnchor.trim(4);
+    expect(await verify(inAnchor)).toMatchObject({ outcome: "restarted_account_unverified", accountEvidence: { state: "not_observed" } });
+  });
+
+  it("a restart recorded with the earlier whole-pane counts is still compared as before", async () => {
+    const w = await restartedAfterOldStatus();
+    w.db.prepare("UPDATE events SET payload = json_remove(json_set(payload, '$.accountLinesAtRestart', json(?)), '$.accountTextAtRestart') WHERE type = 'seat.restart_in_place_finished'")
+      .run(JSON.stringify({ [createHash("sha256").update(OLD.trim()).digest("hex").slice(0, 16)]: 2 }));
+    w.print(OLD);
+    expect(await verify(w)).toMatchObject({ outcome: "moved" });
+  });
+});
+
+describe("linesAfterAnchor", () => {
+  const key = (line: string) => createHash("sha256").update(line).digest("hex").slice(0, 16);
+  it("takes the anchor's last occurrence, so a repeat only shortens what is compared", () => {
+    expect(linesAfterAnchor(["a", "b", "x", "a", "b", "y"], [key("a"), key("b")])).toEqual(["y"]);
+  });
+  it("uses the longest surviving end of a trimmed anchor, and everything when none survives", () => {
+    expect(linesAfterAnchor(["b", "c", "y"], [key("a"), key("b"), key("c")])).toEqual(["y"]);
+    expect(linesAfterAnchor(["y", "z"], [key("a"), key("b")])).toEqual(["y", "z"]);
+    expect(linesAfterAnchor(["y"], [])).toEqual(["y"]);
   });
 });
 

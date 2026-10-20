@@ -120,6 +120,7 @@ async function driveEveryMethod(): Promise<RunCall[]> {
   await a.restorePaneOption("%1", "remain-on-exit", "on");
   await a.restorePaneOption("%1", "remain-on-exit", null);
   await a.capturePaneHistory("%1");
+  await a.capturePaneHistoryParts("%1");
   await a.setRemainOnExit("%1", true);
   await a.isPaneDead("%1");
   await a.isPaneInMode("%1");

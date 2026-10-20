@@ -1023,6 +1023,39 @@ export class TmuxAdapter {
     }
   }
 
+  /** The pane's history rows alone and its whole text (history and visible screen), both with wrapped lines joined,
+   *  from one chained tmux call so they describe the same moment. `history` is empty when the pane has no history.
+   *  Null when unreadable. */
+  async capturePaneHistoryParts(paneTarget: string): Promise<{ history: string; all: string } | null> {
+    const exact = exactTarget(paneTarget, "pane");
+    const nonce = randomUUID().replace(/-/g, "");
+    const mark = (k: number) => `__openrig_capture_${nonce}_${k}__`;
+    const argv = ["tmux",
+      "display-message", "-p", "-t", exact, `${mark(0)}#{history_size}`, ";",
+      "capture-pane", "-p", "-J", "-t", exact, "-S", "-", "-E", "-1", ";",
+      "display-message", "-p", "-t", exact, mark(1), ";",
+      "capture-pane", "-p", "-J", "-t", exact, "-S", "-", "-E", "-"];
+    const legacy = `tmux display-message -p -t ${shellQuote(exact)} ${shellQuote(`${mark(0)}#{history_size}`)}`
+      + ` \\; capture-pane -p -J -t ${shellQuote(exact)} -S - -E -1`
+      + ` \\; display-message -p -t ${shellQuote(exact)} ${shellQuote(mark(1))}`
+      + ` \\; capture-pane -p -J -t ${shellQuote(exact)} -S - -E -`;
+    let output: string;
+    try {
+      output = await this.run(argv, legacy);
+    } catch {
+      return null;
+    }
+    const lines = output.split("\n");
+    const first = lines.findIndex((line) => line.startsWith(mark(0)));
+    const second = lines.indexOf(mark(1));
+    if (first < 0 || second < first) return null;
+    const historySize = Number.parseInt(lines[first]!.slice(mark(0).length), 10);
+    if (!Number.isInteger(historySize) || historySize < 0) return null;
+    // With no history, `-E -1` is outside the pane and tmux may return a screen row instead.
+    const history = historySize === 0 ? "" : lines.slice(first + 1, second).join("\n");
+    return { history, all: lines.slice(second + 1).join("\n") };
+  }
+
   /** Signal one process by pid. signalPaneProcess signals the pane's root, which in a shell-backed pane is
    *  the shell, not the runtime running under it. Unix `kill`, like signalPaneProcess. */
   async signalPid(pid: number, signal: "TERM" | "KILL"): Promise<TmuxResult> {
