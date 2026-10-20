@@ -690,8 +690,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   // The original decision only ever carries its original payload: if what's left differs, it goes out as a new
   // decision with its own id and receipts (enqueued before the original is acked), so a post under one id never has two
   // contents, and receipts bind to exactly the members posted under it. An earlier attempt of the original that may
-  // have landed is resolved by the reconciler first. If the quiet state can't be read, nothing posts: the members keep
-  // their digest notes, so the next flush selects them again.
+  // have landed is resolved by the reconciler first. If the quiet state can't be read, nothing posts (see the catch).
   const deliverDigestPost = async (decision: Parameters<SubsystemDeliverFn>[0], p: OutboundPostPayload) => {
     const settled = await resolveEarlierAttempt(decision);
     if (settled) return settled;
@@ -700,6 +699,13 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
     try {
       quiet = recipient ? quietHoldFor(opts.queueRepo.db, recipient, new Date()) : null;
     } catch (error) {
+      // An attempted digest (it may be in Slack) is retained: acked, the next flush would mint the ask again from the
+      // row as it is now. A never-attempted one is acked: its members keep their digest notes, so the next flush
+      // selects them again. A store check only: no Slack read on a failure path.
+      if ("attempted" in deliver && (deliver as { attempted: (d: typeof decision) => boolean }).attempted(decision)) {
+        log(`digest post ${decision.decisionId} retained: quiet hours couldn't be read: ${(error as Error).message}`);
+        return { ok: false as const, class: "quiet-unreadable", detail: (error as Error).message };
+      }
       log(`digest post ${decision.decisionId} not posted: quiet hours couldn't be read: ${(error as Error).message}`);
       return { ok: true as const };
     }

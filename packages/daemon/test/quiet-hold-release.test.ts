@@ -762,6 +762,55 @@ describe("after QA: changed circumstances and a second person", () => {
     expect(notes(row).filter((n) => n.startsWith("slack-owner-notification-posted "))).toHaveLength(1);
   });
 
+  it.each(["maybe", "absent"])("review 8: an attempted digest that reads %s, whose quiet read fails, stays pending as it is; the next flush leaves it", async (landing) => {
+    const row = await ask();
+    const alert = await alertFor(row);
+    repo.update({ qitemId: row.qitemId, actorSession: "daemon@kernel", transitionNote: `delivery-decision: digest window=4h notification_key=${alert.notificationKey}` });
+    const first = wire();
+    if (landing === "maybe") loseResponses = true; else failPosts = true;
+    await runDeliveryDigestFlush({ queueRepo: repo, registry: { loadHumanRegistry: registry as never }, home, window: "4h",
+      dispatch: (op, ref, payload, opts) => first.dispatcher.dispatch(op, ref, payload, opts as never) });
+    await settle();
+    loseResponses = false;
+    failPosts = false;
+    const [original] = new DispatchBuffer(home).pending();
+    expect(original!.decisionId.startsWith("digest:")).toBe(true);
+    const before = posts.length;
+    if (landing === "maybe") historyIncomplete = true;
+    const read = vi.spyOn(HumanQuietStore.prototype, "quietStateFor").mockImplementation(() => { throw new Error("disk I/O error (test)"); });
+    try {
+      restart(first); // the replay: not found in Slack, then quiet hours can't be read
+      await settle();
+    } finally { read.mockRestore(); }
+    expect(posts.length, "nothing posts").toBe(before);
+    expect(notes(row).some((n) => n.startsWith("slack-owner-notification-posted "))).toBe(false);
+    expect(new DispatchBuffer(home).pending(), "the original, id and payload, is still pending").toEqual([original]);
+    const flushed = await runDeliveryDigestFlush({ queueRepo: repo, registry: { loadHumanRegistry: registry as never }, home, window: "4h",
+      dispatch: () => { throw new Error("the next flush must not re-mint it"); } });
+    expect(flushed.dispatched).toBe(0);
+  });
+
+  it("review 8 (control): a never-attempted digest whose quiet read fails is acked; the next flush selects it again", async () => {
+    const row = await ask();
+    const alert = await alertFor(row);
+    repo.update({ qitemId: row.qitemId, actorSession: "daemon@kernel", transitionNote: `delivery-decision: digest window=4h notification_key=${alert.notificationKey}` });
+    const buffer = new DispatchBuffer(home);
+    await runDeliveryDigestFlush({ queueRepo: repo, registry: { loadHumanRegistry: registry as never }, home, window: "4h",
+      dispatch: (op, ref, payload, opts) => { buffer.enqueue({ kind: "outbound_decision", decisionId: opts!.decisionId!, op, entityBindingRef: ref, payload }); return { ok: true }; } });
+    expect(buffer.pending()).toHaveLength(1); // buffered, never attempted
+    const read = vi.spyOn(HumanQuietStore.prototype, "quietStateFor").mockImplementation(() => { throw new Error("disk I/O error (test)"); });
+    try {
+      wire(); // startup replays it: never attempted, then quiet hours can't be read
+      await settle();
+    } finally { read.mockRestore(); }
+    expect(posts).toHaveLength(0);
+    expect(buffer.pending(), "acked").toHaveLength(0);
+    let dispatched = 0;
+    await runDeliveryDigestFlush({ queueRepo: repo, registry: { loadHumanRegistry: registry as never }, home, window: "4h",
+      dispatch: () => { dispatched++; return { ok: true }; } });
+    expect(dispatched, "the next flush selects it again").toBe(1);
+  });
+
   it.each(["absent", "maybe"])("review 7: an attempted routine ask whose landing reads %s hasn't started, so quiet holds it", async (landing) => {
     const row = await ask({ destinationSession: "other@external" });
     const first = wire();
