@@ -1,37 +1,33 @@
-# WIP — Topic C: Writer authority (one protected mutation)
+# Topic C — Writer authority (real extract)
 
-**PR contents today:** docs-only scaffold — this file under `spike/upstream-drafts/`. **No** migration, `WriterAuthority` module, HTTP routes, or tests yet.  
-**Status:** blocked on an agreed **first fenced product verb** before any real extract.  
+**PR contents today:** real daemon extract (not docs-only).  
 **Branch:** `piotr/upstream-writer-authority`  
 **Base:** `mvschwarz/openrig` `main`  
-**Depends on:** maintainer answer — which **single** product mutation is the first fenced operation?
+**First fenced product verb (from fork journal):** publish onto a disposable `publish_target` via `FencedPublishTarget.publish` under a live writer lease + matching generation.
 
-## Intent
+## Guarantee
 
-Durable single-writer leases (acquire / renew / release / revoke / transfer) with generation fencing for **one** agreed protected product operation. Guarantee is **API-only fencing**, not an OS sandbox.
+**API-only fencing** — not an OS sandbox. Soft `0444` on the published artifact resists accidental overwrite only.
 
-## Planned extract (future — not in this diff)
+## Ship set
 
-1. Migration `085_writer_authority_leases` + `WriterAuthority`
-2. Lease lifecycle events
-3. **One** call site via `assertHolder` / `withProtectedMutation`
-4. Unit + shared-SQLite two-process fence test
-5. Honest API-only fence wording in docs
+1. Migration `118_writer_authority_leases` (fork used `085`; upstream already shipped a different `085`)
+2. `WriterAuthority` — acquire / renew / release / revoke / transfer + `assertHolder` / `withProtectedMutation`
+3. Lease lifecycle events (`writer.acquired|released|revoked|transferred`)
+4. Call site: `FencedPublishTarget.publish` (needs clean `BoundAcceptance`)
+5. Thin HTTP `/api/writer/*` (acquire/renew/release/revoke/transfer/publish/active)
+6. Unit + shared-SQLite two-process fence test + call-site revoke-blocks-publish test
 
 ## Explicitly out
 
-- Full `ExecutionSlice` orchestration
-- MCP writer tools until an HTTP product surface exists
+- Full `ExecutionSliceService` / Jeff / DecisionProvider
+- Per-operation receipt index (Topic D)
+- MCP writer tools
+- Native OMP/Prime smoke
 - `chmod`-as-security claims
-- Jeff / DecisionProvider, hermetic profiles, cross-host as merge gate
 
-## Maintainer questions (hard blockers for extract)
+## Maintainer notes
 
-1. Which single product mutation is first (publish onto disposable target, integration-branch update, other)?
-2. Resource kinds: one kind first?
-3. Lease TTL / renew for long agent turns?
-4. HTTP under `/api/execution/*` or neutral `/api/writer/*`?
-
-## Next extraction step
-
-**Do not** land daemon code on this branch until the verb is agreed. After that: extract lease schema + authority module + one gated call site against current `main`.
+- Default resource kind for acquire HTTP is `publish_target`.
+- Publish target root: `OPENRIG_PUBLISH_TARGET_ROOT` (explicit opt-in).
+- Without a wired target, `POST /api/writer/publish` returns 503 — never silent `published=true`.
