@@ -30,6 +30,17 @@ Ask your coding agent to help use the toolchain already on your machine. On a Ma
 may belong to another user; do not change its ownership to complete this setup. After correcting PATH or installing
 Node, open a new terminal and check `node --version` and `npx --version` before continuing.
 
+On a Mac where you aren't an administrator, or where another account owns Homebrew, install Node.js in your own home
+folder with [nvm](https://github.com/nvm-sh/nvm). It needs no administrator password:
+
+```sh
+touch ~/.zshrc   # a new Mac account has none, and nvm's installer only adds itself to an existing profile file
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.8/install.sh | bash
+```
+
+Then open a new terminal and run `nvm install 22`. That's nvm v0.40.8's install command; [nvm's
+page](https://github.com/nvm-sh/nvm#install--update-script) has the newest.
+
 ## The quick way: let your coding agent do it
 
 In your project folder, add OpenRig's `rigs` skill to the agent you use:

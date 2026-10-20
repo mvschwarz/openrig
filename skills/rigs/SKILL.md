@@ -23,6 +23,10 @@ seats run with an operational default: Codex with `-s danger-full-access -a neve
 tools, web fetches and operational commands, including reads under the home folder, allowed without asking. Say so
 before you start OpenRig ([the full list](https://github.com/mvschwarz/openrig#what-openrig-changes-on-your-machine)).
 
+When you give the person a file or a command to run in their own terminal, use a path that exists on their side. A
+file a sandboxed agent writes under `/tmp` may not exist in the person's terminal (seen with Codex), so put files the
+person needs in their project or home folder and name that path.
+
 ## 1. Install OpenRig, if it isn't installed
 
 - **Check first:** `rig --version`. If it prints a version, go to step 2.
