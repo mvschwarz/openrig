@@ -272,7 +272,16 @@ configurations, as below; do not take the pin from a cached page summary.
     offers, in its own words. Take an answer for each one. A "yes to all"
     covers only the prompts you showed; don't choose an option that also
     approves future actions (such as "don't ask again") unless they chose it
-    for that prompt. If they want you to pass an answer on, first capture
+    for that prompt. If they have told you outright to decide a kind of
+    future prompt (say, "approve prompts that only write inside my
+    project"), decide each such prompt when you come across it: read its
+    complete action, answer only when the action is clearly inside what they
+    said, and send the answer as below with their instruction as the
+    `--reason`, never as a new yes from them. Bring anything unclear or
+    outside it back to them; a command's name or a path that looks like
+    their project doesn't show what the action touches. Their instruction
+    changes no permission setting.
+    If they want you to pass an answer on, first capture
     that seat again and check its prompt still asks the same action with the
     same choices; if it changed, don't reuse the old answer. Then send exactly
     their choice to that seat with

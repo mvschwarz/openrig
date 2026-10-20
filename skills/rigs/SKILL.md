@@ -139,7 +139,12 @@ person needs in their project or home folder and name that path.
   others waiting, one line each (seat, exact action, the choices offered). Before sending their choice, capture that
   seat again: if its prompt changed, don't reuse the answer. Then send exactly the choice they made for that prompt
   (`rig send --help` says how to send a digit, a letter or Escape to a prompt). A yes to one prompt isn't a
-  yes to the next, and never pick a "don't ask again" choice they didn't pick. Another kind of menu you can answer with
+  yes to the next, and never pick a "don't ask again" choice they didn't pick. If they've told you outright to decide a
+  kind of future prompt (say, "approve prompts that only write inside my project"), you may decide each one: read its
+  whole action, answer only when it's clearly inside what they said, and tell them you answered under that instruction,
+  not that they said yes. Bring anything unclear or outside it back to them; a command's name or a path that looks like
+  their project doesn't show what the action touches. Their instruction changes no permission setting.
+  Another kind of menu you can answer with
   the key that screen shows, or ask the person. Capture it again before sending anything more.
 - **Replies:** in a plain shell, other agents can't type into this session. Read work sent to you with
   `rig queue list --destination <your address>` and `rig queue show <id> --full`, and read an agent's screen with
