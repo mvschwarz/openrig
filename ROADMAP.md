@@ -32,7 +32,6 @@ tie. Feel free to coordinate on the issue first.
 ## Slack
 
 - **A DM or private channel for single-user setups** (#313).
-- **A channel map** (#192): one channel per seat, keyed by channel ID.
 
 ## Reliability and everyday use
 
