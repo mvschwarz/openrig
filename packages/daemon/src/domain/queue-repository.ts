@@ -3235,8 +3235,9 @@ export class QueueRepository {
   /** The parked row an ordinary due park timer reminds about, when its reminder may share one message with other
    *  reminders due for the same seat in the same scheduler pass: a one-shot `--wake-after` timer serving exactly one
    *  live parked row, carrying its default message. Null keeps the reminder's own send: a custom message, a shared
-   *  or attached watchdog, a repeating wait and a provider-limit timer each deliver as before. */
-  parkReminderDigestEntry(jobId: string, message: string): { qitemId: string; summary: string | null } | null {
+   *  or attached watchdog, a repeating wait and a provider-limit timer each deliver as before. The entry carries the
+   *  current park's recorded continuation, or null, for the wake's preview. */
+  parkReminderDigestEntry(jobId: string, message: string): { qitemId: string; summary: string | null; continuation: string | null } | null {
     const generated = this.wakeRepo.findCurrentQitemsByGeneratedTimer(jobId);
     const bound = this.wakeRepo.findBlockedQitemsByWatchdog(jobId, true);
     if (generated.length !== 1 || bound.length !== 1 || bound[0]!.qitemId !== generated[0]!.qitemId) return null;
@@ -3245,7 +3246,7 @@ export class QueueRepository {
     const job = (this.watchdogJobsRepo ?? new WatchdogJobsRepository(this.db)).getById(jobId);
     if (!job || job.policy !== "periodic-reminder" || isQueueWait(job.specYaml)) return null;
     if (message !== defaultParkWakeMessage(row.qitemId)) return null;
-    return { qitemId: row.qitemId, summary: row.summary ?? null };
+    return { qitemId: row.qitemId, summary: row.summary ?? null, continuation: this.currentParkContinuation(row.qitemId) };
   }
 
   /** Called by the watchdog engine after the delivery attempt is durably

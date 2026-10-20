@@ -369,3 +369,105 @@ describe("due parked-row reminders for one seat", () => {
     }
   });
 });
+
+describe("a park wake shows the park's recorded continuation", () => {
+  const header = (jobId: string) => `[OpenRig watchdog scheduler · policy: periodic-reminder · job: ${jobId}]\n`;
+  const guidance = "Check the row's current state and blocker first, then resume only that recorded work and record the "
+    + "outcome, or park it again with a wake. Work already done is recorded, not repeated.";
+
+  /** A row parked with an ordinary `--wake-after` timer and a recorded continuation, as `rig queue block --continuation` writes it. */
+  async function parkWith(owner: string, summary: string, continuation: string, extra: Record<string, unknown> = {}) {
+    const row = await deps.queueRepo.create({ sourceSession: "orch@rig", destinationSession: owner, body: `work ${++seq}`, summary, nudge: false } as never) as unknown as { qitemId: string };
+    deps.queueRepo.update({ qitemId: row.qitemId, actorSession: owner, state: "blocked", blockedOn: "external:wait",
+      transitionNote: `continuation: ${continuation}`, wakeAfterSeconds: 600, ...extra } as never);
+    return { qitemId: row.qitemId, jobId: deps.queueRepo.getParkWakeStatus(row.qitemId)!.ref };
+  }
+
+  it("a lone wake carries the preview and how to act on it, and its history records what went", async () => {
+    const owner = seat();
+    const r = await parkWith(owner, "rebase", "Rebase onto main, then hand off to the planner with the new head.");
+    due(r.jobId);
+    await deps.watchdogScheduler!.runTickNow();
+    const text = `Wake timer fired for parked qitem ${r.qitemId}. Resume the recorded continuation and update the row.\n`
+      + "Recorded continuation: Rebase onto main, then hand off to the planner with the new head.\n" + guidance;
+    expect(sends).toEqual([{ session: owner, text: header(r.jobId) + text }]);
+    expect(deps.watchdogHistoryLog!.listForJob(r.jobId, 1)[0]!.deliveryMessage).toBe(text);
+    expect(disposition(r.jobId, r.qitemId)).toMatchObject({ state: "terminal", terminalReason: "park_timer_fired_once", deliveryStatus: "ok" });
+  });
+
+  it("flattens a multi-line continuation and cuts a long one at 300 characters, saying so and how to read the rest", async () => {
+    const owner = seat();
+    const long = "First check the CI run.\nThen:\n  - rebase\n  - push\n" + "x".repeat(400);
+    const r = await parkWith(owner, "long", long);
+    due(r.jobId);
+    await deps.watchdogScheduler!.runTickNow();
+    const flat = long.replace(/\s+/g, " ").trim();
+    expect(sends[0]!.text).toContain(`Recorded continuation (the first 300 of ${flat.length} characters; read the rest with `
+      + `rig queue show ${r.qitemId} --full): ${flat.slice(0, 300)}…\n${guidance}`);
+    expect(sends[0]!.text).not.toContain(flat.slice(0, 301));
+  });
+
+  it("shows only the current park's continuation, never an earlier park's", async () => {
+    const owner = seat();
+    const r = await parkWith(owner, "replanned", "the old plan");
+    deps.queueRepo.update({ qitemId: r.qitemId, actorSession: owner, state: "in-progress", transitionNote: "resumed" } as never);
+    deps.queueRepo.update({ qitemId: r.qitemId, actorSession: owner, state: "blocked", blockedOn: "external:wait",
+      transitionNote: "parked again", wakeAfterSeconds: 600 } as never);
+    const jobId = deps.queueRepo.getParkWakeStatus(r.qitemId)!.ref;
+    due(jobId);
+    await deps.watchdogScheduler!.runTickNow();
+    expect(sends).toEqual([{ session: owner, text: header(jobId)
+      + `Wake timer fired for parked qitem ${r.qitemId}. Resume the recorded continuation and update the row.` }]);
+
+    sends.length = 0;
+    deps.queueRepo.update({ qitemId: r.qitemId, actorSession: owner, state: "in-progress", transitionNote: "resumed" } as never);
+    deps.queueRepo.update({ qitemId: r.qitemId, actorSession: owner, state: "blocked", blockedOn: "external:wait",
+      transitionNote: "continuation: the new plan", wakeAfterSeconds: 600 } as never);
+    const next = deps.queueRepo.getParkWakeStatus(r.qitemId)!.ref;
+    due(next);
+    await deps.watchdogScheduler!.runTickNow();
+    expect(sends[0]!.text).toContain("Recorded continuation: the new plan");
+    expect(sends[0]!.text).not.toContain("the old plan");
+  });
+
+  it("a digest carries each row's preview; a row without one keeps its line, and every member is accounted", async () => {
+    const owner = seat();
+    const [a, b] = [await parkWith(owner, "first", "Hand the head to the planner."), await park(owner, "second")];
+    for (const r of [a, b]) due(r.jobId);
+    await deps.watchdogScheduler!.runTickNow();
+    expect(sends).toHaveLength(1);
+    const text = sends[0]!.text;
+    expect(text).toContain(`- ${a.qitemId} — first\n  Recorded continuation: Hand the head to the planner.`);
+    expect(text).toContain(`- ${b.qitemId} — second\n`);
+    expect(text.endsWith(guidance)).toBe(true);
+    for (const r of [a, b]) {
+      expect(disposition(r.jobId, r.qitemId)).toMatchObject({ state: "terminal", outcome: "sent", deliveryStatus: "ok", wakePhase: "fired" });
+      const [history] = deps.watchdogHistoryLog!.listForJob(r.jobId, 1);
+      expect(history!.evaluationNotes).toMatchObject({ digestSize: 2 });
+      expect(history!.deliveryMessage).toMatch(new RegExp(`^- ${r.qitemId} — `));
+    }
+  });
+
+  it("keeps an explicit wake message verbatim, with no preview, and out of the digest", async () => {
+    const owner = seat();
+    const [a, b] = [await park(owner, "a"), await park(owner, "b")];
+    const custom = await parkWith(owner, "custom", "a recorded plan", { wakeMessage: "Check the release notes first." });
+    for (const r of [a, b, custom]) due(r.jobId);
+    await deps.watchdogScheduler!.runTickNow();
+    const texts = sends.filter((s) => s.session === owner).map((s) => s.text);
+    expect(texts).toHaveLength(2);
+    expect(texts).toContain(header(custom.jobId) + "Check the release notes first.");
+    expect(texts.join("\n")).not.toContain("a recorded plan");
+  });
+
+  it("leaves a plain reminder that isn't a park unchanged", async () => {
+    const owner = seat();
+    const plain = deps.watchdogJobsRepo!.register({
+      policy: "periodic-reminder", targetSession: owner, intervalSeconds: 600, registeredBySession: owner,
+      specYaml: `policy: periodic-reminder\ntarget:\n  session: ${JSON.stringify(owner)}\nmessage: "check the dashboard"\n`,
+    } as never);
+    due(plain.jobId);
+    await deps.watchdogScheduler!.runTickNow();
+    expect(sends.filter((s) => s.session === owner).map((s) => s.text)).toEqual([header(plain.jobId) + "check the dashboard"]);
+  });
+});

@@ -6,6 +6,7 @@ import { artifactPoolReadyPolicy } from "./policies/artifact-pool-ready.js";
 import { edgeArtifactRequiredPolicy } from "./policies/edge-artifact-required.js";
 import { periodicReminderPolicy } from "./policies/periodic-reminder.js";
 import { contextUsageThresholdPolicy } from "./policies/context-usage-threshold.js";
+import { PARK_WAKE_GUIDANCE, parkContinuationPreview, withContinuationPreview } from "./park-wake-text.js";
 import {
   WatchdogJobsError,
   type WatchdogJob,
@@ -128,7 +129,7 @@ interface WatchdogPolicyEngineDeps {
   onWakeAttempt?: (attempt: { jobId: string; deliveryStatus: string }) => void;
   /** The parked row a due reminder is about, when it may share one message with other reminders due for the same
    *  seat in the same scheduler pass. Null, or absent, keeps the reminder's own send. */
-  resolveDigestEntry?: (input: { jobId: string; message: string }) => { qitemId: string; summary: string | null } | null;
+  resolveDigestEntry?: (input: { jobId: string; message: string }) => ParkReminderEntry | null;
   /** The recorded outcome when a due occurrence was already attempted inside an earlier digest, so it is accounted
    *  from that attempt and never sent again; null when it wasn't. */
   priorDigestAttempt?: (occurrenceId: string) => DeliveryOutcome | null;
@@ -137,13 +138,20 @@ interface WatchdogPolicyEngineDeps {
   occurrenceAttempted?: (occurrenceId: string) => boolean;
 }
 
+/** The parked row an ordinary park reminder is about, with the current park's recorded continuation for its preview. */
+export interface ParkReminderEntry {
+  qitemId: string;
+  summary: string | null;
+  continuation?: string | null;
+}
+
 /** A due reminder whose send waits for the end of its scheduler pass, so reminders for one seat go as one message. */
 interface HeldReminder {
   job: WatchdogJob;
   outcome: Extract<PolicyEvaluation, { action: "send" }>;
   evaluatedAt: string;
   occurrenceId: string;
-  entry: { qitemId: string; summary: string | null };
+  entry: ParkReminderEntry;
 }
 
 /** The reminders held during one scheduler pass; `deliverHeldReminders` sends them when the pass ends. */
@@ -537,13 +545,15 @@ export class WatchdogPolicyEngine {
     const occurrenceId = createHash("sha256").update(JSON.stringify([job.jobId, occupantGeneration, outcome.conditionReceipt ?? (job.policy === "periodic-reminder" ? job.lastFireAt : outcome.message)])).digest("hex");
     // A parked-row reminder due in a scheduler pass waits for the pass's end, when every reminder held for its seat
     // goes in one message. Nothing has changed for it yet, so a pass that stops early leaves it due.
-    const digestEntry = pass && job.policy === "periodic-reminder" && !continuityAction
+    const digestEntry = job.policy === "periodic-reminder" && !continuityAction
       ? this.resolveDigestEntry?.({ jobId: job.jobId, message: outcome.message }) ?? null
       : null;
     if (pass && digestEntry) {
       pass.held.push({ job, outcome, evaluatedAt, occurrenceId, entry: digestEntry });
       return { job, outcome, history: null, delivery: null, meaningful: false };
     }
+    // Outside a pass an ordinary park reminder still goes alone, with its continuation's preview.
+    const message = digestEntry ? withContinuationPreview(outcome.message, digestEntry.qitemId, digestEntry.continuation) : outcome.message;
 
     // Plain wakes retain the proven at-most-once ordering. Structured
     // continuity custody is retry-safe by deterministic qitem id, so its
@@ -555,7 +565,7 @@ export class WatchdogPolicyEngine {
     const delivery = await this.deliver(
       {
         targetSession: outcome.target.session,
-        message: outcome.message,
+        message,
         ...(continuityAction ? { continuityAction } : {}),
       },
       { jobId: job.jobId, policy: job.policy, occurrenceId },
@@ -568,7 +578,7 @@ export class WatchdogPolicyEngine {
     ) {
       this.jobsRepo.recordThresholdFire(job.jobId, occupantGeneration, evaluatedAt);
     }
-    return this.recordAttempt({ job, outcome, evaluatedAt, deliverySchedule, delivery, isContextUsageThreshold });
+    return this.recordAttempt({ job, outcome, evaluatedAt, deliverySchedule, delivery, isContextUsageThreshold, sentMessage: message });
   }
 
   /** The pre-transport guard: a job its owning domain can prove is no longer actionable is terminaled, not sent. */
@@ -633,8 +643,8 @@ export class WatchdogPolicyEngine {
     const finished = new Set<HeldReminder>();
     for (;;) {
       if (shouldStop()) return;
-      const digest: Array<HeldReminder & { entry: { qitemId: string; summary: string | null } }> = [];
-      let alone: HeldReminder | null = null;
+      const digest: HeldReminder[] = [];
+      let alone: { held: HeldReminder; entry: ParkReminderEntry | null } | null = null;
       for (const held of group) {
         if (finished.has(held)) continue;
         if (this.inactiveJobResult(held.job.jobId) || this.terminalBeforeDelivery(held.job, held.evaluatedAt)) {
@@ -648,31 +658,35 @@ export class WatchdogPolicyEngine {
           finished.add(held);
           continue;
         }
-        const entry = this.occurrenceAttempted?.(held.occurrenceId)
-          ? null
-          : this.resolveDigestEntry?.({ jobId: held.job.jobId, message: held.outcome.message }) ?? null;
-        if (entry) digest.push({ ...held, entry });
-        else alone ??= held;
+        // The current entry gives a lone send its preview; only an occurrence with no delivery record may join a digest.
+        const current = this.resolveDigestEntry?.({ jobId: held.job.jobId, message: held.outcome.message }) ?? null;
+        if (current && !this.occurrenceAttempted?.(held.occurrenceId)) digest.push({ ...held, entry: current });
+        else alone ??= { held, entry: current };
       }
       if (alone) {
-        finished.add(alone);
-        await this.deliverAlone(seat, alone);
+        finished.add(alone.held);
+        await this.deliverAlone(seat, alone.held, alone.entry);
         continue;
       }
-      if (digest.length === 1) await this.deliverAlone(seat, digest[0]!);
+      if (digest.length === 1) await this.deliverAlone(seat, digest[0]!, digest[0]!.entry);
       else if (digest.length > 1) await this.deliverDigest(seat, digest);
       return;
     }
   }
 
-  private async deliverDigest(seat: string, digest: Array<HeldReminder & { entry: { qitemId: string; summary: string | null } }>): Promise<void> {
+  private async deliverDigest(seat: string, digest: HeldReminder[]): Promise<void> {
     const schedules = digest.map((held) => this.jobsRepo.getByIdOrThrow(held.job.jobId));
     const members = digest.map((held) => ({ jobId: held.job.jobId, occurrenceId: held.occurrenceId }));
     const digestId = `digest-${createHash("sha256").update(JSON.stringify(members.map((m) => m.occurrenceId).sort())).digest("hex")}`;
-    const lines = digest.map((held) => `- ${held.entry.qitemId}${held.entry.summary ? ` — ${held.entry.summary.replace(/\s+/g, " ")}` : ""}`);
+    const lines = digest.map(({ entry }) => {
+      const recorded = entry.continuation?.trim();
+      return `- ${entry.qitemId}${entry.summary ? ` — ${entry.summary.replace(/\s+/g, " ")}` : ""}`
+        + (recorded ? `\n  ${parkContinuationPreview(entry.qitemId, recorded)}` : "");
+    });
     const message = [
       `Wake timers fired for ${digest.length} parked rows. Resume each row's recorded continuation and update it:`,
       ...lines,
+      ...(digest.some(({ entry }) => entry.continuation?.trim()) ? [PARK_WAKE_GUIDANCE] : []),
     ].join("\n");
     // A digest whose members can't all be bound throws here, before any input, and leaves every member unaccounted
     // and due.
@@ -686,14 +700,16 @@ export class WatchdogPolicyEngine {
     }));
   }
 
-  /** A held reminder sent on its own, exactly as `evaluate` would have sent it. */
-  private async deliverAlone(seat: string, held: HeldReminder): Promise<void> {
+  /** A held reminder sent on its own, exactly as `evaluate` would have sent it: an ordinary park reminder with its
+   *  continuation's preview, anything else verbatim. */
+  private async deliverAlone(seat: string, held: HeldReminder, entry: ParkReminderEntry | null): Promise<void> {
     const schedule = this.jobsRepo.getByIdOrThrow(held.job.jobId);
+    const message = entry ? withContinuationPreview(held.outcome.message, entry.qitemId, entry.continuation) : held.outcome.message;
     const delivery = await this.deliver(
-      { targetSession: seat, message: held.outcome.message },
+      { targetSession: seat, message },
       { jobId: held.job.jobId, policy: held.job.policy, occurrenceId: held.occurrenceId },
     );
-    this.recordAttempt({ ...held, deliverySchedule: schedule, delivery, isContextUsageThreshold: false });
+    this.recordAttempt({ ...held, deliverySchedule: schedule, delivery, isContextUsageThreshold: false, sentMessage: message });
   }
 
   /** Audit one job's delivery attempt and advance its schedule, wake receipt and actionable state from it. */
@@ -706,8 +722,10 @@ export class WatchdogPolicyEngine {
     isContextUsageThreshold: boolean;
     /** Set when this job's reminder went out inside a digest with others: the digest, its size and this job's line. */
     digest?: { deliveryId: string; size: number; line: string };
+    /** The text a lone send delivered, when it differs from the outcome's message (a park wake's continuation preview). */
+    sentMessage?: string;
   }): EvaluationResult {
-    const { job, outcome, evaluatedAt, deliverySchedule, delivery, isContextUsageThreshold, digest } = input;
+    const { job, outcome, evaluatedAt, deliverySchedule, delivery, isContextUsageThreshold, digest, sentMessage } = input;
     const notes = digest
       ? { ...(outcome.notes ?? {}), digestDeliveryId: digest.deliveryId, digestSize: digest.size }
       : outcome.notes;
@@ -718,7 +736,7 @@ export class WatchdogPolicyEngine {
       skipReason: delivery.status === "retained" ? "typing_guard_retained" : null,
       deliveryTargetSession: outcome.target.session,
       deliveryStatus: delivery.status,
-      deliveryMessage: digest?.line ?? outcome.message,
+      deliveryMessage: digest?.line ?? sentMessage ?? outcome.message,
       // OPR.0.5.6.24 — the delivery error/reason string survives into the
       // durable record so a policy can distinguish an interactive-prompt
       // refusal from a generic failure (status alone discards that identity).
