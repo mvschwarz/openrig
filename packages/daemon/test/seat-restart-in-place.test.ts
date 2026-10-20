@@ -15,6 +15,7 @@ import type { ArbitratedSeatState } from "../src/domain/activity-taxonomy.js";
 import type { InPlaceRestartIo, ProcessFacts } from "../src/domain/seat-restart-in-place.js";
 import { accountLineNames, parseEffectiveSettings, shellWords } from "../src/domain/seat-restart-in-place.js";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
+import type { CodexThreadEvidence } from "../src/domain/codex-thread-id.js";
 
 const LSTART = "Mon Oct 12 21:00:00 2026";
 const LATER = "Mon Oct 12 21:05:00 2026";
@@ -41,6 +42,8 @@ interface WorldOptions {
   /** The pane's own remain-on-exit value; "unreadable" makes the read fail. */
   remainOnExit?: string | null | "unreadable";
   threadId?: string;
+  /** What the running Codex's own logs show, and whether the read met no detected incompleteness. */
+  evidence?: CodexThreadEvidence;
   facts?: Partial<Record<number, ProcessFacts | null>>;
   identityFails?: boolean;
   rollout?: string | null;
@@ -191,6 +194,7 @@ function world(options: WorldOptions = {}) {
       return options.facts && pid in options.facts ? options.facts[pid] ?? null : facts();
     },
     readThreadId: async (pid) => (pid === 200 ? options.threadId : undefined),
+    ...(options.evidence ? { readThreadEvidence: async (pid: number) => (pid === 200 ? options.evidence! : { reason: "no_log_row" as const, fullyReadable: true }) } : {}),
     readCredentialStore: () => "file",
     statAuthFile: () => null,
     findRollout: () => (options.rollout === undefined ? null : "/rollout.jsonl"),
@@ -372,6 +376,50 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
     w.db.prepare("UPDATE nodes SET runtime = 'codex' WHERE id = ?").run(w.node.id);
     w.db.prepare("UPDATE sessions SET origin = 'claimed' WHERE id = ?").run(w.session.id);
     expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: false, code: "claimed_session" });
+  });
+});
+
+describe("rig seat restart --keep-conversation: conflicting retained native-thread evidence", () => {
+  const Y = "019fd98d-16a1-7981-8000-000000000002";
+
+  it("refuses when a fully readable read of the running Codex's own logs names only another conversation: nothing stopped, nothing typed", async () => {
+    for (const plan of [true, false]) {
+      const w = world({ evidence: { thread: Y, fullyReadable: true } });
+      const result = await w.service.restartInPlace({ seatRef: SEAT, ...(plan ? { plan: true } : { reason: "take the home's account" }) });
+      expect(result).toMatchObject({ ok: false, code: "resume_binding_unverified",
+        detail: { reason: "conflicting retained native-thread evidence", loggedConversation: Y } });
+      expect((result as { message: string }).message).toMatch(/^Conflicting retained native-thread evidence: .*Nothing was stopped and nothing was typed\.$/);
+      expect(w.calls).toEqual([]);
+      expect(w.launches).toEqual([]);
+      expect(w.events()).toEqual([]);
+    }
+  });
+
+  it("keeps today's ok, with a note, whenever the evidence is incomplete, ambiguous, missing or the same conversation", async () => {
+    const cases: Array<[CodexThreadEvidence, string]> = [
+      [{ thread: TOKEN, fullyReadable: true }, "no other conversation logged"],
+      [{ thread: Y, fullyReadable: false, incomplete: "unreadable" }, "not established: a native database was unreadable"],
+      [{ thread: Y, fullyReadable: false, incomplete: "discovery" }, "not established: the native databases couldn't all be found"],
+      [{ reason: "ambiguous_threads", fullyReadable: true }, "not established: ambiguous_threads"],
+      [{ reason: "no_log_row", fullyReadable: true }, "not established: no_log_row"],
+      [{ reason: "sqlite_unreadable", fullyReadable: false, incomplete: "unreadable" }, "not established: sqlite_unreadable"],
+    ];
+    for (const [evidence, note] of cases) {
+      const w = world({ evidence });
+      expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true }))
+        .toMatchObject({ ok: true, conversationProof: "argv", currentConversation: note });
+    }
+    // Execute still restarts on incomplete evidence, exactly as before.
+    const w = world({ evidence: { thread: Y, fullyReadable: false, incomplete: "discovery" } });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "take the home's account" })).toMatchObject({ ok: true, outcome: "restarted_account_unverified" });
+    expect(w.calls).toEqual(["signalPid 200 TERM"]);
+  });
+
+  it("argv naming no token keeps the native-logs proof unchanged, with no conflict check", async () => {
+    const w = world({ runningArgs: "-m gpt-5.5 -s workspace-write -C /work", threadId: TOKEN, evidence: { thread: Y, fullyReadable: true } });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect(result).toMatchObject({ ok: true, conversationProof: "native_logs" });
+    expect(result).not.toHaveProperty("currentConversation");
   });
 });
 
