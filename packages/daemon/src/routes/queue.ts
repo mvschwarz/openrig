@@ -20,7 +20,7 @@ import { loadHostRegistry, resolveHost } from "../domain/hosts/hosts-registry-re
 import { getSelfHostId, resolvesToLocalHost } from "../domain/hosts/fanout-contract.js";
 import { remoteJsonRequest } from "../domain/hosts/remote-daemon-http.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
-import { deriveCurrentWork, deriveRole, deriveWorkCandidates, type RoleOrientation } from "../domain/current-work.js";
+import { deriveCurrentWork, deriveCurrentWorkChoice, deriveRole, deriveWorkCandidates, type RoleOrientation } from "../domain/current-work.js";
 import type { WhoamiService } from "../domain/whoami-service.js";
 import type Database from "better-sqlite3";
 import type { HumanQuestion } from "../domain/human-questions.js";
@@ -878,6 +878,14 @@ export function queueRoutes(): Hono {
     // the unbounded in-progress set, which makes it independent of recentLimit.
     const inProgress = repo.listInProgressForDestination(session);
     const derived = deriveCurrentWork(inProgress, missionsRoot);
+    const lookups = {
+      getRow: (qitemId: string) => repo.getById(qitemId) ?? null,
+      continuationOf: (qitemId: string) => repo.currentParkContinuation(qitemId),
+    };
+    // When no single work node is settled, the plain answer names every in-progress
+    // candidate and asks the agent to choose, rather than a count alone.
+    const choice = deriveCurrentWorkChoice(derived, inProgress, missionsRoot, lookups);
+    const choiceField = choice ? { currentWorkChoice: choice } : {};
     let role: RoleOrientation = { state: "unknown", reason: "calling node unavailable", files: [] };
     try {
       const identity = (c.get("whoamiService" as never) as WhoamiService | undefined)
@@ -897,16 +905,13 @@ export function queueRoutes(): Hono {
       const workCandidates = deriveWorkCandidates(
         [...inProgress, ...held.slice(0, WORK_CANDIDATE_LIST_LIMIT), ...next.slice(0, WORK_CANDIDATE_LIST_LIMIT)],
         missionsRoot,
-        {
-          getRow: (qitemId) => repo.getById(qitemId) ?? null,
-          continuationOf: (qitemId) => repo.currentParkContinuation(qitemId),
-        },
+        lookups,
       );
-      return c.json({ ...position, ...derived, role,
+      return c.json({ ...position, ...derived, ...choiceField, role,
         // heldAndNextTruncated stays for trace scripts that predate the per-list flags.
         workCandidates: { ...workCandidates, heldTruncated, nextTruncated, heldAndNextTruncated: heldTruncated || nextTruncated } });
     }
-    return c.json({ ...position, ...derived, role });
+    return c.json({ ...position, ...derived, ...choiceField, role });
   });
 
   // GET /list — list with filters. MUST precede /:qitemId so the literal path wins.
