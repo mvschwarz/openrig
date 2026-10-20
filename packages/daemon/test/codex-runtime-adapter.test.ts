@@ -11,6 +11,7 @@ import type { ProjectionPlan, ProjectionEntry } from "../src/domain/projection-p
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { seedCodexThreads } from "./helpers/codex-state.js";
 import { execFileSync } from "node:child_process";
+import { provenCodexResume } from "./helpers/codex-resume-proof.js";
 
 // Verbatim 250-byte Codex 0.160.0 menu capture, SHA-256
 // 45c70fc01c7d33f4652c9d42523f631734c62aac76f449ff0f2c15e99680ac9b.
@@ -991,8 +992,9 @@ describe("Codex runtime adapter", () => {
   });
 
   it("launchHarness sends correct resume command", async () => {
-    const tmux = mockTmux();
-    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs() });
+    const proof = provenCodexResume("sess-456");
+    const tmux = mockTmux({ getPanePid: proof.getPanePid });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), listProcesses: proof.listProcesses as never, readResumeEvidence: proof.readResumeEvidence });
 
     const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig", resumeToken: "sess-456" });
 
@@ -1002,8 +1004,9 @@ describe("Codex runtime adapter", () => {
   });
 
   it("0.5.2-07 A2-3: launchHarness threads the SPEC model onto the codex RESUME command (pod-aware restore gap)", async () => {
-    const tmux = mockTmux();
-    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs() });
+    const proof = provenCodexResume("sess-456");
+    const tmux = mockTmux({ getPanePid: proof.getPanePid });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), listProcesses: proof.listProcesses as never, readResumeEvidence: proof.readResumeEvidence });
     const binding = { ...makeBinding(), model: "gpt-5.4-cheap" };
 
     const result = await adapter.launchHarness(binding, { name: "dev-qa@test-rig", resumeToken: "sess-456" });
@@ -1047,8 +1050,9 @@ describe("Codex runtime adapter", () => {
   });
 
   it("#75: launchHarness threads reasoning effort onto the codex RESUME command", async () => {
-    const tmux = mockTmux();
-    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs() });
+    const proof = provenCodexResume("sess-456");
+    const tmux = mockTmux({ getPanePid: proof.getPanePid });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), listProcesses: proof.listProcesses as never, readResumeEvidence: proof.readResumeEvidence });
     const binding = { ...makeBinding(), effort: "high" };
 
     const result = await adapter.launchHarness(binding, { name: "dev-qa@test-rig", resumeToken: "sess-456" });
@@ -1090,11 +1094,12 @@ describe("Codex runtime adapter", () => {
   });
 
   it("launchHarness passes the requested Codex config profile on resume", async () => {
-    const tmux = mockTmux();
+    const proof = provenCodexResume("sess-456");
+    const tmux = mockTmux({ getPanePid: proof.getPanePid });
     const adapter = new CodexRuntimeAdapter({
       tmux,
       fsOps: mockFs(),
-      listProcesses: () => [],
+      listProcesses: proof.listProcesses as never, readResumeEvidence: proof.readResumeEvidence,
       sleep: async () => {},
       // Housekeeping B1 fixback: controlled preflight (no real codex subprocess).
       verifyProfilePreflight: async (profile) => ({ ok: true, profile }),
@@ -1166,12 +1171,15 @@ describe("Codex runtime adapter", () => {
         .mockResolvedValue("OpenAI Codex (v0.120.0)\n› Ask Codex to do anything"),
     });
     const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {},
-      listProcesses: () => [{ pid: 901, ppid: 1, pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000", command: "codex" }],
+      listProcesses: () => [{ pid: 901, ppid: 1, pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000", command: "codex resume sess-456" }],
+      readResumeEvidence: () => ({ threadId: "sess-456" }),
     });
 
     const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig", resumeToken: "sess-456" });
 
-    expect(result).toEqual({ ok: true, resumeToken: "sess-456", resumeType: "codex_id", appliedLaunch: CODEX_FLOOR_EFFECT });
+    // #1524 (b): the result also names the process the resume was proven on, for restore's join.
+    expect(result).toEqual({ ok: true, resumeToken: "sess-456", resumeType: "codex_id", appliedLaunch: CODEX_FLOOR_EFFECT,
+      resumedProcess: { pid: 901, startedAt: "Sat Jan  1 12:00:00 2000" } });
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText.mock.calls).toEqual([
       ["r01-qa", expectedResumeCommand()],
@@ -1189,8 +1197,9 @@ describe("Codex runtime adapter", () => {
   // slice kills. Corrected: resume now CARRIES -m (top-level flag, same class as the shipped -p), and
   // the queue --add-dir stays intact.
   it("launchHarness passes the SPEC model argument (-m) when resuming Codex", async () => {
-    const tmux = mockTmux();
-    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs() });
+    const proof = provenCodexResume("sess-456");
+    const tmux = mockTmux({ getPanePid: proof.getPanePid });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), listProcesses: proof.listProcesses as never, readResumeEvidence: proof.readResumeEvidence });
     const binding = { ...makeBinding(), model: "gpt-5.5" };
 
     const result = await adapter.launchHarness(binding, { name: "dev-qa@test-rig", resumeToken: "sess-456" });
@@ -1348,11 +1357,13 @@ describe("Codex runtime adapter", () => {
   });
 
   it("accepts readiness and resume after a current-format panel is superseded by a headerless composer", async () => {
+    const proof = provenCodexResume("sess-456");
     const tmux = mockTmux({
+      getPanePid: proof.getPanePid,
       getPaneCommand: vi.fn(async () => "node"),
       capturePaneContent: vi.fn(async () => `${currentTrustPrompt}\n› Continue\n  5h 71% left · GPT-6-Astra high · Context 81% left`),
     });
-    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), listProcesses: proof.listProcesses as never, readResumeEvidence: proof.readResumeEvidence, sleep: async () => {} });
 
     expect(await adapter.checkReady(makeBinding())).toEqual({ ready: true });
     expect(await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig", resumeToken: "sess-456" }))
@@ -1403,7 +1414,9 @@ describe("Codex runtime adapter", () => {
   // with resume metadata, not `attention_required`.
   it("OPR.0.3.4.13: slow Codex resume boot-in-progress then ready TUI classifies resumed with metadata", async () => {
     let callCount = 0;
+    const proof = provenCodexResume("019ecd3b-test-thread");
     const tmux = mockTmux({
+      getPanePid: proof.getPanePid,
       getPaneCommand: vi.fn(async () => {
         callCount++;
         return callCount <= 10 ? "node" : "codex";
@@ -1413,7 +1426,7 @@ describe("Codex runtime adapter", () => {
         return "OpenAI Codex (v0.128.0)\n  gpt-5.5 · session 019ecd3b-test-thread\n› ";
       }),
     });
-    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), listProcesses: proof.listProcesses as never, readResumeEvidence: proof.readResumeEvidence, sleep: async () => {} });
 
     const result = await adapter.launchHarness(makeBinding(), {
       name: "dev-worker@test-rig",

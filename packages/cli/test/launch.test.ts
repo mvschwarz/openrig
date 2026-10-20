@@ -415,6 +415,17 @@ describe("rig launch --seats", () => {
     expect(process.exitCode).toBe(1);
   });
 
+  it("#1524 (b): a Codex resume that couldn't be proven lands attention_required and exits non-zero, not Launched", async () => {
+    const error = "Codex resume could not be proven within the resume window: no_log_row. The session was preserved; nothing was restarted.";
+    const deps = makeDeps({
+      "dev.driver/launch": { status: 409, data: { ok: false, logicalId: "dev.driver", status: "attention_required", error } },
+    });
+    await launchCommand(deps).parseAsync(["node", "rig", "rig-1", "dev.driver"]);
+    expect(logs.some((l) => l.includes("Launched node"))).toBe(false);
+    expect(errors.some((l) => l.includes("could not be proven"))).toBe(true);
+    expect(process.exitCode).toBe(1);
+  });
+
   it.each([["dev.driver"], ["--seats", "dev.driver"]])("explains a missing snapshot for launch %j", async (...args) => {
     const message = "No usable snapshot for rig rig-1";
     const deps = makeDeps({

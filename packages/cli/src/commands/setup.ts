@@ -492,6 +492,16 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
     steps.push({ id: "tmux_config", status: "warn", message: `Could not update tmux config: ${(err as Error).message}` });
   }
 
+  // Informational only: never enable inheritance automatically or add a setup prompt.
+  const tmuxConfigs = [TMUX_CONF, `${process.env["XDG_CONFIG_HOME"] ?? `${process.env["HOME"] ?? "~"}/.config`}/tmux/tmux.conf`, "/etc/tmux.conf"];
+  const customTmux = tmuxConfigs.some(file => {
+    try {
+      const content = deps.readFile(file)?.replace(/# OpenRig managed block[\s\S]*?# End # OpenRig managed block/g, "") ?? "";
+      return content.split(/\r?\n/).some(line => line.trim() && !line.trim().startsWith("#"));
+    } catch { return false; }
+  });
+  if (customTmux) steps.push({ id: "tmux_environment", status: "warn", message: "Custom tmux configuration detected. New POSIX agents use the daemon and seat environment by default; shell startup still runs. If your setup intentionally relies on stored tmux globals, opt in with `rig config set terminal.inherit_tmux_environment true`. This affects future launches and successors, not running agents." });
+
   // 7. Verify
   const tmuxOk = steps.some((s) => s.id === "tmux_install" && (s.status === "pass" || s.status === "applied"));
   const anyFail = steps.some((s) => s.status === "fail");

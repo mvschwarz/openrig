@@ -100,6 +100,10 @@ Keys:
   retention.*            enabled, transitions_days, watchdog_days,
                          watchdog_keep_per_job, batch_size
   launch.non_interruptive  accept harness first-launch warnings at full bypass for new rigs (default off)
+  terminal.inherit_tmux_environment  inherit stored tmux global values for new agents and successors (default off)
+                         POSIX launches otherwise start from daemon + seat environment, preserving shell startup.
+                         Turn on for custom setups that intentionally rely on tmux globals. Running agents are unchanged.
+                         If the scoped boundary is unavailable, launch continues with its previous environment and a diagnostic.
   terminal.status_bar    show the inner tmux status bar on launch (default off)
   output.compact         short default output for queue writes, queue show, queue transitions and whoami peers (default off)
                          --full opts out: queue transitions returns the full log, queue show the complete record, and whoami the complete payload, not its usual identity projection. whoami --all-peers keeps that projection with every peer

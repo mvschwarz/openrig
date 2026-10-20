@@ -1422,6 +1422,17 @@ export class QueueRepository {
     this.recordNudgeAttempt(qitemId, outcome.nudgeResult);
   }
 
+  /** Boot recovery must respect an existing intent's claim and terminal outcome.
+   * Older entry packets have no intent and still need the legacy nudge path. */
+  async recoverLostNudge(qitemId: string, destinationSession: string, sourceSession?: string): Promise<void> {
+    const outboxId = `${WAKE_INTENT_PREFIX}${qitemId}`;
+    if (this.outbox?.getById(outboxId)) {
+      await this.deliverWakeIntent(outboxId);
+      return;
+    }
+    await this.maybeNudge(qitemId, destinationSession, undefined, sourceSession);
+  }
+
   /**
    * W1 (transactional closure): the shared wake-send CORE. Builds the pane
    * envelope, sends with verify, and CLASSIFIES the transport result into the W1

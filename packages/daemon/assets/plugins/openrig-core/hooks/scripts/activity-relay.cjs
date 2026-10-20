@@ -173,6 +173,10 @@ function buildSessionIdentityPayload(providerPayload, env = process.env, now = (
 
   if ((!sessionName && !nodeId) || !runtime) return null;
 
+  // #1524 (a): whether the runtime sent transcript_path, and its raw value. Codex sends an explicit null for a
+  // thread it never persists; the daemon tells that apart from an absent key, an empty string or a malformed value.
+  const transcriptPathPresent = Object.prototype.hasOwnProperty.call(providerPayload, "transcript_path");
+
   return {
     eventFamily: "session_identity",
     sessionName,
@@ -185,6 +189,8 @@ function buildSessionIdentityPayload(providerPayload, env = process.env, now = (
     // The daemon finds the Claude that ran this hook from its parent chain.
     hookPid: process.pid,
     sessionId,
+    transcriptPathPresent,
+    ...(transcriptPathPresent ? { transcriptPath: providerPayload.transcript_path } : {}),
     occurredAt: now().toISOString(),
   };
 }

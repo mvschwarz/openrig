@@ -1902,6 +1902,8 @@ describe("RestoreOrchestrator", () => {
     };
     const adapter = new CodexRuntimeAdapter({ tmux, listProcesses, sleep: async () => { ticks++; },
       fsOps: { exists: () => false, readFile: () => { throw new Error("absent"); }, writeFile: () => {}, mkdirp: () => {}, homedir: "/fixture/home" },
+      // #1524 (b): Codex's records for the resumed process name the requested conversation.
+      readResumeEvidence: () => ({ threadId: token }),
     });
     const result = await createOrchestrator({ tmux, listProcesses }).restore(snap.id, { adapters: { codex: adapter } });
     expect(result.ok).toBe(true);
@@ -1929,6 +1931,64 @@ describe("RestoreOrchestrator", () => {
     expect(tmux.sendKeys).not.toHaveBeenCalled();
     expect(tmux.killSession).not.toHaveBeenCalled();
   });
+
+  it.each(["unchanged process", "changed process"])(
+    "#1524 (b): the restore join must verify the Codex process the resume was proven on: %s", async (mode) => {
+      const { CodexRuntimeAdapter } = await import("../src/adapters/codex-runtime-adapter.js");
+      const token = "00000000-0000-7000-8000-000000000002";
+      const rig = rigRepo.createRig("join-rig");
+      db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-join", rig.id, "Dev");
+      const node = rigRepo.addNode(rig.id, "dev.joined", { runtime: "codex", podId: "pod-join" });
+      const session = sessionRegistry.registerSession(node.id, "dev-joined@join-rig");
+      sessionRegistry.updateStatus(session.id, "running");
+      sessionRegistry.updateResumeToken(session.id, "codex_id", token);
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)")
+        .run(node.id, "[]", "[]", "[]", "codex");
+      const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+      sessionRegistry.updateStatus(session.id, "exited");
+      db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+      let launched = false;
+      const tmux = {
+        ...mockTmux(),
+        createSession: vi.fn(async () => { launched = true; return { ok: true as const }; }),
+        hasSession: vi.fn(async () => launched),
+        sendShellCommand: vi.fn(async () => ({ ok: true as const })),
+        getPanePid: vi.fn(async () => 4001),
+        getPaneCommand: vi.fn(async () => "bash"),
+        capturePaneScreen: vi.fn(async () => "OpenAI Codex (v0.155.1)\n› Ask Codex to do anything"),
+        capturePaneContent: vi.fn(async () => "OpenAI Codex (v0.155.1)\n› Ask Codex to do anything"),
+      } as unknown as TmuxAdapter;
+      const startedAt = "Sat Jan  1 12:00:00 2000";
+      // Synthetic: the same pane, but the Codex process the join sees is a later one (same pid, new start time).
+      let samples = 0;
+      let provedAtSample: number | null = null;
+      const listProcesses = async () => {
+        samples++;
+        const replaced = mode === "changed process" && provedAtSample !== null && samples > provedAtSample + 1;
+        return [
+          { pid: 4001, ppid: 1, pgid: 4001, tpgid: 4002, executableName: "zsh", command: "-zsh", startedAt },
+          { pid: 4002, ppid: 4001, pgid: 4002, tpgid: 4002, executableName: "codex", command: `/opt/native/codex resume ${token}`,
+            startedAt: replaced ? "Sat Jan  1 12:00:05 2000" : startedAt },
+        ];
+      };
+      const adapter = new CodexRuntimeAdapter({ tmux, listProcesses, sleep: async () => {},
+        fsOps: { exists: () => false, readFile: () => { throw new Error("absent"); }, writeFile: () => {}, mkdirp: () => {}, homedir: "/fixture/home" },
+        readResumeEvidence: () => { provedAtSample = samples; return { threadId: token }; },
+      });
+      const result = await createOrchestrator({ tmux, listProcesses }).restore(snap.id, { adapters: { codex: adapter } });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const outcome = result.result.nodes[0];
+      if (mode === "unchanged process") {
+        expect(outcome?.status).toBe("resumed");
+      } else {
+        expect(outcome?.status).toBe("attention_required");
+        expect(outcome?.error).toContain("was proven on process 4002 (started Sat Jan  1 12:00:00 2000)");
+        expect(outcome?.error).toContain("Sat Jan  1 12:00:05 2000");
+      }
+      expect(tmux.sendShellCommand).toHaveBeenCalledTimes(1);
+      expect(tmux.killSession).not.toHaveBeenCalled();
+    });
 
   it.each(["exact", "requested-codex-type", "requested-legacy-type", "wrong-token", "foreign-process", "replaced-pane", "replaced-process",
     "chooser", "login", "login-footer", "trust", "mcp", "error", "missing-token",

@@ -682,6 +682,13 @@ export class CodexInPlaceRestart {
         : missing
           ? `Codex in ${report.codexHome} has no saved session for this conversation; no fresh session was started. Find where it was saved before resuming.`
           : named
+            // #1524 (b): disproved: the resumed process's records name another conversation.
+            ?? (launch.resumeMismatch
+              ? `The resumed Codex opened ${launch.resumeMismatch.opened}, not the seat's conversation ${report.conversationId}; find the seat's conversation before resuming again. Nothing was retried.`
+            // #1524 (b): not disproved, only unproven; the resumed Codex may still be running it.
+            : launch.resumeUnproven
+              ? `The resumed Codex may still be running in the pane: its records didn't prove the conversation in time. Check the pane first; if the conversation is there, adopt it with rig reconcile-session ${report.sessionName} --no-launch. Use the recovery command only if the original is gone. ${attention && keyTyped(launch) ? typedSentence(launch) : "Nothing was retried."}`
+              : null)
             ?? (attention && keyTyped(launch)
               // OpenRig's own key is part of what the person needs to know, even with no screen named.
               ? `Resolve what Codex shows in the pane, then resume with the recovery command. ${typedSentence(launch)}`

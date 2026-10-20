@@ -182,6 +182,7 @@ export const SETTINGS_VALID_KEYS = [
   // twins). Consumed by NodeLauncher at session-create only; a flip is
   // future-launches-only and never retroactive (BR-1 never-retro).
   "terminal.status_bar",
+  "terminal.inherit_tmux_environment",
   // Slice 15 (OPR.0.7.0.15) — compact command-output defaults; CLI-read, twin of the CLI key.
   "output.compact",
   "output.whoami_peers",
@@ -299,6 +300,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "snapshots.periodic.retention_keep": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_RETENTION_KEEP" },
   // OPR.0.4.6.02 S1 — net-new key; OPENRIG_* primary only (no RIGGED_* legacy).
   "terminal.status_bar": { primary: "OPENRIG_TERMINAL_STATUS_BAR" },
+  "terminal.inherit_tmux_environment": { primary: "OPENRIG_TERMINAL_INHERIT_TMUX_ENVIRONMENT" },
   "output.compact": { primary: "OPENRIG_OUTPUT_COMPACT" },
   "output.whoami_peers": { primary: "OPENRIG_OUTPUT_WHOAMI_PEERS" },
   "provider.usage_windows": { primary: "OPENRIG_PROVIDER_USAGE_WINDOWS" },
@@ -386,6 +388,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "snapshots.periodic.interval_seconds": ["snapshots", "periodic", "intervalSeconds"],
   "snapshots.periodic.retention_keep": ["snapshots", "periodic", "retentionKeep"],
   "terminal.status_bar": ["terminal", "statusBar"],
+  "terminal.inherit_tmux_environment": ["terminal", "inheritTmuxEnvironment"],
   "output.compact": ["output", "compact"],
   "output.whoami_peers": ["output", "whoamiPeers"],
   "provider.usage_windows": ["provider", "usageWindows"],
@@ -668,6 +671,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     // (herdr's pane label already carries identity; the inner tmux status
     // is redundant chrome). Operator flip is future-launches-only.
     case "terminal.status_bar": return false;
+    case "terminal.inherit_tmux_environment": return false;
     case "output.compact": return false;
     case "output.whoami_peers": return 8;
     case "provider.usage_windows": return false;

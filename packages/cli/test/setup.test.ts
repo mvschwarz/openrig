@@ -78,6 +78,24 @@ function expectRuntimeConfigDisclosure(result: SetupResult): void {
 }
 
 describe("rig setup", () => {
+  it("advises custom tmux users without changing the inheritance setting or requiring a step", async () => {
+    const writes = vi.fn();
+    const result = await runSetup(makeDeps({
+      readFile: file => file.endsWith("/.tmux.conf") ? "set -g default-command custom-shell\n" : null,
+      writeFile: writes,
+    }), {});
+    expect(result.ready).toBe(true);
+    expect(result.steps.find(step => step.id === "tmux_environment")?.message).toContain("rig config set terminal.inherit_tmux_environment true");
+    expect(writes.mock.calls.some(([file]) => String(file).endsWith("config.json"))).toBe(false);
+  });
+
+  it("does not label the stock managed tmux block as a custom environment setup", async () => {
+    const result = await runSetup(makeDeps({ readFile: file => file.endsWith("/.tmux.conf")
+      ? "# OpenRig managed block\nset -g mouse on\nset -g history-limit 50000\n# End # OpenRig managed block\n" : null }), {});
+    expect(result.steps.find(step => step.id === "tmux_environment")).toBeUndefined();
+    expect(result.ready).toBe(true);
+  });
+
   it("wired via createProgram", async () => {
     const program = createProgram();
     const setupCmd = program.commands.find((c) => c.name() === "setup");
