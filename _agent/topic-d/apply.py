@@ -69,10 +69,23 @@ def apply_patches() -> int:
     patches = sorted(PATCH_DIR.glob("*.patch"))
     for patch in patches:
         print(f"apply {patch.name}")
-        subprocess.check_call(
+        # Exit 1 with "previously applied" / "Skipping" is OK under --forward.
+        proc = subprocess.run(
             ["patch", "-p1", "--forward", "--batch", "-i", str(patch)],
             cwd=ROOT,
+            capture_output=True,
+            text=True,
         )
+        sys.stdout.write(proc.stdout)
+        sys.stderr.write(proc.stderr)
+        if proc.returncode not in (0, 1):
+            raise SystemExit(f"patch failed for {patch.name}: exit {proc.returncode}")
+        # returncode 1 with rejects that are NOT "Skipping" means a real conflict
+        if proc.returncode == 1 and "Skipping" not in proc.stdout and "Skipping" not in proc.stderr:
+            if "FAILED" in proc.stdout or "FAILED" in proc.stderr or ".rej" in proc.stdout:
+                # previously-applied also writes .rej under some patch versions; allow if Skipping
+                if "previously applied" not in proc.stdout and "previously applied" not in proc.stderr:
+                    raise SystemExit(f"patch conflict for {patch.name}\n{proc.stdout}\n{proc.stderr}")
     return len(patches)
 
 
