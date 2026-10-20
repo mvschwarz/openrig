@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { Command } from "commander";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
@@ -36,8 +37,10 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
   // A 4xx (e.g. 404 unknown provider / 400 invalid target) is an ERROR, never a success.
   function handleHttpError(res: { status: number; data: unknown }, label: string): boolean {
     if (res.status < 400) return false;
-    const p = (res.data ?? {}) as { error?: unknown; errors?: unknown };
-    console.error(p.errors ?? p.error ?? `${label} failed (HTTP ${res.status})`);
+    const p = (res.data ?? {}) as { error?: unknown; errors?: unknown; message?: unknown };
+    // Preserve the daemon's actionable explanation instead of showing only its error code.
+    if (typeof p.message === "string" && p.message.trim()) console.error(p.message);
+    else console.error(p.errors ?? p.error ?? `${label} failed (HTTP ${res.status})`);
     process.exitCode = res.status >= 500 ? 2 : 1;
     return true;
   }
@@ -175,10 +178,33 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     if (saved) console.log(`  ${saved["note"]}: ${((saved["names"] as string[]) ?? []).join(", ")}`);
   }
 
+  /** The row's retained history: last observed exhaustion, the account link, and an inactive account's profile. */
+  function historyLines(r: Record<string, unknown>): string[] {
+    const out: string[] = [];
+    const ex = r["lastObservedExhausted"] as Record<string, unknown> | null | undefined;
+    if (ex) out.push(`last observed exhausted at ${ex["at"]} (${ex["window"] ?? "account-level"}: ${ex["evidence"]})`);
+    if (r["accountHistory"] === "unknown") out.push("account history unknown");
+    if (r["savedProfile"] === "not linked") out.push("saved profile: not linked (OpenRig doesn't record which saved profile was active at this read)");
+    return out;
+  }
+
+  /** The row's sign-in fact, as served; nothing when an older daemon doesn't serve it. */
+  function signInLine(r: Record<string, unknown>): string | null {
+    const s = r["signIn"] as Record<string, unknown> | undefined;
+    if (!s) return null;
+    const state = s["state"] === "needs_sign_in" ? "needs sign-in" : String(s["state"]);
+    return `sign-in: ${state} (${s["evidence"]}${s["at"] ? `; as of ${s["at"]}` : ""})`;
+  }
+
   function renderUsageRow(r: Record<string, unknown>, pad = "  "): void {
     const id = r["identity"] as Record<string, unknown> | null;
     if (!id) {
       console.log(`${pad}${r["provider"]}  unavailable: ${r["unavailableReason"] ?? "no reading"}`);
+      // A row with no identity yet can still carry history (Claude's before its first identity refresh): before sign-in,
+      // as on an identified row.
+      for (const line of historyLines(r)) console.log(`${pad}  ${line}`);
+      const signIn = signInLine(r);
+      if (signIn) console.log(`${pad}  ${signIn}`);
       return;
     }
     // Identity first; for Codex the email is a label.
@@ -187,6 +213,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     // Not from the latest read: say only that. A later read proves no other account (an unresolved read
     // may be this same login), so the label names the read, not an account.
     const earlier = r["latestFromSource"] ? ""
+      : r["retained"] === "before_restart" ? "  [kept from before the daemon restarted; not a current reading]"
       : id["source"] === "unresolved" ? "  [from an earlier read; possibly this same login]"
         : "  [from an earlier read; the latest read didn't match this row]";
     console.log(`${pad}${r["provider"]}  ${labels.join(" · ")}${earlier}`);
@@ -205,8 +232,11 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       for (const d of (w["disagreeingSeats"] as Array<Record<string, unknown>> | undefined) ?? []) {
         console.log(`${pad}    seat ${d["seatSession"]} reports ${Math.max(0, 100 - Number(d["usedPercent"]))}% left  resets ${d["resetsAt"] ?? "unknown"}  observed ${d["observedAt"]}`);
       }
+      const expect = w["expectation"] as Record<string, unknown> | undefined;
+      if (expect) console.log(`${pad}    expected full since ${expect["expectedFullSince"]}, not yet observed (${expect["note"]})`);
     }
-    if (((r["windows"] as unknown[]) ?? []).length === 0 && r["unavailableReason"]) console.log(`${pad}  ${r["unavailableReason"]}`);
+    for (const line of historyLines(r)) console.log(`${pad}  ${line}`);
+    if (r["unavailableReason"]) console.log(`${pad}  ${r["unavailableReason"]}`);
     if (r["limitEvidence"]) console.log(`${pad}  limit evidence: ${r["limitEvidence"]}`);
     const last = r["lastRefresh"] as Record<string, unknown> | null;
     if (last?.["outcome"] === "failed") {
@@ -216,6 +246,8 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
         : `${pad}  refresh failed at ${last["at"]}: ${failureText(last)}; last reading kept, marked old`);
     }
     console.log(`${pad}  current availability: ${r["currentAvailability"]}`);
+    const signIn = signInLine(r);
+    if (signIn) console.log(`${pad}  ${signIn}`);
   }
 
   // Slice 01 — usage across registered hosts, as the daemon serves it: each host's status and whether it serves usage
@@ -335,9 +367,9 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     .command("status")
     .description("The whole four-block provider read model (accounts, bindings, signals)")
     .option("--json", "Output as parseable JSON")
-    .option("--refresh", "First read the Codex login's usage windows and the Claude login's identity natively (up to 35 s; needs provider.usage_windows on)")
+    .option("--refresh", "First read the Codex login's usage windows and the Claude login's identity natively (up to 35 s here, 75 s with --all-hosts/--hosts; provider.usage_windows is off by default: rig config set provider.usage_windows true)")
     .option("--provider <p>", "With --refresh, read only this provider (codex|claude)")
-    .option("--all-hosts", "Usage windows across every registered host, as each host already holds them (needs provider.usage_windows on)")
+    .option("--all-hosts", "Usage windows across every registered host, as each host already holds them (off by default: rig config set provider.usage_windows true)")
     .option("--hosts <ids>", "Like --all-hosts, for these registered hosts (comma-separated); this host is always included, so --hosts b --refresh also reads this daemon")
     .action(async (opts: { json?: boolean; refresh?: boolean; provider?: string; allHosts?: boolean; hosts?: string }) => {
       if (opts.provider !== undefined && opts.provider !== "codex" && opts.provider !== "claude") {
@@ -466,6 +498,72 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       if (opts.json) console.log(JSON.stringify(res.data));
       else console.log(res.data.outcome ?? "unknown");
       if (res.data.outcome === "failed_safely") process.exitCode = 1;
+    });
+
+  // OPR.0.7.0.18 — the subscription move record. The agent that moves seats records each move it makes or attempts;
+  // it and the observatory read them back. Labels and references only, never credentials. Off unless the daemon's
+  // provider.subscription_moves is on.
+  const moves = cmd
+    .command("moves")
+    .description("Recorded subscription moves, newest first (needs provider.subscription_moves on)")
+    .option("--home <home>", "Only moves of this Codex home")
+    .option("--seat <seat>", "Only moves that restarted or listed this seat")
+    .option("--limit <n>", "At most this many (default 50)")
+    .option("--json", "Output as parseable JSON")
+    .action(async (opts: { home?: string; seat?: string; limit?: string; json?: boolean }) => {
+      const qs = new URLSearchParams();
+      if (opts.home) qs.set("home", opts.home);
+      if (opts.seat) qs.set("seat", opts.seat);
+      if (opts.limit) qs.set("limit", opts.limit);
+      const q = qs.toString();
+      await read(`/api/provider/moves${q ? `?${q}` : ""}`, opts.json, "moves");
+    });
+  moves
+    .command("show <id>")
+    .description("One recorded move: seats and results, from and to, the reason, the readings and their age, peers (needs provider.subscription_moves on)")
+    .option("--json", "Output as parseable JSON")
+    .action(async (id: string, opts: { json?: boolean }, command: Command) => {
+      // `moves` has its own --json, which commander may take for the parent.
+      await read(`/api/provider/moves/${encodeURIComponent(id)}`, opts.json || command.parent?.opts().json, "move");
+    });
+  moves
+    .command("record")
+    .description("Record a move you made or attempted (JSON: home, host, from, to, reason, readings, seats, peers, supersedes; needs provider.subscription_moves on)")
+    .requiredOption("--file <path>", "The move as JSON, or - for stdin")
+    .option("--operator <name>", "Who is recording, when this shell has no seat identity (a seat identity wins)")
+    .option("--json", "Output as parseable JSON")
+    .addHelpText("after", `
+The JSON shape:
+  { "home": "<codex home>", "host": "<machine>", "from": "<subscription>", "to": "<subscription>",
+    "reason": "<why, in your words>",
+    "readings": [{ "subject": "<allowance>", "observedAt": "<ISO time observed>", "summary": "<what it said>" }],
+    "seats": [{ "seat": "<seat>", "result": "moved|unconfirmed|unknown", "missing": "<what's missing>", "evidence": "<verify outcome>" }],
+    "peers": [{ "seat": "<seat>", "note": "not restarted; account unverified" }],
+    "supersedes": "<an earlier move id>" }
+Record unconfirmed and partial moves too. Labels only: never put credentials in a record.
+The record is off by default. Turn it on with: rig config set provider.subscription_moves true`)
+    .action(async (opts: { file: string; operator?: string; json?: boolean }, command: Command) => {
+      const json = opts.json || command.parent?.opts().json;
+      let body: unknown;
+      try {
+        body = JSON.parse(opts.file === "-" ? fs.readFileSync(0, "utf8") : fs.readFileSync(opts.file, "utf8"));
+      } catch (error) {
+        console.error(`Could not read the move from ${opts.file}: ${(error as Error).message}`);
+        process.exitCode = 1;
+        return;
+      }
+      const client = await getClient(getDeps());
+      if (!client) {
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.operator && body !== null && typeof body === "object" && !Array.isArray(body)) {
+        body = { ...(body as Record<string, unknown>), operator: opts.operator };
+      }
+      const res = await client.post<{ move?: { id?: string } }>("/api/provider/moves", body);
+      if (handleHttpError(res, "record move")) return;
+      if (json) console.log(JSON.stringify(res.data));
+      else console.log(`Recorded ${res.data.move?.id ?? "the move"}`);
     });
 
   return cmd;

@@ -512,8 +512,21 @@ export class WatchdogJobsRepository {
     return rows.map(rowToJob);
   }
 
-  recordEvaluation(jobId: string, evaluatedAt: string, fired: boolean): void {
+  /** Record the evaluation and attempted fire. A delivery's schedule snapshot
+   * advances the due boundary only while the active schedule still matches. */
+  recordEvaluation(jobId: string, evaluatedAt: string, fired: boolean,
+    schedule?: Pick<WatchdogJob, "specYaml" | "intervalSeconds" | "lastEvaluationAt">): void {
     if (fired) {
+      if (schedule) {
+        // A delivery may yield while its owner reschedules the next wake. The
+        // fire still happened, but must not replace that newer due boundary.
+        this.db.prepare(`UPDATE watchdog_jobs SET last_fire_at = ?,
+          last_evaluation_at = CASE WHEN state = 'active' AND spec_yaml = ? AND interval_seconds = ? AND last_evaluation_at IS ?
+            THEN ? ELSE last_evaluation_at END
+          WHERE job_id = ?`)
+          .run(evaluatedAt, schedule.specYaml, schedule.intervalSeconds, schedule.lastEvaluationAt, evaluatedAt, jobId);
+        return;
+      }
       this.db
         .prepare(
           `UPDATE watchdog_jobs SET last_evaluation_at = ?, last_fire_at = ? WHERE job_id = ?`,

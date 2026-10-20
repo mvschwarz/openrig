@@ -87,7 +87,7 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
     );
 
     if (outcome.triggered) {
-      return c.json({ ok: true, session: sessionName, stage: outcome.stage });
+      return c.json({ ok: true, session: sessionName, stage: outcome.stage, compact: compactResultText("submitted_unconfirmed") });
     }
 
     const statusMap: Record<string, number> = {
@@ -110,7 +110,7 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
       session: sessionName,
       stage: outcome.stage,
       reason: outcome.reason,
-      ...(outcome.preparation ? { preparation: outcome.preparation } : {}),
+      ...(outcome.preparation ? { preparation: outcome.preparation, compact: compactResultText(outcome.preparation.compact) } : {}),
       error: manualOutcomeMessage(sessionName, outcome),
     }, status);
   });
@@ -137,6 +137,7 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
     }
     const preparation = enforcer.getPreparationState(session);
     return c.json({ ok: true, session, state: enforcer.getManualCompactionState(session), preparation,
+      ...(preparation ? { compact: compactResultText(preparation.compact) } : {}),
       ...(preparation?.reason === "occupant_generation_unavailable"
         ? { guidance: manualReasonMessage(session, preparation.reason) } : {}),
     });
@@ -155,12 +156,24 @@ function manualOutcomeMessage(sessionName: string, outcome: Extract<ManualCompac
   return `${effect} for '${sessionName}' (attempt ${prep.attemptId}). ${detail} Its map remains at ${prep.mapPath} if written. Inspect rig compact ${shellQuote(sessionName)} --state before an explicit retry.`;
 }
 
+/** The /compact command's result in words. `preparation.delivery` is the preparation prompt's delivery;
+ *  this is the command's, and it never claims that compaction ran. */
+export function compactResultText(compact: "not_sent" | "submitted_unconfirmed" | "uncertain"): string {
+  switch (compact) {
+    case "submitted_unconfirmed": return "submitted, unconfirmed: OpenRig sent /compact and Enter to the seat; it does not check whether Claude Code then started compacting.";
+    case "uncertain": return "uncertain: /compact may have reached the seat, possibly as text left in its input box without Enter; it was not retried.";
+    default: return "not sent: OpenRig has not sent /compact for this attempt.";
+  }
+}
+
 function manualReasonMessage(sessionName: string, reason: string): string {
   switch (reason) {
     case "occupant_generation_unavailable":
       return `The occupant generation could not be resolved for '${sessionName}'; no preparation or compact was sent. For the confirmed live seat, run rig reconcile-session ${shellQuote(sessionName)} --no-launch, then explicitly retry rig compact ${shellQuote(sessionName)}. Reconciliation does not restart this attempt.`;
     case "preparation_incomplete":
       return `Preparation (restore map and idle wait) did not finish in time for '${sessionName}'; managed compaction is disarmed. Inspect rig compact ${sessionName} --state, retry explicitly, or use --skip-map once.`;
+    case "pane_unknown_protected":
+      return `Refused: '${sessionName}' uses draft-aware input protection, and its tmux pane is not recorded. Input to a protected seat needs a known pane, so no preparation or /compact was sent. For a confirmed live managed seat with one intended pane, run rig reconcile-session ${shellQuote(sessionName)} --no-launch, then check its projection-drift report for unresolved pane observations before explicitly retrying rig compact ${shellQuote(sessionName)}. Reconciliation records a new claimed session row, superseding any running row for the seat; conversation continuity stays unverified. If the intended pane cannot be resolved, use rig context get help for operator recovery. Keep input protection enabled; reconciliation does not restart this attempt.`;
     case "preparation_cancelled":
       return `Preparation for '${sessionName}' was cancelled; no further compact is armed.`;
     case "disabled":

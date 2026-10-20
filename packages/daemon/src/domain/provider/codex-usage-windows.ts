@@ -4,7 +4,7 @@
 
 import type { CodexUsageReader } from "./codex-usage-reader.js";
 import type { UsageAllowanceIdentity } from "./provider-types.js";
-import { UsageWindows, type UsageReadWindow, type UsageReading } from "./usage-windows.js";
+import { UsageWindows, type UsageReadWindow, type UsageReading, type UsageReadingStore } from "./usage-windows.js";
 
 export {
   UNRESOLVED_READS_KEPT,
@@ -104,6 +104,8 @@ export const codexUsageIdentityKey = (i: UsageAllowanceIdentity): string | null 
 export interface CodexUsageWindowsDeps {
   read: CodexUsageReader;
   now?: () => string;
+  /** Durable readings (slice 01): absent, a restart starts empty. */
+  store?: UsageReadingStore<UsageAllowanceIdentity>;
 }
 
 export class CodexUsageWindows extends UsageWindows<UsageAllowanceIdentity, { account: unknown; rateLimits: unknown }> {
@@ -115,6 +117,7 @@ export class CodexUsageWindows extends UsageWindows<UsageAllowanceIdentity, { ac
       normalize: (answer) => normalizeCodexUsage(answer.account, answer.rateLimits, answer.observedAt),
       key: codexUsageIdentityKey,
       ...(deps.now ? { now: deps.now } : {}),
+      ...(deps.store ? { store: deps.store } : {}),
     });
   }
 }

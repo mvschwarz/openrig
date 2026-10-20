@@ -1279,6 +1279,40 @@ describe("rig queue CLI", () => {
     expect(call!.path).toContain("recentLimit=10");
   });
 
+  it("plain whoami ends with one line per candidate to choose from; --json adds nothing", async () => {
+    const data = {
+      session: "bob@rig",
+      currentWork: null,
+      currentWorkBasis: "2 distinct typed work nodes — refusing to guess",
+      currentWorkChoice: {
+        instruction: "OpenRig did not choose your current work. Choose the candidate your actual work belongs to.",
+        candidates: [
+          { qitemId: "q-1", projects: ["alpha"], mission: "release", slice: "01-work", workNodePath: "/m/release/slices/01-work", unresolved: null },
+          { qitemId: "q-2", projects: [], mission: "missing", slice: "01-work", workNodePath: null, unresolved: "mission missing resolves to 0 directories on this host" },
+        ],
+        unknown: [{ qitemId: "q-3", summary: null, reason: "no mission tag and no handoff ancestry" }],
+      },
+    };
+    const run = async (json: boolean) => {
+      const { deps } = makeDeps({ routes: { "GET /api/queue/whoami?session=bob%40rig&recentLimit=25": { status: 200, data } } });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      logs.length = 0;
+      await program.parseAsync(["node", "rig", "queue", "whoami", "--session", "bob@rig", ...(json ? ["--json"] : [])]);
+      return [...logs];
+    };
+    const plain = await run(false);
+    expect(plain.slice(-4)).toEqual([
+      "OpenRig did not choose your current work. Choose the candidate your actual work belongs to.",
+      "  1. project alpha · mission release · slice 01-work · /m/release/slices/01-work · from row q-1",
+      "  2. no project tag · mission missing · slice 01-work · no folder found (mission missing resolves to 0 directories on this host) · from row q-2",
+      "  - row q-3: work not named (no mission tag and no handoff ancestry)",
+    ]);
+    const json = await run(true);
+    expect(json).toHaveLength(1);
+    expect(JSON.parse(json[0]!)).toEqual(data);
+  });
+
   it("whoami defaults the session from OPENRIG_SESSION_NAME when --session is omitted", async () => {
     const saved = process.env["OPENRIG_SESSION_NAME"];
     process.env["OPENRIG_SESSION_NAME"] = "bob@rig";
@@ -2312,5 +2346,35 @@ describe("P3 — authored-summary teaching layer (advisory + --summary hint)", (
     const createCmd = queueCmd.commands.find((c) => c.name() === "create")!;
     const summaryOpt = createCmd.options.find((o) => o.long === "--summary")!;
     expect(summaryOpt.description).toMatch(TEACHES_WHERE);
+  });
+
+  // The summary is the row's subject on every surface that lists it, not only the needs-you
+  // view; an agent that reads "needs-you" alone leaves it off a row bound for an agent.
+  const SUBJECT_SURFACES = [/\bRECENT\b/, /\bstory\b/i, /needs-you view/];
+
+  it.each(["create", "handoff", "handoff-and-complete"])(
+    "%s --summary help names every surface that shows the row's subject",
+    (sub) => {
+      const { deps } = makeDeps();
+      const program = createProgram({ queueDeps: deps });
+      const queueCmd = program.commands.find((c) => c.name() === "queue")!;
+      const cmd = queueCmd.commands.find((c) => c.name() === sub)!;
+      const summaryOpt = cmd.options.find((o) => o.long === "--summary")!;
+      for (const surface of SUBJECT_SURFACES) expect(summaryOpt.description).toMatch(surface);
+    },
+  );
+
+  it("the missing-summary warning names every surface that shows the row's subject", async () => {
+    const { deps } = makeDeps({
+      routes: { "POST /api/queue/create": { status: 201, data: { qitemId: "q1", state: "pending" } } },
+    });
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "queue", "create",
+      "--source", "a@rig", "--destination", "b@rig", "--body", "x", "--json",
+    ]);
+    const warn = stderrOut.join("");
+    for (const surface of SUBJECT_SURFACES) expect(warn).toMatch(surface);
   });
 });

@@ -3,14 +3,20 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { defaultListProcesses } from "../src/adapters/codex-runtime-adapter.js";
+import { restoreProc, serveProcRoot, writeFakeProc } from "./helpers/fake-proc.js";
 
 let scratch: string | undefined;
+const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
 afterEach(() => {
+  restoreProc();
+  Object.defineProperty(process, "platform", platform);
   vi.unstubAllEnvs();
   if (scratch) fs.rmSync(scratch, { recursive: true, force: true });
 });
 
 it("reads foreground identity through the real async executable and parser path", async () => {
+  // ps is the process table's source off Linux.
+  Object.defineProperty(process, "platform", { value: "darwin" });
   scratch = fs.mkdtempSync(path.join(os.tmpdir(), "codex-process-read-"));
   // A hermetic ps executable; no provider, tmux or daemon is launched.
   const output = [
@@ -41,6 +47,33 @@ it("reads foreground identity through the real async executable and parser path"
     { pid: 107, ppid: 1, pgid: 107, tpgid: -1, executableName: "node (vitest 1)", startedAt: "Sat Jan  1 12:00:00 2000", command: "node (vitest 1)" },
   ]);
   fs.writeFileSync(path.join(scratch, "ps"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  expect(await defaultListProcesses()).toEqual([]);
+});
+
+it("reads foreground identity through the real /proc reader and parser path", async () => {
+  const started = "Sat Jan  1 12:00:00 2000";
+  const listed = [
+    { pid: 101, ppid: 1, pgid: 101, tpgid: 102, name: "zsh", startedAt: started, command: "-zsh" },
+    { pid: 102, ppid: 101, pgid: 102, tpgid: 102, name: "node", startedAt: started, command: "node /opt/bin/codex -C /project" },
+    { pid: 103, ppid: 102, pgid: 102, tpgid: 102, name: "codex", startedAt: started, command: "/opt/vendor/bin/codex -C /project" },
+    { pid: 104, ppid: 1, pgid: 104, tpgid: -1, name: "node", startedAt: started, command: "node /tmp/other.js --label codex" },
+    // Linux task names may contain spaces (prctl PR_SET_NAME / process.title).
+    { pid: 106, ppid: 1, pgid: 106, tpgid: -1, name: "tmux: server", startedAt: started, command: "tmux new-session -d" },
+    { pid: 107, ppid: 1, pgid: 107, tpgid: -1, name: "node (vitest 1)", startedAt: started, command: "node (vitest 1)" },
+  ];
+  const root = writeFakeProc(listed);
+  // A pid whose stat is cut short is skipped, as ps's broken rows are.
+  fs.mkdirSync(path.join(root, "105"));
+  fs.writeFileSync(path.join(root, "105", "stat"), "105 (sh) S 1 105");
+  fs.writeFileSync(path.join(root, "105", "cmdline"), "");
+  serveProcRoot(root);
+  // No ps runs: one that did would fail the read.
+  scratch = fs.mkdtempSync(path.join(os.tmpdir(), "codex-process-read-"));
+  fs.writeFileSync(path.join(scratch, "ps"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  vi.stubEnv("PATH", scratch);
+  const rows = await defaultListProcesses();
+  expect(rows.sort((a, b) => a.pid - b.pid)).toEqual(listed.map(({ name, ...row }) => ({ ...row, executableName: name })));
+  serveProcRoot(path.join(root, "gone"));
   expect(await defaultListProcesses()).toEqual([]);
 });
 

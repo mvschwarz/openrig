@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Hono } from "hono";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -29,9 +32,12 @@ function buildApp(opts: {
   queueRepo: QueueRepository;
   inboxHandler: InboxHandler;
   outboxHandler: OutboxHandler;
+  /** The configured missions root, for routes that resolve work nodes. */
+  slicesRoot?: string;
 }): Hono {
   const app = new Hono();
   app.use("*", async (c, next) => {
+    if (opts.slicesRoot) c.set("settingsStore" as never, { resolveOne: () => ({ value: opts.slicesRoot }) } as never);
     c.set("eventBus" as never, opts.eventBus);
     c.set("queueRepo" as never, opts.queueRepo);
     c.set("inboxHandler" as never, opts.inboxHandler);
@@ -251,6 +257,37 @@ describe("queue routes", () => {
     expect(await res.json()).toMatchObject({ handoffAdvisory: { status: "unverified" } });
     expect(queueRepo.getById(dependent.qitemId)?.state).toBe("pending");
     expect(queueRepo.list({ limit: 100 })).toHaveLength(2);
+  });
+
+  it("handoffAdvisory guides callers to rig queue handoff commands", async () => {
+    const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "task", nudge: false });
+    const res = await app.request(`/api/queue/${source.qitemId}/update`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
+      body: JSON.stringify({ state: "done", closureReason: "handed_off_to", closureTarget: "next@r" }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.handoffAdvisory?.status).toBe("unverified");
+    expect(body.handoffAdvisory?.message).toContain("rig queue handoff");
+    expect(body.handoffAdvisory?.message).toContain("handoff-and-complete");
+    expect(body.handoffAdvisory?.message).toContain("a local handoff is atomic");
+    expect(body.handoffAdvisory?.message).toContain("across hosts the successor is created first and the source closed after");
+    expect(body.handoffAdvisory?.message).toContain("re-running the same handoff is idempotent");
+  });
+
+  it("handoffAdvisory is not hidden by candidate with malformed chain_of_record", async () => {
+    const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "task", nudge: false });
+    const candidate = await queueRepo.create({ sourceSession: "b@r", destinationSession: "next@r", body: "corrupted candidate", nudge: false });
+    db.prepare("UPDATE queue_items SET chain_of_record = 'not-valid-json' WHERE qitem_id = ?").run(candidate.qitemId);
+
+    const res = await app.request(`/api/queue/${source.qitemId}/update`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
+      body: JSON.stringify({ state: "done", closureReason: "handed_off_to", closureTarget: "next@r" }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.handoffAdvisory?.status).toBe("unverified");
+    expect(body.handoffAdvisory?.message).toContain("rig queue handoff");
   });
 
   it("keeps legacy custody note appends and explicit reopen/repair available", async () => {
@@ -1520,6 +1557,39 @@ describe("queue routes", () => {
     await expectLimitParsing(app, "/api/queue/outbox/list?senderSession=a@r");
   });
 
+  it("GET /api/queue/overdue refuses only a positive limit SQLite cannot bind; every limit main serves is still served", async () => {
+    for (const body of ["one", "two", "three"]) {
+      const res = await app.request("/api/queue/create", {
+        method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
+        body: JSON.stringify({ destinationSession: "b@r", body, nudge: false }),
+      });
+      expect(res.status).toBe(201);
+    }
+    const overdue = db.prepare("UPDATE queue_items SET state = 'in-progress', closure_required_at = ? WHERE body = ?");
+    overdue.run("2026-01-01T00:00:01.000Z", "one");
+    overdue.run("2026-01-01T00:00:02.000Z", "two");
+    overdue.run("2026-01-01T00:00:03.000Z", "three");
+    const bodies = async (query: string) => {
+      const res = await app.request(`/api/queue/overdue${query}`);
+      return { status: res.status, bodies: res.status === 200 ? ((await res.json()) as Array<{ body: string }>).map((q) => q.body) : await res.json() };
+    };
+    const all = { status: 200, bodies: ["one", "two", "three"] };
+    expect(await bodies("")).toEqual(all);
+    expect(await bodies("?limit=2")).toEqual({ status: 200, bodies: ["one", "two"] });
+
+    // A positive limit SQLite cannot bind was a 500; it is now a 400.
+    for (const limit of ["9223372036854775296", "99999999999999999999"]) {
+      expect({ limit, ...(await bodies(`?limit=${limit}`)) })
+        .toEqual({ limit, status: 400, bodies: { error: "limit must be an integer" } });
+    }
+    // Every limit main serves keeps its answer: the largest bindable value, and the values the
+    // route's normalization drops (non-numeric, non-positive, and magnitudes that parse to Infinity).
+    const nines = "9".repeat(400);
+    for (const limit of ["9223372036854775295", "abc", "-1", "0", "-99999999999999999999", nines, `-${nines}`]) {
+      expect({ limit, ...(await bodies(`?limit=${limit}`)) }).toEqual({ limit, ...all });
+    }
+  });
+
   it("GET /api/queue/list filters by destination + state", async () => {
     await app.request("/api/queue/create", {
       method: "POST",
@@ -1534,6 +1604,60 @@ describe("queue routes", () => {
     const res = await app.request("/api/queue/list?destinationSession=b@r");
     const data = (await res.json()) as unknown[];
     expect(data).toHaveLength(1);
+  });
+
+  it("GET /api/queue/list trims each state name and otherwise keeps today's matching", async () => {
+    const post = (path: string, session: string, body: Record<string, unknown>) => app.request(path, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": session }, body: JSON.stringify(body),
+    });
+    const create = async (body: Record<string, unknown>) =>
+      ((await (await post("/api/queue/create", "a@r", { nudge: false, ...body })).json()) as { qitemId: string }).qitemId;
+    const pending = await create({ destinationSession: "b@r", body: "pending" });
+    const inProgress = await create({ destinationSession: "b@r", body: "in progress" });
+    const done = await create({ destinationSession: "b@r", body: "done" });
+    expect((await post(`/api/queue/${inProgress}/claim`, "b@r", {})).status).toBe(200);
+    expect((await post(`/api/queue/${done}/claim`, "b@r", {})).status).toBe(200);
+    expect((await post(`/api/queue/${done}/update`, "b@r", { state: "done", closureReason: "no-follow-on", transitionNote: "done" })).status).toBe(200);
+    const gate = await create({
+      destinationSession: "human-founder@external", body: "approve me", tier: "human-gate",
+      summary: "approve", evidenceRef: "proof/evidence.md",
+    });
+
+    const ids = async (query: string) => {
+      const res = await app.request(`/api/queue/list?${query}`);
+      expect(res.status).toBe(200);
+      return ((await res.json()) as Array<{ qitemId: string }>).map((q) => q.qitemId).sort();
+    };
+    const plain = (rest: string) => ids(`destinationSession=b@r${rest}`);
+    const attention = (rest: string) => ids(`attention=1&destinationSession=human-founder@external${rest}`);
+    const state = (value: string) => `&state=${encodeURIComponent(value)}`;
+
+    // The fix: a space around a name no longer drops it.
+    expect(await plain(state("pending, in-progress"))).toEqual([pending, inProgress].sort());
+    expect(await plain(state(" pending , in-progress "))).toEqual([pending, inProgress].sort());
+    expect(await attention(state(" pending"))).toEqual([gate]);
+    expect(await plain(`&activeOnly=1${state(" done")}`)).toEqual([done]);
+
+    // Unchanged: an unknown name matches nothing, alone or beside a known one.
+    expect(await plain(state("pending,in-progress"))).toEqual([pending, inProgress].sort());
+    expect(await plain(state("pending,inprogress"))).toEqual([pending]);
+    expect(await plain(state("in_progress"))).toEqual([]);
+    expect(await attention(state("pending,inprogress"))).toEqual([gate]);
+    expect(await attention(state("in_progress"))).toEqual([]);
+
+    // Unchanged: only commas or spaces is an explicit filter that matches nothing, with or without activeOnly.
+    for (const value of [",", " ", " , "]) {
+      expect(await plain(state(value))).toEqual([]);
+      expect(await plain(`&activeOnly=1${state(value)}`)).toEqual([]);
+      expect(await attention(state(value))).toEqual([]);
+    }
+
+    // Unchanged: an absent or empty state keeps each path's default.
+    for (const rest of ["", "&state="]) {
+      expect(await plain(rest)).toEqual([pending, inProgress, done].sort());
+      expect(await plain(`&activeOnly=1${rest}`)).toEqual([pending, inProgress].sort());
+      expect(await attention(rest)).toEqual([gate]);
+    }
   });
 
   // OPR.0.3.2.20 — `?attention=1` filter for the For You priority
@@ -2210,6 +2334,56 @@ describe("queue routes", () => {
       expect(body.workCandidates.next).toEqual([expect.objectContaining({ missions: ["m"] })]);
       expect(body.workCandidates.candidates).toEqual([]);
       expect(counts()).toEqual(before);
+    });
+
+    // Plain whoami names every candidate and asks the agent to choose when no single work node is
+    // settled; ordinary unambiguous work and a seat with no rows carry no choice.
+    it("GET /api/queue/whoami names each in-progress candidate when current work is not settled", async () => {
+      const top = mkdtempSync(join(tmpdir(), "whoami-choice-"));
+      try {
+        const missions = join(top, "missions");
+        for (const [mission, slice] of [["release", "01-work"], ["release-b", "02-other"]]) {
+          mkdirSync(join(missions, mission!, "slices", slice!), { recursive: true });
+          writeFileSync(join(missions, mission!, "SPEC.md"), "---\nintent: x\n---\n", "utf8");
+        }
+        app = buildApp({ eventBus: bus, queueRepo, inboxHandler: inbox, outboxHandler: outbox, slicesRoot: missions });
+        const claimed = async (tags: string[]) => {
+          const item = await queueRepo.create({ sourceSession: "alice@r", destinationSession: "bob@r", body: "w", tags, nudge: false });
+          const res = await app.request(`/api/queue/${item.qitemId}/claim`, {
+            method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "bob@r" },
+            body: JSON.stringify({ destinationSession: "bob@r" }),
+          });
+          expect(res.status).toBe(200);
+          return item.qitemId;
+        };
+        const whoami = async () => (await (await app.request("/api/queue/whoami?session=bob@r")).json()) as {
+          currentWork: { workNodePath: string } | null; currentWorkBasis: string;
+          currentWorkChoice?: { instruction: string; candidates: Array<Record<string, unknown>> };
+        };
+
+        expect(await whoami()).not.toHaveProperty("currentWorkChoice");
+        const first = await claimed(["project:alpha", "mission:release", "slice:01-work"]);
+        const settled = await whoami();
+        expect(settled.currentWork?.workNodePath).toBe(join(missions, "release", "slices", "01-work"));
+        expect(settled).not.toHaveProperty("currentWorkChoice");
+
+        const second = await claimed(["project:beta", "mission:release-b", "slice:02-other"]);
+        const open = await whoami();
+        expect(open.currentWork).toBeNull();
+        expect(open.currentWorkBasis).toBe("2 distinct typed work nodes — refusing to guess");
+        expect(open.currentWorkChoice?.instruction).toMatch(/^OpenRig did not choose your current work\. Choose/);
+        expect(open.currentWorkChoice?.candidates).toEqual([
+          expect.objectContaining({ qitemId: first, projects: ["alpha"], mission: "release", slice: "01-work",
+            workNodePath: join(missions, "release", "slices", "01-work") }),
+          expect.objectContaining({ qitemId: second, projects: ["beta"], mission: "release-b", slice: "02-other",
+            workNodePath: join(missions, "release-b", "slices", "02-other") }),
+        ]);
+        const asked = (await (await app.request("/api/queue/whoami?session=bob@r&candidates=1")).json()) as Record<string, unknown>;
+        expect(asked).toHaveProperty("currentWorkChoice");
+        expect(asked).toHaveProperty("workCandidates");
+      } finally {
+        rmSync(top, { recursive: true, force: true });
+      }
     });
 
     // A set-aside row must stay in "held" however many newer pending rows the seat has: the two

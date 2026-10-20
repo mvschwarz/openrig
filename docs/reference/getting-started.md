@@ -1,31 +1,89 @@
-# Getting started: meet the kernel, then make one useful change
+# OpenRig setup reference
 
-Install OpenRig, use a working provider login, and meet the kernel operator with
-the advisor and TUI beside it. No starter team is needed to reach that view.
-Tell the operator what you want to do, then choose a project team for a bounded
-change you can exercise. Reuse the accounts and terminal tools you already have.
+This is the full reference for installing and running OpenRig, written for the agent doing the setup and for anyone
+who wants the detail. The short version for people is [Getting started](quickstart.md).
 
-After installation and sign-in, your agent opens the **OpenRig TUI and operator** for you. The path is `rig daemon start` (if stopped),
-then `rig terminal open saved:kernel --window`. The second command opens the
-desktop window itself. An agent can run it from its shell on the daemon's
-desktop; it does not need to type into your current terminal. See
-[Open the kernel conversations](#open-the-kernel-conversations).
-`rig tui` is the team dashboard; installation ends when you are talking to the
-operator in the OpenRig view.
+## For the agent doing the setup
+
+The `rigs` skill is the procedure: follow it in order. This page is what it looks things up in.
+
+- **Done** means the person is talking to the operator in a visible OpenRig view. A healthy daemon, a started kernel
+  or an opened window isn't done on its own. If they'd rather talk later, the handoff is still pending: say so, and
+  leave them the exact command.
+- **Read readiness; don't assume it:**
+  - **The kernel:** the `Kernel:` line in `rig status`, and `rig ps --nodes --rig kernel`.
+  - **A team:** `rig ps --nodes --rig <team>`.
+  - A missing or unknown signal isn't ready.
+  - `rig up` exiting 1 with `Status: partial` and `Startup attention` means a seat is waiting at a prompt. Answer it,
+    or ask the person to, then run the `rig seat continue <seat>` it names.
+- **Prerequisites:** check the person's existing toolchain first (mise, nvm, Homebrew or the nodejs.org installer)
+  and the PATH. Use what's there. Don't change a shared Homebrew's ownership, and don't make a local workaround the
+  standard route. If Node.js is installed after your session started, check that new shells and the session's hooks
+  can find it. In one published-0.6.11 Mac run, OpenRig's Claude hooks reported `node: command not found` until the
+  PATH was fixed.
+- **Ask once, then reuse the answer:** the provider (Claude Code, Codex or both), Herdr, Ghostty on macOS,
+  remembered command allowances, and the team.
+- **Before changing their machine:** say what applies to their route, then wait for a yes. See
+  [what OpenRig changes on your machine](../../README.md#what-openrig-changes-on-your-machine).
+- **When something stops:**
+  - [Incomplete setup and restart](#incomplete-setup-and-restart) maps what you see to the next action.
+  - [What can interrupt installation and the OpenRig view](#what-can-interrupt-installation-and-the-openrig-view)
+    covers the view.
+  - [Headless or SSH handoff](#headless-or-ssh-handoff) covers no-display cases.
+  - A timed-out command may still have taken effect. Read `rig ps` or `rig seat status <seat>` before you run it
+    again.
+- **Don't:**
+  - relaunch a team to reopen its view;
+  - start another seat to clear a prompt;
+  - build the person's project yourself. Give the goal to the operator.
 
 ## Before you start
 
-You need Node.js 22 or 24 and tmux, on macOS or Linux. On Linux, the
-distribution's own Node.js can be older (Ubuntu 24.04's is 18); install a
-supported version with [nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`)
-or NodeSource. On a Mac with Apple
-silicon, use Node.js 22 (see the [compatibility
-history](../releases/v0.5.15.md#known-compatibility-limitation)). Native
+> **What OpenRig changes on your machine**
+> - **Install:** `@openrig/cli` goes in globally with npm.
+> - **Setup:** `rig setup` adds an OpenRig block to `~/.tmux.conf`. It can install tmux (with Homebrew on macOS), and
+>   Herdr unless you pass `--no-herdr`. Plain `rig setup`, which is what the one-command install runs, checks both
+>   Claude Code and Codex and may install a missing one; `rig setup --providers claude` (or `codex`) limits it to
+>   yours.
+> - **Starting OpenRig, for the coding agent you use** (paths are the usual defaults):
+>   - Codex: hooks and trust in `~/.codex/config.toml`.
+>   - Claude Code: workspace trust in `~/.claude.json`, and activity hooks in the project's
+>     `.claude/settings.local.json`, plus a status line unless you already have your own.
+>   - Discovery skills go in `~/.claude/skills` and `~/.agents/skills`.
+> - **Starting a team in your project:** adds managed guidance to `AGENTS.md` or `CLAUDE.md`, plus the team's skills
+>   and plugins.
+> - **Permissions:** by default, OpenRig's own kernel gets broader permissions than a project team gets by default.
+>   On Codex that's full access with no approval prompts (`-s danger-full-access -a never`). On Claude Code, its file
+>   tools, web fetches and operational commands, including reads under your home folder, run without asking. A
+>   permission policy, per-agent choice or Codex profile changes that. What your team can do depends on the team you
+>   choose and your settings; `workshop`, for example, ships with broad access.
+> - **Backups:** OpenRig doesn't guarantee it can preserve or roll back these files, so back them up first.
+>
+> [Everything OpenRig writes, and why →](https://github.com/mvschwarz/openrig#what-openrig-changes-on-your-machine)
+
+You need Node.js 22 or 24 and tmux, on macOS or Linux, and one working Claude
+Code or Codex account: one is enough, since the kernel operator adapts the
+shipped `starter` team to whichever you have. On Linux, the distribution's own
+Node.js can be older (Ubuntu 24.04's is 18); install a supported version with
+[nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`) or NodeSource. On a Mac
+with Apple silicon, use Node.js 22 (see the [compatibility
+history](../releases/v0.5.15.md#known-compatibility-limitation)). On a Mac where
+you aren't an administrator, or where Homebrew belongs to another account (its
+`brew install` is refused), install Node.js in your own home folder with
+[nvm](https://github.com/nvm-sh/nvm): run `touch ~/.zshrc` (a new Mac account
+has none, and nvm's installer only adds itself to a profile file that already
+exists), then the install command on nvm's page, open a new terminal, and run
+`nvm install 22`. That needs no administrator password, and `npm install -g`
+then installs into your nvm folder. Native
 Windows isn't supported. On Windows, use WSL2: it's the Windows route OpenRig
 supports, though OpenRig's automated tests don't run on it yet. One user's
 [working setup](#wsl2-a-reported-working-setup) is below. Node 20 and
 odd-numbered releases (23, 25 and so on) are not supported; Node 26 and later
 even-numbered releases are untested.
+
+On Linux, if Codex cannot run commands and reports `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`,
+ask the machine owner to follow [OpenAI's sandbox prerequisites](https://developers.openai.com/codex/concepts/sandboxing#prerequisites),
+including its `bwrap` AppArmor profile guidance; changes to AppArmor are the owner's choice.
 
 **Choose permissions before starting the team.** Ordinary OpenRig launches use
 Codex's `-s workspace-write`, with approval policy from your native configuration,
@@ -98,18 +156,32 @@ user.
 
 **Agents:** if you're setting OpenRig up for someone, load the `rigs` skill and follow it. It carries the install, the
 OpenRig view and the handoff to the operator as one procedure. From 0.6.7, OpenRig installs it as `rigs` in
-`~/.claude/skills` and `~/.agents/skills` when the daemon starts. Before that, add it with
-`npx skills add mvschwarz/openrig --skill rigs`, or read [`skills/rigs/SKILL.md`](../../skills/rigs/SKILL.md).
+`~/.claude/skills` and `~/.agents/skills` when the daemon starts. To add it manually, use the release tag matching
+your installed `rig --version`: replace `<release-tag>` below with that tag, including its `v` prefix.
+`rig --version` prints the version and a commit, for example `0.6.11 (379f0a0d)`; the tag is `v0.6.11`.
+The skill is in the repository from v0.6.6; on an older install, use the v0.6.6 tag or upgrade first.
+Choose the command for the agent doing the setup:
+
+```sh
+# Claude Code
+npx skills add "https://github.com/mvschwarz/openrig/tree/<release-tag>/skills/rigs" --skill rigs --agent claude-code
+
+# Codex
+npx skills add "https://github.com/mvschwarz/openrig/tree/<release-tag>/skills/rigs" --skill rigs --agent codex
+```
+
+These are the pinned, per-agent forms used on the [rigs pages](https://openrig.dev/rigs).
+You can also read [`skills/rigs/SKILL.md`](../../skills/rigs/SKILL.md) directly.
 
 **One command, for the full setup.** It needs Node.js 22 or 24 with npm already installed. The preview prints what the
 script will do and changes nothing:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.8/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.12/scripts/install.sh | sh -s -- --dry-run
 ```
 
 The same command without `--dry-run`,
-`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.8/scripts/install.sh | sh`, installs the
+`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.12/scripts/install.sh | sh`, installs the
 latest published `@openrig/cli` with `npm install -g`,
 runs the Node.js and SQLite check, then `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
 Codex and may install a missing one, as described below. A failed step prints
@@ -231,6 +303,17 @@ same view and plan, or creates one if none matches, preserving its config and ex
 caller's Herdr endpoint must match the daemon's endpoint; a mismatch is reported
 without opening a window or putting the view in another session.
 
+The shared TUI (`rig tui --shared`) runs in the daemon's tmux server, so its own environment never
+carries the Herdr you are looking at; the markers are on the tmux client attached to it. When you
+open a terminal view from it on Linux, the TUI passes the markers of the client that was active last
+(normally the one that pressed the key) to the command, which then opens the view in that Herdr. The
+chosen client may belong to a different viewer: tmux only counts keys a client types, so a key sent
+by an agent (`send-keys`) or by a control-mode client doesn't count as any client's activity, and the
+view opens in the Herdr of the interactive client that typed last, however long ago. With no client
+attached, more than one client active in the same second, or a client that isn't in Herdr or can't be
+read, nothing is passed and the result is what it was before. Other platforms, and every other way of
+running `rig terminal open`, keep the previous result too.
+
 On Linux, a local graphical display and a supported hosting terminal are required
 (Ghostty, GNOME Terminal, Konsole or xterm). Linux reports a window request; verify
 what actually appeared. SSH, headless, CI and unsupported Linux hosts get a
@@ -306,6 +389,7 @@ different points in the same journey:
 | Herdr shows its introduction or agent-integration panel | These are Herdr's first-run panels. Follow the displayed controls: Return continues the intro and Esc closes the integration panel. Opening this view does not require installing Herdr's agent integrations or changing your Claude/Codex settings. |
 | A saved layout is cramped in an 80×24 window | The default kernel view gives each role a full-width page. A custom saved `kernel` view still controls its own layout; adjust that saved view if needed. Changing or restarting the team is unnecessary. |
 | The command returned, but visibility is unconfirmed | With authorized desktop tools, inspect the new window and a screenshot of its contents. A window listing alone proves only that a window exists. If the agent has only shell access, report what the command confirmed and ask the person to confirm the visible operator and that the dashboard and advisor tabs or windows are available. Do not report visual success without seeing it. |
+| In a Claude Code seat's terminal, Shift+Enter submits instead of adding a newline | Whether Shift+Enter reaches Claude Code as its own key depends on the terminal and on tmux's extended-key support and settings ([`extended-keys`](https://man.openbsd.org/tmux.1#extended-keys), [`terminal-features`](https://man.openbsd.org/tmux.1#terminal-features__)). To add a newline anyway, press Ctrl+J, or type `\` and then press Enter. Claude Code's [tmux configuration guide](https://code.claude.com/docs/en/terminal-config#configure-tmux) covers the setup. |
 
 After a failure, inspect any newly opened surface before retrying. A tmux failure
 may name a newly created viewing session for inspection. Do not replace a failed
@@ -525,6 +609,16 @@ views. If the provider cannot open, each labelled fallback command joins a diffe
 seat. Keep all returned commands
 complete when sharing them; a created workspace alone does not confirm visibility.
 
+### Built by the community
+
+Tools built around OpenRig are maintained by their authors. We have not tested them;
+this list does not promise support or compatibility with your OpenRig version.
+
+- **[Rig HQ](https://github.com/dmelo/rig-hq)**, by [dmelo](https://github.com/dmelo):
+  a read-only pixel-office viewer for rigs, seats, attention and queue handoffs, as
+  described in the [author's introduction](https://github.com/mvschwarz/openrig/discussions/879).
+  The author reports testing it with OpenRig 0.6.5. See its repository for setup and support.
+
 ## Continue real project work
 
 Return to the same owner with the next outcome, citing the earlier result.
@@ -589,6 +683,7 @@ the lifecycle API without booting a new kernel, then stop the remaining rigs.
 | Tool missing or login fails | Use the specific setup/auth hint; recheck that executable in the launch shell. Do not send work to an unready seat. |
 | "Startup attention" or "Startup details" names a prompt | Answer the login, trust or bypass prompt in that seat's terminal, then run the `rig seat continue <seat>` it shows. |
 | "Readiness timeout after 30s — harness did not become interactive" | The harness took longer than the readiness window. Raise it for the next launch with `rig config set runtime.readiness_timeout_seconds <1-600>`, then relaunch that seat. |
+| "Claude resume did not finish within Ns; Claude may still be starting, so the launch was kept" | A restored Claude seat was not interactive when the wait ended. Its pane and resume token are kept. Look at the pane; once Claude is up, run `rig seat clear-attention <seat>`. The wait is about `runtime.readiness_timeout_seconds` in total for each seat (default 30 s), counting the first 3.2 s, and the time adds up seat by seat in a restore. Raising the setting for slow fresh launches lengthens it. If `rig up` or `rig launch` times out at 120 s, that is not a rollback: check `rig ps` before running it again. |
 | Daemon is healthy, kernel is still starting | Read `rig status` and `rig ps --nodes --rig kernel`; kernel readiness is separate. |
 | Kernel seats fail within a second of the first start, and tmux reports "server exited unexpectedly" | Check that your tmux can capture a pane, then start the failed seats again; see the tmux check below this table. |
 | Shared terminal is absent | Inspect the existing kernel binding and recovery state; use standalone `rig tui` while resolving it. |
@@ -883,7 +978,10 @@ after an authorized launch before claiming its actual permission behavior.
 The rig-level verbs are `rig policy permissions list`, `show`, `current` and
 `apply`. Existing `rig policy list/show/current/apply` remain compatibility
 aliases with the same JSON and exit behavior. Pi resource trust and the per-seat
-typing guard are separate controls.
+typing guard are separate controls. To retain automatic messages while you have
+an unfinished terminal input, opt that seat into [draft-aware delivery](seat-delivery.md).
+The same typing guard offers `hold` for a manual terminal (`--enabled true`)
+and `off` for ordinary automatic sends (`--enabled false`).
 
 ### Claude Code: a different launch flag
 
@@ -941,6 +1039,37 @@ version cannot apply the change in place, preserve the work and use the supporte
 same-seat stop/resume path after checking its retained policy; do not erase the
 rig or start a duplicate to reset permissions. A resume can reapply the stored
 launch mode, so verify the native mode again before continuing work.
+
+## Optional Mac local-user check
+
+On a Mac shared by multiple OS accounts, `transport.local_user_guard` can reduce
+accidental CLI routing to another account's local daemon. It is **off by default**.
+Enable it with `rig config set transport.local_user_guard true`, or set
+`OPENRIG_TRANSPORT_LOCAL_USER_GUARD=true` in the CLI's environment. Set it to
+`false` to turn it off; no daemon restart is needed for the CLI check.
+
+When enabled, automatic local CLI data requests compare the daemon's reported
+`/healthz` PID and effective UID (`euid`) with two `ps` UID/start observations and
+a second health response, with at most one second of observation per check.
+Only stable agreement on a foreign effective UID stops the request. This does
+not require visibility into another user's socket descriptors. It does not
+stop the daemon, choose another port or retry. Diagnostic health/status checks
+remain available. Older daemons without `euid` remain unknown and are permitted.
+`sudo rig …` uses the caller's **effective** UID, so an enabled check against a
+user-owned daemon refuses when its reported/observed UID differs from root.
+
+Explicit `OPENRIG_URL`/`RIGGED_URL` targets and registered remote hosts retain
+their selected routing, including tunnels. An internally resolved local URL is
+still checked. Default UI and TUI openings are checked before launch; this does
+not police later browser or TUI connections.
+
+Missing, disagreeing, restricted or timed-out evidence **continues today's
+behavior**. This is a partial accidental-routing check, not authenticated user
+isolation: it trusts the daemon's PID/UID report and corroborates that process;
+it does not establish the socket's owner. Identity can change between observation
+and connection, and equal UIDs do not distinguish separate instances belonging
+to one account. The check
+does not add authentication to the daemon or protect direct HTTP clients.
 
 ## Custom settings and precedence
 

@@ -51,7 +51,7 @@ describe("founder-approved G2/L2 production composition", () => {
     const header = body.split("\n").find((line) => /POD\s+SEAT\s+RT/.test(line))!;
     expect(header).toMatch(/CTX\s+STATE\s+Q\s+WORK/);
     expect(header).not.toMatch(/MODEL|NOW|ACTIONS/);
-    expect(body).toContain("MODEL/NOW/ACTIONS on drill");
+    expect(body).toContain("MODEL/EFFORT/NOW/ACTIONS on drill");
     expect(body.split("\n").every((line) => line.length <= 84)).toBe(true);
   });
 

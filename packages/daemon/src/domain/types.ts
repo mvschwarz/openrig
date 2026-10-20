@@ -105,6 +105,8 @@ export interface Session {
   origin: "launched" | "claimed";
   startupStatus: "pending" | "ready" | "attention_required" | "failed";
   startupCompletedAt: string | null;
+  /** The community harness this session was launched for (selected through its preset); absent otherwise. */
+  communityHarness?: string;
 }
 
 // -- Event types --
@@ -135,6 +137,7 @@ export type RigEvent =
   // S5 (OPR.0.5.4.7) — seat-lifecycle audit trail: the three supported seat verbs each persist
   // their mutation with actor + reason in the same transaction as the mutation itself.
   | { type: "node.model_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; reason: string; operator: string | null }
+  | { type: "node.cwd_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; reason: string; operator: string | null }
   | { type: "node.effort_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
   | { type: "node.permissions_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; source: "seat_selection"; effect: "future_launches_only" }
   | { type: "node.policy_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; launchPosture: "floor" | "full_bypass" | "auto"; reason: string; operator: string }
@@ -216,6 +219,8 @@ export type RigEvent =
         | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string } }
   // Bundle events (cross-rig)
   | { type: "bundle.created"; bundleName: string; bundleVersion: string; archiveHash: string }
+  // OPR.0.7.0.18 — a subscription move an agent made or attempted, as it reported it (fleet-wide, no rig).
+  | { type: "subscription.move_recorded"; move: import("./provider/subscription-moves.js").SubscriptionMoveEventPayload }
   // Teardown events
   | { type: "rig.stopped"; rigId: string }
   // OPR.0.3.3.19 - rig archive affordance (soft, reversible; NOT a delete)
@@ -226,7 +231,7 @@ export type RigEvent =
   | { type: "pod.deleted"; rigId: string; podId: string }
   | { type: "node.startup_pending"; rigId: string; nodeId: string; startupProof?: StartupProofSelection }
   | { type: "node.startup_ready"; rigId: string; nodeId: string; previousStatus?: "failed" | "attention_required"; submission?: { status: "unverified" | "staged"; reasons: string[]; warning?: string; diagnostics?: StartupSubmissionDiagnostic[] } }
-  | { type: "node.startup_failed"; rigId: string; nodeId: string; error: string; sessionId?: string; freshContextPending?: boolean; submissionDiagnostics?: StartupSubmissionDiagnostic[]; stage?: StartupFailureStage; hasPendingWork?: boolean; requestedResumeToken?: string | null; requestedResumeType?: string | null }
+  | { type: "node.startup_failed"; rigId: string; nodeId: string; error: string; sessionId?: string; freshContextPending?: boolean; forkContextPending?: { parentToken: string; isRestore: boolean }; submissionDiagnostics?: StartupSubmissionDiagnostic[]; stage?: StartupFailureStage; hasPendingWork?: boolean; requestedResumeToken?: string | null; requestedResumeType?: string | null }
   // OPR.0.4.3.06 — startup proof (challenge-verified orientation). Append-only.
   // `node.startup_challenged` freezes this launch's challenge ground truth
   // (challengeId + contractHash; the expected answer is recomputed, never
@@ -587,7 +592,8 @@ export type NodeLifecycleState = "running" | "detached" | "recoverable" | "atten
  * projection; `verified`, `binding_absent`, and `tmux_unavailable` (and an
  * absent verdict) leave it unchanged.
  */
-export type SeatIdentityVerdictKind = "verified" | "mismatch" | "pane_missing" | "binding_absent" | "tmux_unavailable";
+/** `unconfirmed`: the seat's pane is live, but nothing proves which session it runs (a community harness). */
+export type SeatIdentityVerdictKind = "verified" | "unconfirmed" | "mismatch" | "pane_missing" | "binding_absent" | "tmux_unavailable";
 
 export interface SeatIdentityVerdict {
   nodeId: string;
@@ -598,6 +604,7 @@ export interface SeatIdentityVerdict {
   reason:
     | "process_identity_mismatch"
     | "process_identity_ambiguous"
+    | "process_identity_unconfirmed"
     | "pane_ambiguous"
     | "pane_pid_gone"
     | "binding_pane_missing"
@@ -658,6 +665,8 @@ export interface NodeInventoryEntry {
   attachmentType?: "tmux" | "external_cli" | null;
   nodeKind: "agent" | "infrastructure";
   runtime: string | null;
+  /** Present only on a community harness's seat: its label, maintainer and declared limits. */
+  communityHarness?: import("./community-harness-presets.js").CommunityHarnessLabel;
   /** Effective current status; confirmed session absence projects as detached. */
   sessionStatus: string | null;
   /** Persisted session status, retained for history and registry-based rollups. */
@@ -686,6 +695,11 @@ export interface NodeInventoryEntry {
   latestError: string | null;
   // Extended fields
   model: string | null;
+  /** The effort a managed launch sends: the seat's explicit choice, else the authored value.
+   *  null = no configured value (the runtime's own default). Never a guess at what the model ran. */
+  effort: string | null;
+  /** Where `effort` came from. `runtime_default` means no configured level is known. */
+  effortSource: "seat_choice" | "authored" | "runtime_default";
   agentRef: string | null;
   profile: string | null;
   codexConfigProfile?: string | null;
@@ -858,7 +872,10 @@ export interface NodeDetailEntry extends NodeInventoryEntry {
   binding: Binding | null;
   startupFiles: Array<{ path: string; deliveryHint: string; required: boolean }>;
   startupActions: Array<{ type: string; value: string }>;
-  installedResources: Array<{ id: string; category: string; targetPath: string }>;
+  /** `targetPath` is where a resource is known to be installed, or "" when that isn't shown. For guidance, it is the
+   *  file the runtime merges into, and only while that file holds a complete block with this id; `declaredTarget` is the spec's `target`
+   *  (parsed, never used to write), and `effectiveTarget` the file the runtime would merge into. */
+  installedResources: Array<{ id: string; category: string; targetPath: string; declaredTarget?: string; effectiveTarget?: string }>;
   recentEvents: Array<{ type: string; createdAt: string; payload: Record<string, unknown> }>;
   infrastructureStartupCommand: string | null;
   peers: NodeDetailPeer[];
@@ -1330,7 +1347,7 @@ export type InstantiateOutcome =
   | { ok: true; result: InstantiateResult }
   | { ok: false; code: "validation_failed"; errors: string[] }
   | { ok: false; code: "preflight_failed"; errors: string[]; warnings: string[] }
-  | { ok: false; code: "instantiate_error"; message: string }
+  | { ok: false; code: "instantiate_error"; message: string; envCleanupErrors?: string[] }
   | { ok: false; code: "cycle_error"; message: string }
   | { ok: false; code: "service_boot_failed"; message: string }
   | { ok: false; code: "compose_project_conflict"; message: string }
@@ -1367,6 +1384,8 @@ export interface AttentionNode {
 }
 
 export interface InstantiateResult {
+  /** Value-free failures taking one-off launch env out of session state. */
+  envCleanupErrors?: string[];
   rigId: string;
   specName: string;
   specVersion: string;

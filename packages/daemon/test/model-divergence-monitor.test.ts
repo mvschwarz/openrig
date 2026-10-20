@@ -244,7 +244,7 @@ describe("ModelDivergenceMonitor — the cause-agnostic comparison", () => {
 describe("modelsMatch — pin canonicalized through the ONE shipped map, then EXACT (f7dfca0c)", () => {
   it("exact ids match case-insensitively", () => {
     expect(modelsMatch("gpt-5.6-luna", " GPT-5.6-Luna ")).toBe(true);
-    expect(modelsMatch("claude-fable-5", "claude-fable-5")).toBe(true);
+    expect(modelsMatch("claude-fable-5-1", "claude-fable-5-1")).toBe(true);
   });
 
   it("SINGLE MAPPING HOME: the deleted migration bridge stays deleted; the monitor consults the advisory's map", async () => {
@@ -255,7 +255,7 @@ describe("modelsMatch — pin canonicalized through the ONE shipped map, then EX
     const monitorMod = await import("../src/domain/model-divergence/model-divergence-monitor.js");
     expect("CLAUDE_ALIAS_MIGRATION_BRIDGE" in monitorMod).toBe(false);
     const advisory = await import("../src/domain/spec-validation-advisory.js");
-    expect(advisory.CANONICAL_MODEL_PINS.fable).toBe("claude-fable-5");
+    expect(advisory.CANONICAL_MODEL_PINS.fable).toBe("claude-fable-5-1");
     expect(modelsMatch("fable", advisory.CANONICAL_MODEL_PINS.fable)).toBe(true); // same data drives both
     // r2 BLOCKING-1 structural half: the map must stay null-prototype so arbitrary string pins
     // can never read inherited Object members (behavioral pins cover both consumers).
@@ -285,9 +285,9 @@ describe("f7dfca0c — alias-pin false positives end AT THE DETECTOR via the one
   // The pin canonicalizes through CANONICAL_MODEL_PINS (spec-validation-advisory.ts, the ONE
   // mapping home) and then compares EXACT. No token containment; r2's ambiguity discriminators
   // (one pin blessing multiple models) stay false in the neighbors above.
-  it("RED-1: alias pin canonicalizes — fable matches claude-fable-5, with trim/case retained", () => {
-    expect(modelsMatch("fable", "claude-fable-5")).toBe(true);
-    expect(modelsMatch(" FABLE ", " Claude-Fable-5 ")).toBe(true);
+  it("RED-1: alias pin canonicalizes — fable matches claude-fable-5-1, with trim/case retained", () => {
+    expect(modelsMatch("fable", "claude-fable-5-1")).toBe(true);
+    expect(modelsMatch(" FABLE ", " Claude-Fable-5-1 ")).toBe(true);
   });
 
   it("control: alias pin vs a DIFFERENT canonical model still diverges (unknown aliases too)", () => {
@@ -300,7 +300,7 @@ describe("f7dfca0c — alias-pin false positives end AT THE DETECTOR via the one
     const seat: PinnedSeat = { ...SEAT, runtime: "claude", pinnedModel: "fable" };
     const { monitor, recorded } = makeMonitor({
       listPinnedSeats: () => [seat],
-      readEffectiveModel: () => ({ ok: true as const, model: "claude-fable-5" }),
+      readEffectiveModel: () => ({ ok: true as const, model: "claude-fable-5-1" }),
     });
     expect(await monitor.checkOnce()).toHaveLength(0);
     expect(recorded).toHaveLength(0);
@@ -343,5 +343,52 @@ describe("f7dfca0c — alias-pin false positives end AT THE DETECTOR via the one
     expect(fired).toHaveLength(1);
     expect(fired[0]!.pinnedModel).toBe("fable"); // raw pin, never the canonicalized form
     expect(fired[0]!.effectiveModel).toBe("claude-opus-5");
+  });
+});
+
+
+describe("Claude context-window pins", () => {
+  it.each([
+    ["claude-opus-5-5[1m]", "claude-opus-5-5"],
+    ["  Claude-Opus-5-5[1M] ", " CLAUDE-OPUS-5-5 "],
+    ["fable[1m]", "claude-fable-5-1"],
+    ["claude-opus-5-5", "claude-opus-5-5[1m]"],
+    ["claude-opus-5-5[1m]", "claude-opus-5-5[1m]"],
+  ])("matches %s to %s without proclaiming", async (pinnedModel, model) => {
+    const { monitor, sent, recorded } = makeMonitor({
+      listPinnedSeats: () => [{ ...SEAT, runtime: "claude-code", pinnedModel }],
+      readEffectiveModel: () => ({ ok: true, model }),
+    });
+    expect(await monitor.checkOnce()).toEqual([]);
+    expect(monitor.pendingSeats()).toEqual([]);
+    expect(sent).toEqual([]);
+    expect(recorded).toEqual([]);
+  });
+
+  it.each([
+    ["claude-code", "claude-opus-5-5[1m]", "claude-fable-5-1"],
+    ["claude-code", "claude-opus-5-5[2m]", "claude-opus-5-5"],
+    ["claude-code", "claude-opus-5-5[1m]-extra", "claude-opus-5-5"],
+    ["claude-code", "opus[1m]", "claude-opus-5-5"],
+    ["claude-code", "fable", "claude-fable-5"],
+    ["codex", "claude-opus-5-5[1m]", "claude-opus-5-5"],
+    ["pi", "claude-opus-5-5[1m]", "claude-opus-5-5"],
+    ["omp", "claude-opus-5-5[1m]", "claude-opus-5-5"],
+    [null, "claude-opus-5-5[1m]", "claude-opus-5-5"],
+  ])("keeps real divergence for runtime=%s pin=%s effective=%s", async (runtime, pinnedModel, model) => {
+    const { monitor, sent, recorded } = makeMonitor({
+      listPinnedSeats: () => [{ ...SEAT, runtime, pinnedModel }],
+      readEffectiveModel: () => ({ ok: true, model }),
+    });
+    const fired = await monitor.checkOnce();
+    expect(fired).toHaveLength(1);
+    expect(fired[0]).toMatchObject({ runtime, pinnedModel, effectiveModel: model });
+    expect(recorded).toHaveLength(1);
+    expect(sent).toHaveLength(4);
+    for (const message of sent) {
+      expect(message.message).toContain(`pinned=${pinnedModel}`);
+      expect(message.message).toContain(`effective=${model}`);
+    }
+    expect(await monitor.checkOnce()).toEqual([]);
   });
 });

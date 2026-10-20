@@ -1,20 +1,18 @@
 import path from "node:path";
 import { existsSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
-import { connectionErrorCode, formatDaemonHostForUrl } from "./client.js";
+import { DaemonClient, ForeignLocalDaemonError, connectionErrorCode, formatDaemonHostForUrl } from "./client.js";
 import { blockedConnectionGuidance, isBlockedConnectionCode } from "./daemon-reachability.js";
 import type { DaemonStartLock } from "./daemon-start-lock.js";
 import { DAEMON_STOP_WAIT_MS, DAEMON_SHUTDOWN_RECEIPT, type DaemonShutdownReceipt } from "@openrig/daemon/daemon-shutdown";
 import { ConfigStore } from "./config-store.js";
-import { readLocalOrigin } from "./local-origin.js";
 import { OPENRIG_HOME, LEGACY_RIGGED_HOME, readOpenRigEnv } from "./openrig-compat.js";
-import {
-  ensureDefaultWorkspace,
-  ensureOpenRigInstance,
-  formatInstanceInitializationConflicts,
-  type InitializationFsOps,
-  type InitWorkspaceResult,
-  type ManagedPathKind,
+// Types only: the module itself (with the daemon's yaml-reading system world) is imported where an
+// instance is initialized, so a command that only talks to the daemon never loads it.
+import type {
+  InitializationFsOps,
+  InitWorkspaceResult,
+  ManagedPathKind,
 } from "@openrig/daemon/instance-initialization";
 
 export interface DaemonState {
@@ -281,7 +279,8 @@ function lifecycleInitializationFs(deps: LifecycleDeps): InitializationFsOps {
   };
 }
 
-export function ensureWorkspaceScaffold(root: string, deps: LifecycleDeps): WorkspaceScaffoldResult {
+export async function ensureWorkspaceScaffold(root: string, deps: LifecycleDeps): Promise<WorkspaceScaffoldResult> {
+  const { ensureDefaultWorkspace } = await import("@openrig/daemon/instance-initialization");
   return ensureDefaultWorkspace({ root, fs: lifecycleInitializationFs(deps) });
 }
 
@@ -665,6 +664,7 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
   }
   const daemonEntry = path.join(getDaemonPath(), "dist/index.js");
 
+  const { ensureOpenRigInstance, formatInstanceInitializationConflicts } = await import("@openrig/daemon/instance-initialization");
   const initialization = ensureOpenRigInstance({
     home: OPENRIG_DIR,
     workspaceRoot: opts.workspaceRoot,
@@ -1196,7 +1196,8 @@ export async function fetchSelfHostIdentity(
 
 /** Resolve this instance's persisted identity even during an outage; never read it from the target. */
 export async function resolveOriginSelfHostId(_deps: LifecycleDeps): Promise<string | undefined> {
-  return readLocalOrigin();
+  // Imported here, not at the top: it loads better-sqlite3 and yaml, which most commands never reach.
+  return (await import("./local-origin.js")).readLocalOrigin();
 }
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -1255,11 +1256,16 @@ export async function waitForKernelReady(
   timeoutMs: number,
   pollIntervalMs = 500,
 ): Promise<KernelReadyResult> {
+  const ownerClient = new DaemonClient(baseUrl);
+  // Resolve the opt-in before starting the wait. Disabled polls retain main's request/deadline flow.
+  const checkOwner = ownerClient.localOwnerCheckEnabled();
   const deadline = Date.now() + timeoutMs;
   let last: KernelReadyResult = { ok: false, kernelState: null, variant: null, detail: null };
   while (Date.now() < deadline) {
-    const remainingMs = Math.max(1, deadline - Date.now());
     try {
+      if (checkOwner) await ownerClient.assertLocalOwner(Math.min(1000, Math.max(1, deadline - Date.now())));
+      // Once admitted, keep the final request even if an unknown owner check consumed the remainder.
+      const remainingMs = Math.max(1, deadline - Date.now());
       const res = await fetch(`${baseUrl}/api/kernel/status`, {
         signal: AbortSignal.timeout(remainingMs),
       });
@@ -1287,7 +1293,8 @@ export async function waitForKernelReady(
           return last;
         }
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof ForeignLocalDaemonError) return { ...last, detail: error.message };
       // Transient fetch failure; keep polling until the deadline.
     }
     const sleepMs = Math.min(pollIntervalMs, Math.max(0, deadline - Date.now()));

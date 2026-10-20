@@ -31,6 +31,7 @@ import { routeBundleContents, routingFailureWarnings, type BundleContentRouting 
 import { ContextPackLibraryService } from "../src/domain/context-packs/context-pack-library-service.js";
 import type { ExecFn } from "../src/adapters/tmux.js";
 import type { FsOps } from "../src/domain/package-resolver.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
 
 const RIG_YAML = `
 version: "0.2"
@@ -77,11 +78,12 @@ function realFsOps(): FsOps {
   } as FsOps;
 }
 
-async function buildBundleWithPack(workDir: string, packManifest = PACK_MANIFEST): Promise<string> {
+async function buildBundleWithPack(workDir: string, packManifest = PACK_MANIFEST, services = false): Promise<string> {
   const staging = path.join(workDir, "staging");
   fs.mkdirSync(path.join(staging, "agents", "impl"), { recursive: true });
   fs.mkdirSync(path.join(staging, "context-packs", "demo"), { recursive: true });
-  fs.writeFileSync(path.join(staging, "rig.yaml"), RIG_YAML);
+  fs.writeFileSync(path.join(staging, "rig.yaml"), RIG_YAML + (services ? "\nservices:\n  kind: compose\n  compose_file: compose.yaml\n" : ""));
+  if (services) fs.writeFileSync(path.join(staging, "compose.yaml"), "services:\n  demo:\n    image: example/demo:1\n");
   fs.writeFileSync(path.join(staging, "agents", "impl", "agent.yaml"), `name: impl\nversion: "1.0"\n`);
   fs.writeFileSync(path.join(staging, "context-packs", "demo", "manifest.yaml"), packManifest);
   fs.writeFileSync(path.join(staging, "context-packs", "demo", "intro.md"), "# Demo world\n");
@@ -127,6 +129,7 @@ describe("bundle contents are routed before any seat launches", () => {
   let seenAtLaunch: { packOnDisk: boolean; rescans: number } | null;
   let rescans: number;
   let podInstantiator: { db: Database.Database; instantiate: ReturnType<typeof vi.fn> };
+  let serviceRepo: RigRepository | undefined;
 
   beforeEach(async () => {
     db = createDb();
@@ -138,11 +141,13 @@ describe("bundle contents are routed before any seat launches", () => {
     bundlePath = await buildBundleWithPack(workDir);
     seenAtLaunch = null;
     rescans = 0;
+    serviceRepo = undefined;
     podInstantiator = {
       db,
       instantiate: vi.fn(async (_yaml: string, _rigRoot: string, opts?: { prelaunchHook?: Hook }) => {
+        const rigId = serviceRepo?.createRig("routed-rig").id ?? "rig-1";
         if (opts?.prelaunchHook) {
-          const hook = await opts.prelaunchHook("rig-1");
+          const hook = await opts.prelaunchHook(rigId);
           if (!hook.ok) return { ok: false as const, code: hook.code, message: hook.message };
         }
         seenAtLaunch = { packOnDisk: fs.existsSync(path.join(contextRoot, "demo", "manifest.yaml")), rescans };
@@ -152,13 +157,14 @@ describe("bundle contents are routed before any seat launches", () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     db.close();
     if (savedContextRoot === undefined) delete process.env["OPENRIG_CONTEXT_ROOT"];
     else process.env["OPENRIG_CONTEXT_ROOT"] = savedContextRoot;
     fs.rmSync(workDir, { recursive: true, force: true });
   });
 
-  function orchestrator(route?: (bundlePath: string) => Promise<BundleContentRouting>): BootstrapOrchestrator {
+  function orchestrator(route?: (bundlePath: string) => Promise<BundleContentRouting>, extra: Partial<ConstructorParameters<typeof BootstrapOrchestrator>[0]> = {}): BootstrapOrchestrator {
     return new BootstrapOrchestrator({
       db,
       bootstrapRepo: new BootstrapRepository(db),
@@ -187,6 +193,7 @@ describe("bundle contents are routed before any seat launches", () => {
       podBundleSourceResolver: new PodBundleSourceResolver(),
       podInstantiator: podInstantiator as never,
       routeBundleContents: route ?? ((p) => routeBundleContents(p, { onContextPacksRouted: () => { rescans += 1; } })),
+      ...extra,
     });
   }
 
@@ -200,6 +207,24 @@ describe("bundle contents are routed before any seat launches", () => {
     expect(result.bundleRouting?.contextPacksRouting?.routedCount).toBe(1);
     expect(result.bundleRouting?.routingFailures).toBeUndefined();
     expect(result.stages.find((s) => s.stage === "route_bundle_contents")?.status).toBe("ok");
+  });
+
+  it("routes a service bundle's context pack after boot and before its first seat", async () => {
+    vi.stubEnv("OPENRIG_BUNDLE_SERVICES_ENABLED", "true");
+    serviceRepo = new RigRepository(db);
+    const boot = vi.fn(async (rigId: string) => {
+      expect(fs.existsSync(serviceRepo!.getServicesRecord(rigId)!.composeFile)).toBe(true);
+      expect(seenAtLaunch).toBeNull();
+      expect(rescans).toBe(0);
+      return { ok: true, health: "healthy", receipt: {} };
+    });
+    const result = await orchestrator(undefined, { rigRepo: serviceRepo, serviceOrchestrator: { boot } as never }).bootstrap({
+      mode: "apply", sourceRef: await buildBundleWithPack(workDir, PACK_MANIFEST, true), sourceKind: "rig_bundle", targetRoot: path.join(workDir, "target"),
+    });
+    expect(result.status, JSON.stringify(result)).toBe("completed");
+    expect(boot).toHaveBeenCalledOnce();
+    expect(seenAtLaunch).toEqual({ packOnDisk: true, rescans: 1 });
+    expect(result.bundleRouting?.contextPacksRouting?.routedCount).toBe(1);
   });
 
   it("reports a routing failure as a warning and still launches the rig", async () => {

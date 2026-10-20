@@ -53,6 +53,7 @@ import {
   pad2,
   readFrontmatter,
   resolveNotesFile,
+  readProjectMissionsRoot,
   resolveMissionsRoot,
   splitFrontmatter,
   todayDateISO,
@@ -785,6 +786,38 @@ function buildMissionShowCommand(): Command {
     });
 }
 
+function resolveMissionCreateRoot(override: string | null | undefined, advisories: string[]): string {
+  const selected = override ?? process.env.OPENRIG_WORK_ROOT;
+  if (!selected) return resolveMissionsRoot();
+
+  const candidate = path.isAbsolute(selected) ? selected : path.resolve(process.cwd(), selected);
+  const childMissionsRoot = path.join(candidate, "missions");
+  const hasChildMissionsRoot =
+    fs.existsSync(childMissionsRoot) && fs.statSync(childMissionsRoot).isDirectory();
+  const directMissionsRoot = path.basename(candidate) === "missions" && !hasChildMissionsRoot;
+  const workspaceRoot = directMissionsRoot ? path.dirname(candidate) : candidate;
+  // A missing workspace is created at the named path by the mission's own mkdir, after rendering; it never falls
+  // back to the configured root. A path that can't be created reports the filesystem's own error there.
+
+  // A named workspace uses its project.yaml missions.root, as work positions do; a named missions folder is used as is.
+  const missionsRoot = directMissionsRoot ? candidate : readProjectMissionsRoot(workspaceRoot, advisories);
+  if (!missionsRoot) {
+    throw new ScopeCliError({
+      fact: `project.yaml missions.root in ${workspaceRoot} resolves outside the workspace.`,
+      consequence: "Mission not created.",
+      action: "Set missions.root to a relative path inside the workspace.",
+    });
+  }
+  if (fs.existsSync(missionsRoot) && !fs.statSync(missionsRoot).isDirectory()) {
+    throw new ScopeCliError({
+      fact: `Mission root is not a directory: ${missionsRoot}.`,
+      consequence: "Mission not created.",
+      action: "Move the conflicting path and retry mission creation.",
+    });
+  }
+  return missionsRoot;
+}
+
 function buildMissionCreateCommand(): Command {
   return new Command("create")
     .description("Create a new mission with SPEC.md and mission.yaml (mints a stable dot-ID into frontmatter)")
@@ -809,7 +842,8 @@ function buildMissionCreateCommand(): Command {
             action: "Pick a name with no whitespace or path separators.",
           });
         }
-        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
+        const rootAdvisories: string[] = [];
+        const missionsRoot = resolveMissionCreateRoot(getOpts(command).workspace, rootAdvisories);
         const absPath = path.join(missionsRoot, name);
         if (fs.existsSync(absPath)) {
           throw new ScopeCliError({
@@ -937,9 +971,13 @@ function buildMissionCreateCommand(): Command {
           humanLines.push(`  notes: ${notesPath} (template: ${notesRendered?.resolvedFrom})`);
         }
         if (capabilityDeltaPath) humanLines.push(`  capability delta: ${capabilityDeltaPath}`);
-        if (notesRendered?.resolvedFrom === "legacy-env") {
-          humanLines.push("  advisory: OPENRIG_MISSION_NOTES_TEMPLATE_PATH is deprecated; use OPENRIG_NOTES_TEMPLATE_PATH");
-        }
+        const advisories = [
+          ...rootAdvisories,
+          ...(notesRendered?.resolvedFrom === "legacy-env"
+            ? ["OPENRIG_MISSION_NOTES_TEMPLATE_PATH is deprecated; use OPENRIG_NOTES_TEMPLATE_PATH"]
+            : []),
+        ];
+        for (const advisory of advisories) humanLines.push(`  advisory: ${advisory}`);
         emit(out, {
           ok: true,
           mission: {
@@ -951,9 +989,7 @@ function buildMissionCreateCommand(): Command {
             notesPath,
             capabilityDeltaPath,
             notesResolvedFrom: notesRendered?.resolvedFrom ?? null,
-            advisories: notesRendered?.resolvedFrom === "legacy-env"
-              ? ["OPENRIG_MISSION_NOTES_TEMPLATE_PATH is deprecated; use OPENRIG_NOTES_TEMPLATE_PATH"]
-              : [],
+            advisories,
           },
         }, json, humanLines);
       } catch (err) {
@@ -2105,7 +2141,7 @@ function shadowedNodeFileFinding(dir: string, level: "mission" | "slice"): {
 export function scopeCommand(): Command {
   const cmd = new Command("scope")
     .description("Scope tree primitive: missions, slices, sub-slices (per conventions/scope-and-versioning)")
-    .option("--workspace <path>", "Override workspace root (otherwise inferred from cwd or $OPENRIG_WORK_ROOT)");
+    .option("--workspace <path>", "Workspace root; use its project.yaml missions.root, else missions/. A directory named missions without its own missions/ child is used directly. If the tree is missing, fall back to configured workspace.slices_root, except mission create, which creates the named tree, and approve, which refuses. Without this flag, OPENRIG_WORK_ROOT is tried first with the same exceptions.");
 
   const slice = new Command("slice").description("Slice-tier commands");
   slice.addCommand(buildSliceLsCommand());

@@ -48,15 +48,22 @@ export type RecentQueueTransitionScope = { kind: "instance" } | { kind: "rig"; r
 
 /** A compact product event derived only from typed queue state and closure fields.
  * The authored queue summary is presentation only; it never participates in
- * event normalization. transition_note and body remain excluded so prose cannot
- * silently become event semantics. */
+ * event normalization. transition_note and body remain excluded from event
+ * semantics so prose cannot silently become one; `bodyPreview` below is display text only. */
 export interface RecentQueueTransition {
   transitionId: number;
   qitemId: string;
   ts: string;
   actorSession: string;
   change: string;
+  /** The authored queue summary, trimmed; null when the row has none. Never filled with derived text. */
   summary: string | null;
+  /** Display text derived from the body, only for a row with no authored summary (null otherwise).
+   * It is the first non-blank line within the first 2,000 characters of the body, trimmed and cut to at
+   * most 240 code points (the last three being "..." when cut). It is null when the summary is
+   * present, the body is empty, or no non-blank line occurs within those 2,000 characters. SQLite's text
+   * substr stops at an embedded NUL, so the line also ends there, and a NUL before any text gives null. */
+  bodyPreview: string | null;
   rig: string;
   targetKind: RecentQueueTransitionTargetKind;
   target: string;
@@ -86,9 +93,26 @@ interface RecentQueueTransitionRow {
   closure_target: string | null;
   tags: string | null;
   summary: string | null;
+  /** The first 2,000 characters of the body, read only when the summary is blank (null otherwise). */
+  body_head: string | null;
   previous_state: string | null;
   destination_session: string;
   source_session: string;
+}
+
+/** How much of a body is read for bodyPreview, and the longest preview shown (the Story card's preview bound). */
+const BODY_HEAD_CODE_POINTS = 2000;
+const BODY_PREVIEW_MAX_CODE_POINTS = 240;
+/** The characters String.prototype.trim() strips, for SQLite's ltrim (whose default strips spaces only): a summary made of
+ * these alone is blank, which is when the body is read for bodyPreview. */
+const TRIM_CHARS = String.fromCharCode(9, 10, 11, 12, 13, 32, 160, 5760, ...Array.from({ length: 11 }, (_, i) => 8192 + i), 8232, 8233, 8239, 8287, 12288, 65279);
+/** The first non-blank line of a body's head, for a row that has no summary: the rule the TUI already applied
+ * to rows it had loaded. Cut by code point, so a multibyte character is never split. */
+function bodyPreview(bodyHead: string | null): string | null {
+  const line = bodyHead?.split("\n").find((candidate) => candidate.trim())?.trim();
+  if (!line) return null;
+  const points = Array.from(line);
+  return points.length > BODY_PREVIEW_MAX_CODE_POINTS ? `${points.slice(0, BODY_PREVIEW_MAX_CODE_POINTS - 3).join("")}...` : line;
 }
 
 function sessionRig(session: string, knownRigs: ReadonlySet<string>): string | null {
@@ -316,6 +340,7 @@ export class QueueTransitionLog {
         actorSession: row.actor_session,
         change,
         summary: row.summary?.trim() || null,
+        bodyPreview: row.body_head === null ? null : bodyPreview(row.body_head),
         rig,
         ...recentTarget(row),
       }];
@@ -343,7 +368,7 @@ export class QueueTransitionLog {
       `SELECT MAX(transition_id) AS transition_id, state FROM ${table} WHERE qitem_id = ? AND transition_id < ?`,
     ));
     const metadata = this.db.prepare(
-      "SELECT tags, summary, destination_session, source_session FROM queue_items WHERE qitem_id = ?",
+      "SELECT tags, summary, destination_session, source_session, CASE WHEN summary IS NULL OR ltrim(summary, ?) = '' THEN substr(body, 1, ?) END AS body_head FROM queue_items WHERE qitem_id = ?",
     );
     type WalkedRow = Pick<RecentQueueTransitionRow, "transition_id" | "qitem_id" | "ts" | "state" | "actor_session" | "closure_reason" | "closure_target">;
     const previousState = (row: WalkedRow): string | null => {
@@ -360,7 +385,7 @@ export class QueueTransitionLog {
     for (const row of walk.iterate(...scopeParams) as Iterable<WalkedRow>) {
       const previous = row.state === "in-progress" || row.state === "blocked" ? previousState(row) : null;
       if (!qualifiesAsRecent(row, previous)) continue;
-      const item = metadata.get(row.qitem_id) as Pick<RecentQueueTransitionRow, "tags" | "summary" | "destination_session" | "source_session">;
+      const item = metadata.get(TRIM_CHARS, BODY_HEAD_CODE_POINTS, row.qitem_id) as Pick<RecentQueueTransitionRow, "tags" | "summary" | "destination_session" | "source_session" | "body_head">;
       rows.push({ ...row, ...item, previous_state: previous });
       if (rows.length >= limit) break;
     }
@@ -383,14 +408,51 @@ export class QueueTransitionLog {
     return row ? this.rowToTransition(row) : null;
   }
 
+  private ownerNotificationsStatement?: Database.Statement;
+
+  /** The owner notifications a delivery ledger reads, by qitem, newest first: a qitem's latest (the first,
+   *  latestOwnerNotificationForQitem's), and its latest outbound one (a kind other than human-decision-resolved) when
+   *  that is older. One read for a whole listing. */
+  ownerNotificationsForQitems(qitemIds: readonly string[]): Map<string, QueueTransition[]> {
+    const byQitem = new Map<string, QueueTransition[]>();
+    if (!this.hasOwnerNotificationColumns || qitemIds.length === 0) return byQitem;
+    this.ownerNotificationsStatement ??= this.db.prepare(
+      `SELECT * FROM (
+         SELECT history.*, ROW_NUMBER() OVER (
+           PARTITION BY qitem_id, (owner_notification_kind IS NOT NULL AND owner_notification_kind != 'human-decision-resolved')
+           ORDER BY transition_id DESC) AS newest
+           FROM ${this.historySource} history
+          WHERE qitem_id IN (SELECT value FROM json_each(?)) AND owner_notification_level IS NOT NULL)
+        WHERE newest = 1
+        ORDER BY transition_id DESC`,
+    );
+    for (const row of this.ownerNotificationsStatement.all(JSON.stringify(qitemIds)) as QueueTransitionRow[]) {
+      const transitions = byQitem.get(row.qitem_id);
+      if (transitions) transitions.push(this.rowToTransition(row));
+      else byQitem.set(row.qitem_id, [this.rowToTransition(row)]);
+    }
+    return byQitem;
+  }
+
   hasOwnerNotificationReceipt(qitemId: string, notificationKey: string): boolean {
+    return this.getOwnerNotificationReceipt(qitemId, notificationKey) !== null;
+  }
+
+  getOwnerNotificationReceipt(qitemId: string, notificationKey: string): { messageTs: string | null; threadTs: string | null; digest: string | null } | null {
     const rows = this.db
       .prepare(
         `SELECT transition_note FROM ${this.historySource}
-          WHERE qitem_id = ? AND transition_note LIKE 'slack-owner-notification-posted %'`,
+          WHERE qitem_id = ? AND transition_note LIKE 'slack-owner-notification-posted %'
+          ORDER BY transition_id DESC`,
       )
       .all(qitemId) as Array<{ transition_note: string }>;
-    return rows.some((row) => row.transition_note.split(/\s+/).includes(`notification_key=${notificationKey}`));
+    for (const row of rows) {
+      const fields = row.transition_note.split(/\s+/);
+      if (!fields.includes(`notification_key=${notificationKey}`)) continue;
+      const value = (name: string) => fields.find((field) => field.startsWith(`${name}=`))?.slice(name.length + 1) ?? null;
+      return { messageTs: value("message_ts"), threadTs: value("thread_ts"), digest: value("digest") };
+    }
+    return null;
   }
 
   private rowToTransition(row: QueueTransitionRow): QueueTransition {

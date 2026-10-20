@@ -257,7 +257,8 @@ describe("codexUsageReader against a fake codex app-server", () => {
 
   it("U3 failure reasons: rpc error, timeout, child exit", async () => {
     const fake = makeFakeCodex();
-    fake.setPlan({ mode: "rpc_error" });
+    // A signed-in account (a signed-out one is now not_signed_in: provider-sign-in-fact.test.ts).
+    fake.setPlan({ mode: "rpc_error", account: ACCOUNT_ANSWER });
     expect(await reader(fake)()).toMatchObject({ ok: false, reason: "rpc_error", detail: "codex app-server returned an error for account/rateLimits/read: backend unavailable" });
     fake.setPlan({ mode: "hang" });
     expect(await reader(fake, 400)()).toMatchObject({ ok: false, reason: "timeout", detail: "codex app-server did not answer within 400 ms" });

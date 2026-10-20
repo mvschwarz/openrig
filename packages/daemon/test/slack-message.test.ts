@@ -341,3 +341,16 @@ describe("#1013 — a workflow gate parked on a human seat renders the question,
     expect(m.text).not.toContain("step ");
   });
 });
+
+
+describe("question and conversation cues", () => {
+  it("marks a human-required question as answerable without labelling an ordinary update an answer", () => {
+    const question = { qitemId: "q", ownerNotificationKind: "human-required", summary: "Which branch?", body: "Choose a branch." };
+    const shown = buildOutboundMessage(question, { sourceLabel: "fixture" });
+    expect(shown.text).toContain("Reply in this thread after this question to answer it.");
+    expect(JSON.stringify(shown.blocks)).toContain("Earlier and extra messages still reach the agent as conversation.");
+    const update = buildOutboundMessage({ ...question, ownerNotificationKind: "human-update" }, { sourceLabel: "fixture" });
+    expect(update.text).not.toContain("to answer it");
+    expect(JSON.stringify(update.blocks)).not.toContain("to answer it");
+  });
+});

@@ -20,7 +20,7 @@ import type { ConnectionsRead, ControlPlaneRead, SlackManifestRead } from "./con
 import type { UsageRead } from "./usage/usage-model.js";
 import { DaemonClient } from "./daemon-client.js";
 import { parse as parseYaml } from "yaml";
-import type { AgentRow, FleetSnapshot, HealthCoverage, HealthRecord, HostNode, NeedsItem, PodNode, QueueRead, RecentTransitionSnap, SeatActivitySummary, SliceDetailSnap, SpecEntry, ViewState } from "./types.js";
+import type { AgentRow, FleetSnapshot, HealthCoverage, HealthRecord, HostNode, NeedsItem, PodNode, QueueRead, RecentTransitionSnap, SeatActivitySummary, SeatEffortRead, SliceDetailSnap, SpecEntry, ViewState } from "./types.js";
 import { isHumanSeatSession } from "./pulse/pulse-model.js";
 
 // Narrow read-shapes: just the served fields this module consumes (names match
@@ -55,6 +55,9 @@ interface NodeInventoryRead {
   nodeKind: "agent" | "infrastructure";
   runtime: string | null;
   model?: string | null;
+  /** Configured launch effort and its provenance, served by the node inventory. */
+  effort?: string | null;
+  effortSource?: "seat_choice" | "authored" | "runtime_default" | null;
   lifecycleState: string;
   sessionStatus?: string | null;
   startupStatus?: string | null;
@@ -76,6 +79,8 @@ interface NodeInventoryRead {
     decidedBy?: string | null;
   } | null;
   identityVerdict?: { verdict?: string; reason?: string | null } | null;
+  /** Present only on a community harness's seat. */
+  communityHarness?: { harness: string } | null;
   canonicalSessionName: string | null;
   tmuxAttachCommand?: string | null;
   cwd?: string | null;
@@ -221,6 +226,8 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
     name: node.logicalId,
     runtime: node.runtime ?? "unknown",
     model: node.model ?? null,
+    effort: node.effort ?? null,
+    effortSource: node.effortSource ?? null,
     spec: node.resolvedSpecName ?? "",
     profile: node.profile ?? null,
     specVersion: node.resolvedSpecVersion ?? null,
@@ -265,7 +272,9 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
                   ? "active"
                   : node.activityState?.display === "idle"
                     ? "idle"
-                    : (node.terminalActive === true || (node.terminalActive == null && node.agentActivity?.state === "running") ? "active" : "idle"))
+                    : (node.terminalActive === true || (node.terminalActive == null && node.agentActivity?.state === "running") ? "active"
+                      // A community harness gives no idle signal: a quiet screen is unknown, not idle.
+                      : node.communityHarness ? "unknown" : "idle"))
               : (node.sessionStatus ?? "unknown"),
     live: node.lifecycleState === "running",
     canRun: node.lifecycleState !== "running"
@@ -485,8 +494,14 @@ export async function hydrateSnapshot(
   const wantsGraph = wantsTopologyScope && (!viewContext || viewContext.viewTab === "graph");
   // A pending pod/agent address needs every rig's seats to resolve.
   const pendingInventory = viewContext?.pendingDrill?.resource === "pod" || viewContext?.pendingDrill?.resource === "agent";
+  // Agent detail: read the existing seat-effort report once per refresh. It reads
+  // the running process and native transcript, never launches or restarts anything.
+  const drillRig = [...(viewContext?.drill ?? [])].reverse().find((segment) => segment.kind === "rig")?.name
+    ?? currentRigName
+    ?? null;
+  const seatEffortRef = topologyLeaf?.kind === "agent" && drillRig ? `${topologyLeaf.name}@${drillRig}` : null;
 
-  const [instanceHealth, healthProjection, agg, summaries, library, review, streamItems, attention, blocked, inProgress, pending, recentlyFinished, scopesRead, executionRead, sliceDetailRead, connectionsRead] = await Promise.all([
+  const [instanceHealth, healthProjection, agg, summaries, library, review, streamItems, attention, blocked, inProgress, pending, recentlyFinished, scopesRead, executionRead, sliceDetailRead, connectionsRead, seatEffortRead] = await Promise.all([
     safe<InstanceHealthRead>("health", () => client.health()),
     !healthRequested ? Promise.resolve(null) : safe<HealthProjectionRead>("health-findings", () => client.healthFindings()),
     !broadReads ? Promise.resolve(null) : safe<AttentionAggregateRead>("attention-aggregate", () => client.attentionAggregate()),
@@ -507,6 +522,7 @@ export async function hydrateSnapshot(
       ? safe<SliceDetailSnap>(`slice-detail(${sliceDetailName})`, () => client.sliceDetail(sliceDetailName))
       : Promise.resolve(null),
     wantsConnections ? safe<ConnectionsRead>("connections", () => client.connections()) : Promise.resolve(null),
+    seatEffortRef ? safe<SeatEffortRead>("seat-effort", () => client.seatEffort(seatEffortRef)) : Promise.resolve(null),
   ]);
 
   // Optional: an older daemon has no manifest route; the page then points at the CLI instead.
@@ -752,6 +768,9 @@ export async function hydrateSnapshot(
 
   return {
     connections: connectionsRead,
+    // Keep the address even when the read failed: the detail page then says the
+    // report was not read instead of silently omitting the effort section.
+    ...(seatEffortRef ? { seatEffort: { seatRef: seatEffortRef, report: seatEffortRead } } : {}),
     controlPlane: instanceHealth,
     slackManifest,
     daemonTarget: (() => { try { const u = new URL(client.baseUrl); return `${u.protocol}//${u.host}${u.pathname}`; } catch { return "unreported"; } })(),

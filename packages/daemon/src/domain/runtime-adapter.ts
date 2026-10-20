@@ -106,6 +106,19 @@ export type HarnessLaunchResult =
   // conversation doesn't exist; other `retry_fresh` failures (such as a pane back at its shell)
   // leave it unset.
   | { ok: false; error: string; recovery?: HarnessLaunchRecovery; evidence?: string; missingConversation?: true;
+    /** The native resume probe's code for the startup gate that stopped the launch (for example `hook_trust_gate`),
+     *  when one did. Reporting only: it changes no recovery decision. */
+    gate?: string;
+    /** Reporting only, with `gate: "update_gate"`: whether that screen offered a choice (an update prompt with a skip
+     *  option) rather than an update already in progress. */
+    gateChoice?: boolean;
+    /** Reporting only: what the resume verification itself typed into the pane. */
+    verifierInput?: "none" | "update_skip_key_sent" | "update_skip_key_failed";
+    /** Reporting only: the reported screen is the last one seen before the verification's own input (`verifierInput`);
+     *  nothing after that input was observed. */
+    screenBeforeInput?: true;
+    /** The native fork command was sent, but its child identity is not yet available. */
+    forkIdentityPending?: boolean;
     launchedProcess?: import("./native-process-lineage.js").ClaudeLaunchedProcess };
 
 // -- Shared concrete-hint resolver --
@@ -180,8 +193,15 @@ export interface RuntimeAdapter {
    */
   launchHarness(
     binding: NodeBinding,
-    opts: { name: string; resumeToken?: string; forkSource?: ForkSource },
+    opts: { name: string; resumeToken?: string; forkSource?: ForkSource;
+      /** Fresh successor in the retired occupant's pane; not an adopt, resume or fork. */
+      freshInPlace?: boolean },
   ): Promise<HarnessLaunchResult>;
+
+  /** Observe an already launched fork without sending input or starting another process. */
+  captureForkIdentity?(
+    binding: NodeBinding, parentToken: string,
+  ): Promise<{ resumeToken: string; resumeType: string } | null>;
 
   /** Check if the runtime harness is responsive and ready. */
   checkReady(binding: NodeBinding): Promise<ReadinessResult>;

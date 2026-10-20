@@ -122,7 +122,8 @@ describe("#275 codexNetworkDefaultReader (fake codex)", () => {
     const result = await codexNetworkDefaultReader({ launchPath: f.launchPath, graceMs: 200 })(f.cwd);
     expect(result.apply).toBe(true);
     const grandchild = Number(fs.readFileSync(nodePath.join(f.bin, "grandchild.pid"), "utf8"));
-    expect(alive(grandchild)).toBe(false);
+    // Group cleanup is bounded; allow the OS to finish reaping the orphaned descendant.
+    await expect.poll(() => alive(grandchild), { timeout: 2_000 }).toBe(false);
   });
 
   it("a missing executable or an early exit adds nothing", async () => {

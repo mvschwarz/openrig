@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
+import { decodeStoredSnapshotData } from "./snapshot-repository.js";
 import { resolve } from "node:path";
 import { ulid } from "ulid";
 import { deriveComposeProjectName } from "./compose-project-name.js";
@@ -34,7 +35,7 @@ interface SnapshotRow { id: string; rig_id: string; kind: string; status: string
 function snapshotFromRowIfUsable(row: SnapshotRow): Snapshot | null {
   let data: SnapshotData;
   try {
-    data = JSON.parse(row.data) as SnapshotData;
+    data = decodeStoredSnapshotData(row.data);
   } catch {
     return null;
   }
@@ -515,6 +516,13 @@ export class RigRepository {
       .prepare("UPDATE nodes SET model = ? WHERE id = ?")
       .run(model, nodeId);
     return result.changes > 0;
+  }
+
+  /** Saves a seat's launch directory only if it's still `expectedCwd`. The lifecycle service checks the new
+   *  directory, read-only, before calling this; it writes no startup files. */
+  setNodeCwd(nodeId: string, cwd: string, expectedCwd: string | null): boolean {
+    return this.db.prepare("UPDATE nodes SET cwd = ? WHERE id = ? AND cwd IS ?")
+      .run(cwd, nodeId, expectedCwd).changes > 0;
   }
 
   setNodeEffort(nodeId: string, effort: string): boolean {

@@ -11,6 +11,8 @@ import { getOpenRigHome } from "../../../openrig-compat.js";
 import { OWNER_NOTIFICATION_LEVELS, type OwnerNotificationLevel } from "../../queue-transition-log.js";
 import { BASELINE_REQUIRED_SCOPES } from "./capabilities.js";
 import { unsupportedChannelMapFields, validateChannelMap, type ChannelMapEntry } from "./channel-map.js";
+import { botInboxProblems, type BotInboxConfig } from "./bot-inbox.js";
+import { forwardChannelProblems, type ForwardChannel } from "./forwarding.js";
 
 export interface SlackConnectorConfig {
   enabled: boolean;
@@ -41,6 +43,18 @@ export interface SlackConnectorConfig {
    * it saves and digests unchanged.
    */
   channelMap?: ChannelMapEntry[];
+  /**
+   * Optional named-bot delivery (bot-inbox.ts): posts by the named bots in one channel reach one seat,
+   * marked as a bot. Absent = every bot post is dropped, as before. Not in DEFAULT_CONFIG, like
+   * `channelMap`. An invalid block leaves the bot inbox off and is named by staticReadiness.
+   */
+  botInbox?: BotInboxConfig;
+  /**
+   * One shared app across machines: on the hub (the machine with the app-level token), the
+   * channels another machine owns, each relayed to that machine's daemon (forwarding.ts). Absent =
+   * every channel is handled here, as before. Not in DEFAULT_CONFIG, like `channelMap`.
+   */
+  forwardChannels?: ForwardChannel[];
 }
 
 export const DEFAULT_CONFIG: SlackConnectorConfig = {
@@ -123,7 +137,31 @@ export function staticReadiness(cfg: SlackConnectorConfig, hasBotToken: boolean,
     { ok: Boolean(cfg.inboundDestination), label: "inbound-destination", detail: cfg.inboundDestination },
     { ok: cfg.enabled, label: "enabled", detail: cfg.enabled ? "yes" : "no (run `rig slack enable`)" },
     ...channelMapReadiness(cfg),
+    ...botInboxReadiness(cfg),
+    ...forwardReadiness(cfg),
   ];
+}
+
+/** One row only when a bot inbox is set: what it delivers, or why it is off. */
+function botInboxReadiness(cfg: SlackConnectorConfig): ReadinessItem[] {
+  if (cfg.botInbox === undefined) return [];
+  const problems = botInboxProblems(cfg);
+  if (problems.length) return [{ ok: false, label: "bot-inbox", detail: `OFF: ${problems.join("; ")}` }];
+  const { channel, destination, bots } = cfg.botInbox;
+  return [{
+    ok: true,
+    label: "bot-inbox",
+    detail: `${bots.length} named bot(s) in ${channel}, delivered to ${destination}; needs users:read and the app in that channel (\`rig slack verify\` only warns on a missing users:read, and doesn't check this channel)`,
+  }];
+}
+
+/** One row only when channels are forwarded: where they go, or why forwarding is off. */
+function forwardReadiness(cfg: SlackConnectorConfig): ReadinessItem[] {
+  if (cfg.forwardChannels === undefined) return [];
+  const problems = forwardChannelProblems(cfg);
+  if (problems.length) return [{ ok: false, label: "forward-channels", detail: `OFF: ${problems.join("; ")}` }];
+  const hosts = [...new Set(cfg.forwardChannels.map((f) => f.host))];
+  return [{ ok: true, label: "forward-channels", detail: `${cfg.forwardChannels.length} channel(s) relayed to ${hosts.join(", ")}; each host needs an http entry (rig host list) and the app token here` }];
 }
 
 /** #192: one row only when a channel map is set. Fields this version does not support make the

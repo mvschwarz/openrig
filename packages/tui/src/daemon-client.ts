@@ -285,6 +285,27 @@ export class DaemonClient {
   rigNodes(rigId: string) {
     return this.get(`/api/rigs/${encodeURIComponent(rigId)}/nodes`);
   }
+  /** The existing per-seat effort report: requested, saved, emitted and observed. */
+  async seatEffort(seatRef: string): Promise<unknown> {
+    const route = `/api/seat/effort/${encodeURIComponent(seatRef)}`;
+    const res = await this.fetchImpl(`${this.baseUrl}${route}`, {
+      headers: this.headers,
+      signal: AbortSignal.timeout(5_000),
+    });
+    const parsed = await res.json().catch(() => null);
+    if (res.ok) return parsed;
+    if (parsed && typeof parsed === "object"
+      && (parsed as { ok?: unknown }).ok === false
+      && typeof (parsed as { code?: unknown }).code === "string"
+      && typeof (parsed as { message?: unknown }).message === "string") {
+      return parsed;
+    }
+    if (res.status === 404 && parsed == null) return null;
+    const detail = parsed && typeof parsed === "object" && "error" in parsed
+      ? ` — ${(parsed as { error: unknown }).error}`
+      : "";
+    throw new Error(`daemon read failed: GET ${route} → ${res.status}${detail}`);
+  }
   reviewAgents(scope: "rig" | "fleet" = "rig") {
     return this.get(`/api/review/agents?scope=${scope}`);
   }

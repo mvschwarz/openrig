@@ -90,6 +90,17 @@ describe("rig provider status — usage windows", () => {
     expect(out).not.toContain("USAGE");
   });
 
+  it("shows why current availability is unknown even when a Claude row has windows", async () => {
+    model = { ...MODEL, usage: [{ ...READING, provider: "claude", unavailableReason: "Windows are seat samples, not a current availability check." }] };
+    const { out, exitCode } = await run(["status"], port);
+    expect(exitCode).toBeFalsy();
+    expect(out).toContain("5h (primary)");
+    expect(out).toContain("current availability: unknown");
+    expect(out).toContain("Windows are seat samples, not a current availability check.");
+    const json = await run(["status", "--json"], port);
+    expect(JSON.parse(json.out)).toEqual(model);
+  });
+
   it("an allowance row: identity labels, each window's level and freshness with its own time, limit evidence, the failure beside the reading", async () => {
     model = { ...MODEL, usage: [READING] };
     const { out } = await run(["status"], port);
@@ -102,6 +113,51 @@ describe("rig provider status — usage windows", () => {
       "    refresh failed at 2026-10-12T20:05:00.000Z: timeout (codex app-server did not answer within 35000 ms); last reading kept, marked old",
       "    current availability: unknown",
     ].join("\n"));
+  });
+
+  it("reading history: a retained row's label, a window's expectation, the last exhaustion, the account link and the profile", async () => {
+    const win = { ...READING.windows[0], level: "unknown", levelReason: "reset passed at R; a new reading is needed",
+      expectation: { expectedFullSince: "R", note: "planning, not a reading: expected to have been replenished at its reset; current remaining isn't observed, and use since the reset is unknown" } };
+    model = { ...MODEL, usage: [
+      { ...READING, windows: [win], latestFromSource: false, retained: "before_restart", accountHistory: "linked",
+        lastObservedExhausted: { at: "E", window: "primary", evidence: "rate_limit_reached" }, savedProfile: "not linked" },
+      { ...READING, provider: "claude", accountHistory: "unknown" },
+    ] };
+    const { out } = await run(["status"], port);
+    expect(out).toContain("  [kept from before the daemon restarted; not a current reading]");
+    expect(out).toContain("      expected full since R, not yet observed (planning, not a reading: expected to have been replenished at its reset; current remaining isn't observed, and use since the reset is unknown)");
+    expect(out).toContain("    last observed exhausted at E (primary: rate_limit_reached)");
+    expect(out).toContain("    saved profile: not linked (OpenRig doesn't record which saved profile was active at this read)");
+    expect(out).toContain("    account history unknown");
+  });
+
+  it("the sign-in fact prints after availability, with its evidence and time; an unavailable row prints it too", async () => {
+    model = { ...MODEL, usage: [
+      { ...READING, signIn: { state: "usable", evidence: "the refresh's rate-limit read was answered for this login (the daemon's CODEX_HOME)", at: "2026-10-12T20:00:00.000Z" } },
+      { provider: "codex", identity: null, windows: [], unavailableReason: "refresh failed at T: not_signed_in; no earlier reading since the daemon started at S",
+        lastRefresh: { at: "T", outcome: "failed", reason: "not_signed_in", detail: "no account" },
+        signIn: { state: "needs_sign_in", evidence: "the refresh's account/read reported no signed-in account", at: "T" } },
+      { ...READING, latestFromSource: false, signIn: { state: "unknown", evidence: "not the latest read: a later refresh read another one", at: null } },
+    ] };
+    const { out } = await run(["status"], port);
+    expect(out).toContain("    current availability: unknown\n    sign-in: usable (the refresh's rate-limit read was answered for this login (the daemon's CODEX_HOME); as of 2026-10-12T20:00:00.000Z)");
+    expect(out).toContain("  codex  unavailable: refresh failed at T: not_signed_in; no earlier reading since the daemon started at S\n    sign-in: needs sign-in (the refresh's account/read reported no signed-in account; as of T)");
+    expect(out).toContain("    sign-in: unknown (not the latest read: a later refresh read another one)");
+  });
+
+  it("CHANGED: a row with windows whose availability is unknown prints its reason too", async () => {
+    model = { ...MODEL, usage: [{ ...READING, unavailableReason: "no sample-time link between these seats' readings and this login" }] };
+    const { out } = await run(["status"], port);
+    expect(out).toContain("    no sample-time link between these seats' readings and this login");
+  });
+
+  it("a row with no identity yet still prints its history lines, before its sign-in line", async () => {
+    model = { ...MODEL, usage: [
+      { provider: "claude", identity: null, windows: [], unavailableReason: "identity not read yet", accountHistory: "unknown",
+        signIn: { state: "unknown", evidence: "no refresh since the daemon started at S", at: null } },
+    ] };
+    const { out } = await run(["status"], port);
+    expect(out).toContain("  claude  unavailable: identity not read yet\n    account history unknown\n    sign-in: unknown (no refresh since the daemon started at S)");
   });
 
   it("an unavailable row and a last-seen row say so", async () => {

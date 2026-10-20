@@ -83,6 +83,12 @@ function renderCapture(data: Record<string, unknown>): void {
     if (typeof omitted === "number" && omitted > 0) {
       console.error(`[rig capture: ${r["sessionName"]}: ${omitted} earlier line${omitted === 1 ? "" : "s"} not shown; last ${r["lines"]} shown; activity unknown: rig ps --nodes]`);
     }
+    // A Claude Code or Codex seat's input box: whether its text is likely a harness suggestion or typed, on stderr so
+    // the pane text on stdout is unchanged. An empty box, or a screen with no box, needs no note.
+    const box = r["inputBox"] as { status?: string; hint?: string } | undefined;
+    if (box && typeof box.hint === "string" && box.status !== "empty" && box.status !== "no-input-box") {
+      console.error(`[rig capture: ${r["sessionName"]}: input box: ${box.hint}]`);
+    }
   };
 
   // Multi-target result
@@ -134,6 +140,12 @@ Examples:
   rig capture --host remote-dev dev-impl@my-rig --lines 50
 
 Supported notes:
+  - For a Claude Code or Codex seat, an "[rig capture: ...: input box: ...]" note on stderr says
+    what the live input box holds: text the person likely typed, or text that is likely a harness
+    suggestion (ghost text), judged from where the cursor is and whether the text is drawn faint.
+    A suggestion isn't the person's intent, a draft or a staged command. Ambiguous evidence says
+    unknown. --json has it as inputBox: status, confidence, the cursor and the input and
+    suggestion regions on the visible screen (zero-based rows and columns), evidence and hint.
   - --lines N shows at most the last N lines, counted up from the last non-blank line. When lines
     above them are left out, a "[rig capture: ...]" note on stderr says how many; --json reports
     lines (returned), requestedLines and omittedLines. Trailing rows that are entirely whitespace
@@ -201,6 +213,7 @@ Supported notes:
       if (opts.rig) body.rig = opts.rig;
       if (opts.pod) body.pod = opts.pod;
       if (session) body.session = session;
+      body.inputBox = true; // the input box note; a daemon without it ignores the field
 
       const res = await client.post<Record<string, unknown>>("/api/transport/capture", body, { headers: terminalAuthHeaders() });
       if (res.status < 400) res.data = withExactLines(res.data, opts.exactLines);
@@ -305,6 +318,7 @@ async function runHttpHostCapture(
   if (opts.rig) body.rig = opts.rig;
   if (opts.pod) body.pod = opts.pod;
   if (session) body.session = session;
+  body.inputBox = true;
 
   const result = await runRemoteHttpOp(host.id, "POST", "/api/transport/capture", body, deps, {});
   if (result.ok) result.data = withExactLines(result.data, opts.exactLines);

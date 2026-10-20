@@ -262,6 +262,14 @@ describe("GitHub bundle source", () => {
     expect(f.prepare).not.toHaveBeenCalled(); expect(f.post).not.toHaveBeenCalled();
   });
 
+  it.each([false, true])("forwards only the explicit per-create login opt-in for a GitHub source (%s)", async includeLoginFiles => {
+    const f = fixture();
+    await importGitHubBundle(URL, f.deps, { includeLoginFiles }, f.prepare);
+    const body = f.post.mock.calls[0]![1];
+    if (includeLoginFiles) expect(body.includeLoginFiles).toBe(true);
+    else expect(body).not.toHaveProperty("includeLoginFiles");
+  });
+
   it("uses one create, passes authored minima and source, then cleans only settled input", async () => {
     const f = fixture();
     const result = await importGitHubBundle(URL, f.deps, { minCliVersion: "0.6.6" }, f.prepare);

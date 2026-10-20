@@ -556,12 +556,20 @@ describe("OPR.0.5.3.10 — one census per cycle", () => {
     // — through the census that empty array became a CACHED SUCCESS for the
     // whole freshness window. The census's production seam must reject instead.
     const { defaultListProcessesStrict } = await import("../src/domain/resume-metadata-refresher.js");
+    const { restoreProc, serveProcRoot } = await import("./helpers/fake-proc.js");
     const savedPath = process.env.PATH;
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
     try {
+      // ps is the process table's source off Linux, /proc on Linux: neither can be read.
+      Object.defineProperty(process, "platform", { value: "darwin" });
       process.env.PATH = "/nonexistent-bin";
+      await expect(defaultListProcessesStrict()).rejects.toThrow();
+      serveProcRoot("/nonexistent-proc");
       await expect(defaultListProcessesStrict()).rejects.toThrow();
     } finally {
       process.env.PATH = savedPath;
+      Object.defineProperty(process, "platform", platform);
+      restoreProc();
     }
     const rows = await defaultListProcessesStrict();
     expect(rows.length).toBeGreaterThan(0);

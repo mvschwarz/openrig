@@ -23,6 +23,7 @@ import type { PersistedEvent } from "./types.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { findOtherSessionOwner } from "./session-owner.js";
+import { seatCorePluginDir, withCorePlugin } from "./claude-core-plugin-env.js";
 
 /** A bounded labeled-from-record recap of the predecessor's last exchanges + the record path,
  *  resolved from the predecessor's provider transcript (claude transcript_path / codex rollout_path).
@@ -134,6 +135,8 @@ interface SeatHandoverServiceDeps {
   sessionEnv?: Record<string, string | undefined>;
   /** Extra env for one runtime only (OMP's provider keys), merged over sessionEnv. */
   runtimeSessionEnv?: Record<string, Record<string, string | undefined>>;
+  /** Where the daemon vendors its plugins; default is `plugins` under the OpenRig home (tests). */
+  pluginsDir?: string;
   /** Injectable id source for the successor session name (tests). */
   newSuccessorId?: () => string;
   /** Runtime adapters keyed by runtime — used to launch a fresh successor into
@@ -224,6 +227,7 @@ export class SeatHandoverService {
   private sleep: (ms: number) => Promise<void>;
   private appliedLaunchObservations: AppliedLaunchObservationStore;
   private now: () => Date;
+  private pluginsDir: string | undefined;
 
   constructor(deps: SeatHandoverServiceDeps) {
     if (deps.db !== deps.rigRepo.db) throw new Error("SeatHandoverService: rigRepo must share the same db handle");
@@ -245,6 +249,7 @@ export class SeatHandoverService {
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.appliedLaunchObservations = new AppliedLaunchObservationStore(deps.db);
     this.now = deps.now ?? (() => new Date());
+    this.pluginsDir = deps.pluginsDir;
     this.statusService = new SeatStatusService({ rigRepo: deps.rigRepo });
     this.planner = new SeatHandoverPlanner({ rigRepo: deps.rigRepo });
     this.successorLauncher = deps.successorLauncher ?? new SuccessorSessionLauncher(deps.tmuxAdapter, deps.discoveryRepo, {
@@ -454,13 +459,14 @@ export class SeatHandoverService {
     // The successor must carry its own generation from its first byte. This reservation writes no
     // ledger row; commit consumes it, while every failed pre-commit branch remains unregistered.
     const occupantGeneration = this.sessionRegistry.reserveOccupantGeneration();
+    const corePluginDir = seatCorePluginDir(node, this.db, undefined, this.pluginsDir);
     const launch = await this.successorLauncher.createSuccessor({
       // Seam B: the successor is the SAME seat continuing — persisted policy posture carries.
       // 0.5.2-07 model fidelity: carry the seat's SPEC-pinned model so the successor launch reads the
       // spec (else the running topology drifts from the founder-designed one at every handover).
       // A4-profile: likewise carry the codex config profile (adapter emits -p) — the restore path
       // already threads it; handover must too, or a profile-pinned codex seat reverts at handover.
-      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault, nonInterruptive: this.rigRepo.getRigNonInterruptive(statusResult.status.rig_id), launchPosture: effectivePosture, ...(effectivePermissionMode ? { permissionMode: effectivePermissionMode } : {}), model: node.model, effort: readSeatEffort(this.db, node.id)?.effective ?? undefined, codexConfigProfile: node.codex_config_profile ?? undefined, seatEnv: this.rigRepo.getEffectiveSeatEnv(node.id) },
+      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault, nonInterruptive: this.rigRepo.getRigNonInterruptive(statusResult.status.rig_id), launchPosture: effectivePosture, ...(effectivePermissionMode ? { permissionMode: effectivePermissionMode } : {}), model: node.model, effort: readSeatEffort(this.db, node.id)?.effective ?? undefined, codexConfigProfile: node.codex_config_profile ?? undefined, seatEnv: withCorePlugin(this.rigRepo.getEffectiveSeatEnv(node.id), corePluginDir), ...(corePluginDir && node.cwd ? { seatProjectDir: node.cwd } : {}) },
       departingSessionName: latestSession.session_name,
       occupantGeneration,
       // OPR.0.5.5.5: a fork-sourced successor launches as a NATIVE FORK of the

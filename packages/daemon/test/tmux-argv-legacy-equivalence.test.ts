@@ -36,9 +36,12 @@ interface RunCall { site: number; argv: string[]; legacy: string }
 const SESSION = "seat'q a";
 const TARGET = { nodeId: "node-1", session: SESSION, occupant: "occupant-1", pane: "%1" };
 
-function respond(cmd: string, failing: string[]): string {
+function respond(cmd: string, failing: string[], composer = false): string {
   const sub = cmd.split(" ")[1] ?? "";
   if (failing.includes(sub)) throw new Error(`Command failed: ${cmd}\ncan't find session: missing`);
+  // #1072's composer snapshot reads a cursor and a screen before its mode check; other calls keep their replies.
+  if (composer && sub === "display-message" && cmd.includes("cursor_x")) return "2|0|80|24\n";
+  if (composer && sub === "capture-pane") return "❯ \n";
   switch (sub) {
     case "list-sessions": return `${SESSION}\nalpha\n`;
     case "list-panes": return "%1|0|/w|80|24|1\n";
@@ -51,7 +54,7 @@ function respond(cmd: string, failing: string[]): string {
 }
 
 /** A shell-path adapter whose every run() call records its caller line, its argv and the string exec received. */
-function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: boolean } = {}): TmuxAdapter {
+function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: boolean; composer?: boolean } = {}): TmuxAdapter {
   const execs: string[] = [];
   const fileOps: TmuxFileOps = {
     writeFile: async () => {},
@@ -61,7 +64,7 @@ function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: 
   };
   const adapter = new TmuxAdapter(async (cmd) => {
     execs.push(cmd);
-    return respond(cmd, opts.failing ?? []);
+    return respond(cmd, opts.failing ?? [], opts.composer);
   }, fileOps);
   if (opts.guard) {
     adapter.deliveryGuard = {
@@ -72,6 +75,11 @@ function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: 
       input: (_name: string, fn: () => Promise<unknown>) => fn(),
       operation: (_name: string, fn: () => Promise<unknown>) => fn(),
       humanInput: (_name: string, fn: () => Promise<unknown>) => fn(),
+      // The draft-aware hooks (#1072); off here, so input takes the same path as without them.
+      attachInputInspection: () => {},
+      needsInputCheck: () => false,
+      beforeInput: async () => {},
+      notePasted: async () => {},
     } as unknown as SeatDeliveryGuard;
   }
   const self = adapter as unknown as { run: (argv: string[], legacy?: string) => Promise<string> };
@@ -143,6 +151,7 @@ async function driveEveryMethod(): Promise<RunCall[]> {
   // A failed paste deletes the loaded buffer; the guarded kill reads the session id first.
   await recordingAdapter(calls, { failing: ["paste-buffer"] }).sendText(SESSION, "hello");
   await recordingAdapter(calls, { guard: true }).killSession(SESSION);
+  await recordingAdapter(calls, { composer: true }).captureComposerSnapshot("%1");
   return calls;
 }
 

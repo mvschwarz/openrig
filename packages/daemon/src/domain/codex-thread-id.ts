@@ -104,7 +104,7 @@ export class CodexThreadIdResolver {
       /** Explicit provider root; never search another home's logs on a miss. */
       codexHome?: string;
       resolveHomeDirByPid?: ResolveHomeDirByPid;
-      readFromLogs?: (pid: number, homeDir: string, report?: CodexCaptureReporter) => string | undefined;
+      readFromLogs?: (pid: number, homeDir: string, report?: CodexCaptureReporter, startSecond?: StartSecondRows) => string | undefined;
       /** Bounded cache size; oldest-inserted evicts first. Default 256. */
       maxCachedPids?: number;
       /** Freshness bound for UNSETTLED cache entries — identity-less
@@ -132,6 +132,13 @@ export class CodexThreadIdResolver {
     return this.resolveWithDiagnostics(pid, identity, report);
   }
 
+  /** {@link resolve} for a just-launched fork child: rows inside its start second count when they come from the one
+   *  process instance that logged nothing earlier ({@link StartSecondRows} "by-process"). Every other caller keeps
+   *  the strict gate. */
+  async resolveForkChild(pid: number, identity: string, report?: CodexCaptureReporter): Promise<string | undefined> {
+    return this.resolveWithDiagnostics(pid, identity, report, "by-process");
+  }
+
   /**
    * EXPLICIT ungated escape hatch — reads WITHOUT the identity start-time gate (a reused pid can
    * match a retired occupant's rows). Use ONLY for genuinely identity-less callers (tests, adoption
@@ -145,9 +152,10 @@ export class CodexThreadIdResolver {
     return this.resolveWithDiagnostics(pid, undefined, report);
   }
 
-  private async resolveWithDiagnostics(pid: number, identity: string | undefined, report?: CodexCaptureReporter): Promise<string | undefined> {
+  private async resolveWithDiagnostics(pid: number, identity: string | undefined, report?: CodexCaptureReporter,
+    startSecond: StartSecondRows = "exclude"): Promise<string | undefined> {
     const diagnostics: CodexCaptureDiagnostic[] = [];
-    const token = await this.resolveInternal(pid, identity, diagnostic => diagnostics.push(diagnostic));
+    const token = await this.resolveInternal(pid, identity, diagnostic => diagnostics.push(diagnostic), startSecond);
     if (!token) {
       // A default-home miss followed by a successful alternate-home read is not a failure.
       const priority = { no_log_row: 0, no_cli_thread: 1, ambiguous_threads: 2, sqlite_unreadable: 3 };
@@ -157,13 +165,16 @@ export class CodexThreadIdResolver {
     return token;
   }
 
-  private async resolveInternal(pid: number, identity: string | undefined, report: CodexCaptureReporter): Promise<string | undefined> {
+  private async resolveInternal(pid: number, identity: string | undefined, report: CodexCaptureReporter,
+    startSecond: StartSecondRows): Promise<string | undefined> {
     // r2 round-4: the identity's start time gates EVERY log read — a retired
     // occupant's rows predate the current occupant's start and never match.
     const minTs = lstartToMinTs(identity);
-    if (this.opts.codexHome) return readCodexThreadIdFromLogs(pid, "", undefined, minTs, this.opts.codexHome, report);
-    const readFromLogs = this.opts.readFromLogs
-      ?? ((p: number, home: string, report?: CodexCaptureReporter) => readCodexThreadIdFromLogs(p, home, undefined, minTs, undefined, report));
+    if (this.opts.codexHome) return readCodexThreadIdFromLogs(pid, "", undefined, minTs, this.opts.codexHome, report, startSecond);
+    const injected = this.opts.readFromLogs;
+    const readFromLogs = injected
+      ? (p: number, home: string, report?: CodexCaptureReporter) => injected(p, home, report, startSecond)
+      : (p: number, home: string, report?: CodexCaptureReporter) => readCodexThreadIdFromLogs(p, home, undefined, minTs, undefined, report, startSecond);
     const defaultHome = this.opts.defaultHome ?? safeUserHomeDir() ?? os.homedir();
     const now = this.opts.now ?? Date.now;
     const ttl = this.opts.homeTtlMs ?? 60_000;
@@ -259,6 +270,16 @@ function safeUserHomeDir(): string | undefined {
   }
 }
 
+/** How a gated read treats rows logged inside the identity's own start second (see {@link lstartToMinTs}). */
+export type StartSecondRows =
+  /** Exclude them: the default, for every caller that can wait for a later row. */
+  | "exclude"
+  /** Attribute them by process instance: rows whose `process_uuid` logged nothing before the start second, when exactly
+   *  one such instance exists. A retired occupant that logged before the second, the reuse the gate exists for, stays
+   *  excluded, and two candidates stay ambiguous. For a just-launched fork child, whose only row can fall in its start
+   *  second and which writes nothing more until it has work. */
+  | "by-process";
+
 function readCodexThreadIdFromLogs(
   pid: number,
   homeDir: string,
@@ -266,9 +287,12 @@ function readCodexThreadIdFromLogs(
   minTs?: number,
   codexHome?: string,
   report?: CodexCaptureReporter,
+  startSecond: StartSecondRows = "exclude",
 ): string | undefined {
   let unreadable = false;
   const loggedIds = new Set<string>();
+  const sameSecond = new Map<string, Set<string>>(); // process_uuid -> thread ids logged in the start second
+  const loggedBefore = new Set<string>(); // process_uuids with a row before the start second
   for (const dbPath of resolveCodexDbPaths(homeDir, "logs", exists, codexHome)) {
     try {
       const db = new Database(dbPath, { readonly: true });
@@ -278,11 +302,28 @@ function readCodexThreadIdFromLogs(
           "SELECT DISTINCT thread_id FROM logs WHERE process_uuid LIKE ? AND thread_id IS NOT NULL AND ts > ?"
         ).all(`pid:${pid}:%`, minTs ?? 0) as Array<{ thread_id: string }>;
         for (const row of rows) loggedIds.add(row.thread_id);
+        if (startSecond === "by-process" && minTs !== undefined) {
+          const inSecond = db.prepare(
+            "SELECT DISTINCT process_uuid, thread_id FROM logs WHERE process_uuid LIKE ? AND thread_id IS NOT NULL AND ts = ?"
+          ).all(`pid:${pid}:%`, minTs) as Array<{ process_uuid: string; thread_id: string }>;
+          for (const row of inSecond) {
+            const ids = sameSecond.get(row.process_uuid) ?? new Set<string>();
+            ids.add(row.thread_id);
+            sameSecond.set(row.process_uuid, ids);
+          }
+          const before = db.prepare(
+            "SELECT DISTINCT process_uuid FROM logs WHERE process_uuid LIKE ? AND ts < ?"
+          ).all(`pid:${pid}:%`, minTs) as Array<{ process_uuid: string }>;
+          for (const row of before) loggedBefore.add(row.process_uuid);
+        }
       } finally {
         db.close();
       }
     } catch { unreadable = true; }
   }
+  // An unreadable log database could hold an earlier row for a candidate or a second candidate: stay unresolved.
+  const startedInSecond = [...sameSecond.keys()].filter((uuid) => !loggedBefore.has(uuid));
+  if (!unreadable && startedInSecond.length === 1) for (const id of sameSecond.get(startedInSecond[0]!)!) loggedIds.add(id);
   if (!loggedIds.size) {
     report?.({ reason: unreadable ? "sqlite_unreadable" : "no_log_row" });
     return undefined;

@@ -342,6 +342,35 @@ function printResult(json: boolean, body: unknown, status: number): void {
   if (status >= 400) process.exitCode = status >= 500 ? 2 : 1;
 }
 
+interface WorkChoiceCandidate {
+  qitemId?: string | null;
+  projects?: string[];
+  mission?: string;
+  slice?: string | null;
+  workNodePath?: string | null;
+  unresolved?: string | null;
+}
+
+/** After the plain answer, the candidates the agent must choose between, one line each, so a
+ *  refused current work is never just a count. Prints nothing when the daemon sent no choice
+ *  (current work is settled, nothing is in progress, or the daemon predates the field). */
+export function printCurrentWorkChoice(data: unknown): void {
+  const choice = (data as { currentWorkChoice?: { instruction?: string; candidates?: WorkChoiceCandidate[];
+    unknown?: Array<{ qitemId?: string | null; reason?: string }> } } | null)?.currentWorkChoice;
+  if (!choice) return;
+  console.log("");
+  console.log(choice.instruction ?? "OpenRig did not choose your current work.");
+  for (const [index, c] of (choice.candidates ?? []).entries()) {
+    const project = c.projects?.length ? `project ${c.projects.join(", ")}` : "no project tag";
+    const where = c.workNodePath ?? "no folder found";
+    const why = c.unresolved ? ` (${c.unresolved})` : "";
+    console.log(`  ${index + 1}. ${project} · mission ${c.mission ?? "?"} · slice ${c.slice ?? "none"} · ${where}${why} · from row ${c.qitemId ?? "unknown"}`);
+  }
+  for (const u of choice.unknown ?? []) {
+    console.log(`  - row ${u.qitemId ?? "unknown"}: work not named (${u.reason ?? "no reason given"})`);
+  }
+}
+
 /** Slice 15: the receipt context when a write should print its receipt — the
  *  `output.compact` switch is on and `--full` was not given — else null (today's
  *  output). Error responses always print whole, whatever this returns. */
@@ -680,7 +709,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--expires-at <iso>", "ISO timestamp at which the qitem expires")
     .option("--id <qitemId>", "Retry identity: reuse for the same create after an unknown outcome; otherwise generated and printed before sending")
     .option("--target-repo <name>", "PL-007: typed repo scope (must match a repo in the source rig's RigSpec.workspace.repos[])")
-    .option("--summary <text>", "Short human-readable subject, shown in the needs-you view. For a human destination, --body-file is the complete decision brief or update; keep technical continuation in the owning agent row and evidence.")
+    .option("--summary <text>", "Short human-readable subject of the row, shown on every surface that lists it (RECENT, the story, the needs-you view). Say what the work is and why it needs this seat. For a human destination, --body-file is the complete decision brief or update; keep technical continuation in the owning agent row and evidence.")
     .option("--human-intent <intent>", "decision (default) or update: a quiet informational delivery, never an approval request")
     .option("--human-detail-file <path>", "One explicitly authored supplemental thread reply; keep the complete action/options in --body-file")
     .option("--reply-to <qitemId>", "Post this update into an earlier qitem's Slack thread (requires --human-intent update; posts as a new top-level message instead if that thread can't be used, e.g. it is missing or still has an open human decision; --verify reports why)")
@@ -780,7 +809,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       // callers that omit it; hard-require is a future hardening.
       if (!opts.summary) {
         process.stderr.write(
-          "warning: rig queue create called without --summary. Pass --summary <text> to set the new qitem's short human-readable summary; without it, the Story node falls back to a bounded body preview. A good summary is 1-2 plain sentences a human skims in the needs-you view — what the work is and why it needs this seat, not the agent-speak --body. Proceeding (pre-18 callers exempt).\n"
+          "warning: rig queue create called without --summary. Pass --summary <text> to set the new qitem's short human-readable summary; without it, the Story node falls back to a bounded body preview. The summary is the row's subject in RECENT, the story and the needs-you view. A good summary is 1-2 plain sentences a human skims — what the work is and why it needs this seat, not the agent-speak --body. Proceeding (pre-18 callers exempt).\n"
         );
       }
       // A managed seat keeps transport-derived identity; an external caller can
@@ -1118,7 +1147,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .option("--tags <tags>", "Comma-separated tags for the new qitem")
     .option("--gate <role>", "OPR.0.4.3.16: mark the new qitem as gate work; translated to a gate:<role> tag (e.g. guard | spec-review). The idle-gate watchdog reads this predicate. Composes with --tags.")
     .option("--target-repo <name>", "PL-007: typed repo scope for the new qitem")
-    .option("--summary <text>", "OPR.0.4.1.18: short human-readable 1-2 sentence summary for the new qitem — what it is and why this seat, skimmable in the needs-you view (--body stays source of truth). Warned-if-missing.")
+    .option("--summary <text>", "OPR.0.4.1.18: short human-readable 1-2 sentence subject of the new qitem — what it is and why this seat — shown on every surface that lists it (RECENT, the story, the needs-you view); --body stays source of truth. Not inherited from the source row. Warned-if-missing.")
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-5: durable-artifact pointer for the new qitem. Required by the daemon when the new qitem is human-routed; optional otherwise.")
     .option("--host <id>", QUEUE_HOST_OPTION_HELP)
     .option("--no-nudge", "Suppress the default nudge to the new destination")
@@ -1169,7 +1198,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       // it should carry its own summary. Warn to stderr; do not hard-break.
       if (!opts.summary) {
         process.stderr.write(
-          "warning: rig queue handoff called without --summary. Pass --summary <text> to set the new qitem's short human-readable summary; without it, the Story node falls back to a bounded body preview. A good summary is 1-2 plain sentences a human skims in the needs-you view — what the work is and why it needs this seat, not the agent-speak --body. Proceeding.\n"
+          "warning: rig queue handoff called without --summary. Pass --summary <text> to set the new qitem's short human-readable summary; without it, the Story node falls back to a bounded body preview. The summary is the row's subject in RECENT, the story and the needs-you view. A good summary is 1-2 plain sentences a human skims — what the work is and why it needs this seat, not the agent-speak --body. Proceeding.\n"
         );
       }
       const deps = getDeps();
@@ -1217,7 +1246,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .option("--tags <tags>", "Comma-separated tags for the new qitem")
     .option("--gate <role>", "OPR.0.4.3.16: mark the new qitem as gate work; translated to a gate:<role> tag (e.g. guard | spec-review). The idle-gate watchdog reads this predicate. Composes with --tags.")
     .option("--target-repo <name>", "PL-007: typed repo scope for the new qitem")
-    .option("--summary <text>", "OPR.0.4.1.18: short human-readable 1-2 sentence summary for the new qitem — what it is and why this seat, skimmable in the needs-you view (--body stays source of truth). Warned-if-missing.")
+    .option("--summary <text>", "OPR.0.4.1.18: short human-readable 1-2 sentence subject of the new qitem — what it is and why this seat — shown on every surface that lists it (RECENT, the story, the needs-you view); --body stays source of truth. Not inherited from the source row. Warned-if-missing.")
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-5: durable-artifact pointer for the new qitem. Required by the daemon when the new qitem is human-routed; optional otherwise.")
     .option("--host <id>", QUEUE_HOST_OPTION_HELP)
     .option("--no-nudge", "Suppress the default nudge to the new destination")
@@ -1266,7 +1295,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       // it should carry its own summary. Warn to stderr; do not hard-break.
       if (!opts.summary) {
         process.stderr.write(
-          "warning: rig queue handoff called without --summary. Pass --summary <text> to set the new qitem's short human-readable summary; without it, the Story node falls back to a bounded body preview. A good summary is 1-2 plain sentences a human skims in the needs-you view — what the work is and why it needs this seat, not the agent-speak --body. Proceeding.\n"
+          "warning: rig queue handoff called without --summary. Pass --summary <text> to set the new qitem's short human-readable summary; without it, the Story node falls back to a bounded body preview. The summary is the row's subject in RECENT, the story and the needs-you view. A good summary is 1-2 plain sentences a human skims — what the work is and why it needs this seat, not the agent-speak --body. Proceeding.\n"
         );
       }
       const deps = getDeps();
@@ -1318,6 +1347,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       await withClient(deps, async (client) => {
         const res = await client.get<unknown>(`/api/queue/whoami?${params.toString()}`);
         printResult(opts.json ?? false, res.data, res.status);
+        if (!opts.json && res.status < 400) printCurrentWorkChoice(res.data);
       });
     });
 

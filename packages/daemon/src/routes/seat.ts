@@ -19,6 +19,8 @@ import { buildRebuildPrimingChain } from "../domain/rebuild-priming-chain.js";
 import { OPENRIG_HOME } from "../openrig-compat.js";
 import { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { transportSenderSession } from "./require-sender-identity.js";
+import type { SessionTransport } from "../domain/session-transport.js";
+import { DeliveryGuardError } from "../domain/seat-delivery-guard.js";
 
 export const seatRoutes = new Hono();
 
@@ -26,17 +28,22 @@ export const seatRoutes = new Hono();
 seatRoutes.post("/set-typing-guard/:seatRef", async c => {
   const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter).deliveryGuard;
   if (!guard) return c.json({ error: "Delivery guard unavailable" }, 503);
-  const body = await c.req.json<Record<string, unknown>>();
-  if (typeof body.enabled !== "boolean" || typeof body.reason !== "string" || !body.reason.trim()) {
-    return c.json({ error: "enabled boolean and reason required" }, 400);
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+  if (!body || typeof body.reason !== "string" || !body.reason.trim()
+    || (body.enabled === undefined) === (body.mode === undefined)
+    || body.enabled !== undefined && typeof body.enabled !== "boolean"
+    || body.holdSeconds !== undefined || body.maxAttempts !== undefined) {
+    return c.json({ error: "Supply exactly one enabled boolean or mode, and a reason" }, 400);
   }
   const actor = transportSenderSession(c);
   if (!actor) return c.json({ error: "Sender identity required for preference audit" }, 400);
   try {
     const target = guard.target(c.req.param("seatRef"));
-    const preference = await guard.set(target.nodeId, body.enabled, actor, body.reason);
-    return c.json({ ...preference, tradeoff: "Automatic terminal input is paused while enabled, even at an empty prompt. Disabling does not replay retained messages." }, preference.pending ? 202 : 200);
-  } catch (error) { return c.json({ error: (error as Error).message }, 409); }
+    const preference = await guard.set(target.nodeId, { mode: body.mode ?? (body.enabled ? "hold" : "off") }, actor, body.reason);
+    return c.json({ ...preference, tradeoff: "Hold retains all automatic input. Draft-aware sends once or immediately holds with the exact refusal reason; it schedules no retry. Off permits new sends. Changing mode does not flush earlier held messages." }, preference.pending ? 202 : 200);
+  } catch (error) {
+    return c.json({ error: (error as Error).message, code: (error as { code?: string }).code }, error instanceof DeliveryGuardError && error.code === "invalid_typing_guard" ? 400 : 409);
+  }
 });
 
 seatRoutes.get("/held-messages/:seatRef", c => {
@@ -45,13 +52,19 @@ seatRoutes.get("/held-messages/:seatRef", c => {
   try {
     const target = guard.target(c.req.param("seatRef"));
     const outbox = new OutboxHandler(guard.db);
+    const guarded = (c.get("sessionTransport" as never) as SessionTransport | undefined)?.guardedDelivery;
     const id = c.req.query("id");
     if (id) {
       const entry = outbox.getById(id);
       if (entry?.guardBinding?.nodeId !== target.nodeId) return c.json({ error: "No retained history for this node and ID" }, 404);
-      return c.json({ entry });
+      const delivery = guarded?.lookup(id);
+      return c.json({ entry, ...(delivery ? { delivery } : {}) });
     }
-    return c.json(outbox.heldForNode(target.nodeId, Number(c.req.query("limit") ?? 100), Number(c.req.query("offset") ?? 0)));
+    const page = outbox.heldForNode(target.nodeId, Number(c.req.query("limit") ?? 100), Number(c.req.query("offset") ?? 0));
+    return c.json({ ...page, items: page.items.map(entry => {
+      const delivery = guarded?.lookup(entry.outboxId);
+      return delivery ? { ...entry, delivery } : entry;
+    }) });
   } catch (error) { return c.json({ error: (error as Error).message }, 400); }
 });
 
@@ -65,7 +78,8 @@ seatRoutes.post("/retire-held-message/:seatRef/:id", async c => {
     const target = guard.target(c.req.param("seatRef"));
     const outbox = new OutboxHandler(guard.db); const id = c.req.param("id");
     if (outbox.getById(id)?.guardBinding?.nodeId !== target.nodeId) return c.json({ error: "No held message for this node and ID" }, 404);
-    return c.json({ entry: outbox.retire(id, actor, body.reason), effect: "Retired from active quota; evidence preserved. No delivery, native consumption or work closure is asserted." });
+    const entry = outbox.retire(id, actor, body.reason);
+    return c.json({ entry, effect: "Retired from active quota; evidence preserved. No delivery, native consumption or work closure is asserted." });
   } catch (error) { return c.json({ error: (error as Error).message }, 409); }
 });
 
@@ -241,16 +255,18 @@ export function seatLifecycleService(c: { get(key: never): unknown }): SeatLifec
     occupantInvalidator: (c.get("occupantInvalidator" as never) as import("../domain/occupant-invalidator.js").OccupantInvalidator | undefined) ?? undefined,
     activityOracle: (c.get("seatActivityService" as never) as import("../domain/seat-activity-service.js").SeatActivityService | undefined) ?? undefined,
     transcripts: (c.get("contextUsageStore" as never) as ContextUsageStore | undefined) ?? undefined,
+    piRecords: (c.get("currentModelReader" as never) as import("../domain/model-divergence/current-model-reader.js").CurrentModelReader | undefined) ?? undefined,
   });
 }
 
 function seatLifecycleStatus(code: string): 400 | 404 | 409 | 500 | 502 {
   if (code === "seat_ref_required" || code === "missing_model" || code === "missing_reason" || code === "fresh_required"
-    || code === "missing_effort" || code === "invalid_effort" || code === "invalid_policy") return 400;
+    || code === "missing_effort" || code === "invalid_effort" || code === "invalid_policy"
+    || code === "missing_cwd" || code === "invalid_cwd") return 400;
   if (code === "seat_not_found") return 404;
   if (code === "tmux_probe_failed") return 502;
   if (code === "launch_unavailable" || code === "runtime_adapter_missing" || code === "launch_failed" || code === "startup_failed"
-    || code === "effort_unavailable") return 500;
+    || code === "effort_unavailable" || code === "cwd_check_failed" || code === "cwd_persistence_failed") return 500;
   // seat_ambiguous / session_live / session_not_live / no_session / claimed_session /
   // nothing_to_clean — state conflicts, not client syntax errors.
   return 409;
@@ -290,6 +306,18 @@ seatRoutes.post("/set-model/:seatRef", async (c) => {
   });
   if (result.ok) return c.json(result);
   return c.json(result, seatLifecycleStatus(result.code));
+});
+
+seatRoutes.post("/set-cwd/:seatRef", async (c) => {
+  const value: unknown = await c.req.json().catch(() => null);
+  const body = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const result = await seatLifecycleService(c).setCwd({
+    seatRef: c.req.param("seatRef"),
+    cwd: typeof body.cwd === "string" ? body.cwd : "",
+    reason: typeof body.reason === "string" ? body.reason : "",
+    operator: transportSenderSession(c) ?? (typeof body.operator === "string" ? body.operator : null),
+  });
+  return c.json(result, result.ok ? 200 : seatLifecycleStatus(result.code));
 });
 
 // OPR.0.7.0.7 — save (or, with clear: true, remove) one seat's effort choice for its next
@@ -365,7 +393,7 @@ seatRoutes.post("/restart-verify/:seatRef", async (c) => {
 });
 
 seatRoutes.post("/continue/:seatRef", async (c) => {
-  const result = await seatLifecycleService(c).continueFreshStartup(c.req.param("seatRef"));
+  const result = await seatLifecycleService(c).continueStartup(c.req.param("seatRef"));
   return c.json(result, result.ok ? 200 : 409);
 });
 

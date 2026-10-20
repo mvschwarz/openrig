@@ -15,6 +15,7 @@ import { execFileSync } from "node:child_process";
 // Verbatim 250-byte Codex 0.160.0 menu capture, SHA-256
 // 45c70fc01c7d33f4652c9d42523f631734c62aac76f449ff0f2c15e99680ac9b.
 const currentUpdatePrompt = fs.readFileSync(new URL("./fixtures/codex-update-0.160.0.txt", import.meta.url), "utf8");
+const currentTrustPrompt = fs.readFileSync(new URL("./fixtures/codex-trust-0.156.1.txt", import.meta.url), "utf8");
 
 const CODEX_FLOOR_EFFECT = {
   runtime: "codex",
@@ -197,9 +198,16 @@ describe("Codex runtime adapter", () => {
   it("checkReady returns false when the pane has fallen back to a shell prompt", async () => {
     const tmux = mockTmux({
       getPaneCommand: vi.fn(async () => "zsh"),
+      getPanePid: vi.fn(async () => 900),
       capturePaneContent: vi.fn(async () => "user@example.test rigged %"),
     });
-    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs() });
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [
+        { pid: 900, ppid: 1, command: "/bin/zsh", pgid: 900, tpgid: 900, executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000" },
+      ],
+    });
 
     const result = await adapter.checkReady(makeBinding());
 
@@ -207,6 +215,30 @@ describe("Codex runtime adapter", () => {
       ready: false,
       reason: "The probe pane returned to a shell instead of staying inside the runtime.",
       code: "returned_to_shell",
+    });
+  });
+
+  it("checkReady returns awaiting_runtime when paneCommand is a shell that is not a proven idle shell", async () => {
+    const tmux = mockTmux({
+      getPaneCommand: vi.fn(async () => "bash"),
+      getPanePid: vi.fn(async () => 900),
+      capturePaneContent: vi.fn(async () => "booting wrapper..."),
+    });
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [
+        { pid: 900, ppid: 1, command: "/bin/bash", pgid: 900, tpgid: 901, executableName: "bash", startedAt: "Sat Jan  1 12:00:00 2000" },
+        { pid: 901, ppid: 900, command: "codex", pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000" },
+      ],
+    });
+
+    const result = await adapter.checkReady(makeBinding());
+
+    expect(result).toEqual({
+      ready: false,
+      reason: "The pane shows a shell that is not a proven idle shell; a launch script may still be starting Codex.",
+      code: "awaiting_runtime",
     });
   });
 
@@ -723,6 +755,118 @@ describe("Codex runtime adapter", () => {
     expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
   });
 
+  it("a resume stopped at hook review reports the gate kind, and types nothing into it", async () => {
+    const review = "Hooks need review\n1. Review hooks\n2. Trust all and continue\n3. Continue without trusting";
+    const tmux = mockTmux({ capturePaneContent: vi.fn(async () => review), capturePaneScreen: vi.fn(async () => review), getPaneCommand: vi.fn(async () => "codex") });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, listProcesses: () => [] });
+    const result = await adapter.verifyResumeInPane("impl", "tok");
+    expect(result).toMatchObject({ ok: false, recovery: "attention_required", gate: "hook_trust_gate" });
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+    expect(tmux.sendText).not.toHaveBeenCalled();
+  });
+
+  // What a failed resume reports must match the newest screen observed and what was typed (reporting only).
+  const UPDATING = ["✨ Update available! 0.120.0 -> 0.121.0", "Updating Codex..."].join("\n"); // no skip option
+  const HOOK_REVIEW = "Hooks need review\n1. Review hooks\n2. Trust all and continue\n3. Continue without trusting";
+  const SKIPPABLE = ["✨ Update available! 0.120.0 -> 0.121.0", "› 1. Update now (runs `npm install -g @openai/codex`)", "  2. Skip", "  3. Skip until next version", "Press enter to continue"].join("\n");
+  function screens(next: () => string) {
+    const capture = vi.fn(async () => next());
+    return mockTmux({ capturePaneContent: capture, capturePaneScreen: capture, getPaneCommand: vi.fn(async () => "codex"), getPanePid: vi.fn(async () => 901) });
+  }
+
+  it("an update still in progress is reported as an update screen with no choice, and nothing typed", async () => {
+    const tmux = screens(() => UPDATING);
+    const result = await new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, listProcesses: () => [] }).verifyResumeInPane("impl", "tok");
+    expect(result).toMatchObject({ ok: false, gate: "update_gate", gateChoice: false, verifierInput: "none" });
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+  });
+
+  it("when the update helper's own later capture shows hook review, the report names hook review, not the older update screen", async () => {
+    // Count the captures a stable update run makes; then show hook review only at the last one, which is the helper's
+    // nested capture on the final quick poll.
+    const counter = screens(() => UPDATING);
+    await new CodexRuntimeAdapter({ tmux: counter, fsOps: mockFs(), sleep: async () => {}, listProcesses: () => [] }).verifyResumeInPane("impl", "tok");
+    const total = (counter.capturePaneScreen as ReturnType<typeof vi.fn>).mock.calls.length;
+    let n = 0;
+    const tmux = screens(() => (++n === total ? HOOK_REVIEW : UPDATING));
+    const result = await new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, listProcesses: () => [] }).verifyResumeInPane("impl", "tok");
+    expect(n).toBe(total);
+    expect(result).toMatchObject({ ok: false, recovery: "attention_required", gate: "hook_trust_gate" });
+    expect((result as { evidence: string }).evidence).toContain("Hooks need review");
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+  });
+
+  it("a skip key sent to an update prompt that stays on screen is reported as sent, with the choice-bearing update screen", async () => {
+    const tmux = screens(() => SKIPPABLE);
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {},
+      listProcesses: () => [{ pid: 901, ppid: 1, pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000", command: "codex" }] });
+    const result = await adapter.verifyResumeInPane("impl", "tok");
+    expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
+    expect(tmux.sendKeys).toHaveBeenCalledWith("impl", ["3"]);
+    expect(result).toMatchObject({ ok: false, gate: "update_gate", gateChoice: true, verifierInput: "update_skip_key_sent" });
+    // Captured again after the key, so the reported screen isn't the one before it.
+    expect(result).not.toHaveProperty("screenBeforeInput");
+  });
+
+  // Round 3: the newest observation wins in the order it was taken, including the helper's current-screen recheck, and
+  // a screen OpenRig acted on afterwards is reported as the screen before that input.
+  const RESUMED = "OpenAI Codex (v0.120.0)\n› Ask Codex to do anything";
+  const CODEX_ROW = [{ pid: 901, ppid: 1, pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000", command: "codex" }];
+  /** How many screen captures a run on an unchanging, unskippable update screen makes. */
+  async function updatingCaptures(): Promise<number> {
+    const counter = screens(() => UPDATING);
+    await new CodexRuntimeAdapter({ tmux: counter, fsOps: mockFs(), sleep: async () => {}, listProcesses: () => [] }).verifyResumeInPane("impl", "tok");
+    return (counter.capturePaneScreen as ReturnType<typeof vi.fn>).mock.calls.length;
+  }
+
+  it("(a) when the helper's current-screen recheck shows hook review, the report names hook review", async () => {
+    // Final quick poll: the loop sees the update screen, the helper's first capture is skippable, and its recheck (one
+    // capture more than an unskippable run makes) shows hook review. No key is sent.
+    const total = await updatingCaptures() + 1;
+    let n = 0;
+    const tmux = screens(() => { n++; return n === total ? HOOK_REVIEW : n === total - 1 ? SKIPPABLE : UPDATING; });
+    const result = await new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, listProcesses: () => CODEX_ROW }).verifyResumeInPane("impl", "tok");
+    expect(n).toBe(total);
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: false, recovery: "attention_required", gate: "hook_trust_gate", verifierInput: "none" });
+    expect((result as { evidence: string }).evidence).toContain("Hooks need review");
+  });
+
+  it("(b) when the helper's capture on the last quick poll shows a resumed screen, no older gate is reported as current", async () => {
+    const total = await updatingCaptures();
+    let n = 0;
+    const tmux = screens(() => (++n === total ? RESUMED : UPDATING));
+    const result = await new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, listProcesses: () => CODEX_ROW }).verifyResumeInPane("impl", "tok");
+    expect(n).toBe(total);
+    expect(result).toMatchObject({ ok: false, recovery: "attention_required" });
+    expect(result).not.toHaveProperty("gate");
+    expect((result as { evidence: string }).evidence).toContain("Ask Codex to do anything");
+  });
+
+  it.each([["sent", { ok: true }], ["failed", { ok: false, code: "unknown", message: "injected send failure" }]] as const)(
+    "(c) an update prompt first seen on the last quick poll, skip key %s, no later capture: reported as the screen before the key",
+    async (outcome, sendResult) => {
+      // The loop's capture and the helper's two captures on the final quick poll show the skippable prompt.
+      const total = await updatingCaptures() + 1;
+      let n = 0;
+      const tmux = screens(() => (++n >= total - 2 ? SKIPPABLE : UPDATING));
+      (tmux.sendKeys as ReturnType<typeof vi.fn>).mockResolvedValue(sendResult);
+      const result = await new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, listProcesses: () => CODEX_ROW }).verifyResumeInPane("impl", "tok");
+      expect(n).toBe(total);
+      expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({ ok: false, recovery: "attention_required", gate: "update_gate", gateChoice: true,
+        screenBeforeInput: true, verifierInput: outcome === "sent" ? "update_skip_key_sent" : "update_skip_key_failed" });
+    });
+
+  it("(d) a current update menu without option 3 is an update screen without a recognised choice, and no key is sent", async () => {
+    const menu = fs.readFileSync(nodePath.join(__dirname, "fixtures", "codex-update-0.160.0.txt"), "utf8").replace(/^.*3\. Skip until next version.*$/m, "");
+    const tmux = screens(() => menu);
+    const result = await new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, listProcesses: () => CODEX_ROW }).verifyResumeInPane("impl", "tok");
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: false, gate: "update_gate", gateChoice: false, verifierInput: "none" });
+    expect(result).not.toHaveProperty("screenBeforeInput");
+  });
+
   it("launchHarness captures a fresh Codex thread id from the live child process", async () => {
     const tmux = mockTmux({
       getPanePid: vi.fn(async () => 900),
@@ -1172,6 +1316,47 @@ describe("Codex runtime adapter", () => {
       expect(result.recovery).toBe("attention_required");
       expect(result.error.toLowerCase()).toContain("trust");
     }
+  });
+
+  it.each([
+    ["panel alone", currentTrustPrompt],
+    ["trailing heading fragment", `› Earlier conversation prompt\n  Context 81% left · GPT-6-Astra high\n${currentTrustPrompt}\n  Trust this folder?`],
+    ["earlier default footer", `› Earlier conversation prompt\n  gpt-5.6-sol high · ~/work\n${currentTrustPrompt}`],
+    ["earlier Codex header", `OpenAI Codex (v0.156.1)\n› Earlier conversation prompt\n${currentTrustPrompt}`],
+  ])("classifies current folder trust consistently in readiness and resume without answering it: %s", async (_label, paneContent) => {
+    let pollCount = 0;
+    const tmux = mockTmux({
+      getPaneCommand: vi.fn(async () => { pollCount++; return "codex"; }),
+      capturePaneContent: vi.fn(async () => paneContent),
+    });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+
+    expect(await adapter.checkReady(makeBinding())).toMatchObject({ ready: false, code: "trust_gate" });
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+    expect(tmux.sendText).not.toHaveBeenCalled();
+    pollCount = 0;
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig", resumeToken: "sess-456" });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.recovery).toBe("attention_required");
+      expect(result.error).toContain("workspace trust approval");
+    }
+    expect(pollCount).toBeLessThanOrEqual(7);
+    expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
+    expect(tmux.sendKeys).toHaveBeenCalledWith(makeBinding().tmuxSession, ["Enter"]);
+  });
+
+  it("accepts readiness and resume after a current-format panel is superseded by a headerless composer", async () => {
+    const tmux = mockTmux({
+      getPaneCommand: vi.fn(async () => "node"),
+      capturePaneContent: vi.fn(async () => `${currentTrustPrompt}\n› Continue\n  5h 71% left · GPT-6-Astra high · Context 81% left`),
+    });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+
+    expect(await adapter.checkReady(makeBinding())).toEqual({ ready: true });
+    expect(await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig", resumeToken: "sess-456" }))
+      .toMatchObject({ ok: true, resumeToken: "sess-456" });
   });
 
   it("FR-2: resume on an unresolved Codex model-selection gate returns attention_required, not ok:true", async () => {

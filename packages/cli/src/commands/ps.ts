@@ -1,3 +1,4 @@
+import { modelObservation, formatModelObservation, type ModelObservation } from "../lib/model-observation.js";
 import { Command } from "commander";
 import stringWidth from "string-width";
 import { resolveEffectiveHost } from "../host-selection.js";
@@ -55,6 +56,7 @@ interface NodeEntry {
   nodeKind: "agent" | "infrastructure";
   runtime: string | null;
   model: string | null;
+  modelObservation?: ModelObservation;
   sessionStatus: string | null;
   intentionallyStopped?: boolean;
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
@@ -77,6 +79,8 @@ interface NodeEntry {
     decidedBy: string | null;
   } | null;
   identityVerdict?: { reason?: string | null } | null;
+  /** A community harness's seat: its label, maintainer and declared limits. */
+  communityHarness?: { harness: string; maintainer: string | null; limits: string[]; identity: string; needsInput: string; presetError?: string };
   /** Slice 15 — `has-work-to-do` primitive. Derived from queue_items;
    *  NEVER derived from terminalActive. */
   hasAssignedWork?: boolean;
@@ -203,7 +207,9 @@ const ALLOWED_NODE_FIELDS = new Set([
   "canonicalSessionName",
   "nodeKind",
   "runtime",
+  "communityHarness",
   "model",
+  "modelObservation",
   "sessionStatus",
   "intentionallyStopped",
   "startupStatus",
@@ -387,6 +393,7 @@ interface ParsedPsControls {
   limit: number | null;
   fields: string[] | null;
   useEnvelope: boolean;
+  nodeOnlyFilterNotice?: string;
 }
 
 function parsePsControls(opts: PsCliOptions): ParsedPsControls | { error: string } {
@@ -424,6 +431,15 @@ function parsePsControls(opts: PsCliOptions): ParsedPsControls | { error: string
     parsedFilter = result;
   }
 
+  // PL-012: context usage is sampled per node, not on the rig summary.
+  // Preserve the rig-tier output contract, but make the unsupported scope
+  // visible instead of silently implying that the filter was applied.
+  const nodeOnlyFilterNotice = parsedFilter &&
+    (parsedFilter.key === "contextUsage.percent" || parsedFilter.key === "contextUsage.state") &&
+    !opts.nodes
+    ? `Notice: --filter ${parsedFilter.key} is node-level and was not applied at the rig tier; use --nodes to apply it.`
+    : undefined;
+
   const limit = opts.limit !== undefined ? Number(opts.limit) : null;
   if (limit !== null && (!Number.isInteger(limit) || limit < 0)) {
     return { error: `--limit must be a non-negative integer; got '${opts.limit}'` };
@@ -443,6 +459,7 @@ function parsePsControls(opts: PsCliOptions): ParsedPsControls | { error: string
     limit,
     fields,
     useEnvelope: parsedFilter !== null || limit !== null || fields !== null || opts.summary === true,
+    nodeOnlyFilterNotice,
   };
 }
 
@@ -456,7 +473,8 @@ function applyRigFilter(entries: PsEntry[], filter: ParsedFilter): PsEntry[] {
     // level it has no meaning, so the filter passes everything through and
     // the user gets all rigs (the operator can `--nodes` to scope it).
     if (filter.key === "agentActivity.state") return true;
-    // PL-012: contextUsage.* filters are node-level only.
+    // PL-012: contextUsage.* is node-level only. The caller emits a notice
+    // at the rig tier, while retaining the existing output for compatibility.
     if (filter.key === "contextUsage.percent" || filter.key === "contextUsage.state") return true;
     return true;
   });
@@ -605,6 +623,13 @@ function hasCurrentUsageLimit(node: NodeEntry): boolean {
     && activity.stale === false && !activity.fallback;
 }
 
+/** One line per community harness seat: what OpenRig knows about it, and what it doesn't. */
+export function formatCommunityHarnessLine(seat: string, app: NonNullable<NodeEntry["communityHarness"]>): string {
+  if (app.presetError) return `Community harness (${seat}): ${app.harness}: ${app.presetError}.`;
+  const limits = app.limits.length ? `; declared limits: ${app.limits.join("; ")}` : "";
+  return `Community harness (${seat}): ${app.harness}, maintained by ${app.maintainer}, not tested by OpenRig. Identity ${app.identity}; needs-input ${app.needsInput}${limits}.`;
+}
+
 function missingSessionGuidance(node: NodeEntry): string | null {
   return node.identityVerdict?.reason === "session_missing"
     ? "tmux session missing; restore or relaunch the seat"
@@ -625,7 +650,7 @@ function missingSessionGuidance(node: NodeEntry): string | null {
 //
 // SCOPE, stated because the column invites a wider reading: this is the
 // SPEC-DECLARED model (nodes.model), NOT the model the seat is running. The
-// running model has no producer today — it is the ACTIVITY-umbrella rider.
+// last observed native model is reported separately, with its provenance and time.
 export function formatDeclaredModel(model: string | null | undefined): string {
   const m = (model ?? "").trim();
   return m.length > 0 ? m : "not-declared";
@@ -634,6 +659,7 @@ export function formatDeclaredModel(model: string | null | undefined): string {
 export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, unknown>> {
   return nodes.map((n) => {
     const attention = needsAttention(n);
+    const observation = n.modelObservation == null ? null : modelObservation(n.modelObservation, n.sessionStatus === "running");
     const compact: Record<string, unknown> = {
       // identity (rigId/rigName + logicalId + session) — disambiguates under -A.
       rigId: n.rigId,
@@ -649,7 +675,13 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       // runtime is complete fleet-wide; model is a DECLARATION, absent on 13 of
       // 15 claude-code seats — see formatDeclaredModel for the render rule.
       runtime: n.runtime ?? null,
+      ...(n.communityHarness ? { communityHarness: n.communityHarness } : {}),
       model: n.model ?? null,
+      // Compact tuple: [literal model, evidence source, native record time].
+      // Full JSON / --fields retain the complete labelled object and occupant generation.
+      modelObservation: !observation ? null : observation.status === "observed"
+        ? [observation.model, observation.source, observation.observedAt]
+        : { status: "unknown", reason: observation.reason },
       // lifecycle + session/startup state.
       sessionStatus: n.sessionStatus,
       startupStatus: n.startupStatus,
@@ -824,13 +856,13 @@ per-node with hostId-stamped projected rows.
 (rig-summary rows carry no per-node activity). Cannot combine with --filter.
 
 --filter accepts: status, lifecycleState, name-prefix, name, agentActivity.state,
-contextUsage.percent, contextUsage.state. Other keys are rejected.
+contextUsage.percent, contextUsage.state (with --nodes). Other keys are rejected.
 
 --fields accepts (rig-level): rigId, name, rigName, nodeCount, runningCount,
 activeCount, hasWorkCount, attentionCount, status, lifecycleState, uptime,
 latestSnapshot.
 --fields accepts (node-level, with --nodes): rigId, rigName, logicalId, podId,
-podNamespace, hostSelfId, canonicalSessionName, nodeKind, runtime, model, sessionStatus,
+podNamespace, hostSelfId, canonicalSessionName, nodeKind, runtime, communityHarness, model, sessionStatus,
 intentionallyStopped, startupStatus, restoreOutcome, lifecycleState, tmuxAttachCommand,
 resumeCommand, latestError, terminalActive, hasAssignedWork,
 assignedWorkCount, pendingWorkCount, inProgressWorkCount, blockedWorkCount,
@@ -855,7 +887,7 @@ Exit codes:
     .option("--limit <n>", "Limit number of entries (rigs or nodes)")
     .option("--fields <list>", "Comma-separated field list to project (JSON only)")
     .option("--summary", "Emit aggregate-only output (counts by status/lifecycle)")
-    .option("--filter <key=value>", "Filter entries; supported keys: status, lifecycleState, name-prefix, name, agentActivity.state")
+    .option("--filter <key=value>", "Filter entries; supported keys: status, lifecycleState, name-prefix, name, agentActivity.state, contextUsage.percent, contextUsage.state")
     .option("--active", "Shortcut for --filter agentActivity.state=running (PL-019)")
     .option("--running", "Alias for --active")
     .option("-A, --all-rigs", "Show all rigs (default is current rig only)")
@@ -917,7 +949,11 @@ Exit codes:
         process.exitCode = 1;
         return;
       }
-      const { parsedFilter, limit, fields, useEnvelope } = controls;
+      const { parsedFilter, limit, fields, useEnvelope, nodeOnlyFilterNotice } = controls;
+      // Local and fan-out paths render the notice here. A single-host path
+      // emits it in its transport-specific runner so SSH can let the remote
+      // command report it without duplicating the local notice.
+      if (nodeOnlyFilterNotice && !opts.host) console.error(nodeOnlyFilterNotice);
 
       if (opts.allHosts || opts.hosts) {
         // AggregatedPayload is the closed fan-out contract (items + hosts).
@@ -1266,11 +1302,17 @@ async function handleNodes(
       ));
     }
   }
+  for (const n of humanList as NodeEntry[]) {
+    console.log(`Model (${n.canonicalSessionName ?? n.logicalId}): configured ${formatDeclaredModel(n.model)}; last observed ${formatModelObservation(modelObservation(n.modelObservation, n.sessionStatus === "running"))}`);
+  }
   // Keep an actionable startup continuation outside the table's clipped cells.
   for (const n of humanList as NodeEntry[]) {
     if (n.startupStatus === "attention_required" && n.latestError?.includes("rig seat continue ")) {
       console.log(`Startup details (${n.canonicalSessionName ?? n.logicalId}): ${n.latestError}`);
     }
+  }
+  for (const n of humanList as NodeEntry[]) {
+    if (n.communityHarness) console.log(formatCommunityHarnessLine(n.canonicalSessionName ?? n.logicalId, n.communityHarness));
   }
   if (humanTruncated) {
     const remaining = filtered.length - HUMAN_NODE_BUDGET;
@@ -1282,12 +1324,15 @@ async function handleNodes(
   }
 }
 
-function formatActivity(n: Pick<NodeEntry, "agentActivity" | "activityState">): string {
+function formatActivity(n: Pick<NodeEntry, "agentActivity" | "activityState" | "communityHarness">): string {
   // S19 — render from the served taxonomy state when present: needs-input as
   // count(+reason), otherwise the bridge's display value. No local arbitration.
   const tax = n.activityState;
   if (tax) {
     if (tax.needsInput.count > 0) return `needs-input x${tax.needsInput.count}`;
+    // A community harness has no needs-input source in that state, so its zero isn't a clearance: a prompt the
+    // screen shows is kept.
+    if (n.communityHarness && n.agentActivity?.state === "needs_input") return "needs-input (screen)";
     return tax.display;
   }
   // Legacy fallback (a daemon without the S19 enrichment) — retires with the
@@ -1492,7 +1537,8 @@ async function runHttpPs(
     process.exitCode = 1;
     return;
   }
-  const { parsedFilter, limit, fields, useEnvelope } = controls;
+  const { parsedFilter, limit, fields, useEnvelope, nodeOnlyFilterNotice } = controls;
+  if (nodeOnlyFilterNotice) console.error(nodeOnlyFilterNotice);
 
   // A4: stamp the origin triple on this remote read (fail-open to 2-part when unavailable).
   const originSelfHostId = await resolveOriginSelfHostId(deps.lifecycleDeps);

@@ -101,11 +101,14 @@ Keys:
                          watchdog_keep_per_job, batch_size
   launch.non_interruptive  accept harness first-launch warnings at full bypass for new rigs (default off)
   terminal.status_bar    show the inner tmux status bar on launch (default off)
-  output.compact         short default output for queue writes, queue show, queue transitions and whoami peers; --full restores today's output (default off)
+  output.compact         short default output for queue writes, queue show, queue transitions and whoami peers (default off)
+                         --full opts out: queue transitions returns the full log, queue show the complete record, and whoami the complete payload, not its usual identity projection. whoami --all-peers keeps that projection with every peer
   output.whoami_peers    with output.compact on, how many peers rig whoami --json lists, edge peers first; --all-peers lists all (default 8)
+  bundle.services_enabled Service-backed bundle packing, preview and target installs (default off)
   provider.usage_windows Codex and Claude usage windows in rig provider status (Codex read on request; Claude from its seats' status lines) (default off)
+  provider.subscription_moves  the subscription move record: rig provider moves, moves show and moves record, and their routes (default off)
   usage.pi_cost_facts    Pi seats report model-priced cost from their persisted session entries to rig usage cost (default off)
-  usage.pi_openrouter_charge  with usage.pi_cost_facts on, Pi seats look up OpenRouter's actual charge for their requests, shown beside the estimate (default off; off stops new lookups and posts, outcomes recorded while it was on stay visible)
+  usage.pi_openrouter_charge  with usage.pi_cost_facts on, Pi seats look up OpenRouter's actual charge for their requests, shown beside the estimate (default off; changes take effect when a Pi seat next launches or resumes; earlier outcomes stay visible)
   transport.verify_input_box  with --verify, a send to a Claude Code or Codex seat (also queue wakes) reads verified only when the seat was proven idle before the paste and its input box showed the exact text before Enter and was empty after it, on the same pane process; a busy or unknown seat, and anything else, reads unconfirmed, not failed. Reporting only (default off)
 
 Precedence: CLI flag > environment variable > config file > default`)

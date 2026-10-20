@@ -177,9 +177,13 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "output.whoami_peers",
       // Slice 01 (OPR.0.7.0.1) — Codex usage windows switch.
       "provider.usage_windows",
+      "bundle.services_enabled",
+      // Slice 18 (OPR.0.7.0.18) — the subscription move record switch.
+      "provider.subscription_moves",
       "usage.pi_cost_facts",
       "usage.pi_openrouter_charge",
       "transport.verify_input_box",
+      "transport.local_user_guard",
       // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs.
       "retention.enabled",
       "retention.transitions_days",
@@ -257,14 +261,25 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     expect(setting).toMatchObject({ value: 3, source: "default", defaultValue: 3 });
   });
 
+  it("local user guard is opt-in and resolves the file/env twins", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.resolveWithSource("transport.local_user_guard")).toMatchObject({ value: false, source: "default" });
+    store.set("transport.local_user_guard", "true");
+    expect(store.resolve().transport.localUserGuard).toBe(true);
+    try {
+      process.env.OPENRIG_TRANSPORT_LOCAL_USER_GUARD = "false";
+      expect(store.resolveWithSource("transport.local_user_guard")).toMatchObject({ value: false, source: "env" });
+    } finally { delete process.env.OPENRIG_TRANSPORT_LOCAL_USER_GUARD; }
+  });
+
   it("transport.verify_input_box defaults off, resolves its env twin, and appears in the resolved config", () => {
     const store = new ConfigStore(configPath);
     expect(store.resolveWithSource("transport.verify_input_box")).toMatchObject({ value: false, source: "default", defaultValue: false });
-    expect(store.resolve().transport).toEqual({ verifyInputBox: false });
+    expect(store.resolve().transport).toEqual({ verifyInputBox: false, localUserGuard: false });
     try {
       process.env.OPENRIG_TRANSPORT_VERIFY_INPUT_BOX = "1";
       expect(store.resolveWithSource("transport.verify_input_box")).toMatchObject({ value: true, source: "env" });
-      expect(store.resolve().transport).toEqual({ verifyInputBox: true });
+      expect(store.resolve().transport).toEqual({ verifyInputBox: true, localUserGuard: false });
     } finally {
       delete process.env.OPENRIG_TRANSPORT_VERIFY_INPUT_BOX;
     }

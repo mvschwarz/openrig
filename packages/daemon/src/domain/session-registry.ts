@@ -370,6 +370,11 @@ export class SessionRegistry {
   // empty-token skip or a lower-rank no-op. Callers that only set-and-forget can
   // ignore it; the adoption-capture path uses it so its audit event never
   // falsely claims a captured write when the provenance guard refused it.
+  /** Record that this session was launched for a community harness, selected through its preset. */
+  recordCommunityHarnessSelection(sessionId: string, app: string): void {
+    this.db.prepare("UPDATE sessions SET agent_app = ? WHERE id = ?").run(app, sessionId);
+  }
+
   updateResumeToken(sessionId: string, type: string, token: string, provenance?: "hook" | "scrape" | "operator" | "adoption"): boolean {
     if (typeof token !== "string" || token.trim().length === 0) return false;
     if (provenance) {
@@ -707,6 +712,8 @@ export class SessionRegistry {
       origin: (row.origin === "claimed" ? "claimed" : "launched"),
       startupStatus: (row.startup_status as Session["startupStatus"]) ?? "pending",
       startupCompletedAt: row.startup_completed_at ?? null,
+      // Present only on a session launched for a community harness, so other sessions read as before.
+      ...(row.agent_app ? { communityHarness: row.agent_app } : {}),
     };
   }
 
@@ -741,6 +748,7 @@ interface SessionRow {
   origin: string;
   startup_status: string | null;
   startup_completed_at: string | null;
+  agent_app?: string | null;
   // OPR.0.4.3.20 FR-3/FR-6 — resume ledger provenance + verification freshness.
   resume_provenance?: string | null;
   resume_last_verified?: string | null;
@@ -758,4 +766,18 @@ interface BindingRow {
   cmux_workspace: string | null;
   cmux_surface: string | null;
   updated_at: string;
+}
+
+const sessionsHaveCommunityHarness = new WeakMap<Database.Database, boolean>();
+
+/** The SQL that reads a session's recorded community harness: the retained storage column, or NULL on a schema without that column
+ *  (as other optional columns are read), so a partial schema reads every seat as before. The schema check is made
+ *  once per database: the column only appears through a migration, which runs before these reads. */
+export function sessionCommunityHarnessSelect(db: Database.Database, alias = "s"): string {
+  let has = sessionsHaveCommunityHarness.get(db);
+  if (has === undefined) {
+    has = (db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name?: string }>).some(row => row.name === "agent_app");
+    sessionsHaveCommunityHarness.set(db, has);
+  }
+  return has ? `${alias}.agent_app` : "NULL";
 }

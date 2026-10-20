@@ -57,4 +57,21 @@ describe("resolveWakeTarget — L3b seat[@gen] -> token (ruling A: resolve on ex
       expect(res.known[0]!.tokenPresent).toBe(false);
     }
   });
+
+  it.each(["pi", "custom", null, ""])("does not reinterpret unsupported runtime %j as Claude", (runtime) => {
+    const res = resolveWakeTarget([{ ...rows({ resumeToken: "unsupported-token" })[0]!, runtime }], { seat: "dev-planner@my-rig" });
+    expect(res.resolved).toBe(false);
+    if (!res.resolved) {
+      expect(res.reason).toMatch(/runtime .*not supported/i);
+      expect(res.reason).toContain(runtime || "unknown");
+      expect(res).not.toHaveProperty("token");
+      expect(res.known).toHaveLength(1);
+    }
+  });
+
+  it.each([["claude", "claude"], ["claude-code", "claude"], ["codex", "codex"]])("preserves supported runtime %s", (runtime, expected) => {
+    const res = resolveWakeTarget(rows({ runtime }), { seat: "dev-planner@my-rig" });
+    expect(res).toMatchObject({ resolved: true, runtime: expected, token: "tok-100" });
+  });
+
 });

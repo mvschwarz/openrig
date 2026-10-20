@@ -957,7 +957,12 @@ describe("Lifecycle reboot/recovery scenario matrix (Tier 1)", () => {
       const original = ctx.db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").all();
       const result = await ctx.orchestrator.reconcileNodeRuntimeTruth(ctx.rig.id, ctx.nodeId);
       expect(result.ok).toBe(false);
-      if (!result.ok) expect(result.code).toBe("pane_not_usable");
+      if (!result.ok) {
+        expect(result.code).toBe("pane_not_usable");
+        // The Claude lineage was just proven in this pane: the refusal must not claim a return to a shell.
+        expect(result.detail).not.toContain("returned_to_shell");
+        expect(result.detail).toContain("not a proven idle shell");
+      }
       expect(ctx.db.prepare("SELECT verdict FROM seat_identity_verdicts WHERE node_id = ?").get(ctx.nodeId)).toEqual({ verdict: "verified" });
       expect(ctx.db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").all()).toEqual(original);
       expect(ctx.db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toEqual([]);

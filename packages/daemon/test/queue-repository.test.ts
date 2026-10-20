@@ -17,6 +17,7 @@ import {
   QueueRepository,
   QueueRepositoryError,
   classifyNudgeFailure,
+  hasLinkedSuccessor,
 } from "../src/domain/queue-repository.js";
 import { CLOSURE_REASONS } from "../src/domain/hot-potato-enforcer.js";
 import type { PersistedEvent } from "../src/domain/types.js";
@@ -446,6 +447,24 @@ describe("QueueRepository", () => {
     expect(captured.filter((e) => e.type === "queue.handed_off")).toHaveLength(1);
     expect(captured.filter((e) => e.type === "queue.created")).toHaveLength(2); // create + handoff-create
   });
+
+  // The queue-handoff skill teaches this: a handoff keeps the source row's scope tags unless it
+  // sends tags (--tags, or --gate, which sends gate:<role>), and tags it sends replace them.
+  it.each(["handoff", "handoffAndComplete"] as const)(
+    "%s keeps the source row's tags unless it sends tags, and sent tags replace them",
+    async (verb) => {
+      const scope = ["project:p", "mission:m", "slice:s"];
+      const fresh = async () => repo.create({
+        sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", tags: scope,
+      });
+      const keep = await repo[verb]({ qitemId: (await fresh()).qitemId, fromSession: "bob@rig", toSession: "carol@rig" });
+      expect(keep.created.tags).toEqual(scope);
+      const gated = await repo[verb]({
+        qitemId: (await fresh()).qitemId, fromSession: "bob@rig", toSession: "carol@rig", tags: ["gate:guard"],
+      });
+      expect(gated.created.tags).toEqual(["gate:guard"]);
+    },
+  );
 
   it("handoff refuses on already-terminal qitem", async () => {
     const item = await repo.create({
@@ -1447,5 +1466,49 @@ describe("QueueRepository.listOpenObligations: same rows, order and limit as lis
     }
     // The histories reach every state the parked read filters on, and a closed one it must drop.
     expect([...seen].sort()).toEqual([...states].sort());
+  });
+});
+
+describe("hasLinkedSuccessor", () => {
+  let db: Database.Database;
+  let repo: QueueRepository;
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema, outboxEntriesSchema]);
+    repo = new QueueRepository(db, new EventBus(db));
+  });
+
+  afterEach(() => db.close());
+
+  it("recognizes successor linked via handed_off_from", async () => {
+    const source = await repo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "work" });
+    const successor = await repo.create({ sourceSession: "b@r", destinationSession: "c@r", body: "next", handedOffFrom: source.qitemId });
+
+    expect(hasLinkedSuccessor(db, source.qitemId, "c@r")).toBe(true);
+    expect(hasLinkedSuccessor(db, source.qitemId, successor.qitemId)).toBe(true);
+  });
+
+  it("recognizes successor linked via chainOfRecord", async () => {
+    const source = await repo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "work" });
+    const successor = await repo.create({ sourceSession: "b@r", destinationSession: "c@r", body: "next", chainOfRecord: [source.qitemId] });
+
+    expect(hasLinkedSuccessor(db, source.qitemId, "c@r")).toBe(true);
+    expect(hasLinkedSuccessor(db, source.qitemId, successor.qitemId)).toBe(true);
+  });
+
+  it("excludes source row itself even if destination matches target", async () => {
+    const source = await repo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "work" });
+    expect(hasLinkedSuccessor(db, source.qitemId, source.qitemId)).toBe(false);
+    expect(hasLinkedSuccessor(db, source.qitemId, "b@r")).toBe(false);
+  });
+
+  it("does not treat candidate with malformed chain_of_record as linked", async () => {
+    const source = await repo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "work" });
+    const candidate = await repo.create({ sourceSession: "b@r", destinationSession: "c@r", body: "candidate" });
+    db.prepare("UPDATE queue_items SET chain_of_record = 'not-valid-json' WHERE qitem_id = ?").run(candidate.qitemId);
+
+    expect(hasLinkedSuccessor(db, source.qitemId, "c@r")).toBe(false);
+    expect(hasLinkedSuccessor(db, source.qitemId, candidate.qitemId)).toBe(false);
   });
 });

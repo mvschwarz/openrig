@@ -2,6 +2,9 @@
 // Requested, saved, emitted at launch and observed natively stay four separate values; this
 // verb only knows the first two, and never reports a change that didn't happen.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -9,6 +12,8 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
+import type { PiRecordSelection } from "../src/domain/model-divergence/current-generation-record.js";
+import { readPiModelObservation } from "../src/domain/model-divergence/effective-model-readers.js";
 
 function fakeTmux() {
   const alive = new Map<string, boolean>();
@@ -172,5 +177,181 @@ describe("SeatLifecycleService.setEffort", () => {
     const cleared = await service.setEffort({ seatRef: sessionName, effort: null, reason: "clear" });
     if (!cleared.ok) throw new Error(cleared.message);
     expect(cleared.warning).toBeUndefined();
+  });
+});
+
+describe("SeatLifecycleService.setEffort and effortReport on a Pi seat", () => {
+  let db: Database.Database;
+  let rigRepo: RigRepository;
+  let sessionRegistry: SessionRegistry;
+  let tmux: ReturnType<typeof fakeTmux>;
+  let service: SeatLifecycleService;
+  let dir: string;
+  let selection: PiRecordSelection;
+  const RUNNER_START_MS = Date.parse("2026-10-19T10:00:00.000Z");
+  const at = (offsetSeconds: number) => new Date(RUNNER_START_MS + offsetSeconds * 1000).toISOString();
+
+  beforeEach(() => {
+    db = createFullTestDb();
+    rigRepo = new RigRepository(db);
+    sessionRegistry = new SessionRegistry(db);
+    tmux = fakeTmux();
+    dir = mkdtempSync(join(tmpdir(), "pi-effort-"));
+    selection = { ok: false, reason: "no managed Pi runner under registered pane %1" };
+    service = new SeatLifecycleService({
+      db, rigRepo, sessionRegistry, eventBus: new EventBus(db), tmuxAdapter: tmux.adapter,
+      // The reader reads the runner's newest own turn within its occupant recheck.
+      piRecords: { currentPiRecord: async () => selection.ok
+        ? { ...selection, observation: readPiModelObservation(selection.path, { notBeforeMs: selection.notBeforeMs }) } : selection },
+    });
+  });
+  afterEach(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
+
+  function piSeat(runtime = "pi", effort?: string) {
+    const rig = rigRepo.findRigsByName("pi-rig")[0] ?? rigRepo.createRig("pi-rig");
+    const sessionName = `dev-${runtime}@pi-rig`;
+    const node = rigRepo.addNode(rig.id, `dev.${runtime}`, { runtime, cwd: "/project", model: "anthropic/claude-fable-5", ...(effort ? { effort } : {}) });
+    const session = sessionRegistry.registerSession(node.id, sessionName);
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateBinding(node.id, { attachmentType: "tmux", tmuxSession: sessionName, tmuxPane: "%1" });
+    tmux.setAlive(sessionName, true);
+    return { rig, node, sessionName };
+  }
+
+  /** The verified runner, launched with `thinking` (null: no flag), and its session file's records. */
+  function runner(thinking: string | null, records: Array<Record<string, unknown>>) {
+    const path = join(dir, "session.jsonl");
+    const lines = [{ type: "session", version: 3, id: "s1", timestamp: at(-600), cwd: "/project" }, ...records];
+    writeFileSync(path, lines.map((line) => JSON.stringify(line)).join("\n") + "\n");
+    selection = {
+      ok: true, path, launchId: "L1", notBeforeMs: RUNNER_START_MS + 999, pid: 4101, startedAt: "Mon Oct 19 10:00:00 2026",
+      command: `node /opt/openrig/pi-runner.js --session-name dev-pi@pi-rig --state-root /s --cwd /project --launch-id L1 --trust approve --model anthropic/claude-fable-5${thinking ? ` --thinking ${thinking}` : ""}`,
+    };
+  }
+  const turn = (offsetSeconds: number, thinkingLevel?: string) => ({
+    type: "message", id: `e${offsetSeconds}`, parentId: null, timestamp: at(offsetSeconds),
+    message: { role: "assistant", provider: "anthropic", model: "claude-fable-5", stopReason: "stop", ...(thinkingLevel ? { thinkingLevel } : {}) },
+  });
+
+  it("set and --clear succeed with the audited event", async () => {
+    const { rig, node, sessionName } = piSeat("pi", "medium");
+    const set = await service.setEffort({ seatRef: sessionName, effort: "high", reason: "deep work", operator: "op" });
+    if (!set.ok) throw new Error(set.message);
+    expect(set).toMatchObject({ runtime: "pi", requested: "high", changed: true, saved: { choice: "high", effective: "high", source: "seat_choice" } });
+    expect(set.warning).toBeUndefined();
+    const cleared = await service.setEffort({ seatRef: sessionName, effort: null, reason: "back to spec" });
+    if (!cleared.ok) throw new Error(cleared.message);
+    expect(cleared).toMatchObject({ requested: null, changed: true, saved: { choice: null, effective: "medium", source: "authored" } });
+    expect(eventsOfType(db, "node.effort_changed")).toEqual([
+      { type: "node.effort_changed", rigId: rig.id, nodeId: node.id, logicalId: "dev.pi", from: null, to: "high", reason: "deep work", operator: "op" },
+      { type: "node.effort_changed", rigId: rig.id, nodeId: node.id, logicalId: "dev.pi", from: "high", to: null, reason: "back to spec", operator: null },
+    ]);
+  });
+
+  it("saves a level Pi doesn't know, such as Codex's none, with Pi's warning", async () => {
+    const { sessionName } = piSeat();
+    const none = await service.setEffort({ seatRef: sessionName, effort: "none", reason: "x" });
+    if (!none.ok) throw new Error(none.message);
+    expect(none).toMatchObject({ changed: true, saved: { choice: "none", effective: "none" } });
+    expect(none.warning).toContain(`"none" isn't a level Pi is known to accept`);
+    expect(none.warning).toContain("ignores a level it doesn't know");
+  });
+
+  it("an OMP seat is still refused", async () => {
+    const { node, sessionName } = piSeat("omp");
+    const result = await service.setEffort({ seatRef: sessionName, effort: "high", reason: "x" });
+    expect(result).toMatchObject({ ok: false, code: "effort_unsupported_runtime" });
+    if (!result.ok) expect(result.message).toContain("claude-code, codex and pi seats only");
+    expect(await service.effortReport(sessionName)).toMatchObject({ ok: false, code: "effort_unsupported_runtime" });
+    expect(nodeRow(db, node.id).effort_choice).toBeNull();
+  });
+
+  it("the level sent and the level Pi recorded agree", async () => {
+    const { sessionName } = piSeat("pi", "high");
+    runner("high", [turn(-30, "low"), turn(5, "high")]);
+    const report = await service.effortReport(sessionName);
+    expect(report).toMatchObject({
+      ok: true, runtime: "pi",
+      emitted: { state: "observed", value: "high", pid: 4101, startedAt: "Mon Oct 19 10:00:00 2026", matchesSaved: true },
+      observed: { state: "observed", value: "high", at: at(5), source: "Pi session (latest successful assistant turn; error and aborted turns are skipped)", outcome: "recorded", matchesEmitted: true },
+    });
+    const { summary, observed } = report as { summary: string; observed: { detail: string } };
+    expect(observed.detail).toBe("Pi recorded this level with the turn's request: the session's level after Pi's own cap, not proof the provider applied it.");
+    expect(summary).toContain("applied level NOT VERIFIED (Pi records the level it requested, not what the provider ran)");
+    expect(summary).not.toContain("model fallback");
+  });
+
+  it("a capped level is reported apart from the level sent", async () => {
+    const { sessionName } = piSeat("pi", "xhigh");
+    runner("xhigh", [turn(5, "high")]);
+    const report = await service.effortReport(sessionName);
+    expect(report).toMatchObject({ emitted: { value: "xhigh", matchesSaved: true }, observed: { state: "observed", value: "high", matchesEmitted: false } });
+    const summary = (report as { summary: string }).summary;
+    expect(summary).toContain("high, not the xhigh sent at launch (Pi caps a level the model doesn't offer, ignores one it doesn't know, and the level can change inside the session)");
+    expect(summary).not.toContain("changed or overridden inside the session");
+  });
+
+  it("with no flag sent, Pi's own level is not a mismatch", async () => {
+    const { sessionName } = piSeat();
+    runner(null, [turn(5, "medium")]);
+    const report = await service.effortReport(sessionName);
+    expect(report).toMatchObject({ emitted: { state: "observed", value: null, matchesSaved: true }, observed: { state: "observed", value: "medium" } });
+    expect((report as { observed: object }).observed).not.toHaveProperty("matchesEmitted");
+    expect((report as { summary: string }).summary).not.toContain("not the");
+  });
+
+  it("a --thinking value that ps shows with whitespace is unknown, not its first word", async () => {
+    const { sessionName } = piSeat("pi", "high");
+    runner("very high --session x", [turn(5, "high")]);
+    const report = await service.effortReport(sessionName);
+    expect(report).toMatchObject({
+      emitted: { state: "unknown", detail: "The launch command's --thinking value can't be read unambiguously (it contains whitespace)." },
+      observed: { state: "observed", value: "high" },
+    });
+    expect((report as { observed: object }).observed).not.toHaveProperty("matchesEmitted");
+    expect((report as { summary: string }).summary).toContain("Launch: unknown");
+    expect((report as { summary: string }).summary).toContain("Native effort: high (Pi session");
+    expect((report as { summary: string }).summary).not.toContain("NOT VERIFIED");
+  });
+
+  it("a saved value the launch guard leaves out is reported as not sent, with the reason", async () => {
+    const { sessionName } = piSeat("pi", "--cwd");
+    runner(null, [turn(5, "medium")]);
+    const report = await service.effortReport(sessionName);
+    expect(report).toMatchObject({ saved: { effective: "--cwd" }, emitted: { state: "observed", value: null, matchesSaved: true } });
+    const summary = (report as { summary: string }).summary;
+    expect(summary).toContain("Launch sent: no flag. The saved value isn't sent: it doesn't pass the check set-effort uses");
+    expect(summary).not.toContain("it applies at the seat's next managed continuation");
+    // A launch from before the value was saved still carries its own flag; the saved value still isn't sent.
+    runner("high", [turn(5, "high")]);
+    const older = (await service.effortReport(sessionName)) as { summary: string };
+    expect(older.summary).toContain("Launch sent: high. The saved value isn't sent");
+    expect(older.summary).not.toContain("it applies at the seat's next managed continuation");
+  });
+
+  it("a Pi that doesn't record the level (0.87.1) is NOT VERIFIED and says why", async () => {
+    const { sessionName } = piSeat("pi", "high");
+    runner("high", [turn(5)]);
+    const report = await service.effortReport(sessionName);
+    expect(report).toMatchObject({ emitted: { state: "observed", value: "high" }, observed: { state: "not_verified" } });
+    expect((report as { observed: { detail: string } }).observed.detail).toContain("Pi 0.99.0 and later do");
+  });
+
+  it("no turn since this launch is NOT VERIFIED with the reader's reason", async () => {
+    const { sessionName } = piSeat("pi", "high");
+    runner("high", [turn(-30, "high")]);
+    const report = await service.effortReport(sessionName);
+    expect(report).toMatchObject({ emitted: { state: "observed", value: "high" }, observed: { state: "not_verified" } });
+    expect((report as { observed: { detail: string } }).observed.detail).toContain("predates the current runner");
+  });
+
+  it("a runner that can't be verified leaves the launch unknown and native effort NOT VERIFIED, with the reason", async () => {
+    const { sessionName } = piSeat("pi", "high");
+    const report = await service.effortReport(sessionName);
+    expect(report).toMatchObject({ ok: true, emitted: { state: "unknown" }, observed: { state: "not_verified" } });
+    const { emitted, observed, summary } = report as { emitted: { detail: string }; observed: { detail: string }; summary: string };
+    expect(emitted.detail).toContain("no managed Pi runner under registered pane %1");
+    expect(observed.detail).toContain("no managed Pi runner under registered pane %1");
+    expect(summary).toContain("Native effort: NOT VERIFIED");
   });
 });

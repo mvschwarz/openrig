@@ -161,6 +161,24 @@ export async function getGrantedScopes(
   return { ok: r.ok, granted: r.grantedScopes, error: r.error };
 }
 
+/** Named-bot delivery: the app a bot's posts belong to (`bots.info`, needs `users:read`). A transport,
+ *  rate-limit or server failure is retryable; Slack's own refusal (`missing_scope`, `bot_not_found`) is not. */
+export async function lookupBotApp(
+  token: string,
+  botId: string,
+  fetchImpl: FetchImpl = defaultFetch,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<{ ok: true; appId: string } | { ok: false; retryable: boolean; error: string }> {
+  const r = await callWebApi("bots.info", token, { bot: botId }, fetchImpl, timeoutMs, "get-query");
+  const appId = (r.json.bot as { app_id?: unknown } | undefined)?.app_id;
+  if (r.ok && typeof appId === "string" && appId) return { ok: true, appId };
+  return {
+    ok: false,
+    retryable: r.status === 0 || r.status === 429 || r.status >= 500,
+    error: r.ok ? "bots.info named no app_id" : (r.error ?? "bots.info failed"),
+  };
+}
+
 /** OPR.0.5.6.2 — authenticated private-file download (`url_private` + Bearer,
  *  the verified inbound mechanic from the human-layer design §4.1). The host
  *  gate (`isSlackHost`) is enforced HERE so the Bearer token can never reach

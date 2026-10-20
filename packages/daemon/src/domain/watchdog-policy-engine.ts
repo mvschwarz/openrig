@@ -63,6 +63,8 @@ export interface WatchdogDeliverySource {
   occurrenceId?: string;
   jobId: string;
   policy: string;
+  /** A digest's members, when one send carries several reminders: each job and the occurrence it was due for. */
+  members?: Array<{ jobId: string; occurrenceId: string }>;
 }
 
 export type DeliveryFn = (
@@ -74,6 +76,9 @@ export function formatWatchdogDeliveryMessage(
   source: WatchdogDeliverySource,
   message: string,
 ): string {
+  if (source.members) {
+    return `[OpenRig watchdog scheduler · policy: ${source.policy} · ${source.members.length} jobs · digest: ${source.jobId}]\n${message}`;
+  }
   return `[OpenRig watchdog scheduler · policy: ${source.policy} · job: ${source.jobId}]\n${message}`;
 }
 
@@ -121,6 +126,29 @@ interface WatchdogPolicyEngineDeps {
    *  every HELD row armed to this job; delivery outcome is preserved. */
   resolveQueueWait?: (input: { jobId: string }) => PolicyEvaluation | null | undefined;
   onWakeAttempt?: (attempt: { jobId: string; deliveryStatus: string }) => void;
+  /** The parked row a due reminder is about, when it may share one message with other reminders due for the same
+   *  seat in the same scheduler pass. Null, or absent, keeps the reminder's own send. */
+  resolveDigestEntry?: (input: { jobId: string; message: string }) => { qitemId: string; summary: string | null } | null;
+  /** The recorded outcome when a due occurrence was already attempted inside an earlier digest, so it is accounted
+   *  from that attempt and never sent again; null when it wasn't. */
+  priorDigestAttempt?: (occurrenceId: string) => DeliveryOutcome | null;
+  /** Whether a due occurrence already has a delivery record of any kind, alone or in a digest. Such an occurrence
+   *  goes only through its own delivery id, which reads its earlier receipt back and never joins a new digest. */
+  occurrenceAttempted?: (occurrenceId: string) => boolean;
+}
+
+/** A due reminder whose send waits for the end of its scheduler pass, so reminders for one seat go as one message. */
+interface HeldReminder {
+  job: WatchdogJob;
+  outcome: Extract<PolicyEvaluation, { action: "send" }>;
+  evaluatedAt: string;
+  occurrenceId: string;
+  entry: { qitemId: string; summary: string | null };
+}
+
+/** The reminders held during one scheduler pass; `deliverHeldReminders` sends them when the pass ends. */
+export interface ReminderPass {
+  held: HeldReminder[];
 }
 
 const PHASE_C_BUILTIN_POLICIES: ReadonlyArray<Policy> = [
@@ -204,6 +232,9 @@ export class WatchdogPolicyEngine {
   private readonly resolvePreDeliveryTerminalReason?: (input: { jobId: string }) => string | null;
   private readonly resolveQueueWait?: WatchdogPolicyEngineDeps["resolveQueueWait"];
   private readonly onWakeAttempt?: (attempt: { jobId: string; deliveryStatus: string }) => void;
+  private readonly resolveDigestEntry?: WatchdogPolicyEngineDeps["resolveDigestEntry"];
+  private readonly priorDigestAttempt?: WatchdogPolicyEngineDeps["priorDigestAttempt"];
+  private readonly occurrenceAttempted?: WatchdogPolicyEngineDeps["occurrenceAttempted"];
 
   constructor(deps: WatchdogPolicyEngineDeps) {
     this.jobsRepo = deps.jobsRepo;
@@ -214,6 +245,9 @@ export class WatchdogPolicyEngine {
     this.resolvePreDeliveryTerminalReason = deps.resolvePreDeliveryTerminalReason;
     this.onWakeAttempt = deps.onWakeAttempt;
     this.resolveQueueWait = deps.resolveQueueWait;
+    this.resolveDigestEntry = deps.resolveDigestEntry;
+    this.priorDigestAttempt = deps.priorDigestAttempt;
+    this.occurrenceAttempted = deps.occurrenceAttempted;
     this.parseSpec = deps.parseSpec ?? parseWatchdogSpec;
     this.now = deps.now ?? (() => new Date());
     this.policies = new Map();
@@ -239,7 +273,7 @@ export class WatchdogPolicyEngine {
     };
   }
 
-  async evaluate(job: WatchdogJob, evaluationPassStartedAt?: string): Promise<EvaluationResult> {
+  async evaluate(job: WatchdogJob, evaluationPassStartedAt?: string, pass?: ReminderPass): Promise<EvaluationResult> {
     // A prior job's delivery may have yielded since the scheduler selected this row.
     const inactive = this.inactiveJobResult(job.jobId);
     if (inactive) return inactive;
@@ -491,29 +525,8 @@ export class WatchdogPolicyEngine {
     // residue, where the row is already terminal and no transition remains to
     // intercept. It runs after normal policy/throttle/generation decisions but
     // before any custody or message delivery side effect.
-    const preDeliveryTerminalReason = this.resolvePreDeliveryTerminalReason?.({ jobId: job.jobId });
-    if (preDeliveryTerminalReason) {
-      this.jobsRepo.markTerminal(job.jobId, preDeliveryTerminalReason);
-      const history = this.historyLog.record({
-        jobId: job.jobId,
-        evaluatedAt,
-        outcome: "terminal",
-        skipReason: preDeliveryTerminalReason,
-      });
-      this.eventBus.emit({
-        type: "watchdog.evaluation_terminal",
-        jobId: job.jobId,
-        policy: job.policy,
-        terminalReason: preDeliveryTerminalReason,
-      });
-      return {
-        job: this.jobsRepo.getByIdOrThrow(job.jobId),
-        outcome: { action: "terminal", reason: preDeliveryTerminalReason },
-        history,
-        delivery: null,
-        meaningful: true,
-      };
-    }
+    const preDeliveryTerminal = this.terminalBeforeDelivery(job, evaluatedAt);
+    if (preDeliveryTerminal) return preDeliveryTerminal;
 
     const continuityAction = parseContinuityAction(
       parsed.context["continuity_action"],
@@ -521,19 +534,31 @@ export class WatchdogPolicyEngine {
       occupantGeneration,
     );
 
+    const occurrenceId = createHash("sha256").update(JSON.stringify([job.jobId, occupantGeneration, outcome.conditionReceipt ?? (job.policy === "periodic-reminder" ? job.lastFireAt : outcome.message)])).digest("hex");
+    // A parked-row reminder due in a scheduler pass waits for the pass's end, when every reminder held for its seat
+    // goes in one message. Nothing has changed for it yet, so a pass that stops early leaves it due.
+    const digestEntry = pass && job.policy === "periodic-reminder" && !continuityAction
+      ? this.resolveDigestEntry?.({ jobId: job.jobId, message: outcome.message }) ?? null
+      : null;
+    if (pass && digestEntry) {
+      pass.held.push({ job, outcome, evaluatedAt, occurrenceId, entry: digestEntry });
+      return { job, outcome, history: null, delivery: null, meaningful: false };
+    }
+
     // Plain wakes retain the proven at-most-once ordering. Structured
     // continuity custody is retry-safe by deterministic qitem id, so its
     // receipt waits until the durable action has completed.
     if (isContextUsageThreshold && occupantGeneration && !continuityAction) {
       this.jobsRepo.recordThresholdFire(job.jobId, occupantGeneration, evaluatedAt);
     }
+    const deliverySchedule = this.jobsRepo.getByIdOrThrow(job.jobId);
     const delivery = await this.deliver(
       {
         targetSession: outcome.target.session,
         message: outcome.message,
         ...(continuityAction ? { continuityAction } : {}),
       },
-      { jobId: job.jobId, policy: job.policy, occurrenceId: createHash("sha256").update(JSON.stringify([job.jobId, occupantGeneration, outcome.conditionReceipt ?? (job.policy === "periodic-reminder" ? job.lastFireAt : outcome.message)])).digest("hex") },
+      { jobId: job.jobId, policy: job.policy, occurrenceId },
     );
     if (
       isContextUsageThreshold &&
@@ -543,6 +568,149 @@ export class WatchdogPolicyEngine {
     ) {
       this.jobsRepo.recordThresholdFire(job.jobId, occupantGeneration, evaluatedAt);
     }
+    return this.recordAttempt({ job, outcome, evaluatedAt, deliverySchedule, delivery, isContextUsageThreshold });
+  }
+
+  /** The pre-transport guard: a job its owning domain can prove is no longer actionable is terminaled, not sent. */
+  private terminalBeforeDelivery(job: WatchdogJob, evaluatedAt: string): EvaluationResult | null {
+    const preDeliveryTerminalReason = this.resolvePreDeliveryTerminalReason?.({ jobId: job.jobId });
+    if (!preDeliveryTerminalReason) return null;
+    this.jobsRepo.markTerminal(job.jobId, preDeliveryTerminalReason);
+    const history = this.historyLog.record({
+      jobId: job.jobId,
+      evaluatedAt,
+      outcome: "terminal",
+      skipReason: preDeliveryTerminalReason,
+    });
+    this.eventBus.emit({
+      type: "watchdog.evaluation_terminal",
+      jobId: job.jobId,
+      policy: job.policy,
+      terminalReason: preDeliveryTerminalReason,
+    });
+    return {
+      job: this.jobsRepo.getByIdOrThrow(job.jobId),
+      outcome: { action: "terminal", reason: preDeliveryTerminalReason },
+      history,
+      delivery: null,
+      meaningful: true,
+    };
+  }
+
+  /** Send the reminders held during a scheduler pass: one message per seat holding two or more, each naming every row
+   *  it covers, and a lone reminder exactly as it would have gone on its own. Every member keeps its own history,
+   *  schedule and wake receipt, all from the one attempt. */
+  async deliverHeldReminders(
+    pass: ReminderPass,
+    onError: (err: unknown) => void = (err) => { throw err; },
+    shouldStop: () => boolean = () => false,
+  ): Promise<void> {
+    const bySeat = new Map<string, HeldReminder[]>();
+    for (const held of pass.held) {
+      const seat = held.outcome.target.session;
+      bySeat.set(seat, [...(bySeat.get(seat) ?? []), held]);
+    }
+    pass.held = [];
+    for (const [seat, group] of bySeat) {
+      // A stop leaves every seat not yet started untouched, and still due.
+      if (shouldStop()) return;
+      try {
+        await this.deliverHeldGroup(seat, group, shouldStop);
+      } catch (err) {
+        onError(err);
+      }
+    }
+  }
+
+  /**
+   * One seat's held reminders. Before every transport call the remaining members are re-checked against current
+   * state, with nothing awaited in between: a retired or ended one is dropped, one an earlier digest attempted is
+   * accounted from that attempt, and one that is no longer eligible, or already has a delivery record of its own, goes
+   * alone through its own delivery id. Only then are the rest sent as one digest. A stop is honoured before each call;
+   * the call in flight finishes and is accounted, and every member not yet sent stays due.
+   */
+  private async deliverHeldGroup(seat: string, group: HeldReminder[], shouldStop: () => boolean): Promise<void> {
+    const finished = new Set<HeldReminder>();
+    for (;;) {
+      if (shouldStop()) return;
+      const digest: Array<HeldReminder & { entry: { qitemId: string; summary: string | null } }> = [];
+      let alone: HeldReminder | null = null;
+      for (const held of group) {
+        if (finished.has(held)) continue;
+        if (this.inactiveJobResult(held.job.jobId) || this.terminalBeforeDelivery(held.job, held.evaluatedAt)) {
+          finished.add(held);
+          continue;
+        }
+        const prior = this.priorDigestAttempt?.(held.occurrenceId);
+        if (prior) {
+          // Attempted inside an earlier digest whose accounting didn't finish: account it from that attempt.
+          this.recordAttempt({ ...held, deliverySchedule: this.jobsRepo.getByIdOrThrow(held.job.jobId), delivery: prior, isContextUsageThreshold: false });
+          finished.add(held);
+          continue;
+        }
+        const entry = this.occurrenceAttempted?.(held.occurrenceId)
+          ? null
+          : this.resolveDigestEntry?.({ jobId: held.job.jobId, message: held.outcome.message }) ?? null;
+        if (entry) digest.push({ ...held, entry });
+        else alone ??= held;
+      }
+      if (alone) {
+        finished.add(alone);
+        await this.deliverAlone(seat, alone);
+        continue;
+      }
+      if (digest.length === 1) await this.deliverAlone(seat, digest[0]!);
+      else if (digest.length > 1) await this.deliverDigest(seat, digest);
+      return;
+    }
+  }
+
+  private async deliverDigest(seat: string, digest: Array<HeldReminder & { entry: { qitemId: string; summary: string | null } }>): Promise<void> {
+    const schedules = digest.map((held) => this.jobsRepo.getByIdOrThrow(held.job.jobId));
+    const members = digest.map((held) => ({ jobId: held.job.jobId, occurrenceId: held.occurrenceId }));
+    const digestId = `digest-${createHash("sha256").update(JSON.stringify(members.map((m) => m.occurrenceId).sort())).digest("hex")}`;
+    const lines = digest.map((held) => `- ${held.entry.qitemId}${held.entry.summary ? ` — ${held.entry.summary.replace(/\s+/g, " ")}` : ""}`);
+    const message = [
+      `Wake timers fired for ${digest.length} parked rows. Resume each row's recorded continuation and update it:`,
+      ...lines,
+    ].join("\n");
+    // A digest whose members can't all be bound throws here, before any input, and leaves every member unaccounted
+    // and due.
+    const delivery = await this.deliver(
+      { targetSession: seat, message },
+      { jobId: digestId, policy: "periodic-reminder", occurrenceId: digestId, members },
+    );
+    digest.forEach((held, i) => this.recordAttempt({
+      ...held, deliverySchedule: schedules[i]!, delivery, isContextUsageThreshold: false,
+      digest: { deliveryId: digestId, size: digest.length, line: lines[i]! },
+    }));
+  }
+
+  /** A held reminder sent on its own, exactly as `evaluate` would have sent it. */
+  private async deliverAlone(seat: string, held: HeldReminder): Promise<void> {
+    const schedule = this.jobsRepo.getByIdOrThrow(held.job.jobId);
+    const delivery = await this.deliver(
+      { targetSession: seat, message: held.outcome.message },
+      { jobId: held.job.jobId, policy: held.job.policy, occurrenceId: held.occurrenceId },
+    );
+    this.recordAttempt({ ...held, deliverySchedule: schedule, delivery, isContextUsageThreshold: false });
+  }
+
+  /** Audit one job's delivery attempt and advance its schedule, wake receipt and actionable state from it. */
+  private recordAttempt(input: {
+    job: WatchdogJob;
+    outcome: Extract<PolicyEvaluation, { action: "send" }>;
+    evaluatedAt: string;
+    deliverySchedule: WatchdogJob;
+    delivery: DeliveryOutcome;
+    isContextUsageThreshold: boolean;
+    /** Set when this job's reminder went out inside a digest with others: the digest, its size and this job's line. */
+    digest?: { deliveryId: string; size: number; line: string };
+  }): EvaluationResult {
+    const { job, outcome, evaluatedAt, deliverySchedule, delivery, isContextUsageThreshold, digest } = input;
+    const notes = digest
+      ? { ...(outcome.notes ?? {}), digestDeliveryId: digest.deliveryId, digestSize: digest.size }
+      : outcome.notes;
     const history = this.historyLog.record({
       jobId: job.jobId,
       evaluatedAt,
@@ -550,17 +718,17 @@ export class WatchdogPolicyEngine {
       skipReason: delivery.status === "retained" ? "typing_guard_retained" : null,
       deliveryTargetSession: outcome.target.session,
       deliveryStatus: delivery.status,
-      deliveryMessage: outcome.message,
+      deliveryMessage: digest?.line ?? outcome.message,
       // OPR.0.5.6.24 — the delivery error/reason string survives into the
       // durable record so a policy can distinguish an interactive-prompt
       // refusal from a generic failure (status alone discards that identity).
       evaluationNotes:
         delivery.error !== undefined
-          ? { ...(outcome.notes ?? {}), deliveryReason: delivery.error }
-          : delivery.status === "retained" ? { ...(outcome.notes ?? {}), outboxIds: delivery.outboxIds ?? [], retainedNotDelivered: true } : outcome.notes ?? null,
+          ? { ...(notes ?? {}), deliveryReason: delivery.error }
+          : delivery.status === "retained" ? { ...(notes ?? {}), outboxIds: delivery.outboxIds ?? [], retainedNotDelivered: true } : notes ?? null,
     });
     if (!isContextUsageThreshold) {
-      this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, true);
+      this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, true, deliverySchedule);
     }
     // OPR.0.5.8.1 S2 — a policy's condition receipt is banked ONLY on positive
     // delivery. `status` is "ok" | "failed"; anything that is not a definite ok
@@ -578,7 +746,14 @@ export class WatchdogPolicyEngine {
       targetSession: outcome.target.session,
       deliveryStatus: delivery.status,
     });
-    this.onWakeAttempt?.({ jobId: job.jobId, deliveryStatus: delivery.status });
+    // The history above audits the actual attempt. A newer park/blocker change
+    // must not receive its receipt or be backed off as though we sent for it.
+    const current = this.jobsRepo.getByIdOrThrow(job.jobId);
+    if (current.state === "active" && current.specYaml === deliverySchedule.specYaml
+      && current.intervalSeconds === deliverySchedule.intervalSeconds
+      && (isContextUsageThreshold || current.lastEvaluationAt === evaluatedAt)) {
+      this.onWakeAttempt?.({ jobId: job.jobId, deliveryStatus: delivery.status });
+    }
     return {
       job: this.jobsRepo.getByIdOrThrow(job.jobId),
       outcome,

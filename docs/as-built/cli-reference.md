@@ -9,20 +9,20 @@ applies-when: |
   the source that implements a command. Use command help for invocation details.
 siblings: [README.md, codemap.md]
 prerequisite-reads: [../reference/help.md]
-last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
-last-updated: 2026-10-08
+last-verified-against-source: 92a2b8f7157661716a9c79de742cd82a96d1e6f7
+last-updated: 2026-10-09
 ---
 
 # CLI Reference — Registered Commands and Options
 
-Verified against source commit `e8f0ab340db773392ec8be75b072d1c0f3068a50`.
+Verified against source commit `92a2b8f7157661716a9c79de742cd82a96d1e6f7`.
 The inventory below comes from the actual Commander tree returned by
 [`createProgram()`](../../packages/cli/src/index.ts), not a grep of command
 strings or an installed CLI from a different commit.
 
 There are **87 top-level registrations**, **356 registered command objects**
 below `rig` (including groups and the hidden `restore apply` command), and
-**1,082 explicitly registered option objects**, including the root version
+**1,084 explicitly registered option objects**, including the root version
 option. Aliases do not add command objects; short/long spellings of one
 option do not add option objects. Commander-generated help is additional.
 These are source counts, not a claim about a deployed release.
@@ -396,7 +396,7 @@ the sections that were not read are `null`.
 | `rig queue resolve <qitemId>` | — | `--decision <text>` **required**<br>`--actor <session>`<br>`--bearer <token>`<br>`--no-notify`<br>`--json` |
 | `rig queue handoff <qitemId>` | — | `--from <session>`<br>`--to <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--note <text>`<br>`--priority <priority>`<br>`--tier <tier>`<br>`--tags <tags>`<br>`--gate <role>`<br>`--target-repo <name>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--host <id>`<br>`--no-nudge`<br>`--full`<br>`--json` |
 | `rig queue handoff-and-complete <qitemId>` | — | `--from <session>`<br>`--to <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--note <text>`<br>`--priority <priority>`<br>`--tier <tier>`<br>`--tags <tags>`<br>`--gate <role>`<br>`--target-repo <name>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--host <id>`<br>`--no-nudge`<br>`--full`<br>`--json` |
-| `rig queue whoami` | — | `--session <session>`<br>`--recent-limit <n>`<br>`--json` |
+| `rig queue whoami` | — | `--session <session>`<br>`--recent-limit <n>`<br>`--work-candidates`<br>`--json` |
 | `rig queue fallback <qitemId>` | — | `--destination <session>` **required**<br>`--reason <text>`<br>`--json` |
 | `rig queue show <qitemId>` | — | `--full`<br>`--json` |
 | `rig queue transitions <qitemId>` | — | `--json` |
@@ -527,7 +527,11 @@ the sections that were not read are `null`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig ask <rig> <question>` | — | `--json`<br>`--seat <session-name>`<br>`--session <token>`<br>`--wake <seat[@gen]\|token>`<br>`--runtime <runtime>`<br>`--wake-timeout <seconds>` |
+| `rig ask <rig> <question>` | — | `--json`<br>`--seat <session-name>`<br>`--session <token>`<br>`--wake <target>`<br>`--runtime <runtime>`<br>`--wake-timeout <seconds>` |
+
+Wake seat targets must include the rig: `member@rig` or `member@rig@N` (1 = newest tenure).
+Values without `@` go unchanged to the runtime as a session ID or title; a bare member
+name is not resolved within `<rig>`.
 
 ### chatroom
 
@@ -707,6 +711,9 @@ the sections that were not read are `null`.
 | `rig provider signals` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
 | `rig provider precheck` | — | `--seat <s>` **required**<br>`--to-account <a>` **required**<br>`--json` |
 | `rig provider switch` | — | `--seat <s>` **required**<br>`--to-account <a>` **required**<br>`--force-unsafe`<br>`--json` |
+| `rig provider moves` | — | `--home <home>`<br>`--seat <seat>`<br>`--limit <n>`<br>`--json` |
+| `rig provider moves show` | `<id>` | `--json` |
+| `rig provider moves record` | — | `--file <path>` **required**<br>`--operator <name>`<br>`--json` |
 
 ### usage
 
@@ -865,7 +872,7 @@ the sections that were not read are `null`.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig seat` | — | — |
-| `rig seat set-typing-guard <seat>` | — | `--enabled <boolean>` **required**<br>`--reason <text>` **required**<br>`--json` |
+| `rig seat set-typing-guard <seat>` | — | `--enabled <boolean>`<br>`--mode <mode>`<br>`--reason <text>` **required**<br>`--json` |
 | `rig seat held-messages <seat>` | — | `--limit <n>`<br>`--offset <n>`<br>`--id <id>`<br>`--json` |
 | `rig seat retire-held-message <seat> <id>` | — | `--reason <text>` **required**<br>`--json` |
 | `rig seat status <seat>` | — | `--json` |
@@ -874,6 +881,7 @@ the sections that were not read are `null`.
 | `rig seat clear-attention <session>` | — | `--reason <text>`<br>`--json` |
 | `rig seat set-permissions <seat>` | — | `--mode <mode>` **required**<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-model <seat>` | — | `--model <id>` **required**<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
+| `rig seat set-cwd <seat>` | — | `--cwd <directory>` **required**<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat launch <seat>` | — | `--fresh` **required**<br>`--reason <text>` **required**<br>`--stop`<br>`--operator <address>`<br>`--json` |
 | `rig seat continue <seat>` | — | `--json` |
 | `rig seat stop <seat>` | — | `--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
@@ -905,6 +913,9 @@ for restore selection. A partly running rig with an intentionally stopped member
 still appears as a `degraded` candidate and reports `rig_not_stopped` (exit 1)
 when restore is attempted. Launch scheduling and restore eligibility remain
 unchanged.
+
+See [per-seat terminal delivery](../reference/seat-delivery.md) for
+off, draft-aware and hold modes, immediate refusal results and held-message inspection.
 
 ### handover
 

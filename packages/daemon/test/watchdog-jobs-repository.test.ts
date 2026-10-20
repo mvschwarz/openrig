@@ -161,6 +161,23 @@ describe("WatchdogJobsRepository (PL-004 Phase C)", () => {
     expect(after.lastFireAt).toBe("2026-05-03T07:00:00.000Z");
   });
 
+  it.each(["unchanged", "spec", "interval", "due"])("records a fire while preserving the %s schedule", (change) => {
+    const job = repo.register(validInput());
+    const nextSpec = change === "spec" ? `${job.specYaml}\n# revised wait` : job.specYaml;
+    const nextInterval = change === "interval" ? 300 : job.intervalSeconds;
+    const nextDue = change === "due" ? "1970-01-01T00:00:00.000Z" : job.lastEvaluationAt;
+    repo.updateSchedule(job.jobId, nextSpec, nextInterval, nextDue);
+    const firedAt = "2026-05-03T07:00:00.000Z";
+
+    repo.recordEvaluation(job.jobId, firedAt, true, job);
+
+    expect(repo.getByIdOrThrow(job.jobId)).toMatchObject({
+      specYaml: nextSpec, intervalSeconds: nextInterval,
+      lastEvaluationAt: change === "unchanged" ? firedAt : nextDue,
+      lastFireAt: firedAt,
+    });
+  });
+
   it("recordEvaluation(fired=false) updates only last_evaluation_at", () => {
     const job = repo.register(validInput());
     repo.recordEvaluation(job.jobId, "2026-05-03T07:00:00.000Z", false);

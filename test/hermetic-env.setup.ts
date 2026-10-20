@@ -47,6 +47,7 @@ for (const key of [
   "PROVIDER_USAGE_WINDOWS",
   // A seat with input-box verification on must not change what the transport suites verify.
   "TRANSPORT_VERIFY_INPUT_BOX",
+  "TRANSPORT_LOCAL_USER_GUARD",
 ]) {
   delete process.env[`OPENRIG_${key}`];
   delete process.env[`RIGGED_${key}`];

@@ -7,6 +7,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { userInfo } from "node:os";
 
 export interface CodexSeatRow {
   seat: string;
@@ -38,11 +39,20 @@ export interface CodexAuthMetadata {
 
 const SEAT_COLUMN_COUNT = 6;
 
+/** The account's home from the OS account database. Unlike os.homedir() this does not echo an
+ *  empty $HOME back, so a HOME="" process still lands under the real home. Empty string when the
+ *  OS reports no home at all: resolution then keeps the historical cwd-relative ".codex" rather
+ *  than erroring. Mirrors the CLI's resolveCodexHome fallback (the daemon cannot import the CLI). */
+function accountHome(): string {
+  try { return userInfo().homedir ?? ""; } catch { return ""; }
+}
+
 function resolveCodexHome(env: NodeJS.ProcessEnv): { profileDir: string; registryPath: string } {
+  const home = typeof env.HOME === "string" && env.HOME.length > 0 ? env.HOME : accountHome();
   const codexHome =
     typeof env.CODEX_HOME === "string" && env.CODEX_HOME.length > 0
       ? env.CODEX_HOME
-      : path.join(env.HOME ?? "", ".codex");
+      : path.join(home, ".codex");
   return {
     profileDir: path.join(codexHome, "auth-profiles"),
     registryPath: path.join(codexHome, "auth-seat-registry.tsv"),

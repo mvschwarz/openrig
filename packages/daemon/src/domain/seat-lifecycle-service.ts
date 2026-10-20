@@ -1,15 +1,17 @@
 import type { NativeProcessLister } from "./native-process-lineage.js";
+import type { CurrentModelReader } from "./model-divergence/current-model-reader.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import type { TmuxAdapter, SessionProbe } from "../adapters/tmux.js";
 import { shellQuote } from "../adapters/shell-quote.js";
+import { EFFORT_SHAPE, piThinkingValue } from "../adapters/pi-runner-protocol.js";
 import type { NodeInventoryEntry, PersistedEvent } from "./types.js";
 import { deriveCanonicalFromEntry, getNodeInventory } from "./node-inventory.js";
 import { deriveSessionName, parseSessionName } from "./session-name.js";
 import type { NodeLauncher } from "./node-launcher.js";
-import type { StartupOrchestrator } from "./startup-orchestrator.js";
+import type { PendingStartupContext, StartupOrchestrator } from "./startup-orchestrator.js";
 import type { RuntimeAdapter, ResolvedStartupFile } from "./runtime-adapter.js";
 import type { ProjectionEntry, ProjectionPlan } from "./projection-planner.js";
 import type { StartupAction } from "./types.js";
@@ -21,6 +23,11 @@ import { observeSolePane } from "./pane-binding-observation.js";
 import { createHash } from "node:crypto";
 import { NativePermissionStore } from "./native-permission-store.js";
 import { validateNativePermissionSelection, unresolvedClaudePermissionModes } from "./native-permission-selection.js";
+import fs from "node:fs";
+import path from "node:path";
+import { resolveConcreteHint, type NodeBinding } from "./runtime-adapter.js";
+import { ProjectionManifestStore } from "./projection-manifest-store.js";
+import { planCwdPreparation } from "./seat-cwd-preparation.js";
 import { resolvePermissionPolicyAttachment, validatePermissionPolicyRef } from "./permission-policy/policy-ref.js";
 import type { ArbitratedSeatState } from "./activity-taxonomy.js";
 import type { PaneCutoverTiming } from "./pane-cutover.js";
@@ -37,6 +44,8 @@ import {
   CodexInPlaceRestart, type InPlaceCodexLauncher, type InPlaceRestartIo, type InPlaceRestartRefusal,
   type InPlaceRestartReport, type InPlaceRestartTarget, type InPlaceVerifyResult,
 } from "./seat-restart-in-place.js";
+import { CommunityHarnessRuntimeAdapter, seatAdapter } from "../adapters/community-harness-runtime-adapter.js";
+import { sessionCommunityHarnessSelect } from "./session-registry.js";
 
 /**
  * S5 (OPR.0.5.4.7) — the seat-lifecycle verb surface: set-model, single-seat stop,
@@ -76,6 +85,8 @@ export interface SeatLifecycleDeps {
   inPlaceRestartDaemonStartedAt?: Date;
   /** Where a session's native transcript is (the context-usage store); without it native effort is NOT VERIFIED. */
   transcripts?: { readSidecar(sessionName: string): { ok: true; data: { transcript_path?: string | null; session_id?: string | null } } | { ok: false }; readCodexTranscriptPath(threadId: string): string | null };
+  /** The identity-verified current Pi runner and its own session file; without it a Pi seat's launch and native effort are unknown. */
+  piRecords?: Pick<CurrentModelReader, "currentPiRecord">;
 }
 
 interface ResolvedSeat {
@@ -90,6 +101,12 @@ export interface SeatRefusal {
     | "seat_not_found"
     | "seat_ambiguous"
     | "missing_model"
+    | "missing_cwd"
+    | "invalid_cwd"
+    | "cwd_check_failed"
+    | "cwd_persistence_failed"
+    | "cwd_configuration_changed"
+    | "cwd_destination_conflict"
     | "missing_reason"
     | "permission_selection_refused"
     | "no_session"
@@ -134,6 +151,18 @@ export interface SeatDescriptor {
 export type SetModelResult =
   | { ok: true; seat: SeatDescriptor; from: string | null; to: string; changed: boolean }
   | SeatRefusal;
+
+export type SetCwdResult =
+  | { ok: true; seat: SeatDescriptor; from: string | null; to: string; changed: boolean;
+      effect: "next_launch"; warnings: string[] }
+  | (SeatRefusal & { warnings?: string[] });
+
+interface SetCwdInput {
+  seatRef: string;
+  cwd: string;
+  reason: string;
+  operator?: string | null;
+}
 
 export type SetPolicyResult =
   | { ok: true; seat: SeatDescriptor; from: string | null; to: string; launchPosture: "floor" | "full_bypass" | "auto"; changed: boolean; effect: string }
@@ -216,6 +245,7 @@ interface LatestSessionRow {
   session_name: string;
   status: string;
   origin: string;
+  community_harness?: string | null;
 }
 
 interface PersistedStartupContextRow {
@@ -249,6 +279,7 @@ export class SeatLifecycleService {
   private readonly inPlaceRestartTiming?: Partial<PaneCutoverTiming>;
   private readonly inPlaceRestartDaemonStartedAt?: Date;
   private readonly transcripts: SeatLifecycleDeps["transcripts"] | null;
+  private readonly piRecords: SeatLifecycleDeps["piRecords"] | null;
 
   constructor(deps: SeatLifecycleDeps) {
     if (deps.db !== deps.rigRepo.db) throw new Error("SeatLifecycleService: rigRepo must share the same db handle");
@@ -269,6 +300,7 @@ export class SeatLifecycleService {
     this.inPlaceRestartTiming = deps.inPlaceRestartTiming;
     this.inPlaceRestartDaemonStartedAt = deps.inPlaceRestartDaemonStartedAt;
     this.transcripts = deps.transcripts ?? null;
+    this.piRecords = deps.piRecords ?? null;
   }
 
   async setModel(input: { seatRef: string; model: string; reason: string; operator?: string | null }): Promise<SetModelResult> {
@@ -308,6 +340,113 @@ export class SeatLifecycleService {
     return { ok: true, seat, from, to: model, changed: true };
   }
 
+  /**
+   * Save an existing seat's launch directory for its next fresh launch or rebuild handover, keeping its identity,
+   * address, queue and history. Like set-model it validates, then persists the cwd and an audited event in one
+   * transaction. Before that, set-cwd's read-only preflight policy refuses the change when the new directory holds an
+   * operator-edited, unrecorded-and-different or doubly sourced copy that launch would place there. It creates the
+   * folder and writes no startup files: launch does that, as it does today. The running occupant keeps its directory
+   * until it's relaunched.
+   */
+  async setCwd(input: SetCwdInput): Promise<SetCwdResult> {
+    const required = this.requireReason(input.reason);
+    if (required) return required;
+    if (!input.cwd?.trim()) return { ok: false, code: "missing_cwd", message: "An absolute working directory is required (--cwd)." };
+    if (!path.isAbsolute(input.cwd) || input.cwd.includes("\0")) {
+      return { ok: false, code: "invalid_cwd", message: "The working directory must be an absolute path on the daemon's host." };
+    }
+    let to = path.resolve(input.cwd);
+    if (to === path.parse(to).root) {
+      return { ok: false, code: "invalid_cwd", message: "Choose a project directory, not a filesystem root, for managed startup files." };
+    }
+    const resolved = this.resolveSeat(input.seatRef);
+    if ("code" in resolved) return resolved;
+    const seat = this.describe(resolved);
+    const node = this.rigRepo.getRig(seat.rigId)?.nodes.find(candidate => candidate.id === seat.nodeId);
+    if (!node) return { ok: false, code: "seat_not_found", message: "The seat no longer exists.", guidance: SEAT_LOOKUP_GUIDANCE };
+    const from = node.cwd;
+    try {
+      fs.mkdirSync(to, { recursive: true });
+      to = fs.realpathSync(to);
+      if (to === path.parse(to).root || !fs.statSync(to).isDirectory()) throw new Error("Destination must be a project directory.");
+    } catch (error) {
+      return { ok: false, code: "invalid_cwd", message: `Cannot use the requested working directory: ${(error as Error).message}` };
+    }
+    const startup = this.readStartupContext(node.id, to);
+    if (!startup.ok) return startup.refusal;
+    if (!node.runtime || startup.context.runtime !== node.runtime) {
+      return { ok: false, code: "startup_context_runtime_mismatch", message: "The saved startup context belongs to a different runtime." };
+    }
+    // Resolved as launch resolves it, so a recorded community harness finds its adapter too.
+    const adapter = seatAdapter(this.runtimeAdapters, node.runtime, this.latestSession(node.id)?.community_harness);
+    if (!adapter) return { ok: false, code: "runtime_adapter_missing", message: "The configured runtime adapter is unavailable." };
+
+    const warnings: string[] = [];
+    // The filesystem startup files the next fresh launch would deliver (never send_text or actions), with legacy auto
+    // hints resolved, for the read-only destination check.
+    const files: ResolvedStartupFile[] = [];
+    // A community harness takes no startup files at launch (its adapter delivers none), so there's nothing to check.
+    const takesStartupFiles = !(adapter instanceof CommunityHarnessRuntimeAdapter);
+    for (const file of takesStartupFiles ? startup.context.resolvedStartupFiles : []) {
+      if (!file.appliesOn.includes("fresh_start") || file.deliveryHint === "send_text") continue;
+      try {
+        const hint = file.deliveryHint === "auto"
+          ? resolveConcreteHint(file.path, fs.readFileSync(file.absolutePath, "utf8")) : file.deliveryHint;
+        if (hint !== "send_text") files.push({ ...file, deliveryHint: hint });
+      } catch (error) {
+        const detail = `Startup file ${file.path}: ${(error as Error).message}`;
+        if (file.required) return { ok: false, code: "cwd_check_failed", message: detail, warnings };
+        warnings.push(detail);
+      }
+    }
+    const oldBinding = this.sessionRegistry.getBindingForNode(node.id);
+    const binding: NodeBinding = {
+      id: oldBinding?.id ?? `cwd:${node.id}`, nodeId: node.id,
+      attachmentType: oldBinding?.attachmentType ?? "tmux",
+      tmuxSession: oldBinding?.tmuxSession ?? deriveCanonicalFromEntry(resolved.entry),
+      tmuxWindow: null, tmuxPane: null, cmuxWorkspace: null, cmuxSurface: null,
+      updatedAt: oldBinding?.updatedAt ?? new Date().toISOString(), cwd: to,
+    };
+    const inspect = `Inspect the configured directory with: rig seat status ${input.seatRef}`;
+    try {
+      const check = planCwdPreparation({ ...startup.context.plan, cwd: to }, files, binding, adapter, new ProjectionManifestStore(this.db));
+      warnings.push(...check.warnings);
+      if (check.conflicts.length) {
+        warnings.push(...check.conflicts.map(copy => `Protected destination file: ${copy.targetPath}`));
+        return { ok: false, code: "cwd_destination_conflict", warnings,
+          message: "The new directory holds files set-cwd's preflight policy protects; no startup file was written and the cwd was not changed.",
+          guidance: "Use a clean destination, or inspect and move or merge the reported files before retrying." };
+      }
+    } catch (error) {
+      return { ok: false, code: "cwd_check_failed", message: `The new directory couldn't be checked; the cwd was not changed: ${(error as Error).message}`, warnings };
+    }
+
+    let persisted: PersistedEvent | null = null;
+    const changed = from !== to;
+    try {
+      const refusal = this.db.transaction((): SeatRefusal | null => {
+        // Another writer (an import, another connection) must not be silently overwritten.
+        const current = this.resolveSeat(input.seatRef);
+        const currentStartup = this.readStartupContext(node.id, to);
+        if ("code" in current || current.nodeId !== node.id || current.entry.cwd !== from
+          || current.entry.runtime !== node.runtime || !currentStartup.ok || currentStartup.context.hash !== startup.context.hash) {
+          return { ok: false, code: "cwd_configuration_changed", message: "The seat's configuration changed while its new directory was checked; the cwd was not changed.", guidance: inspect };
+        }
+        if (changed) {
+          if (!this.rigRepo.setNodeCwd(node.id, to, from)) throw new Error("The seat's saved working directory changed.");
+          persisted = this.eventBus.persistWithinTransaction({ type: "node.cwd_changed", rigId: seat.rigId,
+            nodeId: node.id, logicalId: seat.logicalId, from, to, reason: input.reason.trim(), operator: input.operator ?? null });
+        }
+        return null;
+      })();
+      if (refusal) return { ...refusal, warnings };
+    } catch (error) {
+      return { ok: false, code: "cwd_persistence_failed", message: `The working directory was not changed: ${(error as Error).message}`, guidance: inspect, warnings };
+    }
+    if (persisted) this.eventBus.notifySubscribers(persisted);
+    return { ok: true, seat, from, to, changed, effect: "next_launch", warnings };
+  }
+
   /** OPR.0.7.0.7 — save one seat's effort for its next managed continuation. Like set-model it
    *  validates, writes, and persists an audited event in the same transaction; it never restarts
    *  the seat or touches its peers, model or account. `effort: null` clears the explicit choice. */
@@ -318,7 +457,7 @@ export class SeatLifecycleService {
     if (requested !== null) {
       if (!requested) return { ok: false, code: "missing_effort", message: "An effort level is required (--effort <level>), or pass --clear." };
       // Levels are the runtime's own (they differ by model and client), so only the shape is checked here.
-      if (!/^[A-Za-z][A-Za-z0-9_-]{0,31}$/.test(requested)) {
+      if (!EFFORT_SHAPE.test(requested)) {
         return { ok: false, code: "invalid_effort", message: `"${requested}" isn't an effort level: use the runtime's level name, such as low, medium or high.` };
       }
     }
@@ -326,8 +465,8 @@ export class SeatLifecycleService {
     if ("code" in resolved) return resolved;
     const seat = this.describe(resolved);
     const runtime = resolved.entry.runtime ?? "unknown";
-    if (runtime !== "claude-code" && runtime !== "codex") {
-      return { ok: false, code: "effort_unsupported_runtime", message: `Seat "${input.seatRef}" runs ${runtime}; reasoning effort applies to claude-code and codex seats only.` };
+    if (runtime !== "claude-code" && runtime !== "codex" && runtime !== "pi") {
+      return { ok: false, code: "effort_unsupported_runtime", message: `Seat "${input.seatRef}" runs ${runtime}; reasoning effort applies to claude-code, codex and pi seats only.` };
     }
 
     const from = this.readEffort(seat.nodeId);
@@ -376,8 +515,8 @@ export class SeatLifecycleService {
     if ("code" in resolved) return resolved;
     const seat = this.describe(resolved);
     const runtime = resolved.entry.runtime ?? "unknown";
-    if (runtime !== "claude-code" && runtime !== "codex") {
-      return { ok: false, code: "effort_unsupported_runtime", message: `Seat "${seatRef}" runs ${runtime}; reasoning effort applies to claude-code and codex seats only.` };
+    if (runtime !== "claude-code" && runtime !== "codex" && runtime !== "pi") {
+      return { ok: false, code: "effort_unsupported_runtime", message: `Seat "${seatRef}" runs ${runtime}; reasoning effort applies to claude-code, codex and pi seats only.` };
     }
     const saved = this.readEffort(seat.nodeId);
     if (!saved) {
@@ -394,6 +533,8 @@ export class SeatLifecycleService {
     if (!session || TERMINAL_SESSION_STATUSES.has(session.status) || !target) {
       emitted = { state: "unknown", detail: "The seat has no running session, so no launch to read." };
       observed = { state: "not_verified", detail: "The seat has no running session." };
+    } else if (runtime === "pi") {
+      ({ emitted, observed } = await this.piEffort(seat.nodeId, session.session_name, saved));
     } else {
       const observe = runtime === "claude-code" ? observeClaudePaneRuntime : observeCodexPaneProcess;
       const process = (await observe({ target, tmux: this.tmuxAdapter, ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) }))?.process;
@@ -411,7 +552,55 @@ export class SeatLifecycleService {
         observed = native.state === "observed" ? { ...native, matchesEmitted: native.value === value } : native;
       }
     }
-    return { ok: true, seat, runtime, requested, saved, emitted, observed, precedence, summary: effortSummary(saved, emitted, observed) };
+    return { ok: true, seat, runtime, requested, saved, emitted, observed, precedence, summary: effortSummary(saved, emitted, observed, runtime) };
+  }
+
+  /** A Pi seat's launch flag and native level, both from the identity-verified current runner: its
+   *  own command line, and the newest assistant record of this launch in its own session file. */
+  private async piEffort(nodeId: string, sessionName: string, saved: EffortResolution): Promise<Pick<EffortReport, "emitted" | "observed">> {
+    if (!this.piRecords) {
+      return {
+        emitted: { state: "unknown", detail: "The seat's Pi runner can't be read here." },
+        observed: { state: "not_verified", detail: "The seat's Pi runner can't be read here, so no turn can be tied to its launch." },
+      };
+    }
+    let selection: Awaited<ReturnType<CurrentModelReader["currentPiRecord"]>>;
+    try {
+      selection = await this.piRecords.currentPiRecord(nodeId, sessionName);
+    } catch {
+      selection = { ok: false, reason: "the pane's processes could not be read" };
+    }
+    if (!selection.ok) {
+      return {
+        emitted: { state: "unknown", detail: `No verified Pi runner for this seat: ${selection.reason}.` },
+        observed: { state: "not_verified", detail: `No verified Pi runner for this seat, so no turn can be tied to its launch: ${selection.reason}.` },
+      };
+    }
+    const tokens = processArgv(selection.command);
+    const flag = emittedEffortFromArgv("pi", tokens);
+    const value = flag.flag === "present" ? flag.value : null;
+    // ps joins argv with spaces: a bare word after the value may be the rest of a value with whitespace.
+    // Scanned as emittedEffortFromArgv does, so a value is never taken for the flag.
+    let after: string | undefined;
+    for (let index = 1; index < tokens.length; index += 1) {
+      if (tokens[index] === "--thinking") { after = tokens[index + 2]; index += 1; }
+      else if (tokens[index]!.startsWith("--thinking=")) after = tokens[index + 1];
+    }
+    const emitted: EffortReport["emitted"] = value !== null && after !== undefined && !after.startsWith("--")
+      ? { state: "unknown", detail: "The launch command's --thinking value can't be read unambiguously (it contains whitespace)." }
+      // Compared with what the launch guard sends for the saved value, not the saved value itself.
+      : { state: "observed", value, pid: selection.pid, startedAt: selection.startedAt, matchesSaved: value === (piThinkingValue(saved.effective) ?? null) };
+    const read = selection.observation;
+    if (!read.ok) return { emitted, observed: { state: "not_verified", detail: `No Pi turn from this launch can be read: ${read.reason}.` } };
+    if (!read.thinkingLevel) {
+      return { emitted, observed: { state: "not_verified", detail: "This Pi doesn't record the thinking level on its turns (Pi 0.99.0 and later do), so the level it ran at can't be shown." } };
+    }
+    // No flag sent: Pi's level comes from the model suffix or its default, so there is nothing to mismatch.
+    return { emitted, observed: {
+      state: "observed", value: read.thinkingLevel, at: read.observedAt ?? "unknown time", source: "Pi session (latest successful assistant turn; error and aborted turns are skipped)", outcome: "recorded",
+      detail: "Pi recorded this level with the turn's request: the session's level after Pi's own cap, not proof the provider applied it.",
+      ...(emitted.state === "observed" && value !== null ? { matchesEmitted: read.thinkingLevel === value } : {}),
+    } };
   }
 
   private lastRequestedEffort(nodeId: string): EffortReport["requested"] {
@@ -714,32 +903,33 @@ export class SeatLifecycleService {
     return { ok: true, seat, actions: { sessionsExited, bindingCleared: binding !== null } };
   }
 
-  /** Finish context delivery to the same fresh occupant after its native gate.
+  /** Finish context delivery to the same fresh or forked occupant after its native gate.
    * This never launches a process or replays an uncertain/finished delivery.
    */
-  async continueFreshStartup(seatRef: string) {
+  async continueStartup(seatRef: string) {
     const resolved = this.resolveSeat(seatRef);
     if ("code" in resolved) return resolved;
     const guard = this.tmuxAdapter.deliveryGuard;
     return guard
-      ? guard.lifecycle([resolved.nodeId], () => this.continueFreshStartupUnchecked(seatRef))
-      : this.continueFreshStartupUnchecked(seatRef);
+      ? guard.lifecycle([resolved.nodeId], () => this.continueStartupUnchecked(seatRef))
+      : this.continueStartupUnchecked(seatRef);
   }
 
-  private async continueFreshStartupUnchecked(seatRef: string) {
+  private async continueStartupUnchecked(seatRef: string) {
     const resolved = this.resolveSeat(seatRef);
     if ("code" in resolved) return resolved;
     const seat = this.describe(resolved);
     const node = this.rigRepo.getRig(seat.rigId)?.nodes.find((n) => n.id === seat.nodeId);
     const session = this.latestSession(seat.nodeId);
     const binding = this.sessionRegistry.getBindingForNode(seat.nodeId);
+    const pending = session && this.startupOrchestrator?.pendingStartupContext(seat.nodeId, session.id);
     if (!node || !session || !binding?.tmuxSession || !this.startupOrchestrator
-      || !this.startupOrchestrator.canContinueFresh(node.id, session.id)) {
-      return { ok: false as const, code: "continuation_unavailable", message: "No verified pending fresh-context delivery exists for this occupant. Refresh to inspect its actual state." };
+      || !pending) {
+      return { ok: false as const, code: "continuation_unavailable", message: "No verified pending startup-context delivery exists for this occupant. Refresh to inspect its actual state." };
     }
     const pane = await observeSolePane(this.tmuxAdapter, binding.tmuxSession);
     if (!pane.ok || pane.pane !== binding.tmuxPane) return { ok: false as const, code: "binding_changed", message: "The managed terminal binding changed; context was not delivered." };
-    const adapter = node.runtime ? this.runtimeAdapters[node.runtime] : undefined;
+    const adapter = seatAdapter(this.runtimeAdapters, node.runtime, session.community_harness);
     if (!adapter) return { ok: false as const, code: "runtime_adapter_missing", message: "The configured runtime adapter is unavailable." };
     const ready = await adapter.checkReady({ ...binding, cwd: node.cwd ?? "." });
     if (!ready.ready) return { ok: false as const, code: "attention_required", message: ready.reason ?? "Resolve the native prerequisite first." };
@@ -749,15 +939,16 @@ export class SeatLifecycleService {
     // Recheck after the asynchronous native observation; startNode immediately
     // records pending before its first await, consuming the retained permission.
     if (this.latestSession(node.id)?.id !== session.id || this.sessionRegistry.getBindingForNode(node.id)?.tmuxPane !== pane.pane
-      || !this.startupOrchestrator.canContinueFresh(node.id, session.id)) return { ok: false as const, code: "continuation_unavailable", message: "Startup changed during the readiness check. Refresh." };
+      || !this.stillPending(node.id, session.id, pending)) return { ok: false as const, code: "continuation_unavailable", message: "Startup changed during the readiness check. Refresh." };
     const result = await this.startupOrchestrator.startNode({
       rigId: seat.rigId, nodeId: node.id, sessionId: session.id,
       binding: { ...binding, cwd: node.cwd ?? ".", model: node.model ?? undefined, effort: resolveSeatEffort(node).effective ?? undefined, codexConfigProfile: node.codexConfigProfile ?? undefined },
       adapter, plan: startup.context.plan, resolvedStartupFiles: startup.context.resolvedStartupFiles,
-      startupActions: startup.context.startupActions, isRestore: false,
-      sessionName: session.session_name, skipHarnessLaunch: true, continueFreshStartup: true, includeDurableObligations: true, allowFreshFallback: false,
+      startupActions: startup.context.startupActions, isRestore: pending.mode === "fork" && pending.isRestore,
+      sessionName: session.session_name, skipHarnessLaunch: true, continueFreshStartup: pending.mode === "fresh", includeDurableObligations: true, allowFreshFallback: false,
+      ...(pending.mode === "fork" ? { forkSource: { kind: "native_id" as const, value: pending.parentToken } } : {}),
     });
-    return { ...result, message: result.ok ? "Configured context delivered to the existing fresh conversation." : result.errors.join("; ") };
+    return { ...result, message: result.ok ? "Configured context delivered to the existing conversation." : result.errors.join("; ") };
   }
 
   /**
@@ -786,7 +977,7 @@ export class SeatLifecycleService {
         message: `Persisted startup context runtime '${startup.context.runtime}' does not match current node runtime '${node.runtime ?? "missing"}'.`,
       };
     }
-    const adapter = this.runtimeAdapters[node.runtime];
+    const adapter = seatAdapter(this.runtimeAdapters, node.runtime, this.latestSession(node.id)?.community_harness);
     if (!adapter) {
       return {
         ok: false as const,
@@ -806,6 +997,14 @@ export class SeatLifecycleService {
    * mismatched sessions. Return its session row or a refusal, including unknown pane
    * observations, without stopping, repairing, or starting a tmux server.
    */
+  /** Whether the context found before the native check is still owed. A fork continuation needs the exact
+   *  same pending event: its child is verified against that attempt. A fresh continuation keeps main's
+   *  check (fresh context still pending for this occupant), so another pending event doesn't refuse it. */
+  private stillPending(nodeId: string, sessionId: string, pending: PendingStartupContext): boolean {
+    const now = this.startupOrchestrator?.pendingStartupContext(nodeId, sessionId);
+    return pending.mode === "fork" ? now?.eventSeq === pending.eventSeq : now?.mode === "fresh";
+  }
+
   private async validateFreshCollision(resolved: ResolvedSeat, canonicalSessionName: string, stop: boolean): Promise<LatestSessionRow | SeatRefusal> {
     const currentSession = this.latestSession(resolved.nodeId);
     const currentBinding = this.sessionRegistry.getBindingForNode(resolved.nodeId);
@@ -1664,7 +1863,7 @@ export class SeatLifecycleService {
 
   private latestSession(nodeId: string): LatestSessionRow | null {
     const row = this.db.prepare(
-      "SELECT id, session_name, status, origin FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1",
+      `SELECT id, session_name, status, origin, ${sessionCommunityHarnessSelect(this.db, "sessions")} AS community_harness FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1`,
     ).get(nodeId) as LatestSessionRow | undefined;
     return row ?? null;
   }
@@ -1761,19 +1960,26 @@ function isStringArrayOf<T extends string>(value: unknown, allowed: readonly T[]
 }
 
 /** One line naming where the four values agree, and where they can't be seen. */
-function effortSummary(saved: EffortResolution, emitted: EffortReport["emitted"], observed: EffortReport["observed"]): string {
+function effortSummary(saved: EffortResolution, emitted: EffortReport["emitted"], observed: EffortReport["observed"], runtime: string): string {
   const savedText = saved.effective ? `${saved.effective} (${saved.source === "seat_choice" ? "seat choice" : "authored"})` : "no flag (the runtime's own default)";
-  if (emitted.state !== "observed") return `Saved: ${savedText}. Launch: unknown (${emitted.detail}) Native effort: NOT VERIFIED.`;
+  if (emitted.state !== "observed") {
+    // Only a Pi launch value that can't be read back unambiguously leaves the native turn readable.
+    const native = observed.state === "observed" ? `${observed.value} (${observed.source}, ${observed.at})` : "NOT VERIFIED";
+    return `Saved: ${savedText}. Launch: unknown (${emitted.detail}) Native effort: ${native}.`;
+  }
   const launch = emitted.value ?? "no flag";
-  const launchNote = emitted.matchesSaved ? "" : " This differs from the saved value: it applies at the seat's next managed continuation.";
+  // A Pi saved value the launch guard leaves out never applies, so it isn't reported as pending.
+  const launchNote = runtime === "pi" && saved.effective && !piThinkingValue(saved.effective) ? " The saved value isn't sent: it doesn't pass the check set-effort uses (a letter, then up to 31 letters, digits, - or _)."
+    : emitted.matchesSaved ? "" : " This differs from the saved value: it applies at the seat's next managed continuation.";
   if (observed.state !== "observed") return `Saved: ${savedText}. Launch sent: ${launch}.${launchNote} Native effort: NOT VERIFIED (${observed.detail})`;
-  const sent = observed.matchesEmitted === false
-    ? `${observed.value}, not the ${launch} the launch sent (changed or overridden inside the session)`
-    : observed.value;
+  const sent = observed.matchesEmitted !== false ? observed.value
+    : runtime === "pi" ? `${observed.value}, not the ${launch} sent at launch (Pi caps a level the model doesn't offer, ignores one it doesn't know, and the level can change inside the session)`
+    : `${observed.value}, not the ${launch} the launch sent (changed or overridden inside the session)`;
   const verdict = observed.outcome === "accepted" ? "accepted by the service for that turn"
     : observed.outcome === "rejected" ? `REJECTED (${observed.detail})`
     : observed.outcome === "failed" || observed.outcome === "interrupted" ? (observed.detail ?? "not judged").replace(/\.$/, "")
     : observed.outcome === "pending" ? "its turn hasn't finished, so not yet known whether it was taken"
+    : runtime === "pi" ? "applied level NOT VERIFIED (Pi records the level it requested, not what the provider ran)"
     : "applied level NOT VERIFIED (whether this is after any model fallback isn't shown)";
   return `Saved: ${savedText}. Launch sent: ${launch}.${launchNote} The session sent ${sent} with its latest turn (${observed.source}, ${observed.at}): ${verdict}.`;
 }

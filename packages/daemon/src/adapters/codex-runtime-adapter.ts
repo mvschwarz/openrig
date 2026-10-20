@@ -21,6 +21,8 @@ import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-plann
 import { observeCodexSandbox, type AppliedLaunchObservation } from "../domain/permission-drift.js";
 import {
   defaultResolveHomeDirByPid,
+  CodexThreadIdResolver,
+  lstartToMinTs,
   readCodexThreadIdFromCandidateHomes,
   type ResolveHomeDirByPid,
 } from "../domain/codex-thread-id.js";
@@ -33,14 +35,22 @@ import { excludeNewGeneratedFiles } from "../domain/generated-file-hygiene.js";
 import { codexQueueStateRoot, codexTeamWorkspaceArg, type PrepareCodexTeamWorkspace } from "../domain/codex-team-workspace.js";
 import { shellQuote } from "./shell-quote.js";
 import { runSyncSite } from "../domain/sync-site-wrap.js";
+import { resolveReadinessTimeoutMs } from "../domain/readiness-timeout.js";
+import type { SettingsStore } from "../domain/user-settings/settings-store.js";
 
-import { listNativeProcesses, observeCodexPaneProcess, type NativeProcessRow } from "../domain/native-process-lineage.js";
+import { listNativeProcesses, observeCodexPaneProcess, observeCodexForkProcess, verifyPaneIdleShell, type NativeProcessRow } from "../domain/native-process-lineage.js";
 
 // Shared by all probes of ONE launch, never reset by a delayed screen or an
 // ambiguous transport result. A separately requested launch gets a new attempt.
 interface UpdatePromptAttempt {
   handled: boolean;
   failure?: Extract<HarnessLaunchResult, { ok: false }>;
+  /** Reporting only: the latest screen the helper itself captured and classified, in capture order, so a report can
+   *  name it rather than an older capture. `beforeInput` marks a screen the helper then sent (or tried to send) its key
+   *  to, with no later capture. Never read by a polling or recovery decision. */
+  observed?: { probe: NativeResumeProbeResult; paneContent: string; beforeInput?: true };
+  /** Reporting only: whether the helper sent the update prompt's skip key on this launch, and how that send came out. */
+  skipKey?: "sent" | "failed";
 }
 
 type CodexProcess = NativeProcessRow;
@@ -92,7 +102,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private seatLaunchEnvironment?: SeatLaunchEnvironment;
   private fs: CodexAdapterFsOps;
   private listProcesses: () => CodexProcess[] | Promise<CodexProcess[]>;
-  private readThreadIdByPid: (pid: number) => Promise<string | undefined> | string | undefined;
+  private readThreadIdByPid: (pid: number, identity?: string) => Promise<string | undefined> | string | undefined;
+  private readinessSettings?: Pick<SettingsStore, "resolveOne">;
   private sleep: (ms: number) => Promise<void>;
   private resolveHomeDirByPid: ResolveHomeDirByPid;
   private codexHome?: string;
@@ -127,7 +138,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     seatLaunchEnvironment?: SeatLaunchEnvironment;
     fsOps: CodexAdapterFsOps;
     listProcesses?: () => CodexProcess[] | Promise<CodexProcess[]>;
-    readThreadIdByPid?: (pid: number) => Promise<string | undefined> | string | undefined;
+    readThreadIdByPid?: (pid: number, identity?: string) => Promise<string | undefined> | string | undefined;
+    readinessSettings?: Pick<SettingsStore, "resolveOne">;
     resolveHomeDirByPid?: ResolveHomeDirByPid;
     sleep?: (ms: number) => Promise<void>;
     activityRelayPath?: string;
@@ -158,8 +170,14 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.resolveGitAddDirs = deps.resolveGitAddDirs ?? resolveCodexGitAddDirs;
     this.activityRelayPath = deps.activityRelayPath;
     this.listProcesses = deps.listProcesses ?? defaultListProcesses;
-    this.readThreadIdByPid = deps.readThreadIdByPid ?? ((pid) => this.readThreadIdFromLogs(pid));
     this.resolveHomeDirByPid = deps.resolveHomeDirByPid ?? defaultResolveHomeDirByPid;
+    const threadIdResolver = new CodexThreadIdResolver({
+      defaultHome: this.fs.homedir ?? os.homedir(), codexHome: this.codexHome,
+      resolveHomeDirByPid: this.resolveHomeDirByPid,
+    });
+    this.readThreadIdByPid = deps.readThreadIdByPid ?? ((pid, identity) => identity === undefined
+      ? this.readThreadIdFromLogs(pid) : threadIdResolver.resolveForkChild(pid, identity));
+    this.readinessSettings = deps.readinessSettings;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.verifyProfilePreflight = deps.verifyProfilePreflight
       ?? ((profile, cwd) => defaultProfilePreflight(profile, this.codexHome ? { cwd, codexHome: this.codexHome, launchPath: this.launchPath } : undefined));
@@ -448,14 +466,25 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       }
       await this.dismissSkippableCodexUpdatePrompt(binding.tmuxSession, updatePrompt, 8);
       if (updatePrompt.failure) return updatePrompt.failure;
-      const threadId = await this.captureFreshThreadId(binding, updatePrompt);
+      // A handover keeps its own capture and checks (#1216). Any other fork saves an id and sends its
+      // role only for the child `rig seat continue` would also verify: a foreground chain forking this
+      // parent, whose own start-time-gated record supplies the id.
+      const threadId = opts.forkSource.pendingIdAllowed
+        ? await this.captureFreshThreadId(binding, updatePrompt)
+        : await this.captureVerifiedForkId(binding, updatePrompt, parentId,
+          resolveReadinessTimeoutMs(undefined, this.readinessSettings));
       if (updatePrompt.failure) return updatePrompt.failure;
       if (!threadId) {
         // For a handover a missed capture is pending metadata, not a failed launch: the fork returns
-        // without a token and the handover's readiness checks still decide success. Every other fork
-        // caller refuses, as before.
+        // without a token and the handover's readiness checks still decide success. Any other fork
+        // keeps its unsent context pending for `rig seat continue`, which verifies the child first.
         if (opts.forkSource.pendingIdAllowed) return { ok: true, appliedLaunch };
-        return { ok: false, error: "codex fork: could not capture new post-fork thread id" };
+        return {
+          ok: false,
+          error: "codex fork: could not capture new post-fork thread id",
+          recovery: "attention_required",
+          forkIdentityPending: true,
+        };
       }
       return { ok: true, resumeToken: threadId, resumeType: "codex_id", appliedLaunch };
     }
@@ -623,8 +652,37 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       paneContent,
     });
 
+    if (probe.code === "returned_to_shell") {
+      const isIdleShell = await verifyPaneIdleShell({
+        target: binding.tmuxSession,
+        tmux: this.tmux,
+        listProcesses: this.listProcesses,
+      });
+      if (!isIdleShell) {
+        return {
+          ready: false,
+          reason: "The pane shows a shell that is not a proven idle shell; a launch script may still be starting Codex.",
+          code: "awaiting_runtime",
+        };
+      }
+    }
+
     if (probe.status === "resumed") return { ready: true };
     return { ready: false, reason: probe.detail, code: probe.code };
+  }
+
+  async captureForkIdentity(binding: NodeBinding, parentToken: string): Promise<{ resumeToken: string; resumeType: string } | null> {
+    const target = binding.tmuxPane ?? binding.tmuxSession;
+    if (!target || !this.tmux.getPanePid) return null;
+    const input = { target, tmux: this.tmux, listProcesses: this.listProcesses, parentToken };
+    const before = await observeCodexForkProcess(input);
+    if (!before || lstartToMinTs(before.process.startedAt) === undefined) return null;
+    // Gate PID logs by process start time, then re-observe the whole foreground
+    // chain. Neither a reused PID nor a replacement pane proves this child.
+    const child = (await this.readThreadIdByPid(before.process.pid, before.process.startedAt))?.trim();
+    if (!child || child === parentToken) return null;
+    const after = await observeCodexForkProcess(input);
+    return after?.fingerprint === before.fingerprint ? { resumeToken: child, resumeType: "codex_id" } : null;
   }
 
   private async dismissSkippableCodexUpdatePrompt(
@@ -634,6 +692,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       const paneCommand = await this.tmux.getPaneCommand(tmuxSession);
       const paneContent = await this.captureProbeScreen(tmuxSession);
       const probe = assessNativeResumeProbe({ runtime: "codex", paneCommand, paneContent });
+      updatePrompt.observed = { probe, paneContent };
 
       if (probe.code === "update_gate") {
         if (updatePrompt.handled || !isSkippableCodexUpdatePrompt(paneContent)) return false;
@@ -647,8 +706,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           return false;
         }
         const currentScreen = await this.tmux.capturePaneScreen?.(tmuxSession);
-        if (!currentScreen || !isSkippableCodexUpdatePrompt(currentScreen)
-          || assessNativeResumeProbe({ runtime: "codex", paneCommand: currentCommand, paneContent: currentScreen }).code !== "update_gate") {
+        const currentProbe = currentScreen ? assessNativeResumeProbe({ runtime: "codex", paneCommand: currentCommand, paneContent: currentScreen }) : null;
+        if (currentScreen && currentProbe) updatePrompt.observed = { probe: currentProbe, paneContent: currentScreen };
+        if (!currentScreen || !isSkippableCodexUpdatePrompt(currentScreen) || currentProbe?.code !== "update_gate") {
           updatePrompt.handled = true;
           return false;
         }
@@ -658,11 +718,15 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         // screen. Consume the attempt before sending, even if delivery fails.
         updatePrompt.handled = true;
         const result = await this.tmux.sendKeys(tmuxSession, ["3"]);
+        updatePrompt.skipKey = result.ok ? "sent" : "failed";
+        // The screen just recorded preceded this input; a later capture on this launch replaces it.
+        if (updatePrompt.observed) updatePrompt.observed.beforeInput = true;
         if (!result.ok) {
           updatePrompt.failure = {
+            gate: "update_gate", gateChoice: true, verifierInput: "update_skip_key_failed", screenBeforeInput: true,
             ok: false, recovery: "attention_required",
-            error: `Could not skip the Codex update prompt: ${result.message}. Inspect the session before retrying.`,
-            evidence: paneContent.split("\n").slice(-12).join("\n"),
+            error: `Could not send the update prompt's skip key (3): ${result.message}; its effect is unknown. Inspect the session before retrying.`,
+            evidence: (currentScreen ?? paneContent).split("\n").slice(-12).join("\n"),
           };
           return false;
         }
@@ -924,6 +988,39 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return undefined;
   }
 
+  /** `work`'s result, or null once `deadline` (epoch ms) passes first. The late result is ignored. */
+  private async withinDeadline<T>(work: Promise<T>, deadline: number): Promise<T | null> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), Math.max(0, deadline - Date.now())); });
+    try {
+      return await Promise.race([work, expired]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** A fork's own id at launch, from a verified child only (see {@link captureForkIdentity}). Polls for up
+   *  to `timeoutMs`, because a fork's record can appear well after the process starts. */
+  private async captureVerifiedForkId(binding: NodeBinding, updatePrompt: UpdatePromptAttempt, parentId: string,
+    timeoutMs: number): Promise<string | undefined> {
+    const deadline = Date.now() + timeoutMs;
+    const attempts = Math.max(1, Math.ceil(timeoutMs / 250));
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      if (attempt > 0 && Date.now() >= deadline) break;
+      // Each attempt may wait on a home probe; bound it by the time left, so a stuck probe ends in attention on time.
+      const identity = await this.withinDeadline(this.captureForkIdentity(binding, parentId), deadline);
+      if (identity) return identity.resumeToken;
+      if (binding.tmuxSession) {
+        await this.dismissSkippableCodexUpdatePrompt(binding.tmuxSession, updatePrompt, 1);
+        if (updatePrompt.failure) return undefined;
+      }
+      const remaining = Math.min(250, deadline - Date.now());
+      if (remaining <= 0) break;
+      await this.sleep(remaining);
+    }
+    return undefined;
+  }
+
   private async verifyResumeLaunch(tmuxSession: string, updatePrompt: UpdatePromptAttempt, opts?: { resumeToken?: string }): Promise<HarnessLaunchResult> {
     const quickAttempts = 6;
     const extendedAttempts = 24;
@@ -942,6 +1039,17 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // within the quick window. Only the awaiting_runtime boot case extends.
     let lastUnresolved: NativeResumeProbeResult | null = null;
     let lastPaneContent = "";
+    // Reporting only: the newest screen observed, in capture order (the loop's own capture, then the update helper's
+    // later ones in the same iteration), so the result names what was seen last. A resumed or booting screen replaces an
+    // older gate. The loop's decisions keep using lastUnresolved.
+    let report: { probe: NativeResumeProbeResult; paneContent: string; beforeInput?: true } | null = null;
+    // Reporting only: what this verification typed into the pane (only the update helper ever types here).
+    const verifierInput = (): "none" | "update_skip_key_sent" | "update_skip_key_failed" =>
+      updatePrompt.skipKey === "sent" ? "update_skip_key_sent" : updatePrompt.skipKey === "failed" ? "update_skip_key_failed" : "none";
+    const gateFields = (p: NativeResumeProbeResult, pane: string) => ({
+      ...(p.code ? { gate: p.code } : {}),
+      ...(p.code === "update_gate" ? { gateChoice: isSkippableCodexUpdatePrompt(pane) } : {}),
+    });
     let sawRealGate = false;
 
     const totalAttempts = quickAttempts + extendedAttempts;
@@ -988,6 +1096,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           ok: false,
           error: probe.detail,
           recovery: "attention_required",
+          ...gateFields(probe, paneContent),
+          verifierInput: verifierInput(),
           evidence: paneContent.split("\n").slice(-12).join("\n"),
         };
       }
@@ -1000,8 +1110,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         };
       }
 
+      report = { probe, paneContent }; // resumed returned above, so this screen is unresolved
       if (probe.code === "update_gate") {
+        updatePrompt.observed = undefined;
         const dismissed = await this.dismissSkippableCodexUpdatePrompt(tmuxSession, updatePrompt, 1);
+        // The helper's own captures came after this one: report its newest, whatever it showed.
+        const helperSaw = helperObservation(updatePrompt);
+        if (helperSaw) report = helperSaw;
         if (updatePrompt.failure) return updatePrompt.failure;
         if (dismissed) {
           lastUnresolved = null;
@@ -1023,12 +1138,23 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       if (attempt < totalAttempts - 1) await this.sleep(sleepMs);
     }
 
+    // Report the newest screen observed; a resumed or booting one names no gate. The loop's own decisions above used
+    // lastUnresolved. The text follows the newest screen too, so an older gate's text never stands for a newer screen.
+    const shown = report && report.probe.status !== "resumed" && report.probe.code !== "awaiting_runtime" ? report : null;
+    const newestText = shown ? shown.probe.detail
+      : report?.probe.status === "resumed" ? "Codex resume could not be confirmed: the last screen observed looked ready, but the resume check ended before proving a restored conversation."
+        : report ? report.probe.detail
+          : lastUnresolved?.detail;
     return {
       ok: false,
-      error: lastUnresolved?.detail
+      error: newestText
         ?? "Codex resume could not be confirmed: the process is alive but a restored conversation was never proven.",
       recovery: "attention_required",
-      evidence: lastPaneContent.split("\n").slice(-12).join("\n"),
+      // The gate on that screen, if any. A boot still in progress names no gate.
+      ...(shown ? gateFields(shown.probe, shown.paneContent) : {}),
+      ...(shown?.beforeInput ? { screenBeforeInput: true as const } : {}),
+      verifierInput: verifierInput(),
+      evidence: (report?.paneContent ?? lastPaneContent).split("\n").slice(-12).join("\n"),
     };
   }
 
@@ -1662,6 +1788,11 @@ function commandLooksLikeCodex(command: string): boolean {
     const base = nodePath.basename(unquoted);
     return base === "codex";
   });
+}
+
+/** The update helper's latest capture, read through a function so flow narrowing doesn't hide the helper's write. */
+function helperObservation(attempt: UpdatePromptAttempt): UpdatePromptAttempt["observed"] {
+  return attempt.observed;
 }
 
 function isSkippableCodexUpdatePrompt(paneContent: string): boolean {

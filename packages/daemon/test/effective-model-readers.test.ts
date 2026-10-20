@@ -8,6 +8,7 @@ import { join } from "node:path";
 import {
   readClaudeEffectiveModel,
   readCodexEffectiveModel,
+  readPiEffectiveModel,
   readTailLines,
 } from "../src/domain/model-divergence/effective-model-readers.js";
 
@@ -152,5 +153,50 @@ describe("readTailLines", () => {
     const lines = readTailLines(p, 7); // lands mid-"bbbb"
     expect(lines).not.toContain("aaaa");
     expect(lines).toContain("cccc");
+  });
+});
+
+// Pi — the newest determinate assistant record's `provider/model`, when it is the occupant's own.
+// (Occupant scoping and the monitor wiring: pi-effective-model-occupant.test.ts.)
+
+const PI_T0 = Date.parse("2026-10-17T09:00:00.000Z");
+const piHeader = JSON.stringify({ type: "session", version: 3, id: "s1", timestamp: new Date(PI_T0).toISOString(), cwd: "/p" });
+let piSeq = 0;
+const piLine = (model: string, provider = "anthropic", atMs = PI_T0 + 60_000) =>
+  JSON.stringify({ type: "message", id: `p${++piSeq}`, timestamp: new Date(atMs).toISOString(), message: { role: "assistant", provider, model, stopReason: "stop" } });
+const piScope = { notBeforeMs: PI_T0 };
+
+describe("readPiEffectiveModel", () => {
+  it("returns the NEWEST own assistant record as provider/model", () => {
+    const p = tmp("s.jsonl", [piHeader, piLine("claude-opus-5"), piLine("claude-fable-5"), ""].join("\n"));
+    expect(readPiEffectiveModel(p, piScope)).toEqual({ ok: true, model: "anthropic/claude-fable-5" });
+  });
+
+  it("missing file, no header, no assistant record: named no-answers; corrupt lines are skipped", () => {
+    expect(readPiEffectiveModel("/nonexistent/s.jsonl", piScope)).toMatchObject({ ok: false, reason: expect.stringMatching(/unreadable/) });
+    expect(readPiEffectiveModel(tmp("a.jsonl", `${piLine("m")}\n`), piScope)).toMatchObject({ ok: false, reason: expect.stringMatching(/no readable session header/) });
+    expect(readPiEffectiveModel(tmp("b.jsonl", `${piHeader}\n`), piScope)).toMatchObject({ ok: false });
+    const p = tmp("c.jsonl", `${piHeader}\n${piLine("claude-fable-5")}\n{not json "assistant"\n`);
+    expect(readPiEffectiveModel(p, piScope)).toEqual({ ok: true, model: "anthropic/claude-fable-5" });
+  });
+
+  it("BOUNDED: a record past one tail window resolves; a record past the scan cap is a no-answer", () => {
+    const p = tmp("s.jsonl", `${piHeader}\n${piLine("claude-fable-5")}\n`);
+    for (let i = 0; i < 2000; i++) appendFileSync(p, JSON.stringify({ type: "message", message: { role: "user", content: "x".repeat(1000) } }) + "\n");
+    expect(readPiEffectiveModel(p, piScope)).toEqual({ ok: true, model: "anthropic/claude-fable-5" });
+    expect(readPiEffectiveModel(p, piScope, 1024 * 1024)).toMatchObject({ ok: false });
+  });
+
+  it("a record STRADDLING a window boundary is re-read whole (shared scanner)", () => {
+    const record = piLine("claude-fable-5");
+    const p = tmp("s.jsonl", `${piHeader}\n${record}\n`);
+    // Trailing bulk sized so the 512KB window starts inside the record.
+    appendFileSync(p, "y".repeat(512 * 1024 - Math.floor(record.length / 2)) + "\n");
+    expect(readPiEffectiveModel(p, piScope)).toEqual({ ok: true, model: "anthropic/claude-fable-5" });
+  });
+
+  it("a line wider than a window terminates the scan and the record before it still resolves", () => {
+    const p = tmp("s.jsonl", `${piHeader}\n${piLine("claude-fable-5")}\n${"z".repeat(600 * 1024)}\n`);
+    expect(readPiEffectiveModel(p, piScope)).toEqual({ ok: true, model: "anthropic/claude-fable-5" });
   });
 });

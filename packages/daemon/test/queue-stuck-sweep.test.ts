@@ -38,7 +38,10 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     db = new Database(":memory:");
     migrate(db, ALL_MIGRATIONS);
     bus = new EventBus(db);
-    repo = new QueueRepository(db, bus, { validateRig: () => true });
+    repo = new QueueRepository(db, bus, {
+      validateRig: () => true,
+      loadHumanRegistry: () => ({ ok: true, entities: [] }),
+    });
   });
   afterEach(() => {
     db.close();
@@ -893,7 +896,10 @@ describe.each(["done", "handed-off"] as const)("#318 seat-target closure without
   beforeEach(() => {
     db = new Database(":memory:");
     migrate(db, ALL_MIGRATIONS);
-    repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    repo = new QueueRepository(db, new EventBus(db), {
+      validateRig: () => true,
+      loadHumanRegistry: () => ({ ok: true, entities: [] }),
+    });
   });
   afterEach(() => {
     db.close();
@@ -1028,6 +1034,44 @@ describe.each(["done", "handed-off"] as const)("#318 seat-target closure without
     const findings = await findingsFor(row.qitemId);
     expect(findings).toHaveLength(1);
     expect(findings[0]!.body).toContain("- next@r");
+  });
+
+  it("SELF TARGET DOES NOT SUPPRESS: closureTarget = row.qitemId leaves it flagged", async () => {
+    const row = await mkRow();
+    await repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@r",
+      state: closureState,
+      closureReason: "handed_off_to",
+      closureTarget: row.qitemId,
+    });
+
+    await runSweep();
+    const findings = await findingsFor(row.qitemId);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.body).toContain(`- ${row.qitemId}`);
+  });
+
+  it("EXPLICIT SUCCESSOR TARGETED BY QITEM ID: successor targeted by qitemId is not flagged", async () => {
+    const row = await mkRow();
+    const successor = await repo.create({
+      sourceSession: "worker@r",
+      destinationSession: "next@r",
+      body: "follow-on",
+      chainOfRecord: [row.qitemId],
+      nudge: false,
+    });
+    await repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@r",
+      state: closureState,
+      closureReason: "handed_off_to",
+      closureTarget: successor.qitemId,
+    });
+
+    const { result } = await runSweep();
+    expect(result.outcome).toBe("clean");
+    expect(await findingsFor(row.qitemId)).toHaveLength(0);
   });
 
   it("REMOTE CUSTODY NOTE SILENCES SEAT TARGET: custody-verified note on source row prevents finding", async () => {

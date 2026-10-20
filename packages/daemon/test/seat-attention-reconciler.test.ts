@@ -568,6 +568,137 @@ describe("SeatAttentionReconciler", () => {
     expect(events).toHaveLength(0);
   });
 
+  // #116 — clear-attention and the projection fence the same restore outcomes.
+  describe("restore outcomes fenced by a ready current-generation fresh launch (#116)", () => {
+    function seedRunningSeat(rigName: string, sessionName: string): { rigId: string; nodeId: string } {
+      const rig = rigRepo.createRig(rigName);
+      const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+      const session = sessionRegistry.registerSession(node.id, sessionName);
+      sessionRegistry.updateStartupStatus(session.id, "ready");
+      sessionRegistry.updateStatus(session.id, "running");
+      return { rigId: rig.id, nodeId: node.id };
+    }
+
+    function launchFreshOccupant(rigId: string, nodeId: string, sessionName: string, status: "ready" | "attention_required" = "ready") {
+      const session = sessionRegistry.registerSession(nodeId, sessionName, "fresh");
+      sessionRegistry.updateStartupStatus(session.id, "ready");
+      sessionRegistry.updateStatus(session.id, "running");
+      eventBus.emit({
+        type: "seat.fresh_launched", rigId, nodeId, logicalId: "worker", sessionName, sessionId: session.id,
+        supersededSessionIds: [], retiringGeneration: null,
+        newGeneration: sessionRegistry.currentOccupantTenure(nodeId)!.generationUuid,
+        nativeSessionId: null, model: null, startupPolicyHash: "test", reason: "fresh occupant", operator: null, status,
+      });
+    }
+
+    function failedRestoreResult(nodeId: string) {
+      return { snapshotId: "snap-1", preRestoreSnapshotId: "snap-0", rigResult: "failed", nodes: [{ nodeId, logicalId: "worker", status: "failed" }], warnings: [] };
+    }
+
+    function refusingStrictReconciler() {
+      const strict = vi.fn(async () => ({ ok: false as const, code: "no_attempt_proof", detail: "test refusal" }));
+      const fenced = new SeatAttentionReconciler({
+        sessionRegistry, eventBus, agentActivityStore: activityStore, db, reconcileRestoreOutcome: strict as any,
+      });
+      return { strict, fenced };
+    }
+
+    function reconciledEvents() {
+      return db.prepare("SELECT payload FROM events WHERE type = 'restore.outcome_reconciled'").all() as { payload: string }[];
+    }
+
+    it("a ready fresh launch after a failed full restore leaves no restore class to clear", async () => {
+      const { rigId, nodeId } = seedDerivedAttentionSeat("r-116-fresh", "worker@r-116-fresh");
+      launchFreshOccupant(rigId, nodeId, "worker@r-116-fresh");
+      const { strict, fenced } = refusingStrictReconciler();
+
+      const result = await fenced.clearAttention("worker@r-116-fresh", { reason: "operator verified" });
+
+      expect(result).toMatchObject({ ok: false, code: "not_in_attention" });
+      expect(strict).not.toHaveBeenCalled();
+      expect(reconciledEvents()).toHaveLength(0);
+      expect(getNodeInventory(db, rigId)[0]).toMatchObject({ restoreOutcome: "n-a", lifecycleState: "running" });
+    });
+
+    it("a fresh launch that needed attention still needs the strict reconciler", async () => {
+      const { rigId, nodeId } = seedDerivedAttentionSeat("r-116-unready", "worker@r-116-unready");
+      launchFreshOccupant(rigId, nodeId, "worker@r-116-unready", "attention_required");
+      const { strict, fenced } = refusingStrictReconciler();
+
+      const result = await fenced.clearAttention("worker@r-116-unready", { reason: "operator verified" });
+
+      expect(result).toMatchObject({ ok: false, code: "not_demonstrably_responsive" });
+      expect(strict).toHaveBeenCalledWith(rigId, nodeId);
+      expect(reconciledEvents()).toHaveLength(0);
+      expect(getNodeInventory(db, rigId)[0]).toMatchObject({ restoreOutcome: "failed", lifecycleState: "attention_required" });
+    });
+
+    it("a restore attempt started after the fresh launch still needs the strict reconciler", async () => {
+      const { rigId, nodeId } = seedRunningSeat("r-116-new-attempt", "worker@r-116-new-attempt");
+      launchFreshOccupant(rigId, nodeId, "worker@r-116-new-attempt");
+      eventBus.emit({ type: "restore.started", rigId, snapshotId: "snap-1" });
+      eventBus.emit({ type: "restore.completed", rigId, snapshotId: "snap-1", result: failedRestoreResult(nodeId) } as any);
+      const { strict, fenced } = refusingStrictReconciler();
+
+      const result = await fenced.clearAttention("worker@r-116-new-attempt");
+
+      expect(result).toMatchObject({ ok: false, code: "not_demonstrably_responsive" });
+      expect(strict).toHaveBeenCalledWith(rigId, nodeId);
+    });
+
+    it("a full restore completing after the fresh launch, for an attempt started before it, is fenced", async () => {
+      const { rigId, nodeId } = seedRunningSeat("r-116-late", "worker@r-116-late");
+      eventBus.emit({ type: "restore.started", rigId, snapshotId: "snap-1" });
+      launchFreshOccupant(rigId, nodeId, "worker@r-116-late");
+      eventBus.emit({ type: "restore.completed", rigId, snapshotId: "snap-1", result: failedRestoreResult(nodeId) } as any);
+      const { strict, fenced } = refusingStrictReconciler();
+
+      const result = await fenced.clearAttention("worker@r-116-late");
+
+      expect(result).toMatchObject({ ok: false, code: "not_in_attention" });
+      expect(strict).not.toHaveBeenCalled();
+      expect(getNodeInventory(db, rigId)[0]).toMatchObject({ restoreOutcome: "n-a", lifecycleState: "running" });
+    });
+
+    // A subset restore records no start, so a completion after the fresh launch
+    // stays current (unresolved) and keeps the subset path.
+    it("a subset completion after the fresh launch keeps the subset path", async () => {
+      const { rigId, nodeId } = seedRunningSeat("r-116-subset", "worker@r-116-subset");
+      launchFreshOccupant(rigId, nodeId, "worker@r-116-subset");
+      eventBus.emit({
+        type: "restore.subset_completed", rigId, snapshotId: "snap-subset",
+        result: { ...failedRestoreResult(nodeId), snapshotId: "snap-subset", nodes: [{ nodeId, logicalId: "worker", status: "attention_required" }] },
+      } as any);
+      emitActivity(rigId, nodeId, "worker@r-116-subset", "running");
+      const { strict, fenced } = refusingStrictReconciler();
+
+      const result = await fenced.clearAttention("worker@r-116-subset");
+
+      expect(result.ok).toBe(true);
+      expect(strict).not.toHaveBeenCalled();
+      expect(result.clearedClasses).toContain("restore_outcome");
+      expect(JSON.parse(reconciledEvents()[0]!.payload)).toMatchObject({ attemptId: 0, from: "attention_required" });
+      // The clear's zero attemptId acknowledges that late subset outcome, as on main.
+      expect(getNodeInventory(db, rigId)[0]).toMatchObject({ restoreOutcome: "operator_recovered" });
+    });
+
+    it("a zero-ID acknowledgment after a full attempt started after the fresh launch still needs strict proof", async () => {
+      const { rigId, nodeId } = seedRunningSeat("r-116-zero-ack", "worker@r-116-zero-ack");
+      launchFreshOccupant(rigId, nodeId, "worker@r-116-zero-ack");
+      eventBus.emit({ type: "restore.started", rigId, snapshotId: "snap-1" });
+      eventBus.emit({ type: "restore.completed", rigId, snapshotId: "snap-1",
+        result: { ...failedRestoreResult(nodeId), nodes: [{ nodeId, logicalId: "worker", status: "attention_required" }] } } as any);
+      eventBus.emit({ type: "restore.outcome_reconciled", rigId, nodeId, attemptId: 0, from: "attention_required", to: "operator_recovered",
+        evidence: { source: "operator_attestation" } });
+      const { strict, fenced } = refusingStrictReconciler();
+
+      const result = await fenced.clearAttention("worker@r-116-zero-ack", { reason: "operator verified" });
+
+      expect(result).toMatchObject({ ok: false, code: "not_demonstrably_responsive" });
+      expect(strict).toHaveBeenCalledWith(rigId, nodeId);
+    });
+  });
+
   it("OPR.0.4.0.16: clears both classes when startupStatus + restoreOutcome both in attention", async () => {
     const rig = rigRepo.createRig("r-both");
     const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });

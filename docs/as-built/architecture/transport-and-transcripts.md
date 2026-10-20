@@ -33,11 +33,12 @@ blanket-replaced: `rigged` → `rig` is a per-occurrence question, not a global
 substitution.
 
 **Axis 1 — MCP tool names are `rig_*`.** `packages/cli/src/mcp-server.ts`
-registers **18** tools, all named `rig_*`
+registers **23** tools, all named `rig_*`
 (`grep -c 'server.tool(' packages/cli/src/mcp-server.ts`), including
-`rig_rig_nodes` (`mcp-server.ts:288`), `rig_send` (`:305`),
-`rig_capture` (`:339`), `rig_chatroom_send` (`:364`) and `rig_chatroom_watch`
-(`:400`). No `rigged_*` name other than the tmux keys below remains in product
+`rig_rig_nodes` (`mcp-server.ts:290`), `rig_send` (`:307`),
+`rig_capture` (`:341`), `rig_chatroom_send` (`:366`) and `rig_chatroom_watch`
+(`:402`), and the five queue tools `rig_queue_create`, `_show`, `_list`, `_claim`
+and `_update`. No `rigged_*` name other than the tmux keys below remains in product
 source: **0** hits
 (`git grep -n 'rigged_' -- ':(glob)packages/*/src/**' | grep -v -c '@rigged_'`).
 
@@ -95,7 +96,15 @@ Routes: `packages/daemon/src/routes/{transport,transcripts,ask,chat,whoami}.ts`
    (`send`, `:1155`). With the seat's typing guard on, the message is held
    instead of typed: the result is `outcome: "retained"` with HTTP 200
    (`routes/transport.ts:115`); operators use `rig seat set-typing-guard` and
-   `rig seat held-messages`.
+   `rig seat held-messages`. This same typing guard has `off` (default),
+   `draft-aware`, and `hold` modes. The legacy enabled boolean selects hold/off.
+   `DraftAwareDelivery` makes one attempt for opted-in seats and immediately returns
+   the exact refusal reason and original held IDs when input is unavailable.
+   Migration `100_typing_guard_modes` extends existing guard/audit rows and adds
+   non-executable receipt metadata to the original outbox; it creates no tables
+   or retry scheduler. Combined wakes preserve every original ID/body.
+   Legacy storage bits fail safe to hold on rollback; newer legacy audit writes
+   supersede older saved modes on re-upgrade, including same-value writes.
 3. Classify send readiness. Only a positive interactive-prompt reading
    (`needs_input`) refuses, with `target_needs_input`
    (`session-transport.ts:1482`), unless the caller passes
@@ -118,6 +127,21 @@ Routes: `packages/daemon/src/routes/{transport,transcripts,ask,chat,whoami}.ts`
    without `-p` (`session-transport.ts:1541`) and Enter is pressed only if the
    whole answer is still staged (`:1562`–`1570`). A successful paste proves
    transport execution, not runtime consumption.
+   The transport's prompt reader uses the shared `composer-prompts.ts` matchers
+   from Mr-Neutr0n's #635. Its cursor-aware extension preserves capture styling
+   and excludes a wholly dim autocomplete suffix after the cursor. The daemon
+   directly depends on `string-width` to compare Unicode terminal cell widths
+   with cursor positions and exact staged text; a dependency hoisted from the
+   TUI would not declare this daemon runtime requirement. Default seats retain
+   their existing advisory recognition and staged-text verification behavior.
+   For draft-aware seats, `TmuxAdapter` checks the current composer after buffer
+   preparation and again immediately before keys. The delivery lease records
+   the pasted text and any observed collapsed-paste label; Enter requires that
+   owned input. Late human input, changed recipients or stopped queue wakes refuse
+   further input or hold the message; ambiguous writes remain indeterminate. Nothing
+   is retried automatically. Unicode cell widths use the daemon's direct
+   `string-width` dependency. See [per-seat terminal delivery](../../reference/seat-delivery.md)
+   for activation, persistence, inspection and lifecycle tradeoffs.
 5. Optional `--verify`: capture the last 30 pane lines before the paste and,
    500 ms after Enter, again, leaving out the current input box (the last
    prompt line and its continuation, `verificationTranscript`). A send
@@ -453,8 +477,8 @@ Claude or Codex session (`claude -p --resume` / `codex exec resume`,
    (`packages/ui/src/components/RigChatPanel.tsx`), but no UI view mounts it:
    **1** file under `packages/ui/src` names it, its own
    (`git grep -l 'RigChatPanel' -- packages/ui/src | wc -l`).
-5. MCP: **`rig_chatroom_send` + `rig_chatroom_watch`** (`mcp-server.ts:364`,
-   `:400`).
+5. MCP: **`rig_chatroom_send` + `rig_chatroom_watch`** (`mcp-server.ts:366`,
+   `:402`).
 6. Source of truth: daemon-backed SQLite (`chat_messages` table), NOT tmux
    scrollback.
 

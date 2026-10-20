@@ -337,6 +337,7 @@ export async function startServer(port?: number) {
         // tree post-bind so the HTTP surface is ready before the first
         // tick (matches contextMonitor pattern).
         deps.watchdogScheduler?.start();
+        deps.sessionTransport?.guardedDelivery?.recover();
         // S10 — start the gateway subsystem's NETWORK services (replay, outbound poll,
         // Socket Mode inbound) post-bind, contextMonitor pattern: the composed wire is
         // already active; only its dial-out half waits for the supervision tree.
@@ -395,6 +396,7 @@ export async function startServer(port?: number) {
       ["proof-source-watch", () => deps.proofSourceWatch?.close()],
       ["health-diagnosis", () => deps.healthDiagnosis?.stop()],
       ["watchdog", () => deps.watchdogScheduler?.stop()],
+      ["draft-delivery", () => deps.sessionTransport?.guardedDelivery?.stop()],
       ["seat-activity", () => deps.seatActivityService?.stop()],
       ["seat-structural-activity", () => deps.seatStructuralActivityService?.stop()],
       ["seat-identity", () => deps.seatIdentityReconciler?.stop()],
@@ -403,6 +405,8 @@ export async function startServer(port?: number) {
       ["wake-ladder", () => wakeLadderScheduler?.stop()],
       ["event-loop-monitor", () => eventLoopMonitor.stop()],
       ["connections", () => Promise.all(servers.map((srv) => closeHttpServer(srv)))],
+      // After the last request: the tmux control client ends and its session goes with it.
+      ["tmux-control", () => deps.tmuxAdapter.closeControlClient()],
       ["recorder", async () => {
         deps.requestPhaseObserver?.close();
         if (await drainSlowOpRecorderOnShutdown(deps.slowOpRecorder) !== 0) {

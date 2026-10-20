@@ -1,4 +1,5 @@
 import nodePath from "node:path";
+import { shellQuote } from "../adapters/shell-quote.js";
 import { effortPrecedence, readSeatEffort } from "./seat-effort.js";
 import type Database from "better-sqlite3";
 import {
@@ -29,6 +30,13 @@ interface RigInstantiatorDeps {
   nodeLauncher: NodeLauncher;
   preflight: RigSpecPreflight;
   tmuxAdapter?: import("../adapters/tmux.js").TmuxAdapter;
+}
+
+function partialEnvCleanupGuidance(rigId: string, logicalId: string, error: string): string {
+  const launch = `rig launch ${shellQuote(rigId)} ${shellQuote(logicalId)}`;
+  const remove = `rig down ${shellQuote(rigId)} --delete`;
+  return error.replace(/ Run it again\.$/, "")
+    + ` This team has been kept. To relaunch only "${logicalId}", run: ${launch}. This does not reapply the unsaved --env values. If those values are needed, first run: ${remove}. This stops and removes the team this launch just created. Then re-run the original rig up command with --env.`;
 }
 
 export class RigInstantiator {
@@ -66,7 +74,7 @@ export class RigInstantiator {
     this.tmuxAdapter = deps.tmuxAdapter;
   }
 
-  async instantiate(spec: RigSpec, opts?: { nonInterruptive?: boolean }): Promise<InstantiateOutcome> {
+  async instantiate(spec: RigSpec, opts?: { nonInterruptive?: boolean; env?: SeatEnv }): Promise<InstantiateOutcome> {
     // 1. Validate
     const raw = RigSpecCodec.parse(RigSpecCodec.serialize(spec));
     const validation = RigSpecSchema.validate(raw);
@@ -148,9 +156,11 @@ export class RigInstantiator {
     const nodeResults: { logicalId: string; status: "launched" | "failed"; error?: string }[] = [];
     const launchedSessionNames: string[] = [];
     const instantiateWarnings: string[] = [];
+    const envCleanupErrors: string[] = [];
+    const envCleanupFailures: { logicalId: string; error: string }[] = [];
 
     for (const logicalId of launchOrder) {
-      const result = await this.nodeLauncher.launchNode(rigId!, logicalId);
+      const result = await this.nodeLauncher.launchNode(rigId!, logicalId, opts?.env ? { env: opts.env } : undefined);
       if (result.ok) {
         nodeResults.push({ logicalId, status: "launched" });
         launchedSessionNames.push(result.sessionName);
@@ -158,7 +168,12 @@ export class RigInstantiator {
           instantiateWarnings.push(...result.warnings);
         }
       } else {
-        nodeResults.push({ logicalId, status: "failed", error: result.message });
+        const failure = { logicalId, status: "failed" as const, error: result.message };
+        nodeResults.push(failure);
+        if (result.code === "seat_env_cleanup_failed") {
+          envCleanupFailures.push(failure);
+          envCleanupErrors.push(`${logicalId}: ${result.message}`);
+        }
       }
     }
 
@@ -180,9 +195,17 @@ export class RigInstantiator {
       return {
         ok: false,
         code: "instantiate_error",
-        message: "all node launches failed",
+        message: envCleanupErrors.length ? `all node launches failed — ${envCleanupErrors.join("; ")}` : "all node launches failed",
+        ...(envCleanupErrors.length ? { envCleanupErrors } : {}),
       };
     }
+
+    // A partial launch keeps the rig: repeating up would collide with its live seats.
+    // Leave all-failed retry guidance and any unconfirmed-removal warning intact.
+    envCleanupFailures.forEach((failure, index) => {
+      failure.error = partialEnvCleanupGuidance(rigId!, failure.logicalId, failure.error);
+      envCleanupErrors[index] = `${failure.logicalId}: ${failure.error}`;
+    });
 
     // 6. Propagate restorePolicy to session metadata (best-effort)
     try {
@@ -222,6 +245,7 @@ export class RigInstantiator {
       ok: true,
       result: {
         rigId: rigId!,
+        ...(envCleanupErrors.length ? { envCleanupErrors } : {}),
         specName: spec.name,
         specVersion: spec.version,
         nodes: nodeResults,
@@ -307,7 +331,7 @@ import { RigSpecCodec as PodRigSpecCodec } from "./rigspec-codec.js";
 import { RigSpecSchema as PodRigSpecSchema, VALID_EDGE_KINDS } from "./rigspec-schema.js";
 import { rigPreflight, preflightValidatedSpec } from "./rigspec-preflight.js";
 import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
-import { resolveNodeConfig } from "./profile-resolver.js";
+import { resolveNodeConfig, selectedPluginPaths } from "./profile-resolver.js";
 import { resolveStartup } from "./startup-resolver.js";
 import { planProjection, claudeConflictTargetPath, projectionConflictWarnings, filterProtectedProjections, type ProjectionPlan } from "./projection-planner.js";
 import { ProjectionManifestStore } from "./projection-manifest-store.js";
@@ -547,6 +571,8 @@ export class PodRigInstantiator {
       rigNameOverride: targetRig?.rig.name,
       externalQualifiedIds: targetRig?.nodes.map((node) => node.logicalId),
       inheritedPermissionPolicy: this.inheritedPermissionPolicy(opts?.targetRigId),
+      // No session follows a materialize; `rig adopt` binds sessions already running under their own names.
+      materializeOnly: true,
       exec: this.deps.exec,
       claudeActivityAssets: this.deps.claudeActivityAssets, // §6: restore main's activity-hook asset threading
     });
@@ -1380,7 +1406,7 @@ export class PodRigInstantiator {
     }
 
     // 5. Create pods + nodes + edges, then launch in topological order
-    const nodeResults: { logicalId: string; status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string }[] = [];
+    const nodeResults: { logicalId: string; status: "launched" | "failed" | "attention_required"; code?: string; error?: string; evidence?: string; sessionName?: string }[] = [];
     const nodeIdMap: Record<string, string> = {}; // "pod.member" -> node DB id
     const launchedSessionNames: string[] = []; // Track for orphan cleanup on total failure
     const podInstantiateWarnings = preflight.warnings;
@@ -1575,6 +1601,7 @@ export class PodRigInstantiator {
         nodeResults.push({
           logicalId: qualifiedId,
           status: launched.status,
+          code: launched.code,
           error: launched.error,
           evidence: launched.evidence,
           sessionName: launched.sessionName,
@@ -1621,6 +1648,8 @@ export class PodRigInstantiator {
     const hasAttention = nodeResults.some((n) => n.status === "attention_required");
     const hasLaunched = nodeResults.some((n) => n.status === "launched");
     const allTerminal = nodeResults.length > 0 && nodeResults.every((n) => n.status === "failed");
+    const envCleanupFailures = nodeResults.filter((n) => n.code === "seat_env_cleanup_failed");
+    const envCleanupErrors = envCleanupFailures.map((n) => `${n.logicalId}: ${n.error}`);
 
     if (allTerminal) {
       let serviceCleanupError: string | undefined;
@@ -1654,8 +1683,18 @@ export class PodRigInstantiator {
       if (guard) await guard.lifecycle(Object.values(nodeIdMap), cleanup);
       else await cleanup();
       const details = nodeResults.map((n) => `${n.logicalId}: ${n.error ?? "unknown"}`).join("; ");
-      return { ok: false, code: "instantiate_error", message: `all node launches/startups failed — ${details}${serviceCleanupError ? `; ${serviceCleanupError}` : ""}` };
+      return {
+        ok: false, code: "instantiate_error",
+        message: `all node launches/startups failed — ${details}${serviceCleanupError ? `; ${serviceCleanupError}` : ""}`,
+        ...(envCleanupErrors.length ? { envCleanupErrors } : {}),
+      };
     }
+
+    // The rig is retained; show the same recovery choices as a flat partial.
+    envCleanupFailures.forEach((failure, index) => {
+      failure.error = partialEnvCleanupGuidance(rigId, failure.logicalId, failure.error ?? "Launch environment cleanup failed.");
+      envCleanupErrors[index] = `${failure.logicalId}: ${failure.error}`;
+    });
 
     if (hasAttention && !hasLaunched) {
       // All-attention_required path — rig + sessions PRESERVED; no
@@ -1684,7 +1723,7 @@ export class PodRigInstantiator {
       return {
         ok: false,
         code: "attention_required",
-        message: `${attentionNodes.length} node${attentionNodes.length === 1 ? " requires" : "s require"} attention before becoming interactive. Inspect the affected sessions and reasons before choosing recovery.`,
+        message: `${attentionNodes.length} node${attentionNodes.length === 1 ? " requires" : "s require"} attention before becoming interactive. Inspect the affected sessions and reasons before choosing recovery.${envCleanupErrors.length ? ` ${envCleanupErrors.join("; ")}` : ""}`,
         rigId,
         attentionNodes,
         // #141: the replacement is kept on this path, so its archive notice must reach the user too.
@@ -1717,7 +1756,7 @@ export class PodRigInstantiator {
 
     return {
       ok: true,
-      result: { rigId, specName: rigSpec.name, specVersion: rigSpec.version, nodes: resultNodes, warnings: podInstantiateWarnings.length > 0 ? podInstantiateWarnings : undefined },
+      result: { rigId, specName: rigSpec.name, specVersion: rigSpec.version, nodes: resultNodes, ...(envCleanupErrors.length ? { envCleanupErrors } : {}), warnings: podInstantiateWarnings.length > 0 ? podInstantiateWarnings : undefined },
     };
   }
 
@@ -1796,7 +1835,7 @@ export class PodRigInstantiator {
     warnings: string[],
     cwdOverride?: string,
     envOverride?: SeatEnv,
-  ): Promise<{ logicalId: string; status: "launched" | "failed"; error?: string }> {
+  ): Promise<{ logicalId: string; status: "launched" | "failed"; code?: string; error?: string }> {
     const effectiveCwd = resolveLaunchCwd(member.cwd, rigRoot, cwdOverride);
     // Create node with sentinel values
     let nodeId: string;
@@ -1839,6 +1878,7 @@ export class PodRigInstantiator {
     return {
       logicalId: qualifiedId,
       status: launched.status,
+      code: launched.code,
       error: launched.error,
     };
   }
@@ -1979,7 +2019,7 @@ export class PodRigInstantiator {
     force?: boolean;
     resolveResult?: ReturnType<typeof resolveAgentRef> extends infer T ? T : never;
     configResult?: ReturnType<typeof resolveNodeConfig> extends infer T ? T : never;
-  }): Promise<{ status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string; warnings?: string[] }> {
+  }): Promise<{ status: "launched" | "failed" | "attention_required"; code?: string; error?: string; evidence?: string; sessionName?: string; warnings?: string[] }> {
     const guard = this.deps.tmuxAdapter?.deliveryGuard;
     if (guard && !guard.ownsLifecycle(input.nodeId)) {
       return guard.lifecycle([input.nodeId], () => this.launchExistingAgentMember(input));
@@ -2077,9 +2117,10 @@ export class PodRigInstantiator {
       sessionName: canonicalSessionName,
       silenceWindowSeconds: configResult.config.activity?.silenceWindowSeconds,
       env: input.envOverride,
+      pluginPaths: selectedPluginPaths(configResult.config.selectedResources),
     });
     if (!launchResult.ok) {
-      return { status: "failed", error: launchResult.message };
+      return { status: "failed", code: launchResult.code, error: launchResult.message };
     }
 
     try {
@@ -2147,8 +2188,8 @@ export class PodRigInstantiator {
     );
     const managedDedupedFiles = this.dedupeProjectedManagedStartupFiles(planResult.plan, resolvedFiles);
     // P20 atom-4 PROTECT: hold back operator-edited skill targets (operator_conflict)
-    // so the adapter never overwrites an operator's edit — unless the operator forces
-    // it (input.force). The per-conflict warning already tells the operator this.
+    // so the adapter never overwrites an operator's edit unless an internal caller sets
+    // input.force. The warning names the source-edit/move-aside remedies available to users.
     const dedupedResolvedFiles = filterProtectedProjections(
       managedDedupedFiles,
       planResult.plan,
@@ -2361,7 +2402,7 @@ export class PodRigInstantiator {
     nodeId: string;
     cwdOverride?: string;
     envOverride?: SeatEnv;
-  }): Promise<{ status: "launched" | "failed"; error?: string; sessionName?: string; warnings?: string[] }> {
+  }): Promise<{ status: "launched" | "failed"; code?: string; error?: string; sessionName?: string; warnings?: string[] }> {
     const guard = this.deps.tmuxAdapter?.deliveryGuard;
     if (guard && !guard.ownsLifecycle(input.nodeId)) {
       return guard.lifecycle([input.nodeId], () => this.launchExistingTerminalMember(input));
@@ -2381,7 +2422,7 @@ export class PodRigInstantiator {
     const canonicalSessionName = deriveCanonicalSessionName(input.pod.id, input.member.id, input.rigSpec.name);
     const launchResult = await this.deps.nodeLauncher.launchNode(input.rigId, input.qualifiedId, { sessionName: canonicalSessionName, env: input.envOverride });
     if (!launchResult.ok) {
-      return { status: "failed", error: launchResult.message };
+      return { status: "failed", code: launchResult.code, error: launchResult.message };
     }
 
     try {

@@ -31,7 +31,7 @@ function seat() {
   };
   const adapter = new ClaudeCodeAdapter({ tmux: {} as TmuxAdapter, fsOps, stateDir: state, collectorAssetPath: asset });
   const settings = nodePath.join(cwd, ".claude", "settings.local.json");
-  const command = `node ${shellQuote(nodePath.join(cwd, ".openrig", "context-collector.cjs"))} `
+  const command = `${shellQuote(process.execPath)} ${shellQuote(nodePath.join(cwd, ".openrig", "context-collector.cjs"))} `
     + `${shellQuote(nodePath.join(state, "state", "context-usage"))} ${shellQuote(nodePath.join(state, "state", "provider-usage"))}`;
   const poll = () => adapter.ensureContextCollector({ cwd, tmuxSession: "seat@rig" });
   return { cwd, settings, command, writes, poll };

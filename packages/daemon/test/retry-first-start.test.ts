@@ -71,6 +71,19 @@ describe("explicit first-start retry after projection failure", () => {
     expect(node).toMatchObject({ effort: "medium", effortChoice: "high" });
   });
 
+  // tmux would create dev-pi@first.start as dev-pi@first_start, so the retry would launch a seat
+  // OpenRig could not reach. The preflight the retry shares refuses it before any launch.
+  it("a first start in a rig whose name has a dot is refused before launch", async () => {
+    const f = await failedAdd();
+    f.db.prepare("UPDATE rigs SET name = ? WHERE id = ?").run("first.start", f.rig.id);
+    const res = await f.request();
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    const body = JSON.stringify(await res.json());
+    expect(body).toContain("tmux would create it as");
+    expect(body).toContain("dev-pi@first_start");
+    expect(f.adapter.launchHarness).not.toHaveBeenCalled();
+  });
+
   it("a first start without a saved choice sends the authored effort, as before", async () => {
     const f = await failedAdd({ effort: "medium" });
     const res = await f.request();

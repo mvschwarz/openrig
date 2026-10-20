@@ -108,6 +108,18 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     return { ok: true, sessionFile: state.sessionFile };
   }
 
+  /** The seat's runner sidecar (null = absent or unparseable) and its sessions folder, with the
+   *  runner entry path and state root this adapter launches with, for a reader that must tie the
+   *  sidecar to the pane's live runner before trusting it. */
+  readRunnerSidecar(sessionName: string): { state: PiRunnerState | null; sessionsDir: string; entryPath: string; stateRoot: string } {
+    return {
+      state: this.readRunnerState(sessionName),
+      sessionsDir: piSeatPaths(this.stateRoot, sessionName).sessionsDir,
+      entryPath: this.runnerEntryPath,
+      stateRoot: this.stateRoot,
+    };
+  }
+
   async listInstalled(binding: NodeBinding): Promise<InstalledResource[]> {
     const results: InstalledResource[] = [];
     const sessionName = binding.tmuxSession;
@@ -276,6 +288,8 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       stateRoot: this.stateRoot,
       cwd: binding.cwd,
       model: binding.model,
+      // The seat's resolved effort, sent as Pi's --thinking; OMP unchanged.
+      thinking: this.runtime === "pi" ? binding.effort : undefined,
       // OPR.0.4.8.2: Pi RESOURCE TRUST (not a permission policy). YOLO forces `approve` on every
       // seat; otherwise the configured posture. Same decision used on the restore path (pi-resume).
       trust,

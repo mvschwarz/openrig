@@ -1,8 +1,6 @@
 import os from "node:os";
 import fs from "node:fs";
 import nodePath from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import type { SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import {
@@ -21,8 +19,7 @@ import { runAsyncSite } from "./sync-site-wrap.js";
 import { isClaudeSidecarFromEarlierProcess, type ResumeTokenCaptureDeps } from "./resume-token-capture.js";
 import { observeClaudePaneRuntime, type NativeProcessLister } from "./native-process-lineage.js";
 import { validateResumeToken } from "./resume-token-validation.js";
-
-const execFileAsync = promisify(execFile);
+import { readProcessTable } from "./process-table.js";
 
 export interface ResumeRefreshSession {
   sessionId: string;
@@ -449,31 +446,11 @@ export async function defaultListProcesses(): Promise<Array<{ pid: number; ppid:
  *  cached while 520 were live). The lenient variant keeps its contract for
  *  the direct per-call consumers that want best-effort. */
 export async function defaultListProcessesStrict(): Promise<Array<{ pid: number; ppid: number; command: string; startedAt: string }>> {
-  const output = await runAsyncSite("resume_metadata.list_processes", async () => {
-    // lstart = the process START TIME — the identity half of pid+start-time
-    // (r1's pid-reuse remedy): a reused pid changes lstart, so a consumer
-    // holding last cycle's identity can invalidate without any extra spawn.
-    // lstart is locale-formatted; the child-only C locale keeps the English date the parser expects.
-    const { stdout } = await execFileAsync("ps", ["-Ao", "pid,ppid,lstart,command"], { encoding: "utf-8", maxBuffer: 8 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } });
-    return stdout;
-  });
-  return output
-    .split("\n")
-    .slice(1)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      // lstart is a fixed 5-token block: "Sun Aug 23 18:52:01 2026".
-      const match = line.match(/^(\d+)\s+(\d+)\s+(\w{3}\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.*)$/);
-      if (!match) return null;
-      return {
-        pid: Number(match[1]),
-        ppid: Number(match[2]),
-        startedAt: match[3] ?? "",
-        command: match[4] ?? "",
-      };
-    })
-    .filter((row): row is { pid: number; ppid: number; command: string; startedAt: string } => row !== null);
+  // startedAt = the process START TIME — the identity half of pid+start-time
+  // (r1's pid-reuse remedy): a reused pid changes it, so a consumer
+  // holding last cycle's identity can invalidate without any extra spawn.
+  const rows = await runAsyncSite("resume_metadata.list_processes", readProcessTable);
+  return rows.map(({ pid, ppid, startedAt, command }) => ({ pid, ppid, startedAt, command }));
 }
 
 function findCodexDescendantPids(

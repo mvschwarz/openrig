@@ -8,6 +8,9 @@ const REPLY_TO_CHOICE_PREFIX = "slack-reply-to-choice";
  *  a note from anyone else must never steer where the update posts. */
 export const REPLY_TO_CHOICE_ACTOR = "daemon@kernel";
 
+/** How far a reply-to chain is followed back to the item that owns a root when the choice is made. */
+export const REPLY_TO_CHAIN_LIMIT = 32;
+
 /** Fallbacks named by the queue item that blocked threading. */
 export type ReplyToQitemFallbackReason =
   | "root-missing" // the referenced conversation never posted a root

@@ -40,6 +40,8 @@ export interface SubsystemSlackDeliveryOpts {
    *  (no map) nothing is recorded and the channel is resolved as before. */
   pinChannel?: boolean;
   sourceLabel: string; // host/box/rig — from config, never hardcoded (item 7)
+  /** This daemon's machine name, read per post, shown after a seat sender (message.ts `machine`). */
+  machine?: () => string | null;
   bodyExcerpt?: number;
   fetchImpl?: FetchImpl;
   /** The owning gateway run's stop signal. When the wire stops (restart, disable,
@@ -341,6 +343,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     const payload = buildOutboundMessage(
       {
         qitemId: q.qitemId ?? decision.decisionId,
+        ownerNotificationKind: q.ownerNotificationKind,
         summary: q.summary,
         body: q.body,
         humanQuestions: q.humanQuestions,
@@ -358,6 +361,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
         // A1.2 — attribution rides every post; identity stays the app's own (postChatMessage
         // structurally cannot carry username/icon overrides — the customize-absence rail).
         attribution: attributionFromSession(q.sourceSession),
+        machine: opts.machine?.() ?? undefined,
         mentionUserId: opts.resolveMentionUserId?.(q),
         // fix-r3 — the reconcile identity, reserved outside the clamp budget (same function
         // the scan above matches: one identity, same bytes, both sides).
@@ -535,6 +539,7 @@ function renderPart(opts: SubsystemSlackDeliveryOpts, q: DeliveryPart, part: Del
   return buildOutboundMessage(part, {
     sourceLabel: opts.sourceLabel,
     attribution: attributionFromSession(part.sourceSession),
+    machine: opts.machine?.() ?? undefined,
     mentionUserId: index === 0 ? opts.resolveMentionUserId?.(q) : undefined,
     reconcileMarker: reconcileToken(partId),
     mediaRefs: partEvidence.mediaRefs,

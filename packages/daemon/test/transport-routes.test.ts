@@ -506,7 +506,8 @@ describe("transport routes", () => {
     expect(body.sent).toBe(true);
     expect(body.attempts).toBe(2);
     expect(body.activity.state).toBe("idle");
-    expect(sendTextSpy).toHaveBeenCalledWith("dev-impl@my-rig", "hello");
+    // The route passes the caller's cancellation check, run by the adapter just before the paste.
+    expect(sendTextSpy).toHaveBeenCalledWith("dev-impl@my-rig", "hello", expect.any(Function));
   });
 
   it("POST /send rejects force with waitForIdleMs before sending", async () => {

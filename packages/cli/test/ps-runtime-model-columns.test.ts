@@ -65,3 +65,15 @@ describe("rig ps — runtime + declared model", () => {
     expect(compact.model).toBeNull();
   });
 });
+
+it("r2: preserves last model observation and provenance in a labelled compact tuple", () => {
+  const observation = { status: "observed", model: "model-response", source: "claude-assistant-response", observedAt: "2026-10-18T23:00:00Z", generation: "current", reason: null };
+  const [row] = compactNodeProjection([{ model: "model-configured", sessionStatus: "running", modelObservation: observation }] as never);
+  expect(row?.model).toBe("model-configured");
+  expect(row?.modelObservation).toEqual([observation.model, observation.source, observation.observedAt]);
+});
+
+it("r2: keeps explicit UNKNOWN reasons compact without fabricating an observed model", () => {
+  const [row] = compactNodeProjection([{ sessionStatus: "running", modelObservation: { status: "unknown", model: null, source: null, observedAt: null, generation: "current", reason: "model-record-unavailable" } }] as never);
+  expect(row?.modelObservation).toEqual({ status: "unknown", reason: "model-record-unavailable" });
+});

@@ -199,7 +199,7 @@ describe("SeatLifecycleService.launchFresh", () => {
     const binding = sessionRegistry.getBindingForNode(seat.node.id);
     const nativeIds = db.prepare("SELECT id, resume_type, resume_token FROM sessions WHERE node_id=? ORDER BY id").all(seat.node.id);
     const launch = vi.spyOn(adapter, "launchHarness");
-    expect(await service.continueFreshStartup(seat.sessionName)).toMatchObject({ ok: false, code: "attention_required" });
+    expect(await service.continueStartup(seat.sessionName)).toMatchObject({ ok: false, code: "attention_required" });
     expect(tmux.sendText).not.toHaveBeenCalled();
     // The person has accepted in the same pane; no new process or session.
     screen = "Claude Code v2.1.282\n❯ ";
@@ -209,14 +209,14 @@ describe("SeatLifecycleService.launchFresh", () => {
       expect(last).toEqual({ type: "node.startup_pending" });
       return { ok: true };
     });
-    expect(await service.continueFreshStartup(seat.sessionName)).toMatchObject({ ok: true });
+    expect(await service.continueStartup(seat.sessionName)).toMatchObject({ ok: true });
     expect(launch).not.toHaveBeenCalled();
     expect(send).toHaveBeenCalledTimes(1);
     expect(db.prepare("SELECT id, resume_type, resume_token FROM sessions WHERE node_id=? ORDER BY id").all(seat.node.id)).toEqual(nativeIds);
     expect(send.mock.calls[0]?.[1]).toContain("Configured startup instructions");
     expect(sessionRegistry.getSessionsForRig(seat.rig.id).map(s => s.id)).toEqual(sessions.map(s => s.id));
     expect(sessionRegistry.getBindingForNode(seat.node.id)?.tmuxPane).toBe(binding?.tmuxPane);
-    expect(await service.continueFreshStartup(seat.sessionName)).toMatchObject({ ok: false, code: "continuation_unavailable" });
+    expect(await service.continueStartup(seat.sessionName)).toMatchObject({ ok: false, code: "continuation_unavailable" });
     expect(send).toHaveBeenCalledTimes(1);
   });
 
@@ -232,14 +232,37 @@ describe("SeatLifecycleService.launchFresh", () => {
     const rows = sessionRegistry.getSessionsForRig(seat.rig.id).map((s) => s.id);
     const launch = vi.spyOn(adapter, "launchHarness");
     const delivery = vi.spyOn(adapter, "deliverStartup");
-    const continued = await service.continueFreshStartup(seat.sessionName);
+    const continued = await service.continueStartup(seat.sessionName);
     expect(continued.ok).toBe(true);
     expect(launch).not.toHaveBeenCalled();
     expect(delivery).toHaveBeenCalled();
     expect(sessionRegistry.getSessionsForRig(seat.rig.id).map((s) => s.id)).toEqual(rows);
     delivery.mockClear();
-    expect((await service.continueFreshStartup(seat.sessionName)).ok).toBe(false);
+    expect((await service.continueStartup(seat.sessionName)).ok).toBe(false);
     expect(delivery).not.toHaveBeenCalled();
+  });
+
+  it("continues a fresh occupant once when another pending event for it arrives during the readiness check", async () => {
+    const seat = seedSeat();
+    adapter.checkReady = async () => ({ ready: false, code: "hook_trust_gate", reason: "native gate" });
+    const first = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "explicit fresh" });
+    expect(first.ok).toBe(false);
+    const occupant = db.prepare("SELECT id FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(seat.node.id) as { id: string };
+    let reported = false;
+    adapter.checkReady = async () => {
+      // The same occupant's fresh context is reported pending again while `continue` observes the pane.
+      if (!reported) {
+        reported = true;
+        eventBus.emit({ type: "node.startup_failed", rigId: seat.rig.id, nodeId: seat.node.id, sessionId: occupant.id,
+          error: "native gate reported again", freshContextPending: true });
+      }
+      return { ready: true };
+    };
+    const delivery = vi.spyOn(adapter, "deliverStartup");
+    expect(await service.continueStartup(seat.sessionName)).toMatchObject({ ok: true });
+    expect(delivery).toHaveBeenCalledTimes(1);
+    expect((await service.continueStartup(seat.sessionName)).ok).toBe(false);
+    expect(delivery).toHaveBeenCalledTimes(1);
   });
 
   it("supersedes detached history so a later reboot identifies the deliberate successor", async () => {
@@ -843,6 +866,32 @@ describe("SeatLifecycleService.launchFresh", () => {
       occupantLifecycle: "active",
       startupStatus: "ready",
     });
+  });
+
+  it("#116: a ready fresh launch supersedes the seat's failed full restore without rewriting it", async () => {
+    const seat = seedSeat();
+    eventBus.emit({ type: "restore.started", rigId: seat.rig.id, snapshotId: "snap-1" });
+    eventBus.emit({
+      type: "restore.completed",
+      rigId: seat.rig.id,
+      snapshotId: "snap-1",
+      result: { snapshotId: "snap-1", preRestoreSnapshotId: "snap-0", rigResult: "failed", nodes: [{ nodeId: seat.node.id, logicalId: "dev.impl", status: "failed" }], warnings: [] },
+    } as any);
+    expect(getNodeInventory(db, seat.rig.id)[0]).toMatchObject({ restoreOutcome: "failed", lifecycleState: "attention_required" });
+
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "replace the failed occupant" });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.message);
+    const event = db.prepare("SELECT payload FROM events WHERE type = 'seat.fresh_launched' ORDER BY seq DESC LIMIT 1").get() as { payload: string };
+    expect(JSON.parse(event.payload)).toMatchObject({ newGeneration: result.generation, status: "ready" });
+    expect(sessionRegistry.currentOccupantTenure(seat.node.id)?.generationUuid).toBe(result.generation);
+    expect(getNodeInventory(db, seat.rig.id)[0]).toMatchObject({
+      restoreOutcome: "n-a",
+      lifecycleState: "running",
+      continuityOutcome: "fresh",
+    });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'restore.completed'").get()).toEqual({ n: 1 });
   });
 
   it("OPR.0.7.0.7: a fresh launch sends the seat's saved effort choice over its authored effort, and records it", async () => {

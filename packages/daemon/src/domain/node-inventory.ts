@@ -1,9 +1,11 @@
+import fs from "node:fs";
 import type { CaptureObserver, ObservedBinding } from "./capture-observer.js";
 import type Database from "better-sqlite3";
 import { decodeTime } from "ulid";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
 import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, NodeOriented, NodeLifecycleState, Binding, RestoreResult, NodeRecoveryGuidance, Snapshot, WorkspaceSpec, SeatIdentityVerdict, SeatIdentityVerdictKind, AgentActivity, SeatActivity } from "./types.js";
 import { identityVerdictConfirmsSessionMissing, identityVerdictDownranksRunning } from "./types.js";
+import { resolveSeatEffort } from "./seat-effort.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { buildOrientedMap } from "./startup-proof.js";
 import type { RuntimeAdapter } from "./runtime-adapter.js";
@@ -14,13 +16,18 @@ import type { SeatActivityService } from "./seat-activity-service.js";
 import { deriveDisplayActivity } from "./activity-taxonomy.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { probeSessionActivity, mapPaneState } from "./session-transport.js";
-import type { StructuralObservation } from "./seat-structural-activity-service.js";
-import { findLatestUsableSnapshot, findLatestUsableSnapshotsForAllRigs } from "./rig-repository.js";
+import { DEFAULT_STRUCTURAL_STALE_MS, type StructuralObservation } from "./seat-structural-activity-service.js";
+import { RigRepository, findLatestUsableSnapshot, findLatestUsableSnapshotsForAllRigs } from "./rig-repository.js";
+import { hasCompleteGuidanceBlock, seatGuidanceFile } from "./restore-guidance.js";
 import { resolveNodeWorkspace } from "./workspace/workspace-resolver.js";
 import { deriveCanonicalSessionName } from "./session-name.js";
 import { buildNativeResumeCommand, buildCodexResumeCore } from "./native-resume-probe.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
+import { readReadyFreshLaunchFences } from "./fresh-occupant-relation.js";
 import { tmuxAttachCommand } from "../adapters/tmux-server.js";
+import { communityHarnessLabel } from "./community-harness-presets.js";
+import { communityHarnessOf } from "./built-in-runtimes.js";
+import { sessionCommunityHarnessSelect } from "./session-registry.js";
 
 // -- Row types for SQL results --
 
@@ -34,6 +41,8 @@ interface InventoryRow {
   role: string | null;
   runtime: string | null;
   model: string | null;
+  effort: string | null;
+  effort_choice: string | null;
   codex_config_profile: string | null;
   agent_ref: string | null;
   profile: string | null;
@@ -52,6 +61,7 @@ interface InventoryRow {
   session_name: string | null;
   session_created_at: string | null;
   session_status: string | null;
+  session_community_harness?: string | null;
   intentionally_stopped: number | null;
   startup_status: string | null;
   resume_type: string | null;
@@ -329,6 +339,8 @@ function buildRestoreOutcomeMap(db: Database.Database, rigId?: string): Map<stri
     type: string; payload: string; seq: number; rig_id: string; node_id: string | null;
   }[];
   const map = new Map<string, RestoreProjection>();
+  // Each entry's attempt, by its start seq; a subset restore records no start.
+  const attemptOf = new Map<string, { nodeId: string; seq: number }>();
   const attempts = new Map<string, {
     seq: number;
     start?: Record<string, any>;
@@ -372,18 +384,34 @@ function buildRestoreOutcomeMap(db: Database.Database, rigId?: string): Map<stri
         && !!attempt && attempt.seq === event.attemptId && attempt.outcomes.get(event.nodeId) === event.from
         && evidence?.tmux === true && evidence.resumeTokenUsed === true && evidence.paneState === "usable"
         && (evidence.fgProcess === "claude" || evidence.fgProcess === "codex");
-      map.set(restoreKey(row.rig_id, event.nodeId), {
+      const key = restoreKey(row.rig_id, event.nodeId);
+      map.set(key, {
         outcome: mapStatus(event.to),
         ...(strict ? { resumedRuntime: evidence!.fgProcess === "claude" ? "claude-code" : "codex" } : {}),
       });
+      // A zero attemptId names no attempt (every subset clear writes it): it acknowledges the outcome it
+      // replaces, so it is as current as that outcome. With nothing replaced, it describes no attempt.
+      const scoped = typeof event.attemptId === "number" && event.attemptId > 0;
+      attemptOf.set(key, { nodeId: event.nodeId, seq: scoped ? event.attemptId : attemptOf.get(key)?.seq ?? 0 });
       continue;
     }
     if (!Array.isArray(event.result?.nodes)) continue;
+    const attemptSeq = row.type === "restore.completed" && attempt ? attempt.seq : row.seq;
     for (const node of [...event.result.nodes].reverse()) {
       if (typeof node?.nodeId === "string") {
-        map.set(restoreKey(row.rig_id, node.nodeId), { outcome: mapStatus(node.status) });
+        const key = restoreKey(row.rig_id, node.nodeId);
+        map.set(key, { outcome: mapStatus(node.status) });
+        attemptOf.set(key, { nodeId: node.nodeId, seq: attemptSeq });
       }
     }
+  }
+  // An attempt that started before the node's ready fresh launch describes the
+  // retired occupant: no restore outcome applies to the current one. History
+  // is unchanged; a subset completion after the launch stays current.
+  const fences = readReadyFreshLaunchFences(db, rigId);
+  for (const [key, entry] of attemptOf) {
+    const fence = fences.get(entry.nodeId);
+    if (fence !== undefined && entry.seq < fence) map.delete(key);
   }
   return map;
 }
@@ -451,9 +479,26 @@ function getLatestError(db: Database.Database, rigId: string, nodeId: string): s
  * The startup-orchestrator persists: { category, effectiveId, sourceSpec, sourcePath, resourcePath, absolutePath, mergeStrategy, target }
  * We normalize to: { id, category, targetPath }
  */
-function mapProjectionEntries(entries: unknown[]): Array<{ id: string; category: string; targetPath: string }> {
+function mapProjectionEntries(
+  entries: unknown[],
+  guidance?: { file: string | null; content: string | null },
+): NodeDetailEntry["installedResources"] {
   return entries.map((e: unknown) => {
     const entry = e as Record<string, string>;
+    if (entry.category === "guidance") {
+      // The runtime decides the file a guidance block goes into; a spec's `target` is only declared. An installed path
+      // is shown only while that file holds the block, never inferred from the declaration.
+      const id = entry.effectiveId ?? entry.id ?? "";
+      const installed = entry.mergeStrategy === "managed_block" && guidance?.file && guidance.content !== null
+        && hasCompleteGuidanceBlock(guidance.content, id);
+      return {
+        id,
+        category: "guidance",
+        targetPath: installed ? guidance!.file! : "",
+        ...(entry.target ? { declaredTarget: entry.target } : {}),
+        ...(guidance?.file ? { effectiveTarget: guidance.file } : {}),
+      };
+    }
     return {
       id: entry.effectiveId ?? entry.id ?? "",
       category: entry.category ?? "",
@@ -547,11 +592,12 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
 function runInventoryRowQuery(db: Database.Database, whereClause: string, orderClause: string, params: readonly string[]): InventoryRow[] {
   // Join nodes with newest session (max ULID = max session.id string comparison)
   // and the rig name
-  const hasCodexConfigProfile = db.prepare("PRAGMA table_info(nodes)").all()
-    .some((row) => (row as { name?: string }).name === "codex_config_profile");
-  const codexConfigProfileSelect = hasCodexConfigProfile
-    ? "n.codex_config_profile"
-    : "NULL";
+  // Older databases predate some node columns. Select NULL for a missing one so
+  // the projection keeps its pre-column behaviour instead of failing the read.
+  const nodeColumns = new Set(db.prepare("PRAGMA table_info(nodes)").all()
+    .map((row) => (row as { name?: string }).name));
+  const nodeColumnOrNull = (name: string) => nodeColumns.has(name) ? `n.${name}` : "NULL";
+  const codexConfigProfileSelect = nodeColumnOrNull("codex_config_profile");
   const stmt = db.prepare(`
     SELECT
       n.id as node_id,
@@ -563,6 +609,8 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       n.role,
       n.runtime,
       n.model,
+      ${nodeColumnOrNull("effort")} as effort,
+      ${nodeColumnOrNull("effort_choice")} as effort_choice,
       ${codexConfigProfileSelect} as codex_config_profile,
       n.agent_ref,
       n.profile,
@@ -580,6 +628,7 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       s.session_name,
       s.created_at as session_created_at,
       s.status as session_status,
+      ${sessionCommunityHarnessSelect(db)} as session_community_harness,
       s.intentionally_stopped,
       s.startup_status,
       s.resume_type,
@@ -648,6 +697,7 @@ function buildInventoryEntry(
   ctx: InventoryBuildContext,
 ): NodeInventoryEntry {
   const { usableSnapshot, workspaceSpec, identityVerdicts, restoreOutcomes, orienteds, codexDaemonOptOuts } = ctx;
+  const effortResolution = resolveSeatEffort({ effort: row.effort, effortChoice: row.effort_choice });
   // FS-1 W1.3 S1 — O(1) lookup into the once-per-rig restore-outcome map
   // (byte-identical to the prior per-node deriveRestoreOutcome; "n-a" when a node
   // is referenced by no restore event, matching the prior fall-through).
@@ -692,6 +742,7 @@ function buildInventoryEntry(
     attachmentType: (row.binding_attachment_type as NodeInventoryEntry["attachmentType"]) ?? null,
     nodeKind: deriveNodeKind(row.runtime),
     runtime: row.runtime,
+    ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!) } : {}),
     sessionStatus,
     storedSessionStatus: row.session_status,
     intentionallyStopped: row.intentionally_stopped === 1
@@ -725,6 +776,10 @@ function buildInventoryEntry(
     latestError: row.startup_status === "ready" ? null : getLatestError(db, row.rig_id, row.node_id),
     // Extended fields
     model: row.model,
+    // Configured launch effort only; an observed level is reported by the
+    // seat-effort route, which reads the running process and native transcript.
+    effort: effortResolution.effective,
+    effortSource: effortResolution.source,
     agentRef: row.agent_ref,
     profile: row.profile,
     codexConfigProfile: row.codex_config_profile,
@@ -887,6 +942,16 @@ export function getNodeDetail(
   const startupFiles = ctxRow ? JSON.parse(ctxRow.resolved_files_json) : [];
   const startupActions = ctxRow ? JSON.parse(ctxRow.startup_actions_json) : [];
   const projectionEntries = ctxRow ? JSON.parse(ctxRow.projection_entries_json) : [];
+  // The seat's guidance file as its runtime resolves it now, and what it holds, read once for the guidance entries.
+  const guidanceEvidence = (): { file: string | null; content: string | null } => {
+    const runtime = (ctxRow as { runtime?: string | null } | undefined)?.runtime ?? entry.runtime;
+    const file = entry.cwd ? seatGuidanceFile(runtime, entry.cwd, new RigRepository(db).getRigClaudeManagedBlockFile(rigId)) : null;
+    let content: string | null = null;
+    if (file) {
+      try { content = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null; } catch { content = null; }
+    }
+    return { file, content };
+  };
 
   // Installed resources: override (from async adapter call) > projection fallback
   let installedResources: NodeDetailEntry["installedResources"];
@@ -908,14 +973,14 @@ export function getNodeDetail(
         }));
       } else {
         // Async — fall through to projection
-        installedResources = mapProjectionEntries(projectionEntries);
+        installedResources = mapProjectionEntries(projectionEntries, guidanceEvidence());
       }
     } catch {
-      installedResources = mapProjectionEntries(projectionEntries);
+      installedResources = mapProjectionEntries(projectionEntries, guidanceEvidence());
     }
   } else {
     // Projection fallback
-    installedResources = mapProjectionEntries(projectionEntries);
+    installedResources = mapProjectionEntries(projectionEntries, guidanceEvidence());
   }
 
   // Recent events (last 20 for this node)
@@ -1342,7 +1407,9 @@ export async function attachAgentActivity(
      *
      *     needs_input > running > MOTION > idle / unknown
      *
-     * Live motion UPGRADES a verdict of `idle` or `unknown`; it never touches `needs_input` or an
+     * A current, target-bound complete idle frame is the narrow exception to motion below.
+     * A generic footer or old idle capture is not that evidence; D2 remains unchanged.
+     * Live motion otherwise UPGRADES a verdict of `idle` or `unknown`; it never touches `needs_input` or an
      * already-`running` verdict, and it never MANUFACTURES `idle`. That asymmetry is the whole
      * safety argument, and it is what each half of the defect needs:
      *
@@ -1366,8 +1433,8 @@ export async function attachAgentActivity(
      * "not unknown" by relabelling the default, which is the closed union rotting rather than the
      * signal improving. Silence therefore leaves the prior verdict exactly as it was.
      */
-    const withMotion = (activity: AgentActivity): AgentActivity => {
-      if (!motionRunning) return activity;
+    const withMotion = (activity: AgentActivity, currentIdleFrame = false): AgentActivity => {
+      if (!motionRunning || (currentIdleFrame && activity.state === "idle")) return activity;
       if (activity.state !== "idle" && activity.state !== "unknown") return activity;
       return {
         state: "running",
@@ -1385,19 +1452,31 @@ export async function attachAgentActivity(
       sessionName: entry.canonicalSessionName,
       now: sampledAt,
     });
-    // A fresh POSITIVE hook (running/needs_input/idle) is authoritative — EXCEPT that a positive
-    // `idle` hook now yields to live motion (D2). running/needs_input hooks are untouched.
-    if (hookActivity && hookActivity.state !== "unknown") {
+    // Reuse the existing cached capture. Only a complete supported idle frame, bound to this
+    // target and started in a later second than the last write, distinguishes idle redraw from resumed work.
+    // window_activity has second precision: same-second ordering is unknown. Poll/completion time is not write time.
+    const structural = entry.canonicalSessionName
+      ? deps.structuralActivity?.getStructuralActivity(entry.canonicalSessionName) ?? null
+      : null;
+    const capturedMs = Date.parse(structural?.idleFrame?.captureStartedAt ?? "");
+    const motionMs = Date.parse(motion?.lastActivityAt ?? "");
+    const currentIdleFrame = structural?.state === "agent_idle"
+      && structural.idleFrame?.sessionName === entry.canonicalSessionName
+      && structural.idleFrame?.runtime === entry.runtime
+      && Number.isFinite(capturedMs) && capturedMs <= sampledAt.getTime()
+      && sampledAt.getTime() - capturedMs < DEFAULT_STRUCTURAL_STALE_MS
+      && (!motionRunning || (Number.isFinite(motionMs)
+        && Math.floor(capturedMs / 1000) > Math.floor(motionMs / 1000)));
+
+    // Running/needs_input hooks keep their meaning. An idle hook alone still yields to motion
+    // (D2); when a current complete idle frame exists, report that frame's provenance instead.
+    if (hookActivity && hookActivity.state !== "unknown"
+      && !(hookActivity.state === "idle" && motionRunning && currentIdleFrame)) {
       return {
         ...entry,
         agentActivity: withMotion(hookActivity),
       };
     }
-
-    // Capture-free cache read; the service rejects expired observations.
-    const structural = entry.canonicalSessionName
-      ? deps.structuralActivity?.getStructuralActivity(entry.canonicalSessionName)
-      : null;
 
     // #763: a typed provider-interruption row (at_limit) is positive evidence
     // even though its state is unknown by construction (it must never count
@@ -1433,7 +1512,7 @@ export async function attachAgentActivity(
           evidenceSource: "pane_heuristic",
           sampledAt: structural.observedAt,
           evidence: structural.evidence,
-        }),
+        }, currentIdleFrame),
       };
     }
 
@@ -1479,6 +1558,7 @@ export async function attachAgentActivity(
       now: sampledAt,
       captureObserver: deps.captureObserver,
       binding: deps.captureObserver ? deps.observationBinding?.(entry) : undefined,
+      communityHarness: entry.communityHarness?.harness ?? null,
     })),
     };
   }));
