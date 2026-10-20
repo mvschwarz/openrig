@@ -374,6 +374,25 @@ describe("BootstrapOrchestrator", () => {
           expect(human.text).toContain("DOCSDESK_ENV_PROBE");
           expect(human.text).toContain(started.find(s => s.session.endsWith("-dev"))!.session);
           expect(human.text).toContain(removal === "confirmed" ? "session was removed" : "check it and remove it");
+          const errors = JSON.stringify(observed?.data.errors);
+          if (singleSeat) {
+            expect(rigRepo.listRigs()).toHaveLength(0);
+            if (removal === "confirmed") expect(human.text).toContain("Run it again.");
+            expect(human.text).not.toContain("To relaunch only");
+          } else {
+            const retained = rigRepo.listRigs();
+            expect(retained).toHaveLength(1);
+            const command = `rig launch '${retained[0]!.id}' 'dev'`;
+            for (const rendered of [human.text, errors, json.text]) {
+              expect(rendered).toContain(command);
+              expect(rendered).toContain("does not reapply the unsaved --env values");
+              expect(rendered).toContain("stop the team first");
+              expect(rendered).toContain("original rig up command with --env");
+              expect(rendered).not.toContain("Run it again.");
+              expect(rendered).not.toContain(`${command} --env`);
+            }
+            expect(rigRepo.getRig(retained[0]!.id)!.nodes.every(node => !node.env)).toBe(true);
+          }
           expect(human.text).not.toContain("synthetic-private-value");
           expect(human.text).not.toContain("private unset fault");
           expect(JSON.stringify(observed?.data.errors)).toContain("DOCSDESK_ENV_PROBE");
