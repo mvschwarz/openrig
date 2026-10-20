@@ -8,21 +8,67 @@ OpenRig is open-source software for building and running your own network of age
 
 It's the open-source system behind my AI civilization experiments.
 
-**Guide:** [Getting started](docs/reference/getting-started.md) · **Stuck?** [Help](docs/reference/help.md) · **Questions:** [Q&A](https://github.com/mvschwarz/openrig/discussions/92) · **Updates and demos:** [@_feralmachine on X](https://x.com/_feralmachine)
+**Guide:** [Getting started](docs/reference/quickstart.md) · **Stuck?** [Help](docs/reference/help.md) · **Questions:** [Q&A](https://github.com/mvschwarz/openrig/discussions/92) · **Updates and demos:** [@_feralmachine on X](https://x.com/_feralmachine)
 
 ## See it running
 
 ![The OpenRig TUI: the build rig as a graph, then as a table of seats with runtime, model, context and state, then one seat in detail (real recording, 10 seconds)](assets/readme/openrig-agents-working.gif)
 
-**Start here:** [the guided first-use path](docs/reference/getting-started.md): install, talk to the kernel operator, then choose a team for your first useful change.
+**Start here:** [the guided first-use path](docs/reference/quickstart.md): install, talk to the kernel operator, then choose a team for your first useful change.
 
 Not setting this up today? Get the next walkthrough and occasional OpenRig updates → https://openrig.dev/follow
 
 ## Install and first run
 
-Requires Node.js 22 or 24 and tmux, on macOS or Linux, and one working Claude Code or Codex account: one is enough, since the kernel operator adapts the shipped `starter` team to whichever you have. On Linux, the distribution's own Node.js can be older (Ubuntu 24.04's is 18); install a supported version with [nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`) or NodeSource. On a Mac with Apple silicon, use Node.js 22 ([compatibility history](docs/releases/v0.5.15.md#known-compatibility-limitation)). On a Mac where you aren't an administrator, or where Homebrew belongs to another account (its `brew install` is refused), install Node.js in your own home folder with [nvm](https://github.com/nvm-sh/nvm): run `touch ~/.zshrc` (a new Mac account has none, and nvm's installer only adds itself to a profile file that already exists), then the install command on nvm's page, open a new terminal, and run `nvm install 22`. That needs no administrator password, and `npm install -g` then installs into your nvm folder. On Windows, use WSL2, the Windows route OpenRig supports; native Windows isn't supported. OpenRig's automated tests don't run on WSL2 yet; see [one user's working setup](docs/reference/getting-started.md#wsl2-a-reported-working-setup). Launching a rig writes provider hooks and workspace trust settings. Before running the commands below, read [what OpenRig changes on your machine](#what-openrig-changes-on-your-machine) and back up the relevant files.
+**Let your coding agent set it up.** First check that `node --version` shows 22 or 24: the command below needs
+Node.js and the `npx` that comes with it. Then, in your project folder, add OpenRig's `rigs` skill to the agent you
+use:
 
-**One command.** This runs OpenRig's install script from the `v0.6.12` release. It checks Node.js and npm, installs the latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check, then runs `rig setup --dry-run` and `rig setup`. The first line prints that plan and changes nothing:
+```sh
+# Claude Code
+npx skills add https://github.com/mvschwarz/openrig/tree/v0.6.12/skills/rigs --skill rigs --agent claude-code
+# Codex
+npx skills add https://github.com/mvschwarz/openrig/tree/v0.6.12/skills/rigs --skill rigs --agent codex
+```
+
+Then type `/rigs` in Claude Code, or `$rigs` in Codex, and say what you want built. The skill has your agent tell
+you what it will run and change before it does, install OpenRig, open the OpenRig view and pass your goal to
+OpenRig's operator.
+
+You need Node.js 22 or 24 (22 on Apple silicon), tmux, macOS or Linux (WSL2 on Windows), and Claude Code or Codex
+signed in. One provider is enough to start.
+
+Already have OpenRig? Use the tag that matches `rig --version`, or upgrade first.
+
+Prefer to type the commands yourself? [Install it yourself ↓](#install-it-yourself)
+
+Requires Node.js 22 or 24 and tmux, on macOS or Linux, and one working Claude Code or Codex account: one is enough, since the kernel operator adapts the shipped `starter` team to whichever you have. On Linux, the distribution's own Node.js can be older (Ubuntu 24.04's is 18); install a supported version with [nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`) or NodeSource. On a Mac with Apple silicon, use Node.js 22 ([compatibility history](docs/releases/v0.5.15.md#known-compatibility-limitation)). On a Mac where you aren't an administrator, or where Homebrew belongs to another account (its `brew install` is refused), install Node.js in your own home folder with [nvm](https://github.com/nvm-sh/nvm): run `touch ~/.zshrc` (a new Mac account has none, and nvm's installer only adds itself to a profile file that already exists), then the install command on nvm's page, open a new terminal, and run `nvm install 22`. That needs no administrator password, and `npm install -g` then installs into your nvm folder. On Windows, use WSL2, the Windows route OpenRig supports; native Windows isn't supported. OpenRig's automated tests don't run on WSL2 yet; see [one user's working setup](docs/reference/getting-started.md#wsl2-a-reported-working-setup).
+
+> **What OpenRig changes on your machine**
+> - **Install:** `@openrig/cli` goes in globally with npm.
+> - **Setup:** `rig setup` adds an OpenRig block to `~/.tmux.conf`. It can install tmux (with Homebrew on macOS), and
+>   Herdr unless you pass `--no-herdr`. Plain `rig setup`, which is what the one-command install runs, checks both
+>   Claude Code and Codex and may install a missing one; `rig setup --providers claude` (or `codex`) limits it to
+>   yours.
+> - **Starting OpenRig, for the coding agent you use** (paths are the usual defaults):
+>   - Codex: hooks and trust in `~/.codex/config.toml`.
+>   - Claude Code: workspace trust in `~/.claude.json`, and activity hooks in the project's
+>     `.claude/settings.local.json`, plus a status line unless you already have your own.
+>   - Discovery skills go in `~/.claude/skills` and `~/.agents/skills`.
+> - **Starting a team in your project:** adds managed guidance to `AGENTS.md` or `CLAUDE.md`, plus the team's skills
+>   and plugins.
+> - **Permissions:** by default, OpenRig's own kernel gets broader permissions than a project team gets by default.
+>   On Codex that's full access with no approval prompts (`-s danger-full-access -a never`). On Claude Code, its file
+>   tools, web fetches and operational commands, including reads under your home folder, run without asking. A
+>   permission policy, per-agent choice or Codex profile changes that. What your team can do depends on the team you
+>   choose and your settings; `workshop`, for example, ships with broad access.
+> - **Backups:** OpenRig doesn't guarantee it can preserve or roll back these files, so back them up first.
+>
+> [Everything OpenRig writes, and why →](https://github.com/mvschwarz/openrig#what-openrig-changes-on-your-machine)
+
+### Install it yourself
+
+This runs OpenRig's install script from the `v0.6.12` release. It checks Node.js and npm, installs the latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check, then runs `rig setup --dry-run` and `rig setup`. The first line prints that plan and changes nothing:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.12/scripts/install.sh | sh -s -- --dry-run
@@ -341,6 +387,8 @@ rig terminal open starter --provider herdr
 For cmux, use `--provider cmux`. In the TUI, a rig's detail view has an `Open terminals ▸ rig <name>` link that opens a terminal view of the running seats of that rig (in a new window or tab, or the current Herdr session), laid out with herdr when installed, otherwise plain tmux; with herdr that is up to 16 seats per tab, in a workspace named after the rig. A seat it can't attach is reported as absent or degraded. The underlying sessions remain accessible through tmux. See the [terminal workspace guide](docs/reference/getting-started.md#share-the-dashboard-and-return-to-it) for setup and returning to an existing view.
 
 ## Key Concepts
+
+The first words you meet, in plain language: [What these words mean](docs/reference/quickstart.md#what-these-words-mean).
 
 - **RigSpec**: Declarative multi-agent harness definition in YAML. Pods, members, edges, continuity policies, culture file.
 - **AgentSpec**: Reusable agent blueprint with skills, guidance, hooks, profiles, and startup contracts.

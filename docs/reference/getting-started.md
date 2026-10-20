@@ -1,19 +1,65 @@
-# Getting started: meet the kernel, then make one useful change
+# OpenRig setup reference
 
-Install OpenRig, use a working provider login, and meet the kernel operator with
-the advisor and TUI beside it. No starter team is needed to reach that view.
-Tell the operator what you want to do, then choose a project team for a bounded
-change you can exercise. Reuse the accounts and terminal tools you already have.
+This is the full reference for installing and running OpenRig, written for the agent doing the setup and for anyone
+who wants the detail. The short version for people is [Getting started](quickstart.md).
 
-After installation and sign-in, your agent opens the **OpenRig TUI and operator** for you. The path is `rig daemon start` (if stopped),
-then `rig terminal open saved:kernel --window`. The second command opens the
-desktop window itself. An agent can run it from its shell on the daemon's
-desktop; it does not need to type into your current terminal. See
-[Open the kernel conversations](#open-the-kernel-conversations).
-`rig tui` is the team dashboard; installation ends when you are talking to the
-operator in the OpenRig view.
+## For the agent doing the setup
+
+The `rigs` skill is the procedure: follow it in order. This page is what it looks things up in.
+
+- **Done** means the person is talking to the operator in a visible OpenRig view. A healthy daemon, a started kernel
+  or an opened window isn't done on its own. If they'd rather talk later, the handoff is still pending: say so, and
+  leave them the exact command.
+- **Read readiness; don't assume it:**
+  - **The kernel:** the `Kernel:` line in `rig status`, and `rig ps --nodes --rig kernel`.
+  - **A team:** `rig ps --nodes --rig <team>`.
+  - A missing or unknown signal isn't ready.
+  - `rig up` exiting 1 with `Status: partial` and `Startup attention` means a seat is waiting at a prompt. Answer it,
+    or ask the person to, then run the `rig seat continue <seat>` it names.
+- **Prerequisites:** check the person's existing toolchain first (mise, nvm, Homebrew or the nodejs.org installer)
+  and the PATH. Use what's there. Don't change a shared Homebrew's ownership, and don't make a local workaround the
+  standard route. If Node.js is installed after your session started, check that new shells and the session's hooks
+  can find it. In one published-0.6.11 Mac run, OpenRig's Claude hooks reported `node: command not found` until the
+  PATH was fixed.
+- **Ask once, then reuse the answer:** the provider (Claude Code, Codex or both), Herdr, Ghostty on macOS,
+  remembered command allowances, and the team.
+- **Before changing their machine:** say what applies to their route, then wait for a yes. See
+  [what OpenRig changes on your machine](../../README.md#what-openrig-changes-on-your-machine).
+- **When something stops:**
+  - [Incomplete setup and restart](#incomplete-setup-and-restart) maps what you see to the next action.
+  - [What can interrupt installation and the OpenRig view](#what-can-interrupt-installation-and-the-openrig-view)
+    covers the view.
+  - [Headless or SSH handoff](#headless-or-ssh-handoff) covers no-display cases.
+  - A timed-out command may still have taken effect. Read `rig ps` or `rig seat status <seat>` before you run it
+    again.
+- **Don't:**
+  - relaunch a team to reopen its view;
+  - start another seat to clear a prompt;
+  - build the person's project yourself. Give the goal to the operator.
 
 ## Before you start
+
+> **What OpenRig changes on your machine**
+> - **Install:** `@openrig/cli` goes in globally with npm.
+> - **Setup:** `rig setup` adds an OpenRig block to `~/.tmux.conf`. It can install tmux (with Homebrew on macOS), and
+>   Herdr unless you pass `--no-herdr`. Plain `rig setup`, which is what the one-command install runs, checks both
+>   Claude Code and Codex and may install a missing one; `rig setup --providers claude` (or `codex`) limits it to
+>   yours.
+> - **Starting OpenRig, for the coding agent you use** (paths are the usual defaults):
+>   - Codex: hooks and trust in `~/.codex/config.toml`.
+>   - Claude Code: workspace trust in `~/.claude.json`, and activity hooks in the project's
+>     `.claude/settings.local.json`, plus a status line unless you already have your own.
+>   - Discovery skills go in `~/.claude/skills` and `~/.agents/skills`.
+> - **Starting a team in your project:** adds managed guidance to `AGENTS.md` or `CLAUDE.md`, plus the team's skills
+>   and plugins.
+> - **Permissions:** by default, OpenRig's own kernel gets broader permissions than a project team gets by default.
+>   On Codex that's full access with no approval prompts (`-s danger-full-access -a never`). On Claude Code, its file
+>   tools, web fetches and operational commands, including reads under your home folder, run without asking. A
+>   permission policy, per-agent choice or Codex profile changes that. What your team can do depends on the team you
+>   choose and your settings; `workshop`, for example, ships with broad access.
+> - **Backups:** OpenRig doesn't guarantee it can preserve or roll back these files, so back them up first.
+>
+> [Everything OpenRig writes, and why →](https://github.com/mvschwarz/openrig#what-openrig-changes-on-your-machine)
 
 You need Node.js 22 or 24 and tmux, on macOS or Linux, and one working Claude
 Code or Codex account: one is enough, since the kernel operator adapts the
