@@ -57,6 +57,12 @@ export function persistedPluginPaths(db: Database.Database, nodeId: string): str
   }
 }
 
+/** Saved selection, even when the vendored manifest is missing; inspection must not call that intentional hooklessness. */
+export function selectedCorePluginDir(paths: readonly string[], pluginsDir: string = getDefaultOpenRigPath("plugins")): string | undefined {
+  const dir = join(pluginsDir, "openrig-core");
+  return paths.some((path) => canonical(path) === canonical(dir)) ? dir : undefined;
+}
+
 /**
  * The directory to load into this node's Claude process, or undefined: not a Claude seat, the plugin is not vendored,
  * or the seat's resolved plugin selection doesn't include it. `selectedPaths` is the selection a launch has just
@@ -72,8 +78,7 @@ export function seatCorePluginDir(
   const dir = vendoredCorePluginDir(pluginsDir);
   if (!dir) return undefined;
   const paths = selectedPaths ?? persistedPluginPaths(db, node.id) ?? [];
-  const want = canonical(dir);
-  return paths.some((path) => canonical(path) === want) ? dir : undefined;
+  return selectedCorePluginDir(paths, pluginsDir);
 }
 
 /** The seat's declared env with the vendored plugin added after any list the seat declared itself. */

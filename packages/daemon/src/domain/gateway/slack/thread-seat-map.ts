@@ -148,6 +148,17 @@ export class ThreadSeatMap {
     return row ? { threadTs: row.thread_ts, seat: row.seat, conversationId: row.conversation_id } : null;
   }
 
+  /** Missed-reply recovery's threads: roots in these channels posted at or after `since` (ISO), by the root's own Slack
+   *  timestamp, or closed at or after it. Never by opened_at: a rebuild from stamps sets that to the rebuild clock. */
+  trackedForRecovery(channels: string[], since: string): Array<{ channel: string; threadTs: string; state: string; closedAt: string | null }> {
+    if (!channels.length) return [];
+    const rows = this.db
+      .prepare(`SELECT channel, thread_ts, state, closed_at FROM thread_seat_map
+         WHERE channel IN (${channels.map(() => "?").join(", ")}) AND (CAST(thread_ts AS REAL) >= ? OR closed_at >= ?)`)
+      .all(...channels, Date.parse(since) / 1000, since) as Array<{ channel: string; thread_ts: string; state: string; closed_at: string | null }>;
+    return rows.map((r) => ({ channel: r.channel, threadTs: r.thread_ts, state: r.state, closedAt: r.closed_at }));
+  }
+
   close(threadTs: string, channel?: string): void {
     const at = this.now().toISOString();
     if (channel === undefined) this.db.prepare(`UPDATE thread_seat_map SET state = 'closed', closed_at = ? WHERE thread_ts = ?`).run(at, threadTs);

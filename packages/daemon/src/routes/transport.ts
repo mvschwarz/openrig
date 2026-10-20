@@ -111,6 +111,8 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       submitOnly: body.submitOnly,
       expectedStagedText: body.expectedStagedText,
       expectedStagedLineCount: body.expectedStagedLineCount,
+      // The caller's request: if it goes away while the send still waits, nothing is typed later.
+      signal: c.req.raw.signal,
     });
 
     if (result.outcome === "retained") return c.json(result);
@@ -118,6 +120,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     if (!result.ok) {
       const statusMap: Record<string, number> = {
         typing_guard_enabled: 409,
+        caller_cancelled: 409,
         guard_target_unknown: 409,
         guard_target_changed: 409,
         delivery_identity_conflict: 409,
@@ -302,6 +305,8 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       actorSession: derivedActor, // transport-derived, never the body claim
       envelopeSender, // the From: is the DERIVED identity (never the body value) — orch ruling (a)
       ...(derivedActor ? { identityProvenance: "transport:v1" } : {}),
+      // Recipients not yet started when the caller goes away are not written; started ones keep their results.
+      signal: c.req.raw.signal,
     });
 
     // A3b (P22 follow-on, planner-ruled IN scope): auto-record the fan-out — N rows, ONE per RESOLVED

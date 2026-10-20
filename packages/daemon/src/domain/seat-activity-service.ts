@@ -11,8 +11,8 @@ import type {
   RungHealthEvent,
   RungTrust,
 } from "./activity-taxonomy.js";
-import { AGENT_APP_RUNG_INVENTORY, EVIDENCE_RUNG_RANK, runtimeRungInventory } from "./activity-taxonomy.js";
-import { sessionAgentAppSelect } from "./session-registry.js";
+import { COMMUNITY_HARNESS_RUNG_INVENTORY, EVIDENCE_RUNG_RANK, runtimeRungInventory } from "./activity-taxonomy.js";
+import { sessionCommunityHarnessSelect } from "./session-registry.js";
 
 /** Default polling cadence: 1Hz. The default silence window is 3s, so
  *  1Hz polling gives at-most ~1s freshness lag on the cached observation. */
@@ -236,14 +236,14 @@ export class SeatActivityService {
     try {
       const rows = db.prepare(`
         SELECT s.session_name as session_name, n.id as node_id, n.runtime as runtime,
-          COALESCE(b.attachment_type, 'tmux') as attachment_type, ${sessionAgentAppSelect(db)} as agent_app
+          COALESCE(b.attachment_type, 'tmux') as attachment_type, ${sessionCommunityHarnessSelect(db)} as community_harness
         FROM nodes n
         JOIN sessions s ON s.node_id = n.id
           AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
         LEFT JOIN bindings b ON b.node_id = n.id
         WHERE s.status = 'running'
           AND s.session_name IS NOT NULL
-      `).all() as Array<{ session_name: string; node_id: string; runtime: string | null; attachment_type: string; agent_app: string | null }>;
+      `).all() as Array<{ session_name: string; node_id: string; runtime: string | null; attachment_type: string; community_harness: string | null }>;
       const tmuxRows = rows.filter((r) => r.attachment_type === "tmux");
       const liveTmux = new Set(tmuxRows.map((r) => r.session_name));
       for (const pane of this.latestByPaneId.keys()) {
@@ -265,10 +265,10 @@ export class SeatActivityService {
       // touching the launch machinery.
       for (const r of tmuxRows) {
         const known = this.ladder.get(r.node_id);
-        const inventory = runtimeRungInventory(r.runtime, r.agent_app);
+        const inventory = runtimeRungInventory(r.runtime, r.community_harness);
         // A replacement occupant can keep the seat's session name; its own recorded app selection (or none) decides.
-        const agentAppChanged = !!known && (known.inventory === AGENT_APP_RUNG_INVENTORY) !== (inventory === AGENT_APP_RUNG_INVENTORY);
-        if (!known || known.inventory === null || known.sessionName !== r.session_name || agentAppChanged) {
+        const communityHarnessChanged = !!known && (known.inventory === COMMUNITY_HARNESS_RUNG_INVENTORY) !== (inventory === COMMUNITY_HARNESS_RUNG_INVENTORY);
+        if (!known || known.inventory === null || known.sessionName !== r.session_name || communityHarnessChanged) {
           this.declareRungInventory({ seatNodeId: r.node_id, sessionName: r.session_name }, inventory);
         }
       }

@@ -39,6 +39,7 @@ export const EXPECT_SURFACES = [
   "transcript",
   "tui_socket",
   "policy_provenance",
+  "hook_context",
 ] as const;
 
 /**
@@ -51,7 +52,7 @@ export const EXPECT_SURFACES = [
 export const RESERVED_SURFACES = ["proof"] as const;
 
 /** The stub's locked four-behavior emit repertoire (shared vocab with 51-01). */
-export const EMIT_BEHAVIORS = ["compaction", "slow_output", "mid_turn_death", "restore"] as const;
+export const EMIT_BEHAVIORS = ["compaction", "slow_output", "mid_turn_death", "restore", "refocus"] as const;
 
 /** Known-but-real-runtime-only emit behaviors: valid ONLY in a real topology. */
 export const REAL_RUNTIME_ONLY_EMIT_BEHAVIORS = ["usage_limit"] as const;

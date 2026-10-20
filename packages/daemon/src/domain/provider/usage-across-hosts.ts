@@ -290,6 +290,7 @@ const usageWindow = record({
   levelReason: optional(str),
   freshness: oneOf(...FRESHNESS),
   freshnessReason: optional(str),
+  expectation: optional(record({ expectedFullSince: str, note: str })),
 });
 const codexIdentity = record({
   accountId: nullable(str), workspaceId: nullable(str), limitId: str, email: nullable(str), planType: nullable(str), source: str,
@@ -322,6 +323,11 @@ const usageRowFields = {
   identityNote: optional(str),
   unresolved: optional(record({ note: str, keptReads: num, droppedReads: num })),
   savedProfiles: optional(record({ names: listOf(str), note: str })),
+  // The reading-history fields are optional, so a host from before them stays valid.
+  retained: optional(oneOf("before_restart")),
+  accountHistory: optional(oneOf("linked", "unknown")),
+  lastObservedExhausted: optional(nullable(record({ at: str, window: nullable(str), evidence: str }))),
+  savedProfile: optional(oneOf("not linked")),
 };
 
 /** A served row with every field the grouping and the views read, typed as provider-types.ts says. */

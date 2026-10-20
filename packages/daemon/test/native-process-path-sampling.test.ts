@@ -31,6 +31,20 @@ describe.each(Object.entries(SOURCES))("from %s", (source, serve) => {
     expect(rows.find(r => r.pid === 15)?.executablePath).toBe("/x/.local/share/claude/versions/2.1.289");
     expect(rows.find(r => r.pid === 16)?.executablePath).toBeUndefined();
   });
+  it("reads the OS path of a script launch's Claude only on request, and only for foreground path-named rows", async () => {
+    // What a #! wrapper that exec's the install leaves: the OS name and argv[0]'s basename are both `claude`.
+    const installed = "/x/installs/claude/2.1.302/claude";
+    serve([row(10, "zsh", "-zsh"), row(30, "claude", `${installed} --resume token`), row(31, "claude", "claude --resume token"),
+      { ...row(32, "claude", `${installed} --resume other`), pgid: 99 }, row(33, "claude", "ugrep -G --hidden")]);
+    paths.mockResolvedValue(new Map([[30, installed]]));
+    // Today's lister, which every other caller uses: no read, so no subprocess on macOS for healthy native seats.
+    expect((await listNativeProcesses()).find(r => r.pid === 30)?.executablePath).toBeUndefined();
+    expect(paths).not.toHaveBeenCalled();
+    const rows = await listNativeProcesses({ claudeLaunchPaths: true });
+    expect(paths).toHaveBeenCalledExactlyOnceWith([30]);
+    expect(rows.find(r => r.pid === 30)?.executablePath).toBe(installed);
+    expect(rows.find(r => r.pid === 31)?.executablePath).toBeUndefined();
+  });
   it("reads the OS path for a Nix-wrapped Claude whose ucomm is the truncated `.claude-unwrapped`", async () => {
     serve([row(20, ".claude-unwrapp", "claude --session-id token"), row(21, ".claude-wrapped", "/nix/store/x-claude-code-2.1.280/bin/claude"),
       row(22, ".claude-unwrapp", "ugrep -G --hidden"), row(23, ".node-unwrapped", "claude")]);

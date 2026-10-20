@@ -34,7 +34,7 @@ const STATE_DIR = "/custom-instance/O'Brien";
 const RELAY_DEST = `${STATE_DIR}/state/claude-activity-hooks/activity-relay.cjs`;
 const SETTINGS = "/project/.claude/settings.local.json";
 // The concrete, absolute, shell-quoted leg-B firing shape — never ${CLAUDE_PLUGIN_ROOT}.
-const OWNED_CMD = `node ${shellQuote(RELAY_DEST)}`;
+const OWNED_CMD = `${shellQuote(process.execPath)} ${shellQuote(RELAY_DEST)}`;
 const OWNED_MARKER = "state/claude-activity-hooks/activity-relay.cjs";
 const EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "Notification"] as const;
 
@@ -259,6 +259,8 @@ describe("Claude activity-hook delivery — instance path transition", () => {
     const userCommands = [
       `echo ${shellQuote(oldPath)}`,
       `node 'user-arg' ${shellQuote(priorInstance)}`,
+      `${shellQuote(process.execPath)} ${shellQuote(priorInstance)} 'extra'`,
+      `${shellQuote("/custom/wrapper")} ${shellQuote(priorInstance)}`,
       `node ${shellQuote(priorInstance + ".backup")}`,
     ];
     const seeded = JSON.stringify({ env: { USER_SETTING: "keep" }, hooks: { Stop: [{ hooks: [

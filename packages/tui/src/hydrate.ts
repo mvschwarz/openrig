@@ -76,8 +76,8 @@ interface NodeInventoryRead {
     decidedBy?: string | null;
   } | null;
   identityVerdict?: { verdict?: string; reason?: string | null } | null;
-  /** Present only on a community agent app's seat. */
-  agentApp?: { app: string } | null;
+  /** Present only on a community harness's seat. */
+  communityHarness?: { harness: string } | null;
   canonicalSessionName: string | null;
   tmuxAttachCommand?: string | null;
   cwd?: string | null;
@@ -268,8 +268,8 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
                   : node.activityState?.display === "idle"
                     ? "idle"
                     : (node.terminalActive === true || (node.terminalActive == null && node.agentActivity?.state === "running") ? "active"
-                      // A community agent app gives no idle signal: a quiet screen is unknown, not idle.
-                      : node.agentApp ? "unknown" : "idle"))
+                      // A community harness gives no idle signal: a quiet screen is unknown, not idle.
+                      : node.communityHarness ? "unknown" : "idle"))
               : (node.sessionStatus ?? "unknown"),
     live: node.lifecycleState === "running",
     canRun: node.lifecycleState !== "running"

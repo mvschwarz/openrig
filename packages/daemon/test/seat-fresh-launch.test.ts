@@ -868,6 +868,32 @@ describe("SeatLifecycleService.launchFresh", () => {
     });
   });
 
+  it("#116: a ready fresh launch supersedes the seat's failed full restore without rewriting it", async () => {
+    const seat = seedSeat();
+    eventBus.emit({ type: "restore.started", rigId: seat.rig.id, snapshotId: "snap-1" });
+    eventBus.emit({
+      type: "restore.completed",
+      rigId: seat.rig.id,
+      snapshotId: "snap-1",
+      result: { snapshotId: "snap-1", preRestoreSnapshotId: "snap-0", rigResult: "failed", nodes: [{ nodeId: seat.node.id, logicalId: "dev.impl", status: "failed" }], warnings: [] },
+    } as any);
+    expect(getNodeInventory(db, seat.rig.id)[0]).toMatchObject({ restoreOutcome: "failed", lifecycleState: "attention_required" });
+
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "replace the failed occupant" });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.message);
+    const event = db.prepare("SELECT payload FROM events WHERE type = 'seat.fresh_launched' ORDER BY seq DESC LIMIT 1").get() as { payload: string };
+    expect(JSON.parse(event.payload)).toMatchObject({ newGeneration: result.generation, status: "ready" });
+    expect(sessionRegistry.currentOccupantTenure(seat.node.id)?.generationUuid).toBe(result.generation);
+    expect(getNodeInventory(db, seat.rig.id)[0]).toMatchObject({
+      restoreOutcome: "n-a",
+      lifecycleState: "running",
+      continuityOutcome: "fresh",
+    });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'restore.completed'").get()).toEqual({ n: 1 });
+  });
+
   it("OPR.0.7.0.7: a fresh launch sends the seat's saved effort choice over its authored effort, and records it", async () => {
     const seat = seedSeat({ clean: true, runtime: "codex", model: "gpt-5.6-codex" });
     rigRepo.setNodeEffort(seat.node.id, "medium");

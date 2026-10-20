@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { accessSync, constants, realpathSync, statSync } from "node:fs";
+import { accessSync, closeSync, constants, openSync, readSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import type Database from "better-sqlite3";
 import { publicSeatEnvironment } from "./seat-launch-environment.js";
@@ -24,12 +24,49 @@ interface TargetSnapshot {
   session: string | null; pane: string | null; generation: string | null;
 }
 
+/** The kernel runs a file as a script only when its first two bytes are `#!`. A managed launch's frozen executable is
+ *  then not the process that ends up running, so its path can't prove the launched Claude. Nothing past those two bytes
+ *  is read; an unreadable, empty or one-byte file is not a script. */
+export function fileStartsWithShebang(file: string): boolean {
+  let fd: number | undefined;
+  try {
+    fd = openSync(file, "r");
+    const head = Buffer.alloc(2);
+    return readSync(fd, head, 0, 2, 0) === 2 && head[0] === 0x23 && head[1] === 0x21;
+  } catch { return false; }
+  finally { if (fd !== undefined) try { closeSync(fd); } catch { /* nothing to release */ } }
+}
+
 /** Dynamic choices use the managed launch environment, not an interactive shell's
  * aliases or startup files. No cache and no persisted environment/credentials.
  * The help child has only the capability environment. Launch adds the existing
  * managed identity/auth channel by variable NAME, never secret values in text.
  */
 const MANAGED_LAUNCH_KEYS = ["PATH", "HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"];
+
+const PANE_TERMINAL_KEYS = ["TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES",
+  "LC_COLLATE", "LC_NUMERIC", "LC_TIME", "LC_MONETARY"];
+
+/** The person's editor and display session, so a managed seat behaves like a plain one for Claude's external-editor
+ *  action (EDITOR, VISUAL; Claude falls back to VS Code without them) and for image paste, which runs
+ *  `xclip || wl-paste` (DISPLAY with XAUTHORITY reach X11; WAYLAND_DISPLAY reaches the compositor, see below). Names only:
+ *  the pane supplies the values. Left out: XDG_RUNTIME_DIR, because sd-bus, GDBus and libdbus fall back to
+ *  $XDG_RUNTIME_DIR/bus when DBUS_SESSION_BUS_ADDRESS is unset, so it would hand the seat the session bus (keyring,
+ *  `systemctl --user`) that the cleared environment keeps out; and DBUS_SESSION_BUS_ADDRESS, XDG_SESSION_TYPE and
+ *  XDG_CURRENT_DESKTOP, which neither path reads. */
+const PANE_SESSION_KEYS = ["EDITOR", "VISUAL", "DISPLAY", "XAUTHORITY"];
+
+/** WAYLAND_DISPLAY without XDG_RUNTIME_DIR: a client resolves a relative socket name against XDG_RUNTIME_DIR, but an
+ *  absolute path needs nothing else. The pane shell computes the value into a variable ahead of `env -i`: an absolute
+ *  value is kept, a relative one is joined to the pane's XDG_RUNTIME_DIR, and a relative one with no XDG_RUNTIME_DIR (or
+ *  an unset or empty one) leaves the variable empty, so the name is never forwarded. An assignment is not word-split or
+ *  globbed, so a value with a space or a `*` arrives whole. The case patterns are balanced `(…)` so that shells that
+ *  mis-parse an unbalanced `)` inside `$(…)` (bash before 4.0, a macOS /bin/sh) accept it. The variable stays in the
+ *  shell that runs the command, which is a staged `/bin/sh` script for a managed launch; `env -i` does not pass it on. */
+const WAYLAND_DISPLAY_VAR = "__openrig_wayland_display";
+const WAYLAND_DISPLAY_ASSIGNMENT = `${WAYLAND_DISPLAY_VAR}=$(case "\${WAYLAND_DISPLAY-}" in (/*) printf %s "$WAYLAND_DISPLAY";; `
+  + `(?*) if [ -n "\${XDG_RUNTIME_DIR-}" ]; then printf %s/%s "$XDG_RUNTIME_DIR" "$WAYLAND_DISPLAY"; fi;; esac)`;
+const WAYLAND_DISPLAY_WORD = `\${${WAYLAND_DISPLAY_VAR}:+"WAYLAND_DISPLAY=$${WAYLAND_DISPLAY_VAR}"}`;
 
 export class ClaudeManagedLaunch {
   constructor(private readonly db: Database.Database,
@@ -123,12 +160,12 @@ export class ClaudeManagedLaunch {
       const s = statSync(file);
       return [realpathSync(file), s.dev, s.ino, s.mode, s.size, s.mtimeMs, s.ctimeMs];
     };
-    return Object.freeze({ env: Object.freeze(env), configDir, executable,
+    return Object.freeze({ env: Object.freeze(env), configDir, executable, executableIsScript: fileStartsWithShebang(executable),
       fileIdentity: Object.freeze(identity(executable)), cwdIdentity: Object.freeze(identity(cwd).slice(0, 3)) });
   }
 
   async prepare(request: ClaudeLaunchTarget, mode: string): Promise<{
-    assertCurrent: () => void; command: (args: readonly string[], launchEnv?: Readonly<Record<string, string>>) => string; configDir: string; executable: string;
+    assertCurrent: () => void; command: (args: readonly string[], launchEnv?: Readonly<Record<string, string>>) => string; configDir: string; executable: string; executableIsScript: boolean;
   }> {
     const target = Object.freeze({ ...request });
     const before = this.target(target.nodeId);
@@ -182,13 +219,12 @@ export class ClaudeManagedLaunch {
     // inside tmux; without it Claude never asks tmux for extended keys, and Shift+Enter reaches it
     // as a plain Enter. TMUX is left out on purpose: a bare `tmux` follows $TMUX ahead of
     // TMUX_TMPDIR, so tools the seat runs (and any daemon it starts) would follow the seat's own tmux server.
-    const terminal = ["TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES",
-      "LC_COLLATE", "LC_NUMERIC", "LC_TIME", "LC_MONETARY"]
-      .map(key => `\${${key}:+"${key}=$${key}"}`);
-    return Object.freeze({ assertCurrent, configDir: context.configDir, executable: context.executable, command: (args: readonly string[], launchEnv: Readonly<Record<string, string>> = {}) => {
+    const terminal = [...PANE_TERMINAL_KEYS, ...PANE_SESSION_KEYS].map(key => `\${${key}:+"${key}=$${key}"}`);
+    terminal.push(WAYLAND_DISPLAY_WORD);
+    return Object.freeze({ assertCurrent, configDir: context.configDir, executable: context.executable, executableIsScript: context.executableIsScript, command: (args: readonly string[], launchEnv: Readonly<Record<string, string>> = {}) => {
       assertCurrent();
       const launch = Object.entries(launchEnv).map(([key, value]) => shellQuote(`${key}=${value}`));
-      return `cd ${shellQuote(cwd)} && /usr/bin/env -i ${[...assignments, ...forwarded, ...seatForwarded, ...projectForwarded, ...terminal, ...launch, shellQuote(context.executable), ...args.map(shellQuote)].join(" ")}`;
+      return `${WAYLAND_DISPLAY_ASSIGNMENT}; cd ${shellQuote(cwd)} && /usr/bin/env -i ${[...assignments, ...forwarded, ...seatForwarded, ...projectForwarded, ...terminal, ...launch, shellQuote(context.executable), ...args.map(shellQuote)].join(" ")}`;
     } });
   }
 }

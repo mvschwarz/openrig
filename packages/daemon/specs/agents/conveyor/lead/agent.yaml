@@ -27,6 +27,7 @@ resources:
 startup:
   files:
     - path: guidance/role.md
+      orientation: role
       delivery_hint: send_text
       required: true
     - path: startup/context.md

@@ -54,6 +54,7 @@ export interface DoctorDeps {
 }
 
 const DEFAULT_PORT = 7433;
+const CMUX_SOCKET_CONTROL_FIX = 'In cmux Settings > Automation, select "Automation mode" for Socket Control Mode, or set automation.socketControlMode to "automation" in ~/.config/cmux/cmux.json (older versions use ~/.config/cmux/settings.json; current cmux reads that legacy file only for keys absent from cmux.json). cmux reloads saved settings automatically; rerun `rig doctor` to re-probe without restarting the daemon.';
 
 function defaultCheckPort(port: number, host: string): Promise<boolean> {
   return new Promise((resolve) => {
@@ -173,9 +174,9 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
       const modeHint = socketMode?.error
         ? ` Likely cause on macOS: ${CMUX_SETTINGS_DISCLOSURE_PATH} is unreadable (${socketMode.error}).`
         : socketMode && !isCmuxSocketControlCompatible(socketMode.mode) && socketMode.source === "default"
-        ? ` Likely cause on macOS: cmux is still using its default automation.socketControlMode '${socketMode.mode}'.`
+        ? ` ${CMUX_SETTINGS_DISCLOSURE_PATH} doesn't set automation.socketControlMode, so this check assumes cmux's default '${socketMode.mode}' (it doesn't read ~/.config/cmux/cmux.json). ${CMUX_SOCKET_CONTROL_FIX}`
         : socketMode && !isCmuxSocketControlCompatible(socketMode.mode)
-        ? ` Likely cause on macOS: automation.socketControlMode is '${socketMode.mode}' in ${CMUX_SETTINGS_DISCLOSURE_PATH}.`
+        ? ` Likely cause on macOS: automation.socketControlMode is '${socketMode.mode}' in ${CMUX_SETTINGS_DISCLOSURE_PATH}. ${CMUX_SOCKET_CONTROL_FIX}`
         : "";
       checks.push({
         name: "cmux_shell",
@@ -352,20 +353,20 @@ function buildCmuxDaemonWarning(deps: DoctorDeps, platform: NodeJS.Platform): Do
       status: "warn",
       message: "Shell cmux works, but the daemon cannot control cmux.",
       reason: `${CMUX_SETTINGS_DISCLOSURE_PATH} is unreadable: ${socketMode.error}`,
-      fix: `Repair ${CMUX_SETTINGS_DISCLOSURE_PATH} or remove it so cmux can regenerate the template, then rerun \`rig setup\` or \`rig doctor\`.`,
+      fix: `Repair JSON in ${CMUX_SETTINGS_DISCLOSURE_PATH}; on current cmux, also check ~/.config/cmux/cmux.json (the primary settings file). Save and rerun \`rig doctor\`; cmux reloads saved settings automatically and this check re-probes without a daemon restart.`,
     };
   }
 
   if (platform === "darwin" && socketMode && !isCmuxSocketControlCompatible(socketMode.mode)) {
     const reason = socketMode.source === "default"
-      ? `cmux is still using its default automation.socketControlMode '${socketMode.mode}', so the daemon cannot attach as an external cmux client yet.`
+      ? `${CMUX_SETTINGS_DISCLOSURE_PATH} doesn't set automation.socketControlMode, so this check assumes cmux's default '${socketMode.mode}' (it doesn't read ~/.config/cmux/cmux.json).`
       : `automation.socketControlMode is '${socketMode.mode}' in ${CMUX_SETTINGS_DISCLOSURE_PATH}, so the daemon cannot attach as an external cmux client yet.`;
     return {
       name: "cmux_daemon",
       status: "warn",
       message: "Shell cmux works, but the daemon cannot control cmux.",
       reason,
-      fix: `Run \`rig setup\` to set automation.socketControlMode to "automation" in ${CMUX_SETTINGS_DISCLOSURE_PATH}, then restart the daemon with \`rig daemon start\`.`,
+      fix: CMUX_SOCKET_CONTROL_FIX,
     };
   }
 
@@ -373,8 +374,8 @@ function buildCmuxDaemonWarning(deps: DoctorDeps, platform: NodeJS.Platform): Do
     name: "cmux_daemon",
     status: "warn",
     message: "Shell cmux works, but the daemon cannot control cmux.",
-    reason: "The daemon inherited a terminal/session environment that broke cmux adapter initialization.",
-    fix: "Restart the daemon with `rig daemon start` after setup. If it still fails, inspect the daemon log with `rig daemon logs`.",
+    reason: "The cmux control probe failed in the daemon, although it succeeded in this shell.",
+    fix: "Check that cmux is running and allows this user to control it, then rerun `rig doctor` to re-probe. If it still fails, inspect the daemon log with `rig daemon logs`.",
   };
 }
 

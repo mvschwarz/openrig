@@ -618,7 +618,7 @@ identity remains unverified; a version number alone cannot clear it.
   cmd
     .command("set-effort")
     .argument("<seat>", "Canonical session name or logical seat ref")
-    .option("--effort <level>", "The runtime's own effort level (for example low, medium, high)")
+    .option("--effort <level>", "The runtime's own effort level (for example low, medium, high; Pi also accepts off, minimal, xhigh, max)")
     .option("--clear", "Remove this seat's explicit choice and go back to its authored or default effort")
     .requiredOption("--reason <text>", "Audit reason recorded on the node.effort_changed event")
     .option("--operator <address>", "Operator recorded on the audit event")
@@ -628,6 +628,8 @@ identity remains unverified; a version number alone cannot clear it.
 Only this seat changes; its peers, model and account don't. The running process
 keeps its current effort until the seat's next managed continuation. Whether the
 native session then uses the level is a separate fact this command can't see.
+Works on Claude Code, Codex and Pi seats; Pi gets it as --thinking <level>. Levels
+are the runtime's own and are not translated; an unfamiliar one is saved with a warning.
 Examples:
   rig seat set-effort dev-impl@my-rig --effort high --reason "long refactor"
   rig seat set-effort dev.impl --clear --reason "back to the spec's effort" --json`)
@@ -660,8 +662,10 @@ Examples:
     .addHelpText("after", `
 Read-only. The launch value is the flag on the running process's own command line.
 The native value is the effort the session recorded for a turn since that process
-started (Claude's transcript, Codex's rollout); until the seat takes a turn, or
-where it can't be read, it is NOT VERIFIED, never assumed from the flag.
+started (Claude's transcript, Codex's rollout, Pi's thinkingLevel on its latest
+successful assistant turn: the level after Pi's own cap, recorded by Pi 0.99.0 or
+later); until the seat takes a turn, or where it can't be read, it is NOT VERIFIED,
+never assumed from the flag.
 Examples:
   rig seat effort dev-impl@my-rig
   rig seat effort dev.impl --json`)
@@ -842,6 +846,11 @@ never launches fresh, forks or retries. Peers sharing the Codex home are reporte
 not restarted.
 Mid-turn activity and child processes are shown in --plan and the result; deciding
 whether to interrupt them is the operator's call.
+An adopted seat (origin=claimed) refuses with claimed_session. The stored conversation
+must match the one the running Codex's command line names (or, when it names none, the
+only one Codex has logged since it started); OpenRig can't tell which conversation
+Codex is on now. If it was changed inside the running Codex, the restart may refuse or
+resume the earlier one: check the pane with rig capture <seat> first.
 --plan starts no Codex process: the network override, --no-daemon and add-dirs are
 taken from the running Codex's own command line, not probed again. Building the
 command can create OpenRig's own seat-bin link, as every managed launch does.
@@ -1146,9 +1155,13 @@ function printRestartReport(data: Record<string, unknown>): void {
   if (settings?.note) console.log(`Settings: ${settings.note}`);
   console.log(`Codex home: ${String(data["codexHome"])}.`);
   console.log(`Billing route: ${(data["billingRoute"] as { detail: string }).detail}`);
-  const account = data["account"] as { credentialStore: { detail: string }; authFile: { detail: string }; startupGate: string | null };
+  const noDaemon = data["codexNoDaemonFlag"] as { detail: string } | undefined;
+  if (noDaemon) console.log(noDaemon.detail);
+  const processMode = data["processMode"] as { detail: string } | undefined;
+  if (processMode) console.log(processMode.detail);
+  const account = data["account"] as { credentialStore: { detail: string }; authFile: { detail: string }; startupGate: string | null; startupGateKind?: string | null };
   console.log(`Account: unverified. ${account.credentialStore.detail} ${account.authFile.detail}`);
-  if (account.startupGate) console.log(`Codex startup gate: ${account.startupGate}`);
+  if (account.startupGate) console.log(`Codex startup gate${account.startupGateKind ? ` (${account.startupGateKind})` : ""}: ${account.startupGate}`);
   const stale = data["staleRestart"] as { startedAt: string; detail: string } | undefined;
   if (stale) console.log(`Stale restart from ${stale.startedAt}: ${stale.detail}`);
   const last = data["lastRestart"] as { outcome: string; finishedAt: string } | undefined;

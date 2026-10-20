@@ -84,7 +84,7 @@ import { jsonBodyErrorHandler, trackJsonBodyParseErrors } from "./middleware/jso
 import { getSelfHostId, getSelfHostIdSource } from "./domain/hosts/fanout-contract.js";
 import { contextPacksRoutes } from "./routes/context-packs.js";
 import { agentImagesRoutes } from "./routes/agent-images.js";
-import { agentAppsRoutes } from "./routes/agent-apps.js";
+import { communityHarnessesRoutes } from "./routes/community-harnesses.js";
 import type { SpecReviewService } from "./domain/spec-review-service.js";
 import type { SpecLibraryService } from "./domain/spec-library-service.js";
 import type { ChatRepository } from "./domain/chat-repository.js";
@@ -777,7 +777,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/agent-images", agentImagesRoutes({
     specRoots: deps.agentImageSpecRoots ?? (() => []),
   }));
-  app.route("/api/agent-apps", agentAppsRoutes());
+  app.route("/api/community-harnesses", communityHarnessesRoutes());
   app.route("/api/whoami", whoamiRoutes());
   // Slice-04 OPR.0.5.0.4: registered so the endpoints exist and 503 honestly; the providerService
   // is not set in context until the collection/service seam (C) wires it (until then -> 503).

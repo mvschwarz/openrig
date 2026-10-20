@@ -170,7 +170,7 @@ describe("Claude identity: claude auth status on refresh, joined and labelled, n
       ["d***@example.test", 50, false, "stale"],
     ]);
     expect(rows[1]!.windows[0]!.freshnessReason).toBe("a later read exists");
-    expect(rows[1]!.identityNote).toBe(`identity: the daemon's Claude login as of the refresh at ${NOW}; a refresh at ${at(5)} reported another login; windows as they were at ${NOW} (from a@rig)`);
+    expect(rows[1]!.identityNote).toBe(`identity: the daemon's Claude login as of the refresh at ${NOW}; a refresh at ${at(5)} reported another login, or one it couldn't identify; windows as they were at ${NOW} (from a@rig)`);
   });
 
   it("switching back to the earlier login makes its row current again; one email in two organisations is two rows", async () => {

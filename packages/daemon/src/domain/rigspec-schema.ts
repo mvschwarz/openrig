@@ -16,6 +16,7 @@ import { WORKSPACE_KINDS } from "./types.js";
 import { validateSafePath } from "./path-safety.js";
 import { CLAUDE_MANAGED_BLOCK_FILES } from "./managed-blocks.js";
 import { canonicalCompactionStrategy, canonicalContinuityMechanic } from "./agent-manifest.js";
+import { unknownLevelWarning } from "./seat-effort.js";
 import { aliasModelPinAdvisory } from "./spec-validation-advisory.js";
 import { normalizeSeatEnv, validateSeatEnv } from "./seat-env.js";
 import { validatePermissionPolicyRef } from "./permission-policy/policy-ref.js";
@@ -496,6 +497,9 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
   if (member["effort"] !== undefined) {
     if (typeof member["effort"] !== "string" || !member["effort"].trim()) {
       advisories.push(`${prefix}.effort: non-string value "${member["effort"]}" ignored; effort must be a text value`);
+    } else if (member["runtime"] === "pi") {
+      const warning = unknownLevelWarning("pi", member["effort"].trim());
+      if (warning) advisories.push(`${prefix}.effort: ${warning}`);
     }
   }
   if (!member["cwd"] || typeof member["cwd"] !== "string") {
@@ -1284,6 +1288,9 @@ export class LegacyRigSpecSchema {
         if (node["effort"] !== undefined) {
           if (typeof node["effort"] !== "string" || !node["effort"].trim()) {
             advisories.push(`nodes.${nodeWhere}.effort: non-string value "${node["effort"]}" ignored; effort must be a text value`);
+          } else if (node["runtime"] === "pi") {
+            const warning = unknownLevelWarning("pi", node["effort"].trim());
+            if (warning) advisories.push(`nodes.${nodeWhere}.effort: ${warning}`);
           }
         }
 

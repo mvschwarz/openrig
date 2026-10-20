@@ -26,8 +26,9 @@ This plugin ships dual-manifest packaging — both `.claude-plugin/` and `.codex
   A seat that has OpenRig's activity relay in its own `settings.local.json` (the `claude-activity-hooks` runtime resource)
   already reports activity from there, so the plugin's `activity-relay.cjs` (which the manifest starts with `--from-plugin`)
   exits for an event the seat's settings register it for. It does so only when the entry is exactly the one OpenRig writes
-  (`node` and one quoted path to `state/claude-activity-hooks/activity-relay.cjs`) and the script at that path is this same
-  script, so a missing script, a different one at that path, or a wrapper around it never silences the plugin. A seat without
+  (legacy `node` or a quoted absolute Node executable, then one quoted path to
+  `state/claude-activity-hooks/activity-relay.cjs`), the interpreter is executable, and the script at that path is this same
+  script. A missing interpreter/script, a different script, or a wrapper around it never silences the plugin. A seat without
   that resource, and a plugin installed outside OpenRig, report through the plugin's relay, so each event is reported once.
   A relay entry written by an older install (a different path or quoting) doesn't match, so until the seat is relaunched and
   its entry refreshed, both relays report and its events come twice. The plugin is not a Claude marketplace entry, so
@@ -42,6 +43,12 @@ This plugin ships dual-manifest packaging — both `.claude-plugin/` and `.codex
   or handover, and behaves as before until then.
 - **Codex CLI** — Codex has no directory option for plugins, so it does not load this plugin. A Codex seat gets only the hooks
   the daemon writes into Codex's `config.toml` (the activity relay); `hooks/codex.json` is not read.
+
+Generated Claude settings commands for the activity relay and context collector use the daemon's absolute Node
+executable when its name is recognized (`node` or `node.exe`); other names keep the legacy bare `node` command and
+its PATH requirement. Pinned commands do not require Node on the Claude process's inherited PATH. The executable must
+remain installed; removing or moving it requires normal command refresh from a healthy runtime. This does not change the static plugin
+manifest commands, which still use `node`, or prove that an already-running Claude reloaded changed settings.
 
 One skill targets Claude Code's compaction behavior specifically:
 - `claude-compaction-restore` — used to rebuild a Claude Code agent's working mental model after `/compact`, from JSONL transcripts and touched files

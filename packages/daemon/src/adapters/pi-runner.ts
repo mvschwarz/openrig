@@ -227,8 +227,11 @@ export function mapPiEvent(event: Record<string, unknown>, runtime: RunnerRuntim
       // same deltas, so appending it repeated the growing text. Thinking and
       // tool-call argument deltas stay out of the pane; tool calls get their
       // own one-line summaries from tool_execution_*.
+      // OMP and Pi both provide text_delta frames. The enclosing message is a
+      // cumulative snapshot, not another delta: appending it duplicates replies.
       const update = event.assistantMessageEvent as Record<string, unknown> | undefined;
-      const delta = update?.type === "text_delta" && typeof update.delta === "string" ? update.delta : "";
+      const hasDelta = update?.type === "text_delta" && typeof update.delta === "string";
+      const delta = hasDelta ? update.delta as string : "";
       return delta ? { mirrorLines: [], mirrorAppend: delta } : { mirrorLines: [] };
     }
     case "message_end":
@@ -383,12 +386,17 @@ export class RunnerCore {
   private ready = false;
   private assistantErrorShown = false;
   private started = false;
-  /** OMP attention (runtime_error | permission_prompt) that must survive the
-   *  end of the turn; cleared by the next agent_start. */
-  private attention: "runtime_error" | "permission_prompt" | null = null;
+  /** OMP failures/approvals survive the turn until agent_start, except typed
+   *  transient assistant failures, released only when agent_end completes. */
+  private attention: "runtime_error" | "permission_prompt" | "transient_turn_error" | null = null;
   /** Whether the last activity posted is that attention. Later activity in
    *  the same turn (a tool call after a denied approval) replaces it. */
   private attentionIsLatest = false;
+  // Native OMP retry summaries have no message/status. Correlate only within
+  // the announced attempt, using the latest typed assistant failure's exact
+  // diagnostic as an identity check, never as a transient-error classifier.
+  private retryAttempt: number | null = null;
+  private retryFailure: string | null = null;
   /** Set once the daemon confirms it persisted the resume token. */
   private identityPersisted = false;
   private identityInFlight = false;
@@ -577,6 +585,7 @@ export class RunnerCore {
       const sessionId = typeof data.sessionId === "string" ? data.sessionId : undefined;
       this.sessionFile = sessionFile ?? this.sessionFile;
       this.sessionId = sessionId ?? this.sessionId;
+      const wasReady = this.ready;
       this.ready = this.runtime === "pi" || !!this.sessionFile;
       if (!this.ready) {
         this.io.mirrorLine("[omp-runner] ERROR rpc get_state returned no session file; cannot provide a resume token");
@@ -584,7 +593,14 @@ export class RunnerCore {
         return;
       }
       this.writeSidecar({});
-      this.io.mirrorLine(`${this.runtime === "omp" ? "[omp-runner] READY" : PI_RUNNER_READY_MARKER} session=${this.sessionFile ?? "unknown"}`);
+      if (!wasReady) {
+        // Only the initial transition to ready announces READY in the pane.
+        // Subsequent get_state evaluations confirm liveness silently to avoid
+        // terminal output spam while preserving state updates.
+        this.io.mirrorLine(`${this.runtime === "omp" ? "[omp-runner] READY" : PI_RUNNER_READY_MARKER} session=${this.sessionFile ?? "unknown"}`);
+      }
+      // Re-post session identity on every successful get_state reply so the
+      // daemon can discover replacement runners and keep session records current.
       this.postSessionIdentity();
       return;
     }
@@ -676,14 +692,15 @@ export class RunnerCore {
     }, () => { /* best-effort: resent on the next refresh */ });
   }
 
-  private raiseAttention(subtype: "runtime_error" | "permission_prompt"): void {
-    // Runtime failures outrank denied approvals. Only emit when the visible
-    // attention changes or intervening activity replaced it.
-    const next = this.attention === "runtime_error" ? this.attention : subtype;
+  private raiseAttention(subtype: "runtime_error" | "permission_prompt" | "transient_turn_error"): void {
+    // Persistent failures and denied approvals outrank transient failures.
+    // Only emit when attention changes or intervening activity replaced it.
+    const next = this.attention === "runtime_error" ? this.attention
+      : this.attention === "permission_prompt" && subtype === "transient_turn_error" ? this.attention : subtype;
     if (this.attention === next && this.attentionIsLatest) return;
     this.attention = next;
     this.attentionIsLatest = true;
-    this.io.postActivity(this.activityPayload("Notification", next));
+    this.io.postActivity(this.activityPayload("Notification", next === "transient_turn_error" ? "runtime_error" : next));
   }
 
   private clearAttention(): void {
@@ -718,8 +735,16 @@ export class RunnerCore {
 
     if (this.runtime === "omp") {
       if (event.type === "agent_start") this.clearAttention();
+      if (event.type === "agent_start" || event.type === "turn_start"
+        || (event.type === "message_start" && message?.role === "assistant")
+        || ((event.type === "message_end" || event.type === "turn_end")
+          && message?.role === "assistant" && message.stopReason !== "error")) this.retryFailure = null;
+      if (event.type === "auto_retry_start") {
+        this.retryAttempt = Number.isInteger(event.attempt) && (event.attempt as number) > 0 ? event.attempt as number : null;
+        this.retryFailure = null;
+      }
       // A successful automatic retry supersedes the failed attempt.
-      if (event.type === "auto_retry_start" && this.attention === "runtime_error") this.clearAttention();
+      if (event.type === "auto_retry_start" && (this.attention === "runtime_error" || this.attention === "transient_turn_error")) this.clearAttention();
       // Some paths omit agent_start; turn_start still opens a new turn.
       if (event.type === "turn_start") this.assistantErrorShown = false;
     }
@@ -747,11 +772,34 @@ export class RunnerCore {
         this.io.mirrorLine(mapped.errorNotice);
       }
       this.assistantErrorShown = true;
-      // OMP still ends the turn normally after a model failure; the operator
-      // has to act, so the seat shows attention rather than idle.
-      if (this.runtime === "omp") this.raiseAttention("runtime_error");
+      // Only typed, explicitly transient HTTP failures may release the send
+      // guard at agent_end. Unknown/auth/configuration failures stay attention;
+      // diagnostic prose is never used to decide whether a retry is safe.
+      const status = message?.errorStatus;
+      const transient = (event.type === "message_end" || event.type === "turn_end")
+        && message?.role === "assistant" && message.stopReason === "error"
+        && typeof status === "number" && [408, 429, 500, 502, 503, 504, 529].includes(status);
+      if (this.runtime === "omp") {
+        const retrySummary = event.type === "auto_retry_end" && event.success === false
+          && this.retryAttempt !== null && event.attempt === this.retryAttempt
+          && this.retryFailure !== null && event.finalError === this.retryFailure
+          && event.message === undefined && event.error === undefined;
+        if (event.type !== "auto_retry_end") {
+          this.retryFailure = transient && this.retryAttempt !== null && typeof message?.errorMessage === "string"
+            && message.errorMessage.length > 0 ? message.errorMessage : null;
+        } else if (!retrySummary) {
+          this.retryFailure = null;
+        }
+        this.raiseAttention(transient || retrySummary ? "transient_turn_error" : "runtime_error");
+      }
+    }
+    if (this.runtime === "omp" && (event.type === "auto_retry_end" && event.success === true
+      || event.type === "agent_end" && event.isTerminal !== false)) {
+      this.retryAttempt = null;
+      this.retryFailure = null;
     }
     if (!mapped.activity) return;
+    if (event.type === "agent_end" && this.attention === "transient_turn_error") this.clearAttention();
     if (mapped.activity.hookEvent === "Stop" && this.attention) {
       // The turn ended, but the operator still has to act. Drop the Stop; if
       // later activity replaced the attention, restore it as the final state.
@@ -827,6 +875,7 @@ interface RunnerArgs {
   cwd: string;
   launchId: string;
   model?: string;
+  thinking?: string;
   trust: "approve" | "no-approve";
   sessionFile?: string;
   forkRef?: string;
@@ -837,8 +886,11 @@ interface RunnerArgs {
 
 export function parseRunnerArgs(argv: string[]): RunnerArgs {
   const args: Partial<RunnerArgs> & { trust?: "approve" | "no-approve" } = {};
+  // The tokens read as flags; a value, such as a --thinking of "--approval-mode", never counts as one.
+  const flags = new Set<string>();
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i]!;
+    flags.add(flag);
     const next = () => {
       const value = argv[++i];
       if (value === undefined) throw new Error(`${flag} requires a value`);
@@ -856,6 +908,7 @@ export function parseRunnerArgs(argv: string[]): RunnerArgs {
       case "--cwd": args.cwd = next(); break;
       case "--launch-id": args.launchId = next(); break;
       case "--model": args.model = next(); break;
+      case "--thinking": args.thinking = next(); break;
       case "--session": args.sessionFile = next(); break;
       case "--fork": args.forkRef = next(); break;
       case "--usage-facts": args.usageFacts = true; break;
@@ -876,10 +929,10 @@ export function parseRunnerArgs(argv: string[]): RunnerArgs {
   if (!args.cwd) throw new Error("--cwd is required");
   if (!args.launchId) throw new Error("--launch-id is required (launch-attempt scoping)");
   if (args.runtime === "omp") {
-    if (!argv.includes("--approval-mode") || argv.some((flag) => flag === "--approve" || flag === "--no-approve")) {
+    if (!flags.has("--approval-mode") || flags.has("--approve") || flags.has("--no-approve")) {
       throw new Error("OMP requires --approval-mode yolo or always-ask, not Pi trust flags");
     }
-  } else if (!args.trust || argv.includes("--approval-mode")) {
+  } else if (!args.trust || flags.has("--approval-mode")) {
     throw new Error("an explicit trust flag is required: --approve or --no-approve");
   }
   if (args.sessionFile && args.forkRef) throw new Error("--session and --fork are mutually exclusive");
@@ -1050,6 +1103,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     sessionsDir: paths.sessionsDir,
     sessionName: args.sessionName,
     model: args.model,
+    thinking: args.thinking,
     trust: args.trust,
     sessionFile: args.sessionFile,
     forkRef: args.forkRef,

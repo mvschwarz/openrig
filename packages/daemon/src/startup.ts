@@ -1,3 +1,4 @@
+import { makeWatchdogDeliver, occurrenceAttempted, priorDigestAttempt } from "./domain/watchdog-delivery.js";
 import { fileURLToPath } from "node:url";
 import { discoverTailscaleSelfNames } from "./middleware/browser-boundary.js";
 import { configureShadowCapture } from "./domain/shadow-capture.js";
@@ -44,6 +45,7 @@ import { codexDaemonSupportProbe } from "./domain/codex-daemon-support.js";
 import { codexNetworkDefaultReader } from "./domain/codex-network-default.js";
 import { codexUsageReader } from "./domain/provider/codex-usage-reader.js";
 import { CodexUsageWindows } from "./domain/provider/codex-usage-windows.js";
+import { ProviderAccountReadingsStore } from "./domain/provider/provider-account-readings.js";
 import { claudeAuthStatusReader } from "./domain/provider/claude-auth-status-reader.js";
 import { ClaudeUsageWindows, latestClaudeWindowSamples } from "./domain/provider/claude-usage-windows.js";
 import { prepareCodexTeamWorkspace } from "./domain/codex-team-workspace.js";
@@ -99,7 +101,7 @@ import { probeSessionActivity, SessionTransport } from "./domain/session-transpo
 import { AgentActivityStore } from "./domain/agent-activity-store.js";
 import { HistoryQuery } from "./domain/history-query.js";
 import { AskService } from "./domain/ask-service.js";
-import { WakeResolveService } from "./domain/wake-resolve-service.js";
+import { WakeResolveService, WAKE_SESSIONS_SQL } from "./domain/wake-resolve-service.js";
 import type { WakeSessionRow } from "./domain/wake-resolver.js";
 import { ChatRepository } from "./domain/chat-repository.js";
 import { StreamStore } from "./domain/stream-store.js";
@@ -177,7 +179,7 @@ import type { NotificationAdapter } from "./domain/mission-control/notification-
 import { OPENRIG_HOME } from "./openrig-compat.js";
 import { homeIsolationAdvisory } from "./domain/home-isolation.js";
 import { materializeBuiltinPolicyReference } from "./domain/builtin-policy-reference.js";
-import { withAgentAppResolver, withAgentApps } from "./adapters/agent-app-runtime-adapter.js";
+import { withCommunityHarnessResolver, withCommunityHarnesses } from "./adapters/community-harness-runtime-adapter.js";
 import { ensureActivityHookToken, writeActivityEndpointFile, deriveActivityUrl, readActivityEndpointFile } from "./domain/activity-endpoint.js";
 import {
   getCompatibleOpenRigPath,
@@ -1024,7 +1026,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     db, rigRepo, podRepo,
     sessionRegistry, eventBus, nodeLauncher, startupOrchestrator,
     fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), exists: (p: string) => fs.existsSync(p) },
-    adapters: withAgentApps({ "claude-code": claudeAdapter, "codex": codexAdapter, "pi": piAdapter, "omp": ompAdapter, "stub": stubAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() }, { tmux: tmuxAdapter, seatLaunchEnvironment }),
+    adapters: withCommunityHarnesses({ "claude-code": claudeAdapter, "codex": codexAdapter, "pi": piAdapter, "omp": ompAdapter, "stub": stubAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() }, { tmux: tmuxAdapter, seatLaunchEnvironment }),
     tmuxAdapter,
     agentImageLibrary,
     continuityPolicyMaterializer,
@@ -1262,7 +1264,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // Capture compatibility before the spec-library initializer creates the primary directory.
   const userSpecLibraryRoot = getDefaultOpenRigPath("specs");
   const compatibleSpecLibraryRoot = getCompatibleOpenRigPath("specs");
-  const runtimeAdaptersMap = withAgentAppResolver({
+  const runtimeAdaptersMap = withCommunityHarnessResolver({
     "claude-code": claudeAdapter,
     "codex": codexAdapter,
     "pi": piAdapter,
@@ -1305,7 +1307,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // samples (usage_samples), read on every view.
       usageWindows: {
         enabled: () => new ContextPackSettingsStore().resolveOne("provider.usage_windows").value === true,
-        windows: new CodexUsageWindows({ read: codexUsageReader({ launchPath: process.env.PATH, home: daemonHome, codexHome }) }),
+        windows: new CodexUsageWindows({ read: codexUsageReader({ launchPath: process.env.PATH, home: daemonHome, codexHome }),
+          store: new ProviderAccountReadingsStore(db) }),
         claude: new ClaudeUsageWindows({
           readIdentity: claudeAuthStatusReader({ launchPath: process.env.PATH, home: daemonHome, claudeConfigDir: process.env.CLAUDE_CONFIG_DIR }),
           listSamples: () => latestClaudeWindowSamples(db),
@@ -1411,10 +1414,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       listSessionsBySeat: (seat: string) =>
         db
           .prepare(
-            `SELECT s.id AS id, s.session_name AS sessionName, s.resume_token AS resumeToken,
-                    n.runtime AS runtime, s.created_at AS createdAt
-               FROM sessions s JOIN nodes n ON s.node_id = n.id
-              WHERE s.session_name = ? ORDER BY s.id DESC`,
+            WAKE_SESSIONS_SQL,
           )
           .all(seat) as WakeSessionRow[],
     }),
@@ -2084,30 +2084,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       jobsRepo: watchdogJobsRepoInstance,
       historyLog: watchdogHistoryLogInstance,
       eventBus,
-      deliver: async ({ targetSession, message, continuityAction }, source) => {
-        let continuityActionCompleted = false;
-        try {
-          if (continuityAction) {
-            await createContinuityCutoverBaton(continuityAction, queueRepoInstance);
-            continuityActionCompleted = true;
-          }
-          const deliveryId = `guard-watchdog-${source.occurrenceId ?? source.jobId}`;
-          const previous = outboxHandlerInstance.getById(deliveryId);
-          const payload = previous?.guardBinding ? previous.body : formatWatchdogDeliveryMessage(source, message);
-          const result = await sessionTransport.send(targetSession, payload,
-            { deliveryId, actorSession: "watchdog@system", auditPointer: source.jobId });
-          if (result.outcome === "retained") return { status: "retained", outboxIds: result.outboxIds, continuityActionCompleted };
-          return result.ok
-            ? { status: "ok", continuityActionCompleted }
-            : { status: "failed", error: result.error, continuityActionCompleted };
-        } catch (err) {
-          return {
-            status: "failed",
-            error: err instanceof Error ? err.message : String(err),
-            continuityActionCompleted,
-          };
-        }
-      },
+      deliver: makeWatchdogDeliver({
+        sessionTransport,
+        outbox: outboxHandlerInstance,
+        db,
+        createContinuityAction: (action) => createContinuityCutoverBaton(action, queueRepoInstance).then(() => {}),
+      }),
       // (i-c) fire-time target-generation gate: resolve the target's LIVE occupant-generation (P12
       // occupant_tenures) so a generation-bound wake is refused once the target has handed over.
       // UNKNOWN (null) fails open → deliver. A drop of this line disables the gate silently (gen-bound
@@ -2119,6 +2101,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       onWakeAttempt: ({ jobId, deliveryStatus }) => {
         queueRepoInstance.recordWatchdogWakeAttempt(jobId, deliveryStatus);
       },
+      // Due parked-row reminders for one seat in one scheduler pass go as one message.
+      resolveDigestEntry: ({ jobId, message }) => queueRepoInstance.parkReminderDigestEntry(jobId, message),
+      priorDigestAttempt: (occurrenceId) => priorDigestAttempt(outboxHandlerInstance, occurrenceId),
+      occurrenceAttempted: (occurrenceId) => occurrenceAttempted(outboxHandlerInstance, occurrenceId),
       // PL-004 Phase D: register workflow-keepalive policy alongside
       // Phase C's three built-in policies. workflow-keepalive reads
       // SQLite workflow_instances directly via the new Phase D tables

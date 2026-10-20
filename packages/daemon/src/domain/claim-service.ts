@@ -15,6 +15,7 @@ import {
   type PaneBindingObservation,
 } from "./pane-binding-observation.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
+import { DeliveryGuardError } from "./seat-delivery-guard.js";
 
 export type ClaimResult =
   | { ok: true; nodeId: string; sessionId: string }
@@ -41,13 +42,14 @@ export interface ReconcileSessionResult {
   continuity: "unverified";
 }
 
+export interface MissingPaneRepairResult extends ReconcileSessionResult {
+  mode: "repair-missing-pane";
+  pane: string;
+}
+
 export type ReconcileSessionOutcome =
-  | { ok: true; result: ReconcileSessionResult }
-  | { ok: false; code: "session_not_found"; message: string }
-  | { ok: false; code: "node_not_found"; message: string }
-  | { ok: false; code: "rig_not_found"; message: string }
-  | { ok: false; code: "node_mismatch"; message: string }
-  | { ok: false; code: "reconcile_error"; message: string };
+  | { ok: true; result: ReconcileSessionResult | MissingPaneRepairResult }
+  | { ok: false; code: string; message: string };
 
 export interface ReconcileSessionOptions {
   sessionName: string;
@@ -55,6 +57,8 @@ export interface ReconcileSessionOptions {
    *  cross-checked against the session-name mapping. */
   rigId?: string;
   logicalId?: string;
+  /** Explicit binding-only recovery; never enters adoption or capture housekeeping. */
+  repairMissingPane?: boolean;
 }
 
 interface ClaimServiceDeps {
@@ -438,6 +442,7 @@ export class ClaimService {
     if (!sessionName) {
       return { ok: false, code: "session_not_found", message: "sessionName is required." };
     }
+    if (opts.repairMissingPane) return this.repairMissingPane({ ...opts, sessionName });
 
     // 1. Resolve the persisted node for this canonical session name. The
     // session-name mapping is the daemon's own history (bindings + session
@@ -615,6 +620,77 @@ export class ClaimService {
     } catch (err) {
       return { ok: false, code: "reconcile_error", message: (err as Error).message };
     }
+  }
+
+  private async repairMissingPane(opts: ReconcileSessionOptions): Promise<ReconcileSessionOutcome> {
+    const { sessionName } = opts;
+    const tmux = this.tmuxAdapter, guard = tmux?.deliveryGuard;
+    if (!tmux || !guard) return { ok: false, code: "reconcile_error", message: "Missing-pane repair requires the managed tmux delivery guard." };
+    const deadline = performance.now() + 5000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refuse = (code: string, message: string): never => { throw new DeliveryGuardError(code, message); };
+    try {
+      const expected = guard.target(sessionName);
+      const owner = this.db.prepare("SELECT rig_id FROM nodes WHERE id=?").get(expected.nodeId) as { rig_id: string } | undefined;
+      const rig = owner && this.rigRepo.getRig(owner.rig_id);
+      const node = rig?.nodes.find(n => n.id === expected.nodeId);
+      if (!rig || !node) return refuse("node_not_found", "The current managed node no longer exists.");
+      if ((opts.rigId && opts.rigId !== rig.rig.id) || (opts.logicalId && opts.logicalId !== node.logicalId)) {
+        return refuse("node_mismatch", "The supplied rig/node does not match the current managed session.");
+      }
+      const current = () => this.db.prepare(`SELECT b.id AS bindingId, b.tmux_session AS sessionName,
+        b.tmux_pane AS pane, b.attachment_type AS attachment, s.id AS sessionId,
+        s.session_name AS registeredName, s.status, s.origin, n.rig_id AS rigId, n.logical_id AS logicalId
+        FROM bindings b JOIN sessions s ON s.node_id=b.node_id JOIN nodes n ON n.id=b.node_id
+        WHERE b.node_id=? ORDER BY s.id DESC LIMIT 1`).get(expected.nodeId) as {
+          bindingId: string; sessionName: string; pane: string | null; attachment: string;
+          sessionId: string; registeredName: string; status: string; origin: string;
+          rigId: string; logicalId: string;
+        } | undefined;
+      const before = current();
+      if (!before || before.attachment !== "tmux" || before.sessionName !== sessionName || before.registeredName !== sessionName
+        || before.pane !== null || expected.pane !== null || expected.session !== sessionName
+        || before.status !== "running" || before.origin !== "launched") {
+        return refuse("repair_not_applicable", "Repair requires a current running launched session with its own NULL tmux pane binding; nothing was adopted or overwritten.");
+      }
+      const observe = async () => {
+        const presence = await tmux.probeSession(sessionName);
+        if (presence.state !== "present") return refuse(presence.state === "absent" ? "session_not_found" : "tmux_unavailable", "The managed tmux session could not be positively observed.");
+        const sessions = (await tmux.listSessions()).filter(s => s.name === sessionName);
+        if (sessions.length !== 1 || sessions[0]!.windows !== 1 || !sessions[0]!.created) {
+          return refuse("pane_ambiguous", "Repair requires exactly one positively observed session with one window.");
+        }
+        const pane = await observeSolePane(tmux, sessionName);
+        if (!pane.ok) return refuse(pane.code, pane.detail);
+        const pid = await tmux.getPanePid(pane.pane);
+        if (!Number.isInteger(pid) || pid! <= 0) return refuse("pane_missing", "The sole pane has no observable process PID.");
+        return { created: sessions[0]!.created, pane: pane.pane, pid };
+      };
+      // ponytail: one command-local wait/commit fence. Late read-only tmux calls may finish,
+      // but cannot reach the commit below; do not cancel the shared tmux control client.
+      const observation = await Promise.race([
+        (async () => {
+          const first = await observe(), second = await observe();
+          if (JSON.stringify(first) !== JSON.stringify(second)) return refuse("guard_target_changed", "The session, pane or PID changed during observation; nothing was repaired.");
+          return second;
+        })(),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new DeliveryGuardError("repair_timed_out", "Pane observation exceeded five seconds; no repair will commit.")), 5000); }),
+      ]);
+      this.db.transaction(() => guard.reconcileBinding(expected, () => {
+        if (performance.now() >= deadline) return refuse("repair_timed_out", "The repair deadline expired before commit; nothing was repaired.");
+        if (JSON.stringify(guard.maybeTarget(sessionName)) !== JSON.stringify(expected)
+          || JSON.stringify(current()) !== JSON.stringify(before)) return refuse("guard_target_changed", "The current name, binding or session changed during observation; nothing was repaired.");
+        const changed = this.db.prepare(`UPDATE bindings SET tmux_pane=?, updated_at=datetime('now')
+          WHERE id=? AND node_id=? AND tmux_session=? AND attachment_type='tmux' AND tmux_pane IS NULL`)
+          .run(observation.pane, before.bindingId, expected.nodeId, sessionName).changes;
+        if (changed !== 1) return refuse("guard_target_changed", "The NULL binding changed before commit; nothing was repaired.");
+      })).immediate();
+      return { ok: true, result: { mode: "repair-missing-pane", pane: observation.pane,
+        rigId: rig.rig.id, rigName: rig.rig.name, nodeId: node.id, logicalId: node.logicalId,
+        sessionName, sessionId: before.sessionId, projectionDrift: [], continuity: "unverified" } };
+    } catch (error) {
+      return { ok: false, code: error instanceof DeliveryGuardError ? error.code : "reconcile_error", message: (error as Error).message };
+    } finally { if (timer) clearTimeout(timer); }
   }
 
   /** The session name a managed node is EXPECTED to live at — pod-aware nodes

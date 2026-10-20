@@ -83,4 +83,22 @@ describe("WakeResolveService — L3b route service (query + resolve)", () => {
     const res = svc.resolve("dev-planner@my-rig", 2);
     expect(res.resolved && res.token).toBe("tok1");
   });
+
+  it.each(["pi", "custom", null])("HTTP resolution does not return a Claude token for runtime %j", async (runtime) => {
+    const svc = new WakeResolveService({ listSessionsBySeat: () => [{ ...row(1, "unsupported-token"), runtime }] });
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("wakeResolveService" as never, svc as never); await next(); });
+    app.route("/api/wake-resolve", wakeResolveRoutes);
+    const response = await app.request("/api/wake-resolve", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seat: "dev-planner@my-rig" }),
+    });
+    expect(response.status).toBe(200);
+    const result = await response.json();
+    expect(result.resolved).toBe(false);
+    expect(result.reason).toMatch(/runtime .*not supported/i);
+    expect(result).not.toHaveProperty("token");
+    expect(result.known[0]).toMatchObject({ sessionId: 1, tokenPresent: true });
+  });
+
 });

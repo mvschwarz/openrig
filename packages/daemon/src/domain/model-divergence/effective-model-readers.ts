@@ -21,6 +21,7 @@
 import { openSync, readSync, closeSync, fstatSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { parsePiModelsJson } from "../../adapters/pi-readiness.js";
+import { KNOWN_EFFORT_LEVELS } from "../seat-effort.js";
 import { parsePiSessionHeader, piAssistantFields, piEntryOrigin, type PiSessionBoundary } from "../pi-usage-facts.js";
 
 const TAIL_BYTES = 512 * 1024;
@@ -197,7 +198,7 @@ export interface PiOccupantScope {
 
 /** Pi's thinking levels for `--thinking` and the `--model` suffix (`pi --help`; the same at the
  *  tested 0.87.1 baseline and 1.3.0). */
-const PI_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+const PI_THINKING_LEVELS = new Set(KNOWN_EFFORT_LEVELS.pi);
 
 /** The model ids a Pi pin can resolve to, in Pi's own order (`parseModelPattern`): the whole pin
  *  first, then with each trailing `:<thinking level>` removed in turn. Pi records the model without
@@ -271,11 +272,15 @@ export function readPiEffectiveModel(
   return result.ok ? { ok: true, model: result.model } : result;
 }
 
+/** Pi's observation also carries the `thinkingLevel` that same record names (Pi 0.99.0 and later
+ *  stamp it on every assistant message; absent on older Pi). */
+export type PiModelObservation = ({ ok: true; thinkingLevel?: string } & NativeModelObservation) | { ok: false; reason: string };
+
 export function readPiModelObservation(
   sessionFile: string,
   scope: PiOccupantScope,
   maxScanBytes = MAX_SCAN_BYTES,
-): ({ ok: true } & NativeModelObservation) | { ok: false; reason: string } {
+): PiModelObservation {
   const header = readFirstLine(sessionFile);
   if (header === null) return { ok: false, reason: `Pi session file ${sessionFile} is unreadable` };
   const boundary = parsePiSessionHeader(header);
@@ -288,7 +293,7 @@ function newestPiModel(
   lines: string[],
   boundary: PiSessionBoundary,
   scope: PiOccupantScope,
-): ({ ok: true } & NativeModelObservation) | { ok: false; reason: string } | null {
+): PiModelObservation | null {
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]!;
     if (!line.includes('"assistant"')) continue;
@@ -311,7 +316,12 @@ function newestPiModel(
     if (origin !== "own") return { ok: false, reason: `newest Pi assistant record ${id} is ${origin === "inherited" ? "inherited from the fork parent" : "of undecidable fork origin"}` };
     if (at <= scope.notBeforeMs) return { ok: false, reason: `newest Pi assistant record ${id} predates the current runner` };
     if (!fields.provider || !fields.model) return { ok: false, reason: `newest Pi assistant record ${id} names no provider and model` };
-    return { ok: true, model: `${fields.provider}/${fields.model}`, source: "pi-assistant-response", observedAt: recordTime(timestamp) };
+    const message = entry["message"] as Record<string, unknown>;
+    const thinkingLevel = typeof message["thinkingLevel"] === "string" && message["thinkingLevel"].length > 0 ? message["thinkingLevel"] : undefined;
+    return {
+      ok: true, model: `${fields.provider}/${fields.model}`, source: "pi-assistant-response", observedAt: recordTime(timestamp),
+      ...(thinkingLevel ? { thinkingLevel } : {}),
+    };
   }
   return null;
 }
