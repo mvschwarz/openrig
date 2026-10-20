@@ -29,11 +29,20 @@ type Evidence = (pid: number, identity: string) => Promise<CodexResumeEvidence> 
 function adapter(opts: {
   frames?: string[]; commands?: string[]; evidence?: Evidence; listProcesses?: () => unknown[];
   resumeProofWindowMs?: number; codexHome?: string; noPanePid?: boolean;
+  /** After this many screen captures, every further capture takes `slowCaptureMs`. */
+  slowCapturesAfter?: number; slowCaptureMs?: number;
 }) {
   const frames = opts.frames ?? [shellFrame, readyFrame];
   const commands = opts.commands ?? ["zsh", "codex"];
   const fsOps = { readFile: (p: string) => { throw new Error(`Not found: ${p}`); }, writeFile: () => {}, exists: () => false, mkdirp: () => {}, listFiles: () => [], homedir: os.tmpdir() } as unknown as CodexAdapterFsOps;
-  const screen = vi.fn(); for (const f of frames) screen.mockResolvedValueOnce(f); screen.mockResolvedValue(frames.at(-1));
+  const fast = vi.fn(); for (const f of frames) fast.mockResolvedValueOnce(f); fast.mockResolvedValue(frames.at(-1));
+  let captures = 0;
+  const screen = vi.fn(async () => {
+    if (opts.slowCapturesAfter !== undefined && ++captures > opts.slowCapturesAfter) {
+      await new Promise((resolve) => setTimeout(resolve, opts.slowCaptureMs ?? 400));
+    }
+    return fast();
+  });
   const command = vi.fn(); for (const c of commands) command.mockResolvedValueOnce(c); command.mockResolvedValue(commands.at(-1));
   const tmux = mockShellCommand({
     sendText: vi.fn(async () => ({ ok: true as const })), hasSession: vi.fn(async () => true), getPaneCommand: command,
@@ -114,6 +123,29 @@ describe("#1524 (b): a Codex resume is resumed only when the launched process's 
     const r = await resume(a);
     expect(r).toMatchObject({ ok: false, recovery: "attention_required" });
     expect(r.ok === false && r.error).toContain("no_cli_thread");
+  });
+
+  it("a synchronous read that runs past the deadline can't be interrupted, but its late match is rejected", async () => {
+    const { a } = adapter({
+      resumeProofWindowMs: 30,
+      evidence: () => { const until = Date.now() + 80; while (Date.now() < until) { /* synchronous, like the SQLite reader */ } return { threadId: token }; },
+    });
+    const r = await resume(a);
+    expect(r).toMatchObject({ ok: false, recovery: "attention_required" });
+  });
+
+  it("after an unknown read, a slow screen capture can't carry the check past the deadline", async () => {
+    // The launch's own update-prompt check and the first poll capture quickly, and that poll's read is unknown; every
+    // later capture takes 400 ms. The window is 80 ms: the check must end near it, not after several slow captures.
+    const { a } = adapter({ resumeProofWindowMs: 80, slowCapturesAfter: 4, slowCaptureMs: 400, evidence: () => ({ reason: "no_log_row" }) });
+    const started = Date.now();
+    const r = await resume(a);
+    const elapsed = Date.now() - started;
+    expect(r).toMatchObject({ ok: false, recovery: "attention_required" });
+    expect(r.ok === false && r.error).toContain("no_log_row");
+    // It reached the slow capture and stopped at the deadline (not before it, and not after the 400 ms capture).
+    expect(elapsed).toBeGreaterThanOrEqual(75);
+    expect(elapsed).toBeLessThan(300);
   });
 
   it("the explicit no-saved-session error is still checked first", async () => {

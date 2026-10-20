@@ -404,6 +404,19 @@ describe("rig seat restart --keep-conversation: outcomes", () => {
     expect(w.launches).toHaveLength(1);
   });
 
+  it("#1524 (b): an unproven resume asks for the live Codex to be checked and adopted first, not for another resume", async () => {
+    const error = "Codex resume could not be proven within the resume window: no_log_row. The session was preserved; nothing was restarted.";
+    const w = world({ launch: { ok: false, error, recovery: "attention_required", resumeUnproven: true, verifierInput: "none" } });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    expect(result).toMatchObject({ ok: true, outcome: "incomplete", account: { startupGate: error } });
+    const remaining = (result as { remainingStep: string }).remainingStep;
+    expect(remaining).toContain("may still be running in the pane");
+    expect(remaining).toContain(`rig reconcile-session ${SEAT} --no-launch`);
+    expect(remaining).toContain("only if the original is gone");
+    expect(remaining).not.toMatch(/^Resolve what Codex shows in the pane, then resume/);
+    expect(w.launches).toHaveLength(1);
+  });
+
   it.each([
     ["hook_trust_gate", "Codex is waiting for hook trust approval before the session can become interactive.", "Codex is waiting for a hook review decision in the pane"],
     ["trust_gate", "Codex is waiting for the folder trust prompt to be answered.", "Codex is waiting for a folder trust decision in the pane"],

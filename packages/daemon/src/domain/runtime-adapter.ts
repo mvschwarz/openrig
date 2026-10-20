@@ -98,7 +98,10 @@ export type HarnessLaunchRecovery = "retry_fresh" | "attention_required";
 // pinned as the one it started, kept even when a later sample saw it replaced (#1077).
 export type HarnessLaunchResult =
   | { ok: true; resumeToken?: string; resumeType?: string; appliedLaunch?: import("./permission-drift.js").AppliedLaunchObservation;
-    launchedProcess?: import("./native-process-lineage.js").ClaudeLaunchedProcess }
+    launchedProcess?: import("./native-process-lineage.js").ClaudeLaunchedProcess;
+    /** Codex (#1524): the native process a managed resume was proven on from Codex's own records. Restore's join
+     *  compares the process it verifies later against this one before it reports the seat resumed. */
+    resumedProcess?: { pid: number; startedAt: string } }
   // `evidence` carries the last-N pane lines for `attention_required` outcomes
   // so the failure can flow honest evidence through to RestoreNodeResult's
   // attentionEvidence field. Omitted for non-attention recoveries.
@@ -117,6 +120,9 @@ export type HarnessLaunchResult =
     /** Reporting only: the reported screen is the last one seen before the verification's own input (`verifierInput`);
      *  nothing after that input was observed. */
     screenBeforeInput?: true;
+    /** Codex (#1524), reporting only: the screen looked resumed, but Codex's records didn't prove the requested
+     *  conversation for the launched process. The process may still be running it. */
+    resumeUnproven?: true;
     /** The native fork command was sent, but its child identity is not yet available. */
     forkIdentityPending?: boolean;
     launchedProcess?: import("./native-process-lineage.js").ClaudeLaunchedProcess };

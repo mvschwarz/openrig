@@ -542,7 +542,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     if (opts.resumeToken) {
       const verification = await this.verifyResumeLaunch(binding.tmuxSession, updatePrompt, { resumeToken: opts.resumeToken });
       if (!verification.ok) return verification;
-      return { ok: true, resumeToken: opts.resumeToken, resumeType: "codex_id", appliedLaunch };
+      return { ok: true, resumeToken: opts.resumeToken, resumeType: "codex_id", appliedLaunch,
+        ...(verification.resumedProcess ? { resumedProcess: verification.resumedProcess } : {}) };
     }
 
     const threadId = await this.captureFreshThreadId(binding, updatePrompt);
@@ -1056,13 +1057,24 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    * before and after the read, so a reused pid or a replaced pane proves nothing. A different conversation is a
    * mismatch; anything unread is unknown, never a mismatch or a match.
    */
+  /** #1524 (b): `work` under the resume check's one deadline. It isn't started once the deadline has passed, it races
+   *  the deadline, and a value that arrives at or after the deadline is rejected (null). A timer can't interrupt
+   *  synchronous work (the default record reader's SQLite queries are synchronous): such work runs to its end, and
+   *  if it ends past the deadline its value is rejected, so the check returns late by that work's duration but
+   *  never accepts a late result. */
+  private async beforeResumeDeadline<T>(work: () => Promise<T> | T, deadline: number): Promise<T | null> {
+    if (Date.now() >= deadline) return null;
+    const value = await this.withinDeadline(Promise.resolve().then(work), deadline);
+    return Date.now() >= deadline ? null : value;
+  }
+
   private async proveResumedProcess(tmuxSession: string, resumeToken: string, deadline: number):
-    Promise<{ kind: "match" } | { kind: "mismatch"; threadId: string } | { kind: "unknown"; reason: string; windowEnded?: true }> {
+    Promise<{ kind: "match"; process: { pid: number; startedAt: string } } | { kind: "mismatch"; threadId: string } | { kind: "unknown"; reason: string; windowEnded?: true }> {
     if (!this.tmux.getPanePid) return { kind: "unknown", reason: "the pane's process can't be read" };
     if (Date.now() >= deadline) return { kind: "unknown", reason: "the resume window ended", windowEnded: true };
     const input = { target: tmuxSession, tmux: this.tmux as { getPanePid(target: string): Promise<number | null> },
       listProcesses: this.listProcesses as never, expectedToken: resumeToken, requireResume: true };
-    const before = await this.withinDeadline(observeCodexPaneProcess(input), deadline);
+    const before = await this.beforeResumeDeadline(() => observeCodexPaneProcess(input), deadline);
     if (!before && Date.now() >= deadline) return { kind: "unknown", reason: "the resume window ended", windowEnded: true };
     if (!before) return { kind: "unknown", reason: "no single Codex process resuming this conversation was observed in the pane" };
     if (lstartToMinTs(before.process.startedAt) === undefined) {
@@ -1070,18 +1082,22 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
     let evidence: CodexResumeEvidence | null;
     try {
-      evidence = await this.withinDeadline(Promise.resolve(this.readResumeEvidence(before.process.pid, before.process.startedAt!)), deadline);
+      evidence = await this.beforeResumeDeadline(() => this.readResumeEvidence(before.process.pid, before.process.startedAt!), deadline);
     } catch (err) {
       return { kind: "unknown", reason: `Codex's records couldn't be read (${(err as Error).message})` };
     }
     if (!evidence) return { kind: "unknown", reason: "reading Codex's records didn't finish inside the resume window", windowEnded: true };
-    const after = await this.withinDeadline(observeCodexPaneProcess(input), deadline);
+    const after = await this.beforeResumeDeadline(() => observeCodexPaneProcess(input), deadline);
     if (!after && Date.now() >= deadline) return { kind: "unknown", reason: "the resume window ended", windowEnded: true };
     if (after?.fingerprint !== before.fingerprint) {
       return { kind: "unknown", reason: "the resumed Codex process changed during the check" };
     }
     if (!evidence.threadId) return { kind: "unknown", reason: evidence.reason ?? "no_log_row" };
-    return evidence.threadId === resumeToken ? { kind: "match" } : { kind: "mismatch", threadId: evidence.threadId };
+    // A decision is only as current as its last observation: at or past the deadline it decides nothing.
+    if (Date.now() >= deadline) return { kind: "unknown", reason: "the resume window ended", windowEnded: true };
+    return evidence.threadId === resumeToken
+      ? { kind: "match", process: { pid: before.process.pid, startedAt: before.process.startedAt! } }
+      : { kind: "mismatch", threadId: evidence.threadId };
   }
 
   private async verifyResumeLaunch(tmuxSession: string, updatePrompt: UpdatePromptAttempt, opts?: { resumeToken?: string }): Promise<HarnessLaunchResult> {
@@ -1094,6 +1110,14 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const resumeToken = opts?.resumeToken;
     const deadline = Date.now() + this.resumeProofWindowMs;
     let unproven: string | null = null;
+    // A sleep between polls never runs past the deadline when proving; false once no time is left.
+    const pause = async (ms: number): Promise<boolean> => {
+      if (!resumeToken) { await this.sleep(ms); return true; }
+      const left = deadline - Date.now();
+      if (left <= 0) return false;
+      await this.sleep(Math.min(ms, left));
+      return Date.now() < deadline;
+    };
 
     // OPR.0.3.3.21 (FR-2): process-alive is NOT proof of a restored
     // conversation. verifyResumeLaunch must NOT return ok:true unless the probe
@@ -1129,8 +1153,20 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         break;
       }
 
-      const paneCommand = await this.tmux.getPaneCommand(tmuxSession);
-      const paneContent = await this.captureProbeScreen(tmuxSession);
+      // #1524 (b): with a conversation to prove, the window is one wall-clock deadline: no capture starts after it,
+      // and a capture that ends after it isn't used.
+      let paneCommand: Awaited<ReturnType<TmuxAdapter["getPaneCommand"]>>;
+      let paneContent: string;
+      if (resumeToken) {
+        const captured = await this.beforeResumeDeadline(async () =>
+          ({ command: await this.tmux.getPaneCommand(tmuxSession), content: await this.captureProbeScreen(tmuxSession) }), deadline);
+        if (!captured) break;
+        paneCommand = captured.command;
+        paneContent = captured.content;
+      } else {
+        paneCommand = await this.tmux.getPaneCommand(tmuxSession);
+        paneContent = await this.captureProbeScreen(tmuxSession);
+      }
       lastPaneContent = paneContent;
       let probe = assessNativeResumeProbe({
         runtime: "codex",
@@ -1175,12 +1211,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       }
       if (probe.status === "resumed" && resumeToken) {
         const proof = await this.proveResumedProcess(tmuxSession, resumeToken, deadline);
-        if (proof.kind === "match") return { ok: true, resumeToken, resumeType: "codex_id" };
+        if (proof.kind === "match") return { ok: true, resumeToken, resumeType: "codex_id", resumedProcess: proof.process };
         if (proof.kind === "mismatch") {
           return {
             ok: false,
             error: `Codex resume opened a different conversation: the resumed process's records name ${proof.threadId}, not the requested ${resumeToken}. The session was preserved; nothing was restarted.`,
             recovery: "attention_required",
+            resumeUnproven: true,
             verifierInput: verifierInput(),
             evidence: paneContent.split("\n").slice(-12).join("\n"),
           };
@@ -1192,7 +1229,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         report = { probe, paneContent };
         if (Date.now() >= deadline) break;
         const sleepMs = attempt < quickAttempts ? quickSleepMs : extendedSleepMs;
-        if (attempt < totalAttempts - 1) await this.sleep(sleepMs);
+        if (attempt < totalAttempts - 1 && !(await pause(sleepMs))) break;
         continue;
       }
 
@@ -1208,7 +1245,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           lastUnresolved = null;
           sawRealGate = false;
           const sleepMs = attempt < quickAttempts ? quickSleepMs : extendedSleepMs;
-          if (attempt < totalAttempts - 1) await this.sleep(sleepMs);
+          if (attempt < totalAttempts - 1 && !(await pause(sleepMs))) break;
           continue;
         }
         lastUnresolved = probe;
@@ -1221,7 +1258,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       }
 
       const sleepMs = attempt < quickAttempts ? quickSleepMs : extendedSleepMs;
-      if (attempt < totalAttempts - 1) await this.sleep(sleepMs);
+      if (attempt < totalAttempts - 1 && !(await pause(sleepMs))) break;
     }
 
     // Report the newest screen observed; a resumed or booting one names no gate. The loop's own decisions above used
@@ -1242,6 +1279,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // The gate on that screen, if any. A boot still in progress names no gate.
       ...(shown ? gateFields(shown.probe, shown.paneContent) : {}),
       ...(shown?.beforeInput ? { screenBeforeInput: true as const } : {}),
+      ...(unprovenText ? { resumeUnproven: true as const } : {}),
       verifierInput: verifierInput(),
       evidence: (report?.paneContent ?? lastPaneContent).split("\n").slice(-12).join("\n"),
     };

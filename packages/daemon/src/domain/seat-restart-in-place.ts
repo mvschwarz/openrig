@@ -652,6 +652,9 @@ export class CodexInPlaceRestart {
         ? `Whoever owns the sign-in signs in to Codex in ${report.codexHome}, then the conversation resumes with the recovery command.`
         : missing
           ? `Codex in ${report.codexHome} has no saved session for this conversation; no fresh session was started. Find where it was saved before resuming.`
+          // #1524 (b): the resume wasn't disproved, only unproven; the resumed Codex may still be running it.
+          : launch.resumeUnproven
+            ? `The resumed Codex may still be running in the pane: its records didn't prove the conversation in time. Check the pane first; if the conversation is there, adopt it with rig reconcile-session ${report.sessionName} --no-launch. Use the recovery command only if the original is gone. Nothing was retried.`
           : named
             ?? (attention && keyTyped(launch)
               // OpenRig's own key is part of what the person needs to know, even with no screen named.

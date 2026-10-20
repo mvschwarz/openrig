@@ -1469,7 +1469,7 @@ export class RestoreOrchestrator {
                 : baseStatus;
               if (finalStatus === "resumed") {
                 return this.finishJoinedResume(node, sessionName, resumeToken, launchResult?.session.id,
-                  isPodAware && node.runtime === "claude-code");
+                  isPodAware && node.runtime === "claude-code", startupResult.resumedProcess);
               }
               return { nodeId: node.id, logicalId: node.logicalId, status: finalStatus };
             }
@@ -1560,6 +1560,8 @@ export class RestoreOrchestrator {
     resumeToken: string | null,
     sessionId?: string,
     managedClaudeResume = false,
+    /** Codex (#1524): the process the adapter proved the resume on. The join must verify that same process. */
+    provenCodexProcess?: { pid: number; startedAt: string },
   ): Promise<RestoreNodeResult> {
     const identity = await rebindAndVerifyPaneIdentity({
       db: this.db,
@@ -1591,6 +1593,18 @@ export class RestoreOrchestrator {
         status: "attention_required",
         error: `Exact native session resumed, but joined restore proof is incomplete: ${identity.detail}. The resumed session was preserved; no replacement was started.`,
       };
+    }
+    // #1524 (b): the adapter proved the resume on one Codex process. The join observed later, after startup's awaits;
+    // a different process (or none matched) there is not certified by that proof. No new read, wait or relaunch.
+    if (node.runtime === "codex" && provenCodexProcess) {
+      const joined = identity.nativeProcess;
+      if (!joined || joined.pid !== provenCodexProcess.pid || joined.startedAt !== provenCodexProcess.startedAt) {
+        const store = new SeatIdentityStore(this.db);
+        const proof = store.getForNode(node.id);
+        if (proof) store.upsert({ ...proof, verdict: "mismatch", reason: "process_identity_mismatch" });
+        return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required",
+          error: `Codex resume was proven on process ${provenCodexProcess.pid} (started ${provenCodexProcess.startedAt}), but the restore join verified ${joined ? `process ${joined.pid} (started ${joined.startedAt ?? "unknown"})` : "no matching Codex process"}. The session was preserved; nothing was restarted.` };
+      }
     }
     // Legacy resume adapters do not write native metadata. Fill only the
     // launched row's empty token after proof; never overwrite a hook/operator.
