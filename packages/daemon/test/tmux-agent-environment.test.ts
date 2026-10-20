@@ -56,4 +56,30 @@ describe.skipIf(process.platform !== "linux")("#1178 initial-shell environment p
       } finally { await tmux(["kill-server"]).catch(()=>{}); rmSync(home,{recursive:true,force:true}); }
     },15000);
   }
+  it("ordinary empty default-command keeps a login shell with generated pane metadata and scoped environment", async () => {
+    const home=mkdtempSync(path.join(tmpdir(),"tmux-login-")), socket=path.join(home,"owned.sock");
+    const env={...process.env,HOME:home}; delete env.TMUX; delete env.TMUX_TMPDIR;
+    const tmux=async(args:string[]) => (await exec("tmux",["-S",socket,...args],{env})).stdout.trim();
+    const adapter=new TmuxAdapter(async()=>{throw new Error("argv fixture only");},undefined,args=>tmux(args.slice(1)));
+    adapter.launchEnvironment=()=>({inheritTmuxEnvironment:false,env:{HOME:home,PATH:process.env.PATH!,Q1178_DAEMON:"daemon"}});
+    try {
+      await tmux(["-f","/dev/null","new-session","-d","-s","anchor","sleep 60"]);
+      await tmux(["set-environment","-g","Q1178_SERVER","tmux"]);
+      await tmux(["set-option","-g","default-shell","/bin/bash"]);
+      await tmux(["set-option","-g","default-command",""]);
+      expect((await adapter.createSession("seat",home,{OPENRIG_NODE_ID:"node",OPENRIG_SESSION_NAME:"seat"})).ok).toBe(true);
+      const [pane,pid]=(await tmux(["display-message","-p","-t","=seat:","#{pane_id} #{pane_pid}"])).split(" ");
+      let processEnv:string[]=[];
+      for(let i=0;i<100;i++) {
+        processEnv=readFileSync(`/proc/${pid}/environ`,"utf8").split("\0");
+        if(processEnv.includes("Q1178_DAEMON=daemon")) break;
+        await new Promise(r=>setTimeout(r,10));
+      }
+      expect(processEnv).toContain("Q1178_DAEMON=daemon");
+      expect(processEnv).not.toContain("Q1178_SERVER=tmux");
+      expect(processEnv).toContain(`TMUX_PANE=${pane}`);
+      expect((await exec("ps",["-o","args=","-p",pid!])).stdout.trim()).toBe("/bin/bash -l");
+    } finally { await tmux(["kill-server"]).catch(()=>{}); rmSync(home,{recursive:true,force:true,maxRetries:5,retryDelay:20}); }
+  });
+
 });
