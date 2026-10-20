@@ -1,7 +1,7 @@
 // OPR.0.7.0.5 — in-place restart of one Codex seat: every gate and every outcome, driven through the
 // public SeatLifecycleService surface against a fake tmux, process table, Codex launcher and OS reads.
 import { defaultTmuxFileOps, isStagedSendScriptPath } from "../src/adapters/tmux.js";
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -15,7 +15,18 @@ import type { ArbitratedSeatState } from "../src/domain/activity-taxonomy.js";
 import type { InPlaceRestartIo, ProcessFacts } from "../src/domain/seat-restart-in-place.js";
 import { accountLineNames, parseEffectiveSettings, shellWords } from "../src/domain/seat-restart-in-place.js";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
-import type { CodexThreadEvidence } from "../src/domain/codex-thread-id.js";
+import { CodexThreadIdResolver, type CodexThreadEvidence } from "../src/domain/codex-thread-id.js";
+
+// No test here may read a real Codex home: the fake io answers every native-thread read. The real resolver is watched for
+// the whole file, and any call fails the test that made it.
+let realResolverReads: ReturnType<typeof vi.spyOn> | undefined;
+beforeEach(() => {
+  realResolverReads = vi.spyOn(CodexThreadIdResolver.prototype, "resolveWithReadability");
+});
+afterEach(() => {
+  expect(realResolverReads!.mock.calls, "a test read a real Codex home").toEqual([]);
+  realResolverReads!.mockRestore();
+});
 
 const LSTART = "Mon Oct 12 21:00:00 2026";
 const LATER = "Mon Oct 12 21:05:00 2026";
@@ -194,7 +205,13 @@ function world(options: WorldOptions = {}) {
       return options.facts && pid in options.facts ? options.facts[pid] ?? null : facts();
     },
     readThreadId: async (pid) => (pid === 200 ? options.threadId : undefined),
-    ...(options.evidence ? { readThreadEvidence: async (pid: number) => (pid === 200 ? options.evidence! : { reason: "no_log_row" as const, fullyReadable: true }) } : {}),
+    // Always answered here, never by the real reader. With no evidence given, the fake readThreadId's answer, as a read
+    // that wasn't complete: it can't produce the conflict refusal, only a "not established" note.
+    readThreadEvidence: async (pid: number): Promise<CodexThreadEvidence> => {
+      if (options.evidence) return pid === 200 ? options.evidence : { reason: "no_log_row", fullyReadable: true };
+      const thread = pid === 200 ? options.threadId : undefined;
+      return { ...(thread ? { thread } : { reason: "no_log_row" as const }), fullyReadable: false, incomplete: "discovery" };
+    },
     readCredentialStore: () => "file",
     statAuthFile: () => null,
     findRollout: () => (options.rollout === undefined ? null : "/rollout.jsonl"),
