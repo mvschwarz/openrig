@@ -1,13 +1,12 @@
-// #1642: queue writes name a host the way `rig send` resolves it, without changing what a daemon decides.
-// The token goes as written first. Only a daemon's unknown-host refusal (made before it contacts any host
-// or writes anything) sends the same write once more under the local registry entry's id. Create alone
-// says "No row was created", and only for refusals that provably come before any write.
+// #1642: when a daemon refuses a host token it doesn't know, queue writes keep that refusal (one write,
+// unchanged stdout and exit) and add a qualified hint: the host substitution this CLI's own registry
+// suggests, which isn't proof of the same host in the registry of the daemon the command reached.
+// Create alone says "No row was created", and only for refusals that provably come before any write.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { QueueDeps } from "../src/commands/queue.js";
-import { resolveQueueHostDestination } from "../src/commands/queue.js";
 import { createProgram } from "../src/index.js";
 import { DaemonConnectionError } from "../src/client.js";
 
@@ -22,59 +21,21 @@ vi.mock("../src/daemon-lifecycle.js", async () => {
 
 const ALIAS = "remote-vm";
 const SELF_ID = "host-5f2e9c1a";
-const entries: Record<string, string> = { [ALIAS]: ALIAS, [SELF_ID]: ALIAS, "other-vm": "other-vm" };
-const entryOf = vi.fn((id: string) => entries[id]);
-
-describe("resolveQueueHostDestination with a registry lookup", () => {
-  beforeEach(() => entryOf.mockClear());
-
-  it("carries the registry id of the entry a learned self-id names", () => {
-    expect(resolveQueueHostDestination(`dev@rig-b@${SELF_ID}`, undefined, entryOf))
-      .toEqual({ ok: true, destination: "dev@rig-b", hostId: SELF_ID, entryId: ALIAS });
-    expect(resolveQueueHostDestination("dev@rig-b", SELF_ID, entryOf))
-      .toEqual({ ok: true, destination: "dev@rig-b", hostId: SELF_ID, entryId: ALIAS });
-  });
-
-  it("two spellings of one entry are not a conflict", () => {
-    expect(resolveQueueHostDestination(`dev@rig-b@${SELF_ID}`, ALIAS, entryOf))
-      .toEqual({ ok: true, destination: "dev@rig-b", hostId: SELF_ID, entryId: ALIAS });
-  });
-
-  it("a different entry, or an explicit host that resolves to nothing, still conflicts", () => {
-    for (const explicit of ["other-vm", "nowhere"]) {
-      const res = resolveQueueHostDestination(`dev@rig-b@${SELF_ID}`, explicit, entryOf);
-      expect(res.ok).toBe(false);
-      if (!res.ok) expect(res.error).toBe("host_qualifier_conflict");
-    }
-  });
-
-  it("a token the registry can't resolve is sent as written", () => {
-    expect(resolveQueueHostDestination("dev@rig-b@host-unknown", undefined, entryOf))
-      .toEqual({ ok: true, destination: "dev@rig-b", hostId: "host-unknown", entryId: undefined });
-  });
-
-  it("local, 'local' and human-seat destinations never consult the registry", () => {
-    expect(resolveQueueHostDestination("dev@rig-a", undefined, entryOf)).toEqual({ ok: true, destination: "dev@rig-a", hostId: undefined });
-    expect(resolveQueueHostDestination("dev@rig-a@local", undefined, entryOf)).toEqual({ ok: true, destination: "dev@rig-a", hostId: "local" });
-    expect(resolveQueueHostDestination("human-ops.1@host", undefined, entryOf)).toEqual({ ok: true, destination: "human-ops.1@host", hostId: undefined });
-    expect(entryOf).not.toHaveBeenCalled();
-  });
-});
 
 type Reply = { status: number; data: unknown } | Error;
 const UNKNOWN_HOST = (hostId: string): Reply => ({ status: 502, data: { error: "remote_queue_write_failed", hostId, failureClass: "unknown-host", detail: `unknown host id '${hostId}'.` } });
 const CREATED: Reply = { status: 201, data: { qitemId: "qitem-20261020230000-aaaa", destinationSession: "dev@rig-b", state: "pending" } };
 
-function makeDeps(replies: Reply[]): { deps: QueueDeps; posts: Array<{ path: string; body: Record<string, unknown> }> } {
-  const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+function makeDeps(replies: Reply[]): { deps: QueueDeps; requests: Array<{ method: string; path: string; body?: Record<string, unknown> }> } {
+  const requests: Array<{ method: string; path: string; body?: Record<string, unknown> }> = [];
   return {
-    posts,
+    requests,
     deps: {
       lifecycleDeps: {} as QueueDeps["lifecycleDeps"],
       clientFactory: () => ({
-        get: vi.fn(async () => ({ status: 200, data: {} })),
+        get: vi.fn(async (p: string) => { requests.push({ method: "GET", path: p }); return { status: 200, data: {} }; }),
         post: vi.fn(async (p: string, body: Record<string, unknown>) => {
-          posts.push({ path: p, body });
+          requests.push({ method: "POST", path: p, body });
           const reply = replies.shift() ?? { status: 500, data: { error: "unrouted" } };
           if (reply instanceof Error) throw reply;
           return reply;
@@ -84,18 +45,18 @@ function makeDeps(replies: Reply[]): { deps: QueueDeps; posts: Array<{ path: str
   };
 }
 
-describe("queue writes against a daemon that doesn't know the token", () => {
+describe("queue writes refused for a host token the daemon doesn't know", () => {
   let home: string;
   let stdout: string[];
   let stderr: string[];
 
   beforeEach(() => {
-    home = fs.mkdtempSync(path.join(os.tmpdir(), "queue-host-retry-"));
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "queue-host-hint-"));
     fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: ${ALIAS}\n    transport: http\n    url: http://127.0.0.1:9\n`);
     const at = "2026-10-20T00:00:00.000Z";
     fs.writeFileSync(path.join(home, "host-bindings.json"), JSON.stringify({ version: 1, bindings: { [ALIAS]: { hostId: SELF_ID, firstObservedAt: at, lastObservedAt: at } } }));
     vi.stubEnv("OPENRIG_HOME", home);
-    vi.stubEnv("OPENRIG_SESSION_NAME", "seat@rig-a");
+    vi.stubEnv("OPENRIG_SESSION_NAME", "lead@rig-a");
     stdout = [];
     stderr = [];
     vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { stdout.push(a.join(" ")); });
@@ -112,53 +73,64 @@ describe("queue writes against a daemon that doesn't know the token", () => {
   });
 
   async function run(argv: string[], replies: Reply[]) {
-    const { deps, posts } = makeDeps(replies);
+    const { deps, requests } = makeDeps(replies);
     const program = createProgram({ queueDeps: deps });
     program.exitOverride();
     await program.parseAsync(["node", "rig", "queue", ...argv, "--json"]);
-    return posts;
+    return requests;
   }
 
-  const CALLERS: Array<{ verb: string; argv: (to: string) => string[]; route: string }> = [
-    { verb: "create", argv: (to) => ["create", "--destination", to, "--body", "b", "--summary", "s"], route: "/api/queue/create" },
-    { verb: "handoff", argv: (to) => ["handoff", "qitem-src-1", "--to", to, "--summary", "s"], route: "/api/queue/qitem-src-1/handoff" },
-    { verb: "handoff-and-complete", argv: (to) => ["handoff-and-complete", "qitem-src-1", "--to", to, "--summary", "s"], route: "/api/queue/qitem-src-1/handoff-and-complete" },
+  const hints = () => stderr.filter((l) => l.startsWith(`Host '${SELF_ID}' resolves to '${ALIAS}' in this CLI's host registry.`));
+
+  const CALLERS: Array<{ verb: string; argv: (to: string) => string[] }> = [
+    { verb: "create", argv: (to) => ["create", "--destination", to, "--body", "b", "--summary", "s"] },
+    { verb: "handoff", argv: (to) => ["handoff", "qitem-src-1", "--to", to, "--summary", "s"] },
+    { verb: "handoff-and-complete", argv: (to) => ["handoff-and-complete", "qitem-src-1", "--to", to, "--summary", "s"] },
   ];
 
   for (const c of CALLERS) {
-    it(`${c.verb}: an unknown-host refusal of a learned self-id sends the same write once more under the registry id`, async () => {
-      const posts = await run(c.argv(`dev@rig-b@${SELF_ID}`), [UNKNOWN_HOST(SELF_ID), CREATED]);
-      expect(posts.map((p) => [p.path, p.body.hostId])).toEqual([[c.route, SELF_ID], [c.route, ALIAS]]);
-      const { hostId: _first, ...firstRest } = posts[0]!.body;
-      const { hostId: _second, ...secondRest } = posts[1]!.body;
-      expect(secondRest).toEqual(firstRest);
-      expect(stderr.join("\n")).toContain(`The daemon doesn't know host '${SELF_ID}'. Sending the same write as '${ALIAS}'`);
-      expect(stdout).toEqual([JSON.stringify((CREATED as { data: unknown }).data)]);
+    it(`${c.verb}: a refused learned self-id suffix stays refused, with one write and a qualified address-form hint`, async () => {
+      const requests = await run(c.argv(`dev@rig-b@${SELF_ID}`), [UNKNOWN_HOST(SELF_ID)]);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]!.body!.hostId).toBe(SELF_ID);
+      expect(stdout).toEqual([JSON.stringify((UNKNOWN_HOST(SELF_ID) as { data: unknown }).data)]);
+      expect(process.exitCode).toBe(2);
+      expect(hints()).toHaveLength(1);
+      const hint = hints()[0]!;
+      expect(hint).toContain(`That doesn't prove '${ALIAS}' names the same host in the registry of the daemon this command reached`);
+      expect(hint).toContain(`the destination 'dev@rig-b@${ALIAS}'`);
+      expect(hint).not.toContain("--host");
+      if (c.verb === "create") expect(hint).toMatch(/keeping --id 'qitem-[0-9]{14}-[0-9a-f]{16}'\.$/);
+      else expect(hint).not.toContain("--id");
+    });
+
+    it(`${c.verb}: a refused --host self-id gets the --host substitution`, async () => {
+      const requests = await run([...c.argv("dev@rig-b"), "--host", SELF_ID], [UNKNOWN_HOST(SELF_ID)]);
+      expect(requests).toHaveLength(1);
+      expect(hints()).toHaveLength(1);
+      expect(hints()[0]).toContain(`--host '${ALIAS}'`);
+      expect(hints()[0]).not.toContain("the destination");
+    });
+
+    it(`${c.verb}: a token this CLI's registry can't resolve gets no hint`, async () => {
+      await run(c.argv("dev@rig-b@host-unknown"), [UNKNOWN_HOST("host-unknown")]);
+      expect(stderr.some((l) => l.includes("in this CLI's host registry"))).toBe(false);
+      expect(process.exitCode).toBe(2);
+    });
+
+    it(`${c.verb}: a daemon that accepts the token decides alone, with no hint`, async () => {
+      const requests = await run(c.argv(`dev@rig-b@${SELF_ID}`), [CREATED]);
+      expect(requests.filter((r) => r.method === "POST")).toHaveLength(1);
+      expect(hints()).toHaveLength(0);
       expect(process.exitCode).toBeUndefined();
     });
 
-    it(`${c.verb}: a daemon that accepts the token as written decides alone (one write)`, async () => {
-      const posts = await run(c.argv(`dev@rig-b@${SELF_ID}`), [CREATED]);
-      expect(posts.map((p) => p.body.hostId)).toEqual([SELF_ID]);
-    });
-
-    it(`${c.verb}: any other failure is never sent again`, async () => {
+    it(`${c.verb}: any other failure gets no hint and is never sent again`, async () => {
       const unreachable = { status: 502, data: { error: "remote_queue_write_failed", hostId: SELF_ID, failureClass: "unreachable", detail: "timed out" } };
-      const posts = await run(c.argv(`dev@rig-b@${SELF_ID}`), [unreachable]);
-      expect(posts).toHaveLength(1);
+      const requests = await run(c.argv(`dev@rig-b@${SELF_ID}`), [unreachable]);
+      expect(requests.filter((r) => r.method === "POST")).toHaveLength(1);
+      expect(hints()).toHaveLength(0);
       expect(process.exitCode).toBe(2);
-    });
-
-    it(`${c.verb}: a token the local registry can't resolve is refused by the daemon alone`, async () => {
-      const posts = await run(c.argv("dev@rig-b@host-unknown"), [UNKNOWN_HOST("host-unknown")]);
-      expect(posts.map((p) => p.body.hostId)).toEqual(["host-unknown"]);
-      expect(process.exitCode).toBe(2);
-    });
-
-    it(`${c.verb}: --host with the registry alias beside the self-id suffix is one host`, async () => {
-      const posts = await run([...c.argv(`dev@rig-b@${SELF_ID}`), "--host", ALIAS], [CREATED]);
-      expect(posts).toHaveLength(1);
-      expect(process.exitCode).toBeUndefined();
     });
   }
 
