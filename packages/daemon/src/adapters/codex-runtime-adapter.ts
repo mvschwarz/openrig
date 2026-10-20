@@ -1057,11 +1057,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    * before and after the read, so a reused pid or a replaced pane proves nothing. A different conversation is a
    * mismatch; anything unread is unknown, never a mismatch or a match.
    */
-  /** #1524 (b): `work` under the resume check's one deadline. It isn't started once the deadline has passed, it races
-   *  the deadline, and a value that arrives at or after the deadline is rejected (null). A timer can't interrupt
-   *  synchronous work (the default record reader's SQLite queries are synchronous): such work runs to its end, and
-   *  if it ends past the deadline its value is rejected, so the check returns late by that work's duration but
-   *  never accepts a late result. */
+  /** #1524 (b): `work` under the resume check's deadline. It isn't started at or after the deadline, it races the
+   *  deadline, and a value that arrives at or after it is not used (null). It cancels nothing: work already started
+   *  runs to its end (an async step may go on to its next read, and synchronous work such as the default record
+   *  reader's SQLite queries can't be interrupted at all), so the check can return after the deadline. */
   private async beforeResumeDeadline<T>(work: () => Promise<T> | T, deadline: number): Promise<T | null> {
     if (Date.now() >= deadline) return null;
     const value = await this.withinDeadline(Promise.resolve().then(work), deadline);
@@ -1107,6 +1106,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const extendedSleepMs = RESUME_EXTENDED_SLEEP_MS;
     // #1524 (b): a managed resume of a known conversation is proven from Codex's own records, inside one wall-clock
     // deadline for the whole existing window. Why it is still unproven, for the attention text at the bound.
+    // With a conversation to prove, no new poll, sleep or proof read starts at or after the deadline, and no value that
+    // arrives after it is used. Work already started isn't cancelled: a capture in flight, a synchronous record read,
+    // or the one-shot update-prompt step can finish late, read-only apart from that step's one key.
     const resumeToken = opts?.resumeToken;
     const deadline = Date.now() + this.resumeProofWindowMs;
     let unproven: string | null = null;
@@ -1153,8 +1155,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         break;
       }
 
-      // #1524 (b): with a conversation to prove, the window is one wall-clock deadline: no capture starts after it,
-      // and a capture that ends after it isn't used.
+      // #1524 (b): with a conversation to prove, no capture starts at or after the deadline, and one that ends after it
+      // isn't used (a capture already started isn't cancelled: its second read may still run, its value discarded).
       let paneCommand: Awaited<ReturnType<TmuxAdapter["getPaneCommand"]>>;
       let paneContent: string;
       if (resumeToken) {
@@ -1217,7 +1219,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
             ok: false,
             error: `Codex resume opened a different conversation: the resumed process's records name ${proof.threadId}, not the requested ${resumeToken}. The session was preserved; nothing was restarted.`,
             recovery: "attention_required",
-            resumeUnproven: true,
+            resumeMismatch: { opened: proof.threadId },
             verifierInput: verifierInput(),
             evidence: paneContent.split("\n").slice(-12).join("\n"),
           };
@@ -1279,7 +1281,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // The gate on that screen, if any. A boot still in progress names no gate.
       ...(shown ? gateFields(shown.probe, shown.paneContent) : {}),
       ...(shown?.beforeInput ? { screenBeforeInput: true as const } : {}),
-      ...(unprovenText ? { resumeUnproven: true as const } : {}),
+      // With a conversation to prove and no gate on the newest screen, the end is "not proven": whatever the last frame
+      // was (a boot, a ready screen, or no capture at all before the deadline), the resumed Codex may be running.
+      ...(resumeToken && !shown ? { resumeUnproven: true as const } : {}),
       verifierInput: verifierInput(),
       evidence: (report?.paneContent ?? lastPaneContent).split("\n").slice(-12).join("\n"),
     };

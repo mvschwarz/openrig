@@ -120,9 +120,12 @@ export type HarnessLaunchResult =
     /** Reporting only: the reported screen is the last one seen before the verification's own input (`verifierInput`);
      *  nothing after that input was observed. */
     screenBeforeInput?: true;
-    /** Codex (#1524), reporting only: the screen looked resumed, but Codex's records didn't prove the requested
-     *  conversation for the launched process. The process may still be running it. */
+    /** Codex (#1524), reporting only: a managed resume of a known conversation ended without proof and without a gate
+     *  on the newest screen (records unread or unknown, or the window ended, whatever the last frame showed). Not set
+     *  for a disproved resume (see `resumeMismatch`). The resumed Codex may still be running the conversation. */
     resumeUnproven?: true;
+    /** Codex (#1524), reporting only: the resumed process's own records name a different conversation (`opened`). */
+    resumeMismatch?: { opened: string };
     /** The native fork command was sent, but its child identity is not yet available. */
     forkIdentityPending?: boolean;
     launchedProcess?: import("./native-process-lineage.js").ClaudeLaunchedProcess };
