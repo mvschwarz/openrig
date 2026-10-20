@@ -303,7 +303,7 @@ Example:
     .option("--actor <actor>", "Named operator when outside a managed seat")
     .option("--json", "The daemon's answer as JSON")
     .addHelpText("after", `
-Setting again replaces the window (an extension is a new setting); what's quiet now carries over under the new window.
+Setting again replaces the window and starts a new revision; if the new window covers now, quiet stays on.
 Times that don't exist or happen twice at a daylight-saving change: a skipped time means the next valid minute, a
 repeated time its first occurrence.
 
