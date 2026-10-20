@@ -221,13 +221,16 @@ provider.
 
 New managed agents and handover successors on macOS/Linux start from the daemon's
 selected launch environment and declared seat values, rather than stored tmux globals.
+Values named by tmux's `update-environment` option, including its default SSH-agent
+and display variables, come from the daemon's environment.
 Normal shell startup and configured tmux shell commands still run. If your custom setup
 intentionally supplies values through tmux's global environment, opt in with
 `rig config set terminal.inherit_tmux_environment true`. Setup points out this option
 when it detects custom tmux configuration; it never enables it automatically. The setting
 applies to future launches and successors, not running agents or your personal tmux server.
 If the scoped environment cannot be prepared, launch keeps its previous environment and
-reports a diagnostic. This is not a promise that shell startup cannot add or override values.
+reports a warning in the launch result and daemon log. This is not a promise that
+shell startup cannot add or override values.
 
 
 ## Start the kernel and check its state

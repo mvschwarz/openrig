@@ -351,7 +351,7 @@ export class TmuxAdapter {
    * before env -i. Generated pane metadata must come from this spawn, never daemon TMUX values.
    * Keep the configured default-command and default-shell lookup, including rc functions.
    */
-  private async scopedLaunchCommand(seatEnv: Record<string, string>, command?: string): Promise<string[] | null> {
+  private async scopedLaunchCommand(seatEnv: Record<string, string>, command?: string, warnings: string[] = []): Promise<string[] | null> {
     if (!this.launchEnvironment || !seatEnv.OPENRIG_NODE_ID) return null;
     try {
       const policy = this.launchEnvironment();
@@ -360,7 +360,11 @@ export class TmuxAdapter {
       const shell = await this.getDefaultShell();
       if (!shell) throw new Error("Default shell unavailable");
       if (command === undefined) command = (await this.run(["tmux", "show-options", "-gv", "default-command"])).replace(/\r?\n$/, "");
-      const baseline = { ...policy.env };
+      // tmux normally copies these client values from the daemon on new-session.
+      // Read its configured names, but never reuse values stored on the server.
+      const updated = (await this.run(["tmux", "show-options", "-gv", "update-environment"]))
+        .trim().split(/\s+/).filter(key => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key));
+      const baseline = { ...Object.fromEntries(updated.map(key => [key, process.env[key]])), ...policy.env };
       removeParentSessionEnv(baseline);
       const values = Object.entries({ ...baseline, ...seatEnv })
         .filter((entry): entry is [string,string] => entry[1] !== undefined)
@@ -369,7 +373,9 @@ export class TmuxAdapter {
       return ["/bin/sh", "-c", reset, "sh", shell, ...(command ? ["-c", command] : ["-l"])];
     } catch {
       // Keep the working launch, with a diagnostic; this option is not a new admission gate.
-      console.warn("[seat launch] Scoped tmux environment unavailable; retaining the previous environment for this launch.");
+      const warning = "Scoped tmux environment unavailable; retaining the previous environment for this launch.";
+      warnings.push(warning);
+      console.warn(`[seat launch] ${warning}`);
       return null;
     }
   }
@@ -669,7 +675,8 @@ export class TmuxAdapter {
     if (cwd != null) legacyParts.push("-c", shellQuote(cwd));
     for (const [k, v] of Object.entries(seatEnv)) legacyParts.push("-e", shellQuote(`${k}=${v}`));
     legacyParts.push("-P", "-F", shellQuote("#{pane_id}"));
-    const scopedCommand = await this.scopedLaunchCommand(seatEnv);
+    const warnings: string[] = [];
+    const scopedCommand = await this.scopedLaunchCommand(seatEnv, undefined, warnings);
     if (scopedCommand) { argv.push(...scopedCommand); legacyParts.push(...scopedCommand.map(shellQuote)); }
     let created: string;
     try {
@@ -688,9 +695,9 @@ export class TmuxAdapter {
         if (cwd != null) respawn.push("-c", cwd);
         await this.run(respawn, posixJoinArgv(respawn));
       }
-      return { ok: true };
+      return warnings.length ? { ok: true, warnings } : { ok: true };
     } catch (err) {
-      return { ok: true, warnings: [parentSessionEnvWarning(name, err)] };
+      return { ok: true, warnings: [...warnings, parentSessionEnvWarning(name, err)] };
     }
   }
 
@@ -977,7 +984,8 @@ export class TmuxAdapter {
     const argv = ["tmux", "respawn-pane", "-t", exact];
     if (opts?.cwd != null) argv.push("-c", opts.cwd);
     if (opts?.env) for (const [k, v] of Object.entries(opts.env)) argv.push("-e", `${k}=${v}`);
-    const scopedCommand = await this.scopedLaunchCommand(opts?.env ?? {}, command);
+    const warnings: string[] = [];
+    const scopedCommand = await this.scopedLaunchCommand(opts?.env ?? {}, command, warnings);
     // Legacy commands remain one argument; the scoped wrapper executes directly before the user shell.
     if (scopedCommand) argv.push(...scopedCommand);
     else if (command != null && command.length > 0) argv.push(command);
@@ -989,15 +997,14 @@ export class TmuxAdapter {
     // The successor starts from the session environment: exclude inherited
     // parent-session identity there first (sessions made before this existed).
     // A failure here is a warning; the respawn goes ahead as it did before.
-    let warnings: string[] | undefined;
     try {
       await this.excludeParentSessionEnv(exact, Object.keys(opts?.env ?? {}));
     } catch (err) {
-      warnings = [parentSessionEnvWarning(exact, err)];
+      warnings.push(parentSessionEnvWarning(exact, err));
     }
     try {
       await this.run(argv, legacyRespawn.join(" "));
-      return warnings ? { ok: true, warnings } : { ok: true };
+      return warnings.length ? { ok: true, warnings } : { ok: true };
     } catch (err) {
       return classifyWriteError(err);
     }
