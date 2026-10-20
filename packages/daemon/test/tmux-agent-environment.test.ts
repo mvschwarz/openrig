@@ -14,7 +14,7 @@ const waitFile = async (file: string) => {
   for (let i=0; i<100 && !existsSync(file); i++) await new Promise(r=>setTimeout(r,25));
   return readFileSync(file,"utf8").trim().split("|");
 };
-describe.skipIf(process.platform !== "linux")("#1178 initial-shell environment policy (actual adapter)", () => {
+describe.skipIf(process.platform === "win32")("#1178 initial-shell environment policy (actual adapter)", () => {
   for (const clean of [false,true]) for (const successor of [false,true]) {
     it(`${clean ? "daemon baseline" : "stock inherited"}, ${successor ? "successor" : "fresh"}: shell startup and classic function remain usable`, async () => {
       const home=mkdtempSync(path.join(tmpdir(),"tmux-premise-")), socket=path.join(home,"owned.sock");
@@ -68,16 +68,11 @@ describe.skipIf(process.platform !== "linux")("#1178 initial-shell environment p
       await tmux(["set-option","-g","default-shell","/bin/bash"]);
       await tmux(["set-option","-g","default-command",""]);
       expect((await adapter.createSession("seat",home,{OPENRIG_NODE_ID:"node",OPENRIG_SESSION_NAME:"seat"})).ok).toBe(true);
-      const [pane,pid]=(await tmux(["display-message","-p","-t","=seat:","#{pane_id} #{pane_pid}"])).split(" ");
-      let processEnv:string[]=[];
-      for(let i=0;i<100;i++) {
-        processEnv=readFileSync(`/proc/${pid}/environ`,"utf8").split("\0");
-        if(processEnv.includes("Q1178_DAEMON=daemon")) break;
-        await new Promise(r=>setTimeout(r,10));
-      }
-      expect(processEnv).toContain("Q1178_DAEMON=daemon");
-      expect(processEnv).not.toContain("Q1178_SERVER=tmux");
-      expect(processEnv).toContain(`TMUX_PANE=${pane}`);
+      const pane=await tmux(["display-message","-p","-t","=seat:","#{pane_id}"]);
+      const inspected=path.join(home,"shell-environment");
+      await tmux(["send-keys","-t","=seat:","-l",`printf '%s|%s|%s' "$Q1178_DAEMON" "\${Q1178_SERVER-absent}" "$TMUX_PANE" > ${shellQuote(inspected)}`]);
+      await tmux(["send-keys","-t","=seat:","Enter"]);
+      expect(await waitFile(inspected)).toEqual(["daemon","absent",pane]);
       const mode=path.join(home,"login-mode");
       await tmux(["send-keys","-t","=seat:","-l",`if shopt -q login_shell; then printf login > ${shellQuote(mode)}; else printf nonlogin > ${shellQuote(mode)}; fi`]);
       await tmux(["send-keys","-t","=seat:","Enter"]);
@@ -93,6 +88,38 @@ describe.skipIf(process.platform !== "linux")("#1178 initial-shell environment p
     expect((await adapter.respawnPane("%1","previous exact command",{cwd:"/private"})).ok).toBe(true);
     expect(read).not.toHaveBeenCalled();
     expect(calls.at(-1)).toEqual(["tmux","respawn-pane","-t","%1","-c","/private","previous exact command"]);
+  });
+
+  it("keeps the daemon's configured update-environment values, not stale server values", async () => {
+    const home=mkdtempSync(path.join(tmpdir(),"tmux-update-env-")),socket=path.join(home,"owned.sock"),observed=path.join(home,"observed");
+    vi.stubEnv("SSH_AUTH_SOCK","/synthetic/daemon-agent.sock");vi.stubEnv("SSH_ASKPASS",undefined);vi.stubEnv("Q1178_CUSTOM_UPDATED","daemon-custom");
+    const env={...process.env,HOME:home};delete env.TMUX;delete env.TMUX_TMPDIR;
+    const tmux=async(args:string[])=>(await exec("tmux",["-S",socket,...args],{env})).stdout.trim();
+    const adapter=new TmuxAdapter(async()=>"",undefined,args=>tmux(args.slice(1)));
+    adapter.launchEnvironment=()=>({inheritTmuxEnvironment:false,env:{HOME:home,PATH:process.env.PATH!}});
+    try {
+      await tmux(["-f","/dev/null","new-session","-d","-s","anchor","sleep 60"]);
+      await tmux(["set-environment","-g","SSH_AUTH_SOCK","/stale/server-agent.sock"]);
+      await tmux(["set-environment","-g","SSH_ASKPASS","stale-server"]);
+      await tmux(["set-option","-g","update-environment","SSH_AUTH_SOCK SSH_ASKPASS Q1178_CUSTOM_UPDATED"]);
+      await tmux(["set-option","-g","default-shell","/bin/bash"]);
+      await tmux(["set-option","-g","default-command",`printf '%s|%s|%s' "$SSH_AUTH_SOCK" "\${SSH_ASKPASS-absent}" "$Q1178_CUSTOM_UPDATED" > ${shellQuote(observed)}; exec /bin/bash --noprofile --norc`]);
+      expect((await adapter.createSession("seat",home,{OPENRIG_NODE_ID:"owned-node"})).ok).toBe(true);
+      expect(await waitFile(observed)).toEqual(["/synthetic/daemon-agent.sock","absent","daemon-custom"]);
+      expect(await tmux(["show-environment","-g","SSH_AUTH_SOCK"])).toBe("SSH_AUTH_SOCK=/stale/server-agent.sock");
+    } finally {await tmux(["kill-server"]).catch(()=>{});vi.unstubAllEnvs();rmSync(home,{recursive:true,force:true,maxRetries:5,retryDelay:20});}
+  });
+  it.each(["create","respawn"])("returns the scoped-environment fallback warning to %s callers",async mode=>{
+    const adapter=new TmuxAdapter(async()=>"",undefined,async args=>{
+      if(args.includes("default-shell"))throw Error("unavailable inspection");
+      return args.includes("new-session")?"%1":"";
+    });
+    adapter.launchEnvironment=()=>({inheritTmuxEnvironment:false,env:{}});
+    vi.spyOn(console,"warn").mockImplementation(()=>{});
+    try {
+      const result=mode==="create"?await adapter.createSession("owned",undefined,{OPENRIG_NODE_ID:"node"}):await adapter.respawnPane("%1","sleep 60",{env:{OPENRIG_NODE_ID:"node"}});
+      expect(result).toMatchObject({ok:true,warnings:[expect.stringContaining("Scoped tmux environment unavailable")]});
+    } finally {vi.restoreAllMocks();}
   });
 
 });
