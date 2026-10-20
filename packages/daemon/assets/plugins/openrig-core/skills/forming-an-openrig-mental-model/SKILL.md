@@ -242,8 +242,9 @@ If you're booting into a new seat in an OpenRig rig:
 4. **Check what skills you have** — list `.claude/skills/` or
    `.agents/skills/` in your cwd. Each skill has a frontmatter description
    that tells you when to reach for it.
-5. **Check your peers** — `rig capture <peer-session>` to see what they're
-   doing.
+5. **Check your peers** — `rig ps --nodes` and the queue first (who is up,
+   who holds what). Capture a peer (`rig capture <peer-session>`) only when
+   you actually need to see its screen.
 6. **Check the transcripts** if you're returning to an in-flight workstream
    — `rig transcript <session> --tail 100` for recent context.
 7. **Ask `rig ask <rig> "<question>"`** if you need cross-cutting evidence

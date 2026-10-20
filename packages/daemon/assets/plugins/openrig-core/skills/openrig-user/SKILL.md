@@ -90,6 +90,23 @@ rig queue handoff <qitem-id> \
   --body-file /tmp/import-report-handoff.md
 ```
 
+### After a queue write — use the response; read back only when it doesn't show what you need
+
+A queue write (`create`, `claim`, `update`, `handoff`, `handoff-and-complete`) answers with the row it wrote; a
+handoff answers with the closed row and its successor. When that answer shows what you need to establish, use it.
+Read back (`rig queue show <id> --full --json`, or `rig queue transitions <id>`) when it doesn't, for example:
+
+- the outcome was INDETERMINATE (a transport failure, or a 502 `remote_queue_write_failed`), or the write warned
+  `qitem_body_not_saved` (an existing row came back). Reconcile by the original ID before any retry;
+- the output was compact or truncated and the field you need isn't in it (the compact receipt shows `bodyBytes`, not
+  the body, and its footer names what it left out);
+- you need a transition note, a closure or blocker detail, or a successor that the output you saw omits;
+- you need evidence from downstream of the write: the recipient's wake (`create --verify` waits for it), or its
+  pickup or claim (a later read);
+- your team's custody rule asks for a separate read-back.
+
+Don't read back only to see again a field the response already showed you.
+
 ### §1b doctrine — turn ends by passing the ball
 
 **A turn ends by passing the ball, never by going idle holding the slice waiting
