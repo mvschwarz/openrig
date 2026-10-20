@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { compactPlanCommand, type CompactPlanDeps } from "../src/commands/compact-plan.js";
 import { createProgram } from "../src/index.js";
 
@@ -101,6 +104,7 @@ function makeDeps(overrides?: {
   nodesByRig?: Record<string, TestNode[]>;
   refreshStatus?: number;
   refreshThrows?: boolean;
+  configPath?: string;
 }): { deps: CompactPlanDeps; requestedPaths: string[]; mutationMethods: Record<string, ReturnType<typeof vi.fn>> } {
   const rigs = (overrides?.rigNames ?? ["test-rig"]).map((name, i) => ({ rigId: `rig-${i}`, name }));
   const nodesByRig = overrides?.nodesByRig ?? { "rig-0": defaultNodes() };
@@ -116,6 +120,7 @@ function makeDeps(overrides?: {
     requestedPaths,
     mutationMethods,
     deps: {
+      ...(overrides?.configPath ? { configPath: overrides.configPath } : {}),
       lifecycleDeps: {} as CompactPlanDeps["lifecycleDeps"],
       clientFactory: () => ({
         get: vi.fn(async (path: string) => {
@@ -187,6 +192,7 @@ describe("rig compact-plan", () => {
       defaultThresholdPercent: 80,
       thresholdTokens: 400_000,
       thresholdPercent: 80,
+      automaticCompactionThresholdPercent: 80,
       oneSeatAtATime: true,
       autoCompactAllowed: false,
       explicitAuthorizationRequired: true,
@@ -304,6 +310,8 @@ describe("rig compact-plan", () => {
     const json = JSON.parse(logs.join(""));
     expect(json.policy.thresholdTokens).toBe(250_000);
     expect(json.policy.thresholdPercent).toBe(70);
+    // The plan's flags stay separate from the automatic compaction setting.
+    expect(json.policy.automaticCompactionThresholdPercent).toBe(80);
     expect(json.candidates.map((entry: { session: string }) => entry.session)).toEqual([
       "lower-token@test-rig",
       "lower-percent@test-rig",
@@ -471,12 +479,36 @@ describe("rig compact-plan", () => {
     const output = logs.join("\n");
     expect(output).toContain("READ-ONLY PLAN");
     expect(output).toContain("does not compact");
-    expect(output).toContain("Thresholds:");
+    expect(output).toContain("Plan thresholds (this plan's own, not the automatic compaction setting):");
+    expect(output).toContain("Automatic compaction setting (policies.claude_compaction.threshold_percent, separate from this plan): 80%.");
     expect(output).toContain("one-seat-at-a-time");
     expect(output).toContain("orch-lead@test-rig");
     expect(output).toContain("authorization");
     expect(output).toContain("checkpoint/restore");
     expect(output).toContain("claude-compaction-restore");
     expect(output).toContain("No automatic compaction has been run");
+  });
+
+  it("shows the configured automatic compaction threshold beside the plan's own thresholds", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "openrig-compact-plan-config-"));
+    try {
+      const configPath = join(dir, "config.json");
+      writeFileSync(configPath, JSON.stringify({ policies: { claudeCompaction: { thresholdPercent: 60 } } }));
+      const { deps } = makeDeps({ configPath });
+
+      await compactPlanCommand(deps).parseAsync(["node", "rig", "--json"]);
+      const json = JSON.parse(logs.join(""));
+      expect(json.policy.thresholdTokens).toBe(400_000);
+      expect(json.policy.thresholdPercent).toBe(80);
+      expect(json.policy.automaticCompactionThresholdPercent).toBe(60);
+
+      logs = [];
+      await compactPlanCommand(deps).parseAsync(["node", "rig"]);
+      const output = logs.join("\n");
+      expect(output).toContain("Plan thresholds (this plan's own, not the automatic compaction setting): 400000 estimated tokens; 80%");
+      expect(output).toContain("Automatic compaction setting (policies.claude_compaction.threshold_percent, separate from this plan): 60%.");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

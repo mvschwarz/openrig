@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { ConfigStore } from "../config-store.js";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, type LifecycleDeps } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
@@ -6,6 +7,8 @@ import { realDeps } from "./daemon.js";
 export interface CompactPlanDeps {
   lifecycleDeps: LifecycleDeps;
   clientFactory: (url: string) => DaemonClient;
+  /** Config file that holds the automatic compaction setting; defaults to the rig config. */
+  configPath?: string;
 }
 
 interface RigEntry {
@@ -110,8 +113,12 @@ interface CompactPlanResult {
     mode: "read_only_plan";
     defaultThresholdTokens: number;
     defaultThresholdPercent: number;
+    /** The plan's own token threshold; not the automatic compaction setting. */
     thresholdTokens: number;
+    /** The plan's own fallback percentage; not the automatic compaction setting. */
     thresholdPercent: number;
+    /** `policies.claude_compaction.threshold_percent`, shown only for comparison. */
+    automaticCompactionThresholdPercent: number;
     oneSeatAtATime: true;
     autoCompactAllowed: false;
     explicitAuthorizationRequired: true;
@@ -302,7 +309,12 @@ function analyzeNode(node: NodeEntry, thresholds: CompactPlanThresholds): Candid
   };
 }
 
-function buildPlan(nodes: NodeEntry[], thresholds = defaultThresholds(), incompleteRigs: IncompleteRig[] = []): CompactPlanResult {
+function buildPlan(
+  nodes: NodeEntry[],
+  thresholds: CompactPlanThresholds,
+  incompleteRigs: IncompleteRig[],
+  automaticCompactionThresholdPercent: number,
+): CompactPlanResult {
   const candidates: CandidateEntry[] = [];
   const blocked: BlockedEntry[] = [];
   const skipped: SkippedEntry[] = [];
@@ -336,6 +348,7 @@ function buildPlan(nodes: NodeEntry[], thresholds = defaultThresholds(), incompl
       defaultThresholdPercent: PERCENT_FALLBACK_THRESHOLD,
       thresholdTokens: thresholds.thresholdTokens,
       thresholdPercent: thresholds.thresholdPercent,
+      automaticCompactionThresholdPercent,
       oneSeatAtATime: true,
       autoCompactAllowed: false,
       explicitAuthorizationRequired: true,
@@ -355,7 +368,8 @@ function printHuman(plan: CompactPlanResult): void {
     console.error(`Warning: partial plan; incomplete rigs: ${plan.incompleteRigs.map(({ rig, status }) => `${rig} (${typeof status === "number" ? `HTTP ${status}` : status})`).join(", ")}`);
   }
   console.log("Policy: read_only_plan; one-seat-at-a-time marshal triage; autoCompactAllowed=false; explicit authorization required.");
-  console.log(`Thresholds: ${plan.policy.thresholdTokens} estimated tokens; ${plan.policy.thresholdPercent}% when context window size is missing.`);
+  console.log(`Plan thresholds (this plan's own, not the automatic compaction setting): ${plan.policy.thresholdTokens} estimated tokens; ${plan.policy.thresholdPercent}% when context window size is missing.`);
+  console.log(`Automatic compaction setting (policies.claude_compaction.threshold_percent, separate from this plan): ${plan.policy.automaticCompactionThresholdPercent}%.`);
   console.log(`Summary: ${plan.summary.candidateCount} candidates | ${plan.summary.blockedCount} blocked | ${plan.summary.skippedCount} skipped`);
   console.log();
 
@@ -415,6 +429,17 @@ Examples:
       if (!thresholds.ok) {
         console.error(thresholds.error);
         process.exitCode = 1;
+        return;
+      }
+
+      let automaticCompactionThresholdPercent: number;
+      try {
+        automaticCompactionThresholdPercent = new ConfigStore(deps.configPath)
+          .resolve().policies.claudeCompaction.thresholdPercent;
+      } catch (err) {
+        console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+        console.error("Fix: check the config file with: rig config");
+        process.exitCode = 2;
         return;
       }
 
@@ -488,7 +513,7 @@ Examples:
           }
         }
 
-        const plan = buildPlan(allNodes, thresholds.value, incompleteRigs);
+        const plan = buildPlan(allNodes, thresholds.value, incompleteRigs, automaticCompactionThresholdPercent);
         if (opts.json) {
           console.log(JSON.stringify(plan, null, 2));
         } else {
