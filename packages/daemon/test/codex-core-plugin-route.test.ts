@@ -22,8 +22,7 @@ const require = createRequire(import.meta.url);
 const PLUGIN = resolve(import.meta.dirname, "../assets/plugins/openrig-core");
 const RELAY = join(PLUGIN, "hooks", "scripts", "activity-relay.cjs");
 const relay = require(RELAY) as { pluginRunIsRedundant(p: Record<string, unknown>, argv: string[], env: NodeJS.ProcessEnv): boolean };
-const managed = require(join(PLUGIN, "hooks", "scripts", "codex-managed-relay.cjs")) as {
-  managedRelayWouldRun(event: string, env: NodeJS.ProcessEnv, deps: { isThisScript(f: string): boolean; interpreterAvailable(e: string, env: NodeJS.ProcessEnv): boolean }): { runs: boolean; reason: string };
+const managed = require(join(PLUGIN, "hooks", "scripts", "codex-hook-trust.cjs")) as {
   computeCodexHookTrust(event: string, input: { keySource: string; command: string; timeoutSec: number }): { key: string; hash: string };
 };
 const NODE_DIR = dirname(process.execPath);
@@ -270,7 +269,7 @@ describe("read before install: the person's choice is never overridden", () => {
   });
 });
 
-describe("the plugin relay on Codex: quiet only when Codex would run the managed relay for the same event", () => {
+describe("the plugin relay on Codex always reports: whether the managed relay runs can't be established", () => {
   /** A CODEX_HOME whose config the daemon itself provisioned: the managed relay block and its trust. */
   function provisioned(): string {
     const codexHome = join(root, "codex-home"); mkdirSync(codexHome, { recursive: true });
@@ -284,60 +283,36 @@ describe("the plugin relay on Codex: quiet only when Codex would run the managed
     keySource: fs.realpathSync.native(config(codexHome)), command: `node "${RELAY}"`, timeoutSec: 5 }).key;
   const edit = (codexHome: string, fn: (s: string) => string) => writeFileSync(config(codexHome), fn(readFileSync(config(codexHome), "utf8")));
 
-  it("both active and trusted: the plugin's run is quiet for each managed event, so each is reported once", () => {
+  it("reports each managed event even with the managed relay trusted in the user file (the stated duplicate)", () => {
+    // Codex merges hook state from every user layer (a selected profile included) and session flags, which the relay can't
+    // see, so it never assumes the managed handler ran. With both routes active each event is reported twice, never zero.
     const home = provisioned();
-    for (const event of ["SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest"]) expect(quiet(event, env(home))).toBe(true);
-    // The same config read by the daemon's own trust recipe and the relay's agree byte for byte.
+    for (const event of ["SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest"]) expect(quiet(event, env(home))).toBe(false);
+    // The daemon's trust writer and the plugin share one hash recipe.
     expect(computeCodexHookTrust("Stop", { keySource: "/k/config.toml", command: `node "${RELAY}"`, timeoutSec: 5 }))
       .toEqual(managed.computeCodexHookTrust("Stop", { keySource: "/k/config.toml", command: `node "${RELAY}"`, timeoutSec: 5 }));
   });
 
-  it("reports for each state in which Codex wouldn't run the managed handler", () => {
-    const reason = (home: string, event = "UserPromptSubmit", e = env(home)) => managed.managedRelayWouldRun(event, e, {
-      isThisScript: (f) => readFileSync(f).equals(readFileSync(RELAY)),
-      interpreterAvailable: (x, en) => x === "node" && String(en.PATH).split(":").some((d) => existsSync(join(d, "node"))),
-    }).reason;
-    const cases: Array<[string, (home: string) => void, string]> = [
-      ["disabled", (h) => edit(h, (s) => s.replace(`[hooks.state.${JSON.stringify(trustKey(h, "UserPromptSubmit"))}]\n`, (m) => `${m}enabled = false\n`)), "disabled"],
-      ["untrusted", (h) => edit(h, (s) => s.replace(new RegExp(`(\\[hooks\\.state\\.${JSON.stringify(trustKey(h, "UserPromptSubmit")).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\]\\n)trusted_hash = "[^"]+"\\n`), "$1")), "untrusted"],
-      ["modified", (h) => edit(h, (s) => s.replace(new RegExp(`(\\[hooks\\.state\\.${JSON.stringify(trustKey(h, "UserPromptSubmit")).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\]\\ntrusted_hash = ")sha256:[0-9a-f]{64}`), `$1sha256:${"0".repeat(64)}`)), "modified since it was trusted"],
-      ["a matcher", (h) => edit(h, (s) => s.replace("[[hooks.UserPromptSubmit]]\n", "[[hooks.UserPromptSubmit]]\nmatcher = \"x\"\n")), "no managed stanza for this event in the daemon's form"],
-      ["another script", (h) => { const other = join(root, "other-relay.cjs"); writeFileSync(other, "// not the relay\n"); edit(h, (s) => s.split(RELAY).join(other)); }, "the managed relay is a different script"],
-      ["a group before it", (h) => edit(h, (s) => `[[hooks.UserPromptSubmit]]\n[[hooks.UserPromptSubmit.hooks]]\ntype = "command"\ncommand = "echo mine"\n\n${s}`), "another hook group may precede it"],
-      ["no managed block (plugin only)", (h) => writeFileSync(config(h), "[features]\nhooks = true\n"), "no single managed relay block"],
-    ];
-    for (const [, mutate, expected] of cases) {
+  it("an edited managed stanza or a disable in another user layer leaves the plugin reporting (never zero)", () => {
+    // The stanza edited after it was trusted, the original hash kept: Codex sees Modified and skips it.
+    for (const extra of ['statusMessage = "activity"\n', "async = true\n"]) {
       rmSync(root, { recursive: true, force: true }); mkdirSync(root);
       const home = provisioned();
-      mutate(home);
-      expect(reason(home)).toBe(expected);
-      expect(quiet("UserPromptSubmit", env(home))).toBe(false);
+      edit(home, (s) => s.replace(/(\[\[hooks\.Stop\.hooks\]\]\ntype = "command"\ncommand = '[^']+'\ntimeout = 5\n)/, `$1${extra}`));
+      expect(quiet("Stop", env(home))).toBe(false);
     }
-    // A non-managed event (refocus's PostCompact) has no managed relay to defer to.
-    const home = provisioned();
-    expect(quiet("PostCompact", env(home))).toBe(false);
-    // The managed relay runs a bare `node`: with none on the session's PATH it wouldn't run, so the plugin reports.
-    const empty = join(root, "no-node"); mkdirSync(empty, { recursive: true });
-    expect(reason(home, "Stop", env(home, empty))).toBe("node does not resolve on this PATH");
-    expect(quiet("Stop", env(home, empty))).toBe(false);
-  });
-
-  it("a hook group for the same event after the managed block doesn't move it; one before it does", () => {
-    const later = provisioned();
-    edit(later, (s) => `${s}\n[[hooks.UserPromptSubmit]]\n[[hooks.UserPromptSubmit.hooks]]\ntype = "command"\ncommand = "echo mine"\n`);
-    expect(quiet("UserPromptSubmit", env(later))).toBe(true);
+    // A selected profile layer disables the managed key while the user file still trusts it.
     rmSync(root, { recursive: true, force: true }); mkdirSync(root);
-    const earlier = provisioned();
-    edit(earlier, (s) => `[[hooks.UserPromptSubmit]]\n[[hooks.UserPromptSubmit.hooks]]\ntype = "command"\ncommand = "echo mine"\n\n${s}`);
-    expect(quiet("UserPromptSubmit", env(earlier))).toBe(false);
+    const home = provisioned();
+    edit(home, (s) => `profile = "work"\n\n${s}`);
+    writeFileSync(join(home, "work.config.toml"), `[hooks.state.${JSON.stringify(trustKey(home, "Stop"))}]\nenabled = false\n`);
+    expect(quiet("Stop", env(home))).toBe(false);
   });
 
-  it("an untrusted managed relay leaves the plugin reporting, which is twice only where Codex is told to bypass hook trust", () => {
-    // Codex runs an untrusted handler only when hook trust is bypassed for the session, which this check can't see; that
-    // case reports twice. It is the stated limit, never a lost report.
+  it("a home with no managed block (the plugin alone) reports", () => {
     const home = provisioned();
-    edit(home, (s) => s.replace(/trusted_hash = "sha256:[0-9a-f]{64}"\n/g, ""));
-    for (const event of ["SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest"]) expect(quiet(event, env(home))).toBe(false);
+    writeFileSync(config(home), "[features]\nhooks = true\n");
+    expect(quiet("Stop", env(home))).toBe(false);
   });
 
   it("the Claude path is unchanged: without OPENRIG_RUNTIME=codex the Codex config is never consulted", () => {

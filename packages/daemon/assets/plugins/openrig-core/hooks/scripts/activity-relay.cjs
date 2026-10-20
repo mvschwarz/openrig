@@ -268,15 +268,10 @@ function settingsRelayReports(hookEvent, providerPayload, env = process.env) {
 function pluginRunIsRedundant(providerPayload, argv = process.argv, env = process.env) {
   if (!argv.includes("--from-plugin")) return false;
   const hookEvent = firstString(providerPayload.hookEvent, providerPayload.hookEventName, providerPayload.hook_event_name, providerPayload.event, providerPayload.eventName);
-  // Codex: the daemon's own relay lives in a managed block of the Codex config, not in Claude's settings. The plugin's run
-  // stays quiet only when Codex would run that managed handler for this event (codex-managed-relay.cjs).
-  if (firstString(env.OPENRIG_RUNTIME, env.RIGGED_RUNTIME) === "codex") {
-    // Required here, not at the top: the daemon also copies this script alone into a Claude seat's settings relay, where
-    // the sibling isn't present and this branch never runs. A missing sibling reports rather than silencing.
-    let managed;
-    try { managed = require("./codex-managed-relay.cjs"); } catch { return false; }
-    return Boolean(hookEvent) && managed.managedRelayWouldRun(hookEvent, env, { isThisScript, interpreterAvailable }).runs;
-  }
+  // Codex: the plugin's run always reports. Whether Codex runs the daemon's managed relay for this event depends on hook
+  // state merged from every user layer (a selected profile included) and session flags, which this script can't see, so it
+  // never assumes so. With both routes active an event is reported twice; it is never lost.
+  if (firstString(env.OPENRIG_RUNTIME, env.RIGGED_RUNTIME) === "codex") return false;
   return settingsRelayReports(hookEvent, providerPayload, env);
 }
 

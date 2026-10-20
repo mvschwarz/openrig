@@ -57,9 +57,8 @@ const defaultCodexCli: CodexCliRunner = (args, env) => new Promise((resolve) => 
   });
 });
 
-// Codex's hook trust recipe lives in the plugin's own script, which the plugin's relay also uses to verify the managed
-// hooks, so the daemon and the relay can't drift apart.
-const codexManagedRelay = createRequire(import.meta.url)("../../assets/plugins/openrig-core/hooks/scripts/codex-managed-relay.cjs") as {
+// Codex's hook trust recipe (the key and hash Codex records for a trusted hook), kept in one script.
+const codexHookTrust = createRequire(import.meta.url)("../../assets/plugins/openrig-core/hooks/scripts/codex-hook-trust.cjs") as {
   codexHookHash(eventLabel: string, handler: { command: string; timeoutSec: number; matcher?: string | null; statusMessage?: string | null }): string;
 };
 
@@ -1443,8 +1442,8 @@ export function computeCodexHookTrust(
   const handlerIndex = input.handlerIndex ?? 0;
   const key = `${input.keySource}:${label}:${groupIndex}:${handlerIndex}`;
   // NormalizedHookIdentity exactly as `TomlValue::try_from` would build it (None fields dropped), hashed by the shared
-  // recipe in codex-managed-relay.cjs.
-  return { key, hash: codexManagedRelay.codexHookHash(label, input) };
+  // recipe in codex-hook-trust.cjs.
+  return { key, hash: codexHookTrust.codexHookHash(label, input) };
 }
 
 /**

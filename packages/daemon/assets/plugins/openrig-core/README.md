@@ -58,14 +58,10 @@ This plugin ships dual-manifest packaging — both `.claude-plugin/` and `.codex
     Codex seat whose resolved plugin selection includes this plugin (`OPENRIG_NODE` is the daemon's own absolute Node). So
     an unselected seat or a personal session is a successful no-op, even with no `node` on its PATH.
   - **Disclosed limit:** a Codex started from inside a selected seat's shell inherits those variables and acts as the seat.
-  - **Activity reported once:** the plugin's relay stays quiet for an event only when Codex would run the daemon's own
-    managed relay for it. That means:
-    - the managed block registers this exact script for the event, with nothing before it;
-    - its hook state isn't disabled;
-    - its stored trust hash matches Codex's hash of that exact handler;
-    - `node` resolves on the session's PATH.
-    In any other state the plugin reports. A session told to bypass hook trust can therefore report an event twice, but
-    never zero times.
+  - **Activity can be reported twice, never zero times:** on Codex the plugin's activity relay always reports. Whether
+    Codex also runs the daemon's own managed relay for an event depends on hook state merged from every user layer (a
+    selected profile included) and session flags, which the plugin can't see. So with both active, each activity event
+    (SessionStart, UserPromptSubmit, Stop, PermissionRequest) is reported twice on a selected Codex seat.
 
 Generated Claude settings commands for the activity relay and context collector use the daemon's absolute Node
 executable when its name is recognized (`node` or `node.exe`); other names keep the legacy bare `node` command and
