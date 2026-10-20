@@ -532,6 +532,7 @@ the sections that were not read are `null`.
 Wake seat targets must include the rig: `member@rig` or `member@rig@N` (1 = newest tenure).
 Values without `@` go unchanged to the runtime as a session ID or title; a bare member
 name is not resolved within `<rig>`.
+Only Claude and Codex tenures can be woken.
 
 ### chatroom
 
@@ -781,7 +782,7 @@ name is not resolved within `<rig>`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig reconcile-session <session>` | — | `--rig <rigId>`<br>`--node <logicalId>`<br>`--no-launch`<br>`--json` |
+| `rig reconcile-session <session>` | — | `--rig <rigId>`<br>`--node <logicalId>`<br>`--no-launch`<br>`--repair-missing-pane`<br>`--json` |
 
 ### env
 

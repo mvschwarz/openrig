@@ -118,8 +118,11 @@ Examples:
 
 Exit codes:
   0  Success
-  1  Daemon not running, or the rig is unknown or ambiguous
-  2  Failed to fetch data from daemon (or wake timed out)`);
+  1  Daemon not running, the rig is unknown or ambiguous, or --runtime or
+     --wake-timeout is invalid
+  2  Failed to fetch data from daemon; the --wake seat has no such tenure, or its
+     tenure isn't Claude or Codex or has no resume token; or the wake failed or
+     timed out`);
 
   const getDeps = (): AskCommandDeps => (depsOverride as AskCommandDeps | undefined) ?? {
     lifecycleDeps: realDeps(),
