@@ -342,6 +342,35 @@ function printResult(json: boolean, body: unknown, status: number): void {
   if (status >= 400) process.exitCode = status >= 500 ? 2 : 1;
 }
 
+interface WorkChoiceCandidate {
+  qitemId?: string | null;
+  projects?: string[];
+  mission?: string;
+  slice?: string | null;
+  workNodePath?: string | null;
+  unresolved?: string | null;
+}
+
+/** After the plain answer, the candidates the agent must choose between, one line each, so a
+ *  refused current work is never just a count. Prints nothing when the daemon sent no choice
+ *  (current work is settled, nothing is in progress, or the daemon predates the field). */
+export function printCurrentWorkChoice(data: unknown): void {
+  const choice = (data as { currentWorkChoice?: { instruction?: string; candidates?: WorkChoiceCandidate[];
+    unknown?: Array<{ qitemId?: string | null; reason?: string }> } } | null)?.currentWorkChoice;
+  if (!choice) return;
+  console.log("");
+  console.log(choice.instruction ?? "OpenRig did not choose your current work.");
+  for (const [index, c] of (choice.candidates ?? []).entries()) {
+    const project = c.projects?.length ? `project ${c.projects.join(", ")}` : "no project tag";
+    const where = c.workNodePath ?? "no folder found";
+    const why = c.unresolved ? ` (${c.unresolved})` : "";
+    console.log(`  ${index + 1}. ${project} · mission ${c.mission ?? "?"} · slice ${c.slice ?? "none"} · ${where}${why} · from row ${c.qitemId ?? "unknown"}`);
+  }
+  for (const u of choice.unknown ?? []) {
+    console.log(`  - row ${u.qitemId ?? "unknown"}: work not named (${u.reason ?? "no reason given"})`);
+  }
+}
+
 /** Slice 15: the receipt context when a write should print its receipt — the
  *  `output.compact` switch is on and `--full` was not given — else null (today's
  *  output). Error responses always print whole, whatever this returns. */
@@ -1318,6 +1347,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       await withClient(deps, async (client) => {
         const res = await client.get<unknown>(`/api/queue/whoami?${params.toString()}`);
         printResult(opts.json ?? false, res.data, res.status);
+        if (!opts.json && res.status < 400) printCurrentWorkChoice(res.data);
       });
     });
 

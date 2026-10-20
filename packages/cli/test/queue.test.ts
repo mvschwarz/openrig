@@ -1279,6 +1279,40 @@ describe("rig queue CLI", () => {
     expect(call!.path).toContain("recentLimit=10");
   });
 
+  it("plain whoami ends with one line per candidate to choose from; --json adds nothing", async () => {
+    const data = {
+      session: "bob@rig",
+      currentWork: null,
+      currentWorkBasis: "2 distinct typed work nodes — refusing to guess",
+      currentWorkChoice: {
+        instruction: "OpenRig did not choose your current work. Choose the candidate your actual work belongs to.",
+        candidates: [
+          { qitemId: "q-1", projects: ["alpha"], mission: "release", slice: "01-work", workNodePath: "/m/release/slices/01-work", unresolved: null },
+          { qitemId: "q-2", projects: [], mission: "missing", slice: "01-work", workNodePath: null, unresolved: "mission missing resolves to 0 directories on this host" },
+        ],
+        unknown: [{ qitemId: "q-3", summary: null, reason: "no mission tag and no handoff ancestry" }],
+      },
+    };
+    const run = async (json: boolean) => {
+      const { deps } = makeDeps({ routes: { "GET /api/queue/whoami?session=bob%40rig&recentLimit=25": { status: 200, data } } });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      logs.length = 0;
+      await program.parseAsync(["node", "rig", "queue", "whoami", "--session", "bob@rig", ...(json ? ["--json"] : [])]);
+      return [...logs];
+    };
+    const plain = await run(false);
+    expect(plain.slice(-4)).toEqual([
+      "OpenRig did not choose your current work. Choose the candidate your actual work belongs to.",
+      "  1. project alpha · mission release · slice 01-work · /m/release/slices/01-work · from row q-1",
+      "  2. no project tag · mission missing · slice 01-work · no folder found (mission missing resolves to 0 directories on this host) · from row q-2",
+      "  - row q-3: work not named (no mission tag and no handoff ancestry)",
+    ]);
+    const json = await run(true);
+    expect(json).toHaveLength(1);
+    expect(JSON.parse(json[0]!)).toEqual(data);
+  });
+
   it("whoami defaults the session from OPENRIG_SESSION_NAME when --session is omitted", async () => {
     const saved = process.env["OPENRIG_SESSION_NAME"];
     process.env["OPENRIG_SESSION_NAME"] = "bob@rig";
