@@ -1,36 +1,22 @@
-# WIP — Topic D: Accept ↔ artifact + receipt ↔ operation
+# Topic D — Accept↔artifact + receipt↔operation (real extract)
 
-**PR contents today:** docs-only scaffold — this file under `spike/upstream-drafts/`. **No** accept/publish/receipt TypeScript or contract tests yet.  
-**Status:** stacked design placeholder — **depends on Topic C** (writer fence) + an agreed thin publish/target backend.  
+**Stacked on:** Topic C [#1598](https://github.com/mvschwarz/openrig/pull/1598) (`piotr/upstream-writer-authority`)  
 **Branch:** `piotr/upstream-accept-receipt-binding`  
-**Base:** `mvschwarz/openrig` `main`  
-**Depends-on:** Topic C / draft PR [#1598](https://github.com/mvschwarz/openrig/pull/1598) (`piotr/upstream-writer-authority`). Do not merge or undraft before C has a real extract + agreed op.
+**PR contents today:** real thin extract (not docs-only).
 
-## Intent
+## What lands
 
-1. Acceptance binds a clean immutable artifact identity + content digest; publishing B under judgment A must fail.
-2. Receipts belong to `submissionId` / operation id, not “latest on target”; retry A after B returns receipt A; crash between artifact and receipt must not confirm B via receipt A.
-
-## Planned extract (thin — future; not full execution-slice)
-
-1. `artifact-acceptance` + units
-2. Thin publish + per-operation receipt index under the writer fence
-3. Contract tests: receipt-per-op + failpoint skew
-4. Simulation without target: never fake `published=true`
+1. `OperationPublishService` — accept binds clean immutable artifact; receipt keyed by `operationId`
+2. HTTP `POST /api/writer/accept-publish`
+3. Contract tests: receipt↔op (retry A after B), simulation without target, failpoint child recovery
+4. Does **not** weaken assertions vs fork round-2 Contract 1 intent
 
 ## Explicitly out
 
-- Full `ExecutionSliceService` (roles / queue close / DEV productization)
+- Full `ExecutionSliceService` (roles/queue/DEV productization)
+- Jeff / DecisionProvider / hermetic / OMP-prime / native smoke
 - Cross-host as merge gate
-- Jeff / DecisionProvider
-- Native smoke / Railway
-- Hermetic private homes
-- Shipping the private fork’s full execution-slice monolith
 
-## Stacking note
+## Depends on C
 
-Keep as a **draft PR** that explicitly depends on Topic C. Prefer stacked review: land C’s fence first, then the thin accept+receipt binding on that op. Fork round-2 accept/receipt proofs are **evidence for a later extract**, not a claim that this PR already contains them.
-
-## Next extraction step
-
-After C lands (or is reviewable with an agreed publish op): extract accept+receipt contracts from the private fork’s round-2 proofs as a thin consumer of the C fence — not the whole slice.
+WriterAuthority + FencedPublishTarget + migration 118. Without C, this PR has no fence.
