@@ -372,6 +372,8 @@ describe("due parked-row reminders for one seat", () => {
 
 describe("a park wake shows the park's recorded continuation", () => {
   const header = (jobId: string) => `[OpenRig watchdog scheduler · policy: periodic-reminder · job: ${jobId}]\n`;
+  // Earlier tests leave other seats' reminders due on purpose, so each test reads only its own seat's sends.
+  const to = (owner: string) => sends.filter((s) => s.session === owner);
   const guidance = "Check the row's current state and blocker first, then resume only that recorded work and record the "
     + "outcome, or park it again with a wake. Work already done is recorded, not repeated.";
 
@@ -390,7 +392,7 @@ describe("a park wake shows the park's recorded continuation", () => {
     await deps.watchdogScheduler!.runTickNow();
     const text = `Wake timer fired for parked qitem ${r.qitemId}. Resume the recorded continuation and update the row.\n`
       + "Recorded continuation: Rebase onto main, then hand off to the planner with the new head.\n" + guidance;
-    expect(sends).toEqual([{ session: owner, text: header(r.jobId) + text }]);
+    expect(to(owner)).toEqual([{ session: owner, text: header(r.jobId) + text }]);
     expect(deps.watchdogHistoryLog!.listForJob(r.jobId, 1)[0]!.deliveryMessage).toBe(text);
     expect(disposition(r.jobId, r.qitemId)).toMatchObject({ state: "terminal", terminalReason: "park_timer_fired_once", deliveryStatus: "ok" });
   });
@@ -402,9 +404,9 @@ describe("a park wake shows the park's recorded continuation", () => {
     due(r.jobId);
     await deps.watchdogScheduler!.runTickNow();
     const flat = long.replace(/\s+/g, " ").trim();
-    expect(sends[0]!.text).toContain(`Recorded continuation (the first 300 of ${flat.length} characters; read the rest with `
+    expect(to(owner)[0]!.text).toContain(`Recorded continuation (the first 300 of ${flat.length} characters; read the rest with `
       + `rig queue show ${r.qitemId} --full): ${flat.slice(0, 300)}…\n${guidance}`);
-    expect(sends[0]!.text).not.toContain(flat.slice(0, 301));
+    expect(to(owner)[0]!.text).not.toContain(flat.slice(0, 301));
   });
 
   it("shows only the current park's continuation, never an earlier park's", async () => {
@@ -416,7 +418,7 @@ describe("a park wake shows the park's recorded continuation", () => {
     const jobId = deps.queueRepo.getParkWakeStatus(r.qitemId)!.ref;
     due(jobId);
     await deps.watchdogScheduler!.runTickNow();
-    expect(sends).toEqual([{ session: owner, text: header(jobId)
+    expect(to(owner)).toEqual([{ session: owner, text: header(jobId)
       + `Wake timer fired for parked qitem ${r.qitemId}. Resume the recorded continuation and update the row.` }]);
 
     sends.length = 0;
@@ -426,8 +428,8 @@ describe("a park wake shows the park's recorded continuation", () => {
     const next = deps.queueRepo.getParkWakeStatus(r.qitemId)!.ref;
     due(next);
     await deps.watchdogScheduler!.runTickNow();
-    expect(sends[0]!.text).toContain("Recorded continuation: the new plan");
-    expect(sends[0]!.text).not.toContain("the old plan");
+    expect(to(owner)[0]!.text).toContain("Recorded continuation: the new plan");
+    expect(to(owner)[0]!.text).not.toContain("the old plan");
   });
 
   it("a digest carries each row's preview; a row without one keeps its line, and every member is accounted", async () => {
@@ -435,8 +437,8 @@ describe("a park wake shows the park's recorded continuation", () => {
     const [a, b] = [await parkWith(owner, "first", "Hand the head to the planner."), await park(owner, "second")];
     for (const r of [a, b]) due(r.jobId);
     await deps.watchdogScheduler!.runTickNow();
-    expect(sends).toHaveLength(1);
-    const text = sends[0]!.text;
+    expect(to(owner)).toHaveLength(1);
+    const text = to(owner)[0]!.text;
     expect(text).toContain(`- ${a.qitemId} — first\n  Recorded continuation: Hand the head to the planner.`);
     expect(text).toContain(`- ${b.qitemId} — second\n`);
     expect(text.endsWith(guidance)).toBe(true);
