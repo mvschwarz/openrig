@@ -141,6 +141,8 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
       // lookup that can't be read keeps today's path: the handle goes to the daemon as an id.
       let rigId = rigHandle;
       let rigLabel = rigHandle;
+      // Set when the handle matched a rig's name: `rig seat launch` resolves `<logicalId>@<rig name>` within that rig.
+      let rigName: string | undefined;
 
       if (opts.host) {
         const { runRemoteHttpOp, lookupRemoteRigId } = await import("../remote-host-ops.js");
@@ -251,7 +253,10 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
         }
         if (resolution.kind === "resolved") {
           rigId = resolution.id;
-          if (resolution.byName) rigLabel = `${rigHandle} (${resolution.id})`;
+          if (resolution.byName) {
+            rigLabel = `${rigHandle} (${resolution.id})`;
+            rigName = rigHandle;
+          }
         }
         return true;
       };
@@ -396,7 +401,7 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
       };
       if (res.data.code === "already_running" || (res.data.alreadyRunning && res.data.alreadyRunning.length > 0)) {
         console.log(`Node ${logicalId} is already running in rig ${rigLabel} (not relaunched)`);
-        console.log(`For a fresh occupant: rig seat launch ${res.data.sessionName ?? "<seat>"} --fresh --stop --reason "<why>"`);
+        console.log(`For a fresh occupant: rig seat launch ${rigName ? `${logicalId}@${rigName}` : logicalId} --fresh --stop --reason "<why>"`);
         printLaunchWarnings();
         return;
       }
