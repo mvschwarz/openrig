@@ -1,0 +1,39 @@
+--- a/packages/daemon/src/startup.ts
++++ b/packages/daemon/src/startup.ts
+@@ -25,6 +25,8 @@
+ import { resolveExternal } from "./domain/gateway/external-admission.js";
+ import { loadHumanRegistry } from "./domain/gateway/human-registry.js";
+ import { EventBus } from "./domain/event-bus.js";
++import { WriterAuthority } from "./domain/writer-authority.js";
++import { FencedPublishTarget } from "./domain/fenced-publish-target.js";
+ import { NodeLauncher } from "./domain/node-launcher.js";
+ import { TmuxOptionDefaultsApplier } from "./domain/tmux-option-defaults.js";
+ import { TmuxAdapter } from "./adapters/tmux.js";
+@@ -344,6 +346,18 @@
+   const rigRepo = new RigRepository(db);
+   const sessionRegistry = new SessionRegistry(db);
+   const eventBus = new EventBus(db);
++  // Topic C — writer authority (API-only fence). First fenced product verb:
++  // publish onto a disposable FencedPublishTarget when OPENRIG_PUBLISH_TARGET_ROOT is set.
++  // Without an explicit root the HTTP publish verb returns 503 (never silent published=true).
++  const writerAuthority = new WriterAuthority(db, eventBus);
++  const publishTargetRoot = process.env.OPENRIG_PUBLISH_TARGET_ROOT?.trim() || "";
++  const fencedPublishTarget = publishTargetRoot
++    ? new FencedPublishTarget({
++        targetRoot: publishTargetRoot,
++        resourceId: process.env.OPENRIG_PUBLISH_TARGET_ID?.trim() || "publish:default",
++        writers: writerAuthority,
++      })
++    : null;
+   const streamStore = new StreamStore(db, eventBus);
+   // Explicit source opt-in only. No sink I/O until a separate drain request.
+   const shadow = configureShadowCapture(process.env.OPENRIG_SHADOW_CAPTURE);
+@@ -1304,6 +1318,8 @@
+     daemonLifecycleStore,
+     daemonBootEpoch,
+     eventBus,
++    writerAuthority,
++    fencedPublishTarget,
+     nodeLauncher,
+     startupOrchestrator,
+     tmuxAdapter,

@@ -1,0 +1,35 @@
+name: topic-c-apply-wiring
+on:
+  push:
+    branches: [piotr/upstream-writer-authority]
+    paths:
+      - "_agent/topic-c/**"
+      - ".github/workflows/topic-c-apply-wiring.yml"
+  workflow_dispatch:
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: piotr/upstream-writer-authority
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Apply Topic C wiring patches
+        run: python3 _agent/topic-c/apply.py
+      - name: Commit wired files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            packages/daemon/src/domain/types.ts \
+            packages/daemon/src/server.ts \
+            packages/daemon/src/startup.ts \
+            packages/daemon/test/helpers/test-app.ts
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+            exit 0
+          fi
+          git commit -m "feat(daemon): wire writer authority into types, server, startup, test-app"
+          git push origin HEAD:piotr/upstream-writer-authority

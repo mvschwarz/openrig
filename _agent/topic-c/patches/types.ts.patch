@@ -1,0 +1,16 @@
+--- a/packages/daemon/src/domain/types.ts
++++ b/packages/daemon/src/domain/types.ts
+@@ -325,7 +325,12 @@
+   // PL-005 Phase B: notification dispatch events. Best-effort delivery;
+   // failure does NOT interrupt the underlying action being notified about.
+   | { type: "mission_control.notification_sent"; mechanism: string; target: string; qitemId: string | null; sentAt: string }
+-  | { type: "mission_control.notification_failed"; mechanism: string; target: string; qitemId: string | null; error: string; failedAt: string };
++  | { type: "mission_control.notification_failed"; mechanism: string; target: string; qitemId: string | null; error: string; failedAt: string }
++  // Writer authority (API-only fence for one protected product mutation)
++  | { type: "writer.acquired"; leaseId: string; resourceKind: string; resourceId: string; holderSession: string; generation: number; acquiredAt: string; expiresAt: string }
++  | { type: "writer.released"; leaseId: string; resourceKind: string; resourceId: string; holderSession: string; generation: number; releasedAt: string }
++  | { type: "writer.revoked"; leaseId: string; resourceKind: string; resourceId: string; previousHolder: string; revokedBySession: string; generation: number; reason: string; revokedAt: string }
++  | { type: "writer.transferred"; previousLeaseId: string; leaseId: string; resourceKind: string; resourceId: string; fromSession: string; toSession: string; generation: number; transferredAt: string };
+ 
+ export type PersistedEvent = RigEvent & {
+   seq: number;
