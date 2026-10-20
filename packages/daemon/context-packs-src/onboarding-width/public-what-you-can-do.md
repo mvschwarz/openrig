@@ -464,8 +464,9 @@ not have to tear one down to change it, and you rarely have to start from nothin
   the system see the live process **without launching anything**. A running seat that refuses every
   send because its tmux pane was never recorded (one launched by an older OpenRig) takes
   `rig reconcile-session <seat> --repair-missing-pane --no-launch`: it fills only the missing pane,
-  keeps the session and resume token, and never adopts. Plain reconcile adopts the seat into a new
-  session without its resume token. Both refuse while typing protection is on.
+  keeps the session and resume token, and never adopts. Plain reconcile adopts: a new session row
+  (any running row for the seat is superseded); it re-captures the resume token if it can, and
+  conversation continuity stays unverified. Both refuse while typing protection is on.
 - **`rig unclaim` / `rig release`** — stop managing one adopted session, or all of them,
   **without killing the process or the agent inside it**. Handing something back to its human is a
   first-class move, not an abandonment.
