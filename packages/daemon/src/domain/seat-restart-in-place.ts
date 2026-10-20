@@ -1076,13 +1076,14 @@ export function accountTextMark(capture: { history: string; all: string } | null
   const all = paneLines(capture.all);
   const end = Math.max(0, history.length - 1);
   const anchor = history.slice(Math.max(0, end - ANCHOR_LINES), end).map(lineDigest);
-  // The two captures can be separate tmux commands; if the pane moved between them, the anchor isn't where history ended.
-  if (!anchor.every((key, i) => lineDigest(all[end - anchor.length + i] ?? "") === key)) return null;
+  // The two captures can be separate tmux commands. If the pane moved between them, the anchor isn't where history
+  // ended, so the baseline is the whole pane with no anchor, and verify compares the whole pane.
+  const aligned = anchor.every((key, i) => lineDigest(all[end - anchor.length + i] ?? "") === key);
   const counts: Record<string, number> = {};
-  for (const line of accountLines(all.slice(end).join("\n"))) {
+  for (const line of accountLines((aligned ? all.slice(end) : all).join("\n"))) {
     counts[lineDigest(line)] = (counts[lineDigest(line)] ?? 0) + 1;
   }
-  return { anchor, counts };
+  return { anchor: aligned ? anchor : [], counts };
 }
 
 /** Whether a status `Account:` line names `expected` as a whole value: `bob@corp.com` doesn't match

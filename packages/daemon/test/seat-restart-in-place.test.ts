@@ -65,6 +65,8 @@ interface WorldOptions {
   screenBefore?: string;
   /** How many of the pane's last lines are its visible screen; the rest is history (default 3). */
   screenRows?: number;
+  /** History as the restart's history-only capture read it, when the pane moved before the whole-pane capture. */
+  historyCapture?: string;
   throwAt?: "signalPid" | "sendResumeCommand" | "readProcessAfter" | "signalPaneProcess" | "respawnPane" | "verifyResumeInPane" | "restorePaneOption";
   daemonStartedAt?: Date;
   /** Only post-relaunch process observations; preflight and stop retain the existing table. */
@@ -175,7 +177,7 @@ function world(options: WorldOptions = {}) {
     capturePaneHistory: async () => paneLines.join("\n"),
     capturePaneHistoryParts: async () => {
       const history = paneLines.slice(0, Math.max(0, paneLines.length - (options.screenRows ?? 3)));
-      return { history: history.join("\n"), all: paneLines.join("\n") };
+      return { history: options.historyCapture ?? history.join("\n"), all: paneLines.join("\n") };
     },
   } as unknown as TmuxAdapter;
 
@@ -1035,6 +1037,22 @@ describe("--verify compares only text after the restart, however much history tm
     expect(await verify(w)).toMatchObject({ outcome: "restarted_account_unverified", accountEvidence: { state: "not_observed" } });
   });
 
+  it("captures that don't line up give a whole-pane baseline: a new /status line still counts, the old one never does", async () => {
+    // The history-only capture read a, b, tail; by the whole-pane capture the pane read b, tail, then an old /status.
+    const restartMisaligned = async () => {
+      const w = world({ screenBefore: ["b", "tail", OLD].join("\n"), historyCapture: "a\nb\ntail", rollout });
+      expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "x" })).toMatchObject({ outcome: "restarted_account_unverified" });
+      expect(w.events().at(-1)!.accountTextAtRestart.anchor).toEqual([]);
+      return w;
+    };
+    const fresh = await restartMisaligned();
+    fresh.print(OLD);
+    expect(await verify(fresh)).toMatchObject({ outcome: "moved", accountEvidence: { state: "matched" } });
+
+    const unchanged = await restartMisaligned();
+    expect(await verify(unchanged)).toMatchObject({ outcome: "restarted_account_unverified", accountEvidence: { state: "not_observed" } });
+  });
+
   it("a restart recorded with the earlier whole-pane counts is still compared as before", async () => {
     const w = await restartedAfterOldStatus();
     w.db.prepare("UPDATE events SET payload = json_remove(json_set(payload, '$.accountLinesAtRestart', json(?)), '$.accountTextAtRestart') WHERE type = 'seat.restart_in_place_finished'")
@@ -1050,8 +1068,11 @@ describe("accountTextMark", () => {
     expect(accountTextMark({ history: "a\nb\ntail", all: "a\nb\ntail\nAccount: x\na\nb" }))
       .toEqual({ anchor: [key("a"), key("b")], counts: { [key("Account: x")]: 1 } });
   });
-  it("records nothing when the pane moved between the two captures", () => {
-    expect(accountTextMark({ history: "a\nb\ntail", all: "b\ntail\nAccount: x" })).toBeNull();
+  it("counts the whole pane, with no anchor, when the two captures don't line up", () => {
+    expect(accountTextMark({ history: "a\nb\ntail", all: "b\ntail\nAccount: x" })).toEqual({ anchor: [], counts: { [key("Account: x")]: 1 } });
+  });
+  it("records nothing when the pane couldn't be read", () => {
+    expect(accountTextMark(null)).toBeNull();
   });
 });
 
