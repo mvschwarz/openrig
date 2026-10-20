@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { SeatLaunchEnvironment } from "../src/domain/seat-launch-environment.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
@@ -83,6 +83,16 @@ describe.skipIf(process.platform !== "linux")("#1178 initial-shell environment p
       await tmux(["send-keys","-t","=seat:","Enter"]);
       expect(await waitFile(mode)).toEqual(["login"]);
     } finally { await tmux(["kill-server"]).catch(()=>{}); rmSync(home,{recursive:true,force:true,maxRetries:5,retryDelay:20}); }
+  });
+
+  it("does not reinterpret a restart that owns its existing command and provides no new seat environment", async () => {
+    const calls:string[][]=[];
+    const adapter=new TmuxAdapter(async()=>"",undefined,async args=>{calls.push(args);return "";});
+    const read=vi.fn(()=>({inheritTmuxEnvironment:false,env:{PATH:"/unused"}}));
+    adapter.launchEnvironment=read;
+    expect((await adapter.respawnPane("%1","previous exact command",{cwd:"/private"})).ok).toBe(true);
+    expect(read).not.toHaveBeenCalled();
+    expect(calls.at(-1)).toEqual(["tmux","respawn-pane","-t","%1","-c","/private","previous exact command"]);
   });
 
 });

@@ -155,8 +155,8 @@ async function driveEveryMethod(): Promise<RunCall[]> {
   await recordingAdapter(calls, { composer: true }).captureComposerSnapshot("%1");
   const scoped = recordingAdapter(calls);
   scoped.launchEnvironment = () => ({ inheritTmuxEnvironment: false, env: { PATH: "/a b:$HOME", PRIVATE_SYNTHETIC: "it's a\nvalue" } });
-  await scoped.createSession(SESSION, "/w x", { Q: "it's" });
-  await scoped.respawnPane("%1", "printf '$HOME'", { env: { A: "b c" } });
+  await scoped.createSession(SESSION, "/w x", { OPENRIG_NODE_ID: "n1", Q: "it's" });
+  await scoped.respawnPane("%1", "printf '$HOME'", { env: { OPENRIG_NODE_ID: "n1", A: "b c" } });
   return calls;
 }
 

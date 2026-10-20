@@ -352,7 +352,7 @@ export class TmuxAdapter {
    * Keep the configured default-command and default-shell lookup, including rc functions.
    */
   private async scopedLaunchCommand(seatEnv: Record<string, string>, command?: string): Promise<string[] | null> {
-    if (!this.launchEnvironment) return null;
+    if (!this.launchEnvironment || !seatEnv.OPENRIG_NODE_ID) return null;
     try {
       const policy = this.launchEnvironment();
       if (policy.inheritTmuxEnvironment) return null;
