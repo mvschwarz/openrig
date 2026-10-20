@@ -1,4 +1,5 @@
 import nodePath from "node:path";
+import { shellQuote } from "../adapters/shell-quote.js";
 import { effortPrecedence, readSeatEffort } from "./seat-effort.js";
 import type Database from "better-sqlite3";
 import {
@@ -149,6 +150,7 @@ export class RigInstantiator {
     const launchedSessionNames: string[] = [];
     const instantiateWarnings: string[] = [];
     const envCleanupErrors: string[] = [];
+    const envCleanupFailures: { logicalId: string; error: string }[] = [];
 
     for (const logicalId of launchOrder) {
       const result = await this.nodeLauncher.launchNode(rigId!, logicalId, opts?.env ? { env: opts.env } : undefined);
@@ -159,8 +161,12 @@ export class RigInstantiator {
           instantiateWarnings.push(...result.warnings);
         }
       } else {
-        nodeResults.push({ logicalId, status: "failed", error: result.message });
-        if (result.code === "seat_env_cleanup_failed") envCleanupErrors.push(`${logicalId}: ${result.message}`);
+        const failure = { logicalId, status: "failed" as const, error: result.message };
+        nodeResults.push(failure);
+        if (result.code === "seat_env_cleanup_failed") {
+          envCleanupFailures.push(failure);
+          envCleanupErrors.push(`${logicalId}: ${result.message}`);
+        }
       }
     }
 
@@ -186,6 +192,15 @@ export class RigInstantiator {
         ...(envCleanupErrors.length ? { envCleanupErrors } : {}),
       };
     }
+
+    // A partial launch keeps the rig: repeating up would collide with its live seats.
+    // Leave all-failed retry guidance and any unconfirmed-removal warning intact.
+    envCleanupFailures.forEach((failure, index) => {
+      const command = `rig launch ${shellQuote(rigId!)} ${shellQuote(failure.logicalId)}`;
+      failure.error = failure.error.replace(/ Run it again\.$/, "")
+        + ` Other seats are still running. To relaunch only "${failure.logicalId}", run: ${command}. This does not reapply the unsaved --env values. If those values are needed, stop the team first, then re-run the original rig up command with --env.`;
+      envCleanupErrors[index] = `${failure.logicalId}: ${failure.error}`;
+    });
 
     // 6. Propagate restorePolicy to session metadata (best-effort)
     try {
