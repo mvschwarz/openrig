@@ -269,7 +269,9 @@ a message arrives from <unknown sender>. To say who it's from, send a queue item
 with a declared source (recorded as declared; a registered human in
 rig gateway human list gets a reply route):
   rig queue create --source <you>@external --destination <seat> --summary "<one line>" --body-file <file>
-or join the team with rig attach --self so your sends carry your name.
+or join this shell to a seat so its sends carry the seat's name
+(rig attach --help covers adding the shell as a new member):
+  eval "$(rig attach --self --rig <rigId> --node <logicalId> --print-env)"
 
 The two-step send pattern (paste text, wait, submit Enter) is handled
 automatically. By default a send is REFUSED only on POSITIVE evidence the target

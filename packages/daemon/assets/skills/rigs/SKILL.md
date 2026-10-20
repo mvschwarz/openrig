@@ -114,6 +114,8 @@ person needs in their project or home folder and name that path.
   If they decline, a message that must still say who it's from can go as a queue item with a declared source,
   `rig queue create --source <their id>@external --destination <seat> --summary "<one line>" --body-file <file>`: the
   seat sees that name, recorded as declared, and can reply to them if they're registered (`rig gateway human list`).
+  A declared name is a claim, not a seat's own identity: for a team that acts only on seat identity, the attached
+  shell above is the route.
 - **Give the operator the goal:** ask what they want worked on, in which repository and on which branch, unless they've
   said. Find the `operator.agent` row in `rig ps --nodes --rig kernel --json`, take its `canonicalSessionName`
   (never the logical ID or a guessed name) and send:
