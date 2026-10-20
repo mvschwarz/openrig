@@ -455,7 +455,6 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   let releaseRef: (qitemId: string) => void = () => {};
   // The wire's own dispatcher, bound once the wire exists: a delivery step that must mint a new durable decision.
   let selfDispatch: (decisionId: string, payload: unknown) => { ok: boolean; error?: string } = () => ({ ok: false, error: "wire not built" });
-  let ackRef: (decisionId: string) => void = () => {};
 
   const deliver = outboundReady
     ? subsystemSlackDeliver({
@@ -667,86 +666,21 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
     releaseRef(key);
   };
   // An earlier attempt of this exact decision may be in Slack with its response lost. A gate that would hold, trim, defer
-  // or ack it (instead of handing it to delivery) resolves that first, through the reconciler: found (the whole post)
-  // goes to delivery unchanged, which records receipts for what was posted and never posts it again in another form; a
-  // scan that can't be read retains the decision. Never-attempted and absent attempts, and a scan that couldn't finish,
-  // go on through the gate: where it posts, delivery reconciles (keeping its at-least-once post for an unfinished scan);
-  // where it holds, that post waits for the release instead of landing in quiet. A post split into parts whose first
-  // part is in Slack (partial) also goes on through the gate, flagged: it is one post, so a gate that would post or
-  // trim it finishes it unchanged through delivery instead, and a gate that holds it for quiet keeps it retained (see
-  // heldContinuation) so its missing parts never post into quiet. A decision that goes straight to delivery skips this.
-  const resolveEarlierAttempt = async (decision: Parameters<SubsystemDeliverFn>[0]):
-    Promise<{ settled: Awaited<ReturnType<SubsystemDeliverFn>> } | { partial: boolean }> => {
+  // or ack it (instead of handing it to delivery) resolves that first, through the reconciler. Found goes to delivery
+  // unchanged, which records receipts for what was posted and never posts it again in another form. A post confirmed
+  // partly in Slack (its first part found, the post not complete) also goes to delivery: only its own remaining parts
+  // post, under its own part ids and in its own thread and channel, even during quiet hours. A scan that can't be read
+  // retains the decision. Never-attempted and absent attempts, and a scan that couldn't finish, haven't started: they
+  // go on through the gate like any other post. Where the gate posts,
+  // delivery reconciles (keeping its at-least-once post for an unfinished scan); where it holds, the release posts it
+  // after quiet. A decision that goes straight to delivery skips this.
+  const resolveEarlierAttempt = async (decision: Parameters<SubsystemDeliverFn>[0]): Promise<Awaited<ReturnType<SubsystemDeliverFn>> | null> => {
     const landing = "landing" in deliver ? await (deliver as { landing: (d: typeof decision) => Promise<unknown> }).landing(decision) : "unattempted";
-    if (landing === "found") return { settled: await deliver(decision) };
+    if (landing === "found" || landing === "partial") return deliver(decision);
     if (typeof landing === "object" && landing !== null) {
-      return { settled: { ok: false as const, class: "reconcile-unreadable", detail: (landing as { unreadable: string }).unreadable } };
+      return { ok: false as const, class: "reconcile-unreadable", detail: (landing as { unreadable: string }).unreadable };
     }
-    return { partial: landing === "partial" };
-  };
-  // A partly posted decision held for quiet stays in the durable buffer (not acked), so its missing parts post later as
-  // the same post's continuation: its own part ids, the primary's thread and channel. The window's release finishes it
-  // (retainedContinuation); a restart replays it through the same gate, which holds it again during quiet and finishes
-  // it through delivery once quiet is over.
-  const heldContinuation = (decision: Parameters<SubsystemDeliverFn>[0]) => ({ ok: false as const, class: "quiet-held-continuation",
-    detail: `part of ${decision.decisionId} is in Slack; the rest waits for quiet hours to end` });
-  // The partly posted decision a held ask belongs to, if one is retained: the release finishes it under its own id
-  // rather than posting the ask again under the release's (whose first part would repeat what's already in Slack).
-  const retainedContinuation = async (qitemId: string, key: string) => {
-    const carries = (d: { payload?: unknown }) => {
-      const q = (d.payload ?? {}) as OutboundPostPayload & { memberReceipts?: Array<{ notificationKey: string }> };
-      return (q.notificationKey ?? q.qitemId) === key || q.memberReceipts?.some((m) => m.notificationKey === key) === true
-        || (q.qitemId === qitemId && !q.notificationKey);
-    };
-    for (const d of new DispatchBuffer(opts.home).pendingStrict()) {
-      if (d.decisionId.startsWith("quiet-release:") || !carries(d)) continue;
-      const landing = "landing" in deliver ? await (deliver as { landing: (x: typeof d) => Promise<unknown> }).landing(d) : "unattempted";
-      if (landing === "partial") return d;
-      // Can't tell whether this one is partly in Slack: never treated as "no continuation" (that would post afresh).
-      if (typeof landing === "object" && landing !== null) return { unreadable: (landing as { unreadable: string }).unreadable };
-    }
-    return undefined;
-  };
-  // One finisher per decision at a time: a second caller (its own replay, a release, another member's release) joins
-  // the first and takes its result, so two callers never both find a part missing and both post it. In-process only;
-  // across processes the marker reconcile applies.
-  const finishing = new Map<string, Promise<Awaited<ReturnType<SubsystemDeliverFn>>>>();
-  const exclusive = (decisionId: string, run: () => Promise<Awaited<ReturnType<SubsystemDeliverFn>>>) => {
-    const current = finishing.get(decisionId);
-    if (current) return current;
-    const running = run().finally(() => finishing.delete(decisionId));
-    finishing.set(decisionId, running);
-    return running;
-  };
-  // A partly posted decision held for quiet: each ask it carries is held, with a continuation note naming it, and the
-  // decision stays retained for the release to finish.
-  const holdAsContinuation = (decision: Parameters<SubsystemDeliverFn>[0], members: Array<{ qitemId: string; notificationKey: string }>,
-    quiet: NonNullable<ReturnType<typeof quietHoldFor>>, recipient: string) => {
-    const jobsRepo = new WatchdogJobsRepository(opts.queueRepo.db);
-    for (const m of members) {
-      holdForQuiet({ queueRepo: opts.queueRepo, jobsRepo, qitemId: m.qitemId, entityId: recipient, hold: { ...quiet, notificationKey: m.notificationKey }, continues: decision.decisionId });
-    }
-    return heldContinuation(decision);
-  };
-
-  // A partly posted decision is finished only for an ask still owed. Once every ask it carries is resolved (a posted
-  // receipt, or a quiet-release disposition: the row closed, was superseded, moved to someone else or fell below the
-  // posting threshold), it is drained without posting. Only when all are: a later part can carry several digest
-  // members and its text is fixed by the recorded cuts, so while any member is still owed the post finishes whole (its
-  // first part already showed every member). A key with only a hold note isn't resolved: its release still owns it.
-  const carriedKeys = (payload: unknown) => {
-    const q = (payload ?? {}) as OutboundPostPayload & { memberReceipts?: Array<{ qitemId: string; notificationKey: string }> };
-    return q.memberReceipts ?? (q.qitemId ? [{ qitemId: q.qitemId, notificationKey: q.notificationKey ?? q.qitemId }] : []);
-  };
-  const keyResolved = (m: { qitemId: string; notificationKey: string }) =>
-    opts.queueRepo.transitionLog.hasOwnerNotificationReceipt(m.qitemId, m.notificationKey)
-    || opts.queueRepo.listTransitions(m.qitemId).some((t) => (t.transitionNote ?? "").startsWith("quiet-release-disposition ")
-      && (t.transitionNote ?? "").split(/\s+/).includes(`notification_key=${m.notificationKey}`));
-  const drainable = (d: Parameters<SubsystemDeliverFn>[0]) => {
-    if ((d.payload as { quietRelease?: boolean } | undefined)?.quietRelease) return false;
-    if (!("unfinished" in deliver) || !(deliver as { unfinished: (x: typeof d) => boolean }).unfinished(d)) return false;
-    const keys = carriedKeys(d.payload);
-    return keys.length > 0 && keys.every(keyResolved);
+    return null;
   };
 
   // A digest post was decided before it was posted. By the time it is delivered (a buffered post replayed after a
@@ -759,16 +693,15 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   // have landed is resolved by the reconciler first. If the quiet state can't be read, nothing posts: the members keep
   // their digest notes, so the next flush selects them again.
   const deliverDigestPost = async (decision: Parameters<SubsystemDeliverFn>[0], p: OutboundPostPayload) => {
-    const earlier = await resolveEarlierAttempt(decision);
-    if ("settled" in earlier) return earlier.settled;
+    const settled = await resolveEarlierAttempt(decision);
+    if (settled) return settled;
     const recipient = (p.destinationSession ?? "").split("@")[0] ?? "";
     let quiet: ReturnType<typeof quietHoldFor>;
     try {
       quiet = recipient ? quietHoldFor(opts.queueRepo.db, recipient, new Date()) : null;
     } catch (error) {
       log(`digest post ${decision.decisionId} not posted: quiet hours couldn't be read: ${(error as Error).message}`);
-      // A partly posted digest is kept, so a later attempt finishes it rather than a new digest repeating its start.
-      return earlier.partial ? { ok: false as const, class: "quiet-unreadable", detail: (error as Error).message } : { ok: true as const };
+      return { ok: true as const };
     }
     const aggregate = (p as { memberReceipts?: Array<{ qitemId: string; notificationKey: string }> }).memberReceipts;
     const members = aggregate ?? (p.qitemId ? [{ qitemId: p.qitemId, notificationKey: p.notificationKey ?? p.qitemId }] : []);
@@ -781,13 +714,6 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       const row = opts.queueRepo.getById(m.qitemId);
       return !!row && row.humanIntent !== "update" && isEscalationClass(row.tags);
     };
-    if (earlier.partial) {
-      // Part of it is in Slack: it is one post, never trimmed. Outside quiet (or with an escalation still to post) it
-      // finishes as it is; during quiet its routine members are held and the post stays retained for the release.
-      const open = members.filter((m) => !owned(m));
-      if (!quiet || open.some(escalation)) return deliver(decision);
-      return holdAsContinuation(decision, open, quiet, recipient);
-    }
     const kept = members.filter((m) => {
       if (owned(m)) return false;
       if (!quiet) return true;
@@ -807,8 +733,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
     return res.ok ? { ok: true as const } : { ok: false as const, class: "kept-dispatch-refused", detail: res.error };
   };
 
-  const engineDeliver: SubsystemDeliverFn = (decision) => exclusive(decision.decisionId, () => engineDeliverOnce(decision));
-  const engineDeliverOnce: SubsystemDeliverFn = async (decision) => {
+  const engineDeliver: SubsystemDeliverFn = async (decision) => {
     const p = ((decision as { payload?: unknown }).payload ?? {}) as OutboundPostPayload & { deliveryDeferralFire?: boolean };
     // The decision-resolved notice is written at closure, so a closed row is its normal case.
     if (replayedAtStart.has(decision.decisionId) && p.qitemId && p.ownerNotificationKind !== "human-decision-resolved"
@@ -818,10 +743,6 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         dropStaleNotification(p, state);
         return { ok: true as const };
       }
-    }
-    if (drainable(decision)) {
-      log(`partly posted ${decision.decisionId} not finished: every ask it carries is resolved`);
-      return { ok: true as const };
     }
     // The T+30 deferral FIRE executes an already-made decision — never re-consult
     // (a re-consult would re-defer: the immediate-plus-deferred shape AM-F3 forbids).
@@ -839,8 +760,8 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         releaseRef(p.qitemId);
         return { ok: true as const };
       }
-      const earlier = await resolveEarlierAttempt(decision);
-      if ("settled" in earlier) return earlier.settled;
+      const settled = await resolveEarlierAttempt(decision);
+      if (settled) return settled;
       const verdict = !p.qitemId ? "post" : await confirmReleaseAtPost({
         queueRepo: opts.queueRepo,
         jobsRepo: new WatchdogJobsRepository(opts.queueRepo.db),
@@ -850,35 +771,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         qitemId: p.qitemId,
         notificationKey: key,
       });
-      if (verdict === "post") {
-        // A held ask whose original post is partly in Slack is finished under the original's id, never posted afresh.
-        let original: Awaited<ReturnType<typeof retainedContinuation>>;
-        try { original = p.qitemId ? await retainedContinuation(p.qitemId, key) : undefined; }
-        catch (error) { return { ok: false as const, class: "buffer-unreadable", detail: (error as Error).message }; }
-        if (original && "unreadable" in original) {
-          // Nothing posts now. Acked like a declined release: the window's job (the ask has neither a receipt nor a
-          // disposition) dispatches it again at its next evaluation, which reads history afresh.
-          log(`release ${decision.decisionId} not posted: a retained original for ${key} couldn't be checked: ${original.unreadable}`);
-          releaseRef(p.qitemId!);
-          return { ok: true as const };
-        }
-        if (!original) return deliver(decision);
-        const finished = await exclusive(original.decisionId, () => deliver(original));
-        if (finished.ok) ackRef(original.decisionId);
-        return finished;
-      }
-      // A disposition resolves the ask now: a retained partly posted original that carries only resolved asks is drained
-      // here rather than at the next restart. (A disposition the release job writes can't reach the buffer; the lazy
-      // drain at the top of delivery covers that one.)
-      if (verdict === "declined" && p.qitemId) {
-        try {
-          for (const d of new DispatchBuffer(opts.home).pendingStrict()) {
-            if (!d.decisionId.startsWith("quiet-release:") && carriedKeys(d.payload).some((m) => m.notificationKey === key) && drainable(d)) ackRef(d.decisionId);
-          }
-        } catch (error) {
-          log(`retained originals for ${key} not checked: ${(error as Error).message}`);
-        }
-      }
+      if (verdict === "post") return deliver(decision);
       // Declined (the row says why) or couldn't be checked (nothing written): either way nothing posts now. Acking is
       // safe because the window's release job owns redelivery until the ask has a receipt or a disposition; keeping it
       // buffered would wait for a restart and block the job's own re-dispatch of the same decision id.
@@ -892,6 +785,14 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         return { ok: true as const };
       }
       return deliver(decision);
+    }
+    // A post confirmed partly in Slack finishes without consulting quiet hours, so it is resolved before the decision
+    // (which reads them). Only a started multipart post is checked here, from the stores first, so an ordinary
+    // retry isn't scanned twice; any other attempted decision is resolved at the gate below.
+    const started = "unfinished" in deliver && (deliver as { unfinished: (d: typeof decision) => boolean }).unfinished(decision);
+    if (started) {
+      const settled = await resolveEarlierAttempt(decision);
+      if (settled) return settled;
     }
     let ruled: DeliveryDecision | null;
     try {
@@ -911,32 +812,10 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       releaseRef(p.notificationKey ?? p.qitemId!);
       return { ok: true as const };
     }
-    if (ruled && (ruled.outcome === "log" || (ruled.outcome === "hold" && ruled.quietHold)
+    if (!started && ruled && (ruled.outcome === "log" || (ruled.outcome === "hold" && ruled.quietHold)
       || ruled.outcome === "digest" || ruled.deferMinutes !== undefined)) {
-      const earlier = await resolveEarlierAttempt(decision);
-      if ("settled" in earlier) return earlier.settled;
-      if (earlier.partial) {
-        // Part of it is already in Slack. Whether to finish it now is decided from the recipient's actual quiet state,
-        // not from the outcome ("log" is decided before quiet is looked at): outside quiet (or for an escalation) it
-        // finishes as it is, rather than being logged, digested or deferred; during quiet it is held as a continuation;
-        // if quiet can't be read, it is retained and nothing posts.
-        const recipient = (p.destinationSession ?? "").split("@")[0] ?? "";
-        let quiet: ReturnType<typeof quietHoldFor>;
-        try {
-          quiet = ruled.outcome === "hold" && ruled.quietHold ? ruled.quietHold
-            : p.humanIntent !== "update" && isEscalationClass(p.tags) ? null
-              : quietHoldFor(opts.queueRepo.db, recipient, new Date());
-        } catch (error) {
-          return { ok: false as const, class: "quiet-unreadable", detail: (error as Error).message };
-        }
-        if (!quiet) return deliver(decision);
-        const episodeKey = p.notificationKey ?? p.qitemId!;
-        if (ruled.outcome === "hold") recordTerminationOnce(p, ruled);
-        const held = holdAsContinuation(decision, [{ qitemId: p.qitemId!, notificationKey: episodeKey }], quiet, recipient);
-        outboundSeen.mark(episodeKey, "quiet-held");
-        releaseRef(p.qitemId!);
-        return held;
-      }
+      const settled = await resolveEarlierAttempt(decision);
+      if (settled) return settled;
     }
     if (ruled) {
       recordTerminationOnce(p, ruled);
@@ -1005,7 +884,6 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
     deliver: outboundReady ? engineDeliver : deliver,
     log,
   });
-  ackRef = (decisionId) => wire.dispatcher.onAck(decisionId);
   selfDispatch = (decisionId, payload) =>
     wire.dispatcher.dispatch(OUTBOUND_OP, String((payload as { destinationSession?: string }).destinationSession ?? ""), payload, { decisionId });
 

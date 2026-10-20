@@ -27,8 +27,6 @@ const HOLD_PREFIX = "delivery-decision: quiet-hold";
 const DISPATCHED_PREFIX = "quiet-release-dispatched";
 const DISPOSITION_PREFIX = "quiet-release-disposition";
 const RETURNED_PREFIX = "quiet-release-returned";
-/** Written beside a hold when the held ask's post is already partly in Slack: the release finishes that post. */
-const CONTINUATION_PREFIX = "quiet-hold-continuation";
 
 export interface QuietHold {
   windowId: string;
@@ -51,32 +49,26 @@ const hasToken = (note: string, prefix: string, key: string): boolean =>
   note.startsWith(`${prefix} `) && note.split(/\s+/).includes(`notification_key=${key}`);
 
 /** Record a held ask on its row (once per episode) and make sure its window's release job is armed: one SQLite
- *  transaction, so a hold note never commits without the job that releases it (or the reverse). `continues` names the
- *  decision whose post is already partly in Slack: its continuation note is written in the same transaction. */
+ *  transaction, so a hold note never commits without the job that releases it (or the reverse). */
 export function holdForQuiet(input: {
   queueRepo: QueueRepository;
   jobsRepo: WatchdogJobsRepository;
   qitemId: string;
   entityId: string;
   hold: QuietHold;
-  continues?: string;
 }): void {
-  const key = input.hold.notificationKey;
-  noteWithReleaseJob(input.queueRepo, input.jobsRepo, input.hold.windowId, input.entityId, input.qitemId, (notes) => [
-    notes.some((n) => parseQuietHoldNote(n)?.notificationKey === key) ? null : formatQuietHoldNote(input.hold),
-    input.continues && !notes.some((n) => hasToken(n, CONTINUATION_PREFIX, key))
-      ? `${CONTINUATION_PREFIX} decision=${input.continues} notification_key=${key}` : null,
-  ]);
+  noteWithReleaseJob(input.queueRepo, input.jobsRepo, input.hold.windowId, input.entityId, input.qitemId, (notes) =>
+    notes.some((n) => parseQuietHoldNote(n)?.notificationKey === input.hold.notificationKey) ? null : formatQuietHoldNote(input.hold));
 }
 
 /** Arm the window's release job and write a note on the row, together or not at all. `note` returns the note to write,
  *  or null when the row already has it. Events from the note are delivered only after the transaction commits. */
 function noteWithReleaseJob(queueRepo: QueueRepository, jobsRepo: WatchdogJobsRepository, windowId: string, entityId: string,
-  qitemId: string, note: (existing: string[]) => string | null | Array<string | null>): void {
+  qitemId: string, note: (existing: string[]) => string | null): void {
   const events = queueRepo.db.transaction(() => {
     armQuietRelease({ jobsRepo, windowId, entityId });
-    const texts = [note(queueRepo.listTransitions(qitemId).map((t) => t.transitionNote ?? ""))].flat().filter((t): t is string => !!t);
-    return texts.flatMap((text) => queueRepo.updateWithinTransaction({ qitemId, actorSession: "daemon@kernel", transitionNote: text }).persistedEvents);
+    const text = note(queueRepo.listTransitions(qitemId).map((t) => t.transitionNote ?? ""));
+    return text ? queueRepo.updateWithinTransaction({ qitemId, actorSession: "daemon@kernel", transitionNote: text }).persistedEvents : [];
   })();
   queueRepo.notifyCommitted(events);
 }
@@ -137,12 +129,6 @@ export async function releaseVerdict(input: {
     : latest && `${input.qitemId}:${latest.transitionId}` !== input.notificationKey ? "superseded"
       : alert ? "recipient-changed"
         : "below-posting-threshold";
-  // A post that already started is finished, not dropped because the posting threshold rose after its first part
-  // landed (as it is outside quiet). Only the threshold: a closed, superseded or reassigned ask still isn't finished.
-  if (reason === "below-posting-threshold" && row && (row.destinationSession ?? "").split("@")[0] === input.entityId
-    && input.queueRepo.listTransitions(input.qitemId).some((t) => hasToken(t.transitionNote ?? "", CONTINUATION_PREFIX, input.notificationKey))) {
-    return { kind: "post", alert: { ...row, notificationKey: input.notificationKey } as QueueItem };
-  }
   return { kind: "disposition", reason };
 }
 
