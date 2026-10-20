@@ -1404,7 +1404,7 @@ export function padCompactNodeRow(rig: string, session: string, lifecycle: strin
     fitCell(rig, 22),
     fitCell(session, 38),
     fitCell(lifecycle, 11),
-    fitCell(activity, 14),
+    fitCell(activity, 17),
     fitCell(work, 6),
     reason,
   ].join("");

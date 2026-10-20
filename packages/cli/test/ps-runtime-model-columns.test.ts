@@ -53,6 +53,13 @@ describe("rig ps — runtime + declared model", () => {
     expect(header).not.toContain("MODEL");
   });
 
+  it("padCompactNodeRow leaves padding between count suffix and WORK", () => {
+    const row = padCompactNodeRow("my-rig", "dev-driver@my-rig", "running", "needs-input x1", "yes", "—");
+    expect(row).not.toContain("needs-input x1yes");
+    expect(row.slice(22 + 38 + 11, 22 + 38 + 11 + 17)).toBe("needs-input x1   ");
+    expect(row.slice(22 + 38 + 11 + 17, 22 + 38 + 11 + 17 + 6)).toBe("yes   ");
+  });
+
   it("RED: the compact PROJECTION carries runtime and model (node-inventory has both; ps dropped them)", () => {
     const [compact] = compactNodeProjection([node({ runtime: "codex", model: "gpt-5.6-sol" })] as never);
     expect(compact.runtime).toBe("codex");

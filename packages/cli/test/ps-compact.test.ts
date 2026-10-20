@@ -609,7 +609,35 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     expect(assignedLine).toBeDefined();
     // WORK begins after the fixed RIG/SESSION/LIFECYCLE/ACTIVITY columns.
     // It renders the total active assignment count (6), never the pending-only count (3).
-    expect(assignedLine!.slice(22 + 38 + 11 + 14, 22 + 38 + 11 + 14 + 6).trim()).toBe("6");
+    expect(assignedLine!.slice(22 + 38 + 11 + 17, 22 + 38 + 11 + 17 + 6).trim()).toBe("6");
+  });
+
+  it("compact human table allows for count suffix in ACTIVITY without overflowing into WORK", async () => {
+    const node = RIG_A_NODES.find((n) => n.logicalId === "dev1.impl")!;
+    const previousActivityState = (node as unknown as Record<string, unknown>).activityState;
+    const previousHasWork = node.hasAssignedWork;
+    (node as unknown as Record<string, unknown>).activityState = {
+      activity: "needs_input",
+      display: "needs-input",
+      needsInput: { count: 1, reason: null },
+      decidedBy: null,
+    };
+    node.hasAssignedWork = true;
+    try {
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A"]);
+      });
+      const output = logs.join("\n");
+      const line = output.split("\n").find((l) => l.includes("dev1-impl@openrig-build"));
+      expect(line).toBeDefined();
+      expect(line).not.toContain("needs-input x1yes");
+      expect(line).toMatch(/needs-input x1\s+yes/);
+      expect(line!.slice(22 + 38 + 11, 22 + 38 + 11 + 17)).toBe("needs-input x1   ");
+      expect(line!.slice(22 + 38 + 11 + 17, 22 + 38 + 11 + 17 + 6)).toBe("yes   ");
+    } finally {
+      (node as unknown as Record<string, unknown>).activityState = previousActivityState;
+      node.hasAssignedWork = previousHasWork;
+    }
   });
 
   it("human node views explain a missing tmux session and the recovery path", async () => {
