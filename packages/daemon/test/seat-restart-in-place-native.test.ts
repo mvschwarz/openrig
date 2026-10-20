@@ -117,6 +117,8 @@ describe.runIf(available())("in-place restart, native (private tmux socket, stub
     const adapter = new CodexRuntimeAdapter({
       tmux: realTmux, launchPath,
       fsOps: { readFile: (p) => fs.readFileSync(p, "utf8"), writeFile: () => {}, exists: (p) => fs.existsSync(p), mkdirp: () => {}, homedir: root },
+      // #1524 (b): the stub keeps no Codex records, so stand in for them: the conversation, for a running stub process only.
+      readResumeEvidence: (pid) => stubPids().includes(pid) ? { threadId: TOKEN } : { reason: "no_log_row" },
     });
     const setupApp = createTestApp(db, { tmux: realTmux, adapters: { codex: adapter },
       appDeps: { seatActivityService: { getSeatState: () => ({ seatNodeId: "", activity: "working", needsInput: { count: 0, reason: null },

@@ -105,15 +105,16 @@ export async function runWorkflowBootSweep(
     }
 
     // 2. Lost-nudge recovery: routed-but-never-nudged pending packets.
+    const recoveredPackets = new Set<string>();
     for (const packet of packets) {
       if (packet.state === "pending" && packet.lastNudgeAttempt === null) {
         result.lostNudgesReissued += 1;
-        await deps.queueRepo.maybeNudge(
+        await deps.queueRepo.recoverLostNudge(
           packet.qitemId,
           packet.destinationSession,
-          undefined,
           instance.createdBySession,
         );
+        recoveredPackets.add(packet.qitemId);
       }
     }
 
@@ -138,12 +139,16 @@ export async function runWorkflowBootSweep(
       );
       // Re-nudge the overdue owner (the keepalive will keep firing on
       // its own cadence; boot gives the immediate wake).
-      await deps.queueRepo.maybeNudge(
-        verdict.evidence.packetId,
-        verdict.evidence.ownerSession,
-        undefined,
-        instance.createdBySession,
-      );
+      // Recovery above already owns this boot's attempt, including an uncertain
+      // or held original. An overdue verdict must not bypass that outcome.
+      if (!recoveredPackets.has(verdict.evidence.packetId)) {
+        await deps.queueRepo.maybeNudge(
+          verdict.evidence.packetId,
+          verdict.evidence.ownerSession,
+          undefined,
+          instance.createdBySession,
+        );
+      }
       // OPR.0.4.6.WF5 FR-2 class (b): ensure the durable exception item
       // at detection. Non-fatal: an item failure must not break the
       // sweep's other legs (the next pass re-detects — the guarantee).

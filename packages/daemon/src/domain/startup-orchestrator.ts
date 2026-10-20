@@ -197,7 +197,9 @@ type StartupDeliveryInput = StartupInput & {
 };
 
 export type StartupResult = { warnings?: string[] } & (
-  | { ok: true; startupStatus: "ready"; continuityOutcome: "resumed" | "fresh" | "forked" | "rebuilt"; submission?: { status: "unverified" | "staged"; reasons: string[]; warning?: string; diagnostics?: StartupSubmissionDiagnostic[] } }
+  | { ok: true; startupStatus: "ready"; continuityOutcome: "resumed" | "fresh" | "forked" | "rebuilt"; submission?: { status: "unverified" | "staged"; reasons: string[]; warning?: string; diagnostics?: StartupSubmissionDiagnostic[] };
+    /** Codex (#1524): the native process the managed resume was proven on, carried to restore's join. */
+    resumedProcess?: { pid: number; startedAt: string } }
   // `evidence` carries the last-N pane lines for `attention_required`
   // outcomes so restore-orchestrator's per-node mapping can populate
   // `attentionEvidence` on the RestoreNodeResult. Internal type only;
@@ -322,6 +324,7 @@ export class StartupOrchestrator {
           ? "rebuilt"
           : "fresh";
     let appliedLaunch: AppliedLaunchObservation | undefined;
+    let resumedProcess: { pid: number; startedAt: string } | undefined;
     const forkContext: PendingForkContext | undefined = input.adapter.runtime === "codex"
       && input.forkSource?.kind === "native_id" && input.forkSource.value?.trim()
       ? { parentToken: input.forkSource.value.trim(), isRestore: input.isRestore } : undefined;
@@ -440,6 +443,7 @@ export class StartupOrchestrator {
           });
           if (launchResult.ok) {
             appliedLaunch = launchResult.appliedLaunch;
+            resumedProcess = launchResult.resumedProcess;
             if (input.adapter.runtime === "claude-code" && launchResumeToken?.trim()) {
               await this.recordClaudeResumeLaunch(input.sessionId, input.binding.tmuxPane ?? input.binding.tmuxSession, launchResumeToken.trim(), launchResult.launchedProcess);
             }
@@ -754,7 +758,7 @@ export class StartupOrchestrator {
       : undefined;
     this.eventBus.emit({ type: "node.startup_ready", rigId: input.rigId, nodeId: input.nodeId, ...(submission ? { submission } : {}) });
 
-    return { ok: true, startupStatus: "ready", continuityOutcome, ...(submission ? { submission } : {}) };
+    return { ok: true, startupStatus: "ready", continuityOutcome, ...(submission ? { submission } : {}), ...(resumedProcess ? { resumedProcess } : {}) };
   }
 
   /** A failed attempt can continue only when it stopped before sending context.
