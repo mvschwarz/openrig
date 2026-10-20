@@ -228,8 +228,17 @@ describe("BootstrapOrchestrator", () => {
     expect(instantiate).toHaveBeenCalledWith(expect.any(String), expect.any(String), expect.objectContaining({ nonInterruptive: expected }));
   });
 
-  describe.each(["flat spec", "v1 bundle"])("one-off launch environment: %s", (format) => {
+  describe.each(["flat spec", "v1 bundle", "pod agent spec", "pod terminal spec"])("one-off launch environment: %s", (format) => {
+    const podSpec = format.startsWith("pod ");
+    const failedSeat = podSpec ? "team.dev" : "dev";
+    const isDevSession = (session: string) => session.endsWith("-dev") || session.startsWith("team-dev@");
     async function source(singleSeat = false) {
+      if (podSpec) {
+        fs.mkdirSync(path.join(tmpDir, "agents", "fixture"), { recursive: true });
+        fs.writeFileSync(path.join(tmpDir, "agents", "fixture", "agent.yaml"), 'name: fixture\nversion: "1.0.0"\nresources: {skills: []}\nprofiles: {default: {uses: {skills: []}}}\n');
+        const terminal = format === "pod terminal spec";
+        return { sourceRef: writeSpec(`version: "0.2"\nname: test-rig\npods:\n  - id: team\n    label: Team\n    members:\n${(singleSeat ? ["dev"] : ["dev", "reviewer"]).map(id => `      - {id: ${id}, agent_ref: "${terminal ? "builtin:terminal" : "local:agents/fixture"}", runtime: ${terminal ? "terminal" : "claude-code"}, profile: ${terminal ? "none" : "default"}, cwd: .}`).join("\n")}\n    edges: []\nedges: []\n`) };
+      }
       const specPath = writeSpec(singleSeat ? SIMPLE_SPEC_YAML : SIMPLE_SPEC_YAML.replace("    runtime: claude-code", "    runtime: claude-code\n  - id: reviewer\n    runtime: codex"));
       if (format === "flat spec") return { sourceRef: specPath };
       const { LegacyBundleAssembler } = await import("../src/domain/bundle-assembler.js");
@@ -263,7 +272,7 @@ describe("BootstrapOrchestrator", () => {
       const { SessionRegistry } = await import("../src/domain/session-registry.js");
       const { EventBus } = await import("../src/domain/event-bus.js");
       const { NodeLauncher } = await import("../src/domain/node-launcher.js");
-      const { RigInstantiator } = await import("../src/domain/rigspec-instantiator.js");
+      const { RigInstantiator, PodRigInstantiator } = await import("../src/domain/rigspec-instantiator.js");
       const { RigSpecPreflight } = await import("../src/domain/rigspec-preflight.js");
       const { LegacyBundleSourceResolver } = await import("../src/domain/bundle-source-resolver.js");
       const rigRepo = new RigRepository(db);
@@ -274,7 +283,7 @@ describe("BootstrapOrchestrator", () => {
       const live = new Map<string, Record<string, string>>();
       const tmux = {
         createSession: vi.fn(async (session: string, _cwd: string, env: Record<string, string> = {}) => {
-          if (fault?.createFailure && session.endsWith("-dev")) return { ok: false, code: "fixture_create_failed", message: "fixture create failure" };
+          if (fault?.createFailure && isDevSession(session)) return { ok: false, code: "fixture_create_failed", message: "fixture create failure" };
           started.push({ session, hasProbe: "DOCSDESK_ENV_PROBE" in env });
           live.set(session, { ...env });
           return { ok: true };
@@ -285,17 +294,30 @@ describe("BootstrapOrchestrator", () => {
           live.delete(session);
           return { ok: true };
         }),
+        sendText: vi.fn(async () => ({ ok: true })), sendKeys: vi.fn(async () => ({ ok: true })),
         hasSession: async () => false, listPanes: async () => [],
         listSessions: async () => [], listWindows: async () => [],
         unsetSessionEnv: vi.fn(async (session: string, key: string) => {
-          if (fault && session.endsWith("-dev")) throw new Error("private unset fault");
+          if (fault && isDevSession(session)) throw new Error("private unset fault");
           delete live.get(session)?.[key];
         }),
       } as unknown as import("../src/adapters/tmux.js").TmuxAdapter;
       const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
       const preflight = new RigSpecPreflight({ rigRepo, tmuxAdapter: tmux, exec: async () => "fixture runtime" });
       const instantiator = new RigInstantiator({ db, rigRepo, sessionRegistry, eventBus, nodeLauncher, preflight });
-      const orch = buildOrchestrator({ instantiator, bundleSourceResolver: new LegacyBundleSourceResolver({ fsOps: realFsOps() }) });
+      const { PodRepository } = await import("../src/domain/pod-repository.js");
+      const { StartupOrchestrator } = await import("../src/domain/startup-orchestrator.js");
+      const adapter = (runtime: string) => ({ runtime,
+        listInstalled: vi.fn(async () => []), project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+        deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })), checkReady: vi.fn(async () => ({ ready: true })),
+        launchHarness: vi.fn(async () => ({ ok: true })),
+      });
+      const podInstantiator = new PodRigInstantiator({ db, rigRepo, podRepo: new PodRepository(db), sessionRegistry, eventBus,
+        nodeLauncher, startupOrchestrator: new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux }),
+        tmuxAdapter: tmux, fsOps: realFsOps(), adapters: { "claude-code": adapter("claude-code"), terminal: adapter("terminal") },
+        exec: async () => "fixture runtime", onboardingEnabledResolver: () => false,
+      });
+      const orch = buildOrchestrator({ instantiator, podInstantiator, bundleSourceResolver: new LegacyBundleSourceResolver({ fsOps: realFsOps() }) });
       return { orch, tmux, rigRepo, started, live };
     }
 
@@ -372,7 +394,7 @@ describe("BootstrapOrchestrator", () => {
           expect(observed?.data.status).toBe(singleSeat ? "failed" : "partial");
           expect([human.exit, json.exit]).toEqual(singleSeat ? [2, 2] : [1, 1]);
           expect(human.text).toContain("DOCSDESK_ENV_PROBE");
-          expect(human.text).toContain(started.find(s => s.session.endsWith("-dev"))!.session);
+          expect(human.text).toContain(started.find(s => s.isDevSession(session))!.session);
           expect(human.text).toContain(removal === "confirmed" ? "session was removed" : "check it and remove it");
           const errors = JSON.stringify(observed?.data.errors);
           if (singleSeat) {
@@ -382,11 +404,13 @@ describe("BootstrapOrchestrator", () => {
           } else {
             const retained = rigRepo.listRigs();
             expect(retained).toHaveLength(1);
-            const command = `rig launch '${retained[0]!.id}' 'dev'`;
+            const command = `rig launch '${retained[0]!.id}' '${failedSeat}'`;
+            const remove = `rig down '${retained[0]!.id}' --delete`;
             for (const rendered of [human.text, errors, json.text]) {
               expect(rendered).toContain(command);
               expect(rendered).toContain("does not reapply the unsaved --env values");
-              expect(rendered).toContain("stop the team first");
+              expect(rendered).toContain(remove);
+              expect(rendered).toContain("removes the team this launch just created");
               expect(rendered).toContain("original rig up command with --env");
               expect(rendered).not.toContain("Run it again.");
               expect(rendered).not.toContain(`${command} --env`);
@@ -398,7 +422,7 @@ describe("BootstrapOrchestrator", () => {
           expect(JSON.stringify(observed?.data.errors)).toContain("DOCSDESK_ENV_PROBE");
           expect(tmux.killSession).toHaveBeenCalledTimes(1);
           expect(live.size).toBe((singleSeat ? 0 : 1) + (removal === "confirmed" ? 0 : 1));
-          expect([...live].some(([session, env]) => session.endsWith("-dev") && "DOCSDESK_ENV_PROBE" in env)).toBe(removal !== "confirmed");
+          expect([...live].some(([session, env]) => isDevSession(session) && "DOCSDESK_ENV_PROBE" in env)).toBe(removal !== "confirmed");
         }
       });
     });
@@ -406,8 +430,8 @@ describe("BootstrapOrchestrator", () => {
     it("does not normalize an unrelated mixed legacy create failure", async () => {
       const { orch } = await realLaunch({ removal: "confirmed", createFailure: true });
       const result = await orch.bootstrap({ mode: "apply", ...await source() });
-      expect(result.status).toBe("completed");
-      expect(result.errors).toEqual([]);
+      expect(result.status).toBe(podSpec ? "partial" : "completed");
+      if (!podSpec) expect(result.errors).toEqual([]);
     });
 
     it("keeps a launch without an override unchanged", async () => {
