@@ -163,7 +163,7 @@ const FIXTURES: Record<string, unknown> = {
 };
 
 function fixtureClient(
-  overrides: Record<string, { status: number } | undefined> = {},
+  overrides: Record<string, { status: number; body?: unknown } | undefined> = {},
   responses: Record<string, unknown> = {},
   calls?: string[],
 ): DaemonClient {
@@ -171,7 +171,7 @@ function fixtureClient(
     const route = String(url).replace("http://x", "");
     calls?.push(route);
     const failure = overrides[route];
-    if (failure) return { ok: false, status: failure.status, json: async () => ({}) } as Response;
+    if (failure) return { ok: false, status: failure.status, json: async () => failure.body ?? null } as Response;
     if (route in responses) return { ok: true, json: async () => responses[route] } as Response;
     if (!(route in FIXTURES)) throw new Error(`unexpected route in test: ${route}`);
     return { ok: true, json: async () => FIXTURES[route] } as Response;
@@ -464,7 +464,26 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     expect(calls.filter((route) => route.startsWith("/api/seat/effort/"))).toHaveLength(1);
   });
 
-  it("keeps the agent detail usable when the seat-effort read fails", async () => {
+  it("keeps a refused seat-effort report in the agent detail", async () => {
+    const detailContext = {
+      section: "topology" as const, viewTab: "table" as const,
+      drill: [
+        { kind: "host" as const, name: "local" },
+        { kind: "rig" as const, name: "myrig" },
+        { kind: "pod" as const, name: "dev" },
+        { kind: "agent" as const, name: "dev.impl" },
+      ],
+    };
+    const report = { ok: false, code: "effort_unsupported_runtime", message: "runtime does not report effort" };
+    const snap = await hydrateSnapshot(
+      fixtureClient({ "/api/seat/effort/dev.impl%40myrig": { status: 409, body: report } }),
+      undefined, undefined, undefined, "myrig", detailContext,
+    );
+    expect(snap.seatEffort).toEqual({ seatRef: "dev.impl@myrig", report });
+    expect(snap.readErrors.some((error) => error.startsWith("seat-effort"))).toBe(false);
+  });
+
+  it("keeps the agent detail usable when the seat-effort read is missing", async () => {
     const detailContext = {
       section: "topology" as const, viewTab: "table" as const,
       drill: [
@@ -479,7 +498,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
       undefined, undefined, undefined, "myrig", detailContext,
     );
     expect(snap.seatEffort).toEqual({ seatRef: "dev.impl@myrig", report: null });
-    expect(snap.readErrors.some((error) => error.startsWith("seat-effort"))).toBe(true);
+    expect(snap.readErrors.some((error) => error.startsWith("seat-effort"))).toBe(false);
   });
 
   it("gives failed, attention, and needs-input truth precedence over terminal active/idle", async () => {
