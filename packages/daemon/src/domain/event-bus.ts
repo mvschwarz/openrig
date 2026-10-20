@@ -8,23 +8,6 @@ declare const notifyTokenBrand: unique symbol;
 export type NotifyToken = PersistedEvent & { readonly [notifyTokenBrand]: true };
 export type NotifyRegister = (token: PersistedEvent) => void;
 
-/** Outcome of validating a durable event-subscribe cursor before replay. */
-export type ReplayCursorResolution =
-  | {
-      ok: true;
-      since: number;
-      oldestSeq: number;
-      newestSeq: number;
-    }
-  | {
-      ok: false;
-      code: "cursor_expired";
-      since: number;
-      oldestSeq: number;
-      newestSeq: number;
-      message: string;
-    };
-
 export interface NotifyDrainStatus {
   state: "healthy" | "unparseable";
   watermark: number;
@@ -249,56 +232,6 @@ export class EventBus {
       ? this.db.prepare("SELECT seq FROM events WHERE rig_id = ? ORDER BY seq DESC LIMIT 1 OFFSET ?").get(rigId, count)
       : this.db.prepare("SELECT seq FROM events ORDER BY seq DESC LIMIT 1 OFFSET ?").get(count)) as { seq: number } | undefined;
     return row?.seq ?? 0;
-  }
-
-  /** Lowest retained seq, or 0 when the log is empty. */
-  oldestSeq(): number {
-    const row = this.db.prepare("SELECT MIN(seq) AS seq FROM events").get() as {
-      seq: number | null;
-    };
-    return row.seq ?? 0;
-  }
-
-  /** Highest retained seq, or 0 when the log is empty. */
-  newestSeq(): number {
-    return this.maxSeq();
-  }
-
-  /**
-   * Resolve a client cursor for durable replay.
-   *
-   * - Cursor behind the retained frontier (`since + 1 < oldest`) → `cursor_expired`
-   *   (client must resync from `oldestSeq - 1` or restart).
-   * - Cursor ahead of newest → empty replay (still ok).
-   * - Otherwise → ok; callers pass `since` to `replaySince` / `replayAll`.
-   */
-  resolveReplayCursor(since: number): ReplayCursorResolution {
-    const raw = Number(since);
-    const cursor = Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 0;
-    const oldest = this.oldestSeq();
-    const newest = this.newestSeq();
-    if (oldest > 0 && cursor + 1 < oldest) {
-      return {
-        ok: false,
-        code: "cursor_expired",
-        since: cursor,
-        oldestSeq: oldest,
-        newestSeq: newest,
-        message:
-          `event cursor ${cursor} is behind the retained frontier (oldestSeq=${oldest}); ` +
-          `resync from ${oldest - 1} or restart the subscription`,
-      };
-    }
-    return { ok: true, since: cursor, oldestSeq: oldest, newestSeq: newest };
-  }
-
-  /**
-   * Test/support helper: drop retained rows with seq <= throughSeq to simulate
-   * retention clipping (produces an expired-cursor condition for older cursors).
-   */
-  dropRetainedThrough(throughSeq: number): number {
-    const result = this.db.prepare("DELETE FROM events WHERE seq <= ?").run(throughSeq);
-    return Number(result.changes);
   }
 
   private drainNotifyRowsToQuiescence(startAfter: number): void {

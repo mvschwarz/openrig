@@ -590,47 +590,6 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
   );
 
-  // 24. rig_queue_status — thin read of one queue item (no transitions); complements rig_queue_show
-  server.tool(
-    "rig_queue_status",
-    "Read queue item status by id (item record only; use rig_queue_show for transitions)",
-    {
-      qitemId: z.string(),
-    },
-    async ({ qitemId }) => {
-      try {
-        const res = await client.get(`/api/queue/${encodeURIComponent(qitemId)}`);
-        return mapResult(res);
-      } catch (err) {
-        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
-      }
-    },
-  );
-
-  // 25. rig_events_replay — one-shot JSON poll of the durable EventBus (same log as SSE)
-  server.tool(
-    "rig_events_replay",
-    "One-shot durable event cursor poll/replay (nextCursor; expired cursor → error). Same EventBus as SSE — not a live subscription.",
-    {
-      since: z.number().optional().describe("Exclusive seq cursor"),
-      rigId: z.string().optional(),
-      limit: z.number().optional(),
-    },
-    async ({ since, rigId, limit }) => {
-      try {
-        const qs = new URLSearchParams();
-        if (since !== undefined) qs.set("since", String(since));
-        if (rigId) qs.set("rigId", rigId);
-        if (limit !== undefined) qs.set("limit", String(limit));
-        const q = qs.toString() ? `?${qs.toString()}` : "";
-        const res = await client.get(`/api/events/replay${q}`);
-        return mapResult(res);
-      } catch (err) {
-        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
-      }
-    },
-  );
-
   return server;
 }
 

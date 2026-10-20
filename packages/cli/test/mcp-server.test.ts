@@ -41,8 +41,8 @@ describe("MCP Server", () => {
     if (cleanup) await cleanup();
   });
 
-  // T1: MCP server lists all 25 tools: original 18, five queue tools, plus status + events replay
-  it("lists all 25 tools", async () => {
+  // T1: MCP server lists all 23 tools: the original 18 and the five queue tools
+  it("lists all 23 tools", async () => {
     await setup();
     const result = await mcpClient.listTools();
     const names = result.tools.map((t) => t.name).sort();
@@ -56,13 +56,11 @@ describe("MCP Server", () => {
       "rig_chatroom_watch",
       "rig_discover",
       "rig_down",
-      "rig_events_replay",
       "rig_ps",
       "rig_queue_claim",
       "rig_queue_create",
       "rig_queue_list",
       "rig_queue_show",
-      "rig_queue_status",
       "rig_queue_update",
       "rig_restore",
       "rig_rig_nodes",
@@ -301,7 +299,7 @@ describe("MCP Server", () => {
 
     // Verify server is responsive
     const result = await mcpClient.listTools();
-    expect(result.tools.length).toBe(25);
+    expect(result.tools.length).toBe(23);
 
     // Clean disconnect
     await cleanup();
@@ -315,7 +313,7 @@ describe("MCP Server", () => {
     await client2.connect(ct2);
 
     const result2 = await client2.listTools();
-    expect(result2.tools.length).toBe(25);
+    expect(result2.tools.length).toBe(23);
 
     await client2.close();
     await server2.close();
@@ -696,36 +694,4 @@ describe("MCP Server", () => {
       await cleanup();
     });
   });
-
-  it("rig_queue_status GETs /api/queue/:qitemId", async () => {
-    const getFn = vi.fn(async () => ({
-      status: 200,
-      data: { qitemId: "q-1", state: "pending" },
-    }));
-    await setup({ get: getFn });
-    const result = await mcpClient.callTool({
-      name: "rig_queue_status",
-      arguments: { qitemId: "q-1" },
-    });
-    expect(getFn).toHaveBeenCalledWith("/api/queue/q-1");
-    expect(result.isError).toBeFalsy();
-    await cleanup();
-  });
-
-  it("rig_events_replay polls /api/events/replay with cursor", async () => {
-    const getFn = vi.fn(async () => ({
-      status: 200,
-      data: { events: [], nextCursor: 10 },
-    }));
-    await setup({ get: getFn });
-    const result = await mcpClient.callTool({
-      name: "rig_events_replay",
-      arguments: { since: 10, rigId: "r01" },
-    });
-    expect(getFn).toHaveBeenCalledWith("/api/events/replay?since=10&rigId=r01");
-    expect(result.isError).toBeFalsy();
-    await cleanup();
-  });
-
-
 });
