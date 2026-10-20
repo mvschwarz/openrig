@@ -288,13 +288,14 @@ Example:
     const path = `/api/gateway/human/${encodeURIComponent(entityId)}/quiet${suffix}`;
     const res = method === "get" ? await client.get<Record<string, any>>(path)
       : method === "put" ? await client.put<Record<string, any>>(path, body) : await client.post<Record<string, any>>(path, body);
-    if (json) { console.log(JSON.stringify(res.data)); if (res.status !== 200) process.exitCode = 1; return; }
+    if (json) { console.log(JSON.stringify(res.data)); if (res.status !== 200) process.exitCode = 1; return false; }
     if (res.status !== 200) {
       console.error(`refused: ${res.data?.message ?? res.data?.error ?? `HTTP ${res.status}`}`);
       process.exitCode = 1;
-      return;
+      return false;
     }
     console.log(`${entityId} ${describeQuiet({ window: res.data.window ?? null, state: res.data.state })}`);
+    return true;
   };
   const actorBody = (opts: { actor?: string }) => ({ actor: resolveSenderSession() ?? opts.actor ?? SENDER_FALLBACK });
   quiet
@@ -315,7 +316,9 @@ Examples:
   rig gateway human quiet set alice --until 09:00 --tz America/New_York`)
     .action(async (entityId: string, opts: { daily?: string; until?: string; tz?: string; actor?: string; json?: boolean }) => {
       const timezone = opts.tz ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
-      await quietCall("put", entityId, "", { ...(opts.daily !== undefined ? { daily: opts.daily } : {}), ...(opts.until !== undefined ? { until: opts.until } : {}), timezone, ...actorBody(opts) }, opts.json);
+      const ok = await quietCall("put", entityId, "", { ...(opts.daily !== undefined ? { daily: opts.daily } : {}), ...(opts.until !== undefined ? { until: opts.until } : {}), timezone, ...actorBody(opts) }, opts.json);
+      // This machine's zone may not be the person's (an agent on a server setting someone's hours).
+      if (ok && opts.tz === undefined) console.log(`stored in ${timezone}; pass --tz for the person's own zone`);
     });
   quiet
     .command("end <entityId>")

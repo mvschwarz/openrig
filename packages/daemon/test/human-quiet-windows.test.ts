@@ -179,6 +179,19 @@ describe("daylight saving time", () => {
     });
   });
 
+  it("a night whose whole window falls in the skipped hour is empty: never on, and never advertised as the next start", () => {
+    const { quiet } = store();
+    // 02:10-02:20 on 2026-03-29 lies wholly in Berlin's skipped hour: both ends resolve to 03:00 CEST (01:00Z).
+    quiet.setDaily("alice", { start: "02:10", end: "02:20", timezone: "Europe/Berlin", setBy: "o", now: at("2026-03-28T12:00:00Z") });
+    const nextValid = { kind: "start", at: "2026-03-30T00:10:00.000Z" }; // 02:10 CEST the next night
+    for (const reading of ["2026-03-29T00:59:00Z", "2026-03-29T01:00:00Z", "2026-03-29T01:30:00Z"]) {
+      expect(quiet.quietStateFor("alice", at(reading)), reading).toMatchObject({ active: false, nextBoundary: nextValid });
+    }
+    expect(quiet.quietStateFor("alice", at("2026-03-30T00:15:00Z"))).toMatchObject({
+      active: true, occurrence: "2026-03-30", nextBoundary: { kind: "end", at: "2026-03-30T00:20:00.000Z" },
+    });
+  });
+
   it("a window that starts in the skipped hour starts at the next valid minute that night", () => {
     const { quiet } = store();
     quiet.setDaily("alice", { start: "02:30", end: "06:00", timezone: "Europe/Berlin", setBy: "o", now: at("2026-03-28T12:00:00Z") });

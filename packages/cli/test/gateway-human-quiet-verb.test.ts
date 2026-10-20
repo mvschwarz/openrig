@@ -79,6 +79,15 @@ describe("rig gateway human quiet", () => {
     expect(requests[0]!.body).toMatchObject({ until: "09:00", timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
   });
 
+  it("set without --tz says which zone it stored and how to choose the person's own; with --tz it says nothing extra", async () => {
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    await run("quiet", "set", "mike", "--daily", "22:00-07:00");
+    expect(logs).toContain(`stored in ${zone}; pass --tz for the person's own zone`);
+    logs.length = 0;
+    await run("quiet", "set", "mike", "--daily", "22:00-07:00", "--tz", "Europe/Berlin");
+    expect(logs.some((l) => l.startsWith("stored in "))).toBe(false);
+  });
+
   it("end, clear and show reach their routes; an active window shows when it ends", async () => {
     reply = { status: 200, body: { ok: true, window, state: { active: true, occurrence: "2026-10-20", revision: 1,
       nextBoundary: { kind: "end", at: "2026-10-21T05:00:00.000Z" } } } };

@@ -125,10 +125,13 @@ export class HumanQuietStore {
     const start = row.daily_start!, end = row.daily_end!, tz = row.timezone;
     const today = localDate(now, tz);
     let nextStart: number | null = null;
-    // The occurrence that started yesterday can still be on (a window across midnight); tomorrow's bounds the search.
-    for (const day of [addDays(today, -1), today, addDays(today, 1)]) {
+    // The occurrence that started yesterday can still be on (a window across midnight). The search runs two days ahead,
+    // so skipping one empty occurrence still finds the next real one.
+    for (const day of [addDays(today, -1), today, addDays(today, 1), addDays(today, 2)]) {
       const startMs = zonedLocalToInstant(day, start, tz).getTime();
       const endMs = zonedLocalToInstant(end > start ? day : addDays(day, 1), end, tz).getTime();
+      // A window wholly inside a skipped hour resolves both ends to the same instant: that night has no quiet at all.
+      if (endMs <= startMs) continue;
       if (startMs <= nowMs && nowMs < endMs && row.ended_occurrence !== day) {
         return { active: true, ...base, occurrence: day, nextBoundary: { kind: "end", at: new Date(endMs).toISOString() } };
       }
