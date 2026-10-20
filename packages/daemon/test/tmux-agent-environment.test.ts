@@ -58,6 +58,8 @@ describe.skipIf(process.platform === "win32")("#1178 initial-shell environment p
   }
   it("ordinary empty default-command keeps a login shell with generated pane metadata and scoped environment", async () => {
     const home=mkdtempSync(path.join(tmpdir(),"tmux-login-")), socket=path.join(home,"owned.sock");
+    // The owned login shell must not create history files while teardown removes its home.
+    writeFileSync(path.join(home,".bash_profile"),"unset HISTFILE\n");
     const env={...process.env,HOME:home}; delete env.TMUX; delete env.TMUX_TMPDIR;
     const tmux=async(args:string[]) => (await exec("tmux",["-S",socket,...args],{env})).stdout.trim();
     const adapter=new TmuxAdapter(async()=>{throw new Error("argv fixture only");},undefined,args=>tmux(args.slice(1)));
@@ -104,7 +106,7 @@ describe.skipIf(process.platform === "win32")("#1178 initial-shell environment p
       await tmux(["set-option","-g","update-environment","SSH_AUTH_SOCK SSH_ASKPASS Q1178_CUSTOM_UPDATED"]);
       await tmux(["set-option","-g","default-shell","/bin/bash"]);
       const script=path.join(home,"observe.sh");
-      writeFileSync(script,`printf '%s|%s|%s' "$SSH_AUTH_SOCK" "\${SSH_ASKPASS-absent}" "$Q1178_CUSTOM_UPDATED" > ${shellQuote(observed)}\nexec /bin/bash --noprofile --norc\n`);
+      writeFileSync(script,`export HISTFILE=/dev/null\nprintf '%s|%s|%s' "$SSH_AUTH_SOCK" "\${SSH_ASKPASS-absent}" "$Q1178_CUSTOM_UPDATED" > ${shellQuote(observed)}\nexec /bin/bash --noprofile --norc\n`);
       await tmux(["set-option","-g","default-command",`exec /bin/bash ${shellQuote(script)}`]);
       expect((await adapter.createSession("seat",home,{OPENRIG_NODE_ID:"owned-node"})).ok).toBe(true);
       expect(await waitFile(observed)).toEqual(["/synthetic/daemon-agent.sock","absent","daemon-custom"]);

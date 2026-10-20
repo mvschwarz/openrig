@@ -229,8 +229,8 @@ intentionally supplies values through tmux's global environment, opt in with
 when it detects custom tmux configuration; it never enables it automatically. The setting
 applies to future launches and successors, not running agents or your personal tmux server.
 If the scoped environment cannot be prepared, launch keeps its previous environment and
-reports a warning in the launch result and daemon log. This is not a promise that
-shell startup cannot add or override values.
+reports a warning in fresh launch results and the daemon log. For handovers, check
+that log for this warning. This is not a promise that shell startup cannot add or override values.
 
 
 ## Start the kernel and check its state
