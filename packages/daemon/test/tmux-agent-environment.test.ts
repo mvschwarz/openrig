@@ -78,7 +78,10 @@ describe.skipIf(process.platform !== "linux")("#1178 initial-shell environment p
       expect(processEnv).toContain("Q1178_DAEMON=daemon");
       expect(processEnv).not.toContain("Q1178_SERVER=tmux");
       expect(processEnv).toContain(`TMUX_PANE=${pane}`);
-      expect((await exec("ps",["-o","args=","-p",pid!])).stdout.trim()).toBe("/bin/bash -l");
+      const mode=path.join(home,"login-mode");
+      await tmux(["send-keys","-t","=seat:","-l",`if shopt -q login_shell; then printf login > ${shellQuote(mode)}; else printf nonlogin > ${shellQuote(mode)}; fi`]);
+      await tmux(["send-keys","-t","=seat:","Enter"]);
+      expect(await waitFile(mode)).toEqual(["login"]);
     } finally { await tmux(["kill-server"]).catch(()=>{}); rmSync(home,{recursive:true,force:true,maxRetries:5,retryDelay:20}); }
   });
 
