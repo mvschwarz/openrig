@@ -58,6 +58,9 @@ export interface DeliveryOutcome {
   error?: string;
   /** Structured continuity custody was durably created or identified. */
   continuityActionCompleted?: boolean;
+  /** The message a lone send bound, without the scheduler header. On recovery that's the occurrence's earlier body,
+   *  not the text composed now. */
+  sentMessage?: string;
 }
 
 export interface WatchdogDeliverySource {
@@ -736,7 +739,7 @@ export class WatchdogPolicyEngine {
       skipReason: delivery.status === "retained" ? "typing_guard_retained" : null,
       deliveryTargetSession: outcome.target.session,
       deliveryStatus: delivery.status,
-      deliveryMessage: digest?.line ?? sentMessage ?? outcome.message,
+      deliveryMessage: digest?.line ?? delivery.sentMessage ?? sentMessage ?? outcome.message,
       // OPR.0.5.6.24 — the delivery error/reason string survives into the
       // durable record so a policy can distinguish an interactive-prompt
       // refusal from a generic failure (status alone discards that identity).

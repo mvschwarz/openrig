@@ -72,8 +72,9 @@ function fixture(saved?: Buffer) {
 
 const seat = "worker@test";
 
-/** The queue, watchdog engine and scheduler on a fixture's store, wired as the daemon wires them. */
-function scheduled(f: ReturnType<typeof fixture>) {
+/** The queue, watchdog engine and scheduler on a fixture's store, wired as the daemon wires them. `withoutPreview`
+ *  leaves out the park-entry lookup, so wakes go with their stored message, as a daemon before the preview sent them. */
+function scheduled(f: ReturnType<typeof fixture>, { withoutPreview = false } = {}) {
   const bus = new EventBus(f.db);
   const repo = new QueueRepository(f.db, bus, { transport: f.transport as never, loadHumanRegistry: () => ({ ok: true, entities: [], warnings: [] }) });
   repo.attachOutbox(f.outbox);
@@ -83,13 +84,13 @@ function scheduled(f: ReturnType<typeof fixture>) {
   const engine = new WatchdogPolicyEngine({ jobsRepo: jobs, historyLog: history, eventBus: bus, deliver: f.deliver,
     resolvePreDeliveryTerminalReason: ({ jobId }) => repo.resolveWatchdogPreDeliveryTerminalReason(jobId),
     onWakeAttempt: ({ jobId, deliveryStatus }) => repo.recordWatchdogWakeAttempt(jobId, deliveryStatus),
-    resolveDigestEntry: ({ jobId, message }) => repo.parkReminderDigestEntry(jobId, message),
+    ...(withoutPreview ? {} : { resolveDigestEntry: ({ jobId, message }: { jobId: string; message: string }) => repo.parkReminderDigestEntry(jobId, message) }),
     priorDigestAttempt: (occurrence) => priorDigestAttempt(f.outbox, occurrence),
     occurrenceAttempted: (occurrence) => occurrenceAttempted(f.outbox, occurrence) });
   const scheduler = new WatchdogScheduler({ jobsRepo: jobs, policyEngine: engine });
-  const park = async (summary: string) => {
+  const park = async (summary: string, transitionNote = "parked") => {
     const row = await repo.create({ sourceSession: "orch@test", destinationSession: seat, body: summary, summary, nudge: false } as never) as unknown as { qitemId: string };
-    repo.update({ qitemId: row.qitemId, actorSession: seat, state: "blocked", blockedOn: "external:wait", transitionNote: "parked", wakeAfterSeconds: 600 } as never);
+    repo.update({ qitemId: row.qitemId, actorSession: seat, state: "blocked", blockedOn: "external:wait", transitionNote, wakeAfterSeconds: 600 } as never);
     return { qitemId: row.qitemId, jobId: repo.getParkWakeStatus(row.qitemId)!.ref };
   };
   const due = (jobId: string) => {
@@ -171,6 +172,31 @@ describe("a watchdog digest through the real outbox and draft-aware transport", 
     expect(next.history.listForJob(b.jobId, 1)[0]).toMatchObject({ deliveryStatus: "ok" });
     expect(next.history.listForJob(a.jobId, 1)[0]).toMatchObject({ deliveryStatus: "failed" });
     // Let the first process's abandoned pass end before its store closes.
+    unblock();
+    await lost;
+  });
+
+  it("a recovered lone wake's history names the body it was bound with, not a preview composed now", async () => {
+    const f = fixture();
+    await f.enable();
+    // The first process binds A's wake with its stored, generic message; A's park has a recorded continuation.
+    const first = scheduled(f, { withoutPreview: true });
+    const a = await first.park("A's wait", "continuation: hand the head to the planner");
+    first.due(a.jobId);
+    let reached!: () => void;
+    const pasting = new Promise<void>((done) => { reached = done; });
+    let unblock!: () => void;
+    f.hooks.paste = () => { reached(); return new Promise((done) => { unblock = done; }); };
+    const lost = first.scheduler.runTickNow();
+    await pasting;
+    // After the restart the engine would compose a preview, but the bound occurrence keeps its body and types nothing.
+    const g = fixture(f.db.serialize());
+    const next = scheduled(g);
+    await next.scheduler.runTickNow();
+    expect(g.submissions).toEqual([]);
+    const [history] = next.history.listForJob(a.jobId, 1);
+    expect(history!.deliveryMessage).toBe(`Wake timer fired for parked qitem ${a.qitemId}. Resume the recorded continuation and update the row.`);
+    expect(history!.deliveryMessage).not.toContain("Recorded continuation");
     unblock();
     await lost;
   });
