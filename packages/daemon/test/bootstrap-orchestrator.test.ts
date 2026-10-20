@@ -394,7 +394,7 @@ describe("BootstrapOrchestrator", () => {
           expect(observed?.data.status).toBe(singleSeat ? "failed" : "partial");
           expect([human.exit, json.exit]).toEqual(singleSeat ? [2, 2] : [1, 1]);
           expect(human.text).toContain("DOCSDESK_ENV_PROBE");
-          expect(human.text).toContain(started.find(s => s.isDevSession(session))!.session);
+          expect(human.text).toContain(started.find(s => isDevSession(s.session))!.session);
           expect(human.text).toContain(removal === "confirmed" ? "session was removed" : "check it and remove it");
           const errors = JSON.stringify(observed?.data.errors);
           if (singleSeat) {
