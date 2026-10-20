@@ -45,9 +45,14 @@ export function evidenceFromHookActivity(input: {
   if (input.activity.reason === "permission_request_pending") {
     return { ...base, permissionRequest: { id: input.activity.turnId ?? "uncorrelated" } };
   }
+  if (input.runtime === "claude-code" && input.activity.rawEvent === "Notification"
+      && input.activity.reason === "permission_prompt") {
+    return { ...base, permissionRequest: { id: "claude-permission-prompt" }, needsInput: { count: 1, reason: "permission_prompt" } };
+  }
   switch (input.activity.state) {
     case "running":
-      return { ...base, activity: "working", needsInput: { count: 0, reason: null } };
+      return { ...base, activity: "working", needsInput: { count: 0, reason: null },
+        ...(input.runtime === "claude-code" && input.activity.rawEvent === "UserPromptSubmit" ? { permissionResolved: true } : {}) };
     case "idle":
       return { ...base, activity: "idle-at-prompt", needsInput: { count: 0, reason: null } };
     case "needs_input":
@@ -328,6 +333,33 @@ activityRoutes.post("/hooks", async (c) => {
       if (target) {
         launchedProcess = await claudeHookFromLaunchedProcess({ target, tmux, launchToken: armed, hookPid,
           listProcesses: c.get("listProcesses" as never) as NativeProcessLister | undefined });
+      }
+    }
+    // #1524 (a), Codex only, synchronous with the write below (no await between them):
+    // - a known earlier occupant's hook (its generation is registered for this node and isn't the current one)
+    //   neither writes nor publishes. An absent or unregistered generation, no current tenure, or an unreadable
+    //   ledger keep today's write.
+    // - Codex sends an explicit transcript_path null for a thread it never persists (an internal thread), and also
+    //   when it can't read a persisted conversation's rollout. Either way the saved pointer is kept, so an internal
+    //   thread can't replace it. An absent key, an empty string or a malformed value keep today's write.
+    if (runtime === "codex") {
+      let generationMismatch = false;
+      try {
+        const current = sessionRegistry.currentOccupantTenure(resolved.nodeId);
+        generationMismatch = !!generation && !!current && current.generationUuid !== generation
+          && sessionRegistry.isOccupantGenerationRegistered(resolved.nodeId, generation);
+      } catch { /* an unreadable ledger is no evidence of a mismatch */ }
+      if (generationMismatch) {
+        return c.json({
+          ok: false, code: "generation_mismatch", tokenPersisted: false,
+          error: "Codex session identity ignored: emitter is an earlier occupant of this seat.",
+        }, 409);
+      }
+      if (body.transcriptPathPresent === true && body.transcriptPath === null) {
+        return c.json({
+          ok: true, sessionId, provenance: "hook", tokenPersisted: false, code: "transcript_absent",
+          detail: "Codex reported no transcript for this thread, so the saved conversation pointer was kept.",
+        });
       }
     }
     const persistHook = (type: string, token: string): boolean => {

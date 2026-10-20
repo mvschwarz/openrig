@@ -531,6 +531,44 @@ edges: []
     expect(resolveSkillsRoot).toHaveBeenCalledOnce();
   });
 
+  it("pod-aware plan warns about members whose session names collide", async () => {
+    const project = path.join(tmpDir, "project");
+    fs.mkdirSync(path.join(tmpDir, "agents", "impl"), { recursive: true });
+    fs.mkdirSync(project, { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, "agents", "impl", "agent.yaml"),
+      "name: impl\nversion: \"1.0.0\"\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: []\n",
+    );
+    const member = (id: string) => `      - id: ${id}
+        agent_ref: local:agents/impl
+        profile: default
+        runtime: codex
+        cwd: ${JSON.stringify(project)}`;
+    const specPath = writeSpec(`version: "0.2"
+name: collide-rig
+pods:
+  - id: dev-impl
+    label: Dev impl
+    members:
+${member("main")}
+    edges: []
+  - id: dev
+    label: Dev
+    members:
+${member("impl-main")}
+    edges: []
+edges: []
+`);
+    const podInstantiator = { db, deps: { fsOps: realFsOps() }, resolveSkillsRoot: vi.fn(), instantiate: vi.fn() };
+    const orch = buildOrchestrator({ podInstantiator });
+
+    const result = await orch.bootstrap({ mode: "plan", sourceRef: specPath, sourceKind: "rig_spec" });
+
+    expect(result.stages.find((stage) => stage.stage === "resolve_spec")?.status).toBe("ok");
+    expect(result.warnings).toContain('pods[1].members[0].id: session name "dev-impl-main@collide-rig" is already used by member "dev-impl.main"');
+    expect(podInstantiator.instantiate).not.toHaveBeenCalled();
+  });
+
   // T2: Apply --yes executes all stages
   it("apply --yes executes all stages and completes", async () => {
     const specPath = writeSpec(SIMPLE_SPEC_YAML);

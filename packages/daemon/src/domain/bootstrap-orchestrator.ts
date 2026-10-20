@@ -697,7 +697,7 @@ export class BootstrapOrchestrator {
       // Plan mode: validate + preflight only
       const { rigPreflight } = await import("./rigspec-preflight.js");
       const { RigSpecCodec: PodCodec } = await import("./rigspec-codec.js");
-      const { RigSpecSchema: PodSchema } = await import("./rigspec-schema.js");
+      const { RigSpecSchema: PodSchema, sessionNameCollisions } = await import("./rigspec-schema.js");
 
       try {
         const raw = PodCodec.parse(rigSpecYaml);
@@ -735,7 +735,7 @@ export class BootstrapOrchestrator {
           status: preflight.ready ? "planned" : "failed",
           stages,
           errors: preflight.errors,
-          warnings: [...warnings, ...preflight.warnings],
+          warnings: [...warnings, ...sessionNameCollisions(raw), ...preflight.warnings],
         };
       } catch (err) {
         stages.push({ stage: "resolve_spec", status: "failed", detail: { error: (err as Error).message } });

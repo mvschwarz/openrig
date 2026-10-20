@@ -478,6 +478,19 @@ describe("rig seat restart --keep-conversation: outcomes", () => {
     expect(w.launches).toHaveLength(1);
   });
 
+  it("#1524 (b): an unproven resume asks for the live Codex to be checked and adopted first, not for another resume", async () => {
+    const error = "Codex resume could not be proven within the resume window: no_log_row. The session was preserved; nothing was restarted.";
+    const w = world({ launch: { ok: false, error, recovery: "attention_required", resumeUnproven: true, verifierInput: "none" } });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    expect(result).toMatchObject({ ok: true, outcome: "incomplete", account: { startupGate: error } });
+    const remaining = (result as { remainingStep: string }).remainingStep;
+    expect(remaining).toContain("may still be running in the pane");
+    expect(remaining).toContain(`rig reconcile-session ${SEAT} --no-launch`);
+    expect(remaining).toContain("only if the original is gone");
+    expect(remaining).not.toMatch(/^Resolve what Codex shows in the pane, then resume/);
+    expect(w.launches).toHaveLength(1);
+  });
+
   it.each([
     ["hook_trust_gate", "Codex is waiting for hook trust approval before the session can become interactive.", "Codex is waiting for a hook review decision in the pane"],
     ["trust_gate", "Codex is waiting for the folder trust prompt to be answered.", "Codex is waiting for a folder trust decision in the pane"],
@@ -515,6 +528,37 @@ describe("rig seat restart --keep-conversation: outcomes", () => {
     expect(remaining).toContain("Codex is waiting for an update decision OpenRig could not skip");
     expect(remaining).toContain("OpenRig sent the update prompt's skip key (3) once while checking the resume; nothing was retried or relaunched.");
     expect(remaining).not.toMatch(/typed nothing|answered/);
+  });
+
+  // #1524 (b), through the real adapter: what the adapter itself reports decides the step, not a flag the test supplies.
+  it("through the adapter: a capture that times out before any proof result asks for the live Codex first, not another resume", async () => {
+    const tmux = { getPanePid: async () => 901, capturePaneScreen: async () => "OpenAI Codex (v0.120.0)\n› Ask Codex to do anything",
+      capturePaneContent: async () => "OpenAI Codex (v0.120.0)\n› Ask Codex to do anything",
+      getPaneCommand: () => new Promise<string>((resolve) => setTimeout(() => resolve("codex"), 120)) } as unknown as TmuxAdapter;
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: {} as never, sleep: async () => {}, resumeProofWindowMs: 40,
+      listProcesses: () => [{ pid: 901, ppid: 1, pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000", command: "codex resume tok" }],
+      readResumeEvidence: () => ({ threadId: "tok" }) });
+    const launch = await adapter.verifyResumeInPane("impl", "tok");
+    expect(launch).toMatchObject({ ok: false, recovery: "attention_required", resumeUnproven: true });
+    const r = await report(launch);
+    expect(r.remainingStep).toContain("may still be running in the pane");
+    expect(r.remainingStep).toContain(`rig reconcile-session ${SEAT} --no-launch`);
+    expect(r.remainingStep).not.toMatch(/^Resolve what Codex shows in the pane, then resume/);
+  });
+
+  it("through the adapter: a resume whose records name another conversation gets its own step, not the unproven one", async () => {
+    const ready = "OpenAI Codex (v0.120.0)\n› Ask Codex to do anything";
+    const tmux = { getPanePid: async () => 901, getPaneCommand: async () => "codex", capturePaneScreen: async () => ready, capturePaneContent: async () => ready } as unknown as TmuxAdapter;
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: {} as never, sleep: async () => {},
+      listProcesses: () => [{ pid: 901, ppid: 1, pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000", command: "codex resume tok" }],
+      readResumeEvidence: () => ({ threadId: "another-thread" }) });
+    const launch = await adapter.verifyResumeInPane("impl", "tok");
+    expect(launch).toMatchObject({ ok: false, recovery: "attention_required", resumeMismatch: { opened: "another-thread" } });
+    expect(launch).not.toHaveProperty("resumeUnproven");
+    const r = await report(launch);
+    expect(r.remainingStep).toContain("The resumed Codex opened another-thread, not the seat's conversation");
+    expect(r.remainingStep).toContain("find the seat's conversation before resuming again");
+    expect(r.remainingStep).not.toContain("didn't prove the conversation in time");
   });
 
   // Round 4: the report's message, startupGate and step all describe the newest moment, through the real adapter.

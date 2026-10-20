@@ -1049,6 +1049,12 @@ describe("TmuxAdapter", () => {
   // seeds a new subscriber with the CURRENT VISIBLE SCREEN + cursor so a live
   // terminal paints immediately instead of staying blank until next output.
   describe("capturePaneScreen (visible screen, NOT scrollback)", () => {
+    it("can retain styling without adding scrollback", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("styled frame");
+      await new TmuxAdapter(exec).capturePaneScreen("worker@rig", { escapeSequences: true });
+      expect(exec.mock.calls[0]![0]).toBe("tmux capture-pane -p -e -t '=worker@rig:'");
+    });
+
     it("calls `tmux capture-pane -p -t <pane>` with NO -S flag (scrollback would reintroduce row drift)", async () => {
       const exec = vi.fn<ExecFn>().mockResolvedValue("row a\nrow b\n");
       const adapter = new TmuxAdapter(exec);

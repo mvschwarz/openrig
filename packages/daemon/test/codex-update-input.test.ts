@@ -87,12 +87,16 @@ function fixture(options: { menu?: string; delay?: number; beforeMenu?: number; 
   };
   // The process table reflects what was launched: a fork's Codex processes carry `fork <parent>`.
   const forkArgs = () => / fork '?([^' ]+)'?$/.exec(launched)?.[1];
+  // #1524 (b): a resume's Codex processes carry `resume <token>`, and Codex's records for them name that token once ready.
+  const resumeArgs = () => / resume '?([^' ]+)'?/.exec(launched)?.[1];
   const listProcesses = vi.fn(() => (options.processes ?? processRows(options.shape ?? "wrapper")).map(row =>
-    forkArgs() && /codex/.test(row.command) && !/codex-code-mode/.test(row.command) ? { ...row, command: `${row.command} fork ${forkArgs()}` } : row));
+    forkArgs() && /codex/.test(row.command) && !/codex-code-mode/.test(row.command) ? { ...row, command: `${row.command} fork ${forkArgs()}` }
+      : resumeArgs() && /codex/.test(row.command) && !/codex-code-mode/.test(row.command) ? { ...row, command: `${row.command} resume ${resumeArgs()}` } : row));
   const adapter = new CodexRuntimeAdapter({
     tmux, fsOps, sleep: async () => { ticks++; },
     listProcesses,
     readThreadIdByPid: () => ready() ? "new-thread" : undefined,
+    readResumeEvidence: () => ready() && resumeArgs() ? { threadId: resumeArgs()! } : { reason: "no_log_row" },
   });
   return { adapter, tmux, listProcesses, commands, leaked, ready, counts: () => ({ updates, dismissals }),
     reset: () => { selected = false; ticks = 0; } };

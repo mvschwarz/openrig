@@ -19,7 +19,9 @@ type PaneIdentityTmux = Pick<TmuxAdapter, "listPanes" | "getPanePid" | "getPaneC
 type ProcessRow = NativeProcessRow;
 
 export type PaneIdentityReconcileResult =
-  | { ok: true; pane: string; pid: number; command: string | null }
+  /** `nativeProcess`: the native runtime process the check matched, when it matched one (Codex, an exact-resume
+   *  Claude). A caller that holds an earlier proof of a process compares against it (#1524). */
+  | { ok: true; pane: string; pid: number; command: string | null; nativeProcess?: { pid: number; startedAt?: string } }
   | { ok: false; detail: string };
 
 /** The rotation recorded with the node's current stored token, when the caller is checking that
@@ -306,7 +308,8 @@ export async function rebindAndVerifyPaneIdentity(input: {
       detail: `tmux pane '${printable(pane.id)}' foreground command '${printable(command ?? "unknown")}' contradicts runtime '${input.runtime ?? "unknown"}'`,
     };
   }
-  return { ok: true, pane: pane.id, pid: pid!, command };
+  return { ok: true, pane: pane.id, pid: pid!, command,
+    ...(lineageMatch ? { nativeProcess: { pid: lineageMatch.pid, ...(lineageMatch.startedAt ? { startedAt: lineageMatch.startedAt } : {}) } } : {}) };
 }
 
 export interface ClearAttentionResult {

@@ -20,7 +20,7 @@ const low = { ...high, usedPercentage: 10 };
 const homes: string[] = [];
 afterEach(() => { vi.restoreAllMocks(); for (const h of homes.splice(0)) rmSync(h, { recursive: true, force: true }); });
 
-function fixture(opts: { observe?: boolean; pasteFails?: boolean; enterFails?: boolean } = {}) {
+function fixture(opts: { observe?: boolean; pasteFails?: boolean; enterFails?: boolean; onWrite?: (text: string) => void } = {}) {
   const home = mkdtempSync(join(tmpdir(), "send-notice-")); homes.push(home);
   let clock = 10_000, activity = "idle", sending = false;
   const generation = "generation-one";
@@ -30,7 +30,7 @@ function fixture(opts: { observe?: boolean; pasteFails?: boolean; enterFails?: b
   const tmux = {
     probeSession: vi.fn(async () => ({ state: "present" })),
     // The work message's paste or Enter can be made to fail, to check that a failed send keeps its result.
-    sendText: vi.fn(async (_: string, text: string) => { writes.push(text); return { ok: !(sending && opts.pasteFails) }; }),
+    sendText: vi.fn(async (_: string, text: string) => { writes.push(text); opts.onWrite?.(text); return { ok: !(sending && opts.pasteFails) }; }),
     sendKeys: vi.fn(async () => { writes.push("ENTER"); return { ok: !(sending && opts.enterFails) }; }),
   };
   Object.assign(tmux, { deliveryGuard: new SeatDeliveryGuard(db, () => ({ nodeId: "node-one", session: seat, pane: "%1", occupant: generation })) });
@@ -66,7 +66,7 @@ function fixture(opts: { observe?: boolean; pasteFails?: boolean; enterFails?: b
     const a = e.getPreparationState(seat)!; mkdirSync(dirname(a.mapPath), { recursive: true });
     writeFileSync(a.mapPath + ".tmp", `# Restore map\n${a.marker}\n`);
   };
-  return { e, rigSend, stageMap, writes, activity: (s: string) => { activity = s; } };
+  return { e, transport, rigSend, stageMap, writes, activity: (s: string) => { activity = s; } };
 }
 
 async function compactSent(f: ReturnType<typeof fixture>) {
@@ -123,4 +123,42 @@ it("control: a failed or uncertain send during a restore keeps its own result; t
     expect(withoutNotice(withNotice.body)).toEqual(without.body);
     expect(withNotice.body).toMatchObject({ ok: false, managedCompaction: { stage: "restoring" } });
   }
+});
+
+it("the seat's preparation for a managed compaction is named, from the preparation prompt until /compact is sent", async () => {
+  const f = fixture();
+  await f.e.maybeAutoCompact(high); // preparation prompt sent; /compact not yet
+  f.activity("running");
+  const sender = await f.rigSend("WORK MESSAGE");
+  expect(sender.status).toBe(200);
+  expect(sender.body).toMatchObject({ ok: true, managedCompaction: { stage: "preparing", observed: "before_send" } });
+  expect((sender.body.managedCompaction as { notice: string }).notice).toBe(`${seat} was preparing for a managed compaction: /compact hasn't been sent yet (when this send started, as OpenRig's managed compaction recorded it). This doesn't mean the restore has finished; if this message matters, check the reply and follow up.`);
+  expect(f.writes).toContain("WORK MESSAGE");
+});
+
+it("a seat that has compacted but whose restore isn't requested yet is named as compacted", async () => {
+  const f = fixture();
+  await compactSent(f);
+  expect(await f.e.maybeAutoCompact(low)).toEqual({ triggered: true }); // turn boundary; the restore request is next
+  f.activity("running");
+  const sender = await f.rigSend("WORK MESSAGE");
+  expect(sender.status).toBe(200);
+  expect(sender.body).toMatchObject({ ok: true, managedCompaction: { stage: "compacted", observed: "before_send" } });
+  expect((sender.body.managedCompaction as { notice: string }).notice).toBe(`${seat} was compacted, with its restore not yet requested (when this send started, as OpenRig's managed compaction recorded it). This doesn't mean the restore has finished; if this message matters, check the reply and follow up.`);
+  expect(f.writes).toContain("WORK MESSAGE");
+});
+
+it("nothing recorded when the send starts but a compaction recorded by the time it finishes: the notice says after_send", async () => {
+  // The observer is the real enforcer's view, except that until the work message is written it reports nothing: the
+  // compaction state the seat is in becomes visible only after the write, as when it's recorded during the send.
+  let written = false;
+  const f = fixture({ observe: false, onWrite: (text) => { if (text === "WORK MESSAGE") written = true; } });
+  await compactSent(f);
+  f.activity("running");
+  f.transport.setCompactionObserver((s) => (written ? f.e.observedCompaction(s) : null));
+  const sender = await f.rigSend("WORK MESSAGE");
+  expect(sender.status).toBe(200);
+  expect(sender.body).toMatchObject({ ok: true, managedCompaction: { stage: "compacting", observed: "after_send" } });
+  expect((sender.body.managedCompaction as { notice: string }).notice).toBe(`${seat} was being compacted: /compact was submitted and the post-compaction steps haven't started (when this send finished, as OpenRig's managed compaction recorded it). This doesn't mean the restore has finished; if this message matters, check the reply and follow up.`);
+  expect(f.writes).toContain("WORK MESSAGE");
 });

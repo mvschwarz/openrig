@@ -644,6 +644,7 @@ export async function probeSessionActivity(input: {
   binding?: Omit<ObservedBinding, "sessionName">;
   /** See ClassifyPaneOptions.timerlessStatusIsLive. */
   timerlessStatusIsLive?: boolean;
+  visibleScreenOnly?: boolean;
   /** Supplied only by an active draft-aware send; ordinary observations stay unchanged. */
   composerSnapshot?: () => Promise<ComposerSnapshot | null>;
   /** The seat's community harness (`communityHarnessOf`): its idle-looking screen reads unknown. */
@@ -651,7 +652,7 @@ export async function probeSessionActivity(input: {
 }): Promise<AgentActivity> {
   // Capture routing and observation labels must share the entry context. The
   // caller may reuse/mutate its input while hasSession is pending.
-  const { sessionName, runtime, attachmentType, tmuxAdapter, now, captureObserver, binding } = input;
+  const { sessionName, runtime, attachmentType, tmuxAdapter, now, captureObserver, binding, visibleScreenOnly } = input;
   const sampledAt = (now ?? new Date()).toISOString();
   // P2: attempt identity frozen at entry, before any await. Early returns below
   // take no capture and are not observed.
@@ -758,8 +759,11 @@ export async function probeSessionActivity(input: {
   };
   const captureSeq = observed ? nextCaptureSeq++ : 0;
   try {
+    const capture = (opts?: { escapeSequences?: boolean }) => visibleScreenOnly
+      ? opts ? tmuxAdapter.capturePaneScreen(sessionName, opts) : tmuxAdapter.capturePaneScreen(sessionName)
+      : opts ? tmuxAdapter.capturePaneContent(sessionName, 20, opts) : tmuxAdapter.capturePaneContent(sessionName, 20);
     const snapshot = input.composerSnapshot ? await input.composerSnapshot().catch(() => null) : null;
-    const paneContent = snapshot?.screen ?? await tmuxAdapter.capturePaneContent(sessionName, 20);
+    const paneContent = snapshot?.screen ?? await capture();
     const capturedAt = new Date().toISOString();
     const classifyOptions = { timerlessStatusIsLive: input.timerlessStatusIsLive === true };
     let classification = communityHarnessPaneActivity(classifyPaneActivity(paneContent ?? "", { ...classifyOptions,
@@ -770,7 +774,7 @@ export async function probeSessionActivity(input: {
     // the verdict is then the styled frame's, as an empty composer. Anything else leaves the draft standing.
     let slot = captureSlot(paneContent, capturedAt, captureSeq);
     if (classification.reason === "prompt_draft" && runtime === "claude-code" && paneContent) {
-      const styled = await tmuxAdapter.capturePaneContent(sessionName, 20, { escapeSequences: true }).catch(() => null);
+      const styled = await capture({ escapeSequences: true }).catch(() => null);
       const later = styled ? classifyStyledFrame(styled, classifyOptions) : null;
       const newer = !later ? null
         : later.asIs.state === "agent_active" || (later.asIs.state === "attention" && later.asIs.reason !== "prompt_draft") ? later.asIs

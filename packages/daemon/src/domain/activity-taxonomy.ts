@@ -125,6 +125,7 @@ export interface ActivityEvidence {
   activity?: ActivityValue;
   needsInput?: NeedsInput;
   permissionRequest?: { id: string };
+  permissionResolved?: boolean;
   /** Which relay route posted hook evidence, when it said. One event can arrive by more than one route (a Codex seat's
    *  plugin hook and its managed hook), so promotion counts agreements per route. Absent for an untagged post. */
   route?: EvidenceRoute;

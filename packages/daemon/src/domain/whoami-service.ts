@@ -173,10 +173,19 @@ export class WhoamiService {
       if (sessionRows.length === 0) return null;
 
       // Check distinct rigs
-      const rigIds = new Set<string>();
+      const rigBySession = new Map<string, string>();
       for (const sess of sessionRows) {
         const node = this.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(sess.node_id) as { rig_id: string } | undefined;
-        if (node) rigIds.add(node.rig_id);
+        if (node) rigBySession.set(sess.id, node.rig_id);
+      }
+      let rigIds = new Set(rigBySession.values());
+      if (rigIds.size > 1) {
+        // An archived rig of the same name counts only when no active one has it,
+        // unless its session with this name is still running
+        const runningRigIds = new Set(sessionRows.filter((s) => s.status === "running").map((s) => rigBySession.get(s.id)));
+        const activeRigIds = new Set([...rigIds].filter((rigId) =>
+          this.db.prepare("SELECT 1 FROM rigs WHERE id = ? AND archived_at IS NULL").get(rigId) !== undefined));
+        if (activeRigIds.size > 0) rigIds = new Set([...rigIds].filter((rigId) => activeRigIds.has(rigId) || runningRigIds.has(rigId)));
       }
 
       if (rigIds.size > 1) {
@@ -185,7 +194,7 @@ export class WhoamiService {
         );
       }
 
-      const sess = sessionRows[0]!;
+      const sess = sessionRows.find((s) => rigIds.has(rigBySession.get(s.id) ?? "")) ?? sessionRows[0]!;
       nodeRow = this.db.prepare("SELECT * FROM nodes WHERE id = ?").get(sess.node_id) as NodeRow | undefined;
       if (!nodeRow) return null;
       resolvedBy = "session_name";
