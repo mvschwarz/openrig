@@ -3,8 +3,9 @@
 // - held: the ask's current notification carries a quiet-hold note (or a release that was turned back because quiet
 //   came on again), and its window's quiet-release job is active. The job owns the continuation: it isn't stuck, it
 //   isn't picked up, and the ladder leaves it alone;
-// - released: the release job dispatched it and its post hasn't landed yet: waiting for transport;
-// - orphaned: held, but no active release job for its window: nothing will release it, so the sweep must find it.
+// - released: the release job dispatched it, its post hasn't landed yet, and the job is still live: waiting for transport;
+// - orphaned: held or released, but no active release job for its window: nothing will release or redrive it, so the
+//   sweep must find it.
 // An ask that has posted, or whose release gave it a disposition, isn't quiet custody any more (null), and neither is
 // any row without a quiet-hold note: digest-held and ordinary rows read exactly as before.
 import type Database from "better-sqlite3";
@@ -39,8 +40,9 @@ export function quietHoldCustody(db: Database.Database, qitemId: string, now: Da
     const lastStep = [...notes].reverse().find((n) => token(n, "quiet-release-dispatched", key) || token(n, "quiet-release-returned", key));
     const live = db.prepare("SELECT 1 FROM watchdog_jobs WHERE policy = 'quiet-release' AND state = 'active' AND spec_yaml LIKE ? LIMIT 1")
       .get(`%windowId: "${windowId}"%`);
-    if (lastStep?.startsWith("quiet-release-dispatched ")) return { state: "released", windowId, notificationKey: key, nextBoundary: null };
+    // Without a live job nothing redrives a release or releases a hold, whichever step it reached: orphaned.
     if (!live) return { state: "orphaned", windowId, notificationKey: key, nextBoundary: null };
+    if (lastStep?.startsWith("quiet-release-dispatched ")) return { state: "released", windowId, notificationKey: key, nextBoundary: null };
     const entity = db.prepare("SELECT entity_id AS id FROM human_quiet_windows WHERE window_id = ?").get(windowId) as { id: string } | undefined;
     const nextBoundary = entity ? new HumanQuietStore(db).quietStateFor(entity.id, now).nextBoundary?.at ?? null : null;
     return { state: "held", windowId, notificationKey: key, nextBoundary };

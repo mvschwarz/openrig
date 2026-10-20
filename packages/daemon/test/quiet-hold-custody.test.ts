@@ -125,6 +125,18 @@ describe("custody of asks held for quiet hours", () => {
     expect(ladderTouched(row), "an orphaned hold isn't pickup, so the ladder takes it up").toBe(true);
   });
 
+  it("a release dispatched but never posted whose job is gone is orphaned and found, not left waiting for transport", async () => {
+    const row = await held();
+    quiet.end("person", { endedBy: "t", now: new Date() });
+    const [job] = releaseJobs();
+    await runQuietRelease({ queueRepo: repo, jobsRepo: new WatchdogJobsRepository(db), home, jobId: job!.jobId,
+      registry: { loadHumanRegistry: registry as never }, dispatch: () => ({ ok: true }) }); // dispatched; the post never lands
+    new WatchdogJobsRepository(db).markTerminal(job!.jobId, "test: the job was killed");
+    expect(String((repo.waitingView(row.qitemId)!.nextBackstop as { note?: string }).note ?? "")).not.toMatch(/waiting for transport/);
+    expect(findingFor(await sweep(), row).length).toBeGreaterThan(0);
+    expect(findingWhy(row)).toMatch(/held for quiet hours .* no release job is live/);
+  });
+
   it("a release turned back because quiet came on again reads as held", async () => {
     const row = await held();
     quiet.end("person", { endedBy: "t", now: new Date() });
