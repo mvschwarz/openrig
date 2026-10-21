@@ -6,6 +6,25 @@ talk to one agent, and it hands work to the others. The team keeps its tasks and
 Most people let their coding agent set it up. This page explains what happens either way, so nothing is a black
 box, and shows how to do each step by hand if you'd rather.
 
+## The quick way: let your coding agent do it
+
+In your project folder, add OpenRig's `rigs` skill to the agent you use:
+
+```sh
+# Claude Code
+npx skills add https://github.com/mvschwarz/openrig/tree/<release-tag>/skills/rigs --skill rigs --agent claude-code
+# Codex
+npx skills add https://github.com/mvschwarz/openrig/tree/<release-tag>/skills/rigs --skill rigs --agent codex
+```
+
+For a new install, use the latest release's tag, for example `v0.6.12`. If OpenRig is already installed, use the tag
+that matches `rig --version`, or upgrade first. If the command fails with `npx: command not found`, Node.js isn't
+installed or isn't on your PATH yet (see below). Then type `/rigs` in Claude Code, or `$rigs` in Codex, and say what
+you want built.
+
+The skill has your agent work through the steps below in order. It says what it will run and change before it runs
+it, and it asks before installing anything on your system. It finishes when you're talking to the operator.
+
 ## How the pieces fit
 
 - **`rig`** is the command you and your agents use. It comes from the npm package `@openrig/cli`.
@@ -42,25 +61,6 @@ curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.8/install.sh | bash
 Then open a new terminal and run `nvm install 22`. If nvm's installer says you need Apple's command line tools, run
 `xcode-select --install`, then its install command again. That's nvm v0.40.8's install command; [nvm's
 page](https://github.com/nvm-sh/nvm#install--update-script) has the newest.
-
-## The quick way: let your coding agent do it
-
-In your project folder, add OpenRig's `rigs` skill to the agent you use:
-
-```sh
-# Claude Code
-npx skills add https://github.com/mvschwarz/openrig/tree/<release-tag>/skills/rigs --skill rigs --agent claude-code
-# Codex
-npx skills add https://github.com/mvschwarz/openrig/tree/<release-tag>/skills/rigs --skill rigs --agent codex
-```
-
-For a new install, use the latest release's tag, for example `v0.6.12`. If OpenRig is already installed, use the tag
-that matches `rig --version`, or upgrade first. If the command fails with `npx: command not found`, Node.js isn't
-installed or isn't on your PATH yet (see above). Then type `/rigs` in Claude Code, or `$rigs` in Codex, and say what
-you want built.
-
-The skill has your agent work through the steps below in order. It says what it will run and change before it runs
-it, and it asks before installing anything on your system. It finishes when you're talking to the operator.
 
 ## What happens, step by step
 
