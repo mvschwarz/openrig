@@ -9,7 +9,8 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME, REFUSED_PREFIX, RESERVE_PREFIX } from "../src/domain/policies/parked-owner-consumer.js";
 import type { PolicyJob } from "../src/domain/policies/types.js";
-import type { WatchdogHistoryEntry } from "../src/domain/watchdog-history-log.js";
+import { WatchdogHistoryLog, type WatchdogHistoryEntry } from "../src/domain/watchdog-history-log.js";
+import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { runWakeLadderTick, queueRecoveryOwnsWake, classifyPromptAfterRefusal } from "../src/domain/queue-wake-ladder.js";
 import { makeOperatorDeliveryEngine } from "../src/domain/gateway/operator-delivery-engine.js";
 import { buildSlackGatewayWire } from "../src/domain/gateway/slack/slack-subsystem.js";
@@ -604,6 +605,43 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?").run("[]", badId);
     await tick(port);
     expect(repo.getById(alert.qitemId)?.state).toBe("done");
+  });
+
+  // A two-hour reminder refused at the seat's prompt, recorded the way the watchdog engine records its attempts.
+  function reminder(outcomes: Array<"refused" | "sent">) {
+    const { jobId } = new WatchdogJobsRepository(db).register({ policy: "periodic-reminder", targetSession: seat, intervalSeconds: 7200,
+      specYaml: `policy: periodic-reminder\ntarget:\n  session: ${seat}\ninterval_seconds: 7200\nmessage: sweep\n`, registeredBySession: seat });
+    const log = new WatchdogHistoryLog(db); let at = 0;
+    const record = (outcome: "refused" | "sent") => log.record({ jobId, evaluatedAt: new Date(Date.now() + at++ * 1000).toISOString(), outcome,
+      deliveryTargetSession: seat, deliveryStatus: outcome === "sent" ? "ok" : "failed",
+      evaluationNotes: outcome === "refused" ? { deliveryReason: `Refused: '${seat}' is at an interactive prompt (selection_prompt). No text was sent.` } : null });
+    outcomes.forEach(record);
+    return { jobId, record };
+  }
+
+  it("a reminder refused twice at the prompt reaches the seat's orchestrator, and the alert stands down once one lands", async () => {
+    const posts: unknown[] = []; const port = engine(posts); const wakes: string[] = [];
+    const opts = { resolveOrchestrator: () => "lead@fixture", attemptWake: async (_id: string, target: string) => { wakes.push(target); return "verified"; } };
+    const { jobId, record } = reminder(["refused"]);
+    await tick(port, opts);
+    expect(alerts()).toEqual([]);
+    record("refused");
+    await tick(port, opts);
+    expect(alerts()).toHaveLength(1);
+    expect(alerts()[0]?.destinationSession).toBe("lead@fixture");
+    expect(alerts()[0]?.body).toContain(jobId);
+    record("sent");
+    await tick(port, opts);
+    expect(alerts()).toEqual([]);
+    expect(wakes).toEqual(["lead@fixture"]); expect(posts).toEqual([]);
+  });
+
+  it("a seat with no orchestrator: its twice-refused reminder reaches a person, never the blocked seat", async () => {
+    const posts: unknown[] = []; const port = engine(posts);
+    const { jobId } = reminder(["refused", "refused"]);
+    await tick(port);
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(JSON.stringify(posts)).toContain(jobId);
   });
 
 });
