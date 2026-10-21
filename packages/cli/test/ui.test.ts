@@ -160,6 +160,7 @@ describe("rig ui open", () => {
   it("busy daemon -> opens the UI URL", async () => {
     const execFn = vi.fn(async () => {});
     const deps: UiDeps = {
+      platform: "darwin",
       lifecycleDeps: mockLifecycleDeps({
         exists: vi.fn((p: string) => p === STATE_FILE),
         readFile: vi.fn((p: string) => {
