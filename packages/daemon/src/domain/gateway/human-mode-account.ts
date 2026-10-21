@@ -4,7 +4,7 @@
 import { HumanModeService, type ModeApplication, type ModeEffect } from "./human-operating-modes.js";
 import { isBlockerLive, type QueueRepository } from "../queue-repository.js";
 import { parseSessionName } from "../session-name.js";
-import { DISPOSITION_PREFIX, hasToken, parseQuietHoldNote, releaseVerdict, type RunQuietReleaseInput } from "../policies/quiet-release.js";
+import { DISPOSITION_PREFIX, hasToken, parseQuietHoldNote, QUIET_RELEASE_POLICY, releaseVerdict, type RunQuietReleaseInput } from "../policies/quiet-release.js";
 
 const POSTED_RECEIPT = "slack-owner-notification-posted";
 
@@ -79,16 +79,30 @@ async function waitingFor(input: Parameters<typeof modeAccount>[0], app: ModeApp
     .filter((r) => mine(r.destination_session) || mine(r.blocked_on)).map((r) => r.qitem_id);
   const heldDuring = (db.prepare("SELECT DISTINCT qitem_id FROM queue_transitions WHERE transition_note LIKE 'delivery-decision: quiet-hold %' AND ts >= ? AND ts <= ?")
     .all(app.startedAt, app.endedAt) as Array<{ qitem_id: string }>).map((r) => r.qitem_id);
+  // Whose quiet window held an ask: each window's release job records its person (a replaced window's too), and the
+  // person's current window is in the quiet-hours table. A hold counts only when it was this person's; one whose window
+  // can't be attributed counts only on a row that is theirs.
+  const owners = new Map<string, string>();
+  for (const j of db.prepare(`SELECT spec_yaml FROM watchdog_jobs WHERE policy = '${QUIET_RELEASE_POLICY}'`).all() as Array<{ spec_yaml: string }>) {
+    const windowId = /windowId:\s*"([^"\n]+)"/.exec(j.spec_yaml)?.[1];
+    const entityId = /entityId:\s*"([^"\n]+)"/.exec(j.spec_yaml)?.[1];
+    if (windowId && entityId) owners.set(windowId, entityId);
+  }
+  for (const w of db.prepare("SELECT entity_id, window_id FROM human_quiet_windows").all() as Array<{ entity_id: string; window_id: string }>) {
+    owners.set(w.window_id, w.entity_id);
+  }
   const out: WaitingAsk[] = [];
   for (const qitemId of [...new Set([...open, ...heldDuring])]) {
     const item = input.queueRepo.getById(qitemId);
     if (!item) continue;
     const ask = { qitemId, summary: item.summary ?? null, state: item.state };
     const notes = input.queueRepo.listTransitions(qitemId).map((t) => t.transitionNote ?? "");
-    const hold = [...notes].reverse().map(parseQuietHoldNote).find((h) => h !== null);
+    const rowIsTheirs = mine(item.destinationSession) || mine(item.blockedOn);
+    const hold = [...notes].reverse().map(parseQuietHoldNote)
+      .find((h) => h !== null && (owners.has(h.windowId) ? owners.get(h.windowId) === input.entityId : rowIsTheirs));
     if (!hold) {
-      // Never held: an open ask to them is still theirs; a closed one isn't waiting.
-      if (isBlockerLive(item.state) && (mine(item.destinationSession) || mine(item.blockedOn))) out.push({ ...ask, standing: "valid", reason: null });
+      // Never held for them: an open ask to them is still theirs; anyone else's, or a closed one, isn't waiting.
+      if (isBlockerLive(item.state) && rowIsTheirs) out.push({ ...ask, standing: "valid", reason: null });
       continue;
     }
     const disposed = notes.find((n) => hasToken(n, DISPOSITION_PREFIX, hold.notificationKey));

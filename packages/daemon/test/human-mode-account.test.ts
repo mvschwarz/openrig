@@ -15,7 +15,8 @@ import { gatewayRoutes } from "../src/routes/gateway.js";
 import { queueRoutes } from "../src/routes/queue.js";
 import { addHumanFragment, loadHumanRegistry } from "../src/domain/gateway/human-registry.js";
 import { HumanQuietStore } from "../src/domain/gateway/human-quiet-windows.js";
-import { formatQuietHoldNote } from "../src/domain/policies/quiet-release.js";
+import { formatQuietHoldNote, holdForQuiet } from "../src/domain/policies/quiet-release.js";
+import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { NOT_TRACKED } from "../src/domain/gateway/human-mode-account.js";
 
 const homes: string[] = [];
@@ -93,12 +94,16 @@ describe("the account's facts", () => {
     expect((await f.account("alex", app.applicationId)).status).toBe(404);
   });
 
-  it("only the person's own asks are waiting for them: a seat that shares their name isn't them", async () => {
+  it("only the person's own asks are waiting for them: not another person's held ask, nor a seat that shares their name", async () => {
     const f = fixture();
     await f.call("PUT", "/api/gateway/human/alex/modes/asleep", { availability: "away" });
     const app = (await f.call("POST", "/api/gateway/human/alex/modes/asleep/apply", {})).body.application;
     const theirs = await f.ask("Approve the copy?");
     await f.ask("Rebase your branch", { destinationSession: "alex@build-rig", humanIntent: undefined });
+    const samsAsk = await f.ask("Sam's private review", { destinationSession: "sam@external" });
+    holdForQuiet({ queueRepo: f.repo, jobsRepo: new WatchdogJobsRepository(f.db), qitemId: samsAsk.qitemId, entityId: "sam",
+      hold: { windowId: "w-sam", occurrence: "until", revision: 1, notificationKey: `${samsAsk.qitemId}:1` } });
+    await f.repo.update({ qitemId: samsAsk.qitemId, actorSession: "designer@rig", state: "done", closureReason: "no-follow-on" } as never);
     await f.call("POST", "/api/gateway/human/alex/mode/end", {});
     expect((await f.account("alex", app.applicationId)).body.account.waiting.map((w: { qitemId: string }) => w.qitemId)).toEqual([theirs.qitemId]);
   });
