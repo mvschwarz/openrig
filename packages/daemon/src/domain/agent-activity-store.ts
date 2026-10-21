@@ -21,6 +21,8 @@ export interface HookActivityInput {
   generation?: string | null;
   /** The emitter's own order for its posts (OpenRig's pi/omp runner), when it sends one. */
   sourceSequence?: number | null;
+  /** How often the emitter promises to report while it stays idle (OpenRig's pi runner). */
+  livenessSeconds?: number | null;
 }
 
 export type RecordHookActivityResult =
@@ -115,6 +117,7 @@ export class AgentActivityStore {
     });
     activity.turnId = input.turnId ?? null;
     if (input.sourceSequence) activity.sourceSequence = input.sourceSequence;
+    if (input.livenessSeconds) activity.livenessSeconds = input.livenessSeconds;
 
     const event = this.eventBus.emit({
       type: "agent.activity",

@@ -43,6 +43,81 @@ function readyCore(f = fakeIo()) {
   return { core, ...f };
 }
 
+// ── Idle heartbeat ──────────────────────────────────────────────────────────
+
+describe("idle heartbeat", () => {
+  function clocked(runtime?: "pi" | "omp") {
+    const f = fakeIo();
+    let t = Date.parse("2026-07-06T10:00:00Z");
+    f.io.now = () => new Date(t).toISOString();
+    const core = new RunnerCore(f.io, { sessionName: SESSION, nodeId: "node-1", launchId: "launch-77" }, runtime ? { runtime } : undefined);
+    core.start();
+    const beats = () => f.activity.filter(a => a.subtype === "idle_heartbeat");
+    return { core, f, beats, advance: (ms: number) => { t += ms; } };
+  }
+  const ready = (core: RunnerCore) => core.handlePiLine(JSON.stringify({
+    type: "response", id: "pi-runner-get-state", data: { sessionFile: SESSION_FILE, sessionId: "0197a2f0" } }));
+
+  it("says nothing before the runner is ready", () => {
+    const c = clocked();
+    c.core.heartbeat();
+    expect(c.beats()).toEqual([]);
+  });
+
+  it("posts idle once ready, then at most once per interval", () => {
+    const c = clocked();
+    ready(c.core);
+    c.core.heartbeat();
+    expect(c.beats()).toEqual([expect.objectContaining({ sessionName: SESSION, hookEvent: "Stop", subtype: "idle_heartbeat", runtime: "pi" })]);
+    c.advance(60_000); c.core.heartbeat();
+    expect(c.beats()).toHaveLength(1);
+    c.advance(120_000); c.core.heartbeat();
+    expect(c.beats()).toHaveLength(2);
+  });
+
+  it("stays quiet mid-turn and resumes after agent_end", () => {
+    const c = clocked();
+    ready(c.core);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    c.advance(10 * 60_000); c.core.heartbeat();
+    expect(c.beats()).toEqual([]);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    c.core.heartbeat();
+    expect(c.beats()).toHaveLength(1);
+  });
+
+  it("stays quiet after the pi child exits", () => {
+    const c = clocked();
+    ready(c.core);
+    c.core.handlePiExit(1);
+    c.advance(10 * 60_000); c.core.heartbeat();
+    expect(c.beats()).toEqual([]);
+  });
+
+  it("every Stop a Pi runner posts says how often it will beat, except its exit report", () => {
+    const c = clocked();
+    ready(c.core);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    c.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    c.core.heartbeat();
+    const stops = c.f.activity.filter(a => a.hookEvent === "Stop");
+    expect(stops).toHaveLength(2);
+    for (const stop of stops) expect(stop.livenessSeconds).toBe(180);
+    c.core.handlePiExit(1);
+    const exit = c.f.activity.find(a => a.subtype === "pi_exited");
+    expect(exit).toBeDefined();
+    expect(exit).not.toHaveProperty("livenessSeconds");
+    expect(c.f.activity.filter(a => a.hookEvent !== "Stop")).toSatisfy((rest: Record<string, unknown>[]) => rest.every(a => !("livenessSeconds" in a)));
+  });
+
+  it("is a Pi-only behaviour", () => {
+    const c = clocked("omp");
+    ready(c.core);
+    c.core.heartbeat();
+    expect(c.beats()).toEqual([]);
+  });
+});
+
 // ── Actual Node line editor + framed input ──────────────────────────────────
 
 describe("runner input", () => {

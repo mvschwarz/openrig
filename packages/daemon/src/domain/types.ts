@@ -551,6 +551,8 @@ export interface AgentActivity {
   eventAt?: string | null;
   /** The emitter's own order for its posts (OpenRig's pi/omp runner), when it sent one. */
   sourceSequence?: number | null;
+  /** How often the emitter promises to report while idle; an idle report older than two of these no longer holds. */
+  livenessSeconds?: number | null;
   rawEvent?: string | null;
   rawSubtype?: string | null;
   runtime?: string | null;
