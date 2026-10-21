@@ -677,6 +677,24 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(wakes).toEqual(["lead@fixture", "lead@fixture"]);
   });
 
+  it("another job's alert retiring while the prompt stays blocked doesn't restart an episode closed by hand", async () => {
+    const port = engine([]); const wakes: string[] = [];
+    const a = reminder(["sent", "refused", "refused"]);
+    await tick(port, toLead(wakes));
+    const [closedByHand] = alerts();
+    repo.update({ qitemId: closedByHand!.qitemId, actorSession: "lead@fixture", state: "done", closureReason: "no-follow-on", transitionNote: "handled by hand" });
+    const b = reminder(["refused", "refused"]);
+    await tick(port, toLead(wakes));
+    expect(alerts()).toHaveLength(1);
+    new WatchdogJobsRepository(db).stop(b.jobId);
+    await tick(port, toLead(wakes));
+    expect(alerts()).toEqual([]);
+    a.record("refused"); a.record("refused");
+    await tick(port, toLead(wakes));
+    expect(alerts()).toEqual([]);
+    expect(wakes).toEqual(["lead@fixture", "lead@fixture"]);
+  });
+
   it("a reminder that joins a seat's existing prompt alert is named on it, and nothing is sent again", async () => {
     await refusal(); const port = engine([]); const wakes: string[] = [];
     await tick(port, toLead(wakes));
