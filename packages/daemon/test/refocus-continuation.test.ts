@@ -9,7 +9,7 @@ const boundary = "OpenRig post-compaction turn boundary. Please acknowledge this
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
-function fixture() {
+function fixture(nodeRig = false) {
   const root = mkdtempSync(join(tmpdir(), "refocus-continuation-"));
   roots.push(root);
   const bin = join(root, "bin");
@@ -20,14 +20,21 @@ function fixture() {
   const transcript = join(root, "transcript.jsonl");
   writeFileSync(transcript, "x".repeat(100));
   writeFileSync(trace, '#!/bin/sh\nprintf "%s" "$TRACE_RESULT"\nprintf "%s" "$TRACE_STDERR" >&2\nexit "${TRACE_STATUS:-0}"\n');
-  writeFileSync(rig, '#!/bin/sh\nif [ "$1 $2" = "stream emit" ]; then\n printf "%s\\n" "$*" >> "$CALLS"\n exit "${STREAM_EXIT:-0}"\nfi\nprintf "{}"\n');
+  writeFileSync(rig, nodeRig ? `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "stream" && args[1] === "emit") {
+  require("node:fs").appendFileSync(process.env.CALLS, args.join(" ") + "\\n");
+  process.exit(Number(process.env.STREAM_EXIT || 0));
+}
+process.stdout.write("{}");
+` : '#!/bin/sh\nif [ "$1 $2" = "stream emit" ]; then\n printf "%s\\n" "$*" >> "$CALLS"\n exit "${STREAM_EXIT:-0}"\nfi\nprintf "{}"\n');
   chmodSync(trace, 0o755);
   chmodSync(rig, 0o755);
   const run = (event: string, prompt = "continue", good = true, extra: NodeJS.ProcessEnv = {}, identity = "occupant", timeout = 10_000) => {
     const result = spawnSync(process.execPath, [hook, "--runtime", "claude"], {
       input: JSON.stringify({ hook_event_name: event, session_id: identity, prompt, transcript_path: transcript }),
       encoding: "utf8", timeout, killSignal: "SIGKILL",
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, OPENRIG_HOME: root,
+      env: { ...process.env, PATH: nodeRig ? bin : `${bin}:${process.env.PATH}`, OPENRIG_HOME: root,
         OPENRIG_SESSION_NAME: "seat@test", OPENRIG_REFOCUS_ENABLED: "1", OPENRIG_REFOCUS_NOW: "",
         OPENRIG_REFOCUS_CONTENT_REF: "", OPENRIG_REFOCUS_CONTENT_FILE: "", OPENRIG_REFOCUS_TREES: "work",
         OPENRIG_REFOCUS_WORK_NODE: root, OPENRIG_WORKSPACE_ROOT: root,
@@ -74,8 +81,8 @@ describe("refocus continuation", () => {
     expect(f.state().pendingOn).toBeUndefined();
   });
 
-  it("reports only the third failed attempt, retains due state, and resets on a successful delivery", () => {
-    const f = fixture();
+  it.each([false, true])("reports the third failure and resets after delivery (env-node CLI without Node on PATH=%s)", nodeRig => {
+    const f = fixture(nodeRig);
     f.run("PostCompact");
     for (let i = 0; i < 2; i++) f.run("UserPromptSubmit", "continue", false);
     expect(f.calls()).toEqual([]);
