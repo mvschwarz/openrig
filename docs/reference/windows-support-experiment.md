@@ -5,7 +5,37 @@ Tracking: https://github.com/mvschwarz/openrig/issues/88
 This branch implements native Windows headless Codex/Pi launch, message delivery,
 process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
-RepoStew migration is deferred.
+Use in a particular local deployment does not establish general native support.
+
+## Current-main audit, 2026-10-21
+
+The experiment is rebased onto main `3657af0b59e82d6b3fb1c136eb7da28ac8ed6ad0`.
+The previously reproduced Windows `ProcessCensus` failure (`spawn ps ENOENT`)
+is repaired: resume metadata uses the strict CIM reader, while best-effort native
+identity observation retains its existing failure behavior. A failed enumeration
+rejects rather than caching an empty successful table, and a later call retries.
+
+Pi children retain `APPDATA` so tools can locate their existing Windows config;
+this does not export GitHub token variables. Process termination uses `taskkill`
+for native psmux, preserving failure results and the existing TERM/KILL sequence.
+The test environment also isolates Windows profile/config directories.
+
+Windows workspace build and typecheck passed. The focused daemon selection passed
+526 tests; a separate 156-test selection covered the tmux adapter, Pi environment,
+census and failure recovery. Actual psmux multiline/argv tests and an owned-process
+termination test passed. The latter verifies that a sibling remains alive. These
+fixtures exercise OS plumbing without provider calls; the stub scenario runner
+cannot exercise Pi's child environment or Windows CIM enumeration.
+
+Full native tests are not green: the UI run has five failures involving a POSIX
+tsx path, CRLF matching and locale assumptions. The repository/workspace runs were
+stopped after the repository suite remained in a POSIX signal fixture; their
+partial failures are not a completed-suite result. Linux and hosted validation
+results belong to the exact source head recorded in the PR.
+
+The 2026-10-20 census gap below is historical and superseded by this repair.
+Physical reboot/suspend, live all-runtime acceptance and general Windows support
+remain separate requirements.
 
 ## Current-main rebase and readiness, 2026-10-20
 
