@@ -295,3 +295,81 @@ describe("sidecar file hygiene", () => {
     expect(JSON.parse(raw).version).toBe(1);
   });
 });
+
+describe("observedUrl — the entry URL a binding was learned at (#1642)", () => {
+  const URL_A = "http://10.0.0.5:7433";
+  const URL_B = "http://10.0.0.6:7433";
+  const later = () => new Date("2026-08-22T03:00:00.000Z");
+
+  it("first contact stores the URL the self-id was observed at", () => {
+    const path = tmpPath();
+    recordHostObservation({ alias: "h", observedHostId: "host-aaaa", observedUrl: URL_A, now: fixedNow, path });
+    expect(loadHostBindings(path).bindings["h"]).toEqual({
+      hostId: "host-aaaa", firstObservedAt: "2026-08-21T02:00:00.000Z", lastObservedAt: "2026-08-21T02:00:00.000Z", observedUrl: URL_A,
+    });
+  });
+
+  it("reconfirming the same id backfills a legacy binding's URL and follows a moved entry", () => {
+    const path = tmpPath();
+    recordHostObservation({ alias: "h", observedHostId: "host-aaaa", now: fixedNow, path });
+    expect(loadHostBindings(path).bindings["h"]!.observedUrl).toBeUndefined();
+    recordHostObservation({ alias: "h", observedHostId: "host-aaaa", observedUrl: URL_A, now: later, path });
+    expect(loadHostBindings(path).bindings["h"]!.observedUrl).toBe(URL_A);
+    recordHostObservation({ alias: "h", observedHostId: "host-aaaa", observedUrl: URL_B, now: later, path });
+    expect(loadHostBindings(path).bindings["h"]!.observedUrl).toBe(URL_B);
+  });
+
+  it("a conflicting observation never attaches its URL to the stored identity", () => {
+    const path = tmpPath();
+    recordHostObservation({ alias: "h", observedHostId: "host-aaaa", observedUrl: URL_A, now: fixedNow, path });
+    const out = recordHostObservation({ alias: "h", observedHostId: "host-bbbb", observedUrl: URL_B, now: later, path });
+    expect(out.outcome).toBe("conflict");
+    const b = loadHostBindings(path).bindings["h"]!;
+    expect(b.hostId).toBe("host-aaaa");
+    expect(b.observedUrl).toBe(URL_A);
+    expect(b.conflict?.hostId).toBe("host-bbbb");
+  });
+
+  it("a conflicting observation leaves a legacy binding without a URL", () => {
+    const path = tmpPath();
+    recordHostObservation({ alias: "h", observedHostId: "host-aaaa", now: fixedNow, path });
+    recordHostObservation({ alias: "h", observedHostId: "host-bbbb", observedUrl: URL_B, now: later, path });
+    expect(loadHostBindings(path).bindings["h"]!.observedUrl).toBeUndefined();
+  });
+
+  it("reconfirming the original id while a conflict is recorded neither changes the URL nor clears the conflict", () => {
+    const path = tmpPath();
+    recordHostObservation({ alias: "h", observedHostId: "host-aaaa", observedUrl: URL_A, now: fixedNow, path });
+    recordHostObservation({ alias: "h", observedHostId: "host-bbbb", observedUrl: URL_B, now: later, path });
+    recordHostObservation({ alias: "h", observedHostId: "host-aaaa", observedUrl: URL_B, now: later, path });
+    const b = loadHostBindings(path).bindings["h"]!;
+    expect(b.observedUrl).toBe(URL_A);
+    expect(b.conflict?.hostId).toBe("host-bbbb");
+  });
+
+  it("the loader keeps a string observedUrl and drops any other value", () => {
+    const path = tmpPath();
+    writeFileSync(path, JSON.stringify({ version: 1, bindings: {
+      a: { hostId: "host-aaaa", firstObservedAt: "x", lastObservedAt: "x", observedUrl: URL_A },
+      b: { hostId: "host-bbbb", firstObservedAt: "x", lastObservedAt: "x", observedUrl: 7 },
+    } }));
+    const { bindings } = loadHostBindings(path);
+    expect(bindings["a"]!.observedUrl).toBe(URL_A);
+    expect("observedUrl" in bindings["b"]!).toBe(false);
+  });
+
+  it("doctor passes the entry URL it probed to the learner", async () => {
+    const { doctorLegs } = await import("../src/commands/host.js");
+    const calls: unknown[][] = [];
+    await doctorLegs({ id: "vm-a", transport: "http", url: URL_A } as const, {
+      run: async () => ({ ok: true as const, stdout: "", sshStderr: "", failedStep: null }),
+      tcpProbe: async () => "open" as const,
+      httpGet: async () => ({ status: 200, body: JSON.stringify({ selfHostId: "host-aaaa" }) }),
+      learnHostBinding: (...args: unknown[]) => {
+        calls.push(args);
+        return { outcome: "bound", binding: { hostId: "host-aaaa", firstObservedAt: "x", lastObservedAt: "x" } };
+      },
+    } as never);
+    expect(calls).toEqual([["vm-a", "host-aaaa", URL_A]]);
+  });
+});

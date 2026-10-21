@@ -13,6 +13,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { serve, type ServerType } from "@hono/node-server";
 import type Database from "better-sqlite3";
@@ -71,13 +72,16 @@ async function startDaemon(validateRig: (ref: string) => boolean): Promise<Daemo
   return { db, repo, server, url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, requests };
 }
 
-function writeHome(dir: string, hostsYaml: string | null, bindings: Record<string, string>): void {
+/** `bindings` maps an alias to a learned self-id, or to the whole binding record. `null` writes no file. */
+function writeHome(dir: string, hostsYaml: string | null, bindings: Record<string, string | Record<string, unknown>> | null): void {
   fs.mkdirSync(dir, { recursive: true });
   if (hostsYaml !== null) fs.writeFileSync(path.join(dir, "hosts.yaml"), hostsYaml);
+  if (bindings === null) return;
   const at = "2026-10-20T00:00:00.000Z";
   fs.writeFileSync(path.join(dir, "host-bindings.json"), JSON.stringify({
     version: 1,
-    bindings: Object.fromEntries(Object.entries(bindings).map(([alias, hostId]) => [alias, { hostId, firstObservedAt: at, lastObservedAt: at }])),
+    bindings: Object.fromEntries(Object.entries(bindings).map(([alias, b]) => [alias,
+      typeof b === "string" ? { hostId: b, firstObservedAt: at, lastObservedAt: at } : { firstObservedAt: at, lastObservedAt: at, ...b }])),
   }));
 }
 
@@ -116,14 +120,15 @@ describe.skipIf(!fs.existsSync(cliEntry))("#1642: cross-host queue writes throug
   });
 
   /** One `rig queue <argv>` as its own process. Async spawn: the daemons run on this event loop.
-   *  `daemonHome` gives the sender's daemon a different OPENRIG_HOME than the CLI's, as OPENRIG_URL can. */
-  async function run(label: string, argv: string[], opts: { daemonHome?: string } = {}): Promise<RunRecord> {
+   *  `daemonHome` gives the sender's daemon a different OPENRIG_HOME than the CLI's, as OPENRIG_URL can;
+   *  `cliHome` does the same for the CLI. */
+  async function run(label: string, argv: string[], opts: { daemonHome?: string; cliHome?: string } = {}): Promise<RunRecord> {
     sender.requests.length = 0;
     receiver.requests.length = 0;
     const before = { sender: rows(sender.db), receiver: rows(receiver.db) };
     if (opts.daemonHome) process.env.OPENRIG_HOME = opts.daemonHome;
     try {
-      const env: NodeJS.ProcessEnv = { ...process.env, OPENRIG_HOME: home, OPENRIG_URL: sender.url, OPENRIG_SESSION_NAME: SENDER };
+      const env: NodeJS.ProcessEnv = { ...process.env, OPENRIG_HOME: opts.cliHome ?? home, OPENRIG_URL: sender.url, OPENRIG_SESSION_NAME: SENDER };
       for (const key of ["RIGGED_HOME", "RIGGED_URL", "RIGGED_SESSION_NAME"]) delete env[key];
       const child = spawn(process.execPath, [cliEntry, "queue", ...argv, "--summary", "fixture", "--no-nudge", "--json"], { env });
       let stdout = "";
@@ -230,4 +235,110 @@ describe.skipIf(!fs.existsSync(cliEntry))("#1642: cross-host queue writes throug
       expect(r.stderr).not.toContain("No row was created");
     }, 30_000);
   }
+
+  describe("the selected daemon's own learned binding (its home's host-bindings.json)", () => {
+    let hangup: http.Server;
+    let hangupUrl: string;
+    const hangupRequests: string[] = [];
+    const eligible = (url: string) => ({ [ALIAS]: { hostId: SELF_ID, observedUrl: url } });
+    const daemonHomeWith = (name: string, url: string, bindings: Parameters<typeof writeHome>[2]) => {
+      const dir = path.join(root, name);
+      writeHome(dir, `hosts:\n  - id: ${ALIAS}\n    transport: http\n    url: ${url}\n`, bindings);
+      return dir;
+    };
+
+    beforeAll(async () => {
+      // A remote that takes the request, starts an answer and drops the connection: the outcome is unknown.
+      hangup = http.createServer((req, res) => {
+        hangupRequests.push(`${req.method} ${req.url}`);
+        req.resume();
+        req.on("end", () => {
+          res.writeHead(201, { "Content-Type": "application/json", "Content-Length": "1000" });
+          res.write("{\"qitemId\":");
+          setTimeout(() => res.destroy(), 20);
+        });
+      });
+      await new Promise<void>((resolve) => hangup.listen(0, "127.0.0.1", () => resolve()));
+      hangupUrl = `http://127.0.0.1:${(hangup.address() as AddressInfo).port}`;
+    });
+    afterAll(async () => { await new Promise<void>((resolve) => hangup.close(() => resolve())); });
+
+    it("a binding learned at the entry's current URL carries the self-id suffix to the receiver: one write, no hint", async () => {
+      const daemonHome = daemonHomeWith("eligible-create", receiver.url, eligible(receiver.url));
+      const r = await run("eligible binding", create(`${REMOTE_SEAT}@${SELF_ID}`), { daemonHome });
+      expect(outcome(r)).toEqual(FORWARDED);
+      expect(r.senderWrites).toEqual(["POST /api/queue/create"]);
+      expect(r.stderr).not.toContain(HINT);
+      expect(r.stderr).not.toContain("No row was created");
+    }, 30_000);
+
+    for (const [verb, closed] of [["handoff", "handed-off"], ["handoff-and-complete", "done"]] as const) {
+      it(`${verb}: one successor on the receiver, the source closed toward it, and a re-run absorbs`, async () => {
+        const daemonHome = daemonHomeWith(`eligible-${verb}`, receiver.url, eligible(receiver.url));
+        const source = await sender.repo.create({ sourceSession: SENDER, destinationSession: SENDER, body: "source work", nudge: false });
+        const transitions = () => (sender.db.prepare("SELECT COUNT(*) c FROM queue_transitions WHERE qitem_id = ?").get(source.qitemId) as { c: number }).c;
+        const before = transitions();
+        const first = await run(`${verb} eligible`, [verb, source.qitemId, "--to", `${REMOTE_SEAT}@${SELF_ID}`], { daemonHome });
+        expect(outcome(first)).toEqual(FORWARDED);
+        expect(transitions()).toBe(before + 1);
+        const closedRow = sender.repo.getById(source.qitemId)!;
+        expect(closedRow.state).toBe(closed);
+        expect(closedRow.closureTarget).toMatch(new RegExp(`@${SELF_ID}$`));
+        const successorId = closedRow.closureTarget!.slice(0, -(SELF_ID.length + 1));
+        expect(receiver.repo.getById(successorId)).toMatchObject({ destinationSession: REMOTE_SEAT, chainOfRecord: [source.qitemId] });
+        // The same command again: the successor create is re-sent and absorbed, the closed source is unchanged.
+        const again = await run(`${verb} eligible re-run`, [verb, source.qitemId, "--to", `${REMOTE_SEAT}@${SELF_ID}`], { daemonHome });
+        expect(again.exit).toBe(0);
+        expect(again.receiverRows).toBe(0);
+        expect(sender.repo.getById(source.qitemId)).toEqual(closedRow);
+        expect(transitions()).toBe(before + 1);
+      }, 30_000);
+    }
+
+    it("a binding only in the CLI's home is never used by the daemon: refused, nothing written", async () => {
+      const cliHome = path.join(root, "cli-only-binding");
+      writeHome(cliHome, `hosts:\n  - id: ${ALIAS}\n    transport: http\n    url: ${receiver.url}\n`, eligible(receiver.url));
+      const daemonHome = daemonHomeWith("daemon-without-binding", receiver.url, null);
+      const r = await run("binding only in the CLI home", create(`${REMOTE_SEAT}@${SELF_ID}`), { daemonHome, cliHome });
+      expect(outcome(r)).toEqual(NOTHING(2));
+      expect(JSON.parse(r.stdout)).toMatchObject({ failureClass: "unknown-host", detail: `unknown host id '${SELF_ID}'. Known host ids: ${ALIAS}.` });
+      expect(r.stderr).toContain(HINT);
+    }, 30_000);
+
+    const INELIGIBLE: Array<[string, Record<string, unknown>, string]> = [
+      ["learned before URLs were recorded", { hostId: SELF_ID }, "was learned before its URL was recorded"],
+      ["learned at a URL the entry no longer has", { hostId: SELF_ID, observedUrl: "http://127.0.0.1:1" }, "was learned at http://127.0.0.1:1, but the entry now points at"],
+      ["carrying a recorded conflict", { hostId: SELF_ID, observedUrl: "RECEIVER", conflict: { hostId: "host-0000beef", observedAt: "2026-10-20T01:00:00.000Z" } }, "has a recorded conflict"],
+    ];
+    for (const [label, binding, reason] of INELIGIBLE) {
+      for (const verb of ["create", "handoff", "handoff-and-complete"] as const) {
+        it(`${verb}: a daemon binding ${label} never forwards, writes or closes, and the refusal says why`, async () => {
+          const b = binding.observedUrl === "RECEIVER" ? { ...binding, observedUrl: receiver.url } : binding;
+          const daemonHome = daemonHomeWith(`ineligible-${verb}-${label.split(" ")[0]}-${reason.length}`, receiver.url, { [ALIAS]: b });
+          const source = verb === "create" ? null : await sender.repo.create({ sourceSession: SENDER, destinationSession: SENDER, body: "source work", nudge: false });
+          const before = source ? sender.repo.getById(source.qitemId) : null;
+          const argv = source ? [verb, source.qitemId, "--to", `${REMOTE_SEAT}@${SELF_ID}`] : create(`${REMOTE_SEAT}@${SELF_ID}`);
+          const r = await run(`${verb} ${label}`, argv, { daemonHome });
+          expect(outcome(r)).toEqual(NOTHING(2));
+          const err = JSON.parse(r.stdout) as { failureClass: string; detail: string };
+          expect(err.failureClass).toBe("unknown-host");
+          expect(err.detail).toContain(reason);
+          expect(err.detail).toContain(`rig host doctor ${ALIAS}`);
+          if (source) expect(sender.repo.getById(source.qitemId)).toEqual(before);
+        }, 30_000);
+      }
+    }
+
+    it("an unclear forward result is never sent again and never claims no row was created", async () => {
+      const daemonHome = daemonHomeWith("eligible-hangup", hangupUrl, eligible(hangupUrl));
+      hangupRequests.length = 0;
+      const r = await run("indeterminate forward", create(`${REMOTE_SEAT}@${SELF_ID}`), { daemonHome });
+      expect(r.exit).toBe(2);
+      expect(hangupRequests).toEqual(["POST /api/queue/create"]);
+      expect(r.senderWrites).toEqual(["POST /api/queue/create"]);
+      expect(JSON.parse(r.stdout)).toMatchObject({ error: "remote_queue_write_failed", outcome: "indeterminate" });
+      expect(r.stderr).not.toContain("No row was created");
+      expect(r.stderr).not.toContain(HINT);
+    }, 30_000);
+  });
 });
