@@ -45,7 +45,7 @@ export interface DaemonStatus {
   state: "running" | "stopped" | "stale" | "unverified";
   /** Home-resolution honesty: set when the resolved home lacks daemon state but a live sibling
    *  home (or a HOME-MOVED marker) exists — callers name BOTH paths, never assert down. */
-  siblingHint?: { resolvedHome: string; siblingHome: string };
+  siblingHint?: { resolvedHome: string; siblingHome: string; /** an explicit HOME-MOVED marker, not just a live adjacent home */ moved?: true };
   port?: number;
   host?: string;
   pid?: number;
@@ -955,7 +955,7 @@ function findSiblingHome(deps: LifecycleDeps): DaemonStatus["siblingHint"] {
     const marker = path.join(home, "HOME-MOVED");
     if (deps.exists(marker)) {
       const target = deps.readFile(marker)?.trim();
-      if (target) return { resolvedHome: home, siblingHome: target };
+      if (target) return { resolvedHome: home, siblingHome: target, moved: true };
     }
     if (!deps.listDir) return undefined;
     const parent = path.dirname(home);

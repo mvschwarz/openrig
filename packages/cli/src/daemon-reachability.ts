@@ -68,3 +68,15 @@ export function daemonMayAnswer(status: DaemonStatus): boolean {
   if (status.siblingHint || isBlockedConnectionCode(status.probeErrorCode)) return false;
   return true;
 }
+
+/** Whether `rig up` or `rig start` should start a local daemon. Yes for one confirmed down (stopped, or a
+ *  stale record). For an unverified status, as before this check existed, when another home's daemon is
+ *  live (an independent home elsewhere, this one's own endpoint possibly free) or the probe was blocked;
+ *  preflight and the start's own state and listener checks then decide. Not for an explicit HOME-MOVED
+ *  marker, and not for a daemon of this home that is alive but too busy to answer (it gets the request). */
+export function shouldAutoStartDaemon(status: DaemonStatus): boolean {
+  if (status.state === "stopped" || status.state === "stale") return true;
+  if (status.state !== "unverified") return false;
+  if (status.siblingHint) return !status.siblingHint.moved;
+  return isBlockedConnectionCode(status.probeErrorCode);
+}

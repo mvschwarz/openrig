@@ -8,6 +8,7 @@ import { parse as parseYamlDoc } from "yaml";
 import { Command } from "commander";
 import { DaemonClient, DaemonConnectionError } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, startDaemon, type LifecycleDeps, daemonStatusGuard } from "../daemon-lifecycle.js";
+import { shouldAutoStartDaemon } from "../daemon-reachability.js";
 import { prepareDaemonAutoStart } from "../daemon-auto-start.js";
 import type { StartOptions } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
@@ -240,8 +241,8 @@ team back with its conversations, run rig up <rig-name> --existing, not the spec
 
       // Run preflight before auto-start
       let status = await getDaemonStatus(deps.lifecycleDeps);
-      // Only a daemon confirmed down is started; an unverified one may be alive and busy.
-      if (status.state === "stopped" || status.state === "stale") {
+      // A busy daemon of this home gets the request instead of a start attempt (shouldAutoStartDaemon).
+      if (shouldAutoStartDaemon(status)) {
         let startOptions: StartOptions;
         try {
           const prepared = await prepareDaemonAutoStart(deps.lifecycleDeps, depsOverride?.preflightExec);

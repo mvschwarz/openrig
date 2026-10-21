@@ -146,6 +146,13 @@ export function renderDaemonTransportError(
   return true;
 }
 
+/** For a command's own catch around a daemon request: renders a daemon transport error as the shared
+ *  path does (a timeout says the outcome is unknown and to check its effect before any retry) and returns
+ *  true; returns false for any other error, which the caller reports as before. */
+export function renderCaughtTransportError(e: unknown, json = false): boolean {
+  return renderDaemonTransportError(e, { out: (l) => console.log(l), err: (l) => console.error(l), json });
+}
+
 /**
  * Parse+run the program through the shared error path. Injectable IO for tests.
  * Returns the process exit code (0 on success / clean help/version).

@@ -12,6 +12,7 @@ import { Command } from "commander";
 import { DaemonClient } from "../client.js";
 import { attestationLineage, type AttestationLineage } from "../lib/scope/attestation-lineage.js";
 import { getDaemonStatus, getDaemonUrl , statusGuardMessage } from "../daemon-lifecycle.js";
+import { renderDaemonTransportError } from "../cli-error.js";
 import { daemonMayAnswer } from "../daemon-reachability.js";
 import { realDeps } from "./daemon.js";
 
@@ -147,7 +148,8 @@ function fail(err: unknown, json: boolean, out: Stdout): never {
     } else {
       process.stderr.write(`Error: ${err.fact}\n${err.consequence}\n${err.action}\n`);
     }
-  } else {
+  } else if (!renderDaemonTransportError(err, { out: (l) => out.write(`${l}\n`), err: (l) => process.stderr.write(`${l}\n`), json })) {
+    // A daemon timeout says the outcome is unknown and to check before any retry; anything else as before.
     const message = err instanceof Error ? err.message : String(err);
     process.stderr.write(`Error: ${message}\n`);
   }
