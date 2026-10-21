@@ -3,10 +3,12 @@
 // a real `codex -p <profile> mcp list`, up to 10 s for one that hangs); they now share execRuntimeProbe. The skill
 // audit read every SKILL.md synchronously. The plan's probe is also covered end to end in bootstrap-orchestrator.test.ts.
 import { describe, it, expect } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execRuntimeProbe } from "../src/adapters/runtime-probe-exec.js";
+import { runtimeProbeFailure } from "../src/adapters/preflight-exec.js";
+import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { verifyCodexProfileLoads } from "../src/domain/codex-profile-preflight.js";
 import { discoverSkillsWithProvenance } from "../src/domain/skill-discovery.js";
 
@@ -46,6 +48,44 @@ describe("the event loop stays free", () => {
     expect(result.ok).toBe(false);
     expect(result.error).toContain("legacy");
     expect(result.migrationHint).toContain("probeprof.config.toml");
+  }));
+
+  it("and a probe that hangs is ended at its bound and reads as a timeout", () => withDir(async (dir) => {
+    writeFileSync(join(dir, "hangs"), "#!/bin/sh\nexec sleep 3\n", { mode: 0o755 });
+    const err = await execRuntimeProbe("test.probe", join(dir, "hangs"), { timeoutMs: 200 }).catch((e: unknown) => e);
+    expect((err as { code?: unknown }).code).toBe("ETIMEDOUT");
+    expect(runtimeProbeFailure(err)).toContain("ETIMEDOUT");
+  }));
+
+  it("while a spec's import preflight runs a Codex profile probe", () => withDir(async (dir) => {
+    const bin = join(dir, "bin");
+    const ran = join(dir, "probe-ran");
+    mkdirSync(bin);
+    mkdirSync(join(dir, "project"));
+    mkdirSync(join(dir, "agents", "impl"), { recursive: true });
+    writeFileSync(join(bin, "codex"), `#!/bin/sh\ntouch ${JSON.stringify(ran)}\nsleep 1\necho ok\n`, { mode: 0o755 });
+    writeFileSync(join(dir, "agents", "impl", "agent.yaml"), "name: impl\nversion: \"1.0.0\"\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: []\n");
+    const spec = `version: "0.2"\nname: probe-rig\npods:\n  - id: dev\n    label: Dev\n    members:\n      - id: impl\n        agent_ref: local:agents/impl\n        profile: default\n        runtime: codex\n        codex_config_profile: probeprof\n        cwd: ${JSON.stringify(join(dir, "project"))}\n    edges: []\nedges: []\n`;
+    const db = createFullTestDb();
+    const oldPath = process.env.PATH;
+    process.env.PATH = `${bin}:${oldPath ?? ""}`;
+    try {
+      const { app } = createTestApp(db);
+      const { value, gap } = await withLongestTickGap(async () => {
+        const res = await app.request("/api/rigs/import/preflight", {
+          method: "POST",
+          headers: { "Content-Type": "text/plain", "X-Rig-Root": dir },
+          body: spec,
+        });
+        return { status: res.status, body: await res.json() as { errors?: string[] } };
+      });
+      expect(value.status, JSON.stringify(value.body)).toBe(200);
+      expect(existsSync(ran)).toBe(true);
+      expect(gap).toBeLessThan(500);
+    } finally {
+      process.env.PATH = oldPath;
+      db.close();
+    }
   }));
 
   it("while the skill audit scans every skill", () => withDir(async (dir) => {
