@@ -15,6 +15,8 @@ vi.mock("../src/daemon-lifecycle.js", async () => {
     ...actual,
     getDaemonStatus: vi.fn(async () => lifecycle.status),
     startDaemon: lifecycle.startDaemon,
+    // rig start waits for the kernel before its first request; report it ready at once.
+    waitForKernelReady: vi.fn(async () => ({ ok: true })),
   };
 });
 vi.mock("../src/daemon-auto-start.js", () => ({
