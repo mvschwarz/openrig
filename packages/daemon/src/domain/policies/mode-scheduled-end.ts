@@ -46,7 +46,7 @@ export const modeEndNoticeId = (applicationId: string): string => `qitem-mode-en
  *  `notice-pending`: it ended at its time, but the notice couldn't be created; the job stays active and the next run
  *  creates it. `already-ended`: ended by hand or by a switch, so nothing is done. `ended` and `already-ended` retire it. */
 export async function runModeScheduledEnd(input: ModeScheduledEndInput):
-  Promise<{ state: "not-yet" | "ended" | "notice-pending" | "already-ended"; notified?: string }> {
+  Promise<{ state: "not-yet" | "ended" | "notice-pending" | "already-ended"; notified?: string; why?: string }> {
   const job = input.jobsRepo.getById(input.jobId);
   const grab = (k: string) => job?.specYaml.match(new RegExp(`${k}:\\s*"([^"\\n]+)"`))?.[1];
   const applicationId = grab("applicationId");
@@ -76,6 +76,7 @@ export async function runModeScheduledEnd(input: ModeScheduledEndInput):
     return { state: "ended", notified: existing.destinationSession };
   }
   const recipient = recipientFor(input, ended);
+  if (!recipient.ok && !recipient.known) return { state: "notice-pending", why: recipient.why }; // stays active: asked again next run
   if (!recipient.ok) {
     // No address the queue would accept: say so on the job and stop, rather than retry a refusal forever.
     input.jobsRepo.markTerminal(input.jobId, `ended at its scheduled time; no notice: ${recipient.why}`);
@@ -93,22 +94,38 @@ export async function runModeScheduledEnd(input: ModeScheduledEndInput):
 
 const SCHEDULER = "daemon@kernel";
 
-type Recipient = { ok: true; to: string; kind: "operator" | "applied-by" | "person"; why: string | null } | { ok: false; why: string };
+/** `known: false`: who can be told couldn't be established (the person registry or the address check failed), so nothing
+ *  is decided yet. */
+type Recipient = { ok: true; to: string; kind: "operator" | "applied-by" | "person"; why: string | null } | { ok: false; known: boolean; why: string };
 
 /** Who's told, through the queue's own destination check: the kernel operator, which gives the account; where it isn't on
  *  this host, the seat that applied the mode, if the queue would accept it (a named operator outside a seat isn't a
  *  destination); otherwise the person, whose account it is. */
 function recipientFor(input: ModeScheduledEndInput, ended: ModeApplication): Recipient {
-  const accepts = (to: string) => { try { return input.queueRepo.acceptsDestination(to); } catch { return false; } };
+  const unknown = (why: string): Recipient => ({ ok: false, known: false, why });
+  // A check that throws hasn't said no.
+  const accepts = (to: string): boolean | Error => { try { return input.queueRepo.acceptsDestination(to); } catch (error) { return error as Error; } };
   const operatorHere = !!input.db.prepare("SELECT 1 FROM sessions WHERE session_name = ? LIMIT 1").get(KERNEL_OPERATOR_SESSION);
-  if (operatorHere && accepts(KERNEL_OPERATOR_SESSION)) return { ok: true, to: KERNEL_OPERATOR_SESSION, kind: "operator", why: null };
+  if (operatorHere) {
+    const ok = accepts(KERNEL_OPERATOR_SESSION);
+    if (ok instanceof Error) return unknown(`checking ${KERNEL_OPERATOR_SESSION} failed: ${ok.message}`);
+    if (ok) return { ok: true, to: KERNEL_OPERATOR_SESSION, kind: "operator", why: null };
+  }
   const noOperator = `${KERNEL_OPERATOR_SESSION} isn't on this host`;
-  if (accepts(ended.startedBy)) return { ok: true, to: ended.startedBy, kind: "applied-by", why: noOperator };
+  const applier = accepts(ended.startedBy);
+  if (applier instanceof Error) return unknown(`checking ${ended.startedBy} failed: ${applier.message}`);
+  if (applier) return { ok: true, to: ended.startedBy, kind: "applied-by", why: noOperator };
+  // The queue's check reads the person registry too, and reads an unreadable one as "not registered" (for an applier
+  // addressed as a person, too): read it here, so a registry that can't be read is "can't tell yet", never "nobody to tell".
   const reg = loadHumanRegistry(input.home);
-  const person = (reg.ok ? reg.entities.find((e) => e.entityId === ended.entityId)?.address : null) ?? `${ended.entityId}@external`;
+  if (!reg.ok) return unknown(`the person registry couldn't be read: ${reg.error}`);
   const notSeat = `${ended.startedBy}, who applied it, isn't an address the queue accepts`;
-  if (accepts(person)) return { ok: true, to: person, kind: "person", why: `${noOperator}, and ${notSeat}` };
-  return { ok: false, why: `${noOperator}, ${notSeat}, and ${person} isn't registered` };
+  const person = reg.entities.find((e) => e.entityId === ended.entityId)?.address;
+  if (!person) return { ok: false, known: true, why: `${noOperator}, ${notSeat}, and ${ended.entityId} isn't registered` };
+  const toPerson = accepts(person);
+  if (toPerson instanceof Error) return unknown(`checking ${person} failed: ${toPerson.message}`);
+  if (toPerson) return { ok: true, to: person, kind: "person", why: `${noOperator}, and ${notSeat}` };
+  return { ok: false, known: true, why: `${noOperator}, ${notSeat}, and ${person} isn't an address the queue accepts` };
 }
 
 function noticeFor(ended: ModeApplication, scheduledEnd: string, qitemId: string, recipient: Extract<Recipient, { ok: true }>): QueueCreateInput {
@@ -148,7 +165,7 @@ export function makeModeScheduledEndPolicy(deps: Omit<ModeScheduledEndInput, "jo
     async evaluate(job: PolicyJob): Promise<PolicyEvaluation> {
       const r = await runModeScheduledEnd({ ...deps, jobId: job.jobId });
       if (r.state === "not-yet") return { action: "skip", reason: "before its scheduled end" };
-      if (r.state === "notice-pending") return { action: "skip", reason: "ended; the operator's notice is still to be created" };
+      if (r.state === "notice-pending") return { action: "skip", reason: `ended; the notice is still to be created${r.why ? `: ${r.why}` : ""}` };
       return { action: "terminal", reason: r.state === "ended" ? "mode ended at its scheduled time" : "mode had already ended" };
     },
   } as Policy;

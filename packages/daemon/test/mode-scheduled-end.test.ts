@@ -2,7 +2,7 @@
 // that application only, with the same end-if-mine path as "I'm back", and tells the kernel operator to give the account.
 // Real SQLite (all migrations), real person records in a temp home, the real queue and watchdog jobs table.
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDb } from "../src/db/connection.js";
@@ -11,7 +11,7 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
-import { addHumanFragment, loadHumanRegistry, readHumanAvailability, setHumanField } from "../src/domain/gateway/human-registry.js";
+import { addHumanFragment, loadHumanRegistry, readHumanAvailability, removeHumanFragment, setHumanField } from "../src/domain/gateway/human-registry.js";
 import { HumanModeService, registryAvailability } from "../src/domain/gateway/human-operating-modes.js";
 import { makeTopologyDestinationCheck } from "../src/domain/queue-destination-check.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -89,14 +89,33 @@ describe("a mode's scheduled end", () => {
       terminalReason: `ended at its scheduled time; alex@external told (${KERNEL_OPERATOR_SESSION} isn't on this host, and op, who applied it, isn't an address the queue accepts)` });
   });
 
-  it("with no address the queue would accept, the job ends saying why, instead of retrying", async () => {
+  it("a person registry that can't be read leaves the notice owed, not lost; once it reads again the person is told once", async () => {
     const f = fixture();
     const app = f.modes.apply("alex", "asleep", { scheduledEnd: END }, "op").application!;
     const jobId = f.jobFor(app.applicationId)!.jobId;
-    rmSync(join(f.home, "gateway", "humans", "alex.yaml")); // no longer registered
+    const fragment = join(f.home, "gateway", "humans", "alex.yaml");
+    const good = readFileSync(fragment, "utf8");
+    writeFileSync(fragment, "entityId: [unclosed\n"); // briefly unreadable
+    expect(await f.run(jobId, END)).toMatchObject({ state: "notice-pending", why: expect.stringContaining("the person registry couldn't be read") });
+    expect(f.modes.get(app.applicationId)!.endReason).toBe("scheduled"); // the mode did end
+    expect(f.jobFor(app.applicationId)?.jobId).toBe(jobId); // still active
+    expect(f.toOperator()).toEqual([]);
+    writeFileSync(fragment, good); // repaired
+    expect(await f.run(jobId, new Date("2026-10-21T07:01:00Z"))).toEqual({ state: "ended", notified: "alex@external" });
+    expect(f.toOperator().map((r) => r.dest)).toEqual(["alex@external"]);
+    expect(f.jobFor(app.applicationId)).toBeUndefined();
+  });
+
+  it("a person no longer registered, with no one else to tell, ends the job saying why, and nothing happens after", async () => {
+    const f = fixture();
+    const app = f.modes.apply("alex", "asleep", { scheduledEnd: END }, "op").application!;
+    const jobId = f.jobFor(app.applicationId)!.jobId;
+    expect(removeHumanFragment("alex", { inflight: [] }, f.home).ok).toBe(true);
     expect(await f.run(jobId, END)).toEqual({ state: "ended", notified: undefined });
-    expect(new WatchdogJobsRepository(f.db).getById(jobId)).toMatchObject({ state: "terminal",
-      terminalReason: expect.stringContaining("no notice: operator-agent@kernel isn't on this host, op, who applied it, isn't an address the queue accepts, and alex@external isn't registered") });
+    const reason = `ended at its scheduled time; no notice: ${KERNEL_OPERATOR_SESSION} isn't on this host, op, who applied it, isn't an address the queue accepts, and alex isn't registered`;
+    expect(new WatchdogJobsRepository(f.db).getById(jobId)).toMatchObject({ state: "terminal", terminalReason: reason });
+    await f.run(jobId, new Date("2026-10-21T07:05:00Z")); // a second pass changes nothing
+    expect(new WatchdogJobsRepository(f.db).getById(jobId)).toMatchObject({ state: "terminal", terminalReason: reason });
     expect(f.toOperator()).toEqual([]);
   });
 
