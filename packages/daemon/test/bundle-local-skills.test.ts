@@ -402,14 +402,14 @@ describe("bundle-local skills", () => {
     expect(fs.readFileSync(targetOf("edited-clean"), "utf8")).toBe(skill("edited-clean"));
   });
 
-  it("discovers Pi bundle skills without importing Claude/Codex home or workspace pools", () => {
+  it("discovers Pi bundle skills without importing Claude/Codex home or workspace pools", async () => {
     for (const prefix of ["home/.agents", "home/.claude", "work/.agents", "work/.claude"]) {
       write(`${prefix}/skills/sibling/SKILL.md`, skill("sibling"));
     }
     write("installed/skills/portable/SKILL.md", skill("portable"));
     const paths = { runtime: "pi" as const, homedir: path.join(root, "home"), cwd: path.join(root, "work"), specInstallDir: path.join(root, "installed") };
     expect(discoverSkillsForRuntime(paths).skills.map(s => s.id)).toEqual(["portable"]);
-    expect(discoverSkillsWithProvenance(paths).skills.map(s => [s.id, s.sourceKind])).toEqual([["portable", "spec_install"]]);
+    expect((await discoverSkillsWithProvenance(paths)).skills.map(s => [s.id, s.sourceKind])).toEqual([["portable", "spec_install"]]);
     expect(discoverSkillsForRuntime({ ...paths, specInstallDir: undefined }).skills).toEqual([]);
   });
 

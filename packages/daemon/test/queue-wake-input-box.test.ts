@@ -172,7 +172,7 @@ describe("a queue wake keeps its input-box reading (#1278)", () => {
 
   it.each<[SendResult, string]>([
     [{ ok: false, error: "send failed" }, "failed:send failed"],
-    [{ ok: false, reason: "timeout", delivery: { state: "indeterminate" } }, "indeterminate:timeout"],
+    [{ ok: false, reason: "draft_input_changed", sent: true }, "indeterminate:draft_input_changed"],
     [{ ok: true, outcome: "retained", reason: "draft_present" }, "retained:draft_aware"],
   ])("keeps a returned reading alongside the unchanged outcome %j", async (result, expected) => {
     const h = harness({ outbox: false });
@@ -212,7 +212,10 @@ describe("a queue wake keeps its input-box reading (#1278)", () => {
   it.each([
     [{ ok: true, verified: true }, "verified"],
     [{ ok: false, error: "Session 'bob@rig' not found" }, "failed:Session 'bob@rig' not found"],
-    [{ ok: false, error: "ack timed out", delivery: { state: "indeterminate" } }, "indeterminate:ack timed out"],
+    [{ ok: false, sent: false, inputPhase: "not_reached", reason: "caller_cancelled" }, "failed:caller_cancelled"],
+    [{ ok: false, reason: "delivery_indeterminate" }, "indeterminate:delivery_indeterminate"],
+    [{ ok: false, reason: "submit_failed" }, "indeterminate:submit_failed"],
+    [{ ok: false, reason: "send_failed", inputPhase: "attempted" }, "indeterminate:send_failed"],
     [{ ok: true, verified: false, outcome: "retained", reason: "typing_guard_enabled" }, "retained:typing_guard"],
     [new Error("transport broke"), "failed:transport broke"],
     [new Error("ack timed out"), "indeterminate:ack timed out"],

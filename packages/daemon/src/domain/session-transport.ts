@@ -25,8 +25,7 @@ import {
 } from "./composer-prompts.js";
 export { inspectStartupStagedText } from "./startup-submission-evidence.js";
 import { OutboxHandler } from "./outbox-handler.js";
-import { DraftAwareDelivery, type GuardedDeliverySummary } from "./draft-aware-delivery.js";
-import type { OutboxEntry } from "./outbox-handler.js";
+import { DraftAwareDelivery, type GuardedDeliverySummary, type QueueWakeFacts } from "./draft-aware-delivery.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import { claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
@@ -1553,7 +1552,7 @@ export interface SendOpts {
    *  `caller_cancelled` and never writes, then or later. Once input may have started it is ignored: the result stays
    *  attempted or written. Queue wakes and committed outbox deliveries have no caller and ignore it. */
   signal?: AbortSignal;
-  /** Stable caller request ID, reused for readback after transport uncertainty. */
+  /** Optional reference for a manually held record; never deduplicates an explicit input request. */
   deliveryId?: string;
   auditPointer?: string;
   /** Internal queue seam: already committed original members, never client-supplied. */
@@ -1822,7 +1821,7 @@ export class SessionTransport {
       (session, text, opts) => this.sendUnguarded(session, text, opts));
   }
 
-  configureGuardedWakes(applicable: (entries: readonly OutboxEntry[]) => boolean): void {
+  configureGuardedWakes(applicable: (entries: readonly QueueWakeFacts[]) => boolean): void {
     this.guardedDelivery?.configureWakes(applicable);
   }
 
@@ -2192,21 +2191,6 @@ export class SessionTransport {
           }
         }
       }
-      const existing = this.guardedDelivery?.existing(sessionName, text, opts ?? {}, ids);
-      if (existing) return existing;
-      // Idempotent readback also after disabling: an old retained ID never becomes a new send.
-      // (P2: this readback is NOT a new retention and is outside the retained_no_write seam.)
-      if (!opts?.committedOutboxIds && opts?.deliveryId) {
-        const prior = outbox.getById(opts.deliveryId);
-        if (prior?.guardBinding) {
-          if (prior.body !== text || prior.destinationSession !== sessionName || prior.senderSession !== (opts.actorSession ?? "unknown")) {
-            return { ok: false, sessionName, sent: false, reason: "delivery_identity_conflict", error: "Delivery ID names different content/identity." };
-          }
-          if (prior.deliveryState === "retained" || prior.deliveryState === "retired") return retainedResult();
-        }
-      }
-      // A recorded delivery has answered with its own outcome above; with nothing recorded, a caller already gone
-      // ends the send here.
       if (callerSignal(opts)?.aborted) return callerCancelled(sessionName);
       // #1084 — the idle wait must not occupy the seat's serial lease: a long
       // --wait-for-idle inside guard.operation holds up other sends and queue
@@ -2245,20 +2229,12 @@ export class SessionTransport {
       }
       const result = await guard.operation(sessionName, async () => {
         if (this.guardedDelivery && !sendOpts?.submitOnly && guard.needsInputCheck(sessionName)) {
-          // Up to its durable record a draft-aware send is still the caller's: one that went away while this send
-          // waited for the lease ends here, unless a record for this delivery already exists. DraftAwareDelivery.send
-          // commits that record synchronously before its first await, so no cancellation lands between this check
-          // and the commit; after the commit a caller going away doesn't cancel it.
-          if (callerSignal(sendOpts)?.aborted && !this.guardedDelivery.existing(sessionName, text, sendOpts ?? {}, ids)) {
-            return callerCancelled(sessionName);
-          }
-          return this.guardedDelivery.send(sessionName, text, { ...sendOpts, signal: undefined }, ids);
+          if (callerSignal(sendOpts)?.aborted) return callerCancelled(sessionName);
+          return this.guardedDelivery.send(sessionName, text, sendOpts ?? {},
+            sendOpts?.committedOutboxIds ?? [`guard-send-${randomUUID()}`]);
         }
-        const prior = this.guardedDelivery?.existing(sessionName, text, sendOpts ?? {}, ids);
-        return prior ?? this.sendUnguarded(sessionName, text, sendOpts);
+        return this.sendUnguarded(sessionName, text, sendOpts);
       }, async target => {
-        const prior = this.guardedDelivery?.existing(sessionName, text, sendOpts ?? {}, ids);
-        if (prior) return prior;
         if (opts?.submitOnly) return { ok: false, sessionName, sent: false, reason: "typing_guard_enabled", error: "Typing guard prevents submit-only; no Enter was sent." };
         // Nothing is retained yet: a caller that went away while this send waited for the lease ends it here.
         if (callerSignal(opts)?.aborted) return callerCancelled(sessionName);

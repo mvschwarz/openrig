@@ -10,7 +10,7 @@
       "core/openrig-architect/SKILL.md": "51b65d2e878eeaf2af2f23974677d6a3272728024f3a6854bf3a646567fd3ae6",
       "core/openrig-cmux/SKILL.md": "73a86eac45d68b16a38fc0a4438713c634d86061073dac96a4d9e656ea5d34dc",
       "core/openrig-herdr/SKILL.md": "37508a02f50bb69ee97c22c37ccf70aa8e37dc0784061eb2a5ad813571eebd1a",
-      "core/openrig-skills/SKILL.md": "c30ca27054b4253db09dc45b7d3e029d8d81f9019f2a1b487d6ca0ca2b99bbf5",
+      "core/openrig-skills/SKILL.md": "bdd6594ae1108455103239d39694c865cc40d3f7d9f24cd3566a18397df270da",
       "core/openrig-software-factory/SKILL.md": "7a57815f3c6865d5cc42c063cccdca998d6ee100a82812362d0c81f314465b77",
       "core/openrig-software-factory/references/worked-example.md": "409680b7e96e1b5725a68fd7e96da0a4c908fec88a77599d39f574d9e64bcc88",
       "core/openrig-upgrade/SKILL.md": "0ddbe16d8c93cd093e5fd3bd11a4323479db46a6d49ae9906df940b699f6e297",
@@ -31,7 +31,8 @@
       "pm/plan-review/SKILL.md": "42f1b746d9ceae32587fc754fcc96462af44ba7f0078407f505d7a30b88a1469",
       "pm/requirements-writer/SKILL.md": "04cfb8853553f1538fd202e9804e14e6b259f3a4c12b5f255c30169cf66ed0af",
       "pm/ui-mockup/SKILL.md": "a597fad7dcdebf43e74e01a607e12eabf848c831c96be3da2f1aeeb12f82ef08",
-      "pods/development-team/SKILL.md": "3d712a94a1725b543371ffc502d3f5641e3b77d9d566aa0f99a2977682241f9b",
+      "pods/development-team/SKILL.md": "4663daa9a4ab845a24f51553671e5359f3a29a44b774e7cf378464976256556b",
+      "pods/development-team/references/refactoring.md": "c73addf5cc5f51806ab31ab5165a8183dd616bd72526905695245e54c29301af",
       "pods/orchestration-team/SKILL.md": "616f332495a8e6fb5b6a3933442c81008158f9d3790a55783860ccbcfa7d6047",
       "pods/oversight-team/SKILL.md": "a48de41350453a09b231e01a89cc1dd3d4a64e082df090a7b0e04034227d2bb4",
       "pods/review-team/SKILL.md": "e669a893d5bd1d01fdd5e357a0f0f56425fc2fb845705bddc629016e04c8a6da",
@@ -52,13 +53,14 @@
       "process/systematic-debugging/root-cause-tracing.md": "a81bee9448794d261b4aca8487c595d11ff4bd4e10a5f96bca1117dd32527050",
       "process/test-driven-development/SKILL.md": "51f65d2bc71dd6fc84640bf113acf287f4e003ef325ed91cb112fce59149a298",
       "process/test-driven-development/testing-anti-patterns.md": "bde453bc258f06543987477c837939afaa774ea2acbd9f308d702fc452bc4283",
-      "process/verification-before-completion/SKILL.md": "0b8cea0bb82a8ab0f015afaf84c87796e2c94eee3a83d4fa3d4461d0917950bd"
+      "process/verification-before-completion/SKILL.md": "c17db073ace9a3f345a9a979323047f5d1b5c4e09eaa7398ccd96b49eef44874",
+      "process/verification-before-completion/references/performance-claims.md": "7db2a496a9423ab409b4e3819f64cd6abd7dff2413ce78232e6d154e62126884"
     },
     "plugin": {
       "agent-operated-software/SKILL.md": "9159d26e7884bc5205f8b06adaa65625c7d9c6bef41dc2f307d91da4cc1b424b",
       "agent-operated-workflows/SKILL.md": "24e54cbfa979999f523516112670618b2926ae5d42c7aa0846c94db214857ea5",
       "applying-a-permission-policy/SKILL.md": "f7bba8d50b10fc8715f40a57bf82677ca9388c6718c8a162833d9c6daf2afdca",
-      "claude-compaction-restore/SKILL.md": "a9d309e42c9579dfcc0d719e42950db2ed45cd7e4e68ab00727630a090751394",
+      "claude-compaction-restore/SKILL.md": "623b00143111a1ad695c72c86bcf0792bbccd1b4a6d250a1cde27145513960ae",
       "claude-compaction-restore/reference/SKILL-v1.md": "6af2a889c9c38227fb186897c6e29185f81b215822070b469a6ceeb47734e133",
       "claude-compaction-restore/scripts/precompact-hook.mjs": "478599ce28f4bdcd1f1e091c687726b598271d834288dcfd80bb2f9adfa2e37a",
       "claude-compaction-restore/scripts/restore-from-jsonl.mjs": "5584cff4ab36cd843e14c81bd201e4a2f8e498e995abacc4f81ec6c1fc556b10",
@@ -81,7 +83,7 @@
       "openrig-operating-model/templates/PLAYBOOK.md": "ff6f9dc8caab06dc7b9ae21977310ddefa23e925453bd54629ce0a669403bfb0",
       "openrig-operating-model/templates/SOP.md": "1eaf0daf4f9bbf0715e6a5aaf0f29f030af5fe8b8a10232488ee97c507afa6dc",
       "openrig-operating-model/templates/SPEC.md": "f126536daa59cea3f1cfb0898d83c7cdf99f6392f6f155ea64fe55187dd0f5f1",
-      "openrig-skills/SKILL.md": "c30ca27054b4253db09dc45b7d3e029d8d81f9019f2a1b487d6ca0ca2b99bbf5",
+      "openrig-skills/SKILL.md": "bdd6594ae1108455103239d39694c865cc40d3f7d9f24cd3566a18397df270da",
       "openrig-user/SKILL.md": "cf2fd3f2cf4d7c5182b63ae42e0c2eaf23fb6ddbbc61cef0b26d0d9536ca2476",
       "orienting-to-an-inherited-seat/CHANGELOG.md": "4d0970e75e5c15b00a48d6a7150376d646257777264fd1b9a191165a8d5a6e84",
       "orienting-to-an-inherited-seat/SKILL.md": "252fed402f19027056bbba241df3305be88de3175b67dc8fe051143bb0d4412b",
@@ -107,7 +109,7 @@
       "core/openrig-architect/SKILL.md": "51b65d2e878eeaf2af2f23974677d6a3272728024f3a6854bf3a646567fd3ae6",
       "core/openrig-cmux/SKILL.md": "73a86eac45d68b16a38fc0a4438713c634d86061073dac96a4d9e656ea5d34dc",
       "core/openrig-herdr/SKILL.md": "37508a02f50bb69ee97c22c37ccf70aa8e37dc0784061eb2a5ad813571eebd1a",
-      "core/openrig-skills/SKILL.md": "c30ca27054b4253db09dc45b7d3e029d8d81f9019f2a1b487d6ca0ca2b99bbf5",
+      "core/openrig-skills/SKILL.md": "bdd6594ae1108455103239d39694c865cc40d3f7d9f24cd3566a18397df270da",
       "core/openrig-software-factory/SKILL.md": "7a57815f3c6865d5cc42c063cccdca998d6ee100a82812362d0c81f314465b77",
       "core/openrig-software-factory/references/worked-example.md": "409680b7e96e1b5725a68fd7e96da0a4c908fec88a77599d39f574d9e64bcc88",
       "core/openrig-upgrade/SKILL.md": "0ddbe16d8c93cd093e5fd3bd11a4323479db46a6d49ae9906df940b699f6e297",
@@ -128,7 +130,8 @@
       "pm/plan-review/SKILL.md": "42f1b746d9ceae32587fc754fcc96462af44ba7f0078407f505d7a30b88a1469",
       "pm/requirements-writer/SKILL.md": "04cfb8853553f1538fd202e9804e14e6b259f3a4c12b5f255c30169cf66ed0af",
       "pm/ui-mockup/SKILL.md": "a597fad7dcdebf43e74e01a607e12eabf848c831c96be3da2f1aeeb12f82ef08",
-      "pods/development-team/SKILL.md": "3d712a94a1725b543371ffc502d3f5641e3b77d9d566aa0f99a2977682241f9b",
+      "pods/development-team/SKILL.md": "4663daa9a4ab845a24f51553671e5359f3a29a44b774e7cf378464976256556b",
+      "pods/development-team/references/refactoring.md": "c73addf5cc5f51806ab31ab5165a8183dd616bd72526905695245e54c29301af",
       "pods/orchestration-team/SKILL.md": "616f332495a8e6fb5b6a3933442c81008158f9d3790a55783860ccbcfa7d6047",
       "pods/oversight-team/SKILL.md": "a48de41350453a09b231e01a89cc1dd3d4a64e082df090a7b0e04034227d2bb4",
       "pods/review-team/SKILL.md": "e669a893d5bd1d01fdd5e357a0f0f56425fc2fb845705bddc629016e04c8a6da",
@@ -149,7 +152,8 @@
       "process/systematic-debugging/root-cause-tracing.md": "a81bee9448794d261b4aca8487c595d11ff4bd4e10a5f96bca1117dd32527050",
       "process/test-driven-development/SKILL.md": "51f65d2bc71dd6fc84640bf113acf287f4e003ef325ed91cb112fce59149a298",
       "process/test-driven-development/testing-anti-patterns.md": "bde453bc258f06543987477c837939afaa774ea2acbd9f308d702fc452bc4283",
-      "process/verification-before-completion/SKILL.md": "0b8cea0bb82a8ab0f015afaf84c87796e2c94eee3a83d4fa3d4461d0917950bd"
+      "process/verification-before-completion/SKILL.md": "c17db073ace9a3f345a9a979323047f5d1b5c4e09eaa7398ccd96b49eef44874",
+      "process/verification-before-completion/references/performance-claims.md": "7db2a496a9423ab409b4e3819f64cd6abd7dff2413ce78232e6d154e62126884"
     }
   }
 }

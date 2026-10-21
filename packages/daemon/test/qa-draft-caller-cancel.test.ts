@@ -115,12 +115,11 @@ describe("independent QA draft-aware cancellation boundary",()=>{
     expect(f.submissions).toEqual([]);
     expect(result).toMatchObject({reason:"caller_cancelled",sent:false,inputPhase:"not_reached"});
   });
-  it("a cancel after draft-aware acceptance never cancels the accepted delivery",async()=>{
-    const f=fixture();await f.enable();const caller=new AbortController();let committedAtAbort=false;
-    f.hooks.load=()=>{committedAtAbort=f.outbox.getById("qa-after-commit")?.deliveryState==="sending";caller.abort();};
-    const result=await f.send("qa-after-commit","QA WORK",{signal:caller.signal,verify:false});
-    console.log("QA POSTCOMMIT CANCEL",JSON.stringify({committedAtAbort,result,submissions:f.submissions}));
-    expect(committedAtAbort).toBe(true);expect(f.submissions).toEqual(["QA WORK"]);
-    expect(result).toMatchObject({ok:true,sent:true});expect(result.reason).not.toBe("caller_cancelled");
+  it("a caller abort before paste still cancels input after bookkeeping",async()=>{
+    const f=fixture();await f.enable();const caller=new AbortController();
+    f.hooks.load=()=>{caller.abort();};
+    const result=await f.send("qa-before-paste","QA WORK",{signal:caller.signal,verify:false});
+    expect(f.submissions).toEqual([]);
+    expect(result).toMatchObject({ok:false,sent:false,reason:"caller_cancelled",inputPhase:"not_reached"});
   });
 });

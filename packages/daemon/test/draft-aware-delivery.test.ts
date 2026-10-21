@@ -96,31 +96,61 @@ function fixture(saved?: Buffer, opts: { runtime?: string; idleHook?: boolean } 
 }
 
 
-describe("single-attempt draft-aware delivery through the real transport", () => {
-  it.each(["ordinary request ", "1. Review the change"])("submits ordinary authored text once: %j", async text => {
+describe("current draft-aware delivery through the real transport", () => {
+  it.each(["ordinary request ", "1. Review the change"])("attempts each ordinary authored request, even with a reused caller ID: %j", async text => {
     const f = fixture(); await f.enable();
-    expect(await f.send("ordinary", text)).toMatchObject({ ok: true, sent: true, delivery: { state: "complete" } });
-    expect(await f.send("ordinary", text)).toMatchObject({ delivery: { state: "complete" } });
-    expect(f.submissions).toEqual([text]);
+    expect(await f.send("ordinary", text)).toMatchObject({ ok: true, sent: true });
+    expect(await f.send("ordinary", text)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([text, text]);
+  });
+
+  it("tries a current request after the person's draft clears, without replaying a saved prerequisite", async () => {
+    const f = fixture(); await f.enable(); f.bodies.a = "a person's draft";
+    const oldPrerequisite = vi.fn();
+    expect(await f.send("draft-cleared", "current request", { beforeWrite: oldPrerequisite })).toMatchObject({ outcome: "retained", sent: false });
+    expect(f.submissions).toEqual([]);
+    f.bodies.a = "";
+    expect(await f.send("draft-cleared", "current request")).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual(["current request"]);
+    expect(oldPrerequisite).not.toHaveBeenCalled();
+  });
+
+  it("delivers at an ordinary empty prompt when receipt bookkeeping is unavailable", async () => {
+    const f = fixture(); await f.enable();
+    f.db.exec("CREATE TRIGGER fail_delivery_receipt BEFORE UPDATE OF guard_delivery ON outbox_entries BEGIN SELECT RAISE(ABORT, 'fixture receipt unavailable'); END;");
+    const result = await f.send("no-receipt", "arrives despite bookkeeping");
+    expect(f.submissions).toEqual(["arrives despite bookkeeping"]);
+    expect(result).toMatchObject({ ok: true, sent: true });
+    expect(result.warning).toMatch(/bookkeeping|receipt/i);
+  });
+
+  it("protects a human draft without claiming custody when its record cannot be saved", async () => {
+    const f = fixture(); await f.enable(); f.bodies.a = "unfinished human input";
+    f.db.exec("CREATE TRIGGER fail_held_receipt BEFORE UPDATE OF guard_delivery ON outbox_entries BEGIN SELECT RAISE(ABORT, 'fixture receipt unavailable'); END;");
+    const result = await f.send("unsaved-held", "incoming message");
+    expect(result).toMatchObject({ ok: false, sent: false, outcome: "failed", reason: "draft_input_busy" });
+    expect(result.warning).toMatch(/bookkeeping/);
+    expect(result.outboxIds).toBeUndefined();
+    expect(f.bodies.a).toBe("unfinished human input"); expect(f.writes).toEqual([]);
   });
 
   it("completes a successful send without requested verification without claiming render proof", async () => {
     const f = fixture(); await f.enable();
     const result = await f.send("no-verify", "message", { verify: false });
-    expect(result).toMatchObject({ ok: true, sent: true, delivery: { state: "complete" } });
+    expect(result).toMatchObject({ ok: true, sent: true });
     expect(result.verified).toBeUndefined();
-    expect(f.outbox.getById("no-verify")!.deliveryState).toBe("delivered");
+    expect(f.outbox.getById(result.outboxIds![0]!)!.deliveryState).toBe("delivered");
     await f.send("no-verify", "message", { verify: false });
-    expect(f.submissions).toEqual(["message"]);
+    expect(f.submissions).toEqual(["message", "message"]);
   });
 
-  it("keeps requested-but-unconfirmed verification indeterminate without resending", async () => {
+  it("keeps unconfirmed verification honest while allowing a current request", async () => {
     const f = fixture(); await f.enable();
     vi.mocked(f.tmux.capturePaneContent).mockResolvedValue("no render evidence");
-    expect(await f.send("not-confirmed")).toMatchObject({ ok: true, sent: true, verified: false, delivery: { state: "indeterminate" } });
+    expect(await f.send("not-confirmed")).toMatchObject({ ok: true, sent: true, verified: false });
     await f.send("not-confirmed");
-    expect(f.outbox.getById("not-confirmed")!.deliveryState).toBe("indeterminate");
-    expect(f.submissions).toHaveLength(1);
+    expect(f.db.prepare("SELECT delivery_state FROM outbox_entries").all()).toEqual([{ delivery_state: "indeterminate" }, { delivery_state: "indeterminate" }]);
+    expect(f.submissions).toHaveLength(2);
   });
 
   // With no authoritative idle hook, a Claude seat's readiness comes from its screen, so the lease-free idle wait would read a draft as
@@ -132,11 +162,11 @@ describe("single-attempt draft-aware delivery through the real transport", () =>
     const reason = condition === "unknown" ? "draft_input_unknown" : "draft_input_busy";
     const sleep = vi.fn((ms: number) => f.advance(ms)); f.hooks.sleep = sleep; // a wait, if any, reaches its deadline
     expect(await f.send("held-claude", "incoming message", { waitForIdleMs: 60000, verify: false })).toMatchObject({
-      outcome: "retained", sent: false, reason, outboxIds: ["held-claude"], delivery: { state: "held", reason },
+      outcome: "retained", sent: false, reason, outboxIds: [expect.any(String)],
     });
     expect(sleep).not.toHaveBeenCalled();
     expect(f.writes).toEqual([]);
-    expect(f.outbox.getById("held-claude")).toMatchObject({ body: "incoming message", deliveryState: "retained" });
+    expect(f.outbox.heldForNode("a").items[0]).toMatchObject({ body: "incoming message", deliveryState: "retained" });
   });
 
   it("a Claude seat with no idle hook and an empty input box takes a wait-for-idle send once", async () => {
@@ -145,61 +175,32 @@ describe("single-attempt draft-aware delivery through the real transport", () =>
     expect(f.submissions).toEqual(["incoming message"]);
   });
 
-  it.each(["draft", "unknown"])("returns the exact %s refusal and original ID immediately, including with wait-for-idle", async condition => {
-    const f = fixture(); await f.enable(); f.bodies.a = condition === "unknown" ? null : "unfinished human request";
-    const reason = condition === "unknown" ? "draft_input_unknown" : "draft_input_busy";
-    const sleep = vi.fn(); f.hooks.sleep = sleep;
-    expect(await f.send("held", "incoming message", { waitForIdleMs: 60000 })).toMatchObject({
-      outcome: "retained", sent: false, reason, outboxIds: ["held"], delivery: { state: "held", reason },
-    });
-    expect(sleep).not.toHaveBeenCalled();
-    f.bodies.a = ""; f.advance(3600000);
-    await f.repo.drainPendingWakeIntents();
-    expect(await f.send("held")).toMatchObject({ outcome: "retained", reason });
-    expect(f.writes).toEqual([]);
-    expect(f.outbox.getById("held")).toMatchObject({ body: "incoming message", deliveryState: "retained" });
-    expect(f.db.prepare("SELECT count(*) n FROM outbox_entries").get()).toEqual({ n: 1 });
-    expect(await f.send("held", "different")).toMatchObject({ ok: false, reason: "delivery_identity_conflict" });
-  });
-
-  it("has no retry timer and keeps held receipts unchanged across restart and mode changes", async () => {
-    const first = fixture(); await first.enable(); first.bodies.a = "draft"; await first.send("restart");
-    const resumed = fixture(first.db.serialize()); resumed.guarded.recover();
-    await resumed.guard.set("a", false, "human@test", "allow new sends");
-    await resumed.enable();
-    vi.useFakeTimers();
-    try { await vi.advanceTimersByTimeAsync(3600000); } finally { vi.useRealTimers(); }
-    expect(await resumed.send("restart")).toMatchObject({ reason: "draft_input_busy", delivery: { state: "held" } });
-    expect(resumed.writes).toEqual([]);
-    expect(resumed.db.prepare("PRAGMA table_info(outbox_entries)").all().map((r: any) => r.name))
-      .not.toContain("retry_request");
-  });
-
-  it.each([false, true])("never replays an interrupted attempt (generic recovery first: %s)", async genericFirst => {
+  it.each([false, true])("preserves old uncertainty but allows a current request (generic recovery first: %s)", async genericFirst => {
     const first = fixture(); await first.enable(); first.bodies.a = "draft"; await first.send("crash");
     first.db.exec("UPDATE outbox_entries SET delivery_state='sending',guard_delivery=json_remove(guard_delivery,'$.result');");
     const resumed = fixture(first.db.serialize());
     if (genericFirst) resumed.outbox.reconcileAbandonedSending("crash");
     resumed.guarded.recover();
-    expect(await resumed.send("crash")).toMatchObject({ ok: false, reason: "delivery_indeterminate", delivery: { state: "indeterminate", reason: "interrupted_write" } });
-    expect(resumed.writes).toEqual([]);
+    expect(await resumed.send("crash")).toMatchObject({ ok: true, sent: true });
+    expect(resumed.submissions).toEqual(["incoming message"]);
+    expect(resumed.db.prepare("SELECT count(*) AS n FROM outbox_entries WHERE delivery_state='indeterminate'").get()).toEqual({ n: 1 });
   });
 
-  it("returns an in-flight receipt without duplicate input and waits for active sends on shutdown", async () => {
+  it("serializes current requests and waits for active input on shutdown", async () => {
     const f = fixture(); await f.enable(); const entered = signal(), release = signal();
     f.hooks.paste = async () => { entered.release(); await release.ready; };
     const sending = f.send("concurrent"); await entered.ready;
-    expect(await f.send("concurrent")).toMatchObject({ ok: false, reason: "delivery_in_progress" });
+    const second = f.send("concurrent");
     let stopped = false; const stopping = f.guarded.stop().then(() => { stopped = true; });
     await Promise.resolve(); expect(stopped).toBe(false);
-    release.release(); await Promise.all([sending, stopping]);
-    expect(f.submissions).toHaveLength(1);
+    release.release(); await Promise.all([sending, second, stopping]);
+    expect(f.submissions).toEqual(["incoming message", "incoming message"]);
   });
 
   it("leaves human edits visible and never replays an already-pasted message", async () => {
     const f = fixture(); await f.enable();
     f.hooks.sleep = ms => { if (ms === 200) f.bodies.a += " plus a human draft"; };
-    expect(await f.send("late")).toMatchObject({ ok: false, sent: true, reason: "draft_input_changed", delivery: { state: "indeterminate" } });
+    expect(await f.send("late")).toMatchObject({ ok: false, sent: true, reason: "draft_input_changed" });
     expect(f.bodies.a).toBe("incoming message plus a human draft");
     await f.send("late"); expect(f.writes).toHaveLength(1); expect(f.submissions).toEqual([]);
   });
@@ -209,25 +210,26 @@ describe("single-attempt draft-aware delivery through the real transport", () =>
     f.hooks.paste = () => { f.bodies.a = "incoming message"; throw new Error("lost native result after dispatch"); };
     const opts = wait ? { waitForIdleMs: 1000 } : {};
     const result = await f.send("unknown-write", "incoming message", opts);
-    expect(result).toMatchObject({ ok: false, delivery: { state: "indeterminate" } });
+    expect(result).toMatchObject({ ok: false });
     expect(result.sent).toBeUndefined();
     await f.send("unknown-write", "incoming message", opts);
     expect(f.submissions).toEqual([]);
   });
 
-  it("a failed final ledger update cannot claim no input or authorize replay", async () => {
+  it("reports actual delivered input when a final ledger update fails", async () => {
     const f = fixture(); await f.enable();
     const finalize = vi.spyOn(OutboxHandler.prototype, "finalizeDelivery").mockImplementationOnce(() => { throw new Error("ledger failure"); });
     try {
       const result = await f.send("ledger-failure");
-      expect(result).toMatchObject({ ok: false, reason: "delivery_indeterminate", delivery: { state: "indeterminate" } });
-      expect(result.sent).toBeUndefined(); await f.send("ledger-failure");
-      expect(f.submissions).toEqual(["incoming message"]);
+      expect(result).toMatchObject({ ok: true, sent: true, verified: true });
+      expect(result.warning).toMatch(/bookkeeping/);
+      await f.send("ledger-failure");
+      expect(f.submissions).toEqual(["incoming message", "incoming message"]);
     } finally { finalize.mockRestore(); }
   });
 
 
-  it("a lost final receipt read cannot report that no input was written", async () => {
+  it("reports current input without requiring a historical receipt read", async () => {
     const f = fixture(); await f.enable();
     const prepare = f.db.prepare.bind(f.db);
     let finalized = false;
@@ -241,44 +243,98 @@ describe("single-attempt draft-aware delivery through the real transport", () =>
     });
     try {
       const result = await f.send("lost-receipt");
-      expect(result).toMatchObject({ ok: false, reason: "delivery_indeterminate", outboxIds: ["lost-receipt"] });
-      expect(result.sent).toBeUndefined(); expect(f.submissions).toHaveLength(1);
+      expect(result).toMatchObject({ ok: true, sent: true });
+      expect(f.submissions).toHaveLength(1);
     } finally { reader.mockRestore(); finalizer.mockRestore(); }
-    expect(await f.send("lost-receipt")).toMatchObject({ delivery: { state: "complete" } });
-    expect(f.submissions).toHaveLength(1);
+    expect(await f.send("lost-receipt")).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toHaveLength(2);
   });
 
   it("does not serialize or replay a live prerequisite", async () => {
     const f = fixture(); await f.enable(); f.bodies.a = "draft"; const beforeWrite = vi.fn();
     expect(await f.send("live", "message", { beforeWrite })).toMatchObject({ outcome: "retained", reason: "draft_input_busy" });
     f.bodies.a = ""; await f.send("live", "message");
-    expect(beforeWrite).not.toHaveBeenCalled(); expect(f.writes).toEqual([]);
+    expect(beforeWrite).not.toHaveBeenCalled(); expect(f.submissions).toEqual(["message"]);
   });
 });
 
 describe("supported seat and queue integration", () => {
+  it.each(["draft_input_changed", "delivery_indeterminate", "submit_failed", "send_failed"])(
+    "keeps a committed wake's %s outcome indeterminate in the queue", async reason => {
+      const f = fixture(); await f.enable();
+      const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work", nudge: false });
+      const id = "wake-intent-" + item.qitemId;
+      f.repo.stageWakeIntent(item.qitemId, "sender@test", "worker@test", null, true);
+      if (reason === "draft_input_changed") f.hooks.sleep = ms => { if (ms === 200) f.bodies.a += " plus a human draft"; };
+      if (reason === "delivery_indeterminate") f.hooks.sleep = () => { throw new Error("interrupted after the paste"); };
+      if (reason === "submit_failed") vi.spyOn(f.tmux, "sendKeys").mockResolvedValue({ ok: false, code: "tmux_error", message: "lost Enter result" });
+      if (reason === "send_failed") f.hooks.paste = () => { f.bodies.a = "possibly pasted"; throw new Error("lost native paste result"); };
+
+      await f.repo.drainPendingWakeIntents();
+      const receipt = JSON.parse((f.db.prepare("SELECT guard_delivery AS value FROM outbox_entries WHERE outbox_id=?").get(id) as { value: string }).value);
+      expect(receipt.result).toMatchObject({ ok: false, reason });
+      expect(receipt.result.delivery).toBeUndefined();
+      expect(f.repo.getById(item.qitemId)!.lastNudgeWireResult).toMatch(/^indeterminate:/);
+      expect(f.outbox.getById(id)!.deliveryState).toBe("indeterminate");
+      expect(f.submissions).toEqual([]);
+    },
+  );
+
+  it.each(["ladder", "legacy-boot"])("delivers a %s nudge without a precommitted outbox entry", async path => {
+    const f = fixture(); await f.enable();
+    const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work", nudge: false });
+    if (path === "ladder") await f.repo.maybeNudge(item.qitemId, "worker@test", true, "sender@test");
+    else await f.repo.recoverLostNudge(item.qitemId, "worker@test", "sender@test");
+    expect(f.submissions).toHaveLength(1);
+    expect(f.submissions[0]).toContain(item.qitemId);
+    expect(f.bodies.b).toBe("");
+    expect(f.repo.getById(item.qitemId)!.lastNudgeWireResult).toBe("verified");
+  });
+
+  it.each(["current", "closed", "reassigned"])("checks the %s queue facts without saved delivery bookkeeping", async state => {
+    const f = fixture(); await f.enable();
+    const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work", nudge: false });
+    f.db.exec("CREATE TRIGGER unavailable_nudge_receipt BEFORE UPDATE OF guard_delivery ON outbox_entries BEGIN SELECT RAISE(ABORT, 'fixture receipt unavailable'); END;");
+    f.hooks.load = () => {
+      if (state === "closed") f.db.prepare("UPDATE queue_items SET state='done' WHERE qitem_id=?").run(item.qitemId);
+      if (state === "reassigned") f.db.prepare("UPDATE queue_items SET destination_session='sibling@test' WHERE qitem_id=?").run(item.qitemId);
+    };
+    await f.repo.maybeNudge(item.qitemId, "worker@test", true, "sender@test");
+    expect(f.db.prepare("SELECT count(*) AS n FROM outbox_entries").get()).toEqual({ n: 0 });
+    if (state === "current") {
+      expect(f.submissions).toHaveLength(1);
+      expect(f.submissions[0]).toContain(item.qitemId);
+      expect(f.repo.getById(item.qitemId)!.lastNudgeWireResult).toBe("verified");
+    } else expect(f.writes).toEqual([]);
+    expect(f.bodies.b).toBe("");
+  });
+
   it("exposes exact held reasons, audit identity and retirement through HTTP", async () => {
     const f = fixture(); f.bodies.a = "draft";
     expect((await f.post("/api/seat/set-typing-guard/worker@test", { mode: "draft-aware", actor: "spoof", reason: "draft" })).status).toBe(200);
     expect(f.db.prepare("SELECT actor FROM seat_delivery_guards").get()).toEqual({ actor: "human@test" });
     const response = await f.post("/api/transport/send", { session: "worker@test", text: "http message", deliveryId: "http", actorSession: "spoof", verify: true });
-    expect(await response.json()).toMatchObject({ outcome: "retained", reason: "draft_input_busy", outboxIds: ["http"], delivery: { state: "held" } });
+    const held = await response.json();
+    expect(held).toMatchObject({ outcome: "retained", reason: "draft_input_busy", outboxIds: [expect.any(String)] });
+    const id = held.outboxIds[0];
     const page = await (await f.app.request("/api/seat/held-messages/worker@test")).json();
     expect(page.items[0]).toMatchObject({ senderSession: "human@test", body: "http message", delivery: { state: "held", reason: "draft_input_busy" } });
     expect(f.db.prepare("SELECT identity_provenance FROM outbox_entries").get()).toEqual({ identity_provenance: "transport:v1" });
     expect(await (await f.app.request("/api/seat/status/worker@test")).json()).toMatchObject({ typingGuard: { effectiveMode: "draft-aware", heldCount: 1 } });
-    expect((await f.post("/api/seat/retire-held-message/sibling@test/http", { reason: "read" })).status).toBe(404);
-    expect((await f.post("/api/seat/retire-held-message/worker@test/http", { reason: "read" })).status).toBe(200);
-    expect(await (await f.app.request("/api/seat/held-messages/worker@test?id=http")).json()).toMatchObject({ entry: { deliveryState: "retired" }, delivery: { state: "held", reason: "message_retired" } });
-    f.bodies.a = ""; expect(await f.send("http", "http message")).toMatchObject({ outcome: "retained" }); expect(f.writes).toEqual([]);
+    expect((await f.post(`/api/seat/retire-held-message/sibling@test/${id}`, { reason: "read" })).status).toBe(404);
+    expect((await f.post(`/api/seat/retire-held-message/worker@test/${id}`, { reason: "read" })).status).toBe(200);
+    expect(await (await f.app.request(`/api/seat/held-messages/worker@test?id=${id}`)).json()).toMatchObject({ entry: { deliveryState: "retired" }, delivery: { state: "held", reason: "message_retired" } });
+    expect(f.writes).toEqual([]); // Retirement itself did not type anything.
+    f.bodies.a = ""; expect(await f.send("http", "http message")).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual(["http message"]);
   });
 
-  it("returns a successful HTTP delivery once, preserving its original row", async () => {
+  it("attempts each explicit HTTP request despite a reused caller ID", async () => {
     const f = fixture(); await f.enable();
     const send = () => f.post("/api/transport/send", { session: "worker@test", text: "http success", deliveryId: "http-success", verify: true });
-    expect(await (await send()).json()).toMatchObject({ ok: true, verified: true, outboxIds: ["http-success"] });
-    expect(await (await send()).json()).toMatchObject({ delivery: { state: "complete" } });
-    expect(f.db.prepare("SELECT count(*) n FROM outbox_entries").get()).toEqual({ n: 1 }); expect(f.submissions).toEqual(["http success"]);
+    expect(await (await send()).json()).toMatchObject({ ok: true, verified: true });
+    expect(await (await send()).json()).toMatchObject({ ok: true, verified: true });
+    expect(f.submissions).toEqual(["http success", "http success"]);
   });
 
   it("broadcast preserves one original record per recipient", async () => {
@@ -302,8 +358,8 @@ describe("supported seat and queue integration", () => {
     const f = fixture(); await f.guard.set("a", { mode: "hold" }, "human@test", "manual terminal");
     expect(await f.send("inbox")).toMatchObject({ outcome: "retained", reason: "typing_guard_enabled" });
     expect(await f.transport.send("sibling@test", "sibling message", { verify: true })).toMatchObject({ ok: true });
-    await f.enable(); expect(await f.send("inbox")).toMatchObject({ outcome: "retained" });
-    expect(f.submissions).toEqual(["sibling message"]);
+    await f.enable(); expect(await f.send("inbox")).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual(["sibling message", "incoming message"]);
   });
 
   it("a held queue wake remains on the existing queue recovery path without a second scheduler", async () => {

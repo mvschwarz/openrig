@@ -107,14 +107,15 @@ describe("independent QA boundary cases", () => {
     console.log("QA COMMITTED",JSON.stringify({result,writes:f.writes}));
     expect(result.ok).toBe(true); expect(f.writes).toEqual(["paste:a:DURABLE","keys:a:Enter"]);
   });
-  it("readback of an already retained delivery stays retained with an aborted retry", async () => {
+  it("an aborted current request stays cancelled while earlier held history remains unchanged", async () => {
     const f=fixture();await f.guard.set("a",{mode:"hold"},"operator","QA hold");
     const opts={deliveryId:"qa-retained",actorSession:"human@test"};
     expect(await f.transport.send("worker@test","HELD",opts)).toMatchObject({outcome:"retained",sent:false});
     const caller=new AbortController();caller.abort();
     const result=await f.transport.send("worker@test","HELD",{...opts,signal:caller.signal});
     console.log("QA RETAINED RETRY",JSON.stringify({result,storedState:f.outbox.getById(opts.deliveryId)?.deliveryState,writes:f.writes}));
-    expect(result).toMatchObject({outcome:"retained",sent:false});
+    expect(result).toMatchObject({ok:false,reason:"caller_cancelled",sent:false});
+    expect(f.outbox.getById(opts.deliveryId)?.deliveryState).toBe("retained");
     expect(f.writes).toEqual([]);
   });
 });

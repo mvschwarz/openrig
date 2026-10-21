@@ -40,7 +40,7 @@ seatRoutes.post("/set-typing-guard/:seatRef", async c => {
   try {
     const target = guard.target(c.req.param("seatRef"));
     const preference = await guard.set(target.nodeId, { mode: body.mode ?? (body.enabled ? "hold" : "off") }, actor, body.reason);
-    return c.json({ ...preference, tradeoff: "Hold retains all automatic input. Draft-aware sends once or immediately holds with the exact refusal reason; it schedules no retry. Off permits new sends. Changing mode does not flush earlier held messages." }, preference.pending ? 202 : 200);
+    return c.json({ ...preference, tradeoff: "Hold retains all automatic input. Each draft-aware request attempts input or immediately holds with the exact refusal reason; retrying is a new attempt. Off permits new sends. Changing mode does not flush earlier held messages." }, preference.pending ? 202 : 200);
   } catch (error) {
     return c.json({ error: (error as Error).message, code: (error as { code?: string }).code }, error instanceof DeliveryGuardError && error.code === "invalid_typing_guard" ? 400 : 409);
   }

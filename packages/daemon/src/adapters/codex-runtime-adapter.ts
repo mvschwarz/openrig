@@ -36,7 +36,7 @@ import { mergeManagedBlock } from "../domain/managed-blocks.js";
 import { excludeNewGeneratedFiles } from "../domain/generated-file-hygiene.js";
 import { codexQueueStateRoot, codexTeamWorkspaceArg, type PrepareCodexTeamWorkspace } from "../domain/codex-team-workspace.js";
 import { shellQuote } from "./shell-quote.js";
-import { runSyncSite } from "../domain/sync-site-wrap.js";
+import { execRuntimeProbe } from "./runtime-probe-exec.js";
 import { resolveReadinessTimeoutMs } from "../domain/readiness-timeout.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
 import {
@@ -1988,18 +1988,13 @@ function escapeRegExp(value: string): string {
 
 // Module-private (P1 pin — NEVER exported). The REAL Codex profile-LOAD probe,
 // extracted verbatim from launchHarness: dynamic imports keep it lazy for
-// production, execFn runs the real `codex -p <profile> mcp list` via execSync
-// (utf-8, piped stdio, 10s timeout). Injected as the adapter's default
-// verifyProfilePreflight; tests substitute a controlled stub.
+// production, execFn runs the real `codex -p <profile> mcp list` through
+// execRuntimeProbe (utf-8, 10s bound, off the event loop). Injected as the
+// adapter's default verifyProfilePreflight; tests substitute a controlled stub.
 async function defaultProfilePreflight(profile: string, selected?: { cwd: string; codexHome: string; launchPath?: string }): Promise<CodexProfileProbeResult> {
   const { verifyCodexProfileLoads } = await import("../domain/codex-profile-preflight.js");
-  const { execSync } = await import("node:child_process");
-  const execFn = async (cmd: string) =>
-    runSyncSite("codex.runtime.profile_preflight", () =>
-      execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10_000,
-        ...(selected ? { cwd: selected.cwd, env: { ...process.env, CODEX_HOME: selected.codexHome, ...(selected.launchPath ? { PATH: selected.launchPath } : {}) } } : {}),
-      })
-    );
+  const execFn = (cmd: string) => execRuntimeProbe("codex.runtime.profile_preflight", cmd,
+    selected ? { cwd: selected.cwd, env: { ...process.env, CODEX_HOME: selected.codexHome, ...(selected.launchPath ? { PATH: selected.launchPath } : {}) } } : {});
   return verifyCodexProfileLoads(profile, execFn, undefined, selected?.codexHome);
 }
 

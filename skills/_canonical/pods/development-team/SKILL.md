@@ -26,6 +26,8 @@ Clarify consequential uncertainty, inspect the existing seam, then complete one
 coherent outcome. Reproduce a defect before repairing it; use tests that distinguish
 the failure and verify through the public surface. Keep chunks as large as the
 outcome and file territory permit. TDD is a feedback loop, not a two-seat protocol.
+When the work consolidates or refactors existing behavior, read
+[references/refactoring.md](references/refactoring.md).
 
 The builder reports the exact candidate, changed behavior, commands and observed
 results, with remaining uncertainty. No universal pre-edit proposal, QA approval

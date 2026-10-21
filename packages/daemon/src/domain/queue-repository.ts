@@ -8,6 +8,7 @@ import { resolveExternal } from "./gateway/external-admission.js";
 import type { PersistedEvent } from "./types.js";
 import { QueueTransitionLog, type OwnerNotificationLevel, type QueueTransition, type RecentQueueTransitionScope } from "./queue-transition-log.js";
 import { WAKE_INTENT_PREFIX, type OutboxHandler, type OutboxEntry } from "./outbox-handler.js";
+import type { QueueWakeFacts } from "./draft-aware-delivery.js";
 import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
 import { lastMeaningfulTransition, readWaitingView, type WaitingView, type WaitingActivityReader } from "./queue-waiting.js";
 import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
@@ -279,14 +280,14 @@ export interface QueueNudgeTransport {
   deliveryTarget?(session: string): import("./seat-delivery-guard.js").GuardTarget | null;
   retentionTarget?(session: string): import("./seat-delivery-guard.js").GuardTarget | null;
   draftAwareTarget?(session: string): import("./seat-delivery-guard.js").GuardTarget | null;
-  configureGuardedWakes?(applicable: (entries: readonly OutboxEntry[]) => boolean): void;
+  configureGuardedWakes?(applicable: (entries: readonly QueueWakeFacts[]) => boolean): void;
   send(
     sessionName: string,
     // (h): stampISO threads the nudge's compose time so the transport's delivered-latency calc can
     // measure the wait for a handoff nudge too (the real impl is SessionTransport, which accepts it).
     text: string,
     opts?: { verify?: boolean; stampISO?: string; actorSession?: string; committedOutboxIds?: string[]; deliveryId?: string; auditPointer?: string; queueWake?: boolean }
-  ): Promise<{ ok: boolean; verified?: boolean; error?: string; reason?: string; outcome?: string; delivery?: { state: string }; inputBox?: InputBoxEvidence }>;
+  ): Promise<{ ok: boolean; verified?: boolean; sent?: boolean; inputPhase?: "not_reached" | "attempted" | "written"; error?: string; reason?: string; outcome?: string; inputBox?: InputBoxEvidence }>;
 }
 
 /** #1278: the result of one wake attempt — its classification, its recorded result, and the
@@ -994,7 +995,7 @@ export class QueueRepository {
     }));
   }
 
-  private currentWakeIntent(entry: OutboxEntry): boolean {
+  private currentWakeIntent(entry: QueueWakeFacts): boolean {
     const row = entry.auditPointer ? this.db.prepare("SELECT state FROM queue_items WHERE qitem_id=?").get(entry.auditPointer) as { state: string } | undefined : undefined;
     if (row?.state !== "pending") return false;
     const prefix = `${WAKE_INTENT_PREFIX}blocker-`;
@@ -1016,7 +1017,10 @@ export class QueueRepository {
       ? "retained:draft_aware" : "retained:typing_guard", ...reading };
     if (res.ok) return res.verified ? { classified: "verified", nudgeResult: "verified", ...reading } : { classified: "indeterminate", nudgeResult: "delivered-ack-pending", ...reading };
     const detail = res.error ?? res.reason ?? "unknown";
-    if (res.delivery?.state === "indeterminate" || res.delivery?.state === "sending" || isWakeTimeoutSignal(res.reason) || isWakeTimeoutSignal(res.error)) {
+    // Input evidence survives receipt removal: an issued paste or uncertain Enter is never an unsent failure.
+    const inputUncertain = res.sent === true || res.inputPhase === "attempted" || res.inputPhase === "written"
+      || (res.sent !== false && res.inputPhase !== "not_reached" && (res.reason === "delivery_indeterminate" || res.reason === "submit_failed"));
+    if (inputUncertain || isWakeTimeoutSignal(res.reason) || isWakeTimeoutSignal(res.error)) {
       return { classified: "indeterminate", nudgeResult: `indeterminate:${detail}`, ...reading };
     }
     return { classified: "failed", nudgeResult: `failed:${detail}`, ...reading };

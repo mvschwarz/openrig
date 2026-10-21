@@ -69,12 +69,10 @@ describe.skipIf(process.platform === "win32")("native draft-aware terminal deliv
         await tmux(["send-keys", "-t", panes.a!, "-l", "unfinished human draft"]);
         await waitInput("unfinished human draft");
       };
-      expect(await send("deferred", "one\nmessage")).toMatchObject({ outcome: "retained", delivery: { state: "held" } });
+      expect(await send("deferred", "one\nmessage")).toMatchObject({ outcome: "retained" });
       expect(state()).toEqual({ input: "unfinished human draft", submissions: [] });
       await tmux(["send-keys", "-t", panes.a!, "C-u"]); await waitInput("");
-      expect(await send("deferred", "one\nmessage")).toMatchObject({ outcome: "retained", reason: "draft_input_busy" });
-      expect(state().submissions).toEqual([]);
-      expect(await send("fresh", "one\nmessage")).toMatchObject({ ok: true, sent: true, delivery: { state: "complete" } });
+      expect(await send("deferred", "one\nmessage")).toMatchObject({ ok: true, sent: true });
       await vi.waitFor(() => expect(state().submissions).toEqual(["one\nmessage"]));
 
       hooks.beforeEnter = async () => {
@@ -82,13 +80,13 @@ describe.skipIf(process.platform === "win32")("native draft-aware terminal deliv
         await tmux(["send-keys", "-t", panes.a!, "-l", " plus a human draft"]);
         await waitInput("second message plus a human draft");
       };
-      expect(await send("late", "second message")).toMatchObject({ ok: false, sent: true, reason: "draft_input_changed", delivery: { state: "indeterminate" } });
+      expect(await send("late", "second message")).toMatchObject({ ok: false, sent: true, reason: "draft_input_changed" });
       expect(state()).toEqual({ input: "second message plus a human draft", submissions: ["one\nmessage"] });
       await send("late", "second message"); expect(state().submissions).toHaveLength(1);
       await tmux(["send-keys", "-t", panes.a!, "C-u"]); await waitInput("");
 
       await tmux(["copy-mode", "-t", panes.a!]);
-      expect(await send("copy-mode", "held during copy")).toMatchObject({ outcome: "retained", delivery: { reason: "draft_input_unknown" } });
+      expect(await send("copy-mode", "held during copy")).toMatchObject({ outcome: "retained", reason: "draft_input_unknown" });
       await tmux(["send-keys", "-t", panes.a!, "-X", "cancel"]);
       await guard.set("a", { mode: "hold" }, "human@test", "manual terminal");
       expect(await send("inbox", "stay in the inbox")).toMatchObject({ outcome: "retained", reason: "typing_guard_enabled" });
@@ -107,7 +105,7 @@ describe.skipIf(process.platform === "win32")("native draft-aware terminal deliv
       await waitInput("Ask Codex to do anything");
       await tmux(["send-keys", "-t", panes.a!, "C-a"]);
       await vi.waitFor(async () => expect((await adapter.captureComposerSnapshot(panes.a!))?.cursor.x).toBe(2));
-      expect(await send("literal-placeholder", "automatic message")).toMatchObject({ outcome: "retained", delivery: { reason: "draft_input_busy" } });
+      expect(await send("literal-placeholder", "automatic message")).toMatchObject({ outcome: "retained", reason: "draft_input_busy" });
       expect(state()).toEqual({ input: "Ask Codex to do anything", submissions: ["one\nmessage", "direct human message"] });
 
       // The native capture must retain dim styling, both for an empty input and
@@ -118,7 +116,7 @@ describe.skipIf(process.platform === "win32")("native draft-aware terminal deliv
         expect(snapshot?.screen).toContain("suggested follow-up");
         expect(inspectComposerInput(snapshot).state).toBe("empty");
       });
-      expect(await send("ghost", "owned delivery")).toMatchObject({ ok: true, delivery: { state: "complete" } });
+      expect(await send("ghost", "owned delivery")).toMatchObject({ ok: true });
       await vi.waitFor(() => expect(state().submissions).toEqual(["one\nmessage", "direct human message", "owned delivery"]));
 
       const framedDraft = "intro\n────────────────────\n❯ \n────────────────────\n? for shortcuts\n────────────────────\n❯ ";
@@ -126,7 +124,7 @@ describe.skipIf(process.platform === "win32")("native draft-aware terminal deliv
       expect(await adapter.humanInput("worker@test", () => adapter.sendText("worker@test", framedDraft))).toEqual({ ok: true });
       await waitInput(framedDraft);
       await vi.waitFor(async () => expect(inspectComposerInput(await adapter.captureComposerSnapshot(panes.a!)).state).toBe("text"));
-      expect(await send("nested-prompt", "automatic message")).toMatchObject({ outcome: "retained", delivery: { reason: "draft_input_busy" } });
+      expect(await send("nested-prompt", "automatic message")).toMatchObject({ outcome: "retained", reason: "draft_input_busy" });
       expect(state()).toEqual({ input: framedDraft, submissions: ["one\nmessage", "direct human message", "owned delivery"] });
     } finally {
       await transport?.guardedDelivery?.stop();
