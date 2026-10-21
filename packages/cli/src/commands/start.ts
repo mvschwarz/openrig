@@ -10,8 +10,7 @@ import {
   getDaemonUrl,
   startDaemon,
   waitForKernelReady,
-  type LifecycleDeps,
-} from "../daemon-lifecycle.js";
+  type LifecycleDeps, daemonMayAnswer } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
@@ -203,7 +202,8 @@ status); a restore that returned without a ready kernel exits 1.
 
       // ---- PHASE 1: ensure daemon is running ----
       let status = await getDaemonStatus(deps.lifecycleDeps);
-      if (status.state !== "running") {
+      // Only a daemon confirmed down is started; an unverified one may be alive and busy.
+      if (status.state === "stopped" || status.state === "stale") {
         if (!opts.json) console.log("Starting daemon...");
         try {
           const { ConfigStore } = await import("../config-store.js");
@@ -258,7 +258,7 @@ status); a restore that returned without a ready kernel exits 1.
         }
       }
 
-      if (status.state !== "running" || status.healthy === false) {
+      if (!daemonMayAnswer(status)) {
         console.error("Daemon is not healthy. Check with: rig daemon status");
         process.exitCode = 1;
         return;

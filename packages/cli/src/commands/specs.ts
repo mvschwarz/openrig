@@ -14,7 +14,7 @@ import {
 import { basename, join } from "node:path";
 import { getDefaultOpenRigPath } from "../openrig-compat.js";
 import { DaemonClient } from "../client.js";
-import { getDaemonStatus, getDaemonUrl , statusGuardMessage} from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl , statusGuardMessage, daemonMayAnswer } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
@@ -203,7 +203,7 @@ Examples:
   async function getClient(): Promise<DaemonClient> {
     const deps = getDeps();
     const status = await getDaemonStatus(deps.lifecycleDeps);
-    if (status.state !== "running" || status.healthy === false) {
+    if (!daemonMayAnswer(status)) {
       // B8-1b: epistemic-matched language via the one helper (down ≠ busy).
       const gm = statusGuardMessage(status); throw new Error(`${gm.fact} ${gm.action}`);
     }

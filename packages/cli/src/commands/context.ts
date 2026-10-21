@@ -30,7 +30,7 @@ import { addGitContext, inspectGitContext, updateGitContext } from "../lib/conte
 import { ConfigStore } from "../config-store.js";
 import { DaemonClient, formatDaemonHostForUrl } from "../client.js";
 import { enumArg } from "../cli-error.js";
-import { getDaemonStatus, getDaemonUrl, startDaemon, statusGuardMessage} from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl, startDaemon, statusGuardMessage, daemonMayAnswer } from "../daemon-lifecycle.js";
 import { resolveWorkPosition, type WorkInstallPlan } from "../lib/work-install.js";
 import {
   reconcileSkillLoadout,
@@ -417,7 +417,7 @@ Examples:
         status = await getDaemonStatus(deps.lifecycleDeps);
       }
     }
-    if (status.state !== "running" || status.healthy === false) {
+    if (!daemonMayAnswer(status)) {
       // B8-1b: epistemic-matched language via the one helper (down ≠ busy).
       const gm = statusGuardMessage(status); throw new Error(`${gm.fact} ${gm.action}`);
     }
@@ -482,7 +482,7 @@ Examples:
     .action(async (opts: { out: string; from: string[] }) => {
       const deps = getDeps();
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (status.state !== "running" || status.healthy === false) {
+      if (!daemonMayAnswer(status)) {
         console.error("Daemon is not running. Start it with: rig daemon start");
         process.exitCode = 1;
         return;

@@ -449,14 +449,17 @@ describe("rig snapshot + restore", () => {
     expect(deps.clientFactory).not.toHaveBeenCalled();
   });
 
-  // Test 9: restore with unhealthy daemon -> no HTTP
-  it("restore: unhealthy daemon -> error, no HTTP", async () => {
-    const deps = unhealthyDeps();
+  // Test 9: restore with a busy daemon (process alive, health check failing) -> the real request runs.
+  // Changed: this used to refuse with no HTTP. A busy daemon is not refused; its answer decides.
+  it("restore: busy daemon -> the real request is made", async () => {
+    const post = vi.fn(async () => ({ status: 404, data: {} }));
+    const deps = { ...unhealthyDeps(), clientFactory: vi.fn(() => ({ post })) as unknown as StatusDeps["clientFactory"] };
     const program = new Command();
     program.addCommand(restoreCommand(deps));
     const logs = await captureLogs(() => program.parseAsync(["node", "rig", "restore", "snap-1", "--rig", "rig-1"]));
-    expect(logs.join("\n")).toMatch(/did not respond|busy or stopped|unhealthy/i) // B8 supersession: epistemic guard language;
-    expect(deps.clientFactory).not.toHaveBeenCalled();
+    expect(deps.clientFactory).toHaveBeenCalledWith("http://127.0.0.1:7433");
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(logs.join("\n")).not.toMatch(/did not respond/i);
   });
 
   // Test 10: snapshot uses stored port from daemon.json

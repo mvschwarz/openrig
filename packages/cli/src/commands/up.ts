@@ -240,7 +240,8 @@ team back with its conversations, run rig up <rig-name> --existing, not the spec
 
       // Run preflight before auto-start
       let status = await getDaemonStatus(deps.lifecycleDeps);
-      if (status.state !== "running") {
+      // Only a daemon confirmed down is started; an unverified one may be alive and busy.
+      if (status.state === "stopped" || status.state === "stale") {
         let startOptions: StartOptions;
         try {
           const prepared = await prepareDaemonAutoStart(deps.lifecycleDeps, depsOverride?.preflightExec);

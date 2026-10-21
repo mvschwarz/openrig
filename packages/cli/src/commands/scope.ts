@@ -11,7 +11,7 @@ import path from "node:path";
 import { Command } from "commander";
 import { DaemonClient } from "../client.js";
 import { attestationLineage, type AttestationLineage } from "../lib/scope/attestation-lineage.js";
-import { getDaemonStatus, getDaemonUrl , statusGuardMessage} from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl , statusGuardMessage, daemonMayAnswer } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 
 import {
@@ -2071,7 +2071,7 @@ function buildApproveCommand(tier: "slice" | "mission"): Command {
 
         const lifecycleDeps = realDeps();
         const status = await getDaemonStatus(lifecycleDeps);
-        if (status.state !== "running" || status.healthy === false) {
+        if (!daemonMayAnswer(status)) {
           throw new ScopeCliError({
             fact: statusGuardMessage(status).fact, // B8-1b: down ≠ busy
             consequence: "scope approve writes the stamp + audit row through the daemon (one operation).",

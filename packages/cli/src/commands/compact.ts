@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { DaemonClient, terminalAuthHeaders } from "../client.js";
-import { getDaemonStatus, getDaemonUrl, type LifecycleDeps } from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl, type LifecycleDeps, daemonMayAnswer } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 
 // Preparation (exact map plus idle wait) shares the 180s ceiling. Give the HTTP
@@ -62,7 +62,7 @@ already submitted. Raw provider /compact and normal messages are unchanged.`);
     const deps = getDepsF();
 
     const status = await getDaemonStatus(deps.lifecycleDeps);
-    if (status.state !== "running" || status.healthy === false) {
+    if (!daemonMayAnswer(status)) {
       console.error("Daemon is not running. Start it with: rig daemon start");
       process.exitCode = 1;
       return;

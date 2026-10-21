@@ -132,11 +132,21 @@ export function statusGuardMessage(status: DaemonStatus): DaemonNotRunningError 
   };
 }
 
-/** B8-1b — THE precheck chokepoint: returns true when the daemon is running+healthy;
- *  otherwise prints the epistemic-matched 3-part (+ the wrong-home sibling hint when
- *  present), sets exit 1, returns false. Replaces the ~55 hand-rolled verbatim guards. */
+/** Whether a command should make its real request: false only when the daemon is confirmed down
+ *  (stopped, or a stale record), when this machine blocked the health probe, or when a live sibling
+ *  home suggests the request would reach another home's daemon. A daemon that is alive but busy (its
+ *  health check slow, failing or reporting a starved loop) gets the request, under its normal timeout. */
+export function daemonMayAnswer(status: DaemonStatus): boolean {
+  if (status.state === "stopped" || status.state === "stale") return false;
+  if (status.siblingHint || isBlockedConnectionCode(status.probeErrorCode)) return false;
+  return true;
+}
+
+/** B8-1b — THE precheck chokepoint: returns true when the command should make its real request
+ *  ({@link daemonMayAnswer}); otherwise prints the epistemic-matched 3-part (+ the wrong-home sibling
+ *  hint when present), sets exit 1, returns false. Replaces the ~55 hand-rolled verbatim guards. */
 export function daemonStatusGuard(status: DaemonStatus, opts?: { json?: boolean }): boolean {
-  if (status.state === "running" && status.healthy !== false) return true;
+  if (daemonMayAnswer(status)) return true;
   const err = statusGuardMessage(status);
   if (opts?.json) {
     console.log(JSON.stringify({ error: err }));
@@ -988,6 +998,15 @@ export async function getDaemonStatus(
   // If OPENRIG_URL is set, bypass daemon.json and probe that URL directly
   const openrigUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
   if (openrigUrl) {
+    // An unverified daemon keeps the endpoint it was probed at, so a command can still make its request.
+    const endpoint = (() => {
+      try {
+        const url = new URL(openrigUrl);
+        return { port: Number(url.port) || DEFAULT_PORT, host: url.hostname || DEFAULT_HOST };
+      } catch {
+        return {};
+      }
+    })();
     try {
       const res = await probeHealthzWithSettle(deps, `${openrigUrl}/healthz`);
       const ev = await readHealthEvidence(res);
@@ -995,7 +1014,7 @@ export async function getDaemonStatus(
       return { state: "running", port: Number(url.port) || DEFAULT_PORT, host: url.hostname || DEFAULT_HOST, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop };
     } catch (err) {
       // 1ae863d2: refusal = positive down; anything else (timeout/wedged/blocked) = unverified.
-      return isRefusedError(err) ? { state: "stopped" } : { state: "unverified", ...probeErrorCodeOf(err) };
+      return isRefusedError(err) ? { state: "stopped" } : { state: "unverified", ...endpoint, ...probeErrorCodeOf(err) };
     }
   }
 
@@ -1018,7 +1037,9 @@ export async function getDaemonStatus(
       // look for a live sibling home / HOME-MOVED marker (the wrong-home class).
       const siblingHint = findSiblingHome(deps);
       if (siblingHint) return { state: "unverified", siblingHint, ...probeErrorCodeOf(err) };
-      return isRefusedError(err) ? { state: "stopped" } : { state: "unverified", ...probeErrorCodeOf(err) };
+      return isRefusedError(err)
+        ? { state: "stopped" }
+        : { state: "unverified", port: configured.port, host: configured.host, ...probeErrorCodeOf(err) };
     }
   }
 
@@ -1045,7 +1066,7 @@ export async function getDaemonStatus(
       return { state: "running", port: state.port, host, pid: state.pid, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop };
     } catch (err) {
       // 1ae863d2: refusal = positive down; anything else (timeout/wedged/blocked) = unverified.
-      return isRefusedError(err) ? { state: "stopped" } : { state: "unverified", pid: state.pid, ...probeErrorCodeOf(err) };
+      return isRefusedError(err) ? { state: "stopped" } : { state: "unverified", pid: state.pid, port: state.port, host, ...probeErrorCodeOf(err) };
     }
   }
 

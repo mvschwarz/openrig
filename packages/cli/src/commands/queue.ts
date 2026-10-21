@@ -297,8 +297,10 @@ async function withClient<T>(
   // RULING 1ae863d2 — status is 3-state: hard-block ONLY on positive evidence
   // (stopped/stale). UNVERIFIED (timeout/wedged/wrong-home) proceeds to the
   // configured-target request as the authority — never a down assertion.
+  // A running daemon whose health check failed or reported a starved loop is busy, not down: it gets
+  // the request, under the request's own timeout.
   const positiveDown = status.state === "stopped" || status.state === "stale";
-  if (positiveDown || (status.state === "running" && status.healthy === false)) {
+  if (positiveDown) {
     if (!attemptWhenProbeUnconfirmed) {
       // B8-1b: the ONE epistemic-matched guard renders both branches.
       daemonStatusGuard(status);
