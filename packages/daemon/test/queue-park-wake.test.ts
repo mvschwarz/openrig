@@ -451,7 +451,7 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
       const { row, jobId } = await parkWithTimer(`own-repeat-${last}@rig`);
       const outcomes = await runUntilRetired(jobId);
       expect(deliveries.map((d) => d.status), last).toEqual(["retained", "retained", "retained", last]);
-      expect(outcomes, last).toEqual(["skipped", "skipped", "skipped", "sent"]);
+      expect(outcomes, last).toEqual(["skipped", "skipped", "skipped", last === "ok" ? "sent" : "failed"]);
       expect(jobs.getById(jobId)?.state, last).toBe("terminal");
       // No further one-shot attempt after consumption: later ticks deliver nothing.
       await tick();
@@ -559,7 +559,7 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     const { attached, jobId } = await sharedTimerWithOriginalStopped("shared-repeat@rig");
     const outcomes = await runUntilRetired(jobId);
     expect(deliveries.map((d) => d.status)).toEqual(["retained", "retained", "failed"]);
-    expect(outcomes).toEqual(["skipped", "skipped", "sent"]);
+    expect(outcomes).toEqual(["skipped", "skipped", "failed"]);
     expect(jobs.getById(jobId)?.state).toBe("terminal");
     expect(wakes(attached.qitemId).filter((w) => w.phase === "fired").map((w) => w.delivery_status)).toEqual(["retained", "retained", "failed"]);
   });

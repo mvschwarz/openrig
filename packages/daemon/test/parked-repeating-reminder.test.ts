@@ -72,7 +72,7 @@ describe("parked diagnosis for a row its owner's own repeating reminder serves",
     if (opts.history !== false) {
       history.record(typeof delivery === "object"
         ? { jobId, evaluatedAt, outcome: "skipped", skipReason: delivery.skipped }
-        : { jobId, evaluatedAt, outcome: delivery === "retained" ? "skipped" : "sent", deliveryStatus: delivery,
+        : { jobId, evaluatedAt, outcome: delivery === "retained" ? "skipped" : delivery === "ok" ? "sent" : "failed", deliveryStatus: delivery,
           deliveryTargetSession: opts.deliveredTo === undefined ? SEAT : opts.deliveredTo,
           ...(delivery === "retained" ? { skipReason: "typing_guard_retained" } : {}) } as never);
     }
