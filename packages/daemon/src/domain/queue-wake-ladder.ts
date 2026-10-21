@@ -3,7 +3,7 @@ import { quietHoldCustody } from "./quiet-hold-custody.js";
 import { latestHookMovedOn, latestHookPermissionPending, latestHookWaitsOnPerson } from "./agent-activity-store.js";
 import type { AgentActivity } from "./types.js";
 import type { OperatorDeliveryEngine } from "./gateway/operator-delivery-engine.js";
-import { openPromptRefusals, CLOSE_PREFIX, REFUSED_PREFIX } from "./policies/parked-owner-consumer.js";
+import { openPromptRefusals, CLOSE_PREFIX, PARKED_OWNER_POLICY_NAME, REFUSED_PREFIX } from "./policies/parked-owner-consumer.js";
 import { findQueueRecovery, recoveryTag } from "./queue-recovery.js";
 import { lastMeaningfulTransition, type WaitingView } from "./queue-waiting.js";
 // S01 (OPR.0.5.5.1) — WAKE OR ESCALATE ON BATONS. A handoff whose wake fails must never
@@ -981,6 +981,27 @@ const PROMPT_RETIRED_NOTE = "prompt escalation retired: prompt cleared or origin
  * spares JSON parsing of the rows that cannot match. The alert tag holds no LIKE wildcard. */
 const PROMPT_ALERT_ROWS = `(tags LIKE '%"${PROMPT_ALERT_TAG}"%' OR tags LIKE '%\\%')`;
 
+/** Active watchdog jobs whose last two attempts were both refused at the same target's prompt. The key names the entry
+ * the run of refusals follows, so the episode holds until a reminder is delivered. Jobs are found through the refused
+ * outcome's index, and only their recent history (the retention's 50 per job) is read. The parked-owner job's refusals
+ * already arrive as notes on the rows it wakes. */
+function refusedWatchdogJobs(db: Database.Database): Array<{ jobId: string; dest: string; registeredBy: string; key: string; refusedAt: string }> {
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'watchdog_history'").get()) return [];
+  const jobs = db.prepare(`SELECT job_id, registered_by_session FROM watchdog_jobs WHERE state = 'active' AND policy != ?
+    AND job_id IN (SELECT job_id FROM watchdog_history WHERE outcome = 'refused')`).all(PARKED_OWNER_POLICY_NAME) as Array<{ job_id: string; registered_by_session: string }>;
+  const recent = db.prepare(`SELECT history_id, outcome, delivery_target_session AS dest, evaluated_at FROM watchdog_history
+    WHERE job_id = ? ORDER BY evaluated_at DESC, history_id DESC LIMIT 50`);
+  return jobs.flatMap(({ job_id, registered_by_session }) => {
+    const entries = recent.all(job_id) as Array<{ history_id: string; outcome: string; dest: string | null; evaluated_at: string }>;
+    const dest = entries[0]?.dest;
+    if (!dest) return [];
+    const end = entries.findIndex(e => e.outcome !== "refused" || e.dest !== dest);
+    if ((end === -1 ? entries.length : end) < 2) return [];
+    const after = end === -1 ? "start" : entries[end]!.history_id;
+    return [{ jobId: job_id, dest, registeredBy: registered_by_session, key: `${dest}|watchdog:${job_id}|after:${after}`, refusedAt: entries[0]!.evaluated_at }];
+  });
+}
+
 /** Positive refusals enter the existing rungs without ever retrying the blocked
  * seat. One aggregate carries the episode's obligations and notification key;
  * original work remains owned by its current recipient. */
@@ -993,7 +1014,7 @@ async function advancePromptRefusals(
   attemptWake: (qitemId: string, target: string) => Promise<string>,
   actions: WakeLadderAction[],
 ): Promise<void> {
-  const groups = new Map<string, { keys: string[]; rows: Map<string, QueueItem>; refusedAt: string }>();
+  const groups = new Map<string, { keys: string[]; rows: Map<string, QueueItem>; jobs: Map<string, string>; refusedAt: string }>();
   const unreadableDestinations = new Set<string>();
   const loggedRows = new Set<string>();
   const readCandidate = (id: string, destination: string): QueueItem | null => {
@@ -1040,11 +1061,22 @@ async function advancePromptRefusals(
         Boolean(row && row.destinationSession === primary.destinationSession && ["pending", "in-progress", "blocked"].includes(row.state)));
       if (!rows.length) continue;
       let group = groups.get(primary.destinationSession);
-      if (!group) { group = { keys: [], rows: new Map(), refusedAt: episode.refusedAt }; groups.set(primary.destinationSession, group); }
+      if (!group) { group = { keys: [], rows: new Map(), jobs: new Map(), refusedAt: episode.refusedAt }; groups.set(primary.destinationSession, group); }
       if (Date.parse(episode.refusedAt) > Date.parse(group.refusedAt)) group.refusedAt = episode.refusedAt;
       group.keys.push(`${PROMPT_EPISODE_TAG}${episode.key}`);
       for (const row of rows) group.rows.set(row.qitemId, row);
     }
+  }
+
+  // A watchdog reminder refused twice at the same prompt joins its seat's episode; the row carries the job ids.
+  for (const job of refusedWatchdogJobs(deps.db)) {
+    const tag = `${PROMPT_EPISODE_TAG}${job.key}`;
+    if (closedEpisode(tag)) continue;
+    let group = groups.get(job.dest);
+    if (!group) { group = { keys: [], rows: new Map(), jobs: new Map(), refusedAt: job.refusedAt }; groups.set(job.dest, group); }
+    if (Date.parse(job.refusedAt) > Date.parse(group.refusedAt)) group.refusedAt = job.refusedAt;
+    group.keys.push(tag);
+    group.jobs.set(job.jobId, job.registeredBy);
   }
 
   const promptState = (dest: string) => {
@@ -1105,8 +1137,8 @@ async function advancePromptRefusals(
     const toOperator = orch === null || orch === dest;
     const reason = "interactive prompt blocks outstanding work; no input was sent";
     const aggregate = await ensureEscalationRow(deps, dest,
-      toOperator ? resolveOperatorSeat() ?? members[0]!.row.sourceSession : orch!, members, reason,
-      `prompt-destination:${dest}`, [PROMPT_ALERT_TAG, ...group.keys]);
+      toOperator ? resolveOperatorSeat() ?? members[0]?.row.sourceSession ?? [...group.jobs.values()][0]! : orch!, members, reason,
+      `prompt-destination:${dest}`, [PROMPT_ALERT_TAG, ...group.keys], group.jobs);
     const row = deps.queueRepo.getById(aggregate.qitemId);
     if (!row) continue;
     const addedKeys = group.keys.filter(key => !row.tags?.includes(key));
@@ -1126,8 +1158,8 @@ async function advancePromptRefusals(
     // Re-read at the send boundary after aggregate persistence.
     if (promptState(dest) !== "blocked") continue;
     const freshMembers = members.map(m => readCandidate(m.row.qitemId, dest));
-    if (unreadableDestinations.has(dest) || !freshMembers.some(fresh =>
-      fresh && fresh.destinationSession === dest && ["pending", "in-progress", "blocked"].includes(fresh.state))) continue;
+    if (unreadableDestinations.has(dest) || (!group.jobs.size && !freshMembers.some(fresh =>
+      fresh && fresh.destinationSession === dest && ["pending", "in-progress", "blocked"].includes(fresh.state)))) continue;
     if (!view.orchRung) {
       if (!toOperator) {
         const outcome = await attemptWake(row.qitemId, orch!);
@@ -1262,6 +1294,8 @@ async function ensureEscalationRow(
   reason: string,
   dedupTag = escalationDedupTag(dest),
   extraTags: string[] = [],
+  /** Watchdog reminders refused at this seat's prompt: job id to the session that registered it. */
+  jobs: ReadonlyMap<string, string> = new Map(),
 ): Promise<{ qitemId: string }> {
   const existing = deps.db
     .prepare(
@@ -1279,12 +1313,13 @@ async function ensureEscalationRow(
     `reason: ${reason}\n` +
     `stuck batons (${members.length}):\n` +
     members.map((m) => `- ${m.row.qitemId}: ${m.row.summary ?? "outstanding work"} (${m.reason})`).join("\n") +
+    (jobs.size ? `\nwatchdog reminders refused at its prompt (${jobs.size}):\n${[...jobs.keys()].map(id => `- ${id}`).join("\n")}` : "") +
     `\nThe rows above still carry their obligations exactly-once; this escalation is the wake, not the content.`;
   const created = await deps.queueRepo.create({
-    sourceSession: members[0]!.row.sourceSession,
+    sourceSession: members[0]?.row.sourceSession ?? [...jobs.values()][0]!,
     destinationSession: orch,
     body,
-    summary: `Wake escalation: ${members.length} baton(s) stuck at ${dest} — ${reason}`,
+    summary: `Wake escalation: ${members.length} baton(s)${jobs.size ? ` and ${jobs.size} watchdog reminder(s)` : ""} stuck at ${dest} — ${reason}`,
     tags: [WAKE_ESCALATION_TAG, dedupTag, ...extraTags, ...members.map(m => recoveryTag(m.row.qitemId))],
     nudge: false, // delivery is the ladder's own rung attempt, recorded with its outcome
   });
