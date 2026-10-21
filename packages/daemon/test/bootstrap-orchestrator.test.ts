@@ -569,6 +569,52 @@ edges: []
     expect(podInstantiator.instantiate).not.toHaveBeenCalled();
   });
 
+  it("a plan's Codex profile probe leaves the event loop free while it runs", async () => {
+    // `codex -p <profile> mcp list` takes most of a second on a real install; the daemon must keep answering meanwhile.
+    const project = path.join(tmpDir, "project");
+    const bin = path.join(tmpDir, "bin");
+    fs.mkdirSync(path.join(tmpDir, "agents", "impl"), { recursive: true });
+    fs.mkdirSync(project, { recursive: true });
+    fs.mkdirSync(bin, { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, "agents", "impl", "agent.yaml"),
+      "name: impl\nversion: \"1.0.0\"\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: []\n",
+    );
+    fs.writeFileSync(path.join(bin, "codex"), "#!/bin/sh\nsleep 1\necho ok\n", { mode: 0o755 });
+    const specPath = writeSpec(`version: "0.2"
+name: probe-rig
+pods:
+  - id: dev
+    label: Dev
+    members:
+      - id: impl
+        agent_ref: local:agents/impl
+        profile: default
+        runtime: codex
+        codex_config_profile: probeprof
+        cwd: ${JSON.stringify(project)}
+    edges: []
+edges: []
+`);
+    const podInstantiator = { db, deps: { fsOps: realFsOps() }, resolveSkillsRoot: vi.fn(), instantiate: vi.fn() };
+    const orch = buildOrchestrator({ podInstantiator });
+
+    const oldPath = process.env.PATH;
+    process.env.PATH = `${bin}:${oldPath ?? ""}`;
+    const ticks: number[] = [Date.now()];
+    const interval = setInterval(() => ticks.push(Date.now()), 10);
+    try {
+      const result = await orch.bootstrap({ mode: "plan", sourceRef: specPath, sourceKind: "rig_spec" });
+      expect(result.status, JSON.stringify(result.errors)).toBe("planned");
+    } finally {
+      clearInterval(interval);
+      process.env.PATH = oldPath;
+    }
+    ticks.push(Date.now());
+    const longestGap = Math.max(...ticks.slice(1).map((t, i) => t - ticks[i]!));
+    expect(longestGap).toBeLessThan(500);
+  });
+
   // T2: Apply --yes executes all stages
   it("apply --yes executes all stages and completes", async () => {
     const specPath = writeSpec(SIMPLE_SPEC_YAML);

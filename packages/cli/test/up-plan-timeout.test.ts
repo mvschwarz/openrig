@@ -23,7 +23,7 @@ vi.mock("../src/remote-host-ops.js", async (importOriginal) => {
 // What runRemoteHttpOp returns when the remote daemon doesn't answer in time.
 const REMOTE_TIMEOUT = {
   ok: false,
-  failedStep: "remote-outcome-unknown",
+  failedStep: "remote-daemon-unreachable",
   error: "Request to http://vps-a:7433/api/up timed out after 120000ms",
   outcomeUnknown: true,
 };

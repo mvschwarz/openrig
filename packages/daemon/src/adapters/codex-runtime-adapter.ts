@@ -1991,7 +1991,7 @@ function escapeRegExp(value: string): string {
 // production, execFn runs the real `codex -p <profile> mcp list` via execSync
 // (utf-8, piped stdio, 10s timeout). Injected as the adapter's default
 // verifyProfilePreflight; tests substitute a controlled stub.
-async function defaultProfilePreflight(profile: string, selected?: { cwd: string; codexHome: string; launchPath?: string }): Promise<CodexProfileProbeResult> {
+export async function defaultProfilePreflight(profile: string, selected?: { cwd: string; codexHome: string; launchPath?: string }): Promise<CodexProfileProbeResult> {
   const { verifyCodexProfileLoads } = await import("../domain/codex-profile-preflight.js");
   const { execSync } = await import("node:child_process");
   const execFn = async (cmd: string) =>
