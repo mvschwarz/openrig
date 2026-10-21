@@ -157,7 +157,7 @@ describe("a deliberately stopped current fresh seat does not block its siblings"
   it.each(["ambiguous-current", "ambiguous-snapshot", "foreign-history", "missing-history", "no-stop-intent"])(
     "still rejects an unproved stopped relation: %s", async kind => {
       const f = await fixture(), snapshot = structuredClone(f.snapshot);
-      if (kind === "ambiguous-current") f.db.prepare("INSERT INTO events(rig_id,type,payload) VALUES (?,'seat.fresh_launched',?)").run(f.rig.id, JSON.stringify({ ...f.freshEvent, sessionId: f.previous.id }));
+      if (kind === "ambiguous-current") f.db.prepare("INSERT INTO events(rig_id,node_id,type,payload) VALUES (?,?,'seat.fresh_launched',?)").run(f.rig.id, f.freshEvent.nodeId, JSON.stringify({ ...f.freshEvent, sessionId: f.previous.id }));
       if (kind === "ambiguous-snapshot") snapshot.data.activeOccupantsByNode![f.paused.id] = { kind: "ambiguous", candidateIds: [f.current.id, f.previous.id] };
       if (kind === "foreign-history") snapshot.data.sessions.find(s => s.id === f.current.id)!.nodeId = f.others[0]!.node.id;
       if (kind === "missing-history") snapshot.data.sessions = snapshot.data.sessions.filter(s => s.id !== f.current.id);

@@ -172,7 +172,7 @@ describe("Up API route", () => {
     const session = sessionRegistry.registerSession(node.id, "worker@fresh-down-up", "fresh");
     sessionRegistry.updateStatus(session.id, "running");
     sessionRegistry.updateResumeToken(session.id, "claude_name", "fresh-native-session", "hook");
-    db.prepare("INSERT INTO events (rig_id, type, payload) VALUES (?, 'seat.fresh_launched', ?)").run(rig.id, JSON.stringify({
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, 'seat.fresh_launched', ?)").run(rig.id, node.id, JSON.stringify({
       nodeId: node.id, sessionId: session.id, newGeneration: sessionRegistry.currentOccupantTenure(node.id)!.generationUuid,
     }));
     const down = await app.request("/api/down", {
