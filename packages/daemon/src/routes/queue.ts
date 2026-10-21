@@ -18,6 +18,7 @@ import { type OutboxHandler } from "../domain/outbox-handler.js";
 import { aggregateAttention } from "../domain/feed/attention-aggregator.js";
 import type { AttentionItem } from "../domain/feed/attention-aggregator.js";
 import { loadHostRegistry, resolveHost } from "../domain/hosts/hosts-registry-reader.js";
+import { eligibleQueueBindings, ineligibleBindingDetail, loadLearnedHostBindings } from "../domain/hosts/learned-host-bindings.js";
 import { getSelfHostId, resolvesToLocalHost } from "../domain/hosts/fanout-contract.js";
 import { remoteJsonRequest } from "../domain/hosts/remote-daemon-http.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
@@ -263,8 +264,18 @@ export function queueRoutes(): Hono {
     });
     const reg = registryLoader();
     if (!reg.ok) return fail(reg.error, "registry");
-    const resolved = resolveHost(reg.registry, hostId);
-    if (!resolved.ok) return fail(resolved.error, "unknown-host");
+    // #1642: this daemon's own learned bindings (its home's host-bindings.json) let a host's self-id
+    // name one of its registry entries, but only bindings that still match their entry. Any other
+    // binding leaves the refusal in place, before anything is forwarded, with the reason it isn't used.
+    const bindingsLoader =
+      (c.get("hostBindingsLoader" as never) as (() => ReturnType<typeof loadLearnedHostBindings>) | undefined) ??
+      loadLearnedHostBindings;
+    const learned = bindingsLoader();
+    const resolved = resolveHost(reg.registry, hostId, eligibleQueueBindings(reg.registry, learned));
+    if (!resolved.ok) {
+      const unused = ineligibleBindingDetail(reg.registry, learned, hostId);
+      return fail(unused ? `${resolved.error} ${unused}` : resolved.error, "unknown-host");
+    }
     if (resolved.host.transport !== "http") {
       return fail(
         `host '${hostId}' is SSH-declared; cross-host queue writes require an http-transport registry entry (url; bearer optional)`,
