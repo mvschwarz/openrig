@@ -52,7 +52,7 @@ For a claim about performance, also read [references/performance-claims.md](refe
 
 **Tests:**
 ```
-✅ [Run test command] [See: 34/34 pass] "All tests pass"
+✅ [Run test command, or read the named candidate's CI output] [See: 34/34 pass] "All tests pass"
 ❌ "Should pass now" / "Looks correct"
 ```
 
@@ -82,7 +82,7 @@ For a claim about performance, also read [references/performance-claims.md](refe
 
 ## When the check itself lies — content over shape
 
-Running a verification is necessary but not sufficient: a check can exit clean and still prove nothing. These are the named ways a green check lies — the failure siblings behind "evidence before claims." (Deeper treatment of *what* you verify against: `reference-first-verification`.)
+A passing check is necessary but not sufficient: a check can exit clean and still prove nothing. These are the named ways a green check lies — the failure siblings behind "evidence before claims." (Deeper treatment of *what* you verify against: `reference-first-verification`.)
 
 - **Assert on CONTENT, never shape or count.** Output that *looks* like success — a non-zero count, a clean exit, no error text — can carry failure as its content. Before trusting a check, ask what its output looks like *when it fails*: if failure and success are indistinguishable at a glance, the check proves nothing. (`[1 lines]` and `No matches found` both read as "a match" to a line-count.)
 - **Compare the returned value to the value you PASSED — never to a description of it.** A confident label (`evidenceRef NOW SET:` printed above the untouched original) is indistinguishable from a verification in a transcript. Diff the actual result against your actual input, not against a claim about it.

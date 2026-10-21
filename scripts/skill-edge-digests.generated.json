@@ -10,7 +10,7 @@
       "core/openrig-architect/SKILL.md": "51b65d2e878eeaf2af2f23974677d6a3272728024f3a6854bf3a646567fd3ae6",
       "core/openrig-cmux/SKILL.md": "73a86eac45d68b16a38fc0a4438713c634d86061073dac96a4d9e656ea5d34dc",
       "core/openrig-herdr/SKILL.md": "37508a02f50bb69ee97c22c37ccf70aa8e37dc0784061eb2a5ad813571eebd1a",
-      "core/openrig-skills/SKILL.md": "c30ca27054b4253db09dc45b7d3e029d8d81f9019f2a1b487d6ca0ca2b99bbf5",
+      "core/openrig-skills/SKILL.md": "c3e13ac515010774098c17e00da86916f1246a535e34e9f8a4272b5bcbaea32e",
       "core/openrig-software-factory/SKILL.md": "7a57815f3c6865d5cc42c063cccdca998d6ee100a82812362d0c81f314465b77",
       "core/openrig-software-factory/references/worked-example.md": "409680b7e96e1b5725a68fd7e96da0a4c908fec88a77599d39f574d9e64bcc88",
       "core/openrig-upgrade/SKILL.md": "0ddbe16d8c93cd093e5fd3bd11a4323479db46a6d49ae9906df940b699f6e297",
@@ -53,7 +53,7 @@
       "process/systematic-debugging/root-cause-tracing.md": "a81bee9448794d261b4aca8487c595d11ff4bd4e10a5f96bca1117dd32527050",
       "process/test-driven-development/SKILL.md": "51f65d2bc71dd6fc84640bf113acf287f4e003ef325ed91cb112fce59149a298",
       "process/test-driven-development/testing-anti-patterns.md": "bde453bc258f06543987477c837939afaa774ea2acbd9f308d702fc452bc4283",
-      "process/verification-before-completion/SKILL.md": "35f332aceab5d4e4dfe2e02f8b24b5e4e13b7146759de2c8031845426aa32d5c",
+      "process/verification-before-completion/SKILL.md": "c17db073ace9a3f345a9a979323047f5d1b5c4e09eaa7398ccd96b49eef44874",
       "process/verification-before-completion/references/performance-claims.md": "7db2a496a9423ab409b4e3819f64cd6abd7dff2413ce78232e6d154e62126884"
     },
     "plugin": {
@@ -83,7 +83,7 @@
       "openrig-operating-model/templates/PLAYBOOK.md": "ff6f9dc8caab06dc7b9ae21977310ddefa23e925453bd54629ce0a669403bfb0",
       "openrig-operating-model/templates/SOP.md": "1eaf0daf4f9bbf0715e6a5aaf0f29f030af5fe8b8a10232488ee97c507afa6dc",
       "openrig-operating-model/templates/SPEC.md": "f126536daa59cea3f1cfb0898d83c7cdf99f6392f6f155ea64fe55187dd0f5f1",
-      "openrig-skills/SKILL.md": "c30ca27054b4253db09dc45b7d3e029d8d81f9019f2a1b487d6ca0ca2b99bbf5",
+      "openrig-skills/SKILL.md": "c3e13ac515010774098c17e00da86916f1246a535e34e9f8a4272b5bcbaea32e",
       "openrig-user/SKILL.md": "6be751aeaeffb9b264a4662b6d086fb1978272c29f27f3a6f45125656b72bf5e",
       "orienting-to-an-inherited-seat/CHANGELOG.md": "4d0970e75e5c15b00a48d6a7150376d646257777264fd1b9a191165a8d5a6e84",
       "orienting-to-an-inherited-seat/SKILL.md": "252fed402f19027056bbba241df3305be88de3175b67dc8fe051143bb0d4412b",
@@ -109,7 +109,7 @@
       "core/openrig-architect/SKILL.md": "51b65d2e878eeaf2af2f23974677d6a3272728024f3a6854bf3a646567fd3ae6",
       "core/openrig-cmux/SKILL.md": "73a86eac45d68b16a38fc0a4438713c634d86061073dac96a4d9e656ea5d34dc",
       "core/openrig-herdr/SKILL.md": "37508a02f50bb69ee97c22c37ccf70aa8e37dc0784061eb2a5ad813571eebd1a",
-      "core/openrig-skills/SKILL.md": "c30ca27054b4253db09dc45b7d3e029d8d81f9019f2a1b487d6ca0ca2b99bbf5",
+      "core/openrig-skills/SKILL.md": "c3e13ac515010774098c17e00da86916f1246a535e34e9f8a4272b5bcbaea32e",
       "core/openrig-software-factory/SKILL.md": "7a57815f3c6865d5cc42c063cccdca998d6ee100a82812362d0c81f314465b77",
       "core/openrig-software-factory/references/worked-example.md": "409680b7e96e1b5725a68fd7e96da0a4c908fec88a77599d39f574d9e64bcc88",
       "core/openrig-upgrade/SKILL.md": "0ddbe16d8c93cd093e5fd3bd11a4323479db46a6d49ae9906df940b699f6e297",
@@ -152,7 +152,7 @@
       "process/systematic-debugging/root-cause-tracing.md": "a81bee9448794d261b4aca8487c595d11ff4bd4e10a5f96bca1117dd32527050",
       "process/test-driven-development/SKILL.md": "51f65d2bc71dd6fc84640bf113acf287f4e003ef325ed91cb112fce59149a298",
       "process/test-driven-development/testing-anti-patterns.md": "bde453bc258f06543987477c837939afaa774ea2acbd9f308d702fc452bc4283",
-      "process/verification-before-completion/SKILL.md": "35f332aceab5d4e4dfe2e02f8b24b5e4e13b7146759de2c8031845426aa32d5c",
+      "process/verification-before-completion/SKILL.md": "c17db073ace9a3f345a9a979323047f5d1b5c4e09eaa7398ccd96b49eef44874",
       "process/verification-before-completion/references/performance-claims.md": "7db2a496a9423ab409b4e3819f64cd6abd7dff2413ce78232e6d154e62126884"
     }
   }
