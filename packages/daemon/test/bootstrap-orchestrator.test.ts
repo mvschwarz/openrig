@@ -267,7 +267,7 @@ describe("BootstrapOrchestrator", () => {
       return { sourceRef, sourceKind: "rig_bundle" };
     }
 
-    async function realLaunch(fault?: { removal: "confirmed" | "unconfirmed" | "throw"; createFailure?: boolean }) {
+    async function realLaunch(fault?: { removal: "confirmed" | "unconfirmed" | "throw"; createFailure?: boolean; attention?: boolean }) {
       const { RigRepository } = await import("../src/domain/rig-repository.js");
       const { SessionRegistry } = await import("../src/domain/session-registry.js");
       const { EventBus } = await import("../src/domain/event-bus.js");
@@ -310,7 +310,10 @@ describe("BootstrapOrchestrator", () => {
       const adapter = (runtime: string) => ({ runtime,
         listInstalled: vi.fn(async () => []), project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
         deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })), checkReady: vi.fn(async () => ({ ready: true })),
-        launchHarness: vi.fn(async () => ({ ok: true })),
+        // A startup gate (such as a first-launch trust prompt) leaves the seat running and waiting for a person.
+        launchHarness: vi.fn(async () => fault?.attention
+          ? { ok: false, error: "fixture startup gate", recovery: "attention_required", evidence: "Do you trust the files in this folder?" }
+          : { ok: true }),
       });
       const podInstantiator = new PodRigInstantiator({ db, rigRepo, podRepo: new PodRepository(db), sessionRegistry, eventBus,
         nodeLauncher, startupOrchestrator: new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux }),
@@ -336,8 +339,9 @@ describe("BootstrapOrchestrator", () => {
     });
 
     describe.each([true, false])("a one-off that stays in the session, single seat=%s", (singleSeat) => {
-      it("keeps every launched seat running and reports the leftover by name with its remedy", async () => {
-        const { orch, tmux, rigRepo, started, live } = await realLaunch({ removal: "confirmed" });
+      it.each(podSpec ? ["running", "at a startup gate"] : ["running"])("keeps every launched seat %s and reports the leftover by name with its remedy", async (state) => {
+        const gate = state === "at a startup gate";
+        const { orch, tmux, rigRepo, started, live } = await realLaunch({ removal: "confirmed", attention: gate });
         const input = await source(singleSeat);
         const { createTestApp } = await import("./helpers/test-app.js");
         const { app } = createTestApp(db, { tmux, appDeps: { bootstrapOrchestrator: orch }, upRouterFsOps: {
@@ -381,10 +385,12 @@ describe("BootstrapOrchestrator", () => {
         // rolled back, and the leftover is reported by name with how to put it back, never by value.
         expect(started).toHaveLength(singleSeat ? 1 : 2);
         expect(started.every(s => s.hasProbe)).toBe(true);
-        expect(observed?.status).toBe(201);
-        expect(observed?.data.status).toBe("completed");
-        expect(observed?.data.code).toBeUndefined();
-        expect([human.exit, json.exit]).toEqual([0, 0]);
+        if (!gate) {
+          expect(observed?.status).toBe(201);
+          expect(observed?.data.status).toBe("completed");
+          expect(observed?.data.code).toBeUndefined();
+          expect([human.exit, json.exit]).toEqual([0, 0]);
+        }
         expect(tmux.killSession).not.toHaveBeenCalled();
         expect(live.size).toBe(singleSeat ? 1 : 2);
         expect(rigRepo.listRigs()).toHaveLength(1);

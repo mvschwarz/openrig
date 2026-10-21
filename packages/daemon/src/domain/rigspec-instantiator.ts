@@ -1697,8 +1697,9 @@ export class PodRigInstantiator {
         message: `${attentionNodes.length} node${attentionNodes.length === 1 ? " requires" : "s require"} attention before becoming interactive. Inspect the affected sessions and reasons before choosing recovery.`,
         rigId,
         attentionNodes,
-        // #141: the replacement is kept on this path, so its archive notice must reach the user too.
-        ...(archivedGenerations.length > 0 ? { warnings: podInstantiateWarnings } : {}),
+        // The seats are kept on this path, so their warnings reach the person too: a replacement's archive notice (#141)
+        // and a one-off --env setting that stayed in a session.
+        ...(podInstantiateWarnings.length > 0 ? { warnings: podInstantiateWarnings } : {}),
       };
     }
 
