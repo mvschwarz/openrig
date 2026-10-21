@@ -1,3 +1,4 @@
+import { relayLocalFingerprint, readRelaySnapshot, type SshTmuxRelay, type RelaySnapshot } from "./ssh-tmux-relay.js";
 import { isShellForeground } from "./shell-classifier.js";
 import { runAsyncSite } from "./sync-site-wrap.js";
 import { readNativeExecutablePaths } from "./native-process-executable.js";
@@ -598,7 +599,8 @@ export function explainNativeRejection(rows: NativeProcessRow[], panePid: number
 
 async function observeNativePaneProcess(input: {
   target: string;
-  tmux: { getPanePid(target: string): Promise<number | null> };
+  tmux: { getPanePid(target: string): Promise<number | null>; getSshRelay?: (target: string) => SshTmuxRelay | null };
+  readRelay?: (relay: SshTmuxRelay) => Promise<RelaySnapshot | null>;
   listProcesses?: NativeProcessLister;
   expectedToken?: string | null;
   requireResume?: boolean;
@@ -615,6 +617,19 @@ async function observeNativePaneProcess(input: {
     const pid = await input.tmux.getPanePid(input.target);
     if (!pid) return null;
     const rows = await (input.listProcesses ?? (() => listNativeProcesses({ claudeLaunchPaths: input.scriptLaunch === true })))();
+    const relay = input.tmux.getSshRelay?.(input.target);
+    if (relay) {
+      if (runtime !== "codex") return null;
+      const local = relayLocalFingerprint(rows, pid, relay);
+      if (!local) return null;
+      const snapshot = await (input.readRelay ?? readRelaySnapshot)(relay);
+      const afterLocal = await (input.listProcesses ?? listNativeProcesses)();
+      if (!snapshot || relayLocalFingerprint(afterLocal, pid, relay) !== local || await input.tmux.getPanePid(input.target) !== pid
+        || JSON.stringify(input.tmux.getSshRelay?.(input.target)) !== JSON.stringify(relay)) return null;
+      const remote = selectNativeProcess(snapshot.rows, snapshot.panePid, input.expectedToken, input.requireResume, runtime);
+      if (!remote) return null;
+      return { ...remote, panePid: pid, fingerprint: JSON.stringify([relay, local, snapshot.identity, remote.fingerprint]) };
+    }
     return selectNativeProcess(rows, pid, input.expectedToken, input.requireResume, runtime, input.selectedExecutable,
       runtime === "claude-code" ? input.rotation : undefined, input.scriptLaunch);
   } catch { return null; }

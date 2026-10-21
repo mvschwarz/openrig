@@ -49,6 +49,27 @@ describe("attached team address preserves physical custody", () => {
   afterEach(() => { db.close(); rmSync(transcriptRoot, { recursive: true, force: true }); });
   const context = (tmuxSession: string) => ({ attachmentType: "tmux" as const, tmuxSession, tmuxWindow: "@12", tmuxPane: "%42" });
 
+  it("validates and persists a relay through the actual attach route", async () => {
+    const rig = rigs.createRig("relay-api");
+    pods.createPod(rig.id, "agents", "Agents");
+    const body = { podNamespace: "agents", memberName: "remote", runtime: "codex", ...context("relay-local"),
+      relay: { kind: "ssh-tmux", host: "worker", session: "wm-remote" } };
+    for (const relay of [{ ...body.relay, host: "-oProxyCommand=x" }, { ...body.relay, session: "a;cmd" }]) {
+      const response = await app.request(`/api/rigs/${rig.id}/attach-self`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...body, relay }) });
+      expect(response.status).toBe(400);
+    }
+    const response = await app.request(`/api/rigs/${rig.id}/attach-self`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    expect(response.status).toBe(201);
+    const result = await response.json() as { nodeId: string };
+    expect(sessions.getBindingForNode(result.nodeId)?.relay).toEqual(body.relay);
+    tmux.getSshRelay = () => body.relay as { kind: "ssh-tmux"; host: string; session: string };
+    tmux.getPaneCommand = async () => "ssh";
+    tmux.getPanePid = async () => 999999999;
+    const delivery = await transport.send("relay-local", "must not reach an unverified remote shell");
+    expect(delivery).toMatchObject({ ok: false, sent: false, reason: "target_runtime_unverified" });
+    expect(writes).toEqual([]);
+  });
+
   it.each(["0", "person-terminal"])("returns a routable sender and records the display label without renaming %s", async (physical) => {
     const rig = rigs.createRig("sample-team"), node = rigs.addNode(rig.id, "person.agent", { runtime: "terminal" });
     const result = await attach.attachToNode({ rigId: rig.id, logicalId: node.logicalId, displayName: "Taylor", context: context(physical) });

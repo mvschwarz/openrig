@@ -74,6 +74,7 @@ export interface Edge {
 }
 
 export interface Binding {
+  relay?: import("./ssh-tmux-relay.js").SshTmuxRelay | null;
   id: string;
   nodeId: string;
   attachmentType?: "tmux" | "external_cli";

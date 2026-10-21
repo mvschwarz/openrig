@@ -1,3 +1,4 @@
+import { parseSshTmuxRelay, type SshTmuxRelay } from "./ssh-tmux-relay.js";
 import type Database from "better-sqlite3";
 import { monotonicFactory } from "ulid";
 import { randomUUID } from "node:crypto";
@@ -30,6 +31,7 @@ interface OccupantTenureRow {
 }
 
 interface BindingFields {
+  relay?: SshTmuxRelay | null;
   attachmentType?: "tmux" | "external_cli";
   tmuxSession?: string;
   tmuxWindow?: string;
@@ -817,6 +819,13 @@ export class SessionRegistry {
             fields.cmuxSurface ?? null
           );
       }
+      // Older partial-schema fixtures still exercise ordinary bindings. A relay
+      // always requires its migration; never silently ignore explicit metadata.
+      if (fields.relay !== undefined || existing?.ssh_relay) {
+        const clear = fields.attachmentType !== undefined || fields.tmuxSession !== undefined || fields.tmuxPane !== undefined || fields.tmuxWindow !== undefined;
+        const value = fields.relay !== undefined ? fields.relay ? JSON.stringify(fields.relay) : null : clear ? null : existing?.ssh_relay;
+        this.db.prepare("UPDATE bindings SET ssh_relay = ? WHERE node_id = ?").run(value, nodeId);
+      }
     });
 
     upsert();
@@ -865,6 +874,7 @@ export class SessionRegistry {
       cmuxWorkspace: row.cmux_workspace,
       cmuxSurface: row.cmux_surface,
       updatedAt: row.updated_at,
+      ...(row.ssh_relay ? { relay: parseSshTmuxRelay(JSON.parse(row.ssh_relay)) } : {}),
     };
   }
 }
@@ -892,6 +902,7 @@ interface SessionRow {
 }
 
 interface BindingRow {
+  ssh_relay?: string | null;
   id: string;
   node_id: string;
   attachment_type: string | null;

@@ -88,7 +88,7 @@ type PaneObservation = { pid: number | null; command: string | null };
 
 export interface SeatIdentityReconcilerDeps {
   db: Database.Database;
-  tmux: Pick<TmuxAdapter, "listSessions" | "getPanePid" | "getPaneCommand"> & Partial<Pick<TmuxAdapter, "readAllPaneProcesses" | "listPanes">>;
+  tmux: Pick<TmuxAdapter, "listSessions" | "getPanePid" | "getPaneCommand"> & Partial<Pick<TmuxAdapter, "readAllPaneProcesses" | "listPanes" | "getSshRelay">>;
   now?: () => Date;
   listProcesses?: NativeProcessLister;
 }
@@ -235,7 +235,7 @@ export class SeatIdentityReconciler {
       return Promise.all(nativeSeats.map((seat) => (seat.runtime === "codex" ? observeCodexPaneProcess
         : seat.resume_token !== null && seat.resume_token !== undefined ? observeClaudePaneProcess : observeClaudePaneRuntime)({
         target: seat.tmux_pane!, tmux, expectedToken: seat.resume_token, rotation: claudeResumeRotation(seat),
-        listProcesses: () => snapshot ??= this.listProcesses(),
+        listProcesses: () => tmux.getSshRelay?.(seat.tmux_pane!) ? this.listProcesses() : snapshot ??= this.listProcesses(),
       })));
     };
     const first = await sample(panes);

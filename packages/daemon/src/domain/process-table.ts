@@ -41,6 +41,11 @@ const PS_ROW = /^(\d+)\s+(\d+)\s+(-?\d+)\s+(-?\d+)\s+(.+?)\s+(\w{3}\s+\w{3}\s+\d
 async function readPsTable(): Promise<ProcessTableRow[]> {
   // lstart is locale-formatted; the child-only C locale keeps the English date the parser expects.
   const { stdout } = await execFileAsync("ps", ["-Ao", "pid,ppid,pgid,tpgid,ucomm,lstart,command"], { encoding: "utf-8", maxBuffer: 8 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } });
+  return parsePsTable(stdout);
+}
+
+/** Parse the same C-locale OS table for local and SSH observations. */
+export function parsePsTable(stdout: string): ProcessTableRow[] {
   return stdout.split("\n").slice(1).flatMap((line) => {
     // ucomm may contain spaces on every platform: macOS app helpers (`Slack Helper`), and on
     // Linux task names set by prctl(PR_SET_NAME) or process.title (`tmux: server`,

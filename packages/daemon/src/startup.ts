@@ -501,6 +501,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const deliveryGuard = new SeatDeliveryGuard(db, target => resolveGuardTarget(db, target));
   deliveryGuard.recoverActivation();
   tmuxAdapter.deliveryGuard = deliveryGuard;
+  tmuxAdapter.getSshRelay = target => {
+    const bound = resolveGuardTarget(db, target);
+    return bound ? sessionRegistry.getBindingForNode(bound.nodeId)?.relay ?? null : null;
+  };
 
   // Slice 15 — Seat-activity service for the `terminal-active` primitive.
   // Lives at module scope so the projection chain (PsProjectionService,

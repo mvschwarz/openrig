@@ -1,3 +1,4 @@
+import { parseSshTmuxRelay } from "../domain/ssh-tmux-relay.js";
 import { inventoryCaptureOptions, type ShadowCapture } from "../domain/shadow-capture.js";
 import { DeliveryGuardError } from "../domain/seat-delivery-guard.js";
 import { Hono } from "hono";
@@ -582,6 +583,11 @@ rigsRoutes.post("/:id/attach-self", async (c) => {
   const tmuxWindow = typeof body["tmuxWindow"] === "string" ? body["tmuxWindow"].trim() : "";
   const tmuxPane = typeof body["tmuxPane"] === "string" ? body["tmuxPane"].trim() : "";
 
+  const relay = body["relay"] === undefined ? undefined : parseSshTmuxRelay(body["relay"]);
+  if (body["relay"] !== undefined && (!relay || runtime !== "codex" || attachmentType !== "tmux" || !tmuxPane)) {
+    return c.json({ error: "relay requires a valid ssh-tmux host/session, explicit codex runtime and tmux pane" }, 400);
+  }
+
   const hasNodeTarget = logicalId.length > 0;
   const hasPodFields = podNamespace.length > 0 || memberName.length > 0;
 
@@ -607,6 +613,7 @@ rigsRoutes.post("/:id/attach-self", async (c) => {
         tmuxSession,
         tmuxWindow: tmuxWindow || undefined,
         tmuxPane: tmuxPane || undefined,
+        relay: relay ?? undefined,
       }
     : undefined;
 

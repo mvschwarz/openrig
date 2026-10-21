@@ -1,3 +1,4 @@
+import { bindingSshRelaySchema } from "./migrations/124_binding_ssh_relay.js";
 // The canonical ordered migration list. SINGLE SOURCE: the daemon boot path
 // (startup.ts) and any test/tool that needs a schema-faithful DB both migrate from THIS array,
 // so a reader DB is never seeded from a stale hand-copied subset (the perf-fixture-migration-parity
@@ -247,4 +248,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   rigStartupLayersSchema,
   humanOperatingModesSchema,
   queueDelegatedDecisionSchema,
+  bindingSshRelaySchema,
 ];

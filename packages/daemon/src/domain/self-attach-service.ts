@@ -84,6 +84,7 @@ interface ExternalCliAttachContext {
 }
 
 interface TmuxAttachContext {
+  relay?: import("./ssh-tmux-relay.js").SshTmuxRelay;
   attachmentType: "tmux";
   tmuxSession: string;
   tmuxWindow?: string;
@@ -290,6 +291,7 @@ export class SelfAttachService {
           tmuxSession: args.context.tmuxSession,
           tmuxWindow: args.context.tmuxWindow,
           tmuxPane: args.context.tmuxPane,
+          relay: args.context.relay,
         }
       : {
           attachmentType: "external_cli",

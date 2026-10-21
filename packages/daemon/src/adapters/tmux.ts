@@ -509,6 +509,9 @@ export class TmuxAdapter {
     return this.deliveryGuard ? this.deliveryGuard.operation(target, fn) : fn();
   }
 
+  /** Binding-scoped relay metadata; a missing remote observation never becomes local proof. */
+  getSshRelay?: (target: string) => import("../domain/ssh-tmux-relay.js").SshTmuxRelay | null;
+
   constructor(
     private exec: ExecFn,
     private fileOps: TmuxFileOps = defaultTmuxFileOps(),

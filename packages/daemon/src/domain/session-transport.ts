@@ -3244,6 +3244,17 @@ export class SessionTransport {
   /** Shell label without positive native proof; not proof of an idle shell or stopped agent.
    * Null when no shell label is observed, or the expected native process is verified. */
   private async unverifiedShellForeground(sessionName: string, runtime: string, pane: string | null, resumeToken: string | null): Promise<string | null> {
+    // A live SSH client is not runtime identity: its remote pane may now be a
+    // shell. Require the same fresh two-host proof even when the local label is ssh.
+    try {
+      if (this.tmuxAdapter.getSshRelay?.(sessionName)) {
+        if (runtime !== "codex" || !pane) return "an unverified SSH relay";
+        const native = await verifyCodexPaneProcess({ target: sessionName, tmux: this.tmuxAdapter,
+          listProcesses: this.listProcesses, expectedToken: resumeToken });
+        return native && await this.tmuxAdapter.getPanePid(pane).catch(() => null) === native.panePid
+          ? null : "an unverified SSH relay";
+      }
+    } catch { return "an unverified SSH relay"; }
     let paneCommand: string | null;
     try {
       paneCommand = await this.tmuxAdapter.getPaneCommand(sessionName);
