@@ -151,8 +151,10 @@ describe("rig slack verify with a channel map", () => {
     expect(logs).toContain("✗ NOT a member of channel C0EXAMPLE2 for pr@my-rig — invite the app");
     expect(logs.at(-1)).toBe("NOT ready");
     expect(process.exitCode).toBe(1);
-    const receipts = readFileSync(join(home, "state", "human-channel-operations.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
-    expect(receipts.at(-1)).toMatchObject({ action: "verify", after: { ready: false } });
+    // verify only observes: it writes nothing to the channel-operations ledger.
+    const ledger = join(home, "state", "human-channel-operations.jsonl");
+    const rows = existsSync(ledger) ? readFileSync(ledger, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
+    expect(rows.filter((r) => r.action === "verify")).toEqual([]);
   });
 
   it("JSON lists every channel's membership; without a map the JSON shape is unchanged", async () => {

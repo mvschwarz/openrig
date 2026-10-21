@@ -296,44 +296,29 @@ export function slackCommand(deps: SlackDeps = {}): Command {
     .command("verify")
     .description("Live-verify GRANTED Slack scopes (from response headers) + channel membership")
     .option("--json", "JSON output")
-    .option("--reason <reason>", "Reason recorded with the verification", "verify human delivery")
-    .option("--actor <actor>", "Named operator when outside a managed seat")
     .action(async (opts) => {
       const surface = await loadSurface();
       const cfg = surface.loadConfig(deps.home);
       const s = resolveSecrets(surface, cfg);
-      const { runChannelOperation, channelStateDigest } = await import("@openrig/daemon/gateway-slack");
-      const verification = await runChannelOperation({
-        actor: resolveSenderSession() ?? opts.actor ?? SENDER_FALLBACK, provenance: "claimed:v1",
-        reason: opts.reason, action: "verify", subject: "slack", before: { digest: channelStateDigest(cfg) },
-        run: async () => {
-          const scope = s.bot ? await surface.verifyScopes(s.bot, cfg.requiredScopes, deps.fetchImpl) : null;
-          // #192: membership in every channel the connector uses — the default and each mapped one.
-          const channels = [];
-          for (const c of s.bot ? surface.mappedChannels(cfg) : []) {
-            channels.push({ ...c, member: await surface.verifyChannelMembership(s.bot!, c.channel, deps.fetchImpl) });
-          }
-          const member = channels.find((c) => c.isDefault)?.member ?? null;
-          const ready = scope === null || scope.error || channels.some((c) => c.member.error) ? null
-            : scope.ok && member !== null && channels.every((c) => c.member.isMember);
-          return { value: { scope, member, channels }, after: { ready }, effect: "observed" };
-        },
-      }, deps.home);
       if (!s.bot) {
         log("✗ bot token unresolved — set SLACK_BOT_TOKEN (env or secrets env file). Cannot verify.");
         process.exitCode = 1;
         return;
       }
-      const scope = verification.value.scope!;
-      const member = verification.value.member;
-      const channels = verification.value.channels;
+      const scope = await surface.verifyScopes(s.bot, cfg.requiredScopes, deps.fetchImpl);
+      // #192: membership in every channel the connector uses — the default and each mapped one.
+      const channels = [];
+      for (const c of surface.mappedChannels(cfg)) {
+        channels.push({ ...c, member: await surface.verifyChannelMembership(s.bot, c.channel, deps.fetchImpl) });
+      }
+      const member = channels.find((c) => c.isDefault)?.member ?? null;
       const ready = scope.ok && member !== null && channels.every((c) => c.member.isMember);
       // Failed scope requests or an absent/empty grant header cannot prove
       // which optional features are available. Baseline readiness is unchanged.
       const missingFeatures = scope.error || scope.granted.length === 0 ? null
         : surface.FEATURE_SCOPES.filter((feature) => !scope.granted.includes(feature.scope));
       if (opts.json) {
-        log(JSON.stringify({ scope, member, ...(cfg.channelMap?.length ? { channels } : {}), ready, missingFeatures, receipt: verification.receipt }));
+        log(JSON.stringify({ scope, member, ...(cfg.channelMap?.length ? { channels } : {}), ready, missingFeatures }));
       } else {
         log(`granted scopes: ${scope.granted.join(", ") || "(none)"}`);
         if (!scope.ok) log(`✗ MISSING scopes (configured != granted — reinstall the app): ${scope.missing.join(", ")}${scope.error ? ` [${scope.error}]` : ""}`);
