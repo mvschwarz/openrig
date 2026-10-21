@@ -605,7 +605,7 @@ Only Claude and Codex tenures can be woken.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig skill` | — | — |
-| `rig skill loadout` | — | `--runtime <runtime>` **required**<br>`--cwd <path>`<br>`--project-root <path>`<br>`--topology <ids>`<br>`--apply`<br>`--json` |
+| `rig skill loadout` | — | `--runtime <runtime>` (folder mode; **required** there)<br>`--seat <session>` (seat mode; `self` is this seat)<br>`--wait-for-idle <ms>`<br>`--cwd <path>`<br>`--project-root <path>`<br>`--topology <ids>`<br>`--apply`<br>`--json` |
 | `rig skill audit` | — | `--json` |
 
 ### agent-image

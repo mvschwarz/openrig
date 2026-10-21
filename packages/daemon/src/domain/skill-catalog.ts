@@ -104,6 +104,10 @@ export interface SkillLoadoutLocation {
   targetRoot: string;
   manifestPath: string;
   qualifiedName: (skillId: string) => string;
+  /** OPR.0.7.0.13: a location that must still be contained when the reconciler is about to change it (a seat's own
+   *  storage): returns why not, and the reconciler changes nothing. Checked after classification, before the first
+   *  folder, staging, replacement, removal or manifest write. */
+  refuseMutation?: () => string | undefined;
 }
 
 interface OwnershipManifest {
@@ -1167,6 +1171,11 @@ export function reconcileSkillLoadout(input: {
     && !gitIgnorePlans.some((plan) => plan.changed)
   ) {
     return { ok: true, applied: false, freshLaunchRequired: false, runtime: input.runtime, targetRoot, manifestPath, receipts, removed: [], errors: [] };
+  }
+  const refusal = input.location?.refuseMutation?.();
+  if (refusal) {
+    return { ok: false, applied: false, freshLaunchRequired: false, runtime: input.runtime, targetRoot, manifestPath, receipts, removed: [],
+      errors: [{ code: "seat_storage_refused", message: refusal, path: targetRoot }] };
   }
   const removed: string[] = [];
   const rollback: Array<{ target: string; backup: string | null }> = [];

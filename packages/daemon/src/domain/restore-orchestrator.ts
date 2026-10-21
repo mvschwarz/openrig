@@ -6,6 +6,7 @@ import { nonInterruptiveNotice, nonInterruptiveSummary } from "../adapters/non-i
 import { effortPrecedence, readSeatEffort } from "./seat-effort.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { ensureSeatSkillPlugin, hasSeatSkillRecords, rehydrateSeatSkills, seatSkillPaths, seatSkillPathsForNode, seatCatalogKeptNote, seatSkillReplay, writeSeatSkillCatalog, type SeatSkillRehydration, writeSeatSkillRouter, seatRouterKeptNote } from "./seat-skill-storage.js";
 import type Database from "better-sqlite3";
 import { NativePermissionStore } from "./native-permission-store.js";
 import type { RigRepository } from "./rig-repository.js";
@@ -1128,6 +1129,42 @@ export class RestoreOrchestrator {
       }
     }
 
+    // OPR.0.7.0.13: a Claude seat's team skills come back before its session starts, because the session's plugin list
+    // is set then. `rig down` removed the unchanged files OpenRig wrote but kept the records, so they are put back from
+    // their recorded sources (only where those still match) and the seat's plugin is written again. An edited or
+    // unprovable file is named, never substituted. Nothing is replayed into a resumed conversation; this is the seat's
+    // storage on disk.
+    // The rehydration's decisions are carried into the fresh relaunch's replay below, so no later writer undoes them.
+    let seatRehydration: SeatSkillRehydration | undefined;
+    if (node.runtime === "claude-code" || node.runtime === "codex") {
+      const seatSkills = seatSkillPaths({ rigId, logicalId: node.logicalId, runtime: node.runtime });
+      if (hasSeatSkillRecords(seatSkills)) {
+        if (node.runtime === "claude-code") warnings?.push(...ensureSeatSkillPlugin(seatSkills).map((w) => `Restore: ${w}`));
+        const rehydrated = rehydrateSeatSkills(seatSkills);
+        seatRehydration = rehydrated;
+        if (rehydrated.restored.length > 0) warnings?.push(`Restore: put back ${rehydrated.restored.length} skill file(s) for ${node.logicalId} from their recorded sources`);
+        for (const file of rehydrated.kept) warnings?.push(`Restore: kept ${file}: it differs from what OpenRig wrote there (an edit is never overwritten)`);
+        for (const file of rehydrated.missing) warnings?.push(`Restore: ${file} is missing and its recorded source is gone or has changed; not substituted`);
+        for (const file of rehydrated.refused) warnings?.push(`Restore: ${file} is not inside this seat's storage (a link on the way); nothing written there`);
+        // The seat's generated router is rebuilt from what is now in its storage, for either runtime.
+        try {
+          const router = writeSeatSkillRouter(seatSkills);
+          if (router.kept) warnings?.push(`Restore: ${seatRouterKeptNote(router)}`);
+        } catch (error) {
+          warnings?.push(`Restore: seat_router_not_written: ${(error as Error).message}`);
+        }
+        // A Codex seat's catalog is rebuilt from what is now in its storage (its startup text sends it on a fresh start).
+        if (node.runtime === "codex") {
+          try {
+            const catalog = writeSeatSkillCatalog(seatSkills);
+            if (catalog.kept) warnings?.push(`Restore: ${seatCatalogKeptNote(catalog)}`);
+          } catch (error) {
+            warnings?.push(`Restore: seat_catalog_not_written: ${seatSkills.catalogPath}: ${(error as Error).message}`);
+          }
+        }
+      }
+    }
+
     // Attempt launch — compensate ONLY if launch itself fails
     // Preserve the snapshot's selected plugins and record the committed session before launch continues.
     const savedStartup = data.nodeStartupContext?.[nodeId];
@@ -1156,7 +1193,7 @@ export class RestoreOrchestrator {
       warnings?.push(...launchResult.warnings);
     }
 
-    const restored = await this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult, opts, warnings, priorState);
+    const restored = await this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult, opts, warnings, priorState, seatRehydration);
     return this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings);
   }
 
@@ -1226,6 +1263,7 @@ export class RestoreOrchestrator {
     opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[] },
     warnings?: string[],
     priorState?: { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] },
+    seatRehydration?: SeatSkillRehydration,
   ): Promise<RestoreNodeResult> {
     const node = entry.node;
     // OPR.0.7.0.7: what this restore launches with when the seat has a saved effort choice is decided by the one
@@ -1497,7 +1535,21 @@ export class RestoreOrchestrator {
             return { nodeId: node.id, logicalId: node.logicalId, status: "failed", error: `Missing required startup files: ${missingRequired.map((f) => f.path).join(", ")}` };
           }
 
-          // Build fresh projection plan (all safe_projection)
+          // OPR.0.7.0.13: a fresh relaunch of a seat with its own storage keeps the saved selection, through every later
+          // writer: a skill or startup skill file already in its storage (put back above, before the launch) is left as
+          // it is, an edited one is named, and a missing one whose recorded source is gone or has changed is not put back
+          // with today's bytes. Only the rest is projected or installed. Nothing is re-resolved from today's spec. Native
+          // resume replays nothing (sourceEntries is empty). The whole selection stays in the saved startup context.
+          const seatSkills = (startupCtx.runtime === "claude-code" || startupCtx.runtime === "codex") && !replayContained ? seatSkillPathsForNode(this.db, node.id) : undefined;
+          let replaySkip: { entryIds: Set<string>; files: Set<string> } | undefined;
+          if (seatSkills) {
+            const replay = seatSkillReplay({ entries: filteredEntries, files: filteredFiles, paths: seatSkills,
+              rehydration: seatRehydration ?? { missing: [], refused: [] } });
+            replaySkip = { entryIds: replay.skipEntryIds, files: replay.skipFiles };
+            warnings?.push(...replay.warnings);
+          }
+
+          // Build fresh projection plan (all safe_projection; replaySkip says which seat skills are left alone)
           const plan: import("./projection-planner.js").ProjectionPlan = {
             runtime: startupCtx.runtime,
             cwd: node.cwd ?? ".",
@@ -1546,6 +1598,7 @@ export class RestoreOrchestrator {
               resolvedStartupFiles: filteredFiles,
               startupActions: sourceActions,
               isRestore: replayAsRestore,
+              ...(replaySkip ? { replaySkip } : {}),
               preserveStartupContext: replayContained,
               skipHarnessLaunch: !shouldLaunchHarness,
               resumeToken: (isPodAware && resumeRequested) ? resumeToken ?? undefined : undefined,

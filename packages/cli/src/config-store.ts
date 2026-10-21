@@ -52,6 +52,8 @@ export interface RiggedConfig {
   };
   skills: {
     root: string;
+    // OPR.0.7.0.13 (router): the person's recorded yes to the one-line seat-skills bootstrap.
+    routerLine: { enabled: boolean };
   };
   onboarding: {
     defaultPack: {
@@ -267,7 +269,7 @@ const DEFAULTS = {
   topology: { root: getDefaultOpenRigPath("topology") },
   // OPR.0.5.9.5 Wave B — canonical addressable context library.
   context: { root: getDefaultOpenRigPath("context"), systemWorld: "default" },
-  skills: { root: getDefaultOpenRigPath("skills") },
+  skills: { root: getDefaultOpenRigPath("skills"), routerLine: { enabled: false } },
   onboarding: { defaultPack: { enabled: true } },
   health: { contextPressure: { warningPercent: 95, criticalPercent: 99 } },
   files: { allowlist: "" },
@@ -427,6 +429,8 @@ export const VALID_KEYS = [
   "context.root",
   "context.system_world",
   "skills.root",
+  // OPR.0.7.0.13 (router): the person's recorded yes to OpenRig's one-line seat-skills bootstrap in AGENTS.md / CLAUDE.md.
+  "skills.router_line.enabled",
   "onboarding.default_pack.enabled",
   "launch.non_interruptive",
   "health.context_pressure.warning_percent",
@@ -540,6 +544,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "context.root": { primary: "OPENRIG_CONTEXT_ROOT" },
   "context.system_world": { primary: "OPENRIG_CONTEXT_SYSTEM_WORLD" },
   "skills.root": { primary: "OPENRIG_SKILLS_ROOT" },
+  "skills.router_line.enabled": { primary: "OPENRIG_SKILLS_ROUTER_LINE_ENABLED" },
   "onboarding.default_pack.enabled": { primary: "OPENRIG_ONBOARDING_DEFAULT_PACK_ENABLED" },
   "launch.non_interruptive": { primary: "OPENRIG_LAUNCH_NON_INTERRUPTIVE" },
   "health.context_pressure.warning_percent": { primary: "OPENRIG_HEALTH_CONTEXT_PRESSURE_WARNING_PERCENT" },
@@ -637,6 +642,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "context.root": ["context", "root"],
   "context.system_world": ["context", "systemWorld"],
   "skills.root": ["skills", "root"],
+  "skills.router_line.enabled": ["skills", "routerLine", "enabled"],
   "onboarding.default_pack.enabled": ["onboarding", "defaultPack", "enabled"],
   "launch.non_interruptive": ["launch", "nonInterruptive"],
   "health.context_pressure.warning_percent": ["health", "contextPressure", "warningPercent"],
@@ -1164,6 +1170,7 @@ export class ConfigStore {
       },
       skills: {
         root: v("skills.root") as string,
+        routerLine: { enabled: v("skills.router_line.enabled") as boolean },
       },
       onboarding: {
         defaultPack: {

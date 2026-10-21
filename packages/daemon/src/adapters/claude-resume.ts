@@ -1,4 +1,4 @@
-import { operationalLaunchArgs } from "./kernel-authority.js";
+import { operationalLaunchArgs, operationalLaunchArg } from "./kernel-authority.js";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { TmuxAdapter } from "./tmux.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
@@ -33,9 +33,6 @@ interface ClaudeResumeOptions {
   pollMs?: number;
   maxWaitMs?: number;
   sleep?: (ms: number) => Promise<void>;
-  /** #875 — the same session flags a fresh launch gets (ClaudeCodeAdapter.launchMaterialArgs).
-   *  Absent → the operational flags alone, as before. */
-  launchMaterialArgs?: (seat: { nodeId?: string | null; tmuxSession?: string | null }, operationalArgs: string[]) => string[];
 }
 
 export class ClaudeResumeAdapter {
@@ -88,13 +85,8 @@ export class ClaudeResumeAdapter {
     const choice = { kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture, permissionMode: selectedPermissionMode };
     const posture = claudePostureFlag(process.env, resolvedPosture, selectedPermissionMode);
     const appliedLaunch = observeClaudePermission(posture);
-    let operational: string[];
-    try {
-      operational = this.options.launchMaterialArgs?.({ nodeId, tmuxSession: tmuxSessionName }, operationalLaunchArgs("claude-code", choice))
-        ?? operationalLaunchArgs("claude-code", choice);
-    } catch (error) { return { ok: false, code: "resume_failed", message: (error as Error).message }; }
-    const permissionMode = posture + operational.map((arg) => ` ${shellQuote(arg)}`).join("");
-    const cmd = managed ? managed.command(["--permission-mode", selectedPermissionMode!, ...operational, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), "--resume", resumeToken!], claudeResumeLaunchEnv(resumeToken!))
+    const permissionMode = posture + operationalLaunchArg("claude-code", choice);
+    const cmd = managed ? managed.command(["--permission-mode", selectedPermissionMode!, ...operationalLaunchArgs("claude-code", choice), ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), "--resume", resumeToken!], claudeResumeLaunchEnv(resumeToken!))
       : `${claudeResumeLaunchPrefix(resumeToken!)}${claudeClassicRendererEnvPrefix(process.env)}claude ${permissionMode}${modelArg}${effortArg} --resume ${shellQuote(resumeToken!)}`;
 
     const textResult = managed ? await this.tmux.sendShellCommand(tmuxSessionName, cmd, managed.assertCurrent)

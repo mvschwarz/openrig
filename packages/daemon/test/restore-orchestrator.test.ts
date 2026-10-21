@@ -4581,6 +4581,46 @@ describe("RestoreOrchestrator", () => {
       expect(allSent.every((s) => !s.includes("OpenRig session identity:"))).toBe(true);
       expect((db.prepare("SELECT startup_actions_json FROM node_startup_context WHERE node_id=?").get(node.id) as {startup_actions_json:string}).startup_actions_json).toContain("guard03-test-identity");
     });
+
+    it("(03b) OPR.0.7.0.13: a natively resumed Codex seat is not sent its skill catalog again", async () => {
+      const rig = rigRepo.createRig("test-rig");
+      db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-guard03b", rig.id, "Dev");
+      const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "codex", podId: "pod-guard03b" });
+      const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+      sessionRegistry.updateStatus(session.id, "running");
+      sessionRegistry.updateResumeToken(session.id, "codex_id", "resume-token-guard03b");
+      const catalog = { path: "openrig-seat-skills.md", absolutePath: "/seat/storage/catalog.md", ownerRoot: "/seat/storage",
+        deliveryHint: "send_text", required: false, appliesOn: ["fresh_start", "restore"] };
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(
+        node.id, "[]", JSON.stringify([catalog]), "[]", "codex",
+      );
+      const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+      sessionRegistry.updateStatus(session.id, "exited");
+      db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+
+      const mockAdapter = {
+        runtime: "codex",
+        listInstalled: vi.fn(async () => []),
+        project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+        deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+        checkReady: vi.fn(async () => ({ ready: true })),
+        launchHarness: vi.fn(async () => ({ ok: true as const, resumeToken: "resume-token-guard03b", resumeType: "codex_id" })),
+      };
+      const tmux = mockTmux();
+      const orch = createOrchestrator({ tmux, listProcesses: nativeLineage("codex", "resume-token-guard03b") });
+      const result = await orch.restore(snap.id, { adapters: { codex: mockAdapter } });
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      // (This harness ends a Codex resume as attention_required for reasons of its own; the replay rule depends only on
+      // a resume being requested with a token, which it is.)
+      expect(result.result.nodes[0]!.status).not.toBe("fresh-primed");
+      // Nothing of the startup text reaches the resumed seat: the catalog file is never handed to the adapter.
+      const handed = mockAdapter.deliverStartup.mock.calls.flatMap((call) => (call as unknown as [Array<{ absolutePath: string }>])[0] ?? []);
+      expect(handed.map((f) => f.absolutePath)).not.toContain(catalog.absolutePath);
+      // It stays saved for a later fresh start.
+      expect((db.prepare("SELECT resolved_files_json FROM node_startup_context WHERE node_id=?").get(node.id) as { resolved_files_json: string }).resolved_files_json).toContain("catalog.md");
+    });
   });
 
   function createOrchestrator2(

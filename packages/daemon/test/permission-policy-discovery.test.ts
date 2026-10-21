@@ -202,6 +202,8 @@ describe("Seam C permission-policy discovery", () => {
         // discovery warning is APPENDED after. Supersedes the 4.8 lineage's original policy-first order.
         'dev.impl: base/import collision in skills on "shared"',
         'dev.impl: permission_policy ref="builtin:yolo" origin=builtin launch_posture=full_bypass',
+        // OPR.0.7.0.13: this Claude seat's profile skill goes to its own storage, so the version limit is named.
+        expect.stringMatching(/^dev-impl@[^:]+: team_skills_need_claude_2\.1\.280: /),
       ]);
     } finally {
       db.close();
@@ -242,6 +244,8 @@ describe("Seam C permission-policy discovery", () => {
         // discovery warning is APPENDED after. Supersedes the 4.8 lineage's original policy-first order.
         'dev.impl: base/import collision in skills on "shared"',
         'dev.impl: permission_policy ref="builtin:yolo" origin=builtin launch_posture=full_bypass',
+        // OPR.0.7.0.13: this Claude seat's profile skill goes to its own storage, so the version limit is named.
+        expect.stringMatching(/^dev-impl@[^:]+: team_skills_need_claude_2\.1\.280: /),
       ]);
     } finally {
       db.close();

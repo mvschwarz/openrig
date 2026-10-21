@@ -198,10 +198,6 @@ function codexConversationToken(args: string[], subcommand: "resume" | "fork"): 
   return last ? null : conversation;
 }
 
-// #875: seat material (claude-seat-material.ts) arrives as launch-only path options.
-const CLAUDE_SEAT_MATERIAL_OPTIONS = ["--plugin-dir", "--mcp-config", "--append-system-prompt-file"];
-const CLAUDE_INLINE_LAUNCH_OPTION = /^--(?:permission-mode|model|name|settings|effort|plugin-dir|mcp-config|append-system-prompt-file)=/;
-
 /** A `ps` command line split the way identity proof splits it. */
 export function processArgv(command: string): string[] {
   return tokens(command);
@@ -237,7 +233,7 @@ function claudeSessionToken(args: string[]): string | null {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
     if (index === 0 && /^\(\d+\.\d+\.\d+[^)]*\)$/.test(arg)) continue;
-    if (arg === "--settings" || CLAUDE_SEAT_MATERIAL_OPTIONS.includes(arg)) {
+    if (arg === "--settings") {
       const value = args[++index];
       if (!value || value.startsWith("-")) return null;
       continue;
@@ -247,7 +243,7 @@ function claudeSessionToken(args: string[]): string | null {
       continue;
     }
     if (["--permission-mode", "--model", "--name", "--effort"].includes(arg)) { index += 1; continue; }
-    if (CLAUDE_INLINE_LAUNCH_OPTION.test(arg)
+    if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg)
       || arg.startsWith("--remote-control=") || arg === "--dangerously-skip-permissions") continue;
     if (arg === "--fork-session") { fork = true; continue; }
     const identity = arg.match(/^--(session-id|resume)(?:=(.*))?$/);
@@ -270,7 +266,7 @@ function claudeSessionIdentity(args: string[]): string | null | { unparsed: true
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
     if (index === 0 && /^\(\d+\.\d+\.\d+[^)]*\)$/.test(arg)) continue;
-    if (["--permission-mode", "--model", "--name", "--settings", "--effort", ...CLAUDE_SEAT_MATERIAL_OPTIONS].includes(arg)) {
+    if (["--permission-mode", "--model", "--name", "--settings", "--effort"].includes(arg)) {
       const value = args[++index];
       if (!value || value.startsWith("-")) return unparsed;
       continue;
@@ -279,7 +275,7 @@ function claudeSessionIdentity(args: string[]): string | null | { unparsed: true
       if (args[index + 1] && !args[index + 1]!.startsWith("-")) index += 1;
       continue;
     }
-    if (CLAUDE_INLINE_LAUNCH_OPTION.test(arg)
+    if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg)
       || arg.startsWith("--remote-control=") || arg === "--dangerously-skip-permissions") continue;
     if (arg === "--fork-session") { fork = true; continue; }
     const identity = arg.match(/^--(session-id|resume)(?:=(.*))?$/);

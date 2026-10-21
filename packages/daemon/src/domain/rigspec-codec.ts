@@ -105,7 +105,6 @@ export class RigSpecCodec {
     if (spec.nonInterruptive !== undefined) doc["non_interruptive"] = spec.nonInterruptive;
     if (spec.env) doc["env"] = { ...spec.env };
     if (spec.managedBlocks) doc["managed_blocks"] = { ...spec.managedBlocks };
-    if (spec.seatMaterial) doc["seat_material"] = { ...spec.seatMaterial };
     if (spec.docs && spec.docs.length > 0) doc["docs"] = spec.docs.map((d) => ({ path: d.path }));
     if (spec.startup) doc["startup"] = serializeStartupBlock(spec.startup);
     if (spec.services) doc["services"] = serializeServices(spec.services);

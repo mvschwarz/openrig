@@ -1248,8 +1248,6 @@ export interface RigSpec {
   env?: Record<string, string>;
   /** #25: per-runtime managed-block destination. Absent = CLAUDE.md. */
   managedBlocks?: { "claude-code"?: import("./managed-blocks.js").ClaudeManagedBlockFile };
-  /** #875: per-runtime location of projected seat material. Absent = cwd. */
-  seatMaterial?: { "claude-code"?: import("./claude-seat-material.js").ClaudeSeatMaterialMode };
   docs?: RigSpecDoc[];
   startup?: StartupBlock;
   services?: RigServicesSpec;

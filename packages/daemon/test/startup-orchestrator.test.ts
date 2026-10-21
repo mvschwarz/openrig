@@ -16,6 +16,12 @@ import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-obse
 import { observeClaudePermission } from "../src/domain/permission-drift.js";
 import type { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 import { assessNativeResumeProbe } from "../src/domain/native-resume-probe.js";
+import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
+import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
+import { seatSkillPaths } from "../src/domain/seat-skill-storage.js";
+import * as nodeFs from "node:fs";
+import * as nodeOs from "node:os";
+import * as nodePath from "node:path";
 
 // -- Mocks --
 
@@ -138,6 +144,209 @@ describe("StartupOrchestrator", () => {
       ...overrides,
     };
   }
+
+  // OPR.0.7.0.13 (router, R1.1): a start replaying a saved context delivers the old seat-skills pointer only with the
+  // person's recorded yes. The Codex catalog (same logical name, sent as text) and other guidance are unchanged.
+  it.each([
+    ["the default (never asked)", { value: false, source: "default" }, false, { outcome: "skipped", reason: "answer_unasked" }],
+    ["a saved no", { value: false, source: "file" }, false, { outcome: "skipped", reason: "answer_no" }],
+    ["the environment's no", { value: false, source: "env" }, false, { outcome: "skipped", reason: "answer_environment_no" }],
+    ["a saved yes", { value: true, source: "file" }, true, { outcome: "delivered" }],
+  ] as const)("a replayed start delivers the bootstrap line only with a yes, and says why not: %s", async (_label, line, delivered, outcome) => {
+    const seed = seedSession();
+    const seen: Array<{ path: string; deliveryHint: string }> = [];
+    const adapter = mockAdapter({
+      deliverStartup: vi.fn(async (files) => { seen.push(...files.map((f) => ({ path: f.path, deliveryHint: f.deliveryHint }))); return { delivered: files.length, failed: [] }; }),
+    });
+    const file = (path: string, deliveryHint: "guidance_merge" | "send_text") =>
+      ({ path, absolutePath: `/fixture/${path}`, ownerRoot: "/fixture", deliveryHint, required: false, appliesOn: ["fresh_start", "restore"] as ("fresh_start" | "restore")[] });
+    const readinessSettings = {
+      resolveOne: (key: string) => key === "skills.router_line.enabled" ? { ...line, defaultValue: false } : { value: 30, source: "default", defaultValue: 30 },
+    } as unknown as Pick<SettingsStore, "resolveOne">;
+    const result = await createOrchestrator({ readinessSettings, readFile: () => "text" }).startNode(makeInput(seed, {
+      adapter, isRestore: true,
+      resolvedStartupFiles: [file("CULTURE.md", "guidance_merge"), file("openrig-seat-skills.md", "guidance_merge"), file("openrig-seat-skills.md", "send_text")],
+    }));
+    expect(seen).toContainEqual({ path: "CULTURE.md", deliveryHint: "guidance_merge" });
+    expect(seen).toContainEqual({ path: "openrig-seat-skills.md", deliveryHint: "send_text" });
+    if (delivered) expect(seen).toContainEqual({ path: "openrig-seat-skills.md", deliveryHint: "guidance_merge" });
+    else expect(seen).not.toContainEqual({ path: "openrig-seat-skills.md", deliveryHint: "guidance_merge" });
+    expect(result).toMatchObject({ ok: true, routerLine: { files: [{ path: expect.stringMatching(/CLAUDE\.md$/), ...outcome }] } });
+  });
+
+  // R6-F1: the real adapters, not a mock, decide what an unwritable guidance file reports.
+  it.skipIf(process.getuid?.() === 0).each(["codex", "claude-code"] as const)("through the real %s adapter: an unwritable guidance file is unwritable with the real error, and the seat still starts", async (runtime) => { // root ignores file modes
+    const seed = seedSession();
+    const cwd = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "line-unwritable-"));
+    nodeFs.chmodSync(cwd, 0o555);
+    try {
+      const fsOps = {
+        readFile: (f: string) => nodeFs.readFileSync(f, "utf8"), writeFile: (f: string, c: string) => nodeFs.writeFileSync(f, c),
+        exists: (f: string) => nodeFs.existsSync(f), mkdirp: (d: string) => { nodeFs.mkdirSync(d, { recursive: true }); },
+        copyFile: (a: string, b: string) => nodeFs.copyFileSync(a, b), listFiles: (d: string) => nodeFs.readdirSync(d), homedir: cwd,
+      };
+      const tmuxNever = new Proxy({}, { get() { throw new Error("no tmux calls in delivery"); } }) as never;
+      const real = runtime === "codex"
+        ? new CodexRuntimeAdapter({ fsOps: fsOps as never, tmux: tmuxNever, listProcesses: () => [] })
+        : new ClaudeCodeAdapter({ fsOps: fsOps as never, tmux: tmuxNever } as never);
+      const adapter = mockAdapter({ runtime, deliverStartup: real.deliverStartup.bind(real) as RuntimeAdapter["deliverStartup"] });
+      const readinessSettings = {
+        resolveOne: (key: string) => key === "skills.router_line.enabled" ? { value: true, source: "file", defaultValue: false } : { value: 30, source: "default", defaultValue: 30 },
+      } as unknown as Pick<SettingsStore, "resolveOne">;
+      const asset = nodePath.join(import.meta.dirname, "../assets/guidance/openrig-seat-skills.md");
+      const result = await createOrchestrator({ readinessSettings, readFile: (f) => nodeFs.readFileSync(f, "utf8") }).startNode(makeInput(seed, {
+        adapter, isRestore: true, binding: { ...makeBinding(), cwd },
+        resolvedStartupFiles: [{ path: "openrig-seat-skills.md", absolutePath: asset, ownerRoot: nodePath.dirname(asset), deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start", "restore"] }],
+      }));
+      expect(result).toMatchObject({ ok: true, routerLine: { answer: { state: "yes", by: "saved" }, files: [{ outcome: "unwritable", error: expect.stringMatching(/EACCES|permission denied/i) }] } });
+      expect(result.warnings?.some((w) => w.startsWith("seat_skills_line_unwritable:"))).toBe(true);
+    } finally {
+      nodeFs.chmodSync(cwd, 0o755);
+      nodeFs.rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  // A link refusing a seat's first plugin manifest or catalog: its skills are refused there and named, never written into
+  // the project; a seat that never had storage (no link) keeps the project, as before.
+  describe.each(["codex", "claude-code"] as const)("through the real %s adapter, a seat whose storage a link refused", (runtime) => {
+    let savedHome: string | undefined;
+    let home: string;
+    const temps: string[] = [];
+    const temp = (name: string) => { const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), name)); temps.push(dir); return dir; };
+    beforeEach(() => { savedHome = process.env["OPENRIG_HOME"]; home = temp("seat-refused-home-"); process.env["OPENRIG_HOME"] = home; });
+    afterEach(() => {
+      if (savedHome === undefined) delete process.env["OPENRIG_HOME"]; else process.env["OPENRIG_HOME"] = savedHome;
+      for (const dir of temps.splice(0)) nodeFs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    // rig: the rig's folder under the shared anchor is a link. record: only a Codex seat's projection record is a link.
+    // marker: only the marker is a link (Claude's .claude-plugin folder; a dangling Codex catalog.md), its skills folder
+    // ordinary. unrelated: usable storage, with an unrelated link at skills/team-plugin. none: no storage and no link.
+    async function start(layout: "rig" | "record" | "marker" | "unrelated" | "none", withPlugin = false) {
+      const rig = rigRepo.createRig("linked-rig");
+      const node = rigRepo.addNode(rig.id, "impl", { runtime });
+      const session = sessionRegistry.registerSession(node.id, "r01-impl");
+      sessionRegistry.updateStatus(session.id, "running");
+      const moved = temp("seat-refused-moved-");
+      const { logical_id: logicalId } = db.prepare("SELECT logical_id FROM nodes WHERE id = ?").get(node.id) as { logical_id: string };
+      const paths = seatSkillPaths({ rigId: rig.id, logicalId, runtime });
+      if (layout === "rig") {
+        nodeFs.mkdirSync(nodePath.join(home, "state", "seats"), { recursive: true });
+        nodeFs.symlinkSync(moved, nodePath.join(home, "state", "seats", rig.id));
+      } else if (layout === "record") {
+        nodeFs.mkdirSync(paths.root, { recursive: true });
+        nodeFs.writeFileSync(nodePath.join(moved, "record.json"), "{}\n");
+        nodeFs.symlinkSync(nodePath.join(moved, "record.json"), paths.projectionsPath);
+      } else if (layout === "marker") {
+        if (runtime === "codex") {
+          nodeFs.mkdirSync(paths.root, { recursive: true });
+          nodeFs.symlinkSync(nodePath.join(moved, "missing.md"), paths.catalogPath);
+        } else {
+          nodeFs.mkdirSync(paths.pluginDir, { recursive: true });
+          nodeFs.symlinkSync(moved, nodePath.dirname(paths.pluginManifestPath));
+        }
+      } else if (layout === "unrelated") {
+        const marker = runtime === "codex" ? paths.catalogPath : paths.pluginManifestPath;
+        nodeFs.mkdirSync(nodePath.dirname(marker), { recursive: true });
+        nodeFs.writeFileSync(marker, runtime === "codex" ? "catalog\n" : "{\"name\":\"openrig\"}\n");
+        nodeFs.mkdirSync(paths.skillsRoot, { recursive: true });
+        nodeFs.symlinkSync(moved, nodePath.join(paths.skillsRoot, "team-plugin"));
+      }
+      const source = nodePath.join(temp("seat-refused-src-"), "review");
+      nodeFs.mkdirSync(source);
+      nodeFs.writeFileSync(nodePath.join(source, "SKILL.md"), "---\nname: review\ndescription: d\n---\n");
+      const cwd = temp("seat-refused-project-");
+      // A selected plugin with a bundled skill, a manifest for each runtime and a hook.
+      const plugin = nodePath.join(temp("seat-refused-plugin-"), "team-plugin");
+      for (const [file, text] of [[".claude-plugin/plugin.json", "{\"name\":\"team-plugin\"}\n"], [".codex-plugin/plugin.json", "{\"name\":\"team-plugin\"}\n"],
+        ["skills/tool/SKILL.md", "---\nname: tool\ndescription: d\n---\n"], ["hooks/hooks.json", "{}\n"]] as const) {
+        nodeFs.mkdirSync(nodePath.dirname(nodePath.join(plugin, file)), { recursive: true });
+        nodeFs.writeFileSync(nodePath.join(plugin, file), text);
+      }
+      const files = (d: string): string[] => (nodeFs.readdirSync(d, { recursive: true }) as string[]).filter((f) => nodeFs.statSync(nodePath.join(d, f)).isFile());
+      const fsOps = {
+        readFile: (f: string) => nodeFs.readFileSync(f, "utf8"), writeFile: (f: string, c: string) => nodeFs.writeFileSync(f, c),
+        exists: (f: string) => nodeFs.existsSync(f), mkdirp: (d: string) => { nodeFs.mkdirSync(d, { recursive: true }); },
+        copyFile: (a: string, b: string) => nodeFs.copyFileSync(a, b), listFiles: files, homedir: cwd,
+      };
+      const tmuxNever = new Proxy({}, { get() { throw new Error("no tmux calls in projection"); } }) as never;
+      const real = runtime === "codex"
+        ? new CodexRuntimeAdapter({ fsOps: fsOps as never, tmux: tmuxNever, listProcesses: () => [] })
+        : new ClaudeCodeAdapter({ fsOps: fsOps as never, tmux: tmuxNever } as never);
+      const adapter = mockAdapter({ runtime, project: real.project.bind(real) as RuntimeAdapter["project"] });
+      const plan = { ...emptyPlan(), runtime, cwd, entries: [{ effectiveId: "review", category: "skill", absolutePath: source, classification: "safe_projection" },
+        ...(withPlugin ? [{ effectiveId: "team-plugin", category: "plugin", absolutePath: plugin, classification: "safe_projection" }] : [])] } as unknown as ProjectionPlan;
+      const result = await createOrchestrator().startNode(makeInput({ rigId: rig.id, nodeId: node.id, sessionId: session.id }, { adapter, plan, binding: { ...makeBinding(), cwd } }));
+      return { result, cwd, moved, paths };
+    }
+
+    const projectSkill = (cwd: string) => nodePath.join(cwd, runtime === "codex" ? ".agents" : ".claude", "skills", "review");
+
+    it("refuses the skill there and names it; nothing goes into the project or through the link, and the seat starts", async () => {
+      const { result, cwd, moved } = await start("rig");
+      expect(result.ok).toBe(true);
+      expect(nodeFs.existsSync(projectSkill(cwd))).toBe(false);
+      expect(nodeFs.readdirSync(moved)).toEqual([]);
+      expect(result.warnings?.some((w) => w.startsWith("review: ") && w.includes("not inside this seat's storage"))).toBe(true);
+    });
+
+    it("names a selected plugin's bundled skills as not delivered; its other files are copied as before", async () => {
+      const { result, cwd } = await start("rig", true);
+      expect(result.ok).toBe(true);
+      const pluginCopy = nodePath.join(cwd, runtime === "codex" ? ".codex" : ".claude", "plugins", "team-plugin");
+      expect(nodeFs.existsSync(nodePath.join(pluginCopy, "hooks", "hooks.json"))).toBe(true);
+      expect(nodeFs.existsSync(nodePath.join(pluginCopy, "skills"))).toBe(false);
+      expect(result.warnings?.some((w) => w.startsWith("team-plugin: plugin_skills_not_delivered: its bundled skills (1 file(s))"))).toBe(true);
+    });
+
+    it.skipIf(runtime !== "codex")("a linked projection record alone: the skill is refused there and named, not written into the project", async () => {
+      const { result, cwd, paths } = await start("record");
+      expect(result.ok).toBe(true);
+      expect(nodeFs.existsSync(projectSkill(cwd))).toBe(false);
+      expect(nodeFs.existsSync(nodePath.join(paths.skillsRoot, "review"))).toBe(false);
+      expect(result.warnings?.some((w) => w.startsWith("review: ") && w.includes("not inside this seat's storage"))).toBe(true);
+    });
+
+    it("only the marker linked: the skill isn't written where nothing reads it, and the plugin's bundled skills are named", async () => {
+      const { result, cwd, paths } = await start("marker", true);
+      expect(result.ok).toBe(true);
+      expect(nodeFs.existsSync(projectSkill(cwd))).toBe(false);
+      expect(nodeFs.existsSync(nodePath.join(paths.skillsRoot, "review"))).toBe(false);
+      expect(result.warnings?.some((w) => w.startsWith("review: ") && w.includes("not inside this seat's storage"))).toBe(true);
+      expect(result.warnings?.some((w) => w.startsWith("team-plugin: plugin_skills_not_delivered:"))).toBe(true);
+    });
+
+    it("usable storage with an unrelated link at skills/<plugin id>: no plugin-skills note", async () => {
+      const { result, paths } = await start("unrelated", true);
+      expect(result.ok).toBe(true);
+      expect(nodeFs.existsSync(nodePath.join(paths.skillsRoot, "review", "SKILL.md"))).toBe(true);
+      expect((result.warnings ?? []).some((w) => w.includes("plugin_skills_not_delivered"))).toBe(false);
+    });
+
+    it("with no link and no storage yet, keeps the project, as before", async () => {
+      const { result, cwd } = await start("none");
+      expect(result.ok).toBe(true);
+      expect(nodeFs.existsSync(nodePath.join(projectSkill(cwd), "SKILL.md"))).toBe(true);
+    });
+  });
+
+  it("a line that can't be written is the start's named result; the seat still starts", async () => {
+    const seed = seedSession();
+    const adapter = mockAdapter({
+      deliverStartup: vi.fn(async (files) => files.some((f) => f.path === "openrig-seat-skills.md")
+        ? { delivered: 0, failed: [{ path: "openrig-seat-skills.md", error: "EACCES: permission denied" }] }
+        : { delivered: files.length, failed: [] }),
+    });
+    const readinessSettings = {
+      resolveOne: (key: string) => key === "skills.router_line.enabled" ? { value: true, source: "file", defaultValue: false } : { value: 30, source: "default", defaultValue: 30 },
+    } as unknown as Pick<SettingsStore, "resolveOne">;
+    const result = await createOrchestrator({ readinessSettings, readFile: () => "text" }).startNode(makeInput(seed, {
+      adapter, isRestore: true,
+      resolvedStartupFiles: [{ path: "openrig-seat-skills.md", absolutePath: "/fixture/line.md", ownerRoot: "/fixture", deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start", "restore"] }],
+    }));
+    expect(result).toMatchObject({ ok: true, routerLine: { answer: { state: "yes", by: "saved" }, files: [{ outcome: "unwritable", error: "EACCES: permission denied" }] } });
+    expect(result.warnings?.some((w) => w.startsWith("seat_skills_line_unwritable:"))).toBe(true);
+  });
 
   it.each([false, true])("returns projection and delivery warnings on launch outcomes (fails=%s)", async fails => {
     const seed = seedSession();

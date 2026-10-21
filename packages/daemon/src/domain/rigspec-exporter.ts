@@ -220,7 +220,6 @@ export class RigSpecExporter {
     const rigEnv = this.rigRepo.getRigEnv(rigId);
     // #25: the selected Claude managed-block file is also a rig-row field.
     const claudeManagedBlockFile = this.rigRepo.getRigClaudeManagedBlockFile(rigId);
-    const claudeSeatMaterial = this.rigRepo.getRigClaudeSeatMaterial(rigId);
 
     return {
       version: "0.2",
@@ -229,7 +228,6 @@ export class RigSpecExporter {
       ...(this.rigRepo.getRigNonInterruptive(rigId) ? { nonInterruptive: true } : {}),
       ...(rigEnv ? { env: rigEnv } : {}),
       ...(claudeManagedBlockFile ? { managedBlocks: { "claude-code": claudeManagedBlockFile } } : {}),
-      ...(claudeSeatMaterial ? { seatMaterial: { "claude-code": claudeSeatMaterial } } : {}),
       ...(workspace ? { workspace } : {}),
       pods: podSpecs,
       edges: crossPodEdges,

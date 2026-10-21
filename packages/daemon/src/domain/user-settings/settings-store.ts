@@ -106,6 +106,8 @@ export const SETTINGS_VALID_KEYS = [
   "context.root",
   "context.system_world",
   "skills.root",
+  // OPR.0.7.0.13 (router): the person's recorded yes to OpenRig's one-line seat-skills bootstrap in AGENTS.md / CLAUDE.md.
+  "skills.router_line.enabled",
   "onboarding.default_pack.enabled",
   "launch.non_interruptive",
   "health.context_pressure.warning_percent",
@@ -251,6 +253,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "context.root": { primary: "OPENRIG_CONTEXT_ROOT" },
   "context.system_world": { primary: "OPENRIG_CONTEXT_SYSTEM_WORLD" },
   "skills.root": { primary: "OPENRIG_SKILLS_ROOT" },
+  "skills.router_line.enabled": { primary: "OPENRIG_SKILLS_ROUTER_LINE_ENABLED" },
   "onboarding.default_pack.enabled": { primary: "OPENRIG_ONBOARDING_DEFAULT_PACK_ENABLED" },
   "launch.non_interruptive": { primary: "OPENRIG_LAUNCH_NON_INTERRUPTIVE" },
   "health.context_pressure.warning_percent": { primary: "OPENRIG_HEALTH_CONTEXT_PRESSURE_WARNING_PERCENT" },
@@ -346,6 +349,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "context.root": ["context", "root"],
   "context.system_world": ["context", "systemWorld"],
   "skills.root": ["skills", "root"],
+  "skills.router_line.enabled": ["skills", "routerLine", "enabled"],
   "onboarding.default_pack.enabled": ["onboarding", "defaultPack", "enabled"],
   "launch.non_interruptive": ["launch", "nonInterruptive"],
   "health.context_pressure.warning_percent": ["health", "contextPressure", "warningPercent"],
@@ -632,6 +636,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "context.root": return DEFAULT_CONTEXT_ROOT;
     case "context.system_world": return "default";
     case "skills.root": return DEFAULT_SKILLS_ROOT;
+    case "skills.router_line.enabled": return false;
     case "onboarding.default_pack.enabled": return true;
     case "launch.non_interruptive": return false;
     case "health.context_pressure.warning_percent": return 95;
