@@ -160,10 +160,13 @@ describe("context add local auto-start", () => {
   });
 
   it("preserves an unverified daemon result without spawning a replacement", async () => {
+    // Changed: an unverified daemon used to refuse (exit 1). It may be alive and busy, so the sync
+    // request now goes to the endpoint it was probed at; still no replacement daemon is spawned.
     const f = fixture("unknown");
     await f.add();
-    expect(process.exitCode).toBe(1);
     expect(f.lifecycleDeps.spawn).not.toHaveBeenCalled();
+    expect(f.clientFactory).toHaveBeenCalledWith("http://127.0.0.1:42761");
+    expect(f.post).toHaveBeenCalledWith("/api/context-packs/library/sync");
   });
 
   it("keeps preflight failures visible and does not spawn", async () => {

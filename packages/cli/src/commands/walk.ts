@@ -11,7 +11,8 @@ import { Command } from "commander";
 import { analyzeWalkSuffix } from "../lib/walk-consumption.js";
 import { existsSync, readFileSync } from "node:fs";
 import { DaemonClient, terminalAuthHeaders } from "../client.js";
-import { getDaemonStatus, getDaemonUrl , statusGuardMessage, daemonMayAnswer } from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl , statusGuardMessage } from "../daemon-lifecycle.js";
+import { daemonMayAnswer } from "../daemon-reachability.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 

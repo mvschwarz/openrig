@@ -10,7 +10,8 @@ import {
   getDaemonUrl,
   startDaemon,
   waitForKernelReady,
-  type LifecycleDeps, daemonMayAnswer } from "../daemon-lifecycle.js";
+  type LifecycleDeps } from "../daemon-lifecycle.js";
+import { daemonMayAnswer } from "../daemon-reachability.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 

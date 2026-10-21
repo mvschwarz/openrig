@@ -11,7 +11,8 @@ import path from "node:path";
 import { Command } from "commander";
 import { DaemonClient } from "../client.js";
 import { attestationLineage, type AttestationLineage } from "../lib/scope/attestation-lineage.js";
-import { getDaemonStatus, getDaemonUrl , statusGuardMessage, daemonMayAnswer } from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl , statusGuardMessage } from "../daemon-lifecycle.js";
+import { daemonMayAnswer } from "../daemon-reachability.js";
 import { realDeps } from "./daemon.js";
 
 import {

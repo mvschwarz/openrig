@@ -5,6 +5,7 @@
 // both so neither depends on the other.
 import path from "node:path";
 import { existsSync } from "node:fs";
+import type { DaemonStatus } from "./daemon-lifecycle.js";
 
 const BLOCKED_CONNECTION_CODES = new Set(["EPERM", "EACCES"]);
 
@@ -54,4 +55,16 @@ export function resolveOfflineHelpPath(baseDir: string, exists: (p: string) => b
 
 export function getOfflineHelpPath(): string | undefined {
   return resolveOfflineHelpPath(import.meta.dirname, existsSync);
+}
+
+/** Whether a command should make its real request: false only when the daemon is confirmed down
+ *  (stopped, a stale record, or a refused health probe, meaning nothing is listening), when this
+ *  machine blocked the health probe, or when a live sibling home suggests the request would reach
+ *  another home's daemon. A daemon that is alive but busy (its health check slow, failing or
+ *  reporting a starved loop) gets the request, under its normal timeout. */
+export function daemonMayAnswer(status: DaemonStatus): boolean {
+  if (status.state === "stopped" || status.state === "stale") return false;
+  if (status.probeErrorCode === "ECONNREFUSED") return false;
+  if (status.siblingHint || isBlockedConnectionCode(status.probeErrorCode)) return false;
+  return true;
 }

@@ -2,7 +2,8 @@ import path from "node:path";
 import { existsSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
 import { DaemonClient, ForeignLocalDaemonError, connectionErrorCode, formatDaemonHostForUrl } from "./client.js";
-import { blockedConnectionGuidance, isBlockedConnectionCode } from "./daemon-reachability.js";
+import { blockedConnectionGuidance, daemonMayAnswer, isBlockedConnectionCode } from "./daemon-reachability.js";
+export { daemonMayAnswer } from "./daemon-reachability.js";
 import type { DaemonStartLock } from "./daemon-start-lock.js";
 import { DAEMON_STOP_WAIT_MS, DAEMON_SHUTDOWN_RECEIPT, type DaemonShutdownReceipt } from "@openrig/daemon/daemon-shutdown";
 import { ConfigStore } from "./config-store.js";
@@ -130,16 +131,6 @@ export function statusGuardMessage(status: DaemonStatus): DaemonNotRunningError 
     action: "Re-check with 'rig daemon status'. If it is confirmed stopped, run 'rig up' or 'rig daemon start'.",
     ...causeCode,
   };
-}
-
-/** Whether a command should make its real request: false only when the daemon is confirmed down
- *  (stopped, or a stale record), when this machine blocked the health probe, or when a live sibling
- *  home suggests the request would reach another home's daemon. A daemon that is alive but busy (its
- *  health check slow, failing or reporting a starved loop) gets the request, under its normal timeout. */
-export function daemonMayAnswer(status: DaemonStatus): boolean {
-  if (status.state === "stopped" || status.state === "stale") return false;
-  if (status.siblingHint || isBlockedConnectionCode(status.probeErrorCode)) return false;
-  return true;
 }
 
 /** B8-1b — THE precheck chokepoint: returns true when the command should make its real request

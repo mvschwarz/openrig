@@ -30,7 +30,8 @@ import { addGitContext, inspectGitContext, updateGitContext } from "../lib/conte
 import { ConfigStore } from "../config-store.js";
 import { DaemonClient, formatDaemonHostForUrl } from "../client.js";
 import { enumArg } from "../cli-error.js";
-import { getDaemonStatus, getDaemonUrl, startDaemon, statusGuardMessage, daemonMayAnswer } from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl, startDaemon, statusGuardMessage } from "../daemon-lifecycle.js";
+import { daemonMayAnswer } from "../daemon-reachability.js";
 import { resolveWorkPosition, type WorkInstallPlan } from "../lib/work-install.js";
 import {
   reconcileSkillLoadout,

@@ -32,8 +32,9 @@ describe("B8-1b — epistemic-matched precheck language (the ONE helper)", () =>
     expect(errSpy.mock.calls.length).toBe(0);
   });
 
-  it("STALE and a probe the OS blocked still refuse", () => {
+  it("STALE, a refused probe and a probe the OS blocked still refuse", () => {
     expect(daemonStatusGuard({ state: "stale" } as DaemonStatus)).toBe(false);
+    expect(daemonStatusGuard({ state: "running", healthy: false, reason: "unresponsive", probeErrorCode: "ECONNREFUSED" } as DaemonStatus)).toBe(false);
     expect(daemonStatusGuard({ state: "unverified", probeErrorCode: "EPERM" } as DaemonStatus)).toBe(false);
     expect(process.exitCode).toBe(1);
   });

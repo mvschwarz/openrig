@@ -26,9 +26,10 @@ const { startCommand } = await import("../src/commands/start.js");
 
 function client() {
   const requests: string[] = [];
+  // Records the first request, then stops the command there: reaching the daemon is the point.
   const factory = () => ({
-    get: vi.fn(async (p: string) => { requests.push(`GET ${p}`); return { status: 200, data: [] }; }),
-    post: vi.fn(async (p: string) => { requests.push(`POST ${p}`); return { status: 200, data: { ok: true, rigs: [] } }; }),
+    get: vi.fn(async (p: string) => { requests.push(`GET ${p}`); throw new Error("stop at the request"); }),
+    post: vi.fn(async (p: string) => { requests.push(`POST ${p}`); throw new Error("stop at the request"); }),
   });
   return { requests, factory };
 }

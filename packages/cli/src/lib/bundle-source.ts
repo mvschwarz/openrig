@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, realpathSync, statSync, lstatSync, readdirSync,
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
 import { DaemonClient } from "../client.js";
-import { getDaemonStatus, getDaemonUrl, daemonMayAnswer } from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
 import { resolveEffectiveHost } from "../host-selection.js";
 import { readLocalOrigin } from "../local-origin.js";
 import { getOpenRigHome } from "../openrig-compat.js";
@@ -78,7 +78,7 @@ export function selectGitHubBundleSource(input: string, refs: string): BundleSou
 export async function localBundleClient(deps: StatusDeps, host?: string): Promise<DaemonClient> {
   if (resolveEffectiveHost(host)) throw new Error(BUNDLE_LOCALITY_HELP);
   const status = await getDaemonStatus(deps.lifecycleDeps);
-  if (!daemonMayAnswer(status)) throw new Error(BUNDLE_LOCALITY_HELP);
+  if (status.state !== "running" || status.healthy === false) throw new Error(BUNDLE_LOCALITY_HELP);
   const client = deps.clientFactory(getDaemonUrl(status));
   const localId = readLocalOrigin();
   if (!localId) throw new Error(BUNDLE_LOCALITY_HELP);

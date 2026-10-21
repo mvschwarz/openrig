@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { DaemonClient, terminalAuthHeaders } from "../client.js";
-import { getDaemonStatus, getDaemonUrl, type LifecycleDeps, daemonMayAnswer } from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl, type LifecycleDeps } from "../daemon-lifecycle.js";
+import { daemonMayAnswer } from "../daemon-reachability.js";
 import { realDeps } from "./daemon.js";
 
 // Preparation (exact map plus idle wait) shares the 180s ceiling. Give the HTTP

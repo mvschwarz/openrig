@@ -16,7 +16,8 @@ import {
 import {
   getDaemonStatus,
   getDaemonUrl,
-  statusGuardMessage, daemonMayAnswer } from "../daemon-lifecycle.js";
+  statusGuardMessage } from "../daemon-lifecycle.js";
+import { daemonMayAnswer } from "../daemon-reachability.js";
 import { realDeps } from "./daemon.js";
 import { identityRoutingHint, resolveIdentitySource } from "./whoami.js";
 import type { StatusDeps } from "./status.js";
