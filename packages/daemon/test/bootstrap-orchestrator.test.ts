@@ -339,7 +339,8 @@ describe("BootstrapOrchestrator", () => {
     });
 
     describe.each([true, false])("a one-off that stays in the session, single seat=%s", (singleSeat) => {
-      it.each(podSpec ? ["running", "at a startup gate"] : ["running"])("keeps every launched seat %s and reports the leftover by name with its remedy", async (state) => {
+      // Only an agent seat can stop at a startup gate; a terminal seat's launch never waits for a person.
+      it.each(format === "pod agent spec" ? ["running", "at a startup gate"] : ["running"])("keeps every launched seat %s and reports the leftover by name with its remedy", async (state) => {
         const gate = state === "at a startup gate";
         const { orch, tmux, rigRepo, started, live } = await realLaunch({ removal: "confirmed", attention: gate });
         const input = await source(singleSeat);
