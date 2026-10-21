@@ -69,9 +69,12 @@ export function resolveActiveOccupantRow<T extends OccupantCandidateRow>(
   return { kind: "resolved", session: hit };
 }
 
-/** The snapshot-shaped entry point (the original public signature; a thin
- *  wrapper so execution call sites are unchanged). */
-export function resolveActiveSnapshotSession(data: SnapshotData, nodeId: string): ActiveSnapshotSessionResolution {
+/** The captured-occupancy reader, also used by the read-only would-capture
+ *  forecast. Full snapshots and narrower preview rows use the same ladder. */
+export function resolveActiveSnapshotSession<T extends OccupantCandidateRow>(
+  data: Pick<SnapshotData, "activeOccupantsByNode" | "activeSessionIdByNode"> & { sessions: T[] },
+  nodeId: string,
+): ActiveOccupantResolution<T> {
   const explicit = data.activeOccupantsByNode;
   if (explicit !== undefined) {
     const state = explicit[nodeId];
@@ -90,6 +93,27 @@ export function resolveActiveSnapshotSession(data: SnapshotData, nodeId: string)
     return { kind: "resolved", session };
   }
   return resolveActiveOccupantRow(data.sessions, data.activeSessionIdByNode, nodeId);
+}
+
+/** A seat with no occupant (none) whose history still carries a resume token. Execution and the
+ *  plan preview both stop such a seat for a decision rather than fresh-priming it: it HAD a session,
+ *  and which earlier conversation to resume is not theirs to guess. Shared so the two cannot drift.
+ *  The seat's newest row (ids are ULIDs) carries its current restore policy: under anything but
+ *  resume_if_possible it starts fresh as before. Otherwise returns a row with a recorded token, or null. */
+export function absentSeatResumeHistory<T extends { id: string; nodeId: string; resumeType: string | null; resumeToken: string | null; restorePolicy?: string | null }>(
+  sessions: T[],
+  nodeId: string,
+): T | null {
+  const rows = sessions.filter((session) => session.nodeId === nodeId);
+  const newest = rows.reduce<T | null>((latest, row) => (!latest || row.id > latest.id ? row : latest), null);
+  if (!newest || (newest.restorePolicy ?? "resume_if_possible") !== "resume_if_possible") return null;
+  return rows.find((session) => !!session.resumeToken?.trim() && !!session.resumeType && session.resumeType !== "none") ?? null;
+}
+
+/** The stop-for-decision explanation for such a seat, worded once for apply and preview. */
+export function absentSeatResumeHistoryError(logicalId: string, resumeType: string | null, rigName: string): string {
+  const seat = `'${`${logicalId}@${rigName}`.replace(/'/g, `'"'"'`)}'`;
+  return `Original session not resumed: the seat had no running occupant when this snapshot was taken, but an earlier occupant left a '${resumeType}' resume token. No session was started. The recorded token has not been verified and may be stale or belong to another runtime. To deliberately start only this seat fresh, run: rig seat launch ${seat} --fresh --reason "<why>".`;
 }
 
 /** One wording for the loud failure everywhere — divergent phrasings would be

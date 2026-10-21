@@ -1,3 +1,4 @@
+import { physicalSessionName } from "./session-registry.js";
 import Database from "better-sqlite3";
 import { join } from "node:path";
 import os from "node:os";
@@ -40,6 +41,8 @@ interface SidecarRaw {
    *  a canonical occupant from a retained predecessor whose launch-time --name aliases the seat. */
   occupant_generation?: string;
   transcript_path?: string;
+  /** Claude's statusline `cost.total_cost_usd`: a cumulative client-side estimate for the native session. */
+  cost?: { total_cost_usd?: number | null } | null;
   sampled_at?: string;
 }
 
@@ -76,6 +79,7 @@ interface CodexTokenCountEvent {
   timestamp?: string;
   payload?: {
     type?: string;
+    rate_limits?: unknown;
     info?: {
       last_token_usage?: CodexTokenUsageRaw;
       model_context_window?: number;
@@ -220,6 +224,7 @@ export class ContextUsageStore {
       sessionName: raw.session_name ?? null,
       sampledAt,
       fresh,
+      clientCostEstimateUsd: typeof raw.cost?.total_cost_usd === "number" && Number.isFinite(raw.cost.total_cost_usd) ? raw.cost.total_cost_usd : null,
     };
   }
 
@@ -313,6 +318,7 @@ export class ContextUsageStore {
   /** Get context usage for a single node. Session-aware: mismatched session returns unknown. */
   getForNode(nodeId: string, currentSessionName: string | null): ContextUsage {
     if (!currentSessionName) return this.unknownUsage("not_managed");
+    currentSessionName = physicalSessionName(this.db, currentSessionName);
 
     const row = this.db.prepare("SELECT * FROM context_usage WHERE node_id = ?").get(nodeId) as ContextUsageRow | undefined;
     if (!row) return this.unknownUsage("no_data");
@@ -337,6 +343,7 @@ export class ContextUsageStore {
     const result = new Map<string, ContextUsage>();
     if (entries.length === 0) return result;
 
+    entries = entries.map(entry => ({ ...entry, currentSessionName: entry.currentSessionName ? physicalSessionName(this.db, entry.currentSessionName) : null }));
     const nodeIds = entries.map((e) => e.nodeId);
     const sessionMap = new Map(entries.map((e) => [e.nodeId, e.currentSessionName]));
 
@@ -472,7 +479,12 @@ export class ContextUsageStore {
       if (!line.includes("\"token_count\"")) continue;
       try {
         const parsed = JSON.parse(line) as CodexTokenCountEvent;
-        if (parsed.payload?.type === "token_count") return parsed;
+        if (parsed.payload?.type === "token_count") {
+          // Native Codex also writes quota-only updates under token_count.
+          // They carry no context measurement and must not replace its timestamp.
+          if (parsed.payload.info == null && parsed.payload.rate_limits != null) continue;
+          return parsed;
+        }
       } catch {
         continue;
       }

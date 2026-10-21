@@ -11,6 +11,8 @@ export interface AppliedLaunchObservation {
   reason?: string;
   /** Emitted Codex approval argument; null/absent does not infer a native default. */
   approvalPolicy?: "never" | null;
+  /** Codex: true when the launch added --no-daemon, false when the probe found no such option; absent when not probed. */
+  daemonOptOut?: boolean;
 }
 
 export type TransportState = "healthy" | "connect" | "timeout" | "response";

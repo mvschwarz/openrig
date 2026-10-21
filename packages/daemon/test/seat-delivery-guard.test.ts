@@ -141,7 +141,7 @@ describe("real adapter/transport guard boundaries with no external effects", () 
     expect(f.commands).toEqual([]);expect(f.files).toEqual([]);expect(f.tmux.listPanes).not.toHaveBeenCalled();
     expect(f.outbox.heldForNode("a").total).toBe(5);f.db.close();
   });
-  it("one retained ID stays not-delivered after disable/retirement, and preserves committed coalesced IDs", async () => {
+  it("manual hold preserves coalesced bodies; changing preference or retiring history does not type", async () => {
     const f = transportFixture();await f.guard.set("a",true,"person","draft");
     const opts={deliveryId:"exact",actorSession:"sender"};
     await f.transport.send("a","body",opts);await f.transport.send("a","body",opts);
@@ -151,7 +151,7 @@ describe("real adapter/transport guard boundaries with no external effects", () 
     expect(await f.transport.send("a","combined",{committedOutboxIds:["wake1","wake2"]})).toMatchObject({outcome:"retained",outboxIds:["wake1","wake2"]});
     expect(f.outbox.getById("wake2")!.body).toBe("original wake2");
     await f.guard.set("a",false,"person","new sends only");f.outbox.retire("exact","person","acknowledge");
-    expect(await f.transport.send("a","body",opts)).toMatchObject({outcome:"retained",sent:false});
+    expect(f.outbox.getById("exact")!.deliveryState).toBe("retired");
     expect(f.commands).toEqual([]);expect(f.db.prepare("SELECT count(*) AS n FROM outbox_entries").get()).toEqual({n:3});f.db.close();
   });
   it("automatic low-level keys/text/shell and lifecycle creation refuse, human broker path and sibling write", async () => {

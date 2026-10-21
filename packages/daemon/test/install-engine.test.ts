@@ -222,6 +222,18 @@ describe("InstallEngine", () => {
     expect(content).toContain("# Footer");
   });
 
+  it.each(["OpenRig", "RIGGED"])("replaces the ordered %s block without consuming an earlier orphan closing marker", (brand) => {
+    const pkg = seedPackage();
+    const sourcePath = writeSource("guidance/AGENTS.md", "Updated guidance.");
+    const targetPath = path.join(repoRoot, "AGENTS.md");
+    const end = `<!-- END ${brand} MANAGED BLOCK: test-pkg -->`;
+    const prefix = `# User instructions\n${end}\nKeep this text.\n`;
+    fs.writeFileSync(targetPath, `${prefix}<!-- BEGIN ${brand} MANAGED BLOCK: test-pkg -->\nOld content.\n${end}\n# Footer\n`);
+    const entry = makeEntry({ exportType: "guidance", classification: "managed_merge", targetPath, sourcePath });
+    new InstallEngine(installRepo, realFs(tmpDir)).apply(makePolicy([entry]), makePlan([entry]), pkg.id, repoRoot);
+    expect(fs.readFileSync(targetPath, "utf8")).toBe(`${prefix}<!-- BEGIN OpenRig MANAGED BLOCK: test-pkg -->\nUpdated guidance.\n<!-- END OpenRig MANAGED BLOCK: test-pkg -->\n# Footer\n`);
+  });
+
   // Test 7: Backup created before overwrite
   it("backup created before overwrite", () => {
     const pkg = seedPackage();

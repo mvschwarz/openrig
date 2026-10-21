@@ -1,10 +1,10 @@
 import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-const { watch, readProjectReadiness, resolveProjectRoot } = vi.hoisted(() => ({
-  watch: vi.fn(), readProjectReadiness: vi.fn(), resolveProjectRoot: vi.fn(),
+const { watch, createProofPolicyRead, readProjectReadiness, resolveProjectRoot } = vi.hoisted(() => ({
+  watch: vi.fn(), createProofPolicyRead: vi.fn(() => vi.fn()), readProjectReadiness: vi.fn(), resolveProjectRoot: vi.fn(),
 }));
 vi.mock("node:fs", () => ({ watch }));
-vi.mock("../src/domain/proof/judgments.js", () => ({ readProjectReadiness, resolveProjectRoot }));
+vi.mock("../src/domain/proof/judgments.js", () => ({ createProofPolicyRead, readProjectReadiness, resolveProjectRoot }));
 import { watchProofSources } from "../src/domain/proof/source-watch.js";
 import type { EventBus } from "../src/domain/event-bus.js";
 afterEach(() => { vi.useRealTimers(); vi.resetAllMocks(); });

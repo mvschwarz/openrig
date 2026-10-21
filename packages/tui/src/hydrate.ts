@@ -17,9 +17,10 @@ import { fileTargetForPath } from "./reading.js";
 import { emptySnapshot } from "./state.js";
 import type { ConfigRead } from "./config/config-model.js";
 import type { ConnectionsRead, ControlPlaneRead, SlackManifestRead } from "./connections/connections-model.js";
+import type { UsageRead } from "./usage/usage-model.js";
 import { DaemonClient } from "./daemon-client.js";
 import { parse as parseYaml } from "yaml";
-import type { AgentRow, FleetSnapshot, HealthCoverage, HealthRecord, HostNode, NeedsItem, PodNode, QueueRead, RecentTransitionSnap, SeatActivitySummary, SliceDetailSnap, SpecEntry, ViewState } from "./types.js";
+import type { AgentRow, FleetSnapshot, HealthCoverage, HealthRecord, HostNode, NeedsItem, PodNode, QueueRead, RecentTransitionSnap, SeatActivitySummary, SeatEffortRead, SliceDetailSnap, SpecEntry, ViewState } from "./types.js";
 import { isHumanSeatSession } from "./pulse/pulse-model.js";
 
 // Narrow read-shapes: just the served fields this module consumes (names match
@@ -54,6 +55,9 @@ interface NodeInventoryRead {
   nodeKind: "agent" | "infrastructure";
   runtime: string | null;
   model?: string | null;
+  /** Configured launch effort and its provenance, served by the node inventory. */
+  effort?: string | null;
+  effortSource?: "seat_choice" | "authored" | "runtime_default" | null;
   lifecycleState: string;
   sessionStatus?: string | null;
   startupStatus?: string | null;
@@ -74,7 +78,9 @@ interface NodeInventoryRead {
     needsInput?: { count?: number; reason?: string | null } | null;
     decidedBy?: string | null;
   } | null;
-  identityVerdict?: { verdict?: string } | null;
+  identityVerdict?: { verdict?: string; reason?: string | null } | null;
+  /** Present only on a community harness's seat. */
+  communityHarness?: { harness: string } | null;
   canonicalSessionName: string | null;
   tmuxAttachCommand?: string | null;
   cwd?: string | null;
@@ -214,12 +220,14 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
   const ctx = node.contextUsage;
   const known = ctx?.availability === "known";
   const identityDownranked = node.identityVerdict?.verdict === "mismatch"
-    || node.identityVerdict?.verdict === "pane_missing";
+    || (node.identityVerdict?.verdict === "pane_missing" && node.identityVerdict?.reason !== "session_missing");
   return {
     nodeId: node.nodeId,
     name: node.logicalId,
     runtime: node.runtime ?? "unknown",
     model: node.model ?? null,
+    effort: node.effort ?? null,
+    effortSource: node.effortSource ?? null,
     spec: node.resolvedSpecName ?? "",
     profile: node.profile ?? null,
     specVersion: node.resolvedSpecVersion ?? null,
@@ -247,8 +255,10 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
     },
     // Mirror the maintained web projection: lifecycle truth drives actions,
     // while session/terminal activity drives the visible status label.
-    status: node.startupStatus === "failed"
-      ? "failed"
+    status: node.identityVerdict?.reason === "session_missing" && node.sessionStatus === "detached" && node.lifecycleState !== "attention_required"
+      ? "detached"
+      : node.startupStatus === "failed"
+        ? "failed"
       : node.lifecycleState === "attention_required" || identityDownranked || node.startupStatus === "attention_required"
         ? "attention_required"
         // S19: the SERVED taxonomy display decides first (the daemon's one bridge);
@@ -262,7 +272,9 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
                   ? "active"
                   : node.activityState?.display === "idle"
                     ? "idle"
-                    : (node.terminalActive === true || (node.terminalActive == null && node.agentActivity?.state === "running") ? "active" : "idle"))
+                    : (node.terminalActive === true || (node.terminalActive == null && node.agentActivity?.state === "running") ? "active"
+                      // A community harness gives no idle signal: a quiet screen is unknown, not idle.
+                      : node.communityHarness ? "unknown" : "idle"))
               : (node.sessionStatus ?? "unknown"),
     live: node.lifecycleState === "running",
     canRun: node.lifecycleState !== "running"
@@ -418,6 +430,35 @@ export async function hydrateSnapshot(
     return { ...emptySnapshot(), terminals, hydratedAt: new Date().toISOString(), readErrors: terminals.error ? [terminals.error] : [] };
   }
 
+  // USAGE ACROSS HOSTS: one GET of the daemon's view across registered hosts, answered from memory there and on every
+  // host. Never the refresh route.
+  if (viewContext?.section === "usage-hosts") {
+    const status = await client.usageAcrossHosts();
+    if (!("view" in status)) readErrors.push(`usage across hosts: ${status.error}`);
+    return { ...emptySnapshot(), usageHosts: { status }, readErrors, hydratedAt: new Date().toISOString() };
+  }
+
+  // COST: one GET of the daemon's cost view, computed from what it already stores. Starts no lookup of any kind.
+  if (viewContext?.section === "cost") {
+    const status = await client.usageCost();
+    if (!("body" in status)) readErrors.push(`cost: ${status.error}`);
+    return { ...emptySnapshot(), cost: { status }, readErrors, hydratedAt: new Date().toISOString() };
+  }
+
+  // USAGE: one GET of the provider read model, answered from the daemon's memory. Never the refresh route. Only
+  // when the model has no usage rows does it read the config browser, to tell "off" from "not served".
+  if (viewContext?.section === "usage") {
+    const status = await client.providerStatus();
+    if (!("model" in status)) readErrors.push(`provider status: ${status.error}`);
+    let switchSetting: UsageRead["switchSetting"];
+    if ("model" in status && !Array.isArray(status.model["usage"])) {
+      const config = await safe<ConfigRead>("CONFIG", () => client.configBrowser());
+      const entry = config?.entries.find((e) => e.key === "provider.usage_windows");
+      switchSetting = config ? (entry ? { value: entry.value, source: entry.source } : "absent") : null;
+    }
+    return { ...emptySnapshot(), usage: { status, ...(switchSetting !== undefined ? { switchSetting } : {}) }, readErrors, hydratedAt: new Date().toISOString() };
+  }
+
   // CONFIG never invokes fleet aggregation, host probes, queue enrichment or provider checks.
   // Failures replace earlier values with an explicit unavailable state.
   if (viewContext?.section === "config") {
@@ -447,12 +488,20 @@ export async function hydrateSnapshot(
   const wantsRecent = wantsTopologyScope && (!topologyLeaf || topologyLeaf.kind === "host" || topologyLeaf.kind === "rig");
   const focusedTopology = !!viewContext && wantsTopologyScope && viewContext.viewTab !== "pulse";
   const broadReads = !readingOnly && !focusedTopology && !wantsConnections;
+  // Seat rows (Q / WORK / NOW) join these four lists: only a seat's page and the drilled table tab show them.
+  const seatQueueReads = broadReads || (focusedTopology && (topologyLeaf?.kind === "agent" || (!!topologyLeaf && viewContext?.viewTab === "table")));
   const healthRequested = broadReads || viewContext?.viewTab === "health";
   const wantsGraph = wantsTopologyScope && (!viewContext || viewContext.viewTab === "graph");
   // A pending pod/agent address needs every rig's seats to resolve.
   const pendingInventory = viewContext?.pendingDrill?.resource === "pod" || viewContext?.pendingDrill?.resource === "agent";
+  // Agent detail: read the existing seat-effort report once per refresh. It reads
+  // the running process and native transcript, never launches or restarts anything.
+  const drillRig = [...(viewContext?.drill ?? [])].reverse().find((segment) => segment.kind === "rig")?.name
+    ?? currentRigName
+    ?? null;
+  const seatEffortRef = topologyLeaf?.kind === "agent" && drillRig ? `${topologyLeaf.name}@${drillRig}` : null;
 
-  const [instanceHealth, healthProjection, agg, summaries, library, review, streamItems, attention, blocked, inProgress, pending, recentlyFinished, scopesRead, executionRead, sliceDetailRead, connectionsRead] = await Promise.all([
+  const [instanceHealth, healthProjection, agg, summaries, library, review, streamItems, attention, blocked, inProgress, pending, recentlyFinished, scopesRead, executionRead, sliceDetailRead, connectionsRead, seatEffortRead] = await Promise.all([
     safe<InstanceHealthRead>("health", () => client.health()),
     !healthRequested ? Promise.resolve(null) : safe<HealthProjectionRead>("health-findings", () => client.healthFindings()),
     !broadReads ? Promise.resolve(null) : safe<AttentionAggregateRead>("attention-aggregate", () => client.attentionAggregate()),
@@ -461,11 +510,11 @@ export async function hydrateSnapshot(
     !broadReads ? Promise.resolve(null) : safe<ReviewFleetRead>("review-fleet", () => client.reviewFleet()),
     !broadReads ? Promise.resolve(null) : safe<StreamItemRead[]>("stream-tail", () => client.streamLatest()),
     // PULSE ▲ NEEDS YOU + ⧗ BLOCKED + ◌ PARKED — the shipped queue reads (increments 2/2b)
-    !broadReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-attention", () => client.queueAttention()),
-    !broadReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-blocked", () => client.queueBlocked()),
-    !broadReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-in-progress", () => client.queueInProgress()),
+    !seatQueueReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-attention", () => client.queueAttention()),
+    !seatQueueReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-blocked", () => client.queueBlocked()),
+    !seatQueueReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-in-progress", () => client.queueInProgress()),
     // PULSE UP NEXT + JUST FINISHED lane reads (increment 3) — same shipped /list route
-    !broadReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-pending", () => client.queuePending()),
+    !seatQueueReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-pending", () => client.queuePending()),
     !broadReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-recently-finished", () => client.queueRecentlyFinished()),
     !broadReads ? Promise.resolve(null) : safe<{ missions: unknown[]; sourceObservation?: { state: string } }>("scopes", () => client.scopesDetailed() as Promise<{ missions: unknown[] }>),
     !broadReads ? Promise.resolve(null) : safe<{ rows: unknown[] }>("execution", () => client.execution(executionMission ?? undefined) as Promise<{ rows: unknown[] }>),
@@ -473,6 +522,7 @@ export async function hydrateSnapshot(
       ? safe<SliceDetailSnap>(`slice-detail(${sliceDetailName})`, () => client.sliceDetail(sliceDetailName))
       : Promise.resolve(null),
     wantsConnections ? safe<ConnectionsRead>("connections", () => client.connections()) : Promise.resolve(null),
+    seatEffortRef ? safe<SeatEffortRead>("seat-effort", () => client.seatEffort(seatEffortRef)) : Promise.resolve(null),
   ]);
 
   // Optional: an older daemon has no manifest route; the page then points at the CLI instead.
@@ -718,6 +768,9 @@ export async function hydrateSnapshot(
 
   return {
     connections: connectionsRead,
+    // Keep the address even when the read failed: the detail page then says the
+    // report was not read instead of silently omitting the effort section.
+    ...(seatEffortRef ? { seatEffort: { seatRef: seatEffortRef, report: seatEffortRead } } : {}),
     controlPlane: instanceHealth,
     slackManifest,
     daemonTarget: (() => { try { const u = new URL(client.baseUrl); return `${u.protocol}//${u.host}${u.pathname}`; } catch { return "unreported"; } })(),
@@ -751,6 +804,11 @@ export async function hydrateSnapshot(
         }
       : {}),
     attention: (attention ?? []).map(toQueueRead),
+    queueCoverage: !seatQueueReads ? undefined
+      : [attention, blocked, inProgress, pending].some(rows => rows === null) ? "unavailable"
+      // Existing /list defaults cap the first three reads at 100; pending requests 50.
+      : [attention, blocked, inProgress].some(rows => rows!.length >= 100) || pending!.length >= 50 ? "partial"
+      : "complete",
     blocked: blockedResolved,
     inProgress: (inProgress ?? []).map(toQueueRead),
     seatActivity,

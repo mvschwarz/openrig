@@ -86,6 +86,7 @@ it.each(["fresh", "resume", "fork"] as const)("C: %s uses the probe's separate N
   vi.spyOn(adapter as any, "dismissSkippableCodexUpdatePrompt").mockResolvedValue(undefined);
   vi.spyOn(adapter as any, "verifyResumeLaunch").mockResolvedValue({ ok: true });
   vi.spyOn(adapter as any, "captureFreshThreadId").mockResolvedValue("new-thread");
+  vi.spyOn(adapter as any, "captureVerifiedForkId").mockResolvedValue("new-thread");
   const binding: any = { id: "b", nodeId: "node", tmuxSession: "seat@rig", tmuxPane: "%1", cwd: f.cwd };
   const result = await adapter.launchHarness(binding, { name: "seat", ...(kind === "resume" ? { resumeToken: "old" } : kind === "fork" ? { forkSource: { kind: "native_id", value: "parent" } } : {}) });
   expect(result.ok).toBe(true);

@@ -48,15 +48,22 @@ export type RecentQueueTransitionScope = { kind: "instance" } | { kind: "rig"; r
 
 /** A compact product event derived only from typed queue state and closure fields.
  * The authored queue summary is presentation only; it never participates in
- * event normalization. transition_note and body remain excluded so prose cannot
- * silently become event semantics. */
+ * event normalization. transition_note and body remain excluded from event
+ * semantics so prose cannot silently become one; `bodyPreview` below is display text only. */
 export interface RecentQueueTransition {
   transitionId: number;
   qitemId: string;
   ts: string;
   actorSession: string;
   change: string;
+  /** The authored queue summary, trimmed; null when the row has none. Never filled with derived text. */
   summary: string | null;
+  /** Display text derived from the body, only for a row with no authored summary (null otherwise).
+   * It is the first non-blank line within the first 2,000 characters of the body, trimmed and cut to at
+   * most 240 code points (the last three being "..." when cut). It is null when the summary is
+   * present, the body is empty, or no non-blank line occurs within those 2,000 characters. SQLite's text
+   * substr stops at an embedded NUL, so the line also ends there, and a NUL before any text gives null. */
+  bodyPreview: string | null;
   rig: string;
   targetKind: RecentQueueTransitionTargetKind;
   target: string;
@@ -86,9 +93,26 @@ interface RecentQueueTransitionRow {
   closure_target: string | null;
   tags: string | null;
   summary: string | null;
+  /** The first 2,000 characters of the body, read only when the summary is blank (null otherwise). */
+  body_head: string | null;
   previous_state: string | null;
   destination_session: string;
   source_session: string;
+}
+
+/** How much of a body is read for bodyPreview, and the longest preview shown (the Story card's preview bound). */
+const BODY_HEAD_CODE_POINTS = 2000;
+const BODY_PREVIEW_MAX_CODE_POINTS = 240;
+/** The characters String.prototype.trim() strips, for SQLite's ltrim (whose default strips spaces only): a summary made of
+ * these alone is blank, which is when the body is read for bodyPreview. */
+const TRIM_CHARS = String.fromCharCode(9, 10, 11, 12, 13, 32, 160, 5760, ...Array.from({ length: 11 }, (_, i) => 8192 + i), 8232, 8233, 8239, 8287, 12288, 65279);
+/** The first non-blank line of a body's head, for a row that has no summary: the rule the TUI already applied
+ * to rows it had loaded. Cut by code point, so a multibyte character is never split. */
+function bodyPreview(bodyHead: string | null): string | null {
+  const line = bodyHead?.split("\n").find((candidate) => candidate.trim())?.trim();
+  if (!line) return null;
+  const points = Array.from(line);
+  return points.length > BODY_PREVIEW_MAX_CODE_POINTS ? `${points.slice(0, BODY_PREVIEW_MAX_CODE_POINTS - 3).join("")}...` : line;
 }
 
 function sessionRig(session: string, knownRigs: ReadonlySet<string>): string | null {
@@ -127,6 +151,17 @@ function recentChange(row: RecentQueueTransitionRow): string | null {
   return null;
 }
 
+/** The recent-activity qualifying rule, as a predicate on a transition and its predecessor's state.
+ * A same-state note (blocked after blocked, in-progress after in-progress) never qualifies. */
+function qualifiesAsRecent(row: Pick<RecentQueueTransitionRow, "state" | "closure_reason">, previousState: string | null): boolean {
+  return (row.state === "in-progress" && (previousState === "pending" || previousState === "blocked"))
+    || (row.state === "blocked" && previousState !== null && previousState !== "blocked")
+    || row.closure_reason === "handed_off_to"
+    || (row.state === "done" && row.closure_reason === "no-follow-on")
+    || ["failed", "denied", "canceled"].includes(row.state)
+    || ["denied", "canceled", "escalation"].includes(row.closure_reason ?? "");
+}
+
 /**
  * Append-only transition log. Domain code MUST NOT update or delete rows here.
  * This log is the authoritative audit trail for queue state evolution.
@@ -141,6 +176,8 @@ export class QueueTransitionLog {
   private readonly hasIdentityProvenanceColumn: boolean;
   private readonly hasOwnerNotificationColumns: boolean;
   private readonly historySource: string;
+  /** The history tables this schema has: the live table, and the archive where it exists. */
+  private readonly historyTables: string[];
 
   constructor(db: Database.Database) {
     this.db = db;
@@ -155,9 +192,11 @@ export class QueueTransitionLog {
     // SELECT * cannot union the archive's extra archived_at column with the live table.
     const fields = ["transition_id", "qitem_id", "ts", "state", "transition_note", "actor_session",
       "closure_reason", "closure_target", "identity_provenance", "owner_notification_kind", "owner_notification_level"];
+    this.historyTables = [];
     const sources = ["queue_transitions", "queue_transitions_archive"].flatMap((table) => {
       const available = new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name));
       if (available.size === 0) return [];
+      this.historyTables.push(table);
       return [`SELECT ${fields.map((field) => available.has(field) ? field : `NULL AS ${field}`).join(", ")} FROM ${table}`];
     });
     this.historySource = `(${sources.join(" UNION ALL ")})`;
@@ -283,47 +322,7 @@ export class QueueTransitionLog {
     if (rigNames.length === 0) return [];
     const knownRigs = new Set(rigNames);
     const sessionPatterns = rigNames.map((rig) => `%@${rig.replace(/%/g, "\\%").replace(/_/g, "\\_")}`);
-    const scopeSql = sessionPatterns.map(() => "(q.destination_session LIKE ? ESCAPE '\\' OR q.source_session LIKE ? ESCAPE '\\')").join(" OR ");
-    const scopeParams = sessionPatterns.flatMap((pattern) => [pattern, pattern]);
-    // Keep display metadata out of the full-history window/sort. Fetch it only
-    // for the qualified window; limiting raw history would change predecessors.
-    const rows = this.db.prepare(`
-      WITH rig_history AS (
-        SELECT
-          t.transition_id,
-          t.qitem_id,
-          t.ts,
-          t.state,
-          t.actor_session,
-          t.closure_reason,
-          t.closure_target,
-          LAG(t.state) OVER (
-            PARTITION BY t.qitem_id
-            ORDER BY t.transition_id
-          ) AS previous_state
-        FROM ${this.historySource} t
-        JOIN queue_items q ON q.qitem_id = t.qitem_id
-        WHERE ${scopeSql}
-      ), qualifying AS (
-        SELECT * FROM rig_history
-        WHERE (state = 'in-progress' AND previous_state IN ('pending', 'blocked'))
-           OR (state = 'blocked' AND previous_state IS NOT NULL AND previous_state <> 'blocked')
-           OR closure_reason = 'handed_off_to'
-           OR (state = 'done' AND closure_reason = 'no-follow-on')
-           OR state IN ('failed', 'denied', 'canceled')
-           OR closure_reason IN ('denied', 'canceled', 'escalation')
-      ), latest AS (
-        SELECT * FROM qualifying
-        ORDER BY ts DESC, transition_id DESC
-        LIMIT ?
-      )
-      SELECT t.transition_id, t.qitem_id, t.ts, t.state, t.actor_session,
-             t.closure_reason, t.closure_target, q.tags, q.summary, t.previous_state,
-             q.destination_session, q.source_session
-      FROM latest t
-      JOIN queue_items q ON q.qitem_id = t.qitem_id
-      ORDER BY t.ts DESC, t.transition_id DESC
-    `).all(...scopeParams, limit) as RecentQueueTransitionRow[];
+    const rows = this.newestQualifying(sessionPatterns, limit);
 
     return rows.reverse().flatMap((row) => {
       const change = recentChange(row);
@@ -339,10 +338,64 @@ export class QueueTransitionLog {
         actorSession: row.actor_session,
         change,
         summary: row.summary?.trim() || null,
+        bodyPreview: row.body_head === null ? null : bodyPreview(row.body_head),
         rig,
         ...recentTarget(row),
       }];
     });
+  }
+
+  /** The newest `limit` qualifying in-scope transitions, newest first. The scope's items are resolved
+   * once; live and archived history is then walked newest-first in (ts, transition_id) order on an
+   * index that carries qitem_id, so a transition outside the scope is rejected from its index entry
+   * without reading its row, and the walk stops at the limit. A candidate's predecessor is the same
+   * item's greatest earlier transition_id across both tables: the value LAG over the item's full
+   * history gave, so a same-state note never qualifies. */
+  private newestQualifying(sessionPatterns: string[], limit: number): RecentQueueTransitionRow[] {
+    // The scope is the items whose destination or source session matches a pattern. Each column is
+    // matched on its own index and the ids are read from the primary-key index, so resolving the scope
+    // never reads queue_items' rows, which carry every body. UNION ALL, not UNION: a merged UNION
+    // wants rowid order, which SQLite gets by scanning the table; a duplicate is harmless in IN.
+    const matches = (column: string) => sessionPatterns.map(() => `q.${column} LIKE ? ESCAPE '\\'`).join(" OR ");
+    // `+t.qitem_id` keeps the scope list from driving a per-item index lookup (which would then sort);
+    // the walk order comes from the (ts, transition_id, qitem_id) index, and the two tables merge.
+    const walk = this.db.prepare(`
+      WITH scope_rows(rid) AS MATERIALIZED (
+        SELECT q.rowid FROM queue_items q WHERE ${matches("destination_session")}
+        UNION ALL SELECT q.rowid FROM queue_items q WHERE ${matches("source_session")}
+      ), scope_items(qitem_id) AS MATERIALIZED (SELECT q.qitem_id FROM queue_items q WHERE +q.rowid IN (SELECT rid FROM scope_rows))
+      ${this.historyTables.map((table) => `
+      SELECT t.transition_id, t.qitem_id, t.ts, t.state, t.actor_session, t.closure_reason, t.closure_target
+      FROM ${table} t
+      WHERE +t.qitem_id IN (SELECT qitem_id FROM scope_items)`).join(" UNION ALL ")}
+      ORDER BY ts DESC, transition_id DESC`);
+    // max() with a bare column reads the state from the row holding the max, one per table.
+    const predecessors = this.historyTables.map((table) => this.db.prepare(
+      `SELECT MAX(transition_id) AS transition_id, state FROM ${table} WHERE qitem_id = ? AND transition_id < ?`,
+    ));
+    const metadata = this.db.prepare(
+      "SELECT tags, summary, destination_session, source_session, CASE WHEN summary IS NULL OR ltrim(summary, ?) = '' THEN substr(body, 1, ?) END AS body_head FROM queue_items WHERE qitem_id = ?",
+    );
+    type WalkedRow = Pick<RecentQueueTransitionRow, "transition_id" | "qitem_id" | "ts" | "state" | "actor_session" | "closure_reason" | "closure_target">;
+    const previousState = (row: WalkedRow): string | null => {
+      let found: { transition_id: number | null; state: string | null } = { transition_id: null, state: null };
+      for (const predecessor of predecessors) {
+        const candidate = predecessor.get(row.qitem_id, row.transition_id) as { transition_id: number | null; state: string | null };
+        if (candidate.transition_id !== null && (found.transition_id === null || candidate.transition_id > found.transition_id)) found = candidate;
+      }
+      return found.state;
+    };
+    const rows: RecentQueueTransitionRow[] = [];
+    // Reads inside the loop are allowed while the walk's iterator is open, and they see the walk's
+    // snapshot; leaving the loop releases it.
+    for (const row of walk.iterate(...sessionPatterns, ...sessionPatterns) as Iterable<WalkedRow>) {
+      const previous = row.state === "in-progress" || row.state === "blocked" ? previousState(row) : null;
+      if (!qualifiesAsRecent(row, previous)) continue;
+      const item = metadata.get(TRIM_CHARS, BODY_HEAD_CODE_POINTS, row.qitem_id) as Pick<RecentQueueTransitionRow, "tags" | "summary" | "destination_session" | "source_session" | "body_head">;
+      rows.push({ ...row, ...item, previous_state: previous });
+      if (rows.length >= limit) break;
+    }
+    return rows;
   }
 
   listRecentForRig(rig: string, requestedLimit = 20): RecentQueueTransition[] {
@@ -361,14 +414,51 @@ export class QueueTransitionLog {
     return row ? this.rowToTransition(row) : null;
   }
 
+  private ownerNotificationsStatement?: Database.Statement;
+
+  /** The owner notifications a delivery ledger reads, by qitem, newest first: a qitem's latest (the first,
+   *  latestOwnerNotificationForQitem's), and its latest outbound one (a kind other than human-decision-resolved) when
+   *  that is older. One read for a whole listing. */
+  ownerNotificationsForQitems(qitemIds: readonly string[]): Map<string, QueueTransition[]> {
+    const byQitem = new Map<string, QueueTransition[]>();
+    if (!this.hasOwnerNotificationColumns || qitemIds.length === 0) return byQitem;
+    this.ownerNotificationsStatement ??= this.db.prepare(
+      `SELECT * FROM (
+         SELECT history.*, ROW_NUMBER() OVER (
+           PARTITION BY qitem_id, (owner_notification_kind IS NOT NULL AND owner_notification_kind != 'human-decision-resolved')
+           ORDER BY transition_id DESC) AS newest
+           FROM ${this.historySource} history
+          WHERE qitem_id IN (SELECT value FROM json_each(?)) AND owner_notification_level IS NOT NULL)
+        WHERE newest = 1
+        ORDER BY transition_id DESC`,
+    );
+    for (const row of this.ownerNotificationsStatement.all(JSON.stringify(qitemIds)) as QueueTransitionRow[]) {
+      const transitions = byQitem.get(row.qitem_id);
+      if (transitions) transitions.push(this.rowToTransition(row));
+      else byQitem.set(row.qitem_id, [this.rowToTransition(row)]);
+    }
+    return byQitem;
+  }
+
   hasOwnerNotificationReceipt(qitemId: string, notificationKey: string): boolean {
+    return this.getOwnerNotificationReceipt(qitemId, notificationKey) !== null;
+  }
+
+  getOwnerNotificationReceipt(qitemId: string, notificationKey: string): { messageTs: string | null; threadTs: string | null; digest: string | null } | null {
     const rows = this.db
       .prepare(
         `SELECT transition_note FROM ${this.historySource}
-          WHERE qitem_id = ? AND transition_note LIKE 'slack-owner-notification-posted %'`,
+          WHERE qitem_id = ? AND transition_note LIKE 'slack-owner-notification-posted %'
+          ORDER BY transition_id DESC`,
       )
       .all(qitemId) as Array<{ transition_note: string }>;
-    return rows.some((row) => row.transition_note.split(/\s+/).includes(`notification_key=${notificationKey}`));
+    for (const row of rows) {
+      const fields = row.transition_note.split(/\s+/);
+      if (!fields.includes(`notification_key=${notificationKey}`)) continue;
+      const value = (name: string) => fields.find((field) => field.startsWith(`${name}=`))?.slice(name.length + 1) ?? null;
+      return { messageTs: value("message_ts"), threadTs: value("thread_ts"), digest: value("digest") };
+    }
+    return null;
   }
 
   private rowToTransition(row: QueueTransitionRow): QueueTransition {

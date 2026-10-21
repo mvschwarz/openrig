@@ -1,16 +1,22 @@
+import { physicalSessionName } from "../domain/session-registry.js";
 import { existsSync } from "node:fs";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AgentActivityStore } from "../domain/agent-activity-store.js";
+import { hookEventState, isRunnerExit } from "../domain/agent-activity-store.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
 import type { EventBus } from "../domain/event-bus.js";
 import { verifyStartupProof } from "../domain/startup-proof.js";
-import type { ActivityEvidence } from "../domain/activity-taxonomy.js";
+import type { ActivityEvidence, EvidenceRoute } from "../domain/activity-taxonomy.js";
 import type { AgentActivity } from "../domain/types.js";
 import * as parkedQuery from "../domain/parked-query.js";
 import { runtimeRungInventory } from "../domain/activity-taxonomy.js";
 import { validateResumeToken } from "../domain/resume-token-validation.js";
+import { claudeHookFromLaunchedProcess, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { transportSenderSession } from "./require-sender-identity.js";
+import {
+  PiUsageEntriesStore, hasPiUsageChargesTable, hasPiUsageEntriesTable, validPiProviderCharge, validPiUsageFact,
+} from "../domain/pi-usage-entries-store.js";
 
 // ── S19 A4 — the ingest half of the adapter seam: hook events reach the ONE oracle ──
 // (SeatActivityService) through this translation, so AgentActivityStore is reduced to a
@@ -27,6 +33,7 @@ export function evidenceFromHookActivity(input: {
   runtime: string | null;
   activity: AgentActivity;
   seq: number;
+  route?: EvidenceRoute;
 }): ActivityEvidence | null {
   const base = {
     seatNodeId: input.seatNodeId,
@@ -35,10 +42,24 @@ export function evidenceFromHookActivity(input: {
     sourceId: `${input.runtime ?? "unknown-runtime"}:hooks`,
     seq: input.seq,
     observedAt: input.activity.eventAt ?? input.activity.sampledAt,
+    ...(input.activity.sourceSequence ? { sourceSequence: input.activity.sourceSequence } : {}),
+    ...(input.route ? { route: input.route } : {}),
   };
+  if (input.activity.reason === "permission_request_pending") {
+    return { ...base, permissionRequest: { id: input.activity.turnId ?? "uncorrelated" } };
+  }
+  if (input.runtime === "claude-code" && input.activity.rawEvent === "Notification"
+      && input.activity.reason === "permission_prompt") {
+    return { ...base, permissionRequest: { id: "claude-permission-prompt" }, needsInput: { count: 1, reason: "permission_prompt" } };
+  }
+  // A runner's exit report clears what its last turn said: the seat is no longer at a prompt or mid-turn.
+  if (input.activity.rawEvent === "Stop" && isRunnerExit(input.activity.rawSubtype, input.runtime)) {
+    return { ...base, activity: "unknown", needsInput: { count: 0, reason: null } };
+  }
   switch (input.activity.state) {
     case "running":
-      return { ...base, activity: "working", needsInput: { count: 0, reason: null } };
+      return { ...base, activity: "working", needsInput: { count: 0, reason: null },
+        ...(input.runtime === "claude-code" && input.activity.rawEvent === "UserPromptSubmit" ? { permissionResolved: true } : {}) };
     case "idle":
       return { ...base, activity: "idle-at-prompt", needsInput: { count: 0, reason: null } };
     case "needs_input":
@@ -46,6 +67,29 @@ export function evidenceFromHookActivity(input: {
     default:
       return null; // unknown = noise, never evidence
   }
+}
+
+/** A runner seat's last recorded hook as oracle evidence, for restoring after a daemon restart. Only the store's own
+ *  checks pass it: the seat's current session, and an occupant generation resolved as the live one. Past the store's
+ *  freshness window it means what its retained raw event means, as for the wake ladder: a runner's boundary holds. */
+export function restoredRunnerHookEvidence(
+  store: Pick<AgentActivityStore, "getLatestForNode">,
+  seat: { seatNodeId: string; sessionName: string },
+  runtime: string,
+): ActivityEvidence | null {
+  const latest = store.getLatestForNode({ nodeId: seat.seatNodeId, sessionName: seat.sessionName, order: "source" });
+  if (!latest || latest.evidenceSource !== "runtime_hook" || latest.generationProvenance !== "resolved") return null;
+  const state = !latest.stale ? latest.state
+    : latest.reason === "stale_runtime_hook" ? hookEventState(latest.rawEvent, latest.rawSubtype, runtime) : "unknown";
+  return evidenceFromHookActivity({ seatNodeId: seat.seatNodeId, sessionName: seat.sessionName, runtime,
+    activity: { ...latest, state }, seq: 0 });
+}
+
+/** The relay route a hook post names: "plugin" or "managed". An untagged post (an older relay) stays untagged; any
+ *  other value is "unrecognised", so a poster can't add promotion keys of its own. */
+export function hookRelayRoute(value: unknown): EvidenceRoute | undefined {
+  if (value === undefined || value === null) return undefined;
+  return value === "plugin" || value === "managed" ? value : "unrecognised";
 }
 
 // Per-source monotonic seq for ingested hook evidence (the relay does not mint one).
@@ -57,6 +101,80 @@ function nextHookSeq(key: string): number {
 }
 
 export const activityRoutes = new Hono();
+
+/** The shared front of the Pi usage routes: configuration, the local hook token, a JSON object body, and the
+ *  managed Pi seat it names. Returns the response to send on any failure. */
+async function piUsageRequest(c: Context, what: string, needs: (db: SessionRegistry["db"]) => boolean):
+  Promise<{ error: Response } | { body: Record<string, unknown>; db: SessionRegistry["db"]; seat: { sessionName: string; nodeId: string }; piSessionId: string }> {
+  const store = c.get("agentActivityStore" as never) as AgentActivityStore | undefined;
+  const expectedToken = c.get("activityHookToken" as never) as string | undefined;
+  const sessionRegistry = c.get("sessionRegistry" as never) as SessionRegistry | undefined;
+  if (!store || !expectedToken || !sessionRegistry || !needs(sessionRegistry.db)) {
+    return { error: c.json({ ok: false, code: "pi_usage_unconfigured", error: `${what} aren't accepted by this daemon.` }, 503) };
+  }
+  const authHeader = c.req.header("authorization");
+  const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice("Bearer ".length).trim() : null;
+  if (bearerToken !== expectedToken && (c.req.header("x-openrig-activity-token") ?? null) !== expectedToken) {
+    return { error: c.json({ ok: false, code: "activity_hook_unauthorized", error: `${what} require the configured local hook token.` }, 401) };
+  }
+  let body: Record<string, unknown>;
+  try {
+    body = await c.req.json() as Record<string, unknown>;
+  } catch {
+    return { error: c.json({ ok: false, code: "invalid_json", error: "Request body must be JSON." }, 400) };
+  }
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    return { error: c.json({ ok: false, code: "invalid_pi_usage", error: `${what} require a JSON object` }, 400) };
+  }
+  const sessionName = stringOrNull(body.sessionName);
+  const piSessionId = stringOrNull(body.piSessionId);
+  if (!sessionName || !piSessionId) {
+    return { error: c.json({ ok: false, code: "invalid_pi_usage", error: `${what} require sessionName and piSessionId` }, 400) };
+  }
+  const resolved = store.resolveSession({ sessionName, nodeId: stringOrNull(body.nodeId), runtime: "pi" });
+  if (!resolved || resolved.runtime !== "pi") {
+    return { error: c.json({ ok: false, code: "session_not_found", error: `No managed Pi seat named ${sessionName}` }, 404) };
+  }
+  return { body, db: sessionRegistry.db, seat: resolved, piSessionId };
+}
+
+// OPR.0.7.0.2 (cost reporting, Pi atom): a Pi runner started with --usage-facts (usage.pi_cost_facts on) posts the
+// usage facts of entries Pi has persisted. Same local hook token as /hooks. Each (Pi session, entry) is stored
+// once; facts for a seat that isn't a managed Pi seat are refused, never stored under another name. The reply
+// also names the posted entries that already have an OpenRouter charge, so a restarted runner doesn't look
+// them up again.
+activityRoutes.post("/pi-usage", async (c) => {
+  const req = await piUsageRequest(c, "Pi usage facts", hasPiUsageEntriesTable);
+  if ("error" in req) return req.error;
+  if (!Array.isArray(req.body.facts)) {
+    return c.json({ ok: false, code: "invalid_pi_usage", error: "pi-usage requires sessionName, piSessionId and facts[]" }, 400);
+  }
+  const facts = (req.body.facts as unknown[]).map(validPiUsageFact);
+  const valid = facts.filter((fact): fact is NonNullable<typeof fact> => fact !== null);
+  const store = new PiUsageEntriesStore(req.db);
+  const result = store.record({
+    seatSession: req.seat.sessionName, nodeId: req.seat.nodeId, generation: stringOrNull(req.body.generation), piSessionId: req.piSessionId, facts: valid,
+  }, new Date().toISOString());
+  return c.json({ ok: true, ...result, rejected: facts.length - valid.length,
+    // Only for a runner that looks up charges; otherwise the reply is unchanged.
+    ...(req.body.wantCharged === true ? { charged: store.chargedEntryIds(req.piSessionId, valid.map((fact) => fact.entryId)) } : {}) });
+});
+
+// OPR.0.7.0.2 (cost reporting, K4): with usage.pi_openrouter_charge on, the runner posts OpenRouter's charge (or
+// why it is unavailable) for entries it already posted here. Same token and seat checks. A charge for an entry
+// not stored for this seat, or for a different generation than the entry recorded, is refused.
+activityRoutes.post("/pi-usage-charges", async (c) => {
+  const req = await piUsageRequest(c, "Pi provider charges", hasPiUsageChargesTable);
+  if ("error" in req) return req.error;
+  if (!Array.isArray(req.body.charges)) {
+    return c.json({ ok: false, code: "invalid_pi_usage", error: "pi-usage-charges requires sessionName, piSessionId and charges[]" }, 400);
+  }
+  const charges = (req.body.charges as unknown[]).map(validPiProviderCharge);
+  const valid = charges.filter((charge): charge is NonNullable<typeof charge> => charge !== null);
+  const result = new PiUsageEntriesStore(req.db).recordCharges(
+    { seatSession: req.seat.sessionName, piSessionId: req.piSessionId, charges: valid }, new Date().toISOString());
+  return c.json({ ok: true, ...result, rejected: charges.length - valid.length });
+});
 
 activityRoutes.post("/hooks", async (c) => {
   const store = c.get("agentActivityStore" as never) as AgentActivityStore | undefined;
@@ -87,6 +205,8 @@ activityRoutes.post("/hooks", async (c) => {
   } catch {
     return c.json({ ok: false, code: "invalid_json", error: "Request body must be JSON." }, 400);
   }
+
+  if (typeof body.sessionName === "string") body = { ...body, sessionName: physicalSessionName(store.db, body.sessionName) };
 
   if (body.eventFamily === "session_identity") {
     const sessionId = typeof body.sessionId === "string" ? body.sessionId : null;
@@ -215,8 +335,65 @@ activityRoutes.post("/hooks", async (c) => {
     // tokenPersisted reports the stored state, not format validity: a higher-provenance token
     // (operator) refuses the hook write, which only counts as persisted when it already matches.
     const validation = validateResumeToken(runtime, sessionId);
+    // A Claude hook also says how the session began. That only counts as evidence about this
+    // seat's launch when the post carries the node's current occupant generation (#1077).
+    const generation = stringOrNull(body.generation);
+    let currentGeneration = false;
+    try {
+      currentGeneration = !!generation && sessionRegistry.currentOccupantTenure(resolved.nodeId)?.generationUuid === generation;
+    } catch { /* an unreadable ledger is no evidence */ }
+    const source = stringOrNull(body.source);
+    const resumeLaunch = stringOrNull(body.resumeLaunch);
+    // Only for a hook that could name the armed launch: was it the launch's first SessionStart (the
+    // relay records that locally, so a first hook lost in delivery still counts), and was it sent
+    // by the process OpenRig launched?
+    let launchedProcess: ClaudeLaunchedProcess | null = null;
+    const armed = runtime === "claude-code" && currentGeneration && source === "resume" && resumeLaunch
+      && body.resumeLaunchFirst === true ? sessionRegistry.armedResumeLaunch(resolved.sessionId) : null;
+    const hookPid = typeof body.hookPid === "number" && Number.isInteger(body.hookPid) && body.hookPid > 0 ? body.hookPid : null;
+    const tmux = c.get("tmuxAdapter" as never) as { getPanePid(target: string): Promise<number | null> } | undefined;
+    if (armed && armed === resumeLaunch?.trim() && hookPid && tmux) {
+      const binding = sessionRegistry.getBindingForNode(resolved.nodeId);
+      const target = binding?.tmuxPane ?? binding?.tmuxSession;
+      if (target) {
+        launchedProcess = await claudeHookFromLaunchedProcess({ target, tmux, launchToken: armed, hookPid,
+          listProcesses: c.get("listProcesses" as never) as NativeProcessLister | undefined });
+      }
+    }
+    // #1524 (a), Codex only, synchronous with the write below (no await between them):
+    // - a known earlier occupant's hook (its generation is registered for this node and isn't the current one)
+    //   neither writes nor publishes. An absent or unregistered generation, no current tenure, or an unreadable
+    //   ledger keep today's write.
+    // - Codex sends an explicit transcript_path null for a thread it never persists (an internal thread), and also
+    //   when it can't read a persisted conversation's rollout. Either way the saved pointer is kept, so an internal
+    //   thread can't replace it. An absent key, an empty string or a malformed value keep today's write.
+    if (runtime === "codex") {
+      let generationMismatch = false;
+      try {
+        const current = sessionRegistry.currentOccupantTenure(resolved.nodeId);
+        generationMismatch = !!generation && !!current && current.generationUuid !== generation
+          && sessionRegistry.isOccupantGenerationRegistered(resolved.nodeId, generation);
+      } catch { /* an unreadable ledger is no evidence of a mismatch */ }
+      if (generationMismatch) {
+        return c.json({
+          ok: false, code: "generation_mismatch", tokenPersisted: false,
+          error: "Codex session identity ignored: emitter is an earlier occupant of this seat.",
+        }, 409);
+      }
+      if (body.transcriptPathPresent === true && body.transcriptPath === null) {
+        return c.json({
+          ok: true, sessionId, provenance: "hook", tokenPersisted: false, code: "transcript_absent",
+          detail: "Codex reported no transcript for this thread, so the saved conversation pointer was kept.",
+        });
+      }
+    }
+    const persistHook = (type: string, token: string): boolean => {
+      if (runtime !== "claude-code") return sessionRegistry.updateResumeToken(resolved.sessionId, type, token, "hook");
+      return sessionRegistry.recordHookSessionIdentity(resolved.sessionId, type, token,
+        { source, currentGeneration, resumeLaunch, launchedProcess });
+    };
     const tokenPersisted = validation.ok
-      && (sessionRegistry.updateResumeToken(resolved.sessionId, validation.resumeType, validation.token, "hook")
+      && (persistHook(validation.resumeType, validation.token)
         || sessionRegistry.resumeTokenMatches(resolved.sessionId, validation.resumeType, validation.token));
     eventBus.emit({
       type: "agent.session_identity",
@@ -268,6 +445,8 @@ activityRoutes.post("/hooks", async (c) => {
     // Legacy, excluded, or no-tenure emitting paths may omit it ⇒ stamped null ⇒ unresolved at read
     // (sound per-path absence; never false-fresh).
     generation: stringOrNull(body.generation),
+    turnId: stringOrNull(body.turnId),
+    sourceSequence: typeof body.sequence === "number" && Number.isSafeInteger(body.sequence) && body.sequence > 0 ? body.sequence : null,
   });
 
   if (!result.ok) {
@@ -318,6 +497,7 @@ activityRoutes.post("/hooks", async (c) => {
       runtime,
       activity: result.activity,
       seq: nextHookSeq(`${emitted.nodeId}:${runtime ?? "unknown-runtime"}:hooks`),
+      route: hookRelayRoute(body.relayRoute),
     });
     if (evidence) oracle.reportEvidence(evidence);
   }
@@ -370,6 +550,7 @@ activityRoutes.get("/parked", (c) => {
     | {
         list: (opts: { destinationSession?: string; state?: string[]; limit?: number }) => Array<{ qitemId: string; state: string; summary?: string | null }>;
         getParkWakeStatus: (qitemId: string) => import("../domain/queue-wake-repository.js").ParkWakeStatus | null;
+        parkWakeServedByOwnReminder?: (qitemId: string) => boolean;
       }
     | undefined;
   const rigRepo = c.get("rigRepo" as never) as { db: import("better-sqlite3").Database } | undefined;
@@ -391,6 +572,7 @@ activityRoutes.get("/parked", (c) => {
       limit,
     }),
     getParkWake: (qitemId: string) => queueRepo.getParkWakeStatus(qitemId),
+    servedByOwnReminder: (qitemId: string) => queueRepo.parkWakeServedByOwnReminder?.(qitemId) === true,
   };
 
   // WAVE-O B2 (R2 508e383d): the diagnosis is RIG-SCOPED, never fleet-wide. Resolve ONE
@@ -437,7 +619,8 @@ activityRoutes.get("/parked", (c) => {
   `).all(scope.rig) as Array<{ node_id: string; session_name: string }>;
 
   if (seatParam) {
-    const match = seats.find((s) => s.node_id === seatParam || s.session_name === seatParam);
+    const physical = physicalSessionName(rigRepo.db, seatParam);
+    const match = seats.find((s) => s.node_id === seatParam || s.session_name === physical);
     if (!match) {
       return c.json({
         ok: false,

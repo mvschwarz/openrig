@@ -24,7 +24,9 @@ import {
   buildStaleMessage,
   checkMode,
   checkModeAbsolute,
+  RSYNC_MISSING_MESSAGE,
 } from "./mirror-skills.mjs";
+import { buildEdgeDigests } from "../packages/daemon/scripts/gen-control-plane-json.mjs";
 
 test("parseChanges extracts file-change and deletion lines from itemize-changes output", () => {
   const output = [
@@ -188,7 +190,7 @@ test("stagePublicSkills applies membership, path, frontmatter, and fence transfo
     write(join(canon, "operator-internal", "SKILL.md"), "# whole internal\n");
 
     await mirror.stagePublicSkills({
-      canonRoot: canon,
+      sourceFor: (skill) => join(canon, skill),
       stagingRoot: staging,
       membership: membershipFixture({
         clean: ["public-skill", "operator-internal"],
@@ -239,7 +241,7 @@ test("stagePublicSkills preserves prose and executable source modes", async () =
     chmodSync(script, 0o755);
 
     await mirror.stagePublicSkills({
-      canonRoot: canon,
+      sourceFor: (skill) => join(canon, skill),
       stagingRoot: staging,
       membership: membershipFixture({ clean: ["alpha"] }),
       rules: fixtureRules(),
@@ -275,7 +277,7 @@ test("stagePublicSkills applies existing EXCLUDES before scanning or copying", a
     }
 
     await mirror.stagePublicSkills({
-      canonRoot: canon,
+      sourceFor: (skill) => join(canon, skill),
       stagingRoot: staging,
       membership: membershipFixture({ clean: ["alpha"] }),
       rules: fixtureRules(),
@@ -336,7 +338,7 @@ test("stagePublicSkills recursively strips configured keys and internal values w
     );
 
     await mirror.stagePublicSkills({
-      canonRoot: canon,
+      sourceFor: (skill) => join(canon, skill),
       stagingRoot: staging,
       membership: membershipFixture({ clean: ["public-skill"] }),
       rules: fixtureRules(),
@@ -384,7 +386,7 @@ test("stagePublicSkills aborts an unmatched internal fence with file and line", 
 
     await assert.rejects(
       mirror.stagePublicSkills({
-        canonRoot: canon,
+        sourceFor: (skill) => join(canon, skill),
         stagingRoot: join(root, "staging"),
         membership: membershipFixture({ clean: ["public-skill"] }),
         rules: fixtureRules(),
@@ -428,7 +430,7 @@ test("stagePublicSkills strips internal fences from non-SKILL Markdown without s
     }
 
     await mirror.stagePublicSkills({
-      canonRoot: canon,
+      sourceFor: (skill) => join(canon, skill),
       stagingRoot: staging,
       membership: membershipFixture({ clean: ["alpha"] }),
       rules: fixtureRules(),
@@ -461,7 +463,7 @@ test("stagePublicSkills rejects an unmatched fence in non-SKILL Markdown with fi
 
     await assert.rejects(
       mirror.stagePublicSkills({
-        canonRoot: canon,
+        sourceFor: (skill) => join(canon, skill),
         stagingRoot: join(root, "staging"),
         membership: membershipFixture({ clean: ["alpha"] }),
         rules: fixtureRules(),
@@ -493,7 +495,7 @@ test("stagePublicSkills rejects canon file symlinks before reading or staging ou
 
     await assert.rejects(
       mirror.stagePublicSkills({
-        canonRoot: canon,
+        sourceFor: (skill) => join(canon, skill),
         stagingRoot: staging,
         membership: membershipFixture({ clean: ["alpha"] }),
         rules: fixtureRules(),
@@ -528,7 +530,7 @@ test("stagePublicSkills rejects canon directory symlinks before recursion or sta
 
     await assert.rejects(
       mirror.stagePublicSkills({
-        canonRoot: canon,
+        sourceFor: (skill) => join(canon, skill),
         stagingRoot: staging,
         membership: membershipFixture({ clean: ["alpha"] }),
         rules: fixtureRules(),
@@ -561,7 +563,7 @@ test("stagePublicSkills is deterministic for the same clean input", async () => 
     const first = join(root, "first");
     const second = join(root, "second");
     const input = {
-      canonRoot: canon,
+      sourceFor: (skill) => join(canon, skill),
       membership: membershipFixture({ clean: ["public-skill"] }),
       rules: fixtureRules(),
     };
@@ -683,10 +685,12 @@ test("checkGeneratedEdges detects layout and digest drift without invoking the l
       },
     };
     let scannerCalls = 0;
+    const sources = { membership: membershipFixture({ clean: ["alpha"] }), rules: fixtureRules() };
     const clean = await mirror.checkGeneratedEdges({
       repoRoot: root,
       layout,
       digests,
+      ...sources,
       scan: () => {
         scannerCalls += 1;
         throw new Error("provisional scanner must not run from mirror --check");
@@ -696,7 +700,7 @@ test("checkGeneratedEdges detects layout and digest drift without invoking the l
     assert.equal(scannerCalls, 0);
 
     write(join(root, pluginPath, "alpha", "SKILL.md"), "# Changed\n");
-    const drift = await mirror.checkGeneratedEdges({ repoRoot: root, layout, digests });
+    const drift = await mirror.checkGeneratedEdges({ repoRoot: root, layout, digests, ...sources });
     assert.equal(drift.stale, true);
     assert.ok(
       drift.changes.some(
@@ -709,7 +713,7 @@ test("checkGeneratedEdges detects layout and digest drift without invoking the l
 
     write(join(root, pluginPath, "alpha", "SKILL.md"), "# Alpha\n");
     write(join(root, pluginPath, "alpha", "unexpected.txt"), "extra\n");
-    const added = await mirror.checkGeneratedEdges({ repoRoot: root, layout, digests });
+    const added = await mirror.checkGeneratedEdges({ repoRoot: root, layout, digests, ...sources });
     assert.ok(
       added.changes.some(
         (change) =>
@@ -721,7 +725,7 @@ test("checkGeneratedEdges detects layout and digest drift without invoking the l
 
     rmSync(join(root, pluginPath, "alpha", "unexpected.txt"));
     rmSync(join(root, pluginPath, "alpha", "references", "guide.md"));
-    const missing = await mirror.checkGeneratedEdges({ repoRoot: root, layout, digests });
+    const missing = await mirror.checkGeneratedEdges({ repoRoot: root, layout, digests, ...sources });
     assert.ok(
       missing.changes.some(
         (change) =>
@@ -732,7 +736,7 @@ test("checkGeneratedEdges detects layout and digest drift without invoking the l
     );
 
     write(join(root, pluginPath, "alpha", "guide.md"), "# Guide\n");
-    const relocated = await mirror.checkGeneratedEdges({ repoRoot: root, layout, digests });
+    const relocated = await mirror.checkGeneratedEdges({ repoRoot: root, layout, digests, ...sources });
     assert.ok(
       relocated.changes.some(
         (change) =>
@@ -784,14 +788,15 @@ test("checkGeneratedEdges — external-canon-pending allowlist: named-missing to
     // The mechanism is pinned via an injected set: the PRODUCTION default is now EMPTY
     // (oversight-team and retiring-and-inheriting-a-seat landed 2026-08-24; exemptions
     // self-destructed), so under the default EVERY layout-demanded missing skill is loud.
-    const defaultRes = await mirror.checkGeneratedEdges({ repoRoot: root, layout, digests });
+    const sources = { membership: membershipFixture({ clean: ["alpha"] }), rules: fixtureRules() };
+    const defaultRes = await mirror.checkGeneratedEdges({ repoRoot: root, layout, digests, ...sources });
     assert.ok(
       defaultRes.changes.some((c) => c.path === "oversight-team" && c.reason === "layout-missing"),
       "production default allowlist is EMPTY — a missing skill is loud, nothing is tolerated",
     );
 
     const pending = new Set(["oversight-team"]);
-    const res = await mirror.checkGeneratedEdges({ repoRoot: root, layout, digests, externalCanonPending: pending });
+    const res = await mirror.checkGeneratedEdges({ repoRoot: root, layout, digests, ...sources, externalCanonPending: pending });
     const tag = (c) => `${c.path}:${c.reason}`;
     assert.ok(
       !res.changes.some((c) => c.path === "oversight-team" && c.reason === "layout-missing"),
@@ -808,7 +813,7 @@ test("checkGeneratedEdges — external-canon-pending allowlist: named-missing to
 
     // Self-destruct: when the allowlisted skill REAPPEARS on disk, its exemption is flagged stale.
     write(join(root, specPath, "pods", "oversight-team", "SKILL.md"), "# Oversight\n");
-    const res2 = await mirror.checkGeneratedEdges({ repoRoot: root, layout, digests, externalCanonPending: pending });
+    const res2 = await mirror.checkGeneratedEdges({ repoRoot: root, layout, digests, ...sources, externalCanonPending: pending });
     assert.ok(
       res2.changes.some(
         (c) => c.path === "oversight-team" && c.reason === "external-canon-allowlist-stale",
@@ -877,157 +882,246 @@ test("checkGeneratedEdges fails closed on empty or malformed control manifests",
   }
 });
 
-test("authoring regeneration stages canon and projects exact manifest layouts to all three edges", async () => {
+test("authoring regeneration writes each generated copy from the skill's one home and never writes a home", async () => {
   const mirror = await import("./mirror-skills.mjs");
-  assert.equal(
-    typeof mirror.regeneratePublicSkills,
-    "function",
-    "regeneratePublicSkills must be exported",
-  );
-
-  const root = mkdtempSync(join(tmpdir(), "openrig-authoring-red-"));
+  const root = mkdtempSync(join(tmpdir(), "openrig-authoring-homes-"));
   try {
-    const canonRoot = join(root, "canon");
-    const repoRoot = join(root, "repo");
-    write(join(canonRoot, "alpha", "SKILL.md"), "# Alpha\n");
-    write(join(canonRoot, "alpha", "references", "guide.md"), "# Guide\n");
-    write(join(canonRoot, "alpha", "feedback.md"), "private cycle\n");
-    write(join(canonRoot, "alpha", "evals", "case.md"), "private eval\n");
+    const { repoRoot, inputs } = homeFixture(root);
+    const homeBytes = () => snapshotTree(join(repoRoot, "spec"));
+    const before = homeBytes();
 
-    const result = await mirror.regeneratePublicSkills({
-      canonRoot,
-      repoRoot,
-      membership: membershipFixture({ clean: ["alpha"] }),
-      rules: fixtureRules(),
-      layout: {
-        version: 0,
-        edges: {
-          spec: { path: "spec", layout: "categorized" },
-          canonical: { path: "canonical", layout: "mirror-of-spec" },
-          plugin: { path: "plugin", layout: "flat" },
-        },
-        skills: {
-          alpha: {
-            edges: ["canonical", "plugin", "spec"],
-            category: "core",
-          },
-        },
-      },
-    });
-
-    for (const path of [
-      "spec/core/alpha/SKILL.md",
-      "canonical/core/alpha/SKILL.md",
-      "plugin/alpha/SKILL.md",
-      "spec/core/alpha/references/guide.md",
-      "canonical/core/alpha/references/guide.md",
-      "plugin/alpha/references/guide.md",
+    const first = await mirror.regeneratePublicSkills(inputs);
+    assert.deepEqual(first.undeclared, []);
+    for (const [copy, home] of [
+      ["canonical/core/two", "spec/core/two"],
+      ["canonical/process/three", "spec/process/three"],
+      ["plugin/three", "spec/process/three"],
     ]) {
-      assert.equal(readFileSync(join(repoRoot, path), "utf8").startsWith("#"), true);
+      assert.deepEqual(snapshotTree(join(repoRoot, copy)), snapshotTree(join(repoRoot, home)));
     }
-    assert.equal(existsSync(join(repoRoot, "spec/core/alpha/feedback.md")), false);
-    assert.equal(existsSync(join(repoRoot, "plugin/alpha/evals")), false);
-    assert.deepEqual(
-      [...new Set(result.changes.map(({ edge }) => edge))].sort(),
-      ["canonical", "plugin", "spec"],
-    );
-    assert.ok(result.changes.every(({ path }) => !path.includes("feedback.md")));
+    assert.deepEqual(homeBytes(), before);
+    assert.deepEqual((await mirror.regeneratePublicSkills(inputs)).changes, []);
 
+    write(join(repoRoot, "spec/core/two/SKILL.md"), "# Two, edited\n");
+    assert.deepEqual((await mirror.regeneratePublicSkills(inputs)).changes, [
+      { edge: "canonical", path: "core/two/SKILL.md", reason: "write" },
+    ]);
+
+    write(join(repoRoot, "spec/process/three/references/guide.md"), "# Guide, edited\n");
+    assert.deepEqual((await mirror.regeneratePublicSkills(inputs)).changes, [
+      { edge: "canonical", path: "process/three/references/guide.md", reason: "write" },
+      { edge: "plugin", path: "three/references/guide.md", reason: "write" },
+    ]);
+
+    write(join(repoRoot, "plugin/solo/SKILL.md"), "# Solo, edited\n");
+    assert.deepEqual((await mirror.regeneratePublicSkills(inputs)).changes, []);
+    assert.equal(readFileSync(join(repoRoot, "plugin/solo/SKILL.md"), "utf8"), "# Solo, edited\n");
+    assert.deepEqual((await mirror.regeneratePublicSkills(inputs)).changes, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("authoring regeneration repairs permission-only drift in generated copies from the home's modes", async () => {
+  const mirror = await import("./mirror-skills.mjs");
+  const root = mkdtempSync(join(tmpdir(), "openrig-authoring-modes-"));
+  try {
+    const { repoRoot, inputs } = homeFixture(root);
+    write(join(repoRoot, "spec/process/three/scripts/run.sh"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(repoRoot, "spec/process/three/scripts/run.sh"), 0o755);
+    await mirror.regeneratePublicSkills(inputs);
+    for (const copy of ["canonical/process/three", "plugin/three"]) {
+      chmodSync(join(repoRoot, copy, "scripts/run.sh"), 0o644);
+    }
+
+    const result = await mirror.regeneratePublicSkills(inputs);
+    assert.deepEqual(result.changes, [
+      { edge: "canonical", path: "process/three/scripts/run.sh", reason: "mode" },
+      { edge: "plugin", path: "three/scripts/run.sh", reason: "mode" },
+    ]);
+    for (const copy of ["canonical/process/three", "plugin/three", "spec/process/three"]) {
+      assert.equal(statSync(join(repoRoot, copy, "scripts/run.sh")).mode & 0o777, 0o755);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("staged files keep the source's exact mode, so a publishable home passes under umask 0077 and 0022", async () => {
+  const mirror = await import("./mirror-skills.mjs");
+  for (const mask of [0o077, 0o022]) {
+    const root = mkdtempSync(join(tmpdir(), "openrig-umask-"));
+    const previous = process.umask(mask);
+    try {
+      const { repoRoot, inputs, layout } = homeFixture(root);
+      write(join(repoRoot, "spec/process/three/scripts/run.sh"), "#!/bin/sh\nexit 0\n");
+      // A clean checkout's modes, whatever the umask that wrote the fixture.
+      for (const path of ["spec/core/two/SKILL.md", "spec/process/three/SKILL.md", "spec/process/three/references/guide.md", "plugin/solo/SKILL.md"]) {
+        chmodSync(join(repoRoot, path), 0o644);
+      }
+      chmodSync(join(repoRoot, "spec/process/three/scripts/run.sh"), 0o755);
+
+      await mirror.regeneratePublicSkills(inputs);
+      for (const copy of ["canonical/process/three", "plugin/three"]) {
+        assert.equal(statSync(join(repoRoot, copy, "SKILL.md")).mode & 0o777, 0o644, `${copy} under ${mask.toString(8)}`);
+        assert.equal(statSync(join(repoRoot, copy, "scripts/run.sh")).mode & 0o777, 0o755, `${copy} under ${mask.toString(8)}`);
+      }
+      assert.deepEqual(
+        await mirror.checkGeneratedEdges({
+          repoRoot,
+          layout,
+          digests: buildEdgeDigests({ repoRoot, layout }),
+          membership: inputs.membership,
+          rules: inputs.rules,
+        }),
+        { stale: false, changes: [] },
+        `umask ${mask.toString(8)}`,
+      );
+      assert.deepEqual((await mirror.regeneratePublicSkills(inputs)).changes, []);
+    } finally {
+      process.umask(previous);
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("a missing source refuses before any write, and an undeclared skill stays in place and is reported", async () => {
+  const mirror = await import("./mirror-skills.mjs");
+  const root = mkdtempSync(join(tmpdir(), "openrig-authoring-visible-"));
+  try {
+    const { repoRoot, inputs, layout } = homeFixture(root);
+    await mirror.regeneratePublicSkills(inputs);
+
+    write(join(repoRoot, "spec/core/stray/SKILL.md"), "# Stray\n");
+    write(join(repoRoot, "plugin/loose/SKILL.md"), "# Loose\n");
+    write(join(repoRoot, "canonical/core/old/SKILL.md"), "# Old\n");
+    const result = await mirror.regeneratePublicSkills(inputs);
+    assert.deepEqual(result.undeclared, [
+      { edge: "plugin", path: "loose" },
+      { edge: "spec", path: "core/stray" },
+    ]);
+    assert.ok(existsSync(join(repoRoot, "spec/core/stray/SKILL.md")));
+    assert.ok(existsSync(join(repoRoot, "plugin/loose/SKILL.md")));
+    assert.ok(result.changes.length > 0);
+    assert.ok(result.changes.every(({ edge, reason }) => edge === "canonical" && reason === "delete"));
+    assert.equal(existsSync(join(repoRoot, "canonical/core/old")), false);
+    const check = await mirror.checkGeneratedEdges({
+      repoRoot,
+      layout,
+      digests: buildEdgeDigests({ repoRoot, layout }),
+      membership: inputs.membership,
+      rules: inputs.rules,
+    });
+    for (const path of ["core/stray/SKILL.md", "loose/SKILL.md"]) {
+      assert.ok(check.changes.some((change) => change.path === path && change.reason === "layout-unexpected"), path);
+    }
+
+    rmSync(join(repoRoot, "spec/core/two"), { recursive: true });
+    const copyBefore = snapshotTree(join(repoRoot, "canonical"));
     await assert.rejects(
-      mirror.regeneratePublicSkills({
-        canonRoot,
+      mirror.regeneratePublicSkills(inputs),
+      /Missing shipping skill source: spec\/core\/two/,
+    );
+    assert.deepEqual(snapshotTree(join(repoRoot, "canonical")), copyBefore);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("--check catches a generated copy that differs from its home even after the digests are re-pinned", async () => {
+  const mirror = await import("./mirror-skills.mjs");
+  const root = mkdtempSync(join(tmpdir(), "openrig-check-source-"));
+  try {
+    const { repoRoot, inputs, layout } = homeFixture(root);
+    await mirror.regeneratePublicSkills(inputs);
+    const check = () =>
+      mirror.checkGeneratedEdges({
         repoRoot,
-        membership: membershipFixture({ clean: ["alpha", "missing"] }),
-        rules: fixtureRules(),
-        layout: {
-          version: 0,
-          edges: {
-            spec: { path: "spec", layout: "categorized" },
-            canonical: { path: "canonical", layout: "mirror-of-spec" },
-            plugin: { path: "plugin", layout: "flat" },
-          },
-          skills: {
-            alpha: { edges: ["spec"], category: "core" },
-          },
-        },
-      }),
-      /missing.*ship|ship.*missing|missing.*membership/i,
+        layout,
+        digests: buildEdgeDigests({ repoRoot, layout }),
+        membership: inputs.membership,
+        rules: inputs.rules,
+      });
+    assert.deepEqual(await check(), { stale: false, changes: [] });
+
+    write(join(repoRoot, "canonical/core/two/SKILL.md"), "# Hand-edited copy\n");
+    assert.deepEqual((await check()).changes, [
+      { edge: "canonical", path: "core/two/SKILL.md", reason: "copy-diverged" },
+    ]);
+
+    write(join(repoRoot, "canonical/core/two/SKILL.md"), readFileSync(join(repoRoot, "spec/core/two/SKILL.md")));
+    write(join(repoRoot, "spec/process/three/SKILL.md"), "# Three, edited without regenerating\n");
+    rmSync(join(repoRoot, "plugin/three/references/guide.md"));
+    write(join(repoRoot, "plugin/three/extra.md"), "# Extra\n");
+    assert.deepEqual(
+      (await check()).changes.map(({ edge, path, reason }) => `${edge} ${path} ${reason}`).sort(),
+      [
+        "canonical process/three/SKILL.md copy-diverged",
+        "plugin three/SKILL.md copy-diverged",
+        "plugin three/extra.md copy-extra",
+        "plugin three/references/guide.md copy-missing",
+      ].sort(),
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("authoring regeneration reports and repairs permission-only drift on all three edges", async () => {
+test("a home that its public copy would change is refused before any write and named by --check", async () => {
   const mirror = await import("./mirror-skills.mjs");
-  const root = mkdtempSync(join(tmpdir(), "openrig-authoring-modes-"));
+  const root = mkdtempSync(join(tmpdir(), "openrig-home-public-"));
   try {
-    const canonRoot = join(root, "canon");
-    const repoRoot = join(root, "repo");
-    const expected = join(root, "expected-alpha");
-    const prose = "# Alpha\n";
-    const script = "#!/bin/sh\nexit 0\n";
+    const { repoRoot, inputs, layout } = homeFixture(root);
+    await mirror.regeneratePublicSkills(inputs);
+    const copyBefore = snapshotTree(join(repoRoot, "canonical"));
+    write(
+      join(repoRoot, "spec/core/two/SKILL.md"),
+      "---\nname: two\nmetadata:\n  openrig:\n    stage: WIP\n    transfer_test: pending\n---\n# Two\n",
+    );
+    write(join(repoRoot, "spec/process/three/evals/case.md"), "eval\n");
 
-    for (const base of [join(canonRoot, "alpha"), expected]) {
-      write(join(base, "SKILL.md"), prose);
-      write(join(base, "scripts", "run.sh"), script);
-      chmodSync(join(base, "SKILL.md"), 0o644);
-      chmodSync(join(base, "scripts", "run.sh"), 0o755);
-    }
-
-    const targets = [
-      join(repoRoot, "canonical", "core", "alpha"),
-      join(repoRoot, "plugin", "alpha"),
-      join(repoRoot, "spec", "core", "alpha"),
-    ];
-    for (const target of targets) {
-      write(join(target, "SKILL.md"), prose);
-      write(join(target, "scripts", "run.sh"), script);
-      chmodSync(join(target, "SKILL.md"), 0o644);
-      chmodSync(join(target, "scripts", "run.sh"), 0o644);
-      const before = checkModeAbsolute(expected, target);
-      assert.equal(before.stale, true);
-      assert.equal(before.changes.length, 1);
-      assert.match(before.changes[0], /^\.f...p(?:...|.....) scripts\/run\.sh$/);
-    }
-
-    const result = await mirror.regeneratePublicSkills({
-      canonRoot,
-      repoRoot,
-      membership: membershipFixture({ clean: ["alpha"] }),
-      rules: fixtureRules(),
-      layout: {
-        version: 0,
-        edges: {
-          spec: { path: "spec", layout: "categorized" },
-          canonical: { path: "canonical", layout: "mirror-of-spec" },
-          plugin: { path: "plugin", layout: "flat" },
-        },
-        skills: {
-          alpha: {
-            edges: ["canonical", "plugin", "spec"],
-            category: "core",
-          },
-        },
-      },
+    await assert.rejects(mirror.regeneratePublicSkills(inputs), (error) => {
+      assert.match(error.message, /public copies would drop/);
+      assert.match(error.message, /spec\/core\/two\/SKILL\.md/);
+      assert.match(error.message, /spec\/process\/three\/evals\/case\.md/);
+      return true;
     });
+    assert.deepEqual(snapshotTree(join(repoRoot, "canonical")), copyBefore);
 
-    assert.deepEqual(result.changes, [
-      { edge: "canonical", path: "core/alpha/scripts/run.sh", reason: "mode" },
-      { edge: "plugin", path: "alpha/scripts/run.sh", reason: "mode" },
-      { edge: "spec", path: "core/alpha/scripts/run.sh", reason: "mode" },
-    ]);
-    for (const target of targets) {
-      assert.equal(
-        statSync(join(target, "SKILL.md")).mode & 0o777,
-        0o644,
+    const check = await mirror.checkGeneratedEdges({
+      repoRoot,
+      layout,
+      digests: buildEdgeDigests({ repoRoot, layout }),
+      membership: inputs.membership,
+      rules: inputs.rules,
+    });
+    for (const [edge, path] of [
+      ["spec", "core/two/SKILL.md"],
+      ["spec", "process/three/evals/case.md"],
+    ]) {
+      assert.ok(
+        check.changes.some((change) => change.edge === edge && change.path === path && change.reason === "source-not-public"),
+        path,
       );
-      assert.equal(
-        statSync(join(target, "scripts", "run.sh")).mode & 0o777,
-        0o755,
-      );
-      assert.deepEqual(checkModeAbsolute(expected, target).changes, []);
     }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a generated output that overlaps a home is refused before anything is staged or replaced", async () => {
+  const mirror = await import("./mirror-skills.mjs");
+  const root = mkdtempSync(join(tmpdir(), "openrig-overlap-"));
+  try {
+    const { repoRoot, inputs } = homeFixture(root);
+    const layout = structuredClone(inputs.layout);
+    layout.edges.canonical.path = "spec";
+    const before = snapshotTree(join(repoRoot, "spec"));
+    await assert.rejects(
+      mirror.regeneratePublicSkills({ ...inputs, layout }),
+      /Refusing to regenerate: the canonical output .* overlaps the source of/,
+    );
+    assert.deepEqual(snapshotTree(join(repoRoot, "spec")), before);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -1149,6 +1243,23 @@ test("checkModeAbsolute retains its one-source/one-target checksum contract", ()
   assert.equal(calls[0].args.at(-1), "/target/");
 });
 
+test("a missing rsync is reported by name with how to install it, not as a bare ENOENT", () => {
+  const missing = () => {
+    const err = new Error("spawnSync rsync ENOENT");
+    err.code = "ENOENT";
+    throw err;
+  };
+  assert.throws(() => checkModeAbsolute("/source", "/target", missing), (err) => {
+    assert.equal(err.message, RSYNC_MISSING_MESSAGE);
+    assert.match(err.message, /rsync on PATH/);
+    assert.equal(err.cause.code, "ENOENT");
+    return true;
+  });
+  // Any other rsync failure keeps its own error.
+  const other = new Error("rsync exited 23");
+  assert.throws(() => checkModeAbsolute("/source", "/target", () => { throw other; }), (err) => err === other);
+});
+
 // --- helpers (test-only) ---
 
 function fixtureRules() {
@@ -1173,6 +1284,39 @@ function fixtureRules() {
       end: "<!-- internal:end -->",
     },
     allowed_context_substrings: ["do not ship"],
+  };
+}
+
+// Three shipped skills, one per home shape: spec-only copy plus canonical, spec plus canonical and
+// plugin, and plugin-only. Only the homes exist until the first regeneration.
+function homeFixture(root) {
+  const repoRoot = join(root, "repo");
+  write(join(repoRoot, "spec/core/two/SKILL.md"), "---\nname: two\ndescription: Use when two.\n---\n# Two\n");
+  write(join(repoRoot, "spec/process/three/SKILL.md"), "# Three\n");
+  write(join(repoRoot, "spec/process/three/references/guide.md"), "# Guide\n");
+  write(join(repoRoot, "plugin/solo/SKILL.md"), "# Solo\n");
+  const layout = {
+    version: 0,
+    edges: {
+      canonical: { path: "canonical", layout: "mirror-of-spec" },
+      plugin: { path: "plugin", layout: "flat" },
+      spec: { path: "spec", layout: "categorized" },
+    },
+    skills: {
+      solo: { edges: ["plugin"], category: null },
+      three: { edges: ["canonical", "plugin", "spec"], category: "process" },
+      two: { edges: ["canonical", "spec"], category: "core" },
+    },
+  };
+  return {
+    repoRoot,
+    layout,
+    inputs: {
+      repoRoot,
+      layout,
+      membership: membershipFixture({ clean: ["solo", "three", "two"] }),
+      rules: fixtureRules(),
+    },
   };
 }
 

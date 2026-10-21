@@ -48,7 +48,7 @@ export class BootstrapRepository {
   }
 
   listRuns(): BootstrapRun[] {
-    const rows = this.db.prepare("SELECT * FROM bootstrap_runs ORDER BY created_at DESC")
+    const rows = this.db.prepare("SELECT * FROM bootstrap_runs ORDER BY created_at DESC, rowid DESC")
       .all() as BootstrapRunRow[];
     return rows.map((r) => this.rowToRun(r));
   }

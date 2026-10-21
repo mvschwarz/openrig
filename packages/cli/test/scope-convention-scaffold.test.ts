@@ -6,7 +6,7 @@
 // SLICE_TEMPLATE_KINDS fails here until its template carries the sections.
 // Conventions SSOT: docs/reference/sdlc-conventions.md.
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -240,6 +240,7 @@ describe("scope create — the mode-neutral SPEC/NOTES convention lands on disk"
       expect(parseYaml(fs.readFileSync(path.join(missionPath, "mission.yaml"), "utf8"))).toEqual({
         schema: "openrig.mission/v0alpha1",
         kind: "mission",
+        metadata: { status: "planned" },
         composition: { mission_markdown: { spec: "SPEC.md" }, slices: [] },
       });
     }
@@ -404,6 +405,28 @@ describe("release capability-delta scaffold and expiry advisory", () => {
       "# Capability canon\n\nAbsorbed: capability-delta-v0.5.4\n\n## Capabilities\n",
       "utf8",
     );
+    const successorPath = path.join(missionPath, "CAPABILITY-DELTA-v0.5.5.md");
+    fs.rmSync(successorPath);
+    fs.mkdirSync(successorPath);
+    const directorySuccessor = await run(["audit", "--mission", "release-0.5.4", "--json"], substrate.missionsRoot);
+    expect(directorySuccessor.exitCode).toBe(0);
+    expect(JSON.parse(directorySuccessor.stdout).mission.findings.filter(
+      (finding: { kind: string }) => finding.kind === "expired_capability_delta",
+    )).toHaveLength(0);
+    fs.rmSync(successorPath, { recursive: true });
+    fs.writeFileSync(successorPath, "successor\n", "utf8");
+    const access = fs.accessSync.bind(fs);
+    const inaccessible = vi.spyOn(fs, "accessSync").mockImplementation((file, mode) => {
+      if (file === successorPath) throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+      return access(file, mode);
+    });
+    try {
+      const deniedSuccessor = await run(["audit", "--mission", "release-0.5.4", "--json"], substrate.missionsRoot);
+      expect(deniedSuccessor.exitCode).toBe(0);
+      expect(JSON.parse(deniedSuccessor.stdout).mission.findings.filter(
+        (finding: { kind: string }) => finding.kind === "expired_capability_delta",
+      )).toHaveLength(0);
+    } finally { inaccessible.mockRestore(); }
     const expired = await run(["audit", "--mission", "release-0.5.4", "--json"], substrate.missionsRoot);
     const parsed = JSON.parse(expired.stdout);
     expect(expired.exitCode).toBe(0);

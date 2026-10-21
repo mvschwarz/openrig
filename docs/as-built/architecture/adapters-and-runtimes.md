@@ -175,10 +175,17 @@ other rig gets `teamPermissionDefault` instead (`native-permission-store.ts:38`,
 `:56`), on the same launch paths. A Claude Code seat at the floor with no native
 permission mode keeps `--permission-mode acceptEdits` and gets
 `--settings` (`kernel-authority.ts:64–66`):
-`TEAM_CLAUDE_ALLOW` (`:25`) is `Skill`, `Read(./**)`, `Glob`, `Grep`,
+`TEAM_CLAUDE_ALLOW` (`:33`) is `Skill`, `Read(./**)`, `Glob`, `Grep`,
 `Bash(rig:*)`, eight read-only shell commands and 17 test-runner commands, and
-`TEAM_CLAUDE_ASK` (`:32`) asks before 41 `rig` lifecycle commands such as `up`,
-`down`, `seat stop` and `bundle install`. The settings carry the allow list and a
+`TEAM_CLAUDE_ASK` (`:40`) asks before 29 `rig` commands: the 23 that start, stop or
+remove teams or agents (such as `up`, `down`, `seat stop`, `seat restart` and `bundle install`),
+and six kept for a person: `import` (its `--instantiate` mode launches nodes), `seat
+set-permissions` and `policy apply` under both spellings (an explicit permission choice),
+`setup` (kept for its `--policy` path, which records one; a prefix rule can't tell that path
+from ordinary setup, so ordinary setup prompts too), and `compact` (it replaces a peer's
+working context). Other `rig` commands fall under the `Bash(rig:*)` allowance. The list was
+42 before: 15 commands were removed and 2 added (`seat restart` and `policy permissions
+apply`), 13 fewer prompts. The settings carry the allow list and a
 `PreToolUse` Bash hook, `packages/daemon/assets/claude-team-permissions.cjs`, that applies
 both lists (`kernel-authority.ts:43–53`): it asks before a lifecycle command unless the
 command only asks for `--help` or `-h`, allows a simple literal command that matches an
@@ -206,14 +213,16 @@ resume launches (`codex-runtime-adapter.ts:378`, `codex-resume.ts:103`).
   `<cwd>/.mcp.json` (`:597`).
 - **Launches**: fresh = `claude <posture> --session-id <generatedId> --name
   <name>` (`:329`); resume = `claude <posture> --resume <token> --name <name>`
-  (`:328`); fork = `claude <posture> --resume <parentId> --fork-session --name
-  <seat>` (`:298`). `<posture>` is the flag above plus any non-interruptive,
+  (`:328`); fork = `claude <posture> --resume <parentId> --fork-session
+  --session-id <generatedId> --name <seat>`, which needs Claude Code 2.0.73 or
+  later. `<posture>` is the flag above plus any non-interruptive,
   kernel operational or team default argument. Each command may carry a `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`
   env prefix (`yolo-mode.ts:101–103`; on by default, off with
   `OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN=0`), a `--model <model>` argument
-  (`:275`) and `--effort <effort>` (`:277`). A fresh launch returns the
-  generated `--session-id` as its `claude_id` token; a fork polls Claude's
-  session files for the new id.
+  (`:275`) and `--effort <effort>` (`:277`). A fresh launch and a fork both
+  return the generated `--session-id` as their `claude_id` token, so a forked
+  seat's process names its own conversation and strict proof can verify it.
+  Neither reads Claude's session files back.
 - **Managed launch.** When the binding selects a native permission mode, the
   command comes from `ClaudeManagedLaunch.prepare()`
   (`domain/claude-managed-launch.ts:97`), which resolves `claude` on the
@@ -299,9 +308,12 @@ maps (`startup.ts:989`, `:1259`); see `daemon-core.md` §4 "Startup sequence".
 Opening a seat in a terminal app goes through `TerminalProvider`s under
 `packages/daemon/src/domain/terminal/`, served by `/api/terminal`:
 `HerdrAdapter` (`herdr-adapter.ts:351`), the default
-(`terminal-service.ts:55–56`), and `CmuxProviderAdapter`
+(`terminal-service.ts:55–58`), and `CmuxProviderAdapter`
 (`cmux-provider-adapter.ts:52`), which is best effort and refuses with
-`cmux_unavailable` when cmux is not connected. These place existing tmux
+`cmux_unavailable` when cmux is not connected. A request that names no
+provider takes the first of Herdr, then cmux, that is available and alive,
+and stays on Herdr when neither is (`providerNameFor`,
+`terminal-service.ts:175`); a named provider is used as named. These place existing tmux
 sessions in views; they do not launch harnesses.
 
 ## 3. Resume honesty

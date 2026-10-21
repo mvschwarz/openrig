@@ -33,6 +33,8 @@ function herdrTransport(respond?: (method: string, params: Record<string, unknow
   let applied = 0;
   // The default fake answers pane.list the way a live herdr would: every applied pane, still alive.
   const panes: Array<{ pane_id: string; tab_id: string; label: string }> = [];
+  // ...and workspace.list with every workspace it created; like herdr, it accepts a duplicate label.
+  const workspaces: Array<{ workspace_id: string; label: string }> = [];
   return {
     requests,
     transport: {
@@ -40,7 +42,11 @@ function herdrTransport(respond?: (method: string, params: Record<string, unknow
       request: async (method, params) => {
         requests.push({ method, params: params as Record<string, unknown> });
         if (respond) return respond(method, params as Record<string, unknown>, applied);
-        if (method === "workspace.create") return { type: "workspace_created", workspace: { workspace_id: "w1" }, tab: { tab_id: "w1:t0" } };
+        if (method === "workspace.create") {
+          workspaces.push({ workspace_id: "w1", label: String((params as Record<string, unknown>)["label"] ?? "") });
+          return { type: "workspace_created", workspace: { workspace_id: "w1" }, tab: { tab_id: "w1:t0" } };
+        }
+        if (method === "workspace.list") return { type: "workspace_list", workspaces };
         if (method === "layout.apply") {
           applied++;
           for (const label of leafLabels((params as Record<string, unknown>)["root"])) panes.push({ pane_id: `p${panes.length}`, tab_id: `w1:t${applied}`, label });
@@ -122,10 +128,10 @@ describe("S08 — the rig opens as one Herdr space, 16 cells per tab", () => {
     const { svc } = service(new HerdrAdapter({ transportFactory: () => transport }));
     const res = await svc.openView({ view: `rig:${RIG}` });
     // #707: each applied page is followed by one pane.list read (this fake lists every pane alive, so nothing changes).
-    expect(requests.map((r) => r.method)).toEqual(["workspace.create", "layout.apply", "pane.list", "layout.apply", "pane.list", "tab.focus", "tab.close"]);
-    expect(requests[2]!.params).toEqual({ workspace_id: "w1" });
-    expect(requests[5]!.params).toEqual({ tab_id: "w1:t1" });
-    expect(requests[6]!.params).toEqual({ tab_id: "w1:t0" });
+    expect(requests.map((r) => r.method)).toEqual(["workspace.list", "workspace.create", "layout.apply", "pane.list", "layout.apply", "pane.list", "tab.focus", "tab.close"]);
+    expect(requests[3]!.params).toEqual({ workspace_id: "w1" });
+    expect(requests[6]!.params).toEqual({ tab_id: "w1:t1" });
+    expect(requests[7]!.params).toEqual({ tab_id: "w1:t0" });
     expect(res.notes).toEqual([TEAM_HANDOFF_NOTE]);
   });
 
@@ -138,21 +144,30 @@ describe("S08 — the rig opens as one Herdr space, 16 cells per tab", () => {
     expect(requests.some((r) => r.method === "tab.close")).toBe(false);
   });
 
-  it("re-opening creates a second space with the same name and different tab labels", async () => {
+  // #1604: herdr accepts a duplicate label, so a re-open is numbered and says the view was already open.
+  it("re-opening creates a second, numbered space that says the view was already open, with different tab labels", async () => {
     const { transport, requests } = herdrTransport();
     let n = 0;
     const { svc } = service(new HerdrAdapter({ transportFactory: () => transport, newLaunchToken: () => `l${++n}` }));
-    await svc.openView({ view: `rig:${RIG}` });
-    await svc.openView({ view: `rig:${RIG}` });
+    const first = await svc.openView({ view: `rig:${RIG}` });
+    const second = await svc.openView({ view: `rig:${RIG}` });
+    const third = await svc.openView({ view: `rig:${RIG}` });
     const creates = requests.filter((r) => r.method === "workspace.create");
-    expect(creates.map((c) => c.params["label"])).toEqual([RIG, RIG]);
+    expect(creates.map((c) => c.params["label"])).toEqual([RIG, `${RIG} (2)`, `${RIG} (3)`]);
+    expect(first.notes).toEqual([TEAM_HANDOFF_NOTE]);
+    expect(second.notes).toEqual([TEAM_HANDOFF_NOTE, `A view named "${RIG}" is already open, so this one is "${RIG} (2)".`]);
+    expect(third.notes).toEqual([TEAM_HANDOFF_NOTE, `A view named "${RIG}" is already open, so this one is "${RIG} (3)".`]);
+    expect([first.ok, second.ok, third.ok]).toEqual([true, true, true]);
     const labels = requests.filter((r) => r.method === "layout.apply").map((a) => a.params["tab_label"]);
-    expect(new Set(labels).size).toBe(4);
+    expect(new Set(labels).size).toBe(6);
     expect(labels[0]).not.toBe(labels[2]);
   });
 
+  // The list read before the create can fail; a refused duplicate name is still numbered after it.
   it("if herdr refuses a duplicate name, it retries with a numbered suffix and says so", async () => {
+    let lists = 0;
     const { transport, requests } = herdrTransport((m, p) => {
+      if (m === "workspace.list" && ++lists === 1) throw new Error("list unavailable");
       if (m === "workspace.create") {
         if (p["label"] === RIG) throw new Error("label already in use");
         return { type: "c", workspace: { workspace_id: "w2" }, tab: { tab_id: "w2:t0" } };
@@ -221,7 +236,7 @@ describe("S08 correction — the starting tab is kept unless it is known blank",
     const { transport, requests } = herdrTransport((m) => (m === "workspace.create" ? create : { type: "l" }));
     const { svc } = service(new HerdrAdapter({ transportFactory: () => transport }));
     const res = await svc.openView({ view: `rig:${RIG}` });
-    expect(requests.map((r) => r.method)).toEqual(["workspace.create", "layout.apply", "layout.apply"]);
+    expect(requests.map((r) => r.method)).toEqual(["workspace.list", "workspace.create", "layout.apply", "layout.apply"]);
     expect(res.notes).toEqual([TEAM_HANDOFF_NOTE, "herdr returned no tab id for any page, so no tab was focused explicitly.", KEPT]);
   });
 
@@ -244,7 +259,7 @@ describe("S08 correction — the starting tab is kept unless it is known blank",
     const { transport, requests } = herdrTransport((m) => { if (m === "workspace.create") return create; throw new Error("refused"); });
     const { svc } = service(new HerdrAdapter({ transportFactory: () => transport }));
     const res = await svc.openView({ view: `rig:${RIG}` });
-    expect(requests.map((r) => r.method)).toEqual(["workspace.create", "layout.apply", "layout.apply"]);
+    expect(requests.map((r) => r.method)).toEqual(["workspace.list", "workspace.create", "layout.apply", "layout.apply"]);
     expect(res.opened).toEqual([]);
     expect(res.degraded).toHaveLength(17);
   });

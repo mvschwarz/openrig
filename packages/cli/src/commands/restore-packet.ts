@@ -14,6 +14,7 @@ import { readFileSync, existsSync, statSync } from "node:fs";
 import { resolve as resolvePath, join as joinPath } from "node:path";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, type LifecycleDeps } from "../daemon-lifecycle.js";
+import { daemonMayAnswer } from "../daemon-reachability.js";
 import { realDeps } from "./daemon.js";
 import { detectRuntime } from "../restore-packet/runtime-detect.js";
 import { parseSessionName } from "../session-name.js";
@@ -143,7 +144,7 @@ async function fetchSourceTranscriptViaDaemon(
 ): Promise<{ content: string; sourceCwd: string | null }> {
   const lifecycleDeps = deps?.lifecycleDeps ?? realDeps();
   const status = await getDaemonStatus(lifecycleDeps);
-  if (status.state !== "running" || typeof status.port !== "number") {
+  if (!daemonMayAnswer(status) || typeof status.port !== "number") {
     throw new Error("daemon not running; start it with: rig daemon start");
   }
   const url = getDaemonUrl(status);

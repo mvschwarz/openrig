@@ -47,7 +47,7 @@ describe("0.5.2-07 A2-3 — model-fidelity enumeration guard", () => {
 
   it("claude adapter: every claude seat-launch template threads modelArg", () => {
     const src = read("adapters/claude-code-adapter.ts");
-    const templates = [...src.matchAll(/`(?:\$\{rendererPrefix\})?claude \$\{[^`]*`/g)].map((m) => m[0]);
+    const templates = [...src.matchAll(/`(?:\$\{claudeResumeLaunchPrefix\([^)]*\)\})?(?:\$\{rendererPrefix\})?claude \$\{[^`]*`/g)].map((m) => m[0]);
     const seatLaunches = templates.filter((t) => /--resume|--session-id|--fork-session/.test(t));
     // fresh (--session-id), resume (--resume … --name), fork (--resume … --fork-session).
     expect(seatLaunches.length).toBeGreaterThanOrEqual(3);
@@ -82,7 +82,7 @@ describe("0.5.2-07 A2-3 — model-fidelity enumeration guard", () => {
     }
 
     const claudeSrc = read("adapters/claude-code-adapter.ts");
-    const claudeTemplates = [...claudeSrc.matchAll(/`(?:\$\{rendererPrefix\})?claude \$\{[^`]*`/g)].map((m) => m[0]);
+    const claudeTemplates = [...claudeSrc.matchAll(/`(?:\$\{claudeResumeLaunchPrefix\([^)]*\)\})?(?:\$\{rendererPrefix\})?claude \$\{[^`]*`/g)].map((m) => m[0]);
     const claudeSeatLaunches = claudeTemplates.filter((t) => /--resume|--session-id|--fork-session/.test(t));
     expect(claudeSeatLaunches.length).toBeGreaterThanOrEqual(3);
     for (const t of claudeSeatLaunches) {
@@ -150,8 +150,9 @@ describe("0.5.2-07 A2-3 — model-fidelity enumeration guard", () => {
       /SELECT id, runtime, cwd, model, codex_config_profile, effort FROM nodes/,
     );
     expect(handover, "NodeRow must carry effort").toMatch(/effort: string \| null/);
-    expect(handover, "createSuccessor must forward effort onto the successor node").toMatch(
-      /effort: node\.effort/,
+    // OPR.0.7.0.7: the successor carries the shared resolver's effort (saved seat choice, else authored).
+    expect(handover, "createSuccessor must forward the resolved effort onto the successor node").toMatch(
+      /effort: readSeatEffort\(this\.db, node\.id\)\?\.effective/,
     );
     const launcher = read("domain/successor-session-launcher.ts");
     expect(launcher, "SuccessorNode must declare effort").toMatch(/effort\?: string \| null/);

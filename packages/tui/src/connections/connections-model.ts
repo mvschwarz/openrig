@@ -15,7 +15,6 @@ export interface ConnectionsRead {
   running: { state: string; activatedAt: string | null; outboundReady: boolean | null; inboundReady: boolean | null; inboundState: string; applied: string;
     inboundDelivery?: string | null; inboundEventsMissingSince?: string | null };
   state: string; nextAction: string;
-  verification: { state: string; at: string | null; actor: string | null };
   registry: { state: string; path: string | null };
   humans: Array<{ entityId: string; address: string; displayName: string | null; deliveryClass: string; availability: string; excluded: boolean | null;
     bindings: Array<{ kind: string; ref: string | null; role: string; handle: string | null }> }>;
@@ -100,9 +99,7 @@ export function connectionsLines(snap: FleetSnapshot, width: number, timeZone = 
     lines.push(fieldLine({ label: "new inbound", value: cfg.inboundDestination ?? "missing", link: inboundAction }),
       { text: "  Replies follow their existing conversation; new/unmapped inbound uses the configured seat above." });
   }
-  lines.push(fieldLine({ label: "last check", value: `${c.verification.state}${c.verification.at ? ` · ${displayTime(c.verification.at, timeZone)} · ${c.verification.actor ?? "actor unknown"}` : " · no matching check in the bounded audit tail"}` }),
-    { text: "  A check records scopes/channel membership at that time. It does not prove delivery, current credentials, or readership." },
-    fieldLine({ label: "next", value: c.nextAction }),
+  lines.push(fieldLine({ label: "next", value: c.nextAction }),
     { text: "  Run guidance on the displayed instance. verify contacts Slack explicitly; enable/disable retain their audited CLI behavior." },
     sectionRule("External humans · instance-wide registry", width));
   if (c.registry.state !== "available") lines.push({ text: "  Registry unavailable; recipients unknown. Next: rig gateway human list --json" });

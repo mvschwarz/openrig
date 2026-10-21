@@ -260,11 +260,11 @@ describe("CodexResumeAdapter", () => {
       }
     });
 
-    it("pane falls back to shell after timeout -> { ok: false, code: 'retry_fresh' }", async () => {
+    it("a shell label without a proven idle shell keeps the launch for attention, not a fresh retry", async () => {
       const adapter = new CodexResumeAdapter(
         mockTmux({
           // Inconclusive during polls (unknown command, empty content), then
-          // shell on the final assessment.
+          // shell on the final assessment, with no process evidence to prove it idle.
           getPaneCommand: async () => "zsh",
           capturePaneContent: async () => "",
         }),
@@ -273,11 +273,21 @@ describe("CodexResumeAdapter", () => {
 
       const result = await adapter.resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo");
 
-      expect(result.ok).toBe(false);
-      if (!result.ok) {
-        expect(result.code).toBe("retry_fresh");
-        expect(result.message).toContain("returned to shell");
-      }
+      expect(result).toMatchObject({ ok: false, code: "attention_required" });
+      if (!result.ok) expect(result.message).toContain("isn't a proven idle shell");
+    });
+
+    it("a proven, stable idle shell is still a return to the shell -> { ok: false, code: 'retry_fresh' }", async () => {
+      const startedAt = "Fri Oct 17 06:00:00 2026";
+      const tmux = Object.assign(mockTmux({ getPaneCommand: async () => "zsh", capturePaneContent: async () => "" }),
+        { getPanePid: async () => 100 });
+      const adapter = new CodexResumeAdapter(tmux, { ...fastOptions,
+        listProcesses: () => [{ pid: 100, ppid: 1, pgid: 100, tpgid: 100, executableName: "zsh", command: "-zsh", startedAt }] });
+
+      const result = await adapter.resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo");
+
+      expect(result).toMatchObject({ ok: false, code: "retry_fresh" });
+      if (!result.ok) expect(result.message).toContain("returned to shell");
     });
 
     it("probe stays inconclusive (unknown pane) past timeout -> { ok: false, code: 'resume_failed' }", async () => {

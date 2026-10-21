@@ -23,7 +23,7 @@ describe("stub-script behavior vocabulary (twin-parity)", () => {
   });
 
   it("carries exactly the locked four-behavior repertoire", () => {
-    expect([...STUB_BEHAVIORS]).toEqual(["compaction", "slow_output", "mid_turn_death", "restore"]);
+    expect([...STUB_BEHAVIORS]).toEqual(["compaction", "slow_output", "mid_turn_death", "restore", "refocus"]);
   });
 });
 

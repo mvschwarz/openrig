@@ -43,6 +43,14 @@ describe("scenario-daemon forced-local spawn (integration)", () => {
     expect(p).toBeLessThan(65536);
   });
 
+  it("names the missing CLI build instead of a Node module error when the rig bin is absent", async () => {
+    scaffold = prepareHermeticEnv({ baseEnv: realBaseEnv() });
+    const missing = resolve(HERE, "../../cli/dist/no-such-bin-wrapper.js");
+    await expect(spawnScenarioDaemon(scaffold, { rigBin: missing })).rejects.toThrow(
+      /the rig CLI is not built at .*no-such-bin-wrapper\.js\. Run `npm run build`/,
+    );
+  });
+
   it("spawns a real forced-local daemon, serves the ps read, and tears it down", async () => {
     scaffold = prepareHermeticEnv({ baseEnv: realBaseEnv() });
     daemon = await spawnScenarioDaemon(scaffold, { rigBin: RIG_BIN });

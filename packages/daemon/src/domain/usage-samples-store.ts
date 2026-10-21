@@ -20,6 +20,10 @@ export interface ContextSampleInput {
   totalInputTokens: number | null;
   totalOutputTokens: number | null;
   usedPercentage: number | null;
+  /** The native session the sample belongs to (Claude session id, Codex thread id). */
+  nativeSessionId?: string | null;
+  /** Claude's cumulative client-side cost estimate for that session; null when none is reported. */
+  clientCostEstimateUsd?: number | null;
 }
 
 export interface ProviderWindowSampleInput {
@@ -35,6 +39,18 @@ interface LastContextRow {
   total_input_tokens: number | null;
   total_output_tokens: number | null;
   used_percentage: number | null;
+  native_session_id?: string | null;
+  client_cost_estimate_usd?: number | null;
+}
+
+/** Whether migration 105's cost columns exist (a database built from 062 alone has none). */
+export function hasClientCostColumns(db: Database): boolean {
+  try {
+    const cols = db.prepare("PRAGMA table_info(usage_samples)").all() as Array<{ name: string }>;
+    return cols.some((c) => c.name === "client_cost_estimate_usd") && cols.some((c) => c.name === "native_session_id");
+  } catch {
+    return false;
+  }
 }
 
 interface LastWindowRow {
@@ -45,16 +61,25 @@ interface LastWindowRow {
 
 export class UsageSamplesStore {
   private readonly db: Database;
+  private costColumns: boolean | null = null;
 
   constructor(db: Database) {
     this.db = db;
   }
 
+  private withCost(): boolean {
+    this.costColumns ??= hasClientCostColumns(this.db);
+    return this.costColumns;
+  }
+
   /** Append the context-lane sample IFF it advanced past the seat's latest row. */
   appendContextSample(s: ContextSampleInput, capturedAt: string): boolean {
+    const cost = this.withCost();
+    const nativeSessionId = s.nativeSessionId ?? null;
+    const estimate = s.clientCostEstimateUsd ?? null;
     const last = this.db
       .prepare(
-        `SELECT sampled_at, total_input_tokens, total_output_tokens, used_percentage
+        `SELECT sampled_at, total_input_tokens, total_output_tokens, used_percentage${cost ? ", native_session_id, client_cost_estimate_usd" : ""}
          FROM usage_samples
          WHERE lane = 'context' AND seat_session = ? AND node_id = ?
          ORDER BY id DESC LIMIT 1`,
@@ -65,7 +90,8 @@ export class UsageSamplesStore {
       last.sampled_at === s.sampledAt &&
       last.total_input_tokens === s.totalInputTokens &&
       last.total_output_tokens === s.totalOutputTokens &&
-      last.used_percentage === s.usedPercentage
+      last.used_percentage === s.usedPercentage &&
+      (!cost || ((last.native_session_id ?? null) === nativeSessionId && (last.client_cost_estimate_usd ?? null) === estimate))
     ) {
       return false;
     }
@@ -73,8 +99,8 @@ export class UsageSamplesStore {
       .prepare(
         `INSERT INTO usage_samples
            (lane, seat_session, node_id, source, sampled_at, captured_at,
-            total_input_tokens, total_output_tokens, used_percentage)
-         VALUES ('context', ?, ?, ?, ?, ?, ?, ?, ?)`,
+            total_input_tokens, total_output_tokens, used_percentage${cost ? ", native_session_id, client_cost_estimate_usd" : ""})
+         VALUES ('context', ?, ?, ?, ?, ?, ?, ?, ?${cost ? ", ?, ?" : ""})`,
       )
       .run(
         s.seatSession,
@@ -85,6 +111,7 @@ export class UsageSamplesStore {
         s.totalInputTokens,
         s.totalOutputTokens,
         s.usedPercentage,
+        ...(cost ? [nativeSessionId, estimate] : []),
       );
     return true;
   }

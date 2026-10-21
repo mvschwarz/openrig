@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { TranscriptStore } from "../src/domain/transcript-store.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
-import { startTranscriptRotation, clearAllTranscriptRotationsForTest, getLastCaptureAt, getTranscriptCaptureStats } from "../src/domain/transcript-rotation.js";
+import { startTranscriptRotation, clearAllTranscriptRotationsForTest, getLastCaptureAt, getLastCheckedAt, getTranscriptCaptureStats } from "../src/domain/transcript-rotation.js";
 
 let root: string;
 beforeEach(() => { root = fs.mkdtempSync(path.join(os.tmpdir(), "adaptive-capture-")); vi.useFakeTimers(); });
@@ -20,6 +20,14 @@ function fixture() {
   return { adapter, activity: (value: number, content: string) => { hint = value; text = content; } };
 }
 
+/** Output every second: the hint is the current second, so every due tick captures (an active seat). */
+function moving(adapter: { readAllSessionWindowActivity: ReturnType<typeof vi.fn> }) {
+  adapter.readAllSessionWindowActivity.mockImplementation(async () => {
+    const now = Math.floor(Date.now() / 1000);
+    return new Map([["seat", now], ["other", now]]);
+  });
+}
+
 function start(adapter: object, session = "seat", resolve?: () => { lines: number; pollIntervalMs: number }) {
   const file = path.join(root, session);
   startTranscriptRotation(adapter as TmuxAdapter, session, file, { lines: 1000, pollIntervalMs: 2000 }, resolve);
@@ -31,14 +39,16 @@ describe("adaptive capture", () => {
     const { adapter, activity } = fixture();
     const options = () => ({ lines: 1000, pollIntervalMs: 2000 });
     const file = start(adapter, "seat", options); start(adapter, "other", options);
-    await vi.advanceTimersByTimeAsync(16_000);
-    // Idle captures at 0, 2, 5, 8, 11 and 14s fit the freshness budget.
-    expect(adapter.capturePaneContent).toHaveBeenCalledTimes(12);
-    expect(adapter.readAllSessionWindowActivity).toHaveBeenCalledTimes(17);
+    await vi.advanceTimersByTimeAsync(9_000);
+    // No output since the first capture: idle ticks at 2, 5 and 8s are checks, not captures.
+    expect(adapter.capturePaneContent).toHaveBeenCalledTimes(2);
+    expect(adapter.readAllSessionWindowActivity).toHaveBeenCalledTimes(10);
     expect(getTranscriptCaptureStats().idleSeats).toBe(2);
-    expect(Date.now() - getLastCaptureAt("seat")!).toBe(2000);
+    expect(getLastCaptureAt("seat")).toBe(Date.now() - 9_000);
+    expect(Date.now() - getLastCheckedAt("seat")!).toBe(1000);
+    // A change with no activity and no key move (the mock moves neither) lands with the full read every 10 s.
     activity(1, "same-second output not reflected by the hint\n");
-    await vi.advanceTimersByTimeAsync(6000);
+    await vi.advanceTimersByTimeAsync(10_000);
     expect(fs.readFileSync(file, "utf8")).toBe("same-second output not reflected by the hint\n");
   });
 
@@ -93,7 +103,7 @@ describe("adaptive capture", () => {
   });
 
   it("applies live intervals and line counts while keeping pending captures exclusive", async () => {
-    const { adapter } = fixture();
+    const { adapter } = fixture(); moving(adapter);
     let options = { lines: 1000, pollIntervalMs: 2000 };
     start(adapter, "seat", () => options);
     await vi.advanceTimersByTimeAsync(6000);
@@ -130,7 +140,7 @@ describe("adaptive capture", () => {
     // Includes tick spacing, a slow hint and capture, after backoff reaches its ceiling.
     for (let n = 0; n < 250; n++) {
       await vi.advanceTimersByTimeAsync(100);
-      expect(Date.now() - getLastCaptureAt("seat")!).toBeLessThan(10_000);
+      expect(Date.now() - Math.max(getLastCaptureAt("seat")!, getLastCheckedAt("seat") ?? 0)).toBeLessThan(10_000);
     }
   });
 
@@ -147,12 +157,12 @@ describe("adaptive capture", () => {
     await vi.advanceTimersByTimeAsync(8000);
     for (let n = 0; n < 300; n++) {
       await vi.advanceTimersByTimeAsync(100);
-      expect(store.getIngestHealth("rig", "seat")).toMatchObject({ state: "live", reason: "capture_fresh" });
+      expect(store.getIngestHealth("rig", "seat").state).toBe("live");
     }
   });
 
   it("does not refresh or overlap a capture that outlives its deadline", async () => {
-    const { adapter } = fixture();
+    const { adapter } = fixture(); moving(adapter);
     start(adapter, "seat", () => ({ lines: 1000, pollIntervalMs: 2000 }));
     await vi.advanceTimersByTimeAsync(0);
     const first = getLastCaptureAt("seat");
@@ -197,7 +207,7 @@ describe("adaptive capture", () => {
   });
 
   it("reports UTF8 byte cost and failures without manufacturing capture freshness", async () => {
-    const { adapter, activity } = fixture(); activity(1, "α\n");
+    const { adapter, activity } = fixture(); activity(1, "α\n"); moving(adapter);
     start(adapter); await vi.advanceTimersByTimeAsync(0);
     const first = getLastCaptureAt("seat");
     adapter.capturePaneContent.mockResolvedValueOnce(null as never);

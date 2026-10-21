@@ -26,7 +26,7 @@ export type TopologyOp =
   // An imperative REPAIR op: not derivable from a declarative membership diff
   // (the node already exists; only the live-binding projection is stale), so
   // diffTopology does not classify it — convergeOp applies it directly.
-  | { kind: "reconcile_session"; sessionName: string; rigId?: string; logicalId?: string }
+  | { kind: "reconcile_session"; sessionName: string; rigId?: string; logicalId?: string; repairMissingPane?: boolean }
   | { kind: "remove_member"; logicalId: string }
   | { kind: "move_member"; logicalId: string; toPod: string }
   | { kind: "fork_member"; logicalId: string; toMember: string }
@@ -148,6 +148,7 @@ export async function convergeOp(
         sessionName: op.sessionName,
         rigId: op.rigId,
         logicalId: op.logicalId,
+        repairMissingPane: op.repairMissingPane,
       });
       return { kind: "reconcile_session", supported: true, outcome };
     }

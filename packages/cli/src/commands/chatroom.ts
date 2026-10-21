@@ -185,6 +185,7 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
       // Direct SSE watch
       const url = `${client.baseUrl}/api/rigs/${encodeURIComponent(rigId)}/chat/watch`;
       try {
+        await client.assertLocalOwner();
         const res = await fetch(url, {
           headers: { Accept: "text/event-stream" },
         });

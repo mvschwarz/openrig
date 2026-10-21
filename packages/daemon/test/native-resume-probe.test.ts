@@ -10,6 +10,9 @@ import {
 import { CLAUDE_BYPASS_CONSENT } from "./fixtures/claude-bypass-consent.js";
 
 const currentUpdatePrompt = fs.readFileSync(new URL("./fixtures/codex-update-0.160.0.txt", import.meta.url), "utf8");
+// Codex's own rust-v0.156.1 snapshot at b412ff32c417f855c2b2d1581b77058eed87c84b:
+// https://github.com/openai/codex/blob/b412ff32c417f855c2b2d1581b77058eed87c84b/codex-rs/tui/src/onboarding/snapshots/codex_tui__onboarding__trust_directory__tests__renders_snapshot_for_git_repo.snap
+const currentTrustPrompt = fs.readFileSync(new URL("./fixtures/codex-trust-0.156.1.txt", import.meta.url), "utf8");
 
 describe("default-path consent", () => {
   it.each([CLAUDE_BYPASS_CONSENT, CLAUDE_BYPASS_CONSENT.replace("    No, exit\n  ❯ Yes, I accept", "  ❯ No, exit\n    Yes, I accept")])("recognizes the current consent menu", screen => {
@@ -47,11 +50,18 @@ describe("native resume probe", () => {
     it.each([
       ["Accessing workspace:\nYes, I trust this folder", "trust_gate"],
       ["new MCP servers found in .mcp.json\nSelect any you wish to enable\nEnter to confirm", "mcp_gate"],
-      ["Not logged in · Run /login", "login_required"],
+      ["● Not logged in · Please run /login\n❯\u00a0", "login_required"],
       ["How would you like to resume?\n❯ Resume from summary\n  Resume full session as-is", "claude_resume_selection_prompt"],
       ["No conversation found", "no_conversation_found"],
     ])("does not let identity proof waive prerequisites: %s", (panel, code) => {
       expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "sh", paneContent: `${screen}\n${panel}`, claudeAutoIdentityVerified: true }).code).toBe(code);
+    });
+    it("lets identity proof decide when only the not-logged-in footer shows", () => {
+      const paneContent = `${screen}                                   Not logged in · Run /login\n`;
+      expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "sh", paneContent }))
+        .toMatchObject({ status: "inconclusive", code: "claude_auto_identity_required" });
+      expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "sh", paneContent, claudeAutoIdentityVerified: true }))
+        .toMatchObject({ status: "resumed", code: "active_runtime" });
     });
   });
   describe("Claude's exact resume identity can validate the visible composer", () => {
@@ -71,7 +81,7 @@ describe("native resume probe", () => {
     it.each([
       ["Accessing workspace:\nYes, I trust this folder", "inconclusive", "trust_gate"],
       ["new MCP servers found in .mcp.json\nSelect any you wish to enable\nEnter to confirm", "inconclusive", "mcp_gate"],
-      ["Not logged in · Run /login", "failed", "login_required"],
+      ["● Not logged in · Please run /login\n❯\u00a0", "failed", "login_required"],
       ["How would you like to resume?\n❯ Resume from summary\n  Resume full session as-is", "attention_required", "claude_resume_selection_prompt"],
       ["No conversation found", "failed", "no_conversation_found"],
     ])("keeps known blocking prompt authoritative despite resume identity proof: %s", (panel, status, code) => {
@@ -81,6 +91,14 @@ describe("native resume probe", () => {
         paneContent: `${screen}\n${panel}`,
         claudeResumeIdentityVerified: true,
       })).toMatchObject({ status, code });
+    });
+
+    it("lets resume identity decide when only the not-logged-in footer shows", () => {
+      const paneContent = `${screen}                                   Not logged in · Run /login\n`;
+      expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "2.1.283", paneContent }))
+        .toMatchObject({ status: "inconclusive", code: "awaiting_runtime" });
+      expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "2.1.283", paneContent, claudeResumeIdentityVerified: true }))
+        .toMatchObject({ status: "resumed", code: "verified_native_identity" });
     });
   });
   describe("issue116 headerless custom status lines", () => {
@@ -399,7 +417,7 @@ describe("native resume probe", () => {
     });
   });
 
-  it("classifies the Claude login-required screen as failed, not resumed", () => {
+  it("reads the persistent not-logged-in footer on a live Claude TUI as input readiness, not a login refusal", () => {
     expect(
       assessNativeResumeProbe({
         runtime: "claude-code",
@@ -416,10 +434,83 @@ describe("native resume probe", () => {
           "  ⏵⏵ accept edits on (shift+tab to cycle)                     ● high · /effort",
         ].join("\n"),
       })
-    ).toEqual({
-      status: "failed",
-      code: "login_required",
-      detail: "Claude is running but cannot continue until the user logs in.",
+    ).toMatchObject({ status: "resumed", code: "active_runtime" });
+  });
+
+  // #1405. The frame is a native Claude Code 2.1.296 capture: header, `❯` prompt row, `●` reply, input box, mode
+  // bar. The refusal strings are Claude's documented ones (code.claude.com/docs/en/errors); where Claude draws a
+  // refusal was not captured, so both a `●` reply row and a `⎿` result row are covered.
+  describe("a Claude login refusal counts only as the latest response", () => {
+    const native = fs.readFileSync(new URL("./fixtures/input-box/claude-code-2.1.296/after-enter-15s.J.txt", import.meta.url), "utf8").split("\n");
+    const head = native.slice(0, native.findIndex((line) => line.startsWith("❯ Reply with")));
+    const tail = native.slice(native.findIndex((line) => line.startsWith("✻ Cooked")) + 1);
+    const lastRule = tail.findLastIndex((line) => line.startsWith("────"));
+    const footerTail = [...tail.slice(0, lastRule + 1), "                                                    Not logged in · Run /login", ...tail.slice(lastRule + 1)];
+    const pane = (history: string[], footer = false) => [...head, ...history, ...(footer ? footerTail : tail)].join("\n");
+    const refusal = "Not logged in · Please run /login";
+
+    it.each([
+      ["the footer before any turn", pane([], true), "resumed"],
+      ["the footer after a completed turn", pane(["❯ Reply with OK.", "", "● OK", ""], true), "resumed"],
+      ["a current refusal as a reply row, with the footer", pane(["❯ hello", "", `● ${refusal}`, ""], true), "failed"],
+      ["a current refusal as a result row, without the footer", pane(["❯ hello", `  ⎿  ${refusal}`, ""]), "failed"],
+      ["a current expired-login refusal", pane(["❯ hello", "", "● Login expired · Please run /login", ""]), "failed"],
+      ["a refusal followed by a newer reply", pane(["❯ hello", "", `● ${refusal}`, "", "❯ again", "", "● OK", ""]), "resumed"],
+      ["a refusal followed by /login", pane(["❯ hello", "", `● ${refusal}`, "", "❯ /login", "  ⎿  Login successful", ""]), "resumed"],
+      ["a refusal quoted in a prompt", pane([`❯ What does "${refusal}" mean?`, "", "● It means Claude has no login of its own.", ""]), "resumed"],
+      ["a refusal on a prompt's own row while the turn runs", pane(["❯ Explain this message:", `  ${refusal}`, "", "✶ Thinking… (2s)", ""]), "resumed"],
+      ["a refusal quoted on its own row inside a reply", pane(["❯ hello", "", "● Claude shows this when it has no login:", "", `  ${refusal}`, "", "  Run /login to fix it.", ""]), "resumed"],
+      ["a refusal quoted inline in a reply", pane(["❯ hello", "", `● The message "${refusal}" means no login.`, ""]), "resumed"],
+    ])("%s", (_name, paneContent, status) => {
+      const result = assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent });
+      expect(result.status).toBe(status);
+      if (status === "failed") expect(result.code).toBe("login_required");
+    });
+
+    // Only the three exact strings count. A real 401 reads ready for input, with or without the footer: no rule on
+    // this input tells it from a reply or tool output that starts with the same words.
+    it.each([
+      ["OAuth token revoked · Please run /login", false, "failed"],
+      ["OAuth token revoked · Please run /login", true, "failed"],
+      ["Please run /login · API Error: 401 OAuth token has expired", false, "resumed"],
+      ["Please run /login · API Error: 401 OAuth token has expired", true, "resumed"],
+      ["Please run /login · API Error: 401 Invalid authentication credentials", false, "resumed"],
+      ["The error Please run /login · API Error: 401 means the token was rejected.", false, "resumed"],
+    ])("reads the revoked refusal as current and a 401 as ready for input: %s (footer %s)", (reply, footer, status) => {
+      expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude",
+        paneContent: pane(["❯ hello", "", `● ${reply}`, ""], footer) }).status).toBe(status);
+    });
+
+    it.each([
+      ["a refusal Claude wraps in a narrow pane", ["● Not logged in · Please run", "  /login"], "failed"],
+      ["a revoked refusal Claude wraps", ["● OAuth token revoked · Please", "  run /login"], "failed"],
+      ["a refusal with the right-aligned footer right below it", [`● ${refusal}`, "                    Not logged in · Run /login"], "failed"],
+    ])("joins Claude's own wrapped rows: %s", (_name, rows, status) => {
+      expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude",
+        paneContent: pane(["❯ hello", "", ...rows, ""]) }).status).toBe(status);
+    });
+
+    // Review inputs (#1417): a submitted prompt with no input box drawn below it, quoted marker rows, and replies or
+    // tool output that start like a 401.
+    it.each([
+      ["F1-current-no-box", `Claude Code v2.1.296\n❯ hello\n● ${refusal}\nNot logged in · Run /login`, "failed"],
+      ["F1-recovered-no-box", `Claude Code v2.1.296\n❯ hello\n● ${refusal}\n❯ /login\n  ⎿ Login successful`, "resumed"],
+      ["F2-quoted-reply-marker", `Claude Code v2.1.296\n❯ Explain this log.\n● Here is the quoted log line:\n\n  ● ${refusal}\n\n  That is an example, not this turn failing.\n\n${"─".repeat(40)}\n❯ \n${"─".repeat(40)}\n  ⏵⏵ accept edits on (shift+tab to cycle)`, "resumed"],
+      ["R2-prefix-explanation", `Claude Code v2.1.296\n❯ Explain this output.\n● Please run /login · API Error: 401 is an example from the manual, not this request failing.\n\n${"─".repeat(40)}\n❯ \n${"─".repeat(40)}\n  ⏵⏵ accept edits on (shift+tab to cycle)`, "resumed"],
+      ["R2-prefix-multiline-tool", `Claude Code v2.1.296\n❯ Explain this output.\n● Bash(print recorded fixture)\n  ⎿  Please run /login · API Error: 401 Invalid authentication credentials\n     This is recorded fixture output; the request succeeded.\n\n${"─".repeat(40)}\n❯ \n${"─".repeat(40)}\n  ⏵⏵ accept edits on (shift+tab to cycle)`, "resumed"],
+      ["F2-quoted-prompt-marker", `Claude Code v2.1.296\n❯ Explain this log:\n  ● ${refusal}\n\n✶ Thinking… (2s)\n\n${"─".repeat(40)}\n❯ \n${"─".repeat(40)}\n  ⏵⏵ accept edits on (shift+tab to cycle)`, "resumed"],
+    ])("%s", (_name, paneContent, status) => {
+      const result = assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent });
+      expect(result.status).toBe(status);
+      if (status === "failed") expect(result.code).toBe("login_required");
+    });
+
+    it("keeps the earlier native gates ahead of a current refusal", () => {
+      const refused = pane(["❯ hello", "", `● ${refusal}`, ""], true);
+      expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude",
+        paneContent: `${refused}\nAccessing workspace:\nYes, I trust this folder` }).code).toBe("trust_gate");
+      expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude",
+        paneContent: `No conversation found\n${refused}` }).code).toBe("no_conversation_found");
     });
   });
 
@@ -459,6 +550,102 @@ describe("native resume probe", () => {
       code: "trust_gate",
       detail: "Codex is waiting for workspace trust approval before the session can become interactive.",
     });
+  });
+
+  it.each(["codex", "node", "bash"])("recognizes the Codex 0.156.1 trust snapshot under %s", (paneCommand) => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand, paneContent: currentTrustPrompt }))
+      .toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
+  it.each(["›", "»"])("keeps the current trust panel below an earlier %s composer and custom footer gated", (prompt) => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
+      paneContent: `${prompt} Earlier conversation prompt\n  Context 81% left · GPT-6-Astra high\n${currentTrustPrompt}`,
+    })).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
+  it.each(["›", "»"])("accepts a headerless %s composer and custom footer after an old trust panel", (prompt) => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
+      paneContent: `${currentTrustPrompt}\n${prompt} Continue\n  5h 71% left · GPT-6-Astra high · Context 81% left`,
+    })).toMatchObject({ status: "resumed", code: "active_runtime" });
+  });
+
+  it.each([
+    "  5h 71% left · GPT-6-Astra high · Context 81% left",
+    "  gpt-6-astra high · /work",
+    "  gpt-5.5 xhigh fast · Context 0% used · Fast on",
+  ])("does not treat an old panel before a later model footer as current: %s", (footer) => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
+      paneContent: `› Earlier conversation prompt\n${currentTrustPrompt}\n${footer}`,
+    })).toMatchObject({ status: "resumed", code: "active_runtime" });
+  });
+
+  it.each(["", " ", "  ", "\t\t"])("preserves the whole-text default-footer match after blank lines with indentation %j", (indent) => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
+      paneContent: `› Earlier conversation prompt\n${currentTrustPrompt}\n\n${indent}gpt-5.5 xhigh fast · Context 0% used · Fast on`,
+    })).toMatchObject({ status: "resumed", code: "active_runtime" });
+  });
+
+  it("does not keep trust pending after a later composer without readiness corroboration", () => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
+      paneContent: `${currentTrustPrompt}\n› Continue`,
+    })).toMatchObject({ status: "inconclusive", code: "awaiting_runtime" });
+  });
+
+  it("keeps the latest panel current after an older panel was dismissed", () => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
+      paneContent: `${currentTrustPrompt}\n› Continue\n  Context 81% left · GPT-6-Astra high\n${currentTrustPrompt}`,
+    })).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
+  it.each([
+    ["earlier custom footer", "› Earlier conversation prompt\n  Context 81% left · GPT-6-Astra high\n"],
+    ["no earlier readiness evidence", ""],
+  ])("retains a complete live trust panel before a trailing heading fragment: %s", (_label, before) => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
+      paneContent: `${before}${currentTrustPrompt}\n  Trust this folder?`,
+    })).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
+  it.each([
+    ["default footer", "› Earlier conversation prompt\n  gpt-5.6-sol high · ~/work"],
+    ["Codex header", "OpenAI Codex (v0.156.1)\n› Earlier conversation prompt"],
+  ])("keeps a complete live trust panel ahead of earlier TUI evidence: %s", (_label, before) => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
+      paneContent: `${before}\n${currentTrustPrompt}`,
+    })).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
+  it.each(["›", "»"])("keeps a stale panel dismissed after a %s composer, footer and trailing heading fragment", (prompt) => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
+      paneContent: `${currentTrustPrompt}\n${prompt} Continue\n  Context 81% left · GPT-6-Astra high\n  Trust this folder?`,
+    })).toMatchObject({ status: "resumed", code: "active_runtime" });
+  });
+
+  it("recognizes the live trust panel when Quit is selected", () => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
+      paneContent: currentTrustPrompt.replace("› 1. Trust and continue", "  1. Trust and continue").replace("  2. Quit", "› 2. Quit"),
+    })).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
+  it("preserves the legacy branch even with a later headerless composer and custom footer", () => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
+      paneContent: "Do you trust the contents of this directory?\n› 1. Yes, continue\n  2. No\n› Continue\n  Context 81% left · GPT-6-Astra high",
+    })).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
+  it.each([
+    "Trust this folder?",
+    "› 1. Trust and continue\n  2. Quit",
+    'The guide asks "Trust this folder?" and offers Trust and continue.',
+  ])("does not classify incomplete or quoted current trust wording: %s", paneContent => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "codex", paneContent }).code)
+      .not.toBe("trust_gate");
+  });
+
+  it("accepts the current TUI after a dismissed current trust snapshot", () => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
+      paneContent: `${currentTrustPrompt}\nOpenAI Codex (v0.156.1)\n› Ask Codex to do anything`,
+    })).toMatchObject({ status: "resumed", code: "active_runtime" });
   });
 
   it("classifies Codex as active when the current TUI appears below an old trust prompt in scrollback", () => {

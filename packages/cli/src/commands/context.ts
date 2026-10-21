@@ -29,8 +29,9 @@ import { assertSafeInstallRef, assertTreeHasNoSymlinks, assertDestinationNamespa
 import { addGitContext, inspectGitContext, updateGitContext } from "../lib/context-git.js";
 import { ConfigStore } from "../config-store.js";
 import { DaemonClient, formatDaemonHostForUrl } from "../client.js";
-import { enumArg } from "../cli-error.js";
-import { getDaemonStatus, getDaemonUrl, startDaemon, statusGuardMessage} from "../daemon-lifecycle.js";
+import { enumArg, renderCaughtTransportError } from "../cli-error.js";
+import { getDaemonStatus, getDaemonUrl, startDaemon, statusGuardMessage } from "../daemon-lifecycle.js";
+import { daemonMayAnswer } from "../daemon-reachability.js";
 import { resolveWorkPosition, type WorkInstallPlan } from "../lib/work-install.js";
 import {
   reconcileSkillLoadout,
@@ -417,7 +418,7 @@ Examples:
         status = await getDaemonStatus(deps.lifecycleDeps);
       }
     }
-    if (status.state !== "running" || status.healthy === false) {
+    if (!daemonMayAnswer(status)) {
       // B8-1b: epistemic-matched language via the one helper (down ≠ busy).
       const gm = statusGuardMessage(status); throw new Error(`${gm.fact} ${gm.action}`);
     }
@@ -482,7 +483,7 @@ Examples:
     .action(async (opts: { out: string; from: string[] }) => {
       const deps = getDeps();
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (status.state !== "running" || status.healthy === false) {
+      if (!daemonMayAnswer(status)) {
         console.error("Daemon is not running. Start it with: rig daemon start");
         process.exitCode = 1;
         return;
@@ -508,7 +509,7 @@ Examples:
           `(${res.data.bytes ?? 0} bytes, ~${res.data.estimatedTokens ?? 0} tokens).`,
         );
       } catch (err) {
-        console.error((err as Error).message);
+        if (!renderCaughtTransportError(err)) console.error((err as Error).message);
         process.exitCode = 1;
       }
     });
@@ -837,7 +838,7 @@ Examples:
           for (const e of data.errors) console.log(`  - ${e.source}: ${e.error}`);
         }
       } catch (err) {
-        console.error((err as Error).message);
+        if (!renderCaughtTransportError(err)) console.error((err as Error).message);
         process.exitCode = 1;
       }
     });
@@ -927,7 +928,7 @@ Examples:
           if (gitSelection) console.log(`Git ${gitSelection.revision} from ${gitSelection.checkout}; inspect/update with rig context source.`);
         }
       } catch (err) {
-        console.error((err as Error).message);
+        if (!renderCaughtTransportError(err)) console.error((err as Error).message);
         process.exitCode = 1;
       }
     });
@@ -960,8 +961,10 @@ Examples:
           // in both terminal and machine use, without a second status renderer.
           console.log(JSON.stringify(result, null, 2));
         } catch (err) {
-          const message = (err as Error).message;
-          console.error(opts.json ? JSON.stringify({ error: message }) : message);
+          if (!renderCaughtTransportError(err, opts.json ?? false)) {
+            const message = (err as Error).message;
+            console.error(opts.json ? JSON.stringify({ error: message }) : message);
+          }
           process.exitCode = 1;
         }
       });
@@ -991,7 +994,7 @@ Examples:
         }
         console.log(`Removed context pack '${res.data.ref}'.${typeof res.data.count === "number" ? ` Library now has ${res.data.count} context pack(s).` : ""}`);
       } catch (err) {
-        console.error((err as Error).message);
+        if (!renderCaughtTransportError(err)) console.error((err as Error).message);
         process.exitCode = 1;
       }
     });

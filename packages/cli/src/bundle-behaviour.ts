@@ -29,6 +29,23 @@ export function formatBundleBehaviour(view: BundleBehaviour): string[] {
     if (view.posture.some(item => item.nonInterruptive === "available" && item.nonInterruptiveDefault !== true)) lines.push("Non-interruptive mode is available using rig bundle install <archive-or-link> --non-interruptive for the declared full-bypass Claude/Codex seats. This view does not select the mode or check whether you've already accepted the warning on this machine; login and other harness preconditions still apply.");
     lines.push("Told files:", ...view.toldFiles.map(f => `  ${f.seat ? plain(f.seat) + ": " : ""}${plain(f.pathOrRef)} [${f.resolution}${f.delivery ? `; ${plain(f.delivery)}` : ""}]`));
     lines.push("Also declared to run:", ...view.alsoRuns.map(f => `  ${f.seat ? plain(f.seat) + ": " : ""}${plain(f.kind)}: ${plain(f.pathOrRef)} [${f.resolution}${f.trigger ? `; ${plain(f.trigger)}` : ""}]`));
+    if (view.services) {
+      lines.push("Service declarations from the archive (not effective host configuration):");
+      for (const service of view.services) {
+        lines.push(`  ${plain(service.name)} (${plain(service.composeFile)}): image ${plain(service.image)}`);
+        lines.push(`    Published ports: ${service.ports.map(plain).join(", ") || "none declared"}`);
+        lines.push(`    Added privileges: privileged=${plain(service.privileged)}, cap_add=${service.capAdd.map(plain).join(", ") || "none"}, security_opt=${service.securityOpt.map(plain).join(", ") || "none"}, devices=${service.devices.map(plain).join(", ") || "none"}`);
+        lines.push(`    Environment names: ${service.environment.map(plain).join(", ") || "none declared"}`);
+        lines.push(`    Mounts: ${service.mounts.map(plain).join(", ") || "none declared"}`);
+        lines.push(`    Healthcheck: ${plain(JSON.stringify(service.healthcheck))}; rig wait_for: ${plain(JSON.stringify(service.waitFor))}`);
+        const downEffect = service.downPolicy === "leave_running" ? "leaves the Compose project running"
+          : service.downPolicy === "down_and_volumes" ? "stops the Compose project and removes its volumes"
+          : service.downPolicy === "down" ? "stops the Compose project" : "effect unresolved";
+        lines.push(`    rig down policy: ${plain(service.downPolicy)} (${downEffect}; a live successor can retain the project)`);
+        if (service.unresolved.length) lines.push(`    Unresolved on the installing host: ${service.unresolved.map(plain).join(", ")}`);
+        for (const note of service.notes) lines.push(`    ${plain(note)}`);
+      }
+    }
     lines.push("Writes and library additions (destinations, runtime support and conflicts resolved at launch):", ...view.writes.map(w => `  ${w.seat ? plain(w.seat) + ": " : ""}${plain(w.destinationBase)}/${plain(w.path)} — ${plain(w.operation)}, ${plain(w.phase)}`));
     lines.push(`Outside domains found in files (not predicted traffic): ${view.outsideAddresses.map(a => plain(a.domain)).join(", ") || "none found"}`);
     lines.push("Needs (not checked):");
@@ -55,6 +72,8 @@ export async function showBundleBehaviourBeforeAction(
 ): Promise<BundleBehaviour | undefined> {
   try {
     const response = await inspect();
+    const integrity = response.data.integrityResult as { warnings?: string[] } | undefined;
+    for (const warning of integrity?.warnings ?? []) output(plain(warning));
     const view = response.data.behaviour as BundleBehaviour | undefined;
     if (response.status < 400 && view?.schema === "openrig.bundle-behaviour/v1") {
       for (const line of formatBundleBehaviour(view)) output(line);

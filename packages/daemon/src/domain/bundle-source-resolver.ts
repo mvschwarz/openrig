@@ -118,7 +118,7 @@ export class LegacyBundleSourceResolver {
 
 // -- Pod-aware bundle source resolver (AgentSpec reboot) --
 
-import { parsePodBundleManifest, validatePodBundleManifest, type PodBundleManifest } from "./bundle-types.js";
+import { parsePodBundleManifest, validatePodBundleManifest, normalizeIncludedLoginFiles, type PodBundleManifest } from "./bundle-types.js";
 
 /** Result of resolving a pod-aware bundle */
 export interface PodBundleResolvedSource {
@@ -174,6 +174,7 @@ export class PodBundleSourceResolver {
             : [],
         })),
         cultureFile: m["culture_file"] as string | undefined,
+        includedLoginFiles: normalizeIncludedLoginFiles(m["included_login_files"]),
       };
 
       const specPath = nodePath.join(tempDir, manifest.rigSpec);
@@ -212,6 +213,8 @@ export function materializePodBundle(
   extractedDir: string,
   targetRoot: string,
   preserveConflicts = false,
+  /** Run the same target checks for a plan, without copying or backing up anything. */
+  dryRun = false,
 ): { ok: true; backupPath?: string } | { ok: false; conflicts: string[] } {
   const files: string[] = [];
   (function walk(dir: string, prefix: string) {
@@ -256,6 +259,7 @@ export function materializePodBundle(
     }
   }
   if (conflicts.size > 0 && !preserveConflicts) return { ok: false, conflicts: [...conflicts] };
+  if (dryRun) return { ok: true };
 
   let backupPath: string | undefined;
   let roots: string[] = [];

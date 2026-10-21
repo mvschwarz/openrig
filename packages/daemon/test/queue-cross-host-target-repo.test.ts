@@ -87,7 +87,11 @@ describe("MH-3 guard fixback — PL-007 target_repo validates BEFORE any cross-h
       body: "x", hostId: "vps-b", targetRepo: "repo-BOGUS", nudge: false,
     });
     expect(res.status).toBe(400);
-    expect((await res.json()) as { error: string }).toMatchObject({ error: "unknown_target_repo" });
+    const refusal = (await res.json()) as { error: string; message: string; knownRepos?: string[] };
+    expect(refusal).toMatchObject({ error: "unknown_target_repo" });
+    // Slice 15 fold-in: compact `whoami --json` has no workspace; the hint names the form that does.
+    expect(refusal.message).toContain("rig whoami --full --json | jq .workspace.repos");
+    expect(refusal.message).not.toContain("rig whoami --json |");
     expect(h.forwards()).toBe(0);
     expect(h.rowCount()).toBe(0);
   });

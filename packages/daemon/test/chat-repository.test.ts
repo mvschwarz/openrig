@@ -7,6 +7,7 @@ import { bindingsSessionsSchema } from "../src/db/migrations/002_bindings_sessio
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { chatMessagesSchema } from "../src/db/migrations/016_chat_messages.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
+import { HistoryQuery } from "../src/domain/history-query.js";
 import { ChatRepository } from "../src/domain/chat-repository.js";
 
 describe("ChatRepository", () => {
@@ -26,6 +27,31 @@ describe("ChatRepository", () => {
 
   afterEach(() => {
     db.close();
+  });
+
+  it.each(["config.json", "function(arg)", "C++", "array[index]"])("history questions find literal chat keyword %s", (keyword) => {
+    chatRepo.send(rigId, "alice", `We discussed ${keyword}`);
+    chatRepo.send(rigId, "bob", "unrelated subject");
+    const history = new HistoryQuery({
+      transcriptsRoot: "/unused-chat-only-fixture",
+      exec: async () => { throw new Error("chat search must not invoke a process"); },
+      chatSearchFn: (id, pattern) => chatRepo.searchChat(id, pattern),
+    });
+    expect(history.searchChat(rigId, `What about ${keyword}?`).map((row) => row.body)).toEqual([`We discussed ${keyword}`]);
+    expect(history.searchChat(rigId, "What is the")).toEqual([]);
+    expect(history.searchChat(rigId, `unrelated ${keyword}`).length).toBe(2);
+  });
+
+  it("searchChat matches _ and % in keywords literally, not as LIKE wildcards", () => {
+    chatRepo.send(rigId, "alice", "rate_limit hit");
+    chatRepo.send(rigId, "alice", "rate limit hit");
+    chatRepo.send(rigId, "bob", "1000 tokens");
+    chatRepo.send(rigId, "bob", "quota 100% used");
+    chatRepo.send(rigId, "bob", "path C:\\tmp");
+    expect(chatRepo.searchChat(rigId, "rate_limit").map((m) => m.body)).toEqual(["rate_limit hit"]);
+    expect(chatRepo.searchChat(rigId, "100%").map((m) => m.body)).toEqual(["quota 100% used"]);
+    expect(chatRepo.searchChat(rigId, "C:\\tmp").map((m) => m.body)).toEqual(["path C:\\tmp"]);
+    expect(chatRepo.searchChat(rigId, "rate_limit|100%").map((m) => m.body)).toEqual(["rate_limit hit", "quota 100% used"]);
   });
 
   it("same-day ISO since uses UTC chronology including offsets and fractions", () => {
@@ -64,6 +90,27 @@ describe("ChatRepository", () => {
     expect(messages[0]!.body).toBe("first");
     expect(messages[1]!.body).toBe("second");
     expect(messages[2]!.body).toBe("third");
+  });
+
+  it("history with a limit and no cursor returns the newest messages in chronological order", () => {
+    for (let i = 1; i <= 5; i++) chatRepo.send(rigId, "alice", `msg ${i}`);
+
+    expect(chatRepo.history(rigId, { limit: 2 }).map((m) => m.body)).toEqual(["msg 4", "msg 5"]);
+    expect(chatRepo.history(rigId, { sender: "alice", limit: 3 }).map((m) => m.body)).toEqual(["msg 3", "msg 4", "msg 5"]);
+  });
+
+  it("history with --after pages forward from the cursor", () => {
+    const sent = [1, 2, 3, 4, 5].map((i) => chatRepo.send(rigId, "alice", `msg ${i}`));
+
+    expect(chatRepo.history(rigId, { after: sent[0]!.id, limit: 2 }).map((m) => m.body)).toEqual(["msg 2", "msg 3"]);
+  });
+
+  it("history with --since pages forward from the starting point", () => {
+    const sent = [1, 2, 3, 4, 5].map((i) => chatRepo.send(rigId, "alice", `msg ${i}`));
+    const stamp = db.prepare("UPDATE chat_messages SET created_at = ? WHERE id = ?");
+    sent.forEach((m, i) => stamp.run(`2026-09-30 11:00:0${i}`, m.id));
+
+    expect(chatRepo.history(rigId, { since: "2026-09-30T11:00:01Z", limit: 2 }).map((m) => m.body)).toEqual(["msg 2", "msg 3"]);
   });
 
   it("history --topic returns messages between topic marker and next topic marker", () => {
@@ -135,7 +182,7 @@ describe("ChatRepository", () => {
 
   it("history --since returns only newer messages", () => {
     // Use a past timestamp to ensure messages created "now" are after it
-    const pastCutoff = "2020-01-01T00:00:00Z";
+    const pastCutoff = new Date(Date.now() - 60_000).toISOString();
     chatRepo.send(rigId, "alice", "msg after cutoff");
     chatRepo.send(rigId, "bob", "also after cutoff");
 
@@ -143,7 +190,7 @@ describe("ChatRepository", () => {
     expect(result).toHaveLength(2);
 
     // Use a future timestamp to ensure nothing matches
-    const futureCutoff = "2099-01-01T00:00:00Z";
+    const futureCutoff = new Date(Date.now() + 60_000).toISOString();
     const futureResult = chatRepo.history(rigId, { since: futureCutoff });
     expect(futureResult).toHaveLength(0);
   });

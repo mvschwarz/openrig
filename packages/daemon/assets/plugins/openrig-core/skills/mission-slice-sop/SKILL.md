@@ -66,7 +66,7 @@ These three are a division of labour, not a chain of gates. One agent may hold a
 ### PROGRESS.md
 - **WHO:** the orchestrator owns the current state; every agent logs its own outcomes.
 - **WHEN:** on material delivery-state changes and at acceptance.
-- **HOW:** keep current delivery state in `## Current state`; append material outcomes with links to proof under `## Outcomes`. Retain historical entries and existing checkboxes without treating them as current acceptance authority. For a selected proof policy, use `rig proof show <slice>` for current readiness; keep frontmatter `stage`/`verified` honest.
+- **HOW:** keep current delivery state in `## Current state`, naming who the next move waits on, and check that against the source (the PR on GitHub, the queue) before you rely on it; append material outcomes with links to proof under `## Outcomes`. Retain historical entries and existing checkboxes without treating them as current acceptance authority. For a selected proof policy, use `rig proof show <slice>` for current readiness; keep frontmatter `stage`/`verified` honest.
 
 ### PROOF.md + proof/
 - **WHO:** the impl/QA pair that worked the slice.
@@ -90,6 +90,15 @@ End every turn by passing the ball — a `rig queue handoff` to the next agent. 
 
 Never go idle holding a baton.
 
+## Records
+
+The rules for recording a slice's state are in the conventions SSOT (`docs/reference/sdlc-conventions.md` in the OpenRig source repository, `$OPENRIG_HOME/reference/sdlc-conventions.md` when installed). Read them before you stamp, judge or report:
+
+- **Stamps, stages and proof:** A2 (`rig proof judge`, `rig scope slice stage` and `verified`) and B2–B3 (`rig scope slice approve --scope spec|delivery`, `rig proof add` and `--candidate-sha`).
+- **Built and merged:** the release-mission paragraphs of A1 (`candidate:<sha>`, `merged:<pr-number>`, `arrangement.source.integration_ref`).
+- **Dispatch data:** the DISPATCH DATA row of the component menu (the `worktree_path=` body line).
+- **Editing judged evidence resets the judgment.** An accepted `rig proof judge` records the sha256 of the evidence it cites; edit that evidence (the cited section, when it cites a heading), the contract item's text or the scope's proof policy, and the item reads `unknown` until you judge it again.
+
 ## Verify (deterministic backstop)
 
 Run `rig scope audit` at slice-close. Every convention check is **advisory / fail-open** — it records and advises, never blocks a write. Fix what's real, skip what isn't, keep moving. **A clean audit score is not required to proceed.**
@@ -99,6 +108,11 @@ Run `rig scope audit` at slice-close. Every convention check is **advisory / fai
 When you `rig capture` a pane, **greyed / ghost autocomplete suggestions are NOT real content** — they are autocomplete *previews*, not typed, staged, or committed input. **This has been faking agents out a lot**: reading a ghost suggestion in a peer's input box as "staged text they're about to send," then reasoning on a string that was never there.
 
 **Rule:** ignore ghost/autosuggest text entirely. Only *committed/rendered* pane output is real. When it matters, verify at source (git, the queue, the actual event) — never off a capture's ghost line.
+
+A plain capture loses the grey, so `rig capture` reads it for you. For a Claude Code or Codex seat, a
+`[rig capture: <seat>: input box: ...]` note on stderr (and `inputBox` in `--json`) says whether the input box's text
+is likely a harness suggestion or typed, from where the cursor is and whether the text is drawn faint. Don't act on
+`likely-suggestion` text as anyone's intent, and treat `unknown` as unknown: verify at source.
 
 ## Moment-of-truth checklist
 

@@ -88,6 +88,9 @@ export class InboxHandler {
     eventBus: EventBus,
     queueRepo: QueueRepository,
   ) {
+    if (db !== eventBus.db || db !== queueRepo.db) {
+      throw new Error("InboxHandler: eventBus and queueRepo must share the same db handle");
+    }
     this.db = db;
     this.eventBus = eventBus;
     this.queueRepo = queueRepo;
@@ -152,42 +155,43 @@ export class InboxHandler {
    * `absorbed_qitem_id` rather than creating a duplicate.
    */
   async absorb(inboxId: string, receiverSession: string, identityProvenance?: string | null): Promise<{ entry: InboxEntry; qitemId: string }> {
-    const entry = this.getById(inboxId);
-    if (!entry) {
-      throw new InboxHandlerError("inbox_not_found", `inbox ${inboxId} not found`);
-    }
-    if (entry.destinationSession !== receiverSession) {
-      throw new InboxHandlerError(
-        "absorb_destination_mismatch",
-        `inbox ${inboxId} is destined for ${entry.destinationSession}, not ${receiverSession}`
-      );
-    }
-    if (entry.state === "absorbed") {
-      return { entry, qitemId: entry.absorbedQitemId! };
-    }
-    if (entry.state === "denied") {
-      throw new InboxHandlerError(
-        "inbox_already_denied",
-        `inbox ${inboxId} was denied; cannot absorb`
-      );
-    }
+    return this.eventBus.withNotifyEnvelope(register => {
+      const entry = this.getById(inboxId);
+      if (!entry) {
+        throw new InboxHandlerError("inbox_not_found", `inbox ${inboxId} not found`);
+      }
+      if (entry.destinationSession !== receiverSession) {
+        throw new InboxHandlerError(
+          "absorb_destination_mismatch",
+          `inbox ${inboxId} is destined for ${entry.destinationSession}, not ${receiverSession}`
+        );
+      }
+      if (entry.state === "absorbed") {
+        return { entry, qitemId: entry.absorbedQitemId! };
+      }
+      if (entry.state === "denied") {
+        throw new InboxHandlerError(
+          "inbox_already_denied",
+          `inbox ${inboxId} was denied; cannot absorb`
+        );
+      }
 
-    // Inbox-absorb suppresses the default queue create-time nudge: the inbox
-    // surface already had its own delivery (the original drop), so a second
-    // nudge on absorb is duplicative. The destination knows it absorbed.
-    const qitem = await this.queueRepo.create({
-      sourceSession: entry.senderSession,
-      destinationSession: entry.destinationSession,
-      body: entry.body,
-      tags: entry.tags ?? undefined,
-      priority: entry.urgency === "critical" ? "critical" : entry.urgency === "urgent" ? "urgent" : "routine",
-      nudge: false,
-      identityProvenance: identityProvenance ?? null, // P21 §4 era-stamp: transport-derived receiver action
-    });
+      // Inbox-absorb suppresses the default queue create-time nudge: the inbox
+      // surface already had its own delivery (the original drop), so a second
+      // nudge on absorb is duplicative. The destination knows it absorbed.
+      const qitem = this.queueRepo.createWithinTransaction({
+        sourceSession: entry.senderSession,
+        destinationSession: entry.destinationSession,
+        body: entry.body,
+        tags: entry.tags ?? undefined,
+        priority: entry.urgency === "critical" ? "critical" : entry.urgency === "urgent" ? "urgent" : "routine",
+        nudge: false,
+        identityProvenance: identityProvenance ?? null, // P21 §4 era-stamp: transport-derived receiver action
+      });
+      register(qitem.persistedEvent);
 
-    const ts = new Date().toISOString();
+      const ts = new Date().toISOString();
 
-    const txn = this.db.transaction(() => {
       this.db
         .prepare(
           `UPDATE inbox_entries
@@ -196,19 +200,16 @@ export class InboxHandler {
         )
         .run(ts, qitem.qitemId, inboxId);
 
-      return this.eventBus.persistWithinTransaction({
+      register(this.eventBus.persistWithinTransaction({
         type: "inbox.absorbed",
         inboxId,
         destinationSession: entry.destinationSession,
         senderSession: entry.senderSession,
         promotedQitemId: qitem.qitemId,
-      });
+      }));
+
+      return { entry: this.getByIdOrThrow(inboxId), qitemId: qitem.qitemId };
     });
-
-    const persistedEvent = txn();
-    this.eventBus.notifySubscribers(persistedEvent);
-
-    return { entry: this.getByIdOrThrow(inboxId), qitemId: qitem.qitemId };
   }
 
   deny(inboxId: string, receiverSession: string, reason: string): InboxEntry {

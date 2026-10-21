@@ -270,7 +270,31 @@ describe("capture --host (cross-host short-circuit)", () => {
       },
     }));
     await cmd.parseAsync(["--host", "vm-a", "--rig", "my-rig", "--pod", "dev", "--json"], { from: "user" });
-    expect(captureCalls.argv).toEqual(["rig", "capture", "--rig", "my-rig", "--pod", "dev", "--lines", "20", "--json"]);
+    expect(captureCalls.argv).toEqual(["rig", "capture", "--rig", "my-rig", "--pod", "dev", "--json"]);
+  });
+
+  it("forwards an explicit --lines as given, even one this CLI wouldn't cut on (the remote decides)", async () => {
+    const captureCalls: { argv?: readonly string[] } = {};
+    const cmd = captureCommand(deps({
+      run: async (_h, argv) => {
+        captureCalls.argv = argv;
+        return { ok: true, failedStep: "none", stdout: "", stderr: "", remoteExitCode: 0 };
+      },
+    }));
+    await cmd.parseAsync(["--host", "vm-a", "dev-impl@my-rig", "--lines", "5x"], { from: "user" });
+    expect(captureCalls.argv).toEqual(["rig", "capture", "dev-impl@my-rig", "--lines", "5x"]);
+  });
+
+  it("forwards --history-plus-pane with the --lines it applies to", async () => {
+    const captureCalls: { argv?: readonly string[] } = {};
+    const cmd = captureCommand(deps({
+      run: async (_h, argv) => {
+        captureCalls.argv = argv;
+        return { ok: true, failedStep: "none", stdout: "", stderr: "", remoteExitCode: 0 };
+      },
+    }));
+    await cmd.parseAsync(["--host", "vm-a", "dev-impl@my-rig", "--lines", "5", "--history-plus-pane"], { from: "user" });
+    expect(captureCalls.argv).toEqual(["rig", "capture", "dev-impl@my-rig", "--lines", "5", "--history-plus-pane"]);
   });
 
   it("unknown host id surfaces a friendly error", async () => {
@@ -364,6 +388,9 @@ function makeFailingLifecycleDeps(): never {
     spawnDetached: () => ({ pid: 0 }),
     isPidAlive: (_p: number) => false,
     fetchHealthDetail: async () => ({ ok: false, code: "unreachable" }),
+    // A refused connection is what makes the probe read "no daemon" (stopped).
+    fetch: async () => { throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }); },
+    sleep: async () => {},
   } as never;
 }
 
@@ -528,6 +555,22 @@ describe("whoami --host (cross-host short-circuit)", () => {
     expect(captureCalls.argv).toEqual([
       "rig", "whoami", "--node-id", "01ABC", "--session", "foo@rig", "--json",
     ]);
+  });
+
+  it.each(["--full", "--verbose"])("forwards %s over SSH as the full payload request", async (flag) => {
+    const calls: { argv?: readonly string[] } = {};
+    const fullPayload = '{"identity":{"rigName":"remote"},"contextUsage":{"availability":"known"},"workspace":{"root":"/fixture"}}\n';
+    const cmd = whoamiCommand(whoamiDeps({
+      run: async (_host, argv) => {
+        calls.argv = argv;
+        // The remote CLI receives the reconstructed argv and selects its view.
+        return { ok: true, failedStep: "none", stdout: argv.includes("--full") ? fullPayload : '{"identity":{"rigName":"remote"}}\n', stderr: "", remoteExitCode: 0 };
+      },
+    }));
+    await cmd.parseAsync(["--host", "vm-a", "--session", "worker@remote", "--json", flag], { from: "user" });
+    expect(calls.argv).toEqual(["rig", "whoami", "--session", "worker@remote", "--json", "--full"]);
+    expect(captured.stdoutWrites.join("")).toBe(fullPayload);
+    expect(process.exitCode).toBeUndefined();
   });
 
   it("argv reconstruction: bare `--host vm-a` produces ['rig','whoami'] with no extra flags", async () => {

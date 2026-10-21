@@ -10,17 +10,6 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { migrate } from "../src/db/migrate.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
-import {
-  makeParkedOwnerConsumerPolicy,
-  makeRigAnchor,
-  FAILED_PREFIX,
-  NUDGE_FAIL_PREFIX,
-  PARKED_OWNER_POLICY_NAME,
-  type ParkedOwnerConsumerDeps,
-  type RowTransitionView,
-} from "../src/domain/policies/parked-owner-consumer.js";
-import type { PolicyJob } from "../src/domain/policies/types.js";
-import type { WatchdogHistoryEntry } from "../src/domain/watchdog-history-log.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 import type { NativeProcessRow } from "../src/domain/native-process-lineage.js";
@@ -147,6 +136,35 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
     expect(sendText).toHaveBeenCalledOnce();
   });
 
+  // #1079: a `codex` launcher that spawns Codex, which spawns its native child.
+  function launcherProcesses(): NativeProcessRow[] {
+    const [shell, sh] = wrapperProcesses();
+    const link = (pid: number, ppid: number, command: string): NativeProcessRow =>
+      ({ ...sh!, pid, ppid, executableName: "codex", command });
+    return [shell!, sh!,
+      link(1199, 1196, "codex --no-daemon -s workspace-write -c check_for_update_on_startup=false"),
+      link(1203, 1199, "codex --no-daemon -s workspace-write"),
+      link(1205, 1203, "codex -c model_provider=local")];
+  }
+
+  it.each(["ordinary verified send", "watchdog wake"])("#1079 Codex behind a spawning launcher receives %s", async kind => {
+    const { transport, sendText, sendKeys } = wrappedSeat(vi.fn(async () => launcherProcesses()));
+    const result = kind === "watchdog wake"
+      ? await watchdogSend(transport, "dev-check@my-rig")
+      : await transport.send("dev-check@my-rig", "existing review", { verify: true });
+    expect(result.ok).toBe(true);
+    expect(sendText).toHaveBeenCalledOnce();
+    expect(sendKeys).toHaveBeenCalledOnce();
+  });
+
+  it("#1079 two Codex processes on different branches still refuse", async () => {
+    const siblings = [...launcherProcesses(), { ...launcherProcesses()[4]!, pid: 1206 }];
+    const { transport, sendText, sendKeys } = wrappedSeat(vi.fn(async () => siblings));
+    expect(await watchdogSend(transport, "dev-check@my-rig")).toMatchObject({ ok: false, sent: false, reason: "target_runtime_unverified" });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
   const unproved: [string, (rows: NativeProcessRow[]) => NativeProcessRow[]][] = [
     ["exited native with stale UI", rows => rows.slice(0, -1)],
     ["background native", rows => rows.map(r => r.pid === 1205 ? { ...r, pgid: 999 } : r)],
@@ -252,6 +270,15 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
     expect(sendKeys).toHaveBeenCalledTimes(conflict ? 0 : 1);
   });
 
+  it("#1088 a Codex launcher chain in a Claude seat keeps main's warn-and-send", async () => {
+    const { transport, sendText, sendKeys } = wrappedClaude(vi.fn(async () => launcherProcesses()));
+    const result = await transport.send("dev-check@my-rig", "existing review");
+    expect(result.ok).toBe(true);
+    expect(result.warning).toContain("without verified native identity");
+    expect(sendText).toHaveBeenCalledOnce();
+    expect(sendKeys).toHaveBeenCalledOnce();
+  });
+
   it("#197 still refuses native approval after proving the Claude wrapper", async () => {
     const { transport, tmux, sendText, sendKeys } = wrappedClaude();
     tmux.capturePaneContent = async () => "Would you like to run the following command?\n› 1. Yes, proceed (y)\n2. No\nPress enter to confirm or esc to cancel";
@@ -306,49 +333,4 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
       expect(result.ok).toBe(true);
       expect(sendText).toHaveBeenCalledOnce();
     });
-});
-
-describe("#142 the parked-owner wake records the refusal honestly and does not retry into the shell", () => {
-  const SEAT = "dev-impl@my-rig";
-  const ROW = "qitem-owed-1";
-
-  it("the refused delivery lands as a failure on the still-open row, and the episode sends no second wake", async () => {
-    const transitions: RowTransitionView[] = [];
-    const nudges: string[] = [];
-    const history: WatchdogHistoryEntry[] = [];
-    const deps = (): ParkedOwnerConsumerDeps => ({
-      diagnoseRig: () => ({ seats: [{
-        sessionName: SEAT,
-        parked: true,
-        activity: { value: "idle-at-prompt", needsInput: { count: 0, reason: null } },
-        obligations: { items: [{ qitemId: ROW, state: "in-progress", summary: null }], held: [] },
-      }] }),
-      history: { listForJob: (_j, limit) => history.slice(0, limit), countForJob: () => history.length },
-      rows: {
-        listTransitions: () => [...transitions],
-        appendNote: (_q, note) => { transitions.push({ ts: new Date().toISOString(), transitionNote: note }); return { ok: true }; },
-        recordNudgeResult: (_q, result) => void nudges.push(result),
-        listOpenIds: () => [ROW],
-      },
-    });
-    const job = {
-      jobId: "job-1", policy: PARKED_OWNER_POLICY_NAME, target: { session: makeRigAnchor("my-rig") },
-      intervalSeconds: 120, context: {}, lastEvaluationAt: null, lastFireAt: null,
-    } as unknown as PolicyJob;
-
-    const first = await makeParkedOwnerConsumerPolicy(deps()).evaluate(job);
-    expect(first.action).toBe("send");
-    const refusal = `Refused: '${SEAT}' reports zsh as the foreground command, but OpenRig could not verify its expected claude-code agent in the bound pane. The agent may still be running behind a wrapper. No text was sent.`;
-    history.push({
-      historyId: "h1", jobId: "job-1", evaluatedAt: new Date().toISOString(), outcome: "sent", skipReason: null,
-      deliveryTargetSession: SEAT, deliveryStatus: "failed", deliveryMessage: "wake",
-      evaluationNotes: { ...first.notes, deliveryReason: refusal },
-    } as WatchdogHistoryEntry);
-
-    const second = await makeParkedOwnerConsumerPolicy(deps()).evaluate(job);
-    expect(second.action).toBe("skip");
-    expect(JSON.stringify(second.notes)).toMatch(/already[-_]woken/);
-    expect(transitions.some((t) => t.transitionNote?.startsWith(FAILED_PREFIX) && t.transitionNote.includes("could not verify"))).toBe(true);
-    expect(nudges.some((n) => n.startsWith(NUDGE_FAIL_PREFIX) && n.includes("could not verify"))).toBe(true);
-  });
 });

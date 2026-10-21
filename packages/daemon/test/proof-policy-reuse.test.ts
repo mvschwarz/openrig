@@ -3,18 +3,21 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import YAML from "yaml";
+import { createHash } from "node:crypto";
 import { Hono } from "hono";
 import { scopesRoutes } from "../src/routes/scopes.js";
-import { createProofPolicyRead, proofFs, evidenceAt, recordJudgment, readSliceReadiness, readMissionReadiness, type JudgeInput } from "../src/domain/proof/judgments.js";
+import { createProofPolicyRead, proofFs, evidenceAt, recordJudgment, readSliceReadiness, readMissionReadiness, readProjectReadiness, type JudgeInput } from "../src/domain/proof/judgments.js";
+import { watchProofSources } from "../src/domain/proof/source-watch.js";
+import type { EventBus } from "../src/domain/event-bus.js";
 import type { ScopeFsDeps } from "../src/domain/scope/scope-view-projection.js";
 
 vi.mock("node:fs", async importOriginal => {
   const actual = await importOriginal<typeof import("node:fs")>();
-  return { ...actual, readFileSync: vi.fn(actual.readFileSync) };
+  return { ...actual, readFileSync: vi.fn(actual.readFileSync), watch: vi.fn(actual.watch) };
 });
 
 const roots: string[] = [];
-afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 function fixture() {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "policy-reuse-"))); roots.push(root);
   const missions = path.join(root, "missions"), mission = path.join(missions, "trial");
@@ -147,5 +150,91 @@ describe("request-local proof-policy reuse", () => {
     expect(replay.replayed).toBe(true); expect(replay.readiness.state).toBe("unknown");
     expect(replay.readiness).toEqual(readSliceReadiness(dir));
     expect(fs.readdirSync(path.join(dir, "proof/judgments"))).toEqual(["00000001.md"]);
+  });
+});
+
+describe("watch-local proof-policy reuse", () => {
+  function observe(missions: string) {
+    vi.useFakeTimers();
+    let changed!: () => void;
+    vi.spyOn(fs, "watch").mockImplementation(((_root: unknown, _options: unknown, listener: () => void) => {
+      changed = listener;
+      return { on: vi.fn(), close: vi.fn() };
+    }) as typeof fs.watch);
+    const invalidate = vi.fn(), emit = vi.fn();
+    const watch = watchProofSources(missions, invalidate, { emit } as unknown as EventBus);
+    const oracle = () => createHash("sha256").update(JSON.stringify(readProjectReadiness(missions).missions.map(m => [m.name, m.revision]))).digest("hex");
+    const event = () => {
+      const previous = watch.observation().revision, calls = invalidate.mock.calls.length;
+      const expected = oracle();
+      changed(); vi.advanceTimersByTime(50);
+      expect(watch.observation()).toEqual({ state: "watching", revision: expected });
+      expect(invalidate).toHaveBeenCalledTimes(calls + Number(previous !== expected));
+      expect(emit).toHaveBeenCalledTimes(invalidate.mock.calls.length);
+    };
+    return { watch, changed, event, oracle, invalidate };
+  }
+
+  it("reads/parses shared policy once in each real watch callback, preserving the uncached revision", () => {
+    const f = fixture();
+    fs.cpSync(f.mission, path.join(f.missions, "second"), { recursive: true });
+    const o = observe(f.missions), read = vi.spyOn(fs, "readFileSync"), parse = vi.spyOn(YAML, "parse");
+    const policy = fs.readFileSync(f.projectFile, "utf8");
+    try {
+      for (const text of ["changed outcome", "second outcome"]) {
+        f.write(path.join(f.dirs[0]!, "SPEC.md"), `# Outcome\n\n## Proof contract\n- [ ] ${text}.\n`);
+        const expected = o.oracle();
+        read.mockClear(); parse.mockClear();
+        o.changed(); vi.advanceTimersByTime(50);
+        expect(o.watch.observation()).toEqual({ state: "watching", revision: expected });
+        expect.soft(read.mock.calls.filter(([file]) => file === f.projectFile)).toHaveLength(1);
+        expect.soft(parse.mock.calls.filter(([text]) => text === policy)).toHaveLength(1);
+        // Mission manifests are also read once each for composition, separately
+        // from the one policy input read per mission in this evaluation.
+        expect.soft(read.mock.calls.filter(([file]) => file === f.missionFile)).toHaveLength(2);
+      }
+      expect(o.invalidate).toHaveBeenCalledTimes(2);
+      o.event(); expect(o.invalidate).toHaveBeenCalledTimes(2);
+    } finally { o.watch.close(); }
+  });
+
+  it("observes changed, missing, overridden, malformed and unreadable policy on the next event", () => {
+    const f = fixture(), sliceFile = path.join(f.dirs[0]!, "slice.yaml");
+    const project = fs.readFileSync(f.projectFile, "utf8"), mission = fs.readFileSync(f.missionFile, "utf8"), slice = fs.readFileSync(sliceFile, "utf8");
+    const o = observe(f.missions);
+    try {
+      for (const [file, base, actor] of [[f.projectFile, project, "new-project"], [f.missionFile, mission, "new-mission"], [sliceFile, slice, "new-slice"]]) {
+        f.write(file!, { ...YAML.parse(base!), proofPolicy: { judges: [actor] } });
+        o.event(); expect(readSliceReadiness(f.dirs[0]!).policy!.judges).toEqual([actor]);
+      }
+      f.write(sliceFile, slice); f.write(f.missionFile, mission); o.event();
+      fs.unlinkSync(f.projectFile); o.event(); expect(readSliceReadiness(f.dirs[0]!).state).toBe("legacy");
+      f.write(f.projectFile, project); o.event();
+      for (const bad of ["proofPolicy: [unclosed", { proofPolicy: { judges: [] } }]) {
+        f.write(f.projectFile, bad); o.event(); expect(readSliceReadiness(f.dirs[0]!).state).toBe("unknown");
+        f.write(f.projectFile, project); o.event(); expect(readSliceReadiness(f.dirs[0]!).policy!.judges).toEqual(["judge@trial"]);
+      }
+      const original = fs.readFileSync, read = vi.spyOn(fs, "readFileSync");
+      read.mockImplementation(((file: fs.PathOrFileDescriptor, ...args: any[]) => {
+        if (file === f.projectFile) throw Object.assign(new Error("policy denied"), { code: "EACCES" });
+        return (original as any)(file, ...args);
+      }) as typeof fs.readFileSync);
+      o.event(); expect(readSliceReadiness(f.dirs[0]!).state).toBe("unknown");
+      read.mockImplementation(original); o.event(); expect(readSliceReadiness(f.dirs[0]!).policy!.judges).toEqual(["judge@trial"]);
+    } finally { o.watch.close(); }
+  });
+
+  it("rechecks accepted evidence between events without reusing judgment inputs", () => {
+    const f = fixture(), dir = f.dirs[0]!, evidence = path.join(dir, "proof/evidence.md");
+    f.write(evidence, "accepted observation");
+    const item = readSliceReadiness(dir).items[0]!;
+    recordJudgment(f.missions, { scope: "trial/slices/slice-0", item: item.id, verdict: "accept", reason: "observed", evidence: ["proof/evidence.md"], expectedRevision: item.revision, expectedPrevious: null }, "judge@trial", "fixture");
+    const o = observe(f.missions);
+    try {
+      expect(readSliceReadiness(dir).state).toBe("ready");
+      f.write(evidence, "changed observation"); o.event(); expect(readSliceReadiness(dir).state).toBe("unknown");
+      f.write(evidence, "accepted observation"); o.event(); expect(readSliceReadiness(dir).state).toBe("ready");
+      expect(o.invalidate).toHaveBeenCalledTimes(2);
+    } finally { o.watch.close(); }
   });
 });

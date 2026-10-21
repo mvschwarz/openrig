@@ -51,9 +51,40 @@ describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
     });
   }
 
+  it("set-cwd forwards the requested directory, prefers the transport actor and returns preparation warnings", async () => {
+    const result = { ok: true as const, seat: {} as never, from: "/workspace", to: "/workspace/planner",
+      changed: true, effect: "next_launch" as const, warnings: ["Existing local guidance was retained"] };
+    const setCwd = vi.spyOn(SeatLifecycleService.prototype, "setCwd").mockResolvedValue(result);
+    const res = await setup.app.request("/api/seat/set-cwd/planner%40project", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "operator@project" },
+      body: JSON.stringify({ cwd: "/workspace/planner", reason: "isolate planning", operator: "body-actor" }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(result);
+    expect(setCwd).toHaveBeenCalledExactlyOnceWith({ seatRef: "planner@project", cwd: "/workspace/planner",
+      reason: "isolate planning", operator: "operator@project" });
+  });
+
+  it.each(["null", "[]", "{broken", '{"cwd": 42, "reason": "isolate"}'])("set-cwd rejects malformed input %s without an internal error", async body => {
+    const res = await setup.app.request("/api/seat/set-cwd/planner%40project", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body,
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ ok: false });
+  });
+
+  it.each([["cwd_configuration_changed", 409], ["cwd_destination_conflict", 409], ["cwd_check_failed", 500], ["cwd_persistence_failed", 500]] as const)("set-cwd exposes %s with its recovery details", async (code, status) => {
+    const result = { ok: false as const, code, message: "The working directory was not changed",
+      guidance: "Inspect the reported files and seat status", warnings: ["Protected destination file: /work/seat/.claude/agents/reviewer.md"] };
+    vi.spyOn(SeatLifecycleService.prototype, "setCwd").mockResolvedValue(result);
+    const res = await post("set-cwd", "planner@project", { cwd: "/work/seat", reason: "isolate" });
+    expect(res.status).toBe(status);
+    expect(await res.json()).toEqual(result);
+  });
+
   it.each([true, false])("default-path continue delegates the existing occupant operation (ok=%s)", async ok => {
     const result = { ok, code: "fixture", message: "Existing continuation result", warnings: ["Submission unverified"] };
-    const spy = vi.spyOn(SeatLifecycleService.prototype, "continueFreshStartup").mockResolvedValue(result as never);
+    const spy = vi.spyOn(SeatLifecycleService.prototype, "continueStartup").mockResolvedValue(result as never);
     const res = await post("continue", "dev@fixture");
     expect(res.status).toBe(ok ? 200 : 409);
     expect(await res.json()).toEqual(result);
@@ -112,6 +143,33 @@ describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
     expect((await probe.json() as { code: string }).code).toBe("tmux_probe_failed");
   });
 
+  it("keeps ps and the TUI rig summary consistent after an intentional stop and a sibling crash", async () => {
+    const stopped = seedSeat("dev.qa");
+    const crashed = seedSeat("dev.impl");
+    seedSeat("dev.lead");
+    tmux().hasSession.mockResolvedValue(true);
+    tmux().killSession.mockResolvedValue({ ok: true });
+    expect((await post("stop", stopped.sessionName, { reason: "on-demand review" })).status).toBe(200);
+
+    async function expectSurfaces(lifecycleState: string, runningCount: number) {
+      const ps = await setup.app.request("/api/ps");
+      expect(ps.status).toBe(200);
+      expect(await ps.json()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ rigId: stopped.rig.id, lifecycleState, nodeCount: 3, runningCount, status: "partial" }),
+      ]));
+      const summary = await setup.app.request("/api/rigs/summary");
+      expect(summary.status).toBe(200);
+      expect(await summary.json()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: stopped.rig.id, lifecycleState, restoreLifecycleState: "degraded", nodeCount: 3, hasLiveAgents: true }),
+      ]));
+    }
+
+    await expectSurfaces("running", 2);
+    setup.sessionRegistry.markDetached(crashed.session.id);
+    setup.sessionRegistry.clearBinding(crashed.node.id);
+    await expectSurfaces("degraded", 1);
+  });
+
   it("clean 409 session_live on a live seat; 200 on a dead one; 409 nothing_to_clean when repeated", async () => {
     const { sessionName } = seedSeat();
     tmux().hasSession.mockResolvedValue(true);
@@ -127,6 +185,23 @@ describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
     const again = await post("clean", sessionName, { reason: "x" });
     expect(again.status).toBe(409);
     expect((await again.json() as { code: string }).code).toBe("nothing_to_clean");
+  });
+
+  it("routes --plan to read-only planning without requiring a reason or entering execution", async () => {
+    const result = { ok: true, planOnly: true, complete: false, launchable: null };
+    const plan = vi.spyOn(SeatLifecycleService.prototype, "planFresh").mockResolvedValue(result as never);
+    const launch = vi.spyOn(SeatLifecycleService.prototype, "launchFresh");
+    const res = await post("launch-plan", "dev@fixture", { fresh: true, stop: true });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(result);
+    expect(plan).toHaveBeenCalledExactlyOnceWith({ seatRef: "dev@fixture", fresh: true, stop: true });
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  it("still requires --fresh for a plan", async () => {
+    const res = await post("launch-plan", "dev@fixture", {});
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ ok: false, planOnly: true, code: "fresh_required" });
   });
 
   it("launch requires explicit fresh=true", async () => {

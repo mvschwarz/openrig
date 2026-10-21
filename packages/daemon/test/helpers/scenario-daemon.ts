@@ -13,6 +13,7 @@
  */
 
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import net from "node:net";
 import { join } from "node:path";
 import { assertNoForeignDaemon, type HermeticScaffold } from "./hermetic-env.js";
@@ -125,6 +126,14 @@ export async function spawnScenarioDaemon(
   assertNoForeignDaemon(scaffold.env);
 
   const { rigBin, timeoutMs } = opts;
+  // The default seam is this checkout's built CLI. `npm test` and `npm run build -w packages/daemon`
+  // build only the daemon, so name the missing build instead of surfacing a Node MODULE_NOT_FOUND.
+  if (!existsSync(rigBin)) {
+    throw new Error(
+      `scenario-local daemon cannot start: the rig CLI is not built at ${rigBin}. ` +
+        "Run `npm run build` at the repository root first (it builds every workspace).",
+    );
+  }
   const port = opts.port ?? (await findFreePort());
   const db = join(scaffold.stateDir, "scenario.db");
 

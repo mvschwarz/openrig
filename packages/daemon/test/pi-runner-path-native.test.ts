@@ -10,7 +10,7 @@ import { piSeatPaths, PI_RUNNER_READY_MARKER } from "../src/adapters/pi-runner-p
 describe.skipIf(process.platform === "win32")("Pi native PATH semantics", () => {
   it.each(["argv0", "fallback", "mise", "relative", "empty", "stubborn-version"])(
     "preserves Pi lookup (%s)", async kind => {
-      const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-path-"));
+      const temp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-path-")));
       const first = path.join(temp, "first"), second = path.join(temp, "second");
       fs.mkdirSync(first); fs.mkdirSync(second);
       const session = path.join(temp, "session.jsonl");

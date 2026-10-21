@@ -245,3 +245,16 @@ describe("Bundle activity feed events", () => {
     expect(eventSummary(event)).toContain("bundled");
   });
 });
+
+// Server diagnostics must stay visible; a FAIL/PASS badge alone cannot explain the login-file policy.
+it.each(["errors", "warnings"] as const)("shows login-file %s with the path and both remedies", async field => {
+  const message = "Harness login file 'agents/worker/.codex/auth.json': anyone with the bundle could read it. Remove it from the agent folder or carried project and build again, or, only if recipients should have this login (for example, your own internal test bundle) and its owner agrees, recreate with --include-login-files.";
+  fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ ...INSPECT_RESPONSE,
+    integrityResult: { ...INSPECT_RESPONSE.integrityResult, passed: field !== "errors", [field]: [message] },
+  }) });
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  render(<QueryClientProvider client={qc}><BundleInspector /></QueryClientProvider>);
+  fireEvent.change(screen.getByTestId("bundle-path-input"), { target: { value: "/tmp/synthetic.rigbundle" } });
+  fireEvent.click(screen.getByTestId("inspect-btn"));
+  await waitFor(() => expect(screen.getByText(message)).toBeTruthy());
+});

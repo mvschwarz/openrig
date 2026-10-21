@@ -42,6 +42,7 @@ export function enumArg(allowed: readonly string[]): (value: string) => string {
 export function wantsJsonOutput(argv: readonly string[]): boolean {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
+    if (a === "--") break;
     if (a === "--json") return true;
     if ((a === "-o" || a === "--output" || a === "--format") && argv[i + 1] === "json") return true;
     if (/^(?:-o|--output|--format)=json$/.test(a)) return true;
@@ -143,6 +144,13 @@ export function renderDaemonTransportError(
     io.err(`  ${parts.action}`);
   }
   return true;
+}
+
+/** For a command's own catch around a daemon request: renders a daemon transport error as the shared
+ *  path does (a timeout says the outcome is unknown and to check its effect before any retry) and returns
+ *  true; returns false for any other error, which the caller reports as before. */
+export function renderCaughtTransportError(e: unknown, json = false): boolean {
+  return renderDaemonTransportError(e, { out: (l) => console.log(l), err: (l) => console.error(l), json });
 }
 
 /**

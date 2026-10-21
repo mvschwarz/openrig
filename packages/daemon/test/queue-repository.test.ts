@@ -17,6 +17,7 @@ import {
   QueueRepository,
   QueueRepositoryError,
   classifyNudgeFailure,
+  hasLinkedSuccessor,
 } from "../src/domain/queue-repository.js";
 import { CLOSURE_REASONS } from "../src/domain/hot-potato-enforcer.js";
 import type { PersistedEvent } from "../src/domain/types.js";
@@ -120,6 +121,64 @@ describe("QueueRepository", () => {
     expect(claimed.claimedAt).toBeTruthy();
     expect(claimed.closureRequiredAt).toBeTruthy();
     expect(captured.some((e) => e.type === "queue.claimed")).toBe(true);
+  });
+
+  describe("lastNudgeResult presents a claim over an unconfirmed wake (#165)", () => {
+    const createRow = () => repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x" });
+    const storedResult = (qitemId: string) =>
+      (db.prepare("SELECT last_nudge_result FROM queue_items WHERE qitem_id = ?").get(qitemId) as { last_nudge_result: string | null }).last_nudge_result;
+
+    it("wake then claim: an unconfirmed result reads claimed, definite ones are kept, the wire result is stored", async () => {
+      const results: Array<[string, string]> = [
+        ["delivered-ack-pending", "claimed"],
+        ["indeterminate:send timed out", "claimed"],
+        ["verified", "verified"],
+        ["failed:Session 'bob@rig' not found", "failed:Session 'bob@rig' not found"],
+        ["retained:typing_guard", "retained:typing_guard"],
+        ["gateway-owned:slack", "gateway-owned:slack"],
+      ];
+      for (const [recorded, expected] of results) {
+        const item = await createRow();
+        repo.recordNudgeAttempt(item.qitemId, recorded);
+        expect(repo.getById(item.qitemId)!.lastNudgeResult).toBe(recorded);
+        const claimed = repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+        expect(claimed.lastNudgeResult).toBe(expected);
+        expect(claimed.lastNudgeWireResult).toBe(recorded);
+        expect(storedResult(item.qitemId)).toBe(recorded);
+      }
+      const unnudged = await createRow();
+      db.prepare("UPDATE queue_items SET last_nudge_result = NULL WHERE qitem_id = ?").run(unnudged.qitemId);
+      expect(repo.claim({ qitemId: unnudged.qitemId, destinationSession: "bob@rig" }).lastNudgeResult).toBeNull();
+    });
+
+    it("claim then wake: a wake recorded on a claimed row reads claimed", async () => {
+      const item = await createRow();
+      repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+      repo.recordNudgeAttempt(item.qitemId, "delivered-ack-pending");
+      const row = repo.getById(item.qitemId)!;
+      expect(row.lastNudgeResult).toBe("claimed");
+      expect(row.lastNudgeWireResult).toBe("delivered-ack-pending");
+    });
+
+    it("a re-wake after the claim is stored as sent and still presented against the claim", async () => {
+      const item = await createRow();
+      repo.recordNudgeAttempt(item.qitemId, "delivered-ack-pending");
+      repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+      repo.recordNudgeAttempt(item.qitemId, "indeterminate:pane render unconfirmed");
+      expect(storedResult(item.qitemId)).toBe("indeterminate:pane render unconfirmed");
+      expect(repo.getById(item.qitemId)!.lastNudgeResult).toBe("claimed");
+      repo.recordNudgeAttempt(item.qitemId, "failed:Session 'bob@rig' not found");
+      expect(repo.getById(item.qitemId)!.lastNudgeResult).toBe("failed:Session 'bob@rig' not found");
+    });
+
+    it("unclaim returns the row to its wire result", async () => {
+      const item = await createRow();
+      repo.recordNudgeAttempt(item.qitemId, "delivered-ack-pending");
+      repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+      const unclaimed = repo.unclaim(item.qitemId, "bob@rig", "handing back");
+      expect(unclaimed.lastNudgeResult).toBe("delivered-ack-pending");
+      expect(unclaimed.lastNudgeWireResult).toBe("delivered-ack-pending");
+    });
   });
 
   it("claim rejects mismatched destination", async () => {
@@ -388,6 +447,24 @@ describe("QueueRepository", () => {
     expect(captured.filter((e) => e.type === "queue.handed_off")).toHaveLength(1);
     expect(captured.filter((e) => e.type === "queue.created")).toHaveLength(2); // create + handoff-create
   });
+
+  // The queue-handoff skill teaches this: a handoff keeps the source row's scope tags unless it
+  // sends tags (--tags, or --gate, which sends gate:<role>), and tags it sends replace them.
+  it.each(["handoff", "handoffAndComplete"] as const)(
+    "%s keeps the source row's tags unless it sends tags, and sent tags replace them",
+    async (verb) => {
+      const scope = ["project:p", "mission:m", "slice:s"];
+      const fresh = async () => repo.create({
+        sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", tags: scope,
+      });
+      const keep = await repo[verb]({ qitemId: (await fresh()).qitemId, fromSession: "bob@rig", toSession: "carol@rig" });
+      expect(keep.created.tags).toEqual(scope);
+      const gated = await repo[verb]({
+        qitemId: (await fresh()).qitemId, fromSession: "bob@rig", toSession: "carol@rig", tags: ["gate:guard"],
+      });
+      expect(gated.created.tags).toEqual(["gate:guard"]);
+    },
+  );
 
   it("handoff refuses on already-terminal qitem", async () => {
     const item = await repo.create({
@@ -1315,5 +1392,123 @@ describe("QueueRepository — S26 blocker-actuation unification (OPR.0.5.6.26)",
     expect(events.filter((e) => e.type === "qitem.closure_overdue")).toHaveLength(2);
 
     minDb.close();
+  });
+});
+
+describe("QueueRepository.listOpenObligations: the parked query's lean read", () => {
+  let db: Database.Database;
+  let repo: QueueRepository;
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema, outboxEntriesSchema, queueItemSummarySchema]);
+    repo = new QueueRepository(db, new EventBus(db));
+    repo.attachOutbox(new OutboxHandler(db));
+  });
+  afterEach(() => db.close());
+
+  it("returns exactly what list() returns for the open states, newest first, with one statement", () => {
+    for (let i = 0; i < 6; i++) {
+      repo.create({ sourceSession: "a@r", destinationSession: i % 3 ? "b@r" : "c@r", body: `task ${i}`, priority: "routine", tier: "mode-0", summary: `s${i}` });
+    }
+    const ids = repo.list({ destinationSession: "b@r" }).map((r) => r.qitemId);
+    repo.claim({ qitemId: ids[0]!, destinationSession: "b@r" });
+    const want = repo.list({ destinationSession: "b@r", state: ["pending", "in-progress", "blocked"], limit: 500 })
+      .map((r) => ({ qitemId: r.qitemId, state: r.state, summary: r.summary ?? null }));
+    const prepare = vi.spyOn(db, "prepare");
+    const got = repo.listOpenObligations("b@r", 500);
+    expect(got).toEqual(want);
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(repo.listOpenObligations("b@r", 2)).toEqual(want.slice(0, 2));
+    expect(repo.listOpenObligations("nobody@r", 500)).toEqual([]);
+  });
+});
+
+describe("QueueRepository.listOpenObligations: same rows, order and limit as list() over random queue states", () => {
+  it("40 seeded random histories of creates, claims, blocks, closes and notes", async () => {
+    const states = new Set<string>(); const seen = new Set<string>();
+    for (let seed = 1; seed <= 40; seed++) {
+      const db = createDb();
+      migrate(db, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema, outboxEntriesSchema, queueItemSummarySchema]);
+      const repo = new QueueRepository(db, new EventBus(db));
+      repo.attachOutbox(new OutboxHandler(db));
+      let x = seed;
+      const rand = (n: number) => { x = (x * 1103515245 + 12345) % 2147483648; return (x >>> 16) % n; };
+      const seats = ["a@r", "b@r", "c@r", "d@r"];
+      const ids: string[] = [];
+      for (let step = 0; step < 60; step++) {
+        const op = rand(12);
+        try {
+          // create is async; every other repository call is synchronous.
+          if (op < 5 || ids.length === 0) {
+            const item = await repo.create({ sourceSession: seats[rand(4)]!, destinationSession: seats[rand(4)]!, body: `t${step}`,
+              priority: "routine", tier: "mode-0", ...(rand(3) ? { summary: `s${step}` } : {}) });
+            ids.push(item.qitemId);
+          } else {
+            const id = ids[rand(ids.length)]!;
+            const row = repo.getById(id)!;
+            if (op === 5 || op >= 9) repo.claim({ qitemId: id, destinationSession: row.destinationSession });
+            else if (op === 6) repo.update({ qitemId: id, actorSession: row.destinationSession, state: "blocked", transitionNote: "hold" });
+            else if (op === 7) repo.update({ qitemId: id, actorSession: row.destinationSession, state: "done", closureReason: "no-follow-on", transitionNote: "done" });
+            else repo.update({ qitemId: id, actorSession: row.destinationSession, transitionNote: "note" });
+          }
+        } catch { /* an illegal transition for this row's state: the history just skips it */ }
+      }
+      for (const s of ["pending", "in-progress", "blocked", "done"]) states.add(s);
+      for (const r of db.prepare("SELECT DISTINCT state FROM queue_items").all() as Array<{ state: string }>) seen.add(r.state);
+      for (const seat of [...seats, "nobody@r"]) {
+        for (const limit of [1, 3, 500]) {
+          const want = repo.list({ destinationSession: seat, state: ["pending", "in-progress", "blocked"], limit })
+            .map((r) => ({ qitemId: r.qitemId, state: r.state, summary: r.summary ?? null }));
+          expect(repo.listOpenObligations(seat, limit), `seed ${seed} ${seat} limit ${limit}`).toEqual(want);
+        }
+      }
+      db.close();
+    }
+    // The histories reach every state the parked read filters on, and a closed one it must drop.
+    expect([...seen].sort()).toEqual([...states].sort());
+  });
+});
+
+describe("hasLinkedSuccessor", () => {
+  let db: Database.Database;
+  let repo: QueueRepository;
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema, outboxEntriesSchema]);
+    repo = new QueueRepository(db, new EventBus(db));
+  });
+
+  afterEach(() => db.close());
+
+  it("recognizes successor linked via handed_off_from", async () => {
+    const source = await repo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "work" });
+    const successor = await repo.create({ sourceSession: "b@r", destinationSession: "c@r", body: "next", handedOffFrom: source.qitemId });
+
+    expect(hasLinkedSuccessor(db, source.qitemId, "c@r")).toBe(true);
+    expect(hasLinkedSuccessor(db, source.qitemId, successor.qitemId)).toBe(true);
+  });
+
+  it("recognizes successor linked via chainOfRecord", async () => {
+    const source = await repo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "work" });
+    const successor = await repo.create({ sourceSession: "b@r", destinationSession: "c@r", body: "next", chainOfRecord: [source.qitemId] });
+
+    expect(hasLinkedSuccessor(db, source.qitemId, "c@r")).toBe(true);
+    expect(hasLinkedSuccessor(db, source.qitemId, successor.qitemId)).toBe(true);
+  });
+
+  it("excludes source row itself even if destination matches target", async () => {
+    const source = await repo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "work" });
+    expect(hasLinkedSuccessor(db, source.qitemId, source.qitemId)).toBe(false);
+    expect(hasLinkedSuccessor(db, source.qitemId, "b@r")).toBe(false);
+  });
+
+  it("does not treat candidate with malformed chain_of_record as linked", async () => {
+    const source = await repo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "work" });
+    const candidate = await repo.create({ sourceSession: "b@r", destinationSession: "c@r", body: "candidate" });
+    db.prepare("UPDATE queue_items SET chain_of_record = 'not-valid-json' WHERE qitem_id = ?").run(candidate.qitemId);
+
+    expect(hasLinkedSuccessor(db, source.qitemId, "c@r")).toBe(false);
+    expect(hasLinkedSuccessor(db, source.qitemId, candidate.qitemId)).toBe(false);
   });
 });

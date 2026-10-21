@@ -23,6 +23,8 @@ describe("quiet waits and bounded recovery on existing domain seams", () => {
   let scheduler: WatchdogScheduler, stop: () => void;
   let sends: Array<{ target: string; message: string; cause: string }>;
   let worker: "working" | "idle-at-prompt" | "unknown", owner: "working" | "unknown", failed: boolean;
+  let duringDelivery: (() => Promise<void>) | undefined;
+  let occurrences: Array<string | undefined>;
   const now = () => Date.now();
   const advance = (seconds: number) => vi.setSystemTime(now() + seconds * 1000);
   beforeEach(() => {
@@ -31,7 +33,7 @@ describe("quiet waits and bounded recovery on existing domain seams", () => {
     vi.stubEnv("OPENRIG_QUEUE_PICKUP_STALL_THRESHOLD_MINUTES", "3");
     db = new Database(":memory:"); migrate(db, ALL_MIGRATIONS);
     db.prepare("INSERT INTO rigs (id,name) VALUES ('r','rig')").run();
-    sends = []; worker = "working"; owner = "working"; failed = false;
+    sends = []; occurrences = []; worker = "working"; owner = "working"; failed = false; duringDelivery = undefined;
     bus = new EventBus(db);
     queue = new QueueRepository(db, bus, { validateRig: () => true, transport: { send: async (target, message) => {
       sends.push({ target, message, cause: "queue" }); return { ok: true, verified: true };
@@ -45,7 +47,11 @@ describe("quiet waits and bounded recovery on existing domain seams", () => {
       resolveQueueWait: input => queue.evaluateWaitReminder(input),
       onWakeAttempt: ({ jobId, deliveryStatus }) => queue.recordWatchdogWakeAttempt(jobId, deliveryStatus),
       deliver: async ({ targetSession: target, message }, source) => {
-        sends.push({ target, message, cause: source.policy }); return { status: failed ? "failed" : "ok" };
+        sends.push({ target, message, cause: source.policy });
+        occurrences.push(source.occurrenceId);
+        const pending = duringDelivery; duringDelivery = undefined;
+        await pending?.();
+        return { status: failed ? "failed" : "ok" };
       },
     }) });
   });
@@ -58,6 +64,55 @@ describe("quiet waits and bounded recovery on existing domain seams", () => {
     return { blocker: blocker.qitemId, waiter: waiter.qitemId, job: queue.getParkWakeStatus(waiter.qitemId)!.ref };
   }
   const sweep = () => runStuckSweep({ db, queueRepo: queue, now: new Date(), unclaimedAgeMinutes: 60, resolveOrchestrator: () => "orch@rig", isRegisteredHost: () => false });
+
+  it.each(["ok", "failed"])("preserves a blocker change when in-flight delivery returns %s", async (status) => {
+    const { blocker, waiter, job } = await waiting();
+    failed = status === "failed";
+    advance(1);
+    await queue.update({ qitemId: blocker, actorSession: "worker@rig", transitionNote: "First result evidence" });
+    duringDelivery = async () => {
+      advance(1);
+      await queue.update({ qitemId: blocker, actorSession: "worker@rig", transitionNote: "New evidence while the first wake is sending" });
+    };
+    await scheduler.runTickNow();
+    expect(sends).toHaveLength(1);
+    const pending = jobs.getByIdOrThrow(job);
+    await scheduler.runTickNow();
+    expect(sends).toHaveLength(2);
+    expect(occurrences[0]).toBeDefined();
+    expect(occurrences[1]).not.toBe(occurrences[0]);
+    expect(queue.getByIdOrThrow(waiter).state).toBe("blocked");
+    expect(pending.lastEvaluationAt).toBe(new Date(0).toISOString());
+    expect(JSON.parse(pending.specYaml).context.queue_wait.eventPending).toBe(true);
+    expect(JSON.parse(pending.specYaml).context.queue_wait.notice).toBeUndefined();
+    advance(300);
+    await scheduler.runTickNow();
+    expect(sends).toHaveLength(2);
+  });
+
+  it("does not credit an in-flight notice to a blocker's onward handoff", async () => {
+    const { blocker, waiter, job } = await waiting();
+    advance(1);
+    await queue.update({ qitemId: blocker, actorSession: "worker@rig", transitionNote: "First result evidence" });
+    let successor = "";
+    duringDelivery = async () => {
+      advance(1);
+      const onward = await queue.handoff({ qitemId: blocker, fromSession: "worker@rig", toSession: "other@rig", body: "Continue the result", nudge: false });
+      successor = onward.created.qitemId;
+    };
+    await scheduler.runTickNow();
+    expect(sends).toHaveLength(1);
+    expect(sends[0]!.message).toContain(blocker);
+    expect(queue.getByIdOrThrow(waiter).blockedOn).toBe(successor);
+    expect(jobs.getByIdOrThrow(job).lastEvaluationAt).toBe(new Date(0).toISOString());
+    await scheduler.runTickNow();
+    expect(sends).toHaveLength(2);
+    expect(sends[1]!.message).toContain(successor);
+    expect(occurrences[1]).not.toBe(occurrences[0]);
+    advance(300);
+    await scheduler.runTickNow();
+    expect(sends).toHaveLength(2);
+  });
 
   it("keeps working-owner waits quiet, wakes once for change, and repairs a missed event on the next tick", async () => {
     const { blocker, waiter, job } = await waiting();

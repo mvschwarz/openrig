@@ -92,10 +92,25 @@ time-bounded evidence. Rungs, top down, with each rung's retirement condition:
   window in production — never by fixture pass alone (symmetric admission: a fixture
   pass admits a rung to TRIAL, where it is measured but not consulted; production agreement
   promotes it). Undeclared and partial-coverage rungs are identity-only, which is also where
-  a degraded rung goes.
+  a degraded rung goes, with one declared exception: for a pi or omp seat or a community
+  harness, sampling is positive-only: a changing pane reads working, and a quiet one never reads idle on its
+  own, since the pane can be quiet mid-turn.
+- **pi and omp runner hooks**: OpenRig's runner reads the child's RPC event stream and posts
+  each turn boundary (`agent_start`, `turn_start`, tool calls, `agent_end`; attention). These
+  decide working, idle and needs-input. Unlike Claude and Codex hooks, an idle or attention
+  boundary holds until the next one instead of expiring after 15 s; a working boundary still
+  expires, so a turn whose end was lost reads unknown, not working forever. Posts are taken
+  in the runner's own order (time, then its sequence), so an older boundary arriving late
+  doesn't win. The runner's report that its child
+  exited reads unknown, not idle. A boundary the runner didn't see (if a runtime ended a turn
+  without `agent_end`) leaves the seat working up to the 15 s window, then unknown, never idle. After a
+  daemon restart, a runner seat takes its last recorded boundary from the hook store, for its
+  current session and occupant generation only, so an idle seat still reads idle before it
+  posts again.
 
 Partial-coverage honesty: a source with partial lifecycle coverage gets identity-only
-trust. The ladder is also the migration path — new oracles slot in above existing
+trust, unless its inventory declares it positive-only. A positive-only source can report
+working and nothing else; its silence reads unknown, never idle. The ladder is also the migration path — new oracles slot in above existing
 heuristics, lower rungs retire a release at a time, consumers never see a flag day.
 
 Seat-keyed: state attaches to the durable seat nodeId, never the occupant. A handover or

@@ -6,6 +6,9 @@ import { DEFAULT_TIME_ZONE, displayTime } from "./time.js";
 import { startupLines, type StartupState } from "./startup.js";
 import { configLines } from "./config/config-model.js";
 import { connectionsLines } from "./connections/connections-model.js";
+import { usageLines } from "./usage/usage-model.js";
+import { usageHostsLines } from "./usage/usage-hosts-model.js";
+import { costLines } from "./cost/cost-model.js";
 // Hand-rolled ANSI renderer (Phase-0 substrate decision). Pure function:
 // (state, snapshot) → {lines, hitMap, explorerRows}. BOTH panes emit hit
 // targets — explorer rows AND content-pane surfaces (table rows, view tabs,
@@ -33,7 +36,7 @@ import type { ColorMode, Token } from "./theme.js";
 import { terminalLines } from "./terminals/terminal-model.js";
 import { detailPage, fieldLine, sectionRule, listItem, alignedRow, LABEL_W, wrapDetailLines } from "./detail.js";
 import { healthAgentLines, healthDetailLines, healthListLines, healthSummaryLine } from "./health/health-model.js";
-import type { Action, FleetSnapshot, LoadState, NeedsItem, RecentTransitionSnap, RowFlash, Screen, ViewState } from "./types.js";
+import type { Action, FleetSnapshot, LoadState, NeedsItem, RecentTransitionSnap, RowFlash, Screen, SeatEffortRead, ViewState } from "./types.js";
 
 interface ContentLine {
   text: string;
@@ -60,7 +63,7 @@ function padLeft(text: string | number | null | undefined, width: number): strin
 }
 
 type Align = "left" | "right";
-type AgentColumnKey = "rig" | "pod" | "seat" | "runtime" | "model" | "context" | "status" | "queue" | "work" | "now" | "actions";
+type AgentColumnKey = "rig" | "pod" | "seat" | "runtime" | "model" | "effort" | "context" | "status" | "queue" | "work" | "now" | "actions";
 type AgentColumn = [key: AgentColumnKey, name: string, width: number, align: Align];
 
 function columnsWidth(columns: AgentColumn[]): number {
@@ -70,14 +73,14 @@ function columnsWidth(columns: AgentColumn[]): number {
 function agentColumns(contentWidth: number): AgentColumn[] {
   if (contentWidth >= 110) return [
     ["pod", "POD", 8, "left"], ["seat", "SEAT", 15, "left"], ["runtime", "RT", 4, "left"],
-    ["model", "MODEL", 12, "left"], ["context", "CTX", 8, "right"], ["status", "STATE", 11, "left"],
-    ["queue", "Q", 3, "right"], ["work", "WORK", 15, "left"], ["now", "NOW", 27, "left"],
+    ["model", "MODEL", 12, "left"], ["effort", "CFG EFF", 7, "left"], ["context", "CTX", 8, "right"], ["status", "STATE", 11, "left"],
+    ["queue", "Q", 3, "right"], ["work", "WORK", 15, "left"], ["now", "NOW", 19, "left"],
     ["actions", "ACTIONS", 14, "left"],
   ];
   if (contentWidth >= 88) return [
-    ["pod", "POD", 6, "left"], ["seat", "SEAT", 12, "left"], ["runtime", "RT", 3, "left"],
-    ["model", "MODEL", 8, "left"], ["context", "CTX", 6, "right"], ["status", "STATE", 9, "left"],
-    ["queue", "Q", 2, "right"], ["work", "WORK", 8, "left"], ["now", "NOW", 11, "left"],
+    ["pod", "POD", 5, "left"], ["seat", "SEAT", 10, "left"], ["runtime", "RT", 3, "left"],
+    ["model", "MODEL", 8, "left"], ["effort", "CFG", 4, "left"], ["context", "CTX", 6, "right"], ["status", "STATE", 9, "left"],
+    ["queue", "Q", 2, "right"], ["work", "WORK", 6, "left"], ["now", "NOW", 11, "left"],
     ["actions", "ACTIONS", 14, "left"],
   ];
   // At 84x28 the L2 content pane is 58 cells. The three explicitly deferred
@@ -126,6 +129,104 @@ function tableModel(model: string | null | undefined): string {
   return model?.replace(/^claude-/i, "") || "—";
 }
 
+/** Table cell for the CONFIGURED value only. A trailing mark names its source:
+ *  `*` the seat's saved choice, `+` the authored value. `—` = no configured level
+ *  (runtime default); `?` = the daemon did not report one (older daemon / read gap).
+ *  A value compacts only when the mark would otherwise overflow the cell. */
+const CONFIGURED_MARK: Record<string, string> = { seat_choice: "*", authored: "+" };
+const COMPACT_EFFORT: Record<string, string> = { high: "hi", medium: "med", xhigh: "xhi", minimal: "min", none: "no" };
+
+function tableEffort(
+  effort: string | null | undefined,
+  source: "seat_choice" | "authored" | "runtime_default" | null | undefined,
+  width: number,
+): string {
+  const value = effort?.trim();
+  if (!value) return source === "runtime_default" ? "—" : "?";
+  const mark = source ? CONFIGURED_MARK[source] ?? "" : "";
+  if (value.length + mark.length <= width) return `${value}${mark}`;
+  const compact = COMPACT_EFFORT[value] ?? value;
+  return `${compact.slice(0, Math.max(0, width - mark.length))}${mark}`;
+}
+
+/** The report-level reason when the whole read is unavailable; null when it answered. */
+function effortReportStatus(report: SeatEffortRead | null): string | null {
+  if (!report) return "report not read";
+  if (report.ok !== true) return `report refused ${report.code ?? "unknown_code"}`;
+  return null;
+}
+
+/** requested: the last saved choice request. null (no event) and an explicit clear differ. */
+function effortRequestedText(report: SeatEffortRead | null): string {
+  if (!report || report.ok !== true) return "unknown";
+  if (!report.requested) return "never set";
+  return report.requested.value == null ? "cleared" : report.requested.value;
+}
+
+/** The configured side. The report's saved resolution is authoritative; the node
+ *  inventory (same resolver) fills in when the report was not read. */
+function effortSavedText(
+  report: SeatEffortRead | null,
+  agent: { effort?: string | null; effortSource?: "seat_choice" | "authored" | "runtime_default" | null },
+): string {
+  const saved = report?.ok === true ? report.saved : undefined;
+  if (saved?.effective) {
+    if (saved.source === "seat_choice") {
+      const authored = saved.authored && saved.authored !== saved.effective ? `; authored ${saved.authored}` : "";
+      return `${saved.effective} (seat choice${authored})`;
+    }
+    if (saved.source === "authored") return `${saved.effective} (authored)`;
+    return `${saved.effective} (source ${saved.source ?? "not reported"})`;
+  }
+  if (saved?.source === "runtime_default") return "none (runtime default)";
+  if (agent.effort) {
+    const source = agent.effortSource === "seat_choice" ? "seat choice"
+      : agent.effortSource === "authored" ? "authored"
+      : "source not reported";
+    return `${agent.effort} (${source}; node inventory)`;
+  }
+  if (agent.effortSource === "runtime_default") return "none (runtime default; node inventory)";
+  return "unknown";
+}
+
+/** emitted: the flag the running process was launched with, never a saved value. */
+function effortEmittedText(report: SeatEffortRead | null): string {
+  if (!report || report.ok !== true) return "unknown";
+  const emitted = report.emitted;
+  if (!emitted || emitted.state !== "observed") return "unknown";
+  const value = emitted.value == null ? "no flag" : emitted.value;
+  return emitted.matchesSaved === false ? `${value} (differs from saved)` : value;
+}
+
+/** The native side. "applied" appears only for outcome `accepted`: every other
+ *  outcome leaves the applied level unproven or judged not taken. */
+function effortObservedText(report: SeatEffortRead | null): string {
+  if (!report || report.ok !== true) return "unknown";
+  const observed = report.observed;
+  if (!observed || observed.state !== "observed") return "unknown";
+  const value = observed.value ?? "—";
+  const outcome = observed.outcome ?? "not reported";
+  const wording = outcome === "accepted" ? "accepted — applied"
+    : outcome === "recorded" ? "recorded; applied not proven"
+    : outcome === "rejected" ? "rejected — not taken"
+    : outcome === "failed" || outcome === "interrupted" || outcome === "pending" ? `${outcome} — not judged`
+    : `outcome ${outcome}`;
+  const differs = observed.matchesEmitted === false ? "; differs from launch" : "";
+  return `${value} (${wording}${differs})`;
+}
+
+/** One wrapped row: the four values stay labelled and distinguishable. */
+function effortDetailText(
+  report: SeatEffortRead | null,
+  agent: { effort?: string | null; effortSource?: "seat_choice" | "authored" | "runtime_default" | null },
+): string {
+  const status = effortReportStatus(report);
+  return `requested ${effortRequestedText(report)} · saved ${effortSavedText(report, agent)} · emitted ${effortEmittedText(report)} · observed ${effortObservedText(report)}${status ? ` · ${status}` : ""}`;
+}
+
+/** One line under the table naming what the column holds: configured, never observed. */
+const EFFORT_LEGEND = "EFFORT (configured): * seat choice · + authored · — none · ? unknown; observed on drill";
+
 function contextCompact(value: number | null, narrow: boolean): string {
   if (value == null) return "—";
   if (narrow) return `${value}%`;
@@ -166,7 +267,7 @@ function queueFacts(snap: FleetSnapshot, session: string | null | undefined): { 
     rows.push({ role, row });
   }
   const primary = rows[0];
-  if (!primary) return { count: 0, work: "—", now: "—" };
+  if (!primary) return { count: 0, work: queueIncomplete(snap) ? "unknown" : "—", now: queueIncomplete(snap) ? "not in sample" : "—" };
   const slice = primary.row.tags?.find((tag) => tag.startsWith("slice:"))?.slice("slice:".length);
   const work = slice?.match(/^OPR(?:\.\d+){3}\.(\d+)$/)?.[1]
     ? `S${slice.slice(slice.lastIndexOf(".") + 1)}`
@@ -174,6 +275,21 @@ function queueFacts(snap: FleetSnapshot, session: string | null | undefined): { 
   const summary = primary.row.summary?.trim() || primary.row.body.split("\n").find((line) => line.trim())?.trim() || primary.row.qitemId;
   const now = primary.role === "working" ? summary : `${primary.role} · ${summary}`;
   return { count: rows.length, work, now };
+}
+
+function queueIncomplete(snap: FleetSnapshot): boolean {
+  return snap.queueCoverage === "partial" || snap.queueCoverage === "unavailable";
+}
+
+function queueCount(snap: FleetSnapshot, count: number): string | number {
+  return queueIncomplete(snap) ? count ? `${count}+` : "?" : count || "·";
+}
+
+function queueSampleLines(snap: FleetSnapshot, width: number): ContentLine[] {
+  return queueIncomplete(snap) ? wrapDetailLines([
+    { text: snap.queueCoverage === "unavailable" ? "Queue sample incomplete: a list read failed." : "Queue sample may be incomplete: a list reached its cap." },
+    { text: "Counts are lower bounds; unlisted work is unknown." },
+  ], width) : [];
 }
 
 function number(value: number | null | undefined): string {
@@ -214,8 +330,8 @@ function rowsForAgent(snap: FleetSnapshot, session: string, sources: Array<Fleet
   return rows;
 }
 
-function workRows(rows: FleetSnapshot["attention"], width: number): ContentLine[] {
-  if (rows.length === 0) return [fieldLine({ label: "rows", value: "none in the served bounded lists" })];
+function workRows(rows: FleetSnapshot["attention"], width: number, incomplete = false): ContentLine[] {
+  if (rows.length === 0) return [fieldLine({ label: "rows", value: incomplete ? "not in sample; work unknown" : "none in the served bounded lists" })];
   return rows.flatMap((row) => {
     const summary = row.summary?.trim() || row.body.split("\n").find((line) => line.trim())?.trim() || "no summary served";
     return [
@@ -239,7 +355,7 @@ function agentDetailLines(
   const pendingRows = session ? rowsForAgent(snap, session, [snap.pending]) : [];
   const recentRows = session ? rowsForAgent(snap, session, [snap.recentlyFinished]) : [];
   const needs = session ? snap.needs.filter((item) => item.target === session) : [];
-  const visibleAssigned = currentRows.length + pendingRows.length;
+  const visibleAssigned = new Set([...currentRows, ...pendingRows].map(row => row.qitemId)).size;
   const assigned = agent.assignedWorkCount ?? visibleAssigned;
   const pending = agent.pendingWorkCount ?? pendingRows.length;
   const inProgress = agent.inProgressWorkCount ?? currentRows.filter((row) => row.state === "in-progress").length;
@@ -256,6 +372,9 @@ function agentDetailLines(
     ...runtimeMarkSegs(agent.runtime),
   ];
   const runtimeLine: ContentLine = { text: rtSegs.map((segment) => segment.text).join(""), segs: rtSegs };
+  const effortReport = snap.seatEffort && snap.seatEffort.seatRef === `${agent.name}@${rig.name}`
+    ? snap.seatEffort.report
+    : null;
   const activityReason = agent.activity?.needsInput?.reason ?? agent.activity?.signalReason ?? null;
   const needsRows = needs.length > 0
     ? needs.flatMap((item) => [
@@ -276,6 +395,9 @@ function agentDetailLines(
           fieldLine({ label: "meter", value: context == null ? "— (not yet known)" : `${context}% used  ${barCells(context / 100, meterWidth)}` }),
           fieldLine({ label: "tokens", value: `${number(agent.totalInputTokens)} input · ${number(agent.totalOutputTokens)} output · ${number(agent.contextWindowSize)} window` }),
           runtimeLine,
+          // #1347 — four values stay distinguishable on one wrapped row. "applied"
+          // appears only for outcome `accepted`; unknowns stay unknown.
+          ...wrapDetailValue("effort", effortDetailText(effortReport, agent), contentWidth),
           ...(agent.attach ? [fieldLine({ label: "attach", value: agent.attach })] : []),
           fieldLine({ label: "terminal", value: `Open terminals ▸ pod ${pod.name}`, link: { type: "act", act: "open-terminal", view: `pod:${rig.name}/${pod.name}` } }),
         ],
@@ -300,15 +422,16 @@ function agentDetailLines(
           local: found.host === snap.hosts[0],
         }, contentWidth),
       },
-      { title: `CURRENT WORK · ${currentRows.length}`, lines: workRows(currentRows, contentWidth) },
+      { title: `CURRENT WORK · ${currentRows.length}${queueIncomplete(snap) ? " sampled" : ""}`, lines: workRows(currentRows, contentWidth, queueIncomplete(snap)) },
       {
         title: "QUEUE",
         lines: [
-          ...wrapDetailValue("depth", `${assigned} assigned · ${pending} pending · ${inProgress} in progress · ${blocked} blocked`, contentWidth),
+          ...queueSampleLines(snap, contentWidth),
+          ...wrapDetailValue("depth", `${agent.assignedWorkCount == null && queueIncomplete(snap) ? `${assigned}+` : assigned} assigned · ${agent.pendingWorkCount == null && queueIncomplete(snap) ? `${pending}+` : pending} pending · ${agent.inProgressWorkCount == null && queueIncomplete(snap) ? `${inProgress}+` : inProgress} in progress · ${agent.blockedWorkCount == null && queueIncomplete(snap) ? `${blocked}+` : blocked} blocked`, contentWidth),
           ...(agent.assignedWorkCount == null ? wrapDetailValue("basis", `${visibleAssigned} rows visible in bounded list reads; complete count not served`, contentWidth) : []),
         ],
       },
-      { title: `UP NEXT · ${pending}`, lines: workRows(pendingRows, contentWidth) },
+      { title: `UP NEXT · ${pending}${queueIncomplete(snap) ? " · sampled rows" : ""}`, lines: workRows(pendingRows, contentWidth, queueIncomplete(snap)) },
       { title: `NEEDS YOU · ${needs.length || agent.activity?.needsInput?.count || 0}`, lines: needsRows },
       ...(recentRows.length ? [{ title: "RECENTLY FINISHED · bounded window", lines: workRows(recentRows, contentWidth) }] : []),
       {
@@ -371,7 +494,7 @@ function queueRows(snap: FleetSnapshot): FleetSnapshot["attention"] {
 function recentWorkText(snap: FleetSnapshot, row: RecentTransitionSnap): string {
   const qitem = queueRows(snap).find((candidate) => candidate.qitemId === row.qitemId);
   const work = qitem?.summary?.trim() || qitem?.body.split("\n").find((line) => line.trim())?.trim();
-  return row.summary?.trim() || work || "no work served";
+  return row.summary?.trim() || row.bodyPreview?.trim() || work || "no work served";
 }
 
 function agentDrillForSession(snap: FleetSnapshot, session: string): Action | undefined {
@@ -636,6 +759,7 @@ function instanceContentLines(
   }
 
   lines.push(healthSummaryLine(snap, scope, contentWidth));
+  lines.push(...queueSampleLines(snap, contentWidth));
   lines.push({ text: state.filter ? `/ filter instance rows: ${state.filter} · / replace · esc clear` : "/ filter instance rows…" });
   const columns = instanceAgentColumns(contentWidth);
   lines.push({ text: tableRow(columns, { rig: "RIG", pod: "POD", seat: "SEAT", runtime: "RT", context: "CTX", status: "STATE", queue: "Q", work: "WORK", now: "NOW" }) });
@@ -675,7 +799,7 @@ function instanceContentLines(
           runtime: runtimeShort(agent.runtime),
           context: contextCompact(agent.context, contentWidth < 110),
           status: stateCell.word,
-          queue: queue.count || "·",
+          queue: queueCount(snap, queue.count),
           work: queue.work,
           now: queue.now,
         }),
@@ -684,7 +808,7 @@ function instanceContentLines(
       });
     }
   }
-  lines.push({ text: "" }, { text: host.rigs.some(r => r.inventoryUnavailable) ? `${host.rigs.length} rigs · inventory incomplete · ${seatCount} seats read` : `${host.rigs.length} rigs · ${seatCount} seats · ${workingCount} working · ${attentionCount} need attention · ${openCount} open rows` });
+  lines.push({ text: "" }, { text: host.rigs.some(r => r.inventoryUnavailable) ? `${host.rigs.length} rigs · inventory incomplete · ${seatCount} seats read` : `${host.rigs.length} rigs · ${seatCount} seats · ${workingCount} working · ${attentionCount} need attention · ${openCount}${queueIncomplete(snap) ? "+ sampled" : ""} open rows` });
   lines.push(...recentLines(snap, scope, contentWidth, false, state.timeZone));
   return lines;
 }
@@ -703,6 +827,9 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
   if (state.section === "terminals") return terminalLines(state, snap, contentWidth);
   if (state.section === "config") return configLines(state, snap, contentWidth);
   if (state.section === "connections") return connectionsLines(snap, contentWidth, state.timeZone, state.expanded);
+  if (state.section === "usage") return usageLines(snap, contentWidth);
+  if (state.section === "usage-hosts") return usageHostsLines(snap, contentWidth);
+  if (state.section === "cost") return costLines(snap.cost, contentWidth);
   if (state.healthOpen) return healthDetailLines(snap, state.healthOpen, contentWidth, state.timeZone);
   if (state.section === "system") return [{ text: "System · Instance health" }, { text: "" }, ...healthListLines(snap, { kind: "instance", local: true }, contentWidth)];
   // PULSE is a FULL-WIDTH view handled by an early return in renderScreen
@@ -853,14 +980,17 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       return lines;
     }
     const agentCols = agentColumns(contentWidth);
+    lines.push(...queueSampleLines(snap, contentWidth));
     const narrowFactory = !agentCols.some(([key]) => key === "model");
-    if (narrowFactory) lines.push({ text: "MODEL/NOW/ACTIONS on drill (enter)" });
+    const effortCol = agentCols.find(([key]) => key === "effort");
+    if (narrowFactory) lines.push({ text: "MODEL/EFFORT/NOW/ACTIONS on drill (enter)" });
     lines.push({
       text: tableRow(agentCols, {
-        pod: "POD", seat: "SEAT", runtime: "RT", model: "MODEL", context: "CTX",
+        pod: "POD", seat: "SEAT", runtime: "RT", model: "MODEL", effort: effortCol?.[1] ?? "CFG EFF", context: "CTX",
         status: "STATE", queue: "Q", work: "WORK", now: "NOW", actions: "ACTIONS",
       }),
     });
+    if (effortCol) lines.push({ text: EFFORT_LEGEND });
     lines.push({ text: "━".repeat(columnsWidth(agentCols)) });
     const actionsIndex = agentCols.findIndex(([key]) => key === "actions");
     const actionsColStart = actionsIndex < 0 ? -1 : agentCols.slice(0, actionsIndex).reduce((n, [, , width]) => n + width + 1, 0);
@@ -896,9 +1026,10 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
           seat: `${stateCell.mark} ${seatName(a.pod, a.name)}`,
           runtime: runtimeShort(a.runtime),
           model: tableModel(a.model),
+          effort: tableEffort(a.effort, a.effortSource, effortCol?.[2] ?? 0),
           context: contextCompact(a.context, narrowFactory),
           status: stateCell.word,
-          queue: queue.count || "·",
+          queue: queueCount(snap, queue.count),
           work: queue.work,
           now: queue.now,
           actions: actionsCell,
@@ -910,7 +1041,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
     lines.push({ text: "" });
     const working = rows.filter((agent) => ["active", "working", "running"].includes(agent.status)).length;
     const attention = rows.filter((agent) => /attention|needs|blocked|unknown|failed/.test(agent.status)).length;
-    lines.push({ text: `${rows.length} seats · ${working} working · ${attention} need attention · ${rows.reduce((n, agent) => n + queueFacts(snap, agent.session).count, 0)} open rows` });
+    lines.push({ text: `${rows.length} seats · ${working} working · ${attention} need attention · ${rows.reduce((n, agent) => n + queueFacts(snap, agent.session).count, 0)}${queueIncomplete(snap) ? "+ sampled" : ""} open rows` });
     if (!podFilter) lines.push(...recentLines(snap, { kind: "rig", rig: rig.name }, contentWidth, false, state.timeZone));
     return lines;
   }
@@ -1327,6 +1458,7 @@ function pushExplorerTargets(
 function readStatus(load: import("./types.js").LoadState, zone: string): string {
   const at = load.retainedAt ?? load.lastSuccessAt;
   const basis = at === undefined ? "" : ` · last ${displayTime(new Date(at).toISOString(), zone)}`;
+  if (load.skew) return load.skew;
   if (load.inFlight) return `${load.settled ? "Refreshing" : "Loading"}…${basis} · ? Help`;
   if (load.stale) return `${at === undefined ? "Read failed" : "Could not refresh"}${basis} · refresh to Retry`;
   return `Tab complete · ? help${basis}`;

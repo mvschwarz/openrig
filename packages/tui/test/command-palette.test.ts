@@ -54,6 +54,19 @@ import { createViewState } from "../src/state.js";
 import { demoSnapshot } from "../src/demo-data.js";
 
 describe("palette state rides dispatch (I3)", () => {
+  it("palette-move stops at the last match, so the first up-press after overshooting moves", () => {
+    const view = createViewState({ instanceId: "t", getSnapshot: () => demoSnapshot() });
+    view.dispatch({ type: "palette-open" });
+    const count = filterPalette("", COMMAND_REGISTRY, "standard").length;
+    for (let i = 0; i < count + 5; i++) view.dispatch({ type: "palette-move", delta: 1 });
+    expect(view.get().palette!.selection).toBe(count - 1);
+    view.dispatch({ type: "palette-move", delta: -1 });
+    expect(view.get().palette!.selection).toBe(count - 2);
+    view.dispatch({ type: "palette-query", query: "graph" });
+    view.dispatch({ type: "palette-move", delta: 100 });
+    expect(view.get().palette!.selection).toBe(filterPalette("graph", COMMAND_REGISTRY, "standard").length - 1);
+  });
+
   it("help/? opens via the grammar; query/move/close transition; execute path parses byte-equal", () => {
     const view = createViewState({ instanceId: "t", getSnapshot: () => demoSnapshot() });
     view.dispatch(parseCommand("?"));

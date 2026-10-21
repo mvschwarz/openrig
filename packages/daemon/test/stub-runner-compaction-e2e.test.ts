@@ -83,7 +83,11 @@ describe("stub-runner compaction behavior (real-spawn wiring, R1)", () => {
 
     child = execFile("node", ["--import", "tsx", RUNNER,
       "--session-name", SEAT, "--cwd", dir, "--launch-id", "cmp-1", "--posture", "floor"],
-      { env: { ...process.env, OPENRIG_HOME: home, OPENRIG_TEST_CLOCK_NOW: INJECTED_ISO } as NodeJS.ProcessEnv });
+      { env: {
+        ...process.env, OPENRIG_HOME: home, OPENRIG_TEST_CLOCK_NOW: INJECTED_ISO,
+        // Keep the packet out of the production default (/tmp/claude-compaction-restore).
+        OPENRIG_COMPACTION_OUT_ROOT: join(dir, "packets"),
+      } as NodeJS.ProcessEnv });
 
     const markerPath = join(home, "compaction", "restore-pending", `${SANITIZED}.json`);
     await waitForFile(markerPath);
@@ -93,6 +97,8 @@ describe("stub-runner compaction behavior (real-spawn wiring, R1)", () => {
     expect(marker.sessionName).toBe(SEAT);
     expect(marker.createdAt).toBe(INJECTED_ISO);
     expect(existsSync(marker.outputDir)).toBe(true);
+    // ...under this test's own packets root, not the production default.
+    expect(dirname(marker.outputDir)).toBe(join(dir!, "packets"));
     // The seam compacted the stub's OWN authored transcript — NOT a foreign one
     // discovered under ~/.claude/projects (findLatestJsonl's real-HOME fallback).
     // On the discovery path input.transcript_path is unset and the marker records

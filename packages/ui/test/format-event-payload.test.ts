@@ -77,4 +77,14 @@ describe("formatEventPayload (Phase 3 bounce-fix A3)", () => {
     expect(result.length).toBeLessThanOrEqual(200);
     expect(result.endsWith("…")).toBe(true);
   });
+
+  it("keeps an emoji whole when shortening at the cut point", () => {
+    const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
+    const summary = formatEventPayload({ summary: `${"x".repeat(198)}🎉 done` });
+    expect(summary.endsWith("…")).toBe(true);
+    expect(loneSurrogate.test(summary)).toBe(false);
+    const preview = formatEventPayload({ kind: `${"y".repeat(38)}🎉z` });
+    expect(preview.endsWith("…")).toBe(true);
+    expect(loneSurrogate.test(preview)).toBe(false);
+  });
 });

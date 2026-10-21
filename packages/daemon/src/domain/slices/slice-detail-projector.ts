@@ -54,6 +54,7 @@ import {
   type PhaseDefinition,
   type CurrentStepPayload,
 } from "../workflow/slice-workflow-projection.js";
+import { sliceWhole } from "../text-cut.js";
 
 export interface StoryEvent {
   ts: string;
@@ -236,7 +237,7 @@ export class SliceDetailProjector {
     const bindingResult = findSliceWorkflowBinding(this.db, slice.qitemIds);
     const binding = bindingResult.primary;
     const spec = binding && this.workflowSpecCache
-      ? this.tryGetSpec(binding.workflowName, binding.workflowVersion)
+      ? this.tryGetSpec(binding.workflowName, binding.workflowVersion, this.boundRigOf(binding.instanceId))
       : null;
     const trailQitemToStep = binding ? this.buildTrailQitemToStepMap(binding.instanceId) : new Map<string, string>();
 
@@ -287,10 +288,21 @@ export class SliceDetailProjector {
 
   // --- v1 helpers ---
 
-  private tryGetSpec(name: string, version: string) {
+  /** The rig the instance is bound to, so `member@{rig}` targets show the seat the packet went to. */
+  private boundRigOf(instanceId: string): string | null {
+    try {
+      const row = this.db.prepare(`SELECT bound_rig FROM workflow_instances WHERE instance_id = ?`)
+        .get(instanceId) as { bound_rig: string | null } | undefined;
+      return row?.bound_rig ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  private tryGetSpec(name: string, version: string, boundRig: string | null) {
     if (!this.workflowSpecCache) return null;
     try {
-      const row = this.workflowSpecCache.getByNameVersion(name, version);
+      const row = this.workflowSpecCache.getForInstance({ workflowName: name, workflowVersion: version, boundRig });
       return row?.spec ?? null;
     } catch {
       return null;
@@ -876,7 +888,7 @@ export class SliceDetailProjector {
 
 function truncate(s: string, n: number): string {
   if (s.length <= n) return s;
-  return `${s.slice(0, n)}…`;
+  return `${sliceWhole(s, n)}…`;
 }
 
 function sessionRigKey(session: string): string {

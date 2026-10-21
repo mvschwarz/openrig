@@ -88,7 +88,7 @@ export function updateFrontmatter(
   updates: Record<string, unknown>,
 ): void {
   const original = fs.existsSync(absPath) ? fs.readFileSync(absPath, "utf8") : "";
-  const match = /^---\s*\n([\s\S]*?)\n---/.exec(original);
+  const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?=\r?\n|$)/.exec(original);
   if (!match) {
     const yaml = YAML.stringify(updates, { lineWidth: 0 }).trimEnd();
     const separator = original.startsWith("\n") ? "" : "\n";
@@ -97,8 +97,8 @@ export function updateFrontmatter(
   }
 
   const originalBlock = match[1]!;
-  const blockStart = match.index + match[0].length - originalBlock.length - 4;
-  const blockEnd = blockStart + originalBlock.length - (originalBlock.endsWith("\r") ? 1 : 0);
+  const blockStart = original.indexOf("\n") + 1;
+  const blockEnd = blockStart + originalBlock.length;
   const newline = original.slice(blockEnd, blockEnd + 2) === "\r\n" ? "\r\n" : "\n";
   let block: string;
   try {
@@ -205,6 +205,49 @@ export function configuredMissionsRoot(configPath?: string): string | null {
   return null;
 }
 
+/**
+ * The project's missions root: project.yaml's optional `missions.root` when it is a relative path inside the
+ * project, else the conventional `missions`. Null when it resolves outside the project. Work positions and
+ * mission creation both use it, so they agree on where a project's missions live.
+ */
+export function projectMissionsRoot(
+  projectRoot: string,
+  projectManifest: Record<string, unknown> | null,
+  warnings: string[],
+): string | null {
+  let missionsRel = "missions";
+  const missions = projectManifest?.["missions"];
+  const root = missions !== null && typeof missions === "object" && !Array.isArray(missions)
+    ? (missions as Record<string, unknown>)["root"]
+    : undefined;
+  if (root !== undefined) {
+    if (typeof root === "string" && !path.isAbsolute(root) && !root.split(/[\\/]/).includes("..")) {
+      missionsRel = root;
+    } else {
+      warnings.push("project.yaml: optional missions.root must be a relative path inside the project; kept the conventional missions root");
+    }
+  }
+  const missionsRoot = path.resolve(projectRoot, missionsRel);
+  const rel = path.relative(projectRoot, missionsRoot);
+  return rel === "" || (!path.isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${path.sep}`)) ? missionsRoot : null;
+}
+
+/** {@link projectMissionsRoot} for the project.yaml at `projectRoot`, when there is one. */
+export function readProjectMissionsRoot(projectRoot: string, warnings: string[]): string | null {
+  const projectManifestPath = path.join(projectRoot, "project.yaml");
+  let projectManifest: Record<string, unknown> | null = null;
+  if (fs.existsSync(projectManifestPath)) {
+    try {
+      const value = YAML.parse(fs.readFileSync(projectManifestPath, "utf8")) as unknown;
+      if (value !== null && typeof value === "object" && !Array.isArray(value)) projectManifest = value as Record<string, unknown>;
+      else warnings.push(`${projectManifestPath} must contain a YAML object; kept the conventional missions root`);
+    } catch (err) {
+      warnings.push(`${projectManifestPath} is not valid YAML: ${(err as Error).message}; kept the conventional missions root`);
+    }
+  }
+  return projectMissionsRoot(projectRoot, projectManifest, warnings);
+}
+
 /** Locate the missions root from an explicit workspace override or the typed
  * `workspace.slices_root` setting. No cwd walk: discovery may enumerate
  * candidates, but selection comes from configuration. */
@@ -228,7 +271,14 @@ export function resolveMissionsRoot(opts: {
   if (fromOverride) {
     const candidate = path.isAbsolute(fromOverride) ? fromOverride : path.resolve(cwd, fromOverride);
     const missions = path.join(candidate, "missions");
-    if (fs.existsSync(missions) && fs.statSync(missions).isDirectory()) return missions;
+    const hasMissionsChild = fs.existsSync(missions) && fs.statSync(missions).isDirectory();
+    // A named workspace reads the missions.root its project.yaml declares, where mission creation writes;
+    // a named missions folder is read as is.
+    if (hasMissionsChild || path.basename(candidate) !== "missions") {
+      const declared = readProjectMissionsRoot(candidate, []);
+      if (declared && fs.existsSync(declared) && fs.statSync(declared).isDirectory()) return declared;
+    }
+    if (hasMissionsChild) return missions;
     if (path.basename(candidate) === "missions" && fs.existsSync(candidate)) return candidate;
     if (opts.strictOverride) {
       const source = fromFlag === null ? "OPENRIG_WORK_ROOT" : "--workspace";
@@ -529,16 +579,18 @@ function findOwningMission(missionsRoot: string, slicePath: string): string | nu
 // Auto-numbering
 // ---------------------------------------------------------------------
 
+export { tryClaimSliceNN } from "./slice-claims.js";
+
 /** Find the next available NN for a mission's slices/ folder. Scans
- *  BOTH slices/ AND closed/ so numbers are never reused (§3.2). */
+ *  BOTH slices/ AND closed/, including ordinal claims, so numbers are never reused (§3.2). */
 export function nextSliceNN(missionAbsPath: string): number {
   let max = 0;
   for (const subdir of ["slices", "closed"]) {
     const root = path.join(missionAbsPath, subdir);
     if (!fs.existsSync(root)) continue;
     for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      const m = SLICE_DIRNAME_RE.exec(entry.name);
+      const marker = subdir === "slices" ? /^\.nn-(\d+)$/.exec(entry.name) : null;
+      const m = marker ?? (entry.isDirectory() ? SLICE_DIRNAME_RE.exec(entry.name) : null);
       if (!m) continue;
       const n = Number(m[1]);
       if (Number.isFinite(n) && n > max) max = n;

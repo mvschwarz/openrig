@@ -433,6 +433,8 @@ export interface PodBundleManifest {
   agents: PodBundleAgentEntry[];
   cultureFile?: string;
   integrity?: BundleIntegrity;
+  /** Exact archive-relative harness login paths deliberately included by the producer. Not authentication. */
+  includedLoginFiles?: string[];
   provenance?: BundleProvenance;
   assembler?: { openrigVersion: string; commit?: string };
   compatibility?: BundleCompatibility;
@@ -456,6 +458,19 @@ export interface PodBundleManifest {
 export interface BundleProjectReference {
   id: string;
   path: string;
+}
+
+/** A producer declaration, never a wildcard or a receiver approval. */
+export function normalizeIncludedLoginFiles(raw: unknown): string[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw) || raw.some(p => typeof p !== "string" || !isRelativeSafePath(p)) || new Set(raw).size !== raw.length) {
+    throw new Error("included_login_files must be a list of unique, exact safe archive-relative login-file paths");
+  }
+  return raw as string[];
+}
+
+function validateIncludedLoginFiles(raw: unknown, errors: string[]): void {
+  try { normalizeIncludedLoginFiles(raw); } catch (err) { errors.push((err as Error).message); }
 }
 
 function validateProjectBlock(raw: unknown, errors: string[]): void {
@@ -501,6 +516,7 @@ export function validatePodBundleManifest(raw: unknown): { valid: boolean; error
   validateContextPacksBlock(m["context_packs"], errors);
   validateAgentImagesBlock(m["agent_images"], errors);
   validateProjectBlock(m["project"], errors);
+  validateIncludedLoginFiles(m["included_login_files"], errors);
 
   return { valid: errors.length === 0, errors };
 }
@@ -529,6 +545,7 @@ export function serializePodBundleManifest(manifest: PodBundleManifest): string 
   };
   if (manifest.cultureFile) doc["culture_file"] = manifest.cultureFile;
   if (manifest.integrity) doc["integrity"] = { algorithm: manifest.integrity.algorithm, files: manifest.integrity.files };
+  if (manifest.includedLoginFiles?.length) doc["included_login_files"] = manifest.includedLoginFiles;
   if (manifest.assembler) doc["assembler"] = manifest.assembler;
   if (manifest.provenance) doc["provenance"] = provenanceToYamlRecord(manifest.provenance);
   if (manifest.compatibility) doc["compatibility"] = compatibilityToYamlRecord(manifest.compatibility);
@@ -575,6 +592,8 @@ export interface LegacyBundleManifest {
   rigSpec: string;
   packages: LegacyBundlePackageEntry[];
   integrity?: BundleIntegrity;
+  /** Exact archive-relative harness login paths deliberately included by the producer. Not authentication. */
+  includedLoginFiles?: string[];
   provenance?: BundleProvenance;
   assembler?: { openrigVersion: string; commit?: string };
   compatibility?: BundleCompatibility;
@@ -691,6 +710,7 @@ export function validateLegacyBundleManifest(
   // (v2) validator already enforces containment here; the legacy (v1) validator must too, or a v1
   // bundle can escape the projects root (write) or the bundle root (read).
   validateProjectBlock(m["project"], errors);
+  validateIncludedLoginFiles(m["included_login_files"], errors);
 
   return { valid: errors.length === 0, errors };
 }
@@ -732,6 +752,9 @@ export function normalizeLegacyBundleManifest(raw: unknown): LegacyBundleManifes
       files: (integ["files"] as Record<string, string>) ?? {},
     };
   }
+
+  const includedLoginFiles = normalizeIncludedLoginFiles(m["included_login_files"]);
+  if (includedLoginFiles) result.includedLoginFiles = includedLoginFiles;
 
   const assembler = m["assembler"] as { openrigVersion?: unknown; commit?: unknown } | undefined;
   if (assembler && typeof assembler.openrigVersion === "string") result.assembler = { openrigVersion: assembler.openrigVersion, ...(typeof assembler.commit === "string" ? { commit: assembler.commit } : {}) };
@@ -785,6 +808,7 @@ export function serializeLegacyBundleManifest(manifest: LegacyBundleManifest): s
     };
   }
 
+  if (manifest.includedLoginFiles?.length) doc["included_login_files"] = manifest.includedLoginFiles;
   if (manifest.assembler) doc["assembler"] = manifest.assembler;
   if (manifest.provenance) doc["provenance"] = provenanceToYamlRecord(manifest.provenance);
 

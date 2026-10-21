@@ -15,7 +15,9 @@
 
 import { Command } from "commander";
 import { DaemonClient } from "../client.js";
-import { getDaemonStatus, getDaemonUrl , statusGuardMessage} from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl , statusGuardMessage } from "../daemon-lifecycle.js";
+import { renderCaughtTransportError } from "../cli-error.js";
+import { daemonMayAnswer } from "../daemon-reachability.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
@@ -115,7 +117,7 @@ Examples:
   async function getClient(): Promise<DaemonClient> {
     const deps = getDeps();
     const status = await getDaemonStatus(deps.lifecycleDeps);
-    if (status.state !== "running" || status.healthy === false) {
+    if (!daemonMayAnswer(status)) {
       // B8-1b: epistemic-matched language via the one helper (down ≠ busy).
       const gm = statusGuardMessage(status); throw new Error(`${gm.fact} ${gm.action}`);
     }
@@ -265,7 +267,7 @@ Examples:
         }
         console.log(`Captured ${r.manifest.name} v${r.manifest.version} (${r.manifest.runtime}) at ${r.imagePath}`);
       } catch (err) {
-        console.error((err as Error).message);
+        if (!renderCaughtTransportError(err)) console.error((err as Error).message);
         process.exitCode = 1;
       }
     });
@@ -291,7 +293,7 @@ Examples:
         }
         console.log(`Deleted ${entry.id}${opts.force ? " (forced)" : ""}.`);
       } catch (err) {
-        console.error((err as Error).message);
+        if (!renderCaughtTransportError(err)) console.error((err as Error).message);
         process.exitCode = 1;
       }
     });
@@ -309,7 +311,7 @@ Examples:
         if (opts.json) console.log(JSON.stringify(res.data, null, 2));
         else console.log(`Pinned ${entry.id}.`);
       } catch (err) {
-        console.error((err as Error).message);
+        if (!renderCaughtTransportError(err)) console.error((err as Error).message);
         process.exitCode = 1;
       }
     });
@@ -327,7 +329,7 @@ Examples:
         if (opts.json) console.log(JSON.stringify(res.data, null, 2));
         else console.log(`Unpinned ${entry.id}.`);
       } catch (err) {
-        console.error((err as Error).message);
+        if (!renderCaughtTransportError(err)) console.error((err as Error).message);
         process.exitCode = 1;
       }
     });
@@ -373,7 +375,7 @@ Examples:
           for (const err of r.errors ?? []) console.log(`  error: ${err.imageId}: ${err.error}`);
         }
       } catch (err) {
-        console.error((err as Error).message);
+        if (!renderCaughtTransportError(err)) console.error((err as Error).message);
         process.exitCode = 1;
       }
     });
@@ -395,7 +397,7 @@ Examples:
         console.log(`Indexed ${res.data.count} agent image(s).`);
         for (const e of res.data.errors) console.log(`  error: ${e.source}: ${e.error}`);
       } catch (err) {
-        console.error((err as Error).message);
+        if (!renderCaughtTransportError(err)) console.error((err as Error).message);
         process.exitCode = 1;
       }
     });
