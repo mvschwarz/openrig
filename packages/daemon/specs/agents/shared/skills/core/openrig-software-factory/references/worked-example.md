@@ -22,7 +22,8 @@ boundary, acceptance and evidence pointers; create it before sending:
 ```sh
 rig whoami --json
 rig queue create --destination dev-build@starter \
-  --body-file ./TASK.md --summary 'Implement the agreed CSV inspection' --json
+  --body-file ./TASK.md --summary 'Implement the agreed CSV inspection' \
+  --tags 'project:<id>,mission:<id>,slice:<id>' --json
 rig queue claim <returned-qitem-id> --json
 ```
 
@@ -30,7 +31,8 @@ After implementing and checking the cumulative candidate, the current owner uses
 
 ```sh
 rig queue handoff <owned-qitem-id> --to dev-review@starter \
-  --body-file ./REVIEW-REQUEST.md --json
+  --body-file ./REVIEW-REQUEST.md --summary 'Review the CSV inspection candidate' \
+  --tags 'project:<id>,mission:<id>,slice:<id>' --json
 ```
 
 The request binds exact candidate, acceptance, commands and evidence. Read the
@@ -120,25 +122,26 @@ rig grow --help
 
 Set `RIG_ID` to the `rigId` for the running `starter`, and `PROJECT_ROOT`
 to the absolute code repository. Verify its existing `dev` pod and choose unused
-member names. When the user has authorized the added capacity and cost, run:
+member names. Here `parser` owns CSV parsing and `cli` owns the command interface.
+When the user has authorized the added capacity and cost, run:
 
 ```sh
-rig grow "$RIG_ID" a b --pod dev --runtime codex --cwd "$PROJECT_ROOT" --json
+rig grow "$RIG_ID" parser cli --pod dev --runtime codex --cwd "$PROJECT_ROOT" --json
 rig ps --nodes --rig starter --json
 ```
 
-For one builder, omit `b`. The expected new logical IDs are `dev.a` and `dev.b`,
-with addresses `dev-a@starter` and `dev-b@starter`; use the actual
+For one builder, omit `cli`. The expected new logical IDs are `dev.parser` and `dev.cli`,
+with addresses `dev-parser@starter` and `dev-cli@starter`; use the actual
 returned identities. The command adds and launches the named seats.
 
 To put those seats in a **new** pod instead, choose this alternative once, with an
-unused pod ID; do not run both examples for the same desired capacity:
+unused domain pod such as `data`; do not run both examples for the same desired capacity:
 
 ```sh
-rig grow "$RIG_ID" a b --new-pod build --runtime codex --cwd "$PROJECT_ROOT" --json
+rig grow "$RIG_ID" parser cli --new-pod data --runtime codex --cwd "$PROJECT_ROOT" --json
 ```
 
-That alternative produces `build.a`/`build.b` and corresponding `build-...`
+That alternative produces `data.parser`/`data.cli` and corresponding `data-...`
 addresses. `--pod` and `--new-pod` are mutually exclusive. With one existing pod,
 `--pod` can be inferred; select it explicitly when the intended target matters.
 The runtime defaults to `claude-code` and cwd defaults to the caller's current
@@ -153,7 +156,7 @@ agent specs, use the optional Architect path below and `rig expand --help`.
 Inspect each node's status/error and native pane. Confirm existing seats and work
 remain present; a created node is not readiness. Partial results can leave nodes
 persisted. After a timeout, reconcile topology before retrying. Fix the reported
-cause, then use `rig launch "$RIG_ID" dev.a` only for an already-created seat that
+cause, then use `rig launch "$RIG_ID" dev.parser` only for an already-created seat that
 failed to start. That command does not create a missing seat.
 
 New seats do not inherit the owner's conversation or task. Record the agreed
@@ -163,8 +166,8 @@ checks, next owner and stopping condition. Then deliver the context instruction,
 for example for the first builder:
 
 ```sh
-rig send dev-a@starter "Read $PROJECT_ROOT/SPEC.md and the addressed sources in $PROJECT_ROOT/.openrig/factory/TASK-A.md. Run rig whoami --json and rig queue list --owned --json in your own seat; report your identity, scope and any native readiness/permission blocker. Await the bounded queue assignment."
-rig capture dev-a@starter
+rig send dev-parser@starter "Read $PROJECT_ROOT/SPEC.md and the addressed sources in $PROJECT_ROOT/.openrig/factory/TASK-A.md. Run rig whoami --json and rig queue list --owned --json in your own seat; report your identity, scope and any native readiness/permission blocker. Await the bounded queue assignment."
+rig capture dev-parser@starter
 ```
 
 Read the actual reply and pane; resolve startup/login/permission prompts under the
@@ -174,12 +177,13 @@ the coordinator creates the distinct agreed task (or hands off an existing owned
 task instead of duplicating it):
 
 ```sh
-rig queue create --destination dev-a@starter \
+rig queue create --destination dev-parser@starter \
   --body-file "$PROJECT_ROOT/.openrig/factory/TASK-A.md" \
-  --summary 'Implement the agreed independent change A' --json
+  --summary 'Implement the agreed independent change A' \
+  --tags 'project:<id>,mission:<id>,slice:<id>' --json
 ```
 
-Use actual project/mission/slice tags where applicable. Read back the returned ID
+Use the project, mission and slice the work belongs to. Read back the returned ID
 with `rig queue show <id> --full --json`; A claims it as itself. Use the earlier
 queue loop for results, review and blockers. Existing Workflow-bound work keeps
 its packet/projection contract: adding a seat does not revise a running graph or
@@ -191,7 +195,7 @@ working agreement and assigned work, not the seat's name or default agent label.
 | Seat in this example | Deliberately agreed responsibility |
 | --- | --- |
 | `dev-build@starter` | Initially implements and coordinates; can become the dedicated orchestrator, selecting outcomes, separating tasks, owning integration and retaining next-work custody. |
-| `dev-a@starter`, `dev-b@starter` | Implement distinct authorized tasks and return exact candidates/evidence. Neither silently edits the other's files or folds both candidates without integration ownership. |
+| `dev-parser@starter`, `dev-cli@starter` | Implement distinct authorized tasks and return exact candidates/evidence. Neither silently edits the other's files or folds both candidates without integration ownership. |
 | `dev-review@starter` | Retains independent judgment under the project's review policy. The implementer does not count its own check as independent review. |
 
 This is one progression, not a required four-seat layout. One extra builder may
@@ -240,8 +244,8 @@ YAML authoring is optional; ordinary growth uses the commands above.
 ### Remove capacity deliberately
 
 When a seat is no longer needed, preserve its work and next owner first.
-`rig remove "$RIG_ID" dev.a` removes that seat; `rig shrink "$RIG_ID" build`
-removes the whole optional build pod. These end the affected sessions. Removal
+`rig remove "$RIG_ID" dev.parser` removes that seat; `rig shrink "$RIG_ID" data`
+removes the whole optional data pod. These end the affected sessions. Removal
 refuses active work unless you explicitly select a live `--fallback <live-seat>`
 to receive it. Check the exact targets, handoff and returned outcomes; do not use
 fallback to discard an obligation or remove seats merely because they look idle.
@@ -500,7 +504,7 @@ At each completed step, the **current packet owner** projects its own result. Ex
 
 ```sh
 rig workflow project --instance <instance-id> --current-packet <inspect-packet> \
-  --exit handoff --actor-session dev-build@starter \
+  --exit handoff \
   --result-note 'Inspection contract implemented; exact candidate and checks recorded' \
   --evidence-ref <absolute-slice-01-proof-path> --json
 ```
@@ -511,7 +515,7 @@ For a **real unresolved blank-cell product choice**, ask the user the concrete q
 
 ```sh
 rig workflow project --instance <instance-id> --current-packet <cli-packet> \
-  --exit waiting --actor-session dev-build@starter \
+  --exit waiting \
   --blocked-on external:user/blank-required-cells \
   --result-note 'Need the user decision recorded in mission NOTES before selecting CLI behavior' \
   --evidence-ref <absolute-mission-notes-path> --json

@@ -6,12 +6,13 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { SeatHandoverService } from "../src/domain/seat-handover-service.js";
+import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 import { SEAT_HANDOVER_SOURCE_CAPABILITIES } from "../src/domain/seat-handover-planner.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import { observeCodexSandbox } from "../src/domain/permission-drift.js";
 import { buildRebuildPrimingChain } from "../src/domain/rebuild-priming-chain.js";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -134,6 +135,31 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
   function nodeRow(nodeId: string) {
     return db.prepare("SELECT continuity_outcome, handover_result FROM nodes WHERE id = ?").get(nodeId) as Record<string, string | null>;
   }
+
+  it("rebuild handover uses the cwd selected through set-cwd for the same seat", async () => {
+    const { node, rig, sessionId } = seedSeat();
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "openrig-handover-cwd-")));
+    const cwd = join(root, "isolated seat");
+    db.prepare(`INSERT INTO node_startup_context
+      (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime)
+      VALUES (?, '[]', '[]', '[]', 'codex')`).run(node.id);
+    const lifecycle = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux(),
+      runtimeAdapters: { codex: { ...codexAdapter(),
+        project: async () => ({ projected: [], skipped: [], failed: [] }),
+        deliverStartup: async () => ({ delivered: 0, failed: [] }),
+      } } });
+    try {
+      expect(await lifecycle.setCwd({ seatRef: "dev-impl@seat-rig", cwd, reason: "isolate workspace" })).toMatchObject({ ok: true });
+      expect(launchHarness).not.toHaveBeenCalled();
+      expect(await service.handover({ seatRef: "dev-impl@seat-rig", source: "rebuild", reason: "carry durable context" })).toMatchObject({ ok: true });
+      expect(respawnPane).toHaveBeenCalledWith("%9", expect.any(String), expect.objectContaining({ cwd }));
+      expect(launchHarness).toHaveBeenCalledWith(expect.objectContaining({ nodeId: node.id, cwd }), expect.any(Object));
+      expect(rigRepo.getRig(rig.id)!.nodes.map(n => n.id)).toEqual([node.id]);
+      expect(sessionRegistry.getSessionsForRig(rig.id)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: sessionId, status: "superseded" }),
+      ]));
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
 
   // ── Mini-req 1: FORK EXECUTES ────────────────────────────────────────────
 
@@ -393,6 +419,47 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     expect(result).toMatchObject({ ok: false, code: "context_delivery_failed" });
     expect(sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe("dev-impl@seat-rig");
     expect(nodeRow(node.id).handover_result).not.toBe("complete");
+  });
+
+  // #981: each composer handover respawns into the seat's own pane (%9 here). The first commit claims
+  // that pane's discovery row for this node, and a rescan upsert keeps the claim (#237).
+  function liveSessionId(nodeId: string) {
+    const row = db.prepare("SELECT id FROM sessions WHERE node_id = ? AND status NOT IN ('superseded', 'detached', 'exited') ORDER BY id DESC").get(nodeId) as { id: unknown } | undefined;
+    return row?.id;
+  }
+  function seatPaneRows() {
+    return db.prepare("SELECT id, status, claimed_node_id FROM discovered_sessions WHERE tmux_session = ? AND tmux_pane = ?").all("dev-impl@seat-rig", "%9");
+  }
+
+  it.each(["rebuild", "fresh"] as const)("%s twice in a row: the second handover succeeds and the seat follows each new occupant (#981)", async (source) => {
+    const { node, sessionId } = seedSeat();
+
+    const first = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "a", source });
+    expect(first).toMatchObject({ ok: true, result: { mutated: true } });
+    const firstOccupant = liveSessionId(node.id);
+    expect(firstOccupant).not.toBe(sessionId);
+    expect(seatPaneRows()).toEqual([expect.objectContaining({ status: "claimed", claimed_node_id: node.id })]);
+
+    const second = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "b", source });
+    expect(second).toMatchObject({ ok: true, result: { mutated: true } });
+    const secondOccupant = liveSessionId(node.id);
+    expect(secondOccupant).not.toBe(firstOccupant);
+    expect(sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe("dev-impl@seat-rig");
+    expect(seatPaneRows()).toEqual([expect.objectContaining({ status: "claimed", claimed_node_id: node.id })]);
+    expect(respawnPane).toHaveBeenCalledTimes(2);
+  });
+
+  it("a seat-pane discovery row claimed by another node still refuses the handover (#237 holds)", async () => {
+    const { rig, node, sessionId } = seedSeat();
+    const other = rigRepo.addNode(rig.id, "dev.other", { runtime: "codex", cwd: "/project" });
+    const row = discoveryRepo.upsertDiscoveredSession({ tmuxSession: "dev-impl@seat-rig", tmuxPane: "%9", runtimeHint: "codex", confidence: "high" });
+    discoveryRepo.markClaimed(row.id, other.id);
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "a", source: "rebuild" });
+
+    expect(result).toMatchObject({ ok: false, code: "discovered_not_active" });
+    expect(liveSessionId(node.id)).toBe(sessionId);
+    expect(discoveryRepo.getDiscoveredSession(row.id)).toMatchObject({ status: "claimed", claimedNodeId: other.id });
   });
 });
 

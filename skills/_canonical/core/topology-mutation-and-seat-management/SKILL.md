@@ -67,8 +67,8 @@ Write a fragment instead when a seat needs something `rig grow` does not set: an
 explicit model, a permission policy, a different agent spec or role profile, a
 per-seat runtime or working directory, or startup files. Use
 `rig expand <rig-id> <pod-fragment-path>` to add a pod, or
-`rig add <rig-id> <pod-namespace> <member-fragment-path>` to add one member to an
-existing pod.
+`rig add <rig> <pod-namespace> <member-fragment-path>` to add one member to an
+existing pod (`<rig>` is the rig id or its exact unique name).
 
 ## Don't use this when
 
@@ -112,7 +112,7 @@ Per `cli-reference.md` v0.2.0:
 - `rig grow <rig-id> <member...> [--pod <pod> | --new-pod <pod>] [--runtime <runtime>] [--cwd <path>]` (added after v0.2.0; check `rig grow --help`)
 - `rig expand <rig-id> <pod-fragment-path>` (with optional `session_source`)
 - `rig shrink <rigId> <podRef>`
-- `rig launch <rigId> <nodeRef>`
+- `rig launch <rig> <nodeRef>` (the rig's name or ID)
 - `rig remove <rigId> <nodeRef>`
 - `rig discover [--draft]`
 - `rig bind <discoveredId> --rig <rigId> (--node <id> | --pod <ns> --member <name>)`

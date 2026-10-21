@@ -157,6 +157,13 @@ export function BundleInspector() {
             </>
           )}
 
+          {result.integrityResult.errors.map(message => (
+            <p key={message} className="text-destructive text-body-md mb-spacing-2">{message}</p>
+          ))}
+          {(result.integrityResult.warnings ?? []).map(message => (
+            <p key={message} className="text-warning text-body-md mb-spacing-2">{message}</p>
+          ))}
+
           {/* Per-file integrity */}
           {result.integrityResult && (
             <>

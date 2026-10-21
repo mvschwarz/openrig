@@ -219,6 +219,28 @@ describe("TranscriptStore", () => {
       expect(result).toBe("echo DEV_ALPHA_READY\nDEV_ALPHA_READY\n");
     });
 
+    it("removes prompt redraw duplicates after filtering status lines", () => {
+      const store = new TranscriptStore({ transcriptsRoot: tmpDir });
+      store.ensureTranscriptDir("my-rig");
+      writeFileSync(
+        store.getTranscriptPath("my-rig", "dev@my-rig"),
+        "Checking for updates\necho READY%\necho READY\nREADY\n",
+      );
+
+      expect(store.readTail("my-rig", "dev@my-rig", 10)).toBe("echo READY\nREADY\n");
+    });
+
+    it("preserves percent-ending output when an earlier line matches its prefix", () => {
+      const store = new TranscriptStore({ transcriptsRoot: tmpDir });
+      store.ensureTranscriptDir("my-rig");
+      writeFileSync(
+        store.getTranscriptPath("my-rig", "dev@my-rig"),
+        "Checking for updates\n? for shortcuts\nStep 1\nProgress 50\nProgress 50%\nDone\n",
+      );
+
+      expect(store.readTail("my-rig", "dev@my-rig", 10)).toBe("Step 1\nProgress 50\nProgress 50%\nDone\n");
+    });
+
     it("drops TUI chrome and redraw fragments from transcript tails", () => {
       const store = new TranscriptStore({ transcriptsRoot: tmpDir });
       store.ensureTranscriptDir("my-rig");
@@ -509,6 +531,18 @@ describe("TranscriptStore", () => {
       const result = store.readTail("noisy-rig", "dev@noisy-rig", 2);
       expect(result).toContain("KEEP_ONE");
       expect(result).toContain("KEEP_TWO");
+    });
+
+    it.each(["\n", ""])("readTail keeps a complete long line before prompt noise (ending %j)", (ending) => {
+      const store = new TranscriptStore({ transcriptsRoot: tmpDir });
+      store.ensureTranscriptDir("long-rig");
+      const filePath = store.getTranscriptPath("long-rig", "dev@long-rig");
+      const output = JSON.stringify({ result: "é".repeat(10_000) });
+      // One output line and seven prompts fill the initial eight-line read.
+      // The last 16 KiB begins inside the output, not at its start.
+      writeFileSync(filePath, ["earlier output", output, ...Array(7).fill("user@example.test rigged %")].join("\n") + ending);
+
+      expect(store.readTail("long-rig", "dev@long-rig", 1)).toBe(output + "\n");
     });
 
     it("readTail handles multibyte UTF-8 characters at chunk boundaries", () => {

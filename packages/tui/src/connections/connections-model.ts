@@ -12,9 +12,9 @@ export interface ConnectionsRead {
     outboundDestinations: Array<string | null>; postLevel: string; interruptLevel: string; botToken: string; appToken: string;
     /** #192: absent from daemons that predate the channel map. */
     channelMap?: Array<{ match: string | null; channel: string | null }> };
-  running: { state: string; activatedAt: string | null; outboundReady: boolean | null; inboundReady: boolean | null; inboundState: string; applied: string };
+  running: { state: string; activatedAt: string | null; outboundReady: boolean | null; inboundReady: boolean | null; inboundState: string; applied: string;
+    inboundDelivery?: string | null; inboundEventsMissingSince?: string | null };
   state: string; nextAction: string;
-  verification: { state: string; at: string | null; actor: string | null };
   registry: { state: string; path: string | null };
   humans: Array<{ entityId: string; address: string; displayName: string | null; deliveryClass: string; availability: string; excluded: boolean | null;
     bindings: Array<{ kind: string; ref: string | null; role: string; handle: string | null }> }>;
@@ -90,7 +90,7 @@ export function connectionsLines(snap: FleetSnapshot, width: number, timeZone = 
       ...(cfg.channelMap ?? []).map((e) => fieldLine({ label: "channel map", value: `${e.match ?? "withheld"} → ${e.channel ?? "withheld"}` })),
       fieldLine({ label: "credentials", value: `bot ${cfg.botToken}; Socket Mode app ${cfg.appToken} (values hidden)` }),
       fieldLine({ label: "outbound", value: c.running.outboundReady === null ? "unreported" : `${c.running.outboundReady ? "configured at activation" : "not configured at activation"}; posting >= ${cfg.postLevel}, interrupting >= ${cfg.interruptLevel} (current config)` }),
-      fieldLine({ label: "inbound", value: c.running.inboundState }));
+      fieldLine({ label: "inbound", value: inboundValue(c.running) }));
     let inboundAction: ContentLine["action"];
     for (const host of snap.hosts) for (const rig of host.rigs) for (const pod of rig.pods) {
       const a = pod.agents.find((a) => a.session === cfg.inboundDestination);
@@ -99,9 +99,7 @@ export function connectionsLines(snap: FleetSnapshot, width: number, timeZone = 
     lines.push(fieldLine({ label: "new inbound", value: cfg.inboundDestination ?? "missing", link: inboundAction }),
       { text: "  Replies follow their existing conversation; new/unmapped inbound uses the configured seat above." });
   }
-  lines.push(fieldLine({ label: "last check", value: `${c.verification.state}${c.verification.at ? ` · ${displayTime(c.verification.at, timeZone)} · ${c.verification.actor ?? "actor unknown"}` : " · no matching check in the bounded audit tail"}` }),
-    { text: "  A check records scopes/channel membership at that time. It does not prove delivery, current credentials, or readership." },
-    fieldLine({ label: "next", value: c.nextAction }),
+  lines.push(fieldLine({ label: "next", value: c.nextAction }),
     { text: "  Run guidance on the displayed instance. verify contacts Slack explicitly; enable/disable retain their audited CLI behavior." },
     sectionRule("External humans · instance-wide registry", width));
   if (c.registry.state !== "available") lines.push({ text: "  Registry unavailable; recipients unknown. Next: rig gateway human list --json" });
@@ -125,4 +123,15 @@ export function connectionsLines(snap: FleetSnapshot, width: number, timeZone = 
   }
   lines.push(listItem("Open work and workflows", { type: "jump", section: "scopes" }), listItem("Human requests and waits", { type: "jump", section: "needs" }), listItem("Return to previous view", { type: "back" }));
   return wrapDetailLines(lines, width);
+}
+
+/** An open socket is not proof that events arrive, so the delivery word is named beside the state.
+ *  A daemon too old to report delivery leaves the bare state. */
+export function inboundValue(r: ConnectionsRead["running"]): string {
+  if (r.inboundDelivery === "events-missing") return `${r.inboundState}; events missing since ${r.inboundEventsMissingSince ?? "unknown"}`;
+  if (r.inboundDelivery === "no-server-pings") return `${r.inboundState}; no server pings`;
+  if (r.inboundDelivery === "socket-mode-disabled") return `${r.inboundState}; Socket Mode disabled in the Slack app settings`;
+  if (r.inboundState === "connected" && r.inboundDelivery === "delivering") return "connected; delivering";
+  if (r.inboundState === "connected" && r.inboundDelivery === "unknown") return "connected; delivery not yet confirmed";
+  return r.inboundState;
 }

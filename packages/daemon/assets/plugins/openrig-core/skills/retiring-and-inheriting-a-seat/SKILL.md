@@ -61,6 +61,9 @@ threshold you can see coming; fall back to compaction only when a transition was
    cadence, on which surface, and who will hold it after cutover. Carry each duty both in this
    packet and in durable seat state, because recurring duties are the content most often lost at
    a generation boundary while urgent one-off work carries cleanly.
+   **Write the seat's recap too:** run `rig context recap-write --rig <rig> --seat <seat> --file <draft>`
+   alongside updating `LEARNED.md`. A `rebuild` reads `RECAP.md` before anything else. The format
+   the store checks is in `seat-continuity-and-handover`, "Write the seat's recap before a handover".
 3. **Prime the fresh successor** — `rig walk` the packet into the seat (paced delivery lets the
    successor absorb it in order), or launch-with-packet. The successor reads it as
    *inheritance*, not *identity*. **The packet's first-read line MUST point the successor at
@@ -134,8 +137,11 @@ generation's session token → resume it for **one question**, then let it sleep
 - Claude: `claude -p --resume <session>`
 - Codex: `codex exec` (resume the rollout)
 
-Use `rig ask <rig> "<q>" --wake <seat[@gen]|token>` for an explicit bounded
-consultation (introduced in CLI 0.5.1). Check `rig ask --help` for `--runtime`
+Use `rig ask <rig> "<q>" --wake <target>` for an explicit bounded consultation
+(introduced in CLI 0.5.1). Wake seat targets must include the rig: `member@rig` or
+`member@rig@N` (1 = newest tenure). Values without `@` go unchanged to the runtime
+as a session ID or title; a bare member name is not resolved within `<rig>`.
+Check `rig ask --help` for `--runtime`
 and `--wake-timeout`. The wrapper uses a runtime resume; its presence is not
 proof that a particular retained history is available. For a Claude history,
 `claude -p --resume <full-uuid>` is the runtime-level fallback when supported.

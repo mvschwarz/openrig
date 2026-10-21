@@ -192,11 +192,13 @@ describe("view-composer partition vectors", () => {
     expect(() => chunkPanes([], 0)).toThrow();
   });
 
-  it("carries live Claude and Codex runtimes into Herdr tile hints but leaves terminal seats unchanged", () => {
+  it("carries known runtimes into Herdr tile hints but leaves terminal and unknown seats unchanged", () => {
     const members = deriveViewMembers([
       { canonicalSessionName: "claude@rig", attachmentType: "tmux", runtime: "claude-code" },
       { canonicalSessionName: "codex@rig", attachmentType: "tmux", runtime: "codex" },
+      { canonicalSessionName: "pi@rig", attachmentType: "tmux", runtime: "pi" },
       { canonicalSessionName: "operator@rig", attachmentType: "tmux", runtime: "terminal" },
+      { canonicalSessionName: "unknown@rig", attachmentType: "tmux", runtime: "unknown" },
     ]);
     const view = composeView("rig:rig", members, ctxWith([]));
     const grid = buildGridRoot(view.opened).root;
@@ -210,7 +212,9 @@ describe("view-composer partition vectors", () => {
     expect(panes.filter((pane) => pane.label).map((pane) => pane.command)).toEqual([
       ["sh", "-c", "env HERDR_AGENT=claude tmux attach -t 'claude@rig'"],
       ["sh", "-c", "env HERDR_AGENT=codex tmux attach -t 'codex@rig'"],
+      ["sh", "-c", "env HERDR_AGENT=pi tmux attach -t 'pi@rig'"],
       ["sh", "-c", "tmux attach -t 'operator@rig'"],
+      ["sh", "-c", "tmux attach -t 'unknown@rig'"],
     ]);
     expect(panes.at(-1)?.command).toEqual(["sh"]);
   });
@@ -498,11 +502,12 @@ describe("herdr adapter — socket ping probe + workspace.create → layout.appl
     // OPR.0.6.0.8: after the page is applied, its tab is focused (no blank-tab close here:
     // this create reply carries no default tab id).
     // #707: the applied page is followed by one pane.list read (this fake's reply has no panes, so nothing changes).
-    expect(requests.map((r) => r.method)).toEqual(["workspace.create", "layout.apply", "pane.list", "tab.focus"]);
-    expect(requests[0]!.params).toEqual({ focus: false, label: "v" });
-    expect(requests[2]!.params).toEqual({ workspace_id: "wG" });
-    expect(requests[3]!.params).toEqual({ tab_id: "wG:t2" });
-    expect(requests[1]!.params).toEqual({
+    // #1604: the open workspaces are read first, so a re-open can be numbered.
+    expect(requests.map((r) => r.method)).toEqual(["workspace.list", "workspace.create", "layout.apply", "pane.list", "tab.focus"]);
+    expect(requests[1]!.params).toEqual({ focus: false, label: "v" });
+    expect(requests[3]!.params).toEqual({ workspace_id: "wG" });
+    expect(requests[4]!.params).toEqual({ tab_id: "wG:t2" });
+    expect(requests[2]!.params).toEqual({
       workspace_id: "wG",
       tab_label: "openrig:v#tok",
       focus: true,
@@ -523,7 +528,7 @@ describe("herdr adapter — socket ping probe + workspace.create → layout.appl
       expect(r.method).not.toContain("--help");
       expect(r.method).not.toContain(" ");
     }
-    expect(requests.map((r) => r.method)).toEqual(["workspace.create", "layout.apply", "pane.list", "tab.focus"]);
+    expect(requests.map((r) => r.method)).toEqual(["workspace.list", "workspace.create", "layout.apply", "pane.list", "tab.focus"]);
   });
 
   it("a labeled workspace.create failure falls back ONCE to a bare create (uncaptured-param defense)", async () => {
@@ -541,8 +546,8 @@ describe("herdr adapter — socket ping probe + workspace.create → layout.appl
     expect(res.ok).toBe(true);
     expect(res.opened).toEqual(["a@r"]);
     // OPR.0.6.0.8: before the bare fallback it checks for a same-named workspace (none here).
-    expect(requests.map((r) => r.method)).toEqual(["workspace.create", "workspace.list", "workspace.create", "layout.apply"]);
-    expect((requests[3]!.params as Record<string, unknown>)["workspace_id"]).toBe("wH");
+    expect(requests.map((r) => r.method)).toEqual(["workspace.list", "workspace.create", "workspace.list", "workspace.create", "layout.apply"]);
+    expect((requests[4]!.params as Record<string, unknown>)["workspace_id"]).toBe("wH");
     expect(res.notes?.join(" ")).toContain('refused the workspace name "v"');
   });
 
@@ -577,6 +582,7 @@ describe("herdr adapter — socket ping probe + workspace.create → layout.appl
     const { transport } = fakeSocketTransport({
       respond: async (method) => {
         if (method === "workspace.create") return { type: "workspace_created", workspace_id: "wG" };
+        if (method !== "layout.apply") return { type: "ok" };
         applies += 1;
         if (applies === 2) throw new Error("herdr error: bad tree");
         return { type: "layout_apply" };

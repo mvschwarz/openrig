@@ -11,8 +11,8 @@ applies-when: |
   named ui/ module.
 siblings: [README.md, codemap.md, architecture.md]
 prerequisite-reads: []
-last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
-last-updated: 2026-10-05
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
 # ui.md was reorganized into the modular as-built tree

@@ -80,9 +80,9 @@ export const USAGE_LINES = [
   "",
   "  rig              open the status dashboard (interactive terminal only; not agent chat)",
   "  rig tui          open the same status dashboard",
-  "  rig terminal open saved:kernel --window   open the welcome screen in a new terminal tab/window",
-  "                   For show me my agents or show me the terminals: the agent runs it on the daemon desktop and checks the result",
-  "  rig tui --shared dashboard-only fallback if the welcome window cannot open",
+  "  rig terminal open saved:kernel --window   open the OpenRig TUI and operator in a new terminal tab/window",
+  "                   After install, and whenever the person wants their agents: the agent runs it on the daemon desktop and checks the result",
+  "  rig tui --shared dashboard-only fallback if that window cannot open",
   "  rig --help       full command list",
   "  rig up <rig>     bring a rig up",
   "  rig ps           list live seats",
@@ -202,10 +202,12 @@ function diagnosticVerdict(diagnostic: FrontDoorPermissionDiagnostic): string {
 async function defaultLaunchTui(): Promise<number> {
   const entry = resolveTuiPath(import.meta.dirname);
   if (!entry) throw new Error("mission-control TUI is not installed (no tui/dist/main.js next to this CLI)");
+  const client = new DaemonClient();
+  await client.assertLocalOwner();
   return await new Promise<number>((resolve, reject) => {
     const sharedKernel = envValue(process.env, "OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME") === "operator-human@kernel";
     const child = spawn(process.execPath, [entry, ...(sharedKernel ? ["--instance", "kernel"] : [])], { stdio: "inherit", env: { ...process.env,
-      OPENRIG_URL: new DaemonClient().baseUrl,
+      OPENRIG_URL: client.baseUrl,
       OPENRIG_TUI_CLI_ENTRY: path.join(import.meta.dirname, "bin-wrapper.js"),
       OPENRIG_TUI_CLI_IDENTITY: `${BUILD_INFO.semver ?? "version unstamped"} · ${BUILD_INFO.commit ?? "commit unstamped"}${BUILD_INFO.dirty === true ? " · dirty" : ""}` } });
     child.on("error", reject);

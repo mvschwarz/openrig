@@ -48,14 +48,36 @@ describe("advisory bundle check", () => {
   });
 
 
+  it("reports a README directory instead of treating it as a readable document", async () => {
+    fs.rmSync(path.join(root, "README.md")); fs.mkdirSync(path.join(root, "README.md"));
+    const result = await checkBundleFolder(root);
+    expect(result.checks).toContainEqual(expect.objectContaining({ ruleId: "readme_in_docs", status: "finding" }));
+    expect(result.checks).toContainEqual(expect.objectContaining({ ruleId: "referenced_files", status: "finding", reason: "Declared file is a directory, expected a file.", path: "README.md" }));
+  });
+
   it("checks startup paths relative to the declaring local agent", async () => {
     const dir = path.join(root, "agent"); fs.mkdirSync(dir);
     fs.writeFileSync(path.join(root, "rig.yaml"), SPEC.replace("builtin:terminal", "local:agent").replace("runtime: terminal", "runtime: codex").replace("profile: none", "profile: default"));
-    fs.writeFileSync(path.join(dir, "agent.yaml"), 'name: fixture\nversion: "1.0"\nstartup:\n  files:\n    - path: context.md\nprofiles:\n  default: {}\n');
+    fs.mkdirSync(path.join(dir, "skill"));
+    fs.writeFileSync(path.join(dir, "agent.yaml"), 'name: fixture\nversion: "1.0"\nresources:\n  skills:\n    - {id: fixture, path: skill}\nstartup:\n  files:\n    - path: context.md\nprofiles:\n  default: {}\n');
     fs.writeFileSync(path.join(dir, "context.md"), "Context");
     expect((await checkBundleFolder(root)).checks.filter(c => c.status === "finding")).toEqual([]);
     fs.rmSync(path.join(dir, "context.md"));
     expect((await checkBundleFolder(root)).checks).toEqual(expect.arrayContaining([expect.objectContaining({ ruleId: "referenced_files", status: "finding", path: "agent/context.md" })]));
+    fs.mkdirSync(path.join(dir, "context.md"));
+    expect((await checkBundleFolder(root)).checks).toEqual(expect.arrayContaining([expect.objectContaining({ ruleId: "referenced_files", status: "finding", reason: "Declared file is a directory, expected a file.", path: "agent/context.md" })]));
+  });
+
+  it("leaves an openrig-home: plugin to the host and still checks a bundle-relative plugin path", async () => {
+    const dir = path.join(root, "agent"); fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(root, "rig.yaml"), SPEC.replace("builtin:terminal", "local:agent").replace("runtime: terminal", "runtime: codex").replace("profile: none", "profile: default"));
+    const manifest = (pluginPath: string) => `name: fixture\nversion: "1.0"\nresources:\n  plugins:\n    - id: openrig-core\n      source:\n        kind: local\n        path: "${pluginPath}"\nprofiles:\n  default:\n    uses:\n      plugins: [openrig-core]\n`;
+    fs.writeFileSync(path.join(dir, "agent.yaml"), manifest("openrig-home:plugins/openrig-core"));
+    const hostResolved = (await checkBundleFolder(root)).checks;
+    expect(hostResolved.filter(c => c.status === "finding")).toEqual([]);
+    expect(hostResolved).toContainEqual(expect.objectContaining({ ruleId: "host_resources", status: "not_checked", path: "agent" }));
+    fs.writeFileSync(path.join(dir, "agent.yaml"), manifest("plugins/missing"));
+    expect((await checkBundleFolder(root)).checks).toContainEqual(expect.objectContaining({ ruleId: "referenced_files", status: "finding", path: "agent/plugins/missing" }));
   });
 
   it("command does not resolve a daemon, create a bundle, or invoke preflight", async () => {
@@ -67,6 +89,18 @@ describe("advisory bundle check", () => {
       expect(factory).not.toHaveBeenCalled(); expect(log).toHaveBeenCalledTimes(1);
       expect(JSON.parse(String(log.mock.calls[0]![0])).standardVersion).toBe("openrig.bundle-standard/v1");
     } finally { log.mockRestore(); }
+  });
+
+  it("human output names the file a finding is about", async () => {
+    fs.writeFileSync(path.join(root, "rig.yaml"), SPEC.replace("docs: [{path: README.md}]", "docs: [{path: README.md}, {path: docs/missing.md}]"));
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const exitCode = process.exitCode;
+    try {
+      const deps = { clientFactory: vi.fn(), lifecycleDeps: {} } as unknown as StatusDeps;
+      await new Command().addCommand(bundleCommand(deps)).parseAsync(["bundle", "check", root], { from: "user" });
+      expect(log.mock.calls.map(c => String(c[0]))).toContain("finding: referenced_files: Declared file is missing, unreadable or outside the bundle folder. (docs/missing.md)");
+      expect(process.exitCode).toBe(1);
+    } finally { log.mockRestore(); process.exitCode = exitCode; }
   });
 
   it("checks that the recommended configuration is the authored team", async () => {

@@ -6,7 +6,7 @@
 // SLICE_TEMPLATE_KINDS fails here until its template carries the sections.
 // Conventions SSOT: docs/reference/sdlc-conventions.md.
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -18,6 +18,7 @@ import { scopeCommand } from "../src/commands/scope.js";
 import { readFrontmatter } from "../src/lib/scope/scope-fs.js";
 import {
   renderCapabilityDeltaTemplate,
+  renderNotesTemplate,
   renderSliceProofTemplate,
   renderSliceTemplate,
 } from "../src/lib/scope/templates.js";
@@ -239,6 +240,7 @@ describe("scope create — the mode-neutral SPEC/NOTES convention lands on disk"
       expect(parseYaml(fs.readFileSync(path.join(missionPath, "mission.yaml"), "utf8"))).toEqual({
         schema: "openrig.mission/v0alpha1",
         kind: "mission",
+        metadata: { status: "planned" },
         composition: { mission_markdown: { spec: "SPEC.md" }, slices: [] },
       });
     }
@@ -252,6 +254,56 @@ describe("scope create — the mode-neutral SPEC/NOTES convention lands on disk"
 
     expect(readFrontmatter(path.join(missionPath, "NOTES.md"))).toMatchObject({ name: title });
     expect(validateWorkspaceFrontmatter({ root: missionPath }).gaps).toEqual([]);
+  });
+
+  const literalValues = [
+    { label: "double-dollar", title: "Document $$ shell PID", intent: "Use $$ for the child PID" },
+    { label: "match", title: "Document $& replacement", intent: "Preserve $& exactly" },
+    { label: "suffix", title: "Show $' substitution", intent: "String $' stays literal" },
+    { label: "prefix", title: "Show $` substitution", intent: "String $` stays literal" },
+    { label: "braces", title: "Document {{intent}} and {{created_date}}", intent: "Keep {{depends_on}} and {{release_version}} literal" },
+    { label: "ordinary", title: "Document shell PID", intent: "Use the child PID" },
+    { label: "ordinary-dollar", title: "Document $1 and $5 values", intent: "Cost $50 without replacement" },
+  ];
+
+  it.each(literalValues)("preserves authored mission scaffold literals: $label", async ({ title, intent }) => {
+    const result = await run([
+      "mission", "create", "release-9.9.9", "--title", title, "--intent", intent, "--json",
+    ], substrate.missionsRoot);
+    expect(result.exitCode).toBe(0);
+    const missionPath = JSON.parse(result.stdout).mission.path as string;
+    const specPath = path.join(missionPath, "SPEC.md");
+    const spec = fs.readFileSync(specPath, "utf8");
+    expect(readFrontmatter(specPath).intent).toBe(intent);
+    expect(spec.split("\n").find((line) => line.startsWith("# "))).toContain(title);
+    expect(spec).toContain(`\n${intent}\n`);
+    expect(readFrontmatter(path.join(missionPath, "NOTES.md")).name).toBe(title);
+    expect(fs.readFileSync(path.join(missionPath, "NOTES.md"), "utf8")).toContain(`# Notes — ${title}\n`);
+    expect(fs.readFileSync(path.join(missionPath, "PROGRESS.md"), "utf8")).toContain(`# Progress — ${title}\n`);
+  });
+
+  it.each(literalValues)("preserves authored slice scaffold literals: $label", async ({ title, intent }) => {
+    const result = await run([
+      "slice", "create", "release-0.4.4", "literal-probe", "--title", title, "--intent", intent, "--json",
+    ], substrate.missionsRoot);
+    expect(result.exitCode).toBe(0);
+    const slicePath = JSON.parse(result.stdout).slice.path as string;
+    const specPath = path.join(slicePath, "SPEC.md");
+    const spec = fs.readFileSync(specPath, "utf8");
+    expect(readFrontmatter(specPath).intent).toBe(intent);
+    expect(spec.split("\n").find((line) => line.startsWith("# "))).toContain(title);
+    expect(spec).toContain(`\n${intent}\n`);
+    expect(fs.readFileSync(path.join(slicePath, "PROOF.md"), "utf8")).toContain(title);
+    expect(fs.readFileSync(path.join(slicePath, "PROGRESS.md"), "utf8")).toContain(`# Progress — ${title}\n`);
+  });
+
+  it("retains unknown custom notes tokens and does not interpolate tokens in the authored name", () => {
+    const template = path.join(substrate.root, "custom-notes.md");
+    fs.writeFileSync(template, "{{mission_name}}\n{{mission_name_yaml}}\n{{created_date}}\n{{unknown}} {{constructor}} {{__proto__}}\n");
+    const name = "$$ $& {{created_date}}";
+    const result = renderNotesTemplate({ mission_id: "OPR.9.9.9", mission_name: name, created_date: "2026-10-07" }, template);
+    expect(result.resolvedFrom).toBe("env");
+    expect(result.rendered).toBe(`${name}\n${JSON.stringify(name)}\n2026-10-07\n{{unknown}} {{constructor}} {{__proto__}}\n`);
   });
 });
 
@@ -353,6 +405,28 @@ describe("release capability-delta scaffold and expiry advisory", () => {
       "# Capability canon\n\nAbsorbed: capability-delta-v0.5.4\n\n## Capabilities\n",
       "utf8",
     );
+    const successorPath = path.join(missionPath, "CAPABILITY-DELTA-v0.5.5.md");
+    fs.rmSync(successorPath);
+    fs.mkdirSync(successorPath);
+    const directorySuccessor = await run(["audit", "--mission", "release-0.5.4", "--json"], substrate.missionsRoot);
+    expect(directorySuccessor.exitCode).toBe(0);
+    expect(JSON.parse(directorySuccessor.stdout).mission.findings.filter(
+      (finding: { kind: string }) => finding.kind === "expired_capability_delta",
+    )).toHaveLength(0);
+    fs.rmSync(successorPath, { recursive: true });
+    fs.writeFileSync(successorPath, "successor\n", "utf8");
+    const access = fs.accessSync.bind(fs);
+    const inaccessible = vi.spyOn(fs, "accessSync").mockImplementation((file, mode) => {
+      if (file === successorPath) throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+      return access(file, mode);
+    });
+    try {
+      const deniedSuccessor = await run(["audit", "--mission", "release-0.5.4", "--json"], substrate.missionsRoot);
+      expect(deniedSuccessor.exitCode).toBe(0);
+      expect(JSON.parse(deniedSuccessor.stdout).mission.findings.filter(
+        (finding: { kind: string }) => finding.kind === "expired_capability_delta",
+      )).toHaveLength(0);
+    } finally { inaccessible.mockRestore(); }
     const expired = await run(["audit", "--mission", "release-0.5.4", "--json"], substrate.missionsRoot);
     const parsed = JSON.parse(expired.stdout);
     expect(expired.exitCode).toBe(0);

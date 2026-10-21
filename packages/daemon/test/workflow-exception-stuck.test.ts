@@ -131,6 +131,20 @@ describe("WF-5 FR-2 class (b): detection-time stuck exception items", () => {
     expect(exceptionRows(db)).toHaveLength(1);
   });
 
+  it("routes an overdue exception to its owner despite a Slack failure notice at the sender", async () => {
+    const f = await build();
+    const notice = () => f.queueRepo.create({ sourceSession: "ops@rig", destinationSession: "ops@rig",
+      body: "The human notice could not be delivered.", nudge: false,
+      tags: ["slack-undeliverable", `recovery-for:${f.packetId}`] });
+    await notice();
+    expect((await sweep(f)).exceptionItemsCreated).toBe(1);
+    expect(exceptionRows(db)).toHaveLength(1);
+    expect(exceptionRows(db)[0]!.destination_session).toBe("orch-lead@rig");
+    await notice();
+    expect((await sweep(f)).exceptionItemsCreated).toBe(0);
+    expect(exceptionRows(db)).toHaveLength(1);
+  });
+
   it("BOTH detection paths share the occurrence: keepalive evaluation after a sweep dedupes into the same single item", async () => {
     const f = await build();
     await sweep(f);

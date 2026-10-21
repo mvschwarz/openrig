@@ -146,8 +146,8 @@ describe("workflow-render (WF3 FR-2)", () => {
     const show = renderInstanceShow(lifecycle, NOW).join("\n");
     expect(show).toContain("Q-LEFT  step=left  owner=left@rig");
     expect(show).toContain("Q-RIGHT  step=right  owner=right@rig  state=blocked  blocked_on=gate-2");
-    expect(show).toContain("project --instance WF01ABC --current-packet Q-LEFT --exit <handoff|waiting|done|failed> --actor-session left@rig");
-    expect(show).toContain("project --instance WF01ABC --current-packet Q-RIGHT --exit <handoff|waiting|done|failed> --actor-session right@rig");
+    expect(show).toContain("project --instance WF01ABC --current-packet Q-LEFT --exit <handoff|waiting|done|failed>");
+    expect(show).toContain("project --instance WF01ABC --current-packet Q-RIGHT --exit <handoff|waiting|done|failed>");
     expect(show).toContain("--occurrence Q-FAILED");
     expect(show).toContain("unknown:  frontier packet Q-GHOST has no queue row");
 

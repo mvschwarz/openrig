@@ -1,20 +1,19 @@
 import path from "node:path";
 import { existsSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
-import { connectionErrorCode, formatDaemonHostForUrl } from "./client.js";
-import { blockedConnectionGuidance, isBlockedConnectionCode } from "./daemon-reachability.js";
+import { DaemonClient, ForeignLocalDaemonError, connectionErrorCode, formatDaemonHostForUrl } from "./client.js";
+import { blockedConnectionGuidance, daemonMayAnswer, isBlockedConnectionCode } from "./daemon-reachability.js";
+export { daemonMayAnswer } from "./daemon-reachability.js";
 import type { DaemonStartLock } from "./daemon-start-lock.js";
 import { DAEMON_STOP_WAIT_MS, DAEMON_SHUTDOWN_RECEIPT, type DaemonShutdownReceipt } from "@openrig/daemon/daemon-shutdown";
 import { ConfigStore } from "./config-store.js";
-import { readLocalOrigin } from "./local-origin.js";
 import { OPENRIG_HOME, LEGACY_RIGGED_HOME, readOpenRigEnv } from "./openrig-compat.js";
-import {
-  ensureDefaultWorkspace,
-  ensureOpenRigInstance,
-  formatInstanceInitializationConflicts,
-  type InitializationFsOps,
-  type InitWorkspaceResult,
-  type ManagedPathKind,
+// Types only: the module itself (with the daemon's yaml-reading system world) is imported where an
+// instance is initialized, so a command that only talks to the daemon never loads it.
+import type {
+  InitializationFsOps,
+  InitWorkspaceResult,
+  ManagedPathKind,
 } from "@openrig/daemon/instance-initialization";
 
 export interface DaemonState {
@@ -46,7 +45,7 @@ export interface DaemonStatus {
   state: "running" | "stopped" | "stale" | "unverified";
   /** Home-resolution honesty: set when the resolved home lacks daemon state but a live sibling
    *  home (or a HOME-MOVED marker) exists — callers name BOTH paths, never assert down. */
-  siblingHint?: { resolvedHome: string; siblingHome: string };
+  siblingHint?: { resolvedHome: string; siblingHome: string; /** an explicit HOME-MOVED marker, not just a live adjacent home */ moved?: true };
   port?: number;
   host?: string;
   pid?: number;
@@ -134,11 +133,11 @@ export function statusGuardMessage(status: DaemonStatus): DaemonNotRunningError 
   };
 }
 
-/** B8-1b — THE precheck chokepoint: returns true when the daemon is running+healthy;
- *  otherwise prints the epistemic-matched 3-part (+ the wrong-home sibling hint when
- *  present), sets exit 1, returns false. Replaces the ~55 hand-rolled verbatim guards. */
+/** B8-1b — THE precheck chokepoint: returns true when the command should make its real request
+ *  ({@link daemonMayAnswer}); otherwise prints the epistemic-matched 3-part (+ the wrong-home sibling
+ *  hint when present), sets exit 1, returns false. Replaces the ~55 hand-rolled verbatim guards. */
 export function daemonStatusGuard(status: DaemonStatus, opts?: { json?: boolean }): boolean {
-  if (status.state === "running" && status.healthy !== false) return true;
+  if (daemonMayAnswer(status)) return true;
   const err = statusGuardMessage(status);
   if (opts?.json) {
     console.log(JSON.stringify({ error: err }));
@@ -201,8 +200,12 @@ export interface LifecycleDeps {
   // /healthz body (event-loop evidence). Optional so existing mocks that
   // return `{ ok }` are unchanged; production (realDeps) supplies it.
   fetch: (url: string) => Promise<{ ok: boolean; json?: () => Promise<unknown> }>;
+  /** Exclusive bind check used only after a no-state health probe times out. */
+  isPortOccupied?: (host: string, port: number) => Promise<boolean>;
   kill: (pid: number, signal: string) => boolean;
   readFile: (path: string) => string | null;
+  fileSize?: (path: string) => number;
+  readFileFrom?: (path: string, offset: number) => string | null;
   writeFile: (path: string, content: string) => void;
   removeFile: (path: string) => void;
   exists: (path: string) => boolean;
@@ -277,7 +280,8 @@ function lifecycleInitializationFs(deps: LifecycleDeps): InitializationFsOps {
   };
 }
 
-export function ensureWorkspaceScaffold(root: string, deps: LifecycleDeps): WorkspaceScaffoldResult {
+export async function ensureWorkspaceScaffold(root: string, deps: LifecycleDeps): Promise<WorkspaceScaffoldResult> {
+  const { ensureDefaultWorkspace } = await import("@openrig/daemon/instance-initialization");
   return ensureDefaultWorkspace({ root, fs: lifecycleInitializationFs(deps) });
 }
 
@@ -598,6 +602,10 @@ export async function verifyRequiredListeners(input: {
   return { ok: true, verified };
 }
 
+function occupiedPortGuidance(port: number): string {
+  return `Address already in use (EADDRINUSE) on port ${port}. Inspect the listener before stopping it, or run 'rig daemon start --port <unused-port>'.`;
+}
+
 class StartupIdentityError extends Error {}
 class StartupChildPendingError extends Error {}
 
@@ -644,9 +652,11 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     try {
       await fetchDaemonProbe(deps, `http://${formatDaemonHostForUrl(probeHost)}:${port}/healthz`, HEALTHZ_PROBE_TIMEOUT_MS);
       recoveredRunning = true;
-    } catch (err) {
-      if (err instanceof HealthProbeTimeoutError) {
-        throw new Error(`Daemon on port ${port} is unresponsive, and daemon state is missing — recover it before starting a new daemon.`);
+    } catch (error) {
+      // WSL2 can silently drop probes to an unused port. A slow live daemon can
+      // also time out: do not run a second child's initialization against its DB.
+      if (error instanceof HealthProbeTimeoutError && await deps.isPortOccupied?.(probeHost, port)) {
+        throw new Error(occupiedPortGuidance(port));
       }
     }
     if (recoveredRunning) {
@@ -655,6 +665,7 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
   }
   const daemonEntry = path.join(getDaemonPath(), "dist/index.js");
 
+  const { ensureOpenRigInstance, formatInstanceInitializationConflicts } = await import("@openrig/daemon/instance-initialization");
   const initialization = ensureOpenRigInstance({
     home: OPENRIG_DIR,
     workspaceRoot: opts.workspaceRoot,
@@ -667,6 +678,7 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     throw new Error(`OpenRig instance initialization blocked: ${formatInstanceInitializationConflicts(initialization)}`);
   }
 
+  const logOffset = deps.fileSize?.(LOG_FILE) ?? Buffer.byteLength(deps.readFile(LOG_FILE) ?? "");
   const logFd = deps.openForAppend(LOG_FILE);
 
   let child: ChildProcess;
@@ -699,7 +711,13 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     rejectExit(childFailure);
   };
   const onExit = (code: number | null, signal: string | null): void => {
-    childFailure = new Error(`Daemon child ${child.pid ?? "unknown"} exited before startup completed (code ${code}, signal ${signal ?? "none"})`);
+    const startupLog = deps.readFileFrom
+      ? deps.readFileFrom(LOG_FILE, logOffset) ?? ""
+      : Buffer.from(deps.readFile(LOG_FILE) ?? "").subarray(logOffset).toString();
+    const guidance = /\bEADDRINUSE\b/.test(startupLog)
+      ? ` ${occupiedPortGuidance(port)}`
+      : ` See ${LOG_FILE} for details.`;
+    childFailure = new Error(`Daemon child ${child.pid ?? "unknown"} exited before startup completed (code ${code}, signal ${signal ?? "none"}).${guidance}`);
     rejectExit(childFailure);
     resolveExit();
   };
@@ -937,7 +955,7 @@ function findSiblingHome(deps: LifecycleDeps): DaemonStatus["siblingHint"] {
     const marker = path.join(home, "HOME-MOVED");
     if (deps.exists(marker)) {
       const target = deps.readFile(marker)?.trim();
-      if (target) return { resolvedHome: home, siblingHome: target };
+      if (target) return { resolvedHome: home, siblingHome: target, moved: true };
     }
     if (!deps.listDir) return undefined;
     const parent = path.dirname(home);
@@ -971,6 +989,15 @@ export async function getDaemonStatus(
   // If OPENRIG_URL is set, bypass daemon.json and probe that URL directly
   const openrigUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
   if (openrigUrl) {
+    // An unverified daemon keeps the endpoint it was probed at, so a command can still make its request.
+    const endpoint = (() => {
+      try {
+        const url = new URL(openrigUrl);
+        return { port: Number(url.port) || DEFAULT_PORT, host: url.hostname || DEFAULT_HOST };
+      } catch {
+        return {};
+      }
+    })();
     try {
       const res = await probeHealthzWithSettle(deps, `${openrigUrl}/healthz`);
       const ev = await readHealthEvidence(res);
@@ -978,7 +1005,7 @@ export async function getDaemonStatus(
       return { state: "running", port: Number(url.port) || DEFAULT_PORT, host: url.hostname || DEFAULT_HOST, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop };
     } catch (err) {
       // 1ae863d2: refusal = positive down; anything else (timeout/wedged/blocked) = unverified.
-      return isRefusedError(err) ? { state: "stopped" } : { state: "unverified", ...probeErrorCodeOf(err) };
+      return isRefusedError(err) ? { state: "stopped" } : { state: "unverified", ...endpoint, ...probeErrorCodeOf(err) };
     }
   }
 
@@ -1001,7 +1028,9 @@ export async function getDaemonStatus(
       // look for a live sibling home / HOME-MOVED marker (the wrong-home class).
       const siblingHint = findSiblingHome(deps);
       if (siblingHint) return { state: "unverified", siblingHint, ...probeErrorCodeOf(err) };
-      return isRefusedError(err) ? { state: "stopped" } : { state: "unverified", ...probeErrorCodeOf(err) };
+      return isRefusedError(err)
+        ? { state: "stopped" }
+        : { state: "unverified", port: configured.port, host: configured.host, ...probeErrorCodeOf(err) };
     }
   }
 
@@ -1028,7 +1057,7 @@ export async function getDaemonStatus(
       return { state: "running", port: state.port, host, pid: state.pid, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop };
     } catch (err) {
       // 1ae863d2: refusal = positive down; anything else (timeout/wedged/blocked) = unverified.
-      return isRefusedError(err) ? { state: "stopped" } : { state: "unverified", pid: state.pid, ...probeErrorCodeOf(err) };
+      return isRefusedError(err) ? { state: "stopped" } : { state: "unverified", pid: state.pid, port: state.port, host, ...probeErrorCodeOf(err) };
     }
   }
 
@@ -1179,7 +1208,8 @@ export async function fetchSelfHostIdentity(
 
 /** Resolve this instance's persisted identity even during an outage; never read it from the target. */
 export async function resolveOriginSelfHostId(_deps: LifecycleDeps): Promise<string | undefined> {
-  return readLocalOrigin();
+  // Imported here, not at the top: it loads better-sqlite3 and yaml, which most commands never reach.
+  return (await import("./local-origin.js")).readLocalOrigin();
 }
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -1231,6 +1261,9 @@ export interface KernelReadyResult {
   kernelState: string | null;
   variant: string | null;
   detail: string | null;
+  /** The daemon is restoring an existing kernel a reboot left down, not booting a first one:
+   *  whether that restore is still running or has returned. */
+  existingRestore?: "in_progress" | "finished";
 }
 
 export async function waitForKernelReady(
@@ -1238,11 +1271,16 @@ export async function waitForKernelReady(
   timeoutMs: number,
   pollIntervalMs = 500,
 ): Promise<KernelReadyResult> {
+  const ownerClient = new DaemonClient(baseUrl);
+  // Resolve the opt-in before starting the wait. Disabled polls retain main's request/deadline flow.
+  const checkOwner = ownerClient.localOwnerCheckEnabled();
   const deadline = Date.now() + timeoutMs;
   let last: KernelReadyResult = { ok: false, kernelState: null, variant: null, detail: null };
   while (Date.now() < deadline) {
-    const remainingMs = Math.max(1, deadline - Date.now());
     try {
+      if (checkOwner) await ownerClient.assertLocalOwner(Math.min(1000, Math.max(1, deadline - Date.now())));
+      // Once admitted, keep the final request even if an unknown owner check consumed the remainder.
+      const remainingMs = Math.max(1, deadline - Date.now());
       const res = await fetch(`${baseUrl}/api/kernel/status`, {
         signal: AbortSignal.timeout(remainingMs),
       });
@@ -1251,14 +1289,19 @@ export async function waitForKernelReady(
           kernel_state?: string;
           variant?: string | null;
           detail?: string | null;
+          existing_restore?: string;
         };
         last = {
           ok: body.kernel_state === "ready" || body.kernel_state === "partial_ready",
           kernelState: body.kernel_state ?? null,
           variant: body.variant ?? null,
           detail: body.detail ?? null,
+          ...(body.existing_restore === "in_progress" || body.existing_restore === "finished"
+            ? { existingRestore: body.existing_restore } : {}),
         };
         if (last.ok) return last;
+        // A restore of an existing kernel that has returned without a ready kernel won't change.
+        if (last.existingRestore === "finished") return last;
         // Terminal non-ready states: don't keep polling.
         if (
           body.kernel_state === "auth_blocked" ||
@@ -1270,7 +1313,8 @@ export async function waitForKernelReady(
           return last;
         }
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof ForeignLocalDaemonError) return { ...last, detail: error.message };
       // Transient fetch failure; keep polling until the deadline.
     }
     const sleepMs = Math.min(pollIntervalMs, Math.max(0, deadline - Date.now()));

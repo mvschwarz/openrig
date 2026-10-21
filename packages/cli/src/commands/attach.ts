@@ -57,7 +57,7 @@ export function attachCommand(depsOverride?: StatusDeps): Command {
     .option("--member <name>", "Member name for pod attach mode")
     .option("--runtime <runtime>", "Runtime for pod attach mode; optional guard for node mode")
     .option("--cwd <path>", "Working directory to record", process.cwd())
-    .option("--display-name <name>", "External session/display name to record")
+    .option("--display-name <name>", "Display label inside tmux; external session name outside tmux")
     .option("--print-env", "Print shell exports for OPENRIG_NODE_ID and OPENRIG_SESSION_NAME")
     .option("--json", "JSON output")
     .action(async (opts: {
@@ -119,9 +119,8 @@ export function attachCommand(depsOverride?: StatusDeps): Command {
         body["tmuxSession"] = attachContext.tmuxSession;
         if (attachContext.tmuxWindow) body["tmuxWindow"] = attachContext.tmuxWindow;
         body["tmuxPane"] = attachContext.tmuxPane;
-      } else if (opts.displayName) {
-        body["displayName"] = opts.displayName;
       }
+      if (opts.displayName) body["displayName"] = opts.displayName;
 
       if (hasNode) {
         body["logicalId"] = opts.node;
@@ -160,7 +159,9 @@ export function attachCommand(depsOverride?: StatusDeps): Command {
       } else {
         console.log(`Created node ${logicalId} and attached this shell in rig ${opts.rig}`);
       }
-      console.log(`Session:    ${sessionName}`);
+      console.log(`Sender:     ${sessionName}`);
+      const physicalSession = res.data["sessionName"];
+      if (typeof physicalSession === "string" && physicalSession !== sessionName) console.log(`Tmux:       ${physicalSession}`);
       console.log(`Transport:  ${
         res.data["attachmentType"] === "tmux"
           ? "tmux"

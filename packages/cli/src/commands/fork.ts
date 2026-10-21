@@ -13,6 +13,7 @@ import { Command } from "commander";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
+import { renderCaughtTransportError } from "../cli-error.js";
 import type { StatusDeps } from "./status.js";
 
 interface ForkResponse {
@@ -112,7 +113,7 @@ Examples:
 
         if (node && node.status !== "launched") process.exitCode = 1;
       } catch (err) {
-        console.error((err as Error).message);
+        if (!renderCaughtTransportError(err, opts.json ?? false)) console.error((err as Error).message);
         process.exitCode = 1;
       }
     });

@@ -182,6 +182,33 @@ describe("rig ps --host HTTP", () => {
     expect(client._calls.length).toBe(0);
     expect(stderr.some((s) => s.includes("cannot be combined"))).toBe(true);
   });
+
+  it("warns once when a rig-tier context filter is ignored", async () => {
+    vi.stubEnv("HOST_B_TOKEN", "tok");
+    const client = mockClient({
+      "/api/ps": { status: 200, data: [{ rigId: "r1", name: "demo", status: "running" }] },
+    });
+    const deps: PsDeps = {
+      lifecycleDeps: {} as PsDeps["lifecycleDeps"],
+      clientFactory: () => client,
+      hostRegistryLoader: mockRegistry([
+        { id: "host-b", transport: "http", url: "http://x", bearer_env: "HOST_B_TOKEN" },
+      ]),
+    };
+    const { stdout, stderr } = await captureLogs(async () => {
+      await makeCmd(deps).parseAsync(["node", "rig", "ps", "--host", "host-b", "--json", "--filter", "contextUsage.state=critical"]);
+    });
+    expect(JSON.parse(stdout.join(""))).toEqual({
+      entries: [expect.objectContaining({ rigId: "r1", name: "demo" })],
+      totalRigs: 1,
+      truncated: false,
+    });
+    expect(stderr).toHaveLength(1);
+    expect(stderr[0]).toContain("contextUsage.state");
+    expect(stderr[0]).toContain("was not applied");
+    expect(stderr[0]).toContain("--nodes");
+  });
+
   it("--nodes --json returns flattened node array (not rig wrappers)", async () => {
     vi.stubEnv("HOST_B_TOKEN", "tok");
     const client = mockClient({
@@ -276,6 +303,123 @@ describe("rig ps --host HTTP", () => {
     });
     const parsed = JSON.parse(stdout.join(""));
     expect(parsed.totalRigs).toBe(2);
+  });
+
+  it("--rig scopes the remote rig list before --summary and --limit", async () => {
+    vi.stubEnv("HOST_B_TOKEN", "tok");
+    const client = mockClient({
+      "/api/ps": { status: 200, data: [
+        { rigId: "r1", name: "a", status: "running" },
+        { rigId: "r2", name: "b", status: "stopped" },
+        { rigId: "r3", rigName: "c", name: "c-display", status: "running" },
+      ] },
+    });
+    const deps: PsDeps = {
+      lifecycleDeps: {} as PsDeps["lifecycleDeps"],
+      clientFactory: () => client,
+      hostRegistryLoader: mockRegistry([
+        { id: "host-b", transport: "http", url: "http://x", bearer_env: "HOST_B_TOKEN" },
+      ]),
+    };
+    const list = await captureLogs(async () => {
+      await makeCmd(deps).parseAsync(["node", "rig", "ps", "--host", "host-b", "--rig", "b", "--json"]);
+    });
+    expect(JSON.parse(list.stdout.join("")).map((e: { rigId: string }) => e.rigId)).toEqual(["r2"]);
+
+    const byRigName = await captureLogs(async () => {
+      await makeCmd(deps).parseAsync(["node", "rig", "ps", "--host", "host-b", "--rig", "c", "--json"]);
+    });
+    expect(JSON.parse(byRigName.stdout.join("")).map((e: { rigId: string }) => e.rigId)).toEqual(["r3"]);
+
+    const summary = await captureLogs(async () => {
+      await makeCmd(deps).parseAsync(["node", "rig", "ps", "--host", "host-b", "--rig", "b", "--summary", "--json"]);
+    });
+    expect(JSON.parse(summary.stdout.join("")).totalRigs).toBe(1);
+
+    const envelope = await captureLogs(async () => {
+      await makeCmd(deps).parseAsync(["node", "rig", "ps", "--host", "host-b", "--rig", "c", "--limit", "1", "--json"]);
+    });
+    const parsed = JSON.parse(envelope.stdout.join(""));
+    expect(parsed.totalRigs).toBe(1);
+    expect(parsed.entries.map((e: { rigId: string }) => e.rigId)).toEqual(["r3"]);
+  });
+
+  it("--rig naming no rig on the host says so and exits 1, like the local view; --json keeps []", async () => {
+    vi.stubEnv("HOST_B_TOKEN", "tok");
+    const client = mockClient({
+      "/api/ps": { status: 200, data: [{ rigId: "r1", name: "a", status: "running" }] },
+      "/api/ps?includeArchived=true": { status: 200, data: [
+        { rigId: "r1", name: "a", status: "running" },
+        { rigId: "r9", name: "old", status: "stopped", isArchived: true },
+      ] },
+    });
+    const deps: PsDeps = {
+      lifecycleDeps: {} as PsDeps["lifecycleDeps"],
+      clientFactory: () => client,
+      hostRegistryLoader: mockRegistry([
+        { id: "host-b", transport: "http", url: "http://x", bearer_env: "HOST_B_TOKEN" },
+      ]),
+    };
+    const run = async (...args: string[]) => {
+      process.exitCode = undefined;
+      const logs = await captureLogs(async () => {
+        await makeCmd(deps).parseAsync(["node", "rig", "ps", "--host", "host-b", ...args]);
+      });
+      const exitCode = process.exitCode;
+      process.exitCode = undefined;
+      return { ...logs, exitCode };
+    };
+
+    for (const args of [["--rig", "nope"], ["--rig", "nope", "--summary"]]) {
+      const r = await run(...args);
+      expect(r.stderr.join("")).toContain("Rig 'nope' not found on host host-b. List rigs with: rig ps --host host-b");
+      expect(r.stdout.join("")).toBe("");
+      expect(r.exitCode).toBe(1);
+    }
+
+    const archived = await run("--rig", "old");
+    expect(archived.stderr.join("")).toContain("Rig 'old' is archived on host host-b. Show it with: rig ps --host host-b --rig old --include-archived");
+    expect(archived.exitCode).toBe(1);
+
+    const json = await run("--rig", "nope", "--json");
+    expect(JSON.parse(json.stdout.join(""))).toEqual([]);
+    expect(json.exitCode).toBeUndefined();
+  });
+
+  it("a failed archived lookup is reported as a failure, not as 'not found'", async () => {
+    vi.stubEnv("HOST_B_TOKEN", "tok");
+    const client = mockClient({
+      "/api/ps": { status: 200, data: [{ rigId: "r1", name: "a", status: "running" }] },
+      "/api/ps?includeArchived=true": { status: 503, data: { error: "busy" } },
+    });
+    const deps: PsDeps = {
+      lifecycleDeps: {} as PsDeps["lifecycleDeps"],
+      clientFactory: () => client,
+      hostRegistryLoader: mockRegistry([
+        { id: "host-b", transport: "http", url: "http://x", bearer_env: "HOST_B_TOKEN" },
+      ]),
+    };
+    for (const args of [["--rig", "nope"], ["--nodes", "--rig", "nope"]]) {
+      process.exitCode = undefined;
+      const { stderr } = await captureLogs(async () => {
+        await makeCmd(deps).parseAsync(["node", "rig", "ps", "--host", "host-b", ...args]);
+      });
+      const exitCode = process.exitCode;
+      process.exitCode = undefined;
+      expect(stderr.join("")).toContain("503");
+      expect(stderr.join("")).not.toContain("not found");
+      // The remote rig view uses the cross-host error (1); the node view, the rig-list failure (2).
+      expect(exitCode).toBe(args.includes("--nodes") ? 2 : 1);
+    }
+  });
+
+  it("the help's exit codes list --rig naming no rig", async () => {
+    const prog = makeCmd({ lifecycleDeps: {} as PsDeps["lifecycleDeps"], clientFactory: () => mockClient({}) });
+    let out = "";
+    prog.commands[0]!.configureOutput({ writeOut: (text) => { out += text; } });
+    await prog.parseAsync(["node", "rig", "ps", "--help"]).catch(() => {});
+    expect(out).toContain("Exit codes:");
+    expect(out).toContain("--rig names no rig");
   });
 });
 

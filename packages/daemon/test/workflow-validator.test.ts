@@ -124,6 +124,77 @@ describe("WorkflowValidator (PL-004 Phase D)", () => {
     expect(result.issues.find((i) => i.code === "step_exit_not_allowed")).toBeDefined();
   });
 
+  // A last step that allows only handoff/waiting/failed can never finish: handoff has no
+  // next step (the projector refuses with no_next_step) and done is refused by allowed_exits.
+  it("step_cannot_finish when a terminal step allows neither done nor a routable exit", () => {
+    const result = validator.validate(
+      spec({
+        invariants: { allowed_exits: ["handoff", "waiting", "done", "failed"] },
+        steps: [
+          { id: "produce", actor_role: "producer", allowed_exits: ["handoff"] },
+          { id: "review", actor_role: "reviewer", allowed_exits: ["handoff", "waiting", "failed"] },
+        ],
+      }),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.issues.filter((i) => i.code === "step_cannot_finish")).toEqual([
+      expect.objectContaining({
+        severity: "error",
+        field: "workflow.steps[1].allowed_exits",
+        message: expect.stringContaining('step "review"'),
+      }),
+    ]);
+  });
+
+  it.each([
+    ["done is allowed", { allowed_exits: ["handoff", "waiting", "done"] }],
+    ["allowed_exits is omitted", {}],
+    ["an allowed exit is branch-mapped", { allowed_exits: ["handoff", "failed"], next_hop: { on: { failed: "produce" } } }],
+  ] as const)("no step_cannot_finish on the last step when %s", (_label, last) => {
+    const result = validator.validate(
+      spec({
+        steps: [
+          { id: "produce", actor_role: "producer", allowed_exits: ["handoff", "done"] },
+          { id: "review", actor_role: "reviewer", ...last },
+        ],
+        invariants: { allowed_exits: ["handoff", "waiting", "done", "failed"] },
+        loop_guards: { max_hops: 10 },
+      }),
+    );
+    expect(result.issues.filter((i) => i.code === "step_cannot_finish")).toEqual([]);
+  });
+
+  it("no step_cannot_finish when handoff has a next step", () => {
+    const result = validator.validate(spec());
+    expect(result.issues.filter((i) => i.code === "step_cannot_finish")).toEqual([]);
+  });
+
+  it("no step_cannot_finish for a handoff-only sink in a dependency graph (handoff completes it)", () => {
+    const result = validator.validate(
+      spec({
+        steps: [
+          { id: "produce", actor_role: "producer", depends_on: [], allowed_exits: ["handoff"] },
+          { id: "review", actor_role: "reviewer", depends_on: ["produce"], allowed_exits: ["handoff", "failed"] },
+        ],
+      }),
+    );
+    expect(result.issues.filter((i) => i.code === "step_cannot_finish")).toEqual([]);
+  });
+
+  it("step_cannot_finish in a dependency graph when no allowed exit completes the step", () => {
+    const result = validator.validate(
+      spec({
+        steps: [
+          { id: "produce", actor_role: "producer", depends_on: [], allowed_exits: ["handoff"] },
+          { id: "review", actor_role: "reviewer", depends_on: ["produce"], allowed_exits: ["waiting", "failed"] },
+        ],
+      }),
+    );
+    expect(result.issues.find((i) => i.code === "step_cannot_finish")).toMatchObject({
+      field: "workflow.steps[1].allowed_exits",
+    });
+  });
+
   it("step_id_missing when step has no id", () => {
     const result = validator.validate(
       spec({

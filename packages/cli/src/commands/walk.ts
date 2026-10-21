@@ -11,7 +11,8 @@ import { Command } from "commander";
 import { analyzeWalkSuffix } from "../lib/walk-consumption.js";
 import { existsSync, readFileSync } from "node:fs";
 import { DaemonClient, terminalAuthHeaders } from "../client.js";
-import { getDaemonStatus, getDaemonUrl , statusGuardMessage} from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl , statusGuardMessage } from "../daemon-lifecycle.js";
+import { daemonMayAnswer } from "../daemon-reachability.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
@@ -356,7 +357,7 @@ initial record is explicitly reported as unverified delivery.`)
 
   async function getClient(deps: WalkDeps): Promise<DaemonClient> {
     const status = await getDaemonStatus(deps.lifecycleDeps);
-    if (status.state !== "running" || status.healthy === false) {
+    if (!daemonMayAnswer(status)) {
       // B8-1b: epistemic-matched language via the one helper (down ≠ busy).
       const gm = statusGuardMessage(status); throw new Error(`${gm.fact} ${gm.action}`);
     }

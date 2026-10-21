@@ -21,12 +21,14 @@ async function finalObservation(output: string) {
   fs.mkdirSync(bin);
   fs.writeFileSync(path.join(bin, "codex"), `#!${process.execPath}\n` +
     `const fs = require("node:fs");\n` +
-    `if (process.argv.slice(2).join(" ") !== "-s workspace-write resume fixture-id") process.exit(2);\n` +
+    `if (process.argv.slice(2).join(" ") !== "-s workspace-write -c check_for_update_on_startup=false resume fixture-id") process.exit(2);\n` +
     `process.stdout.write("\\n".repeat(36) + "fixture waiting for final observation\\n");\n` +
     `const tick = setInterval(() => { if (fs.existsSync(${JSON.stringify(gate)})) {\n` +
     `process.stdout.write(fs.readFileSync(${JSON.stringify(gate)}, "utf8") + "\\n"); clearInterval(tick);\n` +
     `setInterval(() => {}, 1000); } }, 5);\n`, { mode: 0o755 });
-  const env = { ...process.env, HOME: home, TERM: "xterm-256color" };
+  // The pane's interactive bash saves history into HOME as kill-server hangs it
+  // up, racing the teardown's rmSync (ENOTEMPTY); keep that file out of home.
+  const env = { ...process.env, HOME: home, TERM: "xterm-256color", HISTFILE: "/dev/null" };
   delete env.TMUX;
   delete env.TMUX_TMPDIR;
   const tmux = async (args: string[]) => (await runFile("tmux", ["-S", socket, ...args], { env })).stdout;
@@ -87,11 +89,12 @@ describe.skipIf(process.platform === "win32")("native terminal final Codex resum
     expect(await finalObservation("OpenAI Codex (v0.0.0)\n› Ask Codex to do anything")).toMatchObject({ ok: true });
   }, 15_000);
 
-  it("preserves the shell fallback without claiming readiness or attention from unrelated output", async () => {
-    // The production launch stages this fixture via /bin/sh. Native tmux sees
-    // that foreground wrapper, so retain its existing shell fallback outcome.
+  it("keeps the launch for attention while the staging wrapper holds the foreground, never claiming readiness", async () => {
+    // The production launch stages this fixture via /bin/sh, so native tmux labels the pane with that wrapper while
+    // Codex runs under it. The wrapper isn't an idle shell, so the launch is kept rather than retried fresh.
     expect(await finalObservation("fixture output remains inconclusive")).toMatchObject({
-      ok: false, code: "retry_fresh", message: "Codex resume failed: pane returned to shell instead of entering Codex",
+      ok: false, code: "attention_required",
+      message: "Codex resume could not be verified; launch retained: the pane shows a shell that isn't a proven idle shell, so a launch script may still be starting Codex.",
     });
   }, 15_000);
 });

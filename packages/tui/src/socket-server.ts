@@ -35,8 +35,14 @@ export function describeState(state: ViewState) {
     ...(mission ? [`mission:${mission}`] : []),
     ...(slice ? [`slice:${slice}`] : []),
   ];
+  const pending = state.pendingDrill;
   return {
     ok: !state.lastError,
+    // Not done yet: the address resolves when Topology's read settles; `state` reports the outcome.
+    ...(pending ? {
+      resolving: `${pending.resource} ${pending.name}`,
+      notice: `Switched to Topology; resolving ${pending.resource} "${pending.name}" once its read settles. Send "state" for the result.`,
+    } : {}),
     screen: state.section,
     drill: state.drill.map((d) => `${d.kind}:${d.name}`),
     filter: state.filter || undefined,
@@ -67,7 +73,8 @@ export function describeState(state: ViewState) {
 export function defaultSocketPath(instanceId: string): string {
   const override = process.env["OPENRIG_TUI_SOCKET"];
   if (override) return override;
-  const home = process.env["OPENRIG_HOME"] ?? path.join(os.homedir(), ".openrig");
+  // An empty OPENRIG_HOME is unset, as openrig-compat reads it, not a cwd-relative home.
+  const home = process.env["OPENRIG_HOME"] || path.join(os.homedir(), ".openrig");
   return path.join(home, "run", `tui-${instanceId}.sock`);
 }
 

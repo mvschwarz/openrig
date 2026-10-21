@@ -55,6 +55,8 @@ export interface SetupDeps {
   platform?: NodeJS.Platform;
   /** Environment for CODEX_HOME and provider credential checks (default process.env). */
   env?: NodeJS.ProcessEnv;
+  /** Source of terminal.history_limit for the managed tmux block (default: the OpenRig config). */
+  configStore?: Pick<ConfigStore, "resolve">;
 }
 
 // Preserve the setup module's existing selector export.
@@ -183,7 +185,7 @@ function installGhostty(deps: SetupDeps, platform: NodeJS.Platform, choice?: boo
   if (choice !== true) return {
     id, status: "skipped",
     message: "Installing agent: ask once, 'Install Ghostty for the OpenRig view?'",
-    fixHint: "On Yes, rerun rig setup with --ghostty, preserving earlier choices such as --no-herdr. On No, use --no-ghostty; Terminal.app remains available. The person types no command.",
+    fixHint: "On Yes, rerun rig setup with --ghostty, preserving earlier choices such as --no-herdr and --providers. On No, use --no-ghostty; Terminal.app remains available. The person types no command.",
   };
   try {
     installCommand(deps, "brew install --cask ghostty");
@@ -289,15 +291,48 @@ export function recordPermissionPolicyStep(deps: SetupDeps, choice: string, spec
   };
 }
 
-export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?: boolean; policy?: string; specPath?: string; herdr?: boolean; ghostty?: boolean; doctorDeps?: DoctorDeps }): Promise<SetupResult> {
+export type SetupProvider = "claude" | "codex";
+const PROVIDER_LABELS: Record<SetupProvider, string> = { claude: "Claude Code", codex: "Codex" };
+
+/** `--providers`: the person's choice, comma-separated (`claude`, `codex`, `claude,codex` or `both`). */
+export function parseSetupProviders(value: string): SetupProvider[] | { error: string } {
+  const names = value.split(",").map((name) => name.trim().toLowerCase()).filter(Boolean);
+  const chosen = new Set<SetupProvider>();
+  for (const name of names) {
+    if (name === "both") { chosen.add("claude"); chosen.add("codex"); }
+    else if (name === "claude" || name === "codex") chosen.add(name);
+    else return { error: `Unknown provider '${name}' in --providers: use claude, codex, or both.` };
+  }
+  if (chosen.size === 0) return { error: "--providers needs claude, codex, or both." };
+  return [...chosen];
+}
+
+/** A provider the person didn't choose is left out: not installed, not checked, and never failed. */
+function notSelectedSteps(provider: SetupProvider, chosen: readonly SetupProvider[]): SetupStep[] {
+  const label = PROVIDER_LABELS[provider];
+  const choice = chosen.map((p) => PROVIDER_LABELS[p]).join(" and ");
+  return [
+    { id: `${provider}_install`, status: "skipped", message: `Not selected: the person chose ${choice} (--providers), so ${label} is not installed here.` },
+    { id: `${provider}_auth`, status: "skipped", message: `Not selected: ${label} sign-in is not needed for this choice.` },
+  ];
+}
+
+export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?: boolean; policy?: string; specPath?: string; herdr?: boolean; ghostty?: boolean; providers?: readonly SetupProvider[]; doctorDeps?: DoctorDeps }): Promise<SetupResult> {
   const profile = opts.full ? "full" : "core";
   const platform = deps.platform ?? process.platform;
   const runtimeConfig = [...BASE_RUNTIME_CONFIG_DISCLOSURE];
   const stepIds = opts.full ? [...CORE_STEP_IDS, ...FULL_EXTRA_STEP_IDS] : [...CORE_STEP_IDS];
   const steps: SetupStep[] = [];
+  // No --providers: both are checked, as before. With it, only the chosen ones.
+  const selected = (provider: SetupProvider) => !opts.providers || opts.providers.includes(provider);
 
   if (opts.dryRun) {
     for (const id of stepIds) {
+      const provider = (["claude", "codex"] as const).find((p) => id === `${p}_install` || id === `${p}_auth`);
+      if (provider && !selected(provider)) {
+        steps.push(notSelectedSteps(provider, opts.providers!).find((step) => step.id === id)!);
+        continue;
+      }
       const platformSkip = id === "herdr_install" && opts.herdr === false ? "Skipped: herdr installation declined (--no-herdr)."
         : id === "herdr_install" && !["darwin", "linux"].includes(platform) ? "Automatic herdr installation is supported on macOS and Linux."
         : id === "ghostty_install" ? (platform !== "darwin" ? "The Ghostty offer is for macOS."
@@ -371,68 +406,75 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   steps.push(installGhostty(deps, platform, opts.ghostty));
 
   // 4. Claude Code runtime
-  let claudeInstalled = false;
-  try {
-    deps.exec("claude --version");
-    claudeInstalled = true;
-    steps.push({ id: "claude_install", status: "pass", message: "Claude Code available." });
-  } catch {
+  if (!selected("claude")) steps.push(...notSelectedSteps("claude", opts.providers!));
+  else {
+    let claudeInstalled = false;
     try {
-      installCommand(deps, "npm install -g @anthropic-ai/claude-code");
       deps.exec("claude --version");
       claudeInstalled = true;
-      steps.push({ id: "claude_install", status: "applied", message: "Installed Claude Code with npm." });
-    } catch (err) {
-      steps.push({
-        id: "claude_install",
-        status: "fail",
-        message: `Failed to install Claude Code: ${(err as Error).message}`,
-        reason: "Claude Code seats need the Claude CLI; a Codex-only project can use its own runtime readiness result.",
-        fixHint: "Install Claude Code with `npm install -g @anthropic-ai/claude-code`.",
-      });
+      steps.push({ id: "claude_install", status: "pass", message: "Claude Code available." });
+    } catch {
+      try {
+        installCommand(deps, "npm install -g @anthropic-ai/claude-code");
+        deps.exec("claude --version");
+        claudeInstalled = true;
+        steps.push({ id: "claude_install", status: "applied", message: "Installed Claude Code with npm." });
+      } catch (err) {
+        steps.push({
+          id: "claude_install",
+          status: "fail",
+          message: `Failed to install Claude Code: ${(err as Error).message}`,
+          reason: "Claude Code seats need the Claude CLI; a Codex-only project can use its own runtime readiness result.",
+          fixHint: "Install Claude Code with `npm install -g @anthropic-ai/claude-code`.",
+        });
+      }
     }
-  }
 
-  const { name: claudeName, fix: claudeFix, ...claudeAuth } = checkClaudeAuth(deps, claudeInstalled);
-  steps.push({ id: claudeName, ...claudeAuth, ...(claudeFix ? { fixHint: claudeFix } : {}) });
+    const { name: claudeName, fix: claudeFix, ...claudeAuth } = checkClaudeAuth(deps, claudeInstalled);
+    steps.push({ id: claudeName, ...claudeAuth, ...(claudeFix ? { fixHint: claudeFix } : {}) });
+  }
 
   // 5. Codex runtime
-  let codexInstalled = false;
-  try {
-    deps.exec("codex --version");
-    codexInstalled = true;
-    steps.push({ id: "codex_install", status: "pass", message: "Codex available." });
-  } catch {
+  if (!selected("codex")) steps.push(...notSelectedSteps("codex", opts.providers!));
+  else {
+    let codexInstalled = false;
     try {
-      installCommand(deps, "npm install -g @openai/codex");
       deps.exec("codex --version");
       codexInstalled = true;
-      steps.push({ id: "codex_install", status: "applied", message: "Installed Codex with npm." });
-    } catch (err) {
-      steps.push({
-        id: "codex_install",
-        status: "fail",
-        message: `Failed to install Codex: ${(err as Error).message}`,
-        reason: "Codex seats need the Codex CLI installed on this machine.",
-        fixHint: "Install Codex with `npm install -g @openai/codex`.",
-      });
+      steps.push({ id: "codex_install", status: "pass", message: "Codex available." });
+    } catch {
+      try {
+        installCommand(deps, "npm install -g @openai/codex");
+        deps.exec("codex --version");
+        codexInstalled = true;
+        steps.push({ id: "codex_install", status: "applied", message: "Installed Codex with npm." });
+      } catch (err) {
+        steps.push({
+          id: "codex_install",
+          status: "fail",
+          message: `Failed to install Codex: ${(err as Error).message}`,
+          reason: "Codex seats need the Codex CLI installed on this machine.",
+          fixHint: "Install Codex with `npm install -g @openai/codex`.",
+        });
+      }
     }
-  }
 
-  const { name: codexName, fix: codexFix, ...codexAuth } = checkCodexAuth(deps, codexInstalled);
-  steps.push({ id: codexName, ...codexAuth, ...(codexFix ? { fixHint: codexFix } : {}) });
+    const { name: codexName, fix: codexFix, ...codexAuth } = checkCodexAuth(deps, codexInstalled);
+    steps.push({ id: codexName, ...codexAuth, ...(codexFix ? { fixHint: codexFix } : {}) });
+  }
 
   // 6. tmux config
   const TMUX_CONF = `${process.env["HOME"] ?? "~"}/.tmux.conf`;
   const MANAGED_MARKER = "# OpenRig managed block";
-  const MANAGED_BLOCK = [
-    MANAGED_MARKER,
-    "set -g mouse on",
-    "set -g history-limit 50000",
-    `# End ${MANAGED_MARKER}`,
-  ].join("\n");
 
   try {
+    const historyLimit = (deps.configStore ?? new ConfigStore()).resolve().terminal.historyLimit;
+    const MANAGED_BLOCK = [
+      MANAGED_MARKER,
+      "set -g mouse on",
+      `set -g history-limit ${historyLimit}`,
+      `# End ${MANAGED_MARKER}`,
+    ].join("\n");
     const existing = deps.readFile(TMUX_CONF);
     if (existing && existing.includes(MANAGED_MARKER)) {
       // Replace existing managed block
@@ -441,17 +483,27 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
         MANAGED_BLOCK,
       );
       deps.writeFile(TMUX_CONF, replaced);
-      steps.push({ id: "tmux_config", status: "applied", message: "Updated OpenRig managed tmux config block." });
+      steps.push({ id: "tmux_config", status: "applied", message: `Updated OpenRig managed tmux config block (history-limit ${historyLimit}).` });
     } else if (existing) {
       deps.writeFile(TMUX_CONF, existing.trimEnd() + "\n\n" + MANAGED_BLOCK + "\n");
-      steps.push({ id: "tmux_config", status: "applied", message: "Appended OpenRig managed tmux config block." });
+      steps.push({ id: "tmux_config", status: "applied", message: `Appended OpenRig managed tmux config block (history-limit ${historyLimit}).` });
     } else {
       deps.writeFile(TMUX_CONF, MANAGED_BLOCK + "\n");
-      steps.push({ id: "tmux_config", status: "applied", message: "Created .tmux.conf with OpenRig managed block." });
+      steps.push({ id: "tmux_config", status: "applied", message: `Created .tmux.conf with OpenRig managed block (history-limit ${historyLimit}).` });
     }
   } catch (err) {
     steps.push({ id: "tmux_config", status: "warn", message: `Could not update tmux config: ${(err as Error).message}` });
   }
+
+  // Informational only: never enable inheritance automatically or add a setup prompt.
+  const tmuxConfigs = [TMUX_CONF, `${process.env["XDG_CONFIG_HOME"] ?? `${process.env["HOME"] ?? "~"}/.config`}/tmux/tmux.conf`, "/etc/tmux.conf"];
+  const customTmux = tmuxConfigs.some(file => {
+    try {
+      const content = deps.readFile(file)?.replace(/# OpenRig managed block[\s\S]*?# End # OpenRig managed block/g, "") ?? "";
+      return content.split(/\r?\n/).some(line => line.trim() && !line.trim().startsWith("#"));
+    } catch { return false; }
+  });
+  if (customTmux) steps.push({ id: "tmux_environment", status: "warn", message: "Custom tmux configuration detected. New POSIX agents use the daemon and seat environment by default; shell startup still runs. If your setup intentionally relies on stored tmux globals, opt in with `rig config set terminal.inherit_tmux_environment true`. This affects future launches and successors, not running agents." });
 
   // 7. Verify
   const tmuxOk = steps.some((s) => s.id === "tmux_install" && (s.status === "pass" || s.status === "applied"));
@@ -554,22 +606,24 @@ function buildDefaultDoctorDeps(setupDeps: SetupDeps): DoctorDeps {
  */
 export function goldenPathNextSteps(): string[] {
   return [
-    "Next steps (guidance only; full reference: rig context get reference/getting-started.md):",
+    "Finish installing (full reference: rig context get reference/getting-started.md). Once setup has applied, steps 2 to 5 are",
+    "  part of the install, not extras: do them without stopping to ask whether to go on",
     "  1. Check only selected logins: claude auth status or codex login status; one working provider is enough",
-    "  2. rig daemon start                 If stopped; a fresh instance also starts the kernel, including operator and advisor",
+    "  2. rig daemon start                 If stopped. Starting OpenRig finishes the install; it is not a step beyond setup",
+    "     A fresh instance also starts the kernel, including operator and advisor",
     "     The kernel is part of installation. Keep it for normal setup; --no-kernel is for automation or when requested",
     "  3. rig status                       Read the kernel boot state; rig ps --nodes --rig kernel checks its seats",
     "     Started is not ready. The view may open while agents finish starting; report their actual state",
     "     For an existing kernel or blocked startup: rig context get reference/getting-started.md#incomplete-setup-and-restart",
-    "  4. For 'show me my agents', 'show me the terminals' or 'welcome screen', run the command below; otherwise ask 'Open the OpenRig view now?'",
-    "     Yes: run the command below; it opens a NEW terminal tab/window and preserves this terminal",
-    "     rig terminal open saved:kernel --window --json (TUI | advisor | operator; herdr, otherwise plain tmux)",
+    "  4. Show the person OpenRig: open the OpenRig TUI and operator for them now. Say so first; it's the next step, not a question",
+    "     It opens a NEW terminal tab/window, or a space in their current Herdr, and preserves this terminal",
+    "     rig terminal open saved:kernel --window --json (TUI and operator, advisor on its own tab; herdr, otherwise plain tmux)",
     "     rig context get reference/getting-started.md#open-the-kernel-conversations",
-    "     No: give the command to open it later. Over headless SSH: ask the person to open a new terminal/tab and give the exact connection/attach command",
+    "     If they said not now: give the command to open it later. Over headless SSH: ask the person to open a new terminal/tab and give the exact connection/attach command",
     "     Herdr needs a terminal the person can see; switching the shared TUI to :terminals does not open one",
     "     No, SSH and headless use are fine background outcomes; do not report an unseen window as opened",
-    "     On a desktop, no copying or typing for the person; confirm three visible columns, not just CLI success",
-    "     On a Mac, offer Ghostty once: on Yes run rig setup --ghostty; preserve earlier choices such as --no-herdr",
+    "     On a desktop, no copying or typing for the person; check the result notes, not just CLI success",
+    "     On a Mac, offer Ghostty once: on Yes run rig setup --ghostty; preserve earlier choices such as --no-herdr and --providers",
     "     On No use --no-ghostty; Terminal.app remains available",
     "     Setup installs herdr by default; use --no-herdr if the person declines. Plain tmux remains available",
     "     Only if the window cannot open: rig tui --shared is the dashboard-only fallback, not the operator's conversation",
@@ -641,15 +695,28 @@ export function setupCommand(depsOverride?: SetupDeps): Command {
     .option("--dry-run", "Show the plan without making changes")
     .option("--json", "Machine-readable JSON output")
     .option("--full", "Install broader operator workstation tools")
-    .option("--no-herdr", "Skip the default herdr installation; the welcome view can use plain tmux")
+    .option("--no-herdr", "Skip the default herdr installation; the OpenRig view can use plain tmux")
     .option("--ghostty", "Install Ghostty on macOS after the person accepts the offer")
     .option("--no-ghostty", "Decline Ghostty; Terminal.app remains available on macOS")
+    .option("--providers <list>", "The person's provider choice: claude, codex, or both. One not chosen is skipped (not installed or checked), never failed")
     .option("--policy <name>", `Record a deliberate permission-policy choice into an existing spec (${POLICY_CHOICES.join("|")})`)
     .option("--spec <path>", "Existing rig spec (file or directory) to record the --policy choice into")
-    .action(async (opts: { dryRun?: boolean; json?: boolean; full?: boolean; herdr?: boolean; ghostty?: boolean; policy?: string; spec?: string }) => {
+    .addHelpText("after", `
+tmux scrollback:
+  The OpenRig block in ~/.tmux.conf keeps terminal.history_limit rows per pane (default 10000).
+  To keep more:  rig config set terminal.history_limit 50000   then rerun  rig setup
+  A running tmux server keeps its old limit until it restarts or you run
+  tmux source-file ~/.tmux.conf; before tmux 3.7 that changes new panes only.`)
+    .action(async (opts: { dryRun?: boolean; json?: boolean; full?: boolean; herdr?: boolean; ghostty?: boolean; providers?: string; policy?: string; spec?: string }) => {
+      const providers = opts.providers === undefined ? undefined : parseSetupProviders(opts.providers);
+      if (providers && "error" in providers) {
+        console.error(providers.error);
+        process.exitCode = 1;
+        return;
+      }
       const deps = depsOverride ?? defaultDeps();
       const doctorDeps = opts.dryRun ? undefined : buildDefaultDoctorDeps(deps);
-      const result = await runSetup(deps, { dryRun: opts.dryRun, full: opts.full, policy: opts.policy, specPath: opts.spec, herdr: opts.herdr, ghostty: opts.ghostty, doctorDeps });
+      const result = await runSetup(deps, { dryRun: opts.dryRun, full: opts.full, policy: opts.policy, specPath: opts.spec, herdr: opts.herdr, ghostty: opts.ghostty, providers, doctorDeps });
 
       if (opts.json) {
         console.log(JSON.stringify({ ...result, nextSteps: goldenPathNextSteps() }, null, 2));
@@ -671,6 +738,10 @@ export function setupCommand(depsOverride?: SetupDeps): Command {
         if (step.reason) console.log(`       Why: ${step.reason}`);
         if (step.fixHint) console.log(`       Fix: ${step.fixHint}`);
       }
+      if (!providers) {
+        console.log("\n  Providers: setup installs and checks both Claude Code and Codex. If the person chose one, pass it,");
+        console.log("  for example rig setup --providers claude; the other then reads not selected instead of failed.");
+      }
 
       // OPR.0.3.3.04.2 (AC-1): the canonical ordered golden path. `rig setup` is
       // the primary surface for the new-operator sequence (status/doctor only
@@ -684,7 +755,7 @@ export function setupCommand(depsOverride?: SetupDeps): Command {
           console.log(`  ${step.id}: ${step.message}`);
           if (step.fixHint) console.log(`    Fix: ${step.fixHint}`);
         }
-        console.log("Only the harnesses selected for your project need a login; an unused harness does not.");
+        console.log("Only the harnesses selected for your project need a login; an unused harness does not (rerun with --providers to leave it out).");
         console.log("Run `rig doctor` to recheck the system and provider authentication.");
       }
       // Keep the conversation route available even after a dry run or incomplete setup,

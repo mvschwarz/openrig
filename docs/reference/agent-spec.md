@@ -176,7 +176,7 @@ defaults:
 |-------|------|----------|---------|-------------|
 | `runtime` | string | no | — | Default runtime for this agent. Precedence: the rig spec member's `runtime`, then the profile's `preferences.runtime`, then this, then `claude-code`. |
 | `model` | string | no | — | Default model, with the same precedence. |
-| `effort` | string | no | — | Default reasoning effort, with the same precedence. Claude gets `--effort`, Codex `-c model_reasoning_effort=…`. A blank or non-string value is ignored with an advisory. |
+| `effort` | string | no | — | Default reasoning effort, with the same precedence. Claude gets `--effort`, Codex `-c model_reasoning_effort=…`, Pi `--thinking <level>` (Pi's levels: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; passed as written). A blank or non-string value is ignored with an advisory. |
 | `lifecycle` | Lifecycle | no | see below | Lifecycle behavior defaults. |
 
 ### Lifecycle Defaults
@@ -184,7 +184,7 @@ defaults:
 | Field | Type | Default | Allowed Values |
 |-------|------|---------|----------------|
 | `execution_mode` | string | `interactive_resident` | `interactive_resident` (only value in v1; `wake_on_demand` is explicitly rejected) |
-| `compaction_strategy` | string | `default-compaction` | `default-compaction`, `managed-compaction`, `handover`, `apprentice-handover`; deprecated aliases accepted with a validation advisory: `harness_native` → `default-compaction`, `pod_continuity` → `handover` (`custom_prompt` is explicitly rejected in v1) |
+| `compaction_strategy` | string | `default-compaction` | `default-compaction`, `managed-compaction`, `handover`, `apprentice-handover`; deprecated aliases accepted with a validation advisory: `harness_native` → `default-compaction`, `pod_continuity` → `handover` (`custom_prompt` is explicitly rejected in v1). `managed-compaction` and `apprentice-handover` create their jobs only for `claude-code` seats; see [Codex compaction and sizing](agent-startup-guide.md#codex-compaction-and-sizing) |
 | `restore_policy` | string | `resume_if_possible` | `resume_if_possible`, `relaunch_fresh`, `checkpoint_only` |
 | `mechanic` | string | — | A canonical `seat@rig` session address; needed by `apprentice-handover` |
 
@@ -228,7 +228,9 @@ This gives access to the shared pool: skills such as `systematic-debugging`, `ve
 `development-team` and `test-driven-development`; the `openrig-core` plugin, which carries `openrig-user` and OpenRig's
 other skills; and runtime resources such as `claude-default-settings`, `claude-default-mcp`, `codex-default-config` and
 `claude-activity-hooks`. Agents select the ones they need via profile `uses`, for example
-`plugins: [shared:openrig-core]`.
+`plugins: [shared:openrig-core]`. That selection projects the plugin's skills into the seat. For a Claude seat it also loads
+the plugin's hooks, through a `CLAUDE_CODE_PLUGIN_DIRS` the daemon sets for a seat that selected `openrig-core` (see
+`refocus-channel.md`); a seat that didn't select it gets neither.
 
 ---
 
@@ -369,7 +371,7 @@ version.
 | `skills` | `id`, `path` | Skill directories containing a SKILL.md. Projected by the runtime adapter: Claude to `<cwd>/.claude/skills/<id>`, Codex to `<cwd>/.agents/skills/<id>`, Pi and OMP to the seat's own agent directory under OpenRig's state. |
 | `guidance` | `id`, `path`, `target`*, `merge`* | Guidance files, merged as a managed block (see "Guidance Resources"). |
 | `subagents` | `id`, `path` | Subagent definitions. Claude copies them to `<cwd>/.claude/agents/`, Codex to `<cwd>/.agents/`; Pi and OMP don't project them. |
-| `plugins` | `id`, `source`, `plugin_type`* | Local plugin directories; selected with `uses.plugins`. `source.kind` must be `local`. `plugin_type` is `claude`, `codex` or `auto` (default): Claude projects a plugin to `<cwd>/.claude/plugins/<id>` when it is `claude`, or `auto` with a `.claude-plugin/plugin.json`; Codex projects to `<cwd>/.codex/plugins/<id>` when it is `codex`, or `auto` with a `.codex-plugin/plugin.json`. Pi and OMP don't project plugins. Neither Claude Code nor Codex reads skills from that plugin folder, so when a seat is instantiated a selected plugin's skills are also projected into the seat's skill folder (`.claude/skills/<name>` or `.agents/skills/<name>`) under their plain names. A folder already there with the same name, ignoring letter case, that OpenRig doesn't own is left alone; unless it already holds the same bytes, launch warns `plugin_skill_kept`. A skill the seat already selects by that name (from its profile, the System World or the project) keeps that source, an edited OpenRig-owned copy is kept with `plugin_skill_kept`, and if the plugin skills can't be projected the seat launches without them and warns `plugin_skills_not_projected`. Hooks ship inside plugins. |
+| `plugins` | `id`, `source`, `plugin_type`* | Local plugin directories; selected with `uses.plugins`. `source.kind` must be `local`. `plugin_type` is `claude`, `codex` or `auto` (default): Claude projects a plugin to `<cwd>/.claude/plugins/<id>` when it is `claude`, or `auto` with a `.claude-plugin/plugin.json`; Codex projects to `<cwd>/.codex/plugins/<id>` when it is `codex`, or `auto` with a `.codex-plugin/plugin.json`. Pi and OMP don't project plugins. Neither Claude Code nor Codex reads skills from that plugin folder, so when a seat is instantiated a selected plugin's skills are also projected into the seat's skill folder (`.claude/skills/<name>` or `.agents/skills/<name>`) under their plain names. A folder already there with the same name, ignoring letter case, that OpenRig doesn't own is left alone; unless it already holds the same bytes, launch warns `plugin_skill_kept`. A skill the seat already selects by that name (from its profile, the System World or the project) keeps that source, an edited OpenRig-owned copy is kept with `plugin_skill_kept`, a retained plugin copy whose remembered source can no longer be projected is also kept with `plugin_skill_kept` (a seat selecting that plugin refreshes it at its next launch), and if the plugin skills can't be projected the seat launches without them and warns `plugin_skills_not_projected`. Hooks ship inside plugins. |
 | `runtime_resources` | `id`, `path`, `runtime`, `type` | Runtime-specific resources. `runtime` and `type` are required. An entry whose `runtime` isn't the seat's runtime is skipped. Pi and OMP project none. |
 
 *Fields marked with `*` are optional.

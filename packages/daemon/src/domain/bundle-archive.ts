@@ -13,7 +13,7 @@ import nodePath from "node:path";
 import * as tar from "tar";
 import { verifyIntegrity, type IntegrityFsOps } from "./bundle-integrity.js";
 // TODO: AS-T12 — migrate to pod-aware bundle types
-import { parseLegacyBundleManifest as parseBundleManifest, normalizeLegacyBundleManifest as normalizeBundleManifest } from "./bundle-types.js";
+import { parseLegacyBundleManifest as parseBundleManifest, normalizeLegacyBundleManifest as normalizeBundleManifest, normalizeIncludedLoginFiles } from "./bundle-types.js";
 
 /**
  * Pack a staging directory into a .rigbundle archive (deterministic tar.gz).
@@ -109,7 +109,7 @@ export async function collectUnsafeArchiveEntries(archivePath: string): Promise<
  * Rejects symlinks, hardlinks, path traversal, and absolute paths.
  * Runs content integrity verification after extraction.
  */
-export async function unpack(archivePath: string, outputDir: string): Promise<void> {
+export async function unpack(archivePath: string, outputDir: string): Promise<{ warnings: string[] } | undefined> {
   // Step 1: Verify archive-level digest
   const digestResult = verifyArchiveDigest(archivePath);
   if (!digestResult.valid) {
@@ -173,8 +173,8 @@ export async function unpack(archivePath: string, outputDir: string): Promise<vo
       walkFiles: (dir) => walkFilesSync(dir),
     };
 
-    // verifyIntegrity only reads manifest.integrity — safe to cast
-    const result = verifyIntegrity(outputDir, { integrity } as unknown as Parameters<typeof verifyIntegrity>[1], fsOps);
+    const includedLoginFiles = normalizeIncludedLoginFiles(raw["included_login_files"]);
+    const result = verifyIntegrity(outputDir, { integrity, includedLoginFiles } as unknown as Parameters<typeof verifyIntegrity>[1], fsOps);
     if (!result.passed) {
       const details = [
         ...result.mismatches.map((f) => `tampered: ${f}`),
@@ -184,6 +184,7 @@ export async function unpack(archivePath: string, outputDir: string): Promise<vo
       ];
       throw new Error(`Content integrity verification failed: ${details.join("; ")}`);
     }
+    if (result.warnings) return { warnings: result.warnings };
   }
 }
 

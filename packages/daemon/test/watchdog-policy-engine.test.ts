@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -66,6 +66,101 @@ describe("WatchdogPolicyEngine (PL-004 Phase C R1)", () => {
 
   afterEach(() => db.close());
 
+  it.each(["stopped", "terminal"] as const)("does not evaluate a job made %s after the scheduler selected it", async (state) => {
+    const engine = makeEngine();
+    const job = jobsRepo.register({
+      policy: "periodic-reminder", specYaml: "target: { session: alice@rig }\nmessage: ping\n",
+      targetSession: "alice@rig", intervalSeconds: 60, registeredBySession: "ops@kernel",
+    });
+    if (state === "stopped") jobsRepo.stop(job.jobId, "work finished");
+    else jobsRepo.markTerminal(job.jobId, "park ended");
+    const before = jobsRepo.getByIdOrThrow(job.jobId);
+
+    const result = await engine.evaluate(job);
+
+    expect(deliveryCalls).toEqual([]);
+    expect(jobsRepo.getByIdOrThrow(job.jobId)).toEqual(before);
+    expect(result.delivery).toBeNull();
+    expect(result.meaningful).toBe(false);
+    expect(log.countForJob(job.jobId)).toBe(0);
+    expect(captured).toEqual([]);
+  });
+
+  it.each([
+    ["stopped", "send"], ["stopped", "skip"], ["stopped", "terminal"],
+    ["terminal", "send"], ["terminal", "skip"], ["terminal", "terminal"],
+  ] as const)("preserves a %s job when its in-flight policy returns %s", async (state, action) => {
+    const engine = makeEngine();
+    const job = jobsRepo.register({
+      policy: "periodic-reminder", specYaml: "target: { session: alice@rig }\nmessage: ping\n",
+      targetSession: "alice@rig", intervalSeconds: 60, registeredBySession: "ops@kernel",
+    });
+    let finish!: (outcome: PolicyEvaluation) => void;
+    const policy = engine.resolvePolicy(job.policy)!;
+    const pending = vi.spyOn(policy, "evaluate").mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    try {
+      const evaluation = engine.evaluate(job);
+      expect(pending).toHaveBeenCalledOnce();
+      if (state === "stopped") jobsRepo.stop(job.jobId, "work finished");
+      else jobsRepo.markTerminal(job.jobId, "park ended");
+      const before = jobsRepo.getByIdOrThrow(job.jobId);
+      finish(action === "send"
+        ? { action, target: { session: "alice@rig" }, message: "ping" }
+        : { action, reason: "policy result" });
+      const result = await evaluation;
+
+      expect(deliveryCalls).toEqual([]);
+      expect(jobsRepo.getByIdOrThrow(job.jobId)).toEqual(before);
+      expect(result.delivery).toBeNull();
+      expect(result.meaningful).toBe(false);
+      expect(log.countForJob(job.jobId)).toBe(0);
+      expect(captured).toEqual([]);
+    } finally {
+      pending.mockRestore();
+    }
+  });
+
+  it.each([
+    ["stopped", "ok"], ["stopped", "failed"],
+    ["terminal", "ok"], ["terminal", "failed"],
+  ] as const)("records a completed %s job's %s delivery without advancing its schedule", async (state, status) => {
+    const registered = jobsRepo.register({
+      policy: "periodic-reminder", specYaml: "target: { session: alice@rig }\nmessage: ping\n",
+      targetSession: "alice@rig", intervalSeconds: 60, registeredBySession: "ops@kernel",
+    });
+    const previousFire = "2026-05-03T06:00:00.000Z";
+    const completedFire = "2026-05-03T07:00:00.000Z";
+    jobsRepo.recordEvaluation(registered.jobId, previousFire, true);
+    const job = jobsRepo.getByIdOrThrow(registered.jobId);
+    let started!: () => void;
+    const delivering = new Promise<void>(resolve => { started = resolve; });
+    let finish!: (outcome: { status: "ok" | "failed" }) => void;
+    const onWakeAttempt = vi.fn();
+    const engine = makeEngine({
+      now: () => new Date(completedFire), onWakeAttempt,
+      deliver: () => {
+        started();
+        return new Promise(resolve => { finish = resolve; });
+      },
+    });
+
+    const evaluation = engine.evaluate(job);
+    await delivering;
+    if (state === "stopped") jobsRepo.stop(job.jobId, "work finished");
+    else jobsRepo.markTerminal(job.jobId, "park ended");
+    const retired = jobsRepo.getByIdOrThrow(job.jobId);
+    finish({ status });
+    const result = await evaluation;
+
+    expect(result.history).toMatchObject({ deliveryStatus: status, evaluatedAt: completedFire });
+    expect(jobsRepo.getByIdOrThrow(job.jobId)).toMatchObject({
+      state, terminalReason: retired.terminalReason,
+      lastEvaluationAt: retired.lastEvaluationAt, lastFireAt: completedFire,
+      specYaml: retired.specYaml, intervalSeconds: retired.intervalSeconds,
+    });
+    expect(onWakeAttempt).not.toHaveBeenCalled();
+  });
+
   it("evaluate(periodic-reminder) routes through delivery + records sent + emits evaluation_fired + sets actionable=true", async () => {
     const engine = makeEngine();
     const job = jobsRepo.register({
@@ -123,7 +218,7 @@ describe("WatchdogPolicyEngine (PL-004 Phase C R1)", () => {
     }
   });
 
-  it("delivery failure recorded as sent with delivery_status=failed (still meaningful)", async () => {
+  it("a failed delivery is recorded as failed, not sent (still meaningful)", async () => {
     const failingDeliver: DeliveryFn = async () => ({ status: "failed", error: "transport denied" });
     const engine = makeEngine({ deliver: failingDeliver });
     const job = jobsRepo.register({
@@ -136,7 +231,7 @@ describe("WatchdogPolicyEngine (PL-004 Phase C R1)", () => {
     });
     await engine.evaluate(job);
     const list = log.listForJob(job.jobId);
-    expect(list[0]?.outcome).toBe("sent");
+    expect(list[0]?.outcome).toBe("failed");
     expect(list[0]?.deliveryStatus).toBe("failed");
   });
 
@@ -495,7 +590,7 @@ describe("engine effects for the parked-owner consumer (OPR.0.5.6.24)", () => {
     h.db.close();
   });
 
-  it("delivery-reason pin: the delivery error string is persisted EXACTLY into the sent row's evaluationNotes.deliveryReason", async () => {
+  it("delivery-reason pin: a prompt refusal reads refused, with its error string persisted EXACTLY into evaluationNotes.deliveryReason", async () => {
     const refusal = "Refused: 'dev-planner@test-rig' is at an interactive prompt (target_needs_input). No text was sent.";
     const h = makeHarness({
       deliver: async () => ({ status: "failed" as const, error: refusal }),
@@ -509,7 +604,7 @@ describe("engine effects for the parked-owner consumer (OPR.0.5.6.24)", () => {
     await h.engine.evaluate(h.job);
     const entries = h.log.listForJob(h.job.jobId, 10);
     expect(entries).toHaveLength(1);
-    expect(entries[0]?.outcome).toBe("sent");
+    expect(entries[0]?.outcome).toBe("refused");
     expect(entries[0]?.deliveryStatus).toBe("failed");
     expect(entries[0]?.evaluationNotes?.["deliveryReason"]).toBe(refusal);
     // The policy's own notes survive the merge untouched.

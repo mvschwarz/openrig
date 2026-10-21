@@ -41,8 +41,8 @@ describe("MCP Server", () => {
     if (cleanup) await cleanup();
   });
 
-  // T1: MCP server lists all 18 tools
-  it("lists all 18 tools", async () => {
+  // T1: MCP server lists all 23 tools: the original 18 and the five queue tools
+  it("lists all 23 tools", async () => {
     await setup();
     const result = await mcpClient.listTools();
     const names = result.tools.map((t) => t.name).sort();
@@ -57,6 +57,11 @@ describe("MCP Server", () => {
       "rig_discover",
       "rig_down",
       "rig_ps",
+      "rig_queue_claim",
+      "rig_queue_create",
+      "rig_queue_list",
+      "rig_queue_show",
+      "rig_queue_update",
       "rig_restore",
       "rig_rig_nodes",
       "rig_rig_validate",
@@ -294,7 +299,7 @@ describe("MCP Server", () => {
 
     // Verify server is responsive
     const result = await mcpClient.listTools();
-    expect(result.tools.length).toBe(18);
+    expect(result.tools.length).toBe(23);
 
     // Clean disconnect
     await cleanup();
@@ -308,7 +313,7 @@ describe("MCP Server", () => {
     await client2.connect(ct2);
 
     const result2 = await client2.listTools();
-    expect(result2.tools.length).toBe(18);
+    expect(result2.tools.length).toBe(23);
 
     await client2.close();
     await server2.close();
@@ -567,8 +572,8 @@ describe("MCP Server", () => {
     await cleanup();
   });
 
-  // T15: rig_capture returns structured result
-  it("rig_capture returns structured result", async () => {
+  // T15: rig_capture asks for the input box and returns structured result
+  it("rig_capture asks for the input box and returns structured result", async () => {
     const postFn = vi.fn(async () => ({
       status: 200,
       data: { ok: true, sessionName: "dev-impl@my-rig", content: "pane output", lines: 20 },
@@ -581,10 +586,112 @@ describe("MCP Server", () => {
     });
 
     expect(postFn).toHaveBeenCalled();
+    const [path, body] = postFn.mock.calls[0] as unknown as [string, Record<string, unknown>];
+    expect(path).toBe("/api/transport/capture");
+    expect(body).toEqual({ session: "dev-impl@my-rig", inputBox: true });
     expect(result.isError).toBeUndefined();
     const parsed = JSON.parse((result.content as Array<{ text: string }>)[0]!.text);
     expect(parsed.ok).toBe(true);
     expect(parsed.content).toBe("pane output");
     await cleanup();
+  });
+  describe("queue tools", () => {
+    const text = (result: Awaited<ReturnType<Client["callTool"]>>) => (result.content as Array<{ text: string }>)[0]!.text;
+
+    it("rig_queue_create posts the task with a minted request id and no body sender", async () => {
+      const postFn = vi.fn(async () => ({ status: 201, data: { qitemId: "qitem-1" } }));
+      await setup({ post: postFn });
+      const result = await mcpClient.callTool({ name: "rig_queue_create", arguments: { destination: "impl@team", body: "Do X", summary: "X", tags: ["mission:m"] } });
+      expect(result.isError).toBeUndefined();
+      const [path, body] = postFn.mock.calls[0] as unknown as [string, Record<string, unknown>];
+      expect(path).toBe("/api/queue/create");
+      expect(body).toMatchObject({ destinationSession: "impl@team", body: "Do X", summary: "X", tags: ["mission:m"] });
+      expect(body.qitemId).toMatch(/^qitem-\d{14}-[0-9a-f]{16}$/);
+      expect(body).not.toHaveProperty("sourceSession");
+      await cleanup();
+    });
+
+    it("rig_queue_create reuses a given request id and names it when the outcome is unknown", async () => {
+      const postFn = vi.fn(async () => { throw new Error("timed out after 5000ms"); });
+      await setup({ post: postFn });
+      const result = await mcpClient.callTool({ name: "rig_queue_create", arguments: { destination: "impl@team", body: "Do X", qitemId: "qitem-retry" } });
+      expect((postFn.mock.calls[0] as unknown as [string, Record<string, unknown>])[1].qitemId).toBe("qitem-retry");
+      expect(result.isError).toBe(true);
+      expect(text(result)).toContain("unknown");
+      expect(text(result)).toContain("qitem-retry");
+      await cleanup();
+    });
+
+    it("rig_queue_show returns the item and its transitions together", async () => {
+      const getFn = vi.fn(async (path: string) => path.endsWith("/transitions")
+        ? { status: 200, data: [{ state: "done", transitionNote: "the answer" }] }
+        : { status: 200, data: { qitemId: "qitem 1", state: "done" } });
+      await setup({ get: getFn });
+      const result = await mcpClient.callTool({ name: "rig_queue_show", arguments: { qitemId: "qitem 1" } });
+      expect(getFn.mock.calls.map(c => c[0])).toEqual(["/api/queue/qitem%201", "/api/queue/qitem%201/transitions"]);
+      expect(JSON.parse(text(result))).toEqual({ item: { qitemId: "qitem 1", state: "done" }, transitions: [{ state: "done", transitionNote: "the answer" }] });
+      await cleanup();
+    });
+
+    it("rig_queue_show surfaces a missing item as an error without reading transitions", async () => {
+      const getFn = vi.fn(async () => ({ status: 404, data: { error: "not found" } }));
+      await setup({ get: getFn });
+      const result = await mcpClient.callTool({ name: "rig_queue_show", arguments: { qitemId: "qitem-x" } });
+      expect(result.isError).toBe(true);
+      expect(getFn).toHaveBeenCalledTimes(1);
+      await cleanup();
+    });
+
+    it("rig_queue_list scopes owned and mine to this server's seat", async () => {
+      const getFn = vi.fn(async () => ({ status: 200, data: [] }));
+      const prior = process.env.OPENRIG_SESSION_NAME;
+      process.env.OPENRIG_SESSION_NAME = "desk@team";
+      try {
+        await setup({ get: getFn });
+        await mcpClient.callTool({ name: "rig_queue_list", arguments: { owned: true } });
+        await mcpClient.callTool({ name: "rig_queue_list", arguments: { mine: true, all: true } });
+        await mcpClient.callTool({ name: "rig_queue_list", arguments: {} });
+        await mcpClient.callTool({ name: "rig_queue_list", arguments: { owned: true, destination: "other@team" } });
+        const queries = getFn.mock.calls.map(c => new URLSearchParams(String(c[0]).split("?")[1]));
+        expect(queries[3]!.getAll("destinationSession")).toEqual(["desk@team"]);
+        expect(queries[0]!.get("destinationSession")).toBe("desk@team");
+        expect(queries[0]!.get("activeOnly")).toBe("1");
+        expect(queries[1]!.get("as")).toBe("desk@team");
+        expect(queries[1]!.has("activeOnly")).toBe(false);
+        expect(queries[2]!.get("rig")).toBe("team");
+        await cleanup();
+      } finally {
+        if (prior === undefined) delete process.env.OPENRIG_SESSION_NAME; else process.env.OPENRIG_SESSION_NAME = prior;
+      }
+    });
+
+    it("rig_queue_list asks for a seat instead of guessing one", async () => {
+      const getFn = vi.fn(async () => ({ status: 200, data: [] }));
+      const prior = process.env.OPENRIG_SESSION_NAME;
+      const priorLegacy = process.env.RIGGED_SESSION_NAME;
+      delete process.env.OPENRIG_SESSION_NAME;
+      delete process.env.RIGGED_SESSION_NAME;
+      try {
+        await setup({ get: getFn });
+        const result = await mcpClient.callTool({ name: "rig_queue_list", arguments: { owned: true } });
+        expect(result.isError).toBe(true);
+        expect(getFn).not.toHaveBeenCalled();
+        await cleanup();
+      } finally {
+        if (prior !== undefined) process.env.OPENRIG_SESSION_NAME = prior;
+        if (priorLegacy !== undefined) process.env.RIGGED_SESSION_NAME = priorLegacy;
+      }
+    });
+
+    it("rig_queue_claim and rig_queue_update post to the item's routes", async () => {
+      const postFn = vi.fn(async () => ({ status: 200, data: { ok: true } }));
+      await setup({ post: postFn });
+      await mcpClient.callTool({ name: "rig_queue_claim", arguments: { qitemId: "qitem-1" } });
+      await mcpClient.callTool({ name: "rig_queue_update", arguments: { qitemId: "qitem-1", state: "done", closureReason: "no-follow-on", note: "the answer" } });
+      expect(postFn.mock.calls[0]?.[0]).toBe("/api/queue/qitem-1/claim");
+      expect(postFn.mock.calls[1]?.[0]).toBe("/api/queue/qitem-1/update");
+      expect(postFn.mock.calls[1]?.[1]).toMatchObject({ state: "done", closureReason: "no-follow-on", transitionNote: "the answer" });
+      await cleanup();
+    });
   });
 });

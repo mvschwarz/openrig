@@ -1,6 +1,6 @@
 {
   "name": "@openrig/daemon",
-  "version": "0.6.6",
+  "version": "0.6.12",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -50,6 +50,10 @@
       "types": "./dist/skill-loadout-surface.d.ts",
       "import": "./dist/skill-loadout-surface.js"
     },
+    "./composer-prompts": {
+      "types": "./dist/composer-prompts-surface.d.ts",
+      "import": "./dist/composer-prompts-surface.js"
+    },
     "./instance-initialization": {
       "types": "./dist/instance-initialization-surface.d.ts",
       "import": "./dist/instance-initialization-surface.js"
@@ -70,6 +74,10 @@
       "types": "./dist/health-detectors-surface.d.ts",
       "import": "./dist/health-detectors-surface.js"
     },
+    "./workflow-scope": {
+      "types": "./dist/workflow-scope-surface.d.ts",
+      "import": "./dist/workflow-scope-surface.js"
+    },
     "./local-reading": {
       "types": "./dist/local-reading-surface.d.ts",
       "import": "./dist/local-reading-surface.js"
@@ -89,6 +97,7 @@
     "better-sqlite3": "^13.0.3",
     "hono": "^4.7.0",
     "smol-toml": "^1.8.0",
+    "string-width": "^8.3.0",
     "tar": "^7.5.13",
     "ulid": "^2.3.0",
     "yaml": "^2.8.3"

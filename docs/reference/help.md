@@ -63,34 +63,15 @@ in a report; otherwise follow the accompanying diagnostic. If the only remaining
 
 ### Installation finished, but there is nobody to talk to
 
-Follow [Open the kernel conversations](getting-started.md#open-the-kernel-conversations)
-(`rig context get reference/getting-started.md#open-the-kernel-conversations`). The default
-`rig terminal open saved:kernel --window` needs no saved-view YAML or starter team. After the selected login
-works, start the daemon if stopped, then read `rig status` and `rig ps --nodes --rig kernel`. Started is not ready;
-the view can open while the agents finish starting, with that state reported honestly.
-The person's words **“welcome screen”**, **“OpenRig view”**, **“show me my agents”**, **“show me the terminals”** or **“see my agents”** lead to that command.
-It opens the desktop window itself. An agent can run it from its shell on the daemon's desktop, including when
-it did not run setup; “my shell isn't your terminal” is not a reason to stop. Use the person's request to open it,
-or ask **“Open the OpenRig view now?”** if they have not chosen. The command uses installed Herdr, otherwise plain
-tmux, in a new terminal tab/window. Keep your terminal and existing conversations intact. Only if that window
-cannot open, name `rig tui --shared` as the dashboard-only fallback; it does not show the operator conversation.
-Resolve or explain the window failure instead of ending with a command for the person to type. An existing cmux workspace remains available with `--provider cmux`
-without `--window`.
+Load the `rigs` skill and follow its step 2: it opens the OpenRig view (`rig terminal open saved:kernel --window`),
+gives the attach commands when the window can't open or over SSH, and hands the person's goal to the operator.
+[Install and sign in](getting-started.md#install-and-sign-in) says how to load it. The reference for the view, manual
+attachment and the table of what can interrupt it is
+[Open the kernel conversations](getting-started.md#open-the-kernel-conversations)
+(`rig context get reference/getting-started.md#open-the-kernel-conversations`). Started is not ready: the view can
+open while the kernel's agents finish starting, and opening it creates no other kernel or account.
 
-If the person chooses a manual attachment after a failure, read `rig ps --nodes --rig kernel --json`, find
-`operator.agent`, and fill its returned `canonicalSessionName` into
-`env -u TMUX tmux attach-session -t '=<canonicalSessionName>'`. Give the completed command for a new terminal on
-that host and account; not every failure prints one. Over SSH, use the known connection details, as in the guide.
-Herdr is visible only inside a terminal the person can see. Switching the shared TUI to `:terminals` does not
-open that terminal. Over headless SSH, tell the person to open a new terminal window or tab and give the exact
-connection and attachment command using the current Herdr endpoint or operator binding, as in the guide.
-No, SSH and headless use are valid background outcomes. For herdr, open or attach the actual session and check the
-visible view; a created workspace or a CLI running in a new OS window is not visual proof.
-Show TUI | advisor | operator for Claude-only, Codex-only and mixed kernels; the queue worker stays accessible through
-the TUI. Talk to the operator about your goal before choosing and launching a first project team.
-Use the existing recovery routes for unavailable seats; opening a view does not create another kernel or new accounts.
-
-### A step interrupted setup or the welcome screen
+### A step interrupted setup or the OpenRig view
 
 Name the exact command and result, the reason it stopped and the next useful step. A harness's permission rules,
 sandbox or automatic permission decision can refuse an installing agent's tool call before OpenRig runs.
@@ -105,7 +86,7 @@ Automation permission; a missing display or remote daemon needs the documented h
 Herdr may show an intro (Return to continue) and an agent-integration panel (Esc to close); the view does not
 require installing those integrations. Enlarge a cramped 80×24 window. Use authorized desktop tools to inspect the
 window contents, or state that visibility is unconfirmed and ask the person to check. A successful command or
-window listing alone is not visual proof. The [welcome-screen guide and friction table](getting-started.md#open-the-kernel-conversations)
+window listing alone is not visual proof. The [OpenRig view guide and friction table](getting-started.md#open-the-kernel-conversations)
 connects each observation to its next step. Preserve existing conversations while resolving it.
 
 ### The team did not start, or a terminal is missing
@@ -159,6 +140,9 @@ issue's current status; a similar symptom alone is not a diagnosis.
 - A Codex seat on the default `workspace-write` sandbox starts without network access, so it can't reach the local
   daemon, when its Codex configuration sets network access off, a managed requirement could restrict it, or Codex
   doesn't answer OpenRig's configuration read in time: [#275](https://github.com/mvschwarz/openrig/issues/275).
+- Kernel seats fail within a second of the first start on a distribution tmux whose server exits on `capture-pane`
+  (`tmux -V` prints `next-3.4`): [#980](https://github.com/mvschwarz/openrig/issues/980). The check and recovery
+  are in [Incomplete setup and restart](getting-started.md#incomplete-setup-and-restart).
 
 For everything else, search [open issues](https://github.com/mvschwarz/openrig/issues).
 

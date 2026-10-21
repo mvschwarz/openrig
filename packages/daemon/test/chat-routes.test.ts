@@ -12,6 +12,7 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { ChatRepository } from "../src/domain/chat-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { chatRoutes } from "../src/routes/chat.js";
+import { expectLimitParsing } from "./helpers/limit-query-cases.js";
 
 function setupDb(): Database.Database {
   const db = createDb();
@@ -51,6 +52,77 @@ describe("chat routes", () => {
 
   afterEach(() => {
     db.close();
+  });
+
+  it.each([
+    ["send", null], ["send", []], ["send", "text"], ["send", { body: {} }], ["send", { body: true }],
+    ["send", { body: "message", sender: 42 }],
+    ["topic", null], ["topic", []], ["topic", { topic: {} }], ["topic", { topic: true }],
+    ["topic", { topic: "discussion", body: {} }], ["topic", { topic: "discussion", body: true }],
+    ["topic", { topic: "discussion", sender: 42 }],
+  ])("rejects malformed %s payload before persistence or emission: %j", async (route, payload) => {
+    const emit = vi.spyOn(eventBus, "emit");
+    const response = await app.request(`/api/rigs/${rigId}/chat/${route}`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "wire@rig" },
+      body: JSON.stringify(payload),
+    });
+    expect(response.status).toBe(400);
+    expect(chatRepo.history(rigId)).toEqual([]);
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, "", null])("keeps optional empty topic body and transport sender precedence: %s", async body => {
+    const response = await app.request(`/api/rigs/${rigId}/chat/topic`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "wire@rig" },
+      body: JSON.stringify({ topic: "discussion", sender: "claimed@rig", body }),
+    });
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({ sender: "wire@rig", topic: "discussion", body: "" });
+  });
+
+  it.each([
+    ["send", { body: "message", sender: null }, { body: "message" }],
+    ["topic", { topic: "discussion", sender: null }, { topic: "discussion", body: "" }],
+    ["send", { body: 42 }, { body: "42.0" }],
+    ["topic", { topic: 42 }, { topic: "42.0", body: "" }],
+    ["topic", { topic: "discussion", body: 42 }, { topic: "discussion", body: "42.0" }],
+    ["send", { body: ["message"] }, { body: "message" }],
+    ["topic", { topic: ["discussion"], body: "message" }, { topic: "discussion", body: "message" }],
+    ["topic", { topic: "discussion", body: ["message"] }, { topic: "discussion", body: "message" }],
+    ["topic", { topic: [], body: ["message", "discussion"] }, { topic: "discussion", body: "message" }],
+    ["topic", { topic: {}, body: ["message", "discussion"] }, { topic: "discussion", body: "message" }],
+    ["topic", { topic: ["message", "discussion"], body: {} }, { topic: "discussion", body: "message" }],
+  ])("preserves SQLite-bound %s values and transport identity: %j", async (route, payload, expected) => {
+    const emitted: unknown[] = [];
+    const unsubscribe = eventBus.subscribe(event => emitted.push(event));
+    try {
+      const response = await app.request(`/api/rigs/${rigId}/chat/${route}`, {
+        method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "wire@rig" },
+        body: JSON.stringify(payload),
+      });
+      expect(response.status).toBe(201);
+      const returned = await response.json();
+      expect(returned).toMatchObject({ ...expected, sender: "wire@rig" });
+      const stored = chatRepo.history(rigId);
+      expect(stored).toEqual([expect.objectContaining({ ...expected, sender: "wire@rig" })]);
+      expect(returned).toEqual(stored[0]);
+      expect(emitted).toEqual([expect.objectContaining({
+        type: "chat.message", rigId, messageId: stored[0]!.id,
+        sender: stored[0]!.sender, kind: stored[0]!.kind, body: stored[0]!.body,
+        ...(route === "topic" ? { topic: stored[0]!.topic } : {}),
+      })]);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it.each([["send", { body: 0 }], ["topic", { topic: 0 }]])("keeps required zero %s fields missing", async (route, payload) => {
+    const response = await app.request(`/api/rigs/${rigId}/chat/${route}`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "wire@rig" },
+      body: JSON.stringify(payload),
+    });
+    expect(response.status).toBe(400);
+    expect(chatRepo.history(rigId)).toEqual([]);
   });
 
   it.each([false, true])("watch drains buffered messages before switching to live delivery (late arrival: %s)", async lateArrival => {
@@ -185,6 +257,20 @@ describe("chat routes", () => {
     expect(data[1].body).toBe("msg2");
   });
 
+  it("GET /history refuses only a non-numeric or unbindable limit (#586)", async () => {
+    for (const body of ["one", "two", "three"]) chatRepo.send(rigId, "alice", body);
+    await expectLimitParsing(app, `/api/rigs/${rigId}/chat/history`);
+  });
+
+  it("GET /history?topic= keeps answering [] for a topic that hasn't started, whatever the limit (#586)", async () => {
+    chatRepo.send(rigId, "alice", "no topic yet");
+    const res = await app.request(`/api/rigs/${rigId}/chat/history?topic=later&limit=abc`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual([]);
+    chatRepo.sendTopic(rigId, "alice", "later");
+    expect((await app.request(`/api/rigs/${rigId}/chat/history?topic=later&limit=abc`)).status).toBe(400);
+  });
+
   it("GET /history?topic=X filters", async () => {
     chatRepo.send(rigId, "alice", "before topic");
     chatRepo.sendTopic(rigId, "alice", "deploy");
@@ -295,6 +381,72 @@ describe("chat routes", () => {
     const res2 = await app.request(`/api/rigs/${rigId}/chat/history?since=${encodeURIComponent("2020-01-01T00:00:00Z")}`);
     const data2 = await res2.json();
     expect(data2).toHaveLength(2);
+  });
+
+  it("GET /history?since refuses an unparseable cutoff instead of silently returning no rows", async () => {
+    chatRepo.send(rigId, "alice", "msg1");
+
+    // julianday('garbage') is NULL, so this used to report success with zero
+    // rows — indistinguishable from a genuinely empty room.
+    const res = await app.request(`/api/rigs/${rigId}/chat/history?since=${encodeURIComponent("garbage")}`);
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(String(data.error)).toContain("since");
+
+    const res2 = await app.request(`/api/rigs/${rigId}/chat/history?since=${encodeURIComponent("not a timestamp")}`);
+    expect(res2.status).toBe(400);
+  });
+
+  it("GET /history?since keeps an empty value as no filter and refuses whitespace", async () => {
+    chatRepo.send(rigId, "alice", "msg1");
+    chatRepo.send(rigId, "bob", "msg2");
+
+    // An empty value never filtered (the repository skips a falsy since), so it
+    // must keep returning the whole history rather than becoming a 400.
+    const empty = await app.request(`/api/rigs/${rigId}/chat/history?since=`);
+    expect(empty.status).toBe(200);
+    expect(await empty.json()).toHaveLength(2);
+
+    // Whitespace is not empty: it was unparseable before and matched no rows.
+    const blank = await app.request(`/api/rigs/${rigId}/chat/history?since=${encodeURIComponent("   ")}`);
+    expect(blank.status).toBe(400);
+  });
+
+  it("GET /history?since escapes control characters in the rejected value", async () => {
+    const res = await app.request(`/api/rigs/${rigId}/chat/history?since=${encodeURIComponent("a\nb\x1bc")}`);
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    // The CLI prints this message verbatim, so a raw newline or ESC would reach
+    // the terminal; they must appear as visible escapes instead.
+    expect(String(data.error)).toContain("a\\x0ab\\x1bc");
+    expect(String(data.error)).not.toContain("\n");
+  });
+
+  it("GET /history?since escapes C1 control characters and keeps other non-ASCII text", async () => {
+    const res = await app.request(`/api/rigs/${rigId}/chat/history?since=${encodeURIComponent("a\u009bbéc")}`);
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    // U+009B is a single-byte CSI that some terminals act on; an accented letter is ordinary text.
+    expect(String(data.error)).toContain("a\\x9bbéc");
+    expect(String(data.error)).not.toContain("\u009b");
+  });
+
+  it("GET /history?since still accepts the cutoff formats SQLite parses", async () => {
+    chatRepo.send(rigId, "alice", "msg1");
+
+    // A past cutoff deterministically includes the just-sent row.
+    for (const since of ["2020-01-01", "2020-01-01 00:00:00"]) {
+      const res = await app.request(`/api/rigs/${rigId}/chat/history?since=${encodeURIComponent(since)}`);
+      expect(res.status, `since=${since}`).toBe(200);
+      const data = await res.json();
+      expect(data.length, `since=${since}`).toBeGreaterThanOrEqual(1);
+    }
+
+    // 'now' parses, so the guard must keep accepting it; row visibility at a
+    // subsecond cutoff depends on the second-precision created_at stamp, so
+    // only the status is asserted here.
+    const res = await app.request(`/api/rigs/${rigId}/chat/history?since=now`);
+    expect(res.status).toBe(200);
   });
 
   it("POST /clear removes messages and returns count", async () => {

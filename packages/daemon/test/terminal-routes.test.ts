@@ -7,7 +7,7 @@
 //  - service absent → 503 (never a crash);
 //  - the rig-scoped alias composes view = rig:<rigId> and delegates (arch R1).
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { Hono } from "hono";
 import { terminalRoutes, rigTerminalRoutes } from "../src/routes/terminal.js";
 import type { OpenViewResult } from "../src/domain/terminal/terminal-provider.js";
@@ -129,5 +129,20 @@ describe("POST /api/rigs/:rigId/terminal/open — thin alias", () => {
     const { app, openCalls } = makeApp();
     await post(app, "/api/rigs/rig-id-1/terminal/open", { provider: "cmux" });
     expect(openCalls[0]).toEqual({ view: "rig:rig-id-1", provider: "cmux" });
+  });
+});
+
+
+describe("measured welcome width at the HTTP boundary", () => {
+  it.each([119, 120, 159, 160])("passes %i columns unchanged from preview to open", async viewportColumns => {
+    const previewView = vi.fn(async () => ({ planId: "width-plan" }));
+    const openView = vi.fn(async () => okResult("saved:kernel"));
+    const { app } = makeApp({ service: { previewView, openView } });
+    const preview = await app.request(`/api/terminal/preview?view=saved:kernel&provider=herdr&viewportColumns=${viewportColumns}`);
+    expect(preview.status).toBe(200);
+    expect(previewView).toHaveBeenCalledExactlyOnceWith({ view: "saved:kernel", provider: "herdr", viewportColumns });
+    const opened = await post(app, "/api/terminal/open", { view: "saved:kernel", provider: "herdr", viewportColumns, expectedPlan: "width-plan" });
+    expect(opened.status).toBe(200);
+    expect(openView).toHaveBeenCalledExactlyOnceWith({ view: "saved:kernel", provider: "herdr", viewportColumns, expectedPlan: "width-plan" });
   });
 });

@@ -28,7 +28,7 @@
 //    to shell anyway).
 //  - The composer's `paneCommand` is a SHELL string (`tmux attach -r -t 's'`,
 //    `ssh 'dest' tmux attach …`); the pane node's `command` is an ARGV array —
-//    it is carried through `sh -c` with Herdr's fixed Claude/Codex detection
+//    it is carried through `sh -c` with Herdr's fixed Claude/Codex/Pi detection
 //    hint when the live runtime is known, without re-parsing shell quoting.
 //  - Liveness/availability = the socket `ping` (is the multiplexer's OWN
 //    control socket answering — NOT a daemon server ping; HERDR-FINDINGS #3's
@@ -203,7 +203,7 @@ function blankPane(): HerdrPaneNode {
 }
 
 function herdrPaneCommand(pane: ComposedPane): string {
-  const agent = pane.runtime === "claude-code" ? "claude" : pane.runtime === "codex" ? "codex" : null;
+  const agent = pane.runtime === "claude-code" ? "claude" : pane.runtime === "codex" ? "codex" : pane.runtime === "pi" ? "pi" : null;
   return agent ? `env HERDR_AGENT=${agent} ${pane.paneCommand}` : pane.paneCommand;
 }
 
@@ -215,7 +215,7 @@ function herdrPaneCommand(pane: ComposedPane): string {
  * every cell is the same size; blanks are layout filler only — they are never
  * reported as opened seats. Each real leaf runs the composer's shell
  * `paneCommand` via `["sh","-c",…]` so the composed quoting (read-only `-r`,
- * ssh-wrap) is preserved; a known Claude/Codex runtime adds Herdr's detection
+ * ssh-wrap) is preserved; a known Claude/Codex/Pi runtime adds Herdr's detection
  * hint. Rows are built as equal `right` strips,
  * then combined with equal `down` strips.
  */
@@ -252,6 +252,11 @@ export interface HerdrLayoutPlan {
   pages: HerdrPagePlan[];
 }
 
+/** A named view's tab: its panes' names in reading order, such as "dashboard · operator". */
+export function namedTabLabel(page: ComposedPane[]): string {
+  return page.map((pane) => pane.label).join(" · ");
+}
+
 /**
  * Build the herdr socket plan for a composed view. PURE — no I/O. Each page
  * gets a fresh tab labeled `${tabPrefix}:${view.id}#<plan>#${launchToken}/<pageIndex>`;
@@ -265,13 +270,14 @@ export function planHerdrLayout(
 ): HerdrLayoutPlan {
   // Older callers without a preview fingerprint still get fresh, non-reusable tabs.
   const base = `${tabPrefix}:${view.id}${view.planId ? `#${view.planId.slice(0, 16)}` : ""}#${launchToken}`;
-  // The workspace is named for people: the rig name for a rig view, else the view id.
-  // Tab labels keep the launch token, so every open is still a fresh, distinct space.
-  const workspaceLabel = view.id.startsWith("rig:") ? view.id.slice("rig:".length) : view.id;
+  // The workspace is named for people: a named view's own label, the rig name for a rig view, else the view id.
+  // Tab labels keep the launch token, so every open is still a fresh, distinct space. A named view's
+  // tabs carry their panes' names instead; the CLI confirms reuse by live attachments, not labels.
+  const workspaceLabel = view.spaceLabel ?? (view.id.startsWith("rig:") ? view.id.slice("rig:".length) : view.id);
   const pages: HerdrPagePlan[] = view.pages.map((page, pageIndex) => {
     const grid = buildGridRoot(page, view.columns);
     return {
-      tabLabel: view.pages.length > 1 ? `${base}/${pageIndex + 1}` : base,
+      tabLabel: view.spaceLabel ? namedTabLabel(page) : view.pages.length > 1 ? `${base}/${pageIndex + 1}` : base,
       root: grid.root,
       blanks: grid.blanks,
     };
@@ -425,6 +431,10 @@ export class HerdrAdapter implements TerminalProvider {
     }
 
     // A fresh workspace per open (BR-5 fresh-on-relaunch, strongest form).
+    // Herdr accepts a duplicate label, so a re-open would otherwise sit beside the earlier
+    // view under the same name. The existing labels are read first: when this rig's view is
+    // already open, the new workspace takes the next numbered suffix and the result says so.
+    // An unreadable list keeps the plain label.
     // The labeled create is tried first. If herdr refuses it and a workspace with
     // that label already exists, retry once with a numbered suffix and say so;
     // otherwise fall back ONCE to a bare create before degrading.
@@ -432,10 +442,22 @@ export class HerdrAdapter implements TerminalProvider {
     let workspaceId: string | null = null;
     let defaultTabId: string | null = null;
     let createErr: unknown = null;
+    let label = plan.workspaceLabel;
     try {
-      const created = await this.transport.request("workspace.create", { focus: false, label: plan.workspaceLabel });
+      const open = extractWorkspaceLabels(await this.transport.request("workspace.list", {}));
+      if (open.includes(label)) {
+        let n = 2;
+        while (open.includes(`${plan.workspaceLabel} (${n})`)) n++;
+        label = `${plan.workspaceLabel} (${n})`;
+      }
+    } catch { /* unknown → the plain label */ }
+    try {
+      const created = await this.transport.request("workspace.create", { focus: false, label });
       workspaceId = extractWorkspaceId(created);
       defaultTabId = extractTabId(created);
+      if (workspaceId != null && label !== plan.workspaceLabel) {
+        notes.push(`A view named "${plan.workspaceLabel}" is already open, so this one is "${label}".`);
+      }
     } catch (err) {
       createErr = err;
     }

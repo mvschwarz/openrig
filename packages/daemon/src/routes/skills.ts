@@ -165,8 +165,8 @@ export function skillsRoutes(): Hono {
     const { listClaudeSeatSkillRoots } = await import("../domain/claude-seat-material.js");
     const { getOpenRigHome } = await import("../openrig-compat.js");
     const seatSkillRoots = listClaudeSeatSkillRoots(getOpenRigHome(), (dir) => fs.readdirSync(dir));
-    const claudeResult = discoverSkillsWithProvenance({ runtime: "claude-code", homedir, cwd, seatSkillRoots });
-    const codexResult = discoverSkillsWithProvenance({ runtime: "codex", homedir, cwd });
+    const claudeResult = await discoverSkillsWithProvenance({ runtime: "claude-code", homedir, cwd, seatSkillRoots });
+    const codexResult = await discoverSkillsWithProvenance({ runtime: "codex", homedir, cwd });
 
     const seenPaths = new Set<string>();
     const allSkills: typeof claudeResult.skills = [];

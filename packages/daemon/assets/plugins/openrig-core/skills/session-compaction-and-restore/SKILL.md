@@ -79,6 +79,25 @@ OpenRig activity **hooks** and `[features]`, never session or auth state. So the
 rule is "never edits native session/auth/transcript files," NOT "never touches any
 provider-owned file."
 
+## Claude's own idle compaction while managed compaction is on
+
+While `policies.claude_compaction.enabled` is true with a valid threshold (the enforcer treats any other
+threshold as off), every Claude session OpenRig launches (fresh, fork, resume and restore; ordinary, kernel,
+team-default and full-bypass seats) carries `idleCompaction: false` in its one `--settings` value. Claude Code then
+doesn't compact an idle session on its own, so managed seats compact through OpenRig's sequence (restore map, then
+`/compact` at the threshold).
+
+- **Version boundary:** Claude Code supports the key from 2.1.290. Earlier versions ignore it, so idle compaction
+  stays possible there.
+- **Precedence:** it overrides a lower-precedence `idleCompaction: true` in user or project settings for those
+  launches. Claude's managed settings still win.
+- **Native threshold auto-compaction is untouched** (`autoCompactEnabled`, `DISABLE_AUTO_COMPACT`). Where the enforcer
+  has no fresh status-line usage sample for a seat, it doesn't compact that seat, and native auto-compaction is then
+  the only compaction. Nothing guarantees a native fallback.
+- **It applies at the next launch.** Turning the policy off leaves idle compaction off in a running session until
+  that session's next launch. Turning it on doesn't reach sessions already running.
+- **Policy off, or a non-Claude runtime:** the launch command is unchanged.
+
 ## Current CLI surface (operator / kernel seats; verified vs main d37a08ad)
 
 Managed compaction/restore is driven by five shipped verbs — pick per intent, and
@@ -151,6 +170,12 @@ supported tooling. For placement and durable context, load
 selected startup path, use `skills/core/agent-startup-and-context-ingestion/SKILL.md`.
 A packet or marker proves retained/delivered evidence, not successful provider
 restoration; measure the resumed seat against the proof standard above.
+
+Before a planned compaction, restart or long pause, write the seat's authored recap
+with `rig context recap-write --rig <rig> --seat <seat> --file <draft>`. Its format is
+in `seat-continuity-and-handover`, "Write the seat's recap before a handover". A
+rebuild reads it before `LEARNED.md`, and a profile source of `seat:RECAP.md` serves
+it after a restore.
 
 ## See also
 

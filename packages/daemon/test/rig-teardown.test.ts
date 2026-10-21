@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
+import { noServerTerminal } from "./helpers/no-server-terminal.js";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -7,7 +8,10 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { RigTeardownOrchestrator } from "../src/domain/rig-teardown.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
-import type { SnapshotCapture } from "../src/domain/snapshot-capture.js";
+import { SnapshotCapture } from "../src/domain/snapshot-capture.js";
+import { SnapshotRepository } from "../src/domain/snapshot-repository.js";
+import { CheckpointStore } from "../src/domain/checkpoint-store.js";
+import { ResumeMetadataRefresher } from "../src/domain/resume-metadata-refresher.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -127,6 +131,205 @@ describe("RigTeardownOrchestrator", () => {
     expect(latest?.status).toBe("exited");
   });
 
+  it.each([true, false])("keeps the existing teardown result when additional intent bookkeeping throws (live=%s)", async live => {
+    const { rigId, nodeId, sessionId } = seedRig();
+    sessionRegistry.updateBinding(nodeId, { tmuxSession: "r01-dev" });
+    if (!live) sessionRegistry.markDetached(sessionId);
+    const tmux = mockTmux();
+    tmux.probeSession = vi.fn(async () => ({ state: live ? "present" : "absent" }));
+    const prepare = db.prepare.bind(db);
+    const fault = vi.spyOn(db, "prepare").mockImplementation((sql: string) => {
+      if (sql.includes("s.intentionally_stopped = 0")) throw new Error("fixture eligibility query failed");
+      return prepare(sql);
+    });
+    try {
+      expect(await buildTeardown(tmux).teardown(rigId)).toEqual({
+        rigId, sessionsKilled: live ? 1 : 0, snapshotId: live ? "snap-1" : null,
+        deleted: false, deleteBlocked: false, alreadyStopped: !live, errors: [],
+      });
+      expect(sessionRegistry.getBindingForNode(nodeId) === null).toBe(live);
+      expect(tmux.killSession).toHaveBeenCalledTimes(live ? 1 : 0);
+    } finally {
+      fault.mockRestore();
+    }
+  });
+
+  it("kills live sessions before probing already-detached seats", async () => {
+    const { rigId } = seedRig();
+    const detached = rigRepo.addNode(rigId, "old");
+    const session = sessionRegistry.registerSession(detached.id, "r01-old");
+    sessionRegistry.markDetached(session.id);
+    const calls: string[] = [];
+    const tmux = mockTmux();
+    tmux.probeSession = vi.fn(async name => {
+      calls.push(`probe ${name}`);
+      return { state: name === "r01-dev" ? "present" : "absent" };
+    });
+    tmux.killSession = vi.fn(async name => { calls.push(`kill ${name}`); return { ok: true }; });
+    await buildTeardown(tmux).teardown(rigId);
+    expect(calls).toEqual(["probe r01-dev", "kill r01-dev", "probe r01-old"]);
+  });
+
+  it("records stop intent only for a confirmed successful teardown", async () => {
+    const { rigId, nodeId, sessionId } = seedRig();
+    sessionRegistry.updateBinding(nodeId, { tmuxSession: "r01-dev" });
+    await buildTeardown().teardown(rigId);
+    expect(db.prepare("SELECT status, intentionally_stopped FROM sessions WHERE id = ?").get(sessionId))
+      .toEqual({ status: "exited", intentionally_stopped: 1 });
+    expect(sessionRegistry.getBindingForNode(nodeId)).toBeNull();
+    // Repeating down must not turn a deliberate stop into an ordinary exit.
+    await buildTeardown().teardown(rigId);
+    expect(db.prepare("SELECT intentionally_stopped FROM sessions WHERE id = ?").get(sessionId))
+      .toEqual({ intentionally_stopped: 1 });
+  });
+
+  it.each(["detached", "exited"])("records explicit down of an unbound %s seat only after confirmed absence", async status => {
+    const { rigId, sessionId } = seedRig();
+    sessionRegistry.updateStatus(sessionId, status);
+    const tmux = mockTmux();
+    tmux.probeSession = vi.fn(async () => ({ state: "absent" }));
+    expect(db.prepare("SELECT intentionally_stopped FROM sessions WHERE id = ?").get(sessionId))
+      .toEqual({ intentionally_stopped: 0 });
+    expect(await buildTeardown(tmux).teardown(rigId)).toMatchObject({ alreadyStopped: true, sessionsKilled: 0 });
+    expect(tmux.killSession).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT status, intentionally_stopped FROM sessions WHERE id = ?").get(sessionId))
+      .toEqual({ status: "exited", intentionally_stopped: 1 });
+  });
+
+  it("records down after reconciliation leaves a detached session's original binding", async () => {
+    const { rigId, nodeId, sessionId } = seedRig();
+    sessionRegistry.updateBinding(nodeId, { tmuxSession: "r01-dev", tmuxPane: "%1" });
+    const tmux = mockTmux();
+    tmux.probeSession = vi.fn(async () => ({ state: "absent" }));
+    const { Reconciler } = await import("../src/domain/reconciler.js");
+    await new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter: tmux }).reconcile(rigId);
+    expect(sessionRegistry.getBindingForNode(nodeId)).not.toBeNull();
+    await buildTeardown(tmux).teardown(rigId);
+    expect(db.prepare("SELECT status, intentionally_stopped FROM sessions WHERE id = ?").get(sessionId))
+      .toEqual({ status: "exited", intentionally_stopped: 1 });
+    expect(sessionRegistry.getBindingForNode(nodeId)).toBeNull();
+    expect(tmux.killSession).not.toHaveBeenCalled();
+  });
+
+  it("explicit down of a non-kernel rig starts only an empty server before recording absence", async () => {
+    const { rigId, nodeId, sessionId } = seedRig();
+    sessionRegistry.updateBinding(nodeId, { tmuxSession: "r01-dev", tmuxPane: "%1" });
+    sessionRegistry.markDetached(sessionId);
+    const terminal = noServerTerminal();
+    const tmux = mockTmux();
+    tmux.probeSession = terminal.probeSession;
+    tmux.startServer = terminal.startServer;
+    expect(await buildTeardown(tmux).teardown(rigId)).toMatchObject({ alreadyStopped: true, sessionsKilled: 0, errors: [] });
+    expect(db.prepare("SELECT status, intentionally_stopped FROM sessions WHERE id = ?").get(sessionId))
+      .toEqual({ status: "exited", intentionally_stopped: 1 });
+    expect(sessionRegistry.getBindingForNode(nodeId)).toBeNull();
+    expect(terminal.startServer).toHaveBeenCalledTimes(1);
+    expect(terminal.serverRunning()).toBe(true);
+    expect(tmux.createSession).not.toHaveBeenCalled();
+    expect(tmux.killSession).not.toHaveBeenCalled();
+  });
+
+  it.each(["failed-start", "throw-start", "second-permission", "second-unreadable", "second-present", "initial-unreadable", "initial-permission", "mixed-permission"])("no-server stop bookkeeping preserves state on %s", async fault => {
+    const { rigId, nodeId, sessionId } = seedRig();
+    sessionRegistry.markDetached(sessionId);
+    sessionRegistry.updateBinding(nodeId, { tmuxSession: "r01-dev", tmuxPane: "%1" });
+    const before = sessionRegistry.getBindingForNode(nodeId);
+    const tmux = mockTmux();
+    let calls = 0;
+    tmux.probeSession = vi.fn(async () => {
+      calls++;
+      if (fault === "initial-permission" || (calls === 2 && fault === "second-permission")) throw new Error("permission denied");
+      if (fault === "initial-unreadable" || (calls === 2 && fault === "second-unreadable")) return { state: "transport_unavailable", cause: "fixture unreadable" };
+      if (fault === "mixed-permission") return { state: "transport_unavailable", cause: "no server running: permission denied" };
+      if (calls === 1) return { state: "transport_unavailable", cause: "no server running on /tmp/tmux-1000/default" };
+      return { state: "present" };
+    });
+    tmux.startServer = vi.fn(async () => {
+      if (fault === "throw-start") throw new Error("fixture start unreadable");
+      return fault === "failed-start" ? { ok: false, code: "tmux_unavailable" } : { ok: true };
+    });
+    await buildTeardown(tmux).teardown(rigId);
+    expect(db.prepare("SELECT status, intentionally_stopped FROM sessions WHERE id = ?").get(sessionId)).toEqual({ status: "detached", intentionally_stopped: 0 });
+    expect(sessionRegistry.getBindingForNode(nodeId)).toEqual(before);
+    expect(tmux.startServer).toHaveBeenCalledTimes(fault.startsWith("initial-") || fault === "mixed-permission" ? 0 : 1);
+    expect(tmux.killSession).not.toHaveBeenCalled();
+    expect(tmux.createSession).not.toHaveBeenCalled();
+  });
+
+  it.each([["probe", "binding"], ["probe", "latest"], ["start", "binding"], ["start", "latest"], ["reprobe", "binding"], ["reprobe", "latest"]] as const)("rechecks the %s await against a changed %s before recording a no-server stop", async (phase, kind) => {
+    const { rigId, nodeId, sessionId } = seedRig();
+    sessionRegistry.markDetached(sessionId);
+    db.prepare("UPDATE sessions SET created_at = '2000-01-01' WHERE id = ?").run(sessionId);
+    sessionRegistry.updateBinding(nodeId, { tmuxSession: "r01-dev", tmuxPane: "%1" });
+    const tmux = mockTmux();
+    const change = () => {
+      if (kind === "binding") sessionRegistry.updateBinding(nodeId, { tmuxSession: "new-owner", tmuxPane: "%new" });
+      else { const newer = sessionRegistry.registerSession(nodeId, "r01-new-owner"); sessionRegistry.updateStatus(newer.id, "running"); }
+    };
+    let calls = 0;
+    tmux.probeSession = vi.fn(async () => {
+      calls++;
+      if ((phase === "probe" && calls === 1) || (phase === "reprobe" && calls === 2)) change();
+      return calls === 1 ? { state: "transport_unavailable", cause: "no server running on /tmp/tmux-1000/default" } : { state: "absent" };
+    });
+    tmux.startServer = vi.fn(async () => { if (phase === "start") change(); return { ok: true }; });
+    await buildTeardown(tmux).teardown(rigId);
+    expect(db.prepare("SELECT status, intentionally_stopped FROM sessions WHERE id = ?").get(sessionId)).toEqual({ status: "detached", intentionally_stopped: 0 });
+    if (kind === "binding") expect(sessionRegistry.getBindingForNode(nodeId)).toMatchObject({ tmuxSession: "new-owner", tmuxPane: "%new" });
+    else expect(sessionRegistry.getSessionsForRig(rigId).find(session => session.sessionName === "r01-new-owner")?.status).toBe("running");
+    expect(tmux.startServer).toHaveBeenCalledTimes(phase === "probe" ? 0 : 1);
+    expect(tmux.probeSession).toHaveBeenCalledTimes(phase === "reprobe" ? 2 : 1);
+    expect(tmux.killSession).not.toHaveBeenCalled();
+  });
+
+  it.each(["present", "transport_unavailable", "throw", "no-probe"])("keeps an unconfirmed detached seat unchanged: %s", async state => {
+    const { rigId, sessionId } = seedRig();
+    sessionRegistry.updateStatus(sessionId, "detached");
+    const tmux = mockTmux();
+    if (state !== "no-probe") tmux.probeSession = vi.fn(async () => {
+      if (state === "throw") throw new Error("fixture unavailable");
+      return state === "present" ? { state: "present" } : { state: "transport_unavailable", cause: "fixture unavailable" };
+    });
+    await buildTeardown(tmux).teardown(rigId);
+    expect(tmux.killSession).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT status, intentionally_stopped FROM sessions WHERE id = ?").get(sessionId))
+      .toEqual({ status: "detached", intentionally_stopped: 0 });
+  });
+
+  it("preserves a detached node's binding, including a binding created while its absence probe awaited", async () => {
+    const { rigId, nodeId, sessionId } = seedRig();
+    sessionRegistry.updateStatus(sessionId, "detached");
+    const tmux = mockTmux();
+    tmux.probeSession = vi.fn(async () => {
+      sessionRegistry.updateBinding(nodeId, { tmuxSession: "new-owner", tmuxPane: "%new" });
+      return { state: "absent" };
+    });
+    await buildTeardown(tmux).teardown(rigId);
+    expect(sessionRegistry.getBindingForNode(nodeId)).toMatchObject({ tmuxSession: "new-owner", tmuxPane: "%new" });
+    expect(db.prepare("SELECT status, intentionally_stopped FROM sessions WHERE id = ?").get(sessionId))
+      .toEqual({ status: "detached", intentionally_stopped: 0 });
+    vi.mocked(tmux.probeSession).mockClear();
+    await buildTeardown(tmux).teardown(rigId);
+    expect(tmux.probeSession).not.toHaveBeenCalled();
+  });
+
+  it("does not mark an older detached session after a new session appears during the probe", async () => {
+    const { rigId, nodeId, sessionId } = seedRig();
+    sessionRegistry.updateStatus(sessionId, "detached");
+    db.prepare("UPDATE sessions SET created_at = '2000-01-01' WHERE id = ?").run(sessionId);
+    const tmux = mockTmux();
+    tmux.probeSession = vi.fn(async () => {
+      const newer = sessionRegistry.registerSession(nodeId, "r01-new");
+      sessionRegistry.updateStatus(newer.id, "running");
+      return { state: "absent" };
+    });
+    await buildTeardown(tmux).teardown(rigId);
+    expect(db.prepare("SELECT status, intentionally_stopped FROM sessions WHERE id = ?").get(sessionId))
+      .toEqual({ status: "detached", intentionally_stopped: 0 });
+    expect(sessionRegistry.getSessionsForRig(rigId).find(s => s.sessionName === "r01-new")?.status).toBe("running");
+    expect(tmux.killSession).not.toHaveBeenCalled();
+  });
+
   // T4: Rig preserved
   it("rig record preserved without --delete", async () => {
     const { rigId } = seedRig();
@@ -173,6 +376,54 @@ describe("RigTeardownOrchestrator", () => {
     await td.teardown(rigId);
 
     expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("captures durable recovery state before stopping when live metadata discovery fails", async () => {
+    const { rigId, nodeId, sessionId } = seedRigWithNode({ runtime: "codex", cwd: tmpDir });
+    sessionRegistry.updateResumeToken(sessionId, "codex_id", "saved-thread", "operator");
+    const missingTokenNode = rigRepo.addNode(rigId, "new-seat", { runtime: "codex", cwd: tmpDir });
+    const missingTokenSession = sessionRegistry.registerSession(missingTokenNode.id, "new-seat@test-rig");
+    sessionRegistry.updateStatus(missingTokenSession.id, "running");
+    const checkpointStore = new CheckpointStore(db);
+    checkpointStore.createCheckpoint(nodeId, { summary: "latest work", nextStep: "finish review" });
+    const snapshotRepo = new SnapshotRepository(db);
+    const snapshotCapture = new SnapshotCapture({ db, rigRepo, sessionRegistry, eventBus, snapshotRepo, checkpointStore });
+    const tmux = mockTmux();
+    tmux.getPanePid = vi.fn(async () => 100);
+    const refresher = new ResumeMetadataRefresher({ sessionRegistry, tmuxAdapter: tmux,
+      listProcesses: async () => { throw new Error("process discovery timed out"); } });
+    tmux.killSession = vi.fn(async () => {
+      const captured = snapshotRepo.findLatestAutoPreDown(rigId);
+      expect(captured?.data.sessions.find(s => s.id === sessionId)).toMatchObject({ status: "running", resumeToken: "saved-thread" });
+      expect(captured?.data.checkpoints[nodeId]).toMatchObject({ summary: "latest work", nextStep: "finish review" });
+      return { ok: true };
+    });
+    const td = new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, eventBus,
+      tmuxAdapter: tmux, snapshotCapture, resumeMetadataRefresher: refresher });
+
+    const result = await td.teardown(rigId);
+
+    expect(result.snapshotId).toBe(snapshotRepo.findLatestAutoPreDown(rigId)?.id);
+    expect(result.snapshotId).not.toBeNull();
+    expect(result.sessionsKilled).toBe(2);
+    expect(result.errors).toContain("Resume metadata refresh failed: process discovery timed out");
+    expect(result.errors.some(error => error.startsWith("Snapshot failed:"))).toBe(false);
+    expect(sessionRegistry.getSessionsForRig(rigId).find(s => s.id === sessionId)?.status).toBe("exited");
+  });
+
+  it("reports refresh and capture failures separately and still stops the rig", async () => {
+    const { rigId } = seedRig();
+    const snapshotCapture = mockSnapshotCapture(db);
+    vi.mocked(snapshotCapture.captureSnapshot).mockImplementation(() => { throw new Error("snapshot storage unavailable"); });
+    const tmux = mockTmux();
+    const td = new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux, snapshotCapture,
+      resumeMetadataRefresher: { refresh: async () => { throw new Error("discovery unavailable"); } } as unknown as ResumeMetadataRefresher });
+
+    const result = await td.teardown(rigId);
+
+    expect(snapshotCapture.captureSnapshot).toHaveBeenCalledWith(rigId, "auto-pre-down");
+    expect(result).toMatchObject({ snapshotId: null, sessionsKilled: 1 });
+    expect(result.errors).toEqual(["Resume metadata refresh failed: discovery unavailable", "Snapshot failed: snapshot storage unavailable"]);
   });
 
   // T7: --force (same as default in v1)
@@ -257,6 +508,8 @@ describe("RigTeardownOrchestrator", () => {
     expect(result).toMatchObject({ sessionsKilled: 1, deleted: false, deleteBlocked: true });
     expect(sessionRegistry.getSessionsForRig(rigId).find(s => s.id === sessionId)?.status).toBe("exited");
     expect(sessionRegistry.getSessionsForRig(rigId).find(s => s.id === survivingSession.id)?.status).toBe("running");
+    expect(db.prepare("SELECT intentionally_stopped FROM sessions WHERE id = ?").get(sessionId)).toEqual({ intentionally_stopped: 1 });
+    expect(db.prepare("SELECT intentionally_stopped FROM sessions WHERE id = ?").get(survivingSession.id)).toEqual({ intentionally_stopped: 0 });
     expect(fs.readFileSync(guidance, "utf-8")).toBe(content);
     expect(sessionRegistry.getBindingForNode(nodeId)).toBeNull();
 
@@ -275,6 +528,7 @@ describe("RigTeardownOrchestrator", () => {
     if (failure === "transport_unavailable") tmux.probeSession = vi.fn(async () => ({ state: "transport_unavailable", cause: "socket unavailable" }));
     await buildTeardown(tmux).teardown(rigId);
     expect(sessionRegistry.getSessionsForRig(rigId).find(s => s.id === sessionId)?.status).toBe("running");
+    expect(db.prepare("SELECT intentionally_stopped FROM sessions WHERE id = ?").get(sessionId)).toEqual({ intentionally_stopped: 0 });
     expect(fs.readFileSync(guidance, "utf-8")).toBe(content);
   });
 

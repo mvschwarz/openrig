@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { copyFileSync, lstatSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
+import { getOpenRigHome } from "../openrig-compat.js";
 import { join } from "node:path";
 import { ConfigStore } from "../config-store.js";
 import { formatDaemonHostForUrl } from "../client.js";
@@ -29,10 +30,6 @@ export interface CrashCartCommandDeps {
   emit: () => Promise<CrashCartEmit>;
   /** Emit one line (default: stdout). */
   write: (line: string) => void;
-}
-
-function openrigHome(): string {
-  return process.env.OPENRIG_HOME ?? join(homedir(), ".openrig");
 }
 
 /** Read daemon.json returning the FULL record incl. `db` (loadCrashCartDiscovery needs the db path;
@@ -65,7 +62,7 @@ function existsOrThrow(path: string): boolean {
  */
 async function realEmit(): Promise<CrashCartEmit> {
   const cc = await import("@openrig/daemon/crash-cart");
-  const home = openrigHome();
+  const home = getOpenRigHome();
   const openrigUrl = process.env.OPENRIG_URL;
   const probeClassified = (url: string) =>
     cc.probeHealthz(url, { fetch: (u, init) => fetch(u, init as RequestInit), timeoutMs: 700 });

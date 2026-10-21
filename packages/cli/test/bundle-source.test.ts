@@ -155,6 +155,7 @@ describe("GitHub bundle source", () => {
     let assembledRigRoot = "";
     f.post.mockImplementation(async (_url, body) => {
       assembledRigRoot = body.rigRoot as string;
+      expect(body.bundleName).toBe("team");
       const result = assembler.assemble({ rigRoot: assembledRigRoot, rigSpecPath: body.specPath as string,
         outputDir: output, bundleName: "fixture", bundleVersion: "1.0.0" });
       expect(result.manifest.agents.map(agent => agent.name)).toEqual(["helper"]);
@@ -259,6 +260,14 @@ describe("GitHub bundle source", () => {
     if (mode === "unknown") state.origin = "";
     await expect(importGitHubBundle(URL, f.deps, { host: mode === "explicit" ? "other-host" : undefined }, f.prepare)).rejects.toThrow(/verified local daemon/);
     expect(f.prepare).not.toHaveBeenCalled(); expect(f.post).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("forwards only the explicit per-create login opt-in for a GitHub source (%s)", async includeLoginFiles => {
+    const f = fixture();
+    await importGitHubBundle(URL, f.deps, { includeLoginFiles }, f.prepare);
+    const body = f.post.mock.calls[0]![1];
+    if (includeLoginFiles) expect(body.includeLoginFiles).toBe(true);
+    else expect(body).not.toHaveProperty("includeLoginFiles");
   });
 
   it("uses one create, passes authored minima and source, then cleans only settled input", async () => {

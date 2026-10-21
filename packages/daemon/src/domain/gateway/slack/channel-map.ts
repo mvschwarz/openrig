@@ -3,10 +3,13 @@
 // `rig slack verify`.
 //
 //   outbound: exact seat entry → rig entry → the default `channel`
+//   inbound (a person's new message): an entry's `inbound` seat → a rig entry's representative →
+//   `inboundDestination`. A seat entry alone doesn't make its channel a seat's inbox: channels are
+//   per machine or per rig, never per seat, unless `inbound` names the recipient.
 //
-// An absent or empty map is today's single-channel behaviour exactly. Inbound routing does not
-// consult the map: a known thread routes to its seat in whatever channel it lives, and every
-// other message lands at `inboundDestination` (thread-routing.ts).
+// An absent or empty map is today's single-channel behaviour exactly. A known thread still routes
+// to its seat in whatever channel it lives (thread-routing.ts). The inbound direction composes the
+// channel-destination design proposed publicly on #1160.
 import { parseSessionName, sessionRigOf, validateSessionNameChars } from "../../session-name.js";
 
 export interface ChannelMapEntry {
@@ -14,6 +17,9 @@ export interface ChannelMapEntry {
   match: string;
   /** Slack channel ID this rig's or seat's human-bound items post to. */
   channel: string;
+  /** The seat a person's new message in this channel goes to. Absent: for a rig entry, the rig's
+   *  representative; for a seat entry, `inboundDestination`. */
+  inbound?: string;
 }
 
 export interface ChannelMapConfig {
@@ -21,13 +27,13 @@ export interface ChannelMapConfig {
   channelMap?: ChannelMapEntry[];
 }
 
-const ENTRY_KEYS = new Set(["match", "channel"]);
+const ENTRY_KEYS = new Set(["match", "channel", "inbound"]);
 
 function isSeatMatch(match: string): boolean {
   return match.includes("@");
 }
 
-/** Fields this version does not know, per entry ("channelMap[0].inbound"). A config written by a
+/** Fields this version does not know, per entry ("channelMap[0].policy"). A config written by a
  *  newer OpenRig can carry them; reading it ignores them (see validateChannelMap). */
 export function unsupportedChannelMapFields(cfg: ChannelMapConfig): string[] {
   if (!Array.isArray(cfg.channelMap)) return [];
@@ -68,6 +74,10 @@ export function validateChannelMap(cfg: ChannelMapConfig, opts: { allowUnknownFi
     }
     if (typeof channel !== "string" || !channel || /\s/.test(channel)) {
       throw new Error(`${where}.channel must be a Slack channel ID (e.g. C0EXAMPLE1) for '${match}'`);
+    }
+    const inbound = (entry as { inbound?: unknown }).inbound;
+    if (inbound !== undefined && (typeof inbound !== "string" || parseSessionName(inbound).kind !== "canonical")) {
+      throw new Error(`${where}.inbound must be a seat (member@rig) for '${match}'`);
     }
     if (seen.has(match)) throw new Error(`channelMap has two entries for '${match}': edit slack-connector.json by hand and keep one entry`);
     seen.add(match);
@@ -116,9 +126,29 @@ export function mappedChannels(cfg: ChannelMapConfig): MappedChannel[] {
   return out;
 }
 
+/** Where a person's new (top-level) message in `channel` goes, or null for `inboundDestination`.
+ *  An entry's `inbound` seat decides; otherwise the channel's one rig entry names its rig's
+ *  representative. Two different `inbound` seats, or several rig entries, on one channel are
+ *  ambiguous, and so is a representative that can't be found: null. The machine's own `channel`
+ *  keeps `inboundDestination` unless an entry there names `inbound`: a rig entry on it sends that
+ *  rig's posts there, not the machine's messages to the rig. */
+export function resolveInboundChannelDestination(
+  cfg: ChannelMapConfig,
+  channel: string | undefined,
+  rigRepresentative: (rig: string) => string | null,
+): string | null {
+  if (!channel) return null;
+  const entries = (cfg.channelMap ?? []).filter((e) => e.channel === channel);
+  const explicit = [...new Set(entries.flatMap((e) => (e.inbound ? [e.inbound] : [])))];
+  if (explicit.length) return explicit.length === 1 ? explicit[0]! : null;
+  if (channel === cfg.channel) return null;
+  const rigs = entries.filter((e) => !isSeatMatch(e.match));
+  return rigs.length === 1 ? rigRepresentative(rigs[0]!.match) : null;
+}
+
 /** Add or replace the entry for `match` (CLI `channel-map set`), keeping its position. */
 export function setChannelMapEntry(map: readonly ChannelMapEntry[] | undefined, entry: ChannelMapEntry): ChannelMapEntry[] {
-  const authored: ChannelMapEntry = { match: entry.match, channel: entry.channel };
+  const authored: ChannelMapEntry = { match: entry.match, channel: entry.channel, ...(entry.inbound ? { inbound: entry.inbound } : {}) };
   const current = map ?? [];
   return current.some((e) => e.match === entry.match)
     ? current.map((e) => (e.match === entry.match ? authored : e))

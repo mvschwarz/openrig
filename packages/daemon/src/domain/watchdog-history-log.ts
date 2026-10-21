@@ -6,7 +6,8 @@ import { ulid } from "ulid";
  *
  * Per slice IMPL § Guard Checkpoint Focus item 2:
  * - Pure `not_due` polls are NOT recorded (matches POC; minimizes
- *   table size). Only `sent` / `skipped` / `terminal` outcomes pass
+ *   table size). Only `sent` / `refused` / `failed` / `skipped` /
+ *   `terminal` outcomes pass
  *   through this log.
  * - Append-only API surface: only `record()` exposed. UPDATE/DELETE
  *   are not exposed. SQLite has no view/role layer so direct SQL
@@ -14,7 +15,9 @@ import { ulid } from "ulid";
  *   boundary.
  */
 
-export type WatchdogOutcome = "sent" | "skipped" | "terminal";
+/** `refused`: the seat was at an interactive prompt and no text was sent. `failed`: any other failed delivery; its
+ * reason (and whether text may have landed) is in `evaluationNotes`. */
+export type WatchdogOutcome = "sent" | "refused" | "failed" | "skipped" | "terminal";
 
 export interface WatchdogHistoryRecordInput {
   jobId: string;

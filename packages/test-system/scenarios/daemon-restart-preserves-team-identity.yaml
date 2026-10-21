@@ -1,0 +1,62 @@
+# Family: lifecycle `daemon` (round trip: up, ps, daemon restart, ps, down, ps).
+# Defect class: a daemon restart that loses or duplicates the team's persisted row, so the
+#   team comes back missing, archived, stopped, or with the old seats re-recorded beside the
+#   live ones instead of one clean two-seat row.
+# What this proves: STUB PLUMBING plus the daemon's persisted team identity across its own
+#   lifecycle. `rig up <spec>` brings the two-seat stub team up; the runner restarts the
+#   scratch daemon (`daemon {op: restart}`) and the shipped `rig ps --json` reports the same
+#   name still running with exactly two seats, both running, not archived; `rig down` then
+#   records it stopped with both seats still members, so the restart left a governable team
+#   and not a corrupted one.
+# What this does NOT prove: that queue items survive the restart (that is
+#   `queue-baton-survives-restart.yaml`), that a kill inside a handoff window is reconciled
+#   (that is `kill-daemon-mid-handoff.yaml`), that the port and the process agree through
+#   public commands (the row's remaining half; no shipped surface asserts them here), that
+#   the tmux panes are actually gone after `down` (the runner has no absence form), that any
+#   message is consumed by a seat, or any Claude Code / Codex behaviour.
+# Planted negative: a restart that re-records the stopped or archived seats beside the live
+#   ones reports a doubled `runningCount` on the post-restart `ps`, and that expect fails
+#   while the first `up`, the pre-restart read and the final stopped read still pass; a
+#   restart that drops the row fails the same expect with the name absent. `match` is a
+#   structural subset, so it confirms the row it names and cannot reject an extra running row
+#   for the same rig name; a restart that adds a second row rather than reusing the first is
+#   outside what this scenario can see.
+# Deps: R-10 runner (`up`, `down`, `daemon` verbs and the `ps` surface). No emit, no
+#   seed_regression, no env preconditions.
+scenario: daemon-restart-preserves-team-identity
+topology: ./dev-pair-stub.yaml
+steps:
+  - up: {}
+  # the two stub seats come up as one running team
+  - expect:
+      surface: ps
+      within: 30s
+      match:
+        - name: dev-pair-stub
+          status: running
+          nodeCount: 2
+          runningCount: 2
+          isArchived: false
+  # the scenario-local daemon goes down and comes back; the persisted team row must survive
+  - daemon: { op: restart }
+  - expect:
+      surface: ps
+      within: 60s
+      match:
+        - name: dev-pair-stub
+          status: running
+          nodeCount: 2
+          runningCount: 2
+          isArchived: false
+  # a restart that left a governable team: down records it stopped, not vanished
+  - down: {}
+  - expect:
+      surface: ps
+      within: 30s
+      match:
+        - name: dev-pair-stub
+          status: stopped
+          lifecycleState: stopped
+          nodeCount: 2
+          runningCount: 0
+          isArchived: false

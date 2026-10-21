@@ -25,7 +25,7 @@ named slice's explicit exception. Authors do not perform their own selected
 independent review.
 
 Match the selected review to the consequence. A small diff gets a focused pass;
-the deep protocol below runs only when explicitly selected for named work.
+the deep review method below runs only when explicitly selected for named work.
 Importance, size or a prior finding alone cannot self-select it. If another review
 seems necessary, name the concrete unresolved risk to the owner while continuing
 the selected path.
@@ -36,32 +36,26 @@ Derive the selection before forming a review position. If the assigned boundary
 has not arrived, record readiness and wait for its event; do not scan for work to
 turn into additional required reviews.
 
-## Context priming — always do this first
+## Context
 
-Before reviewing ANY code, you must understand the codebase context. Never review cold.
+Read the context this change needs before forming a position. Don't review cold.
 
-1. Read the project's `CLAUDE.md` or equivalent conventions doc
-2. Read the as-built architecture docs for the subsystems you're reviewing
-3. Read the relevant planning/spec docs if they exist
-4. Understand the domain vocabulary and key invariants
+1. The project's `CLAUDE.md` or equivalent conventions doc
+2. The as-built architecture docs for the subsystems the change touches
+3. The relevant planning or spec docs, if they exist
+4. The domain vocabulary and the invariants the change could break
 
-If you have blanks — areas you don't understand — say so explicitly and fill them before forming opinions. A review built on misunderstood context is worse than no review.
-
-For deep reviews, write a **context proof** before proceeding:
-- Subsystem purpose summary
-- Key invariants (must-not-break rules)
-- Architecture boundaries and constraints
-- PR/range intent and expected behavior
-- Unknowns / missing context
-- Confidence scores (0-100) per section
+Preparing context is part of the review, not a gate before it. Name the consequential unknowns with your findings and investigate them within scope. A genuinely missing decision goes to its owner; keep reviewing what it doesn't affect.
 
 ## Everyday review discipline
 
 These apply to every review, not just deep reviews.
 
+Does the change solve the user's problem with a maintainable design? Check affected contracts, invalid input, state transitions, recovery, consumers and unnecessary duplication.
+
 ### Anti-slop lens
 
-The primary question for every review: **"Will an agent working on this code in 3 months find two ways to do the same thing?"**
+Then, for every review: **"Will an agent working on this code in 3 months find two ways to do the same thing?"**
 
 Check for:
 - Code duplication across files or subsystems
@@ -70,26 +64,32 @@ Check for:
 - Parallel implementations where one should extend the other
 - Abstractions that don't earn their complexity
 
-### Empirical verification
+### Grounding findings
 
-Every claim you make must be verified against actual code. Not plausible inference. Not file-tree reasoning.
+Ground findings in the affected source and callers, not plausible inference or file-tree reasoning.
 
-- Run the tests yourself: `npm test -w @openrig/daemon -- <relevant-suite>`
 - Read the actual source at the line you're citing
-- If you claim something is broken, write a repro (even a quick `npx tsx -e "..."`)
+- Reproduce a consequential behavior claim through the permitted validation path where needed; reuse relevant run evidence with its limits
 - If you claim a test is missing, explain what input would break the code
 - If you claim duplication exists, cite both locations
+- Label source-only reasoning and untested concerns, and say what would confirm or falsify them
 
-A finding you haven't verified is a finding you shouldn't report.
+Don't run code where the assignment forbids it, and don't hide an uncertainty because you can't run it here.
 
-### Severity rating
+### What a finding says
 
-Rate every finding clearly:
-- **MUST-FIX** — blocks merge. Broken behavior, security issue, or test suite failure.
-- **HIGH** — contract violation or honesty failure. Should fix before calling the range clean.
-- **MEDIUM** — real concern that affects maintenance or agent UX. Should fix soon.
-- **LOW** — polish, robustness, or minor inconsistency. Fix when convenient.
+For a material finding, explain the user consequence, the affected path and how you know. Distinguish an observed result, source reasoning and an untested concern. Say whether this change introduces, exposes or leaves the issue unchanged. A serious hypothesis is not an established defect; an inherited defect can still matter. Investigate within scope, keep the uncertainty visible, and route unrelated work without enlarging this task by default.
+
+### Severity and disposition
+
+Rate the consequence:
+- **MUST-FIX** — broken behavior or a real exposure on a reachable path.
+- **HIGH** — contract violation or honesty failure.
+- **MEDIUM** — real concern that affects maintenance or agent UX.
+- **LOW** — polish, robustness, or minor inconsistency.
 - **INFO** — observation worth noting. Not a defect.
+
+Whether a finding blocks merge is a separate call under the project's actual acceptance rules: say which rule makes it blocking, from its reachability, user consequence and relation to this change. A failing suite or a security concern unrelated to the change doesn't automatically become a veto on it.
 
 ### Reporting findings
 
@@ -101,8 +101,8 @@ docs/review/<review-name>/01-review-<your-id>.md
 Also report to the orchestrator or chatroom:
 ```bash
 rig send <orchestrator-session> "REVIEW: <title>
-HIGH :: <file:line> :: <issue>
-MEDIUM :: <file:line> :: <issue>
+HIGH :: <file:line> :: <user consequence> :: <how you know> :: introduces|exposes|leaves
+MEDIUM :: <file:line> :: <user consequence> :: <how you know> :: introduces|exposes|leaves
 ..." --verify
 ```
 
@@ -126,89 +126,39 @@ When reviewing work that was implemented without a pre-existing spec (ad hoc, do
 - Ask: "Does this code deliver what it appears to intend? Are the contracts honest?"
 - This is called a **hindsight review** — you review forward from the code, not backward from a spec
 
-## Deep review protocol
+## Deep review method
 
-Only when the owner or composition explicitly selects this protocol for named work, the orchestrator coordinates these phases. An ordinary review or two selected review legs do not implicitly select cross-examination, convergence, or roundtable.
+Only when the owner or composition explicitly selects this method for named work. An ordinary review, or two selected review legs, is not a deep review. A protocol the project specifically selected for the work stays controlling; this method doesn't waive its named checks or restart a review already completed.
 
-### Phase 1: Context priming gate
+### 1. Independent first views
 
-Each reviewer independently reads context docs and writes a context proof (see above). The orchestrator reads both proofs and decides GO or NO-GO. No code review starts until the gate passes.
-
-### Phase 2: Independent reviews
-
-Each reviewer reads the full diff/range independently and writes findings to disk:
+Each reviewer inspects the relevant context, source and exact target before reading anyone else's findings, and writes findings to disk in the format above, with consequential unknowns:
 ```
 docs/review/<review-name>/01-review-<your-id>.md
 ```
 
-Do NOT read the other reviewer's work during this phase. Independence is the point — different reviewers catch different things.
+Independence is the point: different reviewers catch different things. Cover what the change affects: test posture, the affected files or themes, duplication, any review questions the owner asked, and a merge readiness verdict.
 
-Your independent review should cover:
-- Test posture (does the suite pass? are there regressions?)
-- Theme-by-theme or file-by-file analysis
-- Anti-slop audit
-- Answers to any review questions from the orchestrator or hindsight doc
-- Merge readiness verdict
+### 2. Compare, then challenge what could change the disposition
 
-### Phase 3: Cross-examination
+The decision owner compares the independent findings. For a disagreement or a material concern that could change the disposition, ask the relevant reviewer or the author for the evidence or a counterexample. No one must answer every finding, there's no fixed number of rounds, and there's no roundtable when nothing consequential needs resolving.
 
-Each reviewer reads the other's independent review and responds to every finding:
+### 3. One disposition
 
-- **AGREE** — correct, evidence checks out
-- **DISAGREE** — incorrect, here is counter-evidence
-- **PARTIALLY AGREE** — valid concern but severity or details are wrong
+The decision owner records one disposition:
+- findings with severity, and the blocking rationale under the project's acceptance rules, kept separate
+- evidence limits and any material dissent, still visible
+- action items with owner, and what the implementation team should not reopen
 
-You must also state:
-- What did they find that you missed? (Be honest about your blind spots)
-- What did you find that they missed?
-- Do their findings change any of your severity assessments?
-- Updated merge readiness verdict
+Agreement alone doesn't prove a finding. Don't suppress a serious untested concern or turn it automatically into a merge veto; unanimity isn't required.
 
-Write cross-exam to disk:
-```
-docs/review/<review-name>/02-cross-review-<your-id>.md
-```
+## Choosing reviewers
 
-### Phase 4: Convergence and roundtable
-
-The orchestration pod reads all reviews and cross-exams and writes a convergence synthesis classifying each finding as:
-- **CONFIRMED** — all reviewers agree
-- **DISPUTED** — disagreement exists with evidence on both sides
-- **WITHDRAWN** — originator retracted
-
-Then a roundtable in the chatroom where all participants (reviewers + orchestrators) post positions, respond to each other, and converge on final findings and action items.
-
-Culture for the roundtable:
-- Truth-seeking. Not contrarian for theater. Not agreeable to be nice.
-- Every participant posts an initial position
-- Every participant responds to at least one other's position
-- Every participant posts a final concur or amend
-- The host does not synthesize early — real back-and-forth first
-
-### Phase 5: Final output
-
-The host writes the final roundtable document with:
-- Confirmed findings with severity
-- Final priority stack (P0 / P1 / P2)
-- Action items with owner
-- What the implementation team should NOT reopen
-
-## Reviewer behavioral awareness
-
-### If you are Claude (R1)
-- You tend to be strongest on architecture and weakest on edge-case honesty
-- You verify the happy path thoroughly but may miss failure-mode gaps
-- You should deliberately check: "What happens when this fails? What happens with bad input? What about the release-then-remove sequence?"
-
-### If you are Codex (R2)
-- You catch edge cases that Claude misses
-- You are thorough at empirical verification
-- You may over-weight severity on issues that are real but minor
-- You should deliberately check: "Is this actually a shipped defect or just a robustness wish?"
+Choose reviewers by the assigned independence, relevant capability and observed work. A model name does not establish which failures it will catch.
 
 ### When reviewers disagree
 
-Disagreement is useful. Keep your position grounded in evidence and let the orchestrator or roundtable resolve the conflict. Do not collapse your view just to create false consensus. If you're right, defend it. If you're wrong, retract it honestly.
+Disagreement is useful. Keep your position grounded in evidence and let the decision owner resolve it. Do not collapse your view just to create false consensus. If you're right, defend it. If you're wrong, retract it honestly.
 
 ## When there is no assigned review
 

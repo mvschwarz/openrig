@@ -9,15 +9,15 @@ describe("aliasModelPinAdvisory — names the canonical id for an alias pin", ()
     expect(adv).not.toBeNull();
     expect(adv).toContain("pods.dev.members.driver");
     expect(adv).toContain('"fable"');
-    expect(adv).toContain("claude-fable-5"); // the canonical id
+    expect(adv).toContain('"claude-fable-5-1"'); // the canonical id
   });
 
   it("case/whitespace-insensitive on the alias", () => {
-    expect(aliasModelPinAdvisory("  Fable ", "x")).toContain("claude-fable-5");
+    expect(aliasModelPinAdvisory("  Fable ", "x")).toContain('"claude-fable-5-1"');
   });
 
   it("returns null for a canonical pin, an unknown pin, or a non-string", () => {
-    expect(aliasModelPinAdvisory("claude-fable-5", "x")).toBeNull();
+    expect(aliasModelPinAdvisory("claude-fable-5-1", "x")).toBeNull();
     expect(aliasModelPinAdvisory("gpt-5.6-codex", "x")).toBeNull();
     expect(aliasModelPinAdvisory(undefined, "x")).toBeNull();
     expect(aliasModelPinAdvisory(42 as unknown, "x")).toBeNull();
@@ -41,10 +41,10 @@ describe("RigSpecSchema.validate — alias pins surface as advisories, never err
 
   it("an alias-form pin emits a named advisory and does NOT affect validity/errors", () => {
     const aliasResult = RigSpecSchema.validate(base("fable"));
-    const canonResult = RigSpecSchema.validate(base("claude-fable-5"));
+    const canonResult = RigSpecSchema.validate(base("claude-fable-5-1"));
 
     // advisory present for the alias, absent for the canonical pin
-    expect(aliasResult.advisories?.some((a) => a.includes("claude-fable-5"))).toBe(true);
+    expect(aliasResult.advisories?.some((a) => a.includes("claude-fable-5-1"))).toBe(true);
     expect(canonResult.advisories ?? []).toHaveLength(0);
 
     // FAIL-OPEN: the advisory changes neither `valid` nor `errors`.
@@ -65,9 +65,9 @@ describe("LegacyRigSpecSchema.validate — alias pins surface as advisories on t
 
   it("a legacy node's alias-form pin emits the named advisory (fail-open)", () => {
     const aliasResult = LegacyRigSpecSchema.validate(legacyBase("fable"));
-    const canonResult = LegacyRigSpecSchema.validate(legacyBase("claude-fable-5"));
+    const canonResult = LegacyRigSpecSchema.validate(legacyBase("claude-fable-5-1"));
 
-    expect(aliasResult.advisories?.some((a) => a.includes("claude-fable-5"))).toBe(true);
+    expect(aliasResult.advisories?.some((a) => a.includes("claude-fable-5-1"))).toBe(true);
     expect(canonResult.advisories ?? []).toHaveLength(0);
     // FAIL-OPEN: identical valid/errors with vs without the alias.
     expect(aliasResult.valid).toBe(canonResult.valid);
@@ -85,7 +85,7 @@ describe("LegacyRigSpecSchema.validate — alias pins surface as advisories on t
     });
     expect(result.valid).toBe(false);
     expect(result.errors).toContain("each node must have a string id");
-    expect(result.advisories?.some((a) => a.includes("claude-fable-5"))).toBe(true);
+    expect(result.advisories?.some((a) => a.includes("claude-fable-5-1"))).toBe(true);
     expect(result.advisories?.some((a) => a.includes("nodes.?"))).toBe(true); // fallback location
   });
 });

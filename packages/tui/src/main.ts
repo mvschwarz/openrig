@@ -21,8 +21,11 @@ import { demoSnapshot } from "./demo-data.js";
 import { DaemonClient, launchNodeNotice } from "./daemon-client.js";
 import { hydrateSnapshot } from "./hydrate.js";
 import { createLiveRefresh } from "./live.js";
+import { resolvePendingAddress } from "./pending-address.js";
 import { subscribeActivityEvents } from "./live-events.js";
+import { checkVersionSkew, parseCliIdentity } from "./version-skew.js";
 import { execFile } from "node:child_process";
+import { helperCwd } from "./helper-cwd.js";
 import { probeCrashCart, type CrashCartRenderOpts } from "./crash-cart/from-emit.js";
 import { resolveCrashCartKey, type CrashCartKeyAction } from "./crash-cart/keys.js";
 import { driveRestoreLifecycle, buildRestoreLifecycleVM } from "./crash-cart/restore-lifecycle.js";
@@ -60,7 +63,7 @@ async function run(): Promise<void> {
   let snapshot: FleetSnapshot = demo ? demoSnapshot() : emptySnapshot();
   let timeReadWarning = false;
   const timeSetting = new Promise<unknown>((resolve) => {
-    execFile(cliExecutable, cliArgs(["config", "get", "ui.timezone", "--json"]), { timeout: 5000, maxBuffer: 8192 }, (err, stdout, stderr) => {
+    execFile(cliExecutable, cliArgs(["config", "get", "ui.timezone", "--json"]), { cwd: helperCwd(), timeout: 5000, maxBuffer: 8192 }, (err, stdout, stderr) => {
       timeReadWarning = !!err || stderr.includes("ui.timezone");
       if (err) return resolve(null);
       try { resolve(JSON.parse(stdout).value); } catch { resolve(null); }
@@ -137,10 +140,31 @@ async function run(): Promise<void> {
   let drawnSettled = false;
   let previousPage: { state: ReturnType<typeof view.get>; snapshot: FleetSnapshot } | undefined;
   let activityEvents: ReturnType<typeof subscribeActivityEvents> | null = null;
+  // A daemon upgraded or restarted under this TUI: on the first connect and every reconnect, compare
+  // builds; on a mismatch stop the background reads (event-driven and quiet) until the TUI restarts.
+  const tuiBuild = parseCliIdentity(process.env["OPENRIG_TUI_CLI_IDENTITY"]);
+  let buildMismatch = false;
+  let eventsDropped = false;
+  function checkDaemonBuild(attempt = 0): void {
+    if (!live || !client || buildMismatch) return;
+    void checkVersionSkew(tuiBuild, () => client.health()).then((skew) => {
+      // A loaded daemon can time out a /healthz read; retry twice before waiting for the next reconnect.
+      if (skew.state === "unreadable" && attempt < 2) { setTimeout(() => checkDaemonBuild(attempt + 1), 15_000).unref(); return; }
+      if (skew.state !== "mismatch" || buildMismatch) return;
+      buildMismatch = true;
+      activityEvents?.close();
+      live.stopBackground(skew.message);
+    });
+  }
   function enableLive(): boolean {
     if (!live || !client || startup?.state.connection !== "up") return false;
+    if (!liveEnabled) checkDaemonBuild();
     liveEnabled = true;
-    activityEvents ??= subscribeActivityEvents({ open: () => client.openActivityEvents(), onEvent: (event) => { if (event.type.startsWith("proof.")) reviewCache.clear(); void live.invalidate(); }, onStatus: (status) => live.connectionStatus(status) });
+    if (!buildMismatch) activityEvents ??= subscribeActivityEvents({ open: () => client.openActivityEvents(), onEvent: (event) => { if (event.type.startsWith("proof.")) reviewCache.clear(); live.pushed(); }, onStatus: (status) => {
+      if (status === "dropped") eventsDropped = true;
+      else if (status === "connected" && eventsDropped) { eventsDropped = false; checkDaemonBuild(); }
+      live.connectionStatus(status);
+    } });
     return true;
   }
   function commandContext() {
@@ -169,6 +193,7 @@ async function run(): Promise<void> {
     if (live) snapshot = { ...live.snapshot(),
       ...(!liveEnabled ? { readErrors: [`Live data not loaded · connection ${startup?.state.connection ?? "probing"} · L Local reading · S Startup`] } : {}),
       launchingCli: process.env["OPENRIG_TUI_CLI_IDENTITY"]?.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 180) };
+    if (resolvePendingAddress(view, liveEnabled && live ? live.load() : null)) refreshFromActivity();
     const opts = { cols, rows, nowMs, completion, controlSocketPath, colorMode: style.mode, commandContext: commandContext(), ...crashCartOpts, ...(startup?.state.open && !view.get().palette ? { startup: startup.state } : {}), restoreScroll: restoreScrollOffset, ...(liveEnabled && live ? { load: live.load(), rowFlashes: live.flashes() } : {}) };
     if (liveEnabled && live?.load().settled) previousPage = { state: { ...view.get() }, snapshot };
     const pageOptions = { ...opts, ...(liveEnabled && !live?.load().settled ? { previousPage } : {}) };
@@ -192,7 +217,7 @@ async function run(): Promise<void> {
   // JSON is the truth even on a hint non-zero exit). Any failure → normal TUI (never a fabricated cockpit).
   const runCrashCartVerb = (): Promise<string> =>
     new Promise((resolve, reject) => {
-      execFile(cliExecutable, cliArgs(["crash-cart", "--json"]), { timeout: 5000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+      execFile(cliExecutable, cliArgs(["crash-cart", "--json"]), { cwd: helperCwd(), timeout: 5000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
         if (stdout && stdout.trim()) resolve(stdout);
         else reject(new Error(stderr.trim() || err?.message || "crash-cart: no output"));
       });
@@ -200,7 +225,7 @@ async function run(): Promise<void> {
   if (client) startup = new StartupController({
     client, home: process.env["OPENRIG_HOME"] ?? "default local instance", probe: runCrashCartVerb,
     startDaemon: () => new Promise<void>((resolve, reject) => {
-      execFile(cliExecutable, cliArgs(daemonStartArgs(client.baseUrl)), { timeout: 30_000 }, (error, stdout, stderr) => {
+      execFile(cliExecutable, cliArgs(daemonStartArgs(client.baseUrl)), { cwd: helperCwd(), timeout: 30_000 }, (error, stdout, stderr) => {
         if (error) reject(new Error(`Daemon start did not confirm completion: ${stderr.trim() || stdout.trim() || error.message}`));
         else resolve();
       });
@@ -293,7 +318,7 @@ async function run(): Promise<void> {
     restoreCancelRequested = false;
     restoreScrollOffset = 0;
     new Promise<void>((resolve, reject) =>
-      execFile("rig", ["daemon", "start"], { timeout: 30_000 }, (err) => (err ? reject(err) : resolve())),
+      execFile("rig", ["daemon", "start"], { cwd: helperCwd(), timeout: 30_000 }, (err) => (err ? reject(err) : resolve())),
     )
       .then(() => pollRestore(daemonClient))
       .catch((e: unknown) => {
@@ -330,7 +355,7 @@ async function run(): Promise<void> {
       startingDaemon = true;
       crashCartOpts = { ...crashCartOpts, starting: client!.baseUrl };
       draw();
-      execFile(cliExecutable, cliArgs(startArgs), { timeout: 30_000 }, (error, stdout, stderr) => {
+      execFile(cliExecutable, cliArgs(startArgs), { cwd: helperCwd(), timeout: 30_000 }, (error, stdout, stderr) => {
         startingDaemon = false;
         if (error) {
           crashCartOpts = { unavailable: `Daemon start did not confirm completion. Retry reads actual state before another attempt. ${stderr.trim() || stdout.trim() || error.message}` };
@@ -619,10 +644,11 @@ async function run(): Promise<void> {
           perform(parseCommand("select-text", view.get().sections));
           continue;
         }
-        // SCOPES accelerators: m/n ride the REGISTERED commands (one path).
+        // SCOPES accelerators: M/N ride the REGISTERED commands (one path). Upper case, like S and
+        // L, so a typed verb that starts with m or n (mission, narrative, needs) reaches the line.
         if (inputLine === "" && view.get().section === "scopes" && view.get().scopesSelected) {
-          if (ev.ch === "m") { perform(parseCommand("reqs", view.get().sections)); continue; }
-          if (ev.ch === "n") { perform(parseCommand("narrative", view.get().sections)); continue; }
+          if (ev.ch === "M") { perform(parseCommand("reqs", view.get().sections)); continue; }
+          if (ev.ch === "N") { perform(parseCommand("narrative", view.get().sections)); continue; }
         }
         if (ev.ch === "?" && inputLine === "") {
           // The registered palette trigger — through the grammar, never beside it.
@@ -633,7 +659,8 @@ async function run(): Promise<void> {
           void shutdown();
           return;
         }
-        if (ev.ch === "f" && inputLine === "") {
+        // F, not f: feed and find start with f and must stay typeable on an empty line.
+        if (ev.ch === "F" && inputLine === "") {
           view.dispatch({ type: "footer" });
           continue;
         }
@@ -645,6 +672,20 @@ async function run(): Promise<void> {
             performCrashCart(cca);
             continue;
           }
+        }
+        if (inputLine === "" && (ev.ch === "j" || ev.ch === "k")) {
+          if (lastScreen) {
+            const key = ev.ch === "j" ? "down" : "up";
+            const delta = key === "down" ? 1 : -1;
+            const action = resolveKeyAction(
+              { type: "key", key, action: { type: "select", delta } },
+              view.get(),
+              lastScreen,
+              computeExplorerRows(view.get(), snapshot).length,
+            );
+            if (action) perform(action);
+          }
+          continue;
         }
         inputLine += ev.ch;
       } else if (ev.type === "key" && ev.key === "backspace") {

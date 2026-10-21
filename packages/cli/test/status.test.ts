@@ -184,6 +184,33 @@ describe("rig status", () => {
       }
     });
 
+    it("shows a recovered boot failure as history under a ready kernel (#1042)", async () => {
+      const recovered = createDaemonServer([], { available: false }, {
+        code: 200,
+        body: {
+          kernel_state: "ready",
+          last_boot_failure: { state: "bootstrap_failed", detail: "startup gate timed out after 30s", at: "2026-10-08T12:00:00.000Z" },
+        },
+      });
+      const recoveredPort = await recovered.listen();
+      try {
+        const program = new Command();
+        program.addCommand(statusCommand({
+          lifecycleDeps: mockLifecycleDeps({
+            exists: vi.fn((p: string) => p === STATE_FILE),
+            readFile: vi.fn((p: string) => (p === STATE_FILE ? JSON.stringify(runningState(recoveredPort)) : null)),
+            fetch: vi.fn(async () => ({ ok: true })),
+          }),
+          clientFactory: (baseUrl) => new DaemonClient(baseUrl),
+        }));
+        const output = (await captureLogs(() => program.parseAsync(["node", "rig", "status"]))).join("\n");
+        expect(output).toContain("Kernel: ready");
+        expect(output).toContain("  Recovered from an earlier boot failure (bootstrap_failed at 2026-10-08T12:00:00.000Z): startup gate timed out after 30s");
+      } finally {
+        await recovered.close();
+      }
+    });
+
     it("marks the workspace root as an override when OPENRIG_WORKSPACE_ROOT is set", async () => {
       const prev = process.env.OPENRIG_WORKSPACE_ROOT;
       process.env.OPENRIG_WORKSPACE_ROOT = process.cwd(); // a real existing dir
@@ -501,5 +528,196 @@ describe("rig status", () => {
 
       expect(logs.join("\n")).toMatch(/failed.*summary|HTTP 500/i);
     });
+  });
+});
+
+describe("rig status --json", () => {
+  function runningDeps(port: number): StatusDeps {
+    return {
+      lifecycleDeps: mockLifecycleDeps({
+        exists: vi.fn((p: string) => p === STATE_FILE),
+        readFile: vi.fn((p: string) => (p === STATE_FILE ? JSON.stringify(runningState(port)) : null)),
+        fetch: vi.fn(async () => ({ ok: true })),
+      }),
+      clientFactory: (baseUrl) => new DaemonClient(baseUrl),
+    };
+  }
+
+  async function run(deps: StatusDeps, args: string[]): Promise<string> {
+    const program = new Command();
+    program.addCommand(statusCommand(deps));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "status", ...args]));
+    return logs.join("\n");
+  }
+
+  describe("with a running daemon", () => {
+    const rigs = [
+      { id: "r1", name: "alpha", nodeCount: 3, latestSnapshotAt: "2026-03-24 01:00:00", latestSnapshotId: "snap-1" },
+      { id: "r2", name: "beta", nodeCount: 1, latestSnapshotAt: null, latestSnapshotId: null },
+    ];
+    let srv: ReturnType<typeof createDaemonServer>;
+    let port: number;
+    beforeAll(async () => {
+      srv = createDaemonServer(rigs, { available: true }, { code: 200, body: { kernel_state: "ready" } });
+      port = await srv.listen();
+    });
+    afterAll(async () => { await srv.close(); });
+
+    it("prints one JSON object with daemon, kernel, rigs and cmux", async () => {
+      const out = await run(runningDeps(port), ["--json"]);
+      const parsed = JSON.parse(out);
+      expect(parsed.daemon).toEqual({ state: "running", reachable: true, pid: 123, port, healthy: true });
+      expect(parsed.rigs).toEqual(rigs);
+      expect(parsed.cmux).toEqual({ available: true });
+      expect(parsed.kernel).toEqual({ state: "ready", lastBootFailure: null });
+    });
+
+    it("leaves the text output without --json unchanged", async () => {
+      const out = await run(runningDeps(port), []);
+      expect(out).toContain(`Daemon running on port ${port}`);
+      expect(out).toContain("Kernel: ready (boots on daemon-start; distinct from daemon health)");
+      expect(out).toContain("2 rig(s):");
+      expect(out).toContain("cmux: available");
+      expect(() => JSON.parse(out)).toThrow();
+    });
+  });
+
+  it("reports a kernel boot failure and an untracked kernel", async () => {
+    const failed = createDaemonServer([], { available: false }, {
+      code: 200,
+      body: { kernel_state: "ready", last_boot_failure: { state: "failed", detail: "boom", at: "2026-03-24T00:00:00Z" } },
+    });
+    const untracked = createDaemonServer([], { available: false }, { code: 503, body: {} });
+    const [p1, p2] = [await failed.listen(), await untracked.listen()];
+    try {
+      const a = JSON.parse(await run(runningDeps(p1), ["--json"]));
+      expect(a.kernel.lastBootFailure).toEqual({ state: "failed", detail: "boom", at: "2026-03-24T00:00:00Z" });
+      expect(a.cmux).toEqual({ available: false });
+      const b = JSON.parse(await run(runningDeps(p2), ["--json"]));
+      expect(b.kernel.state).toBe("not_tracked");
+    } finally {
+      await failed.close();
+      await untracked.close();
+    }
+  });
+
+  describe("when the daemon is not answering", () => {
+    const noLifecycle = { kind: "unknown", lastSeen: null, stoppedAt: null };
+    const refused = () => Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:7433"), { code: "ECONNREFUSED" });
+    const noClient = () => vi.fn() as unknown as StatusDeps["clientFactory"];
+
+    async function parsedJson(deps: StatusDeps) {
+      process.exitCode = undefined;
+      const parsed = JSON.parse(await run(deps, ["--json"]));
+      expect(process.exitCode).toBeUndefined();
+      expect(deps.clientFactory).not.toHaveBeenCalled();
+      expect(parsed).toMatchObject({ kernel: null, workspaceRoot: null, rigs: null, cmux: null });
+      return parsed;
+    }
+
+    it("stopped (connection refused): reachable false, exit 0 like the text path", async () => {
+      const parsed = await parsedJson({
+        lifecycleDeps: mockLifecycleDeps({ exists: vi.fn(() => false), fetch: vi.fn(async () => { throw refused(); }) }),
+        clientFactory: noClient(),
+      });
+      expect(parsed.daemon).toEqual({ state: "stopped", reachable: false, message: "Daemon not running.", lifecycle: noLifecycle });
+    });
+
+    it("stale (state file names a dead pid): reachable false", async () => {
+      const parsed = await parsedJson({
+        lifecycleDeps: mockLifecycleDeps({
+          exists: vi.fn((p: string) => p === STATE_FILE),
+          readFile: vi.fn((p: string) => (p === STATE_FILE ? JSON.stringify(runningState(7433)) : null)),
+          isProcessAlive: vi.fn(() => false),
+        }),
+        clientFactory: noClient(),
+      });
+      expect(parsed.daemon).toEqual({ state: "stale", reachable: false, message: "Daemon not running.", lifecycle: noLifecycle });
+    });
+
+    it("unverified (probe neither answered nor refused): reachable null, not false", async () => {
+      const parsed = await parsedJson({
+        lifecycleDeps: mockLifecycleDeps({ exists: vi.fn(() => false), fetch: vi.fn(async () => { throw new Error("timed out"); }) }),
+        clientFactory: noClient(),
+      });
+      expect(parsed.daemon).toEqual({
+        state: "unverified",
+        reachable: null,
+        message: "Daemon did not respond — it may be busy or stopped (state not confirmed).",
+      });
+    });
+
+    it("unverified with a live sibling home: reachable null and the sibling hint", async () => {
+      const parsed = await parsedJson({
+        lifecycleDeps: mockLifecycleDeps({
+          homeDir: "/home/x/.openrig",
+          exists: vi.fn((p: string) => p === "/home/x/.openrig/HOME-MOVED"),
+          readFile: vi.fn((p: string) => (p === "/home/x/.openrig/HOME-MOVED" ? "/home/x/.openrig-new\n" : null)),
+          fetch: vi.fn(async () => { throw refused(); }),
+        }),
+        clientFactory: noClient(),
+      });
+      expect(parsed.daemon).toEqual({
+        state: "unverified",
+        reachable: null,
+        message: "Daemon did not respond — it may be busy or stopped (state not confirmed).",
+        probeErrorCode: "ECONNREFUSED",
+        siblingHint: { resolvedHome: "/home/x/.openrig", siblingHome: "/home/x/.openrig-new" },
+      });
+    });
+
+    it("running but unhealthy, /healthz answered: reachable true with the daemon's evidence", async () => {
+      const eventLoop = { lagMeanMs: 900, lagP99Ms: 2000, utilization: 0.99, lastTickAgeMs: 5000, healthy: false };
+      const parsed = await parsedJson({
+        lifecycleDeps: mockLifecycleDeps({
+          exists: vi.fn((p: string) => p === STATE_FILE),
+          readFile: vi.fn((p: string) => (p === STATE_FILE ? JSON.stringify(runningState(7433)) : null)),
+          fetch: vi.fn(async () => ({ ok: true, json: async () => ({ eventLoop }) })),
+        }),
+        clientFactory: noClient(),
+      });
+      expect(parsed.daemon).toEqual({
+        state: "running",
+        reachable: true,
+        pid: 123,
+        port: 7433,
+        healthy: false,
+        reason: "event-loop-starved",
+        eventLoop,
+      });
+    });
+
+    it("running but /healthz did not answer: reachable null, reason unresponsive", async () => {
+      const parsed = await parsedJson({
+        lifecycleDeps: mockLifecycleDeps({
+          exists: vi.fn((p: string) => p === STATE_FILE),
+          readFile: vi.fn((p: string) => (p === STATE_FILE ? JSON.stringify(runningState(7433)) : null)),
+          isProcessAlive: vi.fn(() => true),
+          fetch: vi.fn(async () => { throw new Error("timed out"); }),
+        }),
+        clientFactory: noClient(),
+      });
+      expect(parsed.daemon).toEqual({ state: "running", reachable: null, pid: 123, port: 7433, healthy: false, reason: "unresponsive" });
+    });
+  });
+
+  it("keeps exit code 1 and names the failure when the rig summary fails", async () => {
+    const server = http.createServer((req, res) => {
+      const url = new URL(req.url!, "http://localhost");
+      if (url.pathname === "/api/rigs/summary") { res.writeHead(500, { "Content-Type": "application/json" }); res.end("{}"); return; }
+      if (url.pathname === "/healthz") { res.writeHead(200, { "Content-Type": "application/json" }); res.end("{}"); return; }
+      res.writeHead(404); res.end();
+    });
+    const port = await new Promise<number>((r) => server.listen(0, () => r((server.address() as { port: number }).port)));
+    try {
+      process.exitCode = undefined;
+      const parsed = JSON.parse(await run(runningDeps(port), ["--json"]));
+      expect(parsed.error).toMatch(/rig summary \(HTTP 500\)/);
+      expect(parsed.rigs).toBeNull();
+      expect(process.exitCode).toBe(1);
+    } finally {
+      process.exitCode = undefined;
+      await new Promise<void>((r) => server.close(() => r()));
+    }
   });
 });

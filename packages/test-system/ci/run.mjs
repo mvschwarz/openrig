@@ -1,7 +1,7 @@
 // Runs INSIDE the network-disabled testbed, never on an operator's working host.
 // The existing pipeline, YAML, assertions, CLI, daemon and SQLite remain real.
 import assert from 'node:assert/strict';
-import { readFileSync, realpathSync } from 'node:fs';
+import { readFileSync, realpathSync, writeFileSync, mkdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { networkInterfaces } from 'node:os';
@@ -14,12 +14,13 @@ assert.notEqual(process.getuid(), 0, 'run as the unprivileged testbed user');
 assert.ok(Object.values(networkInterfaces()).flat().every(address => address.internal),
   'requires --network none');
 const mode = process.argv[2];
-assert.ok(['healthy', 'lost-baton'].includes(mode), 'expected healthy or lost-baton');
+assert.ok(['healthy', 'lost-baton', 'seeded'].includes(mode), 'expected healthy or lost-baton');
 const caseName = process.argv[3] ?? 'fixture';
 const passingOnly = Object.hasOwn(PASSING_CASES, caseName);
 const selected = passingOnly ? PASSING_CASES[caseName] : CASES[caseName];
 assert.ok(selected, 'unknown scenario case');
 assert.ok(!passingOnly || mode === 'healthy', 'a passing-only case runs healthy only');
+assert.ok(mode !== 'seeded' || selected.kind === 'hook', 'seeded mode is bound to the hook control');
 const rigBin = realpathSync('/usr/local/bin/rig');
 const scenario = join('/opt/openrig-testbed', selected.file);
 const records = [];
@@ -34,6 +35,39 @@ try {
     baseEnv: { PATH: '/usr/local/bin:/usr/bin:/bin', TERM: 'xterm-256color' },
     deps: {
       appendRecord: record => records.push(record),
+      onHookContext: hook => {
+        report.hook = hook;
+        if (mode === 'seeded') report.fault = JSON.parse(readFileSync(report.faultReceipt, 'utf8'));
+      },
+      refocusEnv: env => {
+        if (mode !== 'seeded') return env;
+        assert.deepEqual(report.seed, { class: 'parked-baton-as-current', enabled: true });
+        const dir = join(env.OPENRIG_HOME, 'planted-trace-fault'); mkdirSync(dir, { recursive: true });
+        const shim = join(dir, 'python'); report.faultReceipt = join(dir, 'effect.json');
+        // Plant the held-as-current regression in this hook's trace child, not in the captured hook output:
+        // the real held row is moved into the candidates as the seat's current work, and the real trace renders it.
+        writeFileSync(shim, `#!/usr/bin/env python3
+import sys, subprocess, json, os
+args = sys.argv[1:]
+evidence = json.loads(sys.stdin.read() or "null")
+held = (evidence or {}).get("held") or []
+node = os.path.join((evidence or {}).get("missionsRoot") or "", "regression", "slices", "01-context")
+if "--packet" not in args or "--work-candidates" not in args or [r.get("qitemId") for r in held] != ["refocus-baton"] or not os.path.isdir(node):
+    sys.stderr.write("expected the packet with exactly one real held row before planting fault")
+    sys.exit(1)
+row = held[0]
+evidence["held"] = []
+evidence["candidates"] = [{"kind": "tag", "qitemId": row["qitemId"], "mission": "regression", "slice": "SCN.1",
+    "workNodePath": node, "intent": None, "source": "tag mission:regression + slice:SCN.1 on row refocus-baton", "unresolved": None}]
+r = subprocess.run([sys.executable, *args], input=json.dumps(evidence), capture_output=True, text=True)
+with open(os.environ["SCENARIO_TRACE_FAULT_RECEIPT"], "w") as f:
+    json.dump({"class": "parked-baton-as-current", "movedRows": 1}, f)
+sys.stdout.write(r.stdout)
+sys.stderr.write(r.stderr)
+sys.exit(r.returncode)
+`, { mode: 0o755 });
+        return { ...env, PYTHON: shim, SCENARIO_TRACE_FAULT_RECEIPT: report.faultReceipt };
+      },
       seedRegression: async regressionClass => {
         assert.equal(regressionClass, selected.seed, 'unsupported regression class');
         assert.equal(report.seed, undefined, 'seed must be armed exactly once');
@@ -43,7 +77,7 @@ try {
     },
     daemon: async (scaffold, options) => {
       const daemon = await defaultHostDaemon(scaffold, options);
-      if (mode === 'healthy') return daemon;
+      if (mode === 'healthy' || selected.kind === 'hook') return daemon;
       return {
         ...daemon,
         restart: async () => {

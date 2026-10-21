@@ -48,7 +48,8 @@ it.each([
   const desktop = vi.fn(async () => "window");
   const beforeSplits: string[] = [];
   const deps: WindowDeps = {
-    platform: "darwin", env: { HOME: dir }, exists: () => false,
+    herdrConfig: () => { throw new Error("tmux must not prepare Herdr config"); },
+    platform: "darwin", env: { TERM_PROGRAM: "Apple_Terminal", HOME: dir }, exists: () => false,
     exec: async (file, args) => {
       if (file === "/bin/sh") return "tmux";
       if (file === "/usr/bin/osascript") return desktop();
@@ -74,19 +75,20 @@ it.each([
   }
 }, 40_000);
 
-it("opens three real viewer panes while original sessions keep the same pane and process", async () => {
+it.each([false, true])("opens real viewer panes and preserves source processes (one role per window=%s)", async paged => {
   // Short names also fit macOS Unix sockets under CI's existing TMPDIR.
   const source = `ws-${randomUUID().slice(0, 12)}`;
   const viewer = `wv-${randomUUID().slice(0, 12)}`;
   sockets.push(source, viewer);
-  const names = ["tui", "advisor", "operator"];
+  const names = paged ? ["operator", "tui", "advisor"] : ["tui", "advisor", "operator"];
   for (const name of names) tmux(source, ["new-session", "-d", "-s", name, "sleep 60"]);
   const original = tmux(source, ["list-panes", "-a", "-F", "#{session_name} #{pane_id} #{pane_pid}"]);
   const panes = names.map(seat => ({ seat, label: seat, paneCommand: `tmux -L ${source} attach-session -t '=${seat}'` }));
-  const client = { baseUrl: "http://localhost:7433", get: async () => ({ status: 200, data: { planId: "fixture", status: {}, composed: { opened: panes, pages: [panes], columns: 3, absent: [], degraded: [] } } }) } as unknown as DaemonClient;
+  const client = { baseUrl: "http://localhost:7433", get: async () => ({ status: 200, data: { planId: "fixture", status: {}, composed: { opened: panes, pages: paged ? panes.map(pane => [pane]) : [panes], columns: paged ? 1 : 3, absent: [], degraded: [] } } }) } as unknown as DaemonClient;
   const desktop = vi.fn(async () => "window");
   const deps: WindowDeps = {
-    platform: "darwin", env: { HOME: "/fixture" }, exists: () => false,
+    herdrConfig: () => { throw new Error("tmux must not prepare Herdr config"); },
+    platform: "darwin", env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" }, exists: () => false,
     exec: async (file, args) => {
       if (file === "/bin/sh") return "tmux";
       if (file === "/usr/bin/osascript") return desktop();
@@ -96,12 +98,61 @@ it("opens three real viewer panes while original sessions keep the same pane and
     launch: vi.fn(async () => {}), sleep: async () => {}, id: () => "owned-view",
   };
   const result = await openTerminalWindow(client, "saved:kernel", "tmux", deps);
-  expect(result).toMatchObject({ ok: true, opened: names });
+  expect(result).toMatchObject({ ok: true, opened: names, pages: paged ? 3 : 1 });
   expect(desktop).toHaveBeenCalledTimes(1);
-  const actual = tmux(viewer, ["list-panes", "-t", "openrig-view-owned-view:view-1", "-F", "#{pane_title}|#{pane_top}|#{pane_left}|#{pane_dead}"]).trim().split("\n").map(line => line.split("|"));
-  expect(actual.map(row => row[0])).toEqual(names);
-  expect(actual.map(row => row[1])).toEqual(["0", "0", "0"]);
-  expect(actual.map(row => Number(row[2]))).toEqual([...actual.map(row => Number(row[2]))].sort((a, b) => a - b));
-  expect(actual.every(row => row[3] === "0")).toBe(true);
+  expect(tmux(viewer, ["list-windows", "-t", "=openrig-view-owned-view", "-F", "#{window_name}|#{window_active}"]).trim().split("\n"))
+    .toEqual(paged ? ["view-1|1", "view-2|0", "view-3|0"] : ["view-1|1"]);
+  for (const [index, expected] of (paged ? names.map(name => [name]) : [names]).entries()) {
+    const actual = tmux(viewer, ["list-panes", "-t", `openrig-view-owned-view:view-${index + 1}`, "-F", "#{pane_title}|#{pane_top}|#{pane_left}|#{pane_dead}"]).trim().split("\n").map(line => line.split("|"));
+    expect(actual.map(row => row[0])).toEqual(expected);
+    expect(actual.map(row => row[1])).toEqual(expected.map(() => "0"));
+    expect(actual.map(row => Number(row[2]))).toEqual([...actual.map(row => Number(row[2]))].sort((a, b) => a - b));
+    expect(actual.every(row => row[3] === "0")).toBe(true);
+  }
   expect(tmux(source, ["list-panes", "-a", "-F", "#{session_name} #{pane_id} #{pane_pid}"])).toBe(original);
+});
+
+
+it.each([80, 119, 120, 174])("opens the measured %i-column welcome in an owned viewer without replacing source panes", async columns => {
+  const id = randomUUID().slice(0, 12);
+  const source = `ws-${id}`, viewer = `wv-${id}`;
+  sockets.push(source, viewer);
+  const names = ["operator", "dashboard", "advisor"];
+  for (const name of names) tmux(source, ["new-session", "-d", "-s", name, "sleep 60"]);
+  const snapshot = () => tmux(source, ["list-panes", "-a", "-F", "#{session_name}|#{pane_id}|#{pane_pid}"]);
+  const original = snapshot();
+  const panes = names.map(seat => ({ seat, label: seat, paneCommand: `tmux -L ${source} attach-session -t '=${seat}'` }));
+  const get = vi.fn(async (url: string) => {
+    const width = Number(new URL(url, "http://fixture").searchParams.get("viewportColumns"));
+    const pages = width >= 120 ? [[panes[1]!, panes[0]!], [panes[2]!]] : panes.map(pane => [pane]);
+    return { status: 200, data: { planId: "fixture", status: {}, composed: { id: "kernel", kernelLayout: "dual-runtime", opened: pages.flat(), pages, columns: width >= 120 ? 2 : 1, absent: [], degraded: [] } } };
+  });
+  const client = { baseUrl: "http://localhost:7433", get } as unknown as DaemonClient;
+  const desktop = vi.fn(async () => `window:${columns}`);
+  const deps: WindowDeps = {
+    herdrConfig: () => { throw new Error("tmux must not prepare Herdr config"); },
+    platform: "darwin", env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" }, exists: () => false,
+    exec: async (file, args) => {
+      if (file === "/bin/sh") return "tmux";
+      if (file === "/usr/bin/osascript") return desktop();
+      if (file === "tmux") return tmux(viewer, args);
+      throw new Error(`unexpected executable ${file}`);
+    },
+    launch: vi.fn(async () => {}), sleep: async () => {}, id: () => id,
+  };
+  const result = await openTerminalWindow(client, "saved:kernel", "tmux", deps);
+  const expected = columns >= 120 ? [["dashboard", "operator"], ["advisor"]] : names.map(name => [name]);
+  expect(result, JSON.stringify(result)).toMatchObject({ ok: true, opened: expected.flat(), pages: expected.length });
+  expect(desktop).toHaveBeenCalledTimes(1);
+  expect(get).toHaveBeenCalledWith(`/api/terminal/preview?view=saved%3Akernel&provider=herdr&viewportColumns=${columns}`);
+  const session = `openrig-view-${id}`;
+  expect(tmux(viewer, ["list-windows", "-t", `=${session}`, "-F", "#{window_name}|#{window_active}"]).trim().split("\n"))
+    .toEqual(expected.map((_page, i) => `view-${i + 1}|${i === 0 ? 1 : 0}`));
+  for (const [index, page] of expected.entries()) {
+    const actual = tmux(viewer, ["list-panes", "-t", `${session}:view-${index + 1}`, "-F", "#{pane_title}|#{pane_top}|#{pane_width}"]).trim().split("\n").map(line => line.split("|"));
+    expect(actual.map(row => row[0])).toEqual(page);
+    expect(actual.map(row => row[1])).toEqual(page.map(() => "0"));
+    if (page.length === 2) expect(Math.abs(Number(actual[0]![2]) - Number(actual[1]![2]))).toBeLessThanOrEqual(1);
+  }
+  expect(snapshot()).toBe(original);
 });

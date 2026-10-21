@@ -140,3 +140,16 @@ test("skill paths preserve their directory, and may refer to shipped helper file
   const report = await checkReferences(f.root,f.scope,f.authority);
   assert.deepEqual(report.failures.map((r) => r.value),["skills/wrong/good-skill/SKILL.md"]);
 });
+
+test("repository skills/ paths and the daemon's global skills are real homes; a missing skill still fails", async (t) => {
+  const f = fixture(t, '`skills/rigs/SKILL.md` [rigs](../skills/rigs/SKILL.md) `skills/global-only/SKILL.md` `skills/nowhere/SKILL.md`');
+  for (const dir of ["skills/rigs", "packages/daemon/assets/skills/global-only"]) {
+    fs.mkdirSync(path.join(f.root, dir), { recursive: true });
+    fs.writeFileSync(path.join(f.root, dir, "SKILL.md"), "# Skill");
+  }
+  const report = await checkReferences(f.root, f.scope, f.authority);
+  assert.deepEqual(report.failures.map((r) => r.value), ["skills/nowhere/SKILL.md"]);
+  assert.deepEqual(report.checked.map((r) => [r.kind, r.against]), [
+    ["path", "skills/rigs/SKILL.md"], ["path", "packages/daemon/assets/skills/global-only/SKILL.md"], ["link", "skills/rigs/SKILL.md"],
+  ]);
+});

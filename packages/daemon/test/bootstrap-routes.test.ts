@@ -102,6 +102,17 @@ describe("Bootstrap API routes", () => {
   });
 
   // T4: GET / lists runs
+  it("GET /api/bootstrap returns same-second runs newest first", async () => {
+    const runs = ["first", "second", "third"].map((ref) => setup.bootstrapRepo.createRun("rigspec", ref));
+    const stamp = db.prepare("UPDATE bootstrap_runs SET created_at = ? WHERE id = ?");
+    for (const run of runs) stamp.run("2026-10-10 12:00:00", run.id);
+    const later = setup.bootstrapRepo.createRun("rigspec", "later-second");
+    stamp.run("2026-10-10 12:00:01", later.id);
+    const response = await app.request("/api/bootstrap");
+    expect(response.status).toBe(200);
+    expect((await response.json()).map((run: { id: string }) => run.id)).toEqual([later.id, ...runs.map((run) => run.id).reverse()]);
+  });
+
   it("GET /api/bootstrap lists runs", async () => {
     const specPath = writeSpec(SIMPLE_SPEC_YAML);
 

@@ -10,8 +10,8 @@ import {
   getDaemonUrl,
   startDaemon,
   waitForKernelReady,
-  type LifecycleDeps,
-} from "../daemon-lifecycle.js";
+  type LifecycleDeps, daemonStatusGuard } from "../daemon-lifecycle.js";
+import { shouldAutoStartDaemon } from "../daemon-reachability.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
@@ -23,6 +23,8 @@ interface RigSummary {
   name: string;
   nodeCount?: number;
   lifecycleState?: string;
+  // Includes intentional stops for restore selection; absent on older daemons.
+  restoreLifecycleState?: string;
 }
 
 interface PlanPreviewNode {
@@ -56,6 +58,33 @@ export interface StartCandidate {
   nodeCount: number;
   lastActivity: string | null;
   preview: PlanPreviewResponse | null;
+  /** What the seats say about the last stop; read only under `--last`, where `down` is kept down. */
+  lastStop: LastStopState | null;
+}
+
+/**
+ * `down`: at least one seat was launched and every launched seat carries the recorded stop
+ * intent (`intentionallyStopped`, set by `rig down` and `rig seat stop`).
+ * `was_running`: anything else, including a plain `exited` without the intent, a seat the boot
+ * reconciler marked `detached` when tmux was lost, and a daemon that does not report the intent.
+ * `unknown`: the seat statuses could not be read.
+ */
+export type LastStopState = "was_running" | "down" | "unknown";
+
+export function lastStopState(nodes: unknown): LastStopState {
+  if (!Array.isArray(nodes)) return "unknown";
+  let launched = 0;
+  let allStoppedOnPurpose = true;
+  for (const node of nodes) {
+    if (!node || typeof node !== "object" || !("sessionStatus" in node)) return "unknown";
+    const { sessionStatus, intentionallyStopped } = node as { sessionStatus: unknown; intentionallyStopped?: unknown };
+    if (sessionStatus !== null && typeof sessionStatus !== "string") return "unknown";
+    if (intentionallyStopped !== undefined && typeof intentionallyStopped !== "boolean") return "unknown";
+    if (sessionStatus === null) continue; // never launched: neutral
+    launched++;
+    if (intentionallyStopped !== true) allStoppedOnPurpose = false;
+  }
+  return launched > 0 && allStoppedOnPurpose ? "down" : "was_running";
 }
 
 /** Default interactive [y/N] prompt (same shape as up.ts, reused for the TTY path). */
@@ -153,15 +182,19 @@ export function startCommand(depsOverride?: StartDeps): Command {
     .addHelpText("after", `
 Examples:
   rig start                         Interactive: daemon + kernel + pick-and-restore
-  rig start --last                  Headless: restore everything that was running
+  rig start --last                  Headless: restore everything that was running, except rigs stopped on purpose
   rig start --all                   Headless: restore all rigs with restore-usable snapshots
   rig start --rigs prod-rig dev-rig Headless: restore only the named rigs
+
+When the daemon is restoring a kernel a reboot left down, rig start goes on to
+your other rigs. Exit 0 then does not mean the kernel is ready (check rig
+status); a restore that returned without a ready kernel exits 1.
 `);
   const getDepsF = (): StartDeps =>
     depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
   cmd
-    .option("--last", "Headless: restore all rigs that were last running (zero prompts)")
+    .option("--last", "Headless: restore all rigs that were last running; a rig stopped on purpose (with rig down or rig seat stop) stays down (zero prompts)")
     .option("--all", "Headless: restore all rigs with restore-usable snapshots (zero prompts)")
     .option("--rigs <names...>", "Headless: restore only the named rigs (zero prompts)")
     .option("--json", "JSON output for agents")
@@ -170,7 +203,8 @@ Examples:
 
       // ---- PHASE 1: ensure daemon is running ----
       let status = await getDaemonStatus(deps.lifecycleDeps);
-      if (status.state !== "running") {
+      // A busy daemon of this home gets the request instead of a start attempt (shouldAutoStartDaemon).
+      if (shouldAutoStartDaemon(status)) {
         if (!opts.json) console.log("Starting daemon...");
         try {
           const { ConfigStore } = await import("../config-store.js");
@@ -225,11 +259,7 @@ Examples:
         }
       }
 
-      if (status.state !== "running" || status.healthy === false) {
-        console.error("Daemon is not healthy. Check with: rig daemon status");
-        process.exitCode = 1;
-        return;
-      }
+      if (!daemonStatusGuard(status)) return;
 
       const baseUrl = getDaemonUrl(status);
       const client = deps.clientFactory(baseUrl);
@@ -237,9 +267,29 @@ Examples:
       // ---- PHASE 2: kernel invariant — verify/await kernel readiness ----
       if (!opts.json) console.log("Waiting for kernel...");
       const kernelResult = await waitForKernelReady(baseUrl, KERNEL_WAIT_MS);
-      if (!kernelResult.ok) {
+      // Restoring an existing kernel a reboot left down: before that restore existed the kernel read
+      // `skipped` here and start went on to the other rigs, so it still does, saying what it saw.
+      let kernelRestore: { state: "restoring" | "failed"; kernelState: string | null; detail: string | null } | undefined;
+      if (!kernelResult.ok && kernelResult.existingRestore) {
+        // The restore returned without a ready kernel (errors, or seats that did not come up).
+        const failed = kernelResult.existingRestore === "finished" || kernelResult.kernelState === "bootstrap_failed";
+        kernelRestore = { state: failed ? "failed" : "restoring", kernelState: kernelResult.kernelState, detail: kernelResult.detail };
+        if (failed) {
+          console.error(`Kernel restore did not bring the kernel up: state=${kernelResult.kernelState ?? "unknown"}, detail=${kernelResult.detail ?? "none"}`);
+          console.error("Recover it with: rig up kernel --existing");
+          process.exitCode = 1;
+        } else if (!opts.json) {
+          // Not a failure: --json carries it as kernelRestore.
+          console.error(`Kernel is still restoring and not ready yet (state=${kernelResult.kernelState ?? "unknown"}). Check it with: rig status`);
+        }
+        if (!opts.json) console.log("Continuing with your other rigs.");
+      } else if (!kernelResult.ok) {
         if (kernelResult.kernelState === "skipped") {
-          if (!opts.json) console.log("Kernel auto-boot skipped (--no-kernel or test mode), including the operator that helps you start a team. To start it later, run rig, set up or select kernel, then start its operator seat.");
+          // The daemon also skips its boot when a kernel rig already exists (kernel-boot.ts).
+          // That rig need not be running, after a reboot it is not, and this command does not restore it.
+          if (!opts.json) console.log(kernelResult.detail === "kernel rig already managed"
+            ? "Kernel auto-boot skipped (kernel rig already managed). If its seats are not running, for example after a reboot, bring it back with: rig up kernel --existing"
+            : "Kernel auto-boot skipped (--no-kernel or test mode), including the operator that helps you start a team. To start it later, run rig, set up or select kernel, then start its operator seat.");
         } else {
           const terminalFailure = ["auth_blocked", "spec_missing", "bootstrap_failed", "degraded"].includes(kernelResult.kernelState ?? "");
           console.error(`${terminalFailure ? "Kernel failed to start" : "Kernel did not report ready before the deadline"}: state=${kernelResult.kernelState ?? "unknown"}, detail=${kernelResult.detail ?? "none"}`);
@@ -255,7 +305,8 @@ Examples:
       // Verify UI is actually serving before announcing the URL.
       let uiUrl: string | null = null;
       try {
-        const healthRes = await fetch(`${baseUrl}/healthz`);
+        // Bounded like any request: a daemon that never answers must not hold the start here.
+        const healthRes = await fetch(`${baseUrl}/healthz`, { signal: AbortSignal.timeout(5_000) });
         if (healthRes.ok) {
           uiUrl = baseUrl;
         }
@@ -283,9 +334,14 @@ Examples:
       // Guard BLOCKING bfed4ce3: track preview errors so they are not collapsed
       // into a clean empty-candidate result.
       const previewErrors: Array<{ rigId: string; rigName: string; code: string; message: string }> = [];
+      // Not errors: the run still succeeds. Only --last adds them (seat_status_unreadable).
+      const warnings: Array<{ rigId: string; rigName: string; code: string; message: string }> = [];
+      // --all wins over --last; only --last reads the seats.
+      const lastOnly = Boolean(opts.last && !opts.all);
       for (const rig of allSummaries) {
         if (rig.name === "kernel") continue;
-        if (rig.lifecycleState === "running") continue;
+        const lifecycleState = rig.restoreLifecycleState ?? rig.lifecycleState;
+        if (lifecycleState === "running") continue;
 
         try {
           const planRes = await client.post<Record<string, unknown>>(
@@ -303,13 +359,23 @@ Examples:
               lastActivity = dates.length > 0 ? dates[dates.length - 1]! : null;
             } catch { /* degrade: lastActivity stays null */ }
 
+            let lastStop: LastStopState | null = null;
+            if (lastOnly) {
+              lastStop = "unknown";
+              try {
+                const nodesRes = await client.get<unknown>(`/api/rigs/${encodeURIComponent(rig.id)}/nodes`);
+                if (nodesRes.status === 200) lastStop = lastStopState(nodesRes.data);
+              } catch { /* lastStop stays unknown; --last restores the rig with a warning */ }
+            }
+
             candidates.push({
               rigId: rig.id,
               rigName: rig.name,
-              lifecycleState: rig.lifecycleState ?? "unknown",
+              lifecycleState: lifecycleState ?? "unknown",
               nodeCount: rig.nodeCount ?? 0,
               lastActivity,
               preview,
+              lastStop,
             });
           } else if (planRes.status === 404) {
             // no_snapshot or not found — this rig is not a candidate (expected exclusion).
@@ -331,14 +397,16 @@ Examples:
           console.log(JSON.stringify({
             status: previewErrors.length > 0 ? "started_with_errors" : "started",
             candidates: [],
+            keptDown: lastOnly ? [] : undefined,
             restoredRigs: [],
             previewErrors: previewErrors.length > 0 ? previewErrors : undefined,
+            kernelRestore,
           }));
         } else {
           if (previewErrors.length > 0) {
             console.error(`${previewErrors.length} rig(s) failed preview (see errors above). Some candidates may be missing.`);
           } else {
-            console.log("Daemon and kernel are up. No rigs to restore.");
+            console.log(kernelRestore ? "Daemon is up. No other rigs to restore." : "Daemon and kernel are up. No rigs to restore.");
           }
         }
         if (previewErrors.length > 0) process.exitCode = 1;
@@ -347,8 +415,22 @@ Examples:
 
       // ---- PHASE 4: selection (id-grounded, rev1 BLOCKING b4c6ada4) ----
       let selectedCandidates: StartCandidate[];
-      if (opts.all || opts.last) {
+      // --last keeps down a rig whose every launched seat carries the recorded stop intent, and
+      // names the command that brings it back. Any other rig, including one whose seats could not
+      // be read (a warning, not an error), is restored as --all would. --all and --rigs restore all.
+      const keptDown = lastOnly ? candidates.filter((c) => c.lastStop === "down") : [];
+      if (opts.all) {
         selectedCandidates = [...candidates];
+      } else if (opts.last) {
+        selectedCandidates = candidates.filter((c) => c.lastStop !== "down");
+        for (const c of candidates.filter((x) => x.lastStop === "unknown")) {
+          const message = "selected for restore because its seat statuses could not be read";
+          warnings.push({ rigId: c.rigId, rigName: c.rigName, code: "seat_status_unreadable", message });
+          if (!opts.json) console.error(`  ${c.rigName}: ${message}`);
+        }
+        if (!opts.json) {
+          for (const c of keptDown) console.log(`  ${c.rigName}: stopped on purpose (with rig down or rig seat stop), so --last leaves it down. Bring it back: ${restoreCommand(c)}`);
+        }
       } else if (opts.rigs) {
         selectedCandidates = candidates.filter((c) => opts.rigs!.includes(c.rigName));
         const missing = opts.rigs.filter((n) => !candidates.some((c) => c.rigName === n));
@@ -364,7 +446,7 @@ Examples:
         if (!interactive) {
           console.error("No TTY available. Use --last, --all, or --rigs <names> for headless mode.");
           if (opts.json) {
-            console.log(JSON.stringify({ status: "started", candidates: candidates.map((c) => ({ rigName: c.rigName, lifecycleState: c.lifecycleState })), restoredRigs: [] }));
+            console.log(JSON.stringify({ status: "started", candidates: candidates.map((c) => ({ rigName: c.rigName, lifecycleState: c.lifecycleState })), restoredRigs: [], kernelRestore }));
           }
           process.exitCode = 1;
           return;
@@ -397,6 +479,18 @@ Examples:
 
       if (selectedCandidates.length === 0) {
         if (!opts.json) console.log("No rigs selected for restore.");
+        else if (lastOnly) {
+          console.log(JSON.stringify({
+            status: previewErrors.length > 0 ? "started_with_errors" : "started",
+            uiUrl,
+            candidates: candidates.map((c) => ({ rigName: c.rigName, lifecycleState: c.lifecycleState })),
+            keptDown: keptDown.map(keptDownEntry),
+            restoredRigs: [],
+            previewErrors: previewErrors.length > 0 ? previewErrors : undefined,
+            kernelRestore,
+          }));
+        }
+        if (lastOnly && previewErrors.length > 0) process.exitCode = 1;
         return;
       }
 
@@ -413,7 +507,7 @@ Examples:
         try {
           const freshSummary = await client.get<RigSummary[]>("/api/rigs/summary");
           const current = (freshSummary.data ?? []).find((r) => r.id === rigId);
-          if (current?.lifecycleState === "running") {
+          if ((current?.restoreLifecycleState ?? current?.lifecycleState) === "running") {
             if (!opts.json) console.log(`  ${rigName}: already running (skipping)`);
             results.push({ rigName, status: "already_running", nodes: [] });
             continue;
@@ -528,8 +622,11 @@ Examples:
           status: previewErrors.length > 0 ? "started_with_errors" : "started",
           uiUrl,
           candidates: candidates.map((c) => ({ rigName: c.rigName, lifecycleState: c.lifecycleState })),
+          keptDown: lastOnly ? keptDown.map(keptDownEntry) : undefined,
           restoredRigs: results,
           previewErrors: previewErrors.length > 0 ? previewErrors : undefined,
+          kernelRestore,
+          warnings: warnings.length > 0 ? warnings : undefined,
         }));
       }
 
@@ -544,6 +641,14 @@ Examples:
     });
 
   return cmd;
+}
+
+function restoreCommand(c: StartCandidate): string {
+  return `rig start --rigs ${c.rigName}`;
+}
+
+function keptDownEntry(c: StartCandidate): { rigName: string; restoreCommand: string } {
+  return { rigName: c.rigName, restoreCommand: restoreCommand(c) };
 }
 
 function summarizeReadiness(c: StartCandidate): string {

@@ -1,8 +1,8 @@
 # @openrig/tui — mission-control TUI
 
 The explorer / master-detail "k9s for rigs" surface: left Explorer (Topology ·
-Specs · Scopes · Terminals · Needs-You · System, Config and Connections, the
-last three grouped as System; `src/sections.ts`), right content pane, top
+Specs · Scopes · Terminals · Needs-You · System, Config, Connections, Usage,
+Usage across hosts and Cost, the last six grouped as System; `src/sections.ts`), right content pane, top
 command bar, ambient rig-stream footer. OBSERVE / NAVIGATE / DRIVE-STRUCTURE
 only — ACT / PRODUCE / REVIEW-ARTIFACT surfaces live in Studio, not here. One
 runtime dependency (`yaml`); it reads the daemon's EXISTING projections (two renderers, one projection —
@@ -49,9 +49,10 @@ through ONE path. Safe-core grammar: `:<section>` (any of the eight, e.g.
 `:topology` `:needs`) · `/<filter>` · `host|rig|pod|agent|spec <name>` ·
 `tab table|recent|overview|graph|health|topology|configuration|yaml|pulse` ·
 `spec-of <agent>` · `running <spec>`. Keys: arrows + Enter navigate the
-explorer, `f` toggles the footer, `q` quits.
+explorer, `F` toggles the footer, `q` quits.
 
-In Scopes, select a mission or use `mission <name>`. Its workflow rows open the
+In Scopes, select a mission or use `mission <name>`; with a mission selected, `M`
+collapses its mini-requirements and `N` shows its narrative. Its workflow rows open the
 current work, owner, recorded waiting reason, wake mechanism, next action and
 bound sources. `workflow <instance-id>` and `packet <qitem-id>` address those
 pages within the selected mission. Release ceremony, post-release housekeeping
@@ -76,6 +77,11 @@ reply per line, plus two read-only queries, `state` and `commands` (the command
 registry with live availability):
 
     printf 'agent dev.impl\n' | nc -U ~/.openrig/run/tui-tui-1.sock
+
+Terminals, Needs, System, Scopes, Config, Specs and file pages read no rigs. A
+`host`, `rig`, `pod` or `agent` address sent from one switches to Topology and
+resolves once that page's read settles. Until then the reply carries `resolving` and a `notice`; send `state`
+for the result (the drill, or the error).
 
 Socket rules (arch standing constraint): every socket command goes through the
 one resolver/mutation path, and verbs stay OBSERVE/NAVIGATE/DRIVE-STRUCTURE

@@ -363,6 +363,15 @@ describe("classifyRsyncResult / runFileCopy", () => {
     expect(res).toMatchObject({ ok: true, failedStep: "none", bytesTransferred: 2048, filesTransferred: 1 });
   });
 
+  it("parses the byte unit emitted by Apple openrsync", () => {
+    const result = classifyRsyncResult(0, "Number of files transferred: 1\nTotal transferred file size: 21 B\n", "");
+    expect(result).toMatchObject({ ok: true, bytesTransferred: 21, filesTransferred: 1 });
+  });
+
+  it.each(["KB", "MB", "KiB"])("does not interpret the unsupported %s unit as bytes", (unit) => {
+    expect(classifyRsyncResult(0, `Total transferred file size: 21 ${unit}\n`, "").bytesTransferred).toBeUndefined();
+  });
+
   it.each([
     "user@host: Permission denied (publickey).",
     "Could not query Keychain entry",
@@ -467,4 +476,23 @@ describe("local directory copy semantics", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+});
+
+it.skipIf(!rsyncAvailable && process.platform !== "darwin")("native local file copies disclose the transferred byte count", async () => {
+  expect(rsyncAvailable, "macOS native copy proof requires the system rsync").toBe(true);
+  const root = mkdtempSync(path.join(process.cwd(), "openrig-copy-stats-"));
+  try {
+    const src = path.join(root, "source.txt");
+    const dst = path.join(root, "copied.txt");
+    const content = Buffer.from("owned stats fixture\n", "utf8");
+    writeFileSync(src, content);
+    const planned = planFileCopy(src, dst);
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+    const result = await runFileCopy(planned.plan);
+    expect(result.ok, result.stderr).toBe(true);
+    expect(readFileSync(dst)).toEqual(content);
+    expect(result.bytesTransferred).toBe(content.length);
+    expect(result.filesTransferred).toBe(1);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

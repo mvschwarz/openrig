@@ -45,7 +45,7 @@ it("a 24-rig landing fetches names only; a selected rig never reads unrelated in
     const u = new URL(String(input)); calls.push(u.pathname + u.search);
     if (u.pathname === "/healthz") return Response.json({ selfHostId: "fixture" });
     if (u.pathname === "/api/rigs/summary") return Response.json(rigs);
-    if (u.pathname === "/api/rigs/r17/nodes" || u.pathname === "/api/queue/recent-transitions") return Response.json([]);
+    if (u.pathname === "/api/rigs/r17/nodes" || u.pathname === "/api/queue/recent-transitions" || u.pathname === "/api/queue/list") return Response.json([]);
     throw Error(`Unrelated request ${u.pathname}`);
   }) as typeof fetch });
   let snap = emptySnapshot();
@@ -58,7 +58,22 @@ it("a 24-rig landing fetches names only; a selected rig never reads unrelated in
   snap = await hydrateSnapshot(client, undefined, null, null, "rig17", view.get());
   expect(snap.readErrors).toEqual([]);
   expect(calls.filter(c => c.endsWith("/nodes"))).toEqual(["/api/rigs/r17/nodes"]);
-  expect(calls).toHaveLength(4);
+  expect(calls.filter(c => c.startsWith("/api/queue/list")).sort()).toEqual([
+    "/api/queue/list?attention=1", "/api/queue/list?state=blocked", "/api/queue/list?state=in-progress", "/api/queue/list?state=pending&limit=50",
+  ]);
+  expect(calls).toHaveLength(8);
+});
+
+it.each(["overview", "graph", "health"] as const)("a drilled rig on the %s tab reads no seat queue lists", async (viewTab) => {
+  const calls: string[] = [];
+  const client = new DaemonClient({ baseUrl: "http://fixture", fetchImpl: (async input => {
+    const u = new URL(String(input)); calls.push(u.pathname + u.search);
+    if (u.pathname === "/healthz") return Response.json({ selfHostId: "fixture" });
+    if (u.pathname === "/api/rigs/summary") return Response.json([{ id: "r1", name: "rig1", lifecycleState: "running" }]);
+    return Response.json([]);
+  }) as typeof fetch });
+  await hydrateSnapshot(client, undefined, null, null, "rig1", { section: "topology", viewTab, drill: [{ kind: "rig", name: "rig1" }] } as never);
+  expect(calls.filter(c => c.startsWith("/api/queue/list"))).toEqual([]);
 });
 
 it("terminal names never wait for all-rig liveness or any provider preview", async () => {

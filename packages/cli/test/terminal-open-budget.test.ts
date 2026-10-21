@@ -78,11 +78,12 @@ describe("terminal open request budget", () => {
       clientFactory: baseUrl => new DaemonClient(baseUrl),
       // Exercise default window routing without launching a native terminal in CI.
       windowDeps: {
-        platform: "linux", env: { DISPLAY: ":fixture" }, exists: () => false,
+        platform: "linux", env: { DISPLAY: ":fixture", TERM_PROGRAM: "ghostty" }, exists: () => false,
         exec: async (file, args) => file === "/usr/bin/env" && args.at(-1) === "list"
           ? JSON.stringify({ result: { workspaces: [] } })
           : args.includes("--version") ? "herdr 0.9.3" : "/fixture/bin/herdr",
         launch: async () => {}, sleep: async () => {}, id: () => "owned-budget",
+        herdrConfig: () => "/fixture/private herdr.toml",
       },
     };
     const command = new Command();

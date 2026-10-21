@@ -8,7 +8,7 @@ import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { streamItemsSchema } from "../src/db/migrations/023_stream_items.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
-import { CLOSURE_REASONS } from "../src/domain/hot-potato-enforcer.js";
+import { DONE_CLOSURE_REASONS } from "../src/domain/hot-potato-enforcer.js";
 import { inboxEntriesSchema } from "../src/db/migrations/026_inbox_entries.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -192,7 +192,7 @@ describe("coordination integration — stream → queue → inbox handoff chain"
     expect(data.error).toBe("missing_closure_reason");
     // Assert the endpoint surfaces the CANONICAL reason set (self-updating vs a magic count —
     // 0.5.1-53 added `superseded`, which a hardcoded length(6) would wrongly flag as a regression).
-    expect(data.validReasons).toEqual([...CLOSURE_REASONS]);
+    expect(data.validReasons).toEqual([...DONE_CLOSURE_REASONS]);
   });
 
   it("event-bus emits the full coordination event sequence", async () => {

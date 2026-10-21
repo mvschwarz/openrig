@@ -20,6 +20,7 @@
 import type { WorkflowSpec, WorkflowStepSpec } from "./workflow-types.js";
 import { resolveNextStep } from "./workflow-projector.js";
 import { isHumanSeatSession } from "./human-route-enforcer.js";
+import { isRigRelativeTarget } from "./workflow-rig-placeholder.js";
 
 export interface ValidationIssue {
   code: string;
@@ -220,6 +221,26 @@ export class WorkflowValidator {
       }
     });
 
+    // A step whose allowed_exits can neither finish it nor route it on is
+    // a dead end at projection time: done is refused by allowed_exits, and
+    // handoff with no next step is refused as no_next_step (serial path).
+    // failed (unmapped) fails the instance, and waiting (unmapped) re-parks
+    // on the same step, so neither counts as a way out. A branch-mapped exit
+    // routes. In a dependency graph, handoff on a sink completes the step.
+    const dependencyGraph = spec.steps.some((step) => step.depends_on !== undefined);
+    spec.steps.forEach((step, idx) => {
+      const exits = step.allowed_exits;
+      if (!step.id || !exits?.length || exits.includes("done")) return;
+      if (exits.some((exit) => step.next_hop?.on?.[exit] !== undefined)) return;
+      if (exits.includes("handoff") && (dependencyGraph || resolveNextStep(spec, step, "handoff"))) return;
+      issues.push({
+        code: "step_cannot_finish",
+        message: `step "${step.id}" allows exits ${JSON.stringify(exits)}, but none of them can finish it: done is not allowed${exits.includes("handoff") ? ", and handoff has no next step to route to" : ""}. Add "done" to allowed_exits, or give the step a next step.`,
+        field: `workflow.steps[${idx}].allowed_exits`,
+        severity: "error",
+      });
+    });
+
     // Reachability + cycle detection over the FULL successor graph:
     // the structural edge (the projector's own exported resolveNextStep
     // — never a parallel re-implementation) UNIONED with the WF-2
@@ -230,7 +251,6 @@ export class WorkflowValidator {
     // edges separately before applying the routing-loop exception.
     if (spec.steps.length > 0 && spec.steps.every((s) => s.id)) {
       const stepById = new Map(spec.steps.map((s) => [s.id, s]));
-      const dependencyGraph = spec.steps.some((step) => step.depends_on !== undefined);
       const successorsOf = (step: WorkflowStepSpec): string[] => {
         const out: string[] = [];
         if (dependencyGraph) {
@@ -430,7 +450,8 @@ export class WorkflowValidator {
       // preferred target produces a warning (not an error) — agents
       // can still be resolved at runtime via runtime-adapter / claim.
       for (const [roleName, role] of Object.entries(spec.roles ?? {})) {
-        const targets = role?.preferred_targets ?? [];
+        // A `member@{rig}` target has no seat to probe until an instance binds a rig.
+        const targets = (role?.preferred_targets ?? []).filter((t) => !isRigRelativeTarget(t));
         if (targets.length === 0) continue;
         const liveAny = targets.some((t) => seatLivenessCheck(t).alive);
         if (!liveAny) {

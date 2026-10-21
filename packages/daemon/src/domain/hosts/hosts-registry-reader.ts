@@ -226,19 +226,23 @@ export function validateHostRegistry(parsed: unknown, sourcePath: string): HostR
 /** Resolve a host id for placement. Unknown id names the requested id and
  *  lists up to 10 known ids — the FR-4 per-entry validation message rides
  *  this (what/why/fix, before any launch attempt). */
-export function resolveHost(registry: HostRegistry, id: string): HostResolution {
+export function resolveHost(
+  registry: HostRegistry,
+  id: string,
+  learnedBindings?: Record<string, { hostId: string }>,
+): HostResolution {
   // alias -> id -> transport. The human alias is the intentional handle, so an `id` match is tried
   // across the WHOLE registry before any join key — that tiebreak is defined rather than accidental,
-  // even though a collision with a random self-id is near-impossible.
+  // even though a collision with a random self-id is near-impossible. A registry-declared `hostId`
+  // outranks a learned binding: the operator wrote it down.
   //
-  // DELIBERATE TWIN DIVERGENCE: the CLI twin's resolveHost additionally accepts sidecar-LEARNED
-  // bindings (host-bindings.json) so a pasted reply hint ending in a learned self-id resolves at the
-  // CLI edge. This daemon copy does NOT take that parameter, on purpose: it serves PLACEMENT, which
-  // resolves operator-authored aliases from topology manifests, and the daemon never sees a 3-part
-  // target (BR-1 — the CLI edge strips the host qualifier). Mirroring the learned-binding merge here
-  // would be dead surface. If placement ever grows a self-id lookup, take the CLI twin's shape.
+  // `learnedBindings` takes the CLI twin's shape. Placement and every other caller pass none: they
+  // resolve operator-authored aliases. Queue forwards pass the bindings from this daemon's own home
+  // that `eligibleQueueBindings` admits (#1642), because the CLI edge strips a `member@rig@<self-id>`
+  // target into exactly such a `hostId` token.
   const match = registry.hosts.find((h) => h.id === id)
-    ?? registry.hosts.find((h) => h.hostId === id);
+    ?? registry.hosts.find((h) => h.hostId === id)
+    ?? (learnedBindings ? registry.hosts.find((h) => learnedBindings[h.id]?.hostId === id) : undefined);
   if (match) return { ok: true, host: match };
   const knownIds = registry.hosts.map((h) => h.id).slice(0, 10);
   const idsHint = knownIds.length > 0

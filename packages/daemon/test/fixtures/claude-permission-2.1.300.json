@@ -1,0 +1,7 @@
+{
+  "bash": "Bash command\n Tip: auto mode handles these prompts for you — choose \"switch to auto mode\"\n below\n Write a line to bash-output.txt\n printf 'permission-capture\\n' > bash-output.txt\n Do you want to proceed?\n > 1. Yes\n   2. Yes, and always allow access to\n      <project> from this project\n   3. Yes, and switch to auto mode · auto mode handles these prompts for you\n   4. No\n\n Esc to cancel · Tab to amend",
+  "edit": "Edit file\n seed.txt\n 1 -permission capture sample\n 1 +permission capture edited\n Do you want to make this edit to seed.txt?\n > 1. Yes\n   2. Yes, and switch to accept edits (auto-approve file edits and common file\n      commands) for this session (shift+tab)\n   3. No\n\n Esc to cancel · Tab to amend",
+  "webFetch": "Fetch\n Claude wants to fetch content from example.com\n url: https://example.com/\n prompt: What is the exact title of this page? Reply with only the title text.\n Do you want to allow Claude to fetch this content?\n > 1. Yes\n   2. Yes, and don't ask again for example.com\n   3. No, and tell Claude what to do differently (esc)",
+  "approvedBash": "● Bash(printf 'permission-capture\\n' > bash-output.txt)\n  ⎿ Running…\n✶ Churning… (1s · ↓ 44 tokens)\n> \n  ⏸ manual mode on · esc to interrupt · ← for agents · ◈ max · /effort",
+  "deniedWebFetch": "● Fetch(https://example.com)\n  ⎿ Interrupted · What should Claude do instead?\n✻ Cogitated for 1s · done 21:33\n> \n  ⏸ manual mode on · ? for shortcuts · ← for agents · ◈ max · /effort"
+}

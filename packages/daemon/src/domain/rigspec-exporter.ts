@@ -166,6 +166,7 @@ export class RigSpecExporter {
         // OPR.0.4.8.3 Seam B: the seat's RAW permission_policy ref round-trips
         // (export truth = the ref, never the resolved provenance).
         if (node.permissionPolicy) member.permissionPolicy = node.permissionPolicy;
+        if (node.env) member.env = node.env;
         if (node.sessionSource) member.sessionSource = node.sessionSource;
         const rp = getRestorePolicy(node.id);
         if (rp) member.restorePolicy = rp;
@@ -216,6 +217,7 @@ export class RigSpecExporter {
     // from the spec re-emit) — explicit repository read, emitted only when set.
     const rigPermissionPolicy = this.rigRepo.getRigPermissionPolicy(rigId);
     const workspace = this.rigRepo.getRigWorkspace(rigId);
+    const rigEnv = this.rigRepo.getRigEnv(rigId);
     // #25: the selected Claude managed-block file is also a rig-row field.
     const claudeManagedBlockFile = this.rigRepo.getRigClaudeManagedBlockFile(rigId);
     const claudeSeatMaterial = this.rigRepo.getRigClaudeSeatMaterial(rigId);
@@ -225,6 +227,7 @@ export class RigSpecExporter {
       name: rig.rig.name,
       ...(rigPermissionPolicy ? { permissionPolicy: rigPermissionPolicy } : {}),
       ...(this.rigRepo.getRigNonInterruptive(rigId) ? { nonInterruptive: true } : {}),
+      ...(rigEnv ? { env: rigEnv } : {}),
       ...(claudeManagedBlockFile ? { managedBlocks: { "claude-code": claudeManagedBlockFile } } : {}),
       ...(claudeSeatMaterial ? { seatMaterial: { "claude-code": claudeSeatMaterial } } : {}),
       ...(workspace ? { workspace } : {}),

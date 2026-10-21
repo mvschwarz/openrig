@@ -11,8 +11,8 @@ applies-when: |
   resolve and preserve identity.
 siblings: [daemon-core.md, adapters-and-runtimes.md, lifecycle-snapshot-restore.md, packaging-bootstrap-bundles.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
-last-updated: 2026-10-05
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
 # Agent/Rig Spec, Resolution, Startup, Identity
@@ -22,38 +22,38 @@ and identity-addressable topology. The spec-and-startup contract: parse →
 resolve → project → deliver pre-launch files → persist replay context → launch
 → wait → deliver post-launch files.
 
-> Verified against source at main `2620dea84efad75e3c5fff9fcf816a78c8e8155f`. `domain/…` and `routes/…` paths
+> Verified against source at main `e8f0ab340db773392ec8be75b072d1c0f3068a50`. `domain/…` and `routes/…` paths
 > are under `packages/daemon/src/`; a bare file name such as
-> `rigspec-schema.ts:115` is in `packages/daemon/src/domain/`. Each count sits
+> `rigspec-schema.ts:119` is in `packages/daemon/src/domain/`. Each count sits
 > beside the command that produces it; run the command from the repository
 > root to refresh it.
 
 ## 1. Canonical spec and topology types
 
-- **AgentSpec** (`types.ts:937`) — parsed from `agent.yaml`
+- **AgentSpec** (`types.ts:941`) — parsed from `agent.yaml`
   (`agent-resolver.ts:150`). Owns imports, defaults, startup, resources, and
   profiles. Canonical parse/normalize/validate is `domain/agent-manifest.ts`.
-- **RigSpec** (`types.ts:1168`) — canonical pod-aware rig topology. Uses
+- **RigSpec** (`types.ts:1172`) — canonical pod-aware rig topology. Uses
   `version: "0.2"` and `pods[]`; owns cross-pod `edges[]`, rig-level startup
   overlays, and `cultureFile`, plus the optional `summary`, `permissionPolicy`,
   `nonInterruptive`, `managedBlocks`, `docs`, `services` and `workspace` fields.
-  An authored `non_interruptive` must be a boolean (`rigspec-schema.ts:175`) and
+  An authored `non_interruptive` must be a boolean (`rigspec-schema.ts:179`) and
   sets the rig's saved non-interruptive choice at instantiation unless an
   explicit launch option is given (`rigspec-instantiator.ts:1345`).
 
   `version` is the spec-schema version, not the package version. It is not a
   code constant: `RigSpecSchema.validate` requires only a non-empty string
-  (`rigspec-schema.ts:115`) and `RigSpecSchema.normalize` carries the authored
-  value through (`rigspec-schema.ts:247`). `"0.2"` is the canonical authored
+  (`rigspec-schema.ts:119`) and `RigSpecSchema.normalize` carries the authored
+  value through (`rigspec-schema.ts:253`). `"0.2"` is the canonical authored
   value, and the pod-aware exporter writes it (`rigspec-exporter.ts:223`).
 
-- **RigServicesSpec** (`types.ts:1217`) — optional `services` block on a
+- **RigServicesSpec** (`types.ts:1221`) — optional `services` block on a
   pod-aware RigSpec. Shipped kind is Compose-backed env management
   (`kind: "compose"`) with `composeFile`, `projectName?`, `profiles?`,
   `downPolicy?`, `waitFor?`, `surfaces?`, `checkpoints?`.
-- **RigSpecPod** (`types.ts:1124`) — pod-local bounded context with
+- **RigSpecPod** (`types.ts:1128`) — pod-local bounded context with
   `members[]`, pod-local `edges[]`, pod startup, optional continuity policy.
-- **RigSpecPodMember** (`types.ts:1068`) — member-level runtime/startup
+- **RigSpecPodMember** (`types.ts:1072`) — member-level runtime/startup
   surface: `agentRef`, `profile`, `runtime`, `model?`, `effort?`, `cwd`, `restorePolicy?`,
   member startup overlays (`startup?`), plus `label?`, `codexConfigProfile?`,
   `role?`, `permissionPolicy?`, `compactionStrategy?`, `mechanic?`,
@@ -192,16 +192,22 @@ proof selected, or a terminal runtime) record `node.startup_proof_skipped`
 (`startup-orchestrator.ts:374`); resume, fork and rebuild keep the existing proof
 history.
 
-**Fresh context pending and `rig seat continue`.** When a fresh launch stops at
-a native prompt before its context is delivered, `fail()` (`:592`) marks the
-failure `freshContextPending` and adds "run: rig seat continue <session>".
-`canContinueFresh` (`:554`, using `hasPendingFreshStartup`, `:35`) allows
+**Pending startup context and `rig seat continue`.** When a fresh launch stops at
+a native prompt before its context is delivered, `fail()` (`:806`) marks the
+failure `freshContextPending` and adds "run: rig seat continue <session>". A
+Codex fork whose own id isn't verified at launch, or whose readiness times out,
+ends `attention_required` with `forkContextPending` (its parent token) instead:
+the role waits, and nothing is saved for an unverified child.
+`canContinueStartup` (`:764`, using `readPendingStartupContext`, `:46`) allows
 continuation only while that failure is the occupant's latest startup event.
-`continueFreshStartup` (`seat-lifecycle-service.ts:395`) re-checks the binding,
+`continueStartup` (`seat-lifecycle-service.ts:723`) re-checks the binding,
 pane and runtime, then runs startup again on the same conversation without
-relaunching the harness. It is reached by `rig seat continue`,
+relaunching the harness. A fork continuation first re-verifies the child with
+`captureForkIdentity` (`codex-runtime-adapter.ts:668`; `startup-orchestrator.ts:559`)
+and needs the exact pending event it started from; a fresh continuation keeps
+the plain "still pending" check. It is reached by `rig seat continue`,
 `POST /api/seat/continue/:seatRef` and the per-seat startup route's `continue`
-action (`routes/startup.ts:148`).
+action (`routes/startup.ts:159`).
 
 **Startup layering is additive and ordered** (`resolveStartup`,
 `startup-resolver.ts:15`–`22`): (1) agent base, (2) profile, (3) rig culture
@@ -233,17 +239,17 @@ re-runs a first start that failed at projection, before any harness launch.
 **Remote import constraints**: `agent_ref` and AgentSpec imports accept
 `local:<relative path>` and `path:<absolute path>` only
 (`rigspec-schema.ts:41`, `agent-manifest.ts:40`); a terminal member uses the
-`builtin:terminal` sentinel (`rigspec-schema.ts:524`). Remote `agent_ref`
+`builtin:terminal` sentinel (`rigspec-schema.ts:532`). Remote `agent_ref`
 sources remain unsupported: RigSpec validation rejects them
-(`rigspec-schema.ts:555`), `rigPreflight` runs that validation
-(`rigspec-preflight.ts:250`), and the resolver refuses a remote import again
+(`rigspec-schema.ts:563`), `rigPreflight` runs that validation
+(`rigspec-preflight.ts:252`), and the resolver refuses a remote import again
 (`agent-resolver.ts:203`).
 
 ## 5. Instantiation, preflight, export
 
 - `runtime-adapter.ts` — adapter contract + bridge types.
 - `rigspec-preflight.ts` — dual-stack legacy preflight (`RigSpecPreflight`,
-  `rigspec-preflight.ts:25`) plus rebooted `rigPreflight(...)` (`:244`).
+  `rigspec-preflight.ts:26`) plus rebooted `rigPreflight(...)` (`:246`).
 - `rigspec-instantiator.ts` — dual-stack `RigInstantiator`
   (`rigspec-instantiator.ts:33`) plus `PodRigInstantiator` (`:475`).
 - `rigspec-exporter.ts` — dual-format live rig export to YAML/JSON.
@@ -286,7 +292,7 @@ session-name fallback.
   The tmux metadata keys use the `@rigged_` prefix:
   `ClaimService.setRiggedMetadata` writes `@rigged_node_id` /
   `@rigged_session_name` / `@rigged_rig_id` / `@rigged_rig_name` /
-  `@rigged_logical_id` (`claim-service.ts:180`–`184`), called from `bind`,
+  `@rigged_logical_id` (`claim-service.ts:182`–`186`), called from `bind`,
   `reconcileSession` and `createAndBindToPod`;
   `RigLifecycleService.unclaimSession` clears the same five keys
   (`rig-lifecycle-service.ts:209`–`213`); and `rig whoami` reads
@@ -307,7 +313,7 @@ immediately). On the CLI, `rig bind` calls the bind route
 topology and then calls the bind route for each session
 (`packages/cli/src/commands/adopt.ts:163`, `:212`). Authored pod namespace is
 preserved through adoption so logical ids stay `${podNamespace}.${memberName}`
-(`claim-service.ts:661`). Adopted-session parity is tmux-metadata parity, not
+(`claim-service.ts:663`). Adopted-session parity is tmux-metadata parity, not
 fake env-var parity.
 
 ## 7. Specialist rosters

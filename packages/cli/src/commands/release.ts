@@ -3,6 +3,7 @@ import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
+import { resolveRigHandle } from "../rig-handle.js";
 
 export function releaseCommand(depsOverride?: StatusDeps): Command {
   const cmd = new Command("release").description("Release claimed sessions from a rig without killing tmux sessions");
@@ -15,7 +16,7 @@ export function releaseCommand(depsOverride?: StatusDeps): Command {
   }
 
   cmd
-    .argument("<rigId>", "Rig identifier")
+    .argument("<rig>", "Rig name or identifier")
     .option("--delete", "Delete the rig record after a clean release")
     .option("--json", "JSON output")
     .addHelpText("after", `
@@ -30,7 +31,19 @@ Notes:
         return;
       }
 
-      const res = await client.post<Record<string, unknown>>(`/api/rigs/${encodeURIComponent(rigId)}/release`, {
+      const resolution = await resolveRigHandle(client, rigId);
+      if (resolution.kind === "ambiguous") {
+        const msg = `'${rigId}' matches ${resolution.ids.length} active rigs. Nothing was released. Re-run with the specific id, e.g. ${resolution.ids.map((id) => `rig release ${id}`).join("  |  ")}`;
+        if (opts.json) {
+          console.log(JSON.stringify({ ok: false, code: "rig_ambiguous", message: msg, candidates: resolution.ids }, null, 2));
+        } else {
+          console.error(msg);
+        }
+        process.exitCode = 1;
+        return;
+      }
+      const resolvedRigId = resolution.kind === "resolved" ? resolution.id : rigId;
+      const res = await client.post<Record<string, unknown>>(`/api/rigs/${encodeURIComponent(resolvedRigId)}/release`, {
         delete: opts.delete === true,
       });
 

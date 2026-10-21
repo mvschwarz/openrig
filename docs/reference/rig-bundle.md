@@ -20,8 +20,8 @@ Replace `COMMIT` with a full commit ID. Branches and tags are also accepted, inc
 resolve once to a full commit before fetching. Each result names the resolved source, configuration ID, package digest
 and assembler. Save the printed commit-pinned URL to repeat the same source selection. Only a full 40-character commit
 ID counts as a commit; a shorter one is looked up as a branch or tag name. `--preset` and repeatable
-`--seat pod.member=runtime` select only configurations the folder declares. A link build is named `github-bundle`
-unless `--name` says otherwise.
+`--seat pod.member=runtime` select only configurations the folder declares. A link build takes the rig's `name` from
+its `rig.yaml` unless `--name` says otherwise, and is named `github-bundle` when `rig.yaml` has no readable name.
 
 Link import needs a running, verified local daemon and a credential-free, publicly readable GitHub URL. It does not
 upload files to remote daemons. For a remote target, run the link command on that host, or create an archive, transfer
@@ -59,7 +59,8 @@ checks pod-aware rig validity, README inclusion in `docs`, readable declared fil
 minimum-version shape, declared preset consistency and known sensitive filenames. It does not contact a daemon,
 build an archive, run preflight or launch anything. Findings give exit status 1; they are never an install gate. It
 reads the folder on disk, not a link or a commit, so files that aren't committed are checked too. Human output gives
-each rule's status, ID and reason; `--json` also names the files a finding is about.
+each rule's status, ID and reason, then the file it's about in parentheses when there is one; `--json` carries the
+same as a `path` field.
 
 README completeness and arbitrary embedded secrets need human review and are reported as `not_checked`. A bounded
 or unreadable scan is also `not_checked`, never a clean scan. The check is advice for authors, not a security audit or
@@ -190,6 +191,7 @@ integrity:
 | `rig_spec` | string | yes | Relative path to the rig spec within the archive. Safe relative path. |
 | `agents` | AgentEntry[] | yes | Array of vendored agent entries. |
 | `culture_file` | string | no | Relative path to the culture file if present. |
+| `included_login_files` | string[] | no | Exact archive-relative harness login files deliberately included by the producer. Only these paths are exempt from the login-file refusal; this unsigned declaration is not authentication or receiver approval. |
 | `integrity` | Integrity | no | Per-file SHA-256 checksums for content verification. Validation doesn't require it, but install refuses an archive without it and inspect reports integrity FAIL. |
 | `provenance` | object | no | Stated, not verified: `created_at`, `daemon_version`, `cli_version`, `source_host`, `author_session`, `source_rig_id`, `source_rig_name`, `notes`, and `source` for a GitHub link build. |
 | `assembler` | object | no | `openrigVersion` of the OpenRig that built the archive. |
@@ -219,6 +221,28 @@ integrity:
 | `path` | string | yes | Relative path to the vendored import within the archive. |
 | `original_ref` | string | yes | The original import ref before rewriting. |
 | `hash` | string | yes | SHA-256 hash of the imported agent.yaml. |
+
+### Harness login files
+
+By default, create refuses `.claude/.credentials.json`, `.codex/auth.json` and `.pi/agent/auth.json`
+at the root or nested anywhere in selected bundle content, including agents and an explicitly carried project.
+The author check reports them too. Messages name paths, never contents, and explain both remedies:
+remove the file from the agent folder or carried project and build again; or, only if recipients should have this
+login (for example, your own internal test bundle) and its owner agrees, recreate with
+`rig bundle create <spec> -o <archive.rigbundle> --include-login-files`.
+Anyone with that archive could read the included login files.
+
+The flag applies to this create only. The generated `included_login_files` manifest list names only the actual,
+exact archive-relative login files included. Inspect, unpack, install and bootstrap honour those paths without
+another flag and show a credential-bearing notice. An additional unrecorded login file still fails, as do malformed
+records, directory or wildcard exemptions, and unrelated sensitive files. There is no machine setting or `--force`
+bypass. The unsigned record states the producer's choice; it does not authenticate the producer, establish trust,
+or constitute a fresh recipient approval. Review the source and files before using a bundle.
+
+Compatibility change: previously accepted bundles containing these files now fail default creation and downstream
+verification/install unless deliberately rebuilt with the record. Inspection remains diagnostic: it reports failed
+integrity. Ordinary `auth.json` elsewhere and non-login harness files are unchanged. Filename checks do not scan
+arbitrary contents for secrets.
 
 ### Integrity Section
 
@@ -271,7 +295,7 @@ where the daemon runs.
 ### Create a bundle
 
 ```bash
-rig bundle create <spec-path-or-github-link> -o <output.rigbundle> [--rig-root <dir>] [--preset <name>] [--seat <pod.member=runtime>]... [--context-pack <dir>]... [--project-dir <dir>] [--name <name>] [--bundle-version <ver>] [--min-cli-version <ver>] [--min-daemon-version <ver>] [--notes <text>] [--include-packages <refs...>] [--allow-drift] [--json]
+rig bundle create <spec-path-or-github-link> -o <output.rigbundle> [--rig-root <dir>] [--preset <name>] [--seat <pod.member=runtime>]... [--context-pack <dir>]... [--project-dir <dir>] [--name <name>] [--bundle-version <ver>] [--min-cli-version <ver>] [--min-daemon-version <ver>] [--notes <text>] [--include-packages <refs...>] [--allow-drift] [--include-login-files] [--json]
 ```
 
 | Flag | Required | Default | Description |
@@ -283,11 +307,12 @@ rig bundle create <spec-path-or-github-link> -o <output.rigbundle> [--rig-root <
 | `--seat <pod.member=runtime>` | no | — | Use this runtime for one seat, within what `configurations.yaml` allows. Repeatable; applied after `--preset`. An undeclared choice is refused with the allowed set, and nothing is built. |
 | `--context-pack <dir>` | no | — | Carry the context pack in `<dir>`. Repeatable. The directory may be outside the rig folder, for example a world pack whose `manifest.yaml` is at its repository root. Only `manifest.yaml` and the files it declares are carried, the same set `rig context add --git` installs, and the pack lands in the bundle at `context-packs/<manifest name>/`. Needs a pod-aware spec. |
 | `--project-dir <dir>` | no | — | Carry the project the rig works in: the folder holding its `project.yaml` (which must declare an `id`) and files beside it, such as `SPEC.md`. On install the project is registered in the workspace catalog and the rig is associated with it, before any seat launches (see [project-workspace.md](project-workspace.md)). Needs a pod-aware spec. |
-| `--name` | no | `my-bundle` (`github-bundle` for a link) | Bundle name in the manifest. |
+| `--name` | no | the rig's `name` in `rig.yaml`; `my-bundle` (`github-bundle` for a link) when it has no readable name | Bundle name in the manifest. |
 | `--bundle-version` | no | `0.1.0` | Bundle version in the manifest. |
 | `--min-cli-version`, `--min-daemon-version` | no | — | The oldest OpenRig CLI or daemon that may install the bundle, checked on install. For a link they override the author's `bundle.yaml` minimums. |
 | `--notes <text>` | no | — | Notes stored in the manifest's provenance. |
 | `--include-packages <refs...>` | no | all from the spec | Legacy (schema 1) specs only: the package refs to include. |
+| `--include-login-files` | no | off | Only if recipients should have these logins and their owner agrees (for example, an internal test bundle), include them and record their exact archive-relative paths. Create and consumers show a credential-bearing notice. Does not exempt other sensitive files. |
 | `--allow-drift` | no | off | Build a spec that differs from the running rig of the same name. Without it, create refuses; with it, the difference is written into the manifest's provenance notes. |
 | `--json` | no | off | Machine-readable output. |
 
@@ -383,7 +408,8 @@ Before it plans or applies, install runs two checks on the archive, both also un
   failed". The error names the installed and the offered team and lists three choices: use the existing team, stop it
   with `rig down` and retry to replace it, or cancel. This check does not refuse a stopped team with that name.
 
-Each error lists its fixes; the compatibility error also names `--skip-version-check`.
+Each error lists its fixes; the compatibility error also names `--skip-version-check`. `--skip-version-check` and
+`--force` skip only these two checks: the manifest safety check of its `rig_spec` and `project` entries always runs.
 
 For a pod-aware (schema version 2) bundle, installing a team whose rig name matches a stopped team replaces it: the
 earlier team is archived when the new one is created, and the result gives the `rig unarchive <id>` command that
@@ -399,7 +425,7 @@ For a pod-aware (schema version 2) bundle, apply copies every extracted file (`b
 - the target becomes the rig root: `agent_ref` paths resolve inside it, and a member with `cwd: "."` starts in the target (every pod-aware member must declare a `cwd`);
 - an absolute member `cwd` stays as authored, and `--cwd <dir>` (on `rig bundle install` or `rig up`) still overrides every member's cwd;
 - if the target already has a file with **different** content at any bundle path (for example its own `rig.yaml`), install refuses with `target_conflict` and writes nothing. Identical target files don't cause a target-content conflict; the other installation checks above, including the running-team check, still apply. Use an empty or dedicated directory as the target.
-- exception: reinstalling over a stopped team into that team's own install folder (the target's `bundle.yaml` is schema version 2 with the same bundle name) replaces its files there. Each differing path is first copied under `<OpenRig home>/bundle-backups/reinstall-*/files/`, with a `RESTORE.json` beside it; other files in the folder are kept. The files stay installed even if a later launch fails.
+- exception: reinstalling over a stopped team into that team's own install folder (the target's `bundle.yaml` is schema version 2 with the same bundle name, or with `my-bundle` or `github-bundle`, the default names before 0.6.7) replaces its files there. Each differing path is first copied under `<OpenRig home>/bundle-backups/reinstall-*/files/`, with a `RESTORE.json` beside it; other files in the folder are kept. The files stay installed even if a later launch fails.
 
 The bundle's declared skills, plugins, workflow specs, context packs and agent images are routed into your libraries **before any member launches**, and the context-pack library is rescanned, so a member's first turn can already read a pack the bundle carried. A routing failure does not stop the install: it is printed as a warning, returned in `routingFailures`, and recorded in the install audit. The human output lists what each declared kind routed and any entry that was not routed.
 
@@ -535,7 +561,7 @@ When an agent spec has `imports`, each import is resolved, vendored into the bun
 7. Each agent must have `name`, `path` (safe relative), and `hash`
 8. Optional blocks, when present, must be well formed: `provenance`, `compatibility`, `skills`, `plugins`,
    `workflow_specs`, `context_packs`, `agent_images`, and `project` (an `id` made of letters, digits, `.`, `_` and `-`,
-   and a safe relative `path`)
+   and a safe relative `path`), plus `included_login_files` (unique safe relative paths)
 
 The manifest validator doesn't check `integrity`; unpack does (below).
 

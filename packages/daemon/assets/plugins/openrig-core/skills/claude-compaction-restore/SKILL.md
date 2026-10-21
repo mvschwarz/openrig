@@ -151,6 +151,15 @@ already leaves you. The edges are the point.
 
 You have facts without connections. Rebuild the connections before you act on anything.
 
+Use the native read tool for file reads throughout restoration. Load `refocusing`
+and consume the current topology and work trace that actually arrived with the
+restore request; do not rerun Python merely to duplicate it. If no current trace
+arrived, name that delivery gap. A packet pointer, compact summary or truncated
+extract is not a full source read. Read required notes and full sources separately
+and complete the restore steps and read-depth audit below; partial reading does
+not establish completed restoration. The earlier acknowledgement-only boundary
+is not a restore request.
+
 1. **Check for a hold first.** Read the restore request, the per-seat instruction file
    (`<OPENRIG_HOME>/compaction/post-compact-extra/<session>.md`, named by your full session such as
    `dev-impl@my-rig.md`) when it exists, the newest row or message from whoever routes your work, and any hold
@@ -212,12 +221,19 @@ The audit message asks for a read-depth table and tells you not to conserve toke
 
 The next restore map links this note, which keeps the chain unbroken.
 
+## Then resume
+
+Resume the outcome selected by the user's current instructions, standing duties and assigned work. Use existing
+task records, decisions and your recap to recover the next useful action, remaining constraints and evidence
+already earned. Check uncertain effects before replaying work. Available skills and historical suggestions do not
+by themselves widen scope or create required stages. Use authorized skills, subagents, peer help and useful tests
+within your remit without another permission request. Route a missing decision to its existing owner and continue
+unaffected work.
+
 ## Guardrails
 
 - Compaction is survival, not housekeeping. Compact only when a seat is genuinely near its limit, never to
   "lean" a seat or prepare a starter image; a compacted seat can sound confident while missing the context it needs.
-- Continue from the map and the files, not from the summary's "next step" alone: a hold placed after the
-  summary was written still binds.
 - Do not launch a fresh session in place of restoring.
 - An honest `PARTIAL` with its reason is a correct outcome. Claiming coverage you did not reach is the
   failure.

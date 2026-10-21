@@ -3,7 +3,7 @@
 // verbs (enable/disable) route to the daemon, where the seeding rule executes before the wire
 // goes live. setup/status ride the daemon-homed config surface unchanged.
 import { afterEach, describe, it, expect, vi } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
@@ -88,11 +88,10 @@ describe("S10 CLI cutover — admin verbs route to the daemon", () => {
     expect(posts).toHaveLength(0);
   });
 
-  it("records unavailable verification honestly with no credential value", async () => {
+  it("without a bot token, verify fails and writes nothing", async () => {
     const { deps } = makeDeps();
     await run(slackCommand(deps), ["verify", "--json"]);
-    const rows = readFileSync(join(deps.home!, "state", "human-channel-operations.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
-    expect(rows.at(-1)).toMatchObject({ action: "verify", effect: "observed", after: { ready: null }, provenance: "claimed:v1" });
+    expect(existsSync(join(deps.home!, "state", "human-channel-operations.jsonl"))).toBe(false);
     expect(process.exitCode).toBe(1);
     process.exitCode = 0;
   });
@@ -132,6 +131,20 @@ describe("S10 CLI cutover — config surfaces survive on the daemon-homed module
     const { deps, logs } = makeDeps();
     await run(slackCommand(deps), ["status"]);
     expect(logs.join("\n")).toContain("IN-DAEMON");
+  });
+
+  it.each([
+    { name: "disabled connector", outboundReady: false, inboundReady: false, paused: true },
+    { name: "enabled bot-only relay receiver", outboundReady: true, inboundReady: false, paused: false },
+  ])("shows configured routing and retained retry state on a $name", async ({ outboundReady, inboundReady, paused }) => {
+    const { deps, logs } = makeDeps({ clientFactory: () => ({ get: async <T>() => ({ status: 200,
+      data: { state: "active", connector: { outboundReady, inboundReady, inboundRouting: { fallback: "local", destination: "ops@hub" }, inbound: { state: "not-configured" }, deadLetterBacklog: 6, deadLetterBacklogState: "ok" } } as T }) }) });
+    await run(slackCommand(deps), ["status"]);
+    expect(logs.join("\n")).toContain("Configured routing fallback: local to ops@hub (after forwarding, thread and channel routes)");
+    expect(logs.join("\n")).toContain(paused ? "6 retained record(s); retry paused" : "6 retained record(s) awaiting retry");
+    logs.length = 0;
+    await run(slackCommand(deps), ["status", "--json"]);
+    expect(JSON.parse(logs[0]!).observation.connector.inboundRouting).toEqual({ fallback: "local", destination: "ops@hub" });
   });
 });
 
@@ -177,14 +190,16 @@ describe("Slack verify reports optional capabilities from granted scopes", () =>
         const missing = known ? FEATURE_SCOPES.filter(f => !grants!.includes(f.scope)) : null;
         if (json) {
           expect(JSON.parse(logs[0]!)).toMatchObject({ ready, missingFeatures: missing });
+          expect(JSON.parse(logs[0]!)).not.toHaveProperty("receipt");
         } else {
           expect(logs.at(-1)).toBe(ready ? "READY" : "NOT ready");
           const warnings = logs.filter(line => line.startsWith("⚠"));
           expect(warnings).toHaveLength(missing?.length ?? 0);
           for (const feature of missing ?? []) expect(warnings.join("\n")).toContain(`${feature.scope} missing: ${feature.usedBy}`);
         }
-        const receipts = readFileSync(join(home, "state", "human-channel-operations.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
-        expect(receipts.at(-1)).toMatchObject({ action: "verify", effect: "observed", after: { ready: error ? null : ready } });
+        const ledger = join(home, "state", "human-channel-operations.jsonl");
+        const rows = existsSync(ledger) ? readFileSync(ledger, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line)) : [];
+        expect(rows.filter(row => row.action === "verify")).toEqual([]);
       } finally {
         process.exitCode = 0;
         vi.unstubAllEnvs();

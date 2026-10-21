@@ -65,6 +65,7 @@ describe("rig slack manifest (offline)", () => {
     expect(help).toContain("docs/reference/slack-app-setup.md");
     expect(help).toContain("$OPENRIG_HOME/reference/slack-app-setup.md");
     expect(help).toContain("does not prove attachments or mentions");
+    expect(help).toContain("paste the plain YAML output");
   });
 });
 

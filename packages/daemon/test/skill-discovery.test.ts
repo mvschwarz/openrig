@@ -241,7 +241,7 @@ describe("seat-material skill roots", () => {
     writeSkill(join(seatA, "review"), { name: "review", description: "Seat A copy." });
     writeSkill(join(seatB, "review"), { name: "review", description: "Seat B copy." });
 
-    const audited = discoverSkillsWithProvenance({ ...pathsFor("claude-code"), seatSkillRoots: [seatA, seatB] });
+    const audited = await discoverSkillsWithProvenance({ ...pathsFor("claude-code"), seatSkillRoots: [seatA, seatB] });
     expect(audited.skills.filter((s) => s.sourceKind === "seat_material").map((s) => [s.sourceRoot, s.shadowed]))
       .toEqual([[seatA, false], [seatB, false]]);
 

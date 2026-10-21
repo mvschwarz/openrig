@@ -10,6 +10,11 @@ export interface AgentRow {
   runtime: string;
   /** effective served model; separate from runtime, null when not served */
   model?: string | null;
+  /** Configured launch effort: the seat's explicit choice, else the authored value.
+   *  null = no configured level (runtime default); never an observed guess. */
+  effort?: string | null;
+  /** Provenance for `effort`; `runtime_default` = no configured level is known. */
+  effortSource?: "seat_choice" | "authored" | "runtime_default" | null;
   spec: string;
   profile?: string | null;
   specVersion?: string | null;
@@ -264,6 +269,9 @@ export interface RecentTransitionSnap {
   change: string;
   /** Authored queue summary for display only; never used to derive change. */
   summary?: string | null;
+  /** Display text the daemon derives from the body (first non-blank line within its first 2,000
+   *  characters) for a row with no authored summary. Absent from older daemons. */
+  bodyPreview?: string | null;
   /** Owning local rig, explicit on instance-scoped reads. */
   rig?: string | null;
   targetKind: "qitem" | "slice" | "mission";
@@ -349,8 +357,42 @@ export interface HealthSnapshot {
 
 export interface ProjectSelection { id: string; root: string }
 export interface ProjectEntry extends ProjectSelection { name: string; sourcePath: string | null; missionsRoot: string; error?: string }
+/** The served `rig seat effort` report, narrowed to the fields this renderer reads.
+ *  `ok: false` is a refusal (code/message), never a fabricated value. */
+export interface SeatEffortRead {
+  ok: boolean;
+  code?: string;
+  message?: string;
+  runtime?: string;
+  /** The last `rig seat set-effort` for this seat; null = never set. `value: null` = cleared. */
+  requested?: { value?: string | null; at?: string; reason?: string; operator?: string | null } | null;
+  saved?: { effective?: string | null; source?: string | null; authored?: string | null; choice?: string | null };
+  emitted?: {
+    state?: "observed" | "unknown";
+    value?: string | null;
+    pid?: number;
+    startedAt?: string | null;
+    matchesSaved?: boolean;
+    detail?: string;
+  };
+  observed?: {
+    state?: "observed" | "not_verified";
+    value?: string | null;
+    source?: string;
+    outcome?: string;
+    detail?: string;
+    at?: string;
+    matchesEmitted?: boolean;
+  };
+  summary?: string;
+}
+
 export interface FleetSnapshot {
   attentionRead?: import("@openrig/daemon/attention").AttentionRead | null;
+  /** Present only while an agent detail page is open; fetched from the existing
+   *  seat-effort route. A null report = the read did not answer; never a claim that
+   *  no effort exists. */
+  seatEffort?: { seatRef: string; report: SeatEffortRead | null } | null;
   projects?: { catalogPath: string; projects: ProjectEntry[] } | null;
   projectRead?: ProjectSelection | null;
   projectSources?: Record<string, string>;
@@ -367,6 +409,12 @@ export interface FleetSnapshot {
   slackManifest?: import("./connections/connections-model.js").SlackManifestRead | null;
   daemonTarget?: string;
   launchingCli?: string;
+  /** Slice 01 — System → Usage: the served provider read model (usage windows, seat accounts). Absent until read. */
+  usage?: import("./usage/usage-model.js").UsageRead;
+  /** Slice 01 — System → Usage across hosts: the served view across registered hosts. Absent until read. */
+  usageHosts?: import("./usage/usage-hosts-model.js").UsageHostsRead;
+  /** Slice 02 — System → Cost: the served cost view (`rig usage cost`). Absent until read. */
+  cost?: import("./cost/cost-read.js").CostRead;
   /** Canonical daemon health records. Absent on old/demo snapshots. */
   health?: HealthSnapshot;
   /** SCOPES view (d64d2f5c): store-direct mission/slice projections; absent on old daemons (honest-empty). */
@@ -394,6 +442,9 @@ export interface FleetSnapshot {
   /** PULSE ▲ NEEDS YOU source — the shipped attention read (already the exact
    * human-facing set); empty array = the join ran and yielded zero (silence). */
   attention: QueueRead[];
+  /** Coverage of the four active queue lists, before filtering by rig/pod/seat.
+   * A cap is possible truncation; it does not prove an omitted row. */
+  queueCoverage?: "complete" | "partial" | "unavailable";
   /** PULSE ⧗ BLOCKED ON AGENTS source — the shipped state=blocked read (ALL
    * blocked qitems); the render filters to NON-human blockedOn. */
   blocked: QueueRead[];
@@ -440,6 +491,15 @@ export interface DrillSegment {
   specKind?: SpecKind;
 }
 
+/** A topology address typed on a page that reads no rigs; it resolves once
+ *  Topology's own read settles. `seq` gives every request a fresh page read. */
+export interface PendingDrill {
+  resource: "host" | "rig" | "pod" | "agent";
+  name: string;
+  target?: ResourceTarget;
+  seq: number;
+}
+
 export type ViewTab = "table" | "recent" | "overview" | "graph" | "health" | "topology" | "configuration" | "yaml" | "pulse";
 
 export type Action =
@@ -471,6 +531,8 @@ export type Action =
   | { type: "select"; delta?: number; index?: number; rowCount?: number; origin?: "refresh" }
   | { type: "activate" }
   | { type: "drill"; resource: ResourceKind; name: string; target?: ResourceTarget; specKind?: SpecKind }
+  /** Resolve `pendingDrill` against the current (settled Topology) snapshot. */
+  | { type: "resolve-pending" }
   | { type: "cross"; kind: "spec-of" | "running"; name: string; target?: ResourceTarget }
   | { type: "tab"; tab: ViewTab }
   | { type: "content-scroll"; delta: number }
@@ -484,7 +546,7 @@ export type Action =
   /** slice-17: the graph-render style dimension rides the command bar */
   | { type: "style"; name: string }
   /** REGISTRY I3 — the command palette (open/query/move/close ride dispatch like all state). */
-  /** SCOPES view: m collapse + n narrative toggles (dispatch-riding). */
+  /** SCOPES view: M collapse + N narrative toggles (dispatch-riding). */
   | { type: "project-select"; id: string }
   | { type: "project-source" }
   | { type: "scopes-mission-open"; mission: string }
@@ -532,6 +594,9 @@ export interface ViewState {
   history?: NavigationFrame[];
   configCategory?: string | null;
   configKey?: string | null;
+  pendingDrill?: PendingDrill | null;
+  /** Last PendingDrill seq handed out; never reused while this view lives. */
+  pendingSeq?: number;
   /** Canonical health finding opened from any instance/rig/seat surface. */
   healthOpen: string | null;
   /** SCOPES view: the mission whose execution story is open (null = selector only). */
@@ -606,6 +671,8 @@ export interface LoadState {
   /** Known change or lost authority contact; quiet elapsed time alone never sets this. */
   stale?: boolean;
   connection?: "connected" | "dropped" | "reconnecting" | "unavailable";
+  /** this TUI's build differs from the daemon's; background refresh has stopped */
+  skew?: string;
   /** a hydrate refresh is running right now */
   inFlight: boolean;
   /** at least one refresh has completed (success or failure) */

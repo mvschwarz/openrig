@@ -14,7 +14,7 @@ vi.mock("../src/daemon-lifecycle.js", async (original) => {
   const actual = await original<typeof import("../src/daemon-lifecycle.js")>();
   return { ...actual, getDaemonStatus: vi.fn(async () => ({ state: "stopped" })), startDaemon: vi.fn(async () => { throw new Error("startup options captured"); }) };
 });
-vi.mock("../src/system-preflight.js", () => ({ SystemPreflight: class { async run() { return { ready: true, checks: [] }; } } }));
+vi.mock("../src/system-preflight.js", () => ({ SystemPreflight: class { async run() { return { ready: true, checks: [] }; } }, quietPreflightExec: async () => "" }));
 let home: string;
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "transcript-startup-"));

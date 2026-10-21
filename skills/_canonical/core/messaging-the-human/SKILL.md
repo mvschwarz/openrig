@@ -5,6 +5,8 @@ metadata:
   cli_surfaces_referenced:
     - gateway human list
     - gateway human show
+    - gateway human mode room
+    - gateway human mode decide
     - queue create
     - queue transitions
     - queue block
@@ -69,6 +71,28 @@ rig queue create --destination <entityId>@external \
   --evidence-ref <durable-evidence> --verify --json
 ```
 
+Before asking a **decision**, check whether the person has a mode on with a
+decision room: what they said the team may decide for them meanwhile.
+
+```bash
+rig gateway human mode room <entityId>
+```
+
+If it names a room and your decision is plainly inside their words (and none of
+their exclusions), decide instead of waiting. Create the ask as above, then
+record your choice on it straight away:
+
+```bash
+rig gateway human mode decide <qitem-id> --application <applicationId> \
+  --choose <question>=<option> --reason "<why>" --reversible   # or --irreversible
+```
+
+It's recorded as decided on their behalf, never as their answer, the ask
+closes, and it's in their account when they're back. Say honestly whether it
+can be undone. A permission prompt or an approval is never decided this way.
+With no room, a room that doesn't plainly cover it, or any doubt, ask and wait;
+a recommended option is not a decision.
+
 An optional `--human-detail-file <path>` supplies one coherent supplemental
 reply in the same thread. Announce its purpose in the brief; the product also
 marks that a detail reply follows. The primary must already contain the complete
@@ -92,16 +116,30 @@ the human (a pending human decision, or a row parked on the human), since a
 reply in that thread would answer the decision. In every such case the
 `--verify` result says `threaded: false` with the reason.
 
+To answer a reply the human typed inside one of your threads, `--reply-to` the
+row their reply landed as. The update posts in that thread unless one of the
+cases above applies, and `--verify` reports it the same way. A message the
+human started at the top level of the channel has no thread yet, so the answer
+posts as a new message.
+
 A **decision** with a few clear choices can carry `--human-questions-file <path>`:
 a JSON array of 1–4 questions, each
 `{"id", "question", "options": [{"id", "label", "recommended"?}]}` with 2–4
 options (labels up to 75 characters, at most one recommended). Slack shows each
 question as a row of buttons. Each click records that answer on the item, and
 the decision resolves once every question has one. You then receive one reply
-row listing the answers, and the item's `humanAnswers` holds the option ids. The
-human may instead type a reply in the thread; that resolves the decision as
-usual, so read the reply rather than assuming an option was picked. Keep the
-brief complete: the questions add buttons, they do not replace the explanation.
+row listing the answers. In `humanAnswers`, clicked answers are option-id strings.
+A whole typed reply is an object:
+`{kind: "typed-reply", text: "…", placement: "first-unanswered", unansweredCount: N}`.
+It is placed automatically under the first unanswered question; the person did
+not select that question. `N` counts the other question slots still empty in
+`humanAnswers` after that placement.
+Earlier button answers stay intact. Read `text` as the person's words, never as
+an option id even if the strings match. The typed reply still closes the decision
+with the other questions unanswered; `done` is not approval. If every button
+answer was already recorded, that final answer set stays intact and the typed
+reply remains in its correlated reply row. Keep the brief complete: the questions
+add buttons, they do not replace the explanation.
 
 If an existing agent-owned row must wait for a **decision**, block it on the **new live qitem ID**
 (`rig queue block <work-id> --on <human-qitem-id> ...`), not on the human address.

@@ -212,7 +212,11 @@
             "description": "Host settings (for example OPENRIG_YOLO, persisted or native settings) decide the effective permission at launch."
           },
           "permissionPrompts": {
-            "enum": ["off", "on", "default"],
+            "enum": [
+              "off",
+              "on",
+              "default"
+            ],
             "description": "Archive declaration per seat: off for full_bypass (including builtin:yolo) on any runtime; on for a Claude/Codex flag-surface floor policy, or Codex under auto; default for Claude/Codex with no declared policy. Omitted for Claude under auto, config-surface policies, host-resolved Codex profiles, and Pi except declared full bypass. Absent means not stated, never on. Host settings may differ; nativeEffect remains unknown."
           },
           "sourceRefs": {
@@ -417,7 +421,10 @@
           "commands": {
             "type": "array",
             "description": "Unexecuted author setup lines, in order in one shell; the install command follows in the resulting working directory.",
-            "items": { "type": "string", "minLength": 1 }
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
           },
           "status": {
             "const": "not_checked"
@@ -455,6 +462,102 @@
             "type": "array",
             "items": {
               "$ref": "#/$defs/sourceRef"
+            }
+          }
+        }
+      }
+    },
+    "services": {
+      "type": "array",
+      "description": "Optional opt-in service declarations from archived Compose YAML. Host-resolved values remain unresolved; no Compose or health probe ran.",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "composeFile",
+          "image",
+          "ports",
+          "privileged",
+          "capAdd",
+          "securityOpt",
+          "devices",
+          "environment",
+          "mounts",
+          "healthcheck",
+          "waitFor",
+          "downPolicy",
+          "unresolved",
+          "notes"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "composeFile": {
+            "type": "string"
+          },
+          "image": {
+            "type": "string"
+          },
+          "ports": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "privileged": {
+            "type": [
+              "boolean",
+              "string"
+            ]
+          },
+          "capAdd": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "securityOpt": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "devices": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "environment": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "mounts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "healthcheck": {},
+          "waitFor": {
+            "type": "array"
+          },
+          "downPolicy": {
+            "type": "string"
+          },
+          "unresolved": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
             }
           }
         }

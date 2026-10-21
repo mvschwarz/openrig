@@ -10,6 +10,7 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { SessionTransport, classifyPaneActivity } from "../src/domain/session-transport.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
+import { RunnerCore } from "../src/adapters/pi-runner.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -124,6 +125,124 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     return rows.map((r) => JSON.parse(r.payload) as Record<string, unknown>);
   }
 
+  // Real runner -> real hook normalization/store -> real ordinary-send guard.
+  it.each([
+    [529, false, true], [429, false, true], [503, false, true],
+    [401, false, false], [403, false, false], [400, false, false],
+    [undefined, false, false], ["529", false, false],
+    [529, true, false],
+  ] as const)("OMP completed failure status %s approval=%s permits retry=%s", async (errorStatus, approval, retryAllowed) => {
+    const seat = "omp-worker@my-rig";
+    const node = rigRepo.addNode(rigId, "omp.worker", { role: "worker", runtime: "omp" });
+    const session = sessionRegistry.registerSession(node.id, seat);
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: seat });
+    const mirror: string[] = [];
+    const core = new RunnerCore({
+      sendRpc: () => {}, mirrorLine: line => { mirror.push(line); }, mirrorAppend: () => {},
+      writeSidecar: () => {}, now: () => new Date().toISOString(),
+      postActivity: payload => {
+        if (!payload.eventFamily) agentActivityStore.recordHookEvent({
+          runtime: "omp", sessionName: seat, hookEvent: String(payload.hookEvent),
+          subtype: payload.subtype as string | null,
+        });
+      },
+    }, { sessionName: seat, nodeId: node.id, launchId: "attempt-1" }, { runtime: "omp" });
+    const emit = (event: Record<string, unknown>) => core.handlePiLine(JSON.stringify(event));
+    emit({ type: "agent_start" });
+    if (approval) emit({ type: "extension_ui_request", id: "approval-1", method: "confirm" });
+    // Identical diagnostic text across statuses proves that prose cannot
+    // authorize a retry (including when the typed status is auth failure).
+    emit({ type: "turn_end", message: { role: "assistant", stopReason: "error", errorStatus, errorMessage: "529 overloaded" } });
+    const { sendText, sendKeys } = spies();
+    const transport = makeTransport(mockTmux({ sendText, sendKeys }));
+    expect((await transport.send(seat, "premature retry")).reason).toBe("target_needs_input");
+    emit({ type: "agent_end" });
+    const latest = agentActivityStore.getLatestForNode({ nodeId: node.id, sessionName: seat });
+    expect(latest?.state).toBe(retryAllowed ? "idle" : "needs_input");
+    const result = await transport.send(seat, "try again");
+    expect(result.ok).toBe(retryAllowed);
+    if (retryAllowed) expect(sendText).toHaveBeenCalledTimes(1);
+    else {
+      expect(result.reason).toBe("target_needs_input");
+      expect(sendText).not.toHaveBeenCalled();
+      expect(sendKeys).not.toHaveBeenCalled();
+    }
+    expect(mirror).toContain("[omp-runner] ERROR 529 overloaded");
+  });
+
+  // Source-derived OMP v18.2.11 (e4151593), turn-recovery.ts exhaustion
+  // branch + agent-session.ts public lifecycle. No external /tmp fixture needed.
+  it.each([
+    ["exhaustion", true], ["duplicate-summary", true],
+    ["auth", false], ["approval", false], ["unknown", false],
+    ["wrong-attempt", false], ["different-error", false],
+    ["no-retry-start", false], ["new-message", false],
+    ["untyped-followup", false], ["nonterminal", false],
+    ["summary-auth", false], ["new-success", false], ["post-summary-error", false],
+  ] as const)("OMP native retry sequence %s allows ordinary send=%s", async (sequence, allowed) => {
+    const seat = "omp-retry@my-rig";
+    const node = rigRepo.addNode(rigId, "omp.retry", { role: "worker", runtime: "omp" });
+    const session = sessionRegistry.registerSession(node.id, seat);
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: seat });
+    const mirror: string[] = [];
+    const core = new RunnerCore({
+      sendRpc: () => {}, mirrorLine: line => { mirror.push(line); }, mirrorAppend: () => {},
+      writeSidecar: () => {}, now: () => new Date().toISOString(),
+      postActivity: payload => {
+        if (!payload.eventFamily) agentActivityStore.recordHookEvent({
+          runtime: "omp", sessionName: seat, hookEvent: String(payload.hookEvent),
+          subtype: payload.subtype as string | null,
+        });
+      },
+    }, { sessionName: seat, nodeId: node.id, launchId: "retry-run" }, { runtime: "omp" });
+    const emit = (event: Record<string, unknown>) => core.handlePiLine(JSON.stringify(event));
+    const failure = (errorStatus: number | null = 529) => {
+      const message = { role: "assistant", stopReason: "error", errorStatus, errorMessage: "529 overloaded" };
+      emit({ type: "message_end", message });
+      emit({ type: "turn_end", message });
+    };
+    const { sendText, sendKeys } = spies();
+    const transport = makeTransport(mockTmux({ sendText, sendKeys }));
+    emit({ type: "agent_start" });
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      failure();
+      if (sequence !== "no-retry-start") emit({ type: "auto_retry_start", attempt, maxAttempts: 3, delayMs: 0, errorMessage: "529 overloaded" });
+      emit({ type: "agent_end", isTerminal: false });
+      // Nonterminal settles must never advertise readiness.
+      expect(agentActivityStore.getLatestForNode({ nodeId: node.id, sessionName: seat })?.state).not.toBe("idle");
+      emit({ type: "agent_start" });
+      emit({ type: "turn_start" });
+      emit({ type: "message_start", message: { role: "assistant", content: [] } });
+    }
+    failure(sequence === "auth" ? 401 : sequence === "unknown" ? null : 529);
+    if (sequence === "approval") emit({ type: "extension_ui_request", id: "approval-1", method: "confirm" });
+    if (sequence === "new-message") emit({ type: "message_start", message: { role: "assistant", content: [] } });
+    if (sequence === "new-success") emit({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: [] } });
+    if (sequence === "untyped-followup") emit({ type: "turn_end", message: { role: "assistant", stopReason: "error", errorMessage: "new unknown failure" } });
+    expect((await transport.send(seat, "too early")).reason).toBe("target_needs_input");
+    const summary = { type: "auto_retry_end", success: false, attempt: sequence === "wrong-attempt" ? 2 : 3,
+      finalError: sequence === "different-error" ? "new failure" : "529 overloaded", retryErrors: [],
+      ...(sequence === "summary-auth" ? { error: "401 authentication failed" } : {}) };
+    emit(summary);
+    if (sequence === "duplicate-summary") emit(summary);
+    if (sequence === "post-summary-error") emit({ type: "turn_end", message: { role: "assistant", stopReason: "error", errorStatus: 401, errorMessage: "new auth failure" } });
+    emit({ type: "agent_end", isTerminal: false });
+    expect((await transport.send(seat, "still too early")).reason).toBe("target_needs_input");
+    if (sequence !== "nonterminal") emit({ type: "agent_end", isTerminal: true });
+    expect(agentActivityStore.getLatestForNode({ nodeId: node.id, sessionName: seat })?.state).toBe(allowed ? "idle" : "needs_input");
+    const result = await transport.send(seat, "try again");
+    expect(result.ok).toBe(allowed);
+    if (allowed) expect(sendText).toHaveBeenCalledTimes(1);
+    else {
+      expect(result.reason).toBe("target_needs_input");
+      expect(sendText).not.toHaveBeenCalled();
+      expect(sendKeys).not.toHaveBeenCalled();
+    }
+    expect(mirror).toContain("[omp-runner] ERROR 529 overloaded");
+  });
+
   // K-1: default send to a pane at an interactive prompt → refused, nothing typed/submitted.
   it("K-1: default send to an AskUserQuestion refuses (target_needs_input) and never types or submits", async () => {
     const { sendText, sendKeys } = spies();
@@ -198,21 +317,38 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(sendText).not.toHaveBeenCalled();
   });
 
+  it("a current Codex usage limit allows an ordinary send without a prompt override", async () => {
+    const seat = seedCodexSeat();
+    agentActivityStore.recordHookEvent({ runtime: "codex", sessionName: seat, hookEvent: "at_limit" });
+    const { sendText, sendKeys } = spies();
+    const transport = makeTransport(mockTmux({
+      capturePaneContent: async () => "■ You've hit your usage limit.\n› ",
+      sendText, sendKeys,
+    }));
+    expect((await transport.send(seat, "continue when ready")).ok).toBe(true);
+    expect(sendText).toHaveBeenCalledWith(seat, "continue when ready");
+    expect(sendKeys).toHaveBeenCalledWith(seat, ["Enter"]);
+    expect(overrideEvents()).toEqual([]);
+  });
+
   // K-5 HOOK-PRIMARY (founder expansion): a fresh Codex PermissionRequest hook is the PRIMARY signal —
   // it blocks default/raw/force even when the pane looks idle (a high-stakes guard must not depend on
   // screen-scraping). Only --dangerously-interact --reason drives it (+ audit).
-  it("K-5(hook): a Codex PermissionRequest hook is HOOK-PRIMARY — default/raw/force refused, only --dangerously-interact drives + audits", async () => {
+  it.each([0, 15_000])("K-5(hook): a send-fresh pending Codex permission (%sms old) may hide a prompt — refuse sends, allow only an audited answer", async ageMs => {
     const seat = seedCodexSeat();
-    agentActivityStore.recordHookEvent({ runtime: "codex", sessionName: seat, hookEvent: "PermissionRequest", subtype: "Bash" });
+    const now = new Date();
+    agentActivityStore.recordHookEvent({ runtime: "codex", sessionName: seat, hookEvent: "PermissionRequest", subtype: "Bash",
+      occurredAt: new Date(now.getTime() - ageMs).toISOString() });
     const { sendText, sendKeys } = spies();
     // Pane looks idle, but the fresh hook is authoritative.
-    const t = makeTransport(mockTmux({ capturePaneContent: async () => "› ready\n\n  gpt-5.5 xhigh fast · Context [████ ] · ~/code", sendText, sendKeys }));
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => "› ready\n\n  gpt-5.5 xhigh fast · Context [████ ] · ~/code", sendText, sendKeys }), { now: () => now });
 
     const def = await t.send(seat, "hi");
     expect(def.ok).toBe(false);
     expect(def.reason).toBe("target_needs_input");
     expect(def.activity?.evidenceSource).toBe("runtime_hook"); // HOOK-PRIMARY, not screen-scrape
-    expect(def.activity?.reason).toBe("permission_request");
+    expect(def.activity?.reason).toBe("permission_request_pending");
+    expect(agentActivityStore.getLatestForNode({ sessionName: seat })).toMatchObject({ state: "unknown", reason: "permission_request_pending" });
 
     const raw = await t.send(seat, "/compact", {});
     expect(raw.ok).toBe(false);
@@ -229,7 +365,86 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(sendText).toHaveBeenCalledWith(seat, "1", undefined, { bracketed: false });
     const ev = overrideEvents();
     expect(ev.length).toBe(1);
-    expect(ev[0]).toMatchObject({ detectedState: "needs_input", detectedReason: "permission_request", overrideReason: "approve the blocked command" });
+    expect(ev[0]).toMatchObject({ detectedState: "needs_input", detectedReason: "permission_request_pending", overrideReason: "approve the blocked command" });
+    agentActivityStore.recordHookEvent({ runtime: "codex", sessionName: seat, hookEvent: "Stop" });
+    expect((await t.send(seat, "hi")).ok).toBe(true);
+  });
+
+  it.each([15_001, 90_000, 300_000, 300_001, 600_000])("a pending Codex permission %sms old allows a send into a readable empty composer", async ageMs => {
+    const fixedNow = new Date("2026-10-11T05:00:00.000Z");
+    const seat = seedCodexSeat();
+    seedCodexHook(fixedNow, "PermissionRequest", ageMs, seat);
+    const { sendText, sendKeys } = spies();
+    const capture = vi.fn(async () => CODEX_PLACEHOLDER_PANE);
+    const transport = makeTransport(mockTmux({ capturePaneContent: capture, sendText, sendKeys }), { now: () => fixedNow });
+    const result = await transport.send(seat, "follow up");
+    expect(result.ok).toBe(true);
+    expect(capture).toHaveBeenCalled();
+    expect(sendText).toHaveBeenCalledWith(seat, "follow up");
+    expect(sendKeys).toHaveBeenCalledWith(seat, ["Enter"]);
+    expect(overrideEvents()).toEqual([]);
+  });
+
+  it.each([{}, { waitForIdleMs: 1_000 }, { readinessFromPaneOnly: true }])("a send-stale pending permission allows readable empty-composer sends with %j", async options => {
+    const fixedNow = new Date("2026-10-11T05:00:00.000Z");
+    const seat = seedCodexSeat();
+    seedCodexHook(fixedNow, "PermissionRequest", 90_000, seat);
+    const { sendText } = spies();
+    const transport = makeTransport(mockTmux({ capturePaneContent: async () => "› \n\n  test-model · ~/code", sendText }), { now: () => fixedNow });
+    expect((await transport.send(seat, "follow up", options)).ok).toBe(true);
+    expect(sendText).toHaveBeenCalled();
+  });
+
+  it.each([15_001, 90_000, 600_000])("a pending Codex permission %sms old still refuses a visible approval", async ageMs => {
+    const fixedNow = new Date("2026-10-11T05:00:00.000Z");
+    const seat = seedCodexSeat();
+    seedCodexHook(fixedNow, "PermissionRequest", ageMs, seat);
+    const { sendText, sendKeys } = spies();
+    const transport = makeTransport(mockTmux({ capturePaneContent: async () => CODEX_APPROVAL, sendText, sendKeys }), { now: () => fixedNow });
+    expect(await transport.send(seat, "follow up", { force: true })).toMatchObject({ ok: false, reason: "target_needs_input" });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it.each(["null", "empty", "unrecognized", "failure"])("a send-stale pending Codex permission fails safe on %s capture", async captureKind => {
+    const fixedNow = new Date("2026-10-11T05:00:00.000Z");
+    const seat = seedCodexSeat();
+    seedCodexHook(fixedNow, "PermissionRequest", 90_000, seat);
+    const { sendText, sendKeys } = spies();
+    const capture = async () => {
+      if (captureKind === "failure") throw new Error("capture failed");
+      if (captureKind === "null") return null;
+      return captureKind === "empty" ? "" : "unrecognized provider content";
+    };
+    const transport = makeTransport(mockTmux({ capturePaneContent: capture, sendText, sendKeys }), { now: () => fixedNow });
+    expect(await transport.send(seat, "follow up", { force: true })).toMatchObject({
+      ok: false, reason: "target_needs_input", activity: { reason: "permission_request_unverified" },
+    });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it("a clock-stale pending permission still fails safe on an unreadable pane", async () => {
+    const fixedNow = new Date("2026-10-11T05:00:00.000Z");
+    const seat = seedCodexSeat();
+    seedCodexHook(fixedNow, "PermissionRequest", 600_000, seat);
+    const { sendText, sendKeys } = spies();
+    const transport = makeTransport(mockTmux({ capturePaneContent: async () => null, sendText, sendKeys }), { now: () => fixedNow });
+    expect(await transport.send(seat, "follow up", { waitForIdleMs: 1_000 })).toMatchObject({ ok: false, reason: "target_needs_input" });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it("a pending permission over readable live work sends with the existing busy advisory", async () => {
+    const fixedNow = new Date("2026-10-11T05:00:00.000Z");
+    const seat = seedCodexSeat();
+    seedCodexHook(fixedNow, "PermissionRequest", 90_000, seat);
+    const { sendText } = spies();
+    const transport = makeTransport(mockTmux({ capturePaneContent: async () => "• Working (3s • esc to interrupt)", sendText }), { now: () => fixedNow });
+    const result = await transport.send(seat, "follow up");
+    expect(result.ok).toBe(true);
+    expect(result.warning).toContain("busy");
+    expect(sendText).toHaveBeenCalled();
   });
 
   // BOTH PATHS: when the hook is ABSENT (or stale), the capture-pane fallback still catches a Codex
@@ -357,6 +572,72 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     // It proceeded → the stale non-idle hook fell through to the pane (not trusted).
     expect(r.ok).toBe(true);
     expect(r.activity?.evidenceSource).not.toBe("runtime_hook");
+    expect(sendText).toHaveBeenCalled();
+  });
+
+  // A latest hook that says the seat waits on a person stays authoritative past the send window when
+  // the pane cannot be read. 2026-10-08: a Claude AskUserQuestion with option previews read unknown,
+  // its permission_prompt hook was 36 s old, and a watchdog wake's Enter chose the first option.
+  // No capture of that render exists, so these use a pane the classifier cannot parse.
+  const UNRECOGNIZED_PANE = "xyzzy no prompt here";
+  function seedPersonWaitingHook(fixedNow: Date, ageMs: number) {
+    agentActivityStore.recordHookEvent({
+      runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "Notification", subtype: "permission_prompt",
+      occurredAt: new Date(fixedNow.getTime() - ageMs).toISOString(),
+    });
+  }
+
+  it.each([
+    ["36 s old (past the send window)", 36_000],
+    ["10 min old (past the store's freshness window)", 600_000],
+  ])("a latest permission_prompt hook %s + an unrecognized pane refuses, nothing typed", async (_label, ageMs) => {
+    const fixedNow = new Date("2026-10-08T06:47:16.000Z");
+    seedPersonWaitingHook(fixedNow, ageMs);
+    expect(classifyPaneActivity(UNRECOGNIZED_PANE).state).toBe("unknown");
+    const { sendText, sendKeys } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => UNRECOGNIZED_PANE, sendText, sendKeys }), { now: () => fixedNow });
+    const r = await t.send("dev-impl@my-rig", "You are parked while holding 1 open obligation");
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("target_needs_input");
+    expect(r.activity).toMatchObject({ state: "needs_input", evidenceSource: "runtime_hook" });
+    // The watchdog's parked-owner policy records this exact shape as an interactive refusal.
+    expect(r.error).toMatch(/^Refused: .* is at an interactive prompt \(permission_prompt; latest hook, pane unrecognized\)/);
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it("a stale permission_prompt hook + a recognized empty composer sends (no new refusal at an idle prompt)", async () => {
+    const fixedNow = new Date("2026-10-08T06:47:16.000Z");
+    seedPersonWaitingHook(fixedNow, 36_000);
+    const { sendText } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => "idle\n❯ ", sendText }), { now: () => fixedNow });
+    const r = await t.send("dev-impl@my-rig", "hi");
+    expect(r.ok).toBe(true);
+    expect(sendText).toHaveBeenCalled();
+  });
+
+  it("a stale permission_prompt hook + a pane showing live work sends (an approved tool is running)", async () => {
+    const fixedNow = new Date("2026-10-08T06:47:16.000Z");
+    seedPersonWaitingHook(fixedNow, 36_000);
+    const pane = "⏺ Bash(npm test)\n✻ Running… (1m 2s · esc to interrupt)";
+    expect(classifyPaneActivity(pane).state).toBe("agent_active");
+    const { sendText } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => pane, sendText }), { now: () => fixedNow });
+    const r = await t.send("dev-impl@my-rig", "hi");
+    expect(r.ok).toBe(true);
+    expect(sendText).toHaveBeenCalled();
+  });
+
+  it("a stale RUNNING hook + an unrecognized pane still sends (only a person-waiting hook holds)", async () => {
+    const fixedNow = new Date("2026-10-08T06:47:16.000Z");
+    agentActivityStore.recordHookEvent({
+      runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "UserPromptSubmit",
+      occurredAt: new Date(fixedNow.getTime() - 36_000).toISOString(),
+    });
+    const { sendText } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => UNRECOGNIZED_PANE, sendText }), { now: () => fixedNow });
+    const r = await t.send("dev-impl@my-rig", "hi");
+    expect(r.ok).toBe(true);
     expect(sendText).toHaveBeenCalled();
   });
 

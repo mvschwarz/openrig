@@ -96,13 +96,13 @@ describe("validateChannelMap — teaching errors", () => {
     ]))).not.toThrow();
   });
   it("an unsupported entry field is refused when writing and ignored (but reported) when reading", () => {
-    const newer = withMap([{ match: "my-rig", channel: "C1", inbound: "lead@my-rig" }]);
-    expect(() => validateChannelMap(newer)).toThrow(/channelMap\[0\] \('my-rig'\) has unsupported field\(s\) inbound: slack-connector\.json was written by a newer OpenRig version\. Upgrade OpenRig, or edit the file by hand/);
+    const newer = withMap([{ match: "my-rig", channel: "C1", policy: "mention-only" }]);
+    expect(() => validateChannelMap(newer)).toThrow(/channelMap\[0\] \('my-rig'\) has unsupported field\(s\) policy: slack-connector\.json was written by a newer OpenRig version\. Upgrade OpenRig, or edit the file by hand/);
     expect(() => validateChannelMap(newer, { allowUnknownFields: true })).not.toThrow();
-    expect(unsupportedChannelMapFields(newer)).toEqual(["channelMap[0].inbound"]);
+    expect(unsupportedChannelMapFields(newer)).toEqual(["channelMap[0].policy"]);
     expect(unsupportedChannelMapFields(cfg)).toEqual([]);
     // Reading stays strict about everything else.
-    expect(() => validateChannelMap(withMap([{ match: "my-rig", inbound: "x@y" }]), { allowUnknownFields: true })).toThrow(/channel must be/);
+    expect(() => validateChannelMap(withMap([{ match: "my-rig", policy: "x" }]), { allowUnknownFields: true })).toThrow(/channel must be/);
   });
 });
 

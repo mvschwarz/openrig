@@ -1,6 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import { QueueRepository, type QueueItem } from "../src/domain/queue-repository.js";
+import { migrate } from "../src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { queueItemWakeInputBoxSchema } from "../src/db/migrations/116_queue_item_wake_input_box.js";
+import { migrationsForFullTestDb } from "./helpers/test-app.js";
+import type { InputBoxEvidence } from "../src/domain/session-transport.js";
 
 function createTestDb(): Database.Database {
   const db = new Database(":memory:");
@@ -33,6 +38,7 @@ function createTestDb(): Database.Database {
     resolution TEXT,
     target_repo TEXT
   )`);
+  migrate(db, [queueItemWakeInputBoxSchema]);
   return db;
 }
 
@@ -169,12 +175,12 @@ describe("OPR.0.4.0.28 — queue list compact + scope-default", () => {
     expect(owned.map((item) => item.qitemId)).toEqual(["q-to-me"]);
   });
 
-  it("AC-4: compact marks content fields as elided instead of posing as empty content", () => {
+  it("AC-4: compact keeps the summary and leaves elided fields out instead of posing as empty content", () => {
     seedItem(db, "q-1", {
       source: "a@rig",
       destination: "b@rig",
       body: "This body should be excluded in compact mode",
-      summary: "This summary should be excluded in compact mode",
+      summary: "round-2 test, searchable in compact mode",
       evidenceRef: "proof/PROOF.md",
       tags: ["slice:OPR.0.4.0.28"],
     });
@@ -189,12 +195,17 @@ describe("OPR.0.4.0.28 — queue list compact + scope-default", () => {
     expect(item.priority).toBeDefined();
     expect(item.tier).toBeDefined();
     expect(item.tags).toBeDefined();
-    // Compact excludes heavy fields
-    expect(item.body).toBe("");
-    expect(item.summary).toBeNull();
-    expect(item.evidenceRef).toBeNull();
-    expect(item.chainOfRecord).toBeNull();
-    expect(item.fieldsElided).toEqual(["body", "summary", "evidenceRef", "humanDetail", "waiting"]);
+    // The summary is present text, so it's kept: a grep of the listing finds the row by it.
+    expect(item.summary).toBe("round-2 test, searchable in compact mode");
+    expect(JSON.stringify(compact)).toContain("round-2 test");
+    // Heavy fields are left out entirely, never sent as null or empty.
+    expect(item).not.toHaveProperty("body");
+    expect(item).not.toHaveProperty("evidenceRef");
+    expect(item).not.toHaveProperty("humanDetail");
+    expect(JSON.stringify(compact)).not.toContain("excluded in compact mode");
+    expect(item).not.toHaveProperty("chainOfRecord");
+    expect(item).not.toHaveProperty("humanQuestions");
+    expect(item.fieldsElided).toEqual(["body", "evidenceRef", "humanDetail", "waiting", "chainOfRecord", "replyTo", "humanQuestions", "humanAnswers", "delegatedDecision", "lastNudgeInputBox"]);
   });
 
   it("distinguishes a genuinely empty full item from an elided compact item", () => {
@@ -209,11 +220,34 @@ describe("OPR.0.4.0.28 — queue list compact + scope-default", () => {
     const compact = repo.list({ compact: true })[0]!;
     const full = repo.list({})[0]!;
 
-    expect(compact.fieldsElided).toEqual(["body", "summary", "evidenceRef", "humanDetail", "waiting"]);
+    expect(compact.fieldsElided).toEqual(["body", "evidenceRef", "humanDetail", "waiting", "chainOfRecord", "replyTo", "humanQuestions", "humanAnswers", "delegatedDecision", "lastNudgeInputBox"]);
+    expect(compact).not.toHaveProperty("body");
+    expect(compact.summary).toBeNull(); // a genuinely absent summary stays null
     expect(full.body).toBe("");
     expect(full.summary).toBeNull();
     expect(full.evidenceRef).toBeNull();
     expect(full.fieldsElided).toBeUndefined();
+  });
+
+  it("JSON full lists read back the latest reading while compact lists explicitly elide it", () => {
+    seedItem(db, "q-reading", { source: "a@rig", destination: "b@rig" });
+    const reading: InputBoxEvidence = { seat: "idle", before: "exact", after: "exact", sameProcess: true };
+    repo.recordNudgeAttempt("q-reading", "delivered-ack-pending", reading);
+
+    const full = JSON.parse(JSON.stringify(repo.list({})))[0];
+    expect(full.lastNudgeInputBox).toEqual(reading);
+    expect(full.lastNudgeWireResult).toBe("delivered-ack-pending");
+    const compact = JSON.parse(JSON.stringify(repo.list({ compact: true })))[0];
+    expect(compact).not.toHaveProperty("lastNudgeInputBox");
+    expect(compact.fieldsElided).toContain("lastNudgeInputBox");
+    expect(compact.lastNudgeAttempt).toBe(full.lastNudgeAttempt);
+    expect(compact.lastNudgeResult).toBe(full.lastNudgeResult);
+
+    repo.recordNudgeAttempt("q-reading", "failed:unavailable");
+    const newer = JSON.parse(JSON.stringify(repo.list({})))[0];
+    expect(newer.lastNudgeInputBox).toBeNull();
+    expect(newer.lastNudgeWireResult).toBe("failed:unavailable");
+    expect(JSON.parse(JSON.stringify(repo.list({ compact: true })))[0]).not.toHaveProperty("lastNudgeInputBox");
   });
 
   it("AC-5: existing filters compose with asSession", () => {
@@ -310,13 +344,60 @@ describe("Slice 15 — findOverdue rig-scoped + bounded + compact (finding 2)", 
     expect(repo.findOverdue({ now: NOW, limit: 2 })).toHaveLength(2);
   });
 
-  it("compact omits body/summary/evidenceRef; full retains the body", () => {
+  it("compact keeps the summary and leaves elided fields out, as the list does; full retains the body", () => {
     seedOverdue("q1", "rig-a", { body: "SECRET-LONG-BODY-CONTENT" });
+    const reading: InputBoxEvidence = { seat: "not-idle", before: "exact", after: "queued", sameProcess: true };
+    repo.recordNudgeAttempt("q1", "delivered-ack-pending", reading);
     const compact = repo.findOverdue({ now: NOW, compact: true })[0]!;
-    expect(compact.body).toBe("");
-    expect(compact.summary).toBeNull();
-    expect(compact.evidenceRef).toBeNull();
+    expect(compact.summary).toBe("sum");
+    expect(compact).not.toHaveProperty("body");
+    expect(compact).not.toHaveProperty("evidenceRef");
+    expect(JSON.parse(JSON.stringify(compact))).not.toHaveProperty("lastNudgeInputBox");
+    expect(compact.fieldsElided).toEqual(["body", "evidenceRef", "humanDetail", "waiting", "chainOfRecord", "replyTo", "humanQuestions", "humanAnswers", "delegatedDecision", "lastNudgeInputBox"]);
     const full = repo.findOverdue({ now: NOW })[0]!;
     expect(full.body).toContain("SECRET-LONG-BODY-CONTENT");
+    expect(JSON.parse(JSON.stringify(full)).lastNudgeInputBox).toEqual(reading);
+  });
+});
+
+describe("queue wake reading migration upgrade (#1278)", () => {
+  it.each([
+    ["startup", ALL_MIGRATIONS],
+    ["full test fixture", migrationsForFullTestDb],
+  ] as const)("%s preserves existing rows, adds one nullable column, and skips an applied migration", (_name, migrations) => {
+    const db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    try {
+      expect(migrations).toContain(queueItemWakeInputBoxSchema);
+      migrate(db, migrations.filter((migration) => migration.name !== queueItemWakeInputBoxSchema.name));
+      // The curated fixture intentionally excludes summary/evidence columns.
+      db.prepare(`INSERT INTO queue_items
+        (qitem_id, ts_created, ts_updated, source_session, destination_session, state, body)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+        "q-before-upgrade", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z",
+        "a@rig", "b@rig", "in-progress", "existing work survives the upgrade",
+      );
+      new QueueRepository(db).recordNudgeAttempt("q-before-upgrade", "delivered-ack-pending");
+      const oldRow = db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get("q-before-upgrade") as Record<string, unknown>;
+      const oldColumns = db.pragma("table_info(queue_items)") as Array<{ name: string }>;
+
+      migrate(db, [...migrations]);
+      const columns = db.pragma("table_info(queue_items)") as Array<{ name: string; type: string; notnull: number; dflt_value: string | null }>;
+      expect(columns.filter((column) => !oldColumns.some((old) => old.name === column.name))).toEqual([
+        expect.objectContaining({ name: "last_nudge_input_box", type: "TEXT", notnull: 0, dflt_value: null }),
+      ]);
+      expect(db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get("q-before-upgrade")).toEqual({
+        ...oldRow, last_nudge_input_box: null,
+      });
+
+      const repo = new QueueRepository(db);
+      const reading: InputBoxEvidence = { seat: "idle", before: "hidden", after: "empty", sameProcess: true };
+      repo.recordNudgeAttempt("q-before-upgrade", "delivered-ack-pending", reading);
+      migrate(db, [...migrations]);
+      expect(JSON.parse(JSON.stringify(new QueueRepository(db).getById("q-before-upgrade"))).lastNudgeInputBox).toEqual(reading);
+      expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE name = ?").get(queueItemWakeInputBoxSchema.name)).toEqual({ count: 1 });
+    } finally {
+      db.close();
+    }
   });
 });

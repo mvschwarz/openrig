@@ -16,6 +16,7 @@
 // completion green (FR-7 — a mission-altitude fact, not a slice structure).
 
 import YAML from "yaml";
+import { findFrontmatterBlock } from "../frontmatter.js";
 import { createHash } from "node:crypto";
 import type { ScopeReadiness, MissionReadiness } from "../proof/judgments.js";
 import * as posixPath from "node:path/posix";
@@ -146,12 +147,12 @@ export function parseC1Header(content: string, relPath: string, droppedAtIso: st
     mediaRefs: [],
     droppedAt: droppedAtIso,
   };
-  const m = content.match(/^---\n([\s\S]*?)\n---/);
-  out.mediaRefs = extractMediaRefs(m ? content.slice(m[0].length) : content);
-  if (!m) return out;
+  const block = findFrontmatterBlock(content);
+  out.mediaRefs = extractMediaRefs(block ? content.slice(block.bodyStart) : content);
+  if (!block) return out;
   let fm: Record<string, unknown>;
   try {
-    fm = (YAML.parse(m[1]!) ?? {}) as Record<string, unknown>;
+    fm = (YAML.parse(block.yaml) ?? {}) as Record<string, unknown>;
   } catch {
     return out;
   }

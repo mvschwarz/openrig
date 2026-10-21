@@ -3,6 +3,7 @@ import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
+import { resolveRigHandle } from "../rig-handle.js";
 
 interface ArchiveResult {
   ok: boolean;
@@ -29,7 +30,7 @@ export function archiveCommand(depsOverride?: StatusDeps): Command {
   const getDepsF = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
   cmd
-    .argument("<rigId>", "Rig identifier to archive")
+    .argument("<rig>", "Rig name or identifier to archive")
     .option("--force", "Archive even if the rig is running or degraded")
     .option("--json", "JSON output for agents")
     .action(async (rigId: string, opts: { force?: boolean; json?: boolean }) => {
@@ -37,8 +38,20 @@ export function archiveCommand(depsOverride?: StatusDeps): Command {
       const status = await getDaemonStatus(deps.lifecycleDeps);
       if (!daemonStatusGuard(status)) return;
       const client = deps.clientFactory(getDaemonUrl(status));
+      const resolution = await resolveRigHandle(client, rigId);
+      if (resolution.kind === "ambiguous") {
+        const msg = `'${rigId}' matches ${resolution.ids.length} active rigs. Nothing was archived. Re-run with the specific id, e.g. ${resolution.ids.map((id) => `rig archive ${id}`).join("  |  ")}`;
+        if (opts.json) {
+          console.log(JSON.stringify({ ok: false, code: "rig_ambiguous", message: msg, candidates: resolution.ids }, null, 2));
+        } else {
+          console.error(msg);
+        }
+        process.exitCode = 1;
+        return;
+      }
+      const resolvedRigId = resolution.kind === "resolved" ? resolution.id : rigId;
       const res = await client.post<ArchiveResult | ThreePartErrorBody>(
-        `/api/rigs/${encodeURIComponent(rigId)}/archive`,
+        `/api/rigs/${encodeURIComponent(resolvedRigId)}/archive`,
         { force: opts.force ?? false },
       );
 
@@ -74,7 +87,7 @@ export function archiveCommand(depsOverride?: StatusDeps): Command {
       if (r.archived) {
         console.log(`Rig ${rigId} archived (reversible). It is hidden from the default view.`);
         console.log(`  See it with:   rig ps --include-archived`);
-        console.log(`  Bring it back: rig unarchive ${rigId}`);
+        console.log(`  Bring it back: rig unarchive ${resolvedRigId}`);
       } else {
         console.log(`Rig ${rigId} was already archived.`);
       }

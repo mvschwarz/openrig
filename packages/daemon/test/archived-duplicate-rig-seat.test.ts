@@ -30,10 +30,16 @@ describe("#174 archived duplicate rig vs the live seat with the same name", () =
   let stale: { rigId: string; nodeId: string };
   let live: { rigId: string; nodeId: string; sessionId: string };
 
-  function seat(rigName: string, status: "running" | "exited", logicalId = "lead.planner", name = SEAT) {
+  function seat(rigName: string, status: "running" | "exited", logicalId = "lead.planner", name = SEAT, retainedDuplicate = false) {
     const rig = rigRepo.createRig(rigName);
     const node = rigRepo.addNode(rig.id, logicalId, { role: "planner", runtime: "claude-code" });
-    const session = sessionRegistry.registerSession(node.id, name);
+    // New duplicate joins refuse; these two ambiguity controls model retained
+    // pre-admission state while ordinary stopped/archived replacement stays real.
+    const session = retainedDuplicate ? { id: node.id } : sessionRegistry.registerSession(node.id, name);
+    if (retainedDuplicate) {
+      db.prepare("INSERT INTO sessions(id,node_id,session_name) VALUES (?,?,?)").run(session.id, node.id, name);
+      sessionRegistry.mintOccupantTenure(node.id, "initial");
+    }
     sessionRegistry.updateStatus(session.id, status);
     sessionRegistry.updateBinding(node.id, { tmuxSession: name });
     return { rigId: rig.id, nodeId: node.id, sessionId: session.id };
@@ -103,7 +109,7 @@ describe("#174 archived duplicate rig vs the live seat with the same name", () =
   });
 
   it("(guard) control: two unarchived bindings to the same name still resolve to nothing", () => {
-    seat(RIG, "running");
+    seat(RIG, "running", "lead.planner", SEAT, true);
     expect(resolveGuardTarget(db, SEAT)).toBeNull();
   });
 
@@ -132,7 +138,7 @@ describe("#174 archived duplicate rig vs the live seat with the same name", () =
   });
 
   it("control: an unarchived duplicate is still reported as ambiguous", () => {
-    seat(RIG, "running", "lead.planner");
+    seat(RIG, "running", "lead.planner", SEAT, true);
     const status = new SeatStatusService({ rigRepo }).getStatus(SEAT);
 
     expect(status.ok).toBe(false);

@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import type { AgentActivity, NodeInventoryEntry, NodeLifecycleState, RigLifecycleState } from "./types.js";
+import { identityVerdictConfirmsSessionMissing } from "./types.js";
 import {
   countAssignedWorkForEntry,
   getNodeInventoryForAllRigs,
@@ -45,8 +46,8 @@ export interface PsEntry {
    */
   hasWorkCount: number;
   status: "running" | "partial" | "stopped";
-  /** Always populated. Folded from per-node `lifecycleState` (post-L2);
-   * empty rigs derive `stopped`. Never undefined or null. */
+  /** Folded from members not explicitly stopped. Empty rigs and rigs whose
+   * members are all intentionally stopped derive `stopped`. */
   lifecycleState: RigLifecycleState;
   uptime: string | null;
   latestSnapshot: string | null;
@@ -155,6 +156,16 @@ export function deriveRigLifecycleState(nodeStates: NodeLifecycleState[]): RigLi
   return "degraded";
 }
 
+/** Shared display rollup for ps and the rig summaries consumed by the TUI.
+ * Intentionally stopped seats remain in process counts and node diagnostics. */
+export function deriveRigLifecycleFromInventory(
+  inventory: readonly Pick<NodeInventoryEntry, "lifecycleState" | "intentionallyStopped">[],
+): RigLifecycleState {
+  return deriveRigLifecycleState(
+    inventory.filter((entry) => !entry.intentionallyStopped).map((entry) => entry.lifecycleState),
+  );
+}
+
 /**
  * Slice-05 item-5 (D5) — the SINGLE effective-running predicate for the ps
  * running rollup. `sessions.status='running'` alone is verdict-blind: a seat
@@ -175,7 +186,7 @@ export function deriveRigLifecycleState(nodeStates: NodeLifecycleState[]): RigLi
  */
 export function isEffectivelyRunning(node: NodeInventoryEntry): boolean {
   if (node.sessionStatus !== "running") return false;
-  if (node.identityVerdict?.reason === "session_missing") return false;
+  if (identityVerdictConfirmsSessionMissing(node.identityVerdict)) return false;
   return true;
 }
 
@@ -215,14 +226,6 @@ export class PsProjectionService {
         r.name,
         r.archived_at as archived_at,
         (SELECT COUNT(*) FROM nodes n WHERE n.rig_id = r.id) as node_count,
-        (SELECT COUNT(*) FROM nodes n WHERE n.rig_id = r.id AND
-          (SELECT status FROM sessions s WHERE s.node_id = n.id ORDER BY s.created_at DESC, s.id DESC LIMIT 1) = 'running'
-        ) as running_count,
-        (SELECT MIN(s.created_at) FROM sessions s
-          JOIN nodes n ON n.id = s.node_id
-          WHERE n.rig_id = r.id AND s.status = 'running'
-          AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = s.node_id ORDER BY s2.created_at DESC, s2.id DESC LIMIT 1)
-        ) as earliest_running_at,
         (SELECT snap.created_at FROM snapshots snap WHERE snap.rig_id = r.id ORDER BY snap.created_at DESC, snap.id DESC LIMIT 1) as latest_snapshot_at,
         (SELECT COUNT(*) FROM snapshots snap WHERE snap.rig_id = r.id AND snap.kind = 'auto-periodic') as auto_periodic_count
       FROM rigs r
@@ -233,8 +236,6 @@ export class PsProjectionService {
       name: string;
       archived_at: string | null;
       node_count: number;
-      running_count: number;
-      earliest_running_at: string | null;
       latest_snapshot_at: string | null;
       auto_periodic_count: number;
     }>;
@@ -250,29 +251,32 @@ export class PsProjectionService {
     // getNodeInventory query-set PER RIG — the rig-level N+1); indexed per rig below.
     const inventoryByRig = getNodeInventoryForAllRigs(this.db);
 
+    // Read the current registration's timestamp once per node, in one batch.
+    // Uptime membership comes from the same effective-running inventory below.
+    const sessionTimes = this.db.prepare(`
+      SELECT n.id as node_id,
+        (SELECT s.created_at FROM sessions s WHERE s.node_id = n.id ORDER BY s.id DESC LIMIT 1) as created_at
+      FROM nodes n JOIN rigs r ON r.id = n.rig_id
+      ${where}
+    `).all() as Array<{ node_id: string; created_at: string | null }>;
+    const sessionCreatedAt = new Map(sessionTimes.map((row) => [row.node_id, row.created_at]));
+
     return rows.map((r) => {
       // Derive rig-level lifecycleState by folding per-node states. FS-1 W1.2:
       // inventory for ALL rigs was built in ONE batched pass above (previously one
       // getNodeInventory query-set per rig — the rig-level N+1); index it here.
       const inventory = inventoryByRig.get(r.rig_id) ?? [];
 
-      // Slice-05 item-5 (D5) — running honesty. The raw SQL `running_count` is
-      // the running BASE: it selects each node's latest session by
-      // `created_at DESC, id DESC` (the "newest session counts" contract). We
-      // must NOT re-derive that base from `inventory` — node-inventory picks the
-      // latest session by `id DESC` alone, a DIFFERENT ordering that diverges
-      // whenever session ids are not monotonic with created_at (pre-existing
-      // latent inconsistency, orthogonal to D5). Instead, subtract ONLY the
-      // status-running seats that are not EFFECTIVELY running — i.e. those
-      // carrying an applicable `session_missing` verdict — so a torn-down tmux
-      // session is never fabricated as running. The subtraction routes through
-      // the SAME isEffectivelyRunning predicate the activeCount gate uses below,
-      // so the two counts never disagree on liveness. NEVER mutates
-      // `sessions.status`.
-      const sessionMissingRunning = inventory.filter(
-        (n) => n.sessionStatus === "running" && !isEffectivelyRunning(n),
-      ).length;
-      const effectiveRunningCount = Math.max(0, r.running_count - sessionMissingRunning);
+      // Count the same current registrations used for lifecycle and activity.
+      // Registry IDs stay monotonic through clock rollback within one daemon;
+      // created_at does not. Reusing inventory also avoids another per-node sort.
+      const running = inventory.filter(isEffectivelyRunning);
+      const effectiveRunningCount = running.length;
+      let earliestRunningAt: string | null = null;
+      for (const node of running) {
+        const createdAt = sessionCreatedAt.get(node.nodeId);
+        if (createdAt != null && (earliestRunningAt === null || createdAt < earliestRunningAt)) earliestRunningAt = createdAt;
+      }
 
       const status: PsEntry["status"] =
         r.node_count === 0 ? "stopped"
@@ -280,7 +284,7 @@ export class PsProjectionService {
         : effectiveRunningCount > 0 ? "partial"
         : "stopped";
 
-      const lifecycleState = deriveRigLifecycleState(inventory.map((e) => e.lifecycleState));
+      const lifecycleState = deriveRigLifecycleFromInventory(inventory);
 
       // Slice 15 — `terminal-active` count. Subset of running tmux-bound
       // seats whose latest SeatActivity observation says
@@ -341,7 +345,7 @@ export class PsProjectionService {
         hasWorkCount,
         status,
         lifecycleState,
-        uptime: r.earliest_running_at ? formatDuration(now - new Date(r.earliest_running_at + "Z").getTime()) : null,
+        uptime: earliestRunningAt ? formatDuration(now - new Date(earliestRunningAt + "Z").getTime()) : null,
         latestSnapshot: r.latest_snapshot_at ? formatAge(now - new Date(r.latest_snapshot_at + "Z").getTime()) : null,
         archivedAt: r.archived_at,
         isArchived: r.archived_at !== null,

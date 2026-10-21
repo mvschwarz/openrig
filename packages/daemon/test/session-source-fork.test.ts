@@ -273,9 +273,9 @@ function makeBinding(): NodeBinding {
 }
 
 describe("ClaudeCodeAdapter.launchHarness fork branch", () => {
-  it("builds claude --resume <parent> --fork-session for forkSource.kind=native_id and captures the NEW token", async () => {
+  it("builds claude --resume <parent> --fork-session --session-id <new> for forkSource.kind=native_id and returns the NEW id", async () => {
     const tmux = mockTmux();
-    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockClaudeFs("NEW-POST-FORK-TOKEN-XYZ") });
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockClaudeFs(), sessionIdFactory: () => "33333333-3333-4333-8333-333333333333" });
 
     const result = await adapter.launchHarness(makeBinding(), {
       name: "dev-impl@test-rig",
@@ -286,19 +286,31 @@ describe("ClaudeCodeAdapter.launchHarness fork branch", () => {
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText).toHaveBeenCalledWith(
       "r01-impl",
-      "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 claude --permission-mode acceptEdits --resume 'PARENT-TOKEN-ABC' --fork-session --name dev-impl@test-rig",
+      "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 claude --permission-mode acceptEdits --resume 'PARENT-TOKEN-ABC' --fork-session --session-id 33333333-3333-4333-8333-333333333333 --name dev-impl@test-rig",
     );
     if (result.ok) {
-      // Captured token MUST be the new post-fork token, NOT the parent.
-      expect(result.resumeToken).toBe("NEW-POST-FORK-TOKEN-XYZ");
+      // The returned token MUST be the fork's own new id, NOT the parent.
+      expect(result.resumeToken).toBe("33333333-3333-4333-8333-333333333333");
       expect(result.resumeToken).not.toBe("PARENT-TOKEN-ABC");
       expect(result.resumeType).toBe("claude_id");
     }
   });
 
+  it("keeps the fork's own id when another same-name session file exists (an earlier occupant or another seat)", async () => {
+    const tmux = mockTmux();
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockClaudeFs("STALE-SAME-NAME-ID"), sessionIdFactory: () => "33333333-3333-4333-8333-333333333333" });
+
+    const result = await adapter.launchHarness(makeBinding(), {
+      name: "dev-impl@test-rig",
+      forkSource: { kind: "native_id", value: "PARENT-TOKEN-ABC" },
+    });
+
+    expect(result).toMatchObject({ ok: true, resumeToken: "33333333-3333-4333-8333-333333333333", resumeType: "claude_id" });
+  });
+
   it("quotes a hostile fork parent id so it cannot leave the --resume argument (the pane shell is the sink)", async () => {
     const tmux = mockTmux();
-    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockClaudeFs("NEW-POST-FORK-TOKEN-XYZ") });
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockClaudeFs(), sessionIdFactory: () => "33333333-3333-4333-8333-333333333333" });
 
     const hostileParent = "ABC-123'; touch /tmp/OPENRIG_PWNED; '";
     const result = await adapter.launchHarness(makeBinding(), {
@@ -316,7 +328,7 @@ describe("ClaudeCodeAdapter.launchHarness fork branch", () => {
     // shell would execute everything after the first quote terminator.
     expect(command).not.toContain("--resume ABC-123");
     if (result.ok) {
-      expect(result.resumeToken).toBe("NEW-POST-FORK-TOKEN-XYZ");
+      expect(result.resumeToken).toBe("33333333-3333-4333-8333-333333333333");
     }
   });
 
@@ -458,11 +470,13 @@ describe("CodexRuntimeAdapter.launchHarness fork branch", () => {
     const adapter = new CodexRuntimeAdapter({
       tmux: mockShellCommand(tmux),
       fsOps: makeMinimalCodexFs(),
+      // A real fork child: the pane's foreground Codex forks the requested parent, and its own record,
+      // read for its start time, supplies the new id (the launch verifies both).
       listProcesses: () => [
-        { pid: 900, ppid: 1, command: "-zsh" },
-        { pid: 901, ppid: 900, command: "codex" },
+        { pid: 900, ppid: 1, pgid: 900, tpgid: 901, executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000", command: "-zsh" },
+        { pid: 901, ppid: 900, pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000", command: "codex fork PARENT-THREAD-ABC" },
       ],
-      readThreadIdByPid: (pid) => (pid === 901 && captureThreadId ? captureThreadId : undefined),
+      readThreadIdByPid: (pid, identity) => (pid === 901 && identity && captureThreadId ? captureThreadId : undefined),
       sleep: async () => {},
     });
     return { tmux, adapter };
@@ -477,10 +491,8 @@ describe("CodexRuntimeAdapter.launchHarness fork branch", () => {
     expect(result.ok).toBe(true);
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     const sentCmd = sendText.mock.calls[0]?.[1] as string;
-    // R2 LOW-4 reconciliation (truthful floor update, assertion intent unchanged): the
-    // no-profile floor now emits the explicit ` -s workspace-write` sandbox argument
-    // (OPR.0.4.8.2 posture helper) between the executable and the fork subcommand.
-    expect(sentCmd).toMatch(/^codex( -p [^ ]+| -s [a-z-]+)* fork/);
+    // The no-profile floor and managed update setting precede the fork subcommand.
+    expect(sentCmd).toMatch(/^codex -s workspace-write '-c' 'check_for_update_on_startup=false' fork/);
     expect(sentCmd).toContain("PARENT-THREAD-ABC");
     if (result.ok) {
       expect(result.resumeToken).toBe("NEW-CODEX-THREAD-XYZ");
@@ -526,6 +538,19 @@ describe("CodexRuntimeAdapter.launchHarness fork branch", () => {
     }
   });
 
+  it("for a handover (pendingIdAllowed) a missed capture is pending metadata: ok with no token", async () => {
+    const { adapter } = makeCodexAdapter(); // no thread id captured
+    const result = await adapter.launchHarness(makeBinding(), {
+      name: "dev-impl@test-rig",
+      forkSource: { kind: "native_id", value: "PARENT-X", pendingIdAllowed: true },
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.resumeToken).toBeUndefined();
+      expect(result.resumeType).toBeUndefined();
+    }
+  });
+
   it("preserves Codex hook review consent during fork", async () => {
     const hookReviewContent = [
       "Hooks need review",
@@ -558,10 +583,10 @@ describe("CodexRuntimeAdapter.launchHarness fork branch", () => {
       tmux: mockShellCommand(tmux),
       fsOps: makeMinimalCodexFs(),
       listProcesses: () => [
-        { pid: 900, ppid: 1, command: "-zsh" },
-        { pid: 901, ppid: 900, command: "codex" },
+        { pid: 900, ppid: 1, pgid: 900, tpgid: 901, executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000", command: "-zsh" },
+        { pid: 901, ppid: 900, pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000", command: "codex fork PARENT-THREAD-ABC" },
       ],
-      readThreadIdByPid: (pid) => (pid === 901 ? "NEW-THREAD-AFTER-TRUST" : undefined),
+      readThreadIdByPid: (pid, identity) => (pid === 901 && identity ? "NEW-THREAD-AFTER-TRUST" : undefined),
       sleep: async () => {},
     });
 
@@ -788,6 +813,30 @@ describe("StartupOrchestrator forkSource integration", () => {
     const opts = launchSpy.mock.calls[0]![1];
     expect(opts.forkSource).toEqual(forkSource);
     expect(opts.resumeToken).toBeUndefined();
+  });
+
+  // The spec member (session_source: fork) and agent-image entrances both reach the adapter through
+  // startNode with a plain fork source: a missed capture still fails the start, as before.
+  it("a member or agent-image fork whose new id isn't captured still fails its start (no pending success)", async () => {
+    const s = seed();
+    const orch = createOrch();
+    const tmux = {
+      sendText: vi.fn(async () => ({ ok: true as const })), hasSession: vi.fn(async () => true),
+      getPaneCommand: vi.fn(async () => "codex"), capturePaneContent: vi.fn(async () => "OpenAI Codex (v0.0.0)"),
+      createSession: vi.fn(async () => ({ ok: true as const })), killSession: vi.fn(async () => ({ ok: true as const })),
+      listSessions: vi.fn(async () => []), listWindows: vi.fn(async () => []), listPanes: vi.fn(async () => []),
+      sendKeys: vi.fn(async () => ({ ok: true as const })), getPanePid: vi.fn(async () => 900),
+    } as unknown as TmuxAdapter;
+    const adapter = new CodexRuntimeAdapter({
+      tmux: mockShellCommand(tmux),
+      fsOps: { readFile: () => "", writeFile: () => {}, exists: () => false, mkdirp: () => {}, listFiles: () => [] } as unknown as Parameters<typeof CodexRuntimeAdapter>[0]["fsOps"],
+      listProcesses: () => [{ pid: 900, ppid: 1, command: "-zsh" }, { pid: 901, ppid: 900, command: "codex" }],
+      readThreadIdByPid: () => undefined, sleep: async () => {},
+    });
+    const result = await orch.startNode(makeInput(s, { adapter, forkSource: { kind: "native_id", value: "PARENT-TOKEN-ABC" } }));
+    expect(result.ok).toBe(false);
+    const row = db.prepare("SELECT resume_token FROM sessions WHERE id = ?").get(s.sessionId) as { resume_token: string | null };
+    expect(row.resume_token).toBeNull();
   });
 
   it("fresh path (no resumeToken, no forkSource) is unchanged: continuityOutcome=fresh", async () => {

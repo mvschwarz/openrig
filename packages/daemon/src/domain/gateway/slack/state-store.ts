@@ -110,6 +110,9 @@ export interface DeadLetterEntry<T = unknown> {
   attempts: number;
 }
 
+/** Per file system, each dead-letter file's write count in this process (see DeadLetterStore.writeGeneration). */
+const deadLetterWrites = new WeakMap<StateFsOps, Map<string, number>>();
+
 /**
  * Inbound never-drop net. Every event that fails to land is appended
  * (attempt-counted) BEFORE the error path returns.
@@ -135,6 +138,20 @@ export class DeadLetterStore<T = unknown> {
       this.file,
       JSON.stringify({ ev, at: this.now().toISOString(), attempts } satisfies DeadLetterEntry<T>) + "\n",
     );
+    this.wrote();
+  }
+
+  /** How many times this process has written the file, through any store on the same file system (a
+   *  rewire builds new stores while an old router's handlers may still finish). A reader that kept what it
+   *  read re-reads only when this has moved. */
+  writeGeneration(): number {
+    return deadLetterWrites.get(this.fsops)?.get(this.file) ?? 0;
+  }
+
+  private wrote(): void {
+    let files = deadLetterWrites.get(this.fsops);
+    if (!files) deadLetterWrites.set(this.fsops, (files = new Map()));
+    files.set(this.file, (files.get(this.file) ?? 0) + 1);
   }
 
   /** Non-destructive read of all durable entries. */
@@ -148,6 +165,21 @@ export class DeadLetterStore<T = unknown> {
     return parseLines(raw) as DeadLetterEntry<T>[];
   }
 
+  /** Non-destructive read that keeps an ABSENT file apart from an UNREADABLE one.
+   *  A caller that surfaces a count must not report a false zero when the file
+   *  exists but could not be read: absent is a real empty set, any other error is
+   *  a named read failure. */
+  readResult(): { ok: true; entries: DeadLetterEntry<T>[] } | { ok: false; reason: string } {
+    let raw: string;
+    try {
+      raw = this.fsops.readFileSync(this.file);
+    } catch (error) {
+      if ((error as { code?: string }).code === "ENOENT") return { ok: true, entries: [] };
+      return { ok: false, reason: (error as Error).message || "dead-letter file could not be read" };
+    }
+    return { ok: true, entries: parseLines(raw) as DeadLetterEntry<T>[] };
+  }
+
   /** Atomically replace the durable set (temp-write + rename). Used after a retry pass. */
   replaceAll(entries: DeadLetterEntry<T>[]): void {
     this.fsops.mkdirp(path.dirname(this.file));
@@ -155,17 +187,22 @@ export class DeadLetterStore<T = unknown> {
     const tmp = `${this.file}.tmp`;
     this.fsops.writeFileSync(tmp, body);
     this.fsops.rename(tmp, this.file); // atomic: original intact until this instant
+    this.wrote();
   }
 
   /** Finish a retry snapshot without removing entries appended while it awaited I/O.
-   * Match occurrences, not just event ids: a later identical append is still owed. */
-  replaceBatch(processed: DeadLetterEntry<T>[], remaining: DeadLetterEntry<T>[]): void {
+   * Match occurrences, not just event ids: a later identical append is still owed. When the file can't be
+   * read now, its newer entries can't be told apart, so it isn't rewritten (false): the next pass sees every
+   * entry again, and one that landed meanwhile is a duplicate there. */
+  replaceBatch(processed: DeadLetterEntry<T>[], remaining: DeadLetterEntry<T>[]): boolean {
+    const current = this.readResult();
+    if (!current.ok) return false;
     const counts = new Map<string, number>();
     for (const entry of processed) {
       const key = JSON.stringify(entry);
       counts.set(key, (counts.get(key) ?? 0) + 1);
     }
-    const appended = this.readAll().filter((entry) => {
+    const appended = current.entries.filter((entry) => {
       const key = JSON.stringify(entry);
       const count = counts.get(key) ?? 0;
       if (count === 0) return true;
@@ -173,6 +210,7 @@ export class DeadLetterStore<T = unknown> {
       return false;
     });
     this.replaceAll([...remaining, ...appended]);
+    return true;
   }
 }
 
@@ -186,7 +224,8 @@ export type InboundReceiptStatus =
   | "ignored"
   | "refused"
   | "dead-lettered"
-  | "handler-failed";
+  | "handler-failed"
+  | "replace-requested";
 
 export interface InboundReceipt {
   at: string;
@@ -196,6 +235,8 @@ export interface InboundReceipt {
   eventTs?: string;
   channel?: string;
   reason?: string;
+  /** Slack's `hello` count of this app's open Socket Mode connections. */
+  connections?: number;
 }
 
 /** Credential-free ingress/lifecycle ledger. A received receipt is appended before
@@ -240,6 +281,11 @@ export interface ChannelCoverage {
   nextRetryAt?: number;
   /** Available history was scanned, but Slack reported older history beyond its plan limit. */
   historyLimited?: boolean;
+  /** On a machine without its own connection: when the hub first relayed this channel here (the coverage floor then). */
+  relayAdoptedAt?: string;
+  /** Whether nextRetryAt came from Slack's rate limit, which holds the whole method, not only this channel. Absent on an
+   *  older daemon's deadline, which is treated as a possible rate limit. */
+  rateLimited?: boolean;
 }
 
 function readOptional(file: string, fsops: StateFsOps): string | undefined {
@@ -264,6 +310,8 @@ export class ChannelCoverageStore {
       if (start === null || through === null || start > through ||
         !["newest-durable-landing", "feature-adoption"].includes(c.seedBasis) ||
         (c.historyLimited !== undefined && typeof c.historyLimited !== "boolean") ||
+        (c.rateLimited !== undefined && typeof c.rateLimited !== "boolean") ||
+        (c.relayAdoptedAt !== undefined && slackMicros(c.relayAdoptedAt) === null) ||
         (c.nextRetryAt !== undefined && (!Number.isFinite(c.nextRetryAt) || c.nextRetryAt < 0))) throw new Error("invalid coverage checkpoint");
       if (c.pending) {
         const upper = slackMicros(c.pending.upper), next = slackMicros(c.pending.nextLatest);
@@ -271,6 +319,11 @@ export class ChannelCoverageStore {
       }
     }
     return data;
+  }
+
+  /** Every saved channel record (throws on an unreadable or invalid file, like every read). */
+  all(): Record<string, ChannelCoverage> {
+    return this.read();
   }
 
   save(channel: string, coverage: ChannelCoverage): void {
@@ -299,5 +352,71 @@ export class ChannelCoverageStore {
       seedBasis: valid.length ? "newest-durable-landing" : "feature-adoption" };
     this.save(channel, coverage);
     return coverage;
+  }
+
+  /** Only once per channel, at adoption: older coverage is unknown. A landing or seen record is
+   * not scanned coverage, so it never sets this floor (it could skip an earlier hole). */
+  initializeAtAdoption(channel: string, at: string): ChannelCoverage {
+    const data = this.read();
+    if (Object.hasOwn(data, channel)) return data[channel]!;
+    const coverage: ChannelCoverage = { coverageStart: at, coveredThrough: at, seedBasis: "feature-adoption" };
+    this.save(channel, coverage);
+    return coverage;
+  }
+
+  /** The hub relayed this channel here at `at` (local receipt time). The first time, that's the coverage floor; retained
+   * coverage wins over it, and later relays change nothing. Persisted, so a restart needs no fresh relayed event. */
+  adoptRelayed(channel: string, at: string): ChannelCoverage {
+    const data = this.read();
+    const existing = Object.hasOwn(data, channel) ? data[channel]! : undefined;
+    if (existing?.relayAdoptedAt) return existing;
+    const coverage: ChannelCoverage = existing
+      ? { ...existing, relayAdoptedAt: at }
+      : { coverageStart: at, coveredThrough: at, seedBasis: "feature-adoption", relayAdoptedAt: at };
+    this.save(channel, coverage);
+    return coverage;
+  }
+}
+
+export interface ThreadCoverage {
+  /** The thread root: no reply is older, so it is the scan floor. */
+  coverageStart: string;
+  /** Exclusive: every reply posted before this was scanned. */
+  coveredThrough: string;
+  pending?: { upper: string };
+  nextRetryAt?: number;
+  /** Whether nextRetryAt came from Slack's rate limit, which holds the whole method. */
+  rateLimited?: boolean;
+}
+
+/** Scan boundaries for tracked threads, keyed `channel:thread_ts`. A separate file, so a channel
+ * checkpoint reader (including an older daemon's) never meets a thread record. */
+export class ThreadCoverageStore {
+  constructor(private readonly file: string, private readonly fsops: StateFsOps = nodeStateFs) {}
+
+  read(): Record<string, ThreadCoverage> {
+    const raw = readOptional(this.file, this.fsops);
+    if (raw === undefined) return {};
+    const data = JSON.parse(raw);
+    if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("invalid thread coverage store");
+    for (const c of Object.values(data) as ThreadCoverage[]) {
+      const start = slackMicros(c?.coverageStart), through = slackMicros(c?.coveredThrough);
+      if (start === null || through === null || start > through ||
+        (c.rateLimited !== undefined && typeof c.rateLimited !== "boolean") ||
+        (c.nextRetryAt !== undefined && (!Number.isFinite(c.nextRetryAt) || c.nextRetryAt < 0))) throw new Error("invalid thread checkpoint");
+      if (c.pending) {
+        const upper = slackMicros(c.pending.upper);
+        if (upper === null || upper <= through) throw new Error("invalid pending interval");
+      }
+    }
+    return data;
+  }
+
+  save(key: string, coverage: ThreadCoverage): void {
+    const data = this.read();
+    Object.defineProperty(data, key, { value: coverage, enumerable: true, configurable: true });
+    this.fsops.mkdirp(path.dirname(this.file));
+    this.fsops.writeFileSync(`${this.file}.tmp`, JSON.stringify(data) + "\n");
+    this.fsops.rename(`${this.file}.tmp`, this.file);
   }
 }

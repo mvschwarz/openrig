@@ -1,6 +1,9 @@
 import type { ArbitratedSeatState } from "./activity-taxonomy.js";
+import { quietHoldCustody } from "./quiet-hold-custody.js";
+import { latestHookMovedOn, latestHookPermissionPending, latestHookWaitsOnPerson } from "./agent-activity-store.js";
+import type { AgentActivity } from "./types.js";
 import type { OperatorDeliveryEngine } from "./gateway/operator-delivery-engine.js";
-import { openPromptRefusals, CLOSE_PREFIX, REFUSED_PREFIX } from "./policies/parked-owner-consumer.js";
+import { openPromptRefusals, CLOSE_PREFIX, PARKED_OWNER_POLICY_NAME, REFUSED_PREFIX } from "./policies/parked-owner-consumer.js";
 import { findQueueRecovery, recoveryTag } from "./queue-recovery.js";
 import { lastMeaningfulTransition, type WaitingView } from "./queue-waiting.js";
 // S01 (OPR.0.5.5.1) — WAKE OR ESCALATE ON BATONS. A handoff whose wake fails must never
@@ -53,6 +56,8 @@ import {
   USAGE_LIMIT_POOL_TAG_PREFIX,
 } from "./queue-wake-repository.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
+import { loadHumanRegistry, resolveRegisteredHumanAddress, type LoadResult } from "./gateway/human-registry.js";
+import { parseSessionName } from "./session-name.js";
 import {
   LADDER_ATTEMPT_PREFIX,
   LADDER_RUNG_PREFIX,
@@ -69,6 +74,16 @@ export const WAKE_UNCONFIRMED_WINDOW_KEY = "queue.wake_unconfirmed_window_minute
 export const DEFAULT_WAKE_UNCONFIRMED_WINDOW_MINUTES = 30;
 export const WAKE_SWAP_GRACE_KEY = "queue.wake_swap_grace_seconds";
 export const DEFAULT_WAKE_SWAP_GRACE_SECONDS = 180;
+/** Whether the operator rung posts agent-to-agent escalations to a person.
+ *  "always" (default) keeps today's behavior; "explicit-only" ends the ladder at
+ *  the escalation row (operator seat or rig lead) unless the row's destination is
+ *  a person: any `@external` address, or one the human registry resolves to a
+ *  person. An ask that needs a person must be addressed to the person. An instance
+ *  that has never set up the human registry can't read it, so there explicit-only
+ *  posts everything, as "always" does. */
+export const WAKE_HUMAN_RUNG_KEY = "queue.wake_human_rung";
+export type WakeHumanRung = "always" | "explicit-only";
+export const DEFAULT_WAKE_HUMAN_RUNG: WakeHumanRung = "always";
 
 // S16: this margin absorbs provider reset granularity and host/provider clock
 // skew. Fleet dedup already prevents a thundering herd; narrowing it toward zero
@@ -167,6 +182,14 @@ export const resolveWakeUnconfirmedWindowMinutes = (): number =>
   resolveNumber(WAKE_UNCONFIRMED_WINDOW_KEY, DEFAULT_WAKE_UNCONFIRMED_WINDOW_MINUTES);
 export const resolveWakeSwapGraceSeconds = (): number =>
   resolveNumber(WAKE_SWAP_GRACE_KEY, DEFAULT_WAKE_SWAP_GRACE_SECONDS);
+export function resolveWakeHumanRung(): WakeHumanRung {
+  try {
+    const v = new SettingsStore().resolveOne(WAKE_HUMAN_RUNG_KEY as never).value;
+    return v === "explicit-only" ? "explicit-only" : DEFAULT_WAKE_HUMAN_RUNG;
+  } catch {
+    return DEFAULT_WAKE_HUMAN_RUNG;
+  }
+}
 
 export interface WakeLadderDeps {
   db: Database.Database;
@@ -193,6 +216,11 @@ export interface WakeLadderDeps {
    *  (or defers) through the rules engine and reports whether the outcome
    *  resolved synchronously; absent = pre-engine floor behavior. */
   deliveryEngine?: OperatorDeliveryEngine;
+  /** Defaults to the queue.wake_human_rung setting. */
+  humanRung?: WakeHumanRung;
+  /** The human registry the explicit-only rung uses to tell a handoff addressed to a
+   *  person from agent-to-agent work. Defaults to the daemon's registry. */
+  loadHumanRegistry?: () => LoadResult;
 }
 
 export interface WakeLadderAction {
@@ -320,7 +348,10 @@ function hasPickupEvidence(db: Database.Database, row: Pick<QueueItem, "qitemId"
       // ladder before the resolution pass reads it.
       note.startsWith("slack-owner-notification-") ||
       note.startsWith("delivery-termination:") ||
-      note.startsWith("delivery-deferral-")
+      note.startsWith("delivery-deferral-") ||
+      // Quiet hours: holding an ask and releasing it are delivery machinery too, never someone picking it up.
+      note.startsWith("delivery-decision: quiet-hold ") ||
+      note.startsWith("quiet-release-")
     )
       continue;
     return true;
@@ -604,7 +635,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       deps.attemptWake ??
       (async (qitemId: string, target: string): Promise<string> => {
         await deps.queueRepo.maybeNudge(qitemId, target, true);
-        return deps.queueRepo.getById(qitemId)?.lastNudgeResult ?? "indeterminate:no transport available";
+        return deps.queueRepo.getById(qitemId)?.lastNudgeWireResult ?? "indeterminate:no transport available";
       });
 
     const actions: WakeLadderAction[] = [];
@@ -733,6 +764,11 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
         if (minutesSince(row.tsCreated, now) < windowMin) continue;
         if (hasPickupEvidence(deps.db, row)) continue;
       }
+      // An ask held for quiet hours (or released and waiting for its post) belongs to its window's release job, which
+      // posts it when quiet ends; escalating it would post to the person during quiet. An orphaned hold isn't owned, and
+      // a release whose post failed is an ordinary failed delivery.
+      const quiet = quietHoldCustody(deps.db, row.qitemId, now);
+      if (quiet && (quiet.state === "held" || quiet.state === "released")) continue;
       activeLadders += 1;
 
       // Due-ness: the latest ladder marker (or the original nudge attempt) is older than
@@ -909,9 +945,74 @@ export function classifyPromptAfterRefusal(
   return Date.parse(evidence.observedAt) > Date.parse(refusedAt) ? "clear" : "unknown";
 }
 
-const PROMPT_ALERT_TAG = "wake-prompt-refusal";
+/** The production prompt read for a refused destination. The activity oracle answers first; when it has no
+ *  evidence, the ladder reads the same retained runtime hook the send gate refused on, so a held wake still
+ *  escalates after the activity service is rebuilt, or when the oracle does not yet trust the hook source
+ *  (Codex's). A generation-valid hook observed after the refusal that means work started, the turn ended,
+ *  or a Codex permission prompt cleared answers "clear", as does the oracle; anything else stays "unknown". */
+export function makePromptStateReader(deps: {
+  db: Database.Database;
+  getSeatState?: (nodeId: string) => Pick<ArbitratedSeatState, "activity" | "needsInput" | "needsInputEvidence"> | null | undefined;
+  getLatestHook?: (sessionName: string) => AgentActivity | null | undefined;
+}): (destination: string, refusedAt: string) => "blocked" | "clear" | "unknown" {
+  return (destination, refusedAt) => {
+    const nodeId = resolveSessionNodeId(deps.db, destination);
+    const verdict = classifyPromptAfterRefusal(nodeId ? deps.getSeatState?.(nodeId) : null, refusedAt);
+    if (verdict !== "unknown" || !nodeId) return verdict;
+    const node = deps.db.prepare("SELECT runtime FROM nodes WHERE id = ?").get(nodeId) as { runtime: string | null } | undefined;
+    const hook = deps.getLatestHook?.(destination), runtime = node?.runtime ?? null;
+    if (latestHookWaitsOnPerson(hook, runtime) || latestHookPermissionPending(hook, runtime)) return "blocked";
+    if (
+      (runtime === "codex" || runtime === "claude-code") && hook?.rawEvent === "PermissionPromptCleared" &&
+      hook.evidenceSource === "runtime_hook" &&
+      (hook.stale !== true || hook.reason === "stale_runtime_hook") &&
+      Date.parse(hook.eventAt ?? "") > Date.parse(refusedAt)
+    ) return "clear";
+    return latestHookMovedOn(hook, refusedAt, runtime) ? "clear" : "unknown";
+  };
+}
+
+/** Marks the row that asks a person to resolve a seat stuck at a permission or approval prompt. */
+export const PROMPT_ALERT_TAG = "wake-prompt-refusal";
 const PROMPT_EPISODE_TAG = "prompt-episode:";
 const PROMPT_RETIRED_NOTE = "prompt escalation retired: prompt cleared or original episode ended; not a delivery receipt";
+/** The ladder's own transition on a prompt alert it retires because its seat's prompt read clear, and the only thing that
+ *  ends a watchdog refusal run. A transition, not the resolution: a fallback route may already hold that field's text. */
+const PROMPT_CLEARED_NOTE = "prompt escalation: the seat's prompt read clear";
+/** Rows whose tag text could hold the prompt alert tag: valid JSON stores a string verbatim or with backslash
+ * escapes, so this superset (LIKE also ignores case) loses no row the exact json_each test below accepts. It only
+ * spares JSON parsing of the rows that cannot match. The alert tag holds no LIKE wildcard. */
+const PROMPT_ALERT_ROWS = `(tags LIKE '%"${PROMPT_ALERT_TAG}"%' OR tags LIKE '%\\%')`;
+
+/** Active watchdog jobs whose last two attempts were both refused at the same target's prompt. A run of refusals starts
+ * after the job's latest other entry at that target (looked up past the 50-entry read when the read is all refusals) or
+ * after this seat's latest prompt-cleared alert retirement, whichever is later; the key names that boundary, so it stays
+ * the same until a reminder lands or the prompt clears. Jobs are found through the refused outcome's index. The
+ * parked-owner job's refusals already arrive as notes on the rows it wakes. */
+function refusedWatchdogJobs(db: Database.Database, clearedAlert: (dest: string) => { qitemId: string; at: string } | null):
+  Array<{ jobId: string; dest: string; registeredBy: string; key: string; refusedAt: string }> {
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'watchdog_history'").get()) return [];
+  const jobs = db.prepare(`SELECT job_id, registered_by_session FROM watchdog_jobs WHERE state = 'active' AND policy != ?
+    AND job_id IN (SELECT job_id FROM watchdog_history WHERE outcome = 'refused')`).all(PARKED_OWNER_POLICY_NAME) as Array<{ job_id: string; registered_by_session: string }>;
+  const recent = db.prepare(`SELECT history_id, outcome, delivery_target_session AS dest, evaluated_at FROM watchdog_history
+    WHERE job_id = ? ORDER BY evaluated_at DESC, history_id DESC LIMIT 50`);
+  const before = db.prepare(`SELECT history_id, evaluated_at FROM watchdog_history WHERE job_id = ?
+    AND NOT (outcome = 'refused' AND delivery_target_session IS ?) ORDER BY evaluated_at DESC, history_id DESC LIMIT 1`);
+  type Entry = { history_id: string; outcome: string; dest: string | null; evaluated_at: string };
+  return jobs.flatMap(({ job_id, registered_by_session }) => {
+    const entries = recent.all(job_id) as Entry[];
+    const dest = entries[0]?.dest;
+    if (!dest) return [];
+    const end = entries.findIndex(e => e.outcome !== "refused" || e.dest !== dest);
+    const run = end === -1 ? entries : entries.slice(0, end);
+    const anchor = end !== -1 ? entries[end]! : entries.length === 50 ? before.get(job_id, dest) as Pick<Entry, "history_id" | "evaluated_at"> | undefined : undefined;
+    const retired = run.length < 2 ? null : clearedAlert(dest);
+    const cleared = retired && (!anchor || retired.at > anchor.evaluated_at) ? retired : null;
+    if (run.filter(e => !cleared || e.evaluated_at > cleared.at).length < 2) return [];
+    const after = cleared ? `alert:${cleared.qitemId}` : anchor?.history_id ?? "start";
+    return [{ jobId: job_id, dest, registeredBy: registered_by_session, key: `${dest}|watchdog:${job_id}|after:${after}`, refusedAt: entries[0]!.evaluated_at }];
+  });
+}
 
 /** Positive refusals enter the existing rungs without ever retrying the blocked
  * seat. One aggregate carries the episode's obligations and notification key;
@@ -925,7 +1026,7 @@ async function advancePromptRefusals(
   attemptWake: (qitemId: string, target: string) => Promise<string>,
   actions: WakeLadderAction[],
 ): Promise<void> {
-  const groups = new Map<string, { keys: string[]; rows: Map<string, QueueItem>; refusedAt: string }>();
+  const groups = new Map<string, { keys: string[]; rows: Map<string, QueueItem>; jobs: Map<string, string>; refusedAt: string }>();
   const unreadableDestinations = new Set<string>();
   const loggedRows = new Set<string>();
   const readCandidate = (id: string, destination: string): QueueItem | null => {
@@ -945,6 +1046,19 @@ async function advancePromptRefusals(
       AND json_valid(a.tags) AND EXISTS (SELECT 1 FROM json_each(a.tags) WHERE value = ?)
       AND EXISTS (SELECT 1 FROM json_each(a.tags) WHERE value = 'recovery-for:' || q.qitem_id)))`)
     .all(`${REFUSED_PREFIX}%`, PROMPT_ALERT_TAG) as Array<{ qitem_id: string; destination_session: string }>;
+  // Every tag value of every closed (terminal) prompt alert, read once per tick when the first episode needs it,
+  // rather than one scan of all terminal rows per open episode. The row predicates are the per-episode lookup's;
+  // membership is the same exact json_each value equality; and nothing below writes before the last episode is
+  // checked, so every episode sees the snapshot its own lookup would have read.
+  let closedAlertTags: Set<unknown> | undefined;
+  const closedEpisode = (episodeTag: string): boolean => {
+    closedAlertTags ??= new Set((deps.db.prepare(`WITH closed AS MATERIALIZED (
+        SELECT tags FROM queue_items WHERE ${PROMPT_ALERT_ROWS} AND state NOT IN ('pending','in-progress','blocked')
+          AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?))
+      SELECT j.value FROM closed, json_each(closed.tags) j`)
+      .all(PROMPT_ALERT_TAG) as Array<{ value: unknown }>).map(row => row.value));
+    return closedAlertTags.has(episodeTag);
+  };
   for (const { qitem_id, destination_session } of candidates) {
     const primary = readCandidate(qitem_id, destination_session);
     if (!primary) continue;
@@ -954,19 +1068,38 @@ async function advancePromptRefusals(
       if (!episode.key.startsWith(`${primary.destinationSession}|`)) continue;
       // A closed disposition for this exact episode is final, even while the
       // original work remains open. Only a new refusal key can start again.
-      if (deps.db.prepare(`SELECT 1 FROM queue_items WHERE state NOT IN ('pending','in-progress','blocked')
-        AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)
-        AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?) LIMIT 1`)
-        .get(PROMPT_ALERT_TAG, `${PROMPT_EPISODE_TAG}${episode.key}`)) continue;
+      if (closedEpisode(`${PROMPT_EPISODE_TAG}${episode.key}`)) continue;
       const rows = episode.ids.map(id => readCandidate(id, primary.destinationSession)).filter((row): row is QueueItem =>
         Boolean(row && row.destinationSession === primary.destinationSession && ["pending", "in-progress", "blocked"].includes(row.state)));
       if (!rows.length) continue;
       let group = groups.get(primary.destinationSession);
-      if (!group) { group = { keys: [], rows: new Map(), refusedAt: episode.refusedAt }; groups.set(primary.destinationSession, group); }
+      if (!group) { group = { keys: [], rows: new Map(), jobs: new Map(), refusedAt: episode.refusedAt }; groups.set(primary.destinationSession, group); }
       if (Date.parse(episode.refusedAt) > Date.parse(group.refusedAt)) group.refusedAt = episode.refusedAt;
       group.keys.push(`${PROMPT_EPISODE_TAG}${episode.key}`);
       for (const row of rows) group.rows.set(row.qitemId, row);
     }
+  }
+
+  // A watchdog reminder refused twice at the same prompt joins its seat's episode; the row carries the job ids. The
+  // seat's latest alert the ladder marked as retired on a cleared prompt bounds the run; an ended episode doesn't.
+  const clearedAlerts = new Map<string, { qitemId: string; at: string } | null>();
+  const clearedAlert = (dest: string) => {
+    if (!clearedAlerts.has(dest)) clearedAlerts.set(dest, (deps.db.prepare(`SELECT q.qitem_id AS qitemId, MAX(t.ts) AS at
+        FROM queue_items q JOIN queue_transitions t ON t.qitem_id = q.qitem_id
+       WHERE ${PROMPT_ALERT_ROWS} AND q.state NOT IN ('pending','in-progress','blocked') AND json_valid(q.tags)
+         AND EXISTS (SELECT 1 FROM json_each(q.tags) WHERE value = ?)
+         AND t.actor_session = ? AND t.transition_note = ?
+       GROUP BY q.qitem_id ORDER BY at DESC LIMIT 1`).get(`prompt-destination:${dest}`, LADDER_ACTOR, PROMPT_CLEARED_NOTE) as { qitemId: string; at: string } | undefined) ?? null);
+    return clearedAlerts.get(dest)!;
+  };
+  for (const job of refusedWatchdogJobs(deps.db, clearedAlert)) {
+    const tag = `${PROMPT_EPISODE_TAG}${job.key}`;
+    if (closedEpisode(tag)) continue;
+    let group = groups.get(job.dest);
+    if (!group) { group = { keys: [], rows: new Map(), jobs: new Map(), refusedAt: job.refusedAt }; groups.set(job.dest, group); }
+    if (Date.parse(job.refusedAt) > Date.parse(group.refusedAt)) group.refusedAt = job.refusedAt;
+    group.keys.push(tag);
+    group.jobs.set(job.jobId, job.registeredBy);
   }
 
   const promptState = (dest: string) => {
@@ -986,7 +1119,9 @@ async function advancePromptRefusals(
     const group = groups.get(dest);
     const tags = aggregate.tags;
     const sameEpisode = group?.keys.some(key => tags.includes(key));
-    if (!sameEpisode || promptState(dest) === "clear") {
+    const cleared = promptState(dest) === "clear";
+    if (!sameEpisode || cleared) {
+      if (cleared) appendMarker(deps.queueRepo, aggregate, PROMPT_CLEARED_NOTE);
       await deps.queueRepo.update({ qitemId: qitem_id, actorSession: aggregate.sourceSession, state: "done",
         closureReason: "no-follow-on", transitionNote: PROMPT_RETIRED_NOTE });
     }
@@ -1027,14 +1162,19 @@ async function advancePromptRefusals(
     const toOperator = orch === null || orch === dest;
     const reason = "interactive prompt blocks outstanding work; no input was sent";
     const aggregate = await ensureEscalationRow(deps, dest,
-      toOperator ? resolveOperatorSeat() ?? members[0]!.row.sourceSession : orch!, members, reason,
-      `prompt-destination:${dest}`, [PROMPT_ALERT_TAG, ...group.keys]);
+      toOperator ? resolveOperatorSeat() ?? members[0]?.row.sourceSession ?? [...group.jobs.values()][0]! : orch!, members, reason,
+      `prompt-destination:${dest}`, [PROMPT_ALERT_TAG, ...group.keys], group.jobs);
     const row = deps.queueRepo.getById(aggregate.qitemId);
     if (!row) continue;
     const addedKeys = group.keys.filter(key => !row.tags?.includes(key));
     if (addedKeys.length) {
       deps.db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?")
         .run(JSON.stringify([...(row.tags ?? []), ...addedKeys]), row.qitemId);
+      // An alert that already exists names a reminder that joins it; nothing is sent again for it.
+      const addedJobs = [...group.jobs.keys()].filter(id => addedKeys.some(key => key.includes(`|watchdog:${id}|`)));
+      if (addedJobs.length) deps.queueRepo.transitionLog.append({ qitemId: row.qitemId, state: row.state, actorSession: LADDER_ACTOR,
+        transitionNote: `wake-escalation watchdog reminders added: ${addedJobs.join(", ")}`,
+        closureTarget: row.state === "in-progress" ? deps.queueRepo.retainedClaimBlocker(row.qitemId) : undefined });
     }
     // The aggregate ID is the episode. Claiming it does not start a second
     // delivery episode or erase its accepted dispatch/receipt history.
@@ -1048,8 +1188,8 @@ async function advancePromptRefusals(
     // Re-read at the send boundary after aggregate persistence.
     if (promptState(dest) !== "blocked") continue;
     const freshMembers = members.map(m => readCandidate(m.row.qitemId, dest));
-    if (unreadableDestinations.has(dest) || !freshMembers.some(fresh =>
-      fresh && fresh.destinationSession === dest && ["pending", "in-progress", "blocked"].includes(fresh.state))) continue;
+    if (unreadableDestinations.has(dest) || (!group.jobs.size && !freshMembers.some(fresh =>
+      fresh && fresh.destinationSession === dest && ["pending", "in-progress", "blocked"].includes(fresh.state)))) continue;
     if (!view.orchRung) {
       if (!toOperator) {
         const outcome = await attemptWake(row.qitemId, orch!);
@@ -1060,8 +1200,21 @@ async function advancePromptRefusals(
       }
       appendMarker(deps.queueRepo, row, `${LADDER_RUNG_PREFIX} orchestrator self-skip reason=${reason}`);
     }
-    if (await operatorRung(deps, row, reason, actions, view)) appendExhausted(deps.queueRepo, row, "operator rung resolved");
+    if (await operatorRung(deps, row, reason, actions, view, false)) appendExhausted(deps.queueRepo, row, "operator rung resolved");
   }
+}
+
+/** Whether a destination is a person, decided as the gateway destination resolver
+ *  decides it: every `@external` address is person-facing, registered or not (a one-off
+ *  such as slack:U012AB3CD@external is never in the registry), and any other address is
+ *  a person only when the human registry resolves it (a canonical alias such as
+ *  human-founder@kernel), never by its shape. An unreadable registry is not evidence
+ *  that no person was addressed, so the rung posts as it would by default. */
+function addressedToPerson(deps: WakeLadderDeps, destination: string): boolean {
+  if (parseSessionName(destination).kind === "external") return true;
+  const registry = (deps.loadHumanRegistry ?? (() => loadHumanRegistry()))();
+  if (!registry.ok) return true;
+  return resolveRegisteredHumanAddress(destination, registry.entities) !== null;
 }
 
 /** The operator rung (OPR.0.5.6.1 A1.2/AM-F3): the delivery rules engine IS the rung's
@@ -1076,6 +1229,8 @@ async function operatorRung(
   reason: string,
   actions: WakeLadderAction[],
   view: LadderView,
+  /** False for a prompt-blocked seat, which only a person can clear. */
+  humanRungSettingApplies = true,
 ): Promise<boolean> {
   const repo = deps.queueRepo;
   if (!deps.deliveryEngine) {
@@ -1083,6 +1238,22 @@ async function operatorRung(
       repo,
       row,
       `${LADDER_RUNG_PREFIX} operator floor=escalation view + daemon-health (delivery engine not wired) reason=${reason}`,
+    );
+    actions.push({ qitemId: row.qitemId, action: "escalate-operator" });
+    return true;
+  }
+  if (
+    humanRungSettingApplies &&
+    !view.opEngineDispatched &&
+    (deps.humanRung ?? resolveWakeHumanRung()) === "explicit-only" &&
+    !addressedToPerson(deps, row.destinationSession)
+  ) {
+    // Agent-to-agent work: the escalation row stays the visible object for the
+    // operator seat or rig lead, and nothing is posted to a person.
+    appendMarker(
+      repo,
+      row,
+      `${LADDER_RUNG_PREFIX} operator floor=escalation view (human rung explicit-only; not posted to a person) reason=${reason}`,
     );
     actions.push({ qitemId: row.qitemId, action: "escalate-operator" });
     return true;
@@ -1153,6 +1324,8 @@ async function ensureEscalationRow(
   reason: string,
   dedupTag = escalationDedupTag(dest),
   extraTags: string[] = [],
+  /** Watchdog reminders refused at this seat's prompt: job id to the session that registered it. */
+  jobs: ReadonlyMap<string, string> = new Map(),
 ): Promise<{ qitemId: string }> {
   const existing = deps.db
     .prepare(
@@ -1170,12 +1343,13 @@ async function ensureEscalationRow(
     `reason: ${reason}\n` +
     `stuck batons (${members.length}):\n` +
     members.map((m) => `- ${m.row.qitemId}: ${m.row.summary ?? "outstanding work"} (${m.reason})`).join("\n") +
+    (jobs.size ? `\nwatchdog reminders refused at its prompt (${jobs.size}):\n${[...jobs.keys()].map(id => `- ${id}`).join("\n")}` : "") +
     `\nThe rows above still carry their obligations exactly-once; this escalation is the wake, not the content.`;
   const created = await deps.queueRepo.create({
-    sourceSession: members[0]!.row.sourceSession,
+    sourceSession: members[0]?.row.sourceSession ?? [...jobs.values()][0]!,
     destinationSession: orch,
     body,
-    summary: `Wake escalation: ${members.length} baton(s) stuck at ${dest} — ${reason}`,
+    summary: `Wake escalation: ${members.length} baton(s)${jobs.size ? ` and ${jobs.size} watchdog reminder(s)` : ""} stuck at ${dest} — ${reason}`,
     tags: [WAKE_ESCALATION_TAG, dedupTag, ...extraTags, ...members.map(m => recoveryTag(m.row.qitemId))],
     nudge: false, // delivery is the ladder's own rung attempt, recorded with its outcome
   });

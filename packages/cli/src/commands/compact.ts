@@ -1,11 +1,12 @@
 import { Command } from "commander";
 import { DaemonClient, terminalAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, type LifecycleDeps } from "../daemon-lifecycle.js";
+import { daemonMayAnswer } from "../daemon-reachability.js";
 import { realDeps } from "./daemon.js";
 
-// Preparation (exact map plus idle wait) shares the existing 120s ceiling. Give the HTTP
+// Preparation (exact map plus idle wait) shares the 180s ceiling. Give the HTTP
 // call generous headroom so the client does not time out mid-sequence.
-const MANUAL_COMPACT_REQUEST_TIMEOUT_MS = 180_000;
+const MANUAL_COMPACT_REQUEST_TIMEOUT_MS = 240_000;
 
 export interface CompactDeps {
   lifecycleDeps: LifecycleDeps;
@@ -24,7 +25,7 @@ export function compactCommand(depsOverride?: CompactDeps): Command {
     .argument("<session>", "Target Claude session name (e.g. dev-impl@my-rig)")
     .option("--json", "JSON output for agents")
     .option("--skip-map", "Skip the restore-map prerequisite once; keep target, idle and permission checks")
-    .option("--cancel", "End the current preparation and disarm its future compact")
+    .option("--cancel", "Disarm managed preparation or pending restore/audit; cannot undo a submitted /compact")
     .option("--state", "Show the current preparation, expected map and deadline without triggering")
     .addHelpText("after", `
 Examples:
@@ -32,14 +33,24 @@ Examples:
   rig compact dev-impl@my-rig --json   JSON output for agents
 
 Runs the SAME guided lifecycle the auto-compaction policy runs (pre-compact
-prep → /compact with the trust-bridge → restore-from-marker → read-depth audit)
+prep → a short /compact (the full trust note travels in the map) → restore-from-marker → read-depth audit)
 on demand, for ONE Claude seat, without waiting for the context threshold. It is
 NOT a bare /compact and NOT the read-only 'rig compact-plan' triage. Non-Claude
 seats are rejected. Managed /compact waits for the exact attempt/occupant restore
 map named by preparation, published atomically with its completion marker. This
 checks completion identity, not map quality. Manual preparation and idle wait share
-120 seconds; expiry disarms that attempt. --state shows the map/deadline/reason;
---cancel ends preparation. --skip-map skips only the map requirement for this one
+180 seconds; expiry disarms that attempt. --state shows the map/deadline/reason,
+the preparation prompt's delivery, and the /compact result: "submitted, unconfirmed"
+means /compact and Enter reached the seat; OpenRig does not check that compaction
+then ran. Ordinary approvals during preparation can be answered within that same deadline;
+OpenRig does not answer them. Automatic /compact, like manual, is sent only to an idle seat.
+--cancel disarms preparation and pending restore/audit prompts without sending input.
+An already submitted /compact stays unconfirmed: cancellation cannot undo it or prove
+it never ran. No restore request follows cancellation: check the pane before retrying.
+If it compacted or you cannot tell, send a normal restore request naming preparation.mapPath
+from --state, asking it to skip reading if it did not compact; a retry would compact it again.
+An explicit retry still waits for the live pane to be idle; no automatic retry follows
+cancellation. --skip-map skips only the map requirement for this one
 manual request. Cancel an active preparation before retrying or using --skip-map.
 Automatic preparation waits at most 25 minutes from prep delivery, using existing
 polls. A stopped attempt does not restart automatically; rerun this command to
@@ -58,7 +69,7 @@ already submitted. Raw provider /compact and normal messages are unchanged.`);
     const deps = getDepsF();
 
     const status = await getDaemonStatus(deps.lifecycleDeps);
-    if (status.state !== "running" || status.healthy === false) {
+    if (!daemonMayAnswer(status)) {
       console.error("Daemon is not running. Start it with: rig daemon start");
       process.exitCode = 1;
       return;
@@ -88,8 +99,9 @@ already submitted. Raw provider /compact and normal messages are unchanged.`);
       console.log(JSON.stringify(res.data, null, 2)); return;
     }
     const stage = res.data["stage"] as string | undefined;
-    console.log(`Manual compaction triggered for ${session}${stage ? ` (stage: ${stage})` : ""}.`);
-    console.log("The restore + read-depth audit prompts follow automatically as the seat drains below threshold.");
+    const compact = res.data["compact"] as string | undefined;
+    console.log(`Manual compaction for ${session}: ${compact ?? "submitted, unconfirmed"}${stage ? ` (stage: ${stage})` : ""}`);
+    console.log("The restore + read-depth audit prompts follow automatically as the seat drains below threshold, unless the daemon restarts first.");
   });
 
   return cmd;

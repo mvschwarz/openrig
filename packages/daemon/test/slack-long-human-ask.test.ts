@@ -10,6 +10,7 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
+import { runStuckSweep } from "../src/domain/queue-stuck-sweep.js";
 import { SLACK_SECTION_CAP, SLACK_TEXT_CAP, splitForSlack, escapeSlackText } from "../src/domain/gateway/slack/message.js";
 import { MAX_HUMAN_MESSAGE_PARTS, subsystemSlackDeliver } from "../src/domain/gateway/slack/slack-delivery.js";
 import { SeenStore } from "../src/domain/gateway/slack/state-store.js";
@@ -503,9 +504,35 @@ describe("long human asks (#897)", () => {
       expect(notice.body).toMatch(/maximum 20/);
       expect(repo.list({ destinationSession: "author@rig" }).filter((q) => q.qitemId.endsWith("-undeliverable"))).toHaveLength(1);
       expect(fetchImpl.mock.calls.filter(([url]) => url.endsWith("chat.postMessage"))).toHaveLength(0);
+      const swept = await runStuckSweep({ db, queueRepo: repo, resolveOrchestrator: () => null,
+        unclaimedAgeMinutes: 60, isRegisteredHost: () => false });
+      expect(swept.outcome).not.toBe("failed");
+      expect(swept.findings).toContainEqual(expect.objectContaining({ qitemId: item.qitemId,
+        findingQitemId: notice.qitemId, action: "refreshed" }));
+      expect(repo.list({ destinationSession: request.sourceSession }).filter((q) => q.tags.includes("stuck-sweep-finding"))).toHaveLength(0);
     } finally {
       wire.stop();
       db.close();
     }
+  });
+
+  it("#1013 — a parked workflow gate's supplemental detail posts in full; only the agent packet is replaced", async () => {
+    const posts: Post[] = [];
+    const deliver = subsystemSlackDeliver({ ...stores("gate-detail"), botToken: "synthetic", channel: "C", sourceLabel: "fixture", fetchImpl: recorder(posts) });
+    expect(await deliver(decision("gate-detail", {
+      summary: "Approve the plan at https://example.invalid/plan.md",
+      body: "### Workflow gate: mission@1 step plan_signoff\n\nWorkflow instance: 01M4EXAMPLE\nContinuation: rig workflow project --instance 01M4EXAMPLE",
+      state: "blocked",
+      tags: ["workflow", "gate"],
+      humanDetail: "Please sign off by Friday; the signed plan is retained at /srv/rig/plan.md.",
+    }))).toEqual({ ok: true });
+    const primary = posts[0]!;
+    const detail = posts.find((p) => p.text.includes("Supplemental detail"))!;
+    // The primary renders the gate's question (plus its local-path Evidence line), never the packet.
+    expect(primary.text).toContain("*Approve the plan at https://example.invalid/plan.md*");
+    expect(JSON.stringify(primary.blocks)).not.toContain("Workflow instance:");
+    // The supplemental thread reply keeps its full body — the gate check must not eat it.
+    expect(detail.thread_ts).toBeTruthy();
+    expect(unescape(detail.blocks[1]!.text!.text)).toContain("Please sign off by Friday");
   });
 });

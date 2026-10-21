@@ -100,6 +100,20 @@ function setupBasicRig(fs: ReturnType<typeof mockFs>, spec?: RigSpec): RigSpec {
 
 describe("PodBundleAssembler", () => {
   // T1: assembler walks embedded pod members correctly
+  // Launch preflight refuses a dotted rig name (tmux would rename its sessions); bundling does not.
+  it("assembles a rig whose name has a dot", () => {
+    const files: Record<string, string> = {
+      [`${RIG_ROOT}/rig.yaml`]: rigSpecYaml(makeRigSpec({ name: "demo.v2" })),
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl"),
+    };
+    const result = new PodBundleAssembler({ fsOps: mockFs(files) }).assemble({
+      rigRoot: RIG_ROOT, rigSpecPath: `${RIG_ROOT}/rig.yaml`,
+      outputDir: "/tmp/bundle-staging", bundleName: "demo", bundleVersion: "1.0.0",
+    });
+    expect(result.manifest.agents.map((a) => a.name)).toEqual(["impl"]);
+    expect(result.collectedFiles).toContain("rig.yaml");
+  });
+
   it("walks embedded pod members and collects agent dirs", () => {
     const spec = makeRigSpec();
     const files: Record<string, string> = {
@@ -395,7 +409,7 @@ describe("PodBundleAssembler", () => {
   });
 
   it.each([false, true])("keeps in-root symlinks with a symlinked rig root: %s", (aliasRoot) => {
-    const root = nodeFs.mkdtempSync(nodePath.join(tmpdir(), "pod-containment-"));
+    const root = nodeFs.realpathSync(nodeFs.mkdtempSync(nodePath.join(tmpdir(), "pod-containment-")));
     try {
       const actualRoot = nodePath.join(root, "rig");
       nodeFs.mkdirSync(actualRoot);

@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
 import type { EventBus } from "../event-bus.js";
-import { readProjectReadiness, resolveProjectRoot } from "./judgments.js";
+import { createProofPolicyRead, readProjectReadiness, resolveProjectRoot } from "./judgments.js";
 
 export interface ProofSourceWatch {
   close(): void;
@@ -19,7 +19,7 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
   try { projectRoot = resolveProjectRoot(missionsRoot); } catch { /* Legacy roots retain their existing watch boundary. */ }
   // ponytail: bounded local workspaces use a full semantic read after a file burst.
   // Keep this workload measured; subtree indexing is warranted only when that bound is exceeded.
-  const basis = () => createHash("sha256").update(JSON.stringify(readProjectReadiness(missionsRoot).missions.map(m => [m.name, m.revision]))).digest("hex");
+  const basis = () => createHash("sha256").update(JSON.stringify(readProjectReadiness(missionsRoot, createProofPolicyRead()).missions.map(m => [m.name, m.revision]))).digest("hex");
   let state: "watching" | "unavailable" = "unavailable";
   let revision = "unavailable", timer: NodeJS.Timeout | undefined;
   try { revision = basis(); state = "watching"; } catch { /* Direct reads name unavailable inputs; watching may recover them. */ }

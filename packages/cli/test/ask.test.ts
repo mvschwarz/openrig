@@ -166,20 +166,30 @@ describe("Ask CLI", () => {
   });
 
   it("shows guidance when no data available", async () => {
-    const { logs } = await captureLogs(async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "ask", "nonexistent-rig", "some question"]);
     });
     const output = logs.join("\n");
     expect(output).toContain("not found");
     expect(output).toContain("rig ps");
+    expect(exitCode).toBe(1);
+  });
+
+  it("--json for an unknown rig still prints the result and exits 1", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "ask", "nonexistent-rig", "some question", "--json"]);
+    });
+    expect(JSON.parse(logs.join("\n")).rig).toBeNull();
+    expect(exitCode).toBe(1);
   });
 
   it("shows insufficient message when keywords empty", async () => {
-    const { logs } = await captureLogs(async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "ask", "my-rig", "what is the"]);
     });
     const output = logs.join("\n");
     expect(output).toContain("No useful keywords");
+    expect(exitCode).toBeUndefined();
   });
 
   it("human output shows chat evidence when transcript excerpts are empty", async () => {
