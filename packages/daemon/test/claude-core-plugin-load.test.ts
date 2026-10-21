@@ -704,7 +704,7 @@ printf '{"PLUGIN_DIRS":"%s","LEAKED":"%s","PROJECT":"%s","NODE":"%s"}' "\${CLAUD
     for (const sessionKeys of [undefined, "FOO"]) {
       const f = fixture({ sessionKeys, seatSkills: true });
       const seen = await f.run(await launch(f), { [PLUGIN_ENV]: f.seatSkillDir!, LEAKED: "should-not-pass" });
-      expect(seen, String(sessionKeys)).toEqual({ PLUGIN_DIRS: f.seatSkillDir, LEAKED: "absent", PROJECT: "absent" });
+      expect(seen, String(sessionKeys)).toEqual({ PLUGIN_DIRS: f.seatSkillDir, LEAKED: "absent", PROJECT: "absent", NODE: "absent" });
     }
   });
 
