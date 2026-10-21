@@ -7,6 +7,7 @@ import { edgeArtifactRequiredPolicy } from "./policies/edge-artifact-required.js
 import { periodicReminderPolicy } from "./policies/periodic-reminder.js";
 import { contextUsageThresholdPolicy } from "./policies/context-usage-threshold.js";
 import { PARK_WAKE_GUIDANCE, parkContinuationPreview, withContinuationPreview } from "./park-wake-text.js";
+import { isRefusedInteractive } from "./policies/parked-owner-consumer.js";
 import {
   WatchdogJobsError,
   type WatchdogJob,
@@ -720,7 +721,8 @@ export class WatchdogPolicyEngine {
     const history = this.historyLog.record({
       jobId: job.jobId,
       evaluatedAt,
-      outcome: delivery.status === "retained" ? "skipped" : "sent",
+      outcome: delivery.status === "retained" ? "skipped" : delivery.status === "ok" ? "sent"
+        : isRefusedInteractive(delivery.error) ? "refused" : "failed",
       skipReason: delivery.status === "retained" ? "typing_guard_retained" : null,
       deliveryTargetSession: outcome.target.session,
       deliveryStatus: delivery.status,

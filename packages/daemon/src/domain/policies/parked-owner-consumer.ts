@@ -94,7 +94,7 @@ export const PARKED_OWNER_COMPACTION_PENDING = "[managed-compaction-pending] Par
 /** Only the transport's interactive-prompt refusal counts — a generic failed
  *  delivery is never mislabeled refused. Literal source:
  *  session-transport.ts:1045 `Refused: '<name>' is at an interactive prompt`. */
-function isRefusedInteractive(deliveryReason: unknown): boolean {
+export function isRefusedInteractive(deliveryReason: unknown): boolean {
   return (
     typeof deliveryReason === "string" &&
     deliveryReason.startsWith("Refused:") &&
@@ -178,7 +178,7 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
       try { recent = deps.history.listForJob(job.jobId, 25); } catch { /* telemetry is not admission */ }
       const latestRows = new Set<string>();
       for (const e of recent) {
-        if (e.outcome !== "sent" || !e.deliveryStatus) continue;
+        if (e.outcome === "skipped" || e.outcome === "terminal" || !e.deliveryStatus) continue;
         const n = e.evaluationNotes ?? {};
         const key = typeof n["episodeKey"] === "string" ? n["episodeKey"] : null;
         const primary = typeof n["primaryRow"] === "string" ? n["primaryRow"] : null;
