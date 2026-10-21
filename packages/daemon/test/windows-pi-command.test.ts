@@ -22,16 +22,19 @@ describe("Windows Pi executable resolution", () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
   it("forwards Windows runtime locations while retaining provider denial", () => {
-    const source = { SystemRoot: "C:\\Windows", USERPROFILE: "C:\\Users\\probe", TEMP: "C:\\Temp", ProgramFiles: "C:\\Program Files", "ProgramFiles(x86)": "C:\\Program Files (x86)", ProgramW6432: "C:\\Program Files", ANTHROPIC_API_KEY: "private", UNRELATED_SECRET: "private" };
+    const source = { SystemRoot: "C:\\Windows", USERPROFILE: "C:\\Users\\probe", APPDATA: "C:\\Users\\probe\\AppData\\Roaming", TEMP: "C:\\Temp", ProgramFiles: "C:\\Program Files", "ProgramFiles(x86)": "C:\\Program Files (x86)", ProgramW6432: "C:\\Program Files", GH_TOKEN: "private", GITHUB_TOKEN: "private", ANTHROPIC_API_KEY: "private", UNRELATED_SECRET: "private" };
     const env = buildPiChildEnv(source, { agentDir: "seat-agent", sessionsDir: "sessions", platform: "win32", model: "openai-codex/gpt-6-luna" });
     expect(env.SystemRoot).toBe(source.SystemRoot);
     expect(env.USERPROFILE).toBe(source.USERPROFILE);
+    expect(env.APPDATA).toBe(source.APPDATA);
     expect(env.ProgramFiles).toBe(source.ProgramFiles);
     expect(env["ProgramFiles(x86)"]).toBe(source["ProgramFiles(x86)"]);
     expect(env.ProgramW6432).toBe(source.ProgramW6432);
     expect(env.PI_CODING_AGENT_DIR).toBe("seat-agent");
     expect(env).not.toHaveProperty("ANTHROPIC_API_KEY");
     expect(env).not.toHaveProperty("UNRELATED_SECRET");
+    expect(env).not.toHaveProperty("GH_TOKEN");
+    expect(env).not.toHaveProperty("GITHUB_TOKEN");
     expect(buildPiChildEnv(source, { agentDir: "a", sessionsDir: "s", platform: "linux" })).not.toHaveProperty("SystemRoot");
   });
 });

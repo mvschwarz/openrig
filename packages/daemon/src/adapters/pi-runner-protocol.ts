@@ -211,8 +211,9 @@ export function buildPiChildEnv(
   env.PI_CODING_AGENT_DIR = opts.agentDir;
   if ((opts.platform ?? process.platform) === "win32") {
     // OS process/runtime locations, not provider credentials. Node and native
-    // dependencies require SystemRoot; the Pi directory remains explicitly pinned.
-    for (const name of ["SystemRoot", "SYSTEMROOT", "WINDIR", "ComSpec", "COMSPEC", "PATHEXT", "TEMP", "TMP", "USERPROFILE", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"]) {
+    // dependencies require SystemRoot; gh uses APPDATA to locate the existing
+    // Windows login configuration. The Pi directory remains explicitly pinned.
+    for (const name of ["SystemRoot", "SYSTEMROOT", "WINDIR", "ComSpec", "COMSPEC", "PATHEXT", "TEMP", "TMP", "USERPROFILE", "APPDATA", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"]) {
       if (source[name] !== undefined) env[name] = source[name]!;
     }
   }

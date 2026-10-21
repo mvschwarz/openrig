@@ -1521,11 +1521,13 @@ export class TmuxAdapter {
   }
 
   /** Signal one process by pid. signalPaneProcess signals the pane's root, which in a shell-backed pane is
-   *  the shell, not the runtime running under it. Unix `kill`, like signalPaneProcess. */
+   *  the shell, not the runtime running under it. Uses the native host's termination command. */
   async signalPid(pid: number, signal: "TERM" | "KILL"): Promise<TmuxResult> {
     if (!Number.isInteger(pid) || pid <= 1) return { ok: false, code: "invalid_pid", message: `Refusing to signal pid ${pid}.` };
     try {
-      await this.exec(`kill -${signal} ${pid}`);
+      await this.exec(this.terminalKind === "psmux" && process.platform === "win32"
+        ? `taskkill /PID ${pid} /T${signal === "KILL" ? " /F" : ""}`
+        : `kill -${signal} ${pid}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -1548,8 +1550,7 @@ export class TmuxAdapter {
   /** Seat-handover cutover: signal the pane's foreground process (the retiree) — `TERM` for the graceful
    *  exit-in-place, `KILL` for the bounded-timeout force fallback. Resolves the pane pid then `kill`s it;
    *  an unresolvable pid is a structured, non-throwing failure.
-   *  Stays on the shell-string path deliberately: this is a Unix `kill`,
-   *  not a multiplexer command (Windows needs taskkill — named follow-up). */
+   *  Termination is host-native and remains scoped to the resolved pane process. */
   async signalPaneProcess(paneId: string, signal: "TERM" | "KILL"): Promise<TmuxResult> {
     return this.guardedInput(paneId, (pane, beforeWrite) => this.signalPaneProcessUnchecked(pane, signal, beforeWrite));
   }
@@ -1561,8 +1562,7 @@ export class TmuxAdapter {
     }
     try {
       beforeWrite();
-      await this.exec(`kill -${signal} ${pid}`);
-      return { ok: true };
+      return await this.signalPid(pid, signal);
     } catch (err) {
       return classifyWriteError(err);
     }
