@@ -791,6 +791,37 @@ function setNestedValue(obj: Record<string, unknown>, parts: string[], value: un
   current[parts[parts.length - 1]!] = value;
 }
 
+/**
+ * Drop the parent sections a reset left behind as empty objects.
+ *
+ * `rig config reset <key>` deletes the leaf value but leaves its now-empty
+ * parent objects in the file, so a section nobody can explain survives in
+ * every config diff (#1620). After the leaf is gone, walk up the reset path
+ * and delete each section that is now empty.
+ *
+ * Only sections on the path are considered, so a sibling value keeps its
+ * section, and empty objects that were already there (or were written by
+ * hand) are untouched. Arrays are left alone: they are values, not sections.
+ * Walking stops as soon as a section still has content.
+ */
+function pruneEmptyAncestors(root: Record<string, unknown>, pathParts: string[]): void {
+  const chain: Array<{ container: Record<string, unknown>; key: string }> = [];
+  let current: unknown = root;
+  for (const part of pathParts) {
+    if (current == null || typeof current !== "object" || Array.isArray(current)) return;
+    const container = current as Record<string, unknown>;
+    chain.push({ container, key: part });
+    current = container[part];
+  }
+  for (let i = chain.length - 1; i >= 0; i--) {
+    const { container, key } = chain[i]!;
+    const value = container[key];
+    if (value == null || typeof value !== "object" || Array.isArray(value)) return;
+    if (Object.keys(value as Record<string, unknown>).length > 0) return;
+    delete container[key];
+  }
+}
+
 // Per-subdir defaults derived from workspace.root. Steering is a FILE path.
 // Slice discovery defaults to the mission-aware workspace/missions contract;
 // the indexer remains backward-compatible with flat slice roots when an
@@ -1466,6 +1497,9 @@ export class ConfigStore {
           throw new Error(`Invalid context-pressure policy: warning (${warning}) must be less than critical (${critical})`);
         }
       }
+      // The leaf is gone; drop any section that is now an empty object so the
+      // file does not keep a section with nothing in it (#1620).
+      pruneEmptyAncestors(fileConfig, parentParts);
     }
     this.writeConfig(JSON.stringify(fileConfig, null, 2) + "\n");
   }

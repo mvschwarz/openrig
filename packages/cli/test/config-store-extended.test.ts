@@ -659,6 +659,35 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     expect(existsSync(configPath)).toBe(false);
   });
 
+  it("reset(key) removes a section it leaves empty (#1620)", () => {
+    const store = new ConfigStore(configPath);
+    store.set("health.context_pressure.warning_percent", "70");
+    store.reset("health.context_pressure.warning_percent");
+
+    const persisted = JSON.parse(readFileSync(configPath, "utf-8"));
+    expect(persisted.health).toBeUndefined();
+  });
+
+  it("reset(key) keeps a section that still holds a sibling (#1620)", () => {
+    const store = new ConfigStore(configPath);
+    store.set("health.context_pressure.critical_percent", "95");
+    store.set("health.context_pressure.warning_percent", "70");
+    store.reset("health.context_pressure.warning_percent");
+
+    const persisted = JSON.parse(readFileSync(configPath, "utf-8"));
+    expect(persisted.health.context_pressure.critical_percent).toBe(95);
+  });
+
+  it("reset(key) leaves pre-existing empty objects alone (#1620)", () => {
+    writeFileSync(configPath, JSON.stringify({ health: { unrelated: {} } }, null, 2) + "\n");
+    const store = new ConfigStore(configPath);
+    store.set("health.context_pressure.warning_percent", "70");
+    store.reset("health.context_pressure.warning_percent");
+
+    const persisted = JSON.parse(readFileSync(configPath, "utf-8"));
+    expect(persisted.health).toEqual({ unrelated: {} });
+  });
+
   it("resolveAllWithSource returns every valid key with source + default", () => {
     const store = new ConfigStore(configPath);
     const all = store.resolveAllWithSource();
