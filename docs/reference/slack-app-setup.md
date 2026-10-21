@@ -307,6 +307,26 @@ decisions, and posts its own replies.
 - **Not covered yet:** `rig slack verify` on the hub doesn't check the app's membership in relayed
   channels.
 
+## Quiet hours for a person (optional)
+
+Quiet hours hold a person's routine asks while they're on, and post them once they end.
+
+- **Set them** with `rig gateway human quiet set <entityId> --daily 22:00-07:00` (every day) or `--until 07:00` (from now
+  until then), with `--tz` for the person's zone. `show` reports whether they're on, `end` ends tonight's early ("I'm back";
+  a daily rule stays for tomorrow), and `clear` removes the rule. A person's mode can set them too (`rig gateway human
+  mode save … --quiet`).
+- **While quiet is on,** an ask that would post to the person isn't posted and doesn't mention them, whatever their delivery
+  class: it's held, and its row records the hold.
+- **Not held:** an urgent ask, meaning one tagged `escalation` or `wake-escalation` that isn't an update, and the operator's
+  wake-ladder alerts. These reach the person exactly as they would outside quiet. An ask below the posting level is only
+  logged, as at any time.
+- **When quiet ends,** each held ask that never started posts once, on its own, with no mention. One that no longer applies
+  isn't posted, and its row says why: it closed, a newer notification replaced it, its recipient changed, or it's now below
+  the posting level.
+- **A post that may already be in Slack**, confirmed or only partly sent, isn't held: it finishes as itself, in its own
+  thread.
+- **If quiet hours can't be read,** nothing is posted to that person until they can.
+
 ## Reconnect recovery and status
 
 The daemon scans available top-level messages and replies broadcast with **Also send to

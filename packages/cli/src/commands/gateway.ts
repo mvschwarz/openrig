@@ -281,7 +281,7 @@ Example:
       if (res.advisory) console.log(`advisory: ${res.advisory}`);
     });
 
-  const quiet = human.command("quiet").description("Quiet hours: routine asks to this person are meant to wait while it's on (stored and shown; delivery doesn't act on it yet)");
+  const quiet = human.command("quiet").description("Quiet hours: while on, routine asks to this person are held, not posted; urgent ones (tagged escalation) still reach them. Held asks post once, each on its own, when quiet ends");
   const quietCall = async (method: "get" | "put" | "post", entityId: string, suffix: string, body: Record<string, unknown> | undefined, json?: boolean) => {
     const { DaemonClient } = await import("../client.js");
     const client = new DaemonClient();
