@@ -445,13 +445,19 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     for (const row of deps.queueRepo.findUndelivered()) {
       if (isFindingRow(row)) continue;
       if (hasLiveLadder(deps.db, row.qitemId)) continue;
+      // Quiet hours: a held, turned-back or released ask belongs to its window's release job, which redrives it, so a
+      // failed wake or post isn't "nothing retried it". A hold with no live release job is still a finding.
+      const quiet = quietHoldCustody(deps.db, row.qitemId, now);
+      if (quiet && quiet.state !== "orphaned") continue;
       candidates.push({
         kind: "undelivered-wake",
         row,
         route: resolveOrch(row.destinationSession) ?? row.destinationSession,
         ageMinutes: minutesSince(row.tsCreated, now),
         evidenceAt: latestIso(row.tsUpdated, row.lastNudgeAttempt),
-        why: `wake failed (${row.lastNudgeResult ?? "failed"}) and nothing retried it`,
+        why: quiet?.state === "orphaned"
+          ? `held for quiet hours (window ${quiet.windowId}), but no release job is live for that window: nothing will release it (its wake failed: ${row.lastNudgeResult ?? row.deliveryFailureClass ?? "failed"})`
+          : `wake failed (${row.lastNudgeResult ?? "failed"}) and nothing retried it`,
       });
     }
 

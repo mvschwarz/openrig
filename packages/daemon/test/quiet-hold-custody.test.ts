@@ -36,6 +36,7 @@ describe("custody of asks held for quiet hours", () => {
   let prefs: Record<string, unknown>;
   const posts: Array<Record<string, unknown>> = [];
   let failPosts = false;
+  let rejectPosts = false; // the connector answers, but refuses the post
   const wires: Array<ReturnType<typeof buildSlackGatewayWire>> = [];
   const registry = () => ({ ok: true as const, entities: [{
     entityId: "person", class: "human" as const, displayName: "Person", address: "person@external", prefs,
@@ -51,6 +52,7 @@ describe("custody of asks held for quiet hours", () => {
     quiet = new HumanQuietStore(db);
     posts.length = 0;
     failPosts = false;
+    rejectPosts = false;
     const secrets = join(home, "slack.env");
     writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n", { mode: 0o600 });
     saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-OWNER", secretsEnvFile: secrets }, home);
@@ -64,6 +66,7 @@ describe("custody of asks held for quiet hours", () => {
         if (String(url).includes("chat.postMessage")) {
           if (failPosts) throw new Error("connector down before the post");
           posts.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          if (rejectPosts) return new Response(JSON.stringify({ ok: false, error: "channel_not_found" }), { status: 200, headers: { "content-type": "application/json" } });
           return new Response(JSON.stringify({ ok: true, ts: `1724.${100 + posts.length}` }), { status: 200, headers: { "content-type": "application/json" } });
         }
         return new Response(JSON.stringify({ ok: true, messages: [] }), { status: 200, headers: { "content-type": "application/json" } });
@@ -218,6 +221,80 @@ describe("custody of asks held for quiet hours", () => {
     expect(repo.listTransitions(row.qitemId).some((t) => (t.transitionNote ?? "").startsWith("delivery-decision: quiet-hold "))).toBe(false);
     expect(quietHoldCustody(db, row.qitemId)).toBeNull();
     expect(String((repo.waitingView(row.qitemId)!.nextBackstop as { note?: string }).note ?? "")).not.toMatch(/quiet hours/);
+  });
+
+  // A failed wake on the row, so the sweep's undelivered-wake loop sees it.
+  const failedWake = (row: QueueItem) => db.prepare("UPDATE queue_items SET last_nudge_result = 'failed: wake not delivered (test)' WHERE qitem_id = ?").run(row.qitemId);
+  const undeliveredFor = (r: Awaited<ReturnType<typeof sweep>>, row: QueueItem) => findingFor(r, row).filter((f) => f.kind === "undelivered-wake");
+
+  it("QA F1: an aged healthy hold (real timestamps past the post window, live job, no failed wake) gives no finding", async () => {
+    const row = await held();
+    const old = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    db.prepare("UPDATE queue_items SET ts_created = ?, ts_updated = ? WHERE qitem_id = ?").run(old, old, row.qitemId);
+    db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = ?").run(old, row.qitemId);
+    expect(repo.findUndelivered().find((u) => u.qitemId === row.qitemId)?.deliveryOutcome, "the ledger reads it as never posted").toBe("never-posted");
+    expect(quietHoldCustody(db, row.qitemId)).toMatchObject({ state: "held" });
+    expect(findingFor(await sweep(), row)).toEqual([]);
+  });
+
+  it("QA F1: a released ask whose post the connector rejected waits on its live release job: no undelivered-wake finding", async () => {
+    const row = await held();
+    quiet.end("person", { endedBy: "t", now: new Date() });
+    rejectPosts = true;
+    const w = wires[0]!;
+    const [job] = releaseJobs();
+    await runQuietRelease({ queueRepo: repo, jobsRepo: new WatchdogJobsRepository(db), home, jobId: job!.jobId,
+      registry: { loadHumanRegistry: registry as never }, dispatch: (op, ref, payload, opts) => w.dispatcher.dispatch(op, ref, payload, opts as never) });
+    await settle();
+    expect(posts).toHaveLength(1); // the connector saw it, and refused it
+    expect(repo.findUndelivered().some((u) => u.qitemId === row.qitemId), "the ledger reads it as a failed delivery").toBe(true);
+    expect(quietHoldCustody(db, row.qitemId)).toMatchObject({ state: "released" });
+    expect(findingFor(await sweep(), row)).toEqual([]);
+  });
+
+  it("QA F1: a release turned back by quiet, with a failed wake, gives no undelivered-wake finding", async () => {
+    const row = await held();
+    quiet.end("person", { endedBy: "t", now: new Date() });
+    const [job] = releaseJobs();
+    await runQuietRelease({ queueRepo: repo, jobsRepo: new WatchdogJobsRepository(db), home, jobId: job!.jobId,
+      registry: { loadHumanRegistry: registry as never }, dispatch: () => ({ ok: true }) });
+    quietOn();
+    const alert = await alertFor(row);
+    await confirmReleaseAtPost({ queueRepo: repo, jobsRepo: new WatchdogJobsRepository(db), home, registry: { loadHumanRegistry: registry as never },
+      entityId: "person", qitemId: row.qitemId, notificationKey: alert.notificationKey ?? row.qitemId });
+    failedWake(row);
+    expect(quietHoldCustody(db, row.qitemId)).toMatchObject({ state: "held" });
+    expect(findingFor(await sweep(), row)).toEqual([]);
+  });
+
+  it("QA F1: a held ask with a failed wake whose custody read fails reads as held: no undelivered-wake finding", async () => {
+    const row = await held();
+    failedWake(row);
+    const prepare = db.prepare.bind(db);
+    const spy = vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
+      if (sql.includes("watchdog_jobs") && sql.includes("quiet-release")) throw new Error("database is locked (test)");
+      return prepare(sql);
+    }) as typeof db.prepare);
+    let r: Awaited<ReturnType<typeof sweep>>;
+    try { r = await sweep(); } finally { spy.mockRestore(); }
+    expect(undeliveredFor(r, row)).toEqual([]);
+  });
+
+  it("QA F1: an orphaned hold with a failed wake is one finding, with the quiet-hours reason", async () => {
+    const row = await held();
+    failedWake(row);
+    new WatchdogJobsRepository(db).markTerminal(releaseJobs()[0]!.jobId, "test: the job was stopped from outside");
+    const r = await sweep();
+    expect(findingFor(r, row)).toHaveLength(1);
+    expect(findingWhy(row)).toMatch(/held for quiet hours .* no release job is live/);
+  });
+
+  it("QA F1: an ordinary row with a failed wake is an undelivered-wake finding, as before", async () => {
+    const row = await ask(); // never held
+    failedWake(row);
+    const r = await sweep();
+    expect(undeliveredFor(r, row)).toHaveLength(1);
+    expect(findingWhy(row)).toMatch(/^.*wake failed \(failed: wake not delivered \(test\)\) and nothing retried it/s);
   });
 
   it("digest-held and ordinary unposted asks read exactly as before: aged, they are findings", async () => {
