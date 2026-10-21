@@ -202,8 +202,10 @@ export class HumanModeService {
         if (!prior.ok) { this.effect(applicationId, "availability", null, null, "failed", `couldn't read the current availability: ${prior.error}`); return; }
         // An earlier mode whose restore is still owed, and whose change is still the live one: its prior is the real one.
         const owed = this.owedStillOwn(entityId, "availability", (identity) => {
-          const id = identity as { availability: string; changeId?: string | null };
-          return prior.availability === id.availability && (id.changeId == null || prior.changeId === id.changeId);
+          // Absence compares as absence: the registry reads an unset value as undefined, and a partial unset restore is
+          // recorded with null.
+          const id = identity as { availability: string | null; changeId?: string | null };
+          return (prior.availability ?? null) === (id.availability ?? null) && (id.changeId == null || prior.changeId === id.changeId);
         });
         const wrote = this.deps.availability.write(entityId, value);
         // The change identity is the change record the mode's own write left, as the writer returns it (so a manual write
@@ -328,7 +330,7 @@ export class HumanModeService {
 
   private endAvailability(entityId: string, applicationId: string, effect: ModeEffect): void {
     // The identity is what the mode itself last wrote: its own value when the mode started, or, after a restore that
-    // landed but didn't finish, the restored value with that restore's change id (so a retry finishes it).
+    // saved but failed to re-project, the restored value with that restore's change id (so a retry finishes it).
     const identity = effect.changeIdentity as { availability: string | null; changeId?: string | null };
     const wrote = identity.availability ?? null;
     // A snapshot without `away` (only in data from before the flag was recorded, never merged) reads as false.
@@ -350,8 +352,8 @@ export class HumanModeService {
     }
     // A legacy `away: true` added while the mode's away was on only agreed with it, and it would contradict a value being
     // put back (the registry refuses the pair), so it goes first, while availability is still authored (then clearing it
-    // changes nothing about availability and leaves the change record alone). A flag the person had before the mode stays:
-    // with nothing authored before, the person's own away is exactly what comes back.
+    // changes nothing about availability and leaves the change record alone). A flag the person had before the mode is
+    // theirs and is left as it is.
     const setAway = this.deps.availability.setLegacyAway;
     if (now.away && !priorAway && prior !== "away" && setAway) {
       const cleared = setAway(entityId, false);
@@ -361,26 +363,19 @@ export class HumanModeService {
       }
     }
     const restored = this.deps.availability.write(entityId, (prior ?? "unset") as Availability | "unset");
-    // Once the restore has landed (it succeeded, or failed after the fragment and record were written, so it carries its
-    // change id), the live state is the mode's own restore: a failure from here on records that restore's identity, so
-    // the retry recognises it and finishes, while a later manual change still reads as the person's. The prior stays.
-    const restoredIdentity = restored.changeId ? { availability: prior, changeId: restored.changeId } : null;
+    // A restore that failed after the fragment and record were written (re-projecting failed) carries its change id: the
+    // live state is the mode's own restore, so the failure records that restore's identity, the retry recognises it and
+    // finishes, and a later manual change still reads as the person's. The prior stays.
     if (!restored.ok) {
+      const restoredIdentity = restored.changeId ? { availability: prior, changeId: restored.changeId } : null;
       this.effect(applicationId, "availability", effect.prior, restoredIdentity ?? effect.changeIdentity, "failed", `couldn't restore ${prior ?? "not set"}: ${restored.error}`);
       return;
     }
     let detail = `restored to ${prior ?? "not set"}`;
     if (prior === null && priorAway) {
-      // Their own legacy away from before the mode: put back on if it was cleared meanwhile (availability is unset now).
-      if (!now.away && setAway) {
-        const back = setAway(entityId, true);
-        if (!back.ok) {
-          this.effect(applicationId, "availability", effect.prior, restoredIdentity ?? effect.changeIdentity, "failed",
-            `${detail}, but couldn't put away back on as it was before the mode: ${back.error}`);
-          return;
-        }
-      }
-      detail += "; away stays on, as it was before the mode";
+      // Their own legacy away from before the mode is left as it is: OpenRig never clears a flag that was on before, so if
+      // it's off now the person turned it off during the mode, and that's their "I'm back".
+      detail += now.away ? "; away stays on, as it was before the mode" : "; away was turned off during the mode; that choice stands";
     } else if (now.away && !priorAway && prior !== "away") {
       detail += "; the away flag set during it is cleared";
     }

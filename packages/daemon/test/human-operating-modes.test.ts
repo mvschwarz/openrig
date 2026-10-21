@@ -258,34 +258,26 @@ describe("applying and ending a mode", () => {
     expect(awayFlag(f.home, "kim")).toBe(true);
   });
 
-  it("review F6: a restore that landed but couldn't put the away flag back is finished by the retry, not mistaken for a manual change", async () => {
+  it("review R5-1: an away flag the person turned off during the mode is their choice: available after it ends, and the report says so", async () => {
     const f = fixture();
     expect(addHumanFragment(person("kim", { deliveryClass: "B", away: true }), f.home).ok).toBe(true);
-    const real = registryAvailability(f.home);
-    let failFlagOnce = true;
-    const modes = new HumanModeService({ db: f.db, now: () => f.clock.now, availability: { ...real,
-      setLegacyAway: (id, on) => (on && failFlagOnce ? ((failFlagOnce = false), { ok: false, error: "disk full (test)" }) : real.setLegacyAway!(id, on)) } });
-    modes.save("kim", { name: "away-from-desk", availability: { value: "away" } }, "op");
-    const app = modes.apply("kim", "away-from-desk", {}, "op").application!;
-    expect(setHumanField("kim", "away", "false", f.home).ok).toBe(true); // during the mode
-    const first = modes.end("kim", "back", "op")!;
-    expect(first.effects[0]).toMatchObject({ state: "failed", changeIdentity: { availability: null, changeId: expect.any(String) } });
-    expect(modes.unresolved("kim")).toHaveLength(1); // still owed
-    modes.end("kim", "back", "op"); // the retry, nothing changed in between
-    expect(stateOf(modes.get(app.applicationId)!, "availability")).toBe("ended");
-    expect(awayFlag(f.home, "kim")).toBe(true);
-    expect(f.availability("kim")).toBeUndefined(); // so effectively away again
-    expect(modes.unresolved("kim")).toEqual([]);
+    await f.call("PUT", "kim/modes/away-from-desk", { availability: "away" });
+    await f.call("POST", "kim/modes/away-from-desk/apply", {});
+    expect(setHumanField("kim", "away", "false", f.home).ok).toBe(true); // "I'm back", during the mode
+    const ended = (await f.call("POST", "kim/mode/end", {})).body.ended;
+    expect(ended.effects[0]).toMatchObject({ state: "ended", detail: "restored to not set; away was turned off during the mode; that choice stands" });
+    expect(f.availability("kim")).toBeUndefined();
+    expect(awayFlag(f.home, "kim")).toBe(false); // so available
   });
 
-  it("review F6: a restore write that saved but failed to re-project is finished by the retry", async () => {
+  it("review F6: a restore write that saved but failed to re-project is finished by the retry, unless the person changed it first", async () => {
     const f = fixture(); // alex: available
     const real = registryAvailability(f.home);
-    let failRestoreOnce = true;
+    let failRestore = true;
     const modes = new HumanModeService({ db: f.db, now: () => f.clock.now, availability: { ...real, write: (id, value) => {
       const res = real.write(id, value);
-      if (value === "available" && failRestoreOnce && res.ok) {
-        failRestoreOnce = false;
+      if (value === "available" && failRestore && res.ok) {
+        failRestore = false;
         return { ok: false, error: "fragment written but re-projection failed: disk full (test)", changeId: res.changeId };
       }
       return res;
@@ -298,23 +290,38 @@ describe("applying and ending a mode", () => {
     expect(stateOf(modes.get(app.applicationId)!, "availability")).toBe("ended");
     expect(f.availability()).toBe("available");
     expect(modes.unresolved("alex")).toEqual([]);
+    const again = modes.apply("alex", "away-from-desk", {}, "op").application!;
+    failRestore = true;
+    modes.end("alex", "back", "op"); // partial again
+    expect(setHumanField("alex", "availability", "focus", f.home).ok).toBe(true); // by hand, before the retry
+    modes.end("alex", "back", "op");
+    expect(stateOf(modes.get(again.applicationId)!, "availability")).toBe("kept");
+    expect(f.availability()).toBe("focus");
   });
 
-  it("review F6: a manual change after a partial restore is still the person's: kept", async () => {
-    const f = fixture();
-    expect(addHumanFragment(person("kim", { deliveryClass: "B", away: true }), f.home).ok).toBe(true);
+  it("review F7: a partial restore to not set, ended by a switch, is handed off to the next mode, not taken for a manual change", async () => {
+    const f = fixture(); // sam: nothing authored
     const real = registryAvailability(f.home);
-    let failFlagOnce = true;
-    const modes = new HumanModeService({ db: f.db, now: () => f.clock.now, availability: { ...real,
-      setLegacyAway: (id, on) => (on && failFlagOnce ? ((failFlagOnce = false), { ok: false, error: "disk full (test)" }) : real.setLegacyAway!(id, on)) } });
-    modes.save("kim", { name: "away-from-desk", availability: { value: "away" } }, "op");
-    const app = modes.apply("kim", "away-from-desk", {}, "op").application!;
-    expect(setHumanField("kim", "away", "false", f.home).ok).toBe(true);
-    modes.end("kim", "back", "op"); // partial: availability unset, the flag not back
-    expect(setHumanField("kim", "availability", "focus", f.home).ok).toBe(true); // by hand, before the retry
-    modes.end("kim", "back", "op");
-    expect(stateOf(modes.get(app.applicationId)!, "availability")).toBe("kept");
-    expect(f.availability("kim")).toBe("focus");
+    let failRestore = true; // the switch's restore to not set saves but doesn't re-project
+    const modes = new HumanModeService({ db: f.db, now: () => f.clock.now, availability: { ...real, write: (id, value) => {
+      const res = real.write(id, value);
+      if (value === "unset" && failRestore && res.ok) {
+        failRestore = false;
+        return { ok: false, error: "fragment written but re-projection failed: disk full (test)", changeId: res.changeId };
+      }
+      return res;
+    } } });
+    modes.save("sam", { name: "away-from-desk", availability: { value: "away" } }, "op");
+    modes.save("sam", { name: "out-of-office", availability: { value: "away", expectedBack: "Monday" } }, "op");
+    const first = modes.apply("sam", "away-from-desk", {}, "op").application!;
+    const second = modes.apply("sam", "out-of-office", {}, "op").application!; // the switch's end: partial restore
+    expect(second.effects[0]).toMatchObject({ state: "active", prior: { availability: null, away: false } });
+    expect(stateOf(modes.get(first.applicationId)!, "availability")).toBe("handed-off");
+    modes.end("sam", "back", "op"); // recovered
+    expect(stateOf(modes.get(first.applicationId)!, "availability")).toBe("handed-off");
+    expect(stateOf(modes.get(second.applicationId)!, "availability")).toBe("ended");
+    expect(f.availability("sam")).toBeUndefined();
+    expect(modes.unresolved("sam")).toEqual([]);
   });
 
   it("review R3-1: with no availability authored, `away` is the person's availability, so setting it is a change", () => {
