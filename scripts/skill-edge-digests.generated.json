@@ -31,7 +31,8 @@
       "pm/plan-review/SKILL.md": "42f1b746d9ceae32587fc754fcc96462af44ba7f0078407f505d7a30b88a1469",
       "pm/requirements-writer/SKILL.md": "04cfb8853553f1538fd202e9804e14e6b259f3a4c12b5f255c30169cf66ed0af",
       "pm/ui-mockup/SKILL.md": "a597fad7dcdebf43e74e01a607e12eabf848c831c96be3da2f1aeeb12f82ef08",
-      "pods/development-team/SKILL.md": "3d712a94a1725b543371ffc502d3f5641e3b77d9d566aa0f99a2977682241f9b",
+      "pods/development-team/SKILL.md": "4663daa9a4ab845a24f51553671e5359f3a29a44b774e7cf378464976256556b",
+      "pods/development-team/references/refactoring.md": "c73addf5cc5f51806ab31ab5165a8183dd616bd72526905695245e54c29301af",
       "pods/orchestration-team/SKILL.md": "616f332495a8e6fb5b6a3933442c81008158f9d3790a55783860ccbcfa7d6047",
       "pods/oversight-team/SKILL.md": "a48de41350453a09b231e01a89cc1dd3d4a64e082df090a7b0e04034227d2bb4",
       "pods/review-team/SKILL.md": "e669a893d5bd1d01fdd5e357a0f0f56425fc2fb845705bddc629016e04c8a6da",
@@ -52,7 +53,8 @@
       "process/systematic-debugging/root-cause-tracing.md": "a81bee9448794d261b4aca8487c595d11ff4bd4e10a5f96bca1117dd32527050",
       "process/test-driven-development/SKILL.md": "51f65d2bc71dd6fc84640bf113acf287f4e003ef325ed91cb112fce59149a298",
       "process/test-driven-development/testing-anti-patterns.md": "bde453bc258f06543987477c837939afaa774ea2acbd9f308d702fc452bc4283",
-      "process/verification-before-completion/SKILL.md": "0b8cea0bb82a8ab0f015afaf84c87796e2c94eee3a83d4fa3d4461d0917950bd"
+      "process/verification-before-completion/SKILL.md": "35f332aceab5d4e4dfe2e02f8b24b5e4e13b7146759de2c8031845426aa32d5c",
+      "process/verification-before-completion/references/performance-claims.md": "7db2a496a9423ab409b4e3819f64cd6abd7dff2413ce78232e6d154e62126884"
     },
     "plugin": {
       "agent-operated-software/SKILL.md": "9159d26e7884bc5205f8b06adaa65625c7d9c6bef41dc2f307d91da4cc1b424b",
@@ -128,7 +130,8 @@
       "pm/plan-review/SKILL.md": "42f1b746d9ceae32587fc754fcc96462af44ba7f0078407f505d7a30b88a1469",
       "pm/requirements-writer/SKILL.md": "04cfb8853553f1538fd202e9804e14e6b259f3a4c12b5f255c30169cf66ed0af",
       "pm/ui-mockup/SKILL.md": "a597fad7dcdebf43e74e01a607e12eabf848c831c96be3da2f1aeeb12f82ef08",
-      "pods/development-team/SKILL.md": "3d712a94a1725b543371ffc502d3f5641e3b77d9d566aa0f99a2977682241f9b",
+      "pods/development-team/SKILL.md": "4663daa9a4ab845a24f51553671e5359f3a29a44b774e7cf378464976256556b",
+      "pods/development-team/references/refactoring.md": "c73addf5cc5f51806ab31ab5165a8183dd616bd72526905695245e54c29301af",
       "pods/orchestration-team/SKILL.md": "616f332495a8e6fb5b6a3933442c81008158f9d3790a55783860ccbcfa7d6047",
       "pods/oversight-team/SKILL.md": "a48de41350453a09b231e01a89cc1dd3d4a64e082df090a7b0e04034227d2bb4",
       "pods/review-team/SKILL.md": "e669a893d5bd1d01fdd5e357a0f0f56425fc2fb845705bddc629016e04c8a6da",
@@ -149,7 +152,8 @@
       "process/systematic-debugging/root-cause-tracing.md": "a81bee9448794d261b4aca8487c595d11ff4bd4e10a5f96bca1117dd32527050",
       "process/test-driven-development/SKILL.md": "51f65d2bc71dd6fc84640bf113acf287f4e003ef325ed91cb112fce59149a298",
       "process/test-driven-development/testing-anti-patterns.md": "bde453bc258f06543987477c837939afaa774ea2acbd9f308d702fc452bc4283",
-      "process/verification-before-completion/SKILL.md": "0b8cea0bb82a8ab0f015afaf84c87796e2c94eee3a83d4fa3d4461d0917950bd"
+      "process/verification-before-completion/SKILL.md": "35f332aceab5d4e4dfe2e02f8b24b5e4e13b7146759de2c8031845426aa32d5c",
+      "process/verification-before-completion/references/performance-claims.md": "7db2a496a9423ab409b4e3819f64cd6abd7dff2413ce78232e6d154e62126884"
     }
   }
 }
