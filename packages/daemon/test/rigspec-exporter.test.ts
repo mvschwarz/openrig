@@ -315,6 +315,35 @@ describe("RigSpecExporter (pod-aware)", () => {
     expect(PodRigSpecSchema.normalize(parsed as Record<string, unknown>).workspace).toEqual(workspace);
   });
 
+  it("exports the stored culture file and rig startup block", () => {
+    const { rig } = seedPodRig();
+    const startup: import("../src/domain/types.js").StartupBlock = {
+      files: [{ kind: "file", path: "RIG-NOTES.md", deliveryHint: "auto", required: true, appliesOn: ["fresh_start", "restore"] }],
+      actions: [{ type: "send_text", value: "rig hello", phase: "after_files", appliesOn: ["fresh_start"], idempotent: true }],
+    };
+    rigRepo.setRigStartupLayers(rig.id, { root: "/specs/pod-test", cultureFile: "CULTURE.md", startup });
+
+    const spec = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
+    expect(spec.cultureFile).toBe("CULTURE.md");
+    expect(spec.startup).toEqual(startup);
+
+    const parsed = PodRigSpecCodec.parse(PodRigSpecCodec.serialize(spec));
+    expect(PodRigSpecSchema.validate(parsed).valid).toBe(true);
+    const normalized = PodRigSpecSchema.normalize(parsed as Record<string, unknown>);
+    expect(normalized.cultureFile).toBe("CULTURE.md");
+    expect(normalized.startup).toEqual(startup);
+  });
+
+  it("a rig with no stored culture file or startup block exports neither", () => {
+    const { rig } = seedPodRig();
+    const spec = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
+    expect(spec).not.toHaveProperty("cultureFile");
+    expect(spec).not.toHaveProperty("startup");
+    const yaml = PodRigSpecCodec.serialize(spec);
+    expect(yaml).not.toMatch(/^culture_file:/m);
+    expect(yaml).not.toMatch(/startup:/);
+  });
+
   it("pod-local edges use member-local ids", () => {
     const { rig } = seedPodRig();
     const spec = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
