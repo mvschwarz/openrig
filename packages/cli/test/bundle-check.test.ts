@@ -58,6 +58,18 @@ describe("advisory bundle check", () => {
     expect((await checkBundleFolder(root)).checks).toEqual(expect.arrayContaining([expect.objectContaining({ ruleId: "referenced_files", status: "finding", path: "agent/context.md" })]));
   });
 
+  it("leaves an openrig-home: plugin to the host and still checks a bundle-relative plugin path", async () => {
+    const dir = path.join(root, "agent"); fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(root, "rig.yaml"), SPEC.replace("builtin:terminal", "local:agent").replace("runtime: terminal", "runtime: codex").replace("profile: none", "profile: default"));
+    const manifest = (pluginPath: string) => `name: fixture\nversion: "1.0"\nresources:\n  plugins:\n    - id: openrig-core\n      source:\n        kind: local\n        path: "${pluginPath}"\nprofiles:\n  default:\n    uses:\n      plugins: [openrig-core]\n`;
+    fs.writeFileSync(path.join(dir, "agent.yaml"), manifest("openrig-home:plugins/openrig-core"));
+    const hostResolved = (await checkBundleFolder(root)).checks;
+    expect(hostResolved.filter(c => c.status === "finding")).toEqual([]);
+    expect(hostResolved).toContainEqual(expect.objectContaining({ ruleId: "host_resources", status: "not_checked", path: "agent" }));
+    fs.writeFileSync(path.join(dir, "agent.yaml"), manifest("plugins/missing"));
+    expect((await checkBundleFolder(root)).checks).toContainEqual(expect.objectContaining({ ruleId: "referenced_files", status: "finding", path: "agent/plugins/missing" }));
+  });
+
   it("command does not resolve a daemon, create a bundle, or invoke preflight", async () => {
     const factory = vi.fn(() => { throw new Error("daemon must not be used"); });
     const log = vi.spyOn(console, "log").mockImplementation(() => {});

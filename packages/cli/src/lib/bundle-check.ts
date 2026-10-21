@@ -95,7 +95,8 @@ export async function checkBundleFolder(folder: string) {
         if (!Array.isArray(entries)) continue;
         for (const entry of entries as Array<{ path?: string; source?: { kind?: string; path?: string } }>) {
           if (typeof entry.path === "string") fileRead(entry.path, dir);
-          else if (entry.source?.kind === "local" && typeof entry.source.path === "string") fileRead(entry.source.path, dir);
+          // openrig-home: resolves under the installing daemon's OpenRig home (agent-spec "Plugin paths"), not in this folder.
+          else if (entry.source?.kind === "local" && typeof entry.source.path === "string" && !entry.source.path.startsWith("openrig-home:")) fileRead(entry.source.path, dir);
           else if (entry.source) add("host_resources", "not_checked", "Host-resolved plugin/resource availability is checked at launch, not by this author check.", path.relative(root, dir));
         }
       }
