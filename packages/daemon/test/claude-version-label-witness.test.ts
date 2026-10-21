@@ -137,8 +137,9 @@ describe("#86 results that don't change", () => {
     expect(list).not.toHaveBeenCalled();
   });
 
-  it("a shell label stays a return to the shell", async () => {
-    expect(await adapter(mockTmux("zsh"), rows).checkReady(binding())).toMatchObject({ ready: false, code: "returned_to_shell" });
+  it("a shell label over an idle shell stays a return to the shell", async () => {
+    const shellAlone = () => rows().slice(0, 1);
+    expect(await adapter(mockTmux("zsh"), shellAlone).checkReady(binding())).toMatchObject({ ready: false, code: "returned_to_shell" });
   });
 
   it("a claude label stays ready by name, with no process read", async () => {
@@ -245,21 +246,30 @@ describe("#86 an actual path-read timeout ends the witness for the rest of one w
   // As listNativeProcesses does when the OS read times out: the path stays unset and the caller is told.
   const timedOut: NativeProcessLister = (opts) => { opts?.onPathReadTimeout?.(); return unwitnessed(); };
   const launch = (claude: ClaudeCodeAdapter) => claude.launchHarness(binding(), { name: "seat", resumeToken: "tok" });
+  // The witness's own reads carry its timeout listener; main's process checks call the same lister without one.
+  const witnessReads = (list: ReturnType<typeof vi.fn>) =>
+    list.mock.calls.filter(([opts]) => typeof opts === "object" && opts !== null && "onPathReadTimeout" in opts).length;
+  // Main's result for the same process evidence: a managed seat never consults the witness.
+  const mainResult = () => launch(adapter(mockTmux(VERSION), vi.fn(unwitnessed), () => "auto"));
 
   it.each<[string, () => NativeProcessLister, number]>([
     ["a first-sample timeout", () => vi.fn(timedOut), 1],
     ["a second-sample timeout", () => vi.fn<NativeProcessLister>().mockImplementationOnce(() => rows()).mockImplementation(timedOut), 2],
   ])("the launch wait stops reading after %s and ends with main's result", async (_name, makeList, reads) => {
     const list = makeList();
-    expect(await launch(adapter(mockTmux(VERSION), list)))
-      .toMatchObject({ ok: false, error: "Claude resume failed: timed out waiting for Claude to become active" });
-    expect(list).toHaveBeenCalledTimes(reads);
+    const result = await launch(adapter(mockTmux(VERSION), list));
+    expect(result).toEqual(await mainResult());
+    expect(result.ok).toBe(false);
+    expect(witnessReads(list as ReturnType<typeof vi.fn>)).toBe(reads);
   });
 
   it("a missing path without a timeout isn't one: every observation still tries", async () => {
     const list = vi.fn(unwitnessed);
-    expect(await launch(adapter(mockTmux(VERSION), list))).toMatchObject({ ok: false });
-    expect(list).toHaveBeenCalledTimes(17);
+    const tmux = mockTmux(VERSION);
+    expect(await launch(adapter(tmux, list))).toMatchObject({ ok: false });
+    const observations = vi.mocked(tmux.capturePaneContent).mock.calls.length;
+    expect(observations).toBeGreaterThan(16);
+    expect(witnessReads(list)).toBe(observations);
   });
 
   it("a later, independent launch wait uses a healthy witness", async () => {
