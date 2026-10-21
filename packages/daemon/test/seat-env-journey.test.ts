@@ -79,7 +79,7 @@ function wire(db: ReturnType<typeof createDb>, home: string) {
   const tmux = mockTmux();
   const tmuxAdapter = tmux as unknown as TmuxAdapter;
   const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter });
-  const startupOrchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter });
+  const startupOrchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter, sleep: async () => {} });
   const claude = new ClaudeCodeAdapter({ tmux: tmuxAdapter, fsOps: realFs(home), sleep: async () => {} });
   const resolverFs: AgentResolverFsOps = { readFile: (p) => fs.readFileSync(p, "utf-8"), exists: (p) => fs.existsSync(p) };
   const inst = new PodRigInstantiator({
