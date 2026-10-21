@@ -981,19 +981,19 @@ to keep work running, through the Fleet app. Until that bundle is available, the
 subscriptions can use this section. If that's you, you decide which subscription or home moves, and when. You decide
 from:
 - the usage and assignment readings, and their freshness;
-- the move record;
+- your earlier move reports;
 - the person's standing preferences.
 
 You say why, and you see the outcome through. OpenRig gives you the facts and the tools; it never decides for you,
 and there's no threshold to obey.
 
 **Who decides:**
-- **The person's operator agent** can ask you for a move, or look at the record. It doesn't make competing moves of
+- **The person's operator agent** can ask you for a move, or ask what you've moved. It doesn't make competing moves of
   its own.
 - **One agent manages subscriptions:** the one the person asked, or the fleet studio's agent once that bundle is
   available. There's no other fleet-manager role and no automatic manager. Use the commands below directly; no extra
   hand-off is needed.
-- **The Observatory is optional:** it can show your moves and readings, but you don't need it to rotate.
+- **The Observatory is optional:** it can show readings, but you don't need it to rotate.
 
 **The unit is a Codex home, with every seat on it.** Moving some seats on a shared home to a different account, and
 moving Claude seats, aren't supported moves yet: say so instead of improvising.
