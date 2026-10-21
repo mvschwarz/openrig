@@ -155,8 +155,8 @@ Restore behavior, each point checked in `restore-orchestrator.ts`:
   stops before any mutation (outcome `pre_restore_validation_failed`). Its other
   blockers are `invalid_snapshot_data` (`restore-preconditions.ts:27`),
   `invalid_topology_roster` (`:78`), `checkpoint_missing_node_cwd` (`:91`),
-  `startup_owner_root_missing` (`:139`), `service_rig_root_missing` (`:187`)
-  and `service_compose_file_missing` (`:197`). The `/api/up` route returns
+  `service_rig_root_missing` (`:187`) and `service_compose_file_missing`
+  (`:197`). The `/api/up` route returns
   that outcome as HTTP 409 with `status: "not_attempted"`
   (`routes/up.ts:162`). A node that resumes its exact native session replays
   no startup files, actions, guidance or skills (`replayContained`,

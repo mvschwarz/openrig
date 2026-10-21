@@ -658,9 +658,10 @@ team back with its conversations, run rig up <rig-name> --existing, not the spec
         const nodes = (res.data["nodes"] as Array<{ logicalId: string; status: string; error?: string }>) ?? [];
         for (const n of nodes) {
           // OPR.0.3.4.2 — the five-term vocabulary renders distinctly; the
-          // awaiting-decision reason is part of the line (not a dead end).
-          if (n.status === "awaiting-decision" && n.error) {
-            console.log(`  ${n.logicalId}: awaiting-decision — ${n.error}`);
+          // awaiting-decision reason is part of the line (not a dead end), and so is a failed seat's (such as a seat held
+          // back for a missing startup file, with its fix).
+          if ((n.status === "awaiting-decision" || n.status === "failed") && n.error) {
+            console.log(`  ${n.logicalId}: ${n.status} — ${n.error}`);
           } else {
             console.log(`  ${n.logicalId}: ${n.status}`);
           }
