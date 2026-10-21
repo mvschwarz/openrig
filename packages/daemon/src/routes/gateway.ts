@@ -28,6 +28,7 @@ import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import type Database from "better-sqlite3";
 import { HumanQuietStore, QuietWindowError, parseDailyRule, resolveUntil } from "../domain/gateway/human-quiet-windows.js";
 import { HumanModeService, ModeError, registryAvailability, type QuietRule } from "../domain/gateway/human-operating-modes.js";
+import { modeAccount } from "../domain/gateway/human-mode-account.js";
 
 interface SubsystemHandle {
   restart: () => void;
@@ -226,6 +227,22 @@ export function gatewayRoutes(opts: {
     const decisions = queueRepo.delegatedDecisionsFor(applicationId).map((item) => ({ qitemId: item.qitemId, summary: item.summary,
       sourceSession: item.sourceSession, decision: item.delegatedDecision }));
     return c.json({ ok: true, entityId, applicationId, modeName: application.modeName, decisions });
+  });
+  // The facts for the person's "back" account, for one ended application: made from the records only, never composed here.
+  app.get("/human/:entityId/mode/applications/:applicationId/account", async (c) => {
+    const entityId = c.req.param("entityId");
+    const applicationId = c.req.param("applicationId");
+    const db = c.get("db" as never) as Database.Database | undefined;
+    const queueRepo = c.get("queueRepo" as never) as QueueRepository | undefined;
+    if (!db || !queueRepo) return c.json({ error: "modes_unavailable", message: "The daemon's database isn't available to this route." }, 503);
+    const home = opts.home ?? OPENRIG_HOME;
+    const result = await modeAccount({ modes: new HumanModeService({ db, now }), queueRepo, home, registry: { loadHumanRegistry },
+      entityId, applicationId, now: now() });
+    if (result.status === "not-found") return c.json({ error: "application_not_found", entityId, applicationId }, 404);
+    if (result.status === "still-on") {
+      return c.json({ error: "still_on", message: `${result.application.modeName} is still on: end it first (current shows it while it's on)` }, 409);
+    }
+    return c.json({ ok: true, entityId, account: result.account });
   });
   app.post("/human/:entityId/mode/end", modeRoute("ending a mode", ({ modes, entityId, actor, body }) => {
     const reason = body.reason === "scheduled" ? "scheduled" : "back";

@@ -429,9 +429,35 @@ Examples:
       });
     });
 
+  const chosen = (choices: Array<Record<string, any>>) => choices.map((c) => `${c.questionId ?? "choice"}=${c.chosen}`).join(", ");
+  mode
+    .command("account <entityId> <applicationId>")
+    .description("The facts for a person's \"back\" account of one ended mode: how it ended, each effect, decisions made for them, what's waiting, and what isn't tracked. Made from the records only")
+    .option("--json", "The daemon's answer as JSON")
+    .action(async (entityId: string, applicationId: string, opts: { json?: boolean }) => {
+      await modeCall("get", entityId, `/mode/applications/${encodeURIComponent(applicationId)}/account`, undefined, opts.json, (data) => {
+        const a = data.account as Record<string, any>;
+        const m = a.mode;
+        const scheduled = m.scheduledEnd ? `; scheduled for ${m.scheduledEnd}` : "";
+        console.log(describeSavedMode(m.settings));
+        console.log(`  on ${m.startedAt}, ended ${m.endedAt} (${m.endReason}${scheduled})`);
+        for (const e of a.effects as Array<Record<string, any>>) console.log(`  ${e.consumer}: ${e.state}${e.detail ? ` (${e.detail})` : ""}`);
+        for (const line of unresolvedLines(a)) console.log(line);
+        console.log(`  now: ${a.now ? a.now.modeName : "at desk"}`);
+        const decisions = a.decisions as Array<Record<string, any>>;
+        if (decisions.length === 0) console.log("  decided for them: nothing");
+        for (const d of decisions) {
+          console.log(`  decided for them: ${d.qitemId} by ${d.decision.decidedBy} (${d.decision.reversible ? "reversible" : "can't be undone"}): ${chosen(d.decision.choices)}; ${d.decision.reason}`);
+        }
+        const waiting = a.waiting as Array<Record<string, any>>;
+        if (waiting.length === 0) console.log("  waiting for them: nothing");
+        for (const w of waiting) console.log(`  waiting for them: ${w.qitemId} ${w.standing}${w.reason ? ` (${w.reason})` : ""}${w.summary ? `: ${w.summary}` : ""}`);
+        for (const n of a.notTracked as string[]) console.log(`  not tracked: ${n}`);
+      });
+    });
+
   // Deciding on a person's behalf, inside the decision room of the mode they have on: read the room, record the decision
   // on the ask (as delegated, never as their answer), and list what was decided for the account when they're back.
-  const chosen = (choices: Array<Record<string, any>>) => choices.map((c) => `${c.questionId ?? "choice"}=${c.chosen}`).join(", ");
   mode
     .command("room <entityId>")
     .description("Before asking a person a decision: the decision room of the mode they have on, in their own words, or none. You judge whether your decision falls inside it")

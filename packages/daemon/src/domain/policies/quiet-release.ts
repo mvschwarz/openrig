@@ -25,7 +25,7 @@ import type { Policy, PolicyJob, PolicyEvaluation } from "./types.js";
 export const QUIET_RELEASE_POLICY = "quiet-release";
 const HOLD_PREFIX = "delivery-decision: quiet-hold";
 const DISPATCHED_PREFIX = "quiet-release-dispatched";
-const DISPOSITION_PREFIX = "quiet-release-disposition";
+export const DISPOSITION_PREFIX = "quiet-release-disposition";
 const RETURNED_PREFIX = "quiet-release-returned";
 
 export interface QuietHold {
