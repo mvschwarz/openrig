@@ -60,7 +60,10 @@ export function statusCommand(depsOverride?: StatusDeps): Command {
         message: statusGuardMessage(status).fact,
         ...(status.pid !== undefined ? { pid: status.pid } : {}),
         ...(status.probeErrorCode ? { probeErrorCode: status.probeErrorCode } : {}),
-        ...(status.siblingHint ? { siblingHint: status.siblingHint } : {}),
+        // The JSON keeps its two fields; `moved` only decides auto-start.
+        ...(status.siblingHint
+          ? { siblingHint: { resolvedHome: status.siblingHint.resolvedHome, siblingHome: status.siblingHint.siblingHome } }
+          : {}),
         ...(life ? { lifecycle: life } : {}),
       });
       return;
