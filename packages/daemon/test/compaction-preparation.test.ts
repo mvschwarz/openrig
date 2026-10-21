@@ -82,6 +82,12 @@ for(const end of ['expiry','disable','replacement'])it(`after ${end}, automatic 
  expect(next).toMatchObject({mode:'automatic',status:'waiting',delivery:'delivered'});expect(f.writes).toHaveLength(2);expect(compacts(f)).toHaveLength(0);
  stageMap(f);await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(1);
 });
+it('a cancel after a stop keeps automatic preparation off after the retry cooldown',async()=>{
+ const f=fixture();await f.e.maybeAutoCompact(input);f.advance(AUTO_PREP_WAIT_MS_DEFAULT+1);f.e.reconcilePreparations();
+ expect(f.e.getPreparationState(seat)?.status).toBe('stopped');f.e.cancelPreparation(seat);
+ f.advance(AUTO_RETRY_AFTER_STOP_MS_DEFAULT+1);await f.e.maybeAutoCompact(input);
+ expect(f.writes).toHaveLength(1);expect(f.e.getPreparationState(seat)?.status).toBe('stopped');
+});
 it('an explicit cancel keeps automatic preparation off after the retry cooldown',async()=>{
  const f=fixture();await f.e.maybeAutoCompact(input);f.e.cancelPreparation(seat);
  f.advance(AUTO_RETRY_AFTER_STOP_MS_DEFAULT+1);await f.e.maybeAutoCompact(input);
@@ -200,6 +206,10 @@ it('uncertain compact receipt never replays an already submitted command',async(
  await f.e.maybeAutoCompact(input);f.advance(60_001);
  await f.e.maybeAutoCompact(input);await f.e.maybeAutoCompact(input);
  expect(compacts(f)).toHaveLength(1);expect(f.e.getPreparationState(seat)?.status).toBe('stopped');
+ // Past the retry cooldown too: a /compact that may have run is never followed by a fresh preparation.
+ const stopped=f.e.getPreparationState(seat)!.attemptId;const sent=f.writes.length;
+ f.advance(AUTO_RETRY_AFTER_STOP_MS_DEFAULT+1);await f.e.maybeAutoCompact(input);await f.e.maybeAutoCompact(input);
+ expect(compacts(f)).toHaveLength(1);expect(f.writes).toHaveLength(sent);expect(f.e.getPreparationState(seat)?.attemptId).toBe(stopped);
 });
 
 it('skip-map cannot bypass typing guard or a changed occupant',async()=>{
