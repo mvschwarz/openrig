@@ -92,11 +92,12 @@ describe("Claude team command permissions", () => {
   ];
   const KEPT_FOR_A_PERSON = [
     "import", // its --instantiate branch launches nodes, and the prefix rule can't tell its modes apart
-    "seat set-permissions", "policy apply", // an explicit author or person permission choice stays with a person
+    "seat set-permissions", "policy apply", "policy permissions apply", // an explicit permission choice stays with a person
+    "setup", // its --policy option records a permission choice, and the prefix rule can't tell it from ordinary setup
     "compact", // it replaces a peer's working context
   ];
   const ORDINARY = [
-    "archive", "unarchive", "setup", "adopt", "attach", "bind", "unclaim", "release", "reconcile-session",
+    "archive", "unarchive", "adopt", "attach", "bind", "unclaim", "release", "reconcile-session",
     "config set", "config reset", "seat continue", "seat clean", "seat switch-client", "seat set-model", "seat set-effort",
   ];
   it.each([...STARTS_STOPS_OR_REMOVES, ...KEPT_FOR_A_PERSON])("rig %s asks", command =>
@@ -107,7 +108,7 @@ describe("Claude team command permissions", () => {
     expect(decide(`rig seat restart example@demo ${flag}`, policy)).toBe("ask");
     expect(decide("rig seat restart --help", policy)).toBe("allow");
   });
-  it("the ask list is exactly those 27", () => {
+  it("the ask list is exactly those 29", () => {
     expect([...TEAM_CLAUDE_ASK].sort()).toEqual([...STARTS_STOPS_OR_REMOVES, ...KEPT_FOR_A_PERSON].map(command => `Bash(rig ${command}:*)`).sort());
   });
 
