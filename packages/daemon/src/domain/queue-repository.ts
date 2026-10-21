@@ -3444,7 +3444,11 @@ export class QueueRepository {
       if (item.state !== "pending") {
         // Slack can redeliver the click that closed it. Only to the asked human, say whether this answer is on record.
         const onRecord = item.destinationSession === input.actorSession && item.humanAnswers?.[input.questionId] === input.optionId;
-        return { status: "not-applicable" as const, reason: `state-${item.state}`, ...(onRecord ? { answerOnRecord: true as const } : {}) };
+        const delegated = item.destinationSession === input.actorSession ? item.delegatedDecision : null;
+        const decidedForThem = delegated ? { decidedBy: delegated.decidedBy, modeName: delegated.modeName, reversible: delegated.reversible,
+          chose: delegated.choices.map((c) => c.options.find((o) => o.id === c.chosen)?.label ?? c.chosen).join(", ") } : null;
+        return { status: "not-applicable" as const, reason: `state-${item.state}`, ...(onRecord ? { answerOnRecord: true as const } : {}),
+          ...(decidedForThem ? { decidedForThem } : {}) };
       }
       if (item.destinationSession !== input.actorSession) return { status: "not-applicable" as const, reason: "not-the-asked-human" };
       const question = item.humanQuestions.find((q) => q.id === input.questionId);

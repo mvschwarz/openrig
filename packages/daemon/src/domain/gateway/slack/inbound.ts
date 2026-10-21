@@ -79,6 +79,12 @@ export const CLICK_REPLIES = {
   notClosed: "Your answers were recorded and sent to the agent that asked, but the decision itself didn't close.",
 } as const;
 
+/** The reply for a click on a decision made on the person's behalf: who decided, under which mode, and what. */
+export function decidedForThemReply(d: { decidedBy: string; modeName: string; chose: string; reversible: boolean }): string {
+  return `This was decided on your behalf by ${d.decidedBy} under ${d.modeName}: ${d.chose}${d.reversible ? "" : " (it can't be undone)"}. `
+    + "Your click wasn't recorded; the decision is in your account for when you're back.";
+}
+
 /** The reply for a click recordHumanAnswer didn't record, by its reason. */
 export function clickNotRecordedReply(reason: string): string {
   if (reason.startsWith("state-")) return CLICK_REPLIES.closed;
@@ -468,7 +474,10 @@ export class InboundRouter {
       const reason = recorded?.reason ?? "answers-unavailable";
       // A closed decision holding this person's clicked answer: typically Slack's redelivery of the click that closed
       // it, after that click's own confirmation failed to post. It was recorded, so say that.
-      if (live) await acknowledge(recorded?.answerOnRecord ? CLICK_REPLIES.onRecord : clickNotRecordedReply(reason));
+      if (live) {
+        await acknowledge(recorded?.answerOnRecord ? CLICK_REPLIES.onRecord
+          : recorded?.decidedForThem ? decidedForThemReply(recorded.decidedForThem) : clickNotRecordedReply(reason));
+      }
       return { status: "ignored", reason };
     }
     const lines = formatHumanAnswers(recorded.questions, recorded.answers);
