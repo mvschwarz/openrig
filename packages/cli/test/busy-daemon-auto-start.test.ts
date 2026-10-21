@@ -2,6 +2,8 @@
 // `rig context` already does. A daemon whose state is unverified (alive but too busy to answer its
 // health check) is sent the real request instead of a start attempt that reports "already running".
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import type { DaemonStatus } from "../src/daemon-lifecycle.js";
 
 const lifecycle = vi.hoisted(() => ({
@@ -72,4 +74,57 @@ describe("auto-start only for a daemon confirmed down", () => {
     await cmd.parseAsync(["node", "up", "some-rig", "--json"]).catch(() => {});
     expect(lifecycle.startDaemon).toHaveBeenCalledTimes(1);
   });
+
+  it("rig up: a live sibling home still auto-starts here; an explicit HOME-MOVED and a busy own daemon don't", async () => {
+    const cells: Array<[string, DaemonStatus, number]> = [
+      // Another home's daemon is alive and this home's own endpoint refused: an independent home, as on main.
+      ["live sibling", { state: "unverified", siblingHint: { resolvedHome: "/homes/.openrig", siblingHome: "/homes/.openrig-b" }, probeErrorCode: "ECONNREFUSED" }, 1],
+      ["HOME-MOVED", { state: "unverified", siblingHint: { resolvedHome: "/homes/.openrig", siblingHome: "/homes/.openrig-new", moved: true } }, 0],
+      ["busy own daemon", { state: "unverified", host: "127.0.0.1", port: 7433 }, 0],
+    ];
+    const seen: Record<string, number> = {};
+    for (const [label, status] of cells) {
+      lifecycle.startDaemon.mockClear();
+      lifecycle.status = status;
+      const c = client();
+      const cmd = upCommand({ lifecycleDeps: {} as never, clientFactory: c.factory as never });
+      cmd.exitOverride();
+      await cmd.parseAsync(["node", "up", "some-rig", "--json"]).catch(() => {});
+      seen[label] = lifecycle.startDaemon.mock.calls.length;
+    }
+    expect(seen).toEqual(Object.fromEntries(cells.map(([label, , n]) => [label, n])));
+  });
+
+  it("rig start: an explicit HOME-MOVED is refused with the guard's own message, not \"not healthy\"", async () => {
+    lifecycle.status = { state: "unverified", siblingHint: { resolvedHome: "/homes/a", siblingHome: "/homes/b", moved: true } };
+    const c = client();
+    const cmd = startCommand({ lifecycleDeps: {} as never, clientFactory: c.factory as never, preflightExec: async () => "" });
+    cmd.exitOverride();
+    await cmd.parseAsync(["node", "start", "--all", "--json"]).catch(() => {});
+    const out = vi.mocked(console.error).mock.calls.map((a) => a.join(" ")).join("\n");
+    expect(lifecycle.startDaemon).not.toHaveBeenCalled();
+    expect(out).toContain("live sibling /homes/b");
+    expect(out).not.toContain("Daemon is not healthy");
+    expect(c.requests).toEqual([]);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("rig start: a /healthz that never answers doesn't hold the start past the request bound", async () => {
+    const held: http.ServerResponse[] = [];
+    const server = http.createServer((req, res) => { held.push(res); });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    try {
+      lifecycle.status = { state: "unverified", host: "127.0.0.1", port: (server.address() as AddressInfo).port };
+      const c = client();
+      const cmd = startCommand({ lifecycleDeps: {} as never, clientFactory: c.factory as never, preflightExec: async () => "" });
+      cmd.exitOverride();
+      const started = Date.now();
+      await cmd.parseAsync(["node", "start", "--all", "--json"]).catch(() => {});
+      expect(Date.now() - started).toBeLessThan(10_000);
+      expect(c.requests).toEqual(["GET /api/rigs/summary"]);
+    } finally {
+      for (const res of held) res.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 20_000);
 });
