@@ -418,7 +418,7 @@ the sections that were not read are `null`.
 | `rig slack setup` | — | `--channel <id>`<br>`--inbound-destination <session>`<br>`--minimum-level-that-posts <level>`<br>`--minimum-level-that-interrupts <level>`<br>`--source-label <label>`<br>`--secrets-env-file <path>`<br>`--required-scopes <csv>`<br>`--reason <reason>`<br>`--actor <actor>` |
 | `rig slack status` | — | `--json` |
 | `rig slack manifest` | — | `--url`<br>`--json` |
-| `rig slack verify` | — | `--json`<br>`--reason <reason>`<br>`--actor <actor>` |
+| `rig slack verify` | — | `--json` |
 | `rig slack channel-map` | — | — |
 | `rig slack channel-map list` | — | `--json` |
 | `rig slack channel-map set <match> <channel>` | — | `--reason <reason>`<br>`--actor <actor>` |

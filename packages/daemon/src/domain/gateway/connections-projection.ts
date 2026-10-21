@@ -73,7 +73,7 @@ export function connectionsProjection(home: string, gateway: Record<string, unkn
     : gateway.state === "failed" ? "failed" : gateway.state !== "active" ? "unavailable"
     : applied === "changed" ? "unapplied" : applied === "unverified" ? "unverified"
     : !cfg.enabled ? "disabled" : !bot || !cfg.channel ? "incomplete"
-    : "unverified"; // Delivery to Slack is never observed here; `rig slack verify` checks it live.
+    : "unverified"; // Nothing here reaches Slack; `rig slack verify` checks scopes and channel membership live, not an end-to-end post.
   // OPR.0.6.0.5: no Slack app yet (neither token resolves) → create one from the shipped manifest first.
   const noSlackApp = !!cfg && secretsAvailable && !bot && !app;
   const nextAction = state !== "unavailable" && state !== "failed" && noSlackApp ? "rig slack manifest --url"
