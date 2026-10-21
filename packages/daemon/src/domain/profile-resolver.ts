@@ -10,7 +10,7 @@ import type {
 import type { ResolvedAgentSpec, ResourceCollision } from "./agent-resolver.js";
 import { resolveAuthoredCwd } from "./cwd-resolution.js";
 import { resolveStartup } from "./startup-resolver.js";
-import { discoverSkillsForRuntime, parseSkillFrontmatter, type SkillRuntime } from "./skill-discovery.js";
+import { discoverSkillsForRuntime, findNamedSkillsForRuntime, parseSkillFrontmatter, type SkillRuntime } from "./skill-discovery.js";
 import { inspectSkillDirectory, resolvePluginSkills, resolveSkillLoadout, type SkillLoadout } from "./skill-catalog.js";
 import { resolvePluginPath } from "./projection-planner.js";
 
@@ -186,13 +186,18 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
   // rig-local declarations are not overwritten by discovery.
   let rejectedSkillsByBasename: Map<string, { path: string; reason: string }> = new Map();
   if (runtime === "claude-code" || runtime === "codex" || runtime === "pi") {
-    const discovery = discoverSkillsForRuntime({
+    const discoveryPaths = {
       runtime: runtime as SkillRuntime,
       homedir: ctx.homedir ?? osHomedir(),
       cwd,
       specInstallDir: ctx.specRoot,
       ...(ctx.skillsRoot ? { skillsRoot: ctx.skillsRoot } : {}),
-    });
+    };
+    // #1653: only skills the profile names can be selected, so look those up by folder. Scanning every skill on the
+    // machine, once per member, froze the daemon on a large user folder; it now runs only for a name not found that way.
+    const wanted = new Set(profile.uses.skills.filter((ref) => !pool.skills.has(ref)));
+    const named = findNamedSkillsForRuntime(discoveryPaths, wanted);
+    const discovery = named.length === wanted.size ? { skills: named, rejected: [] } : discoverSkillsForRuntime(discoveryPaths);
     for (const discovered of discovery.skills) {
       if (pool.skills.has(discovered.id)) continue; // rig-local-wins
       pool.skills.set(discovered.id, [{

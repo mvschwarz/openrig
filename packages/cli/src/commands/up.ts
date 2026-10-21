@@ -6,7 +6,7 @@ import { resolveEffectiveHost } from "../host-selection.js";
 import { existsSync, readFileSync } from "node:fs";
 import { parse as parseYamlDoc } from "yaml";
 import { Command } from "commander";
-import { DaemonClient, DaemonConnectionError } from "../client.js";
+import { DaemonClient, DaemonConnectionError, DaemonTimeoutError } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, startDaemon, type LifecycleDeps, daemonStatusGuard } from "../daemon-lifecycle.js";
 import { shouldAutoStartDaemon } from "../daemon-reachability.js";
 import { prepareDaemonAutoStart } from "../daemon-auto-start.js";
@@ -224,7 +224,7 @@ team back with its conversations, run rig up <rig-name> --existing, not the spec
             const inspected = await runRemoteHttpOp(opts.host!, "POST", "/api/bundles/inspect", { bundlePath: source }, deps, opts);
             return { status: inspected.ok ? 200 : 500, data: (inspected.data ?? { error: inspected.error }) as Record<string, unknown> };
           }) : undefined;
-        const result = await runRemoteHttpOp(opts.host, "POST", "/api/up", body, deps, { ...opts, timeoutMs: opts.plan ? undefined : LONG_RUNNING_UP_TIMEOUT_MS });
+        const result = await runRemoteHttpOp(opts.host, "POST", "/api/up", body, deps, { ...opts, timeoutMs: LONG_RUNNING_UP_TIMEOUT_MS });
         if (behaviour) result.data = { ...(result.data as Record<string, unknown> | undefined), behaviour };
         if (opts.json) {
           console.log(JSON.stringify(result));
@@ -496,10 +496,16 @@ team back with its conversations, run rig up <rig-name> --existing, not the spec
           targetRoot,
           // OPR.0.3.4.2 — operation B opt-in seats (deliberate fresh-prime).
           freshLogicalIds: opts.fresh,
-        }, opts.plan ? undefined : { timeoutMs: LONG_RUNNING_UP_TIMEOUT_MS });
+        }, { timeoutMs: LONG_RUNNING_UP_TIMEOUT_MS }); // #1654: a plan runs an apply's preflight, Codex profile probes included
       } catch (err) {
         if (err instanceof DaemonConnectionError && !opts.plan) {
           printHonestTimeout(err);
+          return;
+        }
+        if (err instanceof DaemonTimeoutError && opts.plan) {
+          console.error(`The daemon didn't answer the plan in time (${err.message}).`);
+          console.error("A plan doesn't create or change any rig or seat, so it's safe to run again. If the daemon stays slow, check it with: rig status");
+          process.exitCode = 1;
           return;
         }
         throw err;

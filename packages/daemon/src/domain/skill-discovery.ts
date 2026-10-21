@@ -183,6 +183,30 @@ export function discoverSkillsForRuntime(paths: SkillDiscoveryPaths): SkillDisco
   return { skills, rejected };
 }
 
+/** Find only the named skills (#1653). A conforming skill's folder is named after it (Agent Skills: `name` must match
+ *  the parent directory), so each id costs one SKILL.md read per scan root, in the full scan's precedence order. Ids
+ *  not found this way are left out; the caller runs the full scan for those, which also reports rejections. */
+export function findNamedSkillsForRuntime(paths: SkillDiscoveryPaths, ids: Iterable<string>): SkillResource[] {
+  const scanRoots = listScanRoots(paths);
+  const found: SkillResource[] = [];
+  for (const id of new Set(ids)) {
+    if (!id || id === "." || id === ".." || id.includes("/") || id.includes("\\")) continue;
+    for (const root of scanRoots) {
+      const skillDir = join(root, id);
+      let content: string;
+      try {
+        if (!statSync(skillDir).isDirectory()) continue;
+        content = readFileSync(join(skillDir, "SKILL.md"), "utf-8");
+      } catch { continue; }
+      const parsed = parseSkillFrontmatter(content);
+      if (!parsed.ok || parsed.frontmatter.name !== id) continue;
+      found.push({ id, path: skillDir });
+      break;
+    }
+  }
+  return found;
+}
+
 /** Build the precedence-ordered list of scan roots for a runtime.
  *  Earlier entries win on collision (most-specific-wins): rig-bundled
  *  at cwd > spec-install-dir > user libraries. Within user libraries,
