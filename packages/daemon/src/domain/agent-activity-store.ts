@@ -230,19 +230,17 @@ export class AgentActivityStore {
     };
   }
 
-  /** The newest of a node's recent hook records by the emitter's order, for one session when named. Reordering only
-   *  spans posts in flight together, so a short window of recent records is enough. */
+  /** The newest of a node's hook records by the emitter's order (time, then its sequence), for one session when named.
+   *  Not by arrival: a runner's posts aren't awaited, so any number of older ones can land after a newer one. Read once
+   *  per seat when a restart restores it. */
   private latestBySourceOrder(nodeId: string, sessionName: string | null): ReturnType<typeof parseActivityPayload> {
-    const rows = this.db.prepare(
-      "SELECT payload FROM events WHERE node_id = ? AND type = 'agent.activity' ORDER BY seq DESC LIMIT 32"
-    ).all(nodeId) as EventPayloadRow[];
-    let best: ReturnType<typeof parseActivityPayload> = null;
-    for (const row of rows) {
-      const payload = parseActivityPayload(row.payload);
-      if (!payload?.activity || (sessionName && payload.sessionName !== sessionName)) continue;
-      if (!best || hookPrecedes(best.activity!, payload.activity)) best = payload;
-    }
-    return best;
+    const row = this.db.prepare(`
+      SELECT payload FROM events
+      WHERE node_id = ? AND type = 'agent.activity' AND (? IS NULL OR json_extract(payload, '$.sessionName') = ?)
+      ORDER BY json_extract(payload, '$.activity.eventAt') DESC,
+        COALESCE(json_extract(payload, '$.activity.sourceSequence'), 0) DESC, seq DESC
+      LIMIT 1`).get(nodeId, sessionName, sessionName) as EventPayloadRow | undefined;
+    return row ? parseActivityPayload(row.payload) : null;
   }
 
   /** W2a-1 — the dead-tenure verdict: the claim's occupant generation is REGISTERED FOR THIS NODE and

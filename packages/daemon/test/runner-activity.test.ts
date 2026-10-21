@@ -211,18 +211,20 @@ describe("source order", () => {
       postActivity: (payload) => { posts.push(payload); }, writeSidecar: () => {}, now: f.nowIso },
     { sessionName: f.session.sessionName, nodeId: f.node.id, launchId: "launch-1" });
     core.start();
-    // The real runner's posts for one turn and the start of the next, stamped at one clock reading: only its order tells them apart.
-    for (const type of ["agent_start", "agent_end", "agent_start"]) core.handlePiLine(JSON.stringify({ type }));
-    const [start1, stop1, start2] = posts.filter((p) => typeof p.hookEvent === "string" && p.eventFamily === undefined);
-    expect([start1!.hookEvent, stop1!.hookEvent, start2!.hookEvent]).toEqual(["active", "Stop", "active"]);
-    expect([start1!.sequence, stop1!.sequence, start2!.sequence]).toEqual([1, 2, 3]);
-    await f.deliver(start1!);
-    await f.deliver(start2!);
-    await f.deliver(stop1!); // the first turn's Stop arrives last
+    // The real runner's posts for a turn of 33 tool calls and the start of the next, stamped at one clock reading: only its
+    // order tells them apart.
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    for (let i = 0; i < 33; i++) core.handlePiLine(JSON.stringify({ type: "tool_execution_start", toolName: "read" }));
+    for (const type of ["agent_end", "agent_start"]) core.handlePiLine(JSON.stringify({ type }));
+    const sent = posts.filter((p) => typeof p.hookEvent === "string" && p.eventFamily === undefined);
+    const newest = sent.at(-1)!;
+    expect([sent.at(-2)!.hookEvent, newest.hookEvent, newest.sequence]).toEqual(["Stop", "active", 36]);
+    await f.deliver(newest); // the next turn's start arrives first, then all 35 older posts, the Stop last
+    for (const older of sent.slice(0, -1)) await f.deliver(older);
+    expect(f.state().activity).toBe("working");
+    await f.restart(); // restoring uses the same order: the newest start, not the late Stop
     expect(f.state().activity).toBe("working");
     f.later(PAST_HOOK_WINDOW);
-    expect(f.state().activity).toBe("unknown");
-    await f.restart(); // restoring uses the same order: the newer start, now past the window
     expect(f.state().activity).toBe("unknown");
   });
 

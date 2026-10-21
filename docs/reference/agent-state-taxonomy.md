@@ -103,7 +103,7 @@ time-bounded evidence. Rungs, top down, with each rung's retirement condition:
   in the runner's own order (time, then its sequence), so an older boundary arriving late
   doesn't win. The runner's report that its child
   exited reads unknown, not idle. A boundary the runner didn't see (if a runtime ended a turn
-  without `agent_end`) leaves the seat working until its next event, never idle. After a
+  without `agent_end`) leaves the seat working up to the 15 s window, then unknown, never idle. After a
   daemon restart, a runner seat takes its last recorded boundary from the hook store, for its
   current session and occupant generation only, so an idle seat still reads idle before it
   posts again.
