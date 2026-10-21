@@ -973,12 +973,7 @@ rig auth seats … --runtime codex         # seat -> profile registry (metadata 
 
 ### Manage subscriptions across a fleet (when the person asks you to)
 
-**This applies only when both hold:**
-- the daemon's `provider.subscription_moves` setting is on. It's off by default; the person turns it on with
-  `rig config set provider.subscription_moves true`;
-- the person has asked you to manage their subscriptions.
-
-Otherwise, don't take this job on. Installing or upgrading OpenRig appoints no agent, launches no bundle and starts no
+**This applies only when the person has asked you to manage their subscriptions.** Otherwise, don't take this job on. Installing or upgrading OpenRig appoints no agent, launches no bundle and starts no
 rotation.
 
 When a person runs several Claude and Codex subscriptions across machines, the fleet studio bundle's one agent is meant
@@ -1030,8 +1025,7 @@ moving Claude seats, aren't supported moves yet: say so instead of improvising.
      --expect-account <the target's Account line>`. `--verify` only checks; it never restarts. Only that check
      reports `moved`, and anything less is unconfirmed.
    - **A slow reply isn't a failure:** never restart a seat a second time. Follow up at your next look.
-5. **Record every move, partial or unconfirmed included,** with `rig provider moves record --file <move.json>`
-   (`--help` shows the shape):
+5. **Report every move, partial or unconfirmed included,** to whoever asked for it (a queue item to their seat):
    - the home and machine;
    - from and to, as labels;
    - your reason;
@@ -1039,10 +1033,8 @@ moving Claude seats, aren't supported moves yet: say so instead of improvising.
    - each seat's result (`moved`, `unconfirmed` or `unknown`) with its evidence or what's missing;
    - the peers, for example "not restarted; account unverified".
 
-   A seat marked `moved` needs its `evidence`, and an `unconfirmed` or `unknown` one needs what's `missing`. A home
-   switched with every seat left as a peer is still a move to record, with `seats: []`. A follow-up that confirms an
-   earlier unconfirmed seat records a new move with `supersedes`. Asked "why did this
-   seat move?", answer from `rig provider moves --seat <seat>`. Never put credentials in a record.
+   A home switched with every seat left as a peer is still a move to report. A follow-up that confirms an earlier
+   unconfirmed seat says which report it follows. Never put credentials in a report.
 6. **When a sign-in is needed:**
    - Ask the person once, durably: a queue item to their seat, naming the machine and the subscription.
    - Move nothing onto that subscription until it's done.

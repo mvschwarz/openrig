@@ -119,11 +119,11 @@ describe("config routes (User Settings v0)", () => {
     // + 1 bundle.services_enabled (service archive packing, preview and target installs; default off).
     expect(body.settings["transport.local_user_guard"]).toMatchObject({ value: false, source: "default", defaultValue: false });
     expect(body.settings["bundle.services_enabled"]).toMatchObject({ value: false, source: "default", defaultValue: false });
-    // + 1 provider.subscription_moves (slice 18 subscription move record; default off).
+    // (provider.subscription_moves was removed with the subscription move record, which nothing acted on.)
     // + 1 terminal.history_limit (rows of tmux scrollback in the block rig setup writes; default 10000).
-    expect(Object.keys(body.settings).length).toBe(84);
+    expect(Object.keys(body.settings).length).toBe(83);
     expect(body.settings["terminal.history_limit"]).toMatchObject({ value: 10000, source: "default", defaultValue: 10000 });
-    expect(body.settings["provider.subscription_moves"]).toMatchObject({ value: false, source: "default", defaultValue: false });
+    expect(body.settings).not.toHaveProperty("provider.subscription_moves");
     expect(body.settings["launch.non_interruptive"]).toMatchObject({ value: false, source: "default" });
     expect(body.settings["runtime.readiness_timeout_seconds"]).toMatchObject({ value: 30, source: "default" });
     expect(body.settings["ui.enabled"]).toMatchObject({ value: false, source: "default" });

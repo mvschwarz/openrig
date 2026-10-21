@@ -2,10 +2,6 @@ import { Hono, type Context } from "hono";
 import { getSelfHostId, LOCAL_HOST_ID } from "../domain/hosts/fanout-contract.js";
 import { loadHostRegistry } from "../domain/hosts/hosts-registry-reader.js";
 import type { ProviderService } from "../domain/provider/provider-service.js";
-import type { EventBus } from "../domain/event-bus.js";
-import type { SettingsStore } from "../domain/user-settings/settings-store.js";
-import { parseSubscriptionMove, SubscriptionMoveInputError, SubscriptionMoves } from "../domain/provider/subscription-moves.js";
-import { requireSenderIdentity } from "./require-sender-identity.js";
 import type { ProviderKind } from "../domain/provider/provider-types.js";
 import {
   readUsageAcrossHosts,
@@ -227,69 +223,6 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
       (s) => (provider === undefined || s.provider === provider) && (account === undefined || s.accountRef === account),
     );
     return c.json({ signals }, 200);
-  });
-
-  // OPR.0.7.0.18 — the subscription move record: what an agent reports after it moves (or tries to move)
-  // a Codex home's seats. Stored in the event log; it holds labels and references only, and decides nothing.
-  // Off unless provider.subscription_moves is on (read per call): while it's off these routes answer 409 and write
-  // nothing. The other provider routes don't depend on it.
-  const movesEnabled = (c: Context): boolean => {
-    const store = c.get("settingsStore" as never) as SettingsStore | undefined;
-    try {
-      return store?.resolveOne("provider.subscription_moves").value === true;
-    } catch {
-      return false;
-    }
-  };
-  const movesOff = {
-    error: "subscription_moves_disabled",
-    message: "The subscription move record is off on this daemon. Turn it on with: rig config set provider.subscription_moves true",
-  };
-  const movesOf = (c: Context): SubscriptionMoves | null => {
-    const bus = c.get("eventBus" as never) as EventBus | undefined;
-    return bus ? new SubscriptionMoves(bus) : null;
-  };
-
-  router.get("/moves", (c) => {
-    if (!movesEnabled(c)) return c.json(movesOff, 409);
-    const moves = movesOf(c);
-    if (!moves) return c.json({ error: "event_log_unavailable" }, unavailable);
-    const limitRaw = c.req.query("limit");
-    const limit = limitRaw === undefined ? undefined : Number(limitRaw);
-    if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) return c.json({ error: "limit must be a positive integer" }, 400);
-    return c.json({ moves: moves.list({ home: c.req.query("home"), seat: c.req.query("seat"), limit }) }, 200);
-  });
-
-  router.get("/moves/:id", (c) => {
-    if (!movesEnabled(c)) return c.json(movesOff, 409);
-    const moves = movesOf(c);
-    if (!moves) return c.json({ error: "event_log_unavailable" }, unavailable);
-    const move = moves.show(c.req.param("id"));
-    return move ? c.json({ move }, 200) : c.json({ error: "move_not_found" }, 404);
-  });
-
-  router.post("/moves", async (c) => {
-    if (!movesEnabled(c)) return c.json(movesOff, 409);
-    const moves = movesOf(c);
-    if (!moves) return c.json({ error: "event_log_unavailable" }, unavailable);
-    let raw: unknown;
-    try {
-      raw = await c.req.json();
-    } catch {
-      return c.json({ error: "invalid JSON body" }, 400);
-    }
-    let input;
-    try {
-      input = parseSubscriptionMove(raw);
-    } catch (error) {
-      if (error instanceof SubscriptionMoveInputError) return c.json({ error: error.message }, 400);
-      throw error;
-    }
-    // A person recording from a terminal with no seat identity can name themselves; a transport identity wins.
-    const operator = (raw as Record<string, unknown>)["operator"];
-    const identity = requireSenderIdentity(c, { verb: "a subscription move", bodyClaim: typeof operator === "string" ? operator : null });
-    if (!identity.ok) return identity.response;
-    return c.json({ move: moves.record(input, identity.session, identity.provenance) }, 201);
   });
 
   router.get("/precheck", async (c) => {

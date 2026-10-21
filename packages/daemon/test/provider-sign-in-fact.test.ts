@@ -266,9 +266,9 @@ describe("the Claude reason: where to see each seat's readings, and no 'this log
 });
 
 describe("no consumer decides on it", () => {
-  it("subscription moves and the in-place restart don't read the sign-in fact", () => {
+  it("the in-place restart and the seat lifecycle don't read the sign-in fact", () => {
     const src = path.join(__dirname, "..", "src", "domain");
-    for (const file of ["provider/subscription-moves.ts", "seat-restart-in-place.ts", "seat-lifecycle-service.ts"]) {
+    for (const file of ["seat-restart-in-place.ts", "seat-lifecycle-service.ts"]) {
       // The row field or its type; an unrelated local named `signIn` (the restart's sign-in step) is not a read of it.
       expect(fs.readFileSync(path.join(src, file), "utf8")).not.toMatch(/\.signIn\b|\bSignInFact\b/);
     }

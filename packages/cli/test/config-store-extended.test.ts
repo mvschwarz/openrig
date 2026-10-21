@@ -180,8 +180,6 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       // Slice 01 (OPR.0.7.0.1) — Codex usage windows switch.
       "provider.usage_windows",
       "bundle.services_enabled",
-      // Slice 18 (OPR.0.7.0.18) — the subscription move record switch.
-      "provider.subscription_moves",
       "usage.pi_cost_facts",
       "usage.pi_openrouter_charge",
       "transport.verify_input_box",

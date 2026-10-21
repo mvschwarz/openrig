@@ -1,4 +1,3 @@
-import fs from "node:fs";
 import { Command } from "commander";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
@@ -498,72 +497,6 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       if (opts.json) console.log(JSON.stringify(res.data));
       else console.log(res.data.outcome ?? "unknown");
       if (res.data.outcome === "failed_safely") process.exitCode = 1;
-    });
-
-  // OPR.0.7.0.18 — the subscription move record. The agent that moves seats records each move it makes or attempts;
-  // it and the observatory read them back. Labels and references only, never credentials. Off unless the daemon's
-  // provider.subscription_moves is on.
-  const moves = cmd
-    .command("moves")
-    .description("Recorded subscription moves, newest first (needs provider.subscription_moves on)")
-    .option("--home <home>", "Only moves of this Codex home")
-    .option("--seat <seat>", "Only moves that restarted or listed this seat")
-    .option("--limit <n>", "At most this many (default 50)")
-    .option("--json", "Output as parseable JSON")
-    .action(async (opts: { home?: string; seat?: string; limit?: string; json?: boolean }) => {
-      const qs = new URLSearchParams();
-      if (opts.home) qs.set("home", opts.home);
-      if (opts.seat) qs.set("seat", opts.seat);
-      if (opts.limit) qs.set("limit", opts.limit);
-      const q = qs.toString();
-      await read(`/api/provider/moves${q ? `?${q}` : ""}`, opts.json, "moves");
-    });
-  moves
-    .command("show <id>")
-    .description("One recorded move: seats and results, from and to, the reason, the readings and their age, peers (needs provider.subscription_moves on)")
-    .option("--json", "Output as parseable JSON")
-    .action(async (id: string, opts: { json?: boolean }, command: Command) => {
-      // `moves` has its own --json, which commander may take for the parent.
-      await read(`/api/provider/moves/${encodeURIComponent(id)}`, opts.json || command.parent?.opts().json, "move");
-    });
-  moves
-    .command("record")
-    .description("Record a move you made or attempted (JSON: home, host, from, to, reason, readings, seats, peers, supersedes; needs provider.subscription_moves on)")
-    .requiredOption("--file <path>", "The move as JSON, or - for stdin")
-    .option("--operator <name>", "Who is recording, when this shell has no seat identity (a seat identity wins)")
-    .option("--json", "Output as parseable JSON")
-    .addHelpText("after", `
-The JSON shape:
-  { "home": "<codex home>", "host": "<machine>", "from": "<subscription>", "to": "<subscription>",
-    "reason": "<why, in your words>",
-    "readings": [{ "subject": "<allowance>", "observedAt": "<ISO time observed>", "summary": "<what it said>" }],
-    "seats": [{ "seat": "<seat>", "result": "moved|unconfirmed|unknown", "missing": "<what's missing>", "evidence": "<verify outcome>" }],
-    "peers": [{ "seat": "<seat>", "note": "not restarted; account unverified" }],
-    "supersedes": "<an earlier move id>" }
-Record unconfirmed and partial moves too. Labels only: never put credentials in a record.
-The record is off by default. Turn it on with: rig config set provider.subscription_moves true`)
-    .action(async (opts: { file: string; operator?: string; json?: boolean }, command: Command) => {
-      const json = opts.json || command.parent?.opts().json;
-      let body: unknown;
-      try {
-        body = JSON.parse(opts.file === "-" ? fs.readFileSync(0, "utf8") : fs.readFileSync(opts.file, "utf8"));
-      } catch (error) {
-        console.error(`Could not read the move from ${opts.file}: ${(error as Error).message}`);
-        process.exitCode = 1;
-        return;
-      }
-      const client = await getClient(getDeps());
-      if (!client) {
-        process.exitCode = 1;
-        return;
-      }
-      if (opts.operator && body !== null && typeof body === "object" && !Array.isArray(body)) {
-        body = { ...(body as Record<string, unknown>), operator: opts.operator };
-      }
-      const res = await client.post<{ move?: { id?: string } }>("/api/provider/moves", body);
-      if (handleHttpError(res, "record move")) return;
-      if (json) console.log(JSON.stringify(res.data));
-      else console.log(`Recorded ${res.data.move?.id ?? "the move"}`);
     });
 
   return cmd;
