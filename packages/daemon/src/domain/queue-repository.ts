@@ -1,4 +1,4 @@
-import { readWakeLadderBackstop } from "./queue-wake-ladder.js";
+import { PROMPT_ALERT_TAG, readWakeLadderBackstop } from "./queue-wake-ladder.js";
 import { quietCustodyBackstop, quietHoldCustody } from "./quiet-hold-custody.js";
 import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
@@ -147,6 +147,27 @@ export function classifyNudgeFailure(lastNudgeResult: string | null | undefined)
 export const QUEUE_PRIORITIES = ["routine", "urgent", "critical"] as const;
 export type QueuePriority = (typeof QUEUE_PRIORITIES)[number];
 
+/** A decision made on a person's behalf by the agent that would otherwise have asked them, inside the decision room of
+ *  the mode they have on. Kept beside the person's own answers, never as one. */
+export interface DelegatedDecision {
+  applicationId: string;
+  modeName: string;
+  /** The mode's decision room as the person stated it, at the time of the decision. */
+  decisionRoom: { words: string; exclusions: string[] };
+  decidedBy: string;
+  decidedAt: string;
+  /** Per question: what was asked, the options offered, and the option chosen. A row with no structured questions
+   *  records its subject as the question and the agent's choice as text. */
+  choices: Array<{ questionId: string | null; question: string; options: Array<{ id: string; label: string }>; chosen: string }>;
+  reason: string;
+  reversible: boolean;
+}
+
+export type RecordDelegatedDecisionResult =
+  | { status: "recorded"; item: QueueItem }
+  | { status: "refused"; reason: "schema" | "not-found" | "not-pending" | "not-a-decision" | "permission-prompt" | "not-the-asking-agent"
+      | "no-active-mode" | "no-decision-room" | "not-the-persons-mode" | "invalid-choice"; message: string };
+
 export interface QueueItem {
   qitemId: string;
   tsCreated: string;
@@ -191,6 +212,8 @@ export interface QueueItem {
   humanQuestions?: HumanQuestion[] | null;
   /** #193 — answers recorded from clicks, questionId → optionId; null until the first click. */
   humanAnswers?: HumanAnswers | null;
+  /** A decision made on the person's behalf inside their mode's decision room; never their own answer. */
+  delegatedDecision?: DelegatedDecision | null;
   /** Short human-readable subject; null for callers that omit it. */
   summary: string | null;
   /** OPR.0.4.4.19 FR-5 — pointer to the durable artifact a human judges
@@ -253,6 +276,7 @@ interface QueueItemRow {
   reply_to?: string | null;
   human_questions?: string | null;
   human_answers?: string | null;
+  delegated_decision?: string | null;
   summary: string | null;
   evidence_ref: string | null;
   closure_reason: string | null;
@@ -645,7 +669,7 @@ function detectTable(db: Database.Database, tableName: string): boolean {
 // the compact projection is one thing: present text is shown, and what isn't selected is left out
 // and named in fieldsElided, never backfilled as empty.
 const COMPACT_ELIDED_FIELDS = [
-  "body", "evidenceRef", "humanDetail", "waiting", "chainOfRecord", "replyTo", "humanQuestions", "humanAnswers",
+  "body", "evidenceRef", "humanDetail", "waiting", "chainOfRecord", "replyTo", "humanQuestions", "humanAnswers", "delegatedDecision",
   "lastNudgeInputBox",
 ] as const;
 
@@ -859,6 +883,7 @@ export class QueueRepository {
   private readonly hasHumanIntentColumn: boolean;
   private readonly hasReplyToColumn: boolean;
   private readonly hasHumanQuestionsColumn: boolean;
+  private readonly hasDelegatedDecisionColumn: boolean;
   private readonly hasEvidenceRefColumn: boolean;
   /** #1278 — migration 116; older fixtures without it record no reading. */
   private readonly hasNudgeInputBoxColumn: boolean;
@@ -926,6 +951,7 @@ export class QueueRepository {
     this.hasHumanIntentColumn = detectQueueColumn(db, "human_intent");
     this.hasReplyToColumn = detectQueueColumn(db, "reply_to");
     this.hasHumanQuestionsColumn = detectQueueColumn(db, "human_questions");
+    this.hasDelegatedDecisionColumn = detectQueueColumn(db, "delegated_decision");
     this.hasEvidenceRefColumn = detectQueueColumn(db, "evidence_ref");
     this.hasNudgeInputBoxColumn = detectQueueColumn(db, "last_nudge_input_box");
     this.hasQueueTransitionsTable = detectTable(db, "queue_transitions");
@@ -3433,6 +3459,88 @@ export class QueueRepository {
     })();
   }
 
+  /**
+   * Record a decision made on the person's behalf, inside their mode's decision room, on the ask's own row. Only the
+   * agent that asked may record it, only on a pending decision to that person, and only while their mode has a stated
+   * decision room. A permission or approval prompt is never decided this way. It never writes humanAnswers or a
+   * human-decision-resolved notice: the person didn't answer. The ask is closed (done, no follow-on) so it isn't posted
+   * or re-offered, and the asking agent carries on with its choice.
+   */
+  recordDelegatedDecision(input: {
+    qitemId: string;
+    actorSession: string;
+    application: { applicationId: string; entityId: string; modeName: string; decisionRoom: { words: string; exclusions: string[] } | null } | null;
+    choices: Array<{ questionId?: string | null; chosen: string }>;
+    reason: string;
+    reversible: boolean;
+    now?: Date;
+  }): RecordDelegatedDecisionResult {
+    type Refused = Extract<RecordDelegatedDecisionResult, { status: "refused" }>;
+    const refuse = (reason: Refused["reason"], message: string): Refused => ({ status: "refused", reason, message });
+    if (!this.hasDelegatedDecisionColumn) return refuse("schema", "this daemon's queue schema has no place for a delegated decision");
+    const result = this.db.transaction((): Refused | { status: "closed"; events: PersistedEvent[] } => {
+      const item = this.getById(input.qitemId);
+      if (!item) return refuse("not-found", `qitem ${input.qitemId} not found`);
+      if (item.state !== "pending") return refuse("not-pending", `${input.qitemId} is ${item.state}; only a pending ask can be decided`);
+      const person = parseSessionName(item.destinationSession);
+      if (person.kind !== "external" || item.humanIntent === "update") return refuse("not-a-decision", `${input.qitemId} isn't a decision asked of a person`);
+      if (item.tags?.includes(PROMPT_ALERT_TAG)) return refuse("permission-prompt", "a permission or approval prompt is never decided on the person's behalf");
+      if (item.sourceSession !== input.actorSession) {
+        return refuse("not-the-asking-agent", `only the agent that asked (${item.sourceSession}) can record a decision on this ask`);
+      }
+      const app = input.application;
+      if (!app) return refuse("no-active-mode", `${person.local} has no mode on, so nothing can be decided for them`);
+      if (app.entityId !== person.local) return refuse("not-the-persons-mode", `that mode is ${app.entityId}'s, not ${person.local}'s`);
+      if (!app.decisionRoom) return refuse("no-decision-room", `${person.local}'s ${app.modeName} has no decision room, so nothing can be decided for them`);
+      if (!input.reason.trim()) return refuse("invalid-choice", "say why this choice was made");
+      let choices: DelegatedDecision["choices"];
+      const questions = item.humanQuestions ?? [];
+      if (questions.length > 0) {
+        const picked = new Map(input.choices.map((c) => [c.questionId ?? "", c.chosen]));
+        if (picked.size !== input.choices.length || questions.some((q) => !picked.has(q.id)) || [...picked.keys()].some((id) => !questions.some((q) => q.id === id))) {
+          return refuse("invalid-choice", `choose one option for each question: ${questions.map((q) => q.id).join(", ")}`);
+        }
+        choices = [];
+        for (const q of questions) {
+          const chosen = picked.get(q.id)!;
+          if (!q.options.some((o) => o.id === chosen)) return refuse("invalid-choice", `"${chosen}" isn't an option of ${q.id}`);
+          choices.push({ questionId: q.id, question: q.question, options: q.options.map((o) => ({ id: o.id, label: o.label })), chosen });
+        }
+      } else {
+        const chosen = input.choices.length === 1 && !input.choices[0]!.questionId ? input.choices[0]!.chosen.trim() : "";
+        if (!chosen) return refuse("invalid-choice", "this ask has no structured questions: give one choice, in words");
+        choices = [{ questionId: null, question: item.summary ?? item.body.slice(0, 200), options: [], chosen }];
+      }
+      const record: DelegatedDecision = {
+        applicationId: app.applicationId, modeName: app.modeName, decisionRoom: app.decisionRoom, decidedBy: input.actorSession,
+        decidedAt: (input.now ?? new Date()).toISOString(), choices, reason: input.reason.trim(), reversible: input.reversible,
+      };
+      this.db.prepare("UPDATE queue_items SET delegated_decision = ? WHERE qitem_id = ?").run(JSON.stringify(record), input.qitemId);
+      const chose = choices.map((c) => `${c.questionId ?? "choice"}=${c.chosen}`).join(", ");
+      const closed = this.updateInTransactionalContext({
+        qitemId: input.qitemId,
+        actorSession: input.actorSession,
+        state: "done",
+        closureReason: "no-follow-on",
+        transitionNote: `delegated-decision application=${app.applicationId} mode=${app.modeName} reversible=${input.reversible} `
+          + `chose ${chose}: decided on ${person.local}'s behalf by ${input.actorSession}, not answered by them`,
+      });
+      return { status: "closed", events: closed.persistedEvents };
+    })();
+    if (result.status === "refused") return result;
+    for (const event of result.events) this.eventBus.notifySubscribers(event);
+    return { status: "recorded", item: this.getById(input.qitemId)! };
+  }
+
+  /** The decisions made on a person's behalf under one mode application, oldest first: for the account when they're back. */
+  delegatedDecisionsFor(applicationId: string): QueueItem[] {
+    if (!this.hasDelegatedDecisionColumn) return [];
+    const rows = this.db.prepare(`SELECT * FROM queue_items WHERE delegated_decision IS NOT NULL
+        AND json_extract(delegated_decision, '$.applicationId') = ?
+      ORDER BY json_extract(delegated_decision, '$.decidedAt'), qitem_id`).all(applicationId) as QueueItemRow[];
+    return rows.map((row) => this.rowToItem(row));
+  }
+
   getById(qitemId: string): QueueItem | null {
     const row = this.db
       .prepare("SELECT * FROM queue_items WHERE qitem_id = ?")
@@ -4440,6 +4548,7 @@ export class QueueRepository {
       replyTo: row.reply_to ?? null,
       humanQuestions: row.human_questions ? (JSON.parse(row.human_questions) as HumanQuestion[]) : null,
       humanAnswers: row.human_answers ? (JSON.parse(row.human_answers) as HumanAnswers) : null,
+      delegatedDecision: row.delegated_decision ? (JSON.parse(row.delegated_decision) as DelegatedDecision) : null,
       closureReason: row.closure_reason as ClosureReason | null,
       closureTarget: row.closure_target,
       closureRequiredAt: row.closure_required_at,

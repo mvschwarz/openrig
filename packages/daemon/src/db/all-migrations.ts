@@ -123,6 +123,7 @@ import { humanQuietWindowsSchema } from "./migrations/118_human_quiet_windows.js
 import { seatIdentityPanePidSchema } from "./migrations/119_seat_identity_pane_pid.js";
 import { rigStartupLayersSchema } from "./migrations/121_rig_startup_layers.js";
 import { humanOperatingModesSchema } from "./migrations/122_human_operating_modes.js";
+import { queueDelegatedDecisionSchema } from "./migrations/123_queue_delegated_decision.js";
 
 /** Ordered migrations; numbers may be reserved by independent changes. */
 
@@ -245,4 +246,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   seatIdentityPanePidSchema,
   rigStartupLayersSchema,
   humanOperatingModesSchema,
+  queueDelegatedDecisionSchema,
 ];

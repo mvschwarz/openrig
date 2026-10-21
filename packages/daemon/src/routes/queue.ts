@@ -25,6 +25,7 @@ import type { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { deriveCurrentWork, deriveCurrentWorkChoice, deriveRole, deriveWorkCandidates, type RoleOrientation } from "../domain/current-work.js";
 import type { WhoamiService } from "../domain/whoami-service.js";
 import type Database from "better-sqlite3";
+import { HumanModeService } from "../domain/gateway/human-operating-modes.js";
 import type { HumanQuestion } from "../domain/human-questions.js";
 import { queryLimit, SQL_LIMIT_BOUND } from "./query-limit.js";
 
@@ -852,6 +853,37 @@ export function queueRoutes(): Hono {
   });
 
   // POST /:qitemId/fallback
+  // A decision made on the person's behalf, inside the decision room of the mode they have on. Recorded by the agent that
+  // asked, on the ask's own row, beside the person's answers and never as one; refused when there's no room to decide in.
+  app.post("/:qitemId/delegated-decision", async (c) => {
+    const qitemId = c.req.param("qitemId");
+    const body = await c.req.json<{ choices?: unknown; reason?: unknown; reversible?: unknown; actor?: string }>().catch(() => ({} as never));
+    const identity = requireSenderIdentity(c, { verb: "record a delegated decision", bodyClaim: body.actor ?? null });
+    if (!identity.ok) return identity.response;
+    if (typeof body.reversible !== "boolean") {
+      return c.json({ error: "reversible_required", message: "say whether this decision can be undone (reversible: true or false)" }, 400);
+    }
+    const db = c.get("db" as never) as Database.Database | undefined;
+    const repo = getRepo(c);
+    const item = repo.getById(qitemId);
+    if (!item) return c.json({ error: "not-found", message: `qitem ${qitemId} not found` }, 404);
+    const person = parseSessionName(item.destinationSession);
+    const current = db && person.kind === "external" ? new HumanModeService({ db }).current(person.local) : null;
+    const choices = Array.isArray(body.choices)
+      ? body.choices.filter((ch): ch is { questionId?: string | null; chosen: string } => typeof ch === "object" && ch !== null && typeof (ch as { chosen?: unknown }).chosen === "string")
+      : [];
+    const result = repo.recordDelegatedDecision({
+      qitemId,
+      actorSession: identity.session,
+      application: current ? { applicationId: current.applicationId, entityId: current.entityId, modeName: current.modeName, decisionRoom: current.settings.decisionRoom } : null,
+      choices,
+      reason: typeof body.reason === "string" ? body.reason : "",
+      reversible: body.reversible,
+    });
+    if (result.status === "refused") return c.json({ error: result.reason, message: result.message }, result.reason === "not-found" ? 404 : 409);
+    return c.json({ ok: true, item: result.item });
+  });
+
   app.post("/:qitemId/fallback", async (c) => {
     const qitemId = c.req.param("qitemId");
     const body = await c.req.json<{ fallbackDestination?: string; reason?: string }>().catch(() => ({} as never));

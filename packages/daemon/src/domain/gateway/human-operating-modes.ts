@@ -117,8 +117,14 @@ interface EffectRow {
 
 export class HumanModeService {
   private readonly quiet: HumanQuietStore;
-  constructor(private readonly deps: { db: Database.Database; availability: AvailabilityAccess; quiet?: HumanQuietStore; now?: () => Date }) {
+  /** `availability` is needed only to apply or end a mode; reading saved modes and applications works without it. */
+  constructor(private readonly deps: { db: Database.Database; availability?: AvailabilityAccess; quiet?: HumanQuietStore; now?: () => Date }) {
     this.quiet = deps.quiet ?? new HumanQuietStore(deps.db);
+  }
+
+  private get availability(): AvailabilityAccess {
+    if (!this.deps.availability) throw new Error("applying or ending a mode needs the availability writer");
+    return this.deps.availability;
   }
 
   private now(): Date { return this.deps.now?.() ?? new Date(); }
@@ -198,7 +204,7 @@ export class HumanModeService {
     if (mode.availability.value) {
       const value = mode.availability.value;
       step("availability", () => {
-        const prior = this.deps.availability.read(entityId);
+        const prior = this.availability.read(entityId);
         if (!prior.ok) { this.effect(applicationId, "availability", null, null, "failed", `couldn't read the current availability: ${prior.error}`); return; }
         // An earlier mode whose restore is still owed, and whose change is still the live one: its prior is the real one.
         const owed = this.owedStillOwn(entityId, "availability", (identity) => {
@@ -207,13 +213,13 @@ export class HumanModeService {
           const id = identity as { availability: string | null; changeId?: string | null };
           return (prior.availability ?? null) === (id.availability ?? null) && (id.changeId == null || prior.changeId === id.changeId);
         });
-        const wrote = this.deps.availability.write(entityId, value);
+        const wrote = this.availability.write(entityId, value);
         // The change identity is the change record the mode's own write left, as the writer returns it (so a manual write
         // landing right after it is never taken for the mode's), with the value. A write can also fail after the fragment
         // and record are saved (re-projecting it fails); its id comes back with the error, the value is live on the next
         // load, and the change is still the mode's own, so ending puts the prior value back. A writer that returns no id
         // (an injected one, or a record that couldn't be written) falls back to reading the record back after the write.
-        const after = wrote.changeId ? null : this.deps.availability.read(entityId);
+        const after = wrote.changeId ? null : this.availability.read(entityId);
         const landed = wrote.changeId ? { availability: value, changeId: wrote.changeId }
           : after?.ok && after.availability === value ? { availability: value, changeId: after.changeId ?? null } : null;
         // The prior state is the authored availability and the legacy away flag, so ending can put back exactly what the
@@ -335,7 +341,7 @@ export class HumanModeService {
     const wrote = identity.availability ?? null;
     // A snapshot without `away` (only in data from before the flag was recorded, never merged) reads as false.
     const { availability: prior, away: priorAway = false } = effect.prior as { availability: string | null; away?: boolean };
-    const now = this.deps.availability.read(entityId);
+    const now = this.availability.read(entityId);
     if (!now.ok) {
       this.effect(applicationId, "availability", effect.prior, effect.changeIdentity, "pending", `couldn't read the current availability to check it's still this mode's: ${now.error}`);
       return;
@@ -354,7 +360,7 @@ export class HumanModeService {
     // put back (the registry refuses the pair), so it goes first, while availability is still authored (then clearing it
     // changes nothing about availability and leaves the change record alone). A flag the person had before the mode is
     // theirs and is left as it is.
-    const setAway = this.deps.availability.setLegacyAway;
+    const setAway = this.availability.setLegacyAway;
     if (now.away && !priorAway && prior !== "away" && setAway) {
       const cleared = setAway(entityId, false);
       if (!cleared.ok) {
@@ -362,7 +368,7 @@ export class HumanModeService {
         return;
       }
     }
-    const restored = this.deps.availability.write(entityId, (prior ?? "unset") as Availability | "unset");
+    const restored = this.availability.write(entityId, (prior ?? "unset") as Availability | "unset");
     // A restore that failed after the fragment and record were written (re-projecting failed) carries its change id: the
     // live state is the mode's own restore, so the failure records that restore's identity, the retry recognises it and
     // finishes, and a later manual change still reads as the person's. The prior stays.

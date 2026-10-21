@@ -206,6 +206,27 @@ export function gatewayRoutes(opts: {
     const current = modes.current(entityId);
     return { current, atDesk: current === null, unresolved: modes.unresolved(entityId) };
   }));
+  // For an agent about to ask this person: the decision room of the mode they have on, in their own words, or none. The
+  // agent judges whether its decision falls inside it; with none, nothing is decided for them.
+  app.get("/human/:entityId/decision-room", modeRoute("reading the decision room", ({ modes, entityId }) => {
+    const current = modes.current(entityId);
+    if (!current) return { decisionRoom: null, why: "at desk: no mode is on, so ask them" };
+    if (!current.settings.decisionRoom) return { decisionRoom: null, why: `${current.modeName} has no decision room, so nothing is decided for them`, modeName: current.modeName };
+    return { decisionRoom: { applicationId: current.applicationId, modeName: current.modeName, ...current.settings.decisionRoom } };
+  }));
+  // The decisions made on this person's behalf under one application, for the account when they're back.
+  app.get("/human/:entityId/mode/applications/:applicationId/decisions", (c) => {
+    const entityId = c.req.param("entityId");
+    const applicationId = c.req.param("applicationId");
+    const db = c.get("db" as never) as Database.Database | undefined;
+    const queueRepo = c.get("queueRepo" as never) as QueueRepository | undefined;
+    if (!db || !queueRepo) return c.json({ error: "modes_unavailable", message: "The daemon's database isn't available to this route." }, 503);
+    const application = new HumanModeService({ db }).get(applicationId);
+    if (!application || application.entityId !== entityId) return c.json({ error: "application_not_found", entityId, applicationId }, 404);
+    const decisions = queueRepo.delegatedDecisionsFor(applicationId).map((item) => ({ qitemId: item.qitemId, summary: item.summary,
+      sourceSession: item.sourceSession, decision: item.delegatedDecision }));
+    return c.json({ ok: true, entityId, applicationId, modeName: application.modeName, decisions });
+  });
   app.post("/human/:entityId/mode/end", modeRoute("ending a mode", ({ modes, entityId, actor, body }) => {
     const reason = body.reason === "scheduled" ? "scheduled" : "back";
     const ended = modes.end(entityId, reason, actor);

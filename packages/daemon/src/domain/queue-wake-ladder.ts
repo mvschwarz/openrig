@@ -972,7 +972,8 @@ export function makePromptStateReader(deps: {
   };
 }
 
-const PROMPT_ALERT_TAG = "wake-prompt-refusal";
+/** Marks the row that asks a person to resolve a seat stuck at a permission or approval prompt. */
+export const PROMPT_ALERT_TAG = "wake-prompt-refusal";
 const PROMPT_EPISODE_TAG = "prompt-episode:";
 const PROMPT_RETIRED_NOTE = "prompt escalation retired: prompt cleared or original episode ended; not a delivery receipt";
 /** Rows whose tag text could hold the prompt alert tag: valid JSON stores a string verbatim or with backslash

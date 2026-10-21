@@ -205,7 +205,7 @@ describe("OPR.0.4.0.28 — queue list compact + scope-default", () => {
     expect(JSON.stringify(compact)).not.toContain("excluded in compact mode");
     expect(item).not.toHaveProperty("chainOfRecord");
     expect(item).not.toHaveProperty("humanQuestions");
-    expect(item.fieldsElided).toEqual(["body", "evidenceRef", "humanDetail", "waiting", "chainOfRecord", "replyTo", "humanQuestions", "humanAnswers", "lastNudgeInputBox"]);
+    expect(item.fieldsElided).toEqual(["body", "evidenceRef", "humanDetail", "waiting", "chainOfRecord", "replyTo", "humanQuestions", "humanAnswers", "delegatedDecision", "lastNudgeInputBox"]);
   });
 
   it("distinguishes a genuinely empty full item from an elided compact item", () => {
@@ -220,7 +220,7 @@ describe("OPR.0.4.0.28 — queue list compact + scope-default", () => {
     const compact = repo.list({ compact: true })[0]!;
     const full = repo.list({})[0]!;
 
-    expect(compact.fieldsElided).toEqual(["body", "evidenceRef", "humanDetail", "waiting", "chainOfRecord", "replyTo", "humanQuestions", "humanAnswers", "lastNudgeInputBox"]);
+    expect(compact.fieldsElided).toEqual(["body", "evidenceRef", "humanDetail", "waiting", "chainOfRecord", "replyTo", "humanQuestions", "humanAnswers", "delegatedDecision", "lastNudgeInputBox"]);
     expect(compact).not.toHaveProperty("body");
     expect(compact.summary).toBeNull(); // a genuinely absent summary stays null
     expect(full.body).toBe("");
@@ -353,7 +353,7 @@ describe("Slice 15 — findOverdue rig-scoped + bounded + compact (finding 2)", 
     expect(compact).not.toHaveProperty("body");
     expect(compact).not.toHaveProperty("evidenceRef");
     expect(JSON.parse(JSON.stringify(compact))).not.toHaveProperty("lastNudgeInputBox");
-    expect(compact.fieldsElided).toEqual(["body", "evidenceRef", "humanDetail", "waiting", "chainOfRecord", "replyTo", "humanQuestions", "humanAnswers", "lastNudgeInputBox"]);
+    expect(compact.fieldsElided).toEqual(["body", "evidenceRef", "humanDetail", "waiting", "chainOfRecord", "replyTo", "humanQuestions", "humanAnswers", "delegatedDecision", "lastNudgeInputBox"]);
     const full = repo.findOverdue({ now: NOW })[0]!;
     expect(full.body).toContain("SECRET-LONG-BODY-CONTENT");
     expect(JSON.parse(JSON.stringify(full)).lastNudgeInputBox).toEqual(reading);
