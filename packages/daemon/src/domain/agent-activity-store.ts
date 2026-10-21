@@ -19,6 +19,8 @@ export interface HookActivityInput {
    *  inference mis-attributes a delayed prior-occupant hook to the live occupant. Absent on a legacy,
    *  excluded, or no-tenure emitting path ⇒ stamped null ⇒ unresolved at read (never false-fresh). */
   generation?: string | null;
+  /** The emitter's own order for its posts (OpenRig's pi/omp runner), when it sends one. */
+  sourceSequence?: number | null;
 }
 
 export type RecordHookActivityResult =
@@ -112,6 +114,7 @@ export class AgentActivityStore {
       generation,
     });
     activity.turnId = input.turnId ?? null;
+    if (input.sourceSequence) activity.sourceSequence = input.sourceSequence;
 
     const event = this.eventBus.emit({
       type: "agent.activity",
@@ -129,17 +132,20 @@ export class AgentActivityStore {
     nodeId?: string | null;
     sessionName?: string | null;
     now?: Date;
+    /** "source": the newest by the emitter's own order (time, then its sequence) among recent records, not by
+     *  arrival. A runner's posts aren't awaited, so an older boundary can arrive after a newer one. */
+    order?: "arrival" | "source";
   }): AgentActivity | null {
     if (input.sessionName) input = { ...input, sessionName: physicalSessionName(this.db, input.sessionName) };
     const nodeId = input.nodeId ?? (input.sessionName ? this._resolveSession({ sessionName: input.sessionName })?.node_id : null);
     if (!nodeId) return null;
 
-    const row = this.db.prepare(
-      "SELECT payload FROM events WHERE node_id = ? AND type = 'agent.activity' ORDER BY seq DESC LIMIT 1"
-    ).get(nodeId) as EventPayloadRow | undefined;
-    if (!row) return null;
-
-    const payload = parseActivityPayload(row.payload);
+    const payload = input.order === "source" ? this.latestBySourceOrder(nodeId, input.sessionName ?? null) : (() => {
+      const row = this.db.prepare(
+        "SELECT payload FROM events WHERE node_id = ? AND type = 'agent.activity' ORDER BY seq DESC LIMIT 1"
+      ).get(nodeId) as EventPayloadRow | undefined;
+      return row ? parseActivityPayload(row.payload) : null;
+    })();
     if (!payload?.activity) return null;
 
     const activity = payload.activity;
@@ -222,6 +228,21 @@ export class AgentActivityStore {
       stale: false,
       generationProvenance,
     };
+  }
+
+  /** The newest of a node's recent hook records by the emitter's order, for one session when named. Reordering only
+   *  spans posts in flight together, so a short window of recent records is enough. */
+  private latestBySourceOrder(nodeId: string, sessionName: string | null): ReturnType<typeof parseActivityPayload> {
+    const rows = this.db.prepare(
+      "SELECT payload FROM events WHERE node_id = ? AND type = 'agent.activity' ORDER BY seq DESC LIMIT 32"
+    ).all(nodeId) as EventPayloadRow[];
+    let best: ReturnType<typeof parseActivityPayload> = null;
+    for (const row of rows) {
+      const payload = parseActivityPayload(row.payload);
+      if (!payload?.activity || (sessionName && payload.sessionName !== sessionName)) continue;
+      if (!best || hookPrecedes(best.activity!, payload.activity)) best = payload;
+    }
+    return best;
   }
 
   /** W2a-1 — the dead-tenure verdict: the claim's occupant generation is REGISTERED FOR THIS NODE and
@@ -340,6 +361,16 @@ export function hookEventState(rawEvent: string | null | undefined, rawSubtype: 
   if (rawEvent === "Stop" && isRunnerExit(rawSubtype, seatRuntime)) return "unknown";
   if (rawEvent === "Stop" || rawEvent === "SessionEnd" || rawEvent === "stop" || rawEvent === "idle") return "idle";
   return "unknown";
+}
+
+/** Whether hook `a` comes before hook `b` in the emitter's own order: event time, then the emitter's sequence. Records
+ *  without a sequence are ordered by time alone; equal times without both sequences aren't ordered. */
+export function hookPrecedes(a: { eventAt?: string | null; sourceSequence?: number | null }, b: { eventAt?: string | null; sourceSequence?: number | null }): boolean {
+  const at = a.eventAt ? Date.parse(a.eventAt) : NaN;
+  const bt = b.eventAt ? Date.parse(b.eventAt) : NaN;
+  if (!Number.isFinite(at) || !Number.isFinite(bt)) return false;
+  if (at !== bt) return at < bt;
+  return !!a.sourceSequence && !!b.sourceSequence && a.sourceSequence < b.sourceSequence;
 }
 
 /** The runner's Stop for its child's process exit (`pi_exited`, `omp_exited`), on that runtime's seat. */

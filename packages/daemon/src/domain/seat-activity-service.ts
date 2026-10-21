@@ -14,6 +14,7 @@ import type {
 } from "./activity-taxonomy.js";
 import { COMMUNITY_HARNESS_RUNG_INVENTORY, EVIDENCE_RUNG_RANK, runtimeRungInventory } from "./activity-taxonomy.js";
 import { sessionCommunityHarnessSelect } from "./session-registry.js";
+import { hookPrecedes } from "./agent-activity-store.js";
 
 /** Default polling cadence: 1Hz. The default silence window is 3s, so
  *  1Hz polling gives at-most ~1s freshness lag on the cached observation. */
@@ -376,6 +377,10 @@ export class SeatActivityService {
     this.sessionToSeat.set(evidence.sessionName, evidence.seatNodeId);
     const prior = seat.sources.get(evidence.sourceId);
     if (prior && evidence.seq <= prior.latest.seq) return; // stale/reordered — dropped
+    // A durable source's posts can arrive out of their own order: an older boundary arriving later is dropped.
+    if (prior && this.durableBoundaries(seat, evidence.rung)
+        && hookPrecedes({ eventAt: evidence.observedAt, sourceSequence: evidence.sourceSequence },
+          { eventAt: prior.latest.observedAt, sourceSequence: prior.latest.sourceSequence })) return;
     const runtime = seat.inventory?.runtime ?? "codex";
     const claude = runtime === "claude-code";
     const wasConfirmed = seat.arbitrated.needsInput.count > 0;
@@ -598,7 +603,10 @@ export class SeatActivityService {
       if (!evd || evd.activity === undefined) continue;
       // A positive-only rung answers only "working"; its silence leaves the state to the rungs below, or unknown.
       if (trust === "positive-only" && evd.activity !== "working") continue;
-      if (rung === "lifecycle-hooks" && !this.durableBoundaries(seat, rung)
+      // A durable rung's idle or attention boundary holds; a bare working boundary still expires, then falls to the
+      // rungs below, so a turn whose end was lost can't read working forever.
+      if (rung === "lifecycle-hooks" && !(this.durableBoundaries(seat, rung) && (evd.activity !== "working"
+          || (this.latestByRung(seat, rung)?.needsInput?.count ?? 0) > 0))
           && nowMs - Date.parse(evd.observedAt) > HOOK_AUTHORITY_WINDOW_MS) continue;
       return evd;
     }

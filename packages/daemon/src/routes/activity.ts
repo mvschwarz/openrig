@@ -42,6 +42,7 @@ export function evidenceFromHookActivity(input: {
     sourceId: `${input.runtime ?? "unknown-runtime"}:hooks`,
     seq: input.seq,
     observedAt: input.activity.eventAt ?? input.activity.sampledAt,
+    ...(input.activity.sourceSequence ? { sourceSequence: input.activity.sourceSequence } : {}),
     ...(input.route ? { route: input.route } : {}),
   };
   if (input.activity.reason === "permission_request_pending") {
@@ -76,7 +77,7 @@ export function restoredRunnerHookEvidence(
   seat: { seatNodeId: string; sessionName: string },
   runtime: string,
 ): ActivityEvidence | null {
-  const latest = store.getLatestForNode({ nodeId: seat.seatNodeId, sessionName: seat.sessionName });
+  const latest = store.getLatestForNode({ nodeId: seat.seatNodeId, sessionName: seat.sessionName, order: "source" });
   if (!latest || latest.evidenceSource !== "runtime_hook" || latest.generationProvenance !== "resolved") return null;
   const state = !latest.stale ? latest.state
     : latest.reason === "stale_runtime_hook" ? hookEventState(latest.rawEvent, latest.rawSubtype, runtime) : "unknown";
@@ -445,6 +446,7 @@ activityRoutes.post("/hooks", async (c) => {
     // (sound per-path absence; never false-fresh).
     generation: stringOrNull(body.generation),
     turnId: stringOrNull(body.turnId),
+    sourceSequence: typeof body.sequence === "number" && Number.isSafeInteger(body.sequence) && body.sequence > 0 ? body.sequence : null,
   });
 
   if (!result.ok) {

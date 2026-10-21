@@ -15,7 +15,7 @@ import {
   TMUX_GENERIC_RUNG_INVENTORY,
   runtimeRungInventory,
 } from "../src/domain/activity-taxonomy.js";
-import { mapPiEvent } from "../src/adapters/pi-runner.js";
+import { mapPiEvent, RunnerCore } from "../src/adapters/pi-runner.js";
 import { diagnoseSeatParked } from "../src/domain/parked-query.js";
 import { createDaemon } from "../src/startup.js";
 
@@ -70,6 +70,12 @@ function fixture(runtime: "pi" | "omp") {
         occurredAt: new Date(clock.now).toISOString(), ...over }) });
     expect(response.status).toBe(200);
   }
+  /** A post the real runner produced, delivered as its io would send it, for this seat. */
+  async function deliver(payload: Record<string, unknown>) {
+    const { hookEvent, subtype, ...rest } = payload;
+    await post(String(hookEvent), (subtype as string | null) ?? null, { ...rest, sessionName: session.sessionName, nodeId: node.id, generation });
+  }
+  const nowIso = () => new Date(clock.now).toISOString();
   /** A runner event, posted exactly as the runner maps it; events that post nothing post nothing. */
   async function runnerEvent(event: Record<string, unknown>) {
     const mapped = mapPiEvent(event, runtime);
@@ -82,7 +88,7 @@ function fixture(runtime: "pi" | "omp") {
     listOpenObligations: () => ({ rows: [{ qitemId: "q-1", state: "pending" }] as never, limit: 500 }),
   } as never, { seatNodeId: node.id, sessionName: session.sessionName }).parked;
   expect(generation).not.toBe(oldGeneration);
-  return { post, runnerEvent, state, later, parked, restart, node, session, oldGeneration, sessions };
+  return { post, runnerEvent, deliver, nowIso, state, later, parked, restart, node, session, oldGeneration, sessions };
 }
 
 const PAST_HOOK_WINDOW = HOOK_AUTHORITY_WINDOW_MS + 60_000;
@@ -108,13 +114,15 @@ describe("runner inventories", () => {
 });
 
 describe.each(["pi", "omp"] as const)("%s seat activity from its runner's turn events", (runtime) => {
-  it("a quiet active turn stays working past the hook window; a completed turn reads idle and stays idle", async () => {
+  it("a quiet active turn reads working, then unknown past the hook window, never idle; a completed turn stays idle", async () => {
     const f = fixture(runtime);
     expect(f.state().activity).toBe("unknown");
     await f.runnerEvent({ type: "agent_start" });
-    f.later(PAST_HOOK_WINDOW); // waiting on the model: the pane is quiet
     expect(f.state()).toMatchObject({ activity: "working", decidedBy: "lifecycle-hooks" });
     expect(f.parked()).toBe(false);
+    f.later(PAST_HOOK_WINDOW); // waiting on the model, or its end was lost: the pane is quiet
+    expect(f.state()).toMatchObject({ activity: "unknown", decidedBy: null }); // the claimed-row backstop still sees no "working"
+    expect(f.parked()).toBe("indeterminate");
     await f.runnerEvent({ type: "agent_end" });
     f.later(PAST_HOOK_WINDOW);
     expect(f.state()).toMatchObject({ activity: "idle-at-prompt", decidedBy: "lifecycle-hooks" });
@@ -126,7 +134,6 @@ describe.each(["pi", "omp"] as const)("%s seat activity from its runner's turn e
     await f.runnerEvent({ type: "agent_end" });
     expect(f.state().activity).toBe("idle-at-prompt");
     await f.runnerEvent({ type: "turn_start" });
-    f.later(PAST_HOOK_WINDOW);
     expect(f.state().activity).toBe("working");
   });
 
@@ -162,13 +169,18 @@ describe.each(["pi", "omp"] as const)("%s seat after a daemon restart", (runtime
     expect(f.parked()).toBe(true);
   });
 
-  it("a seat mid-turn comes back working, and its first live event still decides", async () => {
+  it("a seat mid-turn comes back working, its first live event still decides, and an old start doesn't hold", async () => {
     const f = fixture(runtime);
     await f.runnerEvent({ type: "agent_start" });
     await f.restart();
     expect(f.state().activity).toBe("working");
     await f.runnerEvent({ type: "agent_end" });
     expect(f.state().activity).toBe("idle-at-prompt");
+    const g = fixture(runtime);
+    await g.runnerEvent({ type: "agent_start" });
+    g.later(PAST_HOOK_WINDOW); // the restored start is older than the hook window: not working forever
+    await g.restart();
+    expect(g.state().activity).toBe("unknown");
   });
 
   it("a seat whose runner exited comes back unknown, not idle", async () => {
@@ -188,6 +200,38 @@ describe.each(["pi", "omp"] as const)("%s seat after a daemon restart", (runtime
     f.sessions.updateStatus(successor.id, "running");
     await f.restart();
     expect(f.state()?.activity ?? "unknown").toBe("unknown");
+  });
+});
+
+describe("source order", () => {
+  it("an older Stop arriving after the next turn's start doesn't win, past the hook window or across a restart", async () => {
+    const f = fixture("pi");
+    const posts: Record<string, unknown>[] = [];
+    const core = new RunnerCore({ sendRpc: () => {}, mirrorLine: () => {}, mirrorAppend: () => {},
+      postActivity: (payload) => { posts.push(payload); }, writeSidecar: () => {}, now: f.nowIso },
+    { sessionName: f.session.sessionName, nodeId: f.node.id, launchId: "launch-1" });
+    core.start();
+    // The real runner's posts for one turn and the start of the next, stamped at one clock reading: only its order tells them apart.
+    for (const type of ["agent_start", "agent_end", "agent_start"]) core.handlePiLine(JSON.stringify({ type }));
+    const [start1, stop1, start2] = posts.filter((p) => typeof p.hookEvent === "string" && p.eventFamily === undefined);
+    expect([start1!.hookEvent, stop1!.hookEvent, start2!.hookEvent]).toEqual(["active", "Stop", "active"]);
+    expect([start1!.sequence, stop1!.sequence, start2!.sequence]).toEqual([1, 2, 3]);
+    await f.deliver(start1!);
+    await f.deliver(start2!);
+    await f.deliver(stop1!); // the first turn's Stop arrives last
+    expect(f.state().activity).toBe("working");
+    f.later(PAST_HOOK_WINDOW);
+    expect(f.state().activity).toBe("unknown");
+    await f.restart(); // restoring uses the same order: the newer start, now past the window
+    expect(f.state().activity).toBe("unknown");
+  });
+
+  it("orders by event time first, so a later runner launch's first post isn't taken as older", async () => {
+    const f = fixture("pi");
+    await f.post("active", "agent_start", { sequence: 40 });
+    f.later(1_000);
+    await f.post("Stop", "agent_end", { sequence: 1 }); // a relaunched runner starts its count again
+    expect(f.state().activity).toBe("idle-at-prompt");
   });
 });
 
@@ -226,7 +270,6 @@ describe("omp only", () => {
     const f = fixture("omp");
     await f.runnerEvent({ type: "agent_start" });
     await f.runnerEvent({ type: "agent_end", isTerminal: false });
-    f.later(PAST_HOOK_WINDOW);
     expect(f.state().activity).toBe("working");
   });
 

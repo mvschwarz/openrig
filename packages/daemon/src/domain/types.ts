@@ -547,6 +547,8 @@ export interface AgentActivity {
   sampledAt: string;
   evidence: string | null;
   eventAt?: string | null;
+  /** The emitter's own order for its posts (OpenRig's pi/omp runner), when it sent one. */
+  sourceSequence?: number | null;
   rawEvent?: string | null;
   rawSubtype?: string | null;
   runtime?: string | null;

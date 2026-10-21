@@ -97,8 +97,11 @@ time-bounded evidence. Rungs, top down, with each rung's retirement condition:
   own, since the pane can be quiet mid-turn.
 - **pi and omp runner hooks**: OpenRig's runner reads the child's RPC event stream and posts
   each turn boundary (`agent_start`, `turn_start`, tool calls, `agent_end`; attention). These
-  decide working, idle and needs-input, and unlike Claude and Codex hooks a boundary holds
-  until the next one instead of expiring after 15 s. The runner's report that its child
+  decide working, idle and needs-input. Unlike Claude and Codex hooks, an idle or attention
+  boundary holds until the next one instead of expiring after 15 s; a working boundary still
+  expires, so a turn whose end was lost reads unknown, not working forever. Posts are taken
+  in the runner's own order (time, then its sequence), so an older boundary arriving late
+  doesn't win. The runner's report that its child
   exited reads unknown, not idle. A boundary the runner didn't see (if a runtime ended a turn
   without `agent_end`) leaves the seat working until its next event, never idle. After a
   daemon restart, a runner seat takes its last recorded boundary from the hook store, for its

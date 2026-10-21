@@ -99,8 +99,10 @@ export interface RungDeclaration {
   lifecycleCoverage: "full" | "partial" | "none";
   /** The trust the rung STARTS with on this adapter (promotion may raise trial). */
   initialTrust: RungTrust;
-  /** Hooks only: the source sees every turn boundary in order, so its last one holds until the next instead of
-   *  expiring with the hook window. Only a runner that reads its child's whole event stream declares it. */
+  /** Hooks only: the source sees every turn boundary in order, so its last idle or attention boundary holds until the
+   *  next instead of expiring with the hook window. A working boundary still expires: a turn whose end was lost must not
+   *  read working forever. Its posts are taken in the source's own order. Only a runner that reads its child's whole
+   *  event stream declares it. */
   durableBoundaries?: true;
 }
 
@@ -125,6 +127,8 @@ export interface ActivityEvidence {
   /** Monotonic per source — stale or reordered reports are dropped. */
   seq: number;
   observedAt: string;
+  /** The emitter's own order (a runner's per-post sequence), which orders posts that share an observedAt. */
+  sourceSequence?: number;
   activity?: ActivityValue;
   needsInput?: NeedsInput;
   permissionRequest?: { id: string };

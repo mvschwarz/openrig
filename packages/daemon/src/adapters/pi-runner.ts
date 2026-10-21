@@ -841,8 +841,12 @@ export class RunnerCore {
     ).finally(() => { this.identityInFlight = false; });
   }
 
+  /** Each activity post's place in this runner's event order: posts aren't awaited, so they can arrive out of order. */
+  private activitySequence = 0;
+
   private activityPayload(hookEvent: string, subtype: string | null): Record<string, unknown> {
     return {
+      sequence: ++this.activitySequence,
       sessionName: this.identity.sessionName,
       nodeId: this.identity.nodeId ?? null,
       generation: this.identity.generation ?? null,
