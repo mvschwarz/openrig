@@ -1,11 +1,13 @@
-// The daemon must keep answering while a runtime probe or a skill audit runs. Codex's profile probe ran `execSync`
-// inside an async function, which held the event loop for the whole probe (most of a second for a real
-// `codex -p <profile> mcp list`, up to 10 s for one that hangs); the skill audit read every SKILL.md synchronously.
+// The daemon must keep answering while a runtime probe or a skill audit runs. The plan, Codex launch and Codex resume
+// probes ran `execSync` inside an async function, which held the event loop for the whole probe (most of a second for
+// a real `codex -p <profile> mcp list`, up to 10 s for one that hangs); they now share execRuntimeProbe. The skill
+// audit read every SKILL.md synchronously. The plan's probe is also covered end to end in bootstrap-orchestrator.test.ts.
 import { describe, it, expect } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { defaultProfilePreflight } from "../src/adapters/codex-runtime-adapter.js";
+import { execRuntimeProbe } from "../src/adapters/preflight-exec.js";
+import { verifyCodexProfileLoads } from "../src/domain/codex-profile-preflight.js";
 import { discoverSkillsWithProvenance } from "../src/domain/skill-discovery.js";
 
 /** The value, and the longest the event loop went without running a 10 ms timer while it was being produced. */
@@ -23,21 +25,24 @@ function withDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 }
 
 describe("the event loop stays free", () => {
-  it("while Codex's profile probe runs before a launch", () => withDir(async (dir) => {
-    const bin = join(dir, "bin");
-    mkdirSync(bin);
-    writeFileSync(join(bin, "codex"), "#!/bin/sh\nsleep 1\necho ok\n", { mode: 0o755 });
-    const { value, gap } = await withLongestTickGap(() =>
-      defaultProfilePreflight("probeprof", { cwd: dir, codexHome: dir, launchPath: `${bin}:${process.env.PATH ?? ""}` }));
-    expect(value.ok).toBe(true);
+  it("while a runtime probe runs", () => withDir(async (dir) => {
+    writeFileSync(join(dir, "slow"), "#!/bin/sh\nsleep 1\necho ok\n", { mode: 0o755 });
+    const { value, gap } = await withLongestTickGap(() => execRuntimeProbe("test.probe", join(dir, "slow")));
+    expect(value).toBe("ok\n");
     expect(gap).toBeLessThan(500);
   }));
 
-  it("and a failed profile probe still reports what Codex said", () => withDir(async (dir) => {
+  it("and a probe gets no input, as it did under execSync", () => withDir(async (dir) => {
+    writeFileSync(join(dir, "reads-input"), "#!/bin/sh\ncat\necho done\n", { mode: 0o755 });
+    expect(await execRuntimeProbe("test.probe", join(dir, "reads-input"))).toBe("done\n");
+  }));
+
+  it("and a failed Codex profile probe still reports what Codex said", () => withDir(async (dir) => {
     const bin = join(dir, "bin");
     mkdirSync(bin);
     writeFileSync(join(bin, "codex"), "#!/bin/sh\necho 'profile probeprof contains legacy [profiles.probeprof]' >&2\nexit 1\n", { mode: 0o755 });
-    const result = await defaultProfilePreflight("probeprof", { cwd: dir, codexHome: dir, launchPath: `${bin}:${process.env.PATH ?? ""}` });
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` };
+    const result = await verifyCodexProfileLoads("probeprof", (cmd) => execRuntimeProbe("test.probe", cmd, { cwd: dir, env }), undefined, dir);
     expect(result.ok).toBe(false);
     expect(result.error).toContain("legacy");
     expect(result.migrationHint).toContain("probeprof.config.toml");

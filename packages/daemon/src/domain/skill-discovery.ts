@@ -11,6 +11,7 @@
 // SC-29 EXCEPTION #7 declared in slice ACK §5.
 
 import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
+import { access, readFile, readdir, stat as statAsync } from "node:fs/promises";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { SkillResource } from "./types.js";
@@ -251,28 +252,29 @@ function rootToSourceKind(root: string, paths: SkillDiscoveryPaths): SourceKind 
   return "shared_user";
 }
 
-export function discoverSkillsWithProvenance(paths: SkillDiscoveryPaths): SkillProvenanceResult {
+/** Every skill in every scan root, with where it came from and whether a more specific root shadows it: the skill
+ *  audit's input. It reads every SKILL.md, so it reads asynchronously and the daemon keeps answering meanwhile. */
+export async function discoverSkillsWithProvenance(paths: SkillDiscoveryPaths): Promise<SkillProvenanceResult> {
   const scanRoots = listScanRoots(paths);
   const skills: SkillProvenanceEntry[] = [];
   const rejected: SkillRejection[] = [];
   const seenIds = new Set<string>();
 
   for (const root of scanRoots) {
-    if (!existsSync(root)) continue;
     let entries: string[];
-    try { entries = readdirSync(root); } catch { continue; }
+    try { entries = await readdir(root); } catch { continue; }
 
     for (const entry of entries) {
       const skillDir = join(root, entry);
       let stat;
-      try { stat = statSync(skillDir); } catch { continue; }
+      try { stat = await statAsync(skillDir); } catch { continue; }
       if (!stat.isDirectory()) continue;
 
       const skillFile = join(skillDir, "SKILL.md");
-      if (!existsSync(skillFile)) continue;
+      try { await access(skillFile); } catch { continue; }
 
       let content: string;
-      try { content = readFileSync(skillFile, "utf-8"); } catch (err) {
+      try { content = await readFile(skillFile, "utf-8"); } catch (err) {
         rejected.push({ path: skillDir, reason: `SKILL.md read error: ${err instanceof Error ? err.message : String(err)}` });
         continue;
       }

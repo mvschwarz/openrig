@@ -1,8 +1,24 @@
+import { exec } from "node:child_process";
 import { statSync } from "node:fs";
 import path from "node:path";
+import { promisify } from "node:util";
+import { runAsyncSite } from "../domain/sync-site-wrap.js";
 import { boundedProbeExec, ProbeTimeoutError } from "./bounded-probe-exec.js";
 import type { ExecFn } from "./tmux.js";
 import { execCommand } from "./tmux-exec.js";
+
+const execAsync = promisify(exec);
+
+/** A runtime probe that must not hold the event loop (`codex -p <profile> mcp list`, `pi --version`): the command and
+ *  options its callers gave `execSync` (utf-8, a 10 s bound that ends the probe, no input, their cwd and env), run
+ *  asynchronously under runAsyncSite. It answers with stdout; a failure keeps `stderr` for the callers that read it. */
+export async function execRuntimeProbe(site: string, cmd: string, options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): Promise<string> {
+  return runAsyncSite(site, async () => {
+    const running = execAsync(cmd, { encoding: "utf-8", timeout: 10_000, ...options });
+    running.child.stdin?.end();
+    return (await running).stdout;
+  });
+}
 
 /** Preserve healthy relative PATH lookup; use the executable's filesystem root
  * only when the daemon's inherited cwd is unavailable. Profile/config probes
