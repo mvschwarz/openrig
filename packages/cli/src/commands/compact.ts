@@ -46,8 +46,11 @@ then ran. Ordinary approvals during preparation can be answered within that same
 OpenRig does not answer them. Automatic /compact, like manual, is sent only to an idle seat.
 --cancel disarms preparation and pending restore/audit prompts without sending input.
 An already submitted /compact stays unconfirmed: cancellation cannot undo it or prove
-it never ran. An explicit retry still waits for the live pane to be idle; no automatic
-retry follows cancellation. --skip-map skips only the map requirement for this one
+it never ran. No restore request follows cancellation: check the pane before retrying.
+If it compacted or you cannot tell, send a normal restore request naming preparation.mapPath
+from --state, asking it to skip reading if it did not compact; a retry would compact it again.
+An explicit retry still waits for the live pane to be idle; no automatic retry follows
+cancellation. --skip-map skips only the map requirement for this one
 manual request. Cancel an active preparation before retrying or using --skip-map.
 Automatic preparation waits at most 25 minutes from prep delivery, using existing
 polls. A stopped attempt does not restart automatically; rerun this command to
