@@ -194,6 +194,7 @@ export interface RiggedConfig {
     wakeUnconfirmedWindowMinutes: number;
     wakeSwapGraceSeconds: number;
     wakeHumanRung: string;
+    seatSerializationRigs: string;
   };
 }
 
@@ -349,6 +350,7 @@ const DEFAULTS = {
     wakeUnconfirmedWindowMinutes: 30,
     wakeSwapGraceSeconds: 180,
     wakeHumanRung: "always",
+    seatSerializationRigs: "",
   },
 } as const;
 
@@ -469,6 +471,7 @@ export const VALID_KEYS = [
   // Under explicit-only, an ask that needs a person must be addressed to the person;
   // without a human registry, explicit-only posts everything, as always does.
   "queue.wake_human_rung",
+  "queue.seat_serialization_rigs",
 ] as const;
 
 export type ValidKey = typeof VALID_KEYS[number];
@@ -560,6 +563,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "queue.wake_unconfirmed_window_minutes": { primary: "OPENRIG_QUEUE_WAKE_UNCONFIRMED_WINDOW_MINUTES" },
   "queue.wake_swap_grace_seconds": { primary: "OPENRIG_QUEUE_WAKE_SWAP_GRACE_SECONDS" },
   "queue.wake_human_rung": { primary: "OPENRIG_QUEUE_WAKE_HUMAN_RUNG" },
+  "queue.seat_serialization_rigs": { primary: "OPENRIG_QUEUE_SEAT_SERIALIZATION_RIGS" },
 };
 
 // Maps dotted-string config keys to the camelCase RiggedConfig path.
@@ -640,6 +644,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "queue.wake_unconfirmed_window_minutes": ["queue", "wakeUnconfirmedWindowMinutes"],
   "queue.wake_swap_grace_seconds": ["queue", "wakeSwapGraceSeconds"],
   "queue.wake_human_rung": ["queue", "wakeHumanRung"],
+  "queue.seat_serialization_rigs": ["queue", "seatSerializationRigs"],
 };
 
 function isValidKey(key: string): key is ValidKey {
@@ -1178,6 +1183,7 @@ export class ConfigStore {
         wakeUnconfirmedWindowMinutes: v("queue.wake_unconfirmed_window_minutes") as number,
         wakeSwapGraceSeconds: v("queue.wake_swap_grace_seconds") as number,
         wakeHumanRung: v("queue.wake_human_rung") as string,
+        seatSerializationRigs: v("queue.seat_serialization_rigs") as string,
       },
     };
   }

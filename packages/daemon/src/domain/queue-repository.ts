@@ -29,6 +29,7 @@ import {
 import { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
 import { armQueueWait, backOffQueueWait, refreshQueueWaits, evaluateQueueWait, retargetQueueWait, isQueueWait } from "./queue-wait-backoff.js";
 import { parseHumanQuestions, unansweredQuestions, describeTypedReplyPlacement, type HumanQuestion, type HumanAnswers, type TypedHumanReply, type RecordHumanAnswerResult } from "./human-questions.js";
+import { SettingsStore } from "./user-settings/settings-store.js";
 
 export const QUEUE_STATES = [
   "pending",
@@ -82,6 +83,36 @@ export function hasLiveHumanGate(item: {
 
 const AUTO_UNPARK_WAKE_TAG = "queue:auto-unpark:blocker";
 const AUTO_UNPARK_BLOCKER_TAG_PREFIX = "queue:auto-unpark:blocker-ref:";
+
+/** Issue #1210 — per-team opt-in for serialized per-seat delivery: a
+ *  comma-separated list of rig names whose seats deliver at most one runnable
+ *  qitem at a time. Default (unset/empty) = today's delivery everywhere. Lockstep
+ *  twin of the key in cli/src/config-store.ts and
+ *  domain/user-settings/settings-store.ts. */
+export const SEAT_SERIALIZATION_RIGS_KEY = "queue.seat_serialization_rigs";
+
+/** Threshold-style fresh read per call (the resolvePickupThresholdMinutes
+ *  precedent): an opt-in flip applies to the next delivery, no restart.
+ *  Fail-open to "no rig opted in" on any resolution error. */
+export function resolveSeatSerializationRigs(): string[] {
+  try {
+    const v = new SettingsStore().resolveOne(SEAT_SERIALIZATION_RIGS_KEY).value;
+    const raw = typeof v === "string" ? v : v == null ? "" : String(v);
+    return raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+/** The rig a session name belongs to: the canonical `{pod}-{member}@{rig}` form
+ *  carries it after the `@`; legacy `r{NN}-{suffix}` names have none (and so can
+ *  never match an opt-in list — they keep today's delivery). Same convention as
+ *  workspace/project-catalog.ts's rigFromSession; kept local so the repository
+ *  does not grow a workspace dependency. */
+export function rigFromSessionName(session: string): string | null {
+  const at = session.indexOf("@");
+  return at > 0 && at < session.length - 1 ? session.slice(at + 1) : null;
+}
 
 /** 0.5.1-53 Atom 1a — typed non-qitem gate blocker prefixes. A park may be gated on a fold / auth /
  *  external condition that is NOT a qitem and NOT a human seat; these prefixes make such a gate a
@@ -1066,12 +1097,14 @@ export class QueueRepository {
    * Issue #1210 — seat serialization: is another qitem already holding this
    * seat's one delivery slot? A seat is OCCUPIED while any OTHER qitem on it is
    * (a) `in-progress` — the seat is working — or (b) still `pending` but already
-   * handed a wake whose delivery is unexpired: `sending` (claimed, ambiguous) or
-   * `delivered` within the pickup-stall grace (`queue.pickup_stall_threshold_minutes`,
-   * the same knob the stalled-after-claim sweep reads). (b) closes the claim race —
-   * a wake that landed but the seat has not picked up yet — and it EXPIRES so a
-   * dropped, never-claimed wake degrades to today's visible-pending behavior
-   * instead of holding the seat forever (no standing sweep covers unclaimed rows).
+   * handed a wake: a CONFIRMED `delivered` wake holds the slot for as long as the
+   * row stays runnable (per the #1210 opt-in ruling, an item that was handed to
+   * the seat is not "finished" just because time has passed — only the row's own
+   * state change frees the slot), while an UNCONFIRMED `sending` wake (the claim
+   * race: claimed, ambiguous) holds only within the pickup-stall grace
+   * (`queue.pickup_stall_threshold_minutes`, the same knob the stalled-after-claim
+   * sweep reads), so a dropped, never-claimed wake degrades to today's
+   * visible-pending behavior instead of holding the seat forever.
    *
    * Called inside deliverWakeIntent's claim transaction: better-sqlite3 txns are
    * synchronous, so concurrent pumps serialize at the DB — the first intent
@@ -1088,11 +1121,39 @@ export class QueueRepository {
                       SELECT 1 FROM outbox_entries w
                       WHERE substr(w.outbox_id, 1, ?) = ?
                         AND w.audit_pointer = occ.qitem_id
-                        AND w.delivery_state IN ('sending', 'delivered')
-                        AND (w.delivered_at IS NULL OR w.delivered_at >= ?))))
+                        AND ((w.delivery_state = 'delivered')
+                             OR (w.delivery_state = 'sending'
+                                 AND (w.delivered_at IS NULL OR w.delivered_at >= ?))))))
           LIMIT 1`)
       .get(destinationSession, exceptQitemId, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX, cutoff);
     return row !== undefined;
+  }
+
+  /**
+   * Issue #1210 — per-team opt-in: serialization applies only to rigs named in
+   * `queue.seat_serialization_rigs` (comma-separated rig names resolved from the
+   * destination session's `@rig` suffix). Default empty = today's delivery
+   * everywhere; pending work stays visible exactly as before for teams that
+   * don't opt in.
+   */
+  private seatSerializationOptedIn(destinationSession: string): boolean {
+    const rig = rigFromSessionName(destinationSession);
+    return rig !== null && resolveSeatSerializationRigs().includes(rig);
+  }
+
+  /**
+   * Issue #1210 — the seat-busy hold yields to results other work depends on:
+   * an auto-unpark return wake (blocker resolved, a parked row is resumable)
+   * must reach an agent even when that agent is busy with something else — the
+   * parked row is waiting on exactly this delivery. Non-queue replies and
+   * results (direct sends, typed human answers) do not travel as queue wake
+   * intents at all, so the gate never touches them. NOTE: a bare
+   * `queue:return:` tag is NOT a bypass — handoff successor nudges carry it as
+   * a correlation marker (stageWakeIntentForSuccessor) and they are ordinary
+   * queued work that must serialize.
+   */
+  private wakeCarriesDependentResult(entry: import("./outbox-handler.js").OutboxEntry): boolean {
+    return (entry.tags ?? []).includes(AUTO_UNPARK_WAKE_TAG);
   }
 
   /**
@@ -1226,7 +1287,16 @@ export class QueueRepository {
       // occupying item's terminal/blocked/handoff/unclaim commit), the startup
       // drain, or daemon restart re-runs the gate. Not a supersession: no
       // failed-marking, the frozen envelope survives for its turn.
-      if (this.seatOccupiedByOtherWake(candidate.destinationSession, candidate.auditPointer ?? candidate.outboxId)) {
+      // Per-team opt-in: the hold applies only to rigs named in
+      // `queue.seat_serialization_rigs`; every other team keeps today's
+      // delivery. A wake carrying a dependent result or reply (auto-unpark
+      // return, `reply_to`) bypasses the hold — it must reach an agent busy
+      // with something else.
+      if (
+        this.seatSerializationOptedIn(candidate.destinationSession) &&
+        !this.wakeCarriesDependentResult(candidate) &&
+        this.seatOccupiedByOtherWake(candidate.destinationSession, candidate.auditPointer ?? candidate.outboxId)
+      ) {
         if (candidate.auditPointer) this.recordNudgeAttempt(candidate.auditPointer, "held:seat-busy");
         seatBusyHeld = true;
         return [];

@@ -191,6 +191,8 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "queue.wake_unconfirmed_window_minutes",
       "queue.wake_swap_grace_seconds",
       "queue.wake_human_rung",
+      // Issue #1210 — per-team opt-in for serialized per-seat delivery.
+      "queue.seat_serialization_rigs",
     ];
     expect([...VALID_KEYS]).toEqual(expected);
   });

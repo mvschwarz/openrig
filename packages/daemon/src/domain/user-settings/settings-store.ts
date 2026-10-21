@@ -216,6 +216,10 @@ export const SETTINGS_VALID_KEYS = [
   // Under explicit-only, an ask that needs a person must be addressed to the person;
   // without a human registry, explicit-only posts everything, as always does.
   "queue.wake_human_rung",
+  // Issue #1210 — per-team opt-in for serialized per-seat delivery: a
+  // comma-separated list of rig names whose seats deliver at most one runnable
+  // qitem at a time. Default "" = today's delivery everywhere.
+  "queue.seat_serialization_rigs",
 ] as const;
 
 export type SettingsValidKey = typeof SETTINGS_VALID_KEYS[number];
@@ -306,6 +310,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "queue.wake_retry_cap": { primary: "OPENRIG_QUEUE_WAKE_RETRY_CAP" },
   "queue.wake_unconfirmed_window_minutes": { primary: "OPENRIG_QUEUE_WAKE_UNCONFIRMED_WINDOW_MINUTES" },
   "queue.wake_human_rung": { primary: "OPENRIG_QUEUE_WAKE_HUMAN_RUNG" },
+  "queue.seat_serialization_rigs": { primary: "OPENRIG_QUEUE_SEAT_SERIALIZATION_RIGS" },
   "queue.wake_swap_grace_seconds": { primary: "OPENRIG_QUEUE_WAKE_SWAP_GRACE_SECONDS" },
 };
 
@@ -384,6 +389,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "queue.wake_retry_cap": ["queue", "wakeRetryCap"],
   "queue.wake_unconfirmed_window_minutes": ["queue", "wakeUnconfirmedWindowMinutes"],
   "queue.wake_human_rung": ["queue", "wakeHumanRung"],
+  "queue.seat_serialization_rigs": ["queue", "seatSerializationRigs"],
   "queue.wake_swap_grace_seconds": ["queue", "wakeSwapGraceSeconds"],
 };
 
@@ -663,6 +669,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "queue.wake_unconfirmed_window_minutes": return 30;
     case "queue.wake_swap_grace_seconds": return 180;
     case "queue.wake_human_rung": return "always";
+    case "queue.seat_serialization_rigs": return "";
     default: return "";
   }
 }

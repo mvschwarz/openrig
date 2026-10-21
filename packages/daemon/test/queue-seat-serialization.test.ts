@@ -11,10 +11,20 @@
 //     synchronous SQLite txn serializes concurrent pumps: the first intent
 //     claims the seat, the rest hold;
 //   • occupancy counts not just `in-progress` but also a still-`pending` qitem
-//     whose wake is unexpired-sent (claim race), expiring after the same
+//     that was handed a wake: a CONFIRMED delivered wake holds the slot until the
+//     row's own state changes (an item that was delivered is not "finished"
+//     because time passed — the #1210 opt-in ruling), while an UNCONFIRMED
+//     `sending` wake (claim race) expires after the same
 //     queue.pickup_stall_threshold_minutes grace the stalled-after-claim sweep
 //     uses — a dropped wake degrades to today's visible-pending behavior
 //     instead of holding the seat forever.
+//
+// Per-team opt-in: the hold applies only to rigs named in
+// queue.seat_serialization_rigs (here: "rig", via the env twin). The default —
+// no rig named — keeps today's delivery. Auto-unpark return wakes bypass the
+// hold: a result other work depends on must reach an agent even when that agent
+// is busy with something else. (Non-queue replies/results travel outside the
+// wake-intent gate entirely.)
 
 import { describe, it, expect, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
@@ -31,6 +41,9 @@ interface SendCall {
 }
 
 function makeHarness() {
+  // Opt this harness's rig into serialization (the test sessions are
+  // `worker@rig` / `orch@rig`). afterEach clears the env twin.
+  process.env["OPENRIG_QUEUE_SEAT_SERIALIZATION_RIGS"] = "rig";
   const db = createDb();
   migrate(db, ALL_MIGRATIONS);
   const bus = new EventBus(db);
@@ -45,14 +58,17 @@ function makeHarness() {
   const repo = new QueueRepository(db, bus, { validateRig: () => true });
   repo.attachTransport(transport);
   repo.attachOutbox(outbox);
-  const create = (body: string, destinationSession = "worker@rig") =>
-    repo.create({ sourceSession: "orch@rig", destinationSession, body });
+  const create = (body: string, destinationSession = "worker@rig", extra?: Parameters<typeof repo.create>[0]) =>
+    repo.create({ sourceSession: "orch@rig", destinationSession, body, ...extra });
   return { db, outbox, repo, calls, create };
 }
 
 describe("seat serialization (issue #1210)", () => {
   let h: ReturnType<typeof makeHarness>;
-  afterEach(() => h.db.close());
+  afterEach(() => {
+    delete process.env["OPENRIG_QUEUE_SEAT_SERIALIZATION_RIGS"];
+    h.db.close();
+  });
 
   it("holds a later qitem's wake while the seat works an earlier one, releasing FIFO at closure", async () => {
     h = makeHarness();
@@ -140,17 +156,45 @@ describe("seat serialization (issue #1210)", () => {
     expect(h.calls).toHaveLength(1);
   });
 
-  it("stops gating an unclaimed delivered wake after the pickup-stall grace", async () => {
+  it("keeps holding the seat for a delivered wake even after the pickup-stall grace", async () => {
     h = makeHarness();
     const stale = await h.create("stale");
     await vi.waitFor(() =>
       expect(h.outbox.getById(`wake-intent-${stale.qitemId}`)?.deliveryState).toBe("delivered"),
     );
-    // The seat never claims it. Past the stall grace a dropped wake must not
-    // hold the seat forever — the next item's wake fires (the visible-pending
-    // recovery the stalled-after-claim sweep idiom already names).
+    // The wake was CONFIRMED delivered: an item that reached the seat is not
+    // "finished" because time has passed. Even far past the stall grace, the
+    // delivered wake holds the slot until the row's own state changes.
     h.db
       .prepare("UPDATE outbox_entries SET delivered_at = ? WHERE outbox_id = ?")
+      .run(new Date(Date.now() - 10 * 60_000).toISOString(), `wake-intent-${stale.qitemId}`);
+
+    const next = await h.create("next");
+    await vi.waitFor(() => expect(h.repo.getById(next.qitemId)?.lastNudgeResult).toBe("held:seat-busy"));
+    expect(h.outbox.getById(`wake-intent-${next.qitemId}`)?.deliveryState).toBe("pending");
+    expect(h.calls).toHaveLength(1);
+
+    // Only the row's own closure frees the slot.
+    h.repo.update({ qitemId: stale.qitemId, actorSession: "worker@rig", state: "done", closureReason: "no-follow-on" });
+    await vi.waitFor(() =>
+      expect(h.outbox.getById(`wake-intent-${next.qitemId}`)?.deliveryState).toBe("delivered"),
+    );
+    expect(h.calls).toHaveLength(2);
+  });
+
+  it("stops gating an unconfirmed sending wake after the pickup-stall grace", async () => {
+    h = makeHarness();
+    const stale = await h.create("stale");
+    await vi.waitFor(() =>
+      expect(h.outbox.getById(`wake-intent-${stale.qitemId}`)?.deliveryState).toBe("delivered"),
+    );
+    // Claim race: the wake is claimed for sending (ambiguous — it may have
+    // landed) but the seat never picked the item up. Past the stall grace the
+    // unconfirmed wake must not hold the seat forever — the next item's wake
+    // fires (the visible-pending recovery the stalled-after-claim sweep
+    // idiom already names).
+    h.db
+      .prepare("UPDATE outbox_entries SET delivery_state = 'sending', delivered_at = ? WHERE outbox_id = ?")
       .run(new Date(Date.now() - 10 * 60_000).toISOString(), `wake-intent-${stale.qitemId}`);
 
     const next = await h.create("next");
@@ -159,6 +203,66 @@ describe("seat serialization (issue #1210)", () => {
     );
     expect(h.calls).toHaveLength(2);
   });
+
+  it("keeps today's delivery for rigs that did not opt in", async () => {
+    h = makeHarness();
+    delete process.env["OPENRIG_QUEUE_SEAT_SERIALIZATION_RIGS"];
+    const first = await h.create("first");
+    await vi.waitFor(() =>
+      expect(h.outbox.getById(`wake-intent-${first.qitemId}`)?.deliveryState).toBe("delivered"),
+    );
+    h.repo.claim({ qitemId: first.qitemId, destinationSession: "worker@rig" });
+    expect(h.repo.getById(first.qitemId)?.state).toBe("in-progress");
+
+    // No opt-in for `rig`: the busy seat still receives the later wake —
+    // exactly the pre-serialization behavior.
+    const second = await h.create("second");
+    await vi.waitFor(() =>
+      expect(h.outbox.getById(`wake-intent-${second.qitemId}`)?.deliveryState).toBe("delivered"),
+    );
+    expect(h.calls).toHaveLength(2);
+    expect(h.repo.getById(second.qitemId)?.lastNudgeResult).not.toBe("held:seat-busy");
+  });
+
+  it("delivers an auto-unpark return wake to a seat that is busy with something else", async () => {
+    h = makeHarness();
+    // The occupier: worker@rig is mid-qitem.
+    const occupier = await h.create("occupier");
+    await vi.waitFor(() =>
+      expect(h.outbox.getById(`wake-intent-${occupier.qitemId}`)?.deliveryState).toBe("delivered"),
+    );
+    h.repo.claim({ qitemId: occupier.qitemId, destinationSession: "worker@rig" });
+
+    // A parked item waiting on a blocker that lives on another seat.
+    const blocker = await h.create("blocker", "orch2@rig");
+    const parked = await h.create("parked");
+    await vi.waitFor(() => expect(h.repo.getById(parked.qitemId)?.lastNudgeResult).toBe("held:seat-busy"));
+    h.repo.update({
+      qitemId: parked.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: blocker.qitemId,
+    });
+
+    // The blocker resolves elsewhere. The return wake ("blocker resolved;
+    // resume") is a result other work depends on — it must reach the busy
+    // worker@rig even though the occupier still holds the seat's slot.
+    h.repo.update({ qitemId: blocker.qitemId, actorSession: "orch2@rig", state: "done", closureReason: "no-follow-on" });
+    await vi.waitFor(() => {
+      const ret = h.db
+        .prepare(
+          "SELECT delivery_state FROM outbox_entries WHERE audit_pointer = ? AND tags LIKE '%queue:auto-unpark:blocker%'",
+        )
+        .get(parked.qitemId) as { delivery_state: string } | undefined;
+      expect(ret?.delivery_state).toBe("delivered");
+    });
+    // The parked row's original wake never reached the seat (it was superseded
+    // when the row parked) — the dependent return is what delivered.
+    expect(h.outbox.getById(`wake-intent-${parked.qitemId}`)?.deliveryState).not.toBe("delivered");
+    // Sends so far: the occupier's wake, the blocker's own wake (orch2@rig),
+    // and the bypassing return — nothing else leaked past the gate.
+    expect(h.calls).toHaveLength(3);
+    expect(h.calls[2]!.session).toBe("worker@rig");
+    expect(h.calls[2]!.text).toContain("Resume the recorded continuation");
+  });
+
 
   it("serializes a same-seat handoff-and-complete successor behind the older held wake", async () => {
     h = makeHarness();
