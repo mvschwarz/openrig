@@ -132,7 +132,30 @@ describe("the account's facts", () => {
       await f.call("POST", "/api/gateway/human/human-alex/mode/end", {});
       const account = (await f.account("human-alex", app.applicationId)).body.account;
       expect(JSON.stringify(account), ending).not.toContain("Sam: private salary review");
-      expect(account.waiting, ending).toEqual([{ qitemId: work.qitemId, summary: null, state: null, standing: "stale", reason: "recipient-changed" }]);
+      // Set aside by the release: stale, with none of its current fields. Posted to them: delivered, so nothing is owed here.
+      expect(account.waiting, ending).toEqual(ending === "disposed"
+        ? [{ qitemId: work.qitemId, summary: null, state: null, standing: "stale", reason: "recipient-changed" }] : []);
     }
+  });
+
+  it("an ask held for them, posted when quiet ended, answered and unblocked, isn't listed as set aside", async () => {
+    const f = fixture();
+    for (const id of ["human-alex"]) {
+      expect(addHumanFragment({ entityId: id, class: "human", displayName: id, address: `${id}@external`, prefs: { deliveryClass: "B" },
+        connectorBindings: [{ kind: "slack", connectorRef: "main", secretsRef: "vault://fixture", role: "primary", handle: `U-${id.toUpperCase()}` }] }, f.home).ok).toBe(true);
+    }
+    await f.call("PUT", "/api/gateway/human/human-alex/modes/asleep", { availability: "away" });
+    const app = (await f.call("POST", "/api/gateway/human/human-alex/modes/asleep/apply", {})).body.application;
+    const work = await f.repo.create({ sourceSession: "designer@rig", destinationSession: "designer@rig", summary: "Alex: approve the layout",
+      body: "work", evidenceRef: "/proof/layout.md", nudge: false } as never) as QueueItem;
+    await f.repo.update({ qitemId: work.qitemId, actorSession: "designer@rig", state: "blocked", blockedOn: "human-alex@host", summary: "Alex: approve the layout" } as never);
+    const key = `${work.qitemId}:1`;
+    holdForQuiet({ queueRepo: f.repo, jobsRepo: new WatchdogJobsRepository(f.db), qitemId: work.qitemId, entityId: "human-alex",
+      hold: { windowId: "w-alex", occurrence: "until", revision: 1, notificationKey: key } });
+    await f.repo.update({ qitemId: work.qitemId, actorSession: "daemon@kernel", transitionNote: `slack-owner-notification-posted notification_key=${key}` });
+    await f.repo.update({ qitemId: work.qitemId, actorSession: "designer@rig", state: "in-progress" } as never); // answered: the agent carries on
+    expect(f.repo.getById(work.qitemId)!.blockedOn).toBeNull();
+    await f.call("POST", "/api/gateway/human/human-alex/mode/end", {});
+    expect((await f.account("human-alex", app.applicationId)).body.account.waiting).toEqual([]);
   });
 });

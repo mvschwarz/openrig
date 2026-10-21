@@ -108,14 +108,17 @@ async function waitingFor(input: Parameters<typeof modeAccount>[0], app: ModeApp
     }
     const disposed = notes.find((n) => hasToken(n, DISPOSITION_PREFIX, hold.notificationKey));
     const disposedReason = disposed ? /reason=(\S+)/.exec(disposed)?.[1] ?? null : null;
+    const posted = notes.some((n) => hasToken(n, POSTED_RECEIPT, hold.notificationKey));
     if (!rowIsTheirs) {
-      // Held for them once, but the row is someone else's now (re-parked on another person, say): what it says now isn't
-      // theirs to read. Only that they had an ask held, set aside, stays.
+      // Held for them once, but the row isn't theirs now. Posted to them when quiet ended: delivered, and what happened after
+      // (answered and unblocked, or re-parked on someone else) isn't theirs. Otherwise it was set aside, and only that stays:
+      // what the row says now isn't theirs to read.
+      if (posted) continue;
       out.push({ qitemId, summary: null, state: null, standing: "stale", reason: disposedReason ?? "recipient-changed" });
       continue;
     }
     if (disposed) { out.push({ ...ask, standing: "stale", reason: disposedReason }); continue; }
-    if (notes.some((n) => hasToken(n, POSTED_RECEIPT, hold.notificationKey))) {
+    if (posted) {
       // Released and posted: still theirs while it's open; closed since, it isn't waiting.
       if (isBlockerLive(item.state)) out.push({ ...ask, standing: "valid", reason: null });
       continue;
