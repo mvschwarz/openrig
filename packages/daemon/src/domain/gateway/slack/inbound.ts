@@ -476,7 +476,7 @@ export class InboundRouter {
       // it, after that click's own confirmation failed to post. It was recorded, so say that.
       if (live) {
         await acknowledge(recorded?.answerOnRecord ? CLICK_REPLIES.onRecord
-          : recorded?.decidedForThem ? decidedForThemReply(recorded.decidedForThem) : clickNotRecordedReply(reason));
+          : recorded?.decidedForThem ? escapeSlackText(redactSecrets(decidedForThemReply(recorded.decidedForThem))) : clickNotRecordedReply(reason));
       }
       return { status: "ignored", reason };
     }
