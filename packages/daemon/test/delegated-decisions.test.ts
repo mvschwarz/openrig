@@ -123,16 +123,27 @@ describe("refused: nothing is decided for the person", () => {
     expect(await f.decide(row.qitemId, f.choose)).toMatchObject({ status: 409, body: { error: "no-active-mode" } });
     // At the recorder itself, an application that isn't the asked person's is refused by name.
     const direct = f.repo.recordDelegatedDecision({ qitemId: row.qitemId, actorSession: "designer@rig", choices: f.choose.choices, reason: "x", reversible: true,
-      application: { applicationId: "app-sam", entityId: "sam", modeName: "asleep", decisionRoom: room } });
+      currentApplication: () => ({ applicationId: "app-sam", entityId: "sam", modeName: "asleep", decisionRoom: room }) });
     expect(direct).toMatchObject({ status: "refused", reason: "not-the-persons-mode" });
   });
 
-  it("on a permission or approval prompt, even inside the room", async () => {
+  it.each([["a permission prompt", { tags: [PROMPT_ALERT_TAG] }], ["an approval gate", { tier: "human-gate" }]])("on %s, even inside the room", async (_kind, extra) => {
     const f = fixture();
     await f.modeOn("alex", true);
-    const row = await f.ask({ tags: [PROMPT_ALERT_TAG] });
+    const row = await f.ask(extra);
     expect(await f.decide(row.qitemId, f.choose)).toMatchObject({ status: 409, body: { error: "permission-prompt" } });
     expect(f.repo.getById(row.qitemId)).toMatchObject({ state: "pending", delegatedDecision: null });
+  });
+
+  it("the mode is read when the decision is recorded: one that ended in the meantime refuses it", async () => {
+    const f = fixture();
+    await f.modeOn("alex", true);
+    const row = await f.ask();
+    let reads = 0;
+    const result = f.repo.recordDelegatedDecision({ qitemId: row.qitemId, actorSession: "designer@rig", choices: f.choose.choices, reason: "x", reversible: true,
+      currentApplication: (entityId) => { reads++; expect(entityId).toBe("alex"); return null; } }); // ended just before
+    expect(result).toMatchObject({ status: "refused", reason: "no-active-mode" });
+    expect(reads).toBe(1);
   });
 
   it("by an agent other than the one that asked, or with an option that isn't offered", async () => {

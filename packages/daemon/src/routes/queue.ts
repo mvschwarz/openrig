@@ -852,7 +852,6 @@ export function queueRoutes(): Hono {
     }
   });
 
-  // POST /:qitemId/fallback
   // A decision made on the person's behalf, inside the decision room of the mode they have on. Recorded by the agent that
   // asked, on the ask's own row, beside the person's answers and never as one; refused when there's no room to decide in.
   app.post("/:qitemId/delegated-decision", async (c) => {
@@ -865,17 +864,18 @@ export function queueRoutes(): Hono {
     }
     const db = c.get("db" as never) as Database.Database | undefined;
     const repo = getRepo(c);
-    const item = repo.getById(qitemId);
-    if (!item) return c.json({ error: "not-found", message: `qitem ${qitemId} not found` }, 404);
-    const person = parseSessionName(item.destinationSession);
-    const current = db && person.kind === "external" ? new HumanModeService({ db }).current(person.local) : null;
+    const modes = db ? new HumanModeService({ db }) : null;
     const choices = Array.isArray(body.choices)
       ? body.choices.filter((ch): ch is { questionId?: string | null; chosen: string } => typeof ch === "object" && ch !== null && typeof (ch as { chosen?: unknown }).chosen === "string")
       : [];
     const result = repo.recordDelegatedDecision({
       qitemId,
       actorSession: identity.session,
-      application: current ? { applicationId: current.applicationId, entityId: current.entityId, modeName: current.modeName, decisionRoom: current.settings.decisionRoom } : null,
+      // Read inside the recorder's transaction, so a mode ending meanwhile can't have a decision recorded under it.
+      currentApplication: (entityId) => {
+        const current = modes?.current(entityId);
+        return current ? { applicationId: current.applicationId, entityId: current.entityId, modeName: current.modeName, decisionRoom: current.settings.decisionRoom } : null;
+      },
       choices,
       reason: typeof body.reason === "string" ? body.reason : "",
       reversible: body.reversible,
@@ -884,6 +884,7 @@ export function queueRoutes(): Hono {
     return c.json({ ok: true, item: result.item });
   });
 
+  // POST /:qitemId/fallback
   app.post("/:qitemId/fallback", async (c) => {
     const qitemId = c.req.param("qitemId");
     const body = await c.req.json<{ fallbackDestination?: string; reason?: string }>().catch(() => ({} as never));

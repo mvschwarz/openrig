@@ -3462,14 +3462,15 @@ export class QueueRepository {
   /**
    * Record a decision made on the person's behalf, inside their mode's decision room, on the ask's own row. Only the
    * agent that asked may record it, only on a pending decision to that person, and only while their mode has a stated
-   * decision room. A permission or approval prompt is never decided this way. It never writes humanAnswers or a
+   * decision room, read in the same transaction. A permission prompt or approval gate is never decided this way. It never writes humanAnswers or a
    * human-decision-resolved notice: the person didn't answer. The ask is closed (done, no follow-on) so it isn't posted
    * or re-offered, and the asking agent carries on with its choice.
    */
   recordDelegatedDecision(input: {
     qitemId: string;
     actorSession: string;
-    application: { applicationId: string; entityId: string; modeName: string; decisionRoom: { words: string; exclusions: string[] } | null } | null;
+    /** The person's active mode application, read inside this transaction (null: at desk). */
+    currentApplication: (entityId: string) => { applicationId: string; entityId: string; modeName: string; decisionRoom: { words: string; exclusions: string[] } | null } | null;
     choices: Array<{ questionId?: string | null; chosen: string }>;
     reason: string;
     reversible: boolean;
@@ -3484,11 +3485,14 @@ export class QueueRepository {
       if (item.state !== "pending") return refuse("not-pending", `${input.qitemId} is ${item.state}; only a pending ask can be decided`);
       const person = parseSessionName(item.destinationSession);
       if (person.kind !== "external" || item.humanIntent === "update") return refuse("not-a-decision", `${input.qitemId} isn't a decision asked of a person`);
-      if (item.tags?.includes(PROMPT_ALERT_TAG)) return refuse("permission-prompt", "a permission or approval prompt is never decided on the person's behalf");
+      // A permission prompt (the wake ladder's prompt alert) or an approval gate (the human-gate tier) is never delegated.
+      if (item.tags?.includes(PROMPT_ALERT_TAG) || item.tier === "human-gate") {
+        return refuse("permission-prompt", "a permission prompt or approval gate is never decided on the person's behalf");
+      }
       if (item.sourceSession !== input.actorSession) {
         return refuse("not-the-asking-agent", `only the agent that asked (${item.sourceSession}) can record a decision on this ask`);
       }
-      const app = input.application;
+      const app = input.currentApplication(person.local);
       if (!app) return refuse("no-active-mode", `${person.local} has no mode on, so nothing can be decided for them`);
       if (app.entityId !== person.local) return refuse("not-the-persons-mode", `that mode is ${app.entityId}'s, not ${person.local}'s`);
       if (!app.decisionRoom) return refuse("no-decision-room", `${person.local}'s ${app.modeName} has no decision room, so nothing can be decided for them`);
