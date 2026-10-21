@@ -92,4 +92,14 @@ describe("the account's facts", () => {
     expect((await f.account("sam", app.applicationId)).body.account).toMatchObject({ decisions: [], waiting: [], mode: { scheduledEnd: null } });
     expect((await f.account("alex", app.applicationId)).status).toBe(404);
   });
+
+  it("only the person's own asks are waiting for them: a seat that shares their name isn't them", async () => {
+    const f = fixture();
+    await f.call("PUT", "/api/gateway/human/alex/modes/asleep", { availability: "away" });
+    const app = (await f.call("POST", "/api/gateway/human/alex/modes/asleep/apply", {})).body.application;
+    const theirs = await f.ask("Approve the copy?");
+    await f.ask("Rebase your branch", { destinationSession: "alex@build-rig", humanIntent: undefined });
+    await f.call("POST", "/api/gateway/human/alex/mode/end", {});
+    expect((await f.account("alex", app.applicationId)).body.account.waiting.map((w: { qitemId: string }) => w.qitemId)).toEqual([theirs.qitemId]);
+  });
 });

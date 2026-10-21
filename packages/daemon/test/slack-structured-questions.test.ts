@@ -398,7 +398,7 @@ describe("structured human questions (#193)", () => {
       await click("db", "mysql");
       await vi.waitFor(() => expect(threadAcks()).toHaveLength(1));
       expect(threadAcks()[0]).toBe("This was decided on your behalf by builder@rig under asleep: Postgres, Yes (it can't be undone). "
-        + "Your click wasn't recorded; the decision is in your account for when you're back.");
+        + "Your click wasn't recorded; it's listed in that mode's account.");
       expect(repo.getById(decisionId)?.humanAnswers).toBeNull();
     });
 

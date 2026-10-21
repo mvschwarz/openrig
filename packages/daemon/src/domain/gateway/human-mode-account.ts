@@ -3,6 +3,7 @@
 // held ask uses slice 08's release verdict, which reads and never releases, posts or marks.
 import { HumanModeService, type ModeApplication, type ModeEffect } from "./human-operating-modes.js";
 import { isBlockerLive, type QueueRepository } from "../queue-repository.js";
+import { parseSessionName } from "../session-name.js";
 import { DISPOSITION_PREFIX, hasToken, parseQuietHoldNote, releaseVerdict, type RunQuietReleaseInput } from "../policies/quiet-release.js";
 
 const POSTED_RECEIPT = "slack-owner-notification-posted";
@@ -66,7 +67,13 @@ export async function modeAccount(input: {
  *  set aside as stale. A held ask is classified as the release classifies it; an ask that was never held is still for them. */
 async function waitingFor(input: Parameters<typeof modeAccount>[0], app: ModeApplication): Promise<WaitingAsk[]> {
   const db = input.queueRepo.db;
-  const mine = (session: string | null | undefined) => (session ?? "").split("@")[0] === input.entityId && (session ?? "").includes("@");
+  // The person's own address, or the `<entityId>@host` custody label a row can be blocked on: a seat that happens to share
+  // their name isn't them.
+  const mine = (session: string | null | undefined) => {
+    const parsed = session ? parseSessionName(session) : null;
+    return (parsed?.kind === "external" && parsed.local === input.entityId)
+      || (parsed?.kind === "canonical" && parsed.member === input.entityId && parsed.rig === "host");
+  };
   const open = (db.prepare("SELECT qitem_id, destination_session, blocked_on FROM queue_items WHERE state IN ('pending', 'in-progress', 'blocked')")
     .all() as Array<{ qitem_id: string; destination_session: string; blocked_on: string | null }>)
     .filter((r) => mine(r.destination_session) || mine(r.blocked_on)).map((r) => r.qitem_id);

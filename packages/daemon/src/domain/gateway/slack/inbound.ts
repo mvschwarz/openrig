@@ -82,7 +82,7 @@ export const CLICK_REPLIES = {
 /** The reply for a click on a decision made on the person's behalf: who decided, under which mode, and what. */
 export function decidedForThemReply(d: { decidedBy: string; modeName: string; chose: string; reversible: boolean }): string {
   return `This was decided on your behalf by ${d.decidedBy} under ${d.modeName}: ${d.chose}${d.reversible ? "" : " (it can't be undone)"}. `
-    + "Your click wasn't recorded; the decision is in your account for when you're back.";
+    + "Your click wasn't recorded; it's listed in that mode's account.";
 }
 
 /** The reply for a click recordHumanAnswer didn't record, by its reason. */

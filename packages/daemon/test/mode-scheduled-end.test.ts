@@ -36,7 +36,7 @@ function fixture() {
   const jobFor = (applicationId: string) => new WatchdogJobsRepository(db).listActive()
     .find((j) => j.policy === MODE_SCHEDULED_END_POLICY && j.specYaml.includes(applicationId));
   // Each run uses new repositories over the same database, as after a daemon restart.
-  const run = (jobId: string, at: Date) => runModeScheduledEnd({ db, queueRepo: new QueueRepository(db, new EventBus(db)),
+  const run = (jobId: string, at: Date, queueRepo = new QueueRepository(db, new EventBus(db))) => runModeScheduledEnd({ db, queueRepo,
     jobsRepo: new WatchdogJobsRepository(db), home, jobId, now: at });
   const toOperator = () => (db.prepare("SELECT destination_session AS dest, body FROM queue_items WHERE source_session = 'daemon@kernel'").all() as Array<{ dest: string; body: string }>);
   const availability = () => (readHumanAvailability("alex", home) as { availability?: string }).availability;
@@ -69,6 +69,20 @@ describe("a mode's scheduled end", () => {
     const app = f.modes.apply("alex", "asleep", { scheduledEnd: END }, "orch@rig").application!;
     expect(await f.run(f.jobFor(app.applicationId)!.jobId, END)).toEqual({ state: "ended", notified: "orch@rig" });
     expect(f.toOperator()[0]!.body).toContain(`Sent to orch@rig because ${KERNEL_OPERATOR_SESSION} isn't on this host.`);
+  });
+
+  it("if telling the operator fails, the mode still ends, and the next run sends the one notice", async () => {
+    const f = fixture();
+    const app = f.modes.apply("alex", "asleep", { scheduledEnd: END }, "orch@rig").application!;
+    const job = f.jobFor(app.applicationId)!;
+    const failing = new QueueRepository(f.db, new EventBus(f.db));
+    failing.create = async () => { throw new Error("database is locked (test)"); };
+    expect(await f.run(job.jobId, END, failing)).toEqual({ state: "notice-pending" });
+    expect(f.modes.get(app.applicationId)!.endReason).toBe("scheduled");
+    expect(f.jobFor(app.applicationId)).toBeDefined(); // still owed
+    expect(await f.run(job.jobId, new Date("2026-10-21T07:01:00Z"))).toEqual({ state: "ended", notified: "orch@rig" });
+    expect(f.toOperator()).toHaveLength(1);
+    expect(f.jobFor(app.applicationId)).toBeUndefined();
   });
 
   it("switched to another mode before its time: the old job retires and never ends the new mode", async () => {
