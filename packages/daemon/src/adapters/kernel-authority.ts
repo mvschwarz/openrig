@@ -24,6 +24,9 @@ export const KERNEL_CLAUDE_ALLOW = [
 // Team defaults are command allowances, not containment. A project's test runner can run code.
 // Native deny/ask rules remain in force. The session hook owns generated lifecycle
 // asks so that a help invocation is not caught by an unconditional ask prefix.
+// Team agents run most rig commands without a prompt; only the commands that start, stop or remove teams
+// or agents ask. Other rig commands (archive, attach, compact, config set, seat set-model and the like)
+// fall under the Bash(rig:*) allowance.
 export const TEAM_CLAUDE_ALLOW = [
   "Skill", "Read(./**)", "Glob", "Grep", "Bash(rig:*)",
   ...["pwd", "ls", "cat", "head", "tail", "rg", "grep", "find"].map(command => `Bash(${command}:*)`),
@@ -33,11 +36,8 @@ export const TEAM_CLAUDE_ALLOW = [
 ];
 export const TEAM_CLAUDE_ASK = [
   "up", "down", "start", "launch", "restore", "fork", "bootstrap", "create", "add", "remove",
-  "grow", "shrink", "expand", "archive", "unarchive", "destroy", "compact", "setup", "import", "adopt",
-  "attach", "bind", "handover", "unclaim", "release", "reconcile-session", "env down",
-  "policy apply", "config set", "config reset",
-  "daemon start", "daemon stop", "bundle install", "seat launch", "seat continue", "seat stop",
-  "seat clean", "seat handover", "seat switch-client", "seat set-permissions", "seat set-model", "seat set-effort",
+  "grow", "shrink", "expand", "destroy", "handover", "env down",
+  "daemon start", "daemon stop", "bundle install", "seat launch", "seat stop", "seat handover",
 ].map(command => `Bash(rig ${command}:*)`);
 
 type LaunchChoice = Pick<NodeBinding, "kernelAuthority" | "teamPermissionDefault" | "nonInterruptive" | "launchPosture" | "permissionMode"> & {

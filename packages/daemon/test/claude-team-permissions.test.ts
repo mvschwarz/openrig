@@ -82,6 +82,25 @@ describe("Claude team command permissions", () => {
     "rig send worker 'literal rig down text'", "rig send worker 'multiline\nrig down example'",
   ])("allows existing allowance spelling: %s", command => expect(decide(command, policy)).toBe("allow"));
 
+  // Team agents run most rig commands without a prompt; the commands that start, stop or remove teams or agents still
+  // ask. These lists are written out, not derived from TEAM_CLAUDE_ASK, so a change to that list is caught here.
+  const STARTS_STOPS_OR_REMOVES = [
+    "up", "down", "start", "launch", "restore", "fork", "bootstrap", "create", "add", "remove", "grow", "shrink", "expand",
+    "destroy", "handover", "env down", "daemon start", "daemon stop", "bundle install", "seat launch", "seat stop", "seat handover",
+  ];
+  const ORDINARY = [
+    "archive", "unarchive", "import", "setup", "adopt", "attach", "bind", "unclaim", "release", "reconcile-session", "compact",
+    "policy apply", "config set", "config reset", "seat continue", "seat clean", "seat switch-client", "seat set-permissions",
+    "seat set-model", "seat set-effort",
+  ];
+  it.each(STARTS_STOPS_OR_REMOVES)("rig %s starts, stops or removes a team or agent: it asks", command =>
+    expect(decide(`rig ${command} example`, policy)).toBe("ask"));
+  it.each(ORDINARY)("rig %s doesn't start, stop or remove anything: no prompt", command =>
+    expect(decide(`rig ${command} example`, policy)).toBe("allow"));
+  it("the ask list is exactly the commands that start, stop or remove", () => {
+    expect([...TEAM_CLAUDE_ASK].sort()).toEqual(STARTS_STOPS_OR_REMOVES.map(command => `Bash(rig ${command}:*)`).sort());
+  });
+
   it.each([
     "/opt/tools/rig down example", "'/opt/my tools/rig' down example", "command rig down example",
     "env A=x rig up example", "rig --host remote down example", "rig --host=remote down example",
