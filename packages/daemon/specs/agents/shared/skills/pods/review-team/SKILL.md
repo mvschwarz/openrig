@@ -51,9 +51,11 @@ Preparing context is part of the review, not a gate before it. Name the conseque
 
 These apply to every review, not just deep reviews.
 
+Does the change solve the user's problem with a maintainable design? Check affected contracts, invalid input, state transitions, recovery, consumers and unnecessary duplication.
+
 ### Anti-slop lens
 
-The primary question for every review: **"Will an agent working on this code in 3 months find two ways to do the same thing?"**
+Then, for every review: **"Will an agent working on this code in 3 months find two ways to do the same thing?"**
 
 Check for:
 - Code duplication across files or subsystems
