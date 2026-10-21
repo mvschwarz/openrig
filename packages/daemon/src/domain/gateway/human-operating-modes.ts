@@ -76,8 +76,8 @@ export interface AvailabilityAccess {
   read(entityId: string): { ok: true; availability: string | undefined; changeId?: string | null; away?: boolean } | { ok: false; error: string };
   /** changeId: the change record this write left (also on an error after the fragment and record were written). */
   write(entityId: string, value: Availability | "unset"): { ok: true; changeId?: string } | { ok: false; error: string; changeId?: string };
-  /** Set the legacy `away` flag: cleared when it only agreed with the mode's away, or put back on when the person had it
-   *  before the mode. */
+  /** Set the legacy `away` flag. Ending a mode only clears one set while the mode's away was on; one the person had
+   *  before the mode is left as it is. */
   setLegacyAway?(entityId: string, on: boolean): { ok: true } | { ok: false; error: string };
 }
 
