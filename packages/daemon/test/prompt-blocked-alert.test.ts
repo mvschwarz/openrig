@@ -611,8 +611,9 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
   function reminder(outcomes: Array<"refused" | "sent">) {
     const { jobId } = new WatchdogJobsRepository(db).register({ policy: "periodic-reminder", targetSession: seat, intervalSeconds: 7200,
       specYaml: `policy: periodic-reminder\ntarget:\n  session: ${seat}\ninterval_seconds: 7200\nmessage: sweep\n`, registeredBySession: seat });
-    const log = new WatchdogHistoryLog(db); let at = 0;
-    const record = (outcome: "refused" | "sent") => log.record({ jobId, evaluatedAt: new Date(Date.now() + at++ * 1000).toISOString(), outcome,
+    // Attempts are stamped in real time, in order, so a ladder tick's own records fall between them as they would.
+    const log = new WatchdogHistoryLog(db); let last = 0;
+    const record = (outcome: "refused" | "sent") => log.record({ jobId, evaluatedAt: new Date(last = Math.max(Date.now(), last + 1)).toISOString(), outcome,
       deliveryTargetSession: seat, deliveryStatus: outcome === "sent" ? "ok" : "failed",
       evaluationNotes: outcome === "refused" ? { deliveryReason: `Refused: '${seat}' is at an interactive prompt (selection_prompt). No text was sent.` } : null });
     outcomes.forEach(record);
@@ -642,6 +643,49 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     await tick(port);
     await vi.waitFor(() => expect(posts).toHaveLength(1));
     expect(JSON.stringify(posts)).toContain(jobId);
+  });
+
+
+  const toLead = (wakes: string[]) => ({ resolveOrchestrator: () => "lead@fixture",
+    attemptWake: async (_id: string, target: string) => { wakes.push(target); return "verified"; } });
+
+  it.each([[49, false], [50, false], [51, false], [51, true]] as const)("%i refusals after a delivered reminder stay one episode (first alert closed by hand: %s)", async (count, closed) => {
+    const port = engine([]); const wakes: string[] = [];
+    const { record } = reminder(["sent", "refused", "refused"]);
+    await tick(port, toLead(wakes));
+    const [alert] = alerts();
+    if (closed) repo.update({ qitemId: alert!.qitemId, actorSession: "lead@fixture", state: "done", closureReason: "no-follow-on", transitionNote: "handled by hand" });
+    for (let i = 2; i < count; i++) record("refused");
+    await tick(port, toLead(wakes));
+    expect(alerts().map(a => a.qitemId)).toEqual(closed ? [] : [alert!.qitemId]);
+    expect(wakes).toEqual(["lead@fixture"]);
+  });
+
+  it("a prompt that clears and comes back between reminders raises a new alert after two new refusals", async () => {
+    const port = engine([]); const wakes: string[] = [];
+    const { record } = reminder(["refused", "refused"]);
+    await tick(port, toLead(wakes));
+    const [first] = alerts();
+    state = "clear"; await tick(port, toLead(wakes));
+    expect(alerts()).toEqual([]);
+    state = "blocked"; await tick(port, toLead(wakes));
+    record("refused"); await tick(port, toLead(wakes));
+    expect(alerts()).toEqual([]);
+    record("refused"); await tick(port, toLead(wakes));
+    expect(alerts()).toHaveLength(1);
+    expect(alerts()[0]?.qitemId).not.toBe(first!.qitemId);
+    expect(wakes).toEqual(["lead@fixture", "lead@fixture"]);
+  });
+
+  it("a reminder that joins a seat's existing prompt alert is named on it, and nothing is sent again", async () => {
+    await refusal(); const port = engine([]); const wakes: string[] = [];
+    await tick(port, toLead(wakes));
+    const [alert] = alerts();
+    const { jobId } = reminder(["refused", "refused"]);
+    await tick(port, toLead(wakes));
+    expect(alerts().map(a => a.qitemId)).toEqual([alert!.qitemId]);
+    expect(notes(alert!.qitemId)).toContain(`wake-escalation watchdog reminders added: ${jobId}`);
+    expect(wakes).toEqual(["lead@fixture"]);
   });
 
 });
