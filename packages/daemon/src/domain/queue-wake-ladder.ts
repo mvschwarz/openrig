@@ -981,23 +981,32 @@ const PROMPT_RETIRED_NOTE = "prompt escalation retired: prompt cleared or origin
  * spares JSON parsing of the rows that cannot match. The alert tag holds no LIKE wildcard. */
 const PROMPT_ALERT_ROWS = `(tags LIKE '%"${PROMPT_ALERT_TAG}"%' OR tags LIKE '%\\%')`;
 
-/** Active watchdog jobs whose last two attempts were both refused at the same target's prompt. The key names the entry
- * the run of refusals follows, so the episode holds until a reminder is delivered. Jobs are found through the refused
- * outcome's index, and only their recent history (the retention's 50 per job) is read. The parked-owner job's refusals
- * already arrive as notes on the rows it wakes. */
-function refusedWatchdogJobs(db: Database.Database): Array<{ jobId: string; dest: string; registeredBy: string; key: string; refusedAt: string }> {
+/** Active watchdog jobs whose last two attempts were both refused at the same target's prompt. A run of refusals starts
+ * after the job's latest other entry at that target (looked up past the 50-entry read when the read is all refusals) or
+ * after this seat's latest prompt-cleared alert retirement, whichever is later; the key names that boundary, so it stays
+ * the same until a reminder lands or the prompt clears. Jobs are found through the refused outcome's index. The
+ * parked-owner job's refusals already arrive as notes on the rows it wakes. */
+function refusedWatchdogJobs(db: Database.Database, retiredAlert: (dest: string) => { qitemId: string; at: string } | null):
+  Array<{ jobId: string; dest: string; registeredBy: string; key: string; refusedAt: string }> {
   if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'watchdog_history'").get()) return [];
   const jobs = db.prepare(`SELECT job_id, registered_by_session FROM watchdog_jobs WHERE state = 'active' AND policy != ?
     AND job_id IN (SELECT job_id FROM watchdog_history WHERE outcome = 'refused')`).all(PARKED_OWNER_POLICY_NAME) as Array<{ job_id: string; registered_by_session: string }>;
   const recent = db.prepare(`SELECT history_id, outcome, delivery_target_session AS dest, evaluated_at FROM watchdog_history
     WHERE job_id = ? ORDER BY evaluated_at DESC, history_id DESC LIMIT 50`);
+  const before = db.prepare(`SELECT history_id, evaluated_at FROM watchdog_history WHERE job_id = ?
+    AND NOT (outcome = 'refused' AND delivery_target_session IS ?) ORDER BY evaluated_at DESC, history_id DESC LIMIT 1`);
+  type Entry = { history_id: string; outcome: string; dest: string | null; evaluated_at: string };
   return jobs.flatMap(({ job_id, registered_by_session }) => {
-    const entries = recent.all(job_id) as Array<{ history_id: string; outcome: string; dest: string | null; evaluated_at: string }>;
+    const entries = recent.all(job_id) as Entry[];
     const dest = entries[0]?.dest;
     if (!dest) return [];
     const end = entries.findIndex(e => e.outcome !== "refused" || e.dest !== dest);
-    if ((end === -1 ? entries.length : end) < 2) return [];
-    const after = end === -1 ? "start" : entries[end]!.history_id;
+    const run = end === -1 ? entries : entries.slice(0, end);
+    const anchor = end !== -1 ? entries[end]! : entries.length === 50 ? before.get(job_id, dest) as Pick<Entry, "history_id" | "evaluated_at"> | undefined : undefined;
+    const retired = run.length < 2 ? null : retiredAlert(dest);
+    const cleared = retired && (!anchor || retired.at > anchor.evaluated_at) ? retired : null;
+    if (run.filter(e => !cleared || e.evaluated_at > cleared.at).length < 2) return [];
+    const after = cleared ? `alert:${cleared.qitemId}` : anchor?.history_id ?? "start";
     return [{ jobId: job_id, dest, registeredBy: registered_by_session, key: `${dest}|watchdog:${job_id}|after:${after}`, refusedAt: entries[0]!.evaluated_at }];
   });
 }
@@ -1068,8 +1077,19 @@ async function advancePromptRefusals(
     }
   }
 
-  // A watchdog reminder refused twice at the same prompt joins its seat's episode; the row carries the job ids.
-  for (const job of refusedWatchdogJobs(deps.db)) {
+  // A watchdog reminder refused twice at the same prompt joins its seat's episode; the row carries the job ids. The
+  // seat's latest alert retired on a cleared prompt (by its producer, as findWakeRecovery reads it) bounds the run.
+  const retiredAlerts = new Map<string, { qitemId: string; at: string } | null>();
+  const retiredAlert = (dest: string) => {
+    if (!retiredAlerts.has(dest)) retiredAlerts.set(dest, (deps.db.prepare(`SELECT q.qitem_id AS qitemId, MAX(t.ts) AS at
+        FROM queue_items q JOIN queue_transitions t ON t.qitem_id = q.qitem_id
+       WHERE ${PROMPT_ALERT_ROWS} AND q.state NOT IN ('pending','in-progress','blocked') AND json_valid(q.tags)
+         AND EXISTS (SELECT 1 FROM json_each(q.tags) WHERE value = ?)
+         AND t.actor_session = q.source_session AND t.transition_note = ?
+       GROUP BY q.qitem_id ORDER BY at DESC LIMIT 1`).get(`prompt-destination:${dest}`, PROMPT_RETIRED_NOTE) as { qitemId: string; at: string } | undefined) ?? null);
+    return retiredAlerts.get(dest)!;
+  };
+  for (const job of refusedWatchdogJobs(deps.db, retiredAlert)) {
     const tag = `${PROMPT_EPISODE_TAG}${job.key}`;
     if (closedEpisode(tag)) continue;
     let group = groups.get(job.dest);
@@ -1145,6 +1165,11 @@ async function advancePromptRefusals(
     if (addedKeys.length) {
       deps.db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?")
         .run(JSON.stringify([...(row.tags ?? []), ...addedKeys]), row.qitemId);
+      // An alert that already exists names a reminder that joins it; nothing is sent again for it.
+      const addedJobs = [...group.jobs.keys()].filter(id => addedKeys.some(key => key.includes(`|watchdog:${id}|`)));
+      if (addedJobs.length) deps.queueRepo.transitionLog.append({ qitemId: row.qitemId, state: row.state, actorSession: LADDER_ACTOR,
+        transitionNote: `wake-escalation watchdog reminders added: ${addedJobs.join(", ")}`,
+        closureTarget: row.state === "in-progress" ? deps.queueRepo.retainedClaimBlocker(row.qitemId) : undefined });
     }
     // The aggregate ID is the episode. Claiming it does not start a second
     // delivery episode or erase its accepted dispatch/receipt history.
