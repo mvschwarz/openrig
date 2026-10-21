@@ -6,7 +6,7 @@ import { describe, it, expect } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execRuntimeProbe } from "../src/adapters/preflight-exec.js";
+import { execRuntimeProbe } from "../src/adapters/runtime-probe-exec.js";
 import { verifyCodexProfileLoads } from "../src/domain/codex-profile-preflight.js";
 import { discoverSkillsWithProvenance } from "../src/domain/skill-discovery.js";
 

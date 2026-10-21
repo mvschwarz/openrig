@@ -6,7 +6,7 @@ import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js
 import type { ResumeResult } from "./claude-resume.js";
 import { assessNativeResumeProbe, buildCodexResumeCore } from "../domain/native-resume-probe.js";
 import { verifyPaneIdleShell, type NativeProcessLister } from "../domain/native-process-lineage.js";
-import { execRuntimeProbe } from "./preflight-exec.js";
+import { execRuntimeProbe } from "./runtime-probe-exec.js";
 import { shellQuote } from "./shell-quote.js";
 import { codexPostureArg } from "./yolo-mode.js";
 import { observeCodexSandbox } from "../domain/permission-drift.js";
