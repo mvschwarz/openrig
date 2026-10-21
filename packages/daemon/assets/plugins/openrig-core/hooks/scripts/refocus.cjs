@@ -555,7 +555,7 @@ function runsForThisSeatsProject(env = process.env) {
   process.stdout.write(output, (error) => {
     // The report gets its own window after the attempt's lookups, however long they actually took (default lookups keep
     // their fixed caps, so a default attempt can run past its 4.5 s budget).
-    recordRefocusResult({ home, seat, identity, failed: failed || Boolean(error),
+    recordRefocusResult({ home, seat, identity, failed: failed || Boolean(error), env: childEnv,
       deadlineMs: Math.max(BUDGET_MS, Math.floor(process.uptime() * 1_000)) + REPORT_MS });
     if (failed || error) {
       state.pendingOn ||= event;
