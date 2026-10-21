@@ -13,6 +13,8 @@ import { QueueRepository } from "../src/domain/queue-repository.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { addHumanFragment, loadHumanRegistry, readHumanAvailability, setHumanField } from "../src/domain/gateway/human-registry.js";
 import { HumanModeService, registryAvailability } from "../src/domain/gateway/human-operating-modes.js";
+import { makeTopologyDestinationCheck } from "../src/domain/queue-destination-check.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
 import { armModeScheduledEnd, KERNEL_OPERATOR_SESSION, MODE_SCHEDULED_END_POLICY, runModeScheduledEnd } from "../src/domain/policies/mode-scheduled-end.js";
 
 const homes: string[] = [];
@@ -36,7 +38,10 @@ function fixture() {
   const jobFor = (applicationId: string) => new WatchdogJobsRepository(db).listActive()
     .find((j) => j.policy === MODE_SCHEDULED_END_POLICY && j.specYaml.includes(applicationId));
   // Each run uses new repositories over the same database, as after a daemon restart.
-  const run = (jobId: string, at: Date, queueRepo = new QueueRepository(db, new EventBus(db))) => runModeScheduledEnd({ db, queueRepo,
+  // The queue as production builds it: rows are refused unless the destination check admits them.
+  const validateRig = makeTopologyDestinationCheck({ findRigsByName: (name) => new RigRepository(db).findRigsByName(name), loadHumanRegistry: () => loadHumanRegistry(home) });
+  const productionQueue = () => new QueueRepository(db, new EventBus(db), { validateRig, loadHumanRegistry: () => loadHumanRegistry(home) });
+  const run = (jobId: string, at: Date, queueRepo = productionQueue()) => runModeScheduledEnd({ db, queueRepo,
     jobsRepo: new WatchdogJobsRepository(db), home, jobId, now: at });
   const toOperator = () => (db.prepare("SELECT destination_session AS dest, body FROM queue_items WHERE source_session = 'daemon@kernel'").all() as Array<{ dest: string; body: string }>);
   const availability = () => (readHumanAvailability("alex", home) as { availability?: string }).availability;
@@ -64,15 +69,40 @@ describe("a mode's scheduled end", () => {
     expect(f.jobFor(app.applicationId)).toBeUndefined(); // retired
   });
 
-  it("where the kernel operator isn't on this host, the seat that applied the mode is told, and the row says why", async () => {
+  it("where the kernel operator isn't on this host, the seat that applied the mode is told when the queue accepts it, and the row says why", async () => {
     const f = fixture();
+    f.db.prepare("INSERT INTO rigs (id, name) VALUES ('r-rig', 'rig')").run(); // orch@rig is a routable seat
     const app = f.modes.apply("alex", "asleep", { scheduledEnd: END }, "orch@rig").application!;
     expect(await f.run(f.jobFor(app.applicationId)!.jobId, END)).toEqual({ state: "ended", notified: "orch@rig" });
     expect(f.toOperator()[0]!.body).toContain(`Sent to orch@rig because ${KERNEL_OPERATOR_SESSION} isn't on this host.`);
   });
 
+  it("applied by a named operator outside any seat, with no kernel operator here, the person is told, as an update", async () => {
+    const f = fixture();
+    const app = f.modes.apply("alex", "asleep", { scheduledEnd: END }, "op").application!;
+    const jobId = f.jobFor(app.applicationId)!.jobId;
+    expect(await f.run(jobId, END)).toEqual({ state: "ended", notified: "alex@external" });
+    const row = f.db.prepare("SELECT destination_session AS dest, human_intent AS intent, body FROM queue_items WHERE source_session = 'daemon@kernel'").get() as Record<string, string>;
+    expect(row).toMatchObject({ dest: "alex@external", intent: "update" });
+    expect(row.body).toBe(`Your asleep ended at its scheduled time. Its account: \`rig gateway human mode account alex ${app.applicationId}\`; ask your operator to go through it.`);
+    expect(new WatchdogJobsRepository(f.db).getById(jobId)).toMatchObject({ state: "terminal",
+      terminalReason: `ended at its scheduled time; alex@external told (${KERNEL_OPERATOR_SESSION} isn't on this host, and op, who applied it, isn't an address the queue accepts)` });
+  });
+
+  it("with no address the queue would accept, the job ends saying why, instead of retrying", async () => {
+    const f = fixture();
+    const app = f.modes.apply("alex", "asleep", { scheduledEnd: END }, "op").application!;
+    const jobId = f.jobFor(app.applicationId)!.jobId;
+    rmSync(join(f.home, "gateway", "humans", "alex.yaml")); // no longer registered
+    expect(await f.run(jobId, END)).toEqual({ state: "ended", notified: undefined });
+    expect(new WatchdogJobsRepository(f.db).getById(jobId)).toMatchObject({ state: "terminal",
+      terminalReason: expect.stringContaining("no notice: operator-agent@kernel isn't on this host, op, who applied it, isn't an address the queue accepts, and alex@external isn't registered") });
+    expect(f.toOperator()).toEqual([]);
+  });
+
   it("if telling the operator fails, the mode still ends, and the next run sends the one notice", async () => {
     const f = fixture();
+    f.db.prepare("INSERT INTO rigs (id, name) VALUES ('r-rig', 'rig')").run();
     const app = f.modes.apply("alex", "asleep", { scheduledEnd: END }, "orch@rig").application!;
     const job = f.jobFor(app.applicationId)!;
     const failing = new QueueRepository(f.db, new EventBus(f.db));

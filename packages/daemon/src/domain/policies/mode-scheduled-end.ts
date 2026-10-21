@@ -6,6 +6,7 @@ import type Database from "better-sqlite3";
 import type { QueueCreateInput, QueueRepository } from "../queue-repository.js";
 import type { WatchdogJobsRepository } from "../watchdog-jobs-repository.js";
 import { HumanModeService, registryAvailability, type ModeApplication } from "../gateway/human-operating-modes.js";
+import { loadHumanRegistry } from "../gateway/human-registry.js";
 import type { Policy, PolicyJob, PolicyEvaluation } from "./types.js";
 
 export const MODE_SCHEDULED_END_POLICY = "mode-scheduled-end";
@@ -74,33 +75,67 @@ export async function runModeScheduledEnd(input: ModeScheduledEndInput):
     input.jobsRepo.markTerminal(input.jobId, `ended at its scheduled time; ${existing.destinationSession} told`);
     return { state: "ended", notified: existing.destinationSession };
   }
-  const notice = noticeFor(input.db, ended, scheduledEnd, noticeId);
+  const recipient = recipientFor(input, ended);
+  if (!recipient.ok) {
+    // No address the queue would accept: say so on the job and stop, rather than retry a refusal forever.
+    input.jobsRepo.markTerminal(input.jobId, `ended at its scheduled time; no notice: ${recipient.why}`);
+    return { state: "ended", notified: undefined };
+  }
+  const notice = noticeFor(ended, scheduledEnd, noticeId, recipient);
   try {
     await input.queueRepo.create(notice);
   } catch {
     return { state: "notice-pending" }; // stays active: the next run creates it
   }
-  input.jobsRepo.markTerminal(input.jobId, `ended at its scheduled time; ${notice.destinationSession} told`);
-  return { state: "ended", notified: notice.destinationSession };
+  input.jobsRepo.markTerminal(input.jobId, `ended at its scheduled time; ${recipient.to} told${recipient.why ? ` (${recipient.why})` : ""}`);
+  return { state: "ended", notified: recipient.to };
 }
 
 const SCHEDULER = "daemon@kernel";
 
-/** The kernel operator gives the account; where it isn't on this host, the seat that applied the mode does, and the row
- *  says so. */
-function noticeFor(db: Database.Database, ended: ModeApplication, scheduledEnd: string, qitemId: string): QueueCreateInput {
-  const operatorHere = !!db.prepare("SELECT 1 FROM sessions WHERE session_name = ? LIMIT 1").get(KERNEL_OPERATOR_SESSION);
+type Recipient = { ok: true; to: string; kind: "operator" | "applied-by" | "person"; why: string | null } | { ok: false; why: string };
+
+/** Who's told, through the queue's own destination check: the kernel operator, which gives the account; where it isn't on
+ *  this host, the seat that applied the mode, if the queue would accept it (a named operator outside a seat isn't a
+ *  destination); otherwise the person, whose account it is. */
+function recipientFor(input: ModeScheduledEndInput, ended: ModeApplication): Recipient {
+  const accepts = (to: string) => { try { return input.queueRepo.acceptsDestination(to); } catch { return false; } };
+  const operatorHere = !!input.db.prepare("SELECT 1 FROM sessions WHERE session_name = ? LIMIT 1").get(KERNEL_OPERATOR_SESSION);
+  if (operatorHere && accepts(KERNEL_OPERATOR_SESSION)) return { ok: true, to: KERNEL_OPERATOR_SESSION, kind: "operator", why: null };
+  const noOperator = `${KERNEL_OPERATOR_SESSION} isn't on this host`;
+  if (accepts(ended.startedBy)) return { ok: true, to: ended.startedBy, kind: "applied-by", why: noOperator };
+  const reg = loadHumanRegistry(input.home);
+  const person = (reg.ok ? reg.entities.find((e) => e.entityId === ended.entityId)?.address : null) ?? `${ended.entityId}@external`;
+  const notSeat = `${ended.startedBy}, who applied it, isn't an address the queue accepts`;
+  if (accepts(person)) return { ok: true, to: person, kind: "person", why: `${noOperator}, and ${notSeat}` };
+  return { ok: false, why: `${noOperator}, ${notSeat}, and ${person} isn't registered` };
+}
+
+function noticeFor(ended: ModeApplication, scheduledEnd: string, qitemId: string, recipient: Extract<Recipient, { ok: true }>): QueueCreateInput {
+  const account = `rig gateway human mode account ${ended.entityId} ${ended.applicationId}`;
+  if (recipient.kind === "person") {
+    // The person's own: an update, never a decision to answer.
+    return {
+      qitemId,
+      sourceSession: SCHEDULER,
+      destinationSession: recipient.to,
+      humanIntent: "update",
+      summary: `Your ${ended.modeName} ended at its scheduled time`,
+      body: `Your ${ended.modeName} ended at its scheduled time. Its account: \`${account}\`; ask your operator to go through it.`,
+      tags: ["mode-scheduled-end"],
+    };
+  }
   const where = ended.settings.delivery.account ?? "their registered channel";
   return {
     qitemId,
     sourceSession: SCHEDULER,
-    destinationSession: operatorHere ? KERNEL_OPERATOR_SESSION : ended.startedBy,
+    destinationSession: recipient.to,
     summary: `${ended.entityId}'s ${ended.modeName} ended at its scheduled time`,
     body: [
       `${ended.entityId}'s ${ended.modeName} ended at its scheduled time (${scheduledEnd}; ended ${ended.endedAt}).`,
       `Give them the account where the mode's delivery says: ${where}. Read the facts first:`,
-      `  rig gateway human mode account ${ended.entityId} ${ended.applicationId}`,
-      `Applied by ${ended.startedBy}.${operatorHere ? "" : ` Sent to ${ended.startedBy} because ${KERNEL_OPERATOR_SESSION} isn't on this host.`}`,
+      `  ${account}`,
+      `Applied by ${ended.startedBy}.${recipient.why ? ` Sent to ${recipient.to} because ${recipient.why}.` : ""}`,
     ].join("\n"),
     tags: ["mode-scheduled-end"],
   };
