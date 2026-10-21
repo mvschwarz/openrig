@@ -264,6 +264,38 @@ describe("custody of asks held for quiet hours", () => {
     expect(ladderTouched(row), "a failed release is an ordinary failed delivery to the ladder").toBe(true);
   });
 
+  it("review R2-F1: a refused release turned back by quiet and re-dispatched, refused again, still reads as a failed delivery: one finding", async () => {
+    const row = await held();
+    quiet.end("person", { endedBy: "t", now: new Date() });
+    rejectPosts = true;
+    const w = wires[0]!;
+    const [job] = releaseJobs();
+    const releaseVia = () => runQuietRelease({ queueRepo: repo, jobsRepo: new WatchdogJobsRepository(db), home, jobId: job!.jobId,
+      registry: { loadHumanRegistry: registry as never }, dispatch: (op, ref, payload, opts) => w.dispatcher.dispatch(op, ref, payload, opts as never) });
+    await releaseVia(); // cycle 1: the post is refused, and its one failure note is written
+    await settle();
+    expect(quietHoldCustody(db, row.qitemId)).toMatchObject({ state: "release-failed" });
+    quietOn();
+    const alert = await alertFor(row);
+    await confirmReleaseAtPost({ queueRepo: repo, jobsRepo: new WatchdogJobsRepository(db), home, registry: { loadHumanRegistry: registry as never },
+      entityId: "person", qitemId: row.qitemId, notificationKey: alert.notificationKey ?? row.qitemId }); // quiet came back: returned
+    expect(quietHoldCustody(db, row.qitemId)).toMatchObject({ state: "held" });
+    quiet.end("person", { endedBy: "t", now: new Date() });
+    w.stop();
+    const w2 = wire(); // a restart: the buffered release replays, refused again
+    await settle();
+    await runQuietRelease({ queueRepo: repo, jobsRepo: new WatchdogJobsRepository(db), home, jobId: job!.jobId,
+      registry: { loadHumanRegistry: registry as never }, dispatch: (op, ref, payload, opts) => w2.dispatcher.dispatch(op, ref, payload, opts as never) });
+    await settle();
+    expect(repo.listTransitions(row.qitemId).filter((t) => (t.transitionNote ?? "").startsWith("quiet-release-dispatched ")), "cycle 2 is dispatched").toHaveLength(2);
+    expect(posts, "cycle 2's post reached the connector and was refused too").toHaveLength(2);
+    expect(repo.listTransitions(row.qitemId).some((t) => (t.transitionNote ?? "").startsWith("slack-owner-notification-posted "))).toBe(false);
+    expect(quietHoldCustody(db, row.qitemId)).toMatchObject({ state: "release-failed" });
+    const r = await sweep();
+    expect(findingFor(r, row)).toHaveLength(1);
+    expect(undeliveredFor(r, row)).toHaveLength(1);
+  });
+
   it("QA F1: a release turned back by quiet, with a failed wake, gives no undelivered-wake finding", async () => {
     const row = await held();
     quiet.end("person", { endedBy: "t", now: new Date() });

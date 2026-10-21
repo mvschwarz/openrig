@@ -4,8 +4,8 @@
 //   came on again), and its window's quiet-release job is active. The job owns what happens next: it isn't stuck, it
 //   isn't picked up, and the ladder leaves it alone. Once quiet has ended, the job posts it at its next pass;
 // - released: the release job dispatched it, its post hasn't landed yet, and the job is still live: waiting for transport;
-// - release-failed: dispatched, and the post failed after that dispatch with no receipt: a failed delivery, reported
-//   as one;
+// - release-failed: dispatched, and a post failure for the notification is recorded with no receipt: a failed delivery,
+//   reported as one;
 // - orphaned: held or released, but no active release job for its window: nothing will release or redrive it, so the
 //   sweep must find it. The hold note and its job are written together, and the job retires only once every ask it
 //   holds is resolved, so this happens only when a job is stopped or terminated from outside.
@@ -55,7 +55,11 @@ export function quietHoldCustody(db: Database.Database, qitemId: string, now: Da
       if (hasToken(notes[i]!, "quiet-release-dispatched", key) || hasToken(notes[i]!, "quiet-release-returned", key)) { step = i; break; }
     }
     if (step >= 0 && notes[step]!.startsWith("quiet-release-dispatched ")) {
-      const failed = notes.slice(step + 1).find((n) => hasToken(n, "slack-owner-notification-transport-failed", key));
+      // A post failure for this notification with no receipt (a receipt or disposition ended custody above) is still
+      // unresolved, even one recorded before this dispatch: the gateway records a failure once per notification, so a
+      // failed re-dispatch adds none. That is the ledger's rule too: failed until a receipt. A release still in flight
+      // after an earlier failure therefore reads as failed until its post lands.
+      const failed = notes.find((n) => hasToken(n, "slack-owner-notification-transport-failed", key));
       if (failed) {
         const failure = failed.split(/\s+/).find((t) => t.startsWith("class="))?.slice("class=".length) ?? "unknown";
         return { state: "release-failed", windowId, notificationKey: key, nextBoundary: null, failure };
