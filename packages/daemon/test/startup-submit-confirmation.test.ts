@@ -497,6 +497,108 @@ describe("startup prompt submission", () => {
     expect(observations?.[0]).not.toHaveProperty("look");
     expect(f.tmux.capturePaneContent).toHaveBeenCalledTimes(2);
   });
+  // On Linux with Claude 2.1.306 the look after the startup Enter found Claude still drawing its screen, with no input line
+  // at all, so the check stopped at unverified and the startup text sat unsent until a person pressed Enter. A screen with
+  // no input line is looked at again, like our collapsed paste, within the same bound.
+  const noInputLine = "user@host:~/project$ ( . '/tmp/openrig-tmux-send-1-fixture.txt' )\n ▐▛███▛█   Claude Code v2.1.306\n▝▜██████▀  Opus 5.5 · Claude Max\n\n  1 more notice hidden\n";
+  it("submits a startup prompt that shows up staged once Claude draws its input box, with one Enter-only retry", async () => {
+    const f = fixture(1);
+    f.tmux.capturePaneContent.mockImplementationOnce(async () => noInputLine);
+    const result = await f.start();
+    expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
+    expect(result.ok && result.submission).toBeUndefined();
+    expect(f.tmux.sendText).toHaveBeenCalledTimes(1);
+    expect(f.tmux.sendKeys).toHaveBeenCalledTimes(2);
+    expect(f.submitted).toEqual([sentPrompt(f)]);
+  });
+  it("confirms a startup prompt Claude took while its input box was still being drawn, with no second Enter", async () => {
+    const f = fixture(0);
+    f.tmux.capturePaneContent.mockImplementationOnce(async () => noInputLine);
+    const result = await f.start();
+    expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
+    expect(result.ok && result.submission).toBeUndefined();
+    expect(f.tmux.sendKeys).toHaveBeenCalledTimes(1);
+  });
+  it("sends no second Enter when the input box appears holding a person's draft", async () => {
+    const f = fixture(Infinity);
+    f.tmux.capturePaneContent.mockResolvedValue("Previous turn\n────────────────────\n❯ a draft typed by the person\n────────────────────\n⏵⏵ accept edits on (shift+tab to cycle)\n");
+    f.tmux.capturePaneContent.mockImplementationOnce(async () => noInputLine);
+    expect(await f.start()).toMatchObject({ ok: true, submission: { status: "unverified",
+      reasons: ["Startup submission is unverified: the current composer does not positively match the complete prompt."] } });
+    expect(f.tmux.sendKeys).toHaveBeenCalledTimes(1);
+  });
+  it("sends no second Enter when a permission prompt appears instead of the input box", async () => {
+    const f = fixture(Infinity);
+    f.tmux.capturePaneContent.mockResolvedValue("Bash command\n\n  rig whoami --json\n\nDo you want to proceed?\n❯ 1. Yes\n  2. No\n\nEsc to cancel · Tab to amend\n");
+    f.tmux.capturePaneContent.mockImplementationOnce(async () => noInputLine);
+    expect(await f.start()).toMatchObject({ ok: true, submission: { status: "unverified",
+      reasons: ["Startup submission is unverified: the current composer boundary was not recognized."] } });
+    expect(f.tmux.capturePaneContent).toHaveBeenCalledTimes(2);
+    expect(f.tmux.sendKeys).toHaveBeenCalledTimes(1);
+  });
+  it("keeps a screen that never shows an input box unverified after the bounded wait, with no second Enter", async () => {
+    const f = fixture(Infinity);
+    f.tmux.capturePaneContent.mockResolvedValue(noInputLine);
+    const result = await f.start();
+    expect(result).toMatchObject({ ok: true, startupStatus: "ready", submission: { status: "unverified",
+      reasons: ["Startup submission is unverified: the current composer boundary was not recognized."] } });
+    expect(f.tmux.sendKeys).toHaveBeenCalledTimes(1);
+    expect(f.tmux.capturePaneContent).toHaveBeenCalledTimes(1 + SETTLE_LOOKS);
+    expect(f.sleep.mock.calls).toEqual(Array.from({ length: 2 + SETTLE_LOOKS }, () => [200]));
+    expect(result.ok && result.submission?.diagnostics).toMatchObject([{ retry: "not_run", observations: [
+      { phase: "initial", look: 0, reason: "unrecognized_composer_boundary", markerLine: null },
+      { phase: "initial", look: SETTLE_LOOKS, reason: "unrecognized_composer_boundary", markerLine: null },
+    ] }]);
+  });
+  // A fresh launch can read ready before Claude has drawn its input box, so before a fresh start's first send the
+  // visible screen is looked at until the input box is drawn, within the same bound.
+  const inputBoxScreen = "────────────────────\n❯ \n────────────────────\n⏵⏵ accept edits on (shift+tab to cycle)\n";
+  const showScreens = (f: ReturnType<typeof fixture>, ...screens: Array<string | null>) => {
+    const capturePaneScreen = vi.fn(async (_pane: string) => screens.length > 1 ? screens.shift()! : screens[0]!);
+    (f.tmux as unknown as { capturePaneScreen: typeof capturePaneScreen }).capturePaneScreen = capturePaneScreen;
+    return capturePaneScreen;
+  };
+  it("waits for Claude to draw its input box before pasting a fresh seat's startup text", async () => {
+    const f = fixture(0);
+    const screen = showScreens(f, noInputLine, noInputLine, inputBoxScreen);
+    const result = await f.start();
+    expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
+    expect(result.ok && result.submission).toBeUndefined();
+    expect(screen).toHaveBeenCalledTimes(3);
+    expect(screen).toHaveBeenCalledWith("%1");
+    expect(screen.mock.invocationCallOrder[2]!).toBeLessThan(f.tmux.sendText.mock.invocationCallOrder[0]!);
+    expect(f.tmux.sendKeys).toHaveBeenCalledTimes(1);
+  });
+  it("pastes a fresh seat's startup text as before when the input box doesn't appear within the bound", async () => {
+    const f = fixture(0);
+    const screen = showScreens(f, noInputLine);
+    expect(await f.start()).toMatchObject({ ok: true, startupStatus: "ready" });
+    expect(screen).toHaveBeenCalledTimes(SETTLE_LOOKS);
+    expect(f.tmux.sendText).toHaveBeenCalledTimes(1);
+  });
+  it("pastes a fresh seat's startup text at once when the screen can't be read", async () => {
+    const f = fixture(0);
+    const screen = showScreens(f, null);
+    expect(await f.start()).toMatchObject({ ok: true, startupStatus: "ready" });
+    expect(screen).toHaveBeenCalledTimes(1);
+    expect(f.tmux.sendText).toHaveBeenCalledTimes(1);
+  });
+  it("waits only before a fresh start's first send, not before the proof line that follows it", async () => {
+    const f = fixture(0, "claude-code", true);
+    const screen = showScreens(f, inputBoxScreen);
+    f.tmux.capturePaneContent.mockImplementationOnce(async () => ownPaste(sentPrompt(f)))
+      .mockResolvedValueOnce(composerCrop("Press up to edit queued messages"));
+    expect(await f.start({ startupActions: proofActions(false) })).toMatchObject({ ok: true, startupStatus: "ready" });
+    expect(f.submitted).toHaveLength(2);
+    expect(screen).toHaveBeenCalledTimes(1);
+  });
+  it("doesn't wait before a restore's first send", async () => {
+    const f = fixture(0, "claude-code", false, true);
+    const screen = showScreens(f, noInputLine);
+    expect(await f.start({ isRestore: true, startupActions: [], resolvedStartupFiles: [file("role.md")] })).toMatchObject({ ok: true });
+    expect(f.tmux.sendText).toHaveBeenCalledTimes(1);
+    expect(screen).not.toHaveBeenCalled();
+  });
   for (const identity of [false, true]) {
     const path = identity ? "identity" : "challenge-only";
     for (const observation of ["unavailable", "mismatch"] as const) {
