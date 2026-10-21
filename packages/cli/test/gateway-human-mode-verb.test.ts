@@ -84,6 +84,14 @@ describe("rig gateway human mode", () => {
     expect(logs).toEqual(["asleep on since 2026-10-20T21:00:00.000Z, until 2026-10-21T07:00:00.000Z\n  availability: active\n  decision-room: active\n  quiet: failed (unknown timezone)"]);
   });
 
+  it("apply --until without --tz uses this machine's zone, as save does, and says which zone it used", async () => {
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    reply = { status: 200, body: { ok: true, application, ended: null, atDesk: false, unresolved: [] } };
+    await run("mode", "apply", "mike", "asleep", "--until", "07:00");
+    expect(requests[0]!.body).toMatchObject({ until: "07:00", timezone: zone });
+    expect(logs.at(-1)).toBe(`until 07:00 in ${zone}; pass --tz for the person's own zone`);
+  });
+
   it("current says at desk, and lists a restoration still owed from an earlier mode", async () => {
     reply = { status: 200, body: { ok: true, current: null, atDesk: true, unresolved: [
       { applicationId: "a-0", modeName: "away-from-desk", endedAt: "2026-10-20T18:00:00.000Z",

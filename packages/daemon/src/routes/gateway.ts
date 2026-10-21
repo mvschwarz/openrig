@@ -202,6 +202,8 @@ export function gatewayRoutes(opts: {
   app.post("/human/:entityId/modes/:name/apply", modeRoute("applying a mode", ({ modes, entityId, name, actor, body, at }) => {
     const until = text(body.until);
     const saved = modes.saved(entityId, name);
+    // The CLI always sends a zone with an end time (this machine's, unless --tz). An API caller that sends none gets the
+    // mode's quiet-hours zone, else UTC.
     const timezone = text(body.timezone) ?? (saved?.delivery.quiet?.timezone || "UTC");
     const result = modes.apply(entityId, name, { scheduledEnd: until ? resolveUntil(until, timezone, at) : null }, actor);
     return { application: result.application, ended: result.ended, atDesk: result.application === null, unresolved: modes.unresolved(entityId) };

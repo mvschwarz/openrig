@@ -393,17 +393,19 @@ Examples:
   mode
     .command("apply <entityId> <name>")
     .description("Switch a person into a saved mode, and show each effect's real state. 'at-desk' ends the current mode and applies none")
-    .option("--until <time>", "When it ends: HH:MM (its next occurrence in --tz) or an ISO time with an offset. Recorded; nothing ends it automatically yet")
-    .option("--tz <zone>", "IANA timezone for --until (default: the mode's quiet-hours zone, else UTC)")
+    .option("--until <time>", "When it ends: HH:MM (its next occurrence in --tz) or an ISO time with an offset. It ends then, as \"scheduled\"")
+    .option("--tz <zone>", "IANA timezone for --until (default: this machine's zone, as for save and quiet set)")
     .option("--actor <actor>", "Named operator when outside a managed seat")
     .option("--json", "The daemon's answer as JSON")
     .action(async (entityId: string, name: string, opts: { until?: string; tz?: string; actor?: string; json?: boolean }) => {
+      const timezone = opts.tz ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
       await modeCall("post", entityId, `/modes/${encodeURIComponent(name)}/apply`, {
-        ...(opts.until ? { until: opts.until } : {}), ...(opts.tz ? { timezone: opts.tz } : {}), ...actorBody(opts),
+        ...(opts.until ? { until: opts.until, timezone } : {}), ...actorBody(opts),
       }, opts.json, (data) => {
         if (data.ended) console.log(describeApplication(data.ended));
         console.log(data.application ? describeApplication(data.application) : `${entityId} is at desk: no mode on`);
         for (const line of unresolvedLines(data)) console.log(line);
+        if (opts.until && opts.tz === undefined) console.log(`until ${opts.until} in ${timezone}; pass --tz for the person's own zone`);
       });
     });
   mode
