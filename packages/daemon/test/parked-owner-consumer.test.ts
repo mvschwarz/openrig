@@ -143,7 +143,9 @@ function sentHistory(input: {
     historyId: `h-${input.episodeKey}`,
     jobId: "job-poc-1",
     evaluatedAt: new Date().toISOString(),
-    outcome: "sent",
+    // As the engine records an attempt: only a delivered one reads sent.
+    outcome: (input.deliveryStatus ?? "ok") === "ok" ? "sent"
+      : input.deliveryReason?.startsWith("Refused:") && input.deliveryReason.includes("interactive prompt") ? "refused" : "failed",
     skipReason: null,
     deliveryTargetSession: SEAT,
     deliveryStatus: input.deliveryStatus ?? "ok",

@@ -218,7 +218,7 @@ describe("WatchdogPolicyEngine (PL-004 Phase C R1)", () => {
     }
   });
 
-  it("delivery failure recorded as sent with delivery_status=failed (still meaningful)", async () => {
+  it("a failed delivery is recorded as failed, not sent (still meaningful)", async () => {
     const failingDeliver: DeliveryFn = async () => ({ status: "failed", error: "transport denied" });
     const engine = makeEngine({ deliver: failingDeliver });
     const job = jobsRepo.register({
@@ -231,7 +231,7 @@ describe("WatchdogPolicyEngine (PL-004 Phase C R1)", () => {
     });
     await engine.evaluate(job);
     const list = log.listForJob(job.jobId);
-    expect(list[0]?.outcome).toBe("sent");
+    expect(list[0]?.outcome).toBe("failed");
     expect(list[0]?.deliveryStatus).toBe("failed");
   });
 
@@ -590,7 +590,7 @@ describe("engine effects for the parked-owner consumer (OPR.0.5.6.24)", () => {
     h.db.close();
   });
 
-  it("delivery-reason pin: the delivery error string is persisted EXACTLY into the sent row's evaluationNotes.deliveryReason", async () => {
+  it("delivery-reason pin: a prompt refusal reads refused, with its error string persisted EXACTLY into evaluationNotes.deliveryReason", async () => {
     const refusal = "Refused: 'dev-planner@test-rig' is at an interactive prompt (target_needs_input). No text was sent.";
     const h = makeHarness({
       deliver: async () => ({ status: "failed" as const, error: refusal }),
@@ -604,7 +604,7 @@ describe("engine effects for the parked-owner consumer (OPR.0.5.6.24)", () => {
     await h.engine.evaluate(h.job);
     const entries = h.log.listForJob(h.job.jobId, 10);
     expect(entries).toHaveLength(1);
-    expect(entries[0]?.outcome).toBe("sent");
+    expect(entries[0]?.outcome).toBe("refused");
     expect(entries[0]?.deliveryStatus).toBe("failed");
     expect(entries[0]?.evaluationNotes?.["deliveryReason"]).toBe(refusal);
     // The policy's own notes survive the merge untouched.
