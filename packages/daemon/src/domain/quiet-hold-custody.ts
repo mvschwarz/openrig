@@ -1,13 +1,15 @@
 // Quiet hours, custody: what an ask held for quiet hours looks like to the wake ladder, the stuck sweep and the waiting
 // view. One read of the row's own notes and the watchdog jobs table, so the three agree:
 // - held: the ask's current notification carries a quiet-hold note (or a release that was turned back because quiet
-//   came on again), and its window's quiet-release job is active. The job owns the continuation: it isn't stuck, it
+//   came on again), and its window's quiet-release job is active. The job owns what happens next: it isn't stuck, it
 //   isn't picked up, and the ladder leaves it alone;
 // - released: the release job dispatched it, its post hasn't landed yet, and the job is still live: waiting for transport;
 // - orphaned: held or released, but no active release job for its window: nothing will release or redrive it, so the
-//   sweep must find it.
+//   sweep must find it. The hold note and its job are written together, and the job retires only once every ask it
+//   holds is resolved, so this happens only when a job is stopped or terminated from outside.
 // An ask that has posted, or whose release gave it a disposition, isn't quiet custody any more (null), and neither is
-// any row without a quiet-hold note: digest-held and ordinary rows read exactly as before.
+// any row without a quiet-hold note: digest-held and ordinary rows read exactly as before, and so does an attempted
+// ask kept in the dispatch buffer because quiet hours couldn't be read (it has no hold; it is ordinary in-flight work).
 import type Database from "better-sqlite3";
 import { HumanQuietStore } from "./gateway/human-quiet-windows.js";
 

@@ -35,6 +35,7 @@ describe("custody of asks held for quiet hours", () => {
   let quiet: HumanQuietStore;
   let prefs: Record<string, unknown>;
   const posts: Array<Record<string, unknown>> = [];
+  let failPosts = false;
   const wires: Array<ReturnType<typeof buildSlackGatewayWire>> = [];
   const registry = () => ({ ok: true as const, entities: [{
     entityId: "person", class: "human" as const, displayName: "Person", address: "person@external", prefs,
@@ -49,6 +50,7 @@ describe("custody of asks held for quiet hours", () => {
     home = mkdtempSync(join(tmpdir(), "quiet-custody-"));
     quiet = new HumanQuietStore(db);
     posts.length = 0;
+    failPosts = false;
     const secrets = join(home, "slack.env");
     writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n", { mode: 0o600 });
     saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-OWNER", secretsEnvFile: secrets }, home);
@@ -60,6 +62,7 @@ describe("custody of asks held for quiet hours", () => {
       home, queueRepo: repo, registry: { loadHumanRegistry: registry as never, resolveSlackHandle }, outboundIntervalMs: 3_600_000,
       fetchImpl: async (url, init) => {
         if (String(url).includes("chat.postMessage")) {
+          if (failPosts) throw new Error("connector down before the post");
           posts.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
           return new Response(JSON.stringify({ ok: true, ts: `1724.${100 + posts.length}` }), { status: 200, headers: { "content-type": "application/json" } });
         }
@@ -115,7 +118,7 @@ describe("custody of asks held for quiet hours", () => {
     expect(ladderTouched(row)).toBe(false);
   });
 
-  it("a hold whose release job is gone is found, by the sweep and by the ladder", async () => {
+  it("a hold whose release job was stopped from outside (the only way one loses its job) is found, by the sweep and by the ladder", async () => {
     const row = await held();
     asBaton(row);
     new WatchdogJobsRepository(db).markTerminal(releaseJobs()[0]!.jobId, "test: the job went away");
@@ -194,6 +197,27 @@ describe("custody of asks held for quiet hours", () => {
     expect(posts).toHaveLength(1);
     expect(repo.waitingView(row.qitemId)!.nextBackstop).toMatchObject({ mechanism: "none (posted to the human; awaiting their decision)" });
     expect(findingFor(await sweep(), row)).toEqual([]);
+  });
+
+  it("an attempted ask kept in flight because quiet hours couldn't be read is neither held nor orphaned: it is ordinary in-flight work", async () => {
+    const row = await ask();
+    const w = wire();
+    failPosts = true; // attempted, nothing reached Slack
+    const alert = await alertFor(row);
+    w.dispatcher.dispatch(OUTBOUND_OP, alert.destinationSession!, toPayload(alert));
+    await settle();
+    failPosts = false;
+    quietOn();
+    w.stop();
+    const read = vi.spyOn(HumanQuietStore.prototype, "quietStateFor").mockImplementation(() => { throw new Error("disk I/O error (test)"); });
+    try {
+      wire(); // the replay can't decide, so the attempted decision stays buffered with no hold
+      await settle();
+    } finally { read.mockRestore(); }
+    expect(posts).toHaveLength(0);
+    expect(repo.listTransitions(row.qitemId).some((t) => (t.transitionNote ?? "").startsWith("delivery-decision: quiet-hold "))).toBe(false);
+    expect(quietHoldCustody(db, row.qitemId)).toBeNull();
+    expect(String((repo.waitingView(row.qitemId)!.nextBackstop as { note?: string }).note ?? "")).not.toMatch(/quiet hours/);
   });
 
   it("digest-held and ordinary unposted asks read exactly as before: aged, they are findings", async () => {
