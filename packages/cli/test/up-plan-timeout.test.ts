@@ -7,17 +7,26 @@ import { DaemonClient, DaemonTimeoutError } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
 
-const remote = vi.hoisted(() => ({ calls: [] as Array<{ path: string; timeoutMs?: number }> }));
+const PLANNED = { ok: true, failedStep: "none", data: { status: "planned", runId: "r", stages: [], errors: [], warnings: [] } };
+const remote = vi.hoisted(() => ({ calls: [] as Array<{ path: string; timeoutMs?: number }>, result: undefined as unknown }));
 vi.mock("../src/remote-host-ops.js", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
   return {
     ...actual,
     runRemoteHttpOp: vi.fn(async (_host: string, _method: string, path: string, _body: unknown, _deps: unknown, options?: { timeoutMs?: number }) => {
       remote.calls.push({ path, timeoutMs: options?.timeoutMs });
-      return { ok: true, data: { status: "planned", runId: "r", stages: [], errors: [], warnings: [] } };
+      return remote.result ?? PLANNED;
     }),
   };
 });
+
+// What runRemoteHttpOp returns when the remote daemon doesn't answer in time.
+const REMOTE_TIMEOUT = {
+  ok: false,
+  failedStep: "remote-outcome-unknown",
+  error: "Request to http://vps-a:7433/api/up timed out after 120000ms",
+  outcomeUnknown: true,
+};
 
 const { upCommand } = await import("../src/commands/up.js");
 
@@ -85,5 +94,47 @@ describe("rig up --plan and the daemon's time to answer", () => {
     expect(text).toContain("A plan doesn't create or change any rig or seat");
     expect(text).not.toContain("UNKNOWN");
     expect(exitCode).toBe(1);
+  });
+
+  it("a plan that times out reports no change in --json too", async () => {
+    const post = vi.fn(async () => { throw new DaemonTimeoutError("Request to http://127.0.0.1:7433/api/up timed out after 120000ms"); });
+    const { logs, exitCode } = await runUp(["/tmp/rig.yaml", "--plan", "--json"], post);
+    const out = JSON.parse(logs.find((l) => l.startsWith("{")) ?? "{}");
+    expect(out).toMatchObject({ ok: false, plan: true, changed: false });
+    expect(out.message).toContain("safe to run again");
+    expect(exitCode).toBe(1);
+  });
+
+  it("a plan on another host that times out says no rig or seat changed", async () => {
+    remote.result = REMOTE_TIMEOUT;
+    try {
+      const { logs, exitCode } = await runUp(["/tmp/rig.yaml", "--plan", "--host", "vps-a"], vi.fn());
+      const text = logs.join("\n");
+      expect(text).toContain("vps-a");
+      expect(text).toContain("A plan doesn't create or change any rig or seat");
+      expect(text).not.toMatch(/unknown/i);
+      expect(exitCode).toBe(1);
+
+      const json = await runUp(["/tmp/rig.yaml", "--plan", "--json", "--host", "vps-a"], vi.fn());
+      const out = JSON.parse(json.logs.find((l) => l.startsWith("{")) ?? "{}");
+      expect(out).toMatchObject({ ok: false, plan: true, changed: false });
+      expect(out.outcomeUnknown).toBeUndefined();
+      expect(json.exitCode).toBe(1);
+    } finally {
+      remote.result = undefined;
+    }
+  });
+
+  it("an apply on another host that times out keeps its unknown outcome", async () => {
+    remote.result = REMOTE_TIMEOUT;
+    try {
+      const { logs, exitCode } = await runUp(["/tmp/rig.yaml", "--json", "--host", "vps-a"], vi.fn());
+      const out = JSON.parse(logs.find((l) => l.startsWith("{")) ?? "{}");
+      expect(out.outcomeUnknown).toBe(true);
+      expect(out.changed).toBeUndefined();
+      expect(exitCode).toBe(1);
+    } finally {
+      remote.result = undefined;
+    }
   });
 });
