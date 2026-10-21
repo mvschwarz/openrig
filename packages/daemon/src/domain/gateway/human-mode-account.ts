@@ -10,8 +10,9 @@ const POSTED_RECEIPT = "slack-owner-notification-posted";
 
 export interface WaitingAsk {
   qitemId: string;
+  /** Null when the row isn't this person's any more: its current fields belong to someone else. */
   summary: string | null;
-  state: string;
+  state: string | null;
   /** valid: still for them. held: quiet hours are still on (it posts when they end). stale: slice 08's release reason.
    *  unclassified: what it depends on couldn't be read, so it's not called valid or stale. */
   standing: "valid" | "held" | "stale" | "unclassified";
@@ -106,7 +107,14 @@ async function waitingFor(input: Parameters<typeof modeAccount>[0], app: ModeApp
       continue;
     }
     const disposed = notes.find((n) => hasToken(n, DISPOSITION_PREFIX, hold.notificationKey));
-    if (disposed) { out.push({ ...ask, standing: "stale", reason: /reason=(\S+)/.exec(disposed)?.[1] ?? null }); continue; }
+    const disposedReason = disposed ? /reason=(\S+)/.exec(disposed)?.[1] ?? null : null;
+    if (!rowIsTheirs) {
+      // Held for them once, but the row is someone else's now (re-parked on another person, say): what it says now isn't
+      // theirs to read. Only that they had an ask held, set aside, stays.
+      out.push({ qitemId, summary: null, state: null, standing: "stale", reason: disposedReason ?? "recipient-changed" });
+      continue;
+    }
+    if (disposed) { out.push({ ...ask, standing: "stale", reason: disposedReason }); continue; }
     if (notes.some((n) => hasToken(n, POSTED_RECEIPT, hold.notificationKey))) {
       // Released and posted: still theirs while it's open; closed since, it isn't waiting.
       if (isBlockerLive(item.state)) out.push({ ...ask, standing: "valid", reason: null });

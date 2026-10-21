@@ -45,7 +45,7 @@ function fixture() {
   const hold = (qitemId: string) => repo.update({ qitemId, actorSession: "daemon@kernel",
     transitionNote: formatQuietHoldNote({ windowId: "w-1", occurrence: "until", revision: 1, notificationKey: `${qitemId}:1` }) });
   const account = (entityId: string, applicationId: string) => call("GET", `/api/gateway/human/${entityId}/mode/applications/${applicationId}/account`);
-  return { db, repo, call, ask, hold, account };
+  return { db, home, repo, call, ask, hold, account };
 }
 
 describe("the account's facts", () => {
@@ -106,5 +106,33 @@ describe("the account's facts", () => {
     await f.repo.update({ qitemId: samsAsk.qitemId, actorSession: "designer@rig", state: "done", closureReason: "no-follow-on" } as never);
     await f.call("POST", "/api/gateway/human/alex/mode/end", {});
     expect((await f.account("alex", app.applicationId)).body.account.waiting.map((w: { qitemId: string }) => w.qitemId)).toEqual([theirs.qitemId]);
+  });
+
+  it("an ask held for them that was re-parked on someone else shows none of its current text, and is never valid", async () => {
+    for (const ending of ["disposed", "posted"] as const) {
+      const f = fixture();
+      for (const id of ["human-alex", "human-sam"]) {
+        expect(addHumanFragment({ entityId: id, class: "human", displayName: id, address: `${id}@external`, prefs: { deliveryClass: "B" },
+          connectorBindings: [{ kind: "slack", connectorRef: "main", secretsRef: "vault://fixture", role: "primary", handle: `U-${id.toUpperCase()}` }] }, f.home).ok).toBe(true);
+      }
+      await f.call("PUT", "/api/gateway/human/human-alex/modes/asleep", { availability: "away" });
+      const applied = await f.call("POST", "/api/gateway/human/human-alex/modes/asleep/apply", {});
+      expect(applied.status, JSON.stringify(applied.body)).toBe(200);
+      const app = applied.body.application;
+      const work = await f.repo.create({ sourceSession: "designer@rig", destinationSession: "designer@rig", summary: "Alex: approve the layout",
+        body: "work", evidenceRef: "/proof/layout.md", nudge: false } as never) as QueueItem;
+      await f.repo.update({ qitemId: work.qitemId, actorSession: "designer@rig", state: "blocked", blockedOn: "human-alex@host", summary: "Alex: approve the layout" } as never);
+      const key = `${work.qitemId}:1`;
+      holdForQuiet({ queueRepo: f.repo, jobsRepo: new WatchdogJobsRepository(f.db), qitemId: work.qitemId, entityId: "human-alex",
+        hold: { windowId: "w-alex", occurrence: "until", revision: 1, notificationKey: key } });
+      await f.repo.update({ qitemId: work.qitemId, actorSession: "daemon@kernel", transitionNote: ending === "disposed"
+        ? `quiet-release-disposition window=w-alex notification_key=${key} reason=recipient-changed`
+        : `slack-owner-notification-posted notification_key=${key}` });
+      await f.repo.update({ qitemId: work.qitemId, actorSession: "designer@rig", state: "blocked", blockedOn: "human-sam@host", summary: "Sam: private salary review" } as never);
+      await f.call("POST", "/api/gateway/human/human-alex/mode/end", {});
+      const account = (await f.account("human-alex", app.applicationId)).body.account;
+      expect(JSON.stringify(account), ending).not.toContain("Sam: private salary review");
+      expect(account.waiting, ending).toEqual([{ qitemId: work.qitemId, summary: null, state: null, standing: "stale", reason: "recipient-changed" }]);
+    }
   });
 });
