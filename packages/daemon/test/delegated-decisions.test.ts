@@ -50,9 +50,14 @@ function fixture() {
     await call("PUT", `/api/gateway/human/${entityId}/modes/asleep`, { availability: "away", ...(withRoom ? { decisionRoom: room.words, exclusions: room.exclusions } : {}) });
     return (await call("POST", `/api/gateway/human/${entityId}/modes/asleep/apply`, {})).body.application as Record<string, any>;
   };
-  const decide = (qitemId: string, body: Record<string, unknown>, session = "designer@rig") =>
-    call("POST", `/api/queue/${qitemId}/delegated-decision`, body, session);
-  const choose = { choices: [{ questionId: "design", chosen: "a" }, { questionId: "ship", chosen: "yes" }], reason: "A is the recommended layout and it's ready", reversible: true };
+  // Decide as an asking agent does: read the room first and pass its application id, unless a test sets one (null: none).
+  const decide = async (qitemId: string, body: Record<string, unknown>, session = "designer@rig") => {
+    const read = (await call("GET", "/api/gateway/human/alex/decision-room")).body.decisionRoom?.applicationId ?? "no-room-read";
+    const { applicationId, ...rest } = body;
+    return call("POST", `/api/queue/${qitemId}/delegated-decision`,
+      { ...rest, ...(applicationId === null ? {} : { applicationId: applicationId || read }) }, session);
+  };
+  const choose = { applicationId: "", choices: [{ questionId: "design", chosen: "a" }, { questionId: "ship", chosen: "yes" }], reason: "A is the recommended layout and it's ready", reversible: true };
   return { db, repo, call, ask, modeOn, decide, choose };
 }
 
@@ -123,7 +128,7 @@ describe("refused: nothing is decided for the person", () => {
     expect(await f.decide(row.qitemId, f.choose)).toMatchObject({ status: 409, body: { error: "no-active-mode" } });
     // At the recorder itself, an application that isn't the asked person's is refused by name.
     const direct = f.repo.recordDelegatedDecision({ qitemId: row.qitemId, actorSession: "designer@rig", choices: f.choose.choices, reason: "x", reversible: true,
-      currentApplication: () => ({ applicationId: "app-sam", entityId: "sam", modeName: "asleep", decisionRoom: room }) });
+      expectedApplicationId: "app-sam", currentApplication: () => ({ applicationId: "app-sam", entityId: "sam", modeName: "asleep", decisionRoom: room }) });
     expect(direct).toMatchObject({ status: "refused", reason: "not-the-persons-mode" });
   });
 
@@ -141,9 +146,29 @@ describe("refused: nothing is decided for the person", () => {
     const row = await f.ask();
     let reads = 0;
     const result = f.repo.recordDelegatedDecision({ qitemId: row.qitemId, actorSession: "designer@rig", choices: f.choose.choices, reason: "x", reversible: true,
-      currentApplication: (entityId) => { reads++; expect(entityId).toBe("alex"); return null; } }); // ended just before
+      expectedApplicationId: "app-gone", currentApplication: (entityId) => { reads++; expect(entityId).toBe("alex"); return null; } }); // ended just before
     expect(result).toMatchObject({ status: "refused", reason: "no-active-mode" });
     expect(reads).toBe(1);
+  });
+
+  it("when their mode changed since the room was read: the decision isn't recorded under a room it wasn't judged against", async () => {
+    const f = fixture();
+    await f.modeOn("alex", true);
+    const read = (await f.call("GET", "/api/gateway/human/alex/decision-room")).body.decisionRoom.applicationId as string;
+    await f.call("PUT", "/api/gateway/human/alex/modes/out-of-office", { availability: "off", decisionRoom: "anything at all" });
+    await f.call("POST", "/api/gateway/human/alex/modes/out-of-office/apply", {}); // a switch, to another mode with a room
+    const row = await f.ask();
+    expect(await f.decide(row.qitemId, { ...f.choose, applicationId: read })).toMatchObject({ status: 409,
+      body: { error: "mode-changed", message: "their mode changed since you read the room; read it again" } });
+    expect(f.repo.getById(row.qitemId)).toMatchObject({ state: "pending", delegatedDecision: null });
+  });
+
+  it("without the application id from reading the room: 400", async () => {
+    const f = fixture();
+    await f.modeOn("alex", true);
+    const row = await f.ask();
+    expect(await f.decide(row.qitemId, { ...f.choose, applicationId: null })).toMatchObject({ status: 400, body: { error: "application_required" } });
+    expect(f.repo.getById(row.qitemId)).toMatchObject({ state: "pending", delegatedDecision: null });
   });
 
   it("by an agent other than the one that asked, or with an option that isn't offered", async () => {

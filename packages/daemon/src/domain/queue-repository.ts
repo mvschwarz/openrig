@@ -166,7 +166,7 @@ export interface DelegatedDecision {
 export type RecordDelegatedDecisionResult =
   | { status: "recorded"; item: QueueItem }
   | { status: "refused"; reason: "schema" | "not-found" | "not-pending" | "not-a-decision" | "permission-prompt" | "not-the-asking-agent"
-      | "no-active-mode" | "no-decision-room" | "not-the-persons-mode" | "invalid-choice"; message: string };
+      | "no-active-mode" | "mode-changed" | "no-decision-room" | "not-the-persons-mode" | "invalid-choice"; message: string };
 
 export interface QueueItem {
   qitemId: string;
@@ -3469,6 +3469,8 @@ export class QueueRepository {
   recordDelegatedDecision(input: {
     qitemId: string;
     actorSession: string;
+    /** The application whose room the agent judged against (from reading the room); a different current one is refused. */
+    expectedApplicationId: string;
     /** The person's active mode application, read inside this transaction (null: at desk). */
     currentApplication: (entityId: string) => { applicationId: string; entityId: string; modeName: string; decisionRoom: { words: string; exclusions: string[] } | null } | null;
     choices: Array<{ questionId?: string | null; chosen: string }>;
@@ -3496,6 +3498,9 @@ export class QueueRepository {
       if (!app) return refuse("no-active-mode", `${person.local} has no mode on, so nothing can be decided for them`);
       if (app.entityId !== person.local) return refuse("not-the-persons-mode", `that mode is ${app.entityId}'s, not ${person.local}'s`);
       if (!app.decisionRoom) return refuse("no-decision-room", `${person.local}'s ${app.modeName} has no decision room, so nothing can be decided for them`);
+      if (app.applicationId !== input.expectedApplicationId) {
+        return refuse("mode-changed", "their mode changed since you read the room; read it again");
+      }
       if (!input.reason.trim()) return refuse("invalid-choice", "say why this choice was made");
       let choices: DelegatedDecision["choices"];
       const questions = item.humanQuestions ?? [];

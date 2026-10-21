@@ -856,9 +856,12 @@ export function queueRoutes(): Hono {
   // asked, on the ask's own row, beside the person's answers and never as one; refused when there's no room to decide in.
   app.post("/:qitemId/delegated-decision", async (c) => {
     const qitemId = c.req.param("qitemId");
-    const body = await c.req.json<{ choices?: unknown; reason?: unknown; reversible?: unknown; actor?: string }>().catch(() => ({} as never));
+    const body = await c.req.json<{ applicationId?: unknown; choices?: unknown; reason?: unknown; reversible?: unknown; actor?: string }>().catch(() => ({} as never));
     const identity = requireSenderIdentity(c, { verb: "record a delegated decision", bodyClaim: body.actor ?? null });
     if (!identity.ok) return identity.response;
+    if (typeof body.applicationId !== "string" || !body.applicationId.trim()) {
+      return c.json({ error: "application_required", message: "pass the applicationId from reading the person's decision room, so the decision is judged against that room" }, 400);
+    }
     if (typeof body.reversible !== "boolean") {
       return c.json({ error: "reversible_required", message: "say whether this decision can be undone (reversible: true or false)" }, 400);
     }
@@ -871,6 +874,7 @@ export function queueRoutes(): Hono {
     const result = repo.recordDelegatedDecision({
       qitemId,
       actorSession: identity.session,
+      expectedApplicationId: body.applicationId.trim(),
       // Read inside the recorder's transaction, so a mode ending meanwhile can't have a decision recorded under it.
       currentApplication: (entityId) => {
         const current = modes?.current(entityId);
