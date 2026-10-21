@@ -91,7 +91,7 @@ These ship in the OpenRig repo and reach a seat when its profile selects them. T
 Pod handbooks (load when you're in that pod):
 - **orchestration-team** — you're orchestrating a rig: dispatching, monitoring, keeping the loop moving.
 - **development-team** — you're on the dev pod: building and shipping product changes.
-- **review-team** — you're reviewing: fresh scrutiny, anti-slop, empirical verification.
+- **review-team** — you're reviewing: fresh scrutiny, anti-slop, grounded findings.
 - **oversight-team** — you're in an oversight pod: monitor boundaries and route findings without taking over the work.
 
 Product-management craft (load when shaping/reviewing work):
