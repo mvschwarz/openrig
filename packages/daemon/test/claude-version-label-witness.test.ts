@@ -138,7 +138,8 @@ describe("#86 results that don't change", () => {
   });
 
   it("a shell label over an idle shell stays a return to the shell", async () => {
-    const shellAlone = () => rows().slice(0, 1);
+    // Claude has exited: the pane's shell leads the foreground group again, with nothing else in it.
+    const shellAlone = () => [{ ...rows()[0], tpgid: 10 }];
     expect(await adapter(mockTmux("zsh"), shellAlone).checkReady(binding())).toMatchObject({ ready: false, code: "returned_to_shell" });
   });
 
