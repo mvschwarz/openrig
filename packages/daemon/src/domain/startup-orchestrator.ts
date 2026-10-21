@@ -18,7 +18,7 @@ import { AppliedLaunchObservationStore } from "./applied-launch-observation-stor
 import { NativePermissionStore } from "./native-permission-store.js";
 import { RigRepository } from "./rig-repository.js";
 import { SessionTransport, inspectStartupStagedText } from "./session-transport.js";
-import { startupOwnCollapsedPaste, startupSubmissionEvidence, type StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
+import { claudeInputBoxDrawn, startupNoInputLine, startupOwnCollapsedPaste, startupSubmissionEvidence, type StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 import { resolveReadinessTimeoutMs } from "./readiness-timeout.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
@@ -1030,6 +1030,7 @@ export class StartupOrchestrator {
     const tmuxSession = input.binding.tmuxSession!;
     input.lastSubmissionConfirmed = false;
     input.lastSubmissionUnconfirmedReason = undefined;
+    if (input.adapter.runtime === "claude-code" && sendOrder === 1 && !input.isRestore) await this.awaitClaudeInputBox(input.binding.tmuxPane);
     const textResult = await this.tmuxAdapter.sendText(tmuxSession, text);
     if (!textResult.ok) {
       return { error: (textResult as { message?: string }).message ?? "unknown" };
@@ -1121,16 +1122,34 @@ export class StartupOrchestrator {
   }
 
   /**
-   * Claude can take the startup Enter after the first look while the composer still shows our paste collapsed.
-   * Only that transient is looked at again, until the composer reads clear or staged, shows anything else, or
-   * the looks run out. A draft, ghost text or any other mismatch keeps its first-look verdict. Observation only.
+   * A fresh launch can read ready before Claude has drawn its input box: on Linux the pane names `claude` the moment
+   * Claude starts, and startup text pasted then sat unsent. Before a fresh start's first send, look at the visible
+   * screen until the input box the startup check reads is drawn, at most STARTUP_SUBMIT_SETTLE_LOOKS looks 200 ms
+   * apart. A screen that never shows one within that, or can't be read, is sent to as before. Observation only.
+   */
+  private async awaitClaudeInputBox(pane: string | null | undefined): Promise<void> {
+    if (!pane) return;
+    for (let look = 0; look < STARTUP_SUBMIT_SETTLE_LOOKS; look++) {
+      let screen: string | null;
+      try { screen = await this.tmuxAdapter.capturePaneScreen(pane); } catch { return; }
+      if (screen === null || claudeInputBoxDrawn(screen)) return;
+      await this.sleep(200);
+    }
+  }
+
+  /**
+   * Claude can take the startup Enter after the first look while the composer still shows our paste collapsed, and a
+   * fresh Claude can still be drawing its screen, with no input line at all, when the first look comes. Only those
+   * two transients are looked at again, until the composer reads clear or staged, shows anything else, or the looks
+   * run out. A draft, ghost text, a dialog or any other mismatch keeps its verdict. Observation only.
    * Remaining ambiguity: a person who clears a collapsed paste with the same line count inside the window reads
    * as submitted.
    */
   private async settleOwnPaste(tmuxSession: string, pane: string, text: string, runtime: string | null): Promise<{ pane: string; state: ReturnType<typeof inspectStartupStagedText>; looks: number }> {
     let state = inspectStartupStagedText(pane, text, runtime);
     let looks = 0;
-    while (state === "unverified" && looks < STARTUP_SUBMIT_SETTLE_LOOKS && startupOwnCollapsedPaste(pane, text, runtime)) {
+    while (state === "unverified" && looks < STARTUP_SUBMIT_SETTLE_LOOKS
+      && (startupOwnCollapsedPaste(pane, text, runtime) || startupNoInputLine(pane, runtime))) {
       await this.sleep(200);
       // A failed re-look adds nothing; the last usable observation stands.
       const next = await this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES).catch(() => null);

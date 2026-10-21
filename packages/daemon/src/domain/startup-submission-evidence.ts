@@ -46,6 +46,17 @@ export function composerRegion(pane: string | null, runtime: string | null = nul
     closingRuleLine: end < 0 ? null : end + 1, capturedLines: pane === null ? 0 : lines.length };
 }
 
+/** Whether Claude's input box is drawn: its input line, then a closing rule with the composer footer under it. */
+export function claudeInputBoxDrawn(pane: string | null): boolean {
+  const { markerLine, closingRuleLine } = composerRegion(pane, "claude-code");
+  return markerLine !== null && closingRuleLine !== null;
+}
+
+/** Whether a screen has no input line at all, as while Claude is still drawing it: not a draft and not a dialog. */
+export function startupNoInputLine(pane: string | null, runtime: string | null = null): boolean {
+  return Boolean(pane?.trim()) && composerRegion(pane, runtime).markerLine === null;
+}
+
 /** An echoed turn or a partial/opaque composer stays unverified. */
 export function inspectStartupStagedText(pane: string | null, expected: string, runtime: string | null = null): "staged" | "clear" | "unverified" {
   const { body } = composerRegion(pane, runtime);
