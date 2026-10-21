@@ -765,9 +765,10 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
         if (hasPickupEvidence(deps.db, row)) continue;
       }
       // An ask held for quiet hours (or released and waiting for its post) belongs to its window's release job, which
-      // posts it when quiet ends; escalating it would post to the person during quiet. An orphaned hold isn't owned.
+      // posts it when quiet ends; escalating it would post to the person during quiet. An orphaned hold isn't owned, and
+      // a release whose post failed is an ordinary failed delivery.
       const quiet = quietHoldCustody(deps.db, row.qitemId, now);
-      if (quiet && quiet.state !== "orphaned") continue;
+      if (quiet && (quiet.state === "held" || quiet.state === "released")) continue;
       activeLadders += 1;
 
       // Due-ness: the latest ladder marker (or the original nudge attempt) is older than

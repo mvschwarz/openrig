@@ -45,7 +45,7 @@ export function parseQuietHoldNote(note: string): QuietHold | null {
   return m ? { windowId: m[1]!, occurrence: m[2]!, revision: Number(m[3]), notificationKey: m[4]! } : null;
 }
 
-const hasToken = (note: string, prefix: string, key: string): boolean =>
+export const hasToken = (note: string, prefix: string, key: string): boolean =>
   note.startsWith(`${prefix} `) && note.split(/\s+/).includes(`notification_key=${key}`);
 
 /** Record a held ask on its row (once per episode) and make sure its window's release job is armed: one SQLite
@@ -73,10 +73,13 @@ function noteWithReleaseJob(queueRepo: QueueRepository, jobsRepo: WatchdogJobsRe
   queueRepo.notifyCommitted(events);
 }
 
+/** How a release job's spec names its window: the job lookup here and custody's read both match on it. */
+export const releaseJobWindowSpec = (windowId: string): string => `windowId: "${windowId}"`;
+
 /** One active release job per quiet window; an existing one is reused. */
 export function armQuietRelease(input: { jobsRepo: WatchdogJobsRepository; windowId: string; entityId: string }): { jobId: string } {
   const existing = input.jobsRepo.listActive().find(
-    (j) => j.policy === QUIET_RELEASE_POLICY && j.specYaml.includes(`windowId: "${input.windowId}"`));
+    (j) => j.policy === QUIET_RELEASE_POLICY && j.specYaml.includes(releaseJobWindowSpec(input.windowId)));
   if (existing) return { jobId: existing.jobId };
   const job = input.jobsRepo.register({
     policy: QUIET_RELEASE_POLICY,
@@ -215,7 +218,10 @@ export async function runQuietRelease(input: RunQuietReleaseInput): Promise<{ st
     if (verdict.kind === "post") {
       open++;
       const res = input.dispatch(OUTBOUND_OP, verdict.alert.destinationSession!, { ...toPayload(verdict.alert), quietRelease: true }, { decisionId: `quiet-release:${key}` });
-      if (res.ok && !notes.some((n) => hasToken(n, DISPATCHED_PREFIX, key))) {
+      // One dispatched note per release: a release turned back by quiet and dispatched again records it again, so the
+      // row shows transport owning the wait; repeat passes over the same release write nothing.
+      const lastStep = [...notes].reverse().find((n) => hasToken(n, DISPATCHED_PREFIX, key) || hasToken(n, RETURNED_PREFIX, key));
+      if (res.ok && !lastStep?.startsWith(`${DISPATCHED_PREFIX} `)) {
         released++;
         input.queueRepo.update({ qitemId, actorSession: "daemon@kernel", transitionNote: `${DISPATCHED_PREFIX} window=${windowId} notification_key=${key}` });
       }

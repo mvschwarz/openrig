@@ -170,6 +170,32 @@ describe("holding and releasing through the gateway", () => {
     } finally { w.stop(); }
   });
 
+  it("review J3: a row parked on the person and held for quiet shows its quiet custody; the blocker and its own timer stay", async () => {
+    quietNow();
+    const row = await park();
+    repo.update({ qitemId: row.qitemId, actorSession: "orch-lead@r", state: "blocked", blockedOn: `${HUMAN}@kernel`, wakeAfterSeconds: 7200,
+      transitionNote: "parked with a reminder" } as never);
+    const alert = await alertFor(row);
+    const w = wire();
+    try {
+      w.startServices?.();
+      w.dispatcher.dispatch(OUTBOUND_OP, alert.destinationSession!, alert);
+      await settle();
+      expect(posts).toHaveLength(0);
+      let view = repo.waitingView(row.qitemId)!;
+      expect(view.blocker).toMatchObject({ ref: `${HUMAN}@kernel` });
+      expect(view.nextBackstop).toMatchObject({ mechanism: expect.stringMatching(/^quiet-release:/), note: expect.stringMatching(/^Held by quiet hours until /) });
+      expect(view.laterBackstop?.mechanism, "the row's own reminder is kept").toMatch(/^watchdog:/);
+      quiet.end(HUMAN, { endedBy: "test", now: new Date() });
+      const [job] = releaseJobs();
+      await runQuietRelease({ queueRepo: repo, jobsRepo: new WatchdogJobsRepository(db), home, jobId: job!.jobId,
+        registry: { loadHumanRegistry: () => registryWith(prefs) }, dispatch: () => ({ ok: true }) }); // dispatched; the post not yet made
+      view = repo.waitingView(row.qitemId)!;
+      expect(view.nextBackstop).toMatchObject({ note: expect.stringMatching(/waiting for transport/) });
+      expect(view.blocker).toMatchObject({ ref: `${HUMAN}@kernel` });
+    } finally { w.stop(); }
+  });
+
   it("during quiet an urgent ask posts at once", async () => {
     quietNow();
     const row = await park({ tags: ["escalation"] });

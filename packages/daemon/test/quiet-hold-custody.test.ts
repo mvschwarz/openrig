@@ -23,7 +23,7 @@ import { HumanQuietStore } from "../src/domain/gateway/human-quiet-windows.js";
 import { confirmReleaseAtPost, QUIET_RELEASE_POLICY, runQuietRelease } from "../src/domain/policies/quiet-release.js";
 import { runStuckSweep } from "../src/domain/queue-stuck-sweep.js";
 import { runWakeLadderTick } from "../src/domain/queue-wake-ladder.js";
-import { quietHoldCustody } from "../src/domain/quiet-hold-custody.js";
+import { quietCustodyBackstop, quietHoldCustody } from "../src/domain/quiet-hold-custody.js";
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 60));
 const LATER = () => new Date(Date.now() + 2 * 3_600_000); // past every age and window threshold below
@@ -187,6 +187,12 @@ describe("custody of asks held for quiet hours", () => {
       entityId: "person", qitemId: row.qitemId, notificationKey: alert.notificationKey ?? row.qitemId })).toBe("declined");
     expect(findingFor(await sweep(), row)).toEqual([]);
     expect(String((repo.waitingView(row.qitemId)!.nextBackstop as { note?: string }).note)).toMatch(/^Held by quiet hours/);
+    // Review J2: quiet ends again and the job dispatches the same release again, its post withheld: transport owns it.
+    quiet.end("person", { endedBy: "t", now: new Date() });
+    await runQuietRelease({ queueRepo: repo, jobsRepo: new WatchdogJobsRepository(db), home, jobId: job!.jobId,
+      registry: { loadHumanRegistry: registry as never }, dispatch: () => ({ ok: true }) });
+    expect(quietHoldCustody(db, row.qitemId)).toMatchObject({ state: "released" });
+    expect(repo.waitingView(row.qitemId)!.nextBackstop).toMatchObject({ note: expect.stringMatching(/waiting for transport/) });
   });
 
   it("after release and its receipt, the row reads as any posted ask", async () => {
@@ -237,8 +243,9 @@ describe("custody of asks held for quiet hours", () => {
     expect(findingFor(await sweep(), row)).toEqual([]);
   });
 
-  it("QA F1: a released ask whose post the connector rejected waits on its live release job: no undelivered-wake finding", async () => {
+  it("review J1: a released ask whose post the connector refused is one failed-delivery finding, named in the view; the ladder takes it up", async () => {
     const row = await held();
+    asBaton(row);
     quiet.end("person", { endedBy: "t", now: new Date() });
     rejectPosts = true;
     const w = wires[0]!;
@@ -247,9 +254,14 @@ describe("custody of asks held for quiet hours", () => {
       registry: { loadHumanRegistry: registry as never }, dispatch: (op, ref, payload, opts) => w.dispatcher.dispatch(op, ref, payload, opts as never) });
     await settle();
     expect(posts).toHaveLength(1); // the connector saw it, and refused it
-    expect(repo.findUndelivered().some((u) => u.qitemId === row.qitemId), "the ledger reads it as a failed delivery").toBe(true);
-    expect(quietHoldCustody(db, row.qitemId)).toMatchObject({ state: "released" });
-    expect(findingFor(await sweep(), row)).toEqual([]);
+    expect(quietHoldCustody(db, row.qitemId)).toMatchObject({ state: "release-failed", failure: expect.any(String) });
+    expect(String((repo.waitingView(row.qitemId)!.nextBackstop as { note?: string }).note)).toMatch(/^Released when quiet ended, but its post failed \(/);
+    const r = await sweep();
+    expect(findingFor(r, row)).toHaveLength(1);
+    expect(undeliveredFor(r, row)).toHaveLength(1);
+    expect(findingWhy(row)).toMatch(/released after quiet hours; its post failed \(.+\); the release stays queued for redelivery/);
+    await ladder();
+    expect(ladderTouched(row), "a failed release is an ordinary failed delivery to the ladder").toBe(true);
   });
 
   it("QA F1: a release turned back by quiet, with a failed wake, gives no undelivered-wake finding", async () => {
@@ -295,6 +307,28 @@ describe("custody of asks held for quiet hours", () => {
     const r = await sweep();
     expect(undeliveredFor(r, row)).toHaveLength(1);
     expect(findingWhy(row)).toMatch(/^.*wake failed \(failed: wake not delivered \(test\)\) and nothing retried it/s);
+  });
+
+  it("review J4: once a daily window has ended, a held ask isn't promised tomorrow's start: the job posts it at its next pass", async () => {
+    const hhmm = (ms: number) => new Date(ms).toISOString().slice(11, 16);
+    const now = Date.now();
+    quiet.setDaily("person", { start: hhmm(now - 3_600_000), end: hhmm(now + 3_600_000), timezone: "UTC", setBy: "t", now: new Date() });
+    const row = await ask();
+    const w = wire();
+    const alert = await alertFor(row);
+    w.dispatcher.dispatch(OUTBOUND_OP, alert.destinationSession!, toPayload(alert));
+    await settle();
+    expect(quietHoldCustody(db, row.qitemId)).toMatchObject({ state: "held", nextBoundary: expect.any(String) });
+    quiet.end("person", { endedBy: "t", now: new Date() }); // "I'm back": tonight's occurrence ends; the job hasn't run yet
+    expect(quiet.quietStateFor("person", new Date()).nextBoundary).toMatchObject({ kind: "start" });
+    expect(quietHoldCustody(db, row.qitemId)).toMatchObject({ state: "held", nextBoundary: null, quietOver: true });
+    expect(repo.waitingView(row.qitemId)!.nextBackstop).toMatchObject({ dueAt: null,
+      note: "Quiet hours have ended; the window's release job posts it at its next pass." });
+  });
+
+  it("review N2: custody that can't be read is worded as treated as held, not as a delivery promise", () => {
+    expect(quietCustodyBackstop("o@r", { state: "held", windowId: "unknown", notificationKey: "k", nextBoundary: null, unreadable: true }))
+      .toMatchObject({ dueAt: null, note: expect.stringMatching(/^Quiet-hours custody couldn't be read; the ask is treated as held for now/) });
   });
 
   it("digest-held and ordinary unposted asks read exactly as before: aged, they are findings", async () => {

@@ -1,5 +1,5 @@
 import { readWakeLadderBackstop } from "./queue-wake-ladder.js";
-import { quietHoldCustody } from "./quiet-hold-custody.js";
+import { quietCustodyBackstop, quietHoldCustody } from "./quiet-hold-custody.js";
 import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import type { EventBus } from "./event-bus.js";
@@ -4376,19 +4376,24 @@ export class QueueRepository {
         view.nextBackstop = { owner: view.owner, mechanism: "none (posted to the human; awaiting their decision)", dueAt: null, intervalSeconds: null };
       }
       // Quiet hours: a held ask is owned by its window's release job until it posts.
-      const quiet = awaitingHuman ? null : quietHoldCustody(this.db, qitemId);
-      if (quiet && quiet.state !== "orphaned") {
-        view.nextBackstop = quiet.state === "held"
-          ? { owner: view.owner, mechanism: `quiet-release:${quiet.windowId}`, dueAt: quiet.nextBoundary, intervalSeconds: 60,
-            note: `Held by quiet hours${quiet.nextBoundary ? ` until ${quiet.nextBoundary}` : ""}; the window's release job posts it when quiet ends.` }
-          : { owner: view.owner, mechanism: `quiet-release:${quiet.windowId}`, dueAt: null, intervalSeconds: null,
-            note: "Released when quiet ended; waiting for transport (the post)." };
+      const quiet = awaitingHuman ? null : quietCustodyBackstop(view.owner, quietHoldCustody(this.db, qitemId));
+      if (quiet) {
+        view.nextBackstop = quiet;
         return view;
       }
       const recovery = readWakeLadderBackstop(this.db, qitemId);
       if (recovery) {
         if (!awaitingHuman) view.laterBackstop = { ...view.nextBackstop, note: "Conditional safety net; current delivery/recovery ownership is evaluated first." };
         view.nextBackstop = recovery;
+      }
+    }
+    if (view?.state === "blocked") {
+      // A row parked on a person carries that person's notification, which quiet hours can hold. Its quiet custody is the
+      // next step; the row's blocker is unchanged, and its own timer or wait notice stays as the later backstop.
+      const quiet = quietCustodyBackstop(view.owner, quietHoldCustody(this.db, qitemId));
+      if (quiet) {
+        if (/^(watchdog:|unconsumed wait notice)/.test(view.nextBackstop.mechanism)) view.laterBackstop = view.nextBackstop;
+        view.nextBackstop = quiet;
       }
     }
     return view;

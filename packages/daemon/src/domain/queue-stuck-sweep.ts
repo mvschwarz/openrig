@@ -445,10 +445,11 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     for (const row of deps.queueRepo.findUndelivered()) {
       if (isFindingRow(row)) continue;
       if (hasLiveLadder(deps.db, row.qitemId)) continue;
-      // Quiet hours: a held, turned-back or released ask belongs to its window's release job, which redrives it, so a
-      // failed wake or post isn't "nothing retried it". A hold with no live release job is still a finding.
+      // Quiet hours: a held, turned-back or released ask belongs to its window's release job, so a failed wake, or a post
+      // not yet made, isn't "nothing retried it". A release whose post failed is a failed delivery, and a hold with no
+      // live release job is orphaned: both stay findings, with their own reason.
       const quiet = quietHoldCustody(deps.db, row.qitemId, now);
-      if (quiet && quiet.state !== "orphaned") continue;
+      if (quiet && (quiet.state === "held" || quiet.state === "released")) continue;
       candidates.push({
         kind: "undelivered-wake",
         row,
@@ -457,7 +458,9 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         evidenceAt: latestIso(row.tsUpdated, row.lastNudgeAttempt),
         why: quiet?.state === "orphaned"
           ? `held for quiet hours (window ${quiet.windowId}), but no release job is live for that window: nothing will release it (its wake failed: ${row.lastNudgeResult ?? row.deliveryFailureClass ?? "failed"})`
-          : `wake failed (${row.lastNudgeResult ?? "failed"}) and nothing retried it`,
+          : quiet?.state === "release-failed"
+            ? `released after quiet hours; its post failed (${quiet.failure}); the release stays queued for redelivery`
+            : `wake failed (${row.lastNudgeResult ?? "failed"}) and nothing retried it`,
       });
     }
 
@@ -486,7 +489,8 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       // legacy and non-human rows keep this net.
       if (deps.queueRepo.humanNotificationPostedThisEpisode(row.qitemId)) continue;
       // Quiet hours: a held ask whose window's release job is live waits on that job, and one already released waits on
-      // its post; neither is stuck. A hold with no live release job is: nothing will ever release it.
+      // its post; neither is stuck. A release whose post failed is reported once, by the undelivered-wake loop above. A
+      // hold with no live release job is stuck: nothing will ever release it.
       const quiet = quietHoldCustody(deps.db, row.qitemId, now);
       if (quiet && quiet.state !== "orphaned") continue;
       candidates.push({
