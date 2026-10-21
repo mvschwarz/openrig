@@ -280,11 +280,13 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
 
     // Only render before reconciliation when comparing a known rejection. Other
     // attempts still reconcile first, including a landed message that no longer renders (#899).
-    let rendered: ReturnType<typeof buildOutboundMessage> | undefined;
-    const render = () => {
-      if (rendered) return rendered;
+    // A rejection is recorded against the plain render, so a repeat note can't make a rejected payload look new.
+    const renders = new Map<boolean, ReturnType<typeof buildOutboundMessage>>();
+    const render = (possibleRepeat = false) => {
+      const cached = renders.get(possibleRepeat);
+      if (cached) return cached;
       const { mediaRefs, evidenceLink } = evidenceAttachment(q.media, q.evidenceRef, q.summary);
-      return rendered = buildOutboundMessage(
+      const built = buildOutboundMessage(
         {
           qitemId: q.qitemId ?? decision.decisionId,
           ownerNotificationKind: q.ownerNotificationKind,
@@ -310,10 +312,13 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
           // fix-r3 — the reconcile identity, reserved outside the clamp budget (same function
           // the scan above matches: one identity, same bytes, both sides).
           reconcileMarker: reconcileToken(decision.decisionId),
+          possibleRepeat,
         },
       );
+      renders.set(possibleRepeat, built);
+      return built;
     };
-    const postInput = () => ({ channel, text: render().text, blocks: render().blocks, thread_ts: threadTs });
+    const postInput = (possibleRepeat = false) => ({ channel, text: render(possibleRepeat).text, blocks: render(possibleRepeat).blocks, thread_ts: threadTs });
     const payloadHash = () => createHash("sha256").update(JSON.stringify(postInput())).digest("hex");
     const failurePrefix = `${decision.decisionId}${TRANSPORT_FAILURE_RECEIPT_PREFIX}`;
     const hasRejection = [...attempted.keys()].some((key) => {
@@ -341,9 +346,9 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     // H — RECONCILE-BY-MARKER before any RESEND: if this decision was attempted before, the
     // prior outcome is ambiguous (a timeout may have posted). Search where the message would
     // live (the thread, else channel history) for the message's STRUCTURAL identity; FOUND →
-    // already delivered, record + ack, never repost. An initial unreadable request
-    // retains the decision. A partial scan warns and keeps main's at-least-once
-    // retry trade-off rather than indefinitely stranding a human notification.
+    // already delivered, record + ack, never repost. A scan that can't be read, or reads
+    // only part of the history, is not proof either way: it warns and posts once
+    // (at least once) rather than indefinitely stranding a human notification.
     // fix-r3 (R2 exactly-once): the identity is reconcileToken(decisionId) — a bounded,
     // decision-scoped token the renderer reserves OUTSIDE the clamp budget, so it is
     // GUARANTEED present in the scanned top-level text at any ordinary length, and ordinary
@@ -351,12 +356,9 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     // decisionId in a delimited form). Producer and scanner call the same function: one
     // identity, same bytes, both sides.
     const marker = reconcileToken(decision.decisionId);
+    let possibleRepeat = false;
     if (attempted.has(decision.decisionId)) {
       const scan = await fetchRecentMessageTexts(opts.botToken, channel, threadTs, opts.fetchImpl, undefined, undefined, marker);
-      if (!scan.ok) {
-        log(`reconcile scan failed for ${decision.decisionId} (${scan.error}) — retained, no blind repost`);
-        return { ok: false, class: "reconcile-unreadable", detail: scan.error };
-      }
       const matched = scan.messages.find((m) => m.text.includes(marker));
       if (matched) {
         log(`reconcile: marker "${marker}" FOUND at ts=${matched.ts || "(missing)"} — prior ambiguous post landed; ack without repost`);
@@ -391,8 +393,10 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
         }
         return { ok: true };
       }
-      if (scan.incomplete) {
-        log(`reconcile WARNING: incomplete scan for ${decision.decisionId}: ${scan.incomplete} — marker not located; attempting one post`);
+      const incomplete = scan.ok ? scan.incomplete : scan.error ?? "reconcile scan failed";
+      if (incomplete) {
+        log(`reconcile WARNING: incomplete scan for ${decision.decisionId}: ${incomplete} — marker not located; attempting one post`);
+        possibleRepeat = true;
       } else {
         log(`reconcile: marker "${marker}" absent — safe to send`);
       }
@@ -400,7 +404,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
 
     if (rejected()) return reject();
 
-    const input = postInput();
+    const input = postInput(possibleRepeat);
     // Marked ATTEMPTED durably BEFORE the post: from here any outcome is ambiguous until 2xx.
     opts.attempted.mark(decision.decisionId, "attempted");
     if (hasRejection) {
@@ -542,10 +546,10 @@ function recordedPlan(attempted: Set<string>, decisionId: string): DeliveryPlan 
 
 /** Whether an ask's first message can already be in Slack; later parts post only after it lands. It can be if
  *  it was delivered or its receipt was kept, or if it was attempted and a scan finds its marker or reads only
- *  part of the history. An unreadable scan is reported, so the caller retains the ask instead of guessing. */
+ *  part of the history or can't be read at all. */
 async function firstMessageMayHaveLanded(
   opts: SubsystemSlackDeliveryOpts, q: DeliveryPart, decisionId: string, firstId: string,
-): Promise<"found" | "maybe" | "absent" | { unreadable: string }> {
+): Promise<"found" | "maybe" | "absent"> {
   if (opts.delivered.load().has(firstId)) return "found";
   const attempted = opts.attempted.load();
   if ([...attempted.keys()].some((key) => key.startsWith(`${decisionId}::primary-receipt::`))) return "found";
@@ -556,9 +560,8 @@ async function firstMessageMayHaveLanded(
   // channel's thread. With no map this is the default channel, as before.
   const channel = firstAttemptChannel(opts, attempted, firstId) ?? opts.resolveChannel?.(q) ?? opts.channel;
   const scan = await fetchRecentMessageTexts(opts.botToken, channel, opts.resolveThreadTs?.(q, channel), opts.fetchImpl, undefined, undefined, marker);
-  if (!scan.ok) return { unreadable: scan.error ?? "reconcile scan failed" };
   if (scan.messages.some((m) => m.text.includes(marker))) return "found";
-  return scan.incomplete ? "maybe" : "absent";
+  return !scan.ok || scan.incomplete ? "maybe" : "absent";
 }
 
 /** The pieces splitForSlack cut, replayed from their recorded lengths; undefined if they no longer add up. */
@@ -633,7 +636,7 @@ function splitIntoParts(opts: SubsystemSlackDeliveryOpts, q: DeliveryPart, decis
  *  rather than sent again in another form. `found` means the whole post: for a post split into parts, a found first
  *  part with the post not yet recorded complete is `partial` (later parts may still be missing). */
 export async function deliveryLanding(opts: SubsystemSlackDeliveryOpts, decision: OutboundDecision):
-  Promise<"unattempted" | "found" | "partial" | "maybe" | "absent" | { unreadable: string }> {
+  Promise<"unattempted" | "found" | "partial" | "maybe" | "absent"> {
   if (opts.delivered.load().has(decision.decisionId)) return "found";
   const attempted = opts.attempted.load();
   const multipart = `${decision.decisionId}:part:1`;
@@ -721,7 +724,6 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
         // whole ask was one message that is found in Slack, which is simply delivered.
         const firstId = partIdFor(decision.decisionId, recorded.body ? 2 : authored.length, 0);
         const landed = await firstMessageMayHaveLanded(opts, q, decision.decisionId, firstId);
-        if (typeof landed === "object") return { ok: false, class: "reconcile-unreadable", detail: landed.unreadable };
         if (landed !== "absent") partlyPosted = true;
         if (landed === "found" && !recorded.body && authored.length === 1) {
           // #899 — the one message is the whole ask, and it is in Slack: acknowledge it through the

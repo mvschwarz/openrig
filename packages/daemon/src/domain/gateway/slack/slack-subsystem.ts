@@ -682,17 +682,13 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   // or ack it (instead of handing it to delivery) resolves that first, through the reconciler. Found goes to delivery
   // unchanged, which records receipts for what was posted and never posts it again in another form. A post confirmed
   // partly in Slack (its first part found, the post not complete) also goes to delivery: only its own remaining parts
-  // post, under its own part ids and in its own thread and channel, even during quiet hours. A scan that can't be read
-  // retains the decision. Never-attempted and absent attempts, and a scan that couldn't finish, haven't started: they
-  // go on through the gate like any other post. Where the gate posts,
+  // post, under its own part ids and in its own thread and channel, even during quiet hours. Never-attempted and absent
+  // attempts, and a scan that couldn't finish or be read, haven't started: they go on through the gate like any other post. Where the gate posts,
   // delivery reconciles (keeping its at-least-once post for an unfinished scan); where it holds, the release posts it
   // after quiet. A decision that goes straight to delivery skips this.
   const resolveEarlierAttempt = async (decision: Parameters<SubsystemDeliverFn>[0]): Promise<Awaited<ReturnType<SubsystemDeliverFn>> | null> => {
     const landing = "landing" in deliver ? await (deliver as { landing: (d: typeof decision) => Promise<unknown> }).landing(decision) : "unattempted";
     if (landing === "found" || landing === "partial") return deliver(decision);
-    if (typeof landing === "object" && landing !== null) {
-      return { ok: false as const, class: "reconcile-unreadable", detail: (landing as { unreadable: string }).unreadable };
-    }
     return null;
   };
 

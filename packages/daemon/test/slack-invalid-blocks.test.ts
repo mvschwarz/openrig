@@ -63,23 +63,18 @@ describe("Slack invalid_blocks is a permanent rejection (#47)", () => {
 
   it("keeps a lost response uncertain and reconciles a landed post without reposting", async () => {
     let posts = 0;
-    let readable = false;
     const fetchImpl = vi.fn(async (url: string) => {
       if (url.endsWith("chat.postMessage")) {
         posts++;
         throw new Error("request timed out after Slack accepted it");
       }
-      return readable
-        ? reply({ ok: true, messages: [{ ts: "1.1", text: reconcileToken(decision.decisionId) }] })
-        : reply({ ok: false, error: "service_unavailable" }, 503);
+      return reply({ ok: true, messages: [{ ts: "1.1", text: reconcileToken(decision.decisionId) }] });
     });
     const onTransportFailed = vi.fn();
     expect(await subsystemSlackDeliver({ ...opts(), fetchImpl, onTransportFailed })(decision)).toMatchObject({ class: "transport" });
+    expect(onTransportFailed).not.toHaveBeenCalledWith(expect.anything(), "slack-invalid-blocks", expect.anything());
     expect(stores().delivered.load().size).toBe(0);
     expect(stores().outboundSeen.load().size).toBe(0);
-    expect(await subsystemSlackDeliver({ ...opts(), fetchImpl, onTransportFailed })(decision)).toMatchObject({ class: "reconcile-unreadable" });
-    expect(onTransportFailed).not.toHaveBeenCalledWith(expect.anything(), "slack-invalid-blocks", expect.anything());
-    readable = true;
     expect(await subsystemSlackDeliver({ ...opts(), fetchImpl, onTransportFailed })(decision)).toEqual({ ok: true });
     expect(posts).toBe(1);
     expect(stores().delivered.load().has(decision.decisionId)).toBe(true);
@@ -87,15 +82,12 @@ describe("Slack invalid_blocks is a permanent rejection (#47)", () => {
 
   it.each(["corrected", "reverted", "unrenderable"])("reconciles a corrected attempt's lost response despite an older rejection (replay=%s)", async (rendering) => {
     let posts = 0;
-    let readable = true;
     const fetchImpl = vi.fn(async (url: string) => {
       if (url.endsWith("chat.postMessage")) {
         if (++posts === 1) return reply({ ok: false, error: "invalid_blocks" });
         throw new Error("corrected message landed but its response was lost");
       }
-      return readable
-        ? reply({ ok: true, messages: posts === 2 ? [{ ts: "2.1", text: reconcileToken(decision.decisionId) }] : [] })
-        : reply({ ok: false, error: "service_unavailable" }, 503);
+      return reply({ ok: true, messages: posts === 2 ? [{ ts: "2.1", text: reconcileToken(decision.decisionId) }] : [] });
     });
     const onTransportFailed = vi.fn();
     const rejected = { ...decision, payload: { ...decision.payload as object, evidenceRef: "https://example.com/page.png" } };
@@ -104,13 +96,9 @@ describe("Slack invalid_blocks is a permanent rejection (#47)", () => {
     expect(await subsystemSlackDeliver({ ...opts(), fetchImpl, onTransportFailed })(corrected)).toMatchObject({ class: "transport" });
     const replay = rendering === "reverted" ? rejected : corrected;
     const replayOpts = () => ({ ...opts(), fetchImpl, onTransportFailed, ...(rendering === "unrenderable" ? { machine: () => "x".repeat(4000) } : {}) });
-    readable = false;
     onTransportFailed.mockClear();
-    expect(await subsystemSlackDeliver(replayOpts())(replay)).toMatchObject({ class: "reconcile-unreadable" });
-    expect(onTransportFailed).not.toHaveBeenCalled();
-    expect(stores().delivered.load().size).toBe(0);
-    readable = true;
     expect(await subsystemSlackDeliver(replayOpts())(replay)).toEqual({ ok: true });
+    expect(onTransportFailed).not.toHaveBeenCalled();
     expect(posts).toBe(2);
     expect(stores().delivered.load().has(decision.decisionId)).toBe(true);
   });
