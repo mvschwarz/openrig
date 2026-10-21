@@ -132,12 +132,23 @@ describe("refused: nothing is decided for the person", () => {
     expect(direct).toMatchObject({ status: "refused", reason: "not-the-persons-mode" });
   });
 
-  it.each([["a permission prompt", { tags: [PROMPT_ALERT_TAG] }], ["an approval gate", { tier: "human-gate" }]])("on %s, even inside the room", async (_kind, extra) => {
+  it.each([["a permission prompt", { tags: [PROMPT_ALERT_TAG] }], ["an approval gate", { tier: "human-gate" }],
+    ["an approval gate by tag", { tags: ["gate:human"] }]])("on %s, even inside the room", async (_kind, extra) => {
     const f = fixture();
     await f.modeOn("alex", true);
     const row = await f.ask(extra);
     expect(await f.decide(row.qitemId, f.choose)).toMatchObject({ status: 409, body: { error: "permission-prompt" } });
     expect(f.repo.getById(row.qitemId)).toMatchObject({ state: "pending", delegatedDecision: null });
+  });
+
+  it("once the person has started answering, the ask is theirs: refused, and their answer stands", async () => {
+    const f = fixture();
+    await f.modeOn("alex", true);
+    const row = await f.ask();
+    expect(f.repo.recordHumanAnswer({ qitemId: row.qitemId, actorSession: "alex@external", questionId: "design", optionId: "b" }))
+      .toMatchObject({ status: "recorded" });
+    expect(await f.decide(row.qitemId, f.choose)).toMatchObject({ status: 409, body: { error: "person-answering" } });
+    expect(f.repo.getById(row.qitemId)).toMatchObject({ state: "pending", delegatedDecision: null, humanAnswers: { design: "b" } });
   });
 
   it("the mode is read when the decision is recorded: one that ended in the meantime refuses it", async () => {

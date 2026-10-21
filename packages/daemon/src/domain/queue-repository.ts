@@ -18,6 +18,7 @@ import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { parseSessionName, isHumanSeatSessionRef } from "./session-name.js";
 import { parseReplyToChoice, formatReplyToChoice, describeReplyToFallback, REPLY_TO_CHOICE_ACTOR, type ReplyToChoice } from "./reply-to-choice.js";
 import { classifyDestination, type DestinationClass } from "./gateway/destination-resolver.js";
+import { effectiveGateRoles } from "./gate-predicate.js";
 import {
   computeClosureRequiredAt,
   validateClosure,
@@ -165,7 +166,7 @@ export interface DelegatedDecision {
 
 export type RecordDelegatedDecisionResult =
   | { status: "recorded"; item: QueueItem }
-  | { status: "refused"; reason: "schema" | "not-found" | "not-pending" | "not-a-decision" | "permission-prompt" | "not-the-asking-agent"
+  | { status: "refused"; reason: "schema" | "not-found" | "not-pending" | "not-a-decision" | "permission-prompt" | "person-answering" | "not-the-asking-agent"
       | "no-active-mode" | "mode-changed" | "no-decision-room" | "not-the-persons-mode" | "invalid-choice"; message: string };
 
 export interface QueueItem {
@@ -3487,9 +3488,13 @@ export class QueueRepository {
       if (item.state !== "pending") return refuse("not-pending", `${input.qitemId} is ${item.state}; only a pending ask can be decided`);
       const person = parseSessionName(item.destinationSession);
       if (person.kind !== "external" || item.humanIntent === "update") return refuse("not-a-decision", `${input.qitemId} isn't a decision asked of a person`);
-      // A permission prompt (the wake ladder's prompt alert) or an approval gate (the human-gate tier) is never delegated.
-      if (item.tags?.includes(PROMPT_ALERT_TAG) || item.tier === "human-gate") {
+      // A permission prompt (the wake ladder's prompt alert) or an approval gate (gate work for the human role) is never delegated.
+      if (item.tags?.includes(PROMPT_ALERT_TAG) || effectiveGateRoles({ tags: item.tags, tier: item.tier }).includes("human")) {
         return refuse("permission-prompt", "a permission prompt or approval gate is never decided on the person's behalf");
+      }
+      // A click keeps a multi-question ask pending until every question is answered: once the person has started, it's theirs.
+      if (item.humanAnswers && Object.keys(item.humanAnswers).length > 0) {
+        return refuse("person-answering", "they've started answering; their answer stands");
       }
       if (item.sourceSession !== input.actorSession) {
         return refuse("not-the-asking-agent", `only the agent that asked (${item.sourceSession}) can record a decision on this ask`);
