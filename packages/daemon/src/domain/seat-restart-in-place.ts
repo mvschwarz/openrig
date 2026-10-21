@@ -54,8 +54,6 @@ export interface ProcessFacts {
   cwd: string | null;
   exe: string | null;
   env: { CODEX_HOME?: string; HOME?: string };
-  /** Names (never values) of API-key variables present. A name alone does not establish billing. */
-  apiKeyEnvNames: string[];
 }
 
 export interface InPlaceRestartIo {
@@ -139,10 +137,6 @@ export interface InPlaceRestartReport {
   /** Launch evidence only: whether the running Codex's command line carries `--no-daemon`. It doesn't show whether an
    *  app-server process, its login or any lock is involved. */
   codexNoDaemonFlag: { present: boolean; detail: string };
-  /** Whether the running Codex is attached to an app-server, as observed. Nothing OpenRig reads observes that today, so
-   *  it is always `unknown`, with the reason. Never inferred from the launch flag. */
-  processMode: { state: "observed" | "unknown"; detail: string };
-  billingRoute: { state: "unknown"; detail: string; apiKeyEnvNames: string[] };
   account: AccountEvidence;
   peers: PeerReport[];
   oldProcess: { pid: number; startedAt: string | null };
@@ -190,7 +184,6 @@ export type InPlaceVerifyResult =
 
 const RESTART_STARTED = "seat.restart_in_place_started" as const;
 const RESTART_FINISHED = "seat.restart_in_place_finished" as const;
-const API_KEY_NAMES = ["OPENAI_API_KEY", "CODEX_API_KEY"];
 const NOT_VERIFIED = [
   "Which account the restarted Codex actually uses: only `--verify` with --expect-account and a completed tool turn can confirm it.",
   "Whether Codex saved the conversation before it exited (TERM, then KILL after the timeout).",
@@ -522,9 +515,6 @@ export class CodexInPlaceRestart {
       codexNoDaemonFlag: running.daemonOptOut
         ? { present: true, detail: "Launch evidence: the running Codex was started with --no-daemon. This doesn't show whether an app-server process, its login or any lock is involved." }
         : { present: false, detail: "Launch evidence: the running Codex's command line has no --no-daemon. This doesn't show whether an app-server process, its login or any lock is involved." },
-      processMode: { state: "unknown", detail: "Process mode: unknown. Nothing OpenRig reads shows whether the running Codex is attached to an app-server; the --no-daemon flag above is launch evidence only." },
-      billingRoute: { state: "unknown", apiKeyEnvNames: facts.apiKeyEnvNames,
-        detail: "Which billing route Codex uses is not observable without reading credentials; API-key variable names alone don't establish it." },
       account: this.accountEvidence(codexHome, startedAt, null),
       ...(currentConversation ? { currentConversation } : {}),
       peers: await this.peers(seat.nodeId, codexHome),
@@ -1101,16 +1091,14 @@ export function defaultInPlaceRestartIo(): InPlaceRestartIo {
       try {
         const environ = fs.readFileSync(`/proc/${pid}/environ`);
         const env: ProcessFacts["env"] = {};
-        const apiKeyEnvNames: string[] = [];
         for (const entry of environ.toString("utf8").split("\0")) {
           const eq = entry.indexOf("=");
           if (eq <= 0) continue;
           const key = entry.slice(0, eq);
           if (key === "CODEX_HOME" || key === "HOME") env[key] = entry.slice(eq + 1);
-          else if (API_KEY_NAMES.includes(key) && eq < entry.length - 1) apiKeyEnvNames.push(key);
         }
         const read = (link: string) => { try { return fs.readlinkSync(`/proc/${pid}/${link}`); } catch { return null; } };
-        return { cwd: read("cwd"), exe: read("exe"), env, apiKeyEnvNames: apiKeyEnvNames.sort() };
+        return { cwd: read("cwd"), exe: read("exe"), env };
       } catch {
         return null;
       }

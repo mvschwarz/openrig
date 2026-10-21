@@ -263,7 +263,7 @@ describe("SeatLifecycleService.effortReport: four values, each from its own sour
         readCodexTranscriptPath: () => transcript,
       },
       inPlaceRestartIo: {
-        readProcess: async () => ({ cwd: "/w", exe: "/usr/local/bin/codex", env: { CODEX_HOME: "/scratch/.codex" }, apiKeyEnvNames: [] }),
+        readProcess: async () => ({ cwd: "/w", exe: "/usr/local/bin/codex", env: { CODEX_HOME: "/scratch/.codex" } }),
         readThreadId: async () => logsThread,
       },
     });

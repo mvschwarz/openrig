@@ -89,7 +89,7 @@ function codexRow(pid: number, ppid: number, args: string, startedAt = LSTART, p
   return { pid, ppid, pgid, tpgid: pgid, executableName: "codex", command: `/usr/local/bin/codex ${args}`, startedAt };
 }
 function facts(over: Partial<ProcessFacts> = {}): ProcessFacts {
-  return { cwd: "/work", exe: "/usr/local/bin/codex", env: { CODEX_HOME: HOME }, apiKeyEnvNames: [], ...over };
+  return { cwd: "/work", exe: "/usr/local/bin/codex", env: { CODEX_HOME: HOME }, ...over };
 }
 
 function world(options: WorldOptions = {}) {
@@ -265,15 +265,14 @@ function state(activity: string, needs = 0): ArbitratedSeatState {
 }
 
 describe("rig seat restart --keep-conversation: gates before any signal", () => {
-  it("plan reports activity, child processes, billing and settings, and changes nothing", async () => {
-    const w = world({ activity: state("working"), facts: { 200: facts({ apiKeyEnvNames: ["OPENAI_API_KEY"] }), 100: facts() } });
+  it("plan reports activity, child processes and settings, and changes nothing", async () => {
+    const w = world({ activity: state("working") });
     w.setRows([shellRow(100, 200), codexRow(200, 100, `-m gpt-5.5 -s workspace-write resume ${TOKEN}`),
       { pid: 210, ppid: 200, pgid: 210, tpgid: 200, executableName: "node", command: "node mcp-server.js --token=x", startedAt: LSTART }]);
     const plan = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
     expect(plan).toMatchObject({
       ok: true, planOnly: true, paneShape: "shell_backed", conversationId: TOKEN, conversationProof: "argv",
       activity: { state: "working" }, childProcesses: [{ pid: 210, name: "node" }],
-      billingRoute: { state: "unknown", apiKeyEnvNames: ["OPENAI_API_KEY"] },
       settings: { effective: { model: "gpt-5.5", sandbox: "workspace-write" }, saved: { model: "gpt-5.5" } },
       codexHome: HOME,
     });
@@ -676,12 +675,15 @@ describe("rig seat restart --keep-conversation: outcomes", () => {
     expect(restarted).toMatchObject({ outcome: "restarted_account_unverified", codexNoDaemonFlag: { present: true } });
   });
 
-  it("--plan and the report give the process mode as unknown, with the reason: nothing observes app-server attachment", async () => {
-    const detail = "Process mode: unknown. Nothing OpenRig reads shows whether the running Codex is attached to an app-server; the --no-daemon flag above is launch evidence only.";
+  it("--plan and the report carry no billing route or process mode: neither was ever observed", async () => {
     for (const runningArgs of [undefined, `--no-daemon -m gpt-5.5 -s workspace-write resume ${TOKEN}`]) {
       const w = world(runningArgs ? { runningArgs } : {});
-      expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ processMode: { state: "unknown", detail } });
-      expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "x" })).toMatchObject({ processMode: { state: "unknown", detail } });
+      for (const result of [await w.service.restartInPlace({ seatRef: SEAT, plan: true }), await w.service.restartInPlace({ seatRef: SEAT, reason: "x" })]) {
+        expect(result).not.toHaveProperty("billingRoute");
+        expect(result).not.toHaveProperty("processMode");
+        // The launch flag's line still says it doesn't show app-server involvement.
+        expect(result).toMatchObject({ codexNoDaemonFlag: { detail: expect.stringContaining("doesn't show whether an app-server process") } });
+      }
     }
   });
 
