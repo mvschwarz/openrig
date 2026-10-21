@@ -83,22 +83,32 @@ describe("Claude team command permissions", () => {
   ])("allows existing allowance spelling: %s", command => expect(decide(command, policy)).toBe("allow"));
 
   // Team agents run most rig commands without a prompt; the commands that start, stop or remove teams or agents still
-  // ask. These lists are written out, not derived from TEAM_CLAUDE_ASK, so a change to that list is caught here.
+  // ask, and so do four that change who decides an agent's permissions or context. These lists are written out, not
+  // derived from TEAM_CLAUDE_ASK, so a change to that list is caught here.
   const STARTS_STOPS_OR_REMOVES = [
     "up", "down", "start", "launch", "restore", "fork", "bootstrap", "create", "add", "remove", "grow", "shrink", "expand",
     "destroy", "handover", "env down", "daemon start", "daemon stop", "bundle install", "seat launch", "seat stop", "seat handover",
+    "seat restart",
+  ];
+  const KEPT_FOR_A_PERSON = [
+    "import", // its --instantiate branch launches nodes, and the prefix rule can't tell its modes apart
+    "seat set-permissions", "policy apply", // an explicit author or person permission choice stays with a person
+    "compact", // it replaces a peer's working context
   ];
   const ORDINARY = [
-    "archive", "unarchive", "import", "setup", "adopt", "attach", "bind", "unclaim", "release", "reconcile-session", "compact",
-    "policy apply", "config set", "config reset", "seat continue", "seat clean", "seat switch-client", "seat set-permissions",
-    "seat set-model", "seat set-effort",
+    "archive", "unarchive", "setup", "adopt", "attach", "bind", "unclaim", "release", "reconcile-session",
+    "config set", "config reset", "seat continue", "seat clean", "seat switch-client", "seat set-model", "seat set-effort",
   ];
-  it.each(STARTS_STOPS_OR_REMOVES)("rig %s starts, stops or removes a team or agent: it asks", command =>
+  it.each([...STARTS_STOPS_OR_REMOVES, ...KEPT_FOR_A_PERSON])("rig %s asks", command =>
     expect(decide(`rig ${command} example`, policy)).toBe("ask"));
   it.each(ORDINARY)("rig %s doesn't start, stop or remove anything: no prompt", command =>
     expect(decide(`rig ${command} example`, policy)).toBe("allow"));
-  it("the ask list is exactly the commands that start, stop or remove", () => {
-    expect([...TEAM_CLAUDE_ASK].sort()).toEqual(STARTS_STOPS_OR_REMOVES.map(command => `Bash(rig ${command}:*)`).sort());
+  it.each(["--plan", "--verify"])("rig seat restart %s asks too, under the prefix rule; --help does not", flag => {
+    expect(decide(`rig seat restart example@demo ${flag}`, policy)).toBe("ask");
+    expect(decide("rig seat restart --help", policy)).toBe("allow");
+  });
+  it("the ask list is exactly those 27", () => {
+    expect([...TEAM_CLAUDE_ASK].sort()).toEqual([...STARTS_STOPS_OR_REMOVES, ...KEPT_FOR_A_PERSON].map(command => `Bash(rig ${command}:*)`).sort());
   });
 
   it.each([

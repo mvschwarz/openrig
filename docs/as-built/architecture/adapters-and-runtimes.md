@@ -175,11 +175,14 @@ other rig gets `teamPermissionDefault` instead (`native-permission-store.ts:38`,
 `:56`), on the same launch paths. A Claude Code seat at the floor with no native
 permission mode keeps `--permission-mode acceptEdits` and gets
 `--settings` (`kernel-authority.ts:64–66`):
-`TEAM_CLAUDE_ALLOW` (`:30`) is `Skill`, `Read(./**)`, `Glob`, `Grep`,
+`TEAM_CLAUDE_ALLOW` (`:32`) is `Skill`, `Read(./**)`, `Glob`, `Grep`,
 `Bash(rig:*)`, eight read-only shell commands and 17 test-runner commands, and
-`TEAM_CLAUDE_ASK` (`:37`) asks before the 22 `rig` commands that start, stop or remove
-teams or agents, such as `up`, `down`, `seat stop` and `bundle install`; other `rig`
-commands fall under the `Bash(rig:*)` allowance. The settings carry the allow list and a
+`TEAM_CLAUDE_ASK` (`:39`) asks before 27 `rig` commands: the 23 that start, stop or
+remove teams or agents (such as `up`, `down`, `seat stop`, `seat restart` and `bundle install`),
+and four kept for a person: `import` (its `--instantiate` mode launches nodes), `seat
+set-permissions` and `policy apply` (an explicit permission choice), and `compact` (it
+replaces a peer's working context). Other `rig` commands fall under the `Bash(rig:*)`
+allowance. The settings carry the allow list and a
 `PreToolUse` Bash hook, `packages/daemon/assets/claude-team-permissions.cjs`, that applies
 both lists (`kernel-authority.ts:43–53`): it asks before a lifecycle command unless the
 command only asks for `--help` or `-h`, allows a simple literal command that matches an
