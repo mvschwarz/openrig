@@ -675,12 +675,14 @@ describe("rig seat restart --keep-conversation: outcomes", () => {
     expect(restarted).toMatchObject({ outcome: "restarted_account_unverified", codexNoDaemonFlag: { present: true } });
   });
 
-  it("--plan and the report carry no billing route or process mode: neither was ever observed", async () => {
+  it("--plan and the report carry no process mode, and only a constant billing route for older CLIs", async () => {
     for (const runningArgs of [undefined, `--no-daemon -m gpt-5.5 -s workspace-write resume ${TOKEN}`]) {
       const w = world(runningArgs ? { runningArgs } : {});
       for (const result of [await w.service.restartInPlace({ seatRef: SEAT, plan: true }), await w.service.restartInPlace({ seatRef: SEAT, reason: "x" })]) {
-        expect(result).not.toHaveProperty("billingRoute");
         expect(result).not.toHaveProperty("processMode");
+        expect(result).toMatchObject({ billingRoute: { state: "unknown", detail: "Not reported." } });
+        // A CLI before 0.7.0 prints this unguarded: the read must succeed.
+        expect(`Billing route: ${(result as unknown as { billingRoute: { detail: string } }).billingRoute.detail}`).toBe("Billing route: Not reported.");
         // The launch flag's line still says it doesn't show app-server involvement.
         expect(result).toMatchObject({ codexNoDaemonFlag: { detail: expect.stringContaining("doesn't show whether an app-server process") } });
       }

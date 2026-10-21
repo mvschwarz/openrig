@@ -137,6 +137,8 @@ export interface InPlaceRestartReport {
   /** Launch evidence only: whether the running Codex's command line carries `--no-daemon`. It doesn't show whether an
    *  app-server process, its login or any lock is involved. */
   codexNoDaemonFlag: { present: boolean; detail: string };
+  /** Kept only for CLIs before 0.7.0, whose printer reads `billingRoute.detail` unguarded; remove once they're gone. */
+  billingRoute: { state: "unknown"; detail: string };
   account: AccountEvidence;
   peers: PeerReport[];
   oldProcess: { pid: number; startedAt: string | null };
@@ -184,6 +186,7 @@ export type InPlaceVerifyResult =
 
 const RESTART_STARTED = "seat.restart_in_place_started" as const;
 const RESTART_FINISHED = "seat.restart_in_place_finished" as const;
+const BILLING_ROUTE_FOR_OLDER_CLIS = { state: "unknown", detail: "Not reported." } as const;
 const NOT_VERIFIED = [
   "Which account the restarted Codex actually uses: only `--verify` with --expect-account and a completed tool turn can confirm it.",
   "Whether Codex saved the conversation before it exited (TERM, then KILL after the timeout).",
@@ -515,6 +518,7 @@ export class CodexInPlaceRestart {
       codexNoDaemonFlag: running.daemonOptOut
         ? { present: true, detail: "Launch evidence: the running Codex was started with --no-daemon. This doesn't show whether an app-server process, its login or any lock is involved." }
         : { present: false, detail: "Launch evidence: the running Codex's command line has no --no-daemon. This doesn't show whether an app-server process, its login or any lock is involved." },
+      billingRoute: BILLING_ROUTE_FOR_OLDER_CLIS,
       account: this.accountEvidence(codexHome, startedAt, null),
       ...(currentConversation ? { currentConversation } : {}),
       peers: await this.peers(seat.nodeId, codexHome),
