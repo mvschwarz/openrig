@@ -181,9 +181,11 @@ permission mode keeps `--permission-mode acceptEdits` and gets
 remove teams or agents (such as `up`, `down`, `seat stop`, `seat restart` and `bundle install`),
 and six kept for a person: `import` (its `--instantiate` mode launches nodes), `seat
 set-permissions` and `policy apply` under both spellings (an explicit permission choice),
-`setup` (its `--policy` option records one, so ordinary setup prompts too), and `compact`
-(it replaces a peer's working context). Other `rig` commands fall under the `Bash(rig:*)`
-allowance. The settings carry the allow list and a
+`setup` (kept for its `--policy` path, which records one; a prefix rule can't tell that path
+from ordinary setup, so ordinary setup prompts too), and `compact` (it replaces a peer's
+working context). Other `rig` commands fall under the `Bash(rig:*)` allowance. The list was
+42 before: 15 commands were removed and 2 added (`seat restart` and `policy permissions
+apply`), 13 fewer prompts. The settings carry the allow list and a
 `PreToolUse` Bash hook, `packages/daemon/assets/claude-team-permissions.cjs`, that applies
 both lists (`kernel-authority.ts:43–53`): it asks before a lifecycle command unless the
 command only asks for `--help` or `-h`, allows a simple literal command that matches an
