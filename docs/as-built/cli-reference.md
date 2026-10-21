@@ -198,6 +198,9 @@ the sections that were not read are `null`.
 | `rig gateway human mode apply <entityId> <name>` | — | `--until <time>`<br>`--tz <zone>`<br>`--actor <actor>`<br>`--json` |
 | `rig gateway human mode current <entityId>` | — | `--json` |
 | `rig gateway human mode end <entityId>` | — | `--scheduled`<br>`--actor <actor>`<br>`--json` |
+| `rig gateway human mode room <entityId>` | — | `--json` |
+| `rig gateway human mode decide <qitemId>` | — | `--application <id>` **required**<br>`--choose <question=option...>`<br>`--reason <why>` **required**<br>`--reversible`<br>`--irreversible`<br>`--actor <actor>`<br>`--json` |
+| `rig gateway human mode decisions <entityId> <applicationId>` | — | `--json` |
 | `rig gateway human remove <entityId>` | — | `--force` |
 
 ### parked

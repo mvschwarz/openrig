@@ -1,5 +1,5 @@
-// `rig gateway human mode save|saved|apply|current|end`: a person's modes, beside quiet hours. The verbs talk to a
-// recording stub daemon over real HTTP.
+// `rig gateway human mode save|saved|apply|current|end|room|decide|decisions`: a person's modes, beside quiet hours, and
+// the decisions made on their behalf inside a mode's decision room. The verbs talk to a recording stub daemon over real HTTP.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -106,5 +106,32 @@ describe("rig gateway human mode", () => {
     await run("mode", "apply", "mike", "asleep");
     expect(errors).toEqual(["refused: needs an end time"]);
     expect(process.exitCode).toBe(1);
+  });
+
+  it("room shows the person's own words and how to decide inside it, or says to ask them; decisions lists what was decided", async () => {
+    reply = { status: 200, body: { ok: true, decisionRoom: { applicationId: "a-1", modeName: "asleep", words: "design choices", exclusions: ["publishing"] } } };
+    await run("mode", "room", "mike");
+    reply = { status: 200, body: { ok: true, decisionRoom: null, why: "at desk: no mode is on, so ask them" } };
+    await run("mode", "room", "mike");
+    reply = { status: 200, body: { ok: true, modeName: "asleep", decisions: [{ qitemId: "q-1",
+      decision: { decidedBy: "designer@rig", reversible: true, choices: [{ questionId: "design", chosen: "a" }], reason: "recommended" } }] } };
+    await run("mode", "decisions", "mike", "a-1");
+    expect(requests.map((r) => r.url)).toEqual(["/api/gateway/human/mike/decision-room", "/api/gateway/human/mike/decision-room",
+      "/api/gateway/human/mike/mode/applications/a-1/decisions"]);
+    expect(logs).toEqual([`mike's asleep decision room: "design choices" except publishing\n  decide with: rig gateway human mode decide <qitemId> --application a-1 ...`,
+      "mike: no decision room (at desk: no mode is on, so ask them); ask them",
+      "q-1 by designer@rig (reversible): design=a; recommended"]);
+  });
+
+  it("decide records each question's choice and the reason, and needs to be told whether it can be undone", async () => {
+    await run("mode", "decide", "q-1", "--application", "a-1", "--choose", "design=a", "--reason", "recommended");
+    expect(errors).toEqual(["Say whether it can be undone: --reversible or --irreversible."]);
+    expect(requests).toEqual([]);
+    process.exitCode = undefined;
+    reply = { status: 200, body: { ok: true, item: { delegatedDecision: { modeName: "asleep", reversible: true, choices: [{ questionId: "design", chosen: "a" }, { questionId: "ship", chosen: "yes" }] } } } };
+    await run("mode", "decide", "q-1", "--application", "a-1", "--choose", "design=a", "ship=yes", "--reason", "recommended", "--reversible", "--actor", "designer@rig");
+    expect(requests[0]).toMatchObject({ method: "POST", url: "/api/queue/q-1/delegated-decision", body: { applicationId: "a-1",
+      choices: [{ questionId: "design", chosen: "a" }, { questionId: "ship", chosen: "yes" }], reason: "recommended", reversible: true, actor: "designer@rig" } });
+    expect(logs).toEqual(["q-1: decided on the person's behalf under asleep (reversible): design=a, ship=yes"]);
   });
 });

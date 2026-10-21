@@ -342,17 +342,19 @@ Examples:
   // decision room and delivery, and the record of applying one. Applying shows each effect's real state; ending undoes
   // only what is still the mode's own.
   const mode = human.command("mode").description("A person's modes: save one as they agreed it, apply it, see what's on, end it (\"I'm back\")");
-  const modeCall = async (method: "get" | "put" | "post", entityId: string, suffix: string, body: Record<string, unknown> | undefined,
+  const daemonCall = async (method: "get" | "put" | "post", path: string, body: Record<string, unknown> | undefined,
     json: boolean | undefined, render: (data: Record<string, any>) => void) => {
     const { DaemonClient } = await import("../client.js");
     const client = new DaemonClient();
-    const path = `/api/gateway/human/${encodeURIComponent(entityId)}${suffix}`;
     const res = method === "get" ? await client.get<Record<string, any>>(path)
       : method === "put" ? await client.put<Record<string, any>>(path, body) : await client.post<Record<string, any>>(path, body);
     if (json) { console.log(JSON.stringify(res.data)); if (res.status !== 200) process.exitCode = 1; return; }
     if (res.status !== 200) { console.error(`refused: ${res.data?.message ?? res.data?.error ?? `HTTP ${res.status}`}`); process.exitCode = 1; return; }
     render(res.data);
   };
+  const modeCall = (method: "get" | "put" | "post", entityId: string, suffix: string, body: Record<string, unknown> | undefined,
+    json: boolean | undefined, render: (data: Record<string, any>) => void) =>
+    daemonCall(method, `/api/gateway/human/${encodeURIComponent(entityId)}${suffix}`, body, json, render);
   const unresolvedLines = (data: Record<string, any>) => ((data.unresolved ?? []) as Array<Record<string, any>>)
     .map((u) => `  still ${u.effect.state} from ${u.modeName} (ended ${u.endedAt}): ${u.effect.consumer}${u.effect.detail ? ` (${u.effect.detail})` : ""}`);
   mode
@@ -424,6 +426,64 @@ Examples:
       await modeCall("post", entityId, "/mode/end", { reason: opts.scheduled ? "scheduled" : "back", ...actorBody(opts) }, opts.json, (data) => {
         console.log(data.ended ? `${describeApplication(data.ended)}\n${entityId} is at desk now` : `${entityId} had no mode on: at desk`);
         for (const line of unresolvedLines(data)) console.log(line);
+      });
+    });
+
+  // Deciding on a person's behalf, inside the decision room of the mode they have on: read the room, record the decision
+  // on the ask (as delegated, never as their answer), and list what was decided for the account when they're back.
+  const chosen = (choices: Array<Record<string, any>>) => choices.map((c) => `${c.questionId ?? "choice"}=${c.chosen}`).join(", ");
+  mode
+    .command("room <entityId>")
+    .description("Before asking a person a decision: the decision room of the mode they have on, in their own words, or none. You judge whether your decision falls inside it")
+    .option("--json", "The daemon's answer as JSON")
+    .action(async (entityId: string, opts: { json?: boolean }) => {
+      await modeCall("get", entityId, "/decision-room", undefined, opts.json, (data) => {
+        const room = data.decisionRoom as Record<string, any> | null;
+        console.log(room
+          ? `${entityId}'s ${room.modeName} decision room: "${room.words}"${room.exclusions?.length ? ` except ${room.exclusions.join(", ")}` : ""}\n`
+            + `  decide with: rig gateway human mode decide <qitemId> --application ${room.applicationId} ...`
+          : `${entityId}: no decision room (${data.why}); ask them`);
+      });
+    });
+
+  mode
+    .command("decide <qitemId>")
+    .description("Record a decision you made on the person's behalf, inside their mode's decision room, on your own pending ask. It's recorded as delegated, never as their answer, and the ask closes")
+    .requiredOption("--application <id>", "The application id from `rig gateway human mode room <entityId>`: the room you judged against. If their mode changed since, it's refused")
+    .option("--choose <question=option...>", "The option chosen for each structured question (for example design=a ship=yes); for an ask without questions, the choice in words")
+    .requiredOption("--reason <why>", "Why this choice")
+    .option("--reversible", "It can be undone")
+    .option("--irreversible", "It can't be undone")
+    .option("--actor <actor>", "Named operator when outside a managed seat")
+    .option("--json", "The daemon's answer as JSON")
+    .action(async (qitemId: string, opts: { application: string; choose?: string[]; reason: string; reversible?: boolean; irreversible?: boolean; actor?: string; json?: boolean }) => {
+      if (Boolean(opts.reversible) === Boolean(opts.irreversible)) {
+        console.error("Say whether it can be undone: --reversible or --irreversible.");
+        process.exitCode = 1;
+        return;
+      }
+      const choices = (opts.choose ?? []).map((c) => {
+        const at = c.indexOf("=");
+        return at > 0 ? { questionId: c.slice(0, at), chosen: c.slice(at + 1) } : { chosen: c };
+      });
+      await daemonCall("post", `/api/queue/${encodeURIComponent(qitemId)}/delegated-decision`,
+        { applicationId: opts.application, choices, reason: opts.reason, reversible: Boolean(opts.reversible), ...actorBody(opts) }, opts.json, (data) => {
+          const d = data.item?.delegatedDecision as Record<string, any>;
+          console.log(`${qitemId}: decided on the person's behalf under ${d.modeName} (${d.reversible ? "reversible" : "can't be undone"}): ${chosen(d.choices)}`);
+        });
+    });
+
+  mode
+    .command("decisions <entityId> <applicationId>")
+    .description("The decisions made on a person's behalf under one mode application")
+    .option("--json", "The daemon's answer as JSON")
+    .action(async (entityId: string, applicationId: string, opts: { json?: boolean }) => {
+      await modeCall("get", entityId, `/mode/applications/${encodeURIComponent(applicationId)}/decisions`, undefined, opts.json, (data) => {
+        const decisions = data.decisions as Array<Record<string, any>>;
+        if (decisions.length === 0) { console.log(`nothing was decided for ${entityId} under ${data.modeName}`); return; }
+        for (const d of decisions) {
+          console.log(`${d.qitemId} by ${d.decision.decidedBy} (${d.decision.reversible ? "reversible" : "can't be undone"}): ${chosen(d.decision.choices)}; ${d.decision.reason}`);
+        }
       });
     });
 
