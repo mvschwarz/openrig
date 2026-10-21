@@ -17,6 +17,7 @@ vi.mock("../src/daemon-lifecycle.js", async () => {
 
 const { contextCommand } = await import("../src/commands/context.js");
 const { agentImageCommand } = await import("../src/commands/agent-image.js");
+const { forkCommand } = await import("../src/commands/fork.js");
 
 describe("a write that times out against a busy daemon", () => {
   let stderr: string[];
@@ -55,6 +56,16 @@ describe("a write that times out against a busy daemon", () => {
     const cmd = agentImageCommand({ lifecycleDeps: {} as never, clientFactory: (() => ({ get, delete: del })) as never });
     await cmd.parseAsync(["node", "agent-image", "delete", "agent-image:abc"]);
     expect(del).toHaveBeenCalledTimes(1);
+    expect(stderr.join("\n")).toContain("outcome is UNKNOWN");
+    expect(stderr.join("\n")).toContain("before any retry");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("rig fork says the outcome is unknown and to check before any retry", async () => {
+    const post = vi.fn(async () => { throw timeout("/api/agent-images/fork"); });
+    const cmd = forkCommand({ lifecycleDeps: {} as never, clientFactory: (() => ({ post })) as never });
+    await cmd.parseAsync(["node", "fork", "dev-impl@r", "--rig", "r", "--pod", "dev", "--member", "dev-impl-2"]);
+    expect(post).toHaveBeenCalledTimes(1);
     expect(stderr.join("\n")).toContain("outcome is UNKNOWN");
     expect(stderr.join("\n")).toContain("before any retry");
     expect(process.exitCode).toBe(1);
