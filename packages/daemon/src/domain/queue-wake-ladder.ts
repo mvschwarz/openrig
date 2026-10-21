@@ -976,8 +976,9 @@ export function makePromptStateReader(deps: {
 export const PROMPT_ALERT_TAG = "wake-prompt-refusal";
 const PROMPT_EPISODE_TAG = "prompt-episode:";
 const PROMPT_RETIRED_NOTE = "prompt escalation retired: prompt cleared or original episode ended; not a delivery receipt";
-/** The resolution of an alert retired because its seat's prompt read clear; only this may end a watchdog refusal run. */
-const PROMPT_CLEARED_RESOLUTION = "prompt cleared";
+/** The ladder's own transition on a prompt alert it retires because its seat's prompt read clear, and the only thing that
+ *  ends a watchdog refusal run. A transition, not the resolution: a fallback route may already hold that field's text. */
+const PROMPT_CLEARED_NOTE = "prompt escalation: the seat's prompt read clear";
 /** Rows whose tag text could hold the prompt alert tag: valid JSON stores a string verbatim or with backslash
  * escapes, so this superset (LIKE also ignores case) loses no row the exact json_each test below accepts. It only
  * spares JSON parsing of the rows that cannot match. The alert tag holds no LIKE wildcard. */
@@ -1080,15 +1081,15 @@ async function advancePromptRefusals(
   }
 
   // A watchdog reminder refused twice at the same prompt joins its seat's episode; the row carries the job ids. The
-  // seat's latest alert its producer retired because the prompt cleared bounds the run; an ended episode doesn't.
+  // seat's latest alert the ladder marked as retired on a cleared prompt bounds the run; an ended episode doesn't.
   const clearedAlerts = new Map<string, { qitemId: string; at: string } | null>();
   const clearedAlert = (dest: string) => {
     if (!clearedAlerts.has(dest)) clearedAlerts.set(dest, (deps.db.prepare(`SELECT q.qitem_id AS qitemId, MAX(t.ts) AS at
         FROM queue_items q JOIN queue_transitions t ON t.qitem_id = q.qitem_id
-       WHERE ${PROMPT_ALERT_ROWS} AND q.state NOT IN ('pending','in-progress','blocked') AND q.resolution = ? AND json_valid(q.tags)
+       WHERE ${PROMPT_ALERT_ROWS} AND q.state NOT IN ('pending','in-progress','blocked') AND json_valid(q.tags)
          AND EXISTS (SELECT 1 FROM json_each(q.tags) WHERE value = ?)
-         AND t.actor_session = q.source_session AND t.transition_note = ?
-       GROUP BY q.qitem_id ORDER BY at DESC LIMIT 1`).get(PROMPT_CLEARED_RESOLUTION, `prompt-destination:${dest}`, PROMPT_RETIRED_NOTE) as { qitemId: string; at: string } | undefined) ?? null);
+         AND t.actor_session = ? AND t.transition_note = ?
+       GROUP BY q.qitem_id ORDER BY at DESC LIMIT 1`).get(`prompt-destination:${dest}`, LADDER_ACTOR, PROMPT_CLEARED_NOTE) as { qitemId: string; at: string } | undefined) ?? null);
     return clearedAlerts.get(dest)!;
   };
   for (const job of refusedWatchdogJobs(deps.db, clearedAlert)) {
@@ -1120,8 +1121,9 @@ async function advancePromptRefusals(
     const sameEpisode = group?.keys.some(key => tags.includes(key));
     const cleared = promptState(dest) === "clear";
     if (!sameEpisode || cleared) {
+      if (cleared) appendMarker(deps.queueRepo, aggregate, PROMPT_CLEARED_NOTE);
       await deps.queueRepo.update({ qitemId: qitem_id, actorSession: aggregate.sourceSession, state: "done",
-        closureReason: "no-follow-on", transitionNote: PROMPT_RETIRED_NOTE, ...(cleared ? { resolution: PROMPT_CLEARED_RESOLUTION } : {}) });
+        closureReason: "no-follow-on", transitionNote: PROMPT_RETIRED_NOTE });
     }
   }
 
