@@ -2270,6 +2270,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
             return fn(op, ref, payload, opts);
           },
         }),
+        // A person's mode ends at the scheduled end they chose, on the same clock.
+        (await import("./domain/policies/mode-scheduled-end.js")).makeModeScheduledEndPolicy({
+          db,
+          queueRepo: queueRepoInstance,
+          jobsRepo: watchdogJobsRepoInstance,
+          home: OPENRIG_HOME,
+        }),
       ],
     });
     queueRepoInstance.startWaitReminders();

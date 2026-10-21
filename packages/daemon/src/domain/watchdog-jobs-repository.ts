@@ -43,6 +43,8 @@ export const PHASE_D_POLICIES = [
   "delivery-digest-flush",
   // Quiet hours: one release job per quiet window, posting what was held once quiet is off.
   "quiet-release",
+  // A person's mode ends at its scheduled end: one job per application.
+  "mode-scheduled-end",
 ] as const;
 
 /** @deprecated since Phase D — use PHASE_D_POLICIES. */

@@ -583,13 +583,13 @@ describe("what a mode never touches", () => {
     escalation_threshold: "low", concurrency_limit: "serial", permission_prompt_posture: "normal", scope: scope as OperatorContextModeRecord["scope"],
     expiry_or_stale_rule: "re_confirm_on_long_gap", evidence_citation: "seeded legacy binding",
   });
-  // Every table except the modes' own and the quiet window they write: seat permissions, posture, lifecycle and the legacy
-  // bindings all live outside them.
+  // Every table except the modes' own, the quiet window they write and the job that ends a mode at its time: seat
+  // permissions, posture, lifecycle and the legacy bindings all live outside them.
   const snapshot = (db: Database.Database) => {
     const own = new Set(["human_saved_modes", "human_mode_applications", "human_mode_effects", "human_quiet_windows"]);
     const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Array<{ name: string }>)
       .map((t) => t.name).filter((t) => !own.has(t));
-    return Object.fromEntries(tables.map((t) => [t, db.prepare(`SELECT * FROM "${t}"`).all()]));
+    return Object.fromEntries(tables.map((t) => [t, db.prepare(t === "watchdog_jobs" ? `SELECT * FROM "${t}" WHERE policy != 'mode-scheduled-end'` : `SELECT * FROM "${t}"`).all()]));
   };
 
   it("applying and ending a mode leaves the legacy bindings, posture and every other table as they were", async () => {

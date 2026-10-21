@@ -1,0 +1,96 @@
+// A person's mode ends at the scheduled end they chose: armed with the application on the watchdog's own clock, it ends
+// that application only, with the same end-if-mine path as "I'm back", and tells the kernel operator to give the account.
+// Real SQLite (all migrations), real person records in a temp home, the real queue and watchdog jobs table.
+import { afterEach, describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createDb } from "../src/db/connection.js";
+import { migrate } from "../src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { EventBus } from "../src/domain/event-bus.js";
+import { QueueRepository } from "../src/domain/queue-repository.js";
+import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
+import { addHumanFragment, loadHumanRegistry, readHumanAvailability, setHumanField } from "../src/domain/gateway/human-registry.js";
+import { HumanModeService, registryAvailability } from "../src/domain/gateway/human-operating-modes.js";
+import { armModeScheduledEnd, KERNEL_OPERATOR_SESSION, MODE_SCHEDULED_END_POLICY, runModeScheduledEnd } from "../src/domain/policies/mode-scheduled-end.js";
+
+const homes: string[] = [];
+afterEach(() => { for (const h of homes.splice(0)) rmSync(h, { recursive: true, force: true }); });
+
+const START = new Date("2026-10-20T21:00:00Z");
+const END = new Date("2026-10-21T07:00:00Z");
+
+function fixture() {
+  const home = mkdtempSync(join(tmpdir(), "mode-end-")); homes.push(home);
+  expect(addHumanFragment({ entityId: "alex", class: "human", displayName: "alex", address: "alex@external", prefs: { deliveryClass: "B", availability: "focus" },
+    connectorBindings: [{ kind: "slack", connectorRef: "main", secretsRef: "vault://fixture", role: "primary", handle: "U-ALEX" }] }, home).ok).toBe(true);
+  const db = createDb();
+  migrate(db, ALL_MIGRATIONS);
+  const queueRepo = new QueueRepository(db, new EventBus(db), { loadHumanRegistry: () => loadHumanRegistry(home) });
+  const clock = { now: START };
+  const modes = new HumanModeService({ db, availability: registryAvailability(home), now: () => clock.now,
+    armScheduledEnd: (a) => armModeScheduledEnd({ jobsRepo: new WatchdogJobsRepository(db), ...a }) });
+  modes.save("alex", { name: "asleep", availability: { value: "away" }, delivery: { account: "slack at seven" } }, "operator-agent@kernel");
+  modes.save("alex", { name: "away-from-desk", availability: { value: "away" } }, "operator-agent@kernel");
+  const jobFor = (applicationId: string) => new WatchdogJobsRepository(db).listActive()
+    .find((j) => j.policy === MODE_SCHEDULED_END_POLICY && j.specYaml.includes(applicationId));
+  // Each run uses new repositories over the same database, as after a daemon restart.
+  const run = (jobId: string, at: Date) => runModeScheduledEnd({ db, queueRepo: new QueueRepository(db, new EventBus(db)),
+    jobsRepo: new WatchdogJobsRepository(db), home, jobId, now: at });
+  const toOperator = () => (db.prepare("SELECT destination_session AS dest, body FROM queue_items WHERE source_session = 'daemon@kernel'").all() as Array<{ dest: string; body: string }>);
+  const availability = () => (readHumanAvailability("alex", home) as { availability?: string }).availability;
+  return { db, home, clock, modes, jobFor, run, toOperator, availability };
+}
+
+describe("a mode's scheduled end", () => {
+  it("ends at its time as \"scheduled\", puts back what was the mode's, and tells the kernel operator where the account goes", async () => {
+    const f = fixture();
+    f.db.prepare("INSERT INTO rigs (id, name) VALUES ('r-k', 'kernel')").run();
+    f.db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('n-op', 'r-k', 'operator.agent')").run();
+    f.db.prepare("INSERT INTO sessions (id, node_id, session_name) VALUES ('s-op', 'n-op', ?)").run(KERNEL_OPERATOR_SESSION);
+    const app = f.modes.apply("alex", "asleep", { scheduledEnd: END }, "orch@rig").application!;
+    const job = f.jobFor(app.applicationId)!;
+    expect(await f.run(job.jobId, new Date("2026-10-21T06:59:00Z"))).toEqual({ state: "not-yet" });
+    expect(f.modes.current("alex")?.applicationId).toBe(app.applicationId);
+    expect(await f.run(job.jobId, new Date("2026-10-21T07:00:30Z"))).toEqual({ state: "ended", notified: KERNEL_OPERATOR_SESSION });
+    expect(f.modes.get(app.applicationId)).toMatchObject({ endReason: "scheduled", endedAt: "2026-10-21T07:00:30.000Z", scheduledEnd: END.toISOString() });
+    expect(f.availability()).toBe("focus");
+    const [row] = f.toOperator();
+    expect(row!.dest).toBe(KERNEL_OPERATOR_SESSION);
+    expect(row!.body).toContain(`rig gateway human mode account alex ${app.applicationId}`);
+    expect(row!.body).toContain("slack at seven");
+    expect(row!.body).toContain("Applied by orch@rig.");
+    expect(f.jobFor(app.applicationId)).toBeUndefined(); // retired
+  });
+
+  it("where the kernel operator isn't on this host, the seat that applied the mode is told, and the row says why", async () => {
+    const f = fixture();
+    const app = f.modes.apply("alex", "asleep", { scheduledEnd: END }, "orch@rig").application!;
+    expect(await f.run(f.jobFor(app.applicationId)!.jobId, END)).toEqual({ state: "ended", notified: "orch@rig" });
+    expect(f.toOperator()[0]!.body).toContain(`Sent to orch@rig because ${KERNEL_OPERATOR_SESSION} isn't on this host.`);
+  });
+
+  it("switched to another mode before its time: the old job retires and never ends the new mode", async () => {
+    const f = fixture();
+    const asleep = f.modes.apply("alex", "asleep", { scheduledEnd: END }, "orch@rig").application!;
+    const job = f.jobFor(asleep.applicationId)!;
+    const away = f.modes.apply("alex", "away-from-desk", {}, "orch@rig").application!;
+    expect(await f.run(job.jobId, new Date("2026-10-21T07:05:00Z"))).toEqual({ state: "already-ended" });
+    expect(f.modes.current("alex")?.applicationId).toBe(away.applicationId);
+    expect(f.modes.get(asleep.applicationId)!.endReason).toBe("switched");
+    expect(f.jobFor(asleep.applicationId)).toBeUndefined();
+    expect(f.toOperator()).toEqual([]);
+  });
+
+  it("ended by hand first: nothing more happens at its time, and a manual choice made since stays", async () => {
+    const f = fixture();
+    const app = f.modes.apply("alex", "asleep", { scheduledEnd: END }, "orch@rig").application!;
+    const job = f.jobFor(app.applicationId)!;
+    f.modes.end("alex", "back", "alex");
+    expect(setHumanField("alex", "availability", "off", f.home).ok).toBe(true);
+    expect(await f.run(job.jobId, END)).toEqual({ state: "already-ended" });
+    expect(f.modes.get(app.applicationId)!.endReason).toBe("back");
+    expect(f.availability()).toBe("off");
+  });
+});

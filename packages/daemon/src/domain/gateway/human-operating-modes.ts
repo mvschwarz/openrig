@@ -118,7 +118,10 @@ interface EffectRow {
 export class HumanModeService {
   private readonly quiet: HumanQuietStore;
   /** `availability` is needed only to apply or end a mode; reading saved modes and applications works without it. */
-  constructor(private readonly deps: { db: Database.Database; availability?: AvailabilityAccess; quiet?: HumanQuietStore; now?: () => Date }) {
+  /** `armScheduledEnd` arms the timer that ends an application at its scheduled end; it runs with the application's insert,
+   *  so one never commits without the other. */
+  constructor(private readonly deps: { db: Database.Database; availability?: AvailabilityAccess; quiet?: HumanQuietStore; now?: () => Date;
+    armScheduledEnd?: (application: { applicationId: string; entityId: string; scheduledEnd: string }) => void }) {
     this.quiet = deps.quiet ?? new HumanQuietStore(deps.db);
   }
 
@@ -193,8 +196,11 @@ export class HumanModeService {
     }
     const ended = this.end(entityId, "switched", actor);
     const applicationId = randomUUID();
-    this.deps.db.prepare(`INSERT INTO human_mode_applications (application_id, entity_id, mode_name, settings, started_by, started_at, scheduled_end)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`).run(applicationId, entityId, wanted, JSON.stringify(mode), actor, at.toISOString(), scheduledEnd?.toISOString() ?? null);
+    this.deps.db.transaction(() => {
+      this.deps.db.prepare(`INSERT INTO human_mode_applications (application_id, entity_id, mode_name, settings, started_by, started_at, scheduled_end)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`).run(applicationId, entityId, wanted, JSON.stringify(mode), actor, at.toISOString(), scheduledEnd?.toISOString() ?? null);
+      if (scheduledEnd) this.deps.armScheduledEnd?.({ applicationId, entityId, scheduledEnd: scheduledEnd.toISOString() });
+    })();
 
     // Each effect is its own step: one that throws is recorded as that effect's failure and never stops the others, so the
     // record always shows every effect's real state.
@@ -278,6 +284,14 @@ export class HumanModeService {
       if (earlier !== row?.application_id) this.endEffects(entityId, earlier, actor, at);
     }
     return row ? this.get(row.application_id) : null;
+  }
+
+  /** End this application, and only while it's still the one on: a timer armed for it never ends a later mode the person
+   *  switched to. Null when it has already ended. */
+  endIfStill(applicationId: string, reason: EndReason, actor: string): ModeApplication | null {
+    const row = this.deps.db.prepare(`SELECT entity_id FROM human_mode_applications WHERE application_id = ? AND ended_at IS NULL`)
+      .get(applicationId) as { entity_id: string } | undefined;
+    return row ? this.end(row.entity_id, reason, actor) : null;
   }
 
   /** Restorations from ended applications that are still pending or failed: owed in the coming-back report, and tried

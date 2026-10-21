@@ -29,6 +29,8 @@ import type Database from "better-sqlite3";
 import { HumanQuietStore, QuietWindowError, parseDailyRule, resolveUntil } from "../domain/gateway/human-quiet-windows.js";
 import { HumanModeService, ModeError, registryAvailability, type QuietRule } from "../domain/gateway/human-operating-modes.js";
 import { modeAccount } from "../domain/gateway/human-mode-account.js";
+import { WatchdogJobsRepository } from "../domain/watchdog-jobs-repository.js";
+import { armModeScheduledEnd } from "../domain/policies/mode-scheduled-end.js";
 
 interface SubsystemHandle {
   restart: () => void;
@@ -164,7 +166,9 @@ export function gatewayRoutes(opts: {
         actor = identity.session;
       }
       const at = now();
-      const modes = new HumanModeService({ db, availability: registryAvailability(home), now: () => at });
+      const jobsRepo = new WatchdogJobsRepository(db);
+      const modes = new HumanModeService({ db, availability: registryAvailability(home), now: () => at,
+        armScheduledEnd: (application) => armModeScheduledEnd({ jobsRepo, ...application }) });
       try {
         return c.json({ ok: true, entityId, ...(handler({ modes, entityId, name: c.req.param("name") ?? "", actor, body, at }) as Record<string, unknown>) });
       } catch (error) {
