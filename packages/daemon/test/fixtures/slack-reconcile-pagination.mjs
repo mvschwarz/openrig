@@ -111,16 +111,8 @@ for (const scenario of scenarios) {
       if (["root", "thread", "receipt-retry", "pending-receipt"].includes(scenario)) { assert.equal(reads, scenario === "receipt-retry" ? 4 : 2); assert.equal(queried[1].cursor, "older"); }
       else assert.equal(reads, scenario.startsWith("deep-absent") ? 4 : 1);
       if (isThread) assert.ok(queried.every((query) => query.method === "/api/conversations.replies"));
-    } else if (scenario === "initial-api-error") {
-      assert.equal(retry.ok, false, "initial failure preserves the unreadable outcome");
-      assert.equal(retry.class, "reconcile-unreadable");
-      assert.equal(postRequests, 1);
-      assert.equal(receipts.length, 0);
-      assert.equal(delivered.load().has(decision.decisionId), false);
-      assert.equal(seen.load().has(decision.payload.qitemId), false);
-      assert.equal(logs.some((line) => line.includes("WARNING: incomplete")), false);
     } else {
-      assert.equal(retry.ok, true, "partial scan warns and permits exactly one post");
+      assert.equal(retry.ok, true, "an unreadable or partial scan warns and permits exactly one post");
       assert.equal(postRequests, 2);
       assert.equal(posted.length, 2, "the accepted trade-off can duplicate an out-of-bound marker");
       assert.deepEqual(receipts, [{ ts: "1000.2", threadTs: undefined }]);

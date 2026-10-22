@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, type LifecycleDeps } from "../daemon-lifecycle.js";
+import { daemonMayAnswer } from "../daemon-reachability.js";
 import { realDeps } from "./daemon.js";
 
 export interface CompactPlanDeps {
@@ -419,7 +420,7 @@ Examples:
       }
 
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (status.state !== "running" || status.healthy === false) {
+      if (!daemonMayAnswer(status)) {
         console.error("Daemon is not running. Start it with: rig daemon start");
         console.error("Cannot build compact-plan without current read-only rig inventory.");
         process.exitCode = 1;

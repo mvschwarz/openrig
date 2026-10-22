@@ -22,7 +22,8 @@ boundary, acceptance and evidence pointers; create it before sending:
 ```sh
 rig whoami --json
 rig queue create --destination dev-build@starter \
-  --body-file ./TASK.md --summary 'Implement the agreed CSV inspection' --json
+  --body-file ./TASK.md --summary 'Implement the agreed CSV inspection' \
+  --tags 'project:<id>,mission:<id>,slice:<id>' --json
 rig queue claim <returned-qitem-id> --json
 ```
 
@@ -30,7 +31,8 @@ After implementing and checking the cumulative candidate, the current owner uses
 
 ```sh
 rig queue handoff <owned-qitem-id> --to dev-review@starter \
-  --body-file ./REVIEW-REQUEST.md --json
+  --body-file ./REVIEW-REQUEST.md --summary 'Review the CSV inspection candidate' \
+  --tags 'project:<id>,mission:<id>,slice:<id>' --json
 ```
 
 The request binds exact candidate, acceptance, commands and evidence. Read the
@@ -177,10 +179,11 @@ task instead of duplicating it):
 ```sh
 rig queue create --destination dev-parser@starter \
   --body-file "$PROJECT_ROOT/.openrig/factory/TASK-A.md" \
-  --summary 'Implement the agreed independent change A' --json
+  --summary 'Implement the agreed independent change A' \
+  --tags 'project:<id>,mission:<id>,slice:<id>' --json
 ```
 
-Use actual project/mission/slice tags where applicable. Read back the returned ID
+Use the project, mission and slice the work belongs to. Read back the returned ID
 with `rig queue show <id> --full --json`; A claims it as itself. Use the earlier
 queue loop for results, review and blockers. Existing Workflow-bound work keeps
 its packet/projection contract: adding a seat does not revise a running graph or
@@ -501,7 +504,7 @@ At each completed step, the **current packet owner** projects its own result. Ex
 
 ```sh
 rig workflow project --instance <instance-id> --current-packet <inspect-packet> \
-  --exit handoff --actor-session dev-build@starter \
+  --exit handoff \
   --result-note 'Inspection contract implemented; exact candidate and checks recorded' \
   --evidence-ref <absolute-slice-01-proof-path> --json
 ```
@@ -512,7 +515,7 @@ For a **real unresolved blank-cell product choice**, ask the user the concrete q
 
 ```sh
 rig workflow project --instance <instance-id> --current-packet <cli-packet> \
-  --exit waiting --actor-session dev-build@starter \
+  --exit waiting \
   --blocked-on external:user/blank-required-cells \
   --result-note 'Need the user decision recorded in mission NOTES before selecting CLI behavior' \
   --evidence-ref <absolute-mission-notes-path> --json

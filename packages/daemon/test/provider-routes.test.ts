@@ -43,6 +43,13 @@ function appWith(svc: ProviderService | null): Hono {
 }
 
 describe("provider routes", () => {
+  it("the subscription move record is gone: its routes answer 404, not a disabled-feature 409", async () => {
+    const app = appWith(stubService);
+    expect((await app.request("/api/provider/moves")).status).toBe(404);
+    expect((await app.request("/api/provider/moves/m-1")).status).toBe(404);
+    expect((await app.request("/api/provider/moves", { method: "POST", body: "{}" })).status).toBe(404);
+  });
+
   it("GET /status returns the whole four-block model", async () => {
     const res = await appWith(stubService).request("/api/provider/status");
     expect(res.status).toBe(200);

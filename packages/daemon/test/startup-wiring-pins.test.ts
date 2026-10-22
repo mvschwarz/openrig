@@ -21,6 +21,8 @@ import type { CmuxTransportFactory } from "../src/terminal/cmux-transport.js";
 import type { ExecFn } from "../src/domain/tmux-adapter.js";
 import type Database from "better-sqlite3";
 import type { ContextMonitor } from "../src/domain/context-monitor.js";
+import type { TmuxAdapter } from "../src/adapters/tmux.js";
+import { getActiveRotationCount, startTranscriptRotation, stopTranscriptRotation } from "../src/domain/transcript-rotation.js";
 
 let db: Database.Database;
 let deps: AppDeps;
@@ -121,6 +123,22 @@ describe("P16 — domain-internal safety injections (the recurred class, pinned 
 
   it("QueueRepository transport is attached post-construction (the wake path)", () => {
     expect(priv(deps.queueRepo, "transport")).toBeTruthy();
+  });
+
+  it("a session's end stops its transcript capture (the rotation is subscribed to session events)", () => {
+    const capture = { capturePaneContent: async () => "" } as unknown as TmuxAdapter;
+    const names = ["stopped@wiring-pin", "removed@wiring-pin", "cleaned@wiring-pin"];
+    try {
+      for (const name of names) startTranscriptRotation(capture, name, path.join(scratch, `${name}.log`), { lines: 1, pollIntervalMs: 60_000 });
+      const before = getActiveRotationCount();
+      deps.eventBus.emit({ type: "session.stopped", rigId: "r", nodeId: "n1", sessionName: names[0]!, reason: "pin", operator: null });
+      deps.eventBus.emit({ type: "session.detached", rigId: "r", nodeId: "n2", sessionName: names[1]! });
+      deps.eventBus.emit({ type: "session.cleaned", rigId: "r", nodeId: "n3", sessionName: names[2]!, reason: "pin", operator: null,
+        actions: { sessionsExited: [names[2]!], bindingCleared: true } });
+      expect(getActiveRotationCount()).toBe(before - names.length);
+    } finally {
+      for (const name of names) stopTranscriptRotation(name);
+    }
   });
 });
 

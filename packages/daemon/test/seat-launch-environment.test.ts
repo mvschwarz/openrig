@@ -92,6 +92,7 @@ describe.skipIf(process.platform === "win32")("seat launch environment after she
     vi.spyOn(adapter as any, "dismissSkippableCodexUpdatePrompt").mockResolvedValue(undefined);
     vi.spyOn(adapter as any, "verifyResumeLaunch").mockResolvedValue({ ok: true });
     vi.spyOn(adapter as any, "captureFreshThreadId").mockResolvedValue("new-native-id");
+    vi.spyOn(adapter as any, "captureVerifiedForkId").mockResolvedValue("new-native-id");
     const result = await adapter.launchHarness(f.binding, { name: "seat", ...(kind === "resume" ? { resumeToken: "old-id" } : kind === "fork" ? { forkSource: { kind: "native_id" as const, value: "parent-id" } } : {}) });
     expect(result.ok).toBe(true); expect(f.commands).toHaveLength(1);
     expect(f.commands[0]).toContain(`${shellQuote(path.join(f.bin, "codex"))} --no-daemon`);

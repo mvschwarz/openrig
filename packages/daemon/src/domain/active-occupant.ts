@@ -69,9 +69,12 @@ export function resolveActiveOccupantRow<T extends OccupantCandidateRow>(
   return { kind: "resolved", session: hit };
 }
 
-/** The snapshot-shaped entry point (the original public signature; a thin
- *  wrapper so execution call sites are unchanged). */
-export function resolveActiveSnapshotSession(data: SnapshotData, nodeId: string): ActiveSnapshotSessionResolution {
+/** The captured-occupancy reader, also used by the read-only would-capture
+ *  forecast. Full snapshots and narrower preview rows use the same ladder. */
+export function resolveActiveSnapshotSession<T extends OccupantCandidateRow>(
+  data: Pick<SnapshotData, "activeOccupantsByNode" | "activeSessionIdByNode"> & { sessions: T[] },
+  nodeId: string,
+): ActiveOccupantResolution<T> {
   const explicit = data.activeOccupantsByNode;
   if (explicit !== undefined) {
     const state = explicit[nodeId];

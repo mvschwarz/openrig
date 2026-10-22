@@ -5,7 +5,8 @@ import type { TmuxAdapter } from "./tmux.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import type { ResumeResult } from "./claude-resume.js";
 import { assessNativeResumeProbe, buildCodexResumeCore } from "../domain/native-resume-probe.js";
-import { runSyncSite } from "../domain/sync-site-wrap.js";
+import { verifyPaneIdleShell, type NativeProcessLister } from "../domain/native-process-lineage.js";
+import { execRuntimeProbe } from "./runtime-probe-exec.js";
 import { shellQuote } from "./shell-quote.js";
 import { codexPostureArg } from "./yolo-mode.js";
 import { observeCodexSandbox } from "../domain/permission-drift.js";
@@ -30,6 +31,10 @@ interface CodexResumeOptions {
   detectDaemonSupport?: CodexDaemonSupportDetector;
   /** #275: Codex's own answer on the plain floor's network default; absent keeps the existing invocation. */
   readNetworkDefault?: CodexNetworkDefaultReader;
+  /** Ensure the managed Codex config (hooks, trust) just before a resume, as a runtime-adapter launch does. */
+  ensureManagedConfig?: () => Promise<void>;
+  /** Process rows for the idle-shell check; defaults to the OS listing. */
+  listProcesses?: NativeProcessLister;
 }
 
 export class CodexResumeAdapter {
@@ -69,16 +74,12 @@ export class CodexResumeAdapter {
       return { ok: false, code: "no_resume", message: "Codex resume not available" };
     }
 
+    await this.options.ensureManagedConfig?.();
+
     if (codexConfigProfile?.trim()) {
       const { verifyCodexProfileLoads } = await import("../domain/codex-profile-preflight.js");
-      const execFn = this.options.exec ?? (async (cmd: string) => {
-        const { execSync } = await import("node:child_process");
-        return runSyncSite("codex.resume.profile_preflight", () =>
-          execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10_000,
-            ...(this.options.codexHome ? { cwd, env: { ...process.env, CODEX_HOME: this.options.codexHome, ...(this.options.launchPath ? { PATH: this.options.launchPath } : {}) } } : {}),
-          })
-        );
-      });
+      const execFn = this.options.exec ?? ((cmd: string) => execRuntimeProbe("codex.resume.profile_preflight", cmd,
+        this.options.codexHome ? { cwd, env: { ...process.env, CODEX_HOME: this.options.codexHome, ...(this.options.launchPath ? { PATH: this.options.launchPath } : {}) } } : {}));
       const probeResult = await verifyCodexProfileLoads(codexConfigProfile, execFn, undefined, this.options.codexHome);
       if (!probeResult.ok) {
         return {
@@ -124,7 +125,8 @@ export class CodexResumeAdapter {
     }
 
     const result = await this.verifyResume(tmuxSessionName);
-    return result.ok ? { ...result, appliedLaunch } : result;
+    const launchFacts = daemonSupport ? { ...appliedLaunch, daemonOptOut: daemonSupport.kind === "supported" } : appliedLaunch;
+    return result.ok ? { ...result, appliedLaunch: launchFacts } : result;
   }
 
   // Mirrors ClaudeResumeAdapter.verifyResume: poll the pane, run the native
@@ -209,10 +211,21 @@ export class CodexResumeAdapter {
     }
 
     if (finalCommand && SHELL_COMMANDS.has(finalCommand)) {
+      // A shell label alone isn't a return to the shell: a launch script still starting Codex holds the pane the
+      // same way. Only a proven, stable idle shell ends the resume; anything else keeps the launch for attention.
+      if (await verifyPaneIdleShell({ target: tmuxSessionName, tmux: this.tmux,
+        ...(this.options.listProcesses ? { listProcesses: this.options.listProcesses } : {}) })) {
+        return {
+          ok: false,
+          code: "retry_fresh",
+          message: "Codex resume failed: pane returned to shell instead of entering Codex",
+        };
+      }
       return {
         ok: false,
-        code: "retry_fresh",
-        message: "Codex resume failed: pane returned to shell instead of entering Codex",
+        code: "attention_required",
+        message: "Codex resume could not be verified; launch retained: the pane shows a shell that isn't a proven idle shell, so a launch script may still be starting Codex.",
+        evidence: finalContent.split("\n").slice(-12).join("\n"),
       };
     }
 

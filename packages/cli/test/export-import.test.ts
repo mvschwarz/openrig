@@ -413,9 +413,11 @@ describe("rig export + import", () => {
     expect(logs2.join("\n").length).toBeGreaterThan(0);
   });
 
-  // Test 12: export unhealthy daemon -> error, no HTTP
-  it("export: unhealthy daemon -> error, no HTTP", async () => {
-    const clientFactory = vi.fn();
+  // Test 12: export with a busy daemon (process alive, health check failing) -> the real request runs.
+  // Changed: this used to refuse with no HTTP. A busy daemon is not refused; its answer decides.
+  it("export: busy daemon -> the real request is made", async () => {
+    const getText = vi.fn(async () => ({ status: 404, data: "" }));
+    const clientFactory = vi.fn(() => ({ getText }));
     const deps: ExportDeps = {
       lifecycleDeps: unhealthyLifecycleDeps(),
       clientFactory: clientFactory as unknown as ExportDeps["clientFactory"],
@@ -424,8 +426,8 @@ describe("rig export + import", () => {
     const program = new Command();
     program.addCommand(exportCommand(deps));
     const logs = await captureLogs(() => program.parseAsync(["node", "rig", "export", "rig-1"]));
-    expect(logs.join("\n")).toMatch(/did not respond|busy or stopped|unhealthy/i) // B8 supersession: epistemic guard language;
-    expect(clientFactory).not.toHaveBeenCalled();
+    expect(getText).toHaveBeenCalledTimes(1);
+    expect(logs.join("\n")).toContain("Rig 'rig-1' not found");
   });
 
   // Test 13: import daemon stopped -> no HTTP

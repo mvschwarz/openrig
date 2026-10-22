@@ -1,3 +1,4 @@
+import { unknownModelObservation, type CurrentModelReader } from "../domain/model-divergence/current-model-reader.js";
 import { inventoryCaptureOptions, type ShadowCapture } from "../domain/shadow-capture.js";
 import { Hono } from "hono";
 import { observeInventoryHandler } from "../domain/request-phase-observer.js";
@@ -168,7 +169,12 @@ nodesRoutes.get("/", observeInventoryHandler, async (c) => {
   // always present, so "not yet known" is a value, never an absence a consumer can misread.
   // selfHostId ONLY — never host.name (display-only; the DP4 conflation healthz already refuses).
   const hostSelfId = getSelfHostId();
-  return c.json(withTerminalAndWork.map((n) => ({ ...n, hostSelfId })));
+  const modelReader = c.get("currentModelReader" as never) as CurrentModelReader | undefined;
+  const observations = modelReader ? await modelReader.observeInventory(withTerminalAndWork) : null;
+  const nodes = withTerminalAndWork.map((n, i) => ({ ...n, hostSelfId,
+    modelObservation: observations?.[i] ?? unknownModelObservation("observer-unavailable"),
+  }));
+  return c.json(nodes);
 });
 
 // GET /api/rigs/:rigId/nodes/:logicalId — node detail
@@ -577,6 +583,35 @@ sessionAdminRoutes.post("/:sessionName/reconcile", terminalAuthGuard(), async (c
   return c.json(outcome, 200);
 });
 
+// Deliberately separate from /reconcile: old daemons must return 404, never adopt.
+sessionAdminRoutes.post("/:sessionName/repair-missing-pane", terminalAuthGuard(), async (c) => {
+  const body: unknown = await c.req.json().catch(() => null);
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return c.json({ error: "Supply a JSON object with optional rigId and logicalId." }, 400);
+  }
+  const input = body as Record<string, unknown>;
+  for (const key of ["rigId", "logicalId"]) {
+    if (input[key] !== undefined && (typeof input[key] !== "string" || !(input[key] as string).trim())) {
+      return c.json({ error: `${key} must be a non-empty string.` }, 400);
+    }
+  }
+  const rigId = input.rigId as string | undefined, logicalId = input.logicalId as string | undefined;
+  if (!!rigId !== !!logicalId) return c.json({ error: "rigId and logicalId must be provided together (or both omitted)." }, 400);
+  const claimService = c.get("claimService" as never) as ClaimService | undefined;
+  const instantiator = c.get("podInstantiator" as never) as PodRigInstantiator | undefined;
+  if (!claimService || !instantiator) return c.json({ error: "Missing-pane repair is unavailable on this daemon." }, 503);
+  const result = await convergeOp({ instantiator, claimService }, rigId ?? "", {
+    kind: "reconcile_session", sessionName: c.req.param("sessionName")!, rigId, logicalId, repairMissingPane: true,
+  }, ".");
+  if (result.kind !== "reconcile_session" || !result.supported) return c.json({ error: "Unexpected repair result." }, 500);
+  const outcome = result.outcome;
+  if (outcome.ok) return c.json(outcome, 200);
+  if (outcome.code === "tmux_unavailable") return c.json(outcome, 503);
+  if (outcome.code === "repair_timed_out") return c.json(outcome, 504);
+  if (outcome.code === "reconcile_error") return c.json(outcome, 500);
+  return c.json(outcome, 409);
+});
+
 // POST /api/sessions/:sessionName/clear-attention — OPR.0.3.4.10.
 sessionAdminRoutes.post("/:sessionName/clear-attention", terminalAuthGuard(), async (c) => {
   const sessionName = c.req.param("sessionName")!;
@@ -665,7 +700,7 @@ sessionAdminRoutes.post("/:sessionRef/unclaim", terminalAuthGuard(), async (c) =
 
   const result = await rigLifecycleService.unclaimSession(sessionRef);
   if (!result.ok) {
-    const status = result.code === "session_ambiguous" ? 409 : 404;
+    const status = result.code === "session_not_found" ? 404 : 409;
     return c.json(result, status);
   }
 

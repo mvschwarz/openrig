@@ -9,6 +9,7 @@ import type { EventBus } from "../domain/event-bus.js";
 import { summarizeSnapshot, type SnapshotRepository } from "../domain/snapshot-repository.js";
 import type { SnapshotCapture } from "../domain/snapshot-capture.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
+import { joinAutomaticRestore, JOINED_AUTOMATIC_RESTORE_WARNING } from "../domain/existing-rig-restore.js";
 import { projectRigToGraph, type InventoryOverlay, type CurrentQitemSummary } from "../domain/graph-projection.js";
 import {
   getNodeInventory,
@@ -22,7 +23,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { AgentActivityStore } from "../domain/agent-activity-store.js";
 import type { SeatActivityService } from "../domain/seat-activity-service.js";
 import type { SeatStructuralActivityService } from "../domain/seat-structural-activity-service.js";
-import { deriveRigLifecycleState } from "../domain/ps-projection.js";
+import { deriveRigLifecycleState, deriveRigLifecycleFromInventory } from "../domain/ps-projection.js";
 import { identityVerdictConfirmsSessionMissing } from "../domain/types.js";
 import { assessCurrentStateRehydrateEligibility, snapshotMatchesCurrentOccupants } from "../domain/rehydrate-eligibility.js";
 import { buildRestorePlanPreview, collectPreviewSessionRows } from "../domain/restore-plan-preview.js";
@@ -33,7 +34,7 @@ import type { KernelBootTracker, KernelState } from "../domain/kernel-boot-track
 import type { RecoveryPlan } from "../domain/restore-check-service.js";
 import type { ContextUsageStore } from "../domain/context-usage-store.js";
 import type { TranscriptStore } from "../domain/transcript-store.js";
-import type { Pod, ExpansionPodFragment } from "../domain/types.js";
+import type { Pod, ExpansionPodFragment, RestoreOutcome, Snapshot } from "../domain/types.js";
 import type { RigExpansionService } from "../domain/rig-expansion-service.js";
 import type { PodRigInstantiator } from "../domain/rigspec-instantiator.js";
 import { convergeOp } from "../domain/topology-converge.js";
@@ -231,12 +232,14 @@ rigsRoutes.get("/summary", (c) => {
     const invByRig = getNodeInventoryForRigs(repo.db, new Set(summaries.map((s) => s.id)));
     const enriched = summaries.map((s) => {
       const inventory = invByRig.get(s.id) ?? [];
-      const lifecycleState = deriveRigLifecycleState(inventory.map((e) => e.lifecycleState));
+      const lifecycleState = deriveRigLifecycleFromInventory(inventory);
+      // Restore eligibility still accounts for every seat, including intentional stops.
+      const restoreLifecycleState = deriveRigLifecycleState(inventory.map((entry) => entry.lifecycleState));
       const agents = inventory.filter((e) => e.nodeKind === "agent");
       // Presence is separate from lifecycle/attention, and uses this same inventory fold.
       const hasLiveAgents = agents.some((e) => e.sessionStatus === "running" || e.sessionStatus === "idle")
         ? true : agents.every((e) => e.sessionStatus === null || e.sessionStatus === "stopped" || e.sessionStatus === "exited") ? false : null;
-      return { ...s, lifecycleState, hasLiveAgents };
+      return { ...s, lifecycleState, restoreLifecycleState, hasLiveAgents };
     });
     return c.json(enriched);
   });
@@ -622,6 +625,7 @@ rigsRoutes.post("/:id/attach-self", async (c) => {
       return c.json(result, 404);
     case "runtime_required":
       return c.json(result, 400);
+    case "address_conflict":
     case "already_bound":
     case "duplicate_logical_id":
     case "invalid_member_name":
@@ -654,6 +658,15 @@ rigsRoutes.post("/:id/up", async (c) => {
 
   const snapshotRepo = c.get("snapshotRepo" as never) as SnapshotRepository;
   const snapshotCapture = c.get("snapshotCapture" as never) as SnapshotCapture;
+  // The same restore daemon start is running, or has just run, for a kernel a reboot left down: its
+  // outcome, as `rig up <rig> --existing` reports it (routes/up.ts).
+  if (!plan && !freshLogicalIds?.length) {
+    const joined = await joinAutomaticRestore({ rigRepo: repo, snapshotRepo }, rigId);
+    if (joined) {
+      if (!joined.ok) return c.json(joined.choice.body, joined.choice.status);
+      return renderExplorerRestore(c, repo, rig.rig.name, rigId, joined.snapshot, joined.capturedCurrentState, joined.staleSnapshot, joined.result, true);
+    }
+  }
   const automaticSelection = snapshotRepo.selectRestoreUsable(rigId);
   let snapshot = automaticSelection.ok ? automaticSelection.snapshot : null;
   let snapshotSelection = automaticSelection.ok ? automaticSelection.selection : undefined;
@@ -678,7 +691,7 @@ rigsRoutes.post("/:id/up", async (c) => {
   // OPR.0.3.4.4 — read-only plan gate BEFORE the auto-rehydrate capture
   // (the capture is itself a mutation) and before restoreOrch.restore().
   if (plan) {
-    return c.json(buildRestorePlanPreview(rig, snapshot ?? null, collectPreviewSessionRows(repo.db, rig, snapshot ?? null), undefined, Date.now(), readFreshOccupantRelations(repo.db, rig.rig.id)), 200);
+    return c.json(buildRestorePlanPreview(rig, snapshot ?? null, collectPreviewSessionRows(repo.db, rig, snapshot ?? null, true), freshLogicalIds, Date.now(), readFreshOccupantRelations(repo.db, rig.rig.id)), 200);
   }
 
   if (!snapshot) {
@@ -703,14 +716,25 @@ rigsRoutes.post("/:id/up", async (c) => {
     adapters: adapters ?? {},
     fsOps: { exists: (p: string) => fs.existsSync(p) },
     freshLogicalIds,
+    preserveStoppedInitial: true,
     snapshotSelection,
   });
+  return renderExplorerRestore(c, repo, rig.rig.name, rigId, snapshot, capturedCurrentState, staleSnapshot, result, false);
+});
+
+async function renderExplorerRestore(
+  c: { json: (data: unknown, status?: number) => Response },
+  repo: RigRepository, rigName: string, rigId: string, snapshot: Snapshot, capturedCurrentState: boolean, staleSnapshot: boolean,
+  result: RestoreOutcome | { ok: false; code: "restore_unavailable"; message: string }, joined: boolean,
+) {
+  const joinedWarning = joined ? [JOINED_AUTOMATIC_RESTORE_WARNING] : [];
   if (!result.ok) {
+    if (result.code === "restore_unavailable") return c.json({ error: result.message }, 500);
     if (result.code === "pre_restore_validation_failed") {
       return c.json({
         status: "not_attempted",
         rigId,
-        rigName: rig.rig.name,
+        rigName,
         error: result.message,
         code: result.code,
         snapshotKind: snapshot.kind,
@@ -718,7 +742,7 @@ rigsRoutes.post("/:id/up", async (c) => {
         remediation: result.result.blockers?.map((blocker) => blocker.remediation) ?? [],
       }, 409);
     }
-    return c.json({ error: result.message, code: result.code }, result.code === "rig_not_stopped" ? 409 : 400);
+    return c.json({ error: result.message, code: result.code, ...(joined ? { warnings: joinedWarning } : {}) }, result.code === "rig_not_stopped" ? 409 : 400);
   }
 
   // Compute attach command from first running/resumed node (same logic as /api/up)
@@ -730,19 +754,19 @@ rigsRoutes.post("/:id/up", async (c) => {
   return c.json({
     status: "restored",
     rigId,
-    rigName: rig.rig.name,
+    rigName,
     snapshotId: snapshot.id,
     snapshotKind: snapshot.kind,
     rigResult: result.result.rigResult,
     nodes: result.result.nodes,
-    warnings: capturedCurrentState
+    warnings: [...joinedWarning, ...(capturedCurrentState
       ? [staleSnapshot
           ? "Existing restore snapshots named an older occupant; captured current DB state as auto-rehydrate snapshot for reboot recovery."
           : "No restore-usable snapshot existed; captured current DB state as auto-rehydrate snapshot for reboot recovery.", ...result.result.warnings]
-      : result.result.warnings,
+      : result.result.warnings)],
     attachCommand,
   }, 200);
-});
+}
 
 // POST /api/rigs/:rigId/expand — dynamic rig expansion
 rigsRoutes.post("/:rigId/expand", async (c) => {

@@ -78,7 +78,9 @@ test('requires the actual runner ledger to agree with the returned result', () =
 test('a passing-only case admits only a clean PASS of its own scenario', () => {
   for (const [caseName, { scenario }] of Object.entries(PASSING_CASES)) {
     const result = { scenario, verdict: 'PASS' };
-    const pass = { mode: 'healthy', caseName, scenarioSha256: 'a'.repeat(64), result, records: [result], fault: null };
+    const text = (PASSING_CASES[caseName].includes ?? []).join('\n');
+    const hook = { rawOutput: JSON.stringify({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: text } }), additionalContext: text };
+    const pass = { ...(PASSING_CASES[caseName].kind === 'hook' ? { hook } : {}), mode: 'healthy', caseName, scenarioSha256: 'a'.repeat(64), result, records: [result], fault: null };
     verifyPassingRun(0, pass, caseName);
     const fail = { ...result, verdict: 'FAIL', failedStep: 2 };
     for (const [exitCode, bad] of [
@@ -105,4 +107,45 @@ test('only one structured outcome is allowed amid human-readable logs', () => {
   assert.throws(() => readReport('no result'));
   assert.throws(() => readReport(line + '\n' + line));
   assert.throws(() => readReport(RESULT_PREFIX + '{'));
+});
+
+const hookOf = context => ({ rawOutput: JSON.stringify({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: context } }), additionalContext: context });
+
+test('refocus admission requires the emitted packet context: held work when healthy, held-as-current when seeded', () => {
+  const heldContext = '## WORK — name it\nHELD WORK (blocked; this is not next):\n- refocus-baton — parked — blocked on external:scenario-release — continuation: none recorded';
+  const passResult = { scenario: 'refocus-parked-baton', verdict: 'PASS' };
+  const green = { mode: 'healthy', caseName: 'refocus-parked', scenarioSha256: 'a'.repeat(64), result: passResult, records: [passResult],
+    hook: hookOf(heldContext), seed: { class: 'parked-baton-as-current', enabled: false }, fault: null };
+  verifyRun('healthy', 0, green, 'refocus-parked');
+  for (const context of [
+    heldContext.replace('HELD WORK', 'held'),
+    heldContext + '\nWORK FROM QUEUE EVIDENCE — tag mission:regression + slice:SCN.1 on row refocus-baton',
+    heldContext + '\nintent: Trace the exact held work',
+  ]) assert.throws(() => verifyRun('healthy', 0, { ...green, hook: hookOf(context) }, 'refocus-parked'));
+
+  const context = '## WORK TRACE\nWORK FROM QUEUE EVIDENCE — tag mission:regression + slice:SCN.1 on row refocus-baton\nintent: Trace the exact held work';
+  const hook = hookOf(context);
+  const result = { scenario: 'refocus-parked-baton', verdict: 'FAIL', failedStep: 4,
+    observation: { surface: 'hook_context', value: { rawOutput: hook.rawOutput, content: context } } };
+  const red = { mode: 'seeded', caseName: 'refocus-parked', scenarioSha256: 'a'.repeat(64),
+    result, records: [result], hook, seed: { class: 'parked-baton-as-current', enabled: true },
+    fault: { class: 'parked-baton-as-current', movedRows: 1 } };
+  verifyRun('seeded', 1, red, 'refocus-parked');
+  for (const bad of [ { ...red, fault: null }, { ...red, fault: { class: 'parked-baton-as-current', removedLines: 1 } },
+    { ...red, hook: { ...hook, rawOutput: '{}' } },
+    { ...red, result: { ...result, failedStep: 2 }, records: [{ ...result, failedStep: 2 }] },
+    { ...red, result: { ...result, observation: { surface: 'pane', value: context } }, records: [{ ...result, observation: { surface: 'pane', value: context } }] },
+    { ...red, hook: { ...hook, additionalContext: 'tokens only in unrelated text' } },
+    { ...red, hook: hookOf(context + '\nHELD WORK (blocked; this is not next):') },
+  ]) assert.throws(() => verifyRun('seeded', 1, bad, 'refocus-parked'));
+});
+
+test('the packet-off control admits only the labelled root fallback', () => {
+  const result = { scenario: 'refocus-parked-baton-packet-off', verdict: 'PASS' };
+  const fallback = 'FALLBACK — no current typed baton (…)\nThe work root is not evidence of a current mission';
+  const pass = { mode: 'healthy', caseName: 'refocus-parked-off', scenarioSha256: 'a'.repeat(64), result, records: [result], fault: null, hook: hookOf(fallback) };
+  verifyPassingRun(0, pass, 'refocus-parked-off');
+  for (const context of ['## WORK — name it\nHELD WORK (blocked; this is not next):', fallback + '\nintent: Execute the scoped regression mission', 'no label']) {
+    assert.throws(() => verifyPassingRun(0, { ...pass, hook: hookOf(context) }, 'refocus-parked-off'));
+  }
 });

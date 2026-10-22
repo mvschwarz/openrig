@@ -39,6 +39,27 @@ describe("SnapshotRepository", () => {
     db.close();
   });
 
+  it("ranks a rig's restore candidates without their data and reads only the snapshots it needs", () => {
+    const first = repo.createSnapshot("rig-1", "manual", sampleData());
+    const second = repo.createSnapshot("rig-1", "auto-pre-down", sampleData());
+    const original = db.prepare;
+    const statements: string[] = [];
+    db.prepare = function(sql: string) { statements.push(sql); return original.call(this, sql); } as typeof db.prepare;
+    let latest: string | undefined;
+    let newer: string | null | undefined;
+    try {
+      latest = repo.findLatestRestoreUsable("rig-1")?.id;
+      const selected = repo.selectRestoreUsable("rig-1", first.id);
+      newer = selected.ok ? selected.selection.newerUsableAlternative?.snapshotId ?? null : undefined;
+    } finally { db.prepare = original; }
+    expect(latest).toBe(second.id);
+    expect(newer).toBe(second.id);
+    // A rig's whole history is ranked by id; snapshot data is read one row at a time.
+    const rigWide = statements.filter((sql) => /WHERE rig_id = \?/.test(sql));
+    expect(rigWide.length).toBeGreaterThan(0);
+    for (const sql of rigWide) expect(sql).not.toMatch(/SELECT \*|\bdata\b/);
+  });
+
   it("createSnapshot persists and returns Snapshot with parsed data, status, createdAt", () => {
     const snap = repo.createSnapshot("rig-1", "manual", sampleData());
 

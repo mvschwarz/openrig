@@ -316,14 +316,15 @@ describe("Chatroom CLI", () => {
     expect(parsed[0].sender).toBe("alice");
   });
 
+  // HTTP errors must settle before the command deadline; fractional deadlines are tested below.
   it.each([
     ["history", [], 404, { error: "Rig removed" }],
     ["history", ["--json"], 500, { error: "History unavailable" }],
-    ["wait", ["--timeout", "0.05"], 404, { error: "Rig removed" }],
-    ["wait", ["--timeout", "0.05", "--json"], 500, { error: "History unavailable" }],
+    ["wait", ["--timeout", "30"], 404, { error: "Rig removed" }],
+    ["wait", ["--timeout", "30", "--json"], 500, { error: "History unavailable" }],
     ["history", [], 503, {}],
-    ["wait", ["--timeout", "0.05"], 503, {}],
-    ["wait", ["--timeout", "0.05"], 503, null],
+    ["wait", ["--timeout", "30"], 503, {}],
+    ["wait", ["--timeout", "30"], 503, null],
   ] as const)("chatroom %s reports an HTTP error (%s, %s)", async (command, options, status, body) => {
     historyFailure = { status, body };
     capturedUrls.length = 0;

@@ -5,6 +5,8 @@ metadata:
   cli_surfaces_referenced:
     - gateway human list
     - gateway human show
+    - gateway human mode room
+    - gateway human mode decide
     - queue create
     - queue transitions
     - queue block
@@ -68,6 +70,28 @@ rig queue create --destination <entityId>@external \
   --human-intent decision --summary "<short subject>" --body-file <brief-file> \
   --evidence-ref <durable-evidence> --verify --json
 ```
+
+Before asking a **decision**, check whether the person has a mode on with a
+decision room: what they said the team may decide for them meanwhile.
+
+```bash
+rig gateway human mode room <entityId>
+```
+
+If it names a room and your decision is plainly inside their words (and none of
+their exclusions), decide instead of waiting. Create the ask as above, then
+record your choice on it straight away:
+
+```bash
+rig gateway human mode decide <qitem-id> --application <applicationId> \
+  --choose <question>=<option> --reason "<why>" --reversible   # or --irreversible
+```
+
+It's recorded as decided on their behalf, never as their answer, the ask
+closes, and it's in their account when they're back. Say honestly whether it
+can be undone. A permission prompt or an approval is never decided this way.
+With no room, a room that doesn't plainly cover it, or any doubt, ask and wait;
+a recommended option is not a decision.
 
 An optional `--human-detail-file <path>` supplies one coherent supplemental
 reply in the same thread. Announce its purpose in the brief; the product also

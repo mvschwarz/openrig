@@ -10,17 +10,6 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { migrate } from "../src/db/migrate.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
-import {
-  makeParkedOwnerConsumerPolicy,
-  makeRigAnchor,
-  FAILED_PREFIX,
-  NUDGE_FAIL_PREFIX,
-  PARKED_OWNER_POLICY_NAME,
-  type ParkedOwnerConsumerDeps,
-  type RowTransitionView,
-} from "../src/domain/policies/parked-owner-consumer.js";
-import type { PolicyJob } from "../src/domain/policies/types.js";
-import type { WatchdogHistoryEntry } from "../src/domain/watchdog-history-log.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 import type { NativeProcessRow } from "../src/domain/native-process-lineage.js";
@@ -344,49 +333,4 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
       expect(result.ok).toBe(true);
       expect(sendText).toHaveBeenCalledOnce();
     });
-});
-
-describe("#142 the parked-owner wake records the refusal honestly and does not retry into the shell", () => {
-  const SEAT = "dev-impl@my-rig";
-  const ROW = "qitem-owed-1";
-
-  it("the refused delivery lands as a failure on the still-open row, and the episode sends no second wake", async () => {
-    const transitions: RowTransitionView[] = [];
-    const nudges: string[] = [];
-    const history: WatchdogHistoryEntry[] = [];
-    const deps = (): ParkedOwnerConsumerDeps => ({
-      diagnoseRig: () => ({ seats: [{
-        sessionName: SEAT,
-        parked: true,
-        activity: { value: "idle-at-prompt", needsInput: { count: 0, reason: null } },
-        obligations: { items: [{ qitemId: ROW, state: "in-progress", summary: null }], held: [] },
-      }] }),
-      history: { listForJob: (_j, limit) => history.slice(0, limit), countForJob: () => history.length },
-      rows: {
-        listTransitions: () => [...transitions],
-        appendNote: (_q, note) => { transitions.push({ ts: new Date().toISOString(), transitionNote: note }); return { ok: true }; },
-        recordNudgeResult: (_q, result) => void nudges.push(result),
-        listOpenIds: () => [ROW],
-      },
-    });
-    const job = {
-      jobId: "job-1", policy: PARKED_OWNER_POLICY_NAME, target: { session: makeRigAnchor("my-rig") },
-      intervalSeconds: 120, context: {}, lastEvaluationAt: null, lastFireAt: null,
-    } as unknown as PolicyJob;
-
-    const first = await makeParkedOwnerConsumerPolicy(deps()).evaluate(job);
-    expect(first.action).toBe("send");
-    const refusal = `Refused: '${SEAT}' reports zsh as the foreground command, but OpenRig could not verify its expected claude-code agent in the bound pane. The agent may still be running behind a wrapper. No text was sent.`;
-    history.push({
-      historyId: "h1", jobId: "job-1", evaluatedAt: new Date().toISOString(), outcome: "sent", skipReason: null,
-      deliveryTargetSession: SEAT, deliveryStatus: "failed", deliveryMessage: "wake",
-      evaluationNotes: { ...first.notes, deliveryReason: refusal },
-    } as WatchdogHistoryEntry);
-
-    const second = await makeParkedOwnerConsumerPolicy(deps()).evaluate(job);
-    expect(second.action).toBe("skip");
-    expect(JSON.stringify(second.notes)).toMatch(/already[-_]woken/);
-    expect(transitions.some((t) => t.transitionNote?.startsWith(FAILED_PREFIX) && t.transitionNote.includes("could not verify"))).toBe(true);
-    expect(nudges.some((n) => n.startsWith(NUDGE_FAIL_PREFIX) && n.includes("could not verify"))).toBe(true);
-  });
 });

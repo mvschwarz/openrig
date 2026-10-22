@@ -6,12 +6,13 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { SeatHandoverService } from "../src/domain/seat-handover-service.js";
+import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 import { SEAT_HANDOVER_SOURCE_CAPABILITIES } from "../src/domain/seat-handover-planner.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import { observeCodexSandbox } from "../src/domain/permission-drift.js";
 import { buildRebuildPrimingChain } from "../src/domain/rebuild-priming-chain.js";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -134,6 +135,31 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
   function nodeRow(nodeId: string) {
     return db.prepare("SELECT continuity_outcome, handover_result FROM nodes WHERE id = ?").get(nodeId) as Record<string, string | null>;
   }
+
+  it("rebuild handover uses the cwd selected through set-cwd for the same seat", async () => {
+    const { node, rig, sessionId } = seedSeat();
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "openrig-handover-cwd-")));
+    const cwd = join(root, "isolated seat");
+    db.prepare(`INSERT INTO node_startup_context
+      (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime)
+      VALUES (?, '[]', '[]', '[]', 'codex')`).run(node.id);
+    const lifecycle = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux(),
+      runtimeAdapters: { codex: { ...codexAdapter(),
+        project: async () => ({ projected: [], skipped: [], failed: [] }),
+        deliverStartup: async () => ({ delivered: 0, failed: [] }),
+      } } });
+    try {
+      expect(await lifecycle.setCwd({ seatRef: "dev-impl@seat-rig", cwd, reason: "isolate workspace" })).toMatchObject({ ok: true });
+      expect(launchHarness).not.toHaveBeenCalled();
+      expect(await service.handover({ seatRef: "dev-impl@seat-rig", source: "rebuild", reason: "carry durable context" })).toMatchObject({ ok: true });
+      expect(respawnPane).toHaveBeenCalledWith("%9", expect.any(String), expect.objectContaining({ cwd }));
+      expect(launchHarness).toHaveBeenCalledWith(expect.objectContaining({ nodeId: node.id, cwd }), expect.any(Object));
+      expect(rigRepo.getRig(rig.id)!.nodes.map(n => n.id)).toEqual([node.id]);
+      expect(sessionRegistry.getSessionsForRig(rig.id)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: sessionId, status: "superseded" }),
+      ]));
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
 
   // ── Mini-req 1: FORK EXECUTES ────────────────────────────────────────────
 

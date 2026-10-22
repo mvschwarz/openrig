@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
@@ -136,6 +136,27 @@ describe("public human registry -> queue admission journey", () => {
     expect(await handed.json()).toMatchObject({ created: { destinationSession: "founder@external" } });
   });
 
+  it("with nobody registered, a create to a person is refused with the same code, saying nobody is registered", async () => {
+    rmSync(home, { recursive: true, force: true });
+    mkdirSync(home);
+    const response = await app.request("/api/queue/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "agent@known-rig" },
+      body: JSON.stringify(humanDestination),
+    });
+    expect(response.status).toBe(400);
+    const body = await response.json() as Record<string, unknown>;
+    expect(body).toMatchObject({ error: "human_registry_unavailable", registryLoadError: true });
+    const nobody = "no human configured yet — register one: rig gateway human add <entityId> --display-name … --binding … --delivery-class …";
+    expect(String(body.registryError)).toBe(nobody);
+    expect(body).not.toHaveProperty("registryProjectionError");
+    // The queue's own frame says nobody is registered, never "failed to load" or "repair the projection".
+    expect(body.message).toBe(`destination_session founder@external cannot be admitted because no human is registered yet: ${nobody}`);
+    expect(body.hint).toBe(`human registry admission is unavailable because no human is registered yet: ${nobody}. Register the person with rig gateway human add; do not downgrade the destination to an agent seat.`);
+    expect(Object.keys(body).sort()).toEqual(["error", "externalDomain", "hint", "message", "registryError", "registryLoadError"]);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM queue_items").get()).toMatchObject({ count: 0 });
+  });
+
   it("reports a malformed projection as human_registry_unavailable with its cause", async () => {
     writeFileSync(projectionPath(home), `${readFileSync(projectionPath(home), "utf8")}# hand edit\n`);
 
@@ -148,6 +169,9 @@ describe("public human registry -> queue admission journey", () => {
     const body = await response.json() as Record<string, unknown>;
     expect(body).toMatchObject({ error: "human_registry_unavailable", registryLoadError: true, registryProjectionError: true });
     expect(String(body.registryError)).toMatch(/manual edit|hand-edited|canonical/i);
+    // A broken registry keeps today's frame byte for byte.
+    expect(body.message).toBe(`destination_session founder@external cannot be admitted because the human registry failed to load: ${String(body.registryError)}`);
+    expect(body.hint).toBe(`human registry admission is unavailable because the registry/projection failed to load: ${String(body.registryError)}. Repair the existing registry projection from its fragments; do not re-add the human or downgrade the destination to an agent seat.`);
     expect(body).not.toHaveProperty("unregisteredEntity");
     expect(db.prepare("SELECT COUNT(*) AS count FROM queue_items").get()).toMatchObject({ count: 0 });
   });

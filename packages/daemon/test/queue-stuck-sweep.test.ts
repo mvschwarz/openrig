@@ -38,7 +38,10 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     db = new Database(":memory:");
     migrate(db, ALL_MIGRATIONS);
     bus = new EventBus(db);
-    repo = new QueueRepository(db, bus, { validateRig: () => true });
+    repo = new QueueRepository(db, bus, {
+      validateRig: () => true,
+      loadHumanRegistry: () => ({ ok: true, entities: [] }),
+    });
   });
   afterEach(() => {
     db.close();
@@ -238,6 +241,14 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
       qitemId: row.qitemId,
       actorSession: "worker@r",
       transitionNote: "resumed work",
+    });
+    // A fresh ladder marker on the row must not keep this finding open: this condition
+    // never went through ladder suppression, so a marker is not the reason it is gone.
+    const mod = await sweepMod();
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "sender@r",
+      transitionNote: `${mod.LADDER_ATTEMPT_PREFIX} 1 failed:tmux session not found`,
     });
     expect(repo.getById(row.qitemId)!.pickup?.state).toBe("working");
     const second = await runSweep();
@@ -595,6 +606,211 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(await findingsFor(row.qitemId)).toHaveLength(1);
   });
 
+  it("#1419 SUPPRESSION IS NOT RESOLUTION: a fresh wake-attempt after a finding exists keeps reporting suppressed WITHOUT closing the open finding", async () => {
+    const mod = await sweepMod();
+    const row = await mkRow();
+    failNudge(row.qitemId);
+    await runSweep();
+    const open = await findingsFor(row.qitemId);
+    expect(open).toHaveLength(1);
+    expect(repo.getById(open[0]!.qitemId)?.state).toBe("pending");
+    // The ladder retries without claiming or delivering anything (issue step 2).
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "sender@r",
+      transitionNote: `${mod.LADDER_ATTEMPT_PREFIX} 1 failed:tmux session not found`,
+    });
+    // Issue step 3: the source is excluded from candidates, and the resolution pass used
+    // to read that exclusion as "condition resolved" and close the finding as done /
+    // no-follow-on. Suppression must leave the finding open; delivery evidence closes it.
+    await runSweep();
+    const after = await findingsFor(row.qitemId);
+    expect(after).toHaveLength(1);
+    expect(repo.getById(after[0]!.qitemId)?.state).toBe("pending");
+    expect(repo.getById(after[0]!.qitemId)?.closureReason ?? null).not.toBe("no-follow-on");
+    // No duplicate is minted while the fresh marker suppresses.
+    await runSweep();
+    expect(await findingsFor(row.qitemId)).toHaveLength(1);
+  });
+
+  it("#1419 STALE SUPPRESSION EXPIRES: a wake-attempt older than the TTL stops suppressing so reporting fails open again", async () => {
+    const mod = await sweepMod();
+    const row = await mkRow();
+    failNudge(row.qitemId);
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "sender@r",
+      transitionNote: `${mod.LADDER_ATTEMPT_PREFIX} 1 failed:tmux session not found`,
+    });
+    // Issue step 5: the marker's time was never read, so suppression never expired.
+    // Age the marker past the bound: the row must be reportable again.
+    const stale = new Date(Date.now() - (mod.resolveLadderSuppressionMinutes() + 1) * 60_000).toISOString();
+    db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = ? AND transition_note LIKE ?")
+      .run(stale, row.qitemId, `${mod.LADDER_ATTEMPT_PREFIX}%`);
+    await runSweep();
+    expect(await findingsFor(row.qitemId)).toHaveLength(1);
+  });
+
+  it("#1419 FUTURE/INVALID MARKER FAILS OPEN: a marker with an unusable timestamp suppresses nothing", async () => {
+    const mod = await sweepMod();
+    const row = await mkRow();
+    failNudge(row.qitemId);
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "sender@r",
+      transitionNote: `${mod.LADDER_ATTEMPT_PREFIX} 1 failed:tmux session not found`,
+    });
+    db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = ? AND transition_note LIKE ?")
+      .run("not-a-timestamp", row.qitemId, `${mod.LADDER_ATTEMPT_PREFIX}%`);
+    await runSweep();
+    expect(await findingsFor(row.qitemId)).toHaveLength(1);
+  });
+
+  it("#1419 CADENCE BOUND: a ladder running on a long retry interval is not reported between its own attempts", async () => {
+    const mod = await sweepMod();
+    const prior = process.env.OPENRIG_QUEUE_WAKE_RETRY_INTERVAL_SECONDS;
+    process.env.OPENRIG_QUEUE_WAKE_RETRY_INTERVAL_SECONDS = "3600"; // an hour between attempts
+    try {
+      const row = await mkRow();
+      failNudge(row.qitemId);
+      repo.update({
+        qitemId: row.qitemId,
+        actorSession: "sender@r",
+        transitionNote: `${mod.LADDER_ATTEMPT_PREFIX} 1 failed:tmux session not found`,
+      });
+      // 45 minutes old: past a flat half hour, well inside two of the ladder's own
+      // retry intervals, so the ladder still owns the item.
+      const now = new Date();
+      const aged = new Date(now.getTime() - 45 * 60_000).toISOString();
+      db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = ? AND transition_note LIKE ?")
+        .run(aged, row.qitemId, `${mod.LADDER_ATTEMPT_PREFIX}%`);
+      await runSweep({ now });
+      expect(await findingsFor(row.qitemId)).toHaveLength(0);
+    } finally {
+      if (prior === undefined) delete process.env.OPENRIG_QUEUE_WAKE_RETRY_INTERVAL_SECONDS;
+      else process.env.OPENRIG_QUEUE_WAKE_RETRY_INTERVAL_SECONDS = prior;
+    }
+  });
+
+  it("#1419 RESOLUTION BEATS SUPPRESSION: a fresh marker does not keep a finding open after the source is claimed", async () => {
+    const mod = await sweepMod();
+    const row = await mkRow();
+    failNudge(row.qitemId);
+    await runSweep();
+    const open = await findingsFor(row.qitemId);
+    expect(open).toHaveLength(1);
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "sender@r",
+      transitionNote: `${mod.LADDER_ATTEMPT_PREFIX} 1 failed:tmux session not found`,
+    });
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    await runSweep();
+    const after = await findingsFor(row.qitemId);
+    expect(after).toHaveLength(1);
+    expect(repo.getById(after[0]!.qitemId)?.state).toBe("done");
+  });
+
+  it("#1419 RESOLUTION BEATS SUPPRESSION: a fresh marker does not keep a finding open after the source is completed", async () => {
+    const mod = await sweepMod();
+    const row = await mkRow();
+    failNudge(row.qitemId);
+    await runSweep();
+    const open = await findingsFor(row.qitemId);
+    expect(open).toHaveLength(1);
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "sender@r",
+      transitionNote: `${mod.LADDER_ATTEMPT_PREFIX} 1 failed:tmux session not found`,
+    });
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@r",
+      state: "done",
+      closureReason: "no-follow-on",
+      transitionNote: "fixture resolved",
+    });
+    await runSweep();
+    const after = await findingsFor(row.qitemId);
+    expect(after).toHaveLength(1);
+    expect(repo.getById(after[0]!.qitemId)?.state).toBe("done");
+  });
+
+  it("#1419 RESOLUTION BEATS SUPPRESSION: a verified delivery closes the finding even while the marker is fresh", async () => {
+    const mod = await sweepMod();
+    const row = await mkRow();
+    failNudge(row.qitemId);
+    await runSweep();
+    const open = await findingsFor(row.qitemId);
+    expect(open).toHaveLength(1);
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "sender@r",
+      transitionNote: `${mod.LADDER_ATTEMPT_PREFIX} 1 failed:tmux session not found`,
+    });
+    await repo.update({
+      qitemId: row.qitemId,
+      actorSession: "daemon@kernel",
+      transitionNote: `slack-owner-notification-posted notification_key=${row.qitemId}:0 level=ALERT message_ts=1.2`,
+    });
+    expect(repo.deliveryOutcomeFor(row.qitemId)?.outcome).toBe("posted");
+    await runSweep();
+    const after = await findingsFor(row.qitemId);
+    expect(after).toHaveLength(1);
+    expect(repo.getById(after[0]!.qitemId)?.state).toBe("done");
+  });
+
+  it("#1419 FAIL OPEN: a marker dated in the future suppresses nothing", async () => {
+    const mod = await sweepMod();
+    const row = await mkRow();
+    failNudge(row.qitemId);
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "sender@r",
+      transitionNote: `${mod.LADDER_ATTEMPT_PREFIX} 1 failed:tmux session not found`,
+    });
+    const ahead = new Date(Date.now() + 5 * 60_000).toISOString();
+    db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = ? AND transition_note LIKE ?")
+      .run(ahead, row.qitemId, `${mod.LADDER_ATTEMPT_PREFIX}%`);
+    await runSweep();
+    expect(await findingsFor(row.qitemId)).toHaveLength(1);
+  });
+
+  it("#1419 FAIL OPEN: a marker with no usable time suppresses nothing", async () => {
+    const mod = await sweepMod();
+    const row = await mkRow();
+    failNudge(row.qitemId);
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "sender@r",
+      transitionNote: `${mod.LADDER_ATTEMPT_PREFIX} 1 failed:tmux session not found`,
+    });
+    // queue_transitions.ts is NOT NULL, so a marker that carries no usable time is
+    // stored as an empty string: the reader must treat it as unknown, not as fresh.
+    db.prepare("UPDATE queue_transitions SET ts = '' WHERE qitem_id = ? AND transition_note LIKE ?")
+      .run(row.qitemId, `${mod.LADDER_ATTEMPT_PREFIX}%`);
+    await runSweep();
+    expect(await findingsFor(row.qitemId)).toHaveLength(1);
+  });
+
+  it("#1419 BOUNDARY: a marker exactly at the bound still suppresses", async () => {
+    const mod = await sweepMod();
+    const row = await mkRow();
+    failNudge(row.qitemId);
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "sender@r",
+      transitionNote: `${mod.LADDER_ATTEMPT_PREFIX} 1 failed:tmux session not found`,
+    });
+    const now = new Date();
+    const bound = mod.resolveLadderSuppressionMinutes();
+    const atBound = new Date(now.getTime() - bound * 60_000).toISOString();
+    db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = ? AND transition_note LIKE ?")
+      .run(atBound, row.qitemId, `${mod.LADDER_ATTEMPT_PREFIX}%`);
+    await runSweep({ now });
+    expect(await findingsFor(row.qitemId)).toHaveLength(0);
+  });
+
   it("S01 SEAM — LATEST MARKER WINS: attempt → exhausted → attempt is live again and skipped", async () => {
     const mod = await sweepMod();
     const row = await mkRow();
@@ -802,6 +1018,14 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
       actorSession: "verifier@r",
       transitionNote: `custody-verified: ${missing} confirmed on the parent host`,
     });
+    // A fresh ladder marker on the closed row must not keep this finding open either: the
+    // custody disposition, not a ladder marker, is what resolved it.
+    const mod = await sweepMod();
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "sender@r",
+      transitionNote: `${mod.LADDER_ATTEMPT_PREFIX} 1 failed:tmux session not found`,
+    });
     const next = await runSweep();
     expect(next.result.findings).toContainEqual(expect.objectContaining({
       kind: "dangling-closure",
@@ -893,7 +1117,10 @@ describe.each(["done", "handed-off"] as const)("#318 seat-target closure without
   beforeEach(() => {
     db = new Database(":memory:");
     migrate(db, ALL_MIGRATIONS);
-    repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    repo = new QueueRepository(db, new EventBus(db), {
+      validateRig: () => true,
+      loadHumanRegistry: () => ({ ok: true, entities: [] }),
+    });
   });
   afterEach(() => {
     db.close();
@@ -1028,6 +1255,44 @@ describe.each(["done", "handed-off"] as const)("#318 seat-target closure without
     const findings = await findingsFor(row.qitemId);
     expect(findings).toHaveLength(1);
     expect(findings[0]!.body).toContain("- next@r");
+  });
+
+  it("SELF TARGET DOES NOT SUPPRESS: closureTarget = row.qitemId leaves it flagged", async () => {
+    const row = await mkRow();
+    await repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@r",
+      state: closureState,
+      closureReason: "handed_off_to",
+      closureTarget: row.qitemId,
+    });
+
+    await runSweep();
+    const findings = await findingsFor(row.qitemId);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.body).toContain(`- ${row.qitemId}`);
+  });
+
+  it("EXPLICIT SUCCESSOR TARGETED BY QITEM ID: successor targeted by qitemId is not flagged", async () => {
+    const row = await mkRow();
+    const successor = await repo.create({
+      sourceSession: "worker@r",
+      destinationSession: "next@r",
+      body: "follow-on",
+      chainOfRecord: [row.qitemId],
+      nudge: false,
+    });
+    await repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@r",
+      state: closureState,
+      closureReason: "handed_off_to",
+      closureTarget: successor.qitemId,
+    });
+
+    const { result } = await runSweep();
+    expect(result.outcome).toBe("clean");
+    expect(await findingsFor(row.qitemId)).toHaveLength(0);
   });
 
   it("REMOTE CUSTODY NOTE SILENCES SEAT TARGET: custody-verified note on source row prevents finding", async () => {
@@ -1341,6 +1606,47 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
       && (i.tags ?? []).some((t) => t.endsWith(`:${qitemId}`)));
   }
 
+  it.each([
+    ["park", "never-posted"], ["park", "transport-failed"],
+    ["direct", "never-posted"], ["direct", "transport-failed"],
+  ] as const)("#1679 %s %s identifies the human notice and routes its recovery to the asking agent", async (shape, outcome) => {
+    repo.attachTransport({ send: async () => ({ ok: true, verified: false }) }); // recorded unconfirmed wake becomes claimed on pickup
+    const row = shape === "direct" ? await ask() : await repo.create({
+      sourceSession: "asker@r", destinationSession: "worker@r", body: "work",
+    });
+    if (shape === "park") {
+      repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+      await repo.update({ qitemId: row.qitemId, actorSession: "worker@r", state: "blocked",
+        blockedOn: "human-owner@kernel", summary: "Owner decision", evidenceRef: "rig queue show qitem-fixture" });
+    }
+    if (shape === "park" && outcome === "transport-failed") await repo.update({ qitemId: row.qitemId, actorSession: "worker@r",
+      transitionNote: "wake-attempt: 1 prior agent wake" }); // an old wake ladder cannot hide the human notice
+    if (outcome === "transport-failed") receipt(row.qitemId, "transport-failed");
+    // Age the notice alone: no unrelated unclaimed/overdue condition is introduced.
+    const episode = repo.transitionLog.latestOwnerNotificationForQitem(row.qitemId)!;
+    db.prepare("UPDATE queue_transitions SET ts = ? WHERE transition_id = ?")
+      .run(new Date(Date.now() - 5 * 60_000).toISOString(), episode.transitionId);
+    expect(repo.findUndelivered().find((r) => r.qitemId === row.qitemId)?.deliveryOutcome).toBe(outcome);
+    const before = repo.getById(row.qitemId)!;
+    const storedBefore = db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId);
+    if (shape === "park") expect(before.lastNudgeResult).toBe("claimed");
+    await sweepMod().then((mod) => mod.runStuckSweep({ db, queueRepo: repo,
+      resolveOrchestrator: () => "advisor@r", unclaimedAgeMinutes: 60, log: () => {}, isRegisteredHost: () => false }));
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding).toMatchObject({ destinationSession: shape === "park" ? "worker@r" : "asker@r" });
+    expect(finding!.body).toContain("undelivered-human-notice");
+    expect(finding!.body).toContain(`human notice ${outcome}`);
+    expect(finding!.body).toContain(shape === "park" ? "human-owner@kernel" : "human-owner@external");
+    expect(finding!.body).not.toContain("wake failed");
+    expect(db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId)).toEqual(storedBefore);
+    await sweep();
+    expect(await findingsFor(row.qitemId)).toHaveLength(1);
+    receipt(row.qitemId, "posted");
+    await sweep();
+    expect(repo.getById(finding!.qitemId)?.state).toBe("done");
+    expect(repo.getById(row.qitemId)?.state).toBe(shape === "park" ? "blocked" : "pending");
+  });
+
   // human-owner@kernel is the registry alias form (canonical member name = entity id).
   it.each(["human-owner@external", "human-owner@kernel"])("a %s ask with a POSTED receipt for its current episode gets no finding and stays the human's open decision", async (destination) => {
     const row = await ask(destination);
@@ -1468,6 +1774,13 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
     const findings = await unclaimedFinding(id);
     expect(findings).toHaveLength(1);
     expect(findings[0]!.destinationSession).toBe("human-beta@external");
+    // A fresh ladder marker must not resolve beta's obligation: the posted receipt is
+    // bound to alpha, and beta still has nothing. The finding stays open.
+    const mod = await sweepMod();
+    repo.update({ qitemId: id, actorSession: "sender@r",
+      transitionNote: `${mod.LADDER_ATTEMPT_PREFIX} 1 failed:tmux session not found` });
+    await sweep();
+    expect(await unclaimedFinding(id)).toHaveLength(1);
   });
 
   it("an ask returned to pending after a POSTED park notice keeps its finding: the park's recipient is not retained", async () => {
@@ -1482,6 +1795,13 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
     expect(repo.deliveryOutcomeFor(id)?.outcome).toBe("posted");
     expect(repo.humanNotificationPostedThisEpisode(id)).toBe(false);
     expect(repo.waitingView(id)!.nextBackstop.mechanism).toBe("queue-stuck-sweep:unclaimed");
+    await sweep();
+    expect(await unclaimedFinding(id)).toHaveLength(1);
+    // A fresh ladder marker must not resolve the obligation: the notice to the person is
+    // still unposted for this episode, so the finding stays open.
+    const mod = await sweepMod();
+    repo.update({ qitemId: id, actorSession: "sender@r",
+      transitionNote: `${mod.LADDER_ATTEMPT_PREFIX} 1 failed:tmux session not found` });
     await sweep();
     expect(await unclaimedFinding(id)).toHaveLength(1);
   });

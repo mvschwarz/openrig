@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { addGitContext, inspectGitContext, updateGitContext } from "../src/lib/context-git.js";
@@ -56,7 +56,7 @@ function commit(root: string, message: string) {
   git(root, "-c", "user.name=Context Test", "-c", "user.email=context@example.invalid", "commit", "-m", message);
 }
 function fixture(format = "sha1") {
-  const home = mkdtempSync(join(tmpdir(), "openrig-context-shallow-")); homes.push(home);
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "openrig-context-shallow-"))); homes.push(home);
   const upstream = join(home, "upstream"); mkdirSync(upstream);
   git(upstream, "init", `--object-format=${format}`, "-b", "main");
   mkdirSync(join(upstream, "registry", "views"), { recursive: true });

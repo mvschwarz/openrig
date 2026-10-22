@@ -23,13 +23,15 @@
 // runtime configs / auth tokens / tmux / lifecycle. It calls a single
 // store (RigModeStore) whose surface area is itself binding-limited.
 
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
-import type { RigModeStore } from "../domain/rig-mode/rig-mode-store.js";
+import { bindingCategory, type BindingCategory, type RigModeStore } from "../domain/rig-mode/rig-mode-store.js";
 import type { OperatingPostureService } from "../domain/rig-mode/operating-posture.js";
 import {
+  OPERATOR_CONTEXT_MODES,
   OPERATOR_CONTEXT_SCOPES,
   SCOPE_SPECIFICITY,
+  type OperatorContextMode,
   type OperatorContextScope,
 } from "../domain/rig-mode/rig-mode-types.js";
 import {
@@ -37,6 +39,9 @@ import {
   RECOMMENDED_DEFAULT_SCOPE,
   RECOMMENDED_MODE_DEFAULTS,
 } from "../domain/rig-mode/rig-mode-defaults.js";
+
+const POSTURE_MODES = OPERATOR_CONTEXT_MODES.filter((m) => bindingCategory(m) === "posture");
+const LEGACY_MODES = OPERATOR_CONTEXT_MODES.filter((m) => bindingCategory(m) === "mode");
 
 export interface RigModeRoutesOpts {
   /** Operator bearer token (same one Mission Control uses). When null,
@@ -166,7 +171,18 @@ export function rigModeRoutes(opts?: RigModeRoutesOpts): Hono {
         hint: "No binding matches this read context. Per convention §Q6 callers MUST treat this as unknown_posture (do not default to desk).",
       });
     }
-    return c.json({ effective: resolved, posture: "known", operatingPosture });
+    // Each category's own effective binding, read the way `effective` is (raw names and canonical ids, the more
+    // specific wins), so a saved mode and a posture kept side by side both show.
+    const ofCategory = (modes: readonly OperatorContextMode[]) => {
+      try {
+        const raw = store.resolveEffective(input, modes);
+        const canonical = store.resolveEffective(operatingPosture.context ?? input, modes);
+        const pick = !raw || (canonical && SCOPE_SPECIFICITY[canonical.resolvedScope] > SCOPE_SPECIFICITY[raw.resolvedScope]) ? canonical : raw;
+        return pick?.binding ?? null;
+      } catch { return null; }
+    };
+    const categories = { mode: ofCategory(LEGACY_MODES), posture: ofCategory(POSTURE_MODES) };
+    return c.json({ effective: resolved, posture: "known", operatingPosture, categories });
   });
 
   // -- read: one binding (qualifier path-optional via /:scope or /:scope/:qualifier)
@@ -175,16 +191,32 @@ export function rigModeRoutes(opts?: RigModeRoutesOpts): Hono {
     if (!store) return c.json({ error: "rig_policy_store_unavailable" }, 503);
     const parsed = parseScopeAndQualifier(c.req.param("scope"), c.req.param("qualifier"));
     if (!parsed.ok) return c.json(parsed.body, parsed.status);
-    let binding = store.getBinding(parsed.scope, parsed.qualifier);
+    // ?for=mode|posture: the bindings at the target a write of that category would land on, resolved as the write
+    // resolves it (a posture through the same canonicalisation, a saved mode as given), named in `writeTarget`.
+    const forRaw = c.req.query("for");
+    if (forRaw !== undefined) {
+      if (forRaw !== "mode" && forRaw !== "posture") return c.json({ error: "category_invalid", hint: "for is mode or posture." }, 400);
+      let target = parsed.qualifier;
+      if (forRaw === "posture") {
+        const service = c.get("operatingPosture" as never) as OperatingPostureService | undefined;
+        if (!service) return c.json({ error: "operating_posture_unavailable" }, 503);
+        try { target = service.target(parsed.scope, target); }
+        catch (error) { return c.json({ error: "scope_unresolved", hint: String(error) }, 400); }
+      }
+      return c.json({ writeTarget: `${parsed.scope}:${target ?? "host"}`, bindings: store.getBindings(parsed.scope, target) });
+    }
+    let qualifier = parsed.qualifier;
+    let binding = store.getBinding(parsed.scope, qualifier);
     if (!binding) {
       const service = c.get("operatingPosture" as never) as OperatingPostureService | undefined;
       if (service) {
-        try { binding = store.getBinding(parsed.scope, service.target(parsed.scope, parsed.qualifier)); }
+        try { qualifier = service.target(parsed.scope, parsed.qualifier); binding = store.getBinding(parsed.scope, qualifier); }
         catch (error) { return c.json({ error: "scope_unresolved", hint: String(error) }, 400); }
       }
     }
     if (!binding) return c.json({ error: "not_found" }, 404);
-    return c.json({ binding });
+    // `binding` is the latest set here; `bindings` is each category kept at this target.
+    return c.json({ binding, bindings: store.getBindings(parsed.scope, qualifier) });
   });
 
   // -- write: upsert (operator-only) -----------------------------------
@@ -222,22 +254,40 @@ export function rigModeRoutes(opts?: RigModeRoutesOpts): Hono {
   });
 
   // -- write: delete (operator-only) -----------------------------------
-  router.delete("/bindings/:scope/:qualifier?", requireOperator, (c) => {
+  // An unset of one category is addressed by path: a daemon without categories has no such route and answers a plain
+  // 404 without deleting anything (its own DELETE ignores a query parameter and would remove whatever is stored).
+  router.delete("/bindings/:scope/categories/:category", requireOperator, (c) =>
+    c.req.param("scope") === "global_host"
+      ? unset(c, "global_host", undefined, c.req.param("category"))
+      : c.json({ error: "qualifier_required", hint: "Only global_host takes a category without a qualifier." }, 400));
+  router.delete("/bindings/:scope/:qualifier/categories/:category", requireOperator, (c) =>
+    unset(c, c.req.param("scope"), c.req.param("qualifier"), c.req.param("category")));
+  router.delete("/bindings/:scope/:qualifier?", requireOperator, (c) =>
+    unset(c, c.req.param("scope"), c.req.param("qualifier"), c.req.query("category")));
+
+  function unset(c: Context, scopeRaw: string, qualifierRaw: string | undefined, categoryRaw: string | undefined) {
     const store = getStore(c);
     if (!store) return c.json({ error: "rig_policy_store_unavailable" }, 503);
-    const parsed = parseScopeAndQualifier(c.req.param("scope"), c.req.param("qualifier"));
+    const parsed = parseScopeAndQualifier(scopeRaw, qualifierRaw);
     if (!parsed.ok) return c.json(parsed.body, parsed.status);
+    if (categoryRaw !== undefined && categoryRaw !== "mode" && categoryRaw !== "posture") {
+      return c.json({ error: "category_invalid", hint: "category is mode or posture; omit it to remove the latest set binding at this target." }, 400);
+    }
+    const category = categoryRaw as BindingCategory | undefined;
     let qualifier = parsed.qualifier;
-    if (!store.getBinding(parsed.scope, qualifier)) {
+    if (!store.getBindings(parsed.scope, qualifier).some((b) => !category || bindingCategory(b.mode) === category)) {
       const service = c.get("operatingPosture" as never) as OperatingPostureService | undefined;
       if (service) {
         try { qualifier = service.target(parsed.scope, qualifier); }
         catch (error) { return c.json({ error: "scope_unresolved", hint: String(error) }, 400); }
       }
     }
-    const removed = store.deleteBinding(parsed.scope, qualifier);
-    return c.json({ removed });
-  });
+    const gone = store.removeBinding(parsed.scope, qualifier, category);
+    if (!gone) return c.json({ removed: false });
+    // The other category kept at this target, if any.
+    const remaining = store.getBinding(parsed.scope, qualifier);
+    return c.json({ removed: true, category: bindingCategory(gone.mode), remaining });
+  }
 
   return router;
 }

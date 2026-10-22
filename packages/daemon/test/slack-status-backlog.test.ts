@@ -89,15 +89,17 @@ describe("slack status: durable inbound dead-letter backlog", () => {
     } finally { wire.stop(); }
   });
 
-  it("omits every field on an inert (disabled) connector rather than lying about it", () => {
+  it("reports all retained inbound records while the connector is disabled", () => {
     configure(false);
     writeBacklog(2);
+    writeActionBacklog(3);
+    writeRecords("slack-inbound-forward-deadletter.jsonl", 1);
     const wire = build();
     try {
       const status = wire.status() as WireStatus;
-      expect(Object.hasOwn(status, "deadLetterBacklog")).toBe(false);
-      expect(Object.hasOwn(status, "deadLetterBacklogState")).toBe(false);
-      expect(Object.hasOwn(status, "deadLetterBacklogReason")).toBe(false);
+      expect(status.deadLetterBacklog).toBe(6);
+      expect(status.deadLetterBacklogState).toBe("ok");
+      expect(status.deadLetterBacklogReason).toBeUndefined();
     } finally { wire.stop(); }
   });
 });

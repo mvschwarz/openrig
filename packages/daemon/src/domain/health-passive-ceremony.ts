@@ -26,10 +26,13 @@ export class PassiveCeremonySource implements HealthObservationSource {
     private readonly posture?: { reader: OperatingPostureService; instanceId: string }) {}
 
   private lastCoverage: HealthSourceCoverage | undefined;
+  /** This evaluation's lineage-tagged rows by tag, read once on first use (closedBoundaries). */
+  private lineageRows: Map<string, string[]> | undefined;
   coverage(): HealthSourceCoverage[] { return this.lastCoverage ? [this.lastCoverage] : []; }
 
   read(): HealthDetectorObservation[] {
     this.lastCoverage = undefined;
+    this.lineageRows = undefined;
     const now = this.now(); const p = this.policy.read().policy;
     const start = new Date(Date.parse(now) - p.observationWindowSeconds * 1000).toISOString();
     const touched = this.queue.db.prepare("SELECT qitem_id AS id, COUNT(*) AS n FROM queue_transitions WHERE ts >= ? AND ts <= ? GROUP BY qitem_id ORDER BY qitem_id LIMIT 2001").all(start, now) as Array<{ id: string; n: number }>;
@@ -173,10 +176,12 @@ export class PassiveCeremonySource implements HealthObservationSource {
   }
 
   private closedBoundaries(lineageId: string): Array<{ transitionId: number; endedAt: string }> {
-    const rows = this.queue.list({ tag: `health-lineage:${lineageId}`, limit: 201 });
-    if (rows.length > 200) throw new Error("health_passive_episode_history_truncated");
-    return rows.flatMap((row) => {
-      const transitions = this.queue.listTransitions(row.qitemId);
+    // One read per evaluation finds every lineage-tagged row: a tag lookup per family was a whole-queue scan each time.
+    this.lineageRows ??= this.readLineageRows();
+    const ids = this.lineageRows.get(`health-lineage:${lineageId}`) ?? [];
+    if (ids.length > 200) throw new Error("health_passive_episode_history_truncated");
+    return ids.flatMap((qitemId) => {
+      const transitions = this.queue.listTransitions(qitemId);
       if (transitions.length > 1000) throw new Error("health_passive_diagnosis_history_truncated");
       for (const t of [...transitions].reverse()) {
         try {
@@ -188,6 +193,24 @@ export class PassiveCeremonySource implements HealthObservationSource {
       }
       return [];
     }).sort((a, b) => a.transitionId - b.transitionId);
+  }
+
+  /** Every `health-lineage:<id>` tag's rows, exact tag match, ids only (all closedBoundaries uses). */
+  private readLineageRows(): Map<string, string[]> {
+    const rows = this.queue.db.prepare("SELECT qitem_id AS id, tags FROM queue_items WHERE tags LIKE '%health-lineage:%'")
+      .all() as Array<{ id: string; tags: string | null }>;
+    const index = new Map<string, string[]>();
+    for (const row of rows) {
+      let tags: unknown;
+      try { tags = JSON.parse(row.tags ?? "[]"); } catch { continue; }
+      if (!Array.isArray(tags)) continue;
+      for (const tag of new Set(tags)) {
+        if (typeof tag !== "string" || !tag.startsWith("health-lineage:")) continue;
+        const ids = index.get(tag) ?? [];
+        ids.push(row.id); index.set(tag, ids);
+      }
+    }
+    return index;
   }
 
   private assessment(id: string, workspace = this.workspace): (NonNullable<PassiveCeremony["assessment"]> & { evidenceChanged: boolean }) | undefined {

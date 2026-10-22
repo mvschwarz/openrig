@@ -14,6 +14,7 @@ export const FEATURE_SCOPES: ReadonlyArray<{ scope: string; usedBy: string }> = 
   { scope: "files:write", usedBy: "outbound attachments: files.getUploadURLExternal / files.completeUploadExternal (slack-api)" },
   { scope: "app_mentions:read", usedBy: "the app_mention event the inbound path admits (ADMITTED_EVENT_TYPES)" },
   { scope: "reactions:read", usedBy: "the reaction_added event the inbound path admits: a reaction on an ask reaches the asking seat (InboundRouter.routeReaction)" },
+  { scope: "users:read", usedBy: "named-bot delivery: bots.info names the app a bot's post in the bot inbox belongs to (InboundRouter.routeBot)" },
 ];
 
 /** The Slack event payload types the inbound path admits (the `type` gate of ingestDecision). */

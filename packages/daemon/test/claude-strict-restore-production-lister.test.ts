@@ -1,9 +1,11 @@
 // #1091 round 5: strict restore through the production process lister. No listProcesses
-// is injected; `ps` is stubbed at the spawn seam, answering whichever columns the caller
-// asks for. These rows are process observations only, not a Claude session.
-import { afterEach, describe, expect, it, vi } from "vitest";
+// is injected; the process table is served from each of its sources: `ps`, stubbed at the
+// spawn seam and answering whichever columns the caller asks for, and a /proc of the test's
+// own. These rows are process observations only, not a Claude session.
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
+import { restoreProc, serveFakeProc } from "./helpers/fake-proc.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { rebindAndVerifyPaneIdentity } from "../src/domain/seat-attention-reconciler.js";
@@ -31,13 +33,15 @@ processMocks.execFile.mockImplementation((file: string, args: string[], _options
     const pids = args.slice(args.indexOf("-e") + 2).map(Number);
     return callback(null, { stdout: JSON.stringify(pids.map((pid) => [pid, witnesses.get(pid) ?? null])), stderr: "" });
   }
-  if (file !== "ps") return callback(new Error(`unexpected spawn: ${file}`), { stdout: "", stderr: "" });
+  if (file !== "ps" || source === "/proc") return callback(new Error(`unexpected spawn: ${file}`), { stdout: "", stderr: "" });
   const columns = args[1]!.split(",");
   const line = (row: Row) => columns.map((column) => column === "lstart" ? startedAt
     : column === "command" ? row.command : String(row[column as keyof Row])).join(" ");
   callback(null, { stdout: [columns.join(" ").toUpperCase(), ...rows.map(line)].join("\n") + "\n", stderr: "" });
 });
 
+const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+let source: "ps" | "/proc" = "ps";
 const databases: Database.Database[] = [];
 afterEach(() => { for (const db of databases.splice(0)) db.close(); });
 
@@ -57,12 +61,17 @@ async function strictRestore(processRows: Row[], panePid = 100, paths: Record<nu
     getPanePid: vi.fn(async () => panePid),
     getPaneCommand: vi.fn(async () => "claude"),
   };
+  // ps is the process table's source off Linux, and the stub above answers for it; on Linux, /proc is.
+  if (source === "ps") Object.defineProperty(process, "platform", { value: "darwin" });
+  else serveFakeProc(processRows.map((row) => ({ ...row, name: row.ucomm, startedAt })));
   const result = await rebindAndVerifyPaneIdentity({ db, sessionRegistry: registry, tmux, nodeId: node.id,
-    sessionName: name, runtime: "claude-code", expectedResumeToken: "review-token", requireExactResumeLineage: true });
+    sessionName: name, runtime: "claude-code", expectedResumeToken: "review-token", requireExactResumeLineage: true })
+    .finally(() => { restoreProc(); Object.defineProperty(process, "platform", platform); });
   return { ok: result.ok, observedPid: new SeatIdentityStore(db).getForNode(node.id)?.evidence.observedPid };
 }
 
-describe("strict restore reads full process rows from the production lister", () => {
+describe.each(["ps", "/proc"] as const)("strict restore reads full process rows from the production lister (%s)", (tableSource) => {
+  beforeEach(() => { source = tableSource; });
   it("refuses a shell script launcher's token over a Claude child on another conversation", async () => {
     expect(await strictRestore([
       { pid: 100, ppid: 1, pgid: 100, tpgid: 100, ucomm: "claude", command: "/bin/sh /shim/claude --resume review-token" },

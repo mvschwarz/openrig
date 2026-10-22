@@ -15,6 +15,7 @@ import { RigSpecPreflight } from "../src/domain/rigspec-preflight.js";
 import type { LegacyRigSpec as RigSpec } from "../src/domain/types.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { ExecFn } from "../src/adapters/tmux.js";
+import { ProbeTimeoutError, RUNTIME_PROBE_TIMEOUT_MS } from "../src/adapters/bounded-probe-exec.js";
 
 function setupDb(): Database.Database {
   const db = createDb();
@@ -155,6 +156,28 @@ describe("RigSpecPreflight", () => {
     const result = await pf.check(validSpec());
     expect(result.ready).toBe(false);
     expect(result.errors.some((e) => e.includes("claude-code"))).toBe(true);
+  });
+
+  it.each([["claude-code", "claude"], ["codex", "codex"]])("a %s version check that hit the time limit says so, and nothing else", async (runtime, binary) => {
+    const cmd = `${binary} --version`;
+    const exec = vi.fn<ExecFn>().mockRejectedValue(new ProbeTimeoutError(cmd, RUNTIME_PROBE_TIMEOUT_MS));
+    const result = await createPreflight({ exec }).check(validSpec({ nodes: [{ id: "worker", runtime: runtime as "codex", cwd: "/" }] }));
+    expect(result.ready).toBe(false);
+    expect(result.errors).toEqual([`\`${cmd}\` didn't answer within 30 s`]);
+  });
+
+  it("a Pi version check that hit the time limit stays a warning with the same message", async () => {
+    const exec = vi.fn<ExecFn>().mockRejectedValue(new ProbeTimeoutError("pi --version", RUNTIME_PROBE_TIMEOUT_MS));
+    const result = await createPreflight({ exec }).check(validSpec({ nodes: [{ id: "worker", runtime: "pi", cwd: "/" }] }));
+    expect(result.ready).toBe(true);
+    expect(result.errors).toEqual([]);
+    expect(result.warnings).toEqual(["`pi --version` didn't answer within 30 s"]);
+  });
+
+  it("a runtime that fails some other way keeps its 'not available' error", async () => {
+    const exec = vi.fn<ExecFn>().mockRejectedValue(Object.assign(new Error("x"), { code: "ETIMEDOUT" }));
+    const result = await createPreflight({ exec }).check(validSpec());
+    expect(result.errors).toEqual(["Runtime 'claude-code' not available (claude --version failed: ETIMEDOUT)"]);
   });
 
   it("reports old Pi versions in legacy preflight without blocking", async () => {

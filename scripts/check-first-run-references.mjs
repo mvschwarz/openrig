@@ -25,6 +25,7 @@ export const SCOPE = [
   { file: `${RIGS}/launch/factory/guidance/lead-first-move.md`, team: "factory" },
   { file: `${RIGS}/launch/factory/guidance/advisor-role.md`, team: "factory" },
   { file: "docs/reference/getting-started.md" },
+  { file: "docs/reference/quickstart.md" },
   { file: "packages/cli/src/commands/setup.ts", function: "goldenPathNextSteps" },
   { file: "packages/daemon/assets/onboarding/01-world-and-purpose.md" },
   { file: "packages/daemon/assets/onboarding/02-self-and-competent-action.md" },

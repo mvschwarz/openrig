@@ -2,12 +2,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { createDefaultRestoreRig } from "../src/domain/crash-cart-conductor.js";
+import { restoreExistingRigUnattended } from "../src/domain/existing-rig-restore.js";
 
 const databases: ReturnType<typeof createFullTestDb>[] = [];
 afterEach(() => { for (const db of databases.splice(0)) db.close(); });
 
 /** Build an isolated restore fixture with saved seat history and mocked terminal effects. */
-function fixture(opts: { status?: string; noRow?: boolean; token?: string | null; policy?: string; kind?: string } = {}) {
+function fixture(opts: { status?: string; noRow?: boolean; token?: string | null; policy?: string; kind?: string; intentional?: boolean; fresh?: boolean } = {}) {
   const db = createFullTestDb(); databases.push(db);
   const live = new Set<string>();
   const tmux = {
@@ -32,11 +33,21 @@ function fixture(opts: { status?: string; noRow?: boolean; token?: string | null
   const node = rigRepo.addNode(rig.id, "dev.worker", { runtime: "claude-code", podId: "pod", cwd: "/tmp" });
   db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, '[]', '[]', '[]', 'claude-code')").run(node.id);
   if (!opts.noRow) {
-    const row = sessionRegistry.registerSession(node.id, "dev-worker@stopped-review");
+    if (opts.fresh) {
+      const predecessor = sessionRegistry.registerSession(node.id, "dev-worker@stopped-review");
+      sessionRegistry.updateStatus(predecessor.id, "exited");
+    }
+    const row = sessionRegistry.registerSession(node.id, "dev-worker@stopped-review", opts.fresh ? "fresh" : undefined);
     sessionRegistry.updateStatus(row.id, opts.status ?? "exited");
     sessionRegistry.updateStartupStatus(row.id, "ready");
     if (opts.token !== null) sessionRegistry.updateResumeToken(row.id, "claude_id", opts.token ?? "00000000-0000-4000-8000-000000000005", "hook");
     if (opts.policy) db.prepare("UPDATE sessions SET restore_policy = ? WHERE id = ?").run(opts.policy, row.id);
+    if (opts.intentional) sessionRegistry.markIntentionallyStopped(row.id);
+    if (opts.fresh) {
+      const generation = sessionRegistry.currentOccupantTenure(node.id)!.generationUuid;
+      db.prepare("INSERT INTO events(rig_id,node_id,type,payload) VALUES (?,?,'seat.fresh_launched',?)")
+        .run(rig.id, node.id, JSON.stringify({ nodeId: node.id, sessionId: row.id, newGeneration: generation }));
+    }
   }
   const snapshot = snapshotCapture.captureSnapshot(rig.id, (opts.kind ?? "manual") as never);
   const post = (path: string, body: unknown = {}) => setup.app.request(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -212,4 +223,202 @@ describe("stopped-seat history and guidance", () => {
     const hint = check.checks.find((item: { check: string }) => item.check.endsWith(".resume-path")).remediation;
     expect(hint).toContain("rig up 'stopped review' --existing --plan");
   });
+});
+
+// Original-generation counterpart of stopped-fresh-up: real SQLite and the actual up route,
+// with inert terminal/provider effects. Deliberate stop is recorded BEFORE snapshot capture.
+const stopCells = [false, true].flatMap(token =>
+  ["resume_if_possible", "relaunch_fresh"].flatMap(policy =>
+    [false, true].map(fresh => ({ token, policy, fresh }))));
+describe("up --existing keeps proved current stops", () => {
+  it.each(stopCells)("token=$token policy=$policy fresh=$fresh", async ({ token, policy, fresh }) => {
+    const h = fixture({ intentional: true, token: token ? undefined : null, policy });
+    const before = h.db.prepare("SELECT * FROM sessions WHERE node_id=?").all(h.node.id);
+    const tenure = h.sessionRegistry.currentOccupantTenure(h.node.id);
+    const body = { sourceRef: h.rig.name, ...(fresh ? { freshLogicalIds: [h.node.logicalId] } : {}) };
+    const changes = h.db.prepare("SELECT total_changes() AS n").get();
+    const preview = await h.post("/api/up", { ...body, plan: true });
+    const plan = await preview.json();
+    expect(h.db.prepare("SELECT total_changes() AS n").get()).toEqual(changes);
+    const applied = await h.post("/api/up", body);
+    const result = await applied.json();
+    expect(preview.status).toBe(200); expect(applied.status).toBe(200);
+    expect(plan.nodes[0].intendedAction).toBe(fresh ? "fresh-primed" : "awaiting-decision");
+    expect(result.nodes[0].status).toBe(plan.nodes[0].intendedAction);
+    if (!fresh) {
+      const command = "rig seat launch 'dev.worker@stopped-review' --fresh --reason";
+      expect(plan.nodes[0].reason).toContain(command);
+      expect(result.nodes[0].error).toBe(plan.nodes[0].reason);
+      expect(plan.nodes[0].reason).toContain("deliberately stopped");
+      expect(plan.nodes[0].freshRequired).toBe(false);
+      expect(h.db.prepare("SELECT * FROM sessions WHERE node_id=?").all(h.node.id)).toEqual(before);
+      expect(h.sessionRegistry.currentOccupantTenure(h.node.id)).toEqual(tenure);
+      expect(h.sessionRegistry.getBindingForNode(h.node.id)).toBeNull();
+      expect(h.tmux.createSession).not.toHaveBeenCalled();
+      expect(h.tmux.killSession).not.toHaveBeenCalled();
+      expect(h.tmux.sendText).not.toHaveBeenCalled();
+    } else {
+      expect(h.tmux.createSession).toHaveBeenCalledTimes(1);
+      expect(h.db.prepare("SELECT status,intentionally_stopped FROM sessions WHERE node_id=? ORDER BY id DESC LIMIT 1").get(h.node.id))
+        .toEqual({ status: "running", intentionally_stopped: 0 });
+    }
+  });
+
+  it.each(["older-stop", "missing-tenure", "handover", "adopt", "detached-snapshot", "different-token", "legacy-relation", "terminal"])(
+    "does not infer a current deliberate stop from %s", async mode => {
+      const h = fixture({ intentional: true, token: null, policy: "relaunch_fresh" });
+      if (mode === "older-stop") {
+        const later = h.sessionRegistry.registerSession(h.node.id, "dev-worker@stopped-review");
+        h.sessionRegistry.updateStatus(later.id, "exited");
+        h.db.prepare("UPDATE sessions SET restore_policy='relaunch_fresh' WHERE id=?").run(later.id);
+        h.snapshotCapture.captureSnapshot(h.rig.id, "manual");
+      }
+      if (mode === "missing-tenure") h.db.prepare("DELETE FROM occupant_tenures WHERE node_id=?").run(h.node.id);
+      if (mode === "handover" || mode === "adopt") h.db.prepare("UPDATE occupant_tenures SET kind=? WHERE node_id=?").run(mode, h.node.id);
+      if (mode === "terminal") {
+        h.db.prepare("UPDATE nodes SET runtime='terminal' WHERE id=?").run(h.node.id);
+        h.db.prepare("UPDATE node_startup_context SET runtime='terminal' WHERE node_id=?").run(h.node.id);
+        h.snapshotCapture.captureSnapshot(h.rig.id, "manual");
+      }
+      if (mode === "legacy-relation") {
+        const data = structuredClone(h.snapshot.data);
+        delete data.activeOccupantsByNode;
+        delete data.activeSessionIdByNode;
+        h.db.prepare("UPDATE snapshots SET data=? WHERE id=?").run(JSON.stringify(data), h.snapshot.id);
+      }
+      if (mode === "detached-snapshot" || mode === "different-token") {
+        const data = structuredClone(h.snapshot.data);
+        if (mode === "detached-snapshot") data.sessions[0]!.status = "detached";
+        else data.sessions[0]!.resumeToken = "different-native-id";
+        h.db.prepare("UPDATE snapshots SET data=? WHERE id=?").run(JSON.stringify(data), h.snapshot.id);
+      }
+      const body = { sourceRef: h.rig.name };
+      const plan = await (await h.post("/api/up", { ...body, plan: true })).json();
+      const result = await (await h.post("/api/up", body)).json();
+      expect(plan.nodes[0].intendedAction).toBe("fresh-primed");
+      expect(result.nodes[0].status).toBe("fresh-primed");
+      expect(h.tmux.createSession).toHaveBeenCalledTimes(1);
+    });
+
+  it("direct snapshot restore keeps its existing initial-seat policy", async () => {
+    const h = fixture({ intentional: true, token: null, policy: "relaunch_fresh" });
+    expect(await h.restoreOrchestrator.restore(h.snapshot.id)).toMatchObject({
+      // No runtime adapters were supplied to this direct call: it still attempts
+      // launch, then reports its existing missing-adapter attention result.
+      ok: true, result: { nodes: [expect.objectContaining({ status: "attention_required", error: expect.stringContaining("no claude-code runtime adapter") })] },
+    });
+    expect(h.tmux.createSession).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["cli", "explorer"])("%s up leaves the proved stop while another seat comes back", async entry => {
+    const h = fixture({ intentional: true, token: null, policy: "relaunch_fresh" });
+    const before = h.db.prepare("SELECT * FROM sessions WHERE node_id=?").all(h.node.id);
+    const other = h.rigRepo.addNode(h.rig.id, "dev.other", { runtime: "claude-code", podId: "pod", cwd: "/tmp" });
+    h.db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, '[]', '[]', '[]', 'claude-code')").run(other.id);
+    const snapshot = h.snapshotCapture.captureSnapshot(h.rig.id, "manual");
+    const path = entry === "cli" ? "/api/up" : `/api/rigs/${h.rig.id}/up`;
+    const body = { sourceRef: h.rig.name };
+    const changes = h.db.prepare("SELECT total_changes() AS n").get();
+    const plan = await (await h.post(path, { ...body, plan: true })).json();
+    expect(h.db.prepare("SELECT total_changes() AS n").get()).toEqual(changes);
+    const result = await (await h.post(path, body)).json();
+    expect(result.snapshotId).toBe(snapshot.id);
+    expect(result.rigResult).toBe("partially_restored");
+    expect(plan.nodes.find((n: { logicalId: string }) => n.logicalId === "dev.worker").intendedAction).toBe("awaiting-decision");
+    expect(result.nodes.find((n: { logicalId: string }) => n.logicalId === "dev.worker").status).toBe("awaiting-decision");
+    expect(result.nodes.find((n: { logicalId: string }) => n.logicalId === "dev.other").status).toBe("fresh-primed");
+    expect(h.tmux.createSession).toHaveBeenCalledTimes(1);
+    expect(h.db.prepare("SELECT * FROM sessions WHERE node_id=?").all(h.node.id)).toEqual(before);
+  });
+
+  it("a fresh-generation no-token/relaunch seat keeps its protection", async () => {
+    const h = fixture({ intentional: true, fresh: true, token: null, policy: "relaunch_fresh" });
+    const plan = await (await h.post("/api/up", { sourceRef: h.rig.name, plan: true })).json();
+    const result = await (await h.post("/api/up", { sourceRef: h.rig.name })).json();
+    expect(plan.nodes[0].intendedAction).toBe("awaiting-decision");
+    expect(result.nodes[0].status).toBe("awaiting-decision");
+    expect(h.tmux.createSession).not.toHaveBeenCalled();
+  });
+
+
+  it("unattended startup keeps its existing initial-seat policy", async () => {
+    const h = fixture({ intentional: true, token: null, policy: "relaunch_fresh" });
+    expect(await restoreExistingRigUnattended(h, h.rig.id, () => true)).toEqual({ errors: [] });
+    expect(h.tmux.createSession).toHaveBeenCalledTimes(1);
+  });
+
+
+  it("keeps the deliberately stopped newest initial row even when an older row was stopped", async () => {
+    const h = fixture({ intentional: true, token: null, policy: "relaunch_fresh" });
+    const latest = h.sessionRegistry.registerSession(h.node.id, "dev-worker@stopped-review");
+    h.db.prepare("UPDATE sessions SET restore_policy='relaunch_fresh' WHERE id=?").run(latest.id);
+    h.sessionRegistry.markIntentionallyStopped(latest.id);
+    h.snapshotCapture.captureSnapshot(h.rig.id, "manual");
+    const body = { sourceRef: h.rig.name };
+    const plan = await (await h.post("/api/up", { ...body, plan: true })).json();
+    const result = await (await h.post("/api/up", body)).json();
+    expect(plan.nodes[0].reason).toContain("deliberately stopped");
+    expect(result.nodes[0]).toMatchObject({ status: "awaiting-decision", error: plan.nodes[0].reason });
+    expect(h.tmux.createSession).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true].flatMap(token => ["resume_if_possible", "relaunch_fresh"].map(policy => ({ token, policy }))))(
+    "holds a restored-then-stopped seat: token=$token policy=$policy", async ({ token, policy }) => {
+      const h = fixture({ token: null, policy: "relaunch_fresh" });
+      const first = await (await h.post("/api/up", { sourceRef: h.rig.name })).json();
+      expect(first.nodes[0].status).toBe("fresh-primed");
+      const current = h.sessionRegistry.getSessionsForRig(h.rig.id).sort((a, b) => b.id.localeCompare(a.id))[0]!;
+      expect(h.sessionRegistry.currentOccupantTenure(h.node.id)).toMatchObject({ kind: "initial", generationOrdinal: 2 });
+      h.db.prepare("UPDATE sessions SET restore_policy=? WHERE id=?").run(policy, current.id);
+      if (token) h.sessionRegistry.updateResumeToken(current.id, "claude_id", "00000000-0000-4000-8000-000000000009", "hook");
+      const stopped = await h.post(`/api/seat/stop/${encodeURIComponent(current.sessionName)}`, { reason: "leave this restored occupant stopped" });
+      expect(stopped.status).toBe(200);
+      const snapshot = h.snapshotCapture.captureSnapshot(h.rig.id, "manual");
+      const before = h.db.prepare("SELECT * FROM sessions WHERE node_id=? ORDER BY id").all(h.node.id);
+      vi.mocked(h.tmux.createSession).mockClear(); vi.mocked(h.tmux.sendText).mockClear();
+      const changes = h.db.prepare("SELECT total_changes() AS n").get();
+      const body = { sourceRef: h.rig.name };
+      const plan = await (await h.post("/api/up", { ...body, plan: true })).json();
+      expect(h.db.prepare("SELECT total_changes() AS n").get()).toEqual(changes);
+      const result = await (await h.post("/api/up", body)).json();
+      expect(result.snapshotId).toBe(snapshot.id);
+      expect(plan.nodes[0].reason).toContain("deliberately stopped");
+      expect(result.nodes[0]).toMatchObject({ status: "awaiting-decision", error: plan.nodes[0].reason });
+      expect(h.db.prepare("SELECT * FROM sessions WHERE node_id=? ORDER BY id").all(h.node.id)).toEqual(before);
+      expect(h.tmux.createSession).not.toHaveBeenCalled();
+      expect(h.tmux.sendText).not.toHaveBeenCalled();
+    });
+
+  it.each(["cli", "explorer"])("%s no-snapshot preview proves the same stop as auto-rehydrate apply", async entry => {
+    const h = fixture({ intentional: true, token: null, policy: "relaunch_fresh" });
+    const other = h.rigRepo.addNode(h.rig.id, "dev.other", { runtime: "claude-code", podId: "pod", cwd: "/tmp" });
+    h.db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, '[]', '[]', '[]', 'claude-code')").run(other.id);
+    const sibling = h.sessionRegistry.registerSession(other.id, "dev-other@stopped-review");
+    h.sessionRegistry.markDetached(sibling.id);
+    h.db.prepare("UPDATE sessions SET restore_policy='relaunch_fresh' WHERE id=?").run(sibling.id);
+    h.db.prepare("DELETE FROM snapshots WHERE rig_id=?").run(h.rig.id);
+    const before = h.db.prepare("SELECT * FROM sessions WHERE node_id=?").all(h.node.id);
+    const changes = h.db.prepare("SELECT total_changes() AS n").get();
+    const path = entry === "cli" ? "/api/up" : `/api/rigs/${h.rig.id}/up`;
+    const body = { sourceRef: h.rig.name };
+    const response = await h.post(path, { ...body, plan: true });
+    expect(response.status).toBe(200);
+    const plan = await response.json();
+    expect(plan).toMatchObject({ snapshot: null, wouldCaptureCurrentState: true, mutated: false });
+    expect(h.db.prepare("SELECT total_changes() AS n").get()).toEqual(changes);
+    expect(h.db.prepare("SELECT count(*) AS n FROM snapshots WHERE rig_id=?").get(h.rig.id)).toEqual({ n: 0 });
+    const applied = await h.post(path, body); expect(applied.status).toBe(200);
+    const result = await applied.json();
+    const pausedPlan = plan.nodes.find((n: { logicalId: string }) => n.logicalId === "dev.worker");
+    const pausedResult = result.nodes.find((n: { logicalId: string }) => n.logicalId === "dev.worker");
+    expect(pausedPlan).toMatchObject({ intendedAction: "awaiting-decision", reason: expect.stringContaining("deliberately stopped") });
+    expect(pausedPlan.reason).toContain("rig seat launch 'dev.worker@stopped-review' --fresh --reason");
+    expect(pausedResult).toMatchObject({ status: "awaiting-decision", error: pausedPlan.reason });
+    expect(result.snapshotKind).toBe("auto-rehydrate");
+    expect(result.rigResult).toBe("partially_restored");
+    expect(result.nodes.find((n: { logicalId: string }) => n.logicalId === "dev.other").status).toBe("fresh-primed");
+    expect(h.db.prepare("SELECT * FROM sessions WHERE node_id=?").all(h.node.id)).toEqual(before);
+    expect(h.tmux.createSession).toHaveBeenCalledTimes(1);
+  });
+
 });

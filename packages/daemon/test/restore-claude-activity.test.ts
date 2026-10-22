@@ -151,8 +151,16 @@ describe("contained Claude restore activity resources", () => {
     if (pod) expect(adapter.launchHarness).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ resumeToken: token }));
     const beforePoll = owned(); const writeCount = writes.filter(w => w.file === settingsPath).length;
     const monitor = new ContextMonitor(db, new ContextUsageStore(db, { stateDir: path.join(root, "state"), codexHome: path.join(root, "codex") }), adapter);
+    // The collector's status line is already in place, so the poll writes nothing and the hooks stay as they are.
+    await monitor.pollOnce();
+    expect(writes.filter(w => w.file === settingsPath).length).toBe(writeCount);
+    expect(owned()).toEqual(beforePoll);
+    expect(settings().hooks.Stop).toContainEqual(userHook);
+    expect(settings().env).toEqual(originalSettings.env);
+    // A poll that does refresh the status line (here a stale collector command) keeps the selected hooks in its write.
+    fs.writeFileSync(settingsPath, JSON.stringify({ ...settings(), statusLine: { type: "command", command: "node /old/.openrig/context-collector.cjs /old/ctx /old/prov" } }));
     await monitor.pollOnce(); monitor.stop();
-    expect(writes.filter(w => w.file === settingsPath).length).toBeGreaterThan(writeCount);
+    expect(writes.filter(w => w.file === settingsPath).length).toBe(writeCount + 1);
     expect(owned()).toEqual(beforePoll);
     expect(writes.filter(w => w.file === settingsPath).every(w => owned(JSON.parse(w.text)).length > 0)).toBe(true);
   });

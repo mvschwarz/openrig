@@ -24,7 +24,15 @@ function runningDeps(port: number): StatusDeps {
 const TALL = Array.from({ length: 26 }, (_, i) => `row${i + 1}`).join("\n") + "\n";
 // A short shell pane: 7 lines of output, then the 14 empty rows below the prompt.
 const SHORT = ["$ for i in 1 2 3 4 5", "line1", "line2", "line3", "line4", "line5", "$"].join("\n") + "\n" + "\n".repeat(14);
-const PANES: Record<string, string> = { "tall@my-rig": TALL, "short@my-rig": SHORT };
+// A busy Claude seat: the activity indicator sits above the input box, a few rows from the bottom.
+const BUSY_CLAUDE = ["● Reading the queue row", "", "✻ Waddling… (12s · ↓ 1.2k tokens · esc to interrupt)", "", "╭──────────────────╮", "│ >                │", "╰──────────────────╯", "  ? for shortcuts"].join("\n") + "\n";
+const PANES: Record<string, string> = { "tall@my-rig": TALL, "short@my-rig": SHORT, "busy@my-rig": BUSY_CLAUDE, "ghost@my-rig": "pane text\n", "empty@my-rig": "pane text\n" };
+// What the daemon adds for a Claude Code or Codex seat: the input box as the cursor and styling read it.
+const GHOST_HINT = "The input box shows \"/compact\", likely a Claude Code suggestion (cursor at the input's start; text drawn faint), not something the person typed: it isn't their intent, a draft or a staged command.";
+const INPUT_BOXES: Record<string, unknown> = {
+  "ghost@my-rig": { status: "likely-suggestion", confidence: "high", cursor: { x: 2, y: 37, width: 120, height: 40 }, input: { startRow: 37, startCol: 2, endRow: 37, endCol: 10, text: "/compact" }, suggestion: { startRow: 37, startCol: 2, endRow: 37, endCol: 10, text: "/compact" }, evidence: ["cursor at the input's start", "text drawn faint"], hint: GHOST_HINT },
+  "empty@my-rig": { status: "empty", confidence: "high", cursor: { x: 2, y: 37, width: 120, height: 40 }, input: null, suggestion: null, evidence: ["no text in the input box"], hint: "The input box is empty." },
+};
 const requests: Array<Record<string, unknown>> = [];
 
 describe("Capture CLI", () => {
@@ -42,7 +50,7 @@ describe("Capture CLI", () => {
           if (parsed.session && PANES[parsed.session] !== undefined) {
             // What `capture-pane -S -N` returns: the history lines asked for, plus the whole visible pane.
             res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ ok: true, sessionName: parsed.session, content: PANES[parsed.session], lines: parsed.lines }));
+            res.end(JSON.stringify({ ok: true, sessionName: parsed.session, content: PANES[parsed.session], lines: parsed.lines, ...(INPUT_BOXES[parsed.session] ? { inputBox: INPUT_BOXES[parsed.session] } : {}) }));
           } else if (parsed.session) {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: true, sessionName: parsed.session, content: "line1\nline2\n", lines: 20 }));
@@ -107,6 +115,35 @@ describe("Capture CLI", () => {
     expect(parsed.content).toContain("line1");
   });
 
+  describe("the input box note: a likely harness suggestion is named on stderr, the pane text is unchanged", () => {
+    async function run(argv: string[]): Promise<{ out: string[]; err: string[] }> {
+      const out: string[] = []; const err: string[] = [];
+      const origLog = console.log; const origErr = console.error;
+      console.log = (...args: unknown[]) => out.push(args.join(" ")); console.error = (...args: unknown[]) => err.push(args.join(" "));
+      try { await makeCmd().parseAsync(["node", "rig", "capture", ...argv]); } finally { console.log = origLog; console.error = origErr; }
+      return { out, err };
+    }
+
+    it("asks the daemon for the input box, prints the pane text as before and the input box's hint on stderr", async () => {
+      const { out, err } = await run(["ghost@my-rig"]);
+      expect(requests.at(-1)!.inputBox).toBe(true);
+      expect(out).toEqual(["pane text\n"]);
+      expect(err).toEqual([`[rig capture: ghost@my-rig: input box: ${GHOST_HINT}]`]);
+    });
+
+    it("prints no note for an empty input box", async () => {
+      const { out, err } = await run(["empty@my-rig"]);
+      expect(out).toEqual(["pane text\n"]);
+      expect(err).toEqual([]);
+    });
+
+    it("--json carries inputBox unchanged and prints no note", async () => {
+      const { out, err } = await run(["ghost@my-rig", "--json"]);
+      expect(JSON.parse(out.join("\n")).inputBox).toEqual(INPUT_BOXES["ghost@my-rig"]);
+      expect(err).toEqual([]);
+    });
+  });
+
   describe("--lines N shows the last N lines (not N plus the visible pane)", () => {
     async function run(argv: string[]): Promise<{ out: string[]; err: string[] }> {
       const out: string[] = []; const err: string[] = [];
@@ -119,14 +156,15 @@ describe("Capture CLI", () => {
     it("--lines 5 on a tall pane prints the last 5 lines, with the omitted count on stderr", async () => {
       const { out, err } = await run(["tall@my-rig", "--lines", "5"]);
       expect(out.join("\n").split("\n").filter(Boolean)).toEqual(["row22", "row23", "row24", "row25", "row26"]);
-      expect(err).toEqual(["[rig capture: tall@my-rig: 21 earlier lines not shown; last 5 shown]"]);
+      expect(err).toEqual(["[rig capture: tall@my-rig: 21 earlier lines not shown; last 5 shown; activity unknown: rig ps --nodes]"]);
       expect(requests.at(-1)!.lines).toBe(5); // the daemon request is unchanged
     });
 
     it("--json reports the count returned, the count requested and the count left out", async () => {
       const { out, err } = await run(["tall@my-rig", "--lines", "5", "--json"]);
       const parsed = JSON.parse(out.join("\n"));
-      expect(parsed).toMatchObject({ ok: true, lines: 5, requestedLines: 5, omittedLines: 21 });
+      expect(parsed).toMatchObject({ ok: true, lines: 5, requestedLines: 5, omittedLines: 21, activity: "unknown" });
+      expect(parsed.activityNote).toContain("rig ps --nodes");
       expect(parsed.content).toBe("row22\nrow23\nrow24\nrow25\nrow26\n");
       expect(err).toEqual([]);
     });
@@ -140,6 +178,21 @@ describe("Capture CLI", () => {
       const { out, err } = await run(["short@my-rig", "--lines", "50"]);
       expect(out.join("\n").split("\n").filter(Boolean)).toHaveLength(7);
       expect(err).toEqual([]);
+      const json = JSON.parse((await run(["short@my-rig", "--lines", "50", "--json"])).out.join("\n"));
+      expect(json, "nothing left out: no activity claim").not.toHaveProperty("activity");
+    });
+
+    it("a busy Claude seat: the default capture still shows it's busy; a cut that drops the indicator says unknown, not idle", async () => {
+      const whole = JSON.parse((await run(["busy@my-rig", "--json"])).out.join("\n"));
+      expect(whole.content).toContain("esc to interrupt");
+      expect(whole).not.toHaveProperty("activity");
+      const cut = await run(["busy@my-rig", "--lines", "3", "--json"]);
+      const parsed = JSON.parse(cut.out.join("\n"));
+      expect(parsed.content).not.toContain("esc to interrupt");
+      expect(parsed).toMatchObject({ activity: "unknown", omittedLines: 5 });
+      const kept = JSON.parse((await run(["busy@my-rig", "--lines", "3", "--history-plus-pane", "--json"])).out.join("\n"));
+      expect(kept.content).toContain("esc to interrupt");
+      expect(kept).not.toHaveProperty("activity");
     });
 
     it("without --lines the output is unchanged: 20 history lines plus the pane, JSON lines echoes the request", async () => {
@@ -149,6 +202,7 @@ describe("Capture CLI", () => {
       expect(parsed.content).toBe(TALL);
       expect(parsed.lines).toBe(20);
       expect(parsed).not.toHaveProperty("requestedLines");
+      expect(parsed).not.toHaveProperty("activity");
       expect(err).toEqual([]);
     });
 
@@ -168,10 +222,11 @@ describe("Capture CLI", () => {
     it("--rig cuts each seat's capture and leaves a failed seat as it was", async () => {
       const { out, err } = await run(["--rig", "tall", "--lines", "2"]);
       expect(out).toEqual(["--- dev-impl@my-rig ---", "row25\nrow26\n", "--- dev-qa@my-rig ---", "qa output\n"]);
-      expect(err).toEqual(["[rig capture: dev-impl@my-rig: 24 earlier lines not shown; last 2 shown]"]);
+      expect(err).toEqual(["[rig capture: dev-impl@my-rig: 24 earlier lines not shown; last 2 shown; activity unknown: rig ps --nodes]"]);
       const json = await run(["--rig", "partial", "--lines", "2", "--json"]);
       const results = JSON.parse(json.out.join("\n")).results;
       expect(results[0]).toMatchObject({ ok: true, content: "impl output\n", lines: 1, requestedLines: 2, omittedLines: 0 });
+      expect(results[0]).not.toHaveProperty("activity");
       expect(results[1]).toEqual({ ok: false, sessionName: "dev-qa@my-rig", error: "external CLI capture is not available" });
     });
   });

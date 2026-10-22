@@ -1,0 +1,42 @@
+user@machine:~/workspace1/run/work/proj1$ ( . '/srv/agenthome/workspace1/run/tmp
+/openrig-tmux-send-100001-00000000-0000-4000-8000-000000000001.txt' )
+ ▐▛███▛█   Claude Code v2.1.296
+▝▜██████▀  Sonnet 5.5 with high effort · Claude Max
+ ▝▝   ▝▝   ~/workspace1/run/work/proj1
+
+▎ [✻] [✻] [✻] · Share Claude Code and earn $10 in usage credits · /passes
+
+❯ review-r1@sample-rig
+  OpenRig session identity:
+  - rig: sample-rig
+  - pod: review
+  - pod_label: Review
+  - member: r1
+  - logical_id: review.r1
+  - agent_spec: demo-core-reviewer
+  - runtime: claude-code
+  - session: review-r1@sample-rig
+    This is your startup identity hint. For durable identity recovery after
+  compaction, run:
+    rig whoami --json
+    That command returns your full topology context: rig, pod, peers, edges,
+  and transcript path.
+
+● Bash(rig whoami --json)
+  ⎿  {
+       "resolvedBy": "node_id",
+       "identity": {
+     … +81 lines (ctrl+o to expand)
+
+● I'm confirmed as review.r1 (review-r1@sample-rig, rig sample-rig, runtime
+  claude-code). I have no queue item yet, so I'm not claiming or judging
+  anything. I'll wait for a review package to be routed to this seat.
+
+✻ Churned for 4s · done 5:24 PM
+
+───────────────────────────────────────────────────────── review-r1@sample-rig ─
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents
+
+

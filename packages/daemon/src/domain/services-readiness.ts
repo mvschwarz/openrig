@@ -37,11 +37,11 @@ export async function evaluateWaitTargets(
       });
     } else if (target.tcp) {
       // TCP probe
-      const ok = await adapter.probeTcp(target.tcp);
+      const check = await adapter.checkTcp(target.tcp);
       results.push({
         target,
-        status: ok ? "healthy" : "unhealthy",
-        detail: ok ? null : `TCP probe failed: ${target.tcp}`,
+        status: check.ok ? "healthy" : "unhealthy",
+        detail: check.ok ? null : tcpFailureDetail(target.tcp, check.reason),
       });
     } else if (target.condition === "healthy" && target.service) {
       // Every replica must be healthy. An unhealthy replica takes priority
@@ -63,6 +63,18 @@ export async function evaluateWaitTargets(
   }
 
   return results;
+}
+
+/** Say why a TCP wait target failed, so a malformed target doesn't read like a closed port. */
+function tcpFailureDetail(tcp: string, reason: "malformed" | "unreachable" | "named_port_needs_nc"): string {
+  switch (reason) {
+    case "malformed":
+      return `TCP probe failed: ${tcp} is not host:port with a port from 1 to 65535 or a service name`;
+    case "named_port_needs_nc":
+      return `TCP probe failed: ${tcp} uses a named port, which needs nc on PATH. Install nc or use a numeric port`;
+    case "unreachable":
+      return `TCP probe failed: ${tcp}`;
+  }
 }
 
 /** Derive overall env health from wait target results. */

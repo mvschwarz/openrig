@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   CLOSURE_REASONS,
+  DONE_CLOSURE_REASONS,
   computeClosureRequiredAt,
   isClosureReason,
   validateClosure,
@@ -21,7 +22,8 @@ describe("hot-potato-enforcer / validateClosure", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.code).toBe("missing_closure_reason");
-      expect(r.validReasons).toEqual(CLOSURE_REASONS);
+      expect(r.validReasons).toEqual(DONE_CLOSURE_REASONS);
+      expect(r.validReasons).not.toContain("blocked_on");
     }
   });
 
@@ -31,8 +33,8 @@ describe("hot-potato-enforcer / validateClosure", () => {
     if (!r.ok) expect(r.code).toBe("invalid_closure_reason");
   });
 
-  it.each(CLOSURE_REASONS)("accepts state=done with valid closure_reason=%s", (reason) => {
-    const target = (reason === "handed_off_to" || reason === "blocked_on" || reason === "escalation")
+  it.each(DONE_CLOSURE_REASONS)("accepts state=done with valid closure_reason=%s", (reason) => {
+    const target = (reason === "handed_off_to" || reason === "escalation")
       ? "downstream-target"
       : null;
     const r = validateClosure({ state: "done", closureReason: reason, closureTarget: target });
@@ -46,10 +48,21 @@ describe("hot-potato-enforcer / validateClosure", () => {
     if (!r.ok) expect(r.code).toBe("missing_closure_target");
   });
 
-  it("rejects blocked_on without closure_target", () => {
-    const r = validateClosure({ state: "done", closureReason: "blocked_on" });
+  it.each([undefined, "child-qitem"])("rejects blocked_on on done with target=%s", (closureTarget) => {
+    const r = validateClosure({ state: "done", closureReason: "blocked_on", closureTarget });
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.code).toBe("missing_closure_target");
+    if (!r.ok) {
+      expect(r.code).toBe("invalid_closure_reason");
+      expect(r.message).toMatch(/state=done.*terminal/);
+      expect(r.message).toContain("rig queue block <id> --on <child>");
+      expect(r.validReasons).toEqual(DONE_CLOSURE_REASONS);
+      expect(r.validReasons).not.toContain("blocked_on");
+    }
+  });
+
+  it("preserves blocked_on on an active blocked park record", () => {
+    expect(validateClosure({ state: "blocked", closureReason: "blocked_on", closureTarget: "child-qitem" }))
+      .toEqual({ ok: true, closureReason: "blocked_on", closureTarget: "child-qitem" });
   });
 
   it("rejects escalation without closure_target", () => {
@@ -67,7 +80,7 @@ describe("hot-potato-enforcer / validateClosure", () => {
 });
 
 describe("hot-potato-enforcer / isClosureReason", () => {
-  it("recognizes all 6 enum values", () => {
+  it("recognizes all enum values, including blocked_on park records", () => {
     for (const r of CLOSURE_REASONS) expect(isClosureReason(r)).toBe(true);
   });
   it("rejects unknown values", () => {

@@ -123,6 +123,7 @@ discoveryRoutes.post("/:id/bind", async (c) => {
     case "node_not_found":
     case "pod_not_found":
       return c.json(result, 404);
+    case "address_conflict":
     case "not_active":
     case "already_bound":
     case "runtime_mismatch":
@@ -166,6 +167,7 @@ discoveryRoutes.post("/:id/adopt", async (c) => {
       case "rig_not_found":
       case "node_not_found":
         return c.json(result, 404);
+      case "address_conflict":
       case "not_active":
       case "already_bound":
       case "runtime_mismatch":
@@ -205,6 +207,7 @@ discoveryRoutes.post("/:id/adopt", async (c) => {
       case "rig_not_found":
       case "pod_not_found":
         return c.json(result, 404);
+      case "address_conflict":
       case "not_active":
       case "duplicate_logical_id":
       case "invalid_member_name":

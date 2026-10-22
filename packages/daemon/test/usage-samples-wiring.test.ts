@@ -15,6 +15,7 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { ContextUsageStore } from "../src/domain/context-usage-store.js";
 import { ContextMonitor } from "../src/domain/context-monitor.js";
 import { UsageSamplesStore, type ProviderWindowSampleInput } from "../src/domain/usage-samples-store.js";
+import { telemetryRoutes } from "../src/routes/telemetry.js";
 import type { ReadinessResult } from "../src/domain/runtime-adapter.js";
 
 describe("51-08 A1 wiring — the series accrues from the real poll tick", () => {
@@ -84,6 +85,33 @@ describe("51-08 A1 wiring — the series accrues from the real poll tick", () =>
 
   const seriesCount = (lane: string) =>
     (db.prepare("SELECT COUNT(*) AS n FROM usage_samples WHERE lane = ?").get(lane) as { n: number }).n;
+
+  it("does not report a new conversation's starting tokens as burn through the telemetry route", async () => {
+    vi.useFakeTimers();
+    try {
+      for (const [at, sessionId, input] of [
+        ["2026-08-07T10:00:00.000Z", "old", 1000],
+        ["2026-08-07T10:30:00.000Z", "old", 1200],
+        ["2026-08-07T11:00:00.000Z", "new", 100_000],
+        ["2026-08-07T12:00:00.000Z", "new", 100_500],
+      ] as const) {
+        vi.setSystemTime(new Date(at));
+        writeSidecar({ session_id: sessionId, sampled_at: at,
+          context_window: { context_window_size: 200000, used_percentage: 10,
+            total_input_tokens: input, total_output_tokens: 100 } });
+        await monitor.pollOnce();
+      }
+      const app = telemetryRoutes({ db: () => db, nowIso: () => "2026-08-07T12:00:00.000Z" });
+      const response = await app.request("/usage/top?window_hours=4");
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        ranked: [{ seatSession: sessionName, tokensDelta: 700, tokensPerHour: 350, resets: 0, samples: 4 }],
+        unknown: [],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it("two polls over an UNCHANGED sidecar append ONE context row; an advanced sidecar appends the second", async () => {
     writeSidecar();

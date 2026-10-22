@@ -180,7 +180,7 @@ export class ProgressIndexer {
     } catch { return null; }
 
     const rows: ProgressRow[] = [];
-    const lines = content.split("\n");
+    const lines = content.split(/\r?\n/);
     let title: string | null = null;
     let inFrontmatter = false;
     let fence: { marker: string; length: number } | null = null;

@@ -10,8 +10,11 @@ import { enumArg, positiveIntArg } from "../cli-error.js";
 import type { StatusDeps } from "./status.js";
 import { resolveContextRef } from "../context-resolve.js";
 import { shellQuote } from "../cross-host-executor.js";
+import { loadHostRegistry, resolveHost } from "../host-registry.js";
+import { loadHostBindings } from "../host-bindings.js";
 import { omittedReadField, readView } from "../read-view.js";
 import { buildWriteReceipt, compactOutputEnabled, type ReceiptContext } from "../queue-receipt.js";
+import { TRANSITIONS_SHOWN, compactShow, compactTransitions, showEmptyNotice, transitionsNotice } from "../queue-read-compact.js";
 
 /**
  * `rig queue` — coordination primitive L3/inbox/outbox commands (PL-004 Phase A).
@@ -36,7 +39,8 @@ export interface QueueDeps extends StatusDeps {
 }
 
 interface DeliveryResultBase {
-  /** human: a human-seat or @external address, or a row the gateway owns. agent: any other seat. */
+  /** human: a human-seat or @external address, a row the gateway owns, or a seat the gateway also
+   *  posts to (a registered person with a pane). agent: any other seat. */
   destinationKind: "agent" | "human";
   /** Human destinations only. No receipt can prove that a person read the message. */
   humanReadership?: "unknown";
@@ -66,6 +70,9 @@ export interface TerminalDeliveryResult extends DeliveryResultBase {
   /** A claim shows the seat took the item; it does not prove the body was read.
    *  pickup is the daemon's derived pickup receipt state, as the row reports it. */
   claim: { observed: boolean; claimedAt: string | null; pickup: string | null };
+  /** Present when the gateway may also post this row: a registered person who is also a seat with
+   *  its own pane. The Slack receipt, kept apart from the terminal side; posted is not read. */
+  gateway?: GatewayReceipt;
 }
 
 export type VerifiedDeliveryResult = GatewayDeliveryResult | TerminalDeliveryResult;
@@ -82,20 +89,46 @@ function stringField(row: QueueRow, key: string): string | null {
   return typeof row[key] === "string" ? row[key] as string : null;
 }
 
-/** The row's own signals decide who owns delivery: a gateway receipt, then the recorded wake
- *  result, then the daemon's destination class (present before any wake, e.g. --no-nudge). The
- *  address pattern is only the fallback for a daemon that reports none of these. */
+/** The row's own signals decide who owns delivery: the recorded wake result, then the daemon's
+ *  destination class (present before any wake, e.g. --no-nudge), then a gateway receipt. The
+ *  address pattern is only the fallback for a daemon that reports none of these. A gateway
+ *  receipt beside a terminal signal adds a gateway side (gatewayAlsoPosts); it doesn't replace it. */
 function receiptSourceOf(destination: string | null, row: QueueRow): "gateway" | "terminal" {
-  if (stringField(row, "deliveryOutcome") !== null) return "gateway";
   const wakeResult = stringField(row, "lastNudgeResult");
   if (wakeResult !== null) return wakeResult.startsWith("gateway-owned:") ? "gateway" : "terminal";
   const destinationClass = stringField(row, "destinationClass");
   if (destinationClass !== null) return destinationClass === "gateway-routable" ? "gateway" : "terminal";
+  if (stringField(row, "deliveryOutcome") !== null) return "gateway";
   return destination !== null && isHumanSeatSessionRef(destination) ? "gateway" : "terminal";
 }
 
-function destinationKindOf(destination: string | null, source: "gateway" | "terminal"): "agent" | "human" {
-  return source === "gateway" || (destination !== null && isHumanSeatSessionRef(destination)) ? "human" : "agent";
+/** A terminal destination the gateway may also post to (a registered person who is also a seat
+ *  with a pane): the row carries the owner notification level the Slack selector keys on, or a
+ *  gateway receipt already exists. */
+function gatewayAlsoPosts(row: QueueRow): boolean {
+  return stringField(row, "ownerNotificationLevel") !== null || stringField(row, "deliveryOutcome") !== null;
+}
+
+/** A terminal destination is a person when the gateway also posts to it or its address is a human seat's. */
+function terminalDestinationKind(destination: string | null, gatewaySide: boolean): "agent" | "human" {
+  return gatewaySide || (destination !== null && isHumanSeatSessionRef(destination)) ? "human" : "agent";
+}
+
+/** The gateway (Slack connector) receipt on the row, in one place for both result shapes. */
+interface GatewayReceipt {
+  outcome: "posted" | "transport-failed" | "never-posted" | "still-pending";
+  connectorAccepted: boolean | null;
+  detail?: string;
+}
+
+function gatewayReceiptOf(row: QueueRow): GatewayReceipt {
+  const outcome = stringField(row, "deliveryOutcome");
+  if (outcome === "posted") return { outcome, connectorAccepted: true };
+  if (outcome === "transport-failed" || outcome === "never-posted") {
+    const detail = stringField(row, "deliveryFailureDetail");
+    return { outcome, connectorAccepted: false, ...(detail ? { detail } : {}) };
+  }
+  return { outcome: "still-pending", connectorAccepted: null };
 }
 
 function terminalWakeOutcome(wakeResult: string | null): TerminalDeliveryResult["outcome"] {
@@ -137,8 +170,16 @@ function terminalDeliveryResult(
   const claimText = claim.observed
     ? `Claimed at ${claimedAt}${pickupState ? ` (pickup ${pickupState})` : ""}. A claim shows the seat took the item; it does not prove the body was read.`
     : waitedMs === null ? "No claim observed yet." : `No claim observed within ${waitedMs}ms.`;
-  const notFailed = !claim.observed && isKnownUnconfirmed(wakeResult, outcome) ? " This is not a failed handoff." : "";
-  const destinationKind = destinationKindOf(destination, "terminal");
+  const gatewaySide = gatewayAlsoPosts(row);
+  const gateway = gatewaySide ? gatewayReceiptOf(row) : null;
+  const slackText = gateway === null ? ""
+    : gateway.outcome === "posted" ? " Slack receipt: posted."
+    : gateway.outcome === "still-pending" ? (waitedMs === null ? " No Slack receipt yet." : ` No Slack receipt within ${waitedMs}ms.`)
+    : ` Slack delivery ${gateway.outcome}${gateway.detail ? `: ${gateway.detail}` : ""}.`;
+  const gatewayFailed = gateway !== null && gateway.connectorAccepted === false;
+  const notFailed = !claim.observed && !gatewayFailed && isKnownUnconfirmed(wakeResult, outcome) ? " This is not a failed handoff." : "";
+  const destinationKind = terminalDestinationKind(destination, gatewaySide);
+  const settled = claim.observed && (gateway === null || gateway.outcome === "posted");
   return {
     receiptSource: "terminal",
     destinationKind,
@@ -146,8 +187,9 @@ function terminalDeliveryResult(
     outcome,
     wakeResult,
     claim,
-    detail: `The qitem is saved. ${receipt[outcome]} ${claimText}${notFailed}`,
-    nextAction: claim.observed ? null : outcome === "retained" ? `rig seat held-messages ${seat}` : `rig queue show ${qitemId} --json`,
+    ...(gateway ? { gateway } : {}),
+    detail: `The qitem is saved. ${receipt[outcome]}${slackText} ${claimText}${notFailed}`,
+    nextAction: settled ? null : outcome === "retained" ? `rig seat held-messages ${seat}` : `rig queue show ${qitemId} --json`,
   };
 }
 
@@ -213,13 +255,8 @@ export async function waitForDeliveryOutcome(
         };
       }
       if (outcome === "transport-failed" || outcome === "never-posted") {
-        return {
-          ...gateway,
-          outcome,
-          connectorAccepted: false,
-          detail: stringField(row, "deliveryFailureDetail") ?? undefined,
-          nextAction: `rig queue show ${qitemId} --json`,
-        };
+        const { detail } = gatewayReceiptOf(row);
+        return { ...gateway, outcome, connectorAccepted: false, ...(detail ? { detail } : {}), nextAction: `rig queue show ${qitemId} --json` };
       }
       if (timedOut) {
         return {
@@ -232,13 +269,15 @@ export async function waitForDeliveryOutcome(
       }
     } else {
       // --no-nudge requested no wake: there is no terminal receipt to wait for.
-      if (target.nudge === false) return terminalDeliveryResult(qitemId, destination, row, "not-requested", null);
       const wakeResult = stringField(row, "lastNudgeResult");
-      const outcome = terminalWakeOutcome(wakeResult);
-      // Any recorded wake result (or an existing claim) ends the wait: a later pickup is
-      // `rig queue show`'s to report. Only a missing wake result waits up to the bound.
-      // Nothing here re-sends the wake.
-      if (wakeResult !== null || stringField(row, "claimedAt") !== null) {
+      const outcome = target.nudge === false ? "not-requested" : terminalWakeOutcome(wakeResult);
+      // Any recorded wake result (or an existing claim) settles the terminal side: a later pickup
+      // is `rig queue show`'s to report. When the gateway may also post the row, its receipt is
+      // awaited too. Only a missing receipt waits, up to the bound. Nothing here re-sends anything.
+      const gatewaySide = gatewayAlsoPosts(row);
+      const terminalSettled = outcome === "not-requested" || wakeResult !== null || stringField(row, "claimedAt") !== null;
+      const gatewaySettled = !gatewaySide || stringField(row, "deliveryOutcome") !== null;
+      if (terminalSettled && gatewaySettled) {
         return terminalDeliveryResult(qitemId, destination, row, outcome, null);
       }
       if (timedOut) return terminalDeliveryResult(qitemId, destination, row, outcome, timeoutMs);
@@ -258,8 +297,10 @@ async function withClient<T>(
   // RULING 1ae863d2 — status is 3-state: hard-block ONLY on positive evidence
   // (stopped/stale). UNVERIFIED (timeout/wedged/wrong-home) proceeds to the
   // configured-target request as the authority — never a down assertion.
+  // A running daemon whose health check failed or reported a starved loop is busy, not down: it gets
+  // the request, under the request's own timeout.
   const positiveDown = status.state === "stopped" || status.state === "stale";
-  if (positiveDown || (status.state === "running" && status.healthy === false)) {
+  if (positiveDown) {
     if (!attemptWhenProbeUnconfirmed) {
       // B8-1b: the ONE epistemic-matched guard renders both branches.
       daemonStatusGuard(status);
@@ -303,6 +344,79 @@ function printResult(json: boolean, body: unknown, status: number): void {
     console.log(JSON.stringify(body, null, 2));
   }
   if (status >= 400) process.exitCode = status >= 500 ? 2 : 1;
+}
+
+/** #1642: why a create provably wrote nothing, for the refusals that come before any write: the
+ *  selected daemon refused the forward before contacting another host (its registry was unreadable,
+ *  the host unknown or SSH-declared), or refused a local create to a rig it doesn't have. Any other
+ *  failure, including a timeout or a remote's error, may follow a commit, so it returns null. */
+function provenCreateRefusal(status: number, body: unknown): string | null {
+  if (!body || typeof body !== "object") return null;
+  const { error, failureClass, hostId } = body as { error?: unknown; failureClass?: unknown; hostId?: unknown };
+  if (status === 502 && error === "remote_queue_write_failed"
+    && (failureClass === "unknown-host" || failureClass === "unsupported-transport" || failureClass === "registry")) {
+    return `the daemon refused to forward it to host '${String(hostId)}' (${failureClass}) before contacting that host.`;
+  }
+  if (status === 400 && error === "unknown_destination_rig") {
+    return "the daemon refused it because the destination's rig doesn't exist on that daemon.";
+  }
+  return null;
+}
+
+/** #1642: after the daemon refuses a host token it doesn't know, the substitution this CLI's own
+ *  registry suggests, when it resolves the token (through an entry's declared hostId or a learned
+ *  binding, as `rig send` does) to another entry id. Only a hint: the registry of the daemon this
+ *  command reached may give that id to another host. Nothing is sent again. */
+function hostSubstitutionHint(
+  status: number,
+  body: unknown,
+  rawDestination: string,
+  explicitHost: string | undefined,
+  resolved: { destination: string; hostId?: string },
+  keep = "",
+): string | null {
+  const token = resolved.hostId;
+  const data = body as { error?: unknown; failureClass?: unknown; hostId?: unknown } | null;
+  if (token === undefined || token === "local" || status !== 502 || data?.error !== "remote_queue_write_failed"
+    || data.failureClass !== "unknown-host" || data.hostId !== token) return null;
+  const registry = loadHostRegistry();
+  const match = registry.ok ? resolveHost(registry.registry, token, loadHostBindings().bindings) : undefined;
+  const entryId = match?.ok ? match.host.id : undefined;
+  if (entryId === undefined || entryId === token) return null;
+  const forms = [
+    ...(rawDestination !== resolved.destination ? [`the destination ${shellQuote(`${resolved.destination}@${entryId}`)}`] : []),
+    ...(explicitHost !== undefined ? [`--host ${shellQuote(entryId)}`] : []),
+  ];
+  return `Host '${token}' resolves to '${entryId}' in this CLI's host registry. That doesn't prove '${entryId}' names the same host in the registry of the daemon this command reached, which OPENRIG_URL can select. If it does, send the write again to the same daemon with ${forms.join(" and ")}${keep}.`;
+}
+
+interface WorkChoiceCandidate {
+  qitemId?: string | null;
+  projects?: string[];
+  mission?: string;
+  slice?: string | null;
+  workNodePath?: string | null;
+  unresolved?: string | null;
+}
+
+/** After the plain answer, the candidates the agent must choose between, one line each, so a
+ *  refused current work is never just a count. Prints nothing when the daemon sent no choice
+ *  (current work is settled, nothing is in progress, or the daemon predates the field). */
+export function printCurrentWorkChoice(data: unknown): void {
+  const choice = (data as { currentWorkChoice?: { instruction?: string; candidates?: WorkChoiceCandidate[];
+    unknown?: Array<{ qitemId?: string | null; reason?: string }> } } | null)?.currentWorkChoice;
+  if (!choice) return;
+  console.log("");
+  console.log(choice.instruction ?? "OpenRig did not choose your current work.");
+  for (const [index, c] of (choice.candidates ?? []).entries()) {
+    const project = c.projects?.length ? `project ${c.projects.join(", ")}` : "no project tag";
+    const where = c.workNodePath ?? "no folder found";
+    const why = c.unresolved ? ` (${c.unresolved})` : "";
+    console.log(`  ${index + 1}. ${project} · mission ${c.mission ?? "?"} · slice ${c.slice ?? "none"} · ${where}${why} · from row ${c.qitemId ?? "unknown"}`);
+  }
+  for (const u of choice.unknown ?? []) {
+    console.log(`  - row ${u.qitemId ?? "unknown"}: work not named (${u.reason ?? "no reason given"})`);
+  }
 }
 
 /** Slice 15: the receipt context when a write should print its receipt — the
@@ -518,6 +632,10 @@ function requireNonEmptyResolvedBody(body: string, source: string): string {
   throw err;
 }
 
+/** The states that close a row; `rig queue update --resolution` needs one of them. */
+const CLOSING_STATES = ["done", "canceled", "denied", "failed", "handed-off"];
+const CLOSING_STATES_PHRASE = "done, canceled, denied, failed or handed-off";
+
 function emitBodyResolveError(err: Error & { fact?: string; consequence?: string; action?: string }, json: boolean): void {
   if (json) {
     console.log(JSON.stringify({ ok: false, error: { fact: err.fact ?? err.message, consequence: err.consequence ?? "", action: err.action ?? "" } }, null, 2));
@@ -639,7 +757,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--expires-at <iso>", "ISO timestamp at which the qitem expires")
     .option("--id <qitemId>", "Retry identity: reuse for the same create after an unknown outcome; otherwise generated and printed before sending")
     .option("--target-repo <name>", "PL-007: typed repo scope (must match a repo in the source rig's RigSpec.workspace.repos[])")
-    .option("--summary <text>", "Short human-readable subject, shown in the needs-you view. For a human destination, --body-file is the complete decision brief or update; keep technical continuation in the owning agent row and evidence.")
+    .option("--summary <text>", "Short human-readable subject of the row, shown on every surface that lists it (RECENT, the story, the needs-you view). Say what the work is and why it needs this seat. For a human destination, --body-file is the complete decision brief or update; keep technical continuation in the owning agent row and evidence.")
     .option("--human-intent <intent>", "decision (default) or update: a quiet informational delivery, never an approval request")
     .option("--human-detail-file <path>", "One explicitly authored supplemental thread reply; keep the complete action/options in --body-file")
     .option("--reply-to <qitemId>", "Post this update into an earlier qitem's Slack thread (requires --human-intent update; posts as a new top-level message instead if that thread can't be used, e.g. it is missing or still has an open human decision; --verify reports why)")
@@ -647,7 +765,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-5: pointer to the durable artifact a human judges (e.g. a PROOF.md path). Required by the daemon when the item is human-routed; optional otherwise.")
     .option("--host <id>", QUEUE_HOST_OPTION_HELP)
     .option("--no-nudge", "Suppress the default destination nudge (cold-queue)")
-    .option("--verify", "Boundedly wait after persistence for the existing receipt: the gateway receipt for a human destination, or the wake result and any claim for an agent. Never retries the create or the wake, and never claims the message was read")
+    .option("--verify", "Boundedly wait after persistence for the existing receipts: the gateway receipt for a person, or the wake result and any claim already present for a seat, plus the gateway receipt when the gateway may also post to that seat (a registered person with a pane; eligible to post, not guaranteed). Never retries the create or the wake, and never claims the message was read")
     .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")
     .action(async (opts: {
@@ -739,7 +857,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       // callers that omit it; hard-require is a future hardening.
       if (!opts.summary) {
         process.stderr.write(
-          "warning: rig queue create called without --summary. Pass --summary <text> to set the new qitem's short human-readable summary; without it, the Story node falls back to a bounded body preview. A good summary is 1-2 plain sentences a human skims in the needs-you view — what the work is and why it needs this seat, not the agent-speak --body. Proceeding (pre-18 callers exempt).\n"
+          "warning: rig queue create called without --summary. Pass --summary <text> to set the new qitem's short human-readable summary; without it, the Story node falls back to a bounded body preview. The summary is the row's subject in RECENT, the story and the needs-you view. A good summary is 1-2 plain sentences a human skims — what the work is and why it needs this seat, not the agent-speak --body. Proceeding (pre-18 callers exempt).\n"
         );
       }
       // A managed seat keeps transport-derived identity; an external caller can
@@ -836,6 +954,10 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           printResult(opts.json ?? false, { ...res.data, qitemId, recovery }, res.status);
           return;
         }
+        const refusal = res.status >= 400 ? provenCreateRefusal(res.status, res.data) : null;
+        if (refusal) console.error(`No row was created: ${refusal}`);
+        const hint = hostSubstitutionHint(res.status, res.data, opts.destination, opts.host, hostResolved, `, keeping --id ${shellQuote(qitemId)}`);
+        if (hint) console.error(hint);
         const createWarning = res.data?.createWarning as { code?: unknown; message?: unknown } | undefined;
         if (res.status < 400 && createWarning?.code === "qitem_body_not_saved" && typeof createWarning.message === "string") {
           console.error(`Warning: ${createWarning.message}`);
@@ -892,16 +1014,17 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
 
   cmd
     .command("update <qitemId>")
-    .description("Append a note and/or mutate qitem state. A note without --state never changes row state. state=done REQUIRES --closure-reason (one of: handed_off_to, blocked_on, denied, canceled, no-follow-on, escalation). Closure ≠ acceptance: handed_off_to records delivery to the next stage; acceptance is the next stage's verdict on its own qitem, not this closure.")
+    .description("Append a note and/or mutate qitem state. A note without --state never changes row state. state=done REQUIRES --closure-reason (one of: handed_off_to, denied, canceled, no-follow-on, escalation, superseded). To wait for another qitem, use rig queue block <id> --on <child>. Closure ≠ acceptance: handed_off_to records delivery to the next stage; acceptance is the next stage's verdict on its own qitem, not this closure.")
     .option("--actor <session>", "(deprecated, ignored) the actor is derived from the seat env (X-OpenRig-Session); P21 I3 made the update route derive it from the transport header")
     .option("--state <state>", "New state: pending | in-progress | done | blocked | failed | denied | canceled | handed-off")
     .option("--reopen", "Explicitly acknowledge a deliberate terminal-to-active repair; requires --state and --note")
     .option("--closure-reason <reason>", "Required for state=done; also 'superseded' on state=canceled (with --closure-target = the successor) records a supersession, distinct from an abandoned cancel")
-    .option("--closure-target <target>", "Required for handed_off_to, blocked_on, escalation, and superseded")
+    .option("--closure-target <target>", "Required for handed_off_to, escalation, and superseded; blocked_on park records use state=blocked with --blocked-on")
+    .option("--resolution <text>", "The outcome, stored on the row and shown by rig queue show. Needs --state done, canceled, denied, failed or handed-off, and non-blank text. Stored when the update closes an open row, after anything the row already has (a fallback line, an earlier outcome); a row that is already closed keeps what it has")
     .option("--blocked-on <blocker>", "For state=blocked: the blocker — a qitem id (must exist and be live), a human seat (FR-6 park; requires summary + evidence_ref), or a typed non-qitem gate 'fold:<what>' / 'auth:<what>' / 'external:<what>'")
     .option("--wake-watchdog <jobId>", "For state=blocked: attach an existing live watchdog id targeting the row owner")
     .option("--wake-after <duration>", "For state=blocked: atomically arm a timer (for example 90s, 15m, 2h)", wakeDurationSeconds)
-    .option("--summary <text>", "OPR.0.4.4.19 FR-6: park-time summary persisted onto the item (human-seat parks only)")
+    .option("--summary <text>", "Summary persisted onto the item (human-seat parks, or standalone summary update without --state)")
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-6: park-time durable-artifact pointer persisted onto the item (human-seat parks only)")
     .option("--note <text>", "Transition note for the audit log")
     .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
@@ -912,6 +1035,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       reopen?: boolean;
       closureReason?: string;
       closureTarget?: string;
+      resolution?: string;
       blockedOn?: string;
       wakeWatchdog?: string;
       wakeAfter?: number;
@@ -921,6 +1045,21 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       json?: boolean;
       full?: boolean;
     }) => {
+      // --resolution is checked here, before anything is sent: it names the outcome of a close, so it
+      // needs a closing --state and some text. The daemon ignores it anywhere else.
+      if (opts.resolution !== undefined) {
+        const problem = opts.state === undefined || !CLOSING_STATES.includes(opts.state)
+          ? { code: "resolution_needs_closing_state", message: `--resolution records the outcome of a close, so it needs --state ${CLOSING_STATES_PHRASE}${opts.state === undefined ? "" : ` (got '${opts.state}')`}. Nothing was sent.` }
+          : opts.resolution.trim().length === 0
+            ? { code: "resolution_needs_text", message: "--resolution needs text; it is blank. Nothing was sent." }
+            : null;
+        if (problem) {
+          if (opts.json) console.error(JSON.stringify({ error: problem.code, message: problem.message }));
+          else console.error(problem.message);
+          process.exitCode = 1;
+          return;
+        }
+      }
       // P21 I3 reconcile: the actor is DERIVED from the seat env (X-OpenRig-Session, stamped by
       // DaemonClient) — --actor is deprecated + ignored, no body actorSession. Verify the env (the
       // header source) or the daemon returns 400 actor_required (no seat identity to record; P18 retired the 401 refusal). Matches `resolve`.
@@ -932,6 +1071,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           reopen: opts.reopen,
           closureReason: opts.closureReason,
           closureTarget: opts.closureTarget,
+          resolution: opts.resolution,
           blockedOn: opts.blockedOn,
           wakeWatchdogId: opts.wakeWatchdog,
           wakeAfterSeconds: opts.wakeAfter,
@@ -1059,7 +1199,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .option("--tags <tags>", "Comma-separated tags for the new qitem")
     .option("--gate <role>", "OPR.0.4.3.16: mark the new qitem as gate work; translated to a gate:<role> tag (e.g. guard | spec-review). The idle-gate watchdog reads this predicate. Composes with --tags.")
     .option("--target-repo <name>", "PL-007: typed repo scope for the new qitem")
-    .option("--summary <text>", "OPR.0.4.1.18: short human-readable 1-2 sentence summary for the new qitem — what it is and why this seat, skimmable in the needs-you view (--body stays source of truth). Warned-if-missing.")
+    .option("--summary <text>", "OPR.0.4.1.18: short human-readable 1-2 sentence subject of the new qitem — what it is and why this seat — shown on every surface that lists it (RECENT, the story, the needs-you view); --body stays source of truth. Not inherited from the source row. Warned-if-missing.")
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-5: durable-artifact pointer for the new qitem. Required by the daemon when the new qitem is human-routed; optional otherwise.")
     .option("--host <id>", QUEUE_HOST_OPTION_HELP)
     .option("--no-nudge", "Suppress the default nudge to the new destination")
@@ -1110,7 +1250,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       // it should carry its own summary. Warn to stderr; do not hard-break.
       if (!opts.summary) {
         process.stderr.write(
-          "warning: rig queue handoff called without --summary. Pass --summary <text> to set the new qitem's short human-readable summary; without it, the Story node falls back to a bounded body preview. A good summary is 1-2 plain sentences a human skims in the needs-you view — what the work is and why it needs this seat, not the agent-speak --body. Proceeding.\n"
+          "warning: rig queue handoff called without --summary. Pass --summary <text> to set the new qitem's short human-readable summary; without it, the Story node falls back to a bounded body preview. The summary is the row's subject in RECENT, the story and the needs-you view. A good summary is 1-2 plain sentences a human skims — what the work is and why it needs this seat, not the agent-speak --body. Proceeding.\n"
         );
       }
       const deps = getDeps();
@@ -1137,6 +1277,8 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           nudge: opts.nudge,
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
         });
+        const hint = hostSubstitutionHint(res.status, res.data, opts.to, opts.host, hostResolved);
+        if (hint) console.error(hint);
         await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, {
           verb: "handoff", nudgeSuppressed: opts.nudge === false, remoteHost: remoteHostOf(hostResolved.hostId),
         }));
@@ -1158,7 +1300,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .option("--tags <tags>", "Comma-separated tags for the new qitem")
     .option("--gate <role>", "OPR.0.4.3.16: mark the new qitem as gate work; translated to a gate:<role> tag (e.g. guard | spec-review). The idle-gate watchdog reads this predicate. Composes with --tags.")
     .option("--target-repo <name>", "PL-007: typed repo scope for the new qitem")
-    .option("--summary <text>", "OPR.0.4.1.18: short human-readable 1-2 sentence summary for the new qitem — what it is and why this seat, skimmable in the needs-you view (--body stays source of truth). Warned-if-missing.")
+    .option("--summary <text>", "OPR.0.4.1.18: short human-readable 1-2 sentence subject of the new qitem — what it is and why this seat — shown on every surface that lists it (RECENT, the story, the needs-you view); --body stays source of truth. Not inherited from the source row. Warned-if-missing.")
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-5: durable-artifact pointer for the new qitem. Required by the daemon when the new qitem is human-routed; optional otherwise.")
     .option("--host <id>", QUEUE_HOST_OPTION_HELP)
     .option("--no-nudge", "Suppress the default nudge to the new destination")
@@ -1207,7 +1349,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       // it should carry its own summary. Warn to stderr; do not hard-break.
       if (!opts.summary) {
         process.stderr.write(
-          "warning: rig queue handoff called without --summary. Pass --summary <text> to set the new qitem's short human-readable summary; without it, the Story node falls back to a bounded body preview. A good summary is 1-2 plain sentences a human skims in the needs-you view — what the work is and why it needs this seat, not the agent-speak --body. Proceeding.\n"
+          "warning: rig queue handoff called without --summary. Pass --summary <text> to set the new qitem's short human-readable summary; without it, the Story node falls back to a bounded body preview. The summary is the row's subject in RECENT, the story and the needs-you view. A good summary is 1-2 plain sentences a human skims — what the work is and why it needs this seat, not the agent-speak --body. Proceeding.\n"
         );
       }
       const deps = getDeps();
@@ -1234,6 +1376,8 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           nudge: opts.nudge,
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
         });
+        const hint = hostSubstitutionHint(res.status, res.data, opts.to, opts.host, hostResolved);
+        if (hint) console.error(hint);
         await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, {
           verb: "handoff-and-complete", nudgeSuppressed: opts.nudge === false, remoteHost: remoteHostOf(hostResolved.hostId),
         }));
@@ -1259,6 +1403,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       await withClient(deps, async (client) => {
         const res = await client.get<unknown>(`/api/queue/whoami?${params.toString()}`);
         printResult(opts.json ?? false, res.data, res.status);
+        if (!opts.json && res.status < 400) printCurrentWorkChoice(res.data);
       });
     });
 
@@ -1298,15 +1443,28 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           await printQueueItemResult(client, qitemId, json, item, res.status);
           return;
         }
+        // The closing transition is for --full; the bounded preview prints the record as it did before.
+        const { closingTransition, ...record } = item as typeof item & { closingTransition?: unknown };
         const { preview, bodyBytes, bodyTruncated } = previewBody(item.body);
         // Append-only additions: keep `body` in place (now the preview) and add
         // the honest size + truncation flag. Object otherwise unchanged.
         const fullCommand = `rig queue show ${shellQuote(qitemId)} --full --json`;
-        const view = readView(item, fullCommand, bodyTruncated ? [omittedReadField("body (after preview)", item.body.slice(preview.length))] : []);
-        const transformed = { ...item, body: preview, bodyBytes, bodyTruncated, readView: view };
-        printResult(json, transformed, res.status);
+        // Everything held back from this preview is declared, so a reader that trusts readView runs --full.
+        const omitted = [
+          ...(bodyTruncated ? [omittedReadField("body (after preview)", item.body.slice(preview.length))] : []),
+          ...(closingTransition === undefined ? [] : [omittedReadField("closingTransition", closingTransition)]),
+        ];
+        const view = readView(item, fullCommand, omitted);
+        const transformed = { ...record, body: preview, bodyBytes, bodyTruncated, readView: view };
+        // Slice 15 P2: with output.compact on, the empty fields are left out and counted.
+        const compact = compactOutputEnabled() ? compactShow(transformed) : null;
+        printResult(json, compact ? compact.item : transformed, res.status);
         if (!json && bodyTruncated) {
           console.log(`… (bounded preview — complete body is ${bodyBytes} bytes; full record ${view.fullJsonBytes} JSON bytes: ${fullCommand})`);
+        }
+        if (compact && compact.emptyOmitted.length > 0) {
+          const notice = showEmptyNotice(compact.emptyOmitted, fullCommand);
+          if (json) console.error(notice); else console.log(notice);
         }
       });
     });
@@ -1315,10 +1473,19 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .command("transitions <qitemId>")
     .description("Show the append-only transition log for a qitem")
     .option("--json", "JSON output for agents")
-    .action(async (qitemId: string, opts: { json?: boolean }) => {
+    .option("--full", `The whole log, as today, even when output.compact is on (compact shows the latest transitions, ${TRANSITIONS_SHOWN} in all, always including the current disposition)`)
+    .action(async (qitemId: string, opts: { json?: boolean; full?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const res = await client.get<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/transitions`);
+        // Slice 15 P3: with output.compact on, the recent story; the notice goes to stderr so it stays
+        // visible when the array is piped through jq.
+        if (!opts.full && res.status < 400 && Array.isArray(res.data) && compactOutputEnabled()) {
+          const { transitions, earlier } = compactTransitions(res.data as Record<string, unknown>[]);
+          printResult(opts.json ?? false, transitions, res.status);
+          if (earlier > 0) console.error(transitionsNotice(earlier, res.data.length, `rig queue transitions ${shellQuote(qitemId)} --full${opts.json ? " --json" : ""}`));
+          return;
+        }
         await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
       });
     });

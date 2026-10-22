@@ -1,3 +1,4 @@
+import { physicalSessionName } from "../domain/session-registry.js";
 import { Hono } from "hono";
 import { shellQuote } from "../adapters/shell-quote.js";
 import type Database from "better-sqlite3";
@@ -41,7 +42,7 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
       return c.json({ ok: false, error: "Missing required field: session" }, 400);
     }
     if (body.skipMap !== undefined && typeof body.skipMap !== "boolean") return c.json({ ok: false, error: "skipMap must be boolean" }, 400);
-    const sessionName = body.session;
+    const sessionName = physicalSessionName(db, body.session);
 
     // Ambiguity / existence check — mirror /send (409 ambiguous, 404 not found).
     const resolved = await transport.resolveSessions({ session: sessionName });
@@ -87,7 +88,7 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
     );
 
     if (outcome.triggered) {
-      return c.json({ ok: true, session: sessionName, stage: outcome.stage });
+      return c.json({ ok: true, session: sessionName, stage: outcome.stage, compact: compactResultText("submitted_unconfirmed") });
     }
 
     const statusMap: Record<string, number> = {
@@ -110,7 +111,7 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
       session: sessionName,
       stage: outcome.stage,
       reason: outcome.reason,
-      ...(outcome.preparation ? { preparation: outcome.preparation } : {}),
+      ...(outcome.preparation ? { preparation: outcome.preparation, compact: compactResultText(outcome.preparation.compact) } : {}),
       error: manualOutcomeMessage(sessionName, outcome),
     }, status);
   });
@@ -123,7 +124,11 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
     if (!body.session) return c.json({ ok: false, error: "Missing required field: session" }, 400);
     const resolved = await transport.resolveSessions({ session: body.session });
     if (!resolved.ok) return c.json({ ok: false, error: resolved.error }, resolved.code === "ambiguous" ? 409 : 404);
-    return c.json({ ok: true, session: body.session, preparation: enforcer.cancelPreparation(body.session) });
+    const preparation = enforcer.cancelPreparation(body.session);
+    return c.json({ ok: true, session: body.session, preparation,
+      ...(preparation ? { compact: compactResultText(preparation.compact) } : {}),
+      guidance: "Managed preparation and pending restore/audit are disarmed. Cancellation sent no input. It cannot undo a submitted /compact or confirm whether it ran. No restore request follows cancellation: check the pane before retrying. If it compacted or you cannot tell, send a normal restore request naming preparation.mapPath from --state, asking it to skip reading if it did not compact; a retry would compact it again. An explicit retry still requires the live pane to be idle.",
+    });
   });
 
   router.get("/state", (c) => {
@@ -137,6 +142,7 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
     }
     const preparation = enforcer.getPreparationState(session);
     return c.json({ ok: true, session, state: enforcer.getManualCompactionState(session), preparation,
+      ...(preparation ? { compact: compactResultText(preparation.compact) } : {}),
       ...(preparation?.reason === "occupant_generation_unavailable"
         ? { guidance: manualReasonMessage(session, preparation.reason) } : {}),
     });
@@ -155,12 +161,24 @@ function manualOutcomeMessage(sessionName: string, outcome: Extract<ManualCompac
   return `${effect} for '${sessionName}' (attempt ${prep.attemptId}). ${detail} Its map remains at ${prep.mapPath} if written. Inspect rig compact ${shellQuote(sessionName)} --state before an explicit retry.`;
 }
 
+/** The /compact command's result in words. `preparation.delivery` is the preparation prompt's delivery;
+ *  this is the command's, and it never claims that compaction ran. */
+export function compactResultText(compact: "not_sent" | "submitted_unconfirmed" | "uncertain"): string {
+  switch (compact) {
+    case "submitted_unconfirmed": return "submitted, unconfirmed: OpenRig sent /compact and Enter to the seat; it does not check whether Claude Code then started compacting.";
+    case "uncertain": return "uncertain: /compact may have reached the seat, possibly as text left in its input box without Enter; it was not retried.";
+    default: return "not sent: OpenRig has not sent /compact for this attempt.";
+  }
+}
+
 function manualReasonMessage(sessionName: string, reason: string): string {
   switch (reason) {
     case "occupant_generation_unavailable":
       return `The occupant generation could not be resolved for '${sessionName}'; no preparation or compact was sent. For the confirmed live seat, run rig reconcile-session ${shellQuote(sessionName)} --no-launch, then explicitly retry rig compact ${shellQuote(sessionName)}. Reconciliation does not restart this attempt.`;
     case "preparation_incomplete":
       return `Preparation (restore map and idle wait) did not finish in time for '${sessionName}'; managed compaction is disarmed. Inspect rig compact ${sessionName} --state, retry explicitly, or use --skip-map once.`;
+    case "pane_unknown_protected":
+      return `Refused: '${sessionName}' uses draft-aware input protection, and its tmux pane is not recorded. Input to a protected seat needs a known pane, so no preparation or /compact was sent. Both fixes refuse while protection is on, so with the person's agreement turn it off first (rig seat set-typing-guard ${shellQuote(sessionName)} --mode off --reason "<why>") and back on afterwards (--mode draft-aware). To keep the session and resume token, run rig reconcile-session ${shellQuote(sessionName)} --repair-missing-pane --no-launch. Otherwise rig reconcile-session ${shellQuote(sessionName)} --no-launch adopts: a new session row (any running row for the seat is superseded); it re-captures the resume token if it can, and conversation continuity stays unverified. Then explicitly retry rig compact ${shellQuote(sessionName)}; reconciliation does not restart this attempt. If the intended pane cannot be resolved, use rig context get help for operator recovery.`;
     case "preparation_cancelled":
       return `Preparation for '${sessionName}' was cancelled; no further compact is armed.`;
     case "disabled":

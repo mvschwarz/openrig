@@ -116,6 +116,16 @@ describe("ComposeServicesAdapter", () => {
     expect(result.error).toContain("unparseable");
   });
 
+  it("status accepts an empty JSON array as a project with no containers", async () => {
+    const exec = vi.fn<ExecFn>().mockResolvedValue("[]\n");
+    const adapter = new ComposeServicesAdapter(exec);
+
+    const result = await adapter.status({ composeFile: "/tmp/dc.yml", projectName: "rig" });
+
+    expect(result.ok).toBe(true);
+    expect(result.services).toEqual([]);
+  });
+
   it("status ignores warning-only output and returns an empty service list", async () => {
     const exec = vi.fn<ExecFn>().mockResolvedValue(
       'time="2026-04-09T06:06:45-07:00" level=warning msg="compose warning"',

@@ -162,8 +162,8 @@ export function skillsRoutes(): Hono {
     const pluginsDir = c.get("pluginsDir" as never) as string | undefined ?? getDefaultOpenRigPath("plugins");
     const mirrorRepoRoot = c.get("mirrorRepoRoot" as never) as string | undefined;
 
-    const claudeResult = discoverSkillsWithProvenance({ runtime: "claude-code", homedir, cwd });
-    const codexResult = discoverSkillsWithProvenance({ runtime: "codex", homedir, cwd });
+    const claudeResult = await discoverSkillsWithProvenance({ runtime: "claude-code", homedir, cwd });
+    const codexResult = await discoverSkillsWithProvenance({ runtime: "codex", homedir, cwd });
 
     const seenPaths = new Set<string>();
     const allSkills: typeof claudeResult.skills = [];

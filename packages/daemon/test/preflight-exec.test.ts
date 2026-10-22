@@ -5,7 +5,8 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { runtimeProbeFailure, runtimeVersionProbeCwd } from "../src/adapters/preflight-exec.js";
-import { verifyPiRuntimeAvailable } from "../src/domain/rigspec-preflight.js";
+import { verifyOmpRuntimeAvailable, verifyPiRuntimeAvailable } from "../src/domain/rigspec-preflight.js";
+import { ProbeTimeoutError, RUNTIME_PROBE_TIMEOUT_MS } from "../src/adapters/bounded-probe-exec.js";
 import type { RigSpec } from "../src/domain/types.js";
 
 const roots: string[] = [];
@@ -59,6 +60,28 @@ describe("runtime version preflight cwd", () => {
     exec.mockClear();
     expect(await verifyPiRuntimeAvailable({ pods: [{ members: [{ runtime: "omp" }] }] } as RigSpec, exec, [])).toEqual([]);
     expect(exec).not.toHaveBeenCalled();
+  });
+
+  it("names the check and the limit for an OMP version check that hit it, without 'not available' or the install hint", async () => {
+    const exec = vi.fn().mockRejectedValue(new ProbeTimeoutError("omp --version", RUNTIME_PROBE_TIMEOUT_MS));
+    const spec = { pods: [{ members: [{ runtime: "omp" }] }] } as RigSpec;
+    expect(await verifyOmpRuntimeAvailable(spec, exec)).toEqual(["`omp --version` didn't answer within 30 s"]);
+  });
+
+  it("keeps the OMP install hint when the check failed some other way", async () => {
+    const exec = vi.fn().mockRejectedValue(Object.assign(new Error("x"), { code: "ENOENT" }));
+    const spec = { pods: [{ members: [{ runtime: "omp" }] }] } as RigSpec;
+    const [error] = await verifyOmpRuntimeAvailable(spec, exec);
+    expect(error).toContain("not available");
+    expect(error).toContain("install Oh My Pi");
+  });
+
+  it("keeps a Pi version check that hit the limit a warning, with the same message", async () => {
+    const warnings: string[] = [];
+    const exec = vi.fn().mockRejectedValue(new ProbeTimeoutError("pi --version", RUNTIME_PROBE_TIMEOUT_MS));
+    const spec = { pods: [{ members: [{ runtime: "pi" }] }] } as RigSpec;
+    expect(await verifyPiRuntimeAvailable(spec, exec, warnings)).toEqual([]);
+    expect(warnings).toEqual(["`pi --version` didn't answer within 30 s"]);
   });
 
   it.each(["pi", "omp", "codex", "claude"])("preserves a healthy cwd for %s --version", (runtime) => {

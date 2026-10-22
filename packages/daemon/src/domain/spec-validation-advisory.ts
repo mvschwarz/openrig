@@ -23,7 +23,7 @@
  *  extending the map; the suites pin the prototype and the behavior. */
 export const CANONICAL_MODEL_PINS: Record<string, string> = Object.assign(
   Object.create(null) as Record<string, string>,
-  { fable: "claude-fable-5" },
+  { fable: "claude-fable-5-1" },
 );
 
 /**

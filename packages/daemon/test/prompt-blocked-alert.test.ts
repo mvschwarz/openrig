@@ -7,9 +7,10 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
-import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME, REFUSED_PREFIX } from "../src/domain/policies/parked-owner-consumer.js";
+import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME, REFUSED_PREFIX, RESERVE_PREFIX } from "../src/domain/policies/parked-owner-consumer.js";
 import type { PolicyJob } from "../src/domain/policies/types.js";
-import type { WatchdogHistoryEntry } from "../src/domain/watchdog-history-log.js";
+import { WatchdogHistoryLog, type WatchdogHistoryEntry } from "../src/domain/watchdog-history-log.js";
+import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { runWakeLadderTick, queueRecoveryOwnsWake, classifyPromptAfterRefusal } from "../src/domain/queue-wake-ladder.js";
 import { makeOperatorDeliveryEngine } from "../src/domain/gateway/operator-delivery-engine.js";
 import { buildSlackGatewayWire } from "../src/domain/gateway/slack/slack-subsystem.js";
@@ -288,6 +289,65 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(log).not.toHaveBeenCalled();
   });
 
+  // A closed disposition is a terminal row whose valid JSON tags hold the alert tag and this exact episode tag as
+  // values. It keeps the episode final; anything short of that leaves the episode free to alert again.
+  function episodeKey(id: string) {
+    return notes(id).find(n => n.startsWith(REFUSED_PREFIX))!.slice(REFUSED_PREFIX.length).trim().split(";")[0]!.trim();
+  }
+  async function disposition(tagsText: string, rowState: string) {
+    const row = await repo.create({ sourceSession: "sender@fixture", destinationSession: "archive@fixture", body: "earlier disposition", nudge: false });
+    db.prepare("UPDATE queue_items SET tags = ?, state = ? WHERE qitem_id = ?").run(tagsText, rowState, row.qitemId);
+    return row.qitemId;
+  }
+  const exact = (key: string) => JSON.stringify(["wake-prompt-refusal", `prompt-episode:${key}`]);
+  const escaped = (tags: string[]) => `[${tags.map(t => `"${[...t].map(c => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`).join("")}"`).join(",")}]`;
+
+  it.each([
+    ["exact tags on a done row", exact, "done", false],
+    ["exact tags on a canceled row", exact, "canceled", false],
+    ["exact tags on a handed-off row", exact, "handed-off", false],
+    ["exact tags on a failed row", exact, "failed", false],
+    ["exact tags on a denied row", exact, "denied", false],
+    ["fully escaped tags", (k: string) => escaped(["wake-prompt-refusal", `prompt-episode:${k}`]), "done", false],
+    ["object-form tags", (k: string) => JSON.stringify({ alert: "wake-prompt-refusal", episode: `prompt-episode:${k}` }), "done", false],
+    ["both tags among others, with no recovery-for tag", (k: string) => JSON.stringify(["review", "wake-prompt-refusal", "prompt-destination:x@fixture", `prompt-episode:${k}`]), "done", false],
+    ["exact tags on a pending row", exact, "pending", true],
+    ["exact tags on an in-progress row", exact, "in-progress", true],
+    ["exact tags on a blocked row", exact, "blocked", true],
+    ["invalid JSON holding both strings", (k: string) => `["wake-prompt-refusal","prompt-episode:${k}"`, "done", true],
+    ["the episode tag without the alert tag", (k: string) => JSON.stringify(["review", `prompt-episode:${k}`]), "done", true],
+    ["a longer key sharing this key as a prefix", (k: string) => exact(`${k}0`), "done", true],
+    ["another attempt for the same obligation set", (k: string) => exact(`${k.split("#")[0]}#another-attempt`), "done", true],
+    ["the episode tag in another case", (k: string) => exact(k.toUpperCase()), "done", true],
+    ["the alert tag as an object key, not a value", (k: string) => JSON.stringify({ "wake-prompt-refusal": `prompt-episode:${k}` }), "done", true],
+    ["both tags nested one level down", (k: string) => JSON.stringify([["wake-prompt-refusal", `prompt-episode:${k}`]]), "done", true],
+  ])("closed-episode lookup: %s -> alerts again: %s", async (_label, tags, rowState, alertsAgain) => {
+    const row = await refusal();
+    const decoy = await disposition(tags(episodeKey(row.qitemId)), rowState);
+    await tick(engine([], false));
+    expect(alerts().filter(a => a.qitemId !== decoy)).toHaveLength(alertsAgain ? 1 : 0);
+  });
+
+  it("one closed-episode read per tick serves every open episode, and only the closed episode stays final", async () => {
+    const keys = [0, 1, 2].map(i => `${seat}|fixture${i}#1`);
+    for (const [i, key] of keys.entries()) {
+      const row = await repo.create({ sourceSession: "sender@fixture", destinationSession: seat, body: `episode work ${i}`, nudge: false });
+      repo.update({ qitemId: row.qitemId, actorSession: "watchdog@system", transitionNote: `${RESERVE_PREFIX} ${key}; obligations ${row.qitemId}` });
+      repo.update({ qitemId: row.qitemId, actorSession: "watchdog@system", transitionNote: `${REFUSED_PREFIX} ${key}; Refused: '${seat}' is at an interactive prompt` });
+    }
+    await disposition(exact(keys[0]!), "done");
+    const prepare = vi.spyOn(db, "prepare");
+    let lookups = -1;
+    try {
+      await tick(engine([], false));
+      lookups = prepare.mock.calls.filter(([sql]) => String(sql).includes("state NOT IN ('pending','in-progress','blocked')")).length;
+    } finally { prepare.mockRestore(); }
+    expect(lookups).toBe(1); // one per tick; the per-episode lookup ran once per open episode (3 here)
+    expect(alerts()).toHaveLength(1);
+    expect(alerts()[0]!.tags).toEqual(expect.arrayContaining([`prompt-episode:${keys[1]}`, `prompt-episode:${keys[2]}`]));
+    expect(alerts()[0]!.tags).not.toContain(`prompt-episode:${keys[0]}`);
+  });
+
   it("an open prompt recovery owns the shared failed-class escalation", async () => {
     const row = await refusal();
     // Exercise the claimed failed-class escalation seam separately from the
@@ -545,6 +605,119 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?").run("[]", badId);
     await tick(port);
     expect(repo.getById(alert.qitemId)?.state).toBe("done");
+  });
+
+  // A two-hour reminder refused at the seat's prompt, recorded the way the watchdog engine records its attempts.
+  function reminder(outcomes: Array<"refused" | "sent">) {
+    const { jobId } = new WatchdogJobsRepository(db).register({ policy: "periodic-reminder", targetSession: seat, intervalSeconds: 7200,
+      specYaml: `policy: periodic-reminder\ntarget:\n  session: ${seat}\ninterval_seconds: 7200\nmessage: sweep\n`, registeredBySession: seat });
+    // Attempts are stamped in real time, in order, so a ladder tick's own records fall between them as they would.
+    const log = new WatchdogHistoryLog(db); let last = 0;
+    const record = (outcome: "refused" | "sent") => log.record({ jobId, evaluatedAt: new Date(last = Math.max(Date.now(), last + 1)).toISOString(), outcome,
+      deliveryTargetSession: seat, deliveryStatus: outcome === "sent" ? "ok" : "failed",
+      evaluationNotes: outcome === "refused" ? { deliveryReason: `Refused: '${seat}' is at an interactive prompt (selection_prompt). No text was sent.` } : null });
+    outcomes.forEach(record);
+    return { jobId, record };
+  }
+
+  it("a reminder refused twice at the prompt reaches the seat's orchestrator, and the alert stands down once one lands", async () => {
+    const posts: unknown[] = []; const port = engine(posts); const wakes: string[] = [];
+    const opts = { resolveOrchestrator: () => "lead@fixture", attemptWake: async (_id: string, target: string) => { wakes.push(target); return "verified"; } };
+    const { jobId, record } = reminder(["refused"]);
+    await tick(port, opts);
+    expect(alerts()).toEqual([]);
+    record("refused");
+    await tick(port, opts);
+    expect(alerts()).toHaveLength(1);
+    expect(alerts()[0]?.destinationSession).toBe("lead@fixture");
+    expect(alerts()[0]?.body).toContain(jobId);
+    record("sent");
+    await tick(port, opts);
+    expect(alerts()).toEqual([]);
+    expect(wakes).toEqual(["lead@fixture"]); expect(posts).toEqual([]);
+  });
+
+  it("a seat with no orchestrator: its twice-refused reminder reaches a person, never the blocked seat", async () => {
+    const posts: unknown[] = []; const port = engine(posts);
+    const { jobId } = reminder(["refused", "refused"]);
+    await tick(port);
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(JSON.stringify(posts)).toContain(jobId);
+  });
+
+
+  const toLead = (wakes: string[]) => ({ resolveOrchestrator: () => "lead@fixture",
+    attemptWake: async (_id: string, target: string) => { wakes.push(target); return "verified"; } });
+
+  it.each([[49, false], [50, false], [51, false], [51, true]] as const)("%i refusals after a delivered reminder stay one episode (first alert closed by hand: %s)", async (count, closed) => {
+    const port = engine([]); const wakes: string[] = [];
+    const { record } = reminder(["sent", "refused", "refused"]);
+    await tick(port, toLead(wakes));
+    const [alert] = alerts();
+    if (closed) repo.update({ qitemId: alert!.qitemId, actorSession: "lead@fixture", state: "done", closureReason: "no-follow-on", transitionNote: "handled by hand" });
+    for (let i = 2; i < count; i++) record("refused");
+    await tick(port, toLead(wakes));
+    expect(alerts().map(a => a.qitemId)).toEqual(closed ? [] : [alert!.qitemId]);
+    expect(wakes).toEqual(["lead@fixture"]);
+  });
+
+  it("a prompt that clears and comes back between reminders raises a new alert after two new refusals", async () => {
+    const port = engine([]); const wakes: string[] = [];
+    const { record } = reminder(["refused", "refused"]);
+    await tick(port, toLead(wakes));
+    const [first] = alerts();
+    state = "clear"; await tick(port, toLead(wakes));
+    expect(alerts()).toEqual([]);
+    state = "blocked"; await tick(port, toLead(wakes));
+    record("refused"); await tick(port, toLead(wakes));
+    expect(alerts()).toEqual([]);
+    record("refused"); await tick(port, toLead(wakes));
+    expect(alerts()).toHaveLength(1);
+    expect(alerts()[0]?.qitemId).not.toBe(first!.qitemId);
+    expect(wakes).toEqual(["lead@fixture", "lead@fixture"]);
+  });
+
+  it("another job's alert retiring while the prompt stays blocked doesn't restart an episode closed by hand", async () => {
+    const port = engine([]); const wakes: string[] = [];
+    const a = reminder(["sent", "refused", "refused"]);
+    await tick(port, toLead(wakes));
+    const [closedByHand] = alerts();
+    repo.update({ qitemId: closedByHand!.qitemId, actorSession: "lead@fixture", state: "done", closureReason: "no-follow-on", transitionNote: "handled by hand" });
+    const b = reminder(["refused", "refused"]);
+    await tick(port, toLead(wakes));
+    expect(alerts()).toHaveLength(1);
+    new WatchdogJobsRepository(db).stop(b.jobId);
+    await tick(port, toLead(wakes));
+    expect(alerts()).toEqual([]);
+    a.record("refused"); a.record("refused");
+    await tick(port, toLead(wakes));
+    expect(alerts()).toEqual([]);
+    expect(wakes).toEqual(["lead@fixture", "lead@fixture"]);
+  });
+
+  it("a prompt alert routed to a fallback still records a cleared prompt, so the next blocked episode alerts", async () => {
+    const port = engine([]); const wakes: string[] = [];
+    const { record } = reminder(["sent", "refused", "refused"]);
+    await tick(port, toLead(wakes));
+    const [first] = alerts();
+    repo.routeToFallback(first!.qitemId, "backup@fixture", "lead removed");
+    state = "clear"; await tick(port, toLead(wakes));
+    expect(alerts()).toEqual([]);
+    state = "blocked"; record("refused"); record("refused");
+    await tick(port, toLead(wakes));
+    expect(alerts()).toHaveLength(1);
+    expect(wakes).toEqual(["lead@fixture", "lead@fixture"]);
+  });
+
+  it("a reminder that joins a seat's existing prompt alert is named on it, and nothing is sent again", async () => {
+    await refusal(); const port = engine([]); const wakes: string[] = [];
+    await tick(port, toLead(wakes));
+    const [alert] = alerts();
+    const { jobId } = reminder(["refused", "refused"]);
+    await tick(port, toLead(wakes));
+    expect(alerts().map(a => a.qitemId)).toEqual([alert!.qitemId]);
+    expect(notes(alert!.qitemId)).toContain(`wake-escalation watchdog reminders added: ${jobId}`);
+    expect(wakes).toEqual(["lead@fixture"]);
   });
 
 });

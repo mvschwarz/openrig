@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openTerminalInWindow, terminalWindowNotice } from "../src/terminals/open-window.js";
+import { openTerminalInWindow, terminalWindowNotice, viewerHerdrEnv } from "../src/terminals/open-window.js";
 import { createViewState } from "../src/state.js";
 import { demoSnapshot } from "../src/demo-data.js";
 import { parseCommand } from "../src/grammar.js";
@@ -15,7 +16,12 @@ import type { DaemonClient } from "../src/daemon-client.js";
 const openWithRecovery: (view: string, endpoint: string, entry?: string, plan?: string, onUnavailable?: () => void) => ReturnType<typeof openTerminalInWindow> = openTerminalInWindow;
 
 const roots: string[] = [];
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+const spawned: ChildProcess[] = [];
+afterEach(() => {
+  vi.unstubAllEnvs();
+  for (const proc of spawned.splice(0)) proc.kill();
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
 function child(result: unknown, exit = 0) {
   const root = mkdtempSync(join(tmpdir(), "tui-window-")); roots.push(root);
   const entry = join(root, "inert cli.mjs"), calls = join(root, "calls.jsonl");
@@ -147,5 +153,105 @@ describe("TUI desktop terminal action", () => {
     expect(notice).toContain("Skipped: remote — connection refused");
     expect(notice).toContain("Page two could not open.");
     expect(notice).toContain("not visual confirmation");
+  });
+});
+
+const viewerMarkers = { TERM_PROGRAM: "herdr", HERDR_ENV: "1", HERDR_PANE_ID: "p-viewer", HERDR_SOCKET_PATH: "/run/viewer/herdr.sock" };
+const herdrKeys = ["TERM_PROGRAM", "HERDR_ENV", "HERDR_PANE_ID", "HERDR_SOCKET_PATH", "HERDR_SESSION"];
+
+describe("TUI terminal action, viewed from a Herdr pane", () => {
+  // The inert CLI reports the Herdr-related environment it was started with.
+  function envChild() {
+    const root = mkdtempSync(join(tmpdir(), "tui-window-env-")); roots.push(root);
+    const entry = join(root, "cli.mjs"), seen = join(root, "env.json");
+    writeFileSync(entry, `import {writeFileSync} from 'node:fs';
+writeFileSync(${JSON.stringify(seen)},JSON.stringify(Object.fromEntries(${JSON.stringify(herdrKeys)}.map(k=>[k,process.env[k]]))));
+console.log(${JSON.stringify(JSON.stringify(opened))});`);
+    return { entry, seen: () => JSON.parse(readFileSync(seen, "utf8")) };
+  }
+  function ownEnv(env: Record<string, string>) {
+    for (const key of herdrKeys) vi.stubEnv(key, "");
+    for (const key of herdrKeys) delete process.env[key];
+    for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
+  }
+
+  it("hands the child the viewer's Herdr markers in place of its own tmux ones", async () => {
+    ownEnv({ TERM_PROGRAM: "tmux", HERDR_SESSION: "stale" });
+    const f = envChild();
+    await openTerminalInWindow("saved:kernel", "http://localhost:7433", f.entry, undefined, undefined, async () => viewerMarkers);
+    expect(f.seen()).toEqual({ ...viewerMarkers });
+  });
+
+  it("keeps the child's own environment when there is no certain viewer", async () => {
+    ownEnv({ TERM_PROGRAM: "tmux" });
+    const f = envChild();
+    await openTerminalInWindow("saved:kernel", "http://localhost:7433", f.entry, undefined, undefined, async () => undefined);
+    expect(f.seen()).toEqual({ TERM_PROGRAM: "tmux" });
+  });
+
+  it("keeps its own Herdr markers and never looks for a viewer", async () => {
+    ownEnv({ TERM_PROGRAM: "herdr", HERDR_ENV: "1", HERDR_PANE_ID: "p-own", HERDR_SOCKET_PATH: "/run/own/herdr.sock" });
+    const f = envChild();
+    const viewer = vi.fn(async () => viewerMarkers);
+    await openTerminalInWindow("saved:kernel", "http://localhost:7433", f.entry, undefined, undefined, viewer);
+    expect(viewer).not.toHaveBeenCalled();
+    expect(f.seen()).toMatchObject({ HERDR_PANE_ID: "p-own", HERDR_SOCKET_PATH: "/run/own/herdr.sock" });
+  });
+});
+
+describe.skipIf(process.platform !== "linux")("the viewer's Herdr markers, read from the attached tmux client", () => {
+  function inHerdrProcess(extra: Record<string, string> = {}) {
+    const proc = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], {
+      env: { ...viewerMarkers, SECRET_TOKEN: "do-not-forward", ...extra }, stdio: "ignore" });
+    spawned.push(proc);
+    return proc.pid!;
+  }
+  // A tmux that lists the given clients: "<activity> <pid> <control mode>".
+  function tmuxListing(...clients: Array<[number, number | undefined, number?]>) {
+    const root = mkdtempSync(join(tmpdir(), "tui-window-tmux-")); roots.push(root);
+    writeFileSync(join(root, "clients"), clients.map(([activity, pid, control]) => `${activity} ${pid} ${control ?? 0}`).join("\n") + "\n");
+    const tmux = join(root, "tmux");
+    writeFileSync(tmux, `#!/bin/sh\ncat ${JSON.stringify(join(root, "clients"))}\n`, { mode: 0o755 });
+    vi.stubEnv("PATH", `${root}:${process.env["PATH"]}`);
+    vi.stubEnv("TMUX", "/tmp/tmux-1000/default,1,0");
+    vi.stubEnv("TMUX_PANE", "%1");
+  }
+  const noSuchProcess = 2 ** 22 + 12345;
+
+  it("returns only the Herdr markers of a single attached client", async () => {
+    tmuxListing([10, inHerdrProcess()]);
+    expect(await viewerHerdrEnv()).toEqual(viewerMarkers);
+  });
+
+  it("uses the client that was active last", async () => {
+    tmuxListing([10, inHerdrProcess({ HERDR_PANE_ID: "p-old" })], [11, inHerdrProcess({ HERDR_PANE_ID: "p-new" })]);
+    expect(await viewerHerdrEnv()).toMatchObject({ HERDR_PANE_ID: "p-new" });
+  });
+
+  it.each([
+    ["clients active in the same second", () => tmuxListing([10, inHerdrProcess()], [10, inHerdrProcess({ HERDR_PANE_ID: "p-other" })])],
+    ["a newest client that can't be read, over an older Herdr client", () => tmuxListing([10, noSuchProcess], [9, inHerdrProcess()])],
+    ["a newest client that isn't in Herdr, over an older Herdr client", () => tmuxListing([10, process.pid], [9, inHerdrProcess()])],
+    ["no client", () => tmuxListing()],
+  ])("gives no answer for %s", async (_name, arrange) => {
+    arrange();
+    expect(await viewerHerdrEnv()).toBeUndefined();
+  });
+
+  it("ignores a control-mode client when choosing the viewer", async () => {
+    tmuxListing([10, inHerdrProcess()], [11, process.pid, 1]);
+    expect(await viewerHerdrEnv()).toMatchObject({ HERDR_PANE_ID: "p-viewer" });
+  });
+
+  it("gives no answer when tmux fails", async () => {
+    tmuxListing([10, inHerdrProcess()]);
+    writeFileSync(join(roots[roots.length - 1]!, "tmux"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    expect(await viewerHerdrEnv()).toBeUndefined();
+  });
+
+  it("gives no answer outside tmux", async () => {
+    tmuxListing([10, inHerdrProcess()]);
+    vi.stubEnv("TMUX", "");
+    expect(await viewerHerdrEnv()).toBeUndefined();
   });
 });

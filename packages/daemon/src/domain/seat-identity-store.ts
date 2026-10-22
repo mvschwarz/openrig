@@ -8,6 +8,7 @@ interface VerdictRow {
   reason: string | null;
   registered_pane: string | null;
   observed_pid: number | null;
+  observed_pane_pid: number | null;
   observed_command: string | null;
   matched_layer: number | null;
   session_name: string | null;
@@ -23,6 +24,7 @@ function rowToVerdict(row: VerdictRow): SeatIdentityVerdict {
     evidence: {
       registeredPane: row.registered_pane,
       observedPid: row.observed_pid,
+      ...(row.observed_pane_pid != null ? { observedPanePid: row.observed_pane_pid } : {}),
       observedCommand: row.observed_command,
       matchedLayer: row.matched_layer,
     },
@@ -50,14 +52,15 @@ export class SeatIdentityStore {
   upsert(v: SeatIdentityVerdict): void {
     this.db.prepare(`
       INSERT INTO seat_identity_verdicts
-        (node_id, verdict, evidence_source, reason, registered_pane, observed_pid, observed_command, matched_layer, session_name, observed_at)
-      VALUES (@node_id, @verdict, @evidence_source, @reason, @registered_pane, @observed_pid, @observed_command, @matched_layer, @session_name, @observed_at)
+        (node_id, verdict, evidence_source, reason, registered_pane, observed_pid, observed_pane_pid, observed_command, matched_layer, session_name, observed_at)
+      VALUES (@node_id, @verdict, @evidence_source, @reason, @registered_pane, @observed_pid, @observed_pane_pid, @observed_command, @matched_layer, @session_name, @observed_at)
       ON CONFLICT(node_id) DO UPDATE SET
         verdict = excluded.verdict,
         evidence_source = excluded.evidence_source,
         reason = excluded.reason,
         registered_pane = excluded.registered_pane,
         observed_pid = excluded.observed_pid,
+        observed_pane_pid = excluded.observed_pane_pid,
         observed_command = excluded.observed_command,
         matched_layer = excluded.matched_layer,
         session_name = excluded.session_name,
@@ -69,6 +72,7 @@ export class SeatIdentityStore {
       reason: v.reason,
       registered_pane: v.evidence.registeredPane,
       observed_pid: v.evidence.observedPid,
+      observed_pane_pid: v.evidence.observedPanePid ?? null,
       observed_command: v.evidence.observedCommand,
       matched_layer: v.evidence.matchedLayer,
       session_name: v.sessionName,

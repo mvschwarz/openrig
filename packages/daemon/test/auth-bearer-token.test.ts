@@ -11,6 +11,7 @@ import {
   findTailscaleIpInInterfaces,
 } from "../src/middleware/auth-bearer-token.js";
 import type { NetworkInterfaceInfo } from "node:os";
+import dns from "node:dns";
 
 describe("auth-bearer-token middleware (PL-005 Phase B)", () => {
   it("constantTimeEqual returns true for equal strings", () => {
@@ -140,8 +141,32 @@ describe("auth-bearer-token middleware (PL-005 Phase B)", () => {
     });
 
     it("returns null for an intentionally-unresolvable hostname (HG-4)", async () => {
-      const ip = await resolveToIpOrNull("this-host-does-not-exist.invalid");
-      expect(ip).toBeNull();
+      // Answer from a stub resolver: some machines' DNS (fake-IP proxies, captive or sandboxed
+      // networks) returns an address even for a reserved `.invalid` name, which tests the host's
+      // resolver rather than this function.
+      const lookup = vi.spyOn(dns.promises, "lookup").mockRejectedValue(
+        Object.assign(new Error("getaddrinfo ENOTFOUND this-host-does-not-exist.invalid"), { code: "ENOTFOUND" }),
+      );
+      try {
+        const ip = await resolveToIpOrNull("this-host-does-not-exist.invalid");
+        expect(ip).toBeNull();
+        expect(lookup).toHaveBeenCalledWith("this-host-does-not-exist.invalid", { all: false });
+      } finally {
+        lookup.mockRestore();
+      }
+    });
+
+    it("returns null when the resolver does not answer within 5 seconds", async () => {
+      vi.useFakeTimers();
+      const lookup = vi.spyOn(dns.promises, "lookup").mockReturnValue(new Promise(() => {}) as never);
+      try {
+        const pending = resolveToIpOrNull("slow.example");
+        await vi.advanceTimersByTimeAsync(5000);
+        await expect(pending).resolves.toBeNull();
+      } finally {
+        lookup.mockRestore();
+        vi.useRealTimers();
+      }
     });
   });
 

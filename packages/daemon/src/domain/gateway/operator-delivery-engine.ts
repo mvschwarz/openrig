@@ -11,6 +11,7 @@ import type { DispatchResult } from "./dispatcher.js";
 import type { LoadResult } from "./human-registry.js";
 import { loadHumanRegistry } from "./human-registry.js";
 import { loadConfig } from "./slack/config.js";
+import { quietHoldFor } from "./human-quiet-windows.js";
 import { OUTBOUND_OP } from "./slack/outbound-driver.js";
 import {
   decideDelivery,
@@ -97,6 +98,9 @@ export function makeOperatorDeliveryEngine(deps: {
           minimumLevelThatPosts: cfg.minimumLevelThatPosts,
           minimumLevelThatInterrupts: cfg.minimumLevelThatInterrupts,
         },
+        // An escalation is never held, so quiet can't change this rung's decision: a failed quiet read is ignored here
+        // rather than blocking the escalation.
+        quiet: (() => { try { return quietHoldFor(deps.queueRepo.db, human.entityId, new Date()); } catch { return null; } })(),
       });
 
       const payload = {

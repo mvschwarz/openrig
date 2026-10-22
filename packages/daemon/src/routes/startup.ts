@@ -22,6 +22,7 @@ import { assessCurrentStateRehydrateEligibility, snapshotMatchesCurrentOccupants
 import { deriveCanonicalSessionName, deriveSessionName } from "../domain/session-name.js";
 import { observeSolePane } from "../domain/pane-binding-observation.js";
 import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
+import { verifyPaneIdleShell, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { RigSpecCodec } from "../domain/rigspec-codec.js";
 import { RigSpecSchema } from "../domain/rigspec-schema.js";
 import { seatLifecycleService } from "./seat.js";
@@ -81,6 +82,12 @@ async function observeSeat(c: Context, rig: RigWithRelations, node: Node) {
     const probe = assessNativeResumeProbe({ runtime: node.runtime,
       paneCommand: await tmux(c).getPaneCommand(pane.pane),
       paneContent: (tmux(c).capturePaneScreen ? await tmux(c).capturePaneScreen(pane.pane) : await tmux(c).capturePaneContent(pane.pane, 40)) ?? "" });
+    // A script-launched runtime reads as `sh` until the script hands over the foreground: name a shell only when proven idle.
+    if (probe.code === "returned_to_shell" && !await verifyPaneIdleShell({ target: pane.pane, tmux: tmux(c),
+      listProcesses: c.get("listProcesses" as never) as NativeProcessLister | undefined })) {
+      return { state: "attention_required", sessionName: name,
+        detail: `The pane shows a shell that is not a proven idle shell; a launch script may still be starting ${node.runtime === "claude-code" ? "Claude" : "Codex"}.` };
+    }
     return { state: probe.status === "resumed" ? "running" : "attention_required", detail: probe.detail, sessionName: name };
   } catch (error) {
     return { state: "unverified", detail: error instanceof Error ? error.message : String(error), sessionName: name };
@@ -132,7 +139,7 @@ startupRoutes.get("/:rigId", async (c) => {
     const observed = await observeSeat(c, rig, node);
     seats.push({ ...forecast, hasHistory, nodeId: node.id, runtime: node.runtime, model: node.model,
       revision: startupRevision(repo(c).db, node), observed,
-      contextPending: history.some((session) => session.nodeId === node.id && dep<import("../domain/startup-orchestrator.js").StartupOrchestrator>(c, "startupOrchestrator")?.canContinueFresh(node.id, session.id)),
+      contextPending: history.some((session) => session.nodeId === node.id && dep<import("../domain/startup-orchestrator.js").StartupOrchestrator>(c, "startupOrchestrator")?.canContinueStartup(node.id, session.id)),
       freshAllowed: available && observed.state === "stopped",
       ...(!available ? { prerequisite: `${node.runtime} is unavailable or unauthenticated. Repair it and retry; fresh history cannot repair this prerequisite.` } : {}) });
   }
@@ -149,7 +156,7 @@ startupRoutes.post("/:rigId/:logicalId", async (c) => {
     if (body.revision !== startupRevision(repo(c).db, node)) return c.json({ ok: false, code: "selection_changed", message: "The seat changed since this choice was displayed. Refresh and make a new decision." }, 409);
     const observed = await observeSeat(c, rig, node);
     if (body.action === "continue") {
-      const result = await seatLifecycleService(c).continueFreshStartup(observed.sessionName);
+      const result = await seatLifecycleService(c).continueStartup(observed.sessionName);
       await refreshNativeMetadata(c, rig.rig.id);
       return c.json(result, result.ok ? 200 : 409);
     }

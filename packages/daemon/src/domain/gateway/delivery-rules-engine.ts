@@ -1,7 +1,7 @@
 // OPR.0.5.6.1 — the §5 delivery rules engine.
 //
 // The stored per-human A–D register plus availability decide exactly ONE
-// connector-agnostic outcome per message: interrupt · notify · digest · log.
+// connector-agnostic outcome per message: interrupt · notify · digest · log · hold.
 // The engine CONSUMES the F-8 owner-notification level enum and the two config
 // dials (one vocabulary, one classifier — S14's); it mints no transport
 // literals and no parallel classification. Dispatch stays in the gateway;
@@ -27,9 +27,14 @@
 //               Delivery is never suppressed (F-8): the post lands unmentioned,
 //               and the single-human termination is recorded loud.
 //
+// QUIET HOURS (a timed overlay beside availability; it doesn't rewrite away or off): while the person's quiet window is
+// on, a routine ask that would post decides `hold` (no post, no mention), class A included. An escalation decides
+// exactly as outside quiet, and the posting dial still logs only. The quiet-release job posts held asks when it ends.
+//
 // The delivery-state table (AM-F4 — one definition site, defined AGAINST the
 // S14 receipt stamps; the engine never re-spells a transport verdict):
 //   queued    = the row exists, no delivery transition yet
+//   held      = a quiet-hold decision is on the row, and no posted receipt yet
 //   posted    = the S14 posted receipt transition is on the row
 //   notified  = posted AND the decision was interrupt (mention delivered)
 //   replied   = an inbound reply row references the conversation
@@ -41,7 +46,8 @@ import type { OwnerNotificationLevel } from "../queue-transition-log.js";
 import { ownerNotificationLevelAtLeast } from "../queue-transition-log.js";
 import { WAKE_ESCALATION_TAG } from "../queue-wake-ladder.js";
 
-export const DELIVERY_OUTCOMES = ["interrupt", "notify", "digest", "log"] as const;
+// `hold`: the person's quiet hours are on and the ask isn't urgent; it waits for the quiet-release job.
+export const DELIVERY_OUTCOMES = ["interrupt", "notify", "digest", "log", "hold"] as const;
 export type DeliveryOutcome = (typeof DELIVERY_OUTCOMES)[number];
 
 export const AVAILABILITY_MODES = ["available", "focus", "away", "off"] as const;
@@ -70,6 +76,15 @@ export interface DeliveryDecision {
   /** Present only for the deferred away-escalation interrupt (fires once at T+N). */
   deferMinutes?: number;
   termination?: DeliveryTermination;
+  /** Present only for `hold`: the quiet window, occurrence and revision the ask is held under. */
+  quietHold?: QuietHoldRef;
+}
+
+/** A person's quiet window as it is now, when it's on. */
+export interface QuietHoldRef {
+  windowId: string;
+  occurrence: string;
+  revision: number;
 }
 
 export interface DeliveryDecisionInput {
@@ -84,6 +99,8 @@ export interface DeliveryDecisionInput {
     minimumLevelThatPosts: OwnerNotificationLevel;
     minimumLevelThatInterrupts: OwnerNotificationLevel;
   };
+  /** The person's quiet window when it's on now; null or absent outside quiet. */
+  quiet?: QuietHoldRef | null;
 }
 
 /** Whole-field-absent legacy inference (the D1 convention): `away: true` reads
@@ -162,6 +179,10 @@ export function decideDelivery(input: DeliveryDecisionInput): DeliveryDecision {
       }
       break;
   }
+
+  // Quiet hours: a routine ask that would post waits, whatever its class (class A included: the window the person chose
+  // wins). An urgent one (escalation) is decided above exactly as outside quiet, and the posting dial still logs only.
+  if (input.quiet && !input.escalation) return { outcome: "hold", mention: false, quietHold: input.quiet };
 
   // mention iff interrupt — for a DEFERRED interrupt the mention rides the
   // T+30 fire, not the sweep (the delivery layer holds the post; the flag

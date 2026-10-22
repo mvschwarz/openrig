@@ -48,13 +48,13 @@ test("legacy YAML inputs refuse with product pointers before changing policy fil
   });
 });
 
-test("authoring apply uses product policy despite conflicting legacy YAML environment", () => {
+test("authoring apply uses product policy and in-repo sources despite legacy YAML and external canon environment", () => {
   withFixture(({ root, legacy, policyBytes }) => {
     const script = join(root, "packages/daemon/scripts/gen-control-plane-json.mjs");
     mkdirSync(dirname(script), { recursive: true });
     // Forward the real invocation: a symlink would defeat the generator's main-module check.
     write(script, `import { spawnSync } from "node:child_process";\nconst r = spawnSync(process.execPath, [${JSON.stringify(GENERATOR)}, ...process.argv.slice(2)], { stdio: "inherit" });\nprocess.exitCode = r.status ?? 1;\n`);
-    write(join(root, "canon/alpha/SKILL.md"), "# Alpha from authoring source\n");
+    write(join(root, "canon/alpha/SKILL.md"), "# Alpha from an outside canon\n");
     const result = run(MIRROR, root, [], {
       OPENRIG_SKILL_CANON_ROOT: join(root, "canon"),
       OPENRIG_PRODUCT_PUBLIC_SKILLS_YAML: legacy.membership,
@@ -62,10 +62,27 @@ test("authoring apply uses product policy despite conflicting legacy YAML enviro
       OPENRIG_SKILL_EDGE_LAYOUT_YAML: legacy.layout,
     });
     assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stderr, /OPENRIG_SKILL_CANON_ROOT is ignored/);
     for (const name of NAMES) {
       assert.deepEqual(readFileSync(join(root, "scripts", `${name}.generated.json`)), policyBytes[name]);
     }
-    assert.equal(readFileSync(join(root, "plugin/alpha/SKILL.md"), "utf8"), "# Alpha from authoring source\n");
+    assert.equal(readFileSync(join(root, "plugin/alpha/SKILL.md"), "utf8"), "# Original alpha\n");
+  });
+});
+
+test("authoring apply regenerates from in-repo sources with no external authoring variables", () => {
+  withFixture(({ root }) => {
+    const script = join(root, "packages/daemon/scripts/gen-control-plane-json.mjs");
+    mkdirSync(dirname(script), { recursive: true });
+    write(script, `import { spawnSync } from "node:child_process";\nconst r = spawnSync(process.execPath, [${JSON.stringify(GENERATOR)}, ...process.argv.slice(2)], { stdio: "inherit" });\nprocess.exitCode = r.status ?? 1;\n`);
+    const env = { ...process.env };
+    delete env.OPENRIG_SKILL_CANON_ROOT;
+    const result = spawnSync(process.execPath, [MIRROR], { cwd: root, encoding: "utf8", env });
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stderr, /OPENRIG_SKILL_CANON_ROOT/);
+    assert.equal(readFileSync(join(root, "plugin/alpha/SKILL.md"), "utf8"), "# Original alpha\n");
+    const check = spawnSync(process.execPath, [MIRROR, "--check"], { cwd: root, encoding: "utf8", env });
+    assert.equal(check.status, 0, check.stderr);
   });
 });
 

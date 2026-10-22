@@ -18,8 +18,8 @@ const AUTHORED_WAIT_SPEC = readFileSync(
   "utf8",
 );
 
-const commandFor = (instanceId: string, packetId: string, owner: string) =>
-  `rig workflow project --instance ${instanceId} --current-packet ${packetId} --exit <handoff|waiting|done|failed> --actor-session ${owner}`;
+const commandFor = (instanceId: string, packetId: string) =>
+  `rig workflow project --instance ${instanceId} --current-packet ${packetId} --exit <handoff|waiting|done|failed>`;
 
 describe("workflow authored waiting re-presentation", () => {
   let db: Database.Database;
@@ -54,7 +54,7 @@ describe("workflow authored waiting re-presentation", () => {
       rootObjective: "prove the authored context rail",
       createdBySession: "ops@rig",
     });
-    const entryCommand = commandFor(created.instance.instanceId, created.entryQitemId, "worker@rig");
+    const entryCommand = commandFor(created.instance.instanceId, created.entryQitemId);
     const entryBody = queueRepo.getByIdOrThrow(created.entryQitemId).body;
     expect(entryBody).toContain(`Continuation: ${entryCommand}`);
     expect(entryBody).toContain("shortcut, not the whole story");
@@ -114,7 +114,7 @@ describe("workflow authored waiting re-presentation", () => {
       exit: "handoff",
       actorSession: "worker@rig",
     });
-    const nextCommand = commandFor(created.instance.instanceId, handoff.nextQitemId!, "next@rig");
+    const nextCommand = commandFor(created.instance.instanceId, handoff.nextQitemId!);
     const nextBody = queueRepo.getByIdOrThrow(handoff.nextQitemId!).body;
     expect(nextBody).toContain(`Continuation: ${nextCommand}`);
     expect(nextBody).toContain("shortcut, not the whole story");
@@ -144,7 +144,7 @@ describe("workflow authored waiting re-presentation", () => {
     });
     const routedBody = queueRepo.getByIdOrThrow(routed.newPacketId).body;
     expect(routedBody).toContain(
-      `Continuation: ${commandFor(created.instance.instanceId, routed.newPacketId, "worker-2@rig")}`,
+      `Continuation: ${commandFor(created.instance.instanceId, routed.newPacketId)}`,
     );
     expect(routedBody).not.toContain(`--current-packet ${created.entryQitemId} `);
 
@@ -162,7 +162,7 @@ describe("workflow authored waiting re-presentation", () => {
     });
     const resumedBody = queueRepo.getByIdOrThrow(resumed.newPacketId).body;
     expect(resumedBody).toContain(
-      `Continuation: ${commandFor(created.instance.instanceId, resumed.newPacketId, resumed.ownerSession)}`,
+      `Continuation: ${commandFor(created.instance.instanceId, resumed.newPacketId)}`,
     );
     expect(resumedBody).toContain("shortcut, not the whole story");
   });

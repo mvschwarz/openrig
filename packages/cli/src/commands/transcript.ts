@@ -72,6 +72,8 @@ OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN=0 — relaunch it to restore scrollback.
       // --grep takes precedence over --tail when both given
       const useGrep = !!opts.grep;
       const tailLines = parseInt(opts.tail ?? "50", 10);
+      // The tail route reads a missing or non-positive count as 50.
+      const requestedLines = Number.isNaN(tailLines) || tailLines < 1 ? 50 : tailLines;
       const apiPath = useGrep
         ? `/api/transcripts/${encodeURIComponent(session)}/grep?pattern=${encodeURIComponent(opts.grep!)}`
         : `/api/transcripts/${encodeURIComponent(session)}/tail?lines=${isNaN(tailLines) ? 50 : tailLines}`;
@@ -80,7 +82,7 @@ OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN=0 — relaunch it to restore scrollback.
       // transcript routes — the SAME paths the local path builds, origin
       // shape verbatim; read-class deadline; daemon untouched). ---
       if (opts.host) {
-        await runCrossHostTranscript(opts.host, apiPath, useGrep, opts, deps, crossHostHint);
+        await runCrossHostTranscript(opts.host, apiPath, useGrep, requestedLines, opts, deps, crossHostHint);
         return;
       }
 
@@ -107,7 +109,7 @@ OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN=0 — relaunch it to restore scrollback.
         return;
       }
 
-      renderTranscript(res.data, useGrep);
+      renderTranscript(res.data, useGrep, requestedLines);
     });
 
   return cmd;
@@ -124,6 +126,7 @@ async function runCrossHostTranscript(
   hostId: string,
   apiPath: string,
   useGrep: boolean,
+  requestedLines: number,
   opts: { json?: boolean },
   deps: TranscriptDeps,
   hint?: string,
@@ -162,12 +165,12 @@ async function runCrossHostTranscript(
   }
 
   console.log(`[via host=${host.id} (${hostDisplayTarget(host)})]`);
-  renderTranscript((result.data ?? {}) as Record<string, unknown>, useGrep);
+  renderTranscript((result.data ?? {}) as Record<string, unknown>, useGrep, requestedLines);
 }
 
 /** One renderer, two callers — the remote output shape is the origin's,
  *  so local and cross-host reads render identically. */
-function renderTranscript(data: Record<string, unknown>, useGrep: boolean): void {
+function renderTranscript(data: Record<string, unknown>, useGrep: boolean, requestedLines: number): void {
   if (useGrep) {
     const matches = data["matches"] as string[] | undefined;
     if (matches && matches.length > 0) {
@@ -180,11 +183,13 @@ function renderTranscript(data: Record<string, unknown>, useGrep: boolean): void
   } else {
     const content = data["content"] as string | undefined;
     let printed = 0;
+    let returned = 0;
     if (content) {
       // Print each line via console.log for consistent capture in tests and terminal
       const lines = content.split("\n");
       // console.log supplies the final newline; keep every other empty line.
       if (lines.at(-1) === "") lines.pop();
+      returned = lines.length;
       for (const line of lines) {
         console.log(line);
         if (line) printed++;
@@ -192,8 +197,9 @@ function renderTranscript(data: Record<string, unknown>, useGrep: boolean): void
     }
     // OPR.0.5.3.1 item 4 — point-of-use hint: a near-empty transcript for a Claude
     // seat almost always means the fullscreen renderer (alternate screen → no
-    // scrollback). Emit to stderr so it never pollutes the content on stdout.
-    if (printed <= THIN_TRANSCRIPT_LINES) emitThinTranscriptHint(printed);
+    // scrollback). Emit to stderr so it never pollutes the content on stdout. A transcript that returned
+    // every line asked for isn't thin, however small the --tail.
+    if (printed <= THIN_TRANSCRIPT_LINES && returned < requestedLines) emitThinTranscriptHint(printed);
   }
 }
 

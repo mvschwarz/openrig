@@ -1,3 +1,4 @@
+import { DaemonClient, ForeignLocalDaemonError } from "../client.js";
 import { Command } from "commander";
 import { getDaemonStatus, getDaemonUrl, type LifecycleDeps , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
@@ -55,13 +56,19 @@ export function uiCommand(depsOverride?: UiDeps): Command {
       // Ask the running daemon, not local config: the setting takes effect when the daemon starts.
       const probeUi = deps.probeUi ?? ((target: string) => fetch(target, { signal: AbortSignal.timeout(3000) }));
       try {
+        await new DaemonClient(url).assertLocalOwner();
         const res = await probeUi(url);
         if (res.status === 404 && res.headers.get("x-openrig-web-ui") === "off") {
           console.error(UI_DISABLED_GUIDANCE);
           process.exitCode = 1;
           return;
         }
-      } catch {
+      } catch (error) {
+        if (error instanceof ForeignLocalDaemonError) {
+          console.error(error.message);
+          process.exitCode = 1;
+          return;
+        }
         // No answer: open the URL as before; the browser shows whatever the daemon serves.
       }
       console.log(url);

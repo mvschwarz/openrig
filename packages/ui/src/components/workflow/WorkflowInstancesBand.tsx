@@ -21,7 +21,7 @@ export function instanceAttentionRank(i: WorkflowInstanceWithDeadline): number {
   if (i.deadline.state !== "healthy") return 1;
   if (i.status === "waiting") return 2;
   if (i.status === "active") return 3;
-  return 4; // completed
+  return 4; // completed or aborted
 }
 
 function statusChip(i: WorkflowInstanceWithDeadline): { glyph: string; label: string; cls: string } {
@@ -29,6 +29,7 @@ function statusChip(i: WorkflowInstanceWithDeadline): { glyph: string; label: st
   if (i.deadline.state !== "healthy") return { glyph: "▲", label: i.deadline.state.toUpperCase(), cls: "text-amber-700" };
   if (i.status === "waiting") return { glyph: "◐", label: "WAITING", cls: "text-on-surface-variant" };
   if (i.status === "active") return { glyph: "●", label: "ACTIVE", cls: "text-emerald-800" };
+  if (i.status === "aborted") return { glyph: "⊘", label: "ABORTED", cls: "text-on-surface-variant" };
   return { glyph: "○", label: "COMPLETED", cls: "text-on-surface-variant" };
 }
 

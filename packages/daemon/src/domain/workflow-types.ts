@@ -8,6 +8,8 @@
 // gate-return-sweep + complex routing tables are graduations
 // (per PRD § Risks "Workflow runtime over-engineered").
 
+import type { WorkflowScope } from "./workflow-scope.js";
+
 export type WorkflowExitKind = "handoff" | "waiting" | "done" | "failed";
 
 /** OPR.0.4.6.WF2 FR-1: the closed v1 branch-key set — exactly the recorded
@@ -201,6 +203,9 @@ export interface WorkflowSpec {
 export type WorkflowInstanceStatus = "active" | "waiting" | "completed" | "failed" | "aborted";
 
 export interface WorkflowInstance {
+  /** The project / mission / slice and free-form tags this instance works for
+   *  (migration 110); stamped on every packet it creates. null = unscoped. */
+  scope?: WorkflowScope | null;
   instanceId: string;
   workflowName: string;
   workflowVersion: string;

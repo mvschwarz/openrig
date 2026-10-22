@@ -761,6 +761,38 @@ describe("TmuxAdapter", () => {
     });
   });
 
+  describe("isPaneInMode", () => {
+    it("reads #{pane_in_mode} from the exact pane target", async () => {
+      const exec: ExecFn = vi.fn(async () => "1\n") as unknown as ExecFn;
+      const adapter = new TmuxAdapter(exec);
+      expect(await adapter.isPaneInMode("dev-impl@my-rig")).toBe(true);
+      expect(exec).toHaveBeenCalledWith(`tmux display-message -p -t '=dev-impl@my-rig:' "#{pane_in_mode}"`);
+    });
+
+    it("returns false outside copy mode", async () => {
+      const adapter = new TmuxAdapter(async () => "0\n");
+      expect(await adapter.isPaneInMode("%0")).toBe(false);
+    });
+
+    it("treats any mode count above 0 as in a mode", async () => {
+      expect(await new TmuxAdapter(async () => "2\n").isPaneInMode("%0")).toBe(true);
+    });
+
+    it("returns null on error or unexpected output", async () => {
+      expect(await new TmuxAdapter(async () => { throw new Error("no server"); }).isPaneInMode("%0")).toBeNull();
+      expect(await new TmuxAdapter(async () => "\n").isPaneInMode("%0")).toBeNull();
+    });
+  });
+
+  describe("cancelPaneMode", () => {
+    it("sends -X cancel to the pane", async () => {
+      const exec: ExecFn = vi.fn(async () => "") as unknown as ExecFn;
+      const adapter = new TmuxAdapter(exec);
+      expect(await adapter.cancelPaneMode("%0")).toEqual({ ok: true });
+      expect(exec).toHaveBeenCalledWith("tmux send-keys -t '%0' '-X' 'cancel'");
+    });
+  });
+
   describe("capturePaneContent", () => {
     it("calls exact tmux capture-pane command with shell quoting", async () => {
       const exec: ExecFn = vi.fn(async () => "line 1\nline 2\n") as unknown as ExecFn;
@@ -1017,6 +1049,12 @@ describe("TmuxAdapter", () => {
   // seeds a new subscriber with the CURRENT VISIBLE SCREEN + cursor so a live
   // terminal paints immediately instead of staying blank until next output.
   describe("capturePaneScreen (visible screen, NOT scrollback)", () => {
+    it("can retain styling without adding scrollback", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("styled frame");
+      await new TmuxAdapter(exec).capturePaneScreen("worker@rig", { escapeSequences: true });
+      expect(exec.mock.calls[0]![0]).toBe("tmux capture-pane -p -e -t '=worker@rig:'");
+    });
+
     it("calls `tmux capture-pane -p -t <pane>` with NO -S flag (scrollback would reintroduce row drift)", async () => {
       const exec = vi.fn<ExecFn>().mockResolvedValue("row a\nrow b\n");
       const adapter = new TmuxAdapter(exec);

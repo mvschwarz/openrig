@@ -142,3 +142,33 @@ test("keeps added header-shaped text as source content inside a hunk", () => {
     { file: "file.md", line: 2, text: "see /Users/alice/work" },
   ]);
 });
+
+
+test("native Git reports UTF-8 and spaced names independently of quotePath configuration", async () => {
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const { execFileSync } = await import("node:child_process");
+  const repo = mkdtempSync(join(tmpdir(), "openrig-portability-paths-"));
+  const names = ["café.md", "ordinary name.md"];
+  try {
+    execFileSync("git", ["init", "--quiet", repo]);
+    for (const name of names) writeFileSync(join(repo, name), "see /Users/alice/project\n");
+    execFileSync("git", ["-C", repo, "add", "--", ...names]);
+    for (const quotePath of ["true", "false"]) {
+      execFileSync("git", ["-C", repo, "config", "core.quotePath", quotePath]);
+      const report = execFileSync(process.execPath, [fileURLToPath(new URL("./portability-report.mjs", import.meta.url)), "--repo", repo, "--staged", "--locations-only"], { encoding: "utf8" });
+      for (const name of names) assert.ok(report.includes(`\`${name}:1\``), report);
+      assert.ok(!report.includes("\t"), report);
+    }
+  } finally { rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("strips Git's separator tab and leaves C-quoted filenames quoted", () => {
+  for (const header of ['"b/quote\\\"name.md"', '"b/back\\\\slash.md"', '"b/tab\\tname.md"']) {
+    const diff = `+++ ${header}\n@@ -0,0 +1 @@\n+see /Users/alice/project\n`;
+    assert.deepEqual(addedLines(diff), [{ file: header, line: 1, text: "see /Users/alice/project" }]);
+  }
+  assert.deepEqual(addedLines("+++ b/ordinary name.md\t\n@@ -0,0 +1 @@\n+see /Users/alice/project\n"), [{ file: "ordinary name.md", line: 1, text: "see /Users/alice/project" }]);
+});

@@ -1413,6 +1413,32 @@ describe("Bundle API routes", () => {
       const comboBody = await combo.json();
       expect(comboBody.total).toBe(1);
       expect(comboBody.records[0].installedAt).toBe("2026-05-18T12:00:00Z");
+
+      // since keeps main's text comparison against installedAt. A since that isn't a date or time
+      // gets an advisory naming it; every other since gets no advisories field at all.
+      const cases: Array<[string, string[], boolean]> = [
+        ["garbage", [], true],
+        ["2026-13-45", [], true],
+        ["2026-05-18T11", ["2026-05-18T11:00:00Z", "2026-05-18T12:00:00Z"], false],
+        ["2026-05-18", ["2026-05-18T10:00:00Z", "2026-05-18T11:00:00Z", "2026-05-18T12:00:00Z"], false],
+        ["", ["2026-05-18T10:00:00Z", "2026-05-18T11:00:00Z", "2026-05-18T12:00:00Z"], false],
+        ["2026-05-18T11:00:00Z", ["2026-05-18T11:00:00Z", "2026-05-18T12:00:00Z"], false],
+      ];
+      for (const [value, installedAts, advised] of cases) {
+        const res = await app.request(`/api/bundles/history?since=${encodeURIComponent(value)}`);
+        expect(res.status, value).toBe(200);
+        const body = await res.json();
+        expect(body.records.map((r: { installedAt: string }) => r.installedAt), value).toEqual(installedAts);
+        expect(body.total, value).toBe(installedAts.length);
+        if (advised) {
+          expect(body.advisories, value).toEqual([
+            `since "${value}" was not recognised as a date or time; the existing text comparison against installedAt was used`,
+          ]);
+        } else {
+          expect("advisories" in body, value).toBe(false);
+        }
+      }
+      expect("advisories" in allBody).toBe(false);
     } finally {
       if (origHome === undefined) delete process.env.OPENRIG_HOME;
       else process.env.OPENRIG_HOME = origHome;

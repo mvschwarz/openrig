@@ -18,9 +18,16 @@ function run(argv) {
   }));
 }`;
 
+/** execFile's own timeout kill (Node sets killed with the kill signal); a maxBuffer overflow or a failed run isn't one. */
+function isTimeoutKill(error: unknown): boolean {
+  const e = error as { killed?: unknown; signal?: unknown } | null;
+  return e?.killed === true && e.signal === "SIGTERM";
+}
+
 /** Optional OS executable witnesses. Unavailable, exited and over-budget PIDs
- * have no witness; this never substitutes argv or a version string for a path. */
-export async function readNativeExecutablePaths(requested: number[]): Promise<Map<number, string>> {
+ * have no witness; this never substitutes argv or a version string for a path.
+ * `onTimeout` hears only an actual read timeout, never any other missing path. */
+export async function readNativeExecutablePaths(requested: number[], opts: { onTimeout?: () => void } = {}): Promise<Map<number, string>> {
   const pids = [...new Set(requested.filter(pid => Number.isInteger(pid) && pid > 0 && pid <= 2147483647))].slice(0, 1024);
   const result = new Map<number, string>();
   if (pids.length === 0) return result;
@@ -42,6 +49,9 @@ export async function readNativeExecutablePaths(requested: number[]): Promise<Ma
       if (typeof path === "string" && path.startsWith("/") && !path.includes("\0")
         && !path.split("/").some(part => part === "." || part === "..")) result.set(entry[0], path);
     }
-  } catch { /* A missing OS witness is unknown, not positive identity. */ }
+  } catch (error) {
+    // A missing OS witness is unknown, not positive identity.
+    if (isTimeoutKill(error)) opts.onTimeout?.();
+  }
   return result;
 }

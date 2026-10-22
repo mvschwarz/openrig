@@ -44,7 +44,7 @@ const BRIDGE_SCRIPT = resolve(
 );
 const APPEND_MARKER = "Operator-configured post-compaction restore instruction";
 
-function runHook(openrigHome: string, withTranscript = true): { stdout: string; stderr: string; status: number | null } {
+function runHook(openrigHome: string, withTranscript = true, extraEnv: NodeJS.ProcessEnv = {}): { stdout: string; stderr: string; status: number | null } {
   const fixtureRoot = dirname(openrigHome);
   const transcript = join(fixtureRoot, "transcript.jsonl");
   if (withTranscript) writeFileSync(transcript, `${JSON.stringify({
@@ -64,6 +64,7 @@ function runHook(openrigHome: string, withTranscript = true): { stdout: string; 
       OPENRIG_COMPACTION_OUT_ROOT: join(fixtureRoot, "packets"),
       // Ensure RIGGED_HOME doesn't pre-empt OPENRIG_HOME selection.
       RIGGED_HOME: undefined,
+      ...extraEnv,
     } as NodeJS.ProcessEnv,
   });
   return {
@@ -143,6 +144,14 @@ describe("precompact-hook.mjs (slice 27 custom message append)", () => {
   });
   afterEach(() => {
     rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("prepares the restore packet and pending marker with no Node on PATH", () => {
+    const { stdout, status } = runHook(openrigHome, true, { PATH: "" });
+    expect(status).toBe(0);
+    expect(JSON.parse(stdout).systemMessage).toContain("Pre-compaction restore seed packet prepared");
+    const marker = JSON.parse(readFileSync(join(openrigHome, "compaction/restore-pending/test-seat@kernel.json"), "utf8"));
+    expect(existsSync(join(marker.outputDir, "restore-instructions.md"))).toBe(true);
   });
 
   it("HG-6: inline message is appended to systemMessage", () => {

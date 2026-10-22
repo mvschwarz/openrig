@@ -14,6 +14,9 @@ import { stopGroup } from "../codex-network-default.js";
 
 export type CodexUsageFailureReason =
   | "binary_not_found"
+  /** `account/read` reported no signed-in account and `account/rateLimits/read` then failed: a classification of
+   *  answers already received, not another read. */
+  | "not_signed_in"
   | "spawn_failed"
   | "rpc_error"
   | "unrecognized_shape"
@@ -45,6 +48,8 @@ export const CODEX_USAGE_READER_ARGS = ["-c", "features.plugins=false", "-c", "f
 
 /** Native reads take 25–35 s (Ops' readers); the refresh is bounded by the upper end. */
 export const CODEX_USAGE_READ_DEADLINE_MS = 35_000;
+/** How long the reader's process group gets at each stop step (and for the reap) once the read ends. */
+export const CODEX_USAGE_READ_GRACE_MS = 2_000;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -52,7 +57,7 @@ const firstLine = (error: unknown): string => String(error instanceof Error ? er
 
 export function codexUsageReader(options: CodexUsageReaderOptions = {}): CodexUsageReader {
   const deadlineMs = options.deadlineMs ?? CODEX_USAGE_READ_DEADLINE_MS;
-  const graceMs = options.graceMs ?? 2_000;
+  const graceMs = options.graceMs ?? CODEX_USAGE_READ_GRACE_MS;
   const maxOutputBytes = options.maxOutputBytes ?? 1024 * 1024;
   const now = options.now ?? (() => new Date().toISOString());
   return async () => {
@@ -121,6 +126,9 @@ function converse(
         if (message.error !== undefined) {
           const method = message.id === 1 ? "initialize" : message.id === 2 ? "account/read" : "account/rateLimits/read";
           const text = isRecord(message.error) && typeof message.error.message === "string" ? `: ${message.error.message.split("\n")[0]}` : "";
+          if (message.id === 3 && isRecord(account) && account.account === null && account.requiresOpenaiAuth === true) {
+            return fail("not_signed_in", `codex app-server's account/read reported no signed-in account; account/rateLimits/read then failed${text}`);
+          }
           return fail("rpc_error", `codex app-server returned an error for ${method}${text}`);
         }
         if (message.id === 1) {

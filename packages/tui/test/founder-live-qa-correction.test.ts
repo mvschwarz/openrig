@@ -442,7 +442,7 @@ describe("founder live-QA correction — slice information architecture", () => 
       const seen = [screen.lines.join("\n")];
       expect(screen.lines.join("\n")).toContain("01-slice-1");
       expect(screen.lines.join("\n")).toMatch(/STATE\s+building/);
-      expect(screen.lines.join("\n")).toMatch(/PROOF\s+2\/3/);
+      expect(screen.lines.join("\n")).toMatch(/PROOF\s+2\/3 paired/);
       expect(screen.lines.join("\n")).toContain("OWNERSHIP");
       expect(screen.lines.join("\n")).toContain("EVIDENCE · declared spec");
       const styled = stylizeLines(screen, createStyle("truecolor"));

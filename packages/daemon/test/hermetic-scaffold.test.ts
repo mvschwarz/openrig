@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { existsSync, statSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import {
@@ -16,6 +16,7 @@ import {
 describe("prepareHermeticEnv scaffold", () => {
   const scaffolds: HermeticScaffold[] = [];
   afterEach(() => {
+    vi.unstubAllEnvs();
     for (const s of scaffolds.splice(0)) s.cleanup();
   });
   const make = (baseEnv?: Record<string, string | undefined>) => {
@@ -62,9 +63,11 @@ describe("prepareHermeticEnv scaffold", () => {
     expect(s.env.HOME).toBe(s.home);
     expect(s.env.OPENRIG_HOME).toBe(s.openrigHome);
     expect(s.env.OPENRIG_NO_KERNEL).toBe("1");
-    // The private tmux wrapper wins command resolution; the caller's PATH is
-    // preserved after it so every non-tmux executable resolves as before.
-    expect(s.env.PATH).toBe(`${join(s.root, "bin")}${delimiter}/usr/bin`);
+    // The private tmux wrapper wins command resolution, then the runtime stubs (codex and claude); the
+    // caller's PATH is preserved after them so every other executable resolves as before.
+    expect(s.env.PATH).toBe(
+      `${join(s.root, "bin")}${delimiter}${join(s.root, ".openrig-test-runtime-stubs")}${delimiter}/usr/bin`,
+    );
   });
 
   it("does NOT mutate the caller's env object nor process.env", () => {
@@ -84,6 +87,35 @@ describe("prepareHermeticEnv scaffold", () => {
     expect(process.env.OPENRIG_NO_KERNEL).toBe(beforeNoKernel);
     // the scaffold's env is a distinct object
     expect(s.env).not.toBe(base);
+  });
+
+  it("scrubs inherited provider roots and the native opt-in from scenario children", () => {
+    vi.stubEnv("CODEX_HOME", "/synthetic-host-codex");
+    vi.stubEnv("CLAUDE_CONFIG_DIR", "/synthetic-host-claude");
+    vi.stubEnv("OPENRIG_E2E_REAL_CODEX", "1");
+    const s = make();
+    expect(s.env.HOME).toBe(s.home);
+    for (const key of ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "OPENRIG_E2E_REAL_CODEX"]) {
+      expect(s.env[key]).toBeUndefined();
+    }
+    expect(process.env.CODEX_HOME).toBe("/synthetic-host-codex");
+    expect(process.env.CLAUDE_CONFIG_DIR).toBe("/synthetic-host-claude");
+    expect(process.env.OPENRIG_E2E_REAL_CODEX).toBe("1");
+  });
+
+  it("preserves explicit provider roots but still scrubs the native opt-in", () => {
+    const base = {
+      HOME: "/synthetic-host-home", CODEX_HOME: "/synthetic-host-codex",
+      CLAUDE_CONFIG_DIR: "/synthetic-host-claude", OPENRIG_E2E_REAL_CODEX: "1",
+    };
+    const s = make(base);
+    expect(s.env.HOME).toBe(s.home);
+    expect(s.env.CODEX_HOME).toBe(base.CODEX_HOME);
+    expect(s.env.CLAUDE_CONFIG_DIR).toBe(base.CLAUDE_CONFIG_DIR);
+    expect(s.env.OPENRIG_E2E_REAL_CODEX).toBeUndefined();
+    expect(base.CODEX_HOME).toBe("/synthetic-host-codex");
+    expect(base.CLAUDE_CONFIG_DIR).toBe("/synthetic-host-claude");
+    expect(base.OPENRIG_E2E_REAL_CODEX).toBe("1");
   });
 
   it("cleanup removes the scaffold root", () => {

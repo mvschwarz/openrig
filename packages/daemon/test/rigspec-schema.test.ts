@@ -122,6 +122,44 @@ describe("RigSpec schema (pod-aware)", () => {
     expect(normalized.pods[0]!.members[0]!.effort).toBeUndefined();
   });
 
+  it("advises on an unknown effort for a Pi member only; known levels and model suffixes stay quiet", () => {
+    const withPi = (extra: Record<string, unknown>) => {
+      const rig = structuredClone(VALID_RIG);
+      rig.pods[0]!.members.push({ id: "pi1", agent_ref: "local:agents/pi", profile: "default", runtime: "pi", cwd: ".", ...extra } as never);
+      return RigSpecSchema.validate(rig);
+    };
+    const quiet = withPi({ effort: "high" });
+    expect(quiet.valid).toBe(true);
+    expect((quiet.advisories ?? []).join(" ")).not.toMatch(/effort/);
+    const suffix = withPi({ model: "x/y:low", effort: "high" });
+    expect(suffix.valid).toBe(true);
+    expect((suffix.advisories ?? []).join(" ")).not.toMatch(/effort/);
+    const bad = withPi({ effort: "none" });
+    expect(bad.valid).toBe(true);
+    expect((bad.advisories ?? []).join(" ")).toMatch(/pods\[0\]\.members\[2\]\.effort: "none" isn't a level Pi is known to accept/);
+    expect((bad.advisories ?? []).join(" ")).toContain("the next managed continuation sends it anyway");
+    const flag = withPi({ effort: "--cwd" });
+    expect(flag.valid).toBe(true);
+    expect((flag.advisories ?? []).join(" ")).toMatch(/pods\[0\]\.members\[2\]\.effort: "--cwd" isn't a level Pi is known to accept \([^)]*\); a managed launch leaves it out/);
+    expect((flag.advisories ?? []).join(" ")).not.toContain("sends it anyway");
+    const codex = structuredClone(VALID_RIG);
+    (codex.pods[0]!.members[1] as Record<string, unknown>)["effort"] = "none";
+    expect(RigSpecSchema.validate(codex).advisories ?? []).toEqual([]);
+  });
+
+  it("advises on an unknown effort for a legacy Pi node only", () => {
+    const spec = (runtime: string, effort: string) => ({
+      schema_version: 1, name: "test", version: "1.0",
+      nodes: [{ id: "n", runtime, effort }], edges: [],
+    });
+    expect(LegacyRigSpecSchema.validate(spec("pi", "high")).advisories ?? []).toEqual([]);
+    const bad = LegacyRigSpecSchema.validate(spec("pi", "none"));
+    expect(bad.valid).toBe(true);
+    expect((bad.advisories ?? []).join(" ")).toMatch(/effort: "none" isn't a level Pi is known to accept/);
+    expect((LegacyRigSpecSchema.validate(spec("pi", "high --cwd")).advisories ?? []).join(" ")).toContain("a managed launch leaves it out");
+    expect(LegacyRigSpecSchema.validate(spec("codex", "none")).advisories ?? []).toEqual([]);
+  });
+
   it("rejects codex_config_profile on non-Codex members", () => {
     const rig = structuredClone(VALID_RIG);
     (rig.pods[0]!.members[0] as Record<string, unknown>)["codex_config_profile"] = "sysadmin";
@@ -193,6 +231,23 @@ describe("RigSpec schema (pod-aware)", () => {
     const result = RigSpecSchema.validate(rig);
     expect(result.valid).toBe(false);
     expect(result.errors[0]).toMatch(/duplicate member id "impl"/);
+  });
+
+  it("members in different pods that derive the same session name get a warning", () => {
+    const rig = structuredClone(VALID_RIG);
+    rig.pods[0]!.id = "dev-impl";
+    rig.pods[0]!.members[0]!.id = "main";
+    rig.pods[0]!.edges[0]!.to = "main";
+    rig.edges[0]!.from = "dev-impl.main";
+    rig.pods[1]!.id = "dev";
+    rig.pods[1]!.members[0]!.id = "impl-main";
+    rig.edges[0]!.to = "dev.impl-main";
+    const result = RigSpecSchema.validate(rig);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
+    expect(result.advisories).toEqual([
+      'pods[1].members[0].id: session name "dev-impl-main@dev-rig" is already used by member "dev-impl.main"',
+    ]);
   });
 
   // T9: dot in pod id or member id fails

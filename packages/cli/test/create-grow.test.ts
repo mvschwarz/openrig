@@ -139,6 +139,36 @@ describe("rig create", () => {
     expect(logs.join("\n")).toContain("shipped default agent is unavailable");
     expect(client.postText).not.toHaveBeenCalled();
   });
+
+  async function createWith(response: { status: number; data: Record<string, unknown> }, json: boolean) {
+    const client = { get: vi.fn(async () => ({ status: 200, data: library })), postText: vi.fn(async () => response) };
+    const program = createProgram({ createDeps: deps(client) });
+    program.exitOverride();
+    return captureLogs(() => program.parseAsync(["node", "rig", "create", "alpha", "--cwd", "/work", ...(json ? ["--json"] : [])]));
+  }
+
+  it.each([
+    ["the daemon's errors", { status: 400, data: { errors: ["first problem", "second problem"] } }, "first problem; second problem"],
+    ["the daemon's message", { status: 409, data: { message: "rig alpha is running" } }, "rig alpha is running"],
+    ["a seat that needs attention", {
+      status: 201,
+      data: { rigId: "rig-1", nodes: [{ logicalId: "main.lead", status: "attention_required", error: "Startup requires attention: log in" }] },
+    }, "Startup requires attention: log in"],
+    ["no detail at all", { status: 500, data: {} }, "Create failed (HTTP 500)"],
+  ])("a failed create's --json carries the reason the text output prints: %s", async (_label, response, reason) => {
+    const json = await createWith(response, true);
+    expect(json.exitCode).toBe(1);
+    expect(JSON.parse(json.logs.join("\n"))).toMatchObject({ ok: false, detail: reason });
+
+    const text = await createWith(response, false);
+    expect(text.exitCode).toBe(1);
+    expect(text.logs).toEqual([reason]);
+  });
+
+  it("a successful create's --json has no detail", async () => {
+    const { logs } = await createWith({ status: 201, data: { rigId: "rig-1", nodes: [{ logicalId: "main.lead", status: "launched" }] } }, true);
+    expect(JSON.parse(logs.join("\n"))).not.toHaveProperty("detail");
+  });
 });
 
 describe("rig grow", () => {
@@ -423,6 +453,129 @@ describe("rig grow", () => {
     const names = createProgram().commands.map((command) => command.name());
     expect(names).toContain("create");
     expect(names).toContain("grow");
+  });
+
+  describe("rig name or id resolution", () => {
+    const RIG_SUMMARY = [
+      { id: "01J00000000000000000000001", name: "my-rig", archivedAt: null },
+      { id: "01J00000000000000000000002", name: "dup-rig", archivedAt: null },
+      { id: "01J00000000000000000000003", name: "dup-rig", archivedAt: null },
+    ];
+
+    it("resolves a unique rig name to its id", async () => {
+      const client = {
+        get: vi.fn(async (path: string) => {
+          if (path.includes("/api/rigs/summary")) return { status: 200, data: RIG_SUMMARY };
+          if (path.includes("specs/library")) return { status: 200, data: library };
+          return { status: 200, data: [{ rigName: "my-rig", podNamespace: "main" }] };
+        }),
+        post: vi.fn(async () => ({
+          status: 201,
+          data: {
+            ok: true,
+            result: {
+              podNamespace: "main",
+              node: { logicalId: "main.worker", status: "launched", sessionName: "main-worker@my-rig" },
+            },
+          },
+        })),
+      };
+
+      const program = createProgram({ growDeps: deps(client) });
+      program.exitOverride();
+      const { logs, exitCode } = await captureLogs(() =>
+        program.parseAsync(["node", "rig", "grow", "my-rig", "worker", "--pod", "main", "--json"]));
+
+      expect(exitCode).toBeUndefined();
+      expect(client.post).toHaveBeenCalledWith(
+        "/api/rigs/01J00000000000000000000001/pods/main/members",
+        expect.anything(),
+        expect.anything(),
+      );
+      expect(JSON.parse(logs.join("\n"))).toMatchObject({
+        ok: true,
+        rigId: "01J00000000000000000000001",
+      });
+    });
+
+    it("resolves an exact id", async () => {
+      const client = {
+        get: vi.fn(async (path: string) => {
+          if (path.includes("/api/rigs/summary")) return { status: 200, data: RIG_SUMMARY };
+          if (path.includes("specs/library")) return { status: 200, data: library };
+          return { status: 200, data: [{ rigName: "my-rig", podNamespace: "main" }] };
+        }),
+        post: vi.fn(async () => ({
+          status: 201,
+          data: {
+            ok: true,
+            result: {
+              podNamespace: "main",
+              node: { logicalId: "main.worker", status: "launched", sessionName: "main-worker@my-rig" },
+            },
+          },
+        })),
+      };
+
+      const program = createProgram({ growDeps: deps(client) });
+      program.exitOverride();
+      const { logs, exitCode } = await captureLogs(() =>
+        program.parseAsync(["node", "rig", "grow", "01J00000000000000000000001", "worker", "--pod", "main", "--json"]));
+
+      expect(exitCode).toBeUndefined();
+      expect(client.post).toHaveBeenCalledWith(
+        "/api/rigs/01J00000000000000000000001/pods/main/members",
+        expect.anything(),
+        expect.anything(),
+      );
+      expect(JSON.parse(logs.join("\n"))).toMatchObject({
+        ok: true,
+        rigId: "01J00000000000000000000001",
+      });
+    });
+
+    it("warns to use rig id when summary lookup fails (HTTP 500) and downstream node lookup fails", async () => {
+      const client = {
+        get: vi.fn(async (path: string) => {
+          if (path.includes("/api/rigs/summary")) return { status: 500, data: { error: "Internal Server Error" } };
+          if (path.includes("specs/library")) return { status: 200, data: library };
+          return { status: 404, data: { error: "Rig not found" } };
+        }),
+        post: vi.fn(),
+      };
+
+      const program = createProgram({ growDeps: deps(client) });
+      program.exitOverride();
+      const { logs, exitCode } = await captureLogs(() =>
+        program.parseAsync(["node", "rig", "grow", "my-rig", "worker", "--pod", "main"]));
+
+      expect(exitCode).toBe(1);
+      const output = logs.join("\n");
+      expect(output).toContain("Rig my-rig was not found.");
+      expect(output).toContain("Could not list rigs to resolve a name. If this is a rig name, pass the rig id instead (rig ps --json).");
+    });
+
+    it("refuses an ambiguous rig name and reports candidate ids", async () => {
+      const client = {
+        get: vi.fn(async (path: string) => {
+          if (path.includes("/api/rigs/summary")) return { status: 200, data: RIG_SUMMARY };
+          return { status: 200, data: [] };
+        }),
+        post: vi.fn(),
+      };
+
+      const program = createProgram({ growDeps: deps(client) });
+      program.exitOverride();
+      const { logs, exitCode } = await captureLogs(() =>
+        program.parseAsync(["node", "rig", "grow", "dup-rig", "worker", "--pod", "main"]));
+
+      expect(exitCode).toBe(1);
+      expect(client.post).not.toHaveBeenCalled();
+      const output = logs.join("\n");
+      expect(output).toContain("'dup-rig' matches 2 rigs");
+      expect(output).toContain("01J00000000000000000000002");
+      expect(output).toContain("01J00000000000000000000003");
+    });
   });
 });
 

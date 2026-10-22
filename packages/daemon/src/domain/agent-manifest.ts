@@ -115,6 +115,10 @@ function validateResourcePaths(resources: Array<{ id: string; path: string }>, c
   const ids = new Set<string>();
   for (let i = 0; i < resources.length; i++) {
     const r = resources[i]!;
+    if (!r || typeof r !== "object" || Array.isArray(r)) {
+      errors.push(`resources.${category}[${i}]: must be an object`);
+      continue;
+    }
     if (!r.id || typeof r.id !== "string") {
       errors.push(`resources.${category}[${i}].id: must be a non-empty string`);
     } else if (ids.has(r.id)) {
@@ -167,6 +171,10 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
     } else {
       for (let i = 0; i < (obj["imports"] as unknown[]).length; i++) {
         const imp = (obj["imports"] as Record<string, unknown>[])[i]!;
+        if (!imp || typeof imp !== "object" || Array.isArray(imp)) {
+          errors.push(`imports[${i}]: must be an object`);
+          continue;
+        }
         const refErr = validateImportRef(imp["ref"] as string, i);
         if (refErr) errors.push(refErr);
         const verErr = validateImportVersion(imp["version"], i);
@@ -252,19 +260,23 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
           errors.push(`resources.${category}: must be an array`);
         } else {
           const entries = items as Array<Record<string, unknown>>;
+          // A blank list item (`- `) parses to null; the per-category validators below
+          // report it, so the id bookkeeping and runtime checks just skip it.
+          const mappingEntries = entries.filter((e) => e && typeof e === "object" && !Array.isArray(e));
 
           if (category === "plugins") {
             // Plugin entries have a different shape (id + source object) — validate inline
             errors.push(...validatePluginResources(entries));
-            allLocalIds[category] = new Set(entries.map((e) => e["id"] as string).filter(Boolean));
+            allLocalIds[category] = new Set(mappingEntries.map((e) => e["id"] as string).filter(Boolean));
           } else {
             errors.push(...validateResourcePaths(entries as Array<{ id: string; path: string }>, category));
-            allLocalIds[category] = new Set(entries.map((e) => e["id"] as string).filter(Boolean));
+            allLocalIds[category] = new Set(mappingEntries.map((e) => e["id"] as string).filter(Boolean));
           }
 
           // runtime_resources must have runtime field
           if (category === "runtime_resources") {
             for (let i = 0; i < entries.length; i++) {
+              if (!entries[i] || typeof entries[i] !== "object" || Array.isArray(entries[i])) continue;
               if (!entries[i]!["runtime"] || typeof entries[i]!["runtime"] !== "string") {
                 errors.push(`resources.runtime_resources[${i}].runtime: required non-empty string`);
               }
@@ -345,7 +357,8 @@ export function normalizeAgentSpec(raw: Record<string, unknown>): AgentSpec {
   const profiles: Record<string, ProfileSpec> = {};
   if (raw["profiles"] && typeof raw["profiles"] === "object" && !Array.isArray(raw["profiles"])) {
     for (const [name, profileRaw] of Object.entries(raw["profiles"] as Record<string, unknown>)) {
-      profiles[name] = normalizeProfile(profileRaw as Record<string, unknown>);
+      // A bare `default:` parses to null; treat it as an empty profile, same as `default: {}`.
+      profiles[name] = normalizeProfile((profileRaw ?? {}) as Record<string, unknown>);
     }
   }
 
@@ -461,6 +474,10 @@ function validatePluginResources(entries: Array<Record<string, unknown>>): strin
   const ids = new Set<string>();
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i]!;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      errors.push(`resources.plugins[${i}]: must be an object`);
+      continue;
+    }
     if (!entry["id"] || typeof entry["id"] !== "string") {
       errors.push(`resources.plugins[${i}].id: must be a non-empty string`);
     } else if (ids.has(entry["id"] as string)) {

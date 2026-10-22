@@ -1631,7 +1631,7 @@ describe("buildDaemonEnv", () => {
 });
 
 describe("ensureWorkspaceScaffold", () => {
-  it("does not overwrite existing workspace files", () => {
+  it("does not overwrite existing workspace files", async () => {
     const existing = new Set<string>([
       "/tmp/ws",
       path.join("/tmp/ws", "SPEC.md"),
@@ -1643,7 +1643,7 @@ describe("ensureWorkspaceScaffold", () => {
       writeFile: vi.fn(),
     });
 
-    const result = ensureWorkspaceScaffold("/tmp/ws", deps);
+    const result = await ensureWorkspaceScaffold("/tmp/ws", deps);
 
     expect(result.rootCreated).toBe(false);
     expect(result.files.find((f) => f.relPath === "SPEC.md")?.skipped).toBe("exists");

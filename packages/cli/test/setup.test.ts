@@ -1,8 +1,12 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { createProgram } from "../src/index.js";
 import { Command } from "commander";
 import { parse as parseYaml } from "yaml";
-import { setupCommand, runSetup, goldenPathNextSteps, permissionPolicyMenuLines, parseSetupProviders, type SetupDeps, type SetupResult } from "../src/commands/setup.js";
+import { setupCommand, runSetup, goldenPathNextSteps, permissionPolicyMenuLines, parseSetupProviders, type SetupDeps, type SetupResult, type SetupStep } from "../src/commands/setup.js";
+import { ConfigStore } from "../src/config-store.js";
 import type { DoctorDeps } from "../src/commands/doctor.js";
 
 function makeDeps(overrides?: Partial<SetupDeps>): SetupDeps {
@@ -78,6 +82,24 @@ function expectRuntimeConfigDisclosure(result: SetupResult): void {
 }
 
 describe("rig setup", () => {
+  it("advises custom tmux users without changing the inheritance setting or requiring a step", async () => {
+    const writes = vi.fn();
+    const result = await runSetup(makeDeps({
+      readFile: file => file.endsWith("/.tmux.conf") ? "set -g default-command custom-shell\n" : null,
+      writeFile: writes,
+    }), {});
+    expect(result.ready).toBe(true);
+    expect(result.steps.find(step => step.id === "tmux_environment")?.message).toContain("rig config set terminal.inherit_tmux_environment true");
+    expect(writes.mock.calls.some(([file]) => String(file).endsWith("config.json"))).toBe(false);
+  });
+
+  it("does not label the stock managed tmux block as a custom environment setup", async () => {
+    const result = await runSetup(makeDeps({ readFile: file => file.endsWith("/.tmux.conf")
+      ? "# OpenRig managed block\nset -g mouse on\nset -g history-limit 50000\n# End # OpenRig managed block\n" : null }), {});
+    expect(result.steps.find(step => step.id === "tmux_environment")).toBeUndefined();
+    expect(result.ready).toBe(true);
+  });
+
   it("wired via createProgram", async () => {
     const program = createProgram();
     const setupCmd = program.commands.find((c) => c.name() === "setup");
@@ -216,6 +238,81 @@ describe("rig setup", () => {
 
     const verify = result.steps.find((s) => s.id === "verify");
     expect(verify?.status).toBe("pass");
+  });
+
+  describe("terminal.history_limit in the managed tmux block", () => {
+    const BLOCK = (limit: number) => `# OpenRig managed block\nset -g mouse on\nset -g history-limit ${limit}\n# End # OpenRig managed block`;
+    let dir: string;
+    let envLimit: string | undefined;
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), "setup-history-limit-"));
+      envLimit = process.env["OPENRIG_TERMINAL_HISTORY_LIMIT"];
+      delete process.env["OPENRIG_TERMINAL_HISTORY_LIMIT"];
+    });
+    afterEach(() => {
+      rmSync(dir, { recursive: true, force: true });
+      if (envLimit === undefined) delete process.env["OPENRIG_TERMINAL_HISTORY_LIMIT"];
+      else process.env["OPENRIG_TERMINAL_HISTORY_LIMIT"] = envLimit;
+    });
+
+    async function setupConf(store: ConfigStore, existing: string | null): Promise<{ conf: string; step: SetupStep | undefined }> {
+      const writeSpy = vi.fn();
+      const result = await runSetup(makeDeps({ readFile: (p) => (p.endsWith("/.tmux.conf") ? existing : null), writeFile: writeSpy, configStore: store }), {});
+      const [, conf] = writeSpy.mock.calls.find(([p]) => String(p).endsWith("/.tmux.conf"))!;
+      return { conf: String(conf), step: result.steps.find((s) => s.id === "tmux_config") };
+    }
+
+    it("keeps the default above the transcript window and small enough for a long-lived fleet", async () => {
+      const { conf } = await setupConf(new ConfigStore(join(dir, "config.json")), null);
+      const limit = Number(/^set -g history-limit (\d+)$/m.exec(conf)?.[1]);
+      // Rotation captures the last 1000 rows (transcripts.lines default): history must hold them with margin.
+      expect(limit).toBeGreaterThanOrEqual(2000);
+      // tmux 3.4 at 90 panes x 50000 rows: 12.8 GB server heap and 250 ms/s of server CPU under the daemon's captures.
+      expect(limit).toBeLessThanOrEqual(10000);
+    });
+
+    it("writes 10000 rows by default", async () => {
+      const store = new ConfigStore(join(dir, "config.json"));
+      expect(store.resolveWithSource("terminal.history_limit")).toMatchObject({ value: 10000, source: "default", defaultValue: 10000 });
+      const { conf, step } = await setupConf(store, null);
+      expect(conf).toBe(BLOCK(10000) + "\n");
+      expect(step).toMatchObject({ status: "applied", message: expect.stringContaining("history-limit 10000") });
+    });
+
+    it("writes the configured value, from the config file or the environment", async () => {
+      const store = new ConfigStore(join(dir, "config.json"));
+      store.set("terminal.history_limit", "50000");
+      expect((await setupConf(store, null)).conf).toBe(BLOCK(50000) + "\n");
+      process.env["OPENRIG_TERMINAL_HISTORY_LIMIT"] = "20000";
+      try {
+        expect((await setupConf(store, null)).conf).toBe(BLOCK(20000) + "\n");
+      } finally { delete process.env["OPENRIG_TERMINAL_HISTORY_LIMIT"]; }
+    });
+
+    it("rejects values that are not an integer in [2000, 1000000]", () => {
+      const store = new ConfigStore(join(dir, "config.json"));
+      for (const raw of ["0", "-5000", "1999", "1000001", "2.5", "10000rows", "many", ""]) {
+        expect(() => store.set("terminal.history_limit", raw)).toThrow(/terminal\.history_limit/);
+      }
+      store.set("terminal.history_limit", "2000");
+      store.set("terminal.history_limit", "1000000");
+      expect(store.get("terminal.history_limit")).toBe(1000000);
+    });
+
+    it("rewrites the block in place on a rerun and leaves the user's override after it", async () => {
+      const store = new ConfigStore(join(dir, "config.json"));
+      const user = "set -g prefix C-a\n\n";
+      const override = "\nset -g history-limit 75000\n";
+      const first = (await setupConf(store, user + BLOCK(50000) + override)).conf;
+      expect(first).toBe(user + BLOCK(10000) + override);
+      store.set("terminal.history_limit", "30000");
+      const { conf, step } = await setupConf(store, first);
+      expect(conf).toBe(user + BLOCK(30000) + override);
+      expect(conf.match(/^# OpenRig managed block$/gm)).toHaveLength(1);
+      expect(step?.message).toBe("Updated OpenRig managed tmux config block (history-limit 30000).");
+      // tmux applies the last `set -g history-limit`: the user's line after the block.
+      expect([...conf.matchAll(/^set -g history-limit (\d+)$/gm)].at(-1)?.[1]).toBe("75000");
+    });
   });
 
   // OPR.0.3.3.04.2 (AC-1): the ONE canonical ordered golden path over EXISTING

@@ -47,7 +47,7 @@ export type ResumeTokenDeriveResult =
   /** A live token was derived + format-validated. The caller persists it. */
   | { outcome: "captured"; resumeType: ResumeType; token: string }
   /** Derivation ran but produced no usable token — the caller emits a skip event. */
-  | { outcome: "skipped"; reason: "missing_sidecar" | "parse_error" | "probe_timeout" | "invalid_token" | "stale_sidecar" };
+  | { outcome: "skipped"; reason: "missing_sidecar" | "parse_error" | "probe_timeout" | "process_unreadable" | "invalid_token" | "stale_sidecar" };
 
 /**
  * A Claude sidecar outlives the process that wrote it (#421: a seat that keeps a user's own status
@@ -104,7 +104,12 @@ export async function deriveResumeToken(
     }
   } else if (runtime === "codex") {
     if (!deps.resumeTokenCapturer) return { outcome: "noop" }; // dep absent — silent no-op
-    token = await deps.resumeTokenCapturer.captureCodexThreadId(input.sessionName);
+    try {
+      token = await deps.resumeTokenCapturer.captureCodexThreadId(input.sessionName);
+    } catch {
+      // Same reason the capture log gives; the exception text stays out of the event.
+      return { outcome: "skipped", reason: "process_unreadable" };
+    }
     if (!token) return { outcome: "skipped", reason: "probe_timeout" };
   } else if (runtime === "pi" || runtime === "omp") {
     const stateStore = runtime === "pi" ? deps.piRunnerStateStore : deps.ompRunnerStateStore;

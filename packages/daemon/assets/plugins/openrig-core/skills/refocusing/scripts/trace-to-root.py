@@ -75,39 +75,19 @@ def read(path):
         return None
 
 
+# Contract twin of CLI scope-fs.ts and daemon scope/node-file.ts; parity is tested.
+NOTES_FILE_PRECEDENCE = ("NOTES.md", "MISSION_NOTES.md")
+
+
 def resolve_notes(node):
-    try:
-        result = subprocess.run(
-            ["rig", "scope", "resolve-notes", str(node), "--json"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return None, "resolver command timed out"
-    except OSError as error:
-        return None, f"resolver command could not start: {error}"
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip().splitlines()
-        suffix = f": {detail[0]}" if detail else ""
-        return None, f"resolver command exited {result.returncode}{suffix}"
-    try:
-        payload = json.loads(result.stdout)
-    except (json.JSONDecodeError, TypeError):
-        return None, "resolver command returned malformed JSON"
-    if not isinstance(payload, dict) or payload.get("ok") is not True or "resolution" not in payload:
-        return None, "resolver command returned an invalid success shape"
-    resolution = payload["resolution"]
-    if resolution is None:
-        return None, None
-    if not isinstance(resolution, dict):
-        return None, "resolver command returned an invalid resolution shape"
-    resolved_path = resolution.get("path")
-    resolved_name = resolution.get("name")
-    if not isinstance(resolved_path, str) or not isinstance(resolved_name, str):
-        return None, "resolver command returned an invalid resolution shape"
-    return (Path(resolved_path), resolved_name), None
+    for name in NOTES_FILE_PRECEDENCE:
+        candidate = node / name
+        try:
+            if candidate.is_file() and os.access(candidate, os.R_OK):
+                return (candidate, name), None
+        except OSError:
+            pass
+    return None, None
 
 
 def intent(text):
@@ -157,6 +137,27 @@ DUTY_HEADINGS = ("my job here", "standing duties")
 NOTES_STATE_HEADINGS = ("current state",)
 HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 DEFAULT_NOTES_MAX_AGE_DAYS = 14
+# Each packet field is bounded on its own; there is no total cap. A row's summary and continuation are one line each,
+# the held and next lists show their newest rows with the full count, and a matched section's body is cut at a line.
+FIELD_CHARS = 160
+HELD_SHOWN = 20
+NEXT_SHOWN = 10
+SECTION_CHARS = 1500
+
+
+def one_line(text):
+    """(text as one line, cut to FIELD_CHARS, whether it was shortened)."""
+    flat = " ".join(str(text).split())
+    if len(flat) <= FIELD_CHARS:
+        return flat, flat != str(text).strip()
+    return flat[:FIELD_CHARS - 1].rstrip() + "…", True
+
+
+def bounded_section(body):
+    if len(body) <= SECTION_CHARS:
+        return body
+    boundary = body.rfind("\n", 0, SECTION_CHARS)
+    return body[:boundary if boundary > 0 else SECTION_CHARS].rstrip() + "\n[… use --depth full for the rest]"
 
 
 def heading_sections(text, wanted):
@@ -180,7 +181,7 @@ def heading_sections(text, wanted):
 
 def by_section(text, wanted, path):
     found = heading_sections(text, wanted)
-    shown = "\n\n".join(f"{title}\n{body}" if body else title for title, body in found)
+    shown = "\n\n".join(f"{title}\n{bounded_section(body)}" if body else title for title, body in found)
     missing = [phrase for phrase in wanted if not any(title.lower().startswith(phrase) for title, _ in found)]
     if not missing:
         return shown
@@ -335,28 +336,51 @@ def candidate_line(candidate):
     return line
 
 
+def row_fields(row, *fields):
+    """Each named field as one bounded line, and a pointer to the whole row when any was shortened."""
+    values, cut = [], False
+    for field, missing in fields:
+        value, shortened = one_line(row.get(field) or missing)
+        values.append(value)
+        cut = cut or shortened
+    pointer = f" — full row: rig queue show {row['qitemId']}" if cut and row.get("qitemId") else ""
+    return values, pointer
+
+
+def cut_notice(name, state, rows, shown, daemon_cut):
+    """The list's notice when it was cut here or by the daemon: how many are shown, of how many."""
+    if not daemon_cut and len(rows) <= shown:
+        return None
+    total = f"more than {len(rows)}" if daemon_cut else str(len(rows))
+    return (f"(the {name} list was cut: {min(len(rows), shown)} of {total} shown; "
+            f"`rig queue list --owned --state {state}` has the rest)")
+
+
 def render_held_and_next(evidence):
     output = []
+    per_list = "heldTruncated" in evidence or "nextTruncated" in evidence
     held = evidence.get("held") or []
     if held:
         output.append("HELD WORK (blocked; this is not next):")
-        for row in held:
-            output.append(f"- {row.get('qitemId') or 'a row'} — {row.get('summary') or 'no summary'} — "
-                          f"blocked on {row.get('blockedOn') or 'unknown'} — "
-                          f"continuation: {row.get('continuation') or 'none recorded'}")
+        for row in held[:HELD_SHOWN]:
+            (summary, blocked_on, continuation), pointer = row_fields(
+                row, ("summary", "no summary"), ("blockedOn", "unknown"), ("continuation", "none recorded"))
+            output.append(f"- {row.get('qitemId') or 'a row'} — {summary} — blocked on {blocked_on} — "
+                          f"continuation: {continuation}{pointer}")
     following = evidence.get("next") or []
     if following:
         output.append("POSSIBLE NEXT WORK (pending; no order implied):")
-        for row in following:
+        for row in following[:NEXT_SHOWN]:
             missions = ", ".join(row.get("missions") or [])
-            output.append(f"- {row.get('qitemId') or 'a row'} — {row.get('summary') or 'no summary'}"
-                          + (f" [mission: {missions}]" if missions else ""))
-    if "heldTruncated" in evidence or "nextTruncated" in evidence:
-        if evidence.get("heldTruncated"):
-            output.append("(the held list was cut; `rig queue list --owned --state blocked` has the rest)")
-        if evidence.get("nextTruncated"):
-            output.append("(the next list was cut; `rig queue list --owned --state pending` has the rest)")
-    elif evidence.get("heldAndNextTruncated"):
+            (summary,), pointer = row_fields(row, ("summary", "no summary"))
+            output.append(f"- {row.get('qitemId') or 'a row'} — {summary}"
+                          + (f" [mission: {missions}]" if missions else "") + pointer)
+    notices = [
+        cut_notice("held", "blocked", held, HELD_SHOWN, per_list and bool(evidence.get("heldTruncated"))),
+        cut_notice("next", "pending", following, NEXT_SHOWN, per_list and bool(evidence.get("nextTruncated"))),
+    ]
+    output.extend(notice for notice in notices if notice)
+    if not per_list and evidence.get("heldAndNextTruncated"):
         output.append("(held and next lists were cut; `rig queue list` has the rest)")
     return "\n".join(output)
 
@@ -390,8 +414,9 @@ def render_candidates(evidence, root, depth, failures):
         output.extend(candidate_line(candidate) for candidate in candidates)
     if unknown:
         output.append("In-progress rows the queue cannot place:")
-        output.extend(f"- {row.get('qitemId') or 'a row'} — {row.get('summary') or 'no summary'}: {row.get('reason')}"
-                      for row in unknown)
+        for row in unknown:
+            (summary,), pointer = row_fields(row, ("summary", "no summary"))
+            output.append(f"- {row.get('qitemId') or 'a row'} — {summary}: {row.get('reason')}{pointer}")
     if not candidates:
         names = evidence.get("missionsOnHost") or []
         if names:

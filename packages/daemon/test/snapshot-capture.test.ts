@@ -73,7 +73,7 @@ describe("SnapshotCapture", () => {
     sessionRegistry.updateResumeToken(successor.id, "claude_id", "native-successor", "hook");
     const generation = sessionRegistry.currentOccupantTenure(n1.id)!.generationUuid;
     const event = { nodeId: n1.id, sessionId: successor.id, newGeneration: generation };
-    db.prepare("INSERT INTO events (rig_id, type, payload) VALUES (?, 'seat.fresh_launched', ?)").run(rig.id, JSON.stringify(event));
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, 'seat.fresh_launched', ?)").run(rig.id, event.nodeId, JSON.stringify(event));
     const current = rigRepo.getRig(rig.id)!;
     const snapshot = capture.captureSnapshot(rig.id, "auto-rehydrate");
     expect(snapshot.data.activeOccupantsByNode?.[n1.id]).toEqual({ kind: "resolved", sessionId: successor.id });
@@ -81,7 +81,7 @@ describe("SnapshotCapture", () => {
     const preview = buildRestorePlanPreview(current, null, collectPreviewSessionRows(db, current, null), undefined, Date.now(), readFreshOccupantRelations(db, rig.id));
     expect(preview.nodes.find((node) => node.logicalId === n1.logicalId)).toMatchObject({ occupantSessionId: successor.id, intendedAction: "resume-original" });
     // Conflicting effects under the same generation cannot select either history.
-    db.prepare("INSERT INTO events (rig_id, type, payload) VALUES (?, 'seat.fresh_launched', ?)").run(rig.id, JSON.stringify({ ...event, sessionId: old.id }));
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, 'seat.fresh_launched', ?)").run(rig.id, event.nodeId, JSON.stringify({ ...event, sessionId: old.id }));
     expect(snapshotMatchesCurrentOccupants(db, current, snapshot)).toBe(false);
     expect(capture.captureSnapshot(rig.id, "auto-rehydrate").data.activeOccupantsByNode?.[n1.id]?.kind).toBe("ambiguous");
   });
@@ -96,14 +96,14 @@ describe("SnapshotCapture", () => {
     sessionRegistry.updateStatus(successor.id, "running");
     sessionRegistry.updateResumeToken(successor.id, "claude_id", "native-successor", "hook");
     const event = { nodeId: n1.id, sessionId: successor.id, newGeneration: sessionRegistry.currentOccupantTenure(n1.id)!.generationUuid };
-    db.prepare("INSERT INTO events (rig_id, type, payload) VALUES (?, 'seat.fresh_launched', ?)").run(rig.id, JSON.stringify(event));
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, 'seat.fresh_launched', ?)").run(rig.id, event.nodeId, JSON.stringify(event));
     const snapshot = capture.captureSnapshot(rig.id, "auto-pre-down");
     sessionRegistry.updateStatus(successor.id, state === "superseded" ? "superseded" : "exited");
 
     if (state === "changed token") sessionRegistry.updateResumeToken(successor.id, "claude_id", "different-native", "hook");
     if (state === "changed type") db.prepare("UPDATE sessions SET resume_type = 'claude_name' WHERE id = ?").run(successor.id);
     if (state === "dangling") db.prepare("UPDATE events SET payload = ? WHERE type = 'seat.fresh_launched'").run(JSON.stringify({ ...event, sessionId: "missing" }));
-    if (state === "conflicting") db.prepare("INSERT INTO events (rig_id, type, payload) VALUES (?, 'seat.fresh_launched', ?)").run(rig.id, JSON.stringify({ ...event, sessionId: old.id }));
+    if (state === "conflicting") db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, 'seat.fresh_launched', ?)").run(rig.id, event.nodeId, JSON.stringify({ ...event, sessionId: old.id }));
 
     expect(snapshotMatchesCurrentOccupants(db, rigRepo.getRig(rig.id)!, state === "older session" ? oldSnapshot : snapshot)).toBe(state === "matching");
   });

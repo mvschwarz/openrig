@@ -3,6 +3,7 @@ import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
+import { resolveRigHandle } from "../rig-handle.js";
 
 interface UnarchiveResult {
   ok: boolean;
@@ -23,15 +24,27 @@ export function unarchiveCommand(depsOverride?: StatusDeps): Command {
   const getDepsF = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
   cmd
-    .argument("<rigId>", "Rig identifier to unarchive")
+    .argument("<rig>", "Archived rig name or identifier to unarchive")
     .option("--json", "JSON output for agents")
     .action(async (rigId: string, opts: { json?: boolean }) => {
       const deps = getDepsF();
       const status = await getDaemonStatus(deps.lifecycleDeps);
       if (!daemonStatusGuard(status)) return;
       const client = deps.clientFactory(getDaemonUrl(status));
+      const resolution = await resolveRigHandle(client, rigId, { archived: true });
+      if (resolution.kind === "ambiguous") {
+        const msg = `'${rigId}' matches ${resolution.ids.length} archived rigs. Nothing was unarchived. Re-run with the specific id, e.g. ${resolution.ids.map((id) => `rig unarchive ${id}`).join("  |  ")}`;
+        if (opts.json) {
+          console.log(JSON.stringify({ ok: false, code: "rig_ambiguous", message: msg, candidates: resolution.ids }, null, 2));
+        } else {
+          console.error(msg);
+        }
+        process.exitCode = 1;
+        return;
+      }
+      const resolvedRigId = resolution.kind === "resolved" ? resolution.id : rigId;
       const res = await client.post<UnarchiveResult | { error: string }>(
-        `/api/rigs/${encodeURIComponent(rigId)}/unarchive`,
+        `/api/rigs/${encodeURIComponent(resolvedRigId)}/unarchive`,
         {},
       );
 

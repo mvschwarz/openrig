@@ -46,8 +46,8 @@ export interface PsEntry {
    */
   hasWorkCount: number;
   status: "running" | "partial" | "stopped";
-  /** Always populated. Folded from per-node `lifecycleState` (post-L2);
-   * empty rigs derive `stopped`. Never undefined or null. */
+  /** Folded from members not explicitly stopped. Empty rigs and rigs whose
+   * members are all intentionally stopped derive `stopped`. */
   lifecycleState: RigLifecycleState;
   uptime: string | null;
   latestSnapshot: string | null;
@@ -154,6 +154,16 @@ export function deriveRigLifecycleState(nodeStates: NodeLifecycleState[]): RigLi
     return anyRecoverable ? "recoverable" : "stopped";
   }
   return "degraded";
+}
+
+/** Shared display rollup for ps and the rig summaries consumed by the TUI.
+ * Intentionally stopped seats remain in process counts and node diagnostics. */
+export function deriveRigLifecycleFromInventory(
+  inventory: readonly Pick<NodeInventoryEntry, "lifecycleState" | "intentionallyStopped">[],
+): RigLifecycleState {
+  return deriveRigLifecycleState(
+    inventory.filter((entry) => !entry.intentionallyStopped).map((entry) => entry.lifecycleState),
+  );
 }
 
 /**
@@ -274,7 +284,7 @@ export class PsProjectionService {
         : effectiveRunningCount > 0 ? "partial"
         : "stopped";
 
-      const lifecycleState = deriveRigLifecycleState(inventory.map((e) => e.lifecycleState));
+      const lifecycleState = deriveRigLifecycleFromInventory(inventory);
 
       // Slice 15 — `terminal-active` count. Subset of running tmux-bound
       // seats whose latest SeatActivity observation says

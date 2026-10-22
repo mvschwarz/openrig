@@ -231,6 +231,37 @@ describe("OMP RPC lifecycle", () => {
     expect(activity.at(-1)).toMatchObject({ hookEvent: "Stop", runtime: "omp" });
   });
 
+  it("mirrors OMP text deltas once when non-text updates include cumulative assistant text", () => {
+    const { core, appends } = runner();
+    core.handlePiLine(JSON.stringify({ type: "message_start", message: { role: "assistant", content: [] } }));
+    core.handlePiLine(JSON.stringify({
+      type: "message_update",
+      assistantMessageEvent: { type: "text_start", contentIndex: 0 },
+      message: { role: "assistant", content: [{ type: "text", text: "" }] },
+    }));
+    core.handlePiLine(JSON.stringify({
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", delta: "Hello" },
+      message: { role: "assistant", content: [{ type: "text", text: "Hello" }] },
+    }));
+    core.handlePiLine(JSON.stringify({
+      type: "message_update",
+      assistantMessageEvent: { type: "usage_update" },
+      message: { role: "assistant", content: [{ type: "text", text: "Hello" }] },
+    }));
+    core.handlePiLine(JSON.stringify({
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", delta: " there" },
+      message: { role: "assistant", content: [{ type: "text", text: "Hello there" }] },
+    }));
+    core.handlePiLine(JSON.stringify({
+      type: "message_update",
+      assistantMessageEvent: { type: "text_end", contentIndex: 0 },
+      message: { role: "assistant", content: [{ type: "text", text: "Hello there" }] },
+    }));
+    expect(appends.join("")).toBe("Hello there");
+  });
+
   it("re-posts identity until the daemon confirms the token, then stops", async () => {
     let persisted = false;
     type Delivery = { promise: Promise<Record<string, unknown> | null>; resolve: (body: Record<string, unknown> | null) => void };
@@ -308,6 +339,57 @@ describe("OMP RPC lifecycle", () => {
     // One alert for one failure: the Stop is dropped, not replaced.
     expect(activity.filter((event) => event.subtype === "runtime_error")).toHaveLength(1);
     expect(activity.filter((event) => event.hookEvent === "Stop")).toHaveLength(0);
+  });
+
+  it.each([408, 429, 500, 502, 503, 504, 529])("releases typed transient status %s only at agent_end", errorStatus => {
+    const { core, activity, mirror } = runner();
+    const failed = { role: "assistant", stopReason: "error", errorStatus, errorMessage: "529 overloaded" };
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "message_end", message: failed }));
+    core.handlePiLine(JSON.stringify({ type: "turn_end", message: failed }));
+    expect(activity.at(-1)).toMatchObject({ hookEvent: "Notification", subtype: "runtime_error" });
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect(activity.at(-1)).toMatchObject({ hookEvent: "Stop", subtype: "agent_end" });
+    expect(mirror.filter(line => line.startsWith("[omp-runner] ERROR"))).toEqual(["[omp-runner] ERROR 529 overloaded"]);
+    core.handleUserBlock("try again");
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect(activity.at(-1)).toMatchObject({ hookEvent: "Stop" });
+  });
+
+  it.each(["invalid-attempt", "new-turn", "new-agent", "success-summary", "terminal", "unmatched-then-matched"])(
+    "invalidates retry-summary correlation at %s", boundary => {
+      const { core, activity } = runner();
+      const emit = (event: Record<string, unknown>) => core.handlePiLine(JSON.stringify(event));
+      emit({ type: "agent_start" });
+      emit({ type: "auto_retry_start", attempt: boundary === "invalid-attempt" ? "3" : 3 });
+      emit({ type: "message_end", message: { role: "assistant", stopReason: "error", errorStatus: 529, errorMessage: "busy" } });
+      if (boundary === "new-turn") emit({ type: "turn_start" });
+      if (boundary === "new-agent") emit({ type: "agent_start" });
+      if (boundary === "success-summary") emit({ type: "auto_retry_end", success: true, attempt: 3 });
+      if (boundary === "terminal") emit({ type: "agent_end", isTerminal: true });
+      if (boundary === "unmatched-then-matched") emit({ type: "auto_retry_end", success: false, attempt: 2, finalError: "busy" });
+      emit({ type: "auto_retry_end", success: false, attempt: 3, finalError: "busy" });
+      emit({ type: "agent_end", isTerminal: true });
+      expect(activity.at(-1)).toMatchObject({ hookEvent: "Notification", subtype: "runtime_error" });
+    },
+  );
+
+  it("keeps approval attention when it follows a typed transient failure", () => {
+    const { core, activity } = runner();
+    core.handlePiLine(JSON.stringify({ type: "turn_end", message: { role: "assistant", stopReason: "error", errorStatus: 529 } }));
+    core.handlePiLine(JSON.stringify({ type: "extension_ui_request", id: "approve-1", method: "confirm" }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect(activity.at(-1)).toMatchObject({ hookEvent: "Notification", subtype: "permission_prompt" });
+  });
+
+  it("does not clear an earlier untyped or auth failure on a later transient error", () => {
+    const { core, activity } = runner();
+    for (const errorStatus of [401, 529]) core.handlePiLine(JSON.stringify({
+      type: "turn_end", message: { role: "assistant", stopReason: "error", errorStatus },
+    }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect(activity.at(-1)).toMatchObject({ hookEvent: "Notification", subtype: "runtime_error" });
   });
 
   it("reports a model error carried only on turn_end, once per turn", () => {

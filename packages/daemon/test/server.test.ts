@@ -132,13 +132,13 @@ function createAppWithUiDist(db: ReturnType<typeof createFullTestDb>, uiDistDir:
 }
 
 describe("Hono server (production app)", () => {
-  it("GET /healthz returns 200 with status ok", async () => {
+  it("GET /healthz reports its process effective UID beside pid", async () => {
     const db = createFullTestDb();
     const { app } = createTestApp(db);
     const res = await app.request("/healthz");
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toEqual({ status: "ok", pid: process.pid });
+    expect(body).toEqual({ status: "ok", pid: process.pid, euid: process.geteuid?.() });
     db.close();
   });
 
