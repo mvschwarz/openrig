@@ -199,7 +199,11 @@ const modeBars = [
   ["plan", "⏸ plan mode on (shift+tab to cycle)"],
   ["default", "? for shortcuts"],
 ] as const;
-const warningSets = [[update], [focus], [weekly], [update, focus]];
+// #1641: an update banner (reported on Claude 2.1.293) and the context hint (native text from Build's
+// Claude seats; reported as the last line on another seat) below the mode bar.
+const updateBanner = "Update available! Run: mise upgrade claude";
+const clearHint = "new task? /clear to save 324.1k tokens";
+const warningSets = [[update], [focus], [weekly], [update, focus], [updateBanner], [clearHint], [update, updateBanner]];
 // Native, from a Claude seat running a hook mid-turn (2026-10-05): the timer follows a hook label.
 const hookRow = "✽ Sketching… (running PostToolUse hook · 3m 12s · ↓ 7.9k tokens)";
 function modePane(hint: string, trailers: string[], composer = "❯\u00a0", before = "● Ready.\n\n✻ Crunched for 2s") {
@@ -247,6 +251,25 @@ describe("#808: Claude permission-mode footers below status warnings", () => {
 
   it.each(modeBars)("still requires the complete input frame: %s", (_name, hint) => {
     expect(classifyPaneActivity(modePane(hint, [update, focus]).replaceAll(border, "")).state).toBe("unknown");
+  });
+
+  // #1641's capture as the reporter posted it (OpenRig 0.6.5, Claude Code 2.1.293): the empty prompt sits fourth from the bottom.
+  it("reads the reported capture with the update banner last as idle", () => {
+    const reported = [
+      "Waiting for further instructions.",
+      "",
+      "✻ Crunched for 7m 29s · done 2:09 AM",
+      "",
+      "──────────────────────────────────────────── fixer@example ─",
+      "❯",
+      "───────────────────────────────────────────────────────────",
+      "  ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent",
+      "                                    Update available! Run: mise upgrade claude",
+      "",
+    ].join("\n");
+    expect(classifyPaneActivity(reported)).toMatchObject({ state: "agent_idle", reason: "idle_prompt", evidence: "❯" });
+    expect(classifyPaneActivity(reported.replace("Update available! Run: mise upgrade claude", clearHint)))
+      .toMatchObject({ state: "agent_idle", reason: "idle_prompt", evidence: "❯" });
   });
 });
 
