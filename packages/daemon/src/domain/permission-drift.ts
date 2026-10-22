@@ -189,14 +189,17 @@ function inspectClaude(
     return unknownEnforcement("permission", expected, sourcePath, "settings_invalid_shape");
   }
 
-  const permissions = (parsed as Record<string, unknown>).permissions;
+  const permissions = (parsed as Record<string, unknown>).permissions === undefined
+    ? {} : (parsed as Record<string, unknown>).permissions;
   if (typeof permissions !== "object" || permissions === null || Array.isArray(permissions)) {
-    return unknownEnforcement("permission", expected, sourcePath, permissions === undefined ? "permissions_missing" : "permissions_invalid_shape");
+    return unknownEnforcement("permission", expected, sourcePath, "permissions_invalid_shape");
   }
   const record = permissions as Record<string, unknown>;
-  const defaultMode = record.defaultMode;
+  // The explicit launch mode takes precedence over the person's manual-start default.
+  // Keep that file value in configuration detail without calling it session drift.
+  const defaultMode = record.defaultMode === undefined ? expected : record.defaultMode;
   if (typeof defaultMode !== "string") {
-    return unknownEnforcement("permission", expected, sourcePath, "default_mode_missing");
+    return unknownEnforcement("permission", expected, sourcePath, "default_mode_invalid_shape");
   }
   let supportedModes: Set<string>;
   try {
@@ -208,8 +211,8 @@ function inspectClaude(
   } catch {
     return unknownEnforcement("permission", expected, sourcePath, "harness_semantics_unknown");
   }
-  if (!supportedModes.has(defaultMode)) {
-    return unknownEnforcement("permission", expected, sourcePath, "unsupported_default_mode");
+  if (!supportedModes.has(expected)) {
+    return unknownEnforcement("permission", expected, sourcePath, "unsupported_launch_mode");
   }
   const allow = parseStringArray(record.allow);
   const ask = parseStringArray(record.ask);
@@ -225,7 +228,8 @@ function inspectClaude(
   const effective: EffectiveClaudePermission = { defaultMode, allow, ask, deny };
   return {
     axis: "permission",
-    state: defaultMode === expected ? "aligned" : "drift",
+    state: "aligned",
+    reason: "emitted_launch_arguments",
     expected,
     effective,
     sourcePath,

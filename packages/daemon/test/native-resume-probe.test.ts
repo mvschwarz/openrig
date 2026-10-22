@@ -223,7 +223,7 @@ describe("native resume probe", () => {
   it("builds a Claude resume command with the canonical session name when provided", () => {
     expect(
       buildNativeResumeCommand("claude-code", "abc-123", "dev-impl@demo-rig")
-    ).toBe("claude --resume 'abc-123' --name 'dev-impl@demo-rig'");
+    ).toBe("claude --permission-mode acceptEdits --resume 'abc-123' --name 'dev-impl@demo-rig'");
   });
 
   it("builds a Codex no-profile resume with the explicit -s workspace-write floor flag", () => {
