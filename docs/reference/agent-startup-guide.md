@@ -321,6 +321,12 @@ not the destination's file contents.)
 - `rig seat launch <seat> --fresh --stop --reason <text>`, which starts a blank conversation; or
 - `rig handover <seat> --source rebuild --reason <text>`, which carries durable context.
 
+For Codex rebuilds, OpenRig also carries a complete supported native permission policy read from the live
+predecessor's own conversation and process, without adding fresh-launch grants. A later recorded seat permission
+or policy choice, or a differing declared successor profile, takes precedence. Missing, stale or unsupported observations keep the existing launch
+behaviour and are reported as unverified in the handover result; requested modes and profiles alone don't prove
+preservation. The result reports what was emitted, not native successor equivalence.
+
 **Adopt it promptly.** The saved directory doesn't move the running process, but background work can use it before
 adoption. Saved configuration isn't the live process's directory, and these examples aren't the only consumers. For a
 running Claude seat:

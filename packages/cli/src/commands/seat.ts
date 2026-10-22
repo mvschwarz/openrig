@@ -131,7 +131,7 @@ interface SeatHandoverMutationResult {
   /** OPR.0.5.5.5 — per-source execution record (wire mirror of the daemon shape). */
   sourceOutcome?:
     | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
-    | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string };
+    | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string; permissions?: { state: string; detail: string } };
   sideEffects: {
     departingSessionKilled: false;
     startupContextDelivered: boolean;
@@ -235,6 +235,7 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
     if (result.sourceOutcome.forkId === "pending") console.log(`Fork id: PENDING. ${result.sourceOutcome.limit ?? ""}`.trim());
   } else if (result.sourceOutcome?.mode === "rebuild") {
     const outcome = result.sourceOutcome;
+    if (outcome.permissions) console.log(`Codex rebuild permissions: ${outcome.permissions.state}. ${outcome.permissions.detail}`);
     if (outcome.primedArtifacts.length > 0) {
       console.log(`Rebuild primed from ${outcome.primedArtifacts.length} durable artifact${outcome.primedArtifacts.length === 1 ? "" : "s"}:`);
       for (const artifact of outcome.primedArtifacts) console.log(`  - ${artifact.address} — ${artifact.label}`);

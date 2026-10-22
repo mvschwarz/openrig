@@ -13,6 +13,8 @@ export interface NodeBinding extends Binding {
   /** Claude-only, session-scoped Advisor model. */
   advisor?: string;
   codexConfigProfile?: string;
+  /** Rebuild only: a process/conversation-bound native predecessor policy. */
+  codexRebuildPermissions?: import("./codex-rebuild-permissions.js").CodexPermissionEnvelope;
   /** OPR.0.4.8.3 Seam B: the seat's RESOLVED launch posture from its permission_policy
    * attachment (member > rig precedence, resolved by the core resolver at materialize /
    * restore). Absent = no policy attached → the env-driven floor/YOLO decision stands.

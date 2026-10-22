@@ -66,6 +66,7 @@ export interface SuccessorNode {
    *  Same continuity rationale as model — populated by the caller from node provenance; absent → the
    *  adapter emits no -p flag (unchanged for legacy/unpinned seats). */
   codexConfigProfile?: string | null;
+  codexRebuildPermissions?: import("./codex-rebuild-permissions.js").CodexPermissionEnvelope;
   /** The seat's declared launch environment (its rig's `env:` with the member's over it). The
    *  successor is the same seat, so it gets the same environment; absent = none declared. */
   seatEnv?: SeatEnv;
@@ -363,6 +364,7 @@ export class SuccessorSessionLauncher {
       advisor: node.advisor ?? undefined,
       // 0.5.2-07 A4-profile: the successor reads the seat's SPEC-pinned codex config profile (adapter emits -p).
       codexConfigProfile: node.codexConfigProfile ?? undefined,
+      codexRebuildPermissions: node.codexRebuildPermissions,
       ...(node.launchAdditions ? { launchAdditions: node.launchAdditions } : {}),
     };
 

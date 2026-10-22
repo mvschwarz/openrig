@@ -109,6 +109,7 @@ seatRoutes.post("/handover/:seatRef", async (c) => {
   const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
   const rigRepo = c.get("rigRepo" as never) as RigRepository;
   const service = new SeatHandoverService({
+    codexPermissions: (c.get("currentModelReader" as never) as import("../domain/model-divergence/current-model-reader.js").CurrentModelReader | undefined) ?? undefined,
     db: rigRepo.db,
     rigRepo,
     sessionRegistry: c.get("sessionRegistry" as never) as SessionRegistry,

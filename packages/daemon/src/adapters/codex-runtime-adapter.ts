@@ -1,3 +1,4 @@
+import { codexEnvelopeArgs } from "../domain/codex-rebuild-permissions.js";
 import { operationalLaunchArg } from "./kernel-authority.js";
 import nodePath from "node:path";
 import fs from "node:fs";
@@ -663,7 +664,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // -s danger-full-access (overrides even a named profile); otherwise the named profile, or
     // OpenRig's explicit -s workspace-write floor flag.
     // Issue #121: only the fresh launch adds git metadata dirs; resume and fork never did.
-    const gitDirArg = opts.resumeToken
+    const gitDirArg = opts.resumeToken || binding.codexRebuildPermissions
       ? ""
       : (await this.resolveGitAddDirs(binding.cwd)).map((dir) => ` --add-dir ${shellQuote(dir)}`).join("");
     const cmd = opts.resumeToken
@@ -746,8 +747,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const effortArg = effort ? ` -c ${shellQuote(`model_reasoning_effort="${effort}"`)}` : "";
     const profile = binding.codexConfigProfile?.trim();
     const profileArg = profile ? ` -p ${shellQuote(profile)}` : "";
-    const posture = codexPostureArg(profileArg, process.env, binding.launchPosture);
-    const appliedLaunch = observeCodexSandbox(posture);
+    const posture = binding.codexRebuildPermissions
+      ? profileArg + codexEnvelopeArgs(binding.codexRebuildPermissions)
+      : codexPostureArg(profileArg, process.env, binding.launchPosture);
+    const appliedLaunch: AppliedLaunchObservation = binding.codexRebuildPermissions
+      ? { runtime: "codex", axis: "sandbox", state: "observed", value: binding.codexRebuildPermissions.sandboxPolicy.type,
+          reason: "emitted_launch_arguments", ...(binding.codexRebuildPermissions.approvalPolicy === "never" ? { approvalPolicy: "never" } : {}) }
+      : observeCodexSandbox(posture);
     const postureArg = posture + operationalLaunchArg(this.runtime, binding);
 
     if (running) {
@@ -771,10 +777,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         };
       }
     }
-    const teamWorkspaceArg = binding.teamPermissionDefault && !profile
+    const teamWorkspaceArg = !binding.codexRebuildPermissions && binding.teamPermissionDefault && !profile
       && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write"
       ? codexTeamWorkspaceArg(this.prepareTeamWorkspace, name) : "";
-    const queueStateDirArg = teamWorkspaceArg || this.buildQueueStateAddDirArg(name);
+    const queueStateDirArg = binding.codexRebuildPermissions ? "" : teamWorkspaceArg || this.buildQueueStateAddDirArg(name);
     // #69: one daemon-support decision for this launch, for the Codex the seat pane runs
     // (its cwd, the launch PATH), applied to fresh, fork and resume.
     const daemonSupport = this.detectDaemonSupport ? await this.detectDaemonSupport(binding.cwd) : undefined;
@@ -784,7 +790,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const daemonOptOut = daemonSupport?.kind === "supported";
     const daemonArg = daemonOptOut ? " --no-daemon" : "";
     // #275: on the plain floor, network access unless Codex reports an opt-out or policy.
-    const networkArg = await codexNetworkDefaultArg(this.readNetworkDefault, appliedLaunch, binding.cwd, name);
+    const networkArg = binding.codexRebuildPermissions ? ""
+      : await codexNetworkDefaultArg(this.readNetworkDefault, appliedLaunch, binding.cwd, name);
 
     // The launch facts keep the probed daemon choice, so a printed recovery command can repeat it; no probe, no fact.
     const launchFacts = daemonSupport ? { ...appliedLaunch, daemonOptOut } : appliedLaunch;

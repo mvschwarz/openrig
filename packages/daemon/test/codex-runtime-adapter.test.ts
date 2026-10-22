@@ -1,3 +1,4 @@
+import type { CodexPermissionEnvelope } from "../src/domain/codex-rebuild-permissions.js";
 import { mockShellCommand } from "./helpers/shell-command-mock.js";
 import fs from "node:fs";
 import os from "node:os";
@@ -2051,5 +2052,43 @@ describe("Codex runtime adapter", () => {
     expect(result.failed).toEqual([]);
     expect(result.projected).toEqual(["reviewer"]);
     expect(fs.readFileSync(nodePath.join(cwd, ".agents", "reviewer.yaml"), "utf-8")).toBe("name: reviewer");
+  });
+});
+
+
+describe("rebuild permission continuity", () => {
+  it.each(["read-only", "danger-full-access"] as const)("emits the observed %s policy and approval choice", async type => {
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+    const result = await adapter.launchHarness({ ...makeBinding(), codexRebuildPermissions: {
+      approvalPolicy: "never", sandboxPolicy: { type } } }, { name: "dev-review@test-rig" });
+    expect(result).toMatchObject({ ok: true, appliedLaunch: { state: "observed", value: type, approvalPolicy: "never" } });
+    expect(vi.mocked(tmux.sendText).mock.calls[0]![1]).toContain(` -s ${type} -a never`);
+    expect(vi.mocked(tmux.sendText).mock.calls[0]![1]).not.toContain("--add-dir");
+  });
+
+  it("emits the predecessor policy without adding fresh network/git/team/queue grants", async () => {
+    const tmux = mockTmux();
+    const readNetworkDefault = vi.fn(async () => ({ apply: true, elapsedMs: 0 }));
+    const resolveGitAddDirs = vi.fn(async () => ["/repo/.git"]);
+    const prepareTeamWorkspace = vi.fn(() => ["/workspace", "/shared-docs"]);
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {},
+      readNetworkDefault, resolveGitAddDirs, prepareTeamWorkspace });
+    const envelope = { approvalPolicy: "on-request", sandboxPolicy: { type: "workspace-write",
+      network_access: false, exclude_tmpdir_env_var: true, exclude_slash_tmp: false,
+      writable_roots: ["/kept dir", "/kept'quote"] } } satisfies CodexPermissionEnvelope;
+    const binding = { ...makeBinding("/repo/review"), teamPermissionDefault: true,
+      codexRebuildPermissions: envelope };
+    expect((await adapter.launchHarness(binding, { name: "dev-review@test-rig" })).ok).toBe(true);
+    const command = vi.mocked(tmux.sendText).mock.calls[0]![1];
+    expect(command).toContain(" -s workspace-write -a on-request");
+    expect(command).toContain("sandbox_workspace_write.network_access=false");
+    expect(command).toContain("sandbox_workspace_write.exclude_tmpdir_env_var=true");
+    expect(command).toContain("sandbox_workspace_write.exclude_slash_tmp=false");
+    expect(command).toContain("sandbox_workspace_write.writable_roots=");
+    expect(command).not.toContain("--add-dir");
+    expect(readNetworkDefault).not.toHaveBeenCalled();
+    expect(resolveGitAddDirs).not.toHaveBeenCalled();
+    expect(prepareTeamWorkspace).not.toHaveBeenCalled();
   });
 });

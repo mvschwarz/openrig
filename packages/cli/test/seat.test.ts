@@ -616,6 +616,20 @@ describe("rig seat status", () => {
     });
   });
 
+  it.each([false, true])("shows an unverified rebuild permission fallback (json=%s)", async json => {
+    const permissions = { state: "unverified", detail: "No complete native policy was observed; existing launch behaviour was used. Permissions were not verified or carried." };
+    const response = { ...HANDOVER_RESULT, source: { mode: "rebuild", raw: "rebuild" },
+      sourceOutcome: { mode: "rebuild", primedArtifacts: [], gaps: [], permissions } };
+    const deps = makeDeps({ status: 200, data: response }, []);
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "dev-impl@seat-rig",
+        "--source", "rebuild", "--reason", "rebuild", ...(json ? ["--json"] : [])]);
+    });
+    expect(exitCode).toBeUndefined();
+    if (json) expect(JSON.parse(logs.join("\n")).sourceOutcome.permissions).toEqual(permissions);
+    else expect(logs.join("\n")).toContain(`Codex rebuild permissions: unverified. ${permissions.detail}`);
+  });
+
   it("handover non-dry-run human output avoids continuity claims (discovered, no context delivery)", async () => {
     const deps = makeDeps({ status: 200, data: HANDOVER_RESULT }, []);
 
