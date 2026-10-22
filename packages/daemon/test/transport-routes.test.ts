@@ -160,6 +160,24 @@ describe("transport routes", () => {
     expect(rows[0]!["identity_provenance"]).toBe("transport:v1"); // era-stamp from the run, not hardcoded-lying
   });
 
+  it("an urgent send names who marked it, from the sender's identity, never the body; a send to the sender's own seat says so", async () => {
+    seedRig();
+    const res = await sendApp().request("/api/transport/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@my-rig" },
+      body: JSON.stringify({ session: "dev-impl@my-rig", text: "the build is red", urgent: true, actorSession: "someone-else@my-rig" }),
+    });
+    expect(await res.json()).toMatchObject({ ok: true, urgent: { by: "orch@my-rig" } });
+    const self = await sendApp().request("/api/transport/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "dev-impl@my-rig" },
+      body: JSON.stringify({ session: "dev-impl@my-rig", text: "note to self" }),
+    });
+    const selfBody = await self.json() as Record<string, unknown>;
+    expect(selfBody).toMatchObject({ fromDestinationSeat: true });
+    expect(selfBody.urgent).toBeUndefined();
+  });
+
   it("A3 — a cross-host send records the ORIGIN triple (the derived header), never the relay's seat", async () => {
     seedRig();
     const res = await sendApp().request("/api/transport/send", {

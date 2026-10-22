@@ -589,6 +589,17 @@ describe("Send CLI", () => {
     }
   });
 
+  it("send --urgent marks the message urgent; without it nothing is marked", async () => {
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "the build is red", "--urgent"]);
+    });
+    expect(lastSendBody?.urgent).toBe(true);
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "routine"]);
+    });
+    expect("urgent" in (lastSendBody ?? {})).toBe(false);
+  });
+
   it("send --dangerously-interact --reason posts the override fields with raw (exact) text", async () => {
     await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "1", "--dangerously-interact", "--reason", "unblock stuck prompt"]);
