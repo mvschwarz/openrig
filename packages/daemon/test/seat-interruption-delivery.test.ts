@@ -275,6 +275,38 @@ describe("a combined wake's released members are each typed at most once in a dr
     expect(f.typed.join("\n")).not.toContain(`parked qitem ${routine} is pending`);
     expect(f.queue.getById(routine!)!.lastNudgeResult).toBe("retained:typing_guard");
   });
+
+  it("an urgent member sent unconfirmed isn't typed again when the level relaxes before its released members go", async () => {
+    const f = fixture({ unconfirmed: true });
+    const offline = new QueueRepository(f.db, new EventBus(f.db), { validateRig: () => true });
+    offline.attachOutbox(new OutboxHandler(f.db));
+    const blocker = await offline.create({ sourceSession: "peer@test", destinationSession: "peer@test", body: "Vendor reply", nudge: false });
+    const parked: string[] = [];
+    for (const priority of ["urgent", "routine", "routine"]) {
+      const row = await offline.create({ sourceSession: "peer@test", destinationSession: seat, body: `${priority} follow-up`, priority, nudge: false });
+      await offline.update({ qitemId: row.qitemId, actorSession: seat, state: "blocked", blockedOn: blocker.qitemId } as never);
+      parked.push(row.qitemId);
+    }
+    await offline.update({ qitemId: blocker.qitemId, actorSession: "peer@test", state: "done", closureReason: "no-follow-on" } as never);
+    // Once the urgent member's send returns (unconfirmed), the person goes back to off before the released members go.
+    const send = f.transport.send.bind(f.transport);
+    let relaxed = false;
+    vi.spyOn(f.transport, "send").mockImplementation(async (...args) => {
+      const result = await send(...args);
+      if (!relaxed) { relaxed = true; await f.level("off"); }
+      return result;
+    });
+    let release!: () => void;
+    const busy = f.guard.operation(seat, () => new Promise<void>((r) => { release = r; }));
+    const drain = f.queue.drainPendingWakeIntents();
+    await new Promise((r) => setTimeout(r, 50));
+    await f.guard.set("a", { mode: "urgent-only" }, "person@test", "focus", 1);
+    release();
+    await busy;
+    await drain;
+    expect(relaxed).toBe(true);
+    for (const id of parked) expect(f.typed.filter((t) => t.includes(`parked qitem ${id} is pending`))).toHaveLength(1);
+  });
 });
 
 describe("a returned result and its resume", () => {
