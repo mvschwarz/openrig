@@ -1289,14 +1289,16 @@ export class QueueRepository {
       const first = candidate; // Keep each member's pre-claim uncertainty.
       const intents = [first];
       const correlation = first.tags?.find(tag => tag.startsWith("queue:return:"));
-      // Only wakes the seat's level would treat alike go together: the same source and the same urgent mark. Any other
-      // waits for its own delivery, so a routine wake never rides in on an urgent one's mark, nor an urgent one under a
-      // routine one's hold.
-      const facts = (entry: OutboxEntry) => {
+      // Group by outcome at the seat's current level: each member is admitted with its own source and urgency, and only
+      // members with the first one's outcome (typed or held) go together. With no level (off, draft-aware), everything is
+      // admitted, so a returned result and its resume still go as one send. At a level, a routine wake never rides in on
+      // an urgent one, nor an urgent one under a routine one's hold; any other member waits for its own delivery.
+      const outcome = (entry: OutboxEntry) => {
         const trigger: WakeTrigger = entry.tags?.includes(WAKE_TRIGGER_OPENRIG_TAG) ? "openrig" : "agent";
-        return JSON.stringify([trigger, entry.auditPointer ? this.wakeAdmission(entry.auditPointer, trigger).urgentBy ?? null : null]);
+        const admission = entry.auditPointer ? this.wakeAdmission(entry.auditPointer, trigger) : { source: trigger, urgent: false };
+        return this.transport?.retentionTarget?.(entry.destinationSession, { source: admission.source, urgent: admission.urgent }) ? "held" : "typed";
       };
-      const firstFacts = facts(first);
+      const firstOutcome = outcome(first);
       if (correlation) {
         const peers = this.db.prepare(`SELECT outbox_id FROM outbox_entries
           WHERE delivery_state IN ('pending','failed','indeterminate') AND destination_session = ? AND substr(outbox_id, 1, ?) = ?
@@ -1304,7 +1306,7 @@ export class QueueRepository {
           ORDER BY outbox_id`).all(first.destinationSession, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX, correlation) as Array<{ outbox_id: string }>;
         for (const peer of peers) {
           const entry = this.outbox!.getById(peer.outbox_id)!;
-          if (facts(entry) !== firstFacts) continue;
+          if (outcome(entry) !== firstOutcome) continue;
           if (actionable(entry) && claim(entry)) intents.push(entry);
         }
       }
@@ -1323,7 +1325,8 @@ export class QueueRepository {
     const qitemId = intent.auditPointer ?? outboxId;
     // Preserve the original envelope/source generation; add context without rewriting its stored bytes.
     const recoveryNotice = recovering ? "Recovered queue notification: delivery may repeat after an earlier unconfirmed attempt.\n" : "";
-    // Every intent in a coalesced send shares its source and urgent mark (see the grouping above), so the first speaks for all.
+    // The group was formed on the first member's outcome, so its own source and urgency reach that same outcome at the
+    // send; the other members' bodies keep their own frozen urgent lines.
     const trigger: WakeTrigger = group[0]!.tags?.includes(WAKE_TRIGGER_OPENRIG_TAG) ? "openrig" : "agent";
     const outcome = await this.performWakeSend(
       qitemId, intent.destinationSession, intent.senderSession, undefined, recoveryNotice + group.map(entry => entry.body).join("\n"), group.map(entry => entry.outboxId),

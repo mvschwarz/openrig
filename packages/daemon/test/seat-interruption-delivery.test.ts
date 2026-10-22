@@ -216,6 +216,23 @@ describe("wakes delivered together each keep their own admission", () => {
     });
 });
 
+describe("a returned result and its resume", () => {
+  it("at urgent-only, both routine: the arrival and the waiter's resume are both held, each its own readable record", async () => {
+    const f = fixture();
+    const waiter = await f.queue.create({ sourceSession: "peer@test", destinationSession: seat, body: "Ship after the review", nudge: false });
+    const blocker = await f.queue.create({ sourceSession: seat, destinationSession: "peer@test", body: "Review it", nudge: false });
+    await f.queue.update({ qitemId: waiter.qitemId, actorSession: seat, state: "blocked", blockedOn: blocker.qitemId } as never);
+    await f.level("urgent-only");
+    const returned = await f.queue.handoff({ qitemId: blocker.qitemId, fromSession: "peer@test", toSession: seat, body: "The review", nudge: true });
+    await vi.waitFor(() => expect(f.queue.getById(waiter.qitemId)!.lastNudgeResult).toBe("retained:typing_guard"));
+    await vi.waitFor(() => expect(f.queue.getById(returned.created.qitemId)!.lastNudgeResult).toBe("retained:typing_guard"));
+    expect(f.typed).toEqual([]);
+    const held = f.held().map((h) => h.body).join("\n");
+    expect(held).toContain(returned.created.qitemId);
+    expect(held).toContain(`parked qitem ${waiter.qitemId} is pending`);
+  });
+});
+
 describe("the attention-clear liveness probe", () => {
   it("is OpenRig's: typed at openrig-urgent; where the level would hold it, it's neither sent nor kept as a held message", async () => {
     const f = fixture();
