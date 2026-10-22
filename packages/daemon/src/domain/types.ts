@@ -128,6 +128,8 @@ export type RigEvent =
       pinnedModel: string;
       effectiveModel: string;
       diagnosis: string | null;
+      /** Absent on events written before this field existed. When present, a restarted daemon doesn't proclaim it again. */
+      occurrenceId?: string;
       channels: Array<{ channel: string; target: string | null; status: string; detail?: string }>;
     }
   | { type: "rig.deleted"; rigId: string }

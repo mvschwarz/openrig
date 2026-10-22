@@ -14,6 +14,9 @@ import {
 } from "../src/domain/model-divergence/model-divergence-monitor.js";
 import { SPEC_VALIDATION_CAPABILITIES } from "../src/domain/rigspec-schema.js";
 import { ProcessCensus } from "../src/domain/process-census.js";
+import * as monitorModule from "../src/domain/model-divergence/model-divergence-monitor.js";
+import { createFullTestDb } from "./helpers/test-app.js";
+import { EventBus } from "../src/domain/event-bus.js";
 
 const SEAT: PinnedSeat = {
   nodeId: "n1",
@@ -390,5 +393,51 @@ describe("Claude context-window pins", () => {
       expect(message.message).toContain(`effective=${model}`);
     }
     expect(await monitor.checkOnce()).toEqual([]);
+  });
+});
+
+// The settled set is in memory, so a daemon restart used to alert again on an unchanged divergence (five alerts in eleven
+// minutes for two unchanged seats across one recovery). The occurrence id is content-derived, and the proclamation's own
+// durable record keeps it.
+describe("ModelDivergenceMonitor — a restart doesn't proclaim an unchanged divergence again", () => {
+  it("a restarted monitor stays quiet for the same occurrence and alerts for a changed model or a new generation", async () => {
+    const proclaimed = new Set<string>();
+    const durable = {
+      recordProclamation: (p: { occurrenceId?: string }) => { if (p.occurrenceId) proclaimed.add(p.occurrenceId); },
+      wasProclaimed: (occurrenceId: string) => proclaimed.has(occurrenceId),
+    };
+    const first = makeMonitor(durable);
+    expect(await first.monitor.checkOnce()).toHaveLength(1);
+
+    const restarted = makeMonitor(durable);
+    expect(await restarted.monitor.checkOnce()).toHaveLength(0);
+    expect(restarted.sent).toHaveLength(0);
+    expect(await restarted.monitor.checkOnce()).toHaveLength(0);
+
+    const changed = makeMonitor({ ...durable, readEffectiveModel: () => ({ ok: true as const, model: "gpt-5.5-mini" }) });
+    expect(await changed.monitor.checkOnce()).toHaveLength(1);
+    const newOccupant = makeMonitor({ ...durable, listPinnedSeats: () => [{ ...SEAT, generation: "gen-2" }] });
+    expect(await newOccupant.monitor.checkOnce()).toHaveLength(1);
+  });
+
+  it("an unreadable record still proclaims, and says why", async () => {
+    const warnings: string[] = [];
+    const { monitor } = makeMonitor({ wasProclaimed: () => { throw new Error("db locked"); }, warn: (m) => warnings.push(m) });
+    expect(await monitor.checkOnce()).toHaveLength(1);
+    expect(warnings.join("\n")).toMatch(/could not read earlier proclamations.*db locked/);
+  });
+
+  it("proclaimedInEventLog answers from the persisted seat.model_divergence event, per node", () => {
+    const db = createFullTestDb();
+    const bus = new EventBus(db);
+    const proclaimedInEventLog = (monitorModule as { proclaimedInEventLog?: (d: typeof db) => (id: string, nodeId: string) => boolean }).proclaimedInEventLog;
+    expect(typeof proclaimedInEventLog).toBe("function");
+    bus.emit({ type: "seat.model_divergence", rigId: "rig-1", nodeId: "n1", sessionName: "dev-impl@r", runtime: "codex",
+      pinnedModel: "gpt-5.1-codex-mini", effectiveModel: "gpt-5.4-mini", diagnosis: null, occurrenceId: "occ-1", channels: [] });
+    const was = proclaimedInEventLog!(db);
+    expect(was("occ-1", "n1")).toBe(true);
+    expect(was("occ-2", "n1")).toBe(false);
+    expect(was("occ-1", "n2")).toBe(false);
+    db.close();
   });
 });
