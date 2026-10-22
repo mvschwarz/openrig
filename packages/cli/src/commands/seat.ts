@@ -26,7 +26,7 @@ interface SeatStatusResponse {
   runtime: string | null;
   current_occupant: string | null;
   typingGuard?: { desired: boolean; effective: boolean; pending: boolean; heldCount: number;
-    desiredMode?: string; effectiveMode?: string; };
+    desiredMode?: string; effectiveMode?: string; desiredLevel?: string; effectiveLevel?: string; };
   permissions?: {
     selectionState: "explicit" | "inherit" | "unknown";
     desired: { mode: string } | null;
@@ -157,6 +157,12 @@ function sessionReason(reason: string | null | undefined): string | null {
   return reason === "session_missing" ? "tmux session missing; restore or relaunch the seat" : null;
 }
 
+const LEVEL_WORDS: Record<string, string> = {
+  "openrig-urgent": "OpenRig's own messages and anything marked urgent type.",
+  "urgent-only": "Only messages marked urgent type.",
+  "sends-only": "Deliberate sends from people and agents type; OpenRig's own notices are held.",
+};
+
 function printHuman(status: SeatStatusResponse): void {
   console.log(`Seat ${status.seat_ref}`);
   console.log(`Rig: ${status.rig_name}`);
@@ -165,9 +171,12 @@ function printHuman(status: SeatStatusResponse): void {
   if (status.launch_cwd !== undefined) console.log(`Working directory for future launches: ${display(status.launch_cwd)}`);
   if (status.typingGuard) {
     const g = status.typingGuard;
-    const mode = g.effectiveMode ?? (g.effective ? "on" : "off");
-    console.log(`Typing guard: ${mode === "hold" ? "on (hold)" : mode}${g.pending ? ` (activation pending; requested ${g.desiredMode ?? (g.desired ? "on" : "off")})` : ""}; ${g.heldCount} retained`);
+    const mode = g.effectiveLevel ?? g.effectiveMode ?? (g.effective ? "on" : "off");
+    const requested = g.desiredLevel ?? g.desiredMode ?? (g.desired ? "on" : "off");
+    console.log(`Typing guard: ${mode === "hold" ? "on (hold)" : mode}${g.pending ? ` (activation pending; requested ${requested})` : ""}; ${g.heldCount} retained`);
     if (mode === "draft-aware") console.log(`Draft-aware sends return immediately; inspect held messages with rig seat held-messages ${status.seat_ref}.`);
+    else if (LEVEL_WORDS[mode]) console.log(`${LEVEL_WORDS[mode]} Other automatic input is held, readable with rig seat held-messages ${status.seat_ref}. Changing it does not replay held messages.`);
+    else if (mode === "off") console.log("Off: automatic input types as it arrives.");
     else console.log("Hold pauses all automatic input, including writing lifecycle. Changing mode does not replay held messages.");
   }
   console.log(`Session: ${display(status.session_status, "unknown")}`);
@@ -304,7 +313,7 @@ export function seatCommand(depsOverride?: SeatDeps & { readStdin?: () => Promis
   };
   cmd.command("set-typing-guard").argument("<seat>")
     .option("--enabled <boolean>", "Compatibility: true selects hold; false selects off")
-    .option("--mode <mode>", "off, draft-aware or hold; choose this or --enabled")
+    .option("--mode <mode>", "off, draft-aware, openrig-urgent, urgent-only, sends-only or hold; choose this or --enabled")
     .requiredOption("--reason <text>").option("--json").description("Choose how this seat's typing guard handles automatic input")
     .addHelpText("after", `
 This one persistent guard defaults off. Hold pauses ALL automatic input, including
@@ -312,6 +321,17 @@ at an empty prompt; --enabled true keeps that existing behavior. Draft-aware hol
 when the current input contains a draft or cannot be read. It returns the exact
 reason and held message ID immediately, without automatic retry.
 Off (--enabled false) permits new automatic sends.
+
+Between off (always interrupt) and hold (full quiet):
+  openrig-urgent  OpenRig's own messages (watchdogs, scheduled wakes, notices) and
+                  anything marked urgent type; other agents' messages are held.
+  urgent-only     only messages marked urgent type (rig send --urgent, or a queue
+                  item at priority urgent or critical).
+  sends-only      deliberate sends from people and agents type; OpenRig's own
+                  notices are held. A terminal member defaults to this.
+What a level lets through never types over a draft. Everything else is held, the
+sender is told, and held messages stay readable. Lifecycle work is refused at
+openrig-urgent and urgent-only, as at hold.
 Messages use the existing outbox. Uncertain writes never replay automatically.
 Direct human input remains available. Other seats keep their own guard mode.
 
@@ -331,13 +351,14 @@ on an active pane; freshly created or respawned lifecycle shells have separate p
 
 Examples:
   rig seat set-typing-guard dev-impl@my-rig --mode draft-aware --reason "preserve my draft"
+  rig seat set-typing-guard review-r1@my-rig --mode urgent-only --reason "reviewing by hand"
   rig seat set-typing-guard dev-impl@my-rig --enabled true --reason "manual terminal"
 `)
     .action(async (seat: string, opts: { enabled?: string; mode?: string; reason: string; json?: boolean }) => {
       if ((opts.enabled === undefined) === (opts.mode === undefined)
         || opts.enabled !== undefined && !["true", "false"].includes(opts.enabled)
-        || opts.mode !== undefined && !["off", "draft-aware", "hold"].includes(opts.mode)) {
-        console.error("Choose --enabled true|false or --mode off|draft-aware|hold.");
+        || opts.mode !== undefined && !["off", "draft-aware", "openrig-urgent", "urgent-only", "sends-only", "hold"].includes(opts.mode)) {
+        console.error("Choose --enabled true|false or --mode off|draft-aware|openrig-urgent|urgent-only|sends-only|hold.");
         process.exitCode = 1; return;
       }
       await guardRequest("POST", `/api/seat/set-typing-guard/${encodeURIComponent(seat)}`, {

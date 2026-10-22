@@ -101,6 +101,17 @@ describe("seat typing guard commands", () => {
     expect(status.logs.join("\n")).toContain("Typing guard: on (hold)");
   });
 
+  it("sets a level through the same control, and status names it with what types and what's held", async () => {
+    const paths: string[] = [], bodies: unknown[] = [];
+    const set = makeDeps({ status: 200, data: { effectiveMode: "hold", effectiveLevel: "urgent-only", pending: false } }, paths, bodies);
+    await captureLogs(() => makeCommand(set).parseAsync(["node", "rig", "seat", "set-typing-guard", "worker@test",
+      "--mode", "urgent-only", "--reason", "reviewing by hand", "--json"]).then(() => undefined));
+    expect(bodies).toEqual([{ mode: "urgent-only", reason: "reviewing by hand" }]);
+    const deps = makeDeps({ status: 200, data: { ...STATUS, typingGuard: { desired: true, effective: true, effectiveMode: "hold", effectiveLevel: "urgent-only", pending: false, heldCount: 2 } } }, []);
+    const status = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
+    expect(status.logs.join("\n")).toContain("Typing guard: urgent-only; 2 retained\nOnly messages marked urgent type. Other automatic input is held, readable with rig seat held-messages dev-impl@seat-rig.");
+  });
+
   it("sends draft-aware mode through the existing control", async () => {
     const paths: string[] = [], bodies: unknown[] = [];
     const deps = makeDeps({ status: 200, data: { effectiveMode: "draft-aware", pending: false } }, paths, bodies);
