@@ -34,6 +34,7 @@ import { latestHookPermissionPending, latestHookWaitsOnPerson, type AgentActivit
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity } from "./types.js";
 import { DeliveryGuardError, type AdmissionInput, type GuardTarget, type SeatDeliveryGuard } from "./seat-delivery-guard.js";
+import { withUrgentLine } from "./urgent-line.js";
 import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "../lib/pane-envelope.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
@@ -2172,7 +2173,7 @@ export class SessionTransport {
     if (!opts?.urgent) return this.sendClassified(sessionName, text, opts);
     // Shown on delivery, and kept with a held message: who marked it urgent.
     console.info(`[transport] urgent send to ${sessionName}, marked by ${opts.urgent.by}`);
-    const result = await this.sendClassified(sessionName, `Urgent (marked by ${opts.urgent.by}):\n${text}`, opts);
+    const result = await this.sendClassified(sessionName, withUrgentLine(text, opts.urgent.by), opts);
     return { ...result, urgent: opts.urgent };
   }
 

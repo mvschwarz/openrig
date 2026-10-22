@@ -156,6 +156,42 @@ describe("queue wakes: who triggered the wake decides its source", () => {
   });
 });
 
+describe("an urgent queue wake shows who marked it, typed or held, exactly once", () => {
+  const lines = (text: string) => text.split("\n").filter((l) => l.startsWith("Urgent (marked by")).length;
+
+  it("held at hold: an agent's urgent row names the agent; OpenRig's own urgent row names OpenRig", async () => {
+    const f = fixture();
+    await f.level("hold");
+    const agentRow = await f.queue.create({ sourceSession: "peer@test", destinationSession: seat, body: "Prod is down", priority: "urgent" });
+    const openrigRow = await f.queue.create({ sourceSession: "peer@test", destinationSession: seat, body: "Workflow exception", priority: "urgent", wakeTrigger: "openrig" });
+    await vi.waitFor(() => expect(f.queue.getById(openrigRow.qitemId)!.lastNudgeResult).toBe("retained:typing_guard"));
+    const heldFor = (id: string) => f.held().find((h) => h.body.includes(id))!;
+    expect(heldFor(agentRow.qitemId)).toMatchObject({ urgency: "urgent", senderSession: "peer@test" });
+    expect(heldFor(agentRow.qitemId).body).toContain("Urgent (marked by peer@test):");
+    expect(heldFor(openrigRow.qitemId).body).toContain("Urgent (marked by OpenRig):");
+    expect(lines(heldFor(openrigRow.qitemId).body)).toBe(1);
+  });
+
+  it("staged earlier and delivered later (the startup drain): the frozen body's line isn't added twice", async () => {
+    const f = fixture();
+    // Staged with no transport attached, as before a restart: the intent waits with its frozen body.
+    const offline = new QueueRepository(f.db, new EventBus(f.db), { validateRig: () => true });
+    offline.attachOutbox(new OutboxHandler(f.db));
+    const row = await offline.create({ sourceSession: "peer@test", destinationSession: seat, body: "Prod is down", priority: "urgent" });
+    await f.queue.drainPendingWakeIntents();
+    await vi.waitFor(() => expect(f.typed.join("\n")).toContain(row.qitemId));
+    expect(lines(f.typed.find((t) => t.includes(row.qitemId))!)).toBe(1);
+  });
+
+  it("typed: an urgent wake carries exactly one line", async () => {
+    const f = fixture();
+    await f.level("urgent-only");
+    const row = await f.queue.create({ sourceSession: "peer@test", destinationSession: seat, body: "Prod is down", priority: "urgent" });
+    await vi.waitFor(() => expect(f.typed.join("\n")).toContain(row.qitemId));
+    expect(lines(f.typed.find((t) => t.includes(row.qitemId))!)).toBe(1);
+  });
+});
+
 describe("the attention-clear liveness probe", () => {
   it("is OpenRig's: typed at openrig-urgent; where the level would hold it, it's neither sent nor kept as a held message", async () => {
     const f = fixture();

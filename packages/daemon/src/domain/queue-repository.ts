@@ -1,4 +1,5 @@
 import { PROMPT_ALERT_TAG, readWakeLadderBackstop } from "./queue-wake-ladder.js";
+import { withUrgentLine } from "./urgent-line.js";
 import { quietCustodyBackstop, quietHoldCustody } from "./quiet-hold-custody.js";
 import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
@@ -1152,9 +1153,11 @@ export class QueueRepository {
       { stampISO, genUuid },
     );
     const admission = this.wakeAdmission(input.auditPointer, input.tags?.includes(WAKE_TRIGGER_OPENRIG_TAG) ? "openrig" : "agent");
+    // An urgent wake's frozen body carries the line naming who marked it, so a person reading it held sees it too; the
+    // transport won't add it a second time when it's delivered.
     const record = {
       outboxId: input.outboxId, senderSession: input.fromSession, destinationSession: input.toSession,
-      body: frozenEnvelope, tags: input.tags, auditPointer: input.auditPointer, identityProvenance: input.identityProvenance,
+      body: admission.urgentBy ? withUrgentLine(frozenEnvelope, admission.urgentBy) : frozenEnvelope, tags: input.tags, auditPointer: input.auditPointer, identityProvenance: input.identityProvenance,
       ...(admission.urgent ? { urgency: "urgent" } : {}),
     };
     const target = this.transport?.retentionTarget?.(input.toSession, admission);
