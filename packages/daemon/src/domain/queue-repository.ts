@@ -323,6 +323,9 @@ type WakeAttemptOutcome = {
 };
 
 export interface QueueCreateInput {
+  /** Internal: a row OpenRig creates itself (a sweep finding, a health notice, a mode-end notice) wakes as OpenRig's own
+   *  message at the destination's interruption level. Never accepted from the HTTP queue routes. */
+  wakeTrigger?: WakeTrigger;
   qitemId?: string;
   sourceSession: string;
   destinationSession: string;
@@ -1011,7 +1014,8 @@ export class QueueRepository {
   private wakeAdmission(qitemId: string, trigger: WakeTrigger): import("./seat-delivery-guard.js").AdmissionInput & { urgentBy?: string } {
     const row = this.getById(qitemId);
     const urgent = row?.priority === "urgent" || row?.priority === "critical";
-    return { source: trigger, urgent, ...(urgent && row ? { urgentBy: row.sourceSession } : {}) };
+    // OpenRig's own row is marked urgent by OpenRig, not by the person whose obligation it's about.
+    return { source: trigger, urgent, ...(urgent && row ? { urgentBy: trigger === "openrig" ? "OpenRig" : row.sourceSession } : {}) };
   }
 
   private classifyWakeResult(res: Awaited<ReturnType<QueueNudgeTransport["send"]>>): WakeAttemptOutcome {
@@ -1105,6 +1109,7 @@ export class QueueRepository {
     toSession: string,
     identityProvenance: string | null,
     nudge: boolean | undefined,
+    trigger: WakeTrigger = "agent",
   ): void {
     // No wake intended (nudge:false) ⇒ no durable intent to make durable. The
     // W1-c guard is nudge-aware for the same reason: absence of an intent is a
@@ -1120,7 +1125,9 @@ export class QueueRepository {
       toSession,
       identityProvenance,
       bareBody: renderQueueHandoffNudge(successorQitemId, successor?.summary),
-      tags: successor?.handedOffFrom ? [`queue:return:${successor.handedOffFrom}`] : undefined,
+      tags: successor?.handedOffFrom || trigger === "openrig"
+        ? [...(successor?.handedOffFrom ? [`queue:return:${successor.handedOffFrom}`] : []), ...(trigger === "openrig" ? [WAKE_TRIGGER_OPENRIG_TAG] : [])]
+        : undefined,
     });
   }
 
@@ -1589,7 +1596,7 @@ export class QueueRepository {
         try {
           // A savepoint removes any partial intent when staging fails, while
           // preserving ordinary create's existing acceptance of the task.
-          this.db.transaction(() => this.stageWakeIntent(created.qitemId, input.sourceSession, input.destinationSession, input.identityProvenance ?? null, input.nudge))();
+          this.db.transaction(() => this.stageWakeIntent(created.qitemId, input.sourceSession, input.destinationSession, input.identityProvenance ?? null, input.nudge, input.wakeTrigger))();
           wakeStaged = true;
         } catch (err) {
           this.recordNudgeAttempt(created.qitemId, `failed:wake not retained: ${err instanceof Error ? err.message : String(err)}`);
@@ -1652,7 +1659,7 @@ export class QueueRepository {
     if (this.outbox) {
       if (wakeStaged) this.deliverWakeIntentAfterCommit(`${WAKE_INTENT_PREFIX}${id}`);
     } else {
-      await this.maybeNudge(id, input.destinationSession, input.nudge, input.sourceSession);
+      await this.maybeNudge(id, input.destinationSession, input.nudge, input.sourceSession, undefined, input.wakeTrigger);
     }
     return this.getByIdOrThrow(id);
   }

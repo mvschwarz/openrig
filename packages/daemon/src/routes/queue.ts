@@ -473,7 +473,8 @@ export function queueRoutes(): Hono {
   }
   function createSuccessorInProcess(c: { get: (key: string) => unknown; json: (body: unknown, status?: number) => Response }) {
     return async (forwardBody: Record<string, unknown>): Promise<{ ok: true; payload: unknown } | { ok: false; response: Response }> => {
-      const input = forwardBody as unknown as QueueCreateInput;
+      // wakeTrigger is internal (a row OpenRig creates itself); a forwarded body never carries it.
+      const { wakeTrigger: _internal, ...input } = forwardBody as unknown as QueueCreateInput;
       const refusal = createInputRefusal(c, input.sourceSession, input);
       if (refusal) return { ok: false, response: refusal };
       try {
