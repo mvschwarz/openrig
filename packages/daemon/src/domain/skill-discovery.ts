@@ -33,6 +33,9 @@ export interface SkillDiscoveryPaths {
   /** Config-resolved managed catalog root. Defaults to the legacy
    *  <homedir>/.openrig/skills path when omitted for compatibility. */
   skillsRoot?: string;
+  /** #875 — skill folders of `seat_material: seat` Claude seats. Audited only
+   *  (discoverSkillsWithProvenance); they are projection output, never a source. */
+  seatSkillRoots?: string[];
 }
 
 export interface SkillFrontmatter {
@@ -58,7 +61,7 @@ export interface SkillDiscoveryResult {
   rejected: SkillRejection[];
 }
 
-export type SourceKind = "rig_bundled" | "spec_install" | "runtime_user" | "shared_user";
+export type SourceKind = "rig_bundled" | "spec_install" | "runtime_user" | "shared_user" | "seat_material";
 
 export interface SkillProvenanceEntry {
   id: string;
@@ -255,12 +258,18 @@ function rootToSourceKind(root: string, paths: SkillDiscoveryPaths): SourceKind 
 /** Every skill in every scan root, with where it came from and whether a more specific root shadows it: the skill
  *  audit's input. It reads every SKILL.md, so it reads asynchronously and the daemon keeps answering meanwhile. */
 export async function discoverSkillsWithProvenance(paths: SkillDiscoveryPaths): Promise<SkillProvenanceResult> {
-  const scanRoots = listScanRoots(paths);
+  const scanRoots = [
+    ...listScanRoots(paths).map((root) => ({ root, sourceKind: rootToSourceKind(root, paths), seat: false })),
+    ...(paths.seatSkillRoots ?? []).map((root) => ({ root, sourceKind: "seat_material" as const, seat: true })),
+  ];
   const skills: SkillProvenanceEntry[] = [];
   const rejected: SkillRejection[] = [];
-  const seenIds = new Set<string>();
+  const sharedSeenIds = new Set<string>();
 
-  for (const root of scanRoots) {
+  for (const { root, sourceKind, seat } of scanRoots) {
+    // Each seat directory is a separate Claude session's loadout: its skills shadow nothing
+    // and are shadowed by nothing, so a stale copy in one seat is still audited.
+    const seenIds = seat ? new Set<string>() : sharedSeenIds;
     let entries: string[];
     try { entries = await readdir(root); } catch { continue; }
 
@@ -286,7 +295,6 @@ export async function discoverSkillsWithProvenance(paths: SkillDiscoveryPaths): 
       }
 
       const id = parsed.frontmatter.name;
-      const sourceKind = rootToSourceKind(root, paths);
       skills.push({
         id,
         path: skillDir,

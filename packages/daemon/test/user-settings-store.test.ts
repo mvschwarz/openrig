@@ -108,6 +108,7 @@ describe("SettingsStore (User Settings v0)", () => {
       "context.root",
       "context.system_world",
       "skills.root",
+      "skills.router_line.enabled",
       "onboarding.default_pack.enabled",
       "launch.non_interruptive",
       "health.context_pressure.warning_percent",

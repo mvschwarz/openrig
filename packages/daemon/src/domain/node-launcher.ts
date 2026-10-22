@@ -15,7 +15,8 @@ import { observeSolePane, paneObservationVerdict } from "./pane-binding-observat
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import type { OccupantKind } from "./session-registry.js";
 import { mergeSeatEnv, seatEnvLaunchVars, type SeatEnv } from "./seat-env.js";
-import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV, seatCodexCorePluginDir, seatCorePluginDir, withCorePlugin } from "./claude-core-plugin-env.js";
+import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV, seatCodexCorePluginDir, seatCorePluginDir, withPluginDirs } from "./claude-core-plugin-env.js";
+import { seatSkillPluginDirForNode } from "./seat-skill-storage.js";
 
 import type { Session, Binding } from "./types.js";
 
@@ -161,6 +162,8 @@ export class NodeLauncher {
     // collision, never authority to kill an unmanaged same-name session.
     const specEnv = this.rigRepo.getEffectiveSeatEnv(node.id);
     const corePluginDir = seatCorePluginDir(node, this.db, opts?.pluginPaths, this.pluginsDir);
+    // OPR.0.7.0.13 — the seat's own skills, from storage keyed by its rig and logical seat (every launch path).
+    const seatSkillDir = seatSkillPluginDirForNode(this.db, node.id);
     const codexCorePluginDir = seatCodexCorePluginDir(node, this.db, opts?.pluginPaths, this.pluginsDir);
     const sessionCwd = opts?.cwd ?? node.cwd ?? undefined;
     const launchEnv = (oneOff?: SeatEnv) => compactEnv({
@@ -169,7 +172,7 @@ export class NodeLauncher {
       OPENRIG_RUNTIME: node.runtime ?? undefined,
       ...this.sessionEnv,
       ...(node.runtime ? this.runtimeSessionEnv[node.runtime] : undefined),
-      ...seatEnvLaunchVars(withCorePlugin(mergeSeatEnv(specEnv, oneOff), corePluginDir)),
+      ...seatEnvLaunchVars(withPluginDirs(mergeSeatEnv(specEnv, oneOff), [corePluginDir, seatSkillDir])),
       // The launch project of a seat that loads the plugin, so a Claude started elsewhere inside the seat is not taken for it.
       // For a Codex seat it is also the selection signal its plugin hooks check, beside the interpreter they run with.
       [SEAT_PROJECT_DIR_ENV]: corePluginDir || codexCorePluginDir ? sessionCwd : undefined,

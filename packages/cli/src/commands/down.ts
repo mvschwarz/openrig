@@ -15,6 +15,8 @@ interface TeardownResult {
   deleteBlocked: boolean;
   alreadyStopped: boolean;
   errors: string[];
+  /** Team skill files kept in seats' own storage: edited, or never recorded as OpenRig's. */
+  keptSkills?: string[];
 }
 
 interface DownAgentEntry {
@@ -194,6 +196,11 @@ rig up <rig> --existing brings it back, resuming each seat's conversation where 
       }
 
       const result = res.data as TeardownResult;
+      // OPR.0.7.0.13: say what was kept and why, whatever else happened.
+      if (result.keptSkills && result.keptSkills.length > 0) {
+        console.log(`Kept ${result.keptSkills.length} team skill file(s) in the seats' own storage: edited, or not recorded as OpenRig's:`);
+        for (const file of result.keptSkills) console.log(`  ${file}`);
+      }
 
       // Exit code: errors first, then deleted, then alreadyStopped
       if (result.errors.length > 0) {

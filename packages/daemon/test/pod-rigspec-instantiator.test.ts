@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, it, expect, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -22,6 +23,7 @@ import type { AgentResolverFsOps } from "../src/domain/agent-resolver.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RigSpec } from "../src/domain/types.js";
+import { seatSkillPaths } from "../src/domain/seat-skill-storage.js";
 
 function mockTmux(): TmuxAdapter {
   return {
@@ -302,6 +304,26 @@ profiles:
     }
   });
 
+  // Every entry under a folder with its mode, and each file's bytes as a hash, sorted.
+  function listTree(dir: string): string[] {
+    const out: string[] = [];
+    const walk = (d: string, rel: string) => {
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        const r = rel ? `${rel}/${e.name}` : e.name;
+        const full = nodePath.join(d, e.name);
+        const mode = (fs.lstatSync(full).mode & 0o777).toString(8);
+        if (e.isDirectory()) { out.push(`${r}/ ${mode}`); walk(full, r); }
+        else out.push(`${r} ${mode} ${createHash("sha256").update(fs.readFileSync(full)).digest("hex").slice(0, 16)}`);
+      }
+    };
+    walk(dir, "");
+    return out.sort();
+  }
+
+  // OPR.0.7.0.13 — a Claude seat's skills go to its own storage (rig, logical seat); Codex's still go to the cwd.
+  const seatSkillsRoot = (rigId: string, logicalId: string, runtime: "claude-code" | "codex" = "claude-code") =>
+    seatSkillPaths({ rigId, logicalId, runtime }, process.env["OPENRIG_HOME"]).skillsRoot;
+
   it.each(["claude-code", "codex"] as const)("reports bundle precedence after real %s reconciliation", async (runtime) => {
     const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "instantiator-bundle-precedence-"));
     let db: ReturnType<typeof createFullTestDb> | undefined;
@@ -336,14 +358,148 @@ profiles:
       expect(JSON.stringify(result)).toContain("the managed catalog was not changed");
       const selected = reconciler.mock.calls[0]![0].loadout.entries.find(e => e.id === "shared")!;
       expect(selected.sourceDir).toBe(nodePath.join(installed, "agents/impl/skills/shared"));
-      expect(fs.readFileSync(nodePath.join(project, runtime === "codex" ? ".agents" : ".claude", "skills/shared/SKILL.md"), "utf8")).toBe(skill("Bundle"));
+      // Both runtimes keep a seat's skills in its own storage; the project gets none of them.
+      const landed = seatSkillsRoot(result.ok ? result.result.rigId : "", "dev.impl", runtime);
+      expect(fs.readFileSync(nodePath.join(landed, "shared/SKILL.md"), "utf8")).toBe(skill("Bundle"));
+      expect(fs.existsSync(nodePath.join(project, runtime === "codex" ? ".agents" : ".claude"))).toBe(false);
+      const seatAdapter = runtime === "codex" ? fixture.codexAdapter : fixture.adapter;
+      expect(vi.mocked(seatAdapter.project).mock.calls[0]![1].seatSkillsRoot).toBe(landed);
       const adapter = runtime === "codex" ? fixture.codexAdapter : fixture.adapter;
       const plan = vi.mocked(adapter.project).mock.calls[0]![0];
       expect(plan.entries.find(e => e.effectiveId === "shared")?.absolutePath).toContain("installed/agents/impl/skills/shared");
     } finally { db?.close(); fs.rmSync(root, { recursive: true, force: true }); }
   });
 
-  it.each(["claude-code", "codex"] as const)("projects a selected plugin's skills for %s and keeps a same-name skill it does not own", async (runtime) => {
+  it("rig up with a linked state/seats and no Codex catalog yet: each seat gets a named refusal and the next member is still handled (OPR.0.7.0.13, round 5)", async () => {
+    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "instantiator-linked-anchor-"));
+    const savedHome = process.env["OPENRIG_HOME"];
+    let db: ReturnType<typeof createFullTestDb> | undefined;
+    try {
+      const home = nodePath.join(root, "home");
+      const moved = nodePath.join(root, "moved-seats");
+      fs.mkdirSync(nodePath.join(home, "state"), { recursive: true });
+      fs.mkdirSync(moved);
+      fs.symlinkSync(moved, nodePath.join(home, "state", "seats"));
+      process.env["OPENRIG_HOME"] = home;
+      const installed = nodePath.join(root, "installed");
+      const project = nodePath.join(root, "project");
+      fs.mkdirSync(nodePath.join(installed, "agents/impl"), { recursive: true });
+      fs.mkdirSync(project);
+      fs.writeFileSync(nodePath.join(installed, "agents/impl/agent.yaml"), 'name: impl\nversion: "1.0"\nprofiles:\n  default:\n    uses: {}\n');
+      const fixture = setup(undefined, undefined, undefined, undefined, undefined, {
+        fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf8"), exists: fs.existsSync },
+      });
+      db = fixture.db;
+      const rig = makeRigSpec({ pods: [{ id: "dev", label: "Dev", edges: [], members: [
+        { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "codex", cwd: project },
+        { id: "qa", agentRef: "local:agents/impl", profile: "default", runtime: "codex", cwd: project },
+      ] }] });
+      // Nothing escapes: the rig's launch returns, with a result for each member.
+      const result = await fixture.inst.instantiate(RigSpecCodec.serialize(rig), installed);
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.nodes.map((n) => n.logicalId).sort()).toEqual(["dev.impl", "dev.qa"]);
+      const text = JSON.stringify(result);
+      expect(text).toContain("seat_catalog_refused");
+      expect(text).toContain("is not inside this seat's storage (a link on the way)");
+      expect(text).not.toContain("differs from what OpenRig last wrote");
+      // Nothing was written through the link.
+      expect(listTree(moved)).toEqual([]);
+    } finally {
+      if (savedHome === undefined) delete process.env["OPENRIG_HOME"]; else process.env["OPENRIG_HOME"] = savedHome;
+      db?.close(); fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rig up refuses the loadout, and changes nothing, when the seat's storage is linked outside the anchor (OPR.0.7.0.13 F1, round 4)", async () => {
+    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "instantiator-linked-seat-"));
+    let db: ReturnType<typeof createFullTestDb> | undefined;
+    try {
+      const installed = nodePath.join(root, "installed");
+      const catalog = nodePath.join(root, "catalog");
+      const project = nodePath.join(root, "project");
+      const moved = nodePath.join(root, "moved-runtime");
+      const skill = `---\nname: shared\ndescription: Skill fixture\n---\nCatalog\n`;
+      for (const dir of ["installed/agents/impl", "catalog/shared", "project"]) fs.mkdirSync(nodePath.join(root, dir), { recursive: true });
+      fs.writeFileSync(nodePath.join(catalog, "catalog.yaml"), "schema: openrig.skill-catalog/v1\nsystem: []\n");
+      fs.writeFileSync(nodePath.join(catalog, "shared/SKILL.md"), skill);
+      fs.writeFileSync(nodePath.join(installed, "agents/impl/agent.yaml"), 'name: impl\nversion: "1.0"\nprofiles:\n  default:\n    uses:\n      skills: [shared]\n');
+      execFileSync("git", ["init", "-q", catalog]);
+      execFileSync("git", ["-C", catalog, "add", "."]);
+      execFileSync("git", ["-C", catalog, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "catalog"]);
+      let movedBefore: string[] = [];
+      const reconciler = vi.fn((input: Parameters<typeof reconcileSkillLoadout>[0]) => {
+        if (input.location) {
+          // The seat's runtime storage (made by the launch just before this) moved out, and a link left in its place.
+          const runtimeRoot = nodePath.dirname(nodePath.dirname(input.location.targetRoot));
+          fs.renameSync(runtimeRoot, moved);
+          fs.symlinkSync(moved, runtimeRoot);
+          movedBefore = listTree(moved);
+        }
+        return reconcileSkillLoadout(input);
+      });
+      const fixture = setup(undefined, undefined, undefined, undefined, undefined, {
+        fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf8"), exists: fs.existsSync },
+        skillsRootResolver: () => catalog, skillReconciler: reconciler,
+      });
+      db = fixture.db;
+      const rig = makeRigSpec({ pods: [{ id: "dev", label: "Dev", edges: [], members: [
+        { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "claude-code", cwd: project },
+      ] }] });
+      const result = await fixture.inst.instantiate(RigSpecCodec.serialize(rig), installed);
+      expect(reconciler).toHaveBeenCalled();
+      expect(reconciler.mock.results[0]?.value).toMatchObject({ ok: false, errors: [expect.objectContaining({ code: "seat_storage_refused" })] });
+      expect(JSON.stringify(result)).toContain("seat_storage_refused");
+      // The moved tree is exactly as it was: no skill written, no staging folder, no manifest.
+      expect(listTree(moved)).toEqual(movedBefore);
+    } finally { db?.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("projects a selected plugin's skills for claude-code into the seat's own storage, leaving the project's same-name skill alone", async () => {
+    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "instantiator-plugin-skills-seat-"));
+    let db: ReturnType<typeof createFullTestDb> | undefined;
+    try {
+      const installed = nodePath.join(root, "installed");
+      const plugin = nodePath.join(installed, "agents/impl/plugins/core");
+      const project = nodePath.join(root, "project");
+      const skill = (id: string, body: string) => `---\nname: ${id}\ndescription: Skill fixture\n---\n${body}\n`;
+      fs.mkdirSync(nodePath.join(plugin, ".claude-plugin"), { recursive: true });
+      fs.writeFileSync(nodePath.join(plugin, ".claude-plugin", "plugin.json"), '{"name":"core","version":"0.1.4"}');
+      for (const id of ["delegating-work", "openrig-skills", "queue-handoff"]) {
+        fs.mkdirSync(nodePath.join(plugin, "skills", id), { recursive: true });
+        fs.writeFileSync(nodePath.join(plugin, "skills", id, "SKILL.md"), skill(id, "Plugin"));
+      }
+      fs.mkdirSync(nodePath.join(project, ".claude/skills/delegating-work"), { recursive: true });
+      fs.writeFileSync(nodePath.join(project, ".claude/skills/delegating-work/SKILL.md"), skill("delegating-work", "The project's own"));
+      fs.writeFileSync(nodePath.join(installed, "agents/impl/agent.yaml"), 'name: impl\nversion: "1.0"\nresources:\n  plugins:\n    - id: core\n      source:\n        kind: local\n        path: plugins/core\nprofiles:\n  default:\n    uses:\n      plugins: [core]\n');
+      const reconciler = vi.fn(reconcileSkillLoadout);
+      const fixture = setup(undefined, undefined, undefined, undefined, undefined, {
+        fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf8"), exists: fs.existsSync },
+        skillsRootResolver: () => nodePath.join(root, "no-catalog"), skillReconciler: reconciler,
+      });
+      db = fixture.db;
+      const rig = makeRigSpec({ pods: [{ id: "dev", label: "Dev", edges: [], members: [
+        { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "claude-code", cwd: project },
+      ] }] });
+      const result = await fixture.inst.instantiate(RigSpecCodec.serialize(rig), installed);
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      expect(reconciler.mock.results[0]?.value.ok).toBe(true);
+      const seat = seatSkillsRoot(result.ok ? result.result.rigId : "", "dev.impl");
+      for (const id of ["delegating-work", "openrig-skills", "queue-handoff"]) {
+        expect(fs.readFileSync(nodePath.join(seat, id, "SKILL.md"), "utf8")).toBe(skill(id, "Plugin"));
+      }
+      // The project's own skill is the project's: untouched, and nothing of the team's is added beside it.
+      expect(fs.readFileSync(nodePath.join(project, ".claude/skills/delegating-work/SKILL.md"), "utf8")).toBe(skill("delegating-work", "The project's own"));
+      expect(fs.readdirSync(nodePath.join(project, ".claude/skills"))).toEqual(["delegating-work"]);
+      expect(JSON.stringify(result)).not.toContain("plugin_skill_kept");
+      // The compatibility limit is named, never silent, and nothing falls back to the project.
+      expect(JSON.stringify(result)).toContain("team_skills_need_claude_2.1.280");
+      // Profile skills and startup skill files follow: the adapter is pointed at the same storage.
+      expect(vi.mocked(fixture.adapter.project).mock.calls[0]![1].seatSkillsRoot).toBe(seat);
+    } finally { db?.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it.each(["codex"] as const)("projects a selected plugin's skills for %s into the seat's own storage, leaving the project's same-name skill alone", async (runtime) => {
     const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "instantiator-plugin-skills-"));
     let db: ReturnType<typeof createFullTestDb> | undefined;
     try {
@@ -375,30 +531,32 @@ profiles:
       const result = await fixture.inst.instantiate(RigSpecCodec.serialize(rig), installed);
       expect(result.ok, JSON.stringify(result)).toBe(true);
       expect(reconciler.mock.results[0]?.value.ok).toBe(true);
-      for (const id of ["openrig-skills", "queue-handoff"]) {
-        expect(fs.readFileSync(nodePath.join(skills, id, "SKILL.md"), "utf8")).toBe(skill(id, "Plugin"));
+      const seat = seatSkillsRoot(result.ok ? result.result.rigId : "", "dev.impl", runtime);
+      for (const id of ["delegating-work", "openrig-skills", "queue-handoff"]) {
+        expect(fs.readFileSync(nodePath.join(seat, id, "SKILL.md"), "utf8")).toBe(skill(id, "Plugin"));
       }
+      // The project's own skill is the project's: untouched, with nothing of the team's beside it.
       expect(fs.readFileSync(nodePath.join(skills, "delegating-work/SKILL.md"), "utf8")).toBe(skill("delegating-work", "The project's own"));
-      const owner = reconciler.mock.calls[0]![0].topologyOwner;
-      expect(JSON.stringify(result)).toContain(`${owner}: plugin_skill_kept: delegating-work`);
+      expect(fs.readdirSync(skills)).toEqual(["delegating-work"]);
     } finally { db?.close(); fs.rmSync(root, { recursive: true, force: true }); }
   });
 
-  it("starts the seat without plugin skills when they cannot be projected, and says why", async () => {
-    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "instantiator-plugin-skills-refused-"));
+  it("projects a Codex seat's plugin skills to its own storage, leaving the project and its ignore file alone", async () => {
+    // Before seat storage, a Codex seat's skills went into the project and its git exclusion could fail; now nothing of
+    // the team's is written into the project at all.
+    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "instantiator-plugin-skills-codex-"));
     let db: ReturnType<typeof createFullTestDb> | undefined;
     try {
       const installed = nodePath.join(root, "installed");
       const plugin = nodePath.join(installed, "agents/impl/plugins/core");
       const project = nodePath.join(root, "project");
-      fs.mkdirSync(nodePath.join(plugin, ".claude-plugin"), { recursive: true });
-      fs.writeFileSync(nodePath.join(plugin, ".claude-plugin/plugin.json"), '{"name":"core","version":"0.1.4"}');
+      fs.mkdirSync(nodePath.join(plugin, ".codex-plugin"), { recursive: true });
+      fs.writeFileSync(nodePath.join(plugin, ".codex-plugin/plugin.json"), '{"name":"core","version":"0.1.4"}');
       fs.mkdirSync(nodePath.join(plugin, "skills/queue-handoff"), { recursive: true });
-      fs.writeFileSync(nodePath.join(plugin, "skills/queue-handoff/SKILL.md"), "---\nname: queue-handoff\ndescription: Skill fixture\n---\nPlugin\n");
+      fs.writeFileSync(nodePath.join(plugin, "skills/queue-handoff/SKILL.md"), "---\nname: queue-handoff\ndescription: Use when handing work to another seat.\n---\nPlugin\n");
       fs.writeFileSync(nodePath.join(installed, "agents/impl/agent.yaml"), 'name: impl\nversion: "1.0"\nresources:\n  plugins:\n    - id: core\n      source:\n        kind: local\n        path: plugins/core\nprofiles:\n  default:\n    uses:\n      plugins: [core]\n');
-      // The project keeps its own ignore file where OpenRig would add its exclusions.
-      fs.mkdirSync(nodePath.join(project, ".claude/skills"), { recursive: true });
-      fs.writeFileSync(nodePath.join(project, ".claude/skills/.gitignore"), "*.tmp\n");
+      fs.mkdirSync(nodePath.join(project, ".agents/skills"), { recursive: true });
+      fs.writeFileSync(nodePath.join(project, ".agents/skills/.gitignore"), "*.tmp\n");
       execFileSync("git", ["init", "-q", project]);
       const reconciler = vi.fn(reconcileSkillLoadout);
       const fixture = setup(undefined, undefined, undefined, undefined, undefined, {
@@ -407,14 +565,36 @@ profiles:
       });
       db = fixture.db;
       const rig = makeRigSpec({ pods: [{ id: "dev", label: "Dev", edges: [], members: [
-        { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "claude-code", cwd: project },
+        { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "codex", cwd: project },
       ] }] });
       const result = await fixture.inst.instantiate(RigSpecCodec.serialize(rig), installed);
       expect(result.ok, JSON.stringify(result)).toBe(true);
-      expect(reconciler.mock.results.map((call) => call.value.ok)).toEqual([false, true]);
-      expect(JSON.stringify(result)).toContain("plugin_skills_not_projected: git_exclusion_failed");
-      expect(fs.existsSync(nodePath.join(project, ".claude/skills/queue-handoff"))).toBe(false);
-      expect(fs.readFileSync(nodePath.join(project, ".claude/skills/.gitignore"), "utf8")).toBe("*.tmp\n");
+      expect(reconciler.mock.results.map((call) => call.value.ok)).toEqual([true]);
+      const seat = seatSkillsRoot(result.ok ? result.result.rigId : "", "dev.impl", "codex");
+      expect(fs.existsSync(nodePath.join(seat, "queue-handoff/SKILL.md"))).toBe(true);
+      expect(fs.readdirSync(nodePath.join(project, ".agents/skills"))).toEqual([".gitignore"]);
+      expect(fs.readFileSync(nodePath.join(project, ".agents/skills/.gitignore"), "utf8")).toBe("*.tmp\n");
+      // C2: the seat's catalog, rebuilt after this launch's projection, lists the skill's trigger and exact path...
+      const catalogPath = nodePath.join(nodePath.dirname(seat), "catalog.md");
+      const catalog = fs.readFileSync(catalogPath, "utf8");
+      expect(catalog).toContain("- **queue-handoff**: Use when handing work to another seat.");
+      expect(catalog).toContain(nodePath.join(seat, "queue-handoff", "SKILL.md"));
+      // ...and it is this seat's per-seat startup text: sent on a fresh start or a fresh-primed restore (native resume
+      // replays nothing), saved with the seat's startup context, never merged into the project's AGENTS.md.
+      const saved = db!.prepare("SELECT resolved_files_json FROM node_startup_context").get() as { resolved_files_json: string };
+      expect(JSON.parse(saved.resolved_files_json)).toContainEqual(expect.objectContaining({
+        absolutePath: catalogPath, deliveryHint: "send_text", appliesOn: ["fresh_start", "restore"],
+      }));
+      // R1.1: the one constant bootstrap line is saved with the seat's startup files; each start decides from the
+      // person's saved answer whether to deliver it (startup-orchestrator), so nothing reached AGENTS.md here.
+      expect(JSON.parse(saved.resolved_files_json)).toContainEqual(expect.objectContaining({
+        path: "openrig-seat-skills.md", deliveryHint: "guidance_merge", appliesOn: ["fresh_start", "restore"] }));
+      expect(fs.existsSync(nodePath.join(project, "AGENTS.md"))).toBe(false);
+      // The seat's one generated router lists the skill's trigger and path, and is never in the catalog itself.
+      const router = fs.readFileSync(nodePath.join(seat, "openrig-seat-router", "SKILL.md"), "utf8");
+      expect(router).toContain("name: openrig-seat-router");
+      expect(router).toContain("- **queue-handoff**: Use when handing work to another seat.");
+      expect(catalog).not.toContain("openrig-seat-router");
     } finally { db?.close(); fs.rmSync(root, { recursive: true, force: true }); }
   });
 

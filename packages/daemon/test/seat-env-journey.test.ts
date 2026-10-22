@@ -160,8 +160,9 @@ describe("env: reaches the seats from a rig spec", () => {
   it("records the declared names on the session so the managed Claude launch can forward them", async () => {
     const f = fixture();
     await launch(f);
-    expect(envOf(f, "dev-impl").OPENRIG_SEAT_ENV_KEYS?.split(",").sort()).toEqual(["MEMBER_ONLY", "RIG_ONLY", "SHARED"]);
-    expect(envOf(f, "dev-plain").OPENRIG_SEAT_ENV_KEYS?.split(",").sort()).toEqual(["RIG_ONLY", "SHARED"]);
+    // A Claude seat also carries its own skill plugin (OPR.0.7.0.13), so the managed launch forwards that name too.
+    expect(envOf(f, "dev-impl").OPENRIG_SEAT_ENV_KEYS?.split(",").sort()).toEqual(["CLAUDE_CODE_PLUGIN_DIRS", "MEMBER_ONLY", "RIG_ONLY", "SHARED"]);
+    expect(envOf(f, "dev-plain").OPENRIG_SEAT_ENV_KEYS?.split(",").sort()).toEqual(["CLAUDE_CODE_PLUGIN_DIRS", "RIG_ONLY", "SHARED"]);
     f.db.close();
   });
 
@@ -182,14 +183,16 @@ describe("env: reaches the seats from a rig spec", () => {
     f.db.close();
   });
 
-  it("a seat that declares nothing is launched exactly as before", async () => {
+  it("a seat that declares nothing is launched with nothing of its own but its skill plugin", async () => {
     const f = fixture();
     const noEnv = f.yaml.replace(/env:\n {2}SHARED: from-rig\n {2}RIG_ONLY: rig\n/, "").replace(/ {8}env:\n {10}SHARED: from-member\n {10}MEMBER_ONLY: member\n/, "");
     expect(noEnv).not.toContain("SHARED");
     const result = await f.inst.instantiate(noEnv, f.rigRoot);
     expect(result.ok, JSON.stringify(result)).toBe(true);
     const env = envOf(f, "dev-impl");
-    expect(env).not.toHaveProperty("OPENRIG_SEAT_ENV_KEYS");
+    // OPR.0.7.0.13: a Claude seat's own skill plugin is the only name it carries; nothing the spec didn't declare.
+    expect(env.OPENRIG_SEAT_ENV_KEYS).toBe("CLAUDE_CODE_PLUGIN_DIRS");
+    expect(env.CLAUDE_CODE_PLUGIN_DIRS).toMatch(/\/state\/seats\/[^/]+\/dev\.impl\/claude-code\/plugin$/);
     expect(env).not.toHaveProperty("SHARED");
     f.db.close();
   });

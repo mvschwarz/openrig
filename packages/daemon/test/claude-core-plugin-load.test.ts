@@ -34,6 +34,7 @@ import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV } from "../src/domain/claude-core-p
 import {
   persistedPluginPaths, seatCorePluginDir, vendoredCorePluginDir, withCorePlugin,
 } from "../src/domain/claude-core-plugin-env.js";
+import { ensureSeatSkillPlugin, recordSeatSkillWrite, seatSkillPaths } from "../src/domain/seat-skill-storage.js";
 import type { AgentResolverFsOps } from "../src/domain/agent-resolver.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { RigSpec } from "../src/domain/types.js";
@@ -254,14 +255,22 @@ profiles:
       expect(result.ok, JSON.stringify(result)).toBe(true);
       const envOf = (member: string) => created.find((c) => c.name === `dev-${member}@test-rig`)?.env;
       expect(created).toHaveLength(members.length);
+      // OPR.0.7.0.13: every Claude seat also gets its own skill plugin, after the vendored one when it selected that.
+      const entries = (member: string) => (envOf(member)?.[PLUGIN_ENV] ?? "").split(":").filter(Boolean);
+      const seatPlugin = (member: string) => new RegExp(`/state/seats/[^/]+/dev\\.${member}/claude-code/plugin$`);
       for (const member of ["qualified", "unqualified", "custom"]) {
-        expect(envOf(member)?.[PLUGIN_ENV], member).toBe(vendored);
+        expect(entries(member)[0], member).toBe(vendored);
+        expect(entries(member)[1], member).toMatch(seatPlugin(member));
+        expect(entries(member), member).toHaveLength(2);
         expect(envOf(member)?.[SEAT_ENV_KEYS_VAR], member).toBe(PLUGIN_ENV);
       }
-      for (const member of ["namesake", "other", "nothing", "codex"]) {
-        expect(envOf(member), member).not.toHaveProperty(PLUGIN_ENV);
-        expect(envOf(member), member).not.toHaveProperty(SEAT_ENV_KEYS_VAR);
+      for (const member of ["namesake", "other", "nothing"]) {
+        expect(entries(member), member).not.toContain(vendored);
+        expect(entries(member), member).toHaveLength(1);
+        expect(entries(member)[0], member).toMatch(seatPlugin(member));
       }
+      expect(envOf("codex"), "codex").not.toHaveProperty(PLUGIN_ENV);
+      expect(envOf("codex"), "codex").not.toHaveProperty(SEAT_ENV_KEYS_VAR);
     } finally {
       db.close();
     }
@@ -366,7 +375,7 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
     expect(created[3]!.env![PLUGIN_ENV]).toBe(OWN_LIST);
   });
 
-  function restoreHarness(entries: unknown[], memberEnv?: Record<string, string>) {
+  function restoreHarness(entries: unknown[], memberEnv?: Record<string, string>, opts: { fresh?: boolean; files?: unknown[]; realFs?: boolean } = {}) {
     const { pluginsDir } = vendoredPlugins(root);
     const db = createFullTestDb(); dbs.push(db);
     const rigRepo = new RigRepository(db);
@@ -382,9 +391,9 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
     const token = "00000000-0000-4000-8000-000000000006";
     const old = sessionRegistry.registerSession(node.id, name);
     sessionRegistry.updateStatus(old.id, "running");
-    sessionRegistry.updateResumeToken(old.id, "claude_id", token, "scrape");
+    if (!opts.fresh) sessionRegistry.updateResumeToken(old.id, "claude_id", token, "scrape");
     sessionRegistry.updateBinding(node.id, { tmuxSession: name, tmuxPane: "%old" });
-    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, JSON.stringify(entries), "[]", "[]", "claude-code");
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, JSON.stringify(entries), JSON.stringify(opts.files ?? []), "[]", "claude-code");
     let live = true;
     const created: Array<Record<string, string> | undefined> = [];
     const tmux = {
@@ -394,26 +403,37 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
       setSessionEnv: vi.fn(async () => {}), unsetSessionEnv: vi.fn(async () => {}),
       listSessions: vi.fn(async () => live ? [{ name }] : []), listWindows: vi.fn(async () => []),
       listPanes: vi.fn(async () => [{ id: "%new", index: 0, cwd: "/", width: 80, height: 24, active: true }]),
-      getPanePid: vi.fn(async () => 100), getPaneCommand: vi.fn(async () => "sh"),
-      capturePaneContent: vi.fn(async () => "Restored conversation\n❯ \n"),
+      // A real-filesystem fresh restore needs the pane to look like an idle Claude, or startup polls readiness until its
+      // timeout; the other cases keep the shell they had.
+      getPanePid: vi.fn(async () => 100), getPaneCommand: vi.fn(async () => opts.realFs ? "claude" : "sh"),
+      capturePaneContent: vi.fn(async () => opts.realFs ? "❯ \n────────────────────\n⏵⏵ accept edits on (shift+tab to cycle)\n" : "Restored conversation\n❯ \n"),
       sendText: vi.fn(async () => ({ ok: true })), sendShellCommand: vi.fn(async () => ({ ok: true })), sendKeys: vi.fn(async () => ({ ok: true })),
     } as unknown as TmuxAdapterType;
     const listProcesses = async () => [];
+    const projected: string[] = [];
     return {
       created,
+      rigId: rig.id,
+      projected,
       async run() {
         const down = await new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, eventBus, snapshotCapture, tmuxAdapter: tmux }).teardown(rig.id);
         expect(down.errors).toEqual([]);
         // The node's live context changes after the snapshot; restore follows the snapshot.
         db.prepare("DELETE FROM node_startup_context WHERE node_id = ?").run(node.id);
-        const adapter = new ClaudeCodeAdapter({ tmux, listProcesses, sleep: async () => {},
+        const adapter: ClaudeCodeAdapter = new ClaudeCodeAdapter({ tmux, listProcesses, sleep: async () => {},
           claudeManagedLaunch: { prepare: async () => ({ command: (args: readonly string[]) => `claude ${args.join(" ")}`, assertCurrent: () => {}, configDir: "/fixture", executable: "/opt/claude.exe" }) } as unknown as ClaudeManagedLaunch,
-          fsOps: { exists: () => false, readFile: () => "", writeFile: () => {}, mkdirp: () => {}, copyFile: () => {} } });
+          fsOps: opts.realFs
+            ? { exists: (p: string) => existsSync(p), readFile: (p: string) => readFileSync(p, "utf8"), writeFile: (p: string, c: string) => writeFileSync(p, c),
+              mkdirp: (p: string) => { mkdirSync(p, { recursive: true }); }, copyFile: (a: string, b: string) => writeFileSync(b, readFileSync(a)) }
+            : { exists: () => false, readFile: () => "", writeFile: () => {}, mkdirp: () => {}, copyFile: () => {} } });
         const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux, sessionEnv: { OPENRIG_HOME: "/state" }, pluginsDir });
         const restore = new RestoreOrchestrator({ db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
           checkpointStore, nodeLauncher, tmuxAdapter: tmux, claudeResume: new ClaudeResumeAdapter(tmux),
           codexResume: new CodexResumeAdapter(tmux), listProcesses });
-        await restore.restore(down.snapshotId!, { adapters: { "claude-code": adapter } });
+        const project = adapter.project.bind(adapter);
+        adapter.project = async (plan, b) => { projected.push(...plan.entries.map((e) => e.effectiveId)); return project(plan, b); };
+        return await restore.restore(down.snapshotId!, { adapters: { "claude-code": adapter }, ...(opts.fresh ? { freshLogicalIds: ["test.c"] } : {}),
+          ...(opts.realFs ? { fsOps: { exists: (p: string) => existsSync(p) } } : {}) });
       },
     };
   }
@@ -428,6 +448,79 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
     await own.run();
     expect(own.created[0]).toMatchObject({ [PLUGIN_ENV]: `${OWN_LIST}:${vendored}` });
   });
+
+  it("restore (native resume): a seat with kept skills gets its seat plugin, from storage keyed by its rig and logical seat", async () => {
+    const { vendored } = vendoredPlugins(root);
+    const h = restoreHarness([{ category: "plugin", absolutePath: vendored }]);
+    const seat = seatSkillPaths({ rigId: h.rigId, logicalId: "test.c", runtime: "claude-code" });
+    ensureSeatSkillPlugin(seat);
+    // One recorded skill: rig down removes it, and restore puts it and the plugin back before the session starts.
+    const file = join(seat.skillsRoot, "queue-handoff", "SKILL.md");
+    const src = join(root, "src", "queue-handoff", "SKILL.md");
+    for (const path of [src, file]) { mkdirSync(join(path, ".."), { recursive: true }); writeFileSync(path, "skill\n"); }
+    recordSeatSkillWrite(seat.skillsRoot, file, src, "skill\n");
+    await h.run();
+    expect(h.created).toHaveLength(1);
+    expect(h.created[0]).toMatchObject({ [PLUGIN_ENV]: `${vendored}:${seat.pluginDir}` });
+  });
+
+  it("rig down then restore (native resume): the seat's unchanged skill is removed at down and put back before its session starts", async () => {
+    const h = restoreHarness([]);
+    const seat = seatSkillPaths({ rigId: h.rigId, logicalId: "test.c", runtime: "claude-code" });
+    ensureSeatSkillPlugin(seat);
+    const src = join(root, "src", "queue-handoff", "SKILL.md");
+    const file = join(seat.skillsRoot, "queue-handoff", "SKILL.md");
+    for (const path of [src, file]) { mkdirSync(join(path, ".."), { recursive: true }); writeFileSync(path, "skill\n"); }
+    recordSeatSkillWrite(seat.skillsRoot, file, src, "skill\n");
+    const result = await h.run();
+    // Down removed it; restore put it back from the record and wrote the plugin again, before the session was created.
+    expect(readFileSync(file, "utf8")).toBe("skill\n");
+    expect(existsSync(seat.pluginManifestPath)).toBe(true);
+    expect(h.created[0]).toMatchObject({ [PLUGIN_ENV]: seat.pluginDir });
+    expect(JSON.stringify(result)).toContain("put back 1 skill file(s) for test.c");
+  });
+
+  it("fresh restore, end to end: a startup-file skill the person edited is kept through the real startup install", async () => {
+    const src = join(root, "src-fresh", "orient", "SKILL.md");
+    mkdirSync(join(src, ".."), { recursive: true });
+    writeFileSync(src, "orient\n");
+    const file = { path: "skills/orient/SKILL.md", absolutePath: src, ownerRoot: join(root, "src-fresh"), deliveryHint: "skill_install", required: false, appliesOn: ["fresh_start", "restore"] };
+    const h = restoreHarness([], undefined, { fresh: true, files: [file], realFs: true });
+    const seat = seatSkillPaths({ rigId: h.rigId, logicalId: "test.c", runtime: "claude-code" });
+    ensureSeatSkillPlugin(seat);
+    const target = join(seat.skillsRoot, "orient", "SKILL.md");
+    mkdirSync(join(target, ".."), { recursive: true });
+    writeFileSync(target, "orient\n");
+    recordSeatSkillWrite(seat.skillsRoot, target, src, "orient\n");
+    writeFileSync(target, "someone's edit\n");
+    const result = await h.run();
+    expect(readFileSync(target, "utf8")).toBe("someone's edit\n");
+    // A fresh relaunch rolls up as partially_restored by design (no conversation resumed); the seat itself succeeded.
+    expect(result).toMatchObject({ ok: true, result: { rigResult: "partially_restored", nodes: [{ logicalId: "test.c", status: "fresh-primed" }] } });
+    expect(JSON.stringify((result as { result: { nodes: unknown[] } }).result.nodes)).not.toContain('"error"');
+    expect(JSON.stringify(result)).toContain(`kept ${target}`);
+  }, 30_000);
+
+  it("fresh restore, end to end: a removed file whose recorded source has changed isn't put back with today's bytes", async () => {
+    const src = join(root, "src-fresh2", "orient", "SKILL.md");
+    mkdirSync(join(src, ".."), { recursive: true });
+    writeFileSync(src, "orient\n");
+    const file = { path: "skills/orient/SKILL.md", absolutePath: src, ownerRoot: join(root, "src-fresh2"), deliveryHint: "skill_install", required: false, appliesOn: ["fresh_start", "restore"] };
+    const h = restoreHarness([], undefined, { fresh: true, files: [file], realFs: true });
+    const seat = seatSkillPaths({ rigId: h.rigId, logicalId: "test.c", runtime: "claude-code" });
+    ensureSeatSkillPlugin(seat);
+    const target = join(seat.skillsRoot, "orient", "SKILL.md");
+    mkdirSync(join(target, ".."), { recursive: true });
+    writeFileSync(target, "orient\n");
+    recordSeatSkillWrite(seat.skillsRoot, target, src, "orient\n");
+    // rig down (inside run) removes the unchanged copy; the source changes before the restore.
+    writeFileSync(src, "today's bytes\n");
+    const result = await h.run();
+    expect(existsSync(target)).toBe(false);
+    expect(result).toMatchObject({ ok: true, result: { rigResult: "partially_restored", nodes: [{ logicalId: "test.c", status: "fresh-primed" }] } });
+    expect(JSON.stringify((result as { result: { nodes: unknown[] } }).result.nodes)).not.toContain('"error"');
+    expect(JSON.stringify(result)).toContain(`${target} not installed again: its recorded source is gone or has changed`);
+  }, 30_000);
 
   it("restore: a seat whose saved selection doesn't include the plugin doesn't get it, and keeps its own list", async () => {
     const none = restoreHarness([{ category: "plugin", absolutePath: "/elsewhere" }]);
@@ -480,7 +573,7 @@ describe("handover successor, on a real tmux server", () => {
     return out;
   }
 
-  async function successorEnviron(rigName: string, saved: unknown[]): Promise<Record<string, string>> {
+  async function successorEnviron(rigName: string, saved: unknown[], seatSkills = false): Promise<Record<string, string>> {
     const { pluginsDir, vendored } = vendoredPlugins(scratch);
     const seat = `dev-impl@${rigName}`;
     seats.push(seat);
@@ -490,6 +583,7 @@ describe("handover successor, on a real tmux server", () => {
       const discoveryRepo = new DiscoveryRepository(db), eventBus = new EventBus(db);
       const rig = rigRepo.createRig(rigName);
       const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", cwd: scratch });
+      if (seatSkills) ensureSeatSkillPlugin(seatSkillPaths({ rigId: rig.id, logicalId: "dev.impl", runtime: "claude-code" }));
       db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, '[]', '[]', 'claude-code')")
         .run(node.id, JSON.stringify(saved.map((p) => p === "vendored" ? { category: "plugin", absolutePath: vendored } : p)));
       const adapter = new TmuxAdapter(exec);
@@ -531,6 +625,15 @@ describe("handover successor, on a real tmux server", () => {
     expect(other).not.toHaveProperty(PLUGIN_ENV);
     expect(other).not.toHaveProperty(SEAT_PROJECT_DIR_ENV);
   }, 90_000);
+
+  it.runIf(available)("has the seat's own skill plugin, the same storage as its predecessor's", async () => {
+    const { vendored } = vendoredPlugins(scratch);
+    const env = await successorEnviron("seatskill-yes", ["vendored"], true);
+    const [core, seat] = (env[PLUGIN_ENV] ?? "").split(":");
+    expect(core).toBe(vendored);
+    expect(seat).toMatch(/\/state\/seats\/[^/]+\/dev\.impl\/claude-code\/plugin$/);
+    expect(existsSync(join(seat!, ".claude-plugin", "plugin.json"))).toBe(true);
+  }, 90_000);
 });
 
 // A Claude seat with a permission mode starts through ClaudeManagedLaunch, whose command is `/usr/bin/env -i`: it keeps only
@@ -543,7 +646,7 @@ describe.skipIf(process.platform === "win32")("the managed (env -i) Claude launc
   const cleanup: Array<() => void> = [];
   afterEach(() => { for (const f of cleanup.splice(0)) f(); });
 
-  function fixture(opts: { memberEnv?: object; sessionKeys?: string; saved?: unknown[] }) {
+  function fixture(opts: { memberEnv?: object; sessionKeys?: string; saved?: unknown[]; seatSkills?: boolean }) {
     const root = mkdtempSync(join(tmpdir(), "managed-plugin-dirs-"));
     cleanup.push(() => rmSync(root, { recursive: true, force: true }));
     const bin = join(root, "bin"), home = join(root, "home"), cwd = join(root, "work");
@@ -555,14 +658,20 @@ printf '{"PLUGIN_DIRS":"%s","LEAKED":"%s","PROJECT":"%s","NODE":"%s"}' "\${CLAUD
     chmodSync(join(bin, "claude"), 0o700);
     const db = new Database(":memory:"); cleanup.push(() => { db.close(); });
     db.exec(`CREATE TABLE rigs(id TEXT, env_json TEXT);
-      CREATE TABLE nodes(id TEXT, rig_id TEXT, runtime TEXT, cwd TEXT, env_json TEXT);
+      CREATE TABLE nodes(id TEXT, rig_id TEXT, logical_id TEXT, runtime TEXT, cwd TEXT, env_json TEXT);
       CREATE TABLE bindings(id TEXT, node_id TEXT, tmux_session TEXT, tmux_pane TEXT);
       CREATE TABLE occupant_tenures(node_id TEXT, generation_uuid TEXT, generation_ordinal INTEGER);
       CREATE TABLE node_startup_context(node_id TEXT, projection_entries_json TEXT);`);
     const { pluginsDir, vendored } = vendoredPlugins(root);
     if (opts.saved) db.prepare("INSERT INTO node_startup_context VALUES ('node', ?)").run(JSON.stringify(opts.saved.map((p) => p === "vendored" ? { category: "plugin", absolutePath: vendored } : p)));
     db.prepare("INSERT INTO rigs VALUES ('rig', NULL)").run();
-    db.prepare("INSERT INTO nodes VALUES ('node', 'rig', 'claude-code', ?, ?)").run(cwd, opts.memberEnv ? JSON.stringify(opts.memberEnv) : null);
+    db.prepare("INSERT INTO nodes VALUES ('node', 'rig', 'dev.impl', 'claude-code', ?, ?)").run(cwd, opts.memberEnv ? JSON.stringify(opts.memberEnv) : null);
+    const seatSkillDir = opts.seatSkills ? (() => {
+      const paths = seatSkillPaths({ rigId: "rig", logicalId: "dev.impl", runtime: "claude-code" });
+      ensureSeatSkillPlugin(paths);
+      cleanup.push(() => rmSync(paths.root, { recursive: true, force: true }));
+      return paths.pluginDir;
+    })() : undefined;
     db.exec("INSERT INTO bindings VALUES ('b', 'node', 'seat@rig', '%1'); INSERT INTO occupant_tenures VALUES ('node', 'gen', 1)");
     // The tmux session variable the launch records: the names the seat's declared environment holds.
     const managed = new RealManagedLaunch(db, { PATH: `${bin}:/usr/bin:/bin`, HOME: home }, {},
@@ -571,7 +680,7 @@ printf '{"PLUGIN_DIRS":"%s","LEAKED":"%s","PROJECT":"%s","NODE":"%s"}' "\${CLAUD
       const { stdout } = await exec("/bin/sh", ["-c", command], { env: { PATH: "/usr/bin:/bin", ...paneEnv }, timeout: 5000 });
       return JSON.parse(stdout) as Record<string, string>;
     };
-    return { managed, run, vendored };
+    return { managed, run, vendored, seatSkillDir };
   }
   const target = { nodeId: "node", session: "seat@rig", pane: "%1" };
   const launch = async (f: ReturnType<typeof fixture>) => (await f.managed.prepare(target, "auto")).command(["--permission-mode", "auto"]);
@@ -589,6 +698,14 @@ printf '{"PLUGIN_DIRS":"%s","LEAKED":"%s","PROJECT":"%s","NODE":"%s"}' "\${CLAUD
     const f = fixture({ memberEnv: { [PLUGIN_ENV]: OWN_LIST }, sessionKeys: PLUGIN_ENV });
     const seen = await f.run(await launch(f), { [PLUGIN_ENV]: `${OWN_LIST}:/v/openrig-core` });
     expect(seen.PLUGIN_DIRS).toBe(`${OWN_LIST}:/v/openrig-core`);
+  });
+
+  it("forwards a seat's own skill plugin from its pane, even when its session's name list predates the variable", async () => {
+    for (const sessionKeys of [undefined, "FOO"]) {
+      const f = fixture({ sessionKeys, seatSkills: true });
+      const seen = await f.run(await launch(f), { [PLUGIN_ENV]: f.seatSkillDir!, LEAKED: "should-not-pass" });
+      expect(seen, String(sessionKeys)).toEqual({ PLUGIN_DIRS: f.seatSkillDir, LEAKED: "absent", PROJECT: "absent", NODE: "absent" });
+    }
   });
 
   it("gives a handover successor the plugin even when its tmux session's name list predates the plugin variable", async () => {

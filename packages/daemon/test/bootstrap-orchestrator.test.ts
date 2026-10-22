@@ -332,7 +332,8 @@ describe("BootstrapOrchestrator", () => {
       expect(tmux.createSession).toHaveBeenCalledTimes(2);
       for (const call of vi.mocked(tmux.createSession).mock.calls) {
         expect(call[2]).toMatchObject(envOverride);
-        expect(call[2]?.OPENRIG_SEAT_ENV_KEYS).toBe("DOCSDESK_ENV_PROBE");
+        // The one-off key, plus, for a Claude seat, its own skill plugin's directory (OPR.0.7.0.13), which is not saved either.
+        expect(call[2]?.OPENRIG_SEAT_ENV_KEYS?.split(",").filter((key) => key !== "CLAUDE_CODE_PLUGIN_DIRS")).toEqual(["DOCSDESK_ENV_PROBE"]);
         expect(tmux.unsetSessionEnv).toHaveBeenCalledWith(call[0], "DOCSDESK_ENV_PROBE");
       }
       expect(rigRepo.getRig(result.rigId!)!.nodes.every((node) => !node.env)).toBe(true);

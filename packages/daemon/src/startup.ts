@@ -186,6 +186,7 @@ import { homeIsolationAdvisory } from "./domain/home-isolation.js";
 import { materializeBuiltinPolicyReference } from "./domain/builtin-policy-reference.js";
 import { withCommunityHarnessResolver, withCommunityHarnesses } from "./adapters/community-harness-runtime-adapter.js";
 import { ensureActivityHookToken, writeActivityEndpointFile, deriveActivityUrl, readActivityEndpointFile } from "./domain/activity-endpoint.js";
+import { recoverSeatSkillAttempts } from "./domain/seat-skill-apply.js";
 import { restoreExistingRigUnattended } from "./domain/existing-rig-restore.js";
 import {
   getCompatibleOpenRigPath,
@@ -451,6 +452,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     reconciledWakeIntents = queueRepoInstance.reconcileAbandonedWakeIntents();
   } catch (err) {
     console.warn(`wake-intent claim recovery: failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // OPR.0.7.0.13: a seat skill list attempt a previous process left mid-send becomes indeterminate, never resent. Like the
+  // wake-intent claims above, it is settled before this process can start new attempts.
+  try {
+    const seatSkillAttempts = recoverSeatSkillAttempts(db);
+    if (seatSkillAttempts) console.log(`seat skill list recovery: ${seatSkillAttempts} interrupted attempt(s) marked indeterminate, not resent`);
+  } catch (err) {
+    console.warn(`seat skill list recovery: failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
   }
   // PL-004 Phase B — classifier lease manager. Constructed early so both
   // the leaseManager dep slot and project-classifier can share one instance.

@@ -5,6 +5,7 @@ import type Database from "better-sqlite3";
 import { publicSeatEnvironment } from "./seat-launch-environment.js";
 import { SEAT_ENV_KEYS_VAR, parseStoredSeatEnv, validateSeatEnvName } from "./seat-env.js";
 import { CLAUDE_PLUGIN_DIRS_ENV, SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV, seatCorePluginDir } from "./claude-core-plugin-env.js";
+import { seatSkillPluginDirForNode } from "./seat-skill-storage.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { claudeClassicRendererEnvPrefix } from "../adapters/yolo-mode.js";
 import { parseClaudePermissionModes } from "./permission-drift.js";
@@ -89,7 +90,8 @@ export class ClaudeManagedLaunch {
     } catch { /* A database from before seat env has no columns to read. */ }
     // A seat that selected the shipped openrig-core plugin has the plugin variable in its pane (the launch, or a
     // handover's respawned pane, put it there). The session's own name list can predate that, so name it here too.
-    if (seatCorePluginDir({ id: nodeId, runtime: "claude-code" }, this.db, undefined, this.pluginsDir)) keys.add(CLAUDE_PLUGIN_DIRS_ENV);
+    if (seatCorePluginDir({ id: nodeId, runtime: "claude-code" }, this.db, undefined, this.pluginsDir)
+      || seatSkillPluginDirForNode(this.db, nodeId)) keys.add(CLAUDE_PLUGIN_DIRS_ENV);
     if (session && this.readSessionEnv) {
       // A one-off name is a convenience on top of the declared ones. If tmux can't be read, the
       // launch proceeds as it would for a seat with no one-off names.

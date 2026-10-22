@@ -323,9 +323,25 @@ import type {
   CompactionStrategy,
   ContinuityPolicyMaterializer,
 } from "./continuity-policy-materializer.js";
-import { isKeptPluginSkill, type ReconcileSkillLoadoutResult, type SkillLoadout, type SkillRuntime } from "./skill-catalog.js";
+import { isKeptPluginSkill, type ReconcileSkillLoadoutResult, type SkillLoadout, type SkillLoadoutLocation, type SkillRuntime } from "./skill-catalog.js";
+import { claudeSeatSkillsNote, ensureSeatSkillPlugin, seatCatalogKeptNote, migrateLegacyProjectSkills, refusedSeatSkillsRootForNode, seatSkillLocation, seatSkillPaths, seatSkillPathsForNode, seatSkillPluginDirForNode, writeSeatSkillCatalog } from "./seat-skill-storage.js";
 import type { SystemWorldResolution } from "./system-world.js";
 import type { SeatEnv } from "./seat-env.js";
+
+/** OPR.0.7.0.13: the constant seat-skills pointer, merged into the project's managed guidance for a Codex seat. It
+ *  names no seat, path or skill, so pod-mates share one identical block, and it tells a non-OpenRig agent it doesn't
+ *  apply. Each seat reads its own list with `rig skill loadout --seat self`. */
+function seatSkillsPointerStartupFile(): ResolvedStartupFile {
+  const assetsRoot = nodePath.resolve(import.meta.dirname, "../../assets");
+  return {
+    path: "openrig-seat-skills.md",
+    absolutePath: nodePath.join(assetsRoot, "guidance/openrig-seat-skills.md"),
+    ownerRoot: assetsRoot,
+    deliveryHint: "guidance_merge",
+    required: false,
+    appliesOn: ["fresh_start", "restore"],
+  };
+}
 
 function defaultCultureStartupFile(): ResolvedStartupFile {
   const assetsRoot = nodePath.resolve(import.meta.dirname, "../../assets");
@@ -380,6 +396,8 @@ interface PodInstantiatorDeps {
     cwd: string;
     apply: true;
     topologyOwner?: string;
+    /** OPR.0.7.0.13 — keep the loadout in the seat's own storage instead of under the cwd. */
+    location?: SkillLoadoutLocation;
   }) => ReconcileSkillLoadoutResult;
   /** S20 P4 — materializes the selected Claude continuity policy by
    *  registering jobs in the existing watchdog engine after startup succeeds. */
@@ -2090,6 +2108,22 @@ export class PodRigInstantiator {
 
     const canonicalSessionName = deriveCanonicalSessionName(input.pod.id, input.member.id, input.rigSpec.name);
     const keptSkillWarnings: string[] = [];
+    // OPR.0.7.0.13 — a team seat's skills go to storage OpenRig owns for this rig and logical seat, not into the
+    // person's project: for Claude, reached through the seat's own plugin; for Codex, through the catalog its per-seat
+    // startup text delivers. Made for every Claude and Codex seat, so profile skills land there even with no loadout.
+    const seatRuntime = configResult.config.runtime === "claude-code" || configResult.config.runtime === "codex" ? configResult.config.runtime : undefined;
+    const seatSkills = seatRuntime ? seatSkillPaths({ rigId: input.rigId, logicalId: input.qualifiedId, runtime: seatRuntime }) : undefined;
+    let loadoutReceipts = 0;
+    if (seatSkills && seatRuntime === "claude-code") keptSkillWarnings.push(...ensureSeatSkillPlugin(seatSkills));
+    if (seatSkills && seatRuntime === "codex") {
+      // A catalog that can't be written is this seat's named result, never an error that escapes the rig's launch.
+      try {
+        const catalog = writeSeatSkillCatalog(seatSkills);
+        if (catalog.kept) keptSkillWarnings.push(seatCatalogKeptNote(catalog));
+      } catch (error) {
+        keptSkillWarnings.push(`seat_catalog_not_written: ${seatSkills.catalogPath}: ${(error as Error).message}`);
+      }
+    }
     if (
       configResult.config.skillLoadout
       && this.deps.skillReconciler
@@ -2101,6 +2135,7 @@ export class PodRigInstantiator {
         cwd: configResult.config.cwd,
         apply: true,
         topologyOwner: canonicalSessionName,
+        ...(seatSkills ? { location: seatSkillLocation(seatSkills, seatRuntime) } : {}),
       });
       const loadout = configResult.config.skillLoadout;
       let projection = reconcile(loadout);
@@ -2120,6 +2155,14 @@ export class PodRigInstantiator {
           sessionName: canonicalSessionName,
         };
       }
+      // OPR.0.7.0.13: copies this seat's earlier launches put in the project. They go only when the project's own
+      // loadout record names this seat as their sole owner and they are unchanged (the reconciler's own rule for a
+      // deselected skill); a skill the person installed for the project stays selected. While another seat still
+      // shares those copies, nothing is removed and the note says why.
+      if (seatSkills && seatRuntime === "claude-code" && projection.ok) {
+        keptSkillWarnings.push(...migrateLegacyProjectSkills({ reconcile: this.deps.skillReconciler!, loadout, cwd: configResult.config.cwd, owner: canonicalSessionName }));
+      }
+      loadoutReceipts = projection.receipts.length;
       for (const receipt of projection.receipts.filter(isKeptPluginSkill)) {
         keptSkillWarnings.push(`plugin_skill_kept: ${receipt.id}: ${receipt.detail.slice("kept: ".length)} (${receipt.target})`);
       }
@@ -2152,6 +2195,13 @@ export class PodRigInstantiator {
     // overwrite). REAL store-backed lookup on this.db (never a mock/null — the
     // uninjected-service dead-invalidator class the P17 comment below records).
     const projectionManifest = new ProjectionManifestStore(this.db);
+    const claudeSeatPlugin = input.member.runtime === "claude-code" ? seatSkillPluginDirForNode(this.db, input.nodeId) : undefined;
+    const claudeSeatSkillsRoot = claudeSeatPlugin ? nodePath.join(claudeSeatPlugin, "skills") : undefined;
+    const codexSeatSkillsRoot = input.member.runtime === "codex" ? seatSkillPathsForNode(this.db, input.nodeId)?.skillsRoot : undefined;
+    // Where a link refused this seat's storage, its skills are planned (and refused) there, not in the project.
+    const refusedSeatSkillsRoot = claudeSeatSkillsRoot || codexSeatSkillsRoot ? undefined : refusedSeatSkillsRootForNode(this.db, input.nodeId)?.skillsRoot;
+    const claudeSkillTargetRoot = input.member.runtime === "claude-code" ? claudeSeatSkillsRoot ?? refusedSeatSkillsRoot : undefined;
+    const codexSkillTargetRoot = input.member.runtime === "codex" ? codexSeatSkillsRoot ?? refusedSeatSkillsRoot : undefined;
     const planResult = planProjection({
       config: configResult.config,
       collisions: resolveResult.collisions,
@@ -2164,7 +2214,10 @@ export class PodRigInstantiator {
       // outside the project tree (OMP's seat agent dir) names its own skill target.
       resolveTargetPath: (category, effectiveId, cwd, sourcePath) =>
         input.member.runtime === "codex" && category === "skill"
-          ? nodePath.join(cwd, ".agents", "skills", effectiveId, "SKILL.md")
+          ? nodePath.join(codexSkillTargetRoot ?? nodePath.join(cwd, ".agents", "skills"), effectiveId, "SKILL.md")
+          // OPR.0.7.0.13: a Claude seat's skills are written to its own storage, so an edit there is what to protect.
+          : input.member.runtime === "claude-code" && category === "skill" && claudeSkillTargetRoot
+            ? nodePath.join(claudeSkillTargetRoot, effectiveId, "SKILL.md")
           : category === "skill" && adapter.skillTargetPath
             ? adapter.skillTargetPath(launchResult.binding.tmuxSession, effectiveId)
             : claudeConflictTargetPath(
@@ -2204,11 +2257,29 @@ export class PodRigInstantiator {
     // P20 atom-4 PROTECT: hold back operator-edited skill targets (operator_conflict)
     // so the adapter never overwrites an operator's edit unless an internal caller sets
     // input.force. The warning names the source-edit/move-aside remedies available to users.
-    const dedupedResolvedFiles = filterProtectedProjections(
+    const protectedFiltered = filterProtectedProjections(
       managedDedupedFiles,
       planResult.plan,
       { force: input.force },
     ).delivered;
+    // OPR.0.7.0.13 (Codex C2): the seat's own catalog, through its per-seat startup text (the route role material takes,
+    // never the shared AGENTS.md). Fresh starts and fresh-primed restores send it; native resume and in-place restart
+    // replay nothing. The startup orchestrator rebuilds the file after this launch's projection.
+    // OPR.0.7.0.13: the compatibility limit, named rather than silent, whichever writer puts a skill in a Claude seat's
+    // storage (its loadout, a profile skill, a startup skill file). Nothing falls back to the project.
+    const versionNote = claudeSeatSkillsRoot
+      ? claudeSeatSkillsNote({ loadoutReceipts, planEntries: planResult.plan.entries, startupFiles: protectedFiltered }) : undefined;
+    if (versionNote) (launchResult.warnings ??= []).push(`${canonicalSessionName}: ${versionNote}`);
+    // OPR.0.7.0.13 (router, R1.1): the one-line seat-skills bootstrap is part of a seat's saved startup files whenever it
+    // has its own skill storage. Each start decides from the person's saved answer whether to deliver it (startup
+    // orchestrator), so a later yes or no applies to restores too; a Codex seat's startup catalog below is unchanged.
+    const bootstrapLine = seatSkills && (codexSeatSkillsRoot || claudeSeatSkillsRoot) ? [seatSkillsPointerStartupFile()] : [];
+    const dedupedResolvedFiles = codexSeatSkillsRoot && seatSkills
+      ? [...protectedFiltered, ...bootstrapLine, {
+        path: "openrig-seat-skills.md", absolutePath: seatSkills.catalogPath, ownerRoot: seatSkills.root,
+        deliveryHint: "send_text" as const, required: false, appliesOn: ["fresh_start", "restore"] as ("fresh_start" | "restore")[],
+      }]
+      : [...protectedFiltered, ...bootstrapLine];
 
     const binding: NodeBinding = {
       id: launchResult.binding.id,
@@ -2760,3 +2831,4 @@ export class PodRigInstantiator {
     });
   }
 }
+

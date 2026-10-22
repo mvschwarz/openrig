@@ -28,6 +28,7 @@ import type { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import type { AgentResolverFsOps } from "../src/domain/agent-resolver.js";
 import type { NodeBinding, RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
+import { isSeatSkillsBootstrapLine } from "../src/domain/startup-orchestrator.js";
 
 // #25 — a rig can send Claude Code's OpenRig-managed blocks to CLAUDE.local.md
 // instead of the (often git-tracked) CLAUDE.md. These drive the real
@@ -255,7 +256,10 @@ describe("#25 selected-file semantics — preservation, idempotence, the other f
     const ctx = f.db.prepare("SELECT projection_entries_json, resolved_files_json FROM node_startup_context WHERE node_id = ?")
       .get(node.id) as { projection_entries_json: string; resolved_files_json: string };
     const binding = { cwd: f.cwd } as NodeBinding; // no destination on the binding: the rig row decides
-    const files = JSON.parse(ctx.resolved_files_json).filter((file: { deliveryHint: string }) => file.deliveryHint === "guidance_merge");
+    // The saved files replayed as a start would: the startup orchestrator delivers the seat-skills bootstrap line only
+    // with the person's yes (none here), so this direct replay leaves it out too.
+    const files = JSON.parse(ctx.resolved_files_json).filter((file: { path: string; deliveryHint: string }) =>
+      file.deliveryHint === "guidance_merge" && !isSeatSkillsBootstrapLine(file));
     await f.claude.deliverStartup(files, { ...binding, claudeManagedBlockFile: "CLAUDE.local.md" });
     await f.claude.deliverStartup(files, { ...binding, claudeManagedBlockFile: "CLAUDE.local.md" });
     const again = f.read("CLAUDE.local.md")!;

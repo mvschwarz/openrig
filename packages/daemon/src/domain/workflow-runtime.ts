@@ -1768,9 +1768,10 @@ export class WorkflowRuntime {
    * mechanical advance is folded into project() for v1; continue() is
    * the audit/inspect entrypoint.
    */
-  continue(instanceId: string): {
+  continue(instanceId: string, options: { fullHistory?: boolean } = {}): {
     instance: WorkflowInstanceWithDeadline;
     trail: WorkflowStepTrailEntry[];
+    trailCompleteness: "complete" | "recent";
     guidance: ReturnType<WorkflowRuntime["guidance"]>;
     reconciliation: ReturnType<typeof inspectGraph>;
     frontier: ReturnType<WorkflowRuntime["inspect"]>["frontier"];
@@ -1779,11 +1780,16 @@ export class WorkflowRuntime {
     boundaryObligations: LifecycleObligation[];
   } {
     const instance = this.instanceStore.getByIdOrThrow(instanceId);
-    const trail = this.trailLog.listForInstance(instanceId);
+    // The default's order either way. One row past the 50 shows whether the default cut anything;
+    // a negative LIMIT is SQLite's "no limit".
+    const read = this.trailLog.listForInstance(instanceId, options.fullHistory ? -1 : 51);
+    const cut = !options.fullHistory && read.length > 50;
+    const trail = cut ? read.slice(0, 50) : read;
     const inspected = this.inspect(instanceId);
     return {
       instance: this.withDeadline(instance),
       trail,
+      trailCompleteness: cut ? "recent" : "complete",
       guidance: this.guidance(instanceId),
       reconciliation: this.inspectGraph(instanceId),
       frontier: inspected.frontier,

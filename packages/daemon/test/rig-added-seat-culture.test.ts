@@ -17,6 +17,7 @@ import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/clau
 import type { AgentResolverFsOps } from "../src/domain/agent-resolver.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
+import { seatSkillPaths } from "../src/domain/seat-skill-storage.js";
 
 // A seat added to a running rig (`rig expand`, or add-member under `rig grow`) launches from a synthetic
 // spec that declares no rig-level layers. It must still get the rig's culture file and rig startup block,
@@ -150,7 +151,7 @@ function fixture() {
   const rigFile = (logicalId: string, path: string) => context(logicalId).files.find((f) => f.path === path);
   const claudeMd = (dir: string) => fs.readFileSync(nodePath.join(dir, "CLAUDE.md"), "utf-8");
 
-  return { db, rigRepo, inst, expansion, yaml, rigRoot, otherRoot, cwd, context, rigFile, claudeMd };
+  return { db, rigRepo, inst, expansion, tmux, yaml, rigRoot, otherRoot, cwd, context, rigFile, claudeMd };
 }
 
 async function launched(f: ReturnType<typeof fixture>): Promise<string> {
@@ -211,6 +212,38 @@ describe("a seat added to a running rig gets the rig's culture and startup layer
     expect(outcome.ok, JSON.stringify(outcome)).toBe(true);
     expect(f.rigFile("dev.late", "CULTURE.md")).toBeUndefined();
     expect(f.rigFile("dev.late", "RIG-NOTES.md")).toBeUndefined();
+    f.db.close();
+  });
+});
+
+// OPR.0.7.0.13 with the above: an added seat gets its own skill storage, its plugin on the launch and the saved seat-skills
+// line exactly as an original seat does, beside the rig's culture and startup; neither feature replaces the other's input.
+describe("an added seat's own skill storage composes with the rig's culture and startup layers", () => {
+  it("original, expanded and added-member seats: the same storage, plugin dir and saved line, beside the rig layers", async () => {
+    const f = fixture();
+    const rigId = await launched(f);
+    const expanded = await f.expansion.expand({
+      rigId,
+      pod: { id: "ux", label: "UX", members: [{ id: "designer", agentRef: "local:agents/impl", profile: "default", runtime: "claude-code", cwd: f.cwd("ux-repo") }], edges: [] },
+      rigRoot: f.otherRoot,
+    } as never);
+    expect(expanded.ok, JSON.stringify(expanded)).toBe(true);
+    const added = await f.inst.addMemberToPod(rigId, "dev",
+      { id: "helper", agent_ref: "local:agents/impl", profile: "default", runtime: "claude-code", cwd: f.cwd("helper-repo") }, f.otherRoot);
+    expect(added.ok, JSON.stringify(added)).toBe(true);
+    const launchEnvs = vi.mocked(f.tmux.createSession).mock.calls.map((call) => (call[2] ?? {}) as Record<string, string>);
+    for (const logicalId of ["dev.impl", "ux.designer", "dev.helper"]) {
+      const paths = seatSkillPaths({ rigId, logicalId, runtime: "claude-code" });
+      expect(fs.existsSync(paths.pluginManifestPath), `${logicalId}: its own plugin manifest`).toBe(true);
+      // This seat's own launch carries its own plugin dir (the list is ":"-joined).
+      const { id: nodeId } = f.db.prepare("SELECT id FROM nodes WHERE rig_id = ? AND logical_id = ?").get(rigId, logicalId) as { id: string };
+      const own = launchEnvs.filter((env) => env["OPENRIG_NODE_ID"] === nodeId);
+      expect(own, `${logicalId}: one launch`).toHaveLength(1);
+      expect((own[0]!["CLAUDE_CODE_PLUGIN_DIRS"] ?? "").split(":"), `${logicalId}: its plugin on its launch`).toContain(paths.pluginDir);
+      const saved = f.context(logicalId).files.map((file) => file.path);
+      expect(saved, logicalId).toEqual(expect.arrayContaining(["CULTURE.md", "RIG-NOTES.md", "openrig-seat-skills.md"]));
+      expect(f.context(logicalId).actions).toContain("rig hello");
+    }
     f.db.close();
   });
 });
