@@ -387,6 +387,8 @@ export class RunnerCore {
   private lastEntryId: string | undefined;
   private ready = false;
   private lastHeartbeatMs: number | null = null;
+  /** Hook event of the last activity this runner posted; null until it posts one. */
+  private lastPostedHook: string | null = null;
   private assistantErrorShown = false;
   private started = false;
   /** OMP failures/approvals survive the turn until agent_start, except typed
@@ -713,6 +715,9 @@ export class RunnerCore {
    *  stops beating and the seat goes back to `unknown`. Pi only; the OMP identity handshake has its own retry. */
   heartbeat(): void {
     if (this.runtime !== "pi" || !this.ready || this.streaming || this.attention) return;
+    // `streaming` follows only agent_start/agent_end; turn_start, compaction and auto-retry also report the agent
+    // working. Beat only when the last thing posted was a Stop (or nothing yet), so a beat never lands mid-turn.
+    if (this.lastPostedHook !== null && this.lastPostedHook !== "Stop") return;
     const now = Date.parse(this.io.now());
     if (this.lastHeartbeatMs !== null && now - this.lastHeartbeatMs < IDLE_HEARTBEAT_MS) return;
     this.lastHeartbeatMs = now;
@@ -859,6 +864,7 @@ export class RunnerCore {
   private activitySequence = 0;
 
   private activityPayload(hookEvent: string, subtype: string | null): Record<string, unknown> {
+    this.lastPostedHook = hookEvent;
     return {
       sequence: ++this.activitySequence,
       sessionName: this.identity.sessionName,

@@ -86,6 +86,23 @@ describe("idle heartbeat", () => {
     expect(c.beats()).toHaveLength(1);
   });
 
+  // agent_start is not the only way a turn runs: turn_start, compaction and auto-retry report the agent working
+  // without setting `streaming`, and a beat in those stretches would read idle mid-turn.
+  it.each([
+    ["a turn opened by turn_start alone", { type: "turn_start" }],
+    ["a compaction", { type: "compaction_start" }],
+    ["an automatic retry", { type: "auto_retry_start" }],
+  ])("stays quiet during %s, and resumes after agent_end", (_name, event) => {
+    const c = clocked();
+    ready(c.core);
+    c.core.handlePiLine(JSON.stringify(event));
+    c.advance(10 * 60_000); c.core.heartbeat();
+    expect(c.beats()).toEqual([]);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    c.core.heartbeat();
+    expect(c.beats()).toHaveLength(1);
+  });
+
   it("stays quiet after the pi child exits", () => {
     const c = clocked();
     ready(c.core);
