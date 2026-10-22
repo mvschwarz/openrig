@@ -2,6 +2,7 @@
 // reach the successor. A blocked row's current park timer is different: it wakes the seat that still owns the row,
 // and the successor inherits that row. It survives the swap; every other job the retiring generation registered for
 // its own seat still stops. Jobs it registered for another seat wake that seat, not the successor, and keep running.
+// A workflow keepalive is work-bound, like a park timer, and keeps running whoever owns the workflow's frontier.
 // Real queue, watchdog and session repositories on a full test DB, wired as startup.ts wires them.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
@@ -14,8 +15,10 @@ import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.j
 import { DefaultOccupantInvalidator } from "../src/domain/occupant-invalidator.js";
 import { diagnoseSeatParked } from "../src/domain/parked-query.js";
 import { WatchdogPolicyEngine } from "../src/domain/watchdog-policy-engine.js";
+import { makeWorkflowKeepalivePolicy } from "../src/domain/policies/workflow-keepalive.js";
 import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
 import { watchdogHistorySchema } from "../src/db/migrations/032_watchdog_history.js";
+import { workflowInstancesSchema } from "../src/db/migrations/034_workflow_instances.js";
 
 const SEAT = "dev-impl@seat-rig";
 const OTHER = "dev-qa@seat-rig";
@@ -158,6 +161,38 @@ describe("#handover-wake: a blocked row's park timer across an occupant swap", (
     expect(jobState(own.jobId)).toBe("stopped");
   });
 
+  // A workflow keepalive wakes the workflow's current frontier owner (else its creator, observers, then its own target) and
+  // ends with the workflow. It's work-bound, like a park timer, so the swap keeps it whoever owns the frontier.
+  async function keepaliveFor(frontierOwner: string, fallback: string) {
+    db.exec(workflowInstancesSchema.sql); // the full test DB leaves the workflow tables to the workflow suites
+    const frontier = await queue.create({ sourceSession: "orch-lead@seat-rig", destinationSession: frontierOwner, body: "step" } as never);
+    db.prepare(`INSERT INTO workflow_instances (instance_id, workflow_name, workflow_version, created_by_session, created_at, status, current_frontier_json)
+      VALUES ('inst-1', 'wf', '1', 'orch-lead@seat-rig', '2026-10-22T00:00:00Z', 'active', ?)`).run(JSON.stringify([frontier.qitemId]));
+    return jobs.register({
+      policy: "workflow-keepalive", targetSession: fallback, intervalSeconds: 1800, registeredBySession: SEAT,
+      specYaml: ["policy: workflow-keepalive", "target:", `  session: ${JSON.stringify(fallback)}`, "context:", "  workflow_instance_id: inst-1", ""].join("\n"),
+    });
+  }
+
+  it("a workflow keepalive the retiring occupant registered with itself as fallback keeps waking another seat's frontier", async () => {
+    const keepalive = await keepaliveFor(OTHER, SEAT);
+    expect((await fireAllActive()).map((d) => d.targetSession)).toEqual([OTHER]); // the frontier owner, not the fallback
+
+    swap();
+
+    expect(jobState(keepalive.jobId)).toBe("active");
+    expect((await fireAllActive()).map((d) => d.targetSession)).toEqual([OTHER]);
+  });
+
+  it("a workflow keepalive for the retiring seat's own frontier keeps running for the successor, who inherits that step", async () => {
+    const keepalive = await keepaliveFor(SEAT, OTHER);
+
+    swap();
+
+    expect(jobState(keepalive.jobId)).toBe("active");
+    expect((await fireAllActive()).map((d) => d.targetSession)).toEqual([SEAT]);
+  });
+
   it("a reminder stored for the retiring seat whose spec targets another seat keeps running", async () => {
     const forOther = reminderFor(SEAT, { specTarget: OTHER });
 
@@ -209,6 +244,7 @@ describe("#handover-wake: a blocked row's park timer across an occupant swap", (
       resolvePreDeliveryTerminalReason: ({ jobId }: { jobId: string }) => queue.resolveWatchdogPreDeliveryTerminalReason(jobId),
       resolveQueueWait: (input: { jobId: string }) => queue.evaluateWaitReminder(input),
       onWakeAttempt: ({ jobId, deliveryStatus }) => queue.recordWatchdogWakeAttempt(jobId, deliveryStatus),
+      additionalPolicies: [makeWorkflowKeepalivePolicy({ db })],
     });
     for (const job of jobs.listActive()) await engine.evaluate(job);
     return deliveries;

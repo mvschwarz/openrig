@@ -84,12 +84,14 @@ export class DefaultOccupantInvalidator implements OccupantInvalidator {
     // wakes that seat, not the successor, so it keeps running (#1775). "This seat" is judged on the job's
     // delivery target (the spec's, where the engine prefers it) against every name that reaches the seat.
     // A blocked row's current park timer is kept: it wakes the seat that owns the row, and nothing re-arms
-    // it if it stops.
+    // it if it stops. A workflow keepalive is kept for the same reason: it wakes the workflow's current
+    // frontier owner (whom the successor succeeds, when it's this seat) and ends with the workflow.
     const seatNames = new Set([retiringSessionName, args.successorSessionName]);
     for (const name of [retiringSessionName, args.successorSessionName]) {
       for (const address of this.deps.addresses?.sessionAddresses(name) ?? []) seatNames.add(address);
     }
-    const wakesThisSeat = (job: SwapWatchdogJob) => seatNames.has(watchdogJobTarget(job, specTarget(job.specYaml)).session);
+    const wakesThisSeat = (job: SwapWatchdogJob) =>
+      job.policy !== "workflow-keepalive" && seatNames.has(watchdogJobTarget(job, specTarget(job.specYaml)).session);
     const keepJobIds = this.deps.queue?.currentParkTimerIds?.() ?? [];
     const stopped =
       this.deps.watchdog?.dropArmedByRegisteringGeneration(retiringGeneration, wakesThisSeat, keepJobIds) ?? 0;
