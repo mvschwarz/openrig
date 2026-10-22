@@ -450,7 +450,10 @@ profiles:
     }
   });
 
-  it("rig up refuses the loadout, and changes nothing, when the seat's storage is linked outside the anchor (OPR.0.7.0.13 F1, round 4)", async () => {
+  it.each([
+    ["a linked seat-storage ancestor starts the seat without its skills, names the loss, and writes nothing through the link or into the project", "link"],
+    ["any other reconciliation error still fails the seat by name", "other"],
+  ] as const)("rig up when the seat's storage is linked outside the anchor: %s (OPR.0.7.0.13 F1)", async (_title, mode) => {
     const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "instantiator-linked-seat-"));
     let db: ReturnType<typeof createFullTestDb> | undefined;
     try {
@@ -467,7 +470,9 @@ profiles:
       execFileSync("git", ["-C", catalog, "add", "."]);
       execFileSync("git", ["-C", catalog, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "catalog"]);
       let movedBefore: string[] = [];
-      const reconciler = vi.fn((input: Parameters<typeof reconcileSkillLoadout>[0]) => {
+      const reconciler = vi.fn((input: Parameters<typeof reconcileSkillLoadout>[0]): ReturnType<typeof reconcileSkillLoadout> => {
+        if (mode === "other") return { ok: false, applied: false, freshLaunchRequired: false, runtime: input.runtime, targetRoot: "", manifestPath: "",
+          receipts: [], removed: [], errors: [{ code: "skill_conflict", message: "shared differs from the catalog", path: "" }] } as never;
         if (input.location) {
           // The seat's runtime storage (made by the launch just before this) moved out, and a link left in its place.
           const runtimeRoot = nodePath.dirname(nodePath.dirname(input.location.targetRoot));
@@ -487,10 +492,20 @@ profiles:
       ] }] });
       const result = await fixture.inst.instantiate(RigSpecCodec.serialize(rig), installed);
       expect(reconciler).toHaveBeenCalled();
+      const seat = result.ok ? result.result.nodes.find((n) => n.logicalId === "dev.impl") : undefined;
+      if (mode === "other") {
+        expect(seat?.status ?? "failed").toBe("failed"); // a rig whose only seat failed is itself refused
+        expect(JSON.stringify(result)).toContain("skill_conflict: shared differs from the catalog");
+        return;
+      }
       expect(reconciler.mock.results[0]?.value).toMatchObject({ ok: false, errors: [expect.objectContaining({ code: "seat_storage_refused" })] });
-      expect(JSON.stringify(result)).toContain("seat_storage_refused");
-      // The moved tree is exactly as it was: no skill written, no staging folder, no manifest.
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      expect(seat?.status).toBeDefined();
+      expect(seat?.status).not.toBe("failed");
+      expect(JSON.stringify(result)).toContain("seat_skills_not_delivered: seat_storage_refused");
+      // The moved tree is exactly as it was: no skill written, no staging folder, no manifest. Nothing fell back into the project.
       expect(listTree(moved)).toEqual(movedBefore);
+      expect(listTree(project).filter((file) => file.includes("shared"))).toEqual([]);
     } finally { db?.close(); fs.rmSync(root, { recursive: true, force: true }); }
   });
 

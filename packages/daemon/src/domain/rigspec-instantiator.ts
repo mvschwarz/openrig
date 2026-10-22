@@ -2178,7 +2178,12 @@ export class PodRigInstantiator {
           projection = withoutPlugins;
         }
       }
-      if (!projection.ok) {
+      // A seat whose storage a link refuses starts without its seat skills, and says what it lost: nothing is written
+      // through the link and nothing falls back into the project. Any other reconciliation error still fails the seat.
+      const refusedOnly = !projection.ok && projection.errors.every((error) => error.code === "seat_storage_refused");
+      if (refusedOnly) {
+        keptSkillWarnings.push(`seat_skills_not_delivered: ${projection.errors.map((error) => `${error.code}: ${error.message}`).join("; ")}; the seat starts without its selected skills`);
+      } else if (!projection.ok) {
         return {
           status: "failed",
           error: projection.errors.map((error) => `${error.code}: ${error.message}`).join("; "),
@@ -2192,8 +2197,8 @@ export class PodRigInstantiator {
       if (seatSkills && seatRuntime === "claude-code" && projection.ok) {
         keptSkillWarnings.push(...migrateLegacyProjectSkills({ reconcile: this.deps.skillReconciler!, loadout, cwd: configResult.config.cwd, owner: canonicalSessionName }));
       }
-      loadoutReceipts = projection.receipts.length;
-      for (const receipt of projection.receipts.filter(isKeptPluginSkill)) {
+      loadoutReceipts = projection.ok ? projection.receipts.length : 0;
+      for (const receipt of projection.ok ? projection.receipts.filter(isKeptPluginSkill) : []) {
         keptSkillWarnings.push(`plugin_skill_kept: ${receipt.id}: ${receipt.detail.slice("kept: ".length)} (${receipt.target})`);
       }
     }
