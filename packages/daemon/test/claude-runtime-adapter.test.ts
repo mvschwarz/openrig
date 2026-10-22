@@ -560,6 +560,26 @@ describe("Claude Code runtime adapter", () => {
     expect(fs.readFileSync(nodePath.join(cwd, ".claude", "agents", "reviewer.yaml"), "utf-8")).toBe("name: reviewer");
   });
 
+  it.each(["auto", "denyAll"])("keeps a worktree's %s permission selection when projecting shared settings", async mode => {
+    const source = "/shared/claude-settings.fragment.json";
+    const target = "/project/.claude/settings.local.json";
+    const permissions = { defaultMode: mode, allow: ["Read(.)"], deny: ["Read(/private/**)"] };
+    const files = mockFs({
+      [source]: fs.readFileSync(new URL("../specs/agents/shared/runtime/claude-settings.fragment.json", import.meta.url), "utf8"),
+      [target]: JSON.stringify({ permissions, userSetting: "keep" }),
+    });
+    const adapter = new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: files });
+    const plan: ProjectionPlan = { runtime: "claude-code", cwd: "/project", entries: [makeEntry({
+      category: "runtime_resource", effectiveId: "claude-default-settings", resourceType: "claude_settings_fragment", absolutePath: source,
+    })], startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [] };
+    await adapter.project(plan, makeBinding());
+    await adapter.project(plan, makeBinding());
+    const result = JSON.parse((files as unknown as { _store: Record<string, string> })._store[target]!);
+    expect(result.permissions).toEqual(permissions);
+    expect(result.userSetting).toBe("keep");
+    expect(result.enabledMcpjsonServers).toEqual(["exa", "context7"]);
+  });
+
   it("applies claude_settings_fragment runtime resources to project-local Claude settings", async () => {
     const fs = mockFs({
       "/agents/base/runtime/claude-settings.json": JSON.stringify({

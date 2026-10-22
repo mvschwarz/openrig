@@ -414,16 +414,6 @@ describe("Starter specs", () => {
       expect(resource).toBeDefined();
       expect(existsSync(join(SPECS_ROOT, "agents/shared", resource!.path))).toBe(true);
     }
-    const claudeSettingsResource = sharedRuntimeResources.find((entry) => entry.id === "claude-default-settings");
-    const claudeSettings = JSON.parse(readFileSync(join(SPECS_ROOT, "agents/shared", claudeSettingsResource!.path), "utf-8"));
-    // OPR.0.4.8.2 agnostic rip-out: the fragment's 13-entry allow-list (assessment C1b) and the
-    // rig up/down ask gates (C1c) are RIPPED. OpenRig bakes NO config-file permission policy
-    // beyond the acceptEdits floor — post-rip the fragment carries only defaultMode.
-    expect(claudeSettings.permissions.allow).toBeUndefined();
-    expect(claudeSettings.permissions.ask).toBeUndefined();
-    expect(claudeSettings.permissions.deny).toBeUndefined();
-    expect(claudeSettings.permissions.defaultMode).toBe("acceptEdits");
-
     // Slice 29: claude-compact-in-place skill DELETED (was mis-imported as a
     // skill; its content remains in skill-spec docs not under skills/).
 

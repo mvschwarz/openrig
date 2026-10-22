@@ -226,9 +226,10 @@ user's home; changing `OPENRIG_HOME` alone does not isolate provider configurati
   installation. Selected settings resources can still replace overlapping keys.
   The collector script lives under `.openrig/`, and the activity-hook relay under
   the instance's `state/claude-activity-hooks/`. Selected settings/MCP resources can also
-  change that settings file and `.mcp.json`. The shared settings resource sets
-  `permissions.defaultMode` to `acceptEdits` and enables Exa/Context7 MCP entries;
-  selected MCP resources configure those external services. Built-in bootstrap
+  change that settings file and `.mcp.json`. The shared settings resource enables
+  Exa/Context7 MCP entries and leaves existing `permissions.defaultMode` and permission
+  rules unchanged. Managed launch flags select the session mode. Selected MCP resources
+  configure those external services. Built-in bootstrap
   no longer writes a command allowlist to `~/.claude/settings.json` or removes
   older allowances. `CLAUDE_CONFIG_DIR` does not relocate the project-local writes.
   To keep your own status line alongside the collector, see

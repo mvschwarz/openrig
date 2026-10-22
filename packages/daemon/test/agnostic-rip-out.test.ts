@@ -1,7 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
 import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
@@ -9,12 +7,9 @@ import type { TmuxAdapter } from "../src/adapters/tmux.js";
 // OPR.0.4.8.2 — agnostic permission RIP-OUT (founder-locked; rip-list = ASSESSMENT sha 5d450fdd).
 // Strips the three OpenRig-baked CONFIG-FILE policy writes beyond the floor: C1b (fragment
 // permissions.allow), C1c (fragment permissions.ask), C2 (provisionRigPermissions global allow).
-// KEEPS the usability floor byte-identical (fragment defaultMode=acceptEdits + the
-// --permission-mode acceptEdits launch flag). Two-surface rule: config-file writes go, launch-flag
-// floor stays. RED-first: the rip assertions FAIL on f81018fb (which ships allow/ask + rig allow).
+// KEEPS the usability floor in the --permission-mode acceptEdits launch flag.
+// Config-file writes go; the launch flag stays. RED-first: the rip assertions FAIL on f81018fb (which ships allow/ask + rig allow).
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const FRAGMENT_PATH = path.join(__dirname, "../specs/agents/shared/runtime/claude-settings.fragment.json");
 
 function mockTmux(): TmuxAdapter {
   return {
@@ -64,20 +59,6 @@ function makeBinding(cwd = "/project"): NodeBinding {
 }
 
 describe("OPR.0.4.8.2 agnostic rip-out — config-file policy writes stripped, launch-flag floor kept", () => {
-  it("C1b/C1c: the shipped fragment carries NO permissions.allow / ask / deny", () => {
-    const frag = JSON.parse(fs.readFileSync(FRAGMENT_PATH, "utf8"));
-    expect(frag.permissions.allow).toBeUndefined();
-    expect(frag.permissions.ask).toBeUndefined();
-    expect(frag.permissions.deny).toBeUndefined();
-  });
-
-  it("floor KEPT: fragment permissions.defaultMode is exactly acceptEdits (+ mcp servers untouched)", () => {
-    const frag = JSON.parse(fs.readFileSync(FRAGMENT_PATH, "utf8"));
-    expect(Object.keys(frag.permissions)).toEqual(["defaultMode"]); // ONLY the floor key remains
-    expect(frag.permissions.defaultMode).toBe("acceptEdits");
-    expect(frag.enabledMcpjsonServers).toEqual(["exa", "context7"]);
-  });
-
   it("C2: a fresh startup authors NO ~/.claude/settings.json for permissions", async () => {
     const fsm = mockFs({});
     const adapter = new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: { ...fsm, homedir: "/home/test" } });
