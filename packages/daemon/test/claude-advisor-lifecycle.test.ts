@@ -107,7 +107,7 @@ function setup() {
   const sessionRegistry = new SessionRegistry(db), eventBus = new EventBus(db);
   const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
   const adapter = new ClaudeCodeAdapter({ tmux, fsOps, sessionIdFactory: randomUUID, sleep: async () => {}, listProcesses });
-  const startupOrchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, listProcesses });
+  const startupOrchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, listProcesses, sleep: async () => {} });
   const inst = new PodRigInstantiator({ db, rigRepo, podRepo, sessionRegistry, eventBus, nodeLauncher,
     startupOrchestrator, fsOps, adapters: { "claude-code": adapter }, tmuxAdapter: tmux, onboardingEnabledResolver: () => false });
   const snapshotRepo = new SnapshotRepository(db), checkpointStore = new CheckpointStore(db);
@@ -222,7 +222,10 @@ describe("per-seat Claude Advisor (#1152)", () => {
     expect(command).toContain("--advisor 'fork-advisor'");
     expect(command).toContain("--model 'claude-sonnet-5-5'");
     const owner = f.rigRepo.getRig(result.result.rigId)!.nodes.find(n => n.logicalId === "dev.owner")!;
-    expect(f.sessionRegistry.getSessionsForRig(result.result.rigId).find(s => s.nodeId === owner.id)?.resumeToken).toBe("fork-native-id");
+    // The fork names its own conversation with --session-id, which becomes the seat's resume token.
+    const forkId = command.match(/--session-id (\S+)/)?.[1];
+    expect(forkId).toBeTruthy();
+    expect(f.sessionRegistry.getSessionsForRig(result.result.rigId).find(s => s.nodeId === owner.id)?.resumeToken).toBe(forkId);
   });
 
   it("removing Advisor from the spec clears persistence and the next launch", async () => {
