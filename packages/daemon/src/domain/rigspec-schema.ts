@@ -1252,7 +1252,6 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
 
 const LEGACY_KNOWN_RUNTIMES = new Set(["claude-code", "codex", "pi", "omp"]);
 const LEGACY_KNOWN_RESTORE_POLICIES = new Set(["resume_if_possible", "relaunch_fresh", "checkpoint_only"]);
-const LEGACY_KNOWN_EDGE_KINDS = new Set(["delegates_to", "spawned_by", "can_observe"]);
 
 export class LegacyRigSpecSchema {
   static validate(raw: unknown): ValidationResult {
@@ -1348,7 +1347,8 @@ export class LegacyRigSpecSchema {
         if (from === to) errors.push(`self-edge not allowed: ${from} -> ${to}`);
         if (from && !nodeIds.has(from)) errors.push(`edge references nonexistent node: '${from}'`);
         if (to && !nodeIds.has(to)) errors.push(`edge references nonexistent node: '${to}'`);
-        if (kind && !LEGACY_KNOWN_EDGE_KINDS.has(kind)) errors.push(`unknown edge kind: '${kind}'`);
+        // The same five kinds as a pod-aware spec, so an edge that `rig edge add` put on a flat rig exports and imports again.
+        if (kind && !VALID_EDGE_KINDS.has(kind)) errors.push(`unknown edge kind: '${kind}'`);
       }
     }
 
