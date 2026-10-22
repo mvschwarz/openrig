@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cleanSeatSkills, hasSeatSkillRecords, rehydrateSeatSkills, seatSkillPaths } from "../src/domain/seat-skill-storage.js";
+import { cleanSeatSkills, hasSeatSkillRecords, rehydrateSeatSkills, seatSkillPaths, type SeatSkillPaths } from "../src/domain/seat-skill-storage.js";
 import { inspectSeatSkills } from "../src/domain/seat-skill-apply.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -253,7 +253,8 @@ describe("a seat's additions on the launch environment", () => {
 });
 
 describe("a seat's additions through a restore", () => {
-  it("puts back a missing copy from its unchanged source, then passes the additions to the Claude resume", async () => {
+  /** Restore one Claude seat from a snapshot; `before` runs before the snapshot, `after` before the restore. */
+  async function restoreSeat(before: (paths: SeatSkillPaths) => void, after: (paths: SeatSkillPaths) => void) {
     const db = createFullTestDb();
     const rigRepo = new RigRepository(db);
     const sessionRegistry = new SessionRegistry(db);
@@ -268,10 +269,9 @@ describe("a seat's additions through a restore", () => {
     sessionRegistry.updateStartupStatus(session.id, "ready", new Date().toISOString());
     db.prepare("UPDATE sessions SET resume_type = 'claude_id', resume_token = 'tok-1' WHERE id = ?").run(session.id);
     const paths = seatSkillPaths({ rigId: rig.id, logicalId: "dev.impl", runtime: "claude-code" });
-    const prepared = prepareSeatLaunchAdditions(paths, sources().input);
-    if (!prepared.ok) throw new Error(prepared.message);
+    before(paths);
     const snapshot = snapshotCapture.captureSnapshot(rig.id, "manual");
-    unlinkSync(prepared.additions.appendSystemPromptFile!);
+    after(paths);
 
     const claudeResume = { canResume: () => true, resume: vi.fn(async () => ({ ok: true, code: "resumed" })) } as unknown as ClaudeResumeAdapter;
     const codexResume = { canResume: () => false, resume: vi.fn() } as unknown as CodexResumeAdapter;
@@ -285,13 +285,31 @@ describe("a seat's additions through a restore", () => {
     const restore = new RestoreOrchestrator({ db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture, checkpointStore,
       nodeLauncher, tmuxAdapter, claudeResume, codexResume });
     const result = await restore.restore(snapshot.id);
+    db.close();
+    // (sessionName, resumeType, resumeToken, cwd, posture, model, permissionMode, nodeId, effort, nonInterruptive, kernelAuthority, teamPermissionDefault, advisor, launchAdditions)
+    return { result, calls: (claudeResume.resume as unknown as { mock: { calls: unknown[][] } }).mock.calls };
+  }
+
+  it("puts back a missing copy from its unchanged source, then passes the additions to the Claude resume", async () => {
+    let prepared: ReturnType<typeof prepareSeatLaunchAdditions> | undefined;
+    const { result, calls } = await restoreSeat((paths) => { prepared = prepareSeatLaunchAdditions(paths, sources().input); },
+      () => { if (prepared?.ok) unlinkSync(prepared.additions.appendSystemPromptFile!); });
+    if (!prepared?.ok) throw new Error("not prepared");
     expect(result.ok, JSON.stringify(result)).toBe(true);
     expect(readFileSync(prepared.additions.appendSystemPromptFile!, "utf8")).toBe("Answer in short sentences.\n");
-    const calls = (claudeResume.resume as unknown as { mock: { calls: unknown[][] } }).mock.calls;
     expect(calls).toHaveLength(1);
-    // (sessionName, resumeType, resumeToken, cwd, posture, model, permissionMode, nodeId, effort, nonInterruptive, kernelAuthority, teamPermissionDefault, advisor, launchAdditions)
     expect(calls[0]![13]).toEqual(prepared.additions);
-    db.close();
+  });
+
+  it.each(["{}\n", "{\"additions\": {}}\n", "not json\n"])("a seat whose additions record isn't one OpenRig wrote (%j) still resumes, without additions, and is told why", async (record) => {
+    const { result, calls } = await restoreSeat(() => {}, (paths) => {
+      mkdirSync(paths.root, { recursive: true });
+      writeFileSync(join(paths.root, "launch-additions.json"), record);
+    });
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]![13]).toBeUndefined();
+    expect(JSON.stringify(result)).toContain("seat_launch_addition_refused");
   });
 });
 

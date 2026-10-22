@@ -41,10 +41,27 @@ const sha256 = (bytes: Buffer): string => createHash("sha256").update(bytes).dig
 const manifestPath = (paths: SeatSkillPaths): string => nodePath.join(paths.root, "launch-additions.json");
 const additionsRoot = (paths: SeatSkillPaths): string => nodePath.join(paths.root, "additions");
 
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+const optionalString = (value: unknown): boolean => value === undefined || typeof value === "string";
+
+/** Only a record in the shape OpenRig writes is read; a hand edit or another version's shape isn't (see manifestUnreadable). */
 function readManifest(paths: SeatSkillPaths): Manifest | undefined {
   const file = manifestPath(paths);
   if (!insideSeatStorage(paths.root, file)) return undefined;
-  try { return JSON.parse(fs.readFileSync(file, "utf8")) as Manifest; } catch { return undefined; }
+  let parsed: unknown;
+  try { parsed = JSON.parse(fs.readFileSync(file, "utf8")); } catch { return undefined; }
+  const additions = isRecord(parsed) ? parsed["additions"] : undefined;
+  const shaped = isRecord(parsed) && isRecord(additions) && Array.isArray(additions["pluginDirs"])
+    && additions["pluginDirs"].every((dir) => typeof dir === "string")
+    && optionalString(additions["agent"]) && optionalString(additions["appendSystemPromptFile"])
+    && (parsed["conversations"] === undefined || isRecord(parsed["conversations"]));
+  return shaped ? parsed as unknown as Manifest : undefined;
+}
+
+/** A record in the seat's storage that can't be read as one OpenRig wrote: named rather than silently absent. */
+function manifestUnreadable(paths: SeatSkillPaths): boolean {
+  const file = manifestPath(paths);
+  return insideSeatStorage(paths.root, file) && fs.existsSync(file) && !readManifest(paths);
 }
 
 function writeManifest(paths: SeatSkillPaths, manifest: Manifest): void {
@@ -236,7 +253,7 @@ export interface SeatLaunchAdditionsReport extends SeatLaunchAdditions {
   agentPromptReplacesDefault?: boolean;
 }
 export function seatLaunchAdditionsReport(paths: SeatSkillPaths): SeatLaunchAdditionsReport | null {
-  if (!readManifest(paths) && !manifestLinked(paths)) return null;
+  if (!readManifest(paths) && !manifestLinked(paths) && !manifestUnreadable(paths)) return null;
   const { additions, missing, refused } = seatLaunchAdditionsAt(paths);
   const report: SeatLaunchAdditionsReport = { ...(additions ?? { pluginDirs: [] }), missing, refused };
   if (additions?.agent) {
@@ -259,7 +276,10 @@ function seatLaunchAdditionsAt(paths: SeatSkillPaths): { additions?: SeatLaunchA
     return { missing: [], refused: [`${manifestPath(paths)} is not inside this seat's storage (a link on the way), so the seat's launch additions aren't read or delivered`] };
   }
   const manifest = readManifest(paths);
-  if (!manifest) return { missing: [], refused: [] };
+  if (!manifest) {
+    return { missing: [], refused: manifestUnreadable(paths)
+      ? [`${manifestPath(paths)} isn't a launch additions record OpenRig can read (not JSON, or not the shape it writes), so the seat's launch additions aren't read or delivered`] : [] };
+  }
   const refused: string[] = [];
   const present = (file: string, kind: "file" | "folder") => {
     if (!(kind === "file" ? insideSeatStorage(paths.root, file) : insideSeatStorageFolder(paths.root, file))) return false;
