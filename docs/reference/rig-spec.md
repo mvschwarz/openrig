@@ -552,7 +552,11 @@ This is human-authored (you choose the pod/member IDs) and system-validated (the
 | `spawned_by` | Source was spawned by target; the target launches first. Constrains launch order. | Child → parent in hierarchical topologies |
 | `can_observe` | Source can observe target's output. Does NOT constrain launch order. | Reviewer → implementer, monitor → worker |
 | `collaborates_with` | Peer collaboration relationship. Does NOT constrain launch order. | Co-equal peers working together |
-| `escalates_to` | Source escalates to target for decisions. Does NOT constrain launch order. | Worker → lead for escalation |
+| `escalates_to` | Fallback queue escalation for a seat without a declared delegation parent. Does NOT constrain launch order. | Local member or same-daemon `pod-member@rig` address |
+
+A named `escalates_to` target may be in another rig on the same daemon and need not exist at import time.
+See [fallback escalation across rigs](edge-types.md#fallback-escalation-across-rigs) for precedence, single-hop delivery,
+cycle detection and visible fallback outcomes.
 
 ### Pod-Local Edges
 

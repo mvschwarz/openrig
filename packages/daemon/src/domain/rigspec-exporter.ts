@@ -107,7 +107,7 @@ export class RigSpecExporter {
       if (!from) {
         throw new Error(`Cannot export edge: unmapped source node ID '${edge.sourceId}'`);
       }
-      const to = idToLogical.get(edge.targetId);
+      const to = edge.targetRef ?? idToLogical.get(edge.targetId);
       if (!to) {
         throw new Error(`Cannot export edge: unmapped target node ID '${edge.targetId}'`);
       }
@@ -219,12 +219,12 @@ export class RigSpecExporter {
       .filter((e) => {
         const srcPod = nodeIdToPodId.get(e.sourceId);
         const tgtPod = nodeIdToPodId.get(e.targetId);
-        return srcPod && tgtPod && srcPod !== tgtPod;
+        return Boolean(e.targetRef) || (srcPod && tgtPod && srcPod !== tgtPod);
       })
       .map((e) => ({
         kind: e.kind,
         from: idToLogical.get(e.sourceId)!,
-        to: idToLogical.get(e.targetId)!,
+        to: e.targetRef ?? idToLogical.get(e.targetId)!,
       }));
 
     // OPR.0.4.8.3 Seam B: rig-level permission_policy is a RIG-ROW field (not derivable

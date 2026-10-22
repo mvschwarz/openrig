@@ -1,3 +1,4 @@
+import { isEscalationTargetRef } from "./escalation-target-ref.js";
 import type {
   LegacyRigSpec,
   LegacyRigSpecNode,
@@ -834,6 +835,8 @@ function validatePodLocalEdge(edge: Record<string, unknown>, index: number, podP
   }
   if (!to || typeof to !== "string") {
     errors.push(`${prefix}.to: required string`);
+  } else if (kind === "escalates_to" && isEscalationTargetRef(to)) {
+    // Another rig need not exist at import time.
   } else if (to.includes(".")) {
     errors.push(`${prefix}.to: pod-local edge must use unqualified member id, not fully-qualified (got "${to}")`);
   } else if (!memberIds.has(to)) {
@@ -864,6 +867,8 @@ function validateCrossPodEdge(edge: Record<string, unknown>, index: number, allQ
   }
   if (!to || typeof to !== "string") {
     errors.push(`${prefix}.to: required string`);
+  } else if (kind === "escalates_to" && isEscalationTargetRef(to)) {
+    // Resolve the declared same-daemon address only when escalating.
   } else if (!to.includes(".")) {
     errors.push(`${prefix}.to: cross-pod edge must use fully-qualified pod.member id (got "${to}")`);
   } else if (!allQualifiedIds.has(to)) {
@@ -1405,7 +1410,7 @@ export class LegacyRigSpecSchema {
 
         if (from === to) errors.push(`self-edge not allowed: ${from} -> ${to}`);
         if (from && !nodeIds.has(from)) errors.push(`edge references nonexistent node: '${from}'`);
-        if (to && !nodeIds.has(to)) errors.push(`edge references nonexistent node: '${to}'`);
+        if (to && !nodeIds.has(to) && !(kind === "escalates_to" && isEscalationTargetRef(to))) errors.push(`edge references nonexistent node: '${to}'`);
         // The same five kinds as a pod-aware spec, so an edge that `rig edge add` put on a flat rig exports and imports again.
         if (kind && !VALID_EDGE_KINDS.has(kind)) errors.push(`unknown edge kind: '${kind}'`);
       }

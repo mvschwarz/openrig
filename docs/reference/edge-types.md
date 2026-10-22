@@ -1,7 +1,8 @@
 # Edge Types Reference
 
-Last validated against code: 2026-10-07, at the 0.6.6 cut `2620dea8` (whole document at `fcaf1f8e`; its sources unchanged in edge behaviour since then)
-Source of truth: `packages/daemon/src/domain/rigspec-schema.ts`, `packages/daemon/src/domain/rigspec-instantiator.ts`, `packages/daemon/src/domain/queue-owner.ts`
+Historical whole-document validation: 2026-10-07, at the 0.6.6 cut `2620dea8` (whole document at `fcaf1f8e`).
+The fallback escalation section and deferred-target exceptions below describe #605.
+Source of truth: `packages/daemon/src/domain/rigspec-schema.ts`, `packages/daemon/src/domain/rigspec-instantiator.ts`, `packages/daemon/src/domain/queue-owner.ts`, `packages/daemon/src/domain/escalation-owner.ts`
 
 ---
 
@@ -16,8 +17,7 @@ See `docs/reference/rig-spec.md` for the YAML syntax.
 
 ## Edge Kinds
 
-Five edge kinds are accepted by the pod-aware validator (the legacy flat-node format accepts only `delegates_to`,
-`spawned_by` and `can_observe`):
+Five edge kinds are accepted by both the pod-aware and legacy flat-node validators:
 
 | Kind | Accepted | Has Runtime Behavior | Description |
 |------|----------|---------------------|-------------|
@@ -25,13 +25,13 @@ Five edge kinds are accepted by the pod-aware validator (the legacy flat-node fo
 | `spawned_by` | yes | **yes — affects launch order** | Source was spawned by target |
 | `can_observe` | yes | no | Source can observe target's output |
 | `collaborates_with` | yes | no | Peer collaboration |
-| `escalates_to` | yes | no | Source escalates to target |
+| `escalates_to` | yes | **yes — fallback queue escalation** | Source escalates to target |
 
 ## What Edges Actually Do Today
 
 ### Launch ordering
 
-Only `delegates_to` and `spawned_by` affect runtime behavior. They constrain the order in which nodes are launched:
+Only `delegates_to` and `spawned_by` constrain the order in which nodes are launched:
 
 - **`delegates_to`**: source launches BEFORE target. The delegator must be up before the delegate.
 - **`spawned_by`**: target (parent) launches BEFORE source (child). The parent must be up before the child it spawned.
@@ -46,13 +46,42 @@ All other edge kinds (`can_observe`, `collaborates_with`, `escalates_to`) do NOT
 wake ladder escalates an unacknowledged row to that orchestrator, and stuck-row findings and recovery go to it. A seat
 with no incoming `delegates_to` edge has no default orchestrator. `spawned_by` plays no part here.
 
+### Fallback escalation across rigs
+
+A seat with **no declared `delegates_to` parent** may declare one `escalates_to` destination. The wake ladder and
+stuck sweep use it for new recovery rows; they do not move the original obligation or reassign an already-open recovery. A stopped or unbound declared
+parent still takes precedence, preserving the existing parent route and its fallback.
+
+```yaml
+edges:
+  - kind: escalates_to
+    from: work.lead
+    to: review-advisor@coord
+```
+
+The target is a canonical same-daemon seat address (`pod-member@rig`), or an existing local member using the usual
+edge syntax. Named targets are stored without requiring the other rig to exist and resolved when needed. A matching
+physical session name takes precedence over a derived canonical address. Deferred declarations survive export and
+snapshots; they don't constrain launch order or make the rigs depend on each other's lifecycle.
+
+Delivery is one hop. Recovery rows carry `escalation-route:one-hop`, so a destination's own `escalates_to` declaration
+does not forward the recovery again. A missing or stopped destination, multiple matches or declarations, self route,
+or declared cycle preserves the existing fallback: the wake ladder proceeds to its operator rung; the sweep retains
+its existing owner fallback. The recovery body/transition explains the result. Cycle inspection includes stopped
+seats and delegation parents; an unresolved downstream endpoint is reported as unknown, never as proof of no cycle.
+Queue address admission is unchanged. Cross-host and synthetic destinations are not supported.
+
+On an existing rig, use `rig edge add <rig> work.lead review-advisor@coord --kind escalates_to`; `--plan` writes nothing.
+The receipt's target node ID is null for a deferred address. Remove it with the exact edge ID returned by add.
+A rig-local graph omits deferred targets, since those seats are outside that graph; the raw topology and export retain them.
+
 ### Graph visualization
 
-All edges are rendered in the UI topology graph. They create visual connections between nodes, helping the operator understand the team structure. Pod-local edges appear within the pod group; cross-pod edges connect across groups.
+Local-node edges are rendered in the UI topology graph; deferred cross-rig targets are omitted. They create visual connections between nodes, helping the operator understand the team structure. Pod-local edges appear within the pod group; cross-pod edges connect across groups.
 
 ### Identity projection
 
-All edges appear in `rig whoami --json` output under `edges.outgoing` and `edges.incoming`, with their kind and the connected peer's identity. This lets an agent know its relationship to other members — but the agent interprets this information, it's not enforced by the runtime.
+Local-node edges appear in `rig whoami --json` output under `edges.outgoing` and `edges.incoming`, with their kind and the connected peer's identity. This lets an agent know its relationship to other members — but the agent interprets this information, it's not enforced by the runtime.
 
 ### Attach hint heuristic
 
@@ -64,7 +93,7 @@ node, in creation order, whose session is running, or else the first node with a
 Edges do NOT currently:
 
 - **Route messages** — `rig send` can target any session, regardless of edges (queue escalation, above, is the one
-  daemon path that follows `delegates_to`)
+  daemon path that follows `delegates_to` or fallback `escalates_to`)
 - **Enforce delegation** — an agent can communicate with any peer, not just its edge targets
 - **Control permissions** — there's no edge-based access control
 - **Affect transport** — `rig capture`, `rig broadcast`, etc. work based on session identity, not edge topology
@@ -128,7 +157,7 @@ If none fit, `can_observe` is the safest default — it documents the relationsh
 ## Validation Rules
 
 1. Edge kinds must be one of: `delegates_to`, `spawned_by`, `can_observe`, `collaborates_with`, `escalates_to`
-2. Pod-local edges use unqualified member IDs — both `from` and `to` must exist in the same pod
-3. Cross-pod edges use `pod.member` format — both endpoints must resolve to actual members
+2. Pod-local edges use unqualified member IDs — both endpoints must exist in the same pod, except a named `escalates_to` target as above.
+3. Cross-pod edges use `pod.member` format — both endpoints must resolve to actual members, except a named `escalates_to` target as above.
 4. Cross-pod edges must reference different pods (same-pod edges should use the pod-local syntax)
 5. Self-edges are not validated at the schema level but are not meaningful

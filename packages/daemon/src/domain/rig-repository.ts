@@ -1,3 +1,4 @@
+import { isEscalationTargetRef } from "./escalation-target-ref.js";
 import type Database from "better-sqlite3";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
 import { decodeStoredSnapshotData } from "./snapshot-repository.js";
@@ -590,11 +591,14 @@ export class RigRepository {
 
   addEdge(rigId: string, sourceId: string, targetId: string, kind: string): Edge {
     const id = ulid();
-    this.db
-      .prepare(
-        "INSERT INTO edges (id, rig_id, source_id, target_id, kind) VALUES (?, ?, ?, ?, ?)"
-      )
-      .run(id, rigId, sourceId, targetId, kind);
+    const targetRef = kind === "escalates_to" && isEscalationTargetRef(targetId) ? targetId : null;
+    if (targetRef) {
+      this.db.prepare("INSERT INTO edges (id, rig_id, source_id, target_ref, kind) VALUES (?, ?, ?, ?, ?)")
+        .run(id, rigId, sourceId, targetRef, kind);
+    } else {
+      this.db.prepare("INSERT INTO edges (id, rig_id, source_id, target_id, kind) VALUES (?, ?, ?, ?, ?)")
+        .run(id, rigId, sourceId, targetId, kind);
+    }
 
     return this.rowToEdge(
       this.db.prepare("SELECT * FROM edges WHERE id = ?").get(id) as EdgeRow
@@ -869,7 +873,8 @@ export class RigRepository {
       id: row.id,
       rigId: row.rig_id,
       sourceId: row.source_id,
-      targetId: row.target_id,
+      targetId: row.target_ref ?? row.target_id!,
+      ...(row.target_ref ? { targetRef: row.target_ref } : {}),
       kind: row.kind,
       createdAt: row.created_at,
     };
@@ -957,7 +962,8 @@ interface EdgeRow {
   id: string;
   rig_id: string;
   source_id: string;
-  target_id: string;
+  target_id: string | null;
+  target_ref?: string | null;
   kind: string;
   created_at: string;
 }

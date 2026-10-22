@@ -1,4 +1,4 @@
-import { defaultResolveOrchestrator } from "./queue-owner.js";
+import { resolveEscalationOwner, ESCALATION_HOP_TAG } from "./escalation-owner.js";
 import type Database from "better-sqlite3";
 import { resolvePickupThresholdMinutes } from "./queue-pickup.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
@@ -62,17 +62,18 @@ export interface WaitingView {
   attention?: { scope: string; revision: string; source: "last observed by wait timer" };
 }
 
-export function readWaitingView(db: Database.Database, id: string, readActivity?: WaitingActivityReader): WaitingView | null {
-  const row = db.prepare(`SELECT qitem_id, source_session, destination_session, state, blocked_on, closure_required_at
+export function readWaitingView(db: Database.Database, id: string, readActivity?: WaitingActivityReader, acceptsDestination?: (destination: string) => boolean): WaitingView | null {
+  const row = db.prepare(`SELECT qitem_id, source_session, destination_session, state, blocked_on, closure_required_at, tags
     FROM queue_items WHERE qitem_id = ?`).get(id) as {
-    qitem_id: string; source_session: string; destination_session: string; state: string; blocked_on: string | null; closure_required_at: string | null;
+    qitem_id: string; source_session: string; destination_session: string; state: string; blocked_on: string | null; closure_required_at: string | null; tags: string | null;
   } | undefined;
   if (!row) return null;
   const blocker = row.blocked_on?.startsWith("qitem-") ? db.prepare(
     "SELECT destination_session, state FROM queue_items WHERE qitem_id = ?",
   ).get(row.blocked_on) as { destination_session: string; state: string } | undefined : undefined;
   let recoveryOwner: string | null = null;
-  try { recoveryOwner = defaultResolveOrchestrator(db, row.destination_session); } catch { /* bootstrap schema has no routing evidence */ }
+  try { recoveryOwner = JSON.parse(row.tags ?? "[]").includes(ESCALATION_HOP_TAG)
+    ? null : resolveEscalationOwner(db, row.destination_session, acceptsDestination).owner; } catch { /* bootstrap schema has no routing evidence */ }
   const subject = row.blocked_on ? blocker?.destination_session ?? row.blocked_on : row.destination_session;
   let observed: ReturnType<WaitingActivityReader> = null;
   try { observed = readActivity?.(subject) ?? null; } catch { /* unavailable remains unknown */ }

@@ -1,3 +1,4 @@
+import { resolveEscalationOwner, ESCALATION_HOP_TAG } from "./escalation-owner.js";
 import { findQueueRecovery, recoveryId, recoveryTag } from "./queue-recovery.js";
 import { quietHoldCustody } from "./quiet-hold-custody.js";
 import { queueWaitNotice } from "./queue-wait-backoff.js";
@@ -24,7 +25,6 @@ import { resolvePickupThresholdMinutes } from "./queue-pickup.js";
 // share one contract instead of two guesses. S03 owns park/wake honesty: state=blocked rows
 // legitimately wait; only an undelivered human notice is a delivery finding.
 
-import { defaultResolveOrchestrator } from "./queue-owner.js";
 import type Database from "better-sqlite3";
 import { deriveCrossHostSuccessorId, hasLinkedSuccessor, matchesRecordedHandoffTarget, QueueRepositoryError, type QueueItem, type QueueRepository } from "./queue-repository.js";
 import { stalledPickupFinding } from "./queue-pickup.js";
@@ -417,8 +417,19 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
      *  Every other finding resolves as soon as the sweep no longer detects its condition. */
     const suppressedTags = new Set<string>();
     const ageMinutes = deps.unclaimedAgeMinutes ?? resolveStuckSweepUnclaimedAgeMinutes();
-    const resolveOrch =
-      deps.resolveOrchestrator ?? ((session: string) => defaultResolveOrchestrator(deps.db, session));
+    const routeNotes = new Map<string, string>();
+    const routed = new Set<string>();
+    const resolveOrch = (session: string, row: QueueItem): string | null => {
+      if (row.tags?.includes(ESCALATION_HOP_TAG)) {
+        routeNotes.set(row.qitemId, "escalates_to one-hop delivery already used; existing fallback retained");
+        return null;
+      }
+      if (deps.resolveOrchestrator) return deps.resolveOrchestrator(session);
+      const route = resolveEscalationOwner(deps.db, session, target => deps.queueRepo.acceptsDestination(target));
+      if (route.outcome !== "none" && route.outcome !== "parent") routeNotes.set(row.qitemId, route.reason);
+      if (route.outcome === "routed") routed.add(row.qitemId);
+      return route.owner;
+    };
     const isRegisteredHost = deps.isRegisteredHost ?? defaultIsRegisteredHost(log);
     const candidates: Candidate[] = [];
 
@@ -454,7 +465,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       candidates.push({
         kind: stalled.kind,
         row,
-        route: resolveOrch(stalled.target) ?? stalled.target,
+        route: resolveOrch(stalled.target, row) ?? stalled.target,
         ageMinutes: minutesSince(row.claimedAt, now),
         // Keep this null arm for the 0.5.7 mechanized-pull turn-end hook that knows the in-flight row;
         // it is the first honest row-scoped writer, and wiring reopens only in that slice.
@@ -477,7 +488,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (response && Date.parse(response.at) > Date.parse(notice.at)) continue;
       const ownerActivity = deps.queueRepo.ownerActivity(row.destinationSession);
       if (ownerActivity?.activity === "working" && !ownerActivity.needsInput.count && notice.deliveryStatus === "ok") continue;
-      candidates.push({ kind: "unconsumed-wait", row, route: resolveOrch(row.destinationSession) ?? row.sourceSession,
+      candidates.push({ kind: "unconsumed-wait", row, route: resolveOrch(row.destinationSession, row) ?? row.sourceSession,
         ageMinutes: minutesSince(notice.at, now), evidenceAt: notice.at,
         why: `wait notice delivery=${notice.deliveryStatus}; no later owner response; activity=${ownerActivity?.activity ?? "unknown"}; inspect exact blocker ${row.blockedOn}` });
     }
@@ -512,7 +523,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       candidates.push({
         kind: humanNotice ? "undelivered-human-notice" : "undelivered-wake",
         row,
-        route: humanNotice ? noticeOwner : resolveOrch(row.destinationSession) ?? row.destinationSession,
+        route: humanNotice ? noticeOwner : resolveOrch(row.destinationSession, row) ?? row.destinationSession,
         ageMinutes: minutesSince(row.tsCreated, now),
         evidenceAt: latestIso(row.tsUpdated, row.lastNudgeAttempt),
         why: quiet?.state === "orphaned"
@@ -562,7 +573,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       candidates.push({
         kind: "unclaimed-obligation",
         row,
-        route: resolveOrch(row.destinationSession) ?? row.destinationSession,
+        route: resolveOrch(row.destinationSession, row) ?? row.destinationSession,
         ageMinutes: minutesSince(actionableAt, now),
         evidenceAt: actionableAt,
         why: quiet?.state === "orphaned"
@@ -722,10 +733,11 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           // finding's source (the workflow-exception precedent).
           sourceSession: c.row.sourceSession,
           destinationSession: c.route,
-          body: evidenceBody(deps.db, c),
+          body: evidenceBody(deps.db, c) + (routeNotes.has(c.row.qitemId) ? `\nescalation route: ${routeNotes.get(c.row.qitemId)}` : ""),
           summary: `Stuck sweep: ${c.verificationTargets ? "successor-verification-required" : c.kind} on ${c.row.qitemId} (${c.ageMinutes} min)`,
           evidenceRef: `rig queue show ${c.row.qitemId}`,
-          tags: [STUCK_SWEEP_FINDING_TAG, dedupTag, recoveryTag(c.row.qitemId)],
+          tags: [STUCK_SWEEP_FINDING_TAG, dedupTag, recoveryTag(c.row.qitemId),
+            ...(routed.has(c.row.qitemId) || c.row.tags?.includes(ESCALATION_HOP_TAG) ? [ESCALATION_HOP_TAG] : [])],
         };
         const created = await deps.queueRepo.create(input);
         findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: created.qitemId, action: "created" });

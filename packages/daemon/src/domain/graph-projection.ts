@@ -230,7 +230,8 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
     });
   }
 
-  const edges: RFEdge[] = rigEdges.map((edge) => ({
+  // Deferred cross-rig addresses are not nodes in this rig-local graph.
+  const edges: RFEdge[] = rigEdges.filter(edge => !edge.targetRef).map((edge) => ({
     id: edge.id,
     source: edge.sourceId,
     target: edge.targetId,

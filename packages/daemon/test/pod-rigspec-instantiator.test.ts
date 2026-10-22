@@ -121,6 +121,25 @@ describe("PodRigInstantiator", () => {
     db.close();
   });
 
+  it.each(["rig", "pod"])("imports and exports a %s-level deferred escalation before its destination rig exists", async level => {
+    const { db, rigRepo, sessionRegistry, inst } = setup();
+    try {
+      const expected = [{ from: "dev.impl", to: "review-advisor@coord", kind: "escalates_to" }];
+      const spec = makeRigSpec({ edges: level === "rig" ? expected : [] });
+      if (level === "pod") spec.pods[0]!.edges = [{ from: "impl", to: "review-advisor@coord", kind: "escalates_to" }];
+      const result = await inst.instantiate(RigSpecCodec.serialize(spec), RIG_ROOT);
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      if (!result.ok) return;
+      const rig = rigRepo.getRig(result.result.rigId)!;
+      expect(rig.edges).toHaveLength(1);
+      expect(rig.edges[0]).toMatchObject({ targetRef: "review-advisor@coord", kind: "escalates_to" });
+      const { RigSpecExporter } = await import("../src/domain/rigspec-exporter.js");
+      const exported = new RigSpecExporter({ rigRepo, sessionRegistry, podRepo: new PodRepository(db) }).exportRig(result.result.rigId) as RigSpec;
+      expect(exported.edges).toEqual(expected);
+      expect(RigSpecCodec.parse(RigSpecCodec.serialize(exported)).edges).toEqual(expected);
+    } finally { db.close(); }
+  });
+
   // T2: resolved spec identity persisted
   it("persists resolved spec identity on node", async () => {
     const { db, rigRepo, inst } = setup();

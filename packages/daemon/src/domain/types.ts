@@ -70,7 +70,9 @@ export interface Edge {
   id: string;
   rigId: string;
   sourceId: string;
+  /** Node ID, or the declared address when targetRef is present. */
   targetId: string;
+  targetRef?: string;
   kind: string;
   createdAt: string;
 }

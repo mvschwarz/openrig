@@ -4421,7 +4421,7 @@ export class QueueRepository {
 
   /** listed: the row's owner notifications and ledger, when a listing read them for all its rows. */
   waitingView(qitemId: string, listed?: ListedLedger): WaitingView | null {
-    const view = readWaitingView(this.db, qitemId, this.activityReader);
+    const view = readWaitingView(this.db, qitemId, this.activityReader, target => this.acceptsDestination(target));
     if (view && ["pending", "in-progress"].includes(view.state)) {
       // #514 — the unclaimed sweep skips a pending ask already posted to its human in the current
       // episode (same predicate as runStuckSweep), so the view must not promise that sweep.
@@ -4435,7 +4435,7 @@ export class QueueRepository {
         view.nextBackstop = quiet;
         return view;
       }
-      const recovery = readWakeLadderBackstop(this.db, qitemId);
+      const recovery = readWakeLadderBackstop(this.db, qitemId, target => this.acceptsDestination(target));
       if (recovery) {
         if (!awaitingHuman) view.laterBackstop = { ...view.nextBackstop, note: "Conditional safety net; current delivery/recovery ownership is evaluated first." };
         view.nextBackstop = recovery;
