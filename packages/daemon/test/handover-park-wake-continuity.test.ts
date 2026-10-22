@@ -1,6 +1,7 @@
-// A seat swap stops the watchdog jobs the retiring occupant registered, so a stale wake doesn't reach the successor.
-// A blocked row's current park timer is different: it wakes the seat that still owns the row, and the successor
-// inherits that row. It survives the swap; every other job the retiring generation registered still stops.
+// A seat swap stops the watchdog jobs the retiring occupant registered for its own seat, so a stale wake doesn't
+// reach the successor. A blocked row's current park timer is different: it wakes the seat that still owns the row,
+// and the successor inherits that row. It survives the swap; every other job the retiring generation registered for
+// its own seat still stops. Jobs it registered for another seat wake that seat, not the successor, and keep running.
 // Real queue, watchdog and session repositories on a full test DB, wired as startup.ts wires them.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
@@ -103,6 +104,33 @@ describe("#handover-wake: a blocked row's park timer across an occupant swap", (
 
     expect(jobState(wakeRef)).toBe("active");
     expect(wakeLive(qitemId)).toBe(true);
+  });
+
+  // #1775: a reminder the retiring occupant registered for another seat wakes that seat, never the successor, so it
+  // keeps running, as reminders aimed at a handed-over seat already do.
+  const reminderFor = (target: string) => jobs.register({
+    policy: "periodic-reminder", targetSession: target, intervalSeconds: 7200, registeredBySession: SEAT,
+    specYaml: ["policy: periodic-reminder", "target:", `  session: ${JSON.stringify(target)}`, 'message: "check CI"', ""].join("\n"),
+  });
+
+  it("a reminder the retiring occupant registered for another seat keeps running and still reaches that seat", async () => {
+    const reminder = reminderFor(OTHER);
+
+    swap();
+
+    expect(jobState(reminder.jobId)).toBe("active");
+    expect((await fireAllActive()).map((d) => d.targetSession)).toEqual([OTHER]);
+  });
+
+  it("a reminder the retiring occupant attached to another seat's blocked row stays that row's live wake", async () => {
+    const reminder = reminderFor(OTHER);
+    const { qitemId } = await park({ destination: OTHER, actor: SEAT, watchdogId: reminder.jobId });
+
+    swap();
+
+    expect(jobState(reminder.jobId)).toBe("active");
+    expect(wakeLive(qitemId)).toBe(true);
+    expect(parkedWhenIdle(OTHER).obligations.unhealthyHeldCount).toBe(0);
   });
 
   it("control: an occupant-only job the retiring generation registered still stops", () => {

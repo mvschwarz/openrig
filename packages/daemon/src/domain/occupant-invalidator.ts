@@ -27,10 +27,12 @@ export interface OccupantInvalidator {
 export interface OccupantInvalidatorDeps {
   enforcer: { invalidateOccupant(sessionName: string): void };
   contextUsage: { invalidateOccupantSidecar(sessionName: string): void };
-  /** (e/Class-B) durable watchdog_jobs store — armed jobs registered by the retiring generation are
-   *  stopped at swap (a stale wake into the successor's context is the ghost). Optional: absent ⇒ the
-   *  watchdog branch is skipped (never a name-scoped fallback). */
-  watchdog?: { dropArmedByRegisteringGeneration(generationUuid: string, keepJobIds?: readonly string[]): number };
+  /** (e/Class-B) durable watchdog_jobs store — armed jobs the retiring generation registered for its own
+   *  seat are stopped at swap (a stale wake into the successor's context is the ghost). Optional: absent ⇒
+   *  the watchdog branch is skipped (never a name-scoped fallback). */
+  watchdog?: {
+    dropArmedByRegisteringGeneration(generationUuid: string, retiringSession: string, keepJobIds?: readonly string[]): number;
+  };
   /** (e/Class-B) durable queue_items store — in-progress items claimed by the retiring generation are
    *  RELEASED to pending (never dropped: the role work is durable, the successor re-claims). Its current
    *  park timers (blocked rows' wakes) are role work too, so the watchdog drop keeps them. Optional. */
@@ -64,12 +66,14 @@ export class DefaultOccupantInvalidator implements OccupantInvalidator {
       return;
     }
     // atom-B present → Class-B gen-scoped invalidation.
-    // Watchdog (3b): stop every ARMED job registered by the retiring generation — a stale wake firing
-    // into the successor's context is the specimen; the successor re-arms its own. Gen-scoped so the
-    // successor's OWN armed jobs (same name, live gen) are untouched. A blocked row's current park timer
+    // Watchdog (3b): stop every ARMED job the retiring generation registered for this seat — a stale wake
+    // firing into the successor's context is the specimen; the successor re-arms its own. Gen-scoped so the
+    // successor's OWN armed jobs (same name, live gen) are untouched. A job it registered for another seat
+    // wakes that seat, not the successor, so it keeps running (#1775). A blocked row's current park timer
     // is kept: it wakes the seat that owns the row, and nothing re-arms it if it stops.
     const keepJobIds = this.deps.queue?.currentParkTimerIds?.() ?? [];
-    const stopped = this.deps.watchdog?.dropArmedByRegisteringGeneration(retiringGeneration, keepJobIds) ?? 0;
+    const stopped =
+      this.deps.watchdog?.dropArmedByRegisteringGeneration(retiringGeneration, retiringSessionName, keepJobIds) ?? 0;
     if (stopped > 0) {
       log(
         `[occupant-invalidator] Class-B: stopped ${stopped} armed watchdog job(s) registered by retired ` +
