@@ -794,7 +794,8 @@ Only Claude and Codex tenures can be woken.
 | `rig edge remove <rig> <edge-id>` | — | `--plan`<br>`--json` |
 
 `add` requires `from`, `to` and `--kind`, and is idempotent: a repeat reports the
-existing edge and writes nothing. See
+existing edge and writes nothing. `remove` deletes the edge with that ID; a repeat changes nothing and
+returns `edge_not_found` (exit 1). See
 [changing edges on an existing rig](../reference/rig-spec.md#changing-edges-on-an-existing-rig)
 for input and receipt examples, rollback, and snapshot behavior.
 

@@ -576,7 +576,8 @@ same validation and returns `would_add` for a new edge without writing anything.
 
 Each `added` receipt includes a rollback command,
 `rig edge remove <rig-id> <edge-id>`, which removes exactly that edge in that rig.
-Removal also supports `--plan` and `--json`; an absent edge returns an error.
+Removal also supports `--plan` and `--json`. Removing an edge that is already gone changes nothing
+and returns `edge_not_found` (HTTP 404, exit 1), so a repeated removal reports not found, not success.
 Rig names resolve only among unarchived rigs, and an ambiguous name requires an
 explicit ID. These commands target the local daemon, as `rig add` does.
 
