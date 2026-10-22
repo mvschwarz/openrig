@@ -98,8 +98,10 @@ export function makeContextUsageThresholdPolicy(
         // changes; that notice is not the threshold, so a later fresh sample
         // still fires.
         const unreadable = (reason: string, detail: string, notes: Record<string, unknown>): PolicyEvaluation => {
-          const receipt = `unreadable:${job.occupantGeneration}:${reason}`;
-          if (job.lastFiredCondition === receipt) {
+          // The receipt names every reason already told to this occupant, so alternating reasons don't repeat.
+          const prefix = `unreadable:${job.occupantGeneration}:`;
+          const told = job.lastFiredCondition?.startsWith(prefix) ? job.lastFiredCondition.slice(prefix.length).split(",") : [];
+          if (told.includes(reason)) {
             return { action: "skip", reason: "context_sample_unreadable_notified", notes: { ...notes, unreadable: reason } };
           }
           const level = unit === "percent" ? `${threshold}%` : `${threshold}-token`;
@@ -109,7 +111,7 @@ export function makeContextUsageThresholdPolicy(
             message: `Context watch ${job.jobId} can't read ${job.target.session}'s context use (${detail}), so it can't tell ` +
               `whether the ${level} threshold is reached. It acts on the next fresh sample, and won't repeat this for this occupant.`,
             notes: { ...notes, unreadable: reason },
-            conditionReceipt: receipt,
+            conditionReceipt: prefix + [...told, reason].sort().join(","),
             notice: true,
           };
         };

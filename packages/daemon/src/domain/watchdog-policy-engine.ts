@@ -616,7 +616,7 @@ export class WatchdogPolicyEngine {
     ) {
       this.jobsRepo.recordThresholdFire(job.jobId, occupantGeneration, evaluatedAt);
     }
-    return this.recordAttempt({ job, outcome, evaluatedAt, deliverySchedule, delivery, isContextUsageThreshold: thresholdFire, sentMessage: message });
+    return this.recordAttempt({ job, outcome, evaluatedAt, deliverySchedule, delivery, isContextUsageThreshold: thresholdFire, notice: outcome.notice === true, sentMessage: message });
   }
 
   /** The pre-transport guard: a job its owning domain can prove is no longer actionable is terminaled, not sent. */
@@ -743,6 +743,8 @@ export class WatchdogPolicyEngine {
     deliverySchedule: WatchdogJob;
     delivery: DeliveryOutcome;
     isContextUsageThreshold: boolean;
+    /** A notice about the watch itself (PolicyEvaluation `notice`), not its condition firing. */
+    notice?: boolean;
     /** Set when this job's reminder went out inside a digest with others: the digest, its size and this job's line. */
     digest?: { deliveryId: string; size: number; line: string };
     /** The text a lone send delivered, when it differs from the outcome's message (a park wake's continuation preview). */
@@ -770,7 +772,11 @@ export class WatchdogPolicyEngine {
           ? { ...(deliveryNotes ?? {}), deliveryReason: delivery.error }
           : delivery.status === "retained" ? { ...(deliveryNotes ?? {}), outboxIds: delivery.outboxIds ?? [], retainedNotDelivered: true } : deliveryNotes ?? null,
     });
-    if (!isContextUsageThreshold) {
+    // A notice stamps no fire time and leaves the job not actionable, so the active-wake throttle can't hold
+    // back the watched condition's own send after it.
+    if (input.notice) {
+      this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, false);
+    } else if (!isContextUsageThreshold) {
       this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, true, deliverySchedule);
     }
     // OPR.0.5.8.1 S2 — a policy's condition receipt is banked ONLY on positive
@@ -781,7 +787,8 @@ export class WatchdogPolicyEngine {
     if (outcome.conditionReceipt !== undefined && delivery.status === "ok") {
       this.jobsRepo.recordConditionReceipt(job.jobId, outcome.conditionReceipt);
     }
-    this.jobsRepo.setActionable(job.jobId, true, evaluatedAt, job.lastActionableAt);
+    if (input.notice) this.jobsRepo.setActionable(job.jobId, false, evaluatedAt);
+    else this.jobsRepo.setActionable(job.jobId, true, evaluatedAt, job.lastActionableAt);
     this.eventBus.emit({
       type: "watchdog.evaluation_fired",
       jobId: job.jobId,
