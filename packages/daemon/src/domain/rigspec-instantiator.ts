@@ -2189,7 +2189,7 @@ export class PodRigInstantiator {
       // through the link and nothing falls back into the project. Any other reconciliation error still fails the seat.
       const refusedOnly = !projection.ok && projection.errors.every((error) => error.code === "seat_storage_refused");
       if (refusedOnly) {
-        keptSkillWarnings.push(`seat_skills_not_delivered: ${projection.errors.map((error) => `${error.code}: ${error.message}`).join("; ")}; the seat starts without its selected skills`);
+        keptSkillWarnings.push(`seat_skills_not_delivered: ${loadout.entries.map((entry) => entry.id).join(", ")}: ${projection.errors.map((error) => `${error.code}: ${error.message}`).join("; ")}; the seat starts without these selected skills`);
       } else if (!projection.ok) {
         return {
           status: "failed",

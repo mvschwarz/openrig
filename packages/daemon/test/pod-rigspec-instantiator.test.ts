@@ -547,7 +547,7 @@ profiles:
       expect(result.ok, JSON.stringify(result)).toBe(true);
       expect(seat?.status).toBeDefined();
       expect(seat?.status).not.toBe("failed");
-      expect(JSON.stringify(result)).toContain("seat_skills_not_delivered: seat_storage_refused");
+      expect(JSON.stringify(result)).toContain("seat_skills_not_delivered: shared: seat_storage_refused");
       // The moved tree is exactly as it was: no skill written, no staging folder, no manifest. Nothing fell back into the project.
       expect(listTree(moved)).toEqual(movedBefore);
       expect(listTree(project).filter((file) => file.includes("shared"))).toEqual([]);
