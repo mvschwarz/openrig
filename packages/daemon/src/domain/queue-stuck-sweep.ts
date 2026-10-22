@@ -370,6 +370,15 @@ export function verificationCommand(target: string): string {
   return `OPENRIG_URL=<registered-host> rig queue list --destination ${target}`;
 }
 
+/** The finding's headline says where custody was not checked, so its owner can act from the list. */
+export function custodyHeadline(rowId: string, targets: string[], ageMinutes: number): string {
+  const hosts = [...new Set(targets.flatMap((target) =>
+    target.startsWith("qitem-") && target.includes("@") ? [target.slice(target.indexOf("@") + 1)] : []))];
+  return hosts.length
+    ? `Custody not checked on host ${hosts.join(", ")} for ${rowId} (${ageMinutes} min)`
+    : `Custody not checked: no successor of ${rowId} in this store (${ageMinutes} min)`;
+}
+
 function evidenceBody(db: Database.Database, c: Candidate): string {
   if (c.verificationTargets?.length) {
     const checks = c.verificationTargets
@@ -726,7 +735,9 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           sourceSession: c.row.sourceSession,
           destinationSession: c.route,
           body: evidenceBody(deps.db, c),
-          summary: `Stuck sweep: ${c.verificationTargets ? "successor-verification-required" : c.kind} on ${c.row.qitemId} (${c.ageMinutes} min)`,
+          summary: c.verificationTargets
+            ? custodyHeadline(c.row.qitemId, c.verificationTargets, c.ageMinutes)
+            : `Stuck sweep: ${c.kind} on ${c.row.qitemId} (${c.ageMinutes} min)`,
           evidenceRef: `rig queue show ${c.row.qitemId}`,
           tags: [STUCK_SWEEP_FINDING_TAG, dedupTag, recoveryTag(c.row.qitemId)],
           // OpenRig's own finding, whoever created the stuck row.

@@ -976,6 +976,7 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(findings[0]!.body).toContain(foreign);
     expect(findings[0]!.body).toMatch(/verification.required|indeterminate/i);
     expect(findings[0]!.body).not.toMatch(/does not exist|dangling/i);
+    expect(findings[0]!.summary).toMatch(new RegExp(`^Custody not checked on host vps-unknown for ${row.qitemId} \\(\\d+ min\\)$`));
   });
 
   it("CUSTODY-VERIFIED DISPOSITION: a durable custody-verified note on the closed row silences the bare-id local miss", async () => {
@@ -1174,7 +1175,7 @@ describe.each(["done", "handed-off"] as const)("#318 seat-target closure without
       state: "pending",
       destinationSession: "worker@r",
     });
-    expect(findings[0]!.summary).toContain("successor-verification-required");
+    expect(findings[0]!.summary).toMatch(new RegExp(`^Custody not checked: no successor of ${row.qitemId} in this store \\(\\d+ min\\)$`));
     expect(findings[0]!.body).toContain("- next@r");
     expect(findings[0]!.body).toContain("OPENRIG_URL=<registered-host> rig queue list --destination next@r");
     expect(findings[0]!.body).toContain("custody-verified: <target>");
