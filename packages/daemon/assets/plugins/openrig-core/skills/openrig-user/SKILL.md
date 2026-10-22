@@ -1482,6 +1482,7 @@ Current shipped MCP tools:
 - `rig_chatroom_watch`
 - `rig_add`
 - `rig_queue_create`, `rig_queue_show`, `rig_queue_list`, `rig_queue_claim`, `rig_queue_update`
+- `rig_telemetry_events`: one bounded page of event metadata, as `rig telemetry events` reads it
 
 The server acts as one seat: the `OPENRIG_SESSION_NAME` in its environment. Every request carries that identity, so
 no tool call names a sender. Without it, writes that need an actor are refused with `actor_required`.

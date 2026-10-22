@@ -626,6 +626,40 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
   );
 
+  // 24. rig_telemetry_events — one bounded page of event metadata, the page `rig telemetry events` reads
+  server.tool(
+    "rig_telemetry_events",
+    "Read one bounded page of event metadata: seq, rig, node, type and time, never payloads. Without a cursor it starts at the newest event and returns no rows; start retained reads the retained past instead. Continue with page.nextCursor and the same filters. coverage.gaps names any history it could not read, including a daemon restart, after which the old cursor can't continue.",
+    {
+      cursor: z.string().optional().describe("page.nextCursor from the previous page; not with start"),
+      start: z.enum(["latest", "retained"]).optional().describe("Without a cursor: latest (default) or retained"),
+      rigId: z.string().optional().describe("Rig name or identifier; events with no rig are left out"),
+      nodeId: z.string().optional().describe("Node identifier"),
+      limit: z.number().int().min(1).max(128).optional().describe("Source rows to scan (default and maximum 128); a filter can return fewer"),
+    },
+    async ({ cursor, start, rigId, nodeId, limit }) => {
+      try {
+        const params = new URLSearchParams();
+        if (rigId) {
+          const rig = await rigIdFor(client, rigId);
+          if ("content" in rig) return rig;
+          // The daemon filters by exact id and matches nothing for an unknown one, which would read as a quiet rig.
+          if (!rig.known) {
+            return { content: [{ type: "text" as const, text: JSON.stringify({ error: `Rig '${rigId}' not found: no rig has that name or id` }) }], isError: true as const };
+          }
+          params.set("rigId", rig.id);
+        }
+        if (cursor) params.set("cursor", cursor);
+        if (start) params.set("start", start);
+        if (nodeId) params.set("nodeId", nodeId);
+        if (limit !== undefined) params.set("limit", String(limit));
+        return mapResult(await client.get(`/api/telemetry/v1/events?${params.toString()}`));
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+      }
+    },
+  );
+
   return server;
 }
 
