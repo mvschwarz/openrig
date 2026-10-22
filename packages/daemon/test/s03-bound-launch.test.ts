@@ -348,7 +348,6 @@ describe("S03 bound launch across existing paths", () => {
     const native = await vi.importActual<typeof import("node:child_process")>("node:child_process");
     writeFileSync(f.executable, `#!${process.execPath}\nconsole.log(process.argv.includes('--help') ? ${JSON.stringify(help)} : JSON.stringify(process.argv.slice(2)));\n`);
     vi.mocked(execFile).mockImplementation(native.execFile);
-    vi.spyOn(f.adapter as any, "pollForResumeToken").mockResolvedValue("fork-id");
     vi.spyOn(f.adapter as any, "verifyResumeLaunch").mockResolvedValue({ ok: true });
     const resume = new ClaudeResumeAdapter(f.tmux, { claudeManagedLaunch: f.managed });
     vi.spyOn(resume as any, "verifyResume").mockResolvedValue({ ok: true });
