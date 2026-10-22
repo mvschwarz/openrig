@@ -1398,8 +1398,10 @@ export class QueueRepository {
       if (wakeEvent) this.eventBus.notifySubscribers(wakeEvent);
     }
     // Each released member is delivered on its own now, so this drain finishes only once every member has its outcome.
+    // One attempt per member: a released member claimed with an earlier one isn't sent again in this pass.
+    const releasedAttempted = new Set<string>();
     for (const entry of released) {
-      await this.deliverWakeIntent(entry.outboxId).catch((err) => console.error(`Queue wake delivery failed for ${entry.outboxId}:`, err));
+      await this.deliverWakeIntent(entry.outboxId, releasedAttempted).catch((err) => console.error(`Queue wake delivery failed for ${entry.outboxId}:`, err));
     }
     return reportedState;
   }
