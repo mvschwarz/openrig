@@ -180,6 +180,10 @@ const CLAUDE_STATUS_WARNINGS = [
   /^✘ Auto-update failed: no write permission to npm prefix · Run claude doctor$/,
   /^tmux focus-events off · add 'set -g focus-events on' to ~\/\.tmux\.conf and re…$/,
   /^You've used (?:\d|[1-9]\d)% of your weekly limit · resets \d{1,2}(?::\d{2})?(?:am|pm) \(UTC\)$/,
+  // #1641: Claude 2.1.293's update banner, whatever installer it names.
+  /^Update available! Run: \S.*$/,
+  // The context hint, as Claude prints it; reported as the last line below the mode bar on one seat.
+  /^new task\? \/clear to save \d+(?:\.\d+)?k tokens$/,
 ];
 // Current Claude status rows need not end in "thinking)" or show "esc to interrupt".
 // Completed summaries such as "✻ Crunched for 2s" lack the live ellipsis/timer shape.
