@@ -1252,11 +1252,11 @@ export class QueueRepository {
    */
   private async deliverWakeIntent(
     outboxId: string,
-    attempted?: Set<string>,
+    attempted: Set<string> = new Set(), // this pass's attempt history, inherited by any release it delivers
   ): Promise<"delivered" | "indeterminate" | "failed" | "skipped" | "retained"> {
     if (!this.outbox) return "skipped";
     if (!this.transport) return "skipped"; // no transport → stays pending for a later drain
-    if (attempted?.has(outboxId)) return "skipped";
+    if (attempted.has(outboxId)) return "skipped";
     const alreadyHeld = this.outbox.getById(outboxId);
     if (alreadyHeld?.deliveryState === "retained" || alreadyHeld?.deliveryState === "retired") {
       if (alreadyHeld.auditPointer) this.recordNudgeAttempt(alreadyHeld.auditPointer, "retained:typing_guard");
@@ -1264,8 +1264,8 @@ export class QueueRepository {
     }
     let recovering = false;
     const claim = (entry: OutboxEntry): boolean => {
-      if (attempted?.has(entry.outboxId) || !this.outbox!.claimForDelivery(entry.outboxId)) return false;
-      attempted?.add(entry.outboxId);
+      if (attempted.has(entry.outboxId) || !this.outbox!.claimForDelivery(entry.outboxId)) return false;
+      attempted.add(entry.outboxId);
       recovering ||= entry.deliveryState !== "pending";
       return true;
     };
@@ -1398,10 +1398,11 @@ export class QueueRepository {
       if (wakeEvent) this.eventBus.notifySubscribers(wakeEvent);
     }
     // Each released member is delivered on its own now, so this drain finishes only once every member has its outcome.
-    // One attempt per member: a released member claimed with an earlier one isn't sent again in this pass.
-    const releasedAttempted = new Set<string>();
+    // One attempt per member for the whole pass: they inherit this pass's history, less themselves (released before any
+    // send, so never attempted), so nothing already sent here is regrouped, and each released member gets one attempt.
+    for (const entry of released) attempted.delete(entry.outboxId);
     for (const entry of released) {
-      await this.deliverWakeIntent(entry.outboxId, releasedAttempted).catch((err) => console.error(`Queue wake delivery failed for ${entry.outboxId}:`, err));
+      await this.deliverWakeIntent(entry.outboxId, attempted).catch((err) => console.error(`Queue wake delivery failed for ${entry.outboxId}:`, err));
     }
     return reportedState;
   }
