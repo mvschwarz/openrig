@@ -1288,6 +1288,14 @@ export class QueueRepository {
       const first = candidate; // Keep each member's pre-claim uncertainty.
       const intents = [first];
       const correlation = first.tags?.find(tag => tag.startsWith("queue:return:"));
+      // Only wakes the seat's level would treat alike go together: the same source and the same urgent mark. Any other
+      // waits for its own delivery, so a routine wake never rides in on an urgent one's mark, nor an urgent one under a
+      // routine one's hold.
+      const facts = (entry: OutboxEntry) => {
+        const trigger: WakeTrigger = entry.tags?.includes(WAKE_TRIGGER_OPENRIG_TAG) ? "openrig" : "agent";
+        return JSON.stringify([trigger, entry.auditPointer ? this.wakeAdmission(entry.auditPointer, trigger).urgentBy ?? null : null]);
+      };
+      const firstFacts = facts(first);
       if (correlation) {
         const peers = this.db.prepare(`SELECT outbox_id FROM outbox_entries
           WHERE delivery_state IN ('pending','failed','indeterminate') AND destination_session = ? AND substr(outbox_id, 1, ?) = ?
@@ -1295,6 +1303,7 @@ export class QueueRepository {
           ORDER BY outbox_id`).all(first.destinationSession, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX, correlation) as Array<{ outbox_id: string }>;
         for (const peer of peers) {
           const entry = this.outbox!.getById(peer.outbox_id)!;
+          if (facts(entry) !== firstFacts) continue;
           if (actionable(entry) && claim(entry)) intents.push(entry);
         }
       }
@@ -1313,8 +1322,8 @@ export class QueueRepository {
     const qitemId = intent.auditPointer ?? outboxId;
     // Preserve the original envelope/source generation; add context without rewriting its stored bytes.
     const recoveryNotice = recovering ? "Recovered queue notification: delivery may repeat after an earlier unconfirmed attempt.\n" : "";
-    // A coalesced send is OpenRig's only when every intent in it is; one agent's handoff among them makes it the agent's.
-    const trigger: WakeTrigger = group.every(entry => entry.tags?.includes(WAKE_TRIGGER_OPENRIG_TAG)) ? "openrig" : "agent";
+    // Every intent in a coalesced send shares its source and urgent mark (see the grouping above), so the first speaks for all.
+    const trigger: WakeTrigger = group[0]!.tags?.includes(WAKE_TRIGGER_OPENRIG_TAG) ? "openrig" : "agent";
     const outcome = await this.performWakeSend(
       qitemId, intent.destinationSession, intent.senderSession, undefined, recoveryNotice + group.map(entry => entry.body).join("\n"), group.map(entry => entry.outboxId),
       trigger,

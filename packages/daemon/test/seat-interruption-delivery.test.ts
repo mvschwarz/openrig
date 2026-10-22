@@ -192,6 +192,30 @@ describe("an urgent queue wake shows who marked it, typed or held, exactly once"
   });
 });
 
+describe("wakes delivered together each keep their own admission", () => {
+  it.each([["routine first", ["routine", "urgent"]], ["urgent first", ["urgent", "routine"]]] as const)(
+    "two rows parked on one blocker, one urgent (%s), delivered together later: at urgent-only only the urgent one types", async (_order, priorities) => {
+      const f = fixture();
+      // Staged with no transport attached (as before a restart), so both wakes are still pending when they're delivered.
+      const offline = new QueueRepository(f.db, new EventBus(f.db), { validateRig: () => true });
+      offline.attachOutbox(new OutboxHandler(f.db));
+      const blocker = await offline.create({ sourceSession: "peer@test", destinationSession: "peer@test", body: "Vendor reply", nudge: false });
+      const parked: Record<string, string> = {};
+      for (const priority of priorities) {
+        const row = await offline.create({ sourceSession: "peer@test", destinationSession: seat, body: `${priority} follow-up`, priority, nudge: false });
+        await offline.update({ qitemId: row.qitemId, actorSession: seat, state: "blocked", blockedOn: blocker.qitemId } as never);
+        parked[priority] = row.qitemId;
+      }
+      await offline.update({ qitemId: blocker.qitemId, actorSession: "peer@test", state: "done", closureReason: "no-follow-on" } as never);
+      await f.level("urgent-only");
+      await f.queue.drainPendingWakeIntents();
+      await vi.waitFor(() => expect(f.typed.join("\n")).toContain(`parked qitem ${parked.urgent} is pending`));
+      expect(f.typed.join("\n")).not.toContain(`parked qitem ${parked.routine} is pending`);
+      expect(f.queue.getById(parked.routine!)!.lastNudgeResult).toBe("retained:typing_guard");
+      expect(f.queue.getById(parked.urgent!)!.lastNudgeResult).not.toMatch(/^retained/);
+    });
+});
+
 describe("the attention-clear liveness probe", () => {
   it("is OpenRig's: typed at openrig-urgent; where the level would hold it, it's neither sent nor kept as a held message", async () => {
     const f = fixture();
