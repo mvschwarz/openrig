@@ -78,6 +78,12 @@ export function createCommand(depsOverride?: StatusDeps): Command {
       );
       const node = res.data.nodes?.find((candidate) => candidate.logicalId === logicalId);
       const ok = res.status < 400 && node?.status === "launched";
+      // The same reason in both outputs, under the key `rig grow --json` uses.
+      const detail = ok ? undefined : (res.data.errors?.join("; ")
+        ?? res.data.message
+        ?? res.data.error
+        ?? node?.error
+        ?? `Create failed (HTTP ${res.status})`);
 
       if (opts.json) {
         console.log(JSON.stringify({
@@ -88,16 +94,12 @@ export function createCommand(depsOverride?: StatusDeps): Command {
           seat: logicalId,
           source: agentRef,
           node,
+          ...(detail !== undefined ? { detail } : {}),
         }, null, 2));
       } else if (ok) {
         console.log(`Created rig ${name} (${res.data.rigId})`);
         console.log(`  Seat: ${logicalId}${node?.sessionName ? ` (${node.sessionName})` : ""}`);
       } else {
-        const detail = res.data.errors?.join("; ")
-          ?? res.data.message
-          ?? res.data.error
-          ?? node?.error
-          ?? `Create failed (HTTP ${res.status})`;
         console.error(detail);
       }
 

@@ -88,6 +88,16 @@ describe("RigSpec codec (pod-aware)", () => {
     expect(normalized.pods[0]!.members[0]!.effort).toBe("high");
   });
 
+  it("member mechanic round-trips through serialize/parse/normalize", () => {
+    const yaml = RigSpecCodec.serialize({
+      ...VALID_RIG,
+      pods: [{ ...VALID_RIG.pods[0]!, members: [{ ...VALID_RIG.pods[0]!.members[0]!, mechanic: "mech@dev-rig" }] }],
+    });
+    expect(yaml).toContain("mechanic: mech@dev-rig");
+    const normalized = RigSpecSchema.normalize(RigSpecCodec.parse(yaml) as Record<string, unknown>);
+    expect(normalized.pods[0]!.members[0]!.mechanic).toBe("mech@dev-rig");
+  });
+
   it("loads YAML with member effort through validation, normalization, and serializes back", () => {
     const rawYaml = `
 version: "0.2"

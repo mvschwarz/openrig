@@ -4,7 +4,7 @@
 // Recomputes every edge's file-integrity hashes from the files ON DISK, using the in-repo (already
 // correct) scripts/skill-edge-layout.generated.json to know which edges to walk. NO external-canon
 // YAMLs are required — the digests are purely disk + layout derived. Full mirror APPLY reads the same
-// product policy JSON and uses OPENRIG_SKILL_CANON_ROOT only for skill content.
+// product policy JSON and regenerates each skill's copies from its home in this repo.
 // THIS regen only refreshes the reality side (hashes of present files)
 // to match folded main.
 //

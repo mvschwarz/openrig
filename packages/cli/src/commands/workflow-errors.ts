@@ -53,7 +53,7 @@ export function describeDaemonRejection(body: unknown, instanceHint?: string): T
         // OPR.0.4.6.WF5 FR-4: the promised pointer upgrade — resume is
         // real now. A FAILED instance redrives; other terminal states
         // still inspect-first.
-        action: `If it is failed, redrive it: rig workflow resume <instanceId> --actor-session <you>. Otherwise inspect: ${showCmd}`,
+        action: `If it is failed, redrive it: rig workflow resume <instanceId>. Otherwise inspect: ${showCmd}`,
       };
     }
     case "instance_not_failed":

@@ -10,12 +10,15 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { listNativeProcesses } from "../src/domain/native-process-lineage.js";
 import { defaultListProcessesStrict } from "../src/domain/resume-metadata-refresher.js";
+import { restoreProc, serveFakeProc } from "./helpers/fake-proc.js";
 
 const ENGLISH_START = "Wed Sep 30 21:44:48 2026";
 const MARKER = "synthetic-unrelated-marker";
 
 let scratch: string | undefined;
+const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
 afterEach(() => {
+  Object.defineProperty(process, "platform", platform);
   vi.unstubAllEnvs();
   if (scratch) fs.rmSync(scratch, { recursive: true, force: true });
   scratch = undefined;
@@ -40,6 +43,8 @@ function installLocaleAwarePs(): string {
   ].join("\n"), { mode: 0o755 });
   vi.stubEnv("PATH", scratch);
   vi.stubEnv("OPENRIG_PS_MARKER", MARKER);
+  // ps is the process table's source off Linux.
+  Object.defineProperty(process, "platform", { value: "darwin" });
   return envLog;
 }
 
@@ -77,6 +82,29 @@ describe.each(LISTERS)("%s under an inherited non-English locale", (_name, list)
       expect(process.env.LC_ALL).toBe(locale.LC_ALL);
       expect(process.env.LC_TIME).toBe(locale.LC_TIME);
       expect(process.env.LANG).toBe(locale.LANG);
+    });
+  }
+});
+
+// On Linux the table comes from /proc, with no ps to run: lstart is formatted by the daemon, in English whatever
+// locale it inherited.
+describe.each(LISTERS)("%s from /proc under an inherited non-English locale", (_name, list) => {
+  afterEach(restoreProc);
+  for (const locale of INHERITED_LOCALES) {
+    it(`keeps every row and an English lstart under ${locale.name}`, async () => {
+      vi.stubEnv("LC_ALL", locale.LC_ALL);
+      vi.stubEnv("LC_TIME", locale.LC_TIME);
+      vi.stubEnv("LANG", locale.LANG);
+      serveFakeProc([
+        { pid: 101, ppid: 1, pgid: 101, tpgid: 101, name: "codex", startedAt: ENGLISH_START, command: `codex resume tok-1 ${MARKER}` },
+        { pid: 102, ppid: 1, pgid: 102, tpgid: 102, name: "zsh", startedAt: ENGLISH_START, command: "-zsh" },
+      ]);
+
+      const rows = await list();
+
+      expect(rows.map((row) => row.pid).sort()).toEqual([101, 102]);
+      expect(rows.every((row) => row.startedAt === ENGLISH_START)).toBe(true);
+      expect(rows.find((row) => row.pid === 101)!.command).toBe(`codex resume tok-1 ${MARKER}`);
     });
   }
 });

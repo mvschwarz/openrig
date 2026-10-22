@@ -17,6 +17,7 @@ import { ulid } from "ulid";
 import { parse as parseYaml } from "yaml";
 import type { WorkflowSpec, WorkflowSpecRow } from "./workflow-types.js";
 import { WORKFLOW_AGENT_HARNESSES, WORKFLOW_EXIT_KINDS } from "./workflow-types.js";
+import { bindSpecToRig } from "./workflow-rig-placeholder.js";
 
 interface SpecRow {
   spec_id: string;
@@ -108,6 +109,12 @@ export const WORKFLOW_STEP_KEYS = [
   "depends_on",
   "acceptance",
 ] as const;
+/** A spec row with `{rig}` targets resolved against `boundRig`. */
+export function bindRowToRig(row: WorkflowSpecRow, boundRig: string | null): WorkflowSpecRow {
+  const spec = bindSpecToRig(row.spec, boundRig);
+  return spec === row.spec ? row : { ...row, spec };
+}
+
 export const WORKFLOW_ROLE_KEYS = ["skill_refs", "preferred_targets"] as const;
 export const WORKFLOW_NEXT_HOP_KEYS = ["mode", "suggested_roles", "on"] as const;
 export const WORKFLOW_GATE_KEYS = ["target", "summary", "evidence_ref"] as const;
@@ -788,6 +795,14 @@ export class WorkflowSpecCache {
       .prepare(`SELECT * FROM workflow_specs WHERE name = ? AND version = ?`)
       .get(name, version) as SpecRow | undefined;
     return row ? rowToWorkflowSpec(row) : null;
+  }
+
+  /** The cached spec as one INSTANCE sees it: `member@{rig}` targets are
+   *  resolved against the instance's bound rig. Use this wherever a running
+   *  instance reads its roles; `getByNameVersion` keeps the literal `{rig}`. */
+  getForInstance(instance: { workflowName: string; workflowVersion: string; boundRig: string | null }): WorkflowSpecRow | null {
+    const row = this.getByNameVersion(instance.workflowName, instance.workflowVersion);
+    return row ? bindRowToRig(row, instance.boundRig) : null;
   }
 
   /**

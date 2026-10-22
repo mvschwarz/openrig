@@ -130,6 +130,22 @@ describe("POST /api/up — topology branch", () => {
     expect(acquired).toEqual(calls.map((c) => c.sourceRef));
   });
 
+  it("a request that carries envOverride is answered as it is without one (the field is not read for a topology)", async () => {
+    fs.writeFileSync(path.join(tmpDir, "a.yaml"), VALID_SPEC);
+    const manifest = writeManifest("rigs:\n  - source: ./a.yaml\n");
+    const send = async (extra: Record<string, unknown>) => {
+      const { app, calls } = makeApp();
+      const res = await app.request("/api/up", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceRef: manifest, autoApprove: true, ...extra }),
+      });
+      return { status: res.status, body: await res.json(), calls };
+    };
+    const baseline = await send({});
+    expect(baseline.status).toBe(200);
+    expect(await send({ envOverride: { DEBUG: "1" } })).toEqual(baseline);
+  });
+
   it("R11-2 daemon side: host flag + topology source → 400 naming per-entry host: (public write path)", async () => {
     fs.writeFileSync(path.join(tmpDir, "a.yaml"), VALID_SPEC);
     const manifest = writeManifest("rigs:\n  - source: ./a.yaml\n");

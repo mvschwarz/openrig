@@ -59,6 +59,17 @@ describe("Broadcast CLI", () => {
                 { ok: false, sessionName: "dev-qa@fail-rig", error: "send failed" },
               ],
             }));
+          } else if (parsed.rig === "notice-rig") {
+            // A managed-compaction notice on a sent and on a failed recipient; none on the third.
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({
+              total: 3, sent: 2, failed: 1,
+              results: [
+                { ok: true, sessionName: "a@notice-rig", managedCompaction: { stage: "restoring", observed: "before_send", notice: "a@notice-rig was mid-restore: the restore request was sent and the post-restore audit is still owed." } },
+                { ok: true, sessionName: "b@notice-rig" },
+                { ok: false, sessionName: "c@notice-rig", error: "send failed", managedCompaction: { stage: "compacting", observed: "before_send", notice: "c@notice-rig was being compacted: /compact was submitted." } },
+              ],
+            }));
           } else if (parsed.rig === "warn-rig") {
             // S2 (OPR.0.5.4.3): an unattributed broadcast's response carries the
             // sign-it notice as an additive warning; the renderer must surface it.
@@ -128,6 +139,21 @@ describe("Broadcast CLI", () => {
     expect(output).toContain("Advisory:");
     expect(output).toMatch(/no way of knowing who sent/i);
     expect(output).toMatch(/sign/i);
+  });
+
+  it("broadcast prints each recipient's compaction notice under that recipient's line, exit code unchanged", async () => {
+    const { stdout, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "broadcast", "--rig", "notice-rig", "hello"]);
+    });
+    expect(stdout).toEqual([
+      "a@notice-rig: sent",
+      "Notice: a@notice-rig was mid-restore: the restore request was sent and the post-restore audit is still owed.",
+      "b@notice-rig: sent",
+      "c@notice-rig: FAILED — send failed",
+      "Notice: c@notice-rig was being compacted: /compact was submitted.",
+      "2/3 delivered",
+    ]);
+    expect(exitCode).toBe(1);
   });
 
   it("broadcast --rig prints per-target summary", async () => {
@@ -217,11 +243,11 @@ describe("Broadcast CLI", () => {
   // path — same helper — wrapped. The fix ADDS body.envelopeSender via the single-origin helper. The
   // DaemonClient auto-stamps X-OpenRig-Session=origin env on the POST (client.ts:171), so the remote derives
   // the From: from the transport; the marker VALUE is ignored.
-  function crossHostBcast(): { posts: Array<{ path: string; body: Record<string, unknown> }>; deps: Parameters<typeof broadcastCommand>[0] } {
+  function crossHostBcast(data: Record<string, unknown> = { results: [{ sessionName: "a@rig", ok: true }], sent: 1, total: 1, failed: 0 }): { posts: Array<{ path: string; body: Record<string, unknown> }>; deps: Parameters<typeof broadcastCommand>[0] } {
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
     const client = {
       get: async (p: string) => { posts.push({ path: p, body: {} }); return { status: 200, data: {} }; },
-      post: async (p: string, b: unknown) => { posts.push({ path: p, body: (b ?? {}) as Record<string, unknown> }); return { status: 200, data: { results: [{ sessionName: "a@rig", ok: true }], sent: 1, total: 1, failed: 0 } }; },
+      post: async (p: string, b: unknown) => { posts.push({ path: p, body: (b ?? {}) as Record<string, unknown> }); return { status: 200, data }; },
     } as unknown as DaemonClient;
     const hostRegistryLoader = () => ({ ok: true as const, registry: { hosts: [{ id: "vm-a", transport: "http" as const, url: "http://vm-a:7433" }] } });
     return { posts, deps: { ...runningDeps(port), clientFactory: () => client, hostRegistryLoader } };
@@ -261,6 +287,27 @@ describe("Broadcast CLI", () => {
     const bcast = posts.find((p) => p.path.includes("/api/transport/broadcast"));
     expect(bcast).toBeDefined(); // dispatch reached the wire
     expect(bcast!.body["envelopeSender"]).toBe("<unknown sender>"); // honest marker present (anti-storm), never forged
+  });
+
+  it("a cross-host broadcast prints each recipient's compaction notice under that recipient's line", async () => {
+    const { deps } = crossHostBcast({
+      total: 2, sent: 2, failed: 0,
+      results: [
+        { ok: true, sessionName: "a@rig", managedCompaction: { stage: "compacted", observed: "after_send", notice: "a@rig was compacted, with its restore not yet requested." } },
+        { ok: true, sessionName: "b@rig" },
+      ],
+    });
+    const prog = new Command(); prog.exitOverride();
+    prog.addCommand(broadcastCommand(deps));
+    const { stdout, exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "broadcast", "--host", "vm-a", "--rig", "my-rig", "hi team"]);
+    });
+    const at = stdout.indexOf("a@rig: sent");
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(stdout[at + 1]).toBe("Notice: a@rig was compacted, with its restore not yet requested.");
+    expect(stdout[at + 2]).toBe("b@rig: sent");
+    expect(stdout.filter((l) => l.startsWith("Notice:"))).toHaveLength(1);
+    expect(exitCode).toBeFalsy();
   });
 
   it("broadcast --json prints raw JSON", async () => {

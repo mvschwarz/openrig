@@ -191,6 +191,18 @@ describe("resolveCrossHostTarget (§4 sugar + precedence)", () => {
 // ---------------------------------------------------------------------------
 
 describe("send --host (http branch)", () => {
+  it.each(["\r", "\x1b", "\t", " "])("preserves explicit byte payload and interaction options over HTTP (%#)", async text => {
+    const h = mockClient(() => ({ status: 200, data: { ok: true, promptInteraction: "unverified" } }));
+    await sendCommand(httpDeps(h)).parseAsync(["--host", "vps-b", "dev-impl@my-rig", text,
+      "--dangerously-interact", "--reason", "explicit key", "--verify"], { from: "user" });
+    expect(process.exitCode).toBeUndefined();
+    expect(h.calls).toHaveLength(1);
+    expect(h.calls[0]).toMatchObject({ method: "POST", path: "/api/transport/send", body: {
+      session: "dev-impl@my-rig", text, dangerouslyInteract: true, reason: "explicit key", verify: true,
+    } });
+    expect(sshRunnerNeverCalled).not.toHaveBeenCalled();
+  });
+
   it("http host: POSTs the LOCAL body shape (wrapped envelope) to /api/transport/send; ssh runner never invoked; BR-1: session stays 2-part", async () => {
     const h = mockClient(() => ({ status: 200, data: { ok: true } }));
     const cmd = sendCommand(httpDeps(h));
@@ -476,7 +488,7 @@ describe("capture --host (http branch)", () => {
     expect(sshRunnerNeverCalled).not.toHaveBeenCalled();
     const call = h.calls[0]!;
     expect(call.path).toBe("/api/transport/capture");
-    expect(call.body).toEqual({ lines: 50, session: "dev-impl@my-rig" });
+    expect(call.body).toEqual({ lines: 50, session: "dev-impl@my-rig", inputBox: true });
     expect(captured.stdoutLines).toContain("[via host=vps-b (http://vps-b:7433)]");
     expect(captured.stdoutLines).toContain("pane content here");
   });
@@ -532,9 +544,9 @@ describe("capture --host (http branch)", () => {
     const pane = Array.from({ length: 26 }, (_, i) => `row${i + 1}`).join("\n") + "\n";
     const h = mockClient(() => ({ status: 200, data: { ok: true, sessionName: "dev-impl@my-rig", content: pane, lines: 5 } }));
     await captureCommand(httpDeps(h)).parseAsync(["--host", "vps-b", "dev-impl@my-rig", "--lines", "5"], { from: "user" });
-    expect(h.calls[0]!.body).toEqual({ lines: 5, session: "dev-impl@my-rig" });
+    expect(h.calls[0]!.body).toEqual({ lines: 5, session: "dev-impl@my-rig", inputBox: true });
     expect(captured.stdoutLines).toContain("row22\nrow23\nrow24\nrow25\nrow26\n");
-    expect(captured.stderrLines).toContain("[rig capture: dev-impl@my-rig: 21 earlier lines not shown; last 5 shown]");
+    expect(captured.stderrLines).toContain("[rig capture: dev-impl@my-rig: 21 earlier lines not shown; last 5 shown; activity unknown: rig ps --nodes]");
 
     captured.stdoutLines.length = 0;
     await captureCommand(httpDeps(h)).parseAsync(["--host", "vps-b", "dev-impl@my-rig", "--lines", "5", "--json"], { from: "user" });

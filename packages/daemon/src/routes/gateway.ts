@@ -24,18 +24,44 @@ import { resolveHumanDeliveryReadiness, type HumanDeliveryReadiness } from "../d
 import { requireSenderIdentity } from "./require-sender-identity.js";
 import { runChannelOperation } from "../domain/gateway/channel-operations.js";
 import { buildSlackAppManifest } from "../domain/gateway/slack/manifest.js";
+import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
+import type Database from "better-sqlite3";
+import { HumanQuietStore, QuietWindowError, parseDailyRule, resolveUntil } from "../domain/gateway/human-quiet-windows.js";
+import { HumanModeService, ModeError, registryAvailability, type QuietRule } from "../domain/gateway/human-operating-modes.js";
+import { modeAccount } from "../domain/gateway/human-mode-account.js";
+import { WatchdogJobsRepository } from "../domain/watchdog-jobs-repository.js";
+import { armModeScheduledEnd } from "../domain/policies/mode-scheduled-end.js";
 
 interface SubsystemHandle {
   restart: () => void;
   status: () => Record<string, unknown>;
   connectorStatus?: () => Record<string, unknown>;
+  acceptForwarded?: (env: unknown) => Promise<{ status: string; reason?: string } | null>;
 }
 
 export function gatewayRoutes(opts: {
   home?: string;
   readiness?: (entityId: string, gatewayState: string) => Promise<HumanDeliveryReadiness | null>;
+  /** The daemon's auth bearer (OPENRIG_AUTH_BEARER_TOKEN, the one `rig host pair` issues); a relay from a
+   *  shared app's hub must carry it. Null: no bearer configured, so the route trusts the bind (loopback or tailnet). */
+  relayBearerToken?: string | null;
+  /** The clock quiet hours are resolved against (tests inject one). */
+  now?: () => Date;
 } = {}): Hono {
   const app = new Hono();
+
+  // A shared Slack app across machines: the hub relays an event or click for a channel this machine
+  // owns, and it runs through this machine's own inbound router. 503 keeps it in the hub's retry.
+  // Registered before /slack/:operation, which would otherwise answer it with 404.
+  app.post("/slack/forwarded", authBearerTokenMiddleware({ expectedToken: opts.relayBearerToken ?? null }), async (c) => {
+    const body = await c.req.json<{ envelope?: unknown }>().catch(() => null);
+    const envelope = body?.envelope;
+    if (!envelope || typeof envelope !== "object") return c.json({ error: "envelope_required" }, 400);
+    const subsystem = c.get("gatewaySubsystem" as never) as SubsystemHandle | undefined;
+    const result = await subsystem?.acceptForwarded?.(envelope);
+    if (!result) return c.json({ error: "slack_inbound_unavailable", message: "This machine's Slack connector isn't enabled with a token, so it can't take relayed events yet." }, 503);
+    return c.json({ ok: true, ...result });
+  });
   let adminTail: Promise<unknown> = Promise.resolve();
 
   app.get("/connections", (c) => {
@@ -74,6 +100,162 @@ export function gatewayRoutes(opts: {
     return c.json({ ok: true, readiness });
   });
 
+  // Quiet hours for a person: one read, plus set, end ("I'm back") and clear. These store and show the window; no
+  // delivery decision reads it yet.
+  const now = opts.now ?? (() => new Date());
+  const quietRoute = (verb: string, handler: (input: { quiet: HumanQuietStore; entityId: string; actor: string; body: Record<string, unknown>; at: Date }) => unknown) =>
+    async (c: import("hono").Context) => {
+      const entityId = c.req.param("entityId") ?? "";
+      const db = c.get("db" as never) as Database.Database | undefined;
+      if (!db) return c.json({ error: "quiet_hours_unavailable", message: "The daemon's database isn't available to this route." }, 503);
+      const registry = loadHumanRegistry(opts.home ?? OPENRIG_HOME);
+      if (!registry.ok) return c.json({ error: "human_registry_unavailable", message: registry.error }, 503);
+      if (!registry.entities.some((candidate) => candidate.entityId === entityId)) return c.json({ error: "human_not_found", entityId }, 404);
+      const body = c.req.method === "GET" ? {} : ((await c.req.json<Record<string, unknown>>().catch(() => ({}))) ?? {});
+      let actor = "";
+      if (c.req.method !== "GET") {
+        const identity = requireSenderIdentity(c, { verb, bodyClaim: typeof body.actor === "string" ? body.actor : null });
+        if (!identity.ok) return identity.response;
+        actor = identity.session;
+      }
+      const quiet = new HumanQuietStore(db);
+      const at = now();
+      try {
+        const result = handler({ quiet, entityId, actor, body, at });
+        return c.json({ ok: true, entityId, ...(result ?? {}), window: quiet.show(entityId), state: quiet.quietStateFor(entityId, at) });
+      } catch (error) {
+        if (!(error instanceof QuietWindowError)) throw error;
+        const status = error.code === "not_quiet" || error.code === "no_window" ? 409 : 400;
+        return c.json({ error: error.code, message: error.message }, status);
+      }
+    };
+  app.get("/human/:entityId/quiet", quietRoute("reading quiet hours", () => undefined));
+  app.put("/human/:entityId/quiet", quietRoute("setting quiet hours", ({ quiet, entityId, actor, body, at }) => {
+    const timezone = typeof body.timezone === "string" ? body.timezone : "";
+    const daily = typeof body.daily === "string" ? body.daily : undefined;
+    const until = typeof body.until === "string" ? body.until : undefined;
+    if ((daily === undefined) === (until === undefined)) {
+      throw new QuietWindowError("invalid_time", "Give either a daily window (HH:MM-HH:MM) or an until-time, not both and not neither.");
+    }
+    if (daily !== undefined) quiet.setDaily(entityId, { ...parseDailyRule(daily), timezone, setBy: actor, now: at });
+    else quiet.setUntil(entityId, { until: resolveUntil(until!, timezone, at), timezone, setBy: actor, now: at });
+    return undefined;
+  }));
+  app.post("/human/:entityId/quiet/end", quietRoute("ending quiet hours", ({ quiet, entityId, actor, at }) =>
+    ({ ended: quiet.end(entityId, { endedBy: actor, now: at }) })));
+  app.post("/human/:entityId/quiet/clear", quietRoute("clearing quiet hours", ({ quiet, entityId, actor, at }) =>
+    ({ cleared: quiet.clear(entityId, { clearedBy: actor, now: at }) })));
+
+  // Operating modes for a person: saved modes and the record of applying one. Same person check and actor as quiet
+  // hours; applying or ending touches only the person's availability, their quiet window and the modes' own records.
+  const modeRoute = (verb: string, handler: (input: { modes: HumanModeService; entityId: string; name: string; actor: string;
+    body: Record<string, unknown>; at: Date }) => unknown) =>
+    async (c: import("hono").Context) => {
+      const entityId = c.req.param("entityId") ?? "";
+      const db = c.get("db" as never) as Database.Database | undefined;
+      if (!db) return c.json({ error: "modes_unavailable", message: "The daemon's database isn't available to this route." }, 503);
+      const home = opts.home ?? OPENRIG_HOME;
+      const registry = loadHumanRegistry(home);
+      if (!registry.ok) return c.json({ error: "human_registry_unavailable", message: registry.error }, 503);
+      if (!registry.entities.some((candidate) => candidate.entityId === entityId)) return c.json({ error: "human_not_found", entityId }, 404);
+      const body = c.req.method === "GET" ? {} : ((await c.req.json<Record<string, unknown>>().catch(() => ({}))) ?? {});
+      let actor = "";
+      if (c.req.method !== "GET") {
+        const identity = requireSenderIdentity(c, { verb, bodyClaim: typeof body.actor === "string" ? body.actor : null });
+        if (!identity.ok) return identity.response;
+        actor = identity.session;
+      }
+      const at = now();
+      const jobsRepo = new WatchdogJobsRepository(db);
+      const modes = new HumanModeService({ db, availability: registryAvailability(home), now: () => at,
+        armScheduledEnd: (application) => armModeScheduledEnd({ jobsRepo, ...application }) });
+      try {
+        return c.json({ ok: true, entityId, ...(handler({ modes, entityId, name: c.req.param("name") ?? "", actor, body, at }) as Record<string, unknown>) });
+      } catch (error) {
+        if (error instanceof ModeError) return c.json({ error: error.code, message: error.message }, error.code === "mode_not_found" ? 404 : 400);
+        if (error instanceof QuietWindowError) return c.json({ error: error.code, message: error.message }, 400);
+        throw error;
+      }
+    };
+  const text = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v.trim() : null);
+  app.get("/human/:entityId/modes", modeRoute("reading modes", ({ modes, entityId }) =>
+    ({ modes: modes.list(entityId), current: modes.current(entityId) })));
+  app.get("/human/:entityId/modes/:name", modeRoute("reading a mode", ({ modes, entityId, name }) => {
+    const mode = modes.saved(entityId, name);
+    if (!mode) throw new ModeError("mode_not_found", `${entityId} has no saved mode "${name}"`);
+    return { mode };
+  }));
+  app.put("/human/:entityId/modes/:name", modeRoute("saving a mode", ({ modes, entityId, name, actor, body }) => {
+    const quietText = text(body.quiet);
+    const timezone = text(body.timezone) ?? "";
+    let quiet: QuietRule | null = null;
+    if (quietText === "until-end") quiet = { kind: "until-end", timezone };
+    else if (quietText) quiet = { kind: "daily", ...parseDailyRule(quietText), timezone };
+    const exclusions = Array.isArray(body.exclusions) ? body.exclusions.filter((e): e is string => typeof e === "string" && e.trim() !== "").map((e) => e.trim()) : [];
+    return { mode: modes.save(entityId, {
+      name,
+      availability: { value: text(body.availability), expectedBack: text(body.expectedBack) },
+      decisionRoom: { words: text(body.decisionRoom), exclusions },
+      delivery: { quiet, account: text(body.account) },
+    }, actor) };
+  }));
+  app.post("/human/:entityId/modes/:name/apply", modeRoute("applying a mode", ({ modes, entityId, name, actor, body, at }) => {
+    const until = text(body.until);
+    const saved = modes.saved(entityId, name);
+    // The CLI always sends a zone with an end time (this machine's, unless --tz). An API caller that sends none gets the
+    // mode's quiet-hours zone, else UTC.
+    const timezone = text(body.timezone) ?? (saved?.delivery.quiet?.timezone || "UTC");
+    const result = modes.apply(entityId, name, { scheduledEnd: until ? resolveUntil(until, timezone, at) : null }, actor);
+    return { application: result.application, ended: result.ended, atDesk: result.application === null, unresolved: modes.unresolved(entityId) };
+  }));
+  // `unresolved`: restorations from earlier modes still pending or failed, owed in the coming-back report until resolved.
+  app.get("/human/:entityId/mode", modeRoute("reading the current mode", ({ modes, entityId }) => {
+    const current = modes.current(entityId);
+    return { current, atDesk: current === null, unresolved: modes.unresolved(entityId) };
+  }));
+  // For an agent about to ask this person: the decision room of the mode they have on, in their own words, or none. The
+  // agent judges whether its decision falls inside it; with none, nothing is decided for them.
+  app.get("/human/:entityId/decision-room", modeRoute("reading the decision room", ({ modes, entityId }) => {
+    const current = modes.current(entityId);
+    if (!current) return { decisionRoom: null, why: "at desk: no mode is on, so ask them" };
+    if (!current.settings.decisionRoom) return { decisionRoom: null, why: `${current.modeName} has no decision room, so nothing is decided for them`, modeName: current.modeName };
+    return { decisionRoom: { applicationId: current.applicationId, modeName: current.modeName, ...current.settings.decisionRoom } };
+  }));
+  // The decisions made on this person's behalf under one application, for the account when they're back.
+  app.get("/human/:entityId/mode/applications/:applicationId/decisions", (c) => {
+    const entityId = c.req.param("entityId");
+    const applicationId = c.req.param("applicationId");
+    const db = c.get("db" as never) as Database.Database | undefined;
+    const queueRepo = c.get("queueRepo" as never) as QueueRepository | undefined;
+    if (!db || !queueRepo) return c.json({ error: "modes_unavailable", message: "The daemon's database isn't available to this route." }, 503);
+    const application = new HumanModeService({ db }).get(applicationId);
+    if (!application || application.entityId !== entityId) return c.json({ error: "application_not_found", entityId, applicationId }, 404);
+    const decisions = queueRepo.delegatedDecisionsFor(applicationId).map((item) => ({ qitemId: item.qitemId, summary: item.summary,
+      sourceSession: item.sourceSession, decision: item.delegatedDecision }));
+    return c.json({ ok: true, entityId, applicationId, modeName: application.modeName, decisions });
+  });
+  // The facts for the person's "back" account, for one ended application: made from the records only, never composed here.
+  app.get("/human/:entityId/mode/applications/:applicationId/account", async (c) => {
+    const entityId = c.req.param("entityId");
+    const applicationId = c.req.param("applicationId");
+    const db = c.get("db" as never) as Database.Database | undefined;
+    const queueRepo = c.get("queueRepo" as never) as QueueRepository | undefined;
+    if (!db || !queueRepo) return c.json({ error: "modes_unavailable", message: "The daemon's database isn't available to this route." }, 503);
+    const home = opts.home ?? OPENRIG_HOME;
+    const result = await modeAccount({ modes: new HumanModeService({ db, now }), queueRepo, home, registry: { loadHumanRegistry },
+      entityId, applicationId, now: now() });
+    if (result.status === "not-found") return c.json({ error: "application_not_found", entityId, applicationId }, 404);
+    if (result.status === "still-on") {
+      return c.json({ error: "still_on", message: `${result.application.modeName} is still on: end it first (current shows it while it's on)` }, 409);
+    }
+    return c.json({ ok: true, entityId, account: result.account });
+  });
+  app.post("/human/:entityId/mode/end", modeRoute("ending a mode", ({ modes, entityId, actor, body }) => {
+    const reason = body.reason === "scheduled" ? "scheduled" : "back";
+    const ended = modes.end(entityId, reason, actor);
+    return { ended, atDesk: modes.current(entityId) === null, unresolved: modes.unresolved(entityId) };
+  }));
+
   app.post("/slack/:operation", async (c) => {
     const operation = c.req.param("operation");
     if (operation !== "enable" && operation !== "disable") return c.notFound();
@@ -95,7 +277,10 @@ export function gatewayRoutes(opts: {
         reason: reason || "enable human delivery", before: state(),
         run: async () => {
           let value = { seeded: 0, onlineStatus: `slack connector already ${enabled ? "enabled" : "disabled"}; no change` };
-          if (cfg.enabled === enabled) return { value, after: state(), effect: "no-op" };
+          if (cfg.enabled === enabled) {
+            if (enabled) value.onlineStatus += ". This call did not reload configuration or tokens. To reload, run rig daemon stop, then rig daemon start; environment token overrides still take precedence.";
+            return { value, after: state(), effect: "no-op" };
+          }
           if (enabled) {
             const registry = loadHumanRegistry(home);
             if (!registry.ok) throw new HTTPException(503, { res: c.json({

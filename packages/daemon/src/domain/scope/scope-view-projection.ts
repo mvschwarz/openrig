@@ -6,9 +6,12 @@
 // `n`; it is not read here at all. The render never asserts a proven-green the store
 // does not enforce: `paired` means exactly "≥1 C1 drop cites this contract item".
 import * as path from "node:path";
+import YAML from "yaml";
+import { findFrontmatterBlock } from "../frontmatter.js";
 import { readSliceReadiness, readProofContract, type ScopeReadiness, type ProofPolicyRead } from "../proof/judgments.js";
 import { createHash } from "node:crypto";
 import { NODE_FILE_PRECEDENCE } from "./node-file.js";
+import { parseMarkdownSections } from "../markdown-address.js";
 
 export interface ScopeFsDeps {
   readBytes?: (path: string) => Uint8Array | null;
@@ -70,9 +73,7 @@ export interface MissionScopes {
 }
 
 function extractFrontmatterRaw(content: string): string | null {
-  if (!content.startsWith("---")) return null;
-  const match = /^---\s*\n([\s\S]*?)\n---/.exec(content);
-  return match ? match[1]! : null;
+  return findFrontmatterBlock(content, { openingWhitespace: true })?.yaml ?? null;
 }
 
 function fmValue(fm: string, key: string): string | null {
@@ -80,9 +81,17 @@ function fmValue(fm: string, key: string): string | null {
   return m ? m[1]!.trim().replace(/^["']|["']$/g, "") : null;
 }
 
-/** Parse a YAML block list under `key:` — the C1 `evidences:` / `media:` shape. */
+/** Parse a YAML block list under `key:` — the C1 `evidences:` / `media:` shape. Read it
+ * as YAML first, as the Review composer does: `rig proof add` writes the header with
+ * YAML.stringify, which folds a long text ref onto continuation lines. */
 function fmList(fm: string, key: string): string[] {
-  const lines = fm.split("\n");
+  let doc: unknown;
+  try { doc = YAML.parse(fm); } catch { doc = undefined; }
+  if (doc && typeof doc === "object" && !Array.isArray(doc)) {
+    const value = (doc as Record<string, unknown>)[key];
+    return Array.isArray(value) ? value.map((e) => String(e)).filter((e) => e.trim().length > 0) : [];
+  }
+  const lines = fm.split(/\r?\n/);
   const out: string[] = [];
   let inKey = false;
   for (const line of lines) {
@@ -98,22 +107,20 @@ function fmList(fm: string, key: string): string[] {
 
 /** Extract a `## <Heading>` section's body (up to the next `## ` or EOF). */
 function sectionBody(content: string, heading: string): string {
-  const re = new RegExp(`^## ${heading}\\s*$`, "m");
-  const m = re.exec(content);
-  if (!m) return "";
-  const start = m.index + m[0].length;
-  const rest = content.slice(start);
-  const next = /^## /m.exec(rest);
-  return (next ? rest.slice(0, next.index) : rest).trim();
+  const section = parseMarkdownSections(content).find((candidate) => candidate.level === 2 && candidate.title === heading);
+  if (!section) return "";
+  // The shared parser preserves fenced examples within the section span.
+  return section.text.split("\n").slice(1).join("\n").trim();
 }
 
-/** Numbered mini-requirement lines (top-level `N.` items; continuation lines folded in). */
+/** Numbered mini-requirement lines (top-level `N.` or `N)` items, as hasAuthoredNumberedItem
+ * reads them; continuation lines folded in). */
 function miniRequirements(content: string): string[] {
   const body = sectionBody(content, "Mini-requirements");
   const items: string[] = [];
   let current: string | null = null;
-  for (const line of body.split("\n")) {
-    const m = /^(\d+)\.\s+(.*)$/.exec(line);
+  for (const line of body.split(/\r?\n/)) {
+    const m = /^(\d+)[.)]\s+(.*)$/.exec(line);
     if (m) {
       if (current !== null) items.push(current.trim());
       current = m[2]!;
@@ -180,7 +187,7 @@ function specShaFromLockedArtifacts(fs: ScopeFsDeps, sliceDir: string, fm: strin
     entryPath = null;
     entryIsSpec = false;
   };
-  for (const line of fm.split("\n")) {
+  for (const line of fm.split(/\r?\n/)) {
     if (/^\s+-\s/.test(line)) closeEntry();
     const p = /^\s+(?:-\s+)?path:\s*(.+)$/.exec(line);
     if (p) entryPath = p[1]!.trim();
@@ -195,7 +202,9 @@ function specShaFromLockedArtifacts(fs: ScopeFsDeps, sliceDir: string, fm: strin
   return createHash("sha256").update(bytes).digest("hex").slice(0, 8);
 }
 
-export function projectSliceScope(fs: ScopeFsDeps, sliceDir: string, readPolicy?: ProofPolicyRead): SliceScopeDetail | null {
+/** `root`: a selected catalog project's root. It bounds the readiness (policy search and scope identity) exactly as
+ *  `rig proof` does for that project, so the scopes view and proof agree; without it the nearest project.yaml is used. */
+export function projectSliceScope(fs: ScopeFsDeps, sliceDir: string, readPolicy?: ProofPolicyRead, root?: string): SliceScopeDetail | null {
   const readmePath = NODE_FILE_PRECEDENCE
     .map((n) => path.join(sliceDir, n))
     .find((p) => fs.exists(p));
@@ -222,7 +231,7 @@ export function projectSliceScope(fs: ScopeFsDeps, sliceDir: string, readPolicy?
   const heading = /^# (.+)$/m.exec(content);
   const progressPath = path.join(sliceDir, "PROGRESS.md");
   return {
-    readiness: readSliceReadiness(sliceDir, fs, readPolicy),
+    readiness: readSliceReadiness(sliceDir, fs, readPolicy, root),
     dirName: path.basename(sliceDir),
     id: fmValue(fm, "id"),
     displayName: heading ? heading[1]!.trim() : path.basename(sliceDir),
@@ -248,7 +257,7 @@ export function projectSliceScope(fs: ScopeFsDeps, sliceDir: string, readPolicy?
   };
 }
 
-export function projectMissionScopes(fs: ScopeFsDeps, missionsRoot: string, mission: string): MissionScopes | null {
+export function projectMissionScopes(fs: ScopeFsDeps, missionsRoot: string, mission: string, root?: string): MissionScopes | null {
   const missionDir = path.join(missionsRoot, mission);
   const slicesDir = path.join(missionDir, "slices");
   if (!fs.exists(missionDir)) return null;
@@ -257,7 +266,7 @@ export function projectMissionScopes(fs: ScopeFsDeps, missionsRoot: string, miss
     for (const entry of fs.listDir(slicesDir)) {
       const sliceDir = path.join(slicesDir, entry);
       if (!fs.isDirectory(sliceDir)) continue;
-      const detail = projectSliceScope(fs, sliceDir);
+      const detail = projectSliceScope(fs, sliceDir, undefined, root);
       if (!detail) continue;
       const { intent: _i, miniRequirements: _m, proofContract: _p, progressPath: _pp, specShaShort: _s, prdExists: _pe, ...summary } = detail;
       slices.push(summary);

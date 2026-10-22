@@ -14,8 +14,8 @@
 // validateHumanFragment runs on `add` and on load, so a present-but-invalid fragment
 // is a loud error, never silently projected.
 
-import { createHash } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { getOpenRigHome } from "../../openrig-compat.js";
@@ -380,6 +380,9 @@ export function addHumanFragment(
   }
   const w = atomicWrite(file, stringifyYaml(v.fragment));
   if (!w.ok) return { ok: false, error: w.error };
+  // A new or replaced record may author any availability: it's a change of its own.
+  const change = recordAvailabilityChange(v.fragment.entityId, home);
+  if (!change.ok) return { ok: false, error: `fragment written but ${change.error}` };
   const proj = writeProjection(home);
   if (!proj.ok) return { ok: false, error: `fragment written but re-projection failed: ${proj.error}` };
   return { ok: true, path: file, fragment: v.fragment };
@@ -413,6 +416,9 @@ export interface HumanSummary {
   deliveryClass: HumanPrefs["deliveryClass"];
   /** EFFECTIVE availability preset (default false when unauthored). */
   away: boolean;
+  /** The availability delivery acts on: the authored value, else legacy `away`, else available (the engine's
+   *  resolveAvailability rule). */
+  availability: NonNullable<HumanPrefs["availability"]>;
   bindings: HumanBindingsSummary;
   fragmentPath: string;
 }
@@ -449,8 +455,10 @@ export type ShowHumanResult =
   | { ok: false; error: string };
 
 export type SetHumanFieldResult =
-  | { ok: true; path: string; fragment: HumanFragment }
-  | { ok: false; error: string };
+  /** changeId: the availability change record this write left, when it left one. */
+  | { ok: true; path: string; fragment: HumanFragment; changeId?: string }
+  /** changeId: set when the fragment and its change record were written but something after them failed. */
+  | { ok: false; error: string; changeId?: string };
 
 export type RemoveHumanResult =
   | { ok: true; removed: string; archivedPath: string; orphanRecordPath?: string }
@@ -509,6 +517,7 @@ export function listHumans(home: string = getOpenRigHome()): ListHumansResult {
       address: e.address,
       deliveryClass: e.prefs.deliveryClass,
       away: e.prefs.away === true,
+      availability: e.prefs.availability ?? (e.prefs.away === true ? "away" : "available"),
       bindings: {
         count: e.connectorBindings.length,
         primary: { kind: primary.kind, connectorRef: primary.connectorRef },
@@ -561,7 +570,7 @@ export function showHuman(entityId: string, home: string = getOpenRigHome()): Sh
 }
 
 const SETTABLE_FIELDS_TEACHING =
-  "settable fields: display-name, delivery-class, away, binding.<n> (binding.<n> takes a full kind:connectorRef:secretsRef:role[:handle=<id>] spec)";
+  "settable fields: display-name, delivery-class, away, availability (available|focus|away|off, or unset), binding.<n> (binding.<n> takes a full kind:connectorRef:secretsRef:role[:handle=<id>] spec)";
 
 /** Cross-fragment handle-uniqueness: the same pre-write check add runs (one platform id =
  *  one human), extracted so set enforces it identically. */
@@ -581,6 +590,42 @@ function handleConflict(fragment: HumanFragment, home: string): string | undefin
     }
   }
   return undefined;
+}
+
+// A person's availability change record: a sidecar beside the fragments (gateway/humans/.availability/<id>.json),
+// rewritten with a fresh change id by every write through these writers that can change availability (set availability
+// or away, add or replace). It lets a mode tell its own change from a later one that happens to have the same value. It
+// lives outside the fragment because the fragment's keys are a closed set every reader validates, and the fragment
+// loaders skip dot-entries, so older readers never see it.
+function availabilityChangePath(entityId: string, home: string): string {
+  return join(humansDir(home), ".availability", `${entityId}.json`);
+}
+function recordAvailabilityChange(entityId: string, home: string): { ok: true; changeId: string } | { ok: false; error: string } {
+  const changeId = randomUUID();
+  const w = atomicWrite(availabilityChangePath(entityId, home), JSON.stringify({ changeId, at: new Date().toISOString() }));
+  return w.ok ? { ok: true, changeId } : { ok: false, error: `availability change record not written: ${w.error}` };
+}
+
+/** The availability a person's fragment authors (undefined when it authors none), and the id of the latest change
+ *  recorded through the writers (null when none has been): what a mode records as the prior value and checks is still
+ *  its own. */
+export function readHumanAvailability(entityId: string, home: string = getOpenRigHome()):
+  { ok: true; availability: string | undefined; changeId: string | null; away: boolean } | { ok: false; error: string } {
+  const f = readFragment(entityId, home);
+  if (!f.ok) return f;
+  const prefs = isObj(f.raw.prefs) ? (f.raw.prefs as Record<string, unknown>) : {};
+  let changeId: string | null = null;
+  const path = availabilityChangePath(entityId, home);
+  if (existsSync(path)) {
+    try {
+      const record = JSON.parse(readFileSync(path, "utf8")) as { changeId?: unknown };
+      if (typeof record.changeId !== "string") throw new Error("it has no change id");
+      changeId = record.changeId;
+    } catch (err) {
+      return { ok: false, error: `availability change record for ${entityId} is unreadable: ${(err as Error).message}` };
+    }
+  }
+  return { ok: true, availability: typeof prefs.availability === "string" ? prefs.availability : undefined, changeId, away: prefs.away === true };
 }
 
 export function setHumanField(
@@ -607,6 +652,12 @@ export function setHumanField(
       return { ok: false, error: `away must be true|false (got "${value}")` };
     }
     rawPrefs.away = value === "true";
+    raw.prefs = rawPrefs;
+  } else if (field === "availability") {
+    // `unset` removes the authored field, so it reads as never authored (what restoring an absent value needs). Any
+    // other value goes through the add-time validator below: the closed enum, and agreement with legacy `away`.
+    if (value === "unset") delete rawPrefs.availability;
+    else rawPrefs.availability = value;
     raw.prefs = rawPrefs;
   } else if (field.startsWith("binding.")) {
     const idxRaw = field.slice("binding.".length);
@@ -636,9 +687,18 @@ export function setHumanField(
 
   const w = atomicWrite(f.path, stringifyYaml(raw));
   if (!w.ok) return { ok: false, error: w.error };
+  // A change to availability rotates the change record. Legacy `away` changes availability only while the fragment
+  // authors none: with availability authored, `away` must agree with it (true only when it's already away) or it's
+  // false, and either way availability is unchanged, so the record stays the latest real change's.
+  let changeId: string | undefined;
+  if (field === "availability" || (field === "away" && rawPrefs.availability === undefined)) {
+    const change = recordAvailabilityChange(entityId, home);
+    if (!change.ok) return { ok: false, error: `fragment written but ${change.error}` };
+    changeId = change.changeId;
+  }
   const proj = writeProjection(home);
-  if (!proj.ok) return { ok: false, error: `fragment written but re-projection failed: ${proj.error}` };
-  return { ok: true, path: f.path, fragment: v.fragment };
+  if (!proj.ok) return { ok: false, error: `fragment written but re-projection failed: ${proj.error}`, ...(changeId ? { changeId } : {}) };
+  return { ok: true, path: f.path, fragment: v.fragment, ...(changeId ? { changeId } : {}) };
 }
 
 export function removeHumanFragment(
@@ -672,6 +732,8 @@ export function removeHumanFragment(
   for (let n = 1; existsSync(archivedPath); n++) archivedPath = join(archiveDir, `${entityId}.${stamp}-${n}.yaml`);
   try {
     renameSync(path, archivedPath);
+    // A later re-add of the same id starts a fresh change record, never inheriting this one.
+    rmSync(availabilityChangePath(entityId, home), { force: true });
   } catch (err) {
     return { ok: false, error: `failed to archive ${path}: ${(err as Error).message}` };
   }
@@ -705,9 +767,14 @@ export function pendingConversationsFor(entityId: string, home: string = getOpen
     }));
 }
 
+/** The refusal when nobody is registered yet; the wording `rig gateway human list` uses for an empty registry. */
+export const NO_HUMAN_CONFIGURED =
+  "no human configured yet — register one: rig gateway human add <entityId> --display-name … --binding … --delivery-class …";
+
 export type LoadResult =
   | { ok: true; entities: HumanFragment[] }
-  | { ok: false; error: string };
+  /** `noHumans`: refused because nobody is registered yet (no fragments, nothing projected), not a broken registry. */
+  | { ok: false; error: string; noHumans?: true };
 
 /** Recognize only projection bytes an adopted generator could have emitted. The
  * parsed snapshot is validation evidence, never identity input; current fragments
@@ -782,6 +849,11 @@ export function loadHumanRegistry(home: string = getOpenRigHome(), opts: { readO
   if (!proj.ok) return { ok: false, error: proj.error };
   const path = projectionPath(home);
   if (!existsSync(path)) {
+    // Nobody registered yet (no fragments, so nothing was ever projected) is not a broken registry: still refused,
+    // but the message says so and names the registration verb, not a projection repair.
+    if (proj.entities.length === 0) {
+      return { ok: false, error: NO_HUMAN_CONFIGURED, noHumans: true };
+    }
     return { ok: false, error: `registry projection missing at ${path} — re-project from the fragments` };
   }
   const stored = readFileSync(path, "utf8");

@@ -138,15 +138,19 @@ checkboxes do not accept an item under the selected proof policy.
     if (r.status >= 400) throw new Error(`${data.error ?? r.status}: ${data.message ?? "Read the named source and retry"}`);
     return data;
   };
-  cmd.command("show [scope]").description("Read current attributed proof readiness for a slice, mission or active project; no status files are changed.")
+  const projectHelp = "Workspace-catalog project id; resolves the scope under that project's missions root (same as a <project>:<scope> prefix)";
+  cmd.command("show [scope]").description("Read current attributed proof readiness for a slice, mission or active project; no status files are changed. Prefix the scope with <project>: (or pass --project) to read a catalog project.")
+    .option("--project <id>", projectHelp)
     .option("--json", "Structured readiness, item revisions and retained judgment references")
     .action(async (scope, opts) => {
       try {
-        const data = await response(await client().get(`/api/proof${scope ? `?scope=${encodeURIComponent(scope)}` : ""}`));
+        const query = new URLSearchParams({ ...(opts.project ? { project: opts.project } : {}), ...(scope ? { scope } : {}) }).toString();
+        const data = await response(await client().get(`/api/proof${query ? `?${query}` : ""}`));
         console.log(opts.json ? JSON.stringify(data) : JSON.stringify(data, null, 2));
       } catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exitCode = 1; }
     });
-  cmd.command("judge <scope-item>").description("Record one attributed item judgment and derive readiness. Use mission/slices/slice#item (index, text or ID). Policy inherits proofPolicy.judges from owning slice, mission or project.")
+  cmd.command("judge <scope-item>").description("Record one attributed item judgment and derive readiness. Use mission/slices/slice#item (index, text or ID), optionally prefixed <project>: for a catalog project. Policy inherits proofPolicy.judges from owning slice, mission or project.")
+    .option("--project <id>", projectHelp)
     .requiredOption("--verdict <verdict>", "accept | reject | withdraw")
     .requiredOption("--reason <text>", "The evidence-backed judgment being made")
     .option("--evidence <ref>", "Existing evidence, relative to slice or workspace missions/; repeat for multiple references", (v: string, prior: string[]) => [...prior, v], [])
@@ -160,7 +164,7 @@ checkboxes do not accept an item under the selected proof policy.
       try {
         const at = address.indexOf("#"), scope = at < 0 ? address : address.slice(0, at), selector = at < 0 ? null : address.slice(at + 1);
         const refs = [...new Set<string>([...opts.evidence, ...(opts.comparison ? [opts.comparison] : [])])];
-        const query = new URLSearchParams({ scope });
+        const query = new URLSearchParams({ ...(opts.project ? { project: opts.project } : {}), scope });
         for (const ref of refs) query.append("evidence", ref);
         const c = client(), view = await response(await c.get(`/api/proof?${query}`));
         const items = view.items as Array<{ id: string; text: string; index: number; revision: string; judgment: { id: string } | null }> | undefined;
@@ -172,7 +176,9 @@ checkboxes do not accept an item under the selected proof policy.
           ...(refs.length ? { evidence: refs, expectedEvidence: view.preparedEvidence } : {}),
           ...(opts.subject ? { subject: { kind: opts.subject.slice(0, subjectAt), ref: opts.subject.slice(subjectAt + 1), ...(opts.comparison ? { comparison: opts.comparison } : {}) } } : {}),
           expectedRevision: opts.revision ?? item.revision, expectedPrevious: item.judgment?.id ?? null,
-          operationId: opts.operationId, replace: opts.replace === true };
+          operationId: opts.operationId, replace: opts.replace === true, ...(opts.project ? { project: opts.project } : {}),
+          // Pin the project root the prepared read resolved; the daemon refuses (409 project_changed) if it moved.
+          ...((view.project as { root?: string } | undefined)?.root ? { projectRoot: (view.project as { root: string }).root } : {}) };
         const result = await response(await c.post("/api/proof/judge", body));
         console.log(opts.json ? JSON.stringify(result) : JSON.stringify(result, null, 2));
       } catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exitCode = 1; }

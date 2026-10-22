@@ -54,7 +54,6 @@ describe.skipIf(process.platform === "win32")("native failed-kill transcript con
       const deadline = Date.now() + 2000;
       while (getLastCaptureAt(sessionName) === undefined && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
       expect(fs.existsSync(outputPath)).toBe(true);
-      const before = getLastCaptureAt(sessionName)!;
       const result = await orchestrator.teardown(rig.id);
       expect(await tmuxAdapter.hasSession(sessionName)).toBe(failure);
       expect(sessionRegistry.getSessionsForRig(rig.id).find((entry) => entry.id === session.id)?.status).toBe(failure ? "running" : "exited");
@@ -62,9 +61,11 @@ describe.skipIf(process.platform === "win32")("native failed-kill transcript con
       expect(getActiveRotationCount()).toBe(failure ? 1 : 0);
       if (failure) {
         expect(result.errors.join("\n")).toContain("fixture transport unavailable");
-        const captureDeadline = Date.now() + 2000;
-        while ((getLastCaptureAt(sessionName) ?? 0) <= before && Date.now() < captureDeadline) await new Promise((resolve) => setTimeout(resolve, 10));
-        expect(getLastCaptureAt(sessionName)).toBeGreaterThan(before);
+        // Quiet panes can skip full captures; prove fresh output is still captured after the failed kill.
+        const marker = "capture-after-failed-kill";
+        expect(fs.readFileSync(outputPath, "utf8")).not.toContain(marker);
+        await runFile("tmux", ["-S", socket, "send-keys", "-t", sessionName, `printf '${marker}\\n'`, "Enter"], { env });
+        await expect.poll(() => fs.readFileSync(outputPath, "utf8"), { timeout: 2000 }).toContain(marker);
       } else {
         expect(result.errors).toEqual([]);
         expect(getLastCaptureAt(sessionName)).toBeUndefined();

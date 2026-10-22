@@ -40,6 +40,23 @@ interface WriteFact {
   condition?: string;
   sourceRefs: SourceRef[];
 }
+export interface BundleServiceBehaviour {
+  name: string;
+  composeFile: string;
+  image: string;
+  ports: string[];
+  privileged: boolean | string;
+  capAdd: string[];
+  securityOpt: string[];
+  devices: string[];
+  environment: string[];
+  mounts: string[];
+  healthcheck: unknown;
+  waitFor: unknown[];
+  downPolicy: string;
+  unresolved: string[];
+  notes: string[];
+}
 interface GeneratedBehaviour {
   schema: "openrig.bundle-behaviour/v1";
   state: "generated";
@@ -52,6 +69,8 @@ interface GeneratedBehaviour {
   outsideAddresses: Array<{ domain: string; sourceRefs: SourceRef[] }>;
   needs: Array<{ seat?: string; kind: string; name: string; commands?: string[]; versionConstraint?: string; status: "not_checked"; sourceRefs: SourceRef[] }>;
   unknownBeforeLaunch: Array<{ seat?: string; subject: string; reason: string; sourceRefs: SourceRef[] }>;
+  /** Present only when bundle.services_enabled is selected. Declarations, not effective deployment. */
+  services?: BundleServiceBehaviour[];
 }
 export type BundleBehaviour = GeneratedBehaviour | {
   schema: "openrig.bundle-behaviour/v1";
@@ -72,6 +91,7 @@ export interface DescribeBundleInput {
   source?: ObjectValue | null;
   configurationId?: string | null;
   assembler?: Assembler | null;
+  servicesEnabled?: boolean;
 }
 
 const object = (v: unknown): ObjectValue => v !== null && typeof v === "object" && !Array.isArray(v) ? v as ObjectValue : {};
@@ -310,8 +330,54 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
     if (rig.services) {
       const services = object(rig.services);
       const refs = [{ path: rigPath, field: "services" }];
-      view.alsoRuns.push({ ...fileFact(undefined, "services", text(services.compose_file) ?? "compose.yaml", rigRoot, refs), trigger: "before agent launch; existing health checks still apply" });
+      const composeFact = fileFact(undefined, "services", text(services.compose_file) ?? "compose.yaml", rigRoot, refs);
+      view.alsoRuns.push({ ...composeFact, trigger: "before agent launch; existing health checks still apply" });
       view.needs.push({ kind: "tool", name: "Docker Compose and the declared services", status: "not_checked", sourceRefs: refs });
+      if (input.servicesEnabled) {
+        const content = composeFact.resolution === "archive" ? files.get(composeFact.pathOrRef) : undefined;
+        if (content !== undefined) {
+          try {
+            const compose = object(parseYaml(content, { merge: true }));
+            if (!compose.services || Array.isArray(compose.services) || typeof compose.services !== "object") throw new Error("Missing service declarations");
+            view.services = Object.entries(object(compose.services)).map(([name, value]) => {
+              const service = object(value);
+              const declared = (v: unknown): string => typeof v === "string" ? v : JSON.stringify(v) ?? String(v);
+              const hostDependent = (v: unknown) => /\$(?:[A-Za-z_]|\{)/.test(JSON.stringify(v ?? "").replace(/\$\$/g, ""));
+              const strings = (v: unknown) => list(v).map(declared);
+              const env = Array.isArray(service.environment)
+                ? Object.fromEntries(service.environment.filter((v): v is string => typeof v === "string").map(v => {
+                    const equal = v.indexOf("="); return equal < 0 ? [v, null] : [v.slice(0, equal), v.slice(equal + 1)];
+                  }))
+                : object(service.environment);
+              const unresolved = new Set<string>();
+              for (const [field, val] of Object.entries({ image: service.image, ports: service.ports, mounts: service.volumes, healthcheck: service.healthcheck, waitFor: services.wait_for, privileges: [service.privileged, service.cap_add, service.security_opt, service.devices], downPolicy: services.down_policy })) {
+                if (hostDependent(val)) unresolved.add(field);
+              }
+              if (Object.values(env).some(v => v == null || hostDependent(v)) || service.env_file) unresolved.add("environment");
+              const notes: string[] = [];
+              const summarized = new Set(["image", "ports", "privileged", "cap_add", "security_opt", "devices", "environment", "volumes", "healthcheck"]);
+              const otherKeys = Object.keys(service).filter(key => !summarized.has(key)).sort();
+              if (otherKeys.length) notes.push(`Also declared, not summarized: ${otherKeys.join(", ")}`);
+              if (service.build) notes.push("Build context is declared; its contents and build effects were not evaluated.");
+              if (service.env_file) notes.push("Environment files are declared; their contents and effective values are not resolved by this summary.");
+              if (service.extends || compose.include) notes.push("Additional Compose sources are not resolved; this summary is incomplete.");
+              if (text(service.image)?.startsWith("hashicorp/vault:") && env.VAULT_DEV_ROOT_TOKEN_ID === "openrig-dev-token") {
+                notes.push("Vault development demonstration with the public dev token openrig-dev-token; not for real secrets.");
+                if (env.VAULT_DEV_LISTEN_ADDRESS === "0.0.0.0:8200") notes.push("The dev listener is declared on all interfaces at port 8200; this does not certify the effective host deployment.");
+              }
+              return {
+                name, composeFile: composeFact.pathOrRef, image: text(service.image) ?? "not declared",
+                ports: strings(service.ports), privileged: typeof service.privileged === "boolean" ? service.privileged : text(service.privileged) ?? (service.privileged == null ? "not declared" : "unresolved"),
+                capAdd: strings(service.cap_add), securityOpt: strings(service.security_opt), devices: strings(service.devices),
+                environment: Object.keys(env), mounts: strings(service.volumes), healthcheck: service.healthcheck ?? null,
+                waitFor: list(services.wait_for), downPolicy: text(services.down_policy) ?? "down", unresolved: [...unresolved], notes,
+              };
+            });
+          } catch {
+            unknown(composeFact.pathOrRef, "The archived Compose declarations could not be described; no service or host configuration was evaluated.", refs);
+          }
+        }
+      }
       for (const hook of list(services.checkpoints)) {
         for (const field of ["export_command", "import_command"]) {
           const command = text(object(hook)[field]);

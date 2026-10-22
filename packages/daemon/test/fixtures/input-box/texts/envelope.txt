@@ -1,0 +1,7 @@
+From: orch-lead@sample-rig
+To: dev-impl@sample-rig
+Sent: 10-13 19:10Z · gen 0a1b2c3d
+---
+Queue handoff: qitem-coordination-0123456789abcdef01234567 - check your queue.
+---
+↩ Reply: rig send orch-lead@sample-rig "..."

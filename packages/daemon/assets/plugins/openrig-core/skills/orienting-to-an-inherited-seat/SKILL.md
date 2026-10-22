@@ -180,10 +180,13 @@ reconcile. **This is the feature a handover has and a compaction does not** — 
 - **Ask across the three levels** — the base verb `rig ask <rig|target> "<question>"` takes a level flag:
   - `--seat <session-name>` — search a **seat's transcript** (the seat-scoped record).
   - `--session <token>` — search a specific **session's JSONL** by token.
-  - `--wake <seat[@gen] | token>` — **wake** that tenure: resume it to reason a *fresh* answer (the
-    expensive level, distinct from the two cheap searches). A `seat@gen` ref resolves through the
-    lineage ledger; an unresolvable ref's refusal **teaches you the available tenures**. This is the
-    ergonomic wrapper for the manual resume in the floor above.
+  - `--wake <target>` — **wake** that tenure: resume it to reason a *fresh* answer (the
+    expensive level, distinct from the two cheap searches). Wake seat targets must include the rig:
+    `member@rig` or `member@rig@N` (1 = newest tenure). Seat refs resolve from that seat's `sessions`
+    rows, newest first; an unresolvable ref's refusal **teaches you the available tenures**.
+    A two-part target such as `x@2` is a seat name, not a generation selector.
+    Values without `@` go unchanged to the runtime as a session ID or title; a bare member
+    name is not resolved within `<rig>`. This is the ergonomic wrapper for the manual resume above.
   Reach for the cheap transcript / JSONL searches first; **wake only when you need reasoning the record
   does not already hold.**
 - **`rig ask --wake` wraps the harness resume and is not yet well-exercised.** If it errors, hangs

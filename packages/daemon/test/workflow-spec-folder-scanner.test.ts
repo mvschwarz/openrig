@@ -154,6 +154,23 @@ describe("scanWorkflowSpecFolder (slice 11)", () => {
     expect(result.skipped).toBe(0);
   });
 
+  it("re-reads a valid edit when file mtime moves backward", () => {
+    const file = join(folder, "wf.yaml");
+    writeFileSync(file, VALID_YAML);
+    scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });
+    const before = db.prepare("SELECT cached_at FROM workflow_specs WHERE source_path = ?").get(file) as {cached_at: string};
+
+    writeFileSync(file, VALID_YAML.replace("A folder-scan fixture", "Updated objective"));
+    const older = new Date(Date.parse(before.cached_at) - 60_000);
+    utimesSync(file, older, older);
+    const result = scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });
+
+    expect(result.valid).toBe(1);
+    expect(result.skipped).toBe(0);
+    const row = db.prepare("SELECT purpose FROM workflow_specs WHERE source_path = ? ORDER BY cached_at DESC, rowid DESC LIMIT 1").get(file) as {purpose: string};
+    expect(row.purpose).toBe("Updated objective");
+  });
+
   it.each(["valid-edit", "invalid-edit"])("re-reads a %s within the cached timestamp's second", (edit) => {
     const file = join(folder, "wf.yaml");
     writeFileSync(file, VALID_YAML);
@@ -334,8 +351,8 @@ describe("scanWorkflowSpecFolder (slice 11)", () => {
 });
 
 // A spec file whose cached versions include one still pinned by running work, then a parse
-// error, then a repair (#503). Each write gets a later mtime and each scan caches one second after
-// it, so the scanner's mtime check sees changed and unchanged files as it would on disk.
+// error, then a repair (#503). Each write gets a later mtime while the cache uses the real clock,
+// so its timestamp comparisons also account for the filesystem's real ctime.
 describe("scanWorkflowSpecFolder: parse error and repair with several cached versions", () => {
   let db: Database.Database;
   let cache: WorkflowSpecCache;
@@ -361,7 +378,7 @@ describe("scanWorkflowSpecFolder: parse error and repair with several cached ver
   beforeEach(() => {
     db = createDb();
     migrate(db, [coreSchema, eventsSchema, workflowSpecsSchema, workflowSpecsDiagnosticSchema]);
-    cache = new WorkflowSpecCache(db, () => new Date((base + tick + 1) * 1000));
+    cache = new WorkflowSpecCache(db, () => new Date());
     folder = mkdtempSync(join(tmpdir(), "wf-folder-versions-"));
     file = join(folder, "wf.yaml");
     tick = 0;

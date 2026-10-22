@@ -140,7 +140,7 @@ function TreeToggle({
 function NodeActivityIndicator({ node }: { node: NodeInventoryEntry }) {
   const activity = node.agentActivity;
   const { state, source: activitySource } = getActivityStateWithSource(activity, node.terminalActive);
-  const label = getActivityLabel(state);
+  const label = getActivityLabel(state, activity);
   const textClass = getActivityTextClass(state);
   const animClass = getActivityAnimationClass(state);
   const qitems = node.currentQitems ?? [];

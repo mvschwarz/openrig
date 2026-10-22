@@ -1,15 +1,14 @@
-// A resumed seat's working guidance (Root's amendment to the OPR.0.5.7.1 D6a zero-projection
-// ruling, qitem-20261009081619-d1537b0f).
+// A resumed seat's working guidance.
 //
-// D6a stopped an exact resume from replaying startup content, after managed CLAUDE.md blocks
-// were rewritten during a resume. Ordinary `rig down` still strips OpenRig's managed blocks from
-// each seat's guidance file, so an exact resume came back with no role, culture or SOP guidance
-// (and the rig reported fully_restored). The amendment is narrow: before the native harness
-// starts, put back only the managed guidance blocks that are MISSING, from the saved startup
-// selection (guidance projections and guidance_merge startup files). An existing block is never
-// refreshed or overwritten; nothing is sent to the conversation; no startup action, skill or
-// plugin runs; no profile is resolved again. The blocks are rebuilt from the saved source paths'
-// current bytes, not from a byte snapshot of the old file.
+// An exact resume replays no startup content (the replay containment in restore-orchestrator.ts),
+// because managed CLAUDE.md blocks were once rewritten during a resume. Ordinary `rig down` still
+// strips OpenRig's managed blocks from each seat's guidance file, so an exact resume came back with
+// no role, culture or SOP guidance (and the rig reported fully_restored). The exception is narrow:
+// before the native harness starts, put back only the managed guidance blocks that are MISSING,
+// from the saved startup selection (guidance projections and guidance_merge startup files). An
+// existing block is never refreshed or overwritten; nothing is sent to the conversation; no
+// startup action, skill or plugin runs; no profile is resolved again. The blocks are rebuilt from
+// the saved source paths' current bytes, not from a byte snapshot of the old file.
 //
 // Guidance problems never block the exact resume. What can't be put back is reported.
 
@@ -46,6 +45,30 @@ export interface SeatGuidance {
   items: GuidanceItem[];
 }
 
+/** The file a seat's runtime merges its managed guidance blocks into, whatever a spec's `target` declares: the rig's
+ *  Claude file for Claude, `AGENTS.md` for Codex, or null for a runtime this doesn't know. */
+export function seatGuidanceFile(
+  runtime: string | null | undefined,
+  cwd: string,
+  claudeManagedBlockFile: string | null | undefined,
+): string | null {
+  const fileName = runtime === "claude-code"
+    ? (claudeManagedBlockFile ?? DEFAULT_CLAUDE_MANAGED_BLOCK_FILE)
+    : runtime === "codex" ? "AGENTS.md" : null;
+  return fileName ? nodePath.join(cwd, fileName) : null;
+}
+
+/** Whether guidance text holds this id's block as it is written: a BEGIN marker followed later by its END, in the
+ *  current or legacy form. For reporting an installed file; restore's own `blockState` is unchanged. */
+export function hasCompleteGuidanceBlock(content: string, blockId: string): boolean {
+  const ordered = (start: string, end: string): boolean => {
+    const begin = content.indexOf(start);
+    return begin >= 0 && content.indexOf(end, begin + start.length) >= 0;
+  };
+  return ordered(MANAGED_BLOCK_START(blockId), MANAGED_BLOCK_END(blockId))
+    || ordered(LEGACY_BLOCK_START(blockId), LEGACY_BLOCK_END(blockId));
+}
+
 /** The guidance file a seat's managed blocks live in, and the blocks it should hold on restore. */
 export function seatGuidance(
   startupCtx: NodeStartupSnapshot | null,
@@ -55,10 +78,8 @@ export function seatGuidance(
   readFile: (path: string) => string,
 ): SeatGuidance | null {
   if (!startupCtx || !cwd) return null;
-  const fileName = startupCtx.runtime === "claude-code"
-    ? (claudeManagedBlockFile ?? DEFAULT_CLAUDE_MANAGED_BLOCK_FILE)
-    : startupCtx.runtime === "codex" ? "AGENTS.md" : null;
-  if (!fileName) return null;
+  const targetPath = seatGuidanceFile(startupCtx.runtime, cwd, claudeManagedBlockFile);
+  if (!targetPath) return null;
   const items = new Map<string, GuidanceItem>();
   for (const saved of startupCtx.projectionEntries) {
     if (saved.category !== "guidance" || saved.mergeStrategy !== "managed_block") continue;
@@ -87,7 +108,7 @@ export function seatGuidance(
     items.set(f.path, { blockId: f.path, sourcePath: f.absolutePath });
   }
   for (const id of NEVER_MERGED) items.delete(id);
-  return { targetPath: nodePath.join(cwd, fileName), items: [...items.values()] };
+  return { targetPath, items: [...items.values()] };
 }
 
 type BlockState = "complete" | "absent" | "incomplete";

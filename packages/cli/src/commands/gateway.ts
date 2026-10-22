@@ -31,6 +31,45 @@ export type HumanRowsLookup = (address: string) => Promise<
 export interface GatewayCommandDeps {
   queueRows?: HumanRowsLookup;
   humanReadiness?: HumanReadinessLookup;
+  humanQuiet?: HumanQuietLookup;
+}
+
+/** A person's quiet hours as the daemon resolves them: the window (null when none) and whether it's on now. */
+export interface HumanQuietView {
+  window: null | { kind: "daily" | "until"; timezone: string; start?: string; end?: string; until?: string; source: string;
+    revision: number; setBy: string; setAt: string; ended?: { occurrence: string; by: string; at: string } };
+  state: { active: boolean; occurrence?: string; revision?: number; nextBoundary: null | { kind: "start" | "end"; at: string } };
+}
+
+export type HumanQuietLookup = (entityId: string) => Promise<{ ok: true; quiet: HumanQuietView } | { ok: false; reason: string }>;
+
+export async function daemonHumanQuiet(entityId: string): ReturnType<HumanQuietLookup> {
+  try {
+    const { DaemonClient } = await import("../client.js");
+    const response = await new DaemonClient().get<HumanQuietView & { ok?: boolean; error?: string; message?: string }>(
+      `/api/gateway/human/${encodeURIComponent(entityId)}/quiet`);
+    if (response.status !== 200 || response.data?.ok !== true || !response.data.state) {
+      const detail = [response.data?.error, response.data?.message].filter((value) => typeof value === "string").join(": ");
+      return { ok: false, reason: `HTTP ${response.status}${detail ? `: ${detail}` : ""}` };
+    }
+    return { ok: true, quiet: { window: response.data.window ?? null, state: response.data.state } };
+  } catch (error) {
+    return { ok: false, reason: (error as Error).message };
+  }
+}
+
+/** One line for a person's quiet hours: the rule, where it came from, whether it's on, and the next boundary. */
+export function describeQuiet(view: HumanQuietView): string {
+  const w = view.window;
+  if (!w) return "quiet: none set";
+  const rule = w.kind === "daily" ? `every day ${w.start}-${w.end} ${w.timezone}` : `until ${w.until} (${w.timezone})`;
+  const next = view.state.nextBoundary;
+  const nextText = next ? `; ${next.kind === "end" ? "ends" : "next starts"} ${next.at}` : "";
+  // Name the occurrence that was ended, from the stored record: a daily one by its start date (it stays recorded until the
+  // next revision, so it may not be tonight's); an until-time window has just the one.
+  const endedWhich = w.ended?.occurrence === "until" ? "ended" : `the ${w.ended?.occurrence} occurrence ended`;
+  const ended = w.ended && !view.state.active ? `; ${endedWhich} early by ${w.ended.by}` : "";
+  return `quiet: ${view.state.active ? "on" : "off"} (${rule}; set by ${w.setBy}, ${w.source}, revision ${w.revision}${nextText}${ended})`;
 }
 
 export interface HumanReadinessView {
@@ -125,6 +164,7 @@ export async function daemonQueueRows(address: string): ReturnType<HumanRowsLook
 export function gatewayCommand(deps: GatewayCommandDeps = {}): Command {
   const queueRows: HumanRowsLookup = deps.queueRows ?? daemonQueueRows;
   const humanReadiness: HumanReadinessLookup = deps.humanReadiness ?? daemonHumanReadiness;
+  const humanQuiet: HumanQuietLookup = deps.humanQuiet ?? daemonHumanQuiet;
   const cmd = new Command("gateway").description("Gateway: the human registry + connector surfaces");
   const human = cmd.command("human").description("Manage human specs (file-per-human fragments under gateway/humans/)");
 
@@ -225,15 +265,254 @@ Example:
       const { listHumans } = await import("@openrig/daemon/gateway-human-registry");
       const res = listHumans();
       if (!res.ok) { console.error(`refused: ${res.error}`); process.exitCode = 1; return; }
-      const humans = await Promise.all(res.humans.map(async (record) => ({ ...record, deliveryReadiness: await humanReadiness(record.entityId) })));
+      const humans = await Promise.all(res.humans.map(async (record) => {
+        const quiet = await humanQuiet(record.entityId);
+        return { ...record, deliveryReadiness: await humanReadiness(record.entityId),
+          quiet: quiet.ok ? quiet.quiet : { unknown: `quiet hours could not be read from the daemon: ${quiet.reason}` } };
+      }));
       if (opts.json) { console.log(JSON.stringify({ ok: true, humans, ...(res.advisory ? { advisory: res.advisory } : {}) })); return; }
       if (res.humans.length === 0) { console.log("no human configured yet — register one: rig gateway human add <entityId> --display-name … --binding … --delivery-class …"); return; }
       for (const h of humans) {
         const inbound = h.bindings.inboundResolvable ? "" : "  [outbound-only]";
-        console.log(`${h.entityId}  "${h.displayName}"  class=${h.deliveryClass}  ${h.away ? "away" : "available"}  bindings=${h.bindings.count} (primary ${h.bindings.primary.kind}:${h.bindings.primary.connectorRef})  delivery=${h.deliveryReadiness.state}${inbound}`);
+        console.log(`${h.entityId}  "${h.displayName}"  class=${h.deliveryClass}  ${h.availability}  bindings=${h.bindings.count} (primary ${h.bindings.primary.kind}:${h.bindings.primary.connectorRef})  delivery=${h.deliveryReadiness.state}${inbound}`);
         if (!h.deliveryReadiness.ready) console.log(`  delivery: ${h.deliveryReadiness.reason}${h.deliveryReadiness.nextAction ? `; next: ${h.deliveryReadiness.nextAction}` : ""}`);
+        console.log(`  ${"unknown" in h.quiet ? `quiet: unknown (${h.quiet.unknown})` : describeQuiet(h.quiet)}`);
       }
       if (res.advisory) console.log(`advisory: ${res.advisory}`);
+    });
+
+  const quiet = human.command("quiet").description("Quiet hours: while on, routine asks to this person are held, not posted; urgent ones (tagged escalation) still reach them. Held asks post once, each on its own, when quiet ends");
+  const quietCall = async (method: "get" | "put" | "post", entityId: string, suffix: string, body: Record<string, unknown> | undefined, json?: boolean) => {
+    const { DaemonClient } = await import("../client.js");
+    const client = new DaemonClient();
+    const path = `/api/gateway/human/${encodeURIComponent(entityId)}/quiet${suffix}`;
+    const res = method === "get" ? await client.get<Record<string, any>>(path)
+      : method === "put" ? await client.put<Record<string, any>>(path, body) : await client.post<Record<string, any>>(path, body);
+    if (json) { console.log(JSON.stringify(res.data)); if (res.status !== 200) process.exitCode = 1; return false; }
+    if (res.status !== 200) {
+      console.error(`refused: ${res.data?.message ?? res.data?.error ?? `HTTP ${res.status}`}`);
+      process.exitCode = 1;
+      return false;
+    }
+    console.log(`${entityId} ${describeQuiet({ window: res.data.window ?? null, state: res.data.state })}`);
+    return true;
+  };
+  const actorBody = (opts: { actor?: string }) => ({ actor: resolveSenderSession() ?? opts.actor ?? SENDER_FALLBACK });
+  quiet
+    .command("set <entityId>")
+    .description("Set quiet hours: every day in a timezone (--daily 22:00-07:00), or from now until a time (--until 07:00 or an ISO time)")
+    .option("--daily <window>", "Every day, local HH:MM-HH:MM; may cross midnight")
+    .option("--until <time>", "Until a time: HH:MM (its next occurrence in --tz) or an ISO time with an offset")
+    .option("--tz <zone>", "IANA timezone, for example Europe/Berlin (default: this machine's zone)")
+    .option("--actor <actor>", "Named operator when outside a managed seat")
+    .option("--json", "The daemon's answer as JSON")
+    .addHelpText("after", `
+Setting again replaces the window and starts a new revision; if the new window covers now, quiet stays on.
+Times that don't exist or happen twice at a daylight-saving change: a skipped time means the next valid minute, a
+repeated time its first occurrence.
+
+Examples:
+  rig gateway human quiet set alice --daily 22:00-07:00 --tz Europe/Berlin
+  rig gateway human quiet set alice --until 09:00 --tz America/New_York`)
+    .action(async (entityId: string, opts: { daily?: string; until?: string; tz?: string; actor?: string; json?: boolean }) => {
+      const timezone = opts.tz ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const ok = await quietCall("put", entityId, "", { ...(opts.daily !== undefined ? { daily: opts.daily } : {}), ...(opts.until !== undefined ? { until: opts.until } : {}), timezone, ...actorBody(opts) }, opts.json);
+      // This machine's zone may not be the person's (an agent on a server setting someone's hours).
+      if (ok && opts.tz === undefined) console.log(`stored in ${timezone}; pass --tz for the person's own zone`);
+    });
+  quiet
+    .command("end <entityId>")
+    .description("\"I'm back\": end the quiet that is on now. A daily rule stays for tomorrow")
+    .option("--actor <actor>", "Named operator when outside a managed seat")
+    .option("--json", "The daemon's answer as JSON")
+    .action(async (entityId: string, opts: { actor?: string; json?: boolean }) => { await quietCall("post", entityId, "/end", actorBody(opts), opts.json); });
+  quiet
+    .command("clear <entityId>")
+    .description("Remove the quiet-hours rule altogether")
+    .option("--actor <actor>", "Named operator when outside a managed seat")
+    .option("--json", "The daemon's answer as JSON")
+    .action(async (entityId: string, opts: { actor?: string; json?: boolean }) => { await quietCall("post", entityId, "/clear", actorBody(opts), opts.json); });
+  quiet
+    .command("show <entityId>")
+    .description("Show the quiet-hours rule, whether it's on now, and the next boundary")
+    .option("--json", "The daemon's answer as JSON")
+    .action(async (entityId: string, opts: { json?: boolean }) => { await quietCall("get", entityId, "", undefined, opts.json); });
+
+  // A person's own modes (asleep, away from desk, out of office, or a name of their own): saved bundles of availability,
+  // decision room and delivery, and the record of applying one. Applying shows each effect's real state; ending undoes
+  // only what is still the mode's own.
+  const mode = human.command("mode").description("A person's modes: save one as they agreed it, apply it, see what's on, end it (\"I'm back\")");
+  const daemonCall = async (method: "get" | "put" | "post", path: string, body: Record<string, unknown> | undefined,
+    json: boolean | undefined, render: (data: Record<string, any>) => void) => {
+    const { DaemonClient } = await import("../client.js");
+    const client = new DaemonClient();
+    const res = method === "get" ? await client.get<Record<string, any>>(path)
+      : method === "put" ? await client.put<Record<string, any>>(path, body) : await client.post<Record<string, any>>(path, body);
+    if (json) { console.log(JSON.stringify(res.data)); if (res.status !== 200) process.exitCode = 1; return; }
+    if (res.status !== 200) { console.error(`refused: ${res.data?.message ?? res.data?.error ?? `HTTP ${res.status}`}`); process.exitCode = 1; return; }
+    render(res.data);
+  };
+  const modeCall = (method: "get" | "put" | "post", entityId: string, suffix: string, body: Record<string, unknown> | undefined,
+    json: boolean | undefined, render: (data: Record<string, any>) => void) =>
+    daemonCall(method, `/api/gateway/human/${encodeURIComponent(entityId)}${suffix}`, body, json, render);
+  const unresolvedLines = (data: Record<string, any>) => ((data.unresolved ?? []) as Array<Record<string, any>>)
+    .map((u) => `  still ${u.effect.state} from ${u.modeName} (ended ${u.endedAt}): ${u.effect.consumer}${u.effect.detail ? ` (${u.effect.detail})` : ""}`);
+  mode
+    .command("save <entityId> <name>")
+    .description("Save one of a person's modes as they agreed it. Saving again replaces it")
+    .option("--availability <value>", "What their availability becomes while it's on: available | focus | away | off (omit to leave it unchanged)")
+    .option("--expected-back <when>", "When they're expected back, in their words (for example 07:00, or Monday)")
+    .option("--decision-room <words>", "What the team may decide for them meanwhile, in their own words. Omit for none: nothing is decided for them")
+    .option("--exclude <item...>", "Exclusions read back from the decision room (for example publishing spending accounts)")
+    .option("--quiet <rule>", "Quiet hours while it's on: a daily HH:MM-HH:MM, or until-end (until the mode's end time). Omit to leave quiet hours unchanged")
+    .option("--tz <zone>", "IANA timezone for --quiet (default: this machine's zone)")
+    .option("--account <where>", "Where the account goes when they're back")
+    .option("--actor <actor>", "Named operator when outside a managed seat")
+    .option("--json", "The daemon's answer as JSON")
+    .action(async (entityId: string, name: string, opts: { availability?: string; expectedBack?: string; decisionRoom?: string; exclude?: string[];
+      quiet?: string; tz?: string; account?: string; actor?: string; json?: boolean }) => {
+      await modeCall("put", entityId, `/modes/${encodeURIComponent(name)}`, {
+        availability: opts.availability ?? null, expectedBack: opts.expectedBack ?? null, decisionRoom: opts.decisionRoom ?? null,
+        exclusions: opts.exclude ?? [], quiet: opts.quiet ?? null, timezone: opts.tz ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
+        account: opts.account ?? null, ...actorBody(opts),
+      }, opts.json, (data) => console.log(describeSavedMode(data.mode)));
+    });
+  mode
+    .command("saved <entityId> [name]")
+    .description("Show a person's saved modes (or one), and the one that's on now")
+    .option("--json", "The daemon's answer as JSON")
+    .action(async (entityId: string, name: string | undefined, opts: { json?: boolean }) => {
+      if (name) { await modeCall("get", entityId, `/modes/${encodeURIComponent(name)}`, undefined, opts.json, (data) => console.log(describeSavedMode(data.mode))); return; }
+      await modeCall("get", entityId, "/modes", undefined, opts.json, (data) => {
+        const modes = data.modes as Array<Record<string, any>>;
+        if (modes.length === 0) console.log(`${entityId} has no saved modes`);
+        for (const m of modes) console.log(describeSavedMode(m));
+        console.log(data.current ? `on now: ${data.current.modeName}` : "on now: at desk (no mode)");
+      });
+    });
+  mode
+    .command("apply <entityId> <name>")
+    .description("Switch a person into a saved mode, and show each effect's real state. 'at-desk' ends the current mode and applies none")
+    .option("--until <time>", "When it ends: HH:MM (its next occurrence in --tz) or an ISO time with an offset. It ends then, as \"scheduled\"")
+    .option("--tz <zone>", "IANA timezone for --until (default: this machine's zone, as for save and quiet set)")
+    .option("--actor <actor>", "Named operator when outside a managed seat")
+    .option("--json", "The daemon's answer as JSON")
+    .action(async (entityId: string, name: string, opts: { until?: string; tz?: string; actor?: string; json?: boolean }) => {
+      const timezone = opts.tz ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+      await modeCall("post", entityId, `/modes/${encodeURIComponent(name)}/apply`, {
+        ...(opts.until ? { until: opts.until, timezone } : {}), ...actorBody(opts),
+      }, opts.json, (data) => {
+        if (data.ended) console.log(describeApplication(data.ended));
+        console.log(data.application ? describeApplication(data.application) : `${entityId} is at desk: no mode on`);
+        for (const line of unresolvedLines(data)) console.log(line);
+        if (opts.until && opts.tz === undefined) console.log(`until ${opts.until} in ${timezone}; pass --tz for the person's own zone`);
+      });
+    });
+  mode
+    .command("current <entityId>")
+    .description("Show the mode that's on for a person, with each effect's real state (none: at desk), and any restoration still owed")
+    .option("--json", "The daemon's answer as JSON")
+    .action(async (entityId: string, opts: { json?: boolean }) => {
+      await modeCall("get", entityId, "/mode", undefined, opts.json, (data) => {
+        console.log(data.current ? describeApplication(data.current) : `${entityId} is at desk: no mode on`);
+        for (const line of unresolvedLines(data)) console.log(line);
+      });
+    });
+  mode
+    .command("end <entityId>")
+    .description("\"I'm back\": end the person's mode. Each effect ends only if it's still the mode's own; a later choice of theirs stays. Restorations still owed are tried again")
+    .option("--scheduled", "Record that it ended at its scheduled end, not on their word")
+    .option("--actor <actor>", "Named operator when outside a managed seat")
+    .option("--json", "The daemon's answer as JSON")
+    .action(async (entityId: string, opts: { scheduled?: boolean; actor?: string; json?: boolean }) => {
+      await modeCall("post", entityId, "/mode/end", { reason: opts.scheduled ? "scheduled" : "back", ...actorBody(opts) }, opts.json, (data) => {
+        console.log(data.ended ? `${describeApplication(data.ended)}\n${entityId} is at desk now` : `${entityId} had no mode on: at desk`);
+        for (const line of unresolvedLines(data)) console.log(line);
+      });
+    });
+
+  const chosen = (choices: Array<Record<string, any>>) => choices.map((c) => `${c.questionId ?? "choice"}=${c.chosen}`).join(", ");
+  mode
+    .command("account <entityId> <applicationId>")
+    .description("The facts for a person's \"back\" account of one ended mode: how it ended, each effect, decisions made for them, what's waiting, and what isn't tracked. Made from the records only")
+    .option("--json", "The daemon's answer as JSON")
+    .action(async (entityId: string, applicationId: string, opts: { json?: boolean }) => {
+      await modeCall("get", entityId, `/mode/applications/${encodeURIComponent(applicationId)}/account`, undefined, opts.json, (data) => {
+        const a = data.account as Record<string, any>;
+        const m = a.mode;
+        const scheduled = m.scheduledEnd ? `; scheduled for ${m.scheduledEnd}` : "";
+        console.log(describeSavedMode(m.settings));
+        console.log(`  on ${m.startedAt}, ended ${m.endedAt} (${m.endReason}${scheduled})`);
+        for (const e of a.effects as Array<Record<string, any>>) console.log(`  ${e.consumer}: ${e.state}${e.detail ? ` (${e.detail})` : ""}`);
+        for (const line of unresolvedLines(a)) console.log(line);
+        console.log(`  now: ${a.now ? a.now.modeName : "at desk"}`);
+        const decisions = a.decisions as Array<Record<string, any>>;
+        if (decisions.length === 0) console.log("  decided for them: nothing");
+        for (const d of decisions) {
+          console.log(`  decided for them: ${d.qitemId} by ${d.decision.decidedBy} (${d.decision.reversible ? "reversible" : "can't be undone"}): ${chosen(d.decision.choices)}; ${d.decision.reason}`);
+        }
+        const waiting = a.waiting as Array<Record<string, any>>;
+        if (waiting.length === 0) console.log("  waiting for them: nothing");
+        for (const w of waiting) console.log(`  waiting for them: ${w.qitemId} ${w.standing}${w.reason ? ` (${w.reason})` : ""}${w.summary ? `: ${w.summary}` : ""}`);
+        for (const n of a.notTracked as string[]) console.log(`  not tracked: ${n}`);
+      });
+    });
+
+  // Deciding on a person's behalf, inside the decision room of the mode they have on: read the room, record the decision
+  // on the ask (as delegated, never as their answer), and list what was decided for the account when they're back.
+  mode
+    .command("room <entityId>")
+    .description("Before asking a person a decision: the decision room of the mode they have on, in their own words, or none. You judge whether your decision falls inside it")
+    .option("--json", "The daemon's answer as JSON")
+    .action(async (entityId: string, opts: { json?: boolean }) => {
+      await modeCall("get", entityId, "/decision-room", undefined, opts.json, (data) => {
+        const room = data.decisionRoom as Record<string, any> | null;
+        console.log(room
+          ? `${entityId}'s ${room.modeName} decision room: "${room.words}"${room.exclusions?.length ? ` except ${room.exclusions.join(", ")}` : ""}\n`
+            + `  decide with: rig gateway human mode decide <qitemId> --application ${room.applicationId} ...`
+          : `${entityId}: no decision room (${data.why}); ask them`);
+      });
+    });
+
+  mode
+    .command("decide <qitemId>")
+    .description("Record a decision you made on the person's behalf, inside their mode's decision room, on your own pending ask. It's recorded as delegated, never as their answer, and the ask closes")
+    .requiredOption("--application <id>", "The application id from `rig gateway human mode room <entityId>`: the room you judged against. If their mode changed since, it's refused")
+    .option("--choose <question=option...>", "The option chosen for each structured question (for example design=a ship=yes); for an ask without questions, the choice in words")
+    .requiredOption("--reason <why>", "Why this choice")
+    .option("--reversible", "It can be undone")
+    .option("--irreversible", "It can't be undone")
+    .option("--actor <actor>", "Named operator when outside a managed seat")
+    .option("--json", "The daemon's answer as JSON")
+    .action(async (qitemId: string, opts: { application: string; choose?: string[]; reason: string; reversible?: boolean; irreversible?: boolean; actor?: string; json?: boolean }) => {
+      if (Boolean(opts.reversible) === Boolean(opts.irreversible)) {
+        console.error("Say whether it can be undone: --reversible or --irreversible.");
+        process.exitCode = 1;
+        return;
+      }
+      const choices = (opts.choose ?? []).map((c) => {
+        const at = c.indexOf("=");
+        return at > 0 ? { questionId: c.slice(0, at), chosen: c.slice(at + 1) } : { chosen: c };
+      });
+      await daemonCall("post", `/api/queue/${encodeURIComponent(qitemId)}/delegated-decision`,
+        { applicationId: opts.application, choices, reason: opts.reason, reversible: Boolean(opts.reversible), ...actorBody(opts) }, opts.json, (data) => {
+          const d = data.item?.delegatedDecision as Record<string, any>;
+          console.log(`${qitemId}: decided on the person's behalf under ${d.modeName} (${d.reversible ? "reversible" : "can't be undone"}): ${chosen(d.choices)}`);
+        });
+    });
+
+  mode
+    .command("decisions <entityId> <applicationId>")
+    .description("The decisions made on a person's behalf under one mode application")
+    .option("--json", "The daemon's answer as JSON")
+    .action(async (entityId: string, applicationId: string, opts: { json?: boolean }) => {
+      await modeCall("get", entityId, `/mode/applications/${encodeURIComponent(applicationId)}/decisions`, undefined, opts.json, (data) => {
+        const decisions = data.decisions as Array<Record<string, any>>;
+        if (decisions.length === 0) { console.log(`nothing was decided for ${entityId} under ${data.modeName}`); return; }
+        for (const d of decisions) {
+          console.log(`${d.qitemId} by ${d.decision.decidedBy} (${d.decision.reversible ? "reversible" : "can't be undone"}): ${chosen(d.decision.choices)}; ${d.decision.reason}`);
+        }
+      });
     });
 
   human
@@ -259,7 +538,7 @@ Example:
 
   human
     .command("set <entityId> <field> <value>")
-    .description("Edit one field through the verb (same validation as add; re-projection immediate). Fields: display-name, delivery-class, away, binding.<n>")
+    .description("Edit one field through the verb (same validation as add; re-projection immediate). Fields: display-name, delivery-class, away, availability (available|focus|away|off, or unset), binding.<n>")
     .option("--reason <reason>", "Reason recorded with connector binding changes", "update human binding")
     .option("--actor <actor>", "Named operator when outside a managed seat")
     .action(async (entityId: string, field: string, value: string, opts: { reason: string; actor?: string }) => {
@@ -324,4 +603,22 @@ Example:
     });
 
   return cmd;
+}
+
+/** One saved mode, in plain words. A setting the mode doesn't touch reads "unchanged". */
+function describeSavedMode(m: Record<string, any>): string {
+  const availability = m.availability?.value ? `${m.availability.value}${m.availability.expectedBack ? `, back ${m.availability.expectedBack}` : ""}` : "unchanged";
+  const room = m.decisionRoom ? `"${m.decisionRoom.words}"${m.decisionRoom.exclusions?.length ? ` except ${m.decisionRoom.exclusions.join(", ")}` : ""}` : "none (nothing is decided for them)";
+  const quiet = !m.delivery?.quiet ? "quiet hours unchanged" : m.delivery.quiet.kind === "daily"
+    ? `quiet ${m.delivery.quiet.start}-${m.delivery.quiet.end} ${m.delivery.quiet.timezone}` : `quiet until the mode ends (${m.delivery.quiet.timezone})`;
+  return `${m.name}: availability ${availability}; decision room ${room}; delivery: ${quiet}${m.delivery?.account ? `, account to ${m.delivery.account}` : ""}`;
+}
+
+/** One application: the mode, when it started or ended, and each effect's state. */
+function describeApplication(a: Record<string, any>): string {
+  const head = a.endedAt
+    ? `${a.modeName} ended ${a.endedAt} (${a.endReason})`
+    : `${a.modeName} on since ${a.startedAt}${a.scheduledEnd ? `, until ${a.scheduledEnd}` : ""}`;
+  const effects = (a.effects as Array<Record<string, any>>).map((e) => `  ${e.consumer}: ${e.state}${e.detail ? ` (${e.detail})` : ""}`);
+  return [head, ...(effects.length ? effects : ["  no effects"])].join("\n");
 }

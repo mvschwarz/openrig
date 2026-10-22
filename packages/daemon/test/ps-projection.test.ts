@@ -1,12 +1,17 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
+import { monotonicFactory } from "ulid";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { PsProjectionService, deriveRigLifecycleState, seatNeedsAttention, arbitratedNeedsInputSignal } from "../src/domain/ps-projection.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
+import { getNodeInventory } from "../src/domain/node-inventory.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import type { AgentActivity, NodeInventoryEntry } from "../src/domain/types.js";
 import type { EvidenceRungId } from "../src/domain/activity-taxonomy.js";
+
+const sessionId = monotonicFactory();
 
 describe("PsProjectionService", () => {
   let db: Database.Database;
@@ -32,7 +37,7 @@ describe("PsProjectionService", () => {
   }
 
   function seedSession(nodeId: string, status: string, createdAt?: string): string {
-    const id = `sess-${nodeId}-${Date.now()}-${Math.random()}`;
+    const id = sessionId();
     db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES (?, ?, ?, ?, ?)")
       .run(id, nodeId, `tmux-${nodeId}`, status, createdAt ?? new Date().toISOString().replace("T", " ").slice(0, 19));
     return id;
@@ -222,6 +227,27 @@ describe("PsProjectionService", () => {
 
       const entries = ps.getEntries();
       expect(entries[0]!.lifecycleState).toBe("recoverable");
+    });
+
+    it("keeps intentionally stopped seats recoverable without degrading the active rig", () => {
+      const rigId = seedRig("intentional-recoverable");
+      const stopped = seedNode(rigId, "qa");
+      const live = seedNode(rigId, "dev");
+      const stoppedSession = seedSession(stopped, "running");
+      const liveSession = seedSession(live, "running");
+      const registry = new SessionRegistry(db);
+      seedSnapshotForRig(rigId, [{ nodeId: stopped, resumeToken: "qa-resume-token" }]);
+      registry.markIntentionallyStopped(stoppedSession);
+
+      expect(getNodeInventory(db, rigId).find((entry) => entry.nodeId === stopped)).toMatchObject({
+        lifecycleState: "recoverable", intentionallyStopped: true, sessionStatus: "exited",
+      });
+      expect(ps.getEntries()[0]).toMatchObject({
+        lifecycleState: "running", status: "partial", nodeCount: 2, runningCount: 1,
+      });
+
+      registry.markIntentionallyStopped(liveSession);
+      expect(ps.getEntries()[0]).toMatchObject({ lifecycleState: "stopped", runningCount: 0 });
     });
 
     it("all nodes detached + no usable snapshot -> lifecycleState=stopped", () => {

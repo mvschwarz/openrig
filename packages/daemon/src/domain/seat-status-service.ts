@@ -15,6 +15,8 @@ export interface SeatStatus {
   pod_id: string | null;
   pod_namespace: string | null;
   runtime: string | null;
+  /** Configured cwd for future launches; an existing process can still use its old cwd. */
+  launch_cwd: string | null;
   current_occupant: string | null;
   session_status: string | null;
   session_reason: SeatIdentityVerdict["reason"];
@@ -112,6 +114,7 @@ export class SeatStatusService {
       pod_id: entry.podId,
       pod_namespace: entry.podNamespace ?? null,
       runtime: entry.runtime,
+      launch_cwd: entry.cwd,
       current_occupant: entry.canonicalSessionName,
       session_status: entry.sessionStatus,
       session_reason: entry.identityVerdict?.reason ?? null,

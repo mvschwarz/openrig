@@ -389,6 +389,32 @@ describe("structured human questions (#193)", () => {
       expect(repliesToSeat()).toHaveLength(1);
     });
 
+    it("a late click on a decision made on the person's behalf names who decided it, under which mode, and what", async () => {
+      repo.db.prepare("UPDATE queue_items SET delegated_decision = ? WHERE qitem_id = ?").run(JSON.stringify({ applicationId: "a-1", modeName: "asleep",
+        decisionRoom: { words: "database choices", exclusions: [] }, decidedBy: "builder@rig", decidedAt: "2026-10-21T02:00:00.000Z", reason: "recommended", reversible: false,
+        choices: [{ questionId: "db", question: "Which database?", options: [{ id: "pg", label: "Postgres" }], chosen: "pg" },
+          { questionId: "ship", question: "Ship this week?", options: [{ id: "yes", label: "Yes" }], chosen: "yes" }] }), decisionId);
+      await repo.update({ qitemId: decisionId, actorSession: "builder@rig", state: "done", closureReason: "no-follow-on" } as never);
+      await click("db", "mysql");
+      await vi.waitFor(() => expect(threadAcks()).toHaveLength(1));
+      expect(threadAcks()[0]).toBe("This was decided on your behalf by builder@rig under asleep: Postgres, Yes (it can't be undone). "
+        + "Your click wasn't recorded; it's listed in that mode's account.");
+      expect(repo.getById(decisionId)?.humanAnswers).toBeNull();
+    });
+
+    it("the reply naming a decision made for the person goes through the same escaping and redaction as other replies", async () => {
+      repo.db.prepare("UPDATE queue_items SET delegated_decision = ? WHERE qitem_id = ?").run(JSON.stringify({ applicationId: "a-1", modeName: "asleep <!channel>",
+        decisionRoom: { words: "database choices", exclusions: [] }, decidedBy: "builder@rig", decidedAt: "2026-10-21T02:00:00.000Z", reason: "recommended", reversible: true,
+        choices: [{ questionId: "db", question: "Which database?", options: [{ id: "pg", label: "Notify <!here>" }], chosen: "pg" },
+          { questionId: "ship", question: "Ship this week?", options: [{ id: "yes", label: "Use xoxb-LEAK-label" }], chosen: "yes" }] }), decisionId);
+      await repo.update({ qitemId: decisionId, actorSession: "builder@rig", state: "done", closureReason: "no-follow-on" } as never);
+      await click("db", "mysql");
+      await vi.waitFor(() => expect(threadAcks()).toHaveLength(1));
+      expect(threadAcks()[0]).toContain("under asleep &lt;!channel&gt;: Notify &lt;!here&gt;, ");
+      expect(threadAcks()[0]).toContain("[redacted-secret]");
+      expect(threadAcks()[0]).not.toMatch(/<!here>|<!channel>|xoxb-LEAK/);
+    });
+
     it("tells the person when a button no longer matches the decision, or its message can't be matched", async () => {
       await click("db", "mysql");
       await vi.waitFor(() => expect(threadAcks()).toEqual([CLICK_REPLIES.stale]));

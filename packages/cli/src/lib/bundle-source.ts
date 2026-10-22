@@ -261,6 +261,7 @@ export interface BundleLinkOptions {
   minDaemonVersion?: string;
   minCliVersion?: string;
   includePackages?: string[];
+  includeLoginFiles?: boolean;
   contextPack?: string[];
   projectDir?: string;
   allowDrift?: boolean;
@@ -310,6 +311,7 @@ export async function importGitHubBundle(input: string, deps: StatusDeps, opts: 
       specPath, rigRoot: folder, outputPath: bundlePath,
       bundleName, bundleVersion: opts.bundleVersion ?? "0.1.0",
       includePackages: opts.includePackages,
+      ...(opts.includeLoginFiles ? { includeLoginFiles: true } : {}),
       ...(opts.projectDir ? { projectDir: path.resolve(opts.projectDir) } : {}),
       ...(opts.contextPack?.length ? { contextPackDirs: opts.contextPack.map(dir => path.resolve(dir)) } : {}),
       provenance: { ...opts.provenance, source: prepared.source },

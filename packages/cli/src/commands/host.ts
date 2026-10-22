@@ -70,7 +70,7 @@ export interface DoctorDeps {
   /** Slice 14 Source-1: record an observed `/healthz` selfHostId for a registry alias in the learned
    *  sidecar (TOFU + loud-conflict). Optional so existing fixtures keep compiling AND unit runs never
    *  write the real sidecar — absent means learning is skipped, which is the fail-open contract. */
-  learnHostBinding?: (alias: string, observedHostId: string) => HostObservationOutcome;
+  learnHostBinding?: (alias: string, observedHostId: string, observedUrl: string) => HostObservationOutcome;
 }
 
 function nestedBoolean(obj: unknown, path: readonly string[]): boolean | undefined {
@@ -113,7 +113,7 @@ function defaultDoctorDeps(): DoctorDeps {
         sock.on("timeout", () => { sock.destroy(); resolve("closed"); });
         sock.on("error", () => { sock.destroy(); resolve("closed"); });
       }),
-    learnHostBinding: (alias, observedHostId) => recordHostObservation({ alias, observedHostId }),
+    learnHostBinding: (alias, observedHostId, observedUrl) => recordHostObservation({ alias, observedHostId, observedUrl }),
   };
 }
 
@@ -254,7 +254,7 @@ export async function doctorLegs(host: HostEntry, deps: DoctorDeps): Promise<Che
       try {
         const parsed = JSON.parse(health.body) as { selfHostId?: unknown };
         if (typeof parsed.selfHostId === "string" && parsed.selfHostId.length > 0) {
-          const obs = deps.learnHostBinding(host.id, parsed.selfHostId);
+          const obs = deps.learnHostBinding(host.id, parsed.selfHostId, (host as HttpHostEntry).url);
           rows.push(obs.outcome === "conflict"
             ? {
                 step: "host-identity-binding",

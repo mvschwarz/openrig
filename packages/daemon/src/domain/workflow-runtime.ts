@@ -1,3 +1,4 @@
+import { physicalSessionName } from "./session-registry.js";
 import { readWorkflowGuidance, type GuidanceInput } from "./workflow-guidance.js";
 import { exceptionConfigurationSource, inspectExceptionReadiness, type ExceptionReadiness } from "./workflow-exception-readiness.js";
 import { inspectGraph, recoverGraphOperation, reviseGraph } from "./workflow-reconciliation.js";
@@ -43,7 +44,7 @@ import {
 } from "./workflow-projector.js";
 import { loadHostRegistry } from "./hosts/hosts-registry-reader.js";
 import type { HostRegistryLookupFn } from "./workflow-validator.js";
-import { WorkflowSpecCache, WorkflowSpecError } from "./workflow-spec-cache.js";
+import { WorkflowSpecCache, WorkflowSpecError, bindRowToRig } from "./workflow-spec-cache.js";
 import { WorkflowStepTrailLog } from "./workflow-step-trail-log.js";
 import {
   type SeatLivenessCheckFn,
@@ -68,6 +69,7 @@ import type {
   WorkflowStepSpec,
   WorkflowStepTrailEntry,
 } from "./workflow-types.js";
+import { lifecycleScope, normalizeWorkflowScope, packetScopeTags, type WorkflowScope } from "./workflow-scope.js";
 import { compileProjectLifecycle, type LifecycleCompilation } from "./project-lifecycle-compiler.js";
 
 export interface WorkflowRuntimeDeps {
@@ -113,6 +115,14 @@ export interface InstantiateInput {
    * Absent AND no spec default = unbound (today's behavior).
    */
   targetRig?: string;
+  /**
+   * The project / mission / slice (and free-form tags) this instance works
+   * for. Normalized here (a reserved or contradicting tag throws
+   * WorkflowScopeError before any write), stored on the instance, and stamped
+   * on every packet it creates. A lifecycle instance takes project and mission
+   * from its compiled identity instead.
+   */
+  scope?: Pick<WorkflowScope, "project" | "mission" | "slice" | "tags">;
   lifecycle?: {
     operationKey: string;
     compiledInputDigest: string;
@@ -209,7 +219,7 @@ export class WorkflowRuntime {
 
   guidance(instanceId: string, options: Pick<GuidanceInput, "packetId" | "component" | "full"> = {}) {
     const instance = this.instanceStore.getByIdOrThrow(instanceId);
-    const spec = this.specCache.getByNameVersion(instance.workflowName, instance.workflowVersion)?.spec;
+    const spec = this.specCache.getForInstance(instance)?.spec;
     const packetId = options.packetId ?? (instance.currentFrontier.length === 1 ? instance.currentFrontier[0] : undefined);
     if (packetId && !instance.currentFrontier.includes(packetId)) throw new WorkflowProjectorError("packet_not_on_frontier", "Guidance needs a current frontier packet; inspect workflow show first.");
     const packet = packetId ? this.queueRepo.getById(packetId) : null;
@@ -220,7 +230,7 @@ export class WorkflowRuntime {
 
   exceptionReadiness(instanceId: string): ExceptionReadiness | null {
     const instance = this.instanceStore.getByIdOrThrow(instanceId);
-    const row = this.specCache.getByNameVersion(instance.workflowName, instance.workflowVersion);
+    const row = this.specCache.getForInstance(instance);
     if (!row) return null;
     return this.readExceptionReadiness(row.spec, exceptionConfigurationSource(row.sourcePath,
       instance.lifecycleBinding?.graphSource as LifecycleCompilation["graphSource"] | undefined), instance.boundRig, instanceId);
@@ -296,8 +306,9 @@ export class WorkflowRuntime {
      *  Absent/null = the shipped fleet-blind string-pick only. */
     boundRig?: string | null,
   ): ExceptionRoute | null {
-    const specRow = this.specCache.getByNameVersion(workflowName, workflowVersion);
-    if (!specRow) return null;
+    const stored = this.specCache.getByNameVersion(workflowName, workflowVersion);
+    if (!stored) return null;
+    const specRow = bindRowToRig(stored, boundRig ?? null);
     const spec = specRow.spec;
     const roleCtx = roleResolutionContext(this.db, boundRig ?? null);
     return resolveExceptionRoute({
@@ -335,6 +346,7 @@ export class WorkflowRuntime {
     // EITHER way — report alive so no warning fires, and never let an advisory
     // path fail validate/instantiate.
     try {
+      sessionRef = physicalSessionName(this.db, sessionRef);
       const row = this.db
         .prepare(
           `SELECT s.status AS status FROM sessions s WHERE s.session_name = ? ORDER BY s.created_at DESC LIMIT 1`,
@@ -384,7 +396,7 @@ export class WorkflowRuntime {
             },
           );
         }
-        const spec = this.specCache.getByNameVersion(existing.workflowName, existing.workflowVersion);
+        const spec = this.specCache.getForInstance(existing);
         const entryQitemId = typeof existing.lifecycleBinding?.entryQitemId === "string"
           ? existing.lifecycleBinding.entryQitemId
           : null;
@@ -406,6 +418,9 @@ export class WorkflowRuntime {
         };
       }
     }
+    const scope = input.compiledLifecycle
+      ? lifecycleScope(input.compiledLifecycle.identity, input.compiledLifecycle.sliceDirs)
+      : normalizeWorkflowScope(input.scope ?? {});
     // OPR.0.3.3.04.1 (AC-3 reachability): a fresh operator runs
     // `workflow instantiate <discovered-name>` (e.g. `conveyor`), not a hidden
     // file path. Resolve the identifier against the seeded spec cache BY NAME
@@ -415,7 +430,7 @@ export class WorkflowRuntime {
     // the bare name straight to readThrough -> spec_file_missing.
     const resolvedSpecPath = this.specCache.resolveSourcePathByName(input.specPath) ?? input.specPath;
     const generatedSpec = input.compiledLifecycle?.workflowSpec;
-    const specRow = generatedSpec
+    let specRow = generatedSpec
       ? this.specCache.putGenerated(
           generatedSpec,
           input.compiledLifecycle!.sources.find((source) => source.kind === "mission")?.path ?? resolvedSpecPath,
@@ -522,6 +537,12 @@ export class WorkflowRuntime {
     } else {
       boundRig = null;
     }
+
+    // `member@{rig}` in preferred_targets resolves against the bound rig.
+    // The instance row stores that binding, so every later read of this
+    // instance's spec expands the same way. With no bound rig the target
+    // stays literal and is handled at the hop that selects it.
+    specRow = bindRowToRig(specRow, boundRig);
 
     // OPR.0.4.6.WF2 FR-2: static harness-pin reconciliation for EVERY
     // pinned step at instantiate (the earliest knowable moment against
@@ -726,6 +747,7 @@ export class WorkflowRuntime {
         // OPR.0.4.6.FAC1: the resolved rig binding persists with the
         // instance row (same txn as the entry packet).
         boundRig,
+        scope,
         lifecycle: input.lifecycle
           ? {
               ...input.lifecycle,
@@ -777,6 +799,7 @@ export class WorkflowRuntime {
           `workflow:${specRow.name}`,
           `instance:${instance.instanceId}`,
           ...(entryGateException ? workflowExceptionTags(entryGateException.identity).filter((t) => !t.startsWith("workflow:") && !t.startsWith("instance:")) : []),
+          ...packetScopeTags(instance, entryStep.id),
         ],
         summary: entryGate?.summary ?? undefined,
         evidenceRef: entryGate?.evidenceRef ?? undefined,
@@ -856,9 +879,15 @@ export class WorkflowRuntime {
   }
 
   async project(input: ProjectStepInput): Promise<ProjectStepResult> {
+    const owner = this.queueRepo.getById(input.currentPacketId)?.destinationSession;
     const result = await this.projector.project(input);
     this.reconcileStuckExceptions(input.instanceId);
-    return result;
+    // A known caller projecting another seat's packet is told so in the response. Nothing is refused and the owner isn't
+    // notified: delegated work stays one call. A claimed or unknown-origin caller isn't a mismatch.
+    const known = input.identityProvenance === "transport:v1" || input.identityProvenance === "relay:v1";
+    if (!known || !owner || owner === input.actorSession) return result;
+    return { ...result, advisories: [...(result.advisories ?? []),
+      `recorded ${input.actorSession} as the agent that projected packet ${input.currentPacketId}, which is owned by ${owner}`] };
   }
 
   /** Recheck each recorded overdue packet, never a sibling's verdict. The
@@ -934,7 +963,7 @@ export class WorkflowRuntime {
   } {
     const instance = this.instanceStore.getByIdOrThrow(instanceId);
     const unknowns: string[] = [];
-    const spec = this.specCache.getByNameVersion(instance.workflowName, instance.workflowVersion)?.spec;
+    const spec = this.specCache.getForInstance(instance)?.spec;
     const frontier = instance.currentFrontier.map((packetId) => {
       const binding = this.instanceStore.getFrontierBinding(instanceId, packetId);
       const packet = this.queueRepo.getById(packetId);
@@ -971,7 +1000,7 @@ export class WorkflowRuntime {
     return { instance, frontier, failures, unknowns, boundaryObligations: lifecycleObligations(this.db, instanceId, instance.lifecycleBinding, spec?.steps ?? [], instance.currentFrontier) };
   }
 
-  async abort(input: { instanceId: string; reason: string; actorSession: string }): Promise<{
+  async abort(input: { instanceId: string; reason: string; actorSession: string; identityProvenance?: string | null }): Promise<{
     instanceId: string;
     closedPacketIds: string[];
     status: "aborted";
@@ -985,7 +1014,7 @@ export class WorkflowRuntime {
       if (instance.status === "completed" || instance.status === "aborted") {
         throw new WorkflowProjectorError("instance_not_abortable", `instance ${instance.instanceId} is ${instance.status}`, { instanceId: instance.instanceId, status: instance.status });
       }
-      const spec = this.specCache.getByNameVersion(instance.workflowName, instance.workflowVersion)?.spec;
+      const spec = this.specCache.getForInstance(instance)?.spec;
       const bindingByPacket = new Map(this.instanceStore.listFrontierBindings(instance.instanceId).map((binding) => [binding.packetId, binding]));
       const closedAt = this.now().toISOString();
       for (const packetId of instance.currentFrontier) {
@@ -998,6 +1027,7 @@ export class WorkflowRuntime {
         const closed = this.queueRepo.updateWithinTransaction({
           qitemId: packetId,
           actorSession: input.actorSession,
+          identityProvenance: input.identityProvenance ?? null,
           viaWorkflowVerb: true,
           state: "canceled",
           transitionNote: `workflow abort by ${input.actorSession}: ${input.reason}`,
@@ -1071,6 +1101,7 @@ export class WorkflowRuntime {
     occurrenceId?: string;
     decision?: string;
     actorSession: string;
+    identityProvenance?: string | null;
   }): Promise<{
     instanceId: string;
     stepId: string;
@@ -1103,7 +1134,7 @@ export class WorkflowRuntime {
           { instanceId: instance.instanceId, status: instance.status, expectedStatus: "failed" },
         );
       }
-      const specRow = this.specCache.getByNameVersion(instance.workflowName, instance.workflowVersion);
+      const specRow = this.specCache.getForInstance(instance);
       if (!specRow) {
         throw new WorkflowProjectorError(
           "spec_not_cached",
@@ -1161,6 +1192,7 @@ export class WorkflowRuntime {
       const created = this.queueRepo.createWithinTransaction({
         qitemId: redrivePacketId,
         sourceSession: input.actorSession,
+        identityProvenance: input.identityProvenance ?? null,
         destinationSession: owner,
         body: withWorkflowContinuation({
           binding: instance.lifecycleBinding,
@@ -1186,6 +1218,7 @@ export class WorkflowRuntime {
           "resume",
           `workflow:${instance.workflowName}`,
           `instance:${instance.instanceId}`,
+          ...packetScopeTags(instance, step.id),
         ],
         chainOfRecord: failedPacketId ? [failedPacketId] : undefined,
       });
@@ -1196,7 +1229,7 @@ export class WorkflowRuntime {
         created.qitemId,
         input.actorSession,
         created.destinationSession,
-        null,
+        input.identityProvenance ?? null,
         created.nudge,
       );
 
@@ -1293,7 +1326,7 @@ export class WorkflowRuntime {
     instanceId: string,
     failedPacketId: string,
     stepId: string,
-    input: { actorSession: string; decision?: string },
+    input: { actorSession: string; decision?: string; identityProvenance?: string | null },
     register: (event: PersistedEvent) => void,
   ): number {
     const openItems = this.db.prepare(
@@ -1307,6 +1340,7 @@ export class WorkflowRuntime {
       const closed = this.queueRepo.updateWithinTransaction({
         qitemId: row.qitem_id,
         actorSession: input.actorSession,
+        identityProvenance: input.identityProvenance ?? null,
         state: "done",
         closureReason: "no-follow-on",
         transitionNote: `workflow resume: occurrence resolved by ${input.actorSession} redriving step ${stepId}${input.decision ? ` — ${input.decision}` : ""}`,
@@ -1321,6 +1355,7 @@ export class WorkflowRuntime {
     occurrenceId?: string;
     decision?: string;
     actorSession: string;
+    identityProvenance?: string | null;
   }): Promise<{
     instanceId: string;
     stepId: string;
@@ -1377,7 +1412,7 @@ export class WorkflowRuntime {
       if (instance.status === "completed" || instance.status === "aborted") {
         throw new WorkflowProjectorError("instance_not_resumable", `instance ${instance.instanceId} is ${instance.status}`, { instanceId: instance.instanceId, status: instance.status });
       }
-      const specRow = this.specCache.getByNameVersion(instance.workflowName, instance.workflowVersion);
+      const specRow = this.specCache.getForInstance(instance);
       if (!specRow) throw new WorkflowProjectorError("spec_not_cached", `workflow spec ${instance.workflowName}@${instance.workflowVersion} is not cached`);
       const step = specRow.spec.steps.find((candidate) => candidate.id === occurrence.stepId);
       if (!step) throw new WorkflowProjectorError("resume_step_missing_from_spec", `failed step "${occurrence.stepId}" no longer exists`, { instanceId: instance.instanceId, stepId: occurrence.stepId });
@@ -1387,6 +1422,7 @@ export class WorkflowRuntime {
       const created = this.queueRepo.createWithinTransaction({
         qitemId: redrivePacketId,
         sourceSession: input.actorSession,
+        identityProvenance: input.identityProvenance ?? null,
         destinationSession: owner,
         body: withWorkflowContinuation({
           binding: instance.lifecycleBinding,
@@ -1400,11 +1436,11 @@ export class WorkflowRuntime {
         }),
         priority: "routine",
         tier: "mode2",
-        tags: ["workflow", "resume", `workflow:${instance.workflowName}`, `instance:${instance.instanceId}`, `occurrence:${occurrence.occurrenceId}`],
+        tags: ["workflow", "resume", `workflow:${instance.workflowName}`, `instance:${instance.instanceId}`, `occurrence:${occurrence.occurrenceId}`, ...packetScopeTags(instance, step.id)],
         chainOfRecord: [occurrence.failedPacketId],
       });
       register(created.persistedEvent);
-      this.queueRepo.stageWakeIntent(created.qitemId, input.actorSession, created.destinationSession, null, created.nudge);
+      this.queueRepo.stageWakeIntent(created.qitemId, input.actorSession, created.destinationSession, input.identityProvenance ?? null, created.nudge);
       this.instanceStore.bindFrontierPacket({
         instanceId: instance.instanceId,
         packetId: created.qitemId,
@@ -1443,6 +1479,7 @@ export class WorkflowRuntime {
     packetId?: string;
     toSession: string;
     actorSession: string;
+    identityProvenance?: string | null;
     reason?: string;
   }): Promise<{
     instanceId: string;
@@ -1523,7 +1560,7 @@ export class WorkflowRuntime {
       // (7) harness pin: the SAME reconciliation the projector applies
       // to explicit --next-owner overrides — an explicit route target
       // never silently defeats a declared pin.
-      const specRow = this.specCache.getByNameVersion(instance.workflowName, instance.workflowVersion);
+      const specRow = this.specCache.getForInstance(instance);
       const oldBinding = this.instanceStore.getFrontierBinding(instance.instanceId, oldPacketId);
       const selectedStepId = oldBinding?.stepId ?? (instance.currentFrontier.length === 1 ? instance.currentStepId : null);
       const step =
@@ -1541,6 +1578,7 @@ export class WorkflowRuntime {
       const closed = this.queueRepo.updateWithinTransaction({
         qitemId: oldPacketId,
         actorSession: input.actorSession,
+        identityProvenance: input.identityProvenance ?? null,
         viaWorkflowVerb: true,
         state: "handed-off",
         closureReason: "handed_off_to",
@@ -1565,6 +1603,7 @@ export class WorkflowRuntime {
       const created = this.queueRepo.createWithinTransaction({
         qitemId: routedPacketId,
         sourceSession: input.actorSession,
+        identityProvenance: input.identityProvenance ?? null,
         destinationSession: input.toSession,
         body: withWorkflowContinuation({
           binding: instance.lifecycleBinding,
@@ -1608,7 +1647,7 @@ export class WorkflowRuntime {
         created.qitemId,
         input.actorSession,
         created.destinationSession,
-        null,
+        input.identityProvenance ?? null,
         created.nudge,
       );
 
@@ -1626,6 +1665,7 @@ export class WorkflowRuntime {
         const reparked = this.queueRepo.updateWithinTransaction({
           qitemId: created.qitemId,
           actorSession: input.actorSession,
+          identityProvenance: input.identityProvenance ?? null,
           state: "blocked",
           closureReason: "blocked_on",
           closureTarget: oldPacket.blockedOn,

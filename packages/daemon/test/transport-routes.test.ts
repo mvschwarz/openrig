@@ -373,6 +373,46 @@ describe("transport routes", () => {
     expect(body.outcome).toBe("failed");
   });
 
+  it.each(["different body", "different long tail", "wrapped full", "wrapped wrong tail", "suffix same line", "suffix next line", "agent reply", "plain assistant output", "thinking before framed composer", "quoted reply", "unsent input", "submitted transcript"])(
+    "POST /send verifies submitted message identity: %s",
+    async (mode) => {
+      seedRig();
+      const text = "From: sender-agent@demo\nTo: dev-impl@my-rig\nSent: 10-11 05:00Z\n---\nPlease check this task.";
+      const message = ["different long tail", "wrapped full", "wrapped wrong tail"].includes(mode) ? text.replace("Please check this task.",
+        "A shared opening longer than forty characters belongs to both messages. Requested tail.") : text;
+      const rendered = "❯ " + message.split("\n").join("\n  ");
+      const wrapped = rendered.replace("belongs to both", "belongs to\n  both");
+      const expectedVerified = ["submitted transcript", "wrapped full", "agent reply", "plain assistant output", "thinking before framed composer"].includes(mode);
+      let submitted = false;
+      const tmux = mockTmux({
+        sendKeys: async () => { submitted = true; return { ok: true }; },
+        capturePaneContent: async () => !submitted ? "idle\n❯ "
+          : mode === "unsent input"
+            ? "────────────────────\n" + rendered + "\n────────────────────\n? for shortcuts"
+            : mode === "thinking before framed composer"
+              ? rendered + "\n\n✻ Thinking… (esc to interrupt)\n\n────────────────────\n❯ \n────────────────────\n? for shortcuts"
+            : (mode === "different body" ? rendered.replace("this task", "a different task")
+              : mode === "different long tail" ? rendered.replace("Requested tail.", "Other tail.")
+              : mode === "wrapped wrong tail" ? wrapped.replace("Requested tail.", "Other tail.")
+              : mode === "wrapped full" ? wrapped
+              : mode === "suffix same line" ? rendered + " Extra body."
+              : mode === "suffix next line" ? rendered + "\n  Extra body."
+              : mode === "agent reply" ? rendered + "\n⏺ Agent reply"
+              : mode === "plain assistant output" ? rendered.replace(/^❯/, "›") + "\nAssistant output without a role glyph"
+              : mode === "quoted reply" ? rendered + "\n  ⏺ extra quoted body" : rendered) + "\n❯ ",
+      });
+      const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, sleep: async () => undefined });
+      const res = await createApp({ sessionTransport: transport }).request("/api/transport/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session: "dev-impl@my-rig", text: message, verify: true }),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ ok: true, verified: expectedVerified,
+        outcome: expectedVerified ? "delivered" : "rendered-unconfirmed" });
+    },
+  );
+
   it("POST /send to a mid-work pane returns 200 and DELIVERS with a non-blocking advisory (OPR.0.4.3.28 fast-follow — mid_work downgraded)", async () => {
     seedRig();
     const tmux = {
@@ -466,7 +506,8 @@ describe("transport routes", () => {
     expect(body.sent).toBe(true);
     expect(body.attempts).toBe(2);
     expect(body.activity.state).toBe("idle");
-    expect(sendTextSpy).toHaveBeenCalledWith("dev-impl@my-rig", "hello");
+    // The route passes the caller's cancellation check, run by the adapter just before the paste.
+    expect(sendTextSpy).toHaveBeenCalledWith("dev-impl@my-rig", "hello", expect.any(Function));
   });
 
   it("POST /send rejects force with waitForIdleMs before sending", async () => {
@@ -888,21 +929,24 @@ describe("transport routes", () => {
     expect(delivered.every((t) => !t.includes("anyone@my-rig"))).toBe(true);
   });
 
-  it("P21 I4 → S2: --dangerously-interact with NO identity delivers; a non-needs_input target writes NO override audit row", async () => {
+  it("P21 I4 → S2: --dangerously-interact with NO identity delivers and audits its actual idle state", async () => {
     seedRig();
     const eventBus = new EventBus(db);
-    const app = createApp({ sessionTransport: new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux(), eventBus, agentActivityStore: new AgentActivityStore({ db, eventBus }) }) });
+    const agentActivityStore = new AgentActivityStore({ db, eventBus });
+    agentActivityStore.recordHookEvent({ runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "Stop" });
+    const app = createApp({ sessionTransport: new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux(), eventBus, agentActivityStore }) });
     const res = await app.request("/api/transport/send", {
       method: "POST",
       headers: { "Content-Type": "application/json" }, // NO X-OpenRig-Session
       body: JSON.stringify({ session: "dev-impl@my-rig", text: "drive it", dangerouslyInteract: true, reason: "why" }),
     });
-    // S2 (OPR.0.5.4.3): the 401 is retired. The idle target takes the normal
-    // send path; the override audit exists only on the needs_input branch, so
-    // no row is written here — unchanged posture, now unattributed-tolerant.
+    // Unknown-sender delivery stays accepted. Explicit interaction now audits
+    // every readiness state without inventing an actor or a positive prompt.
     expect(res.status).toBe(200);
-    const rows = db.prepare("SELECT * FROM events WHERE type = 'transport.prompt_override'").all();
-    expect(rows).toHaveLength(0);
+    const rows = db.prepare("SELECT payload FROM events WHERE type = 'transport.prompt_override'").all() as Array<{ payload: string }>;
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0]!.payload)).toMatchObject({ actorSession: null,
+      overrideReason: "why", detectedState: "idle", evidenceSource: "runtime_hook" });
   });
 
   it("P21 I4: a body actorSession that DIFFERS from the header is SUPERSEDED (no identity_mismatch refusal)", async () => {

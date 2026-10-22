@@ -178,6 +178,9 @@ describe("WF-5 FR-4: resume (redrive)", () => {
 
     const inst = runtime.instanceStore.getByIdOrThrow(instanceId);
     expect(inst.status).toBe("active");
+    // A redrive reopens the instance. The terminal failure timestamp must
+    // not continue to make an active run look completed to API/UI clients.
+    expect(inst.completedAt).toBeNull();
     expect(inst.currentStepId).toBe("produce");
     expect(inst.currentFrontier).toEqual([r.newPacketId]);
     expect(inst.resumeCount).toBe(1);

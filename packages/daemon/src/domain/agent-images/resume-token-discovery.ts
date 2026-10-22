@@ -1,3 +1,4 @@
+import { savedSessionName } from "../session-registry.js";
 // Fork Primitive + Starter Agent Images v0 (PL-016) — runtime-specific
 // resume-token discovery.
 //
@@ -35,6 +36,7 @@ export interface DiscoveryFailure {
 export type DiscoveryOutcome = { ok: true; result: DiscoveryResult } | { ok: false; failure: DiscoveryFailure };
 
 export function discoverResumeToken(db: Database.Database, sourceSession: string): DiscoveryOutcome {
+  sourceSession = savedSessionName(db, sourceSession);
   const sessionRow = db
     .prepare("SELECT id, node_id, resume_token FROM sessions WHERE session_name = ? ORDER BY id DESC LIMIT 1")
     .get(sourceSession) as { id: string; node_id: string; resume_token: string | null } | undefined;

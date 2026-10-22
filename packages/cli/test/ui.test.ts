@@ -153,8 +153,9 @@ describe("rig ui open", () => {
     expect(logs.join("\n")).toContain("http://127.0.0.1:9999");
   });
 
-  // Test 4: Unhealthy daemon -> error, no exec
-  it("unhealthy daemon -> error, no exec", async () => {
+  // Test 4: a busy daemon (process alive, health check failing) -> the UI URL still opens.
+  // Changed: this used to refuse. A busy daemon is not refused; the browser shows what it serves.
+  it("busy daemon -> opens the UI URL", async () => {
     const execFn = vi.fn(async () => {});
     const deps: UiDeps = {
       lifecycleDeps: mockLifecycleDeps({
@@ -167,13 +168,14 @@ describe("rig ui open", () => {
         fetch: vi.fn(async () => { throw new Error("refused"); }),
       }),
       exec: execFn,
+      probeUi: async () => new Response("", { status: 200 }),
     };
     const program = new Command();
     program.addCommand(uiCommand(deps));
     const logs = await captureLogs(() => program.parseAsync(["node", "rig", "ui", "open"]));
 
-    expect(logs.join("\n")).toMatch(/did not respond|busy or stopped|unhealthy/i) // B8 supersession: epistemic guard language;
-    expect(execFn).not.toHaveBeenCalled();
+    expect(execFn).toHaveBeenCalledWith("open", ["http://127.0.0.1:7433"]);
+    expect(logs.join("\n")).not.toMatch(/did not respond/i);
   });
 
   // Test 5: createProgram: rig ui open mounted

@@ -103,6 +103,7 @@ export class RigSpecCodec {
     // OPR.0.4.8.3 Seam B: rig-level permission_policy ref round-trips through serialization.
     if (spec.permissionPolicy) doc["permission_policy"] = spec.permissionPolicy;
     if (spec.nonInterruptive !== undefined) doc["non_interruptive"] = spec.nonInterruptive;
+    if (spec.env) doc["env"] = { ...spec.env };
     if (spec.managedBlocks) doc["managed_blocks"] = { ...spec.managedBlocks };
     if (spec.docs && spec.docs.length > 0) doc["docs"] = spec.docs.map((d) => ({ path: d.path }));
     if (spec.startup) doc["startup"] = serializeStartupBlock(spec.startup);
@@ -164,11 +165,14 @@ export class RigSpecCodec {
         if (m.role) member["role"] = m.role;
         // OPR.0.4.8.3 Seam B: per-seat permission_policy ref round-trips through spec serialization.
         if (m.permissionPolicy) member["permission_policy"] = m.permissionPolicy;
+        if (m.env) member["env"] = { ...m.env };
         if (m.restorePolicy) member["restore_policy"] = m.restorePolicy;
         if (m.startup) member["startup"] = serializeStartupBlock(m.startup);
         // OPR.0.5.6.20 field, OPR.0.5.6.23 fix: parse carries it (schema
         // normalize), so serialize must too — same silent-erasure class.
         if (m.compactionStrategy) member["compaction_strategy"] = m.compactionStrategy;
+        // Normalize carries the per-member continuity mechanic too; emit it beside its strategy.
+        if (m.mechanic) member["mechanic"] = m.mechanic;
         if (m.sessionSource) {
           member["session_source"] = serializeSessionSource(m.sessionSource);
         }

@@ -19,7 +19,8 @@
  *
  * seed_regression calls an explicitly supplied test fault controller. With no
  * controller it fails loud; a declaration alone never counts as a seeded test.
- * restore/emit/mutate/policy have NO shipped runtime binding at v1
+ * emit refocus invokes the shipped hook as a controlled consumer and captures its raw context.
+ * restore/other emit/mutate/policy have NO shipped runtime binding at v1
  * (they ride 51-03 / A5 items 6-8) — the adapter FAILS LOUD with a named
  * UnboundActionError rather than fabricating a call (same floor as the FLAG-1
  * `proof` surface: unbound is never silently-skipped).
@@ -28,6 +29,10 @@
  * so the verb→argv MAPPING is unit-testable without a live daemon.
  */
 
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { stubSeatSidecarPath } from "../../src/adapters/stub-runner-protocol.js";
+import { fireRefocus, type StubRefocusResult } from "../../src/adapters/stub-refocus.js";
 import { runRig as realRunRig, type RigResult, type ScenarioDaemon } from "./scenario-daemon.js";
 import { readSurface } from "./scenario-surfaces.js";
 import type { ExpectSurface } from "./scenario-schema.js";
@@ -98,6 +103,9 @@ export interface RealDepsOptions {
    * control). The paired harness owns injection timing and verifies the actual
    * failing observation; this must never invoke a production `rig` command. */
   seedRegression?: (regressionClass: string) => Promise<ActionResult>;
+  /** Scenario-local planted trace fault only; never changes a live daemon or installed hook. */
+  onHookContext?: (result: StubRefocusResult) => void;
+  refocusEnv?: (env: Record<string, string | undefined>) => Record<string, string | undefined>;
 }
 
 /** `rig up` is heavy (real tmux seat launch) — give it a generous ceiling. */
@@ -111,6 +119,7 @@ export function buildRealDeps(opts: RealDepsOptions): ScenarioRunnerDeps {
   const runRig = opts.runRig ?? realRunRig;
 
   // Captured from the `up` result so down/restart target the real rig (never fabricated).
+  const hookContexts = new Map<string, StubRefocusResult>();
   let rigId: string | undefined;
   let rigName: string | undefined;
 
@@ -159,6 +168,27 @@ export function buildRealDeps(opts: RealDepsOptions): ScenarioRunnerDeps {
         if (op === "restart") { await daemon.restart(); return { code: 0, stdout: "", stderr: "" }; }
         return fail(`daemon: unknown op ${JSON.stringify(op)} (allowed: sigterm, restart)`);
       }
+      case "emit": {
+        const p = payload as { seat?: string; behavior?: string; packet?: unknown };
+        if (p.behavior !== "refocus") throw new UnboundActionError(verb);
+        if (!p.seat || !opts.seatCwd) return fail("emit refocus requires an exact session name and scenario seat cwd");
+        if (p.packet !== undefined && typeof p.packet !== "boolean") return fail("emit refocus: packet must be true or false");
+        // The controlled emitter calls the real hook with the real scenario daemon/CLI identity.
+        // No pane mirror is used as evidence, and no native scheduling/consumption is implied.
+        const hook = ["../daemon", "../../daemon"].map(dir => resolve(dirname(rigBin), dir,
+          "assets/plugins/openrig-core/hooks/scripts/refocus.cjs")).find(existsSync);
+        if (!hook) return fail("installed refocus hook asset not found");
+        // `packet` sets the work-packet switch explicitly, so a scenario never depends on a runtime's default. The
+        // hook gets its selectable 20 s budget: these scenarios assert its content, and each traced node costs a CLI start.
+        const env = { ...daemon.readEnv, OPENRIG_SESSION_NAME: p.seat, OPENRIG_REFOCUS_TREES: "work", OPENRIG_REFOCUS_BUDGET_MS: "20000",
+          ...(p.packet === undefined ? {} : { OPENRIG_REFOCUS_WORK_PACKET: p.packet ? "1" : "0" }) };
+        const state = JSON.parse(readFileSync(stubSeatSidecarPath(opts.seatCwd), "utf8"));
+        if (typeof state.launchId !== "string" || !state.launchId) return fail("stub refocus has no observed launch identity");
+        const result = fireRefocus(hook, opts.seatCwd, opts.refocusEnv?.(env) ?? env, state.launchId);
+        hookContexts.set(p.seat, result);
+        opts.onHookContext?.(result);
+        return { code: 0, stdout: result.rawOutput, stderr: "" };
+      }
       case "seed_regression": {
         const regressionClass = payload && typeof payload === "object"
           ? (payload as { class?: unknown }).class : undefined;
@@ -175,7 +205,8 @@ export function buildRealDeps(opts: RealDepsOptions): ScenarioRunnerDeps {
   };
 
   const observe = (surface: ExpectSurface, o: { seat?: string }): Promise<unknown> =>
-    readSurface(
+    surface === "hook_context" ? Promise.resolve(o.seat && hookContexts.has(o.seat)
+      ? { content: hookContexts.get(o.seat)!.additionalContext, rawOutput: hookContexts.get(o.seat)!.rawOutput } : null) : readSurface(
       surface,
       { rigBin, readEnv: daemon.readEnv, baseUrl: daemon.baseUrl },
       { seat: o.seat, scopeMission: opts.scopeMission },

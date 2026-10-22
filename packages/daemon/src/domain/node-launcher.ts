@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
-import type { SessionRegistry } from "./session-registry.js";
+import { SessionAddressConflict, type SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { TranscriptStore } from "./transcript-store.js";
@@ -14,6 +14,8 @@ import type { TmuxOptionDefaultsApplier } from "./tmux-option-defaults.js";
 import { observeSolePane, paneObservationVerdict } from "./pane-binding-observation.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import type { OccupantKind } from "./session-registry.js";
+import { mergeSeatEnv, seatEnvLaunchVars, type SeatEnv } from "./seat-env.js";
+import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV, seatCodexCorePluginDir, seatCorePluginDir, withCorePlugin } from "./claude-core-plugin-env.js";
 
 import type { Session, Binding } from "./types.js";
 
@@ -33,6 +35,14 @@ interface LaunchOpts {
   silenceWindowSeconds?: number;
   /** A deliberate fresh occupant is distinct from initial rig boot in the tenure ledger. */
   occupantKind?: OccupantKind;
+  /** Told the new session's id as soon as its row is committed, before the launch goes on. */
+  onSessionRegistered?: (sessionId: string) => void;
+  /** One-off env for this launch only (`rig up --env`); wins over the spec's env and is not saved. */
+  env?: SeatEnv;
+  /** The seat's resolved plugin locations (what the profile resolver selected for it, or a snapshot saved). A Claude
+   *  seat whose selection includes the vendored openrig-core plugin loads it. Without this the node's saved startup
+   *  context is read. */
+  pluginPaths?: readonly string[];
 }
 
 interface NodeLauncherDeps {
@@ -46,6 +56,8 @@ interface NodeLauncherDeps {
   /** Extra launch env for one runtime only (OMP's provider keys), merged over
    *  sessionEnv so other runtimes' seats never receive it. */
   runtimeSessionEnv?: Record<string, Record<string, string | undefined>>;
+  /** Where the daemon vendors its plugins; default is `plugins` under the OpenRig home (tests). */
+  pluginsDir?: string;
   /** Default silence window (seconds). Currently used only as the
    *  SeatActivityService global default (3s). Per-seat override via
    *  LaunchOpts is currently inert. */
@@ -70,6 +82,7 @@ export class NodeLauncher {
   private transcriptStore: TranscriptStore | null;
   private sessionEnv: Record<string, string>;
   private runtimeSessionEnv: Record<string, Record<string, string | undefined>>;
+  private pluginsDir: string | undefined;
   private defaultSilenceWindowSeconds: number;
   private tmuxOptionDefaults: TmuxOptionDefaultsApplier | null;
 
@@ -94,6 +107,7 @@ export class NodeLauncher {
     this.transcriptStore = deps.transcriptStore ?? null;
     this.sessionEnv = compactEnv(deps.sessionEnv ?? {});
     this.runtimeSessionEnv = deps.runtimeSessionEnv ?? {};
+    this.pluginsDir = deps.pluginsDir;
     this.defaultSilenceWindowSeconds = deps.defaultSilenceWindowSeconds ?? 3;
     this.tmuxOptionDefaults = deps.tmuxOptionDefaults ?? null;
   }
@@ -133,27 +147,57 @@ export class NodeLauncher {
       };
     }
 
+    try { this.sessionRegistry.assertAddressAvailable(node.id, sessionName); }
+    catch (error) {
+      if (!(error instanceof SessionAddressConflict)) throw error;
+      return { ok: false, code: "address_conflict", message: error.message };
+    }
+
     // 3. Reserve the source-bound occupant generation before the process starts. Reservation is
     // side-effect-free and fail-open: an unavailable ledger yields null and the launch remains valid.
     const occupantGeneration = this.sessionRegistry.reserveOccupantGeneration();
 
     // Create tmux session with OpenRig identity env vars. A duplicate is a
     // collision, never authority to kill an unmanaged same-name session.
-    const openRigEnv = compactEnv({
+    const specEnv = this.rigRepo.getEffectiveSeatEnv(node.id);
+    const corePluginDir = seatCorePluginDir(node, this.db, opts?.pluginPaths, this.pluginsDir);
+    const codexCorePluginDir = seatCodexCorePluginDir(node, this.db, opts?.pluginPaths, this.pluginsDir);
+    const sessionCwd = opts?.cwd ?? node.cwd ?? undefined;
+    const launchEnv = (oneOff?: SeatEnv) => compactEnv({
       OPENRIG_NODE_ID: node.id,
       OPENRIG_SESSION_NAME: sessionName,
       OPENRIG_RUNTIME: node.runtime ?? undefined,
       ...this.sessionEnv,
       ...(node.runtime ? this.runtimeSessionEnv[node.runtime] : undefined),
+      ...seatEnvLaunchVars(withCorePlugin(mergeSeatEnv(specEnv, oneOff), corePluginDir)),
+      // The launch project of a seat that loads the plugin, so a Claude started elsewhere inside the seat is not taken for it.
+      // For a Codex seat it is also the selection signal its plugin hooks check, beside the interpreter they run with.
+      [SEAT_PROJECT_DIR_ENV]: corePluginDir || codexCorePluginDir ? sessionCwd : undefined,
+      [SEAT_NODE_ENV]: corePluginDir || codexCorePluginDir ? process.execPath : undefined,
       OPENRIG_OCCUPANT_GENERATION: occupantGeneration ?? undefined,
     });
-    const sessionCwd = opts?.cwd ?? node.cwd ?? undefined;
+    const openRigEnv = launchEnv(opts?.env);
     const tmuxResult = await this.tmuxAdapter.createSession(sessionName, sessionCwd, openRigEnv);
     if (!tmuxResult.ok) {
       return { ok: false, code: tmuxResult.code, message: tmuxResult.message };
     }
 
-    const launchWarnings: string[] = [];
+    // The session's own non-fatal warnings (#771: the parent-session identity cleanup).
+    const launchWarnings: string[] = [...(tmuxResult.warnings ?? [])];
+
+    // A one-off `rig up --env` value is on the first pane's command line and, because that is how
+    // `new-session -e` works, in the session environment, which a respawned pane (a handover
+    // successor) inherits. The first pane has already started with it, so take it back out of the
+    // session: the spec's or OpenRig's own value for a name they set, no value for the rest.
+    // A name that can't be taken out leaves this seat running as launched; the warning says what a
+    // later pane would inherit and how to put it back. It never carries a value or tmux's text.
+    if (opts?.env && Object.keys(opts.env).length > 0) {
+      for (const name of await this.dropOneOffFromSession(sessionName, Object.keys(opts.env), launchEnv())) {
+        launchWarnings.push(`The one-off --env setting ${name} could not be taken out of session "${sessionName}"'s environment. `
+          + `The seat runs as launched, but a pane that later respawns in this session, such as a handover successor, would start with it. `
+          + `Before that, put it back with \`tmux set-environment -t ${sessionName} ${name} <usual value>\`, or remove it with \`tmux set-environment -t ${sessionName} -u ${name}\`.`);
+      }
+    }
 
     // Observe the pane before the DB transaction. A concrete pane is committed
     // with session+binding; an unresolved pane gets a durable named verdict in
@@ -234,6 +278,7 @@ export class NodeLauncher {
       };
     }
 
+    if (createdSessionId) opts?.onSessionRegistered?.(createdSessionId);
     this.tmuxAdapter.deliveryGuard?.rebindLifecycle(node.id);
     this.tmuxAdapter.finishLaunchBinding?.(sessionName);
 
@@ -252,6 +297,28 @@ export class NodeLauncher {
       binding: binding!,
       warnings: launchWarnings.length > 0 ? launchWarnings : undefined,
     };
+  }
+
+  /**
+   * Put each one-off name back to what the session would have had without it: `baseline` has the
+   * value the spec or OpenRig set for it, and a name with none is unset (the server's own value, if
+   * it has one, is what a later pane gets). `TMUX` and `TMUX_PANE` belong to tmux and are left alone.
+   * Returns the names that could not be restored (every name is tried). The warning built from them
+   * carries no value: tmux errors repeat the command line.
+   */
+  private async dropOneOffFromSession(session: string, names: string[], baseline: Record<string, string>): Promise<string[]> {
+    const failed: string[] = [];
+    for (const name of names) {
+      if (name === "TMUX" || name === "TMUX_PANE") continue;
+      try {
+        const value = baseline[name];
+        if (value !== undefined) await this.tmuxAdapter.setSessionEnv(session, name, value);
+        else await this.tmuxAdapter.unsetSessionEnv(session, name);
+      } catch {
+        failed.push(name);
+      }
+    }
+    return failed;
   }
 }
 

@@ -2,7 +2,7 @@ import { mkdirSync, appendFileSync, existsSync, openSync, readSync, closeSync, s
 import { join, dirname, relative, isAbsolute, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
-import { getLastCaptureAt, DEFAULT_TRANSCRIPT_STALE_AFTER_MS } from "./transcript-rotation.js";
+import { getLastCaptureAt, getLastCheckedAt, DEFAULT_TRANSCRIPT_STALE_AFTER_MS } from "./transcript-rotation.js";
 
 export interface TranscriptStoreOpts {
   transcriptsRoot?: string;
@@ -14,7 +14,7 @@ export type TranscriptIngestState = "live" | "degraded" | "unavailable";
 
 export interface TranscriptIngestHealth {
   state: TranscriptIngestState;
-  reason: "capture_fresh" | "capture_stale" | "capture_empty" | "capture_missing" | "capture_disabled" | "capture_unreadable";
+  reason: "capture_fresh" | "capture_unchanged" | "capture_stale" | "capture_empty" | "capture_missing" | "capture_disabled" | "capture_unreadable";
   lastCapturedAt: string | null;
 }
 
@@ -162,7 +162,9 @@ function readTailChunked(filePath: string, rawLines: number): string | null {
       text = chunk + text;
 
       const newlineCount = countNewlines(text);
-      if (newlineCount >= rawLines) break;
+      // A trailing newline terminates the last line; it does not establish
+      // the start of the first requested line when this chunk starts mid-line.
+      if (newlineCount >= rawLines + (text.endsWith("\n") ? 1 : 0)) break;
     }
 
     const lines = text.split("\n");
@@ -245,10 +247,12 @@ export class TranscriptStore {
       if (stat.size === 0) {
         return { state: "degraded", reason: "capture_empty", lastCapturedAt };
       }
-      if (Date.now() - lastCaptureMs > this.staleAfterMs) {
+      // Between captures of a pane that has not changed, rotation's check keeps ingest live; lastCapturedAt stays the capture.
+      const lastCheckedMs = Math.max(lastCaptureMs, getLastCheckedAt(sessionName) ?? 0);
+      if (Date.now() - lastCheckedMs > this.staleAfterMs) {
         return { state: "degraded", reason: "capture_stale", lastCapturedAt };
       }
-      return { state: "live", reason: "capture_fresh", lastCapturedAt };
+      return { state: "live", reason: Date.now() - lastCaptureMs > this.staleAfterMs ? "capture_unchanged" : "capture_fresh", lastCapturedAt };
     } catch {
       return { state: "degraded", reason: "capture_unreadable", lastCapturedAt: null };
     }

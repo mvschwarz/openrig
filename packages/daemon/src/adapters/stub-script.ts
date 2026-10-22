@@ -11,9 +11,9 @@
 // 51-02's scenario `emit` verb (scenario-schema.ts EMIT_BEHAVIORS) is a copy of the
 // SAME shared contract; test/stub-script.test.ts guards the two against byte-drift.
 
-/** The locked four-behavior repertoire (arch A4 terminal descope). Shared, byte-for-byte,
+/** The finite stub behavior repertoire (arch A4 terminal descope). Shared, byte-for-byte,
  *  with 51-02's EMIT_BEHAVIORS. usage_limit is deliberately absent — real-runtime-only. */
-export const STUB_BEHAVIORS = ["compaction", "slow_output", "mid_turn_death", "restore"] as const;
+export const STUB_BEHAVIORS = ["compaction", "slow_output", "mid_turn_death", "restore", "refocus"] as const;
 export type StubBehavior = (typeof STUB_BEHAVIORS)[number];
 
 /** Known-but-real-runtime-only behaviors: a stub cannot honestly feed the provider-usage

@@ -23,7 +23,7 @@
 //     §Citation Rules.
 
 import { Command } from "commander";
-import { DaemonClient } from "../client.js";
+import { DaemonClient, DaemonResponseError } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -85,6 +85,7 @@ interface ListResponse {
 interface EffectiveResponse {
   operatingPosture?: OperatingPosture;
   effective: { binding: BindingResponse["binding"]; resolvedScope: Scope } | null;
+  categories?: { mode: BindingResponse["binding"] | null; posture: BindingResponse["binding"] | null };
   posture: "known" | "unknown_posture";
   hint?: string;
 }
@@ -99,11 +100,64 @@ async function withClient<T>(
   return fn(client);
 }
 
-function emitRecord(label: string, record: Record<string, string>): void {
+type Binding = BindingResponse["binding"];
+type Category = "mode" | "posture";
+/** A saved legacy mode and an operating posture are kept separately at one target. */
+function categoryOf(mode: string): Category {
+  return mode === "human-led" || mode === "delegated" ? "posture" : "mode";
+}
+
+type WriteTargetState =
+  | { known: true; writeTarget: string; mode: Binding | null; posture: Binding | null }
+  | { known: false; reason: string };
+
+/** A binding as stored: an id, and one of the supported mode names (the store accepts no other). */
+const isBinding = (b: unknown): b is Binding =>
+  typeof b === "object" && b !== null && typeof (b as { id?: unknown }).id === "string"
+  && (MODES as readonly unknown[]).includes((b as { mode?: unknown }).mode);
+
+/** What is stored where a write of this category would land, as the daemon resolves that target (a posture through
+ *  its canonicalisation, a saved mode as given). Anything the daemon doesn't establish is unknown: a failed read, a
+ *  refusal, a malformed answer, or a daemon that doesn't name the write target (one that predates categories, where a
+ *  write replaces whatever binding is stored there). */
+async function writeTargetState(client: DaemonClient, scope: string, qualifier: string | null, category: Category): Promise<WriteTargetState> {
+  try {
+    const res = await client.get<Record<string, unknown>>(`/api/rig-mode/bindings/${scope}${qualifier ? `/${encodeURIComponent(qualifier)}` : ""}?for=${category}`);
+    const data = res.data;
+    if (res.status !== 200) {
+      const error = typeof data?.["error"] === "string" ? data["error"] : `HTTP ${res.status}`;
+      return { known: false, reason: res.status === 404 ? "this daemon doesn't report where this write lands" : error };
+    }
+    if (typeof data !== "object" || data === null || typeof data["writeTarget"] !== "string") {
+      return { known: false, reason: "this daemon doesn't report where this write lands" };
+    }
+    const bindings = data["bindings"];
+    // A successful answer is used only when it's usable: a named target, and bindings as stored.
+    if (data["writeTarget"] === "" || !Array.isArray(bindings) || !bindings.every(isBinding)) {
+      return { known: false, reason: "the daemon's answer was malformed" };
+    }
+    return { known: true, writeTarget: data["writeTarget"], mode: bindings.find((b) => categoryOf(b.mode) === "mode") ?? null,
+      posture: bindings.find((b) => categoryOf(b.mode) === "posture") ?? null };
+  } catch {
+    return { known: false, reason: "the read failed" };
+  }
+}
+
+/** Record fields OpenRig stores, validates and shows, but that nothing in OpenRig acts on yet. (`scope` is the
+ *  binding's key, and the operating-posture reader uses `evidence_citation`.) */
+const NOT_APPLIED_FIELDS = new Set([
+  "autonomy_scope", "heartbeat_cadence", "inspection_depth", "update_detail",
+  "escalation_threshold", "concurrency_limit", "permission_prompt_posture", "expiry_or_stale_rule",
+]);
+const NOT_APPLIED = "(stored; not applied)";
+const NOT_APPLIED_LEGEND = "fields marked (stored; not applied) are saved and shown, but nothing in OpenRig acts on them yet";
+
+function emitRecord(label: string, record: Record<string, string>, legend = true): void {
   console.log(label);
   for (const [k, v] of Object.entries(record)) {
-    console.log(`  ${k}: ${v}`);
+    console.log(`  ${k}: ${v}${NOT_APPLIED_FIELDS.has(k) ? `  ${NOT_APPLIED}` : ""}`);
   }
+  if (legend && Object.keys(record).some((k) => NOT_APPLIED_FIELDS.has(k))) console.log(`  ${NOT_APPLIED_LEGEND}`);
 }
 
 function emitOperatingPosture(value: OperatingPosture | undefined): void {
@@ -177,14 +231,14 @@ export function rigModeCommand(depsOverride?: RigModeDeps): Command {
     )
     .option("--scope <scope>", `Scope: ${SCOPES.join(" | ")} (default: per-mode recommendation)`)
     .option("--qualifier <id>", "Rig/project/qitem ID; mission: project/mission; workstream: project/mission/slice-id; omit for global_host")
-    .option("--autonomy-scope <v>")
-    .option("--heartbeat-cadence <v>")
-    .option("--inspection-depth <v>")
-    .option("--update-detail <v>")
-    .option("--escalation-threshold <v>")
-    .option("--concurrency-limit <v>")
-    .option("--permission-prompt-posture <v>", "One of: normal | batch_for_human | do_not_prompt_unless_blocked (auto_accept is FORBIDDEN by convention).")
-    .option("--expiry-or-stale-rule <v>")
+    .option("--autonomy-scope <v>", `Saved with the mode ${NOT_APPLIED}: nothing in OpenRig acts on it yet.`)
+    .option("--heartbeat-cadence <v>", `Saved with the mode ${NOT_APPLIED}: nothing in OpenRig acts on it yet.`)
+    .option("--inspection-depth <v>", `Saved with the mode ${NOT_APPLIED}: nothing in OpenRig acts on it yet.`)
+    .option("--update-detail <v>", `Saved with the mode ${NOT_APPLIED}: nothing in OpenRig acts on it yet.`)
+    .option("--escalation-threshold <v>", `Saved with the mode ${NOT_APPLIED}: nothing in OpenRig acts on it yet.`)
+    .option("--concurrency-limit <v>", `Saved with the mode ${NOT_APPLIED}: nothing in OpenRig acts on it yet.`)
+    .option("--permission-prompt-posture <v>", `One of: normal | batch_for_human | do_not_prompt_unless_blocked (auto_accept is FORBIDDEN by convention). Saved with the mode ${NOT_APPLIED}: nothing in OpenRig acts on it yet, and it doesn't change any native permission prompt.`)
+    .option("--expiry-or-stale-rule <v>", `Saved with the mode ${NOT_APPLIED}: nothing in OpenRig acts on it yet.`)
     .option("--evidence <citation>", "Free-text citation (operator message id, file pointer, chatroom topic, etc.).")
     .option("--confirm", "Confirm the proposed binding and apply it. Without this flag, set is restate-only.")
     .option("--bearer <token>", "Operator bearer token (or set OPENRIG_AUTH_BEARER_TOKEN env).")
@@ -293,14 +347,26 @@ export function rigModeCommand(depsOverride?: RigModeDeps): Command {
         };
 
         if (!opts.confirm) {
-          // Restate-and-confirm (HG-7). No daemon write.
+          // Restate-and-confirm (HG-7). No daemon write. What's stored where this write would land is read on a
+          // best-effort basis: anything not established leaves the preview as it was, with the current state UNKNOWN.
+          const category = categoryOf(mode);
+          const current = await writeTargetState(client, scope, qualifier, category);
           if (opts.json) {
-            console.log(JSON.stringify({ ok: false, proposed: { mode, scope, qualifier, record }, confirm_required: true }, null, 2));
+            console.log(JSON.stringify({ ok: false, proposed: { mode, scope, qualifier, record }, confirm_required: true,
+              ...(!current.known ? { current: "unknown", displaces: "unknown", currentReason: current.reason }
+                : { current: { writeTarget: current.writeTarget, mode: current.mode, posture: current.posture }, displaces: current[category] }) }, null, 2));
           } else {
             console.log(`Proposed binding (restate-and-confirm — NOT applied):`);
             console.log(`  mode:      ${mode}`);
             console.log(`  scope:     ${scope}${qualifier ? ` (${qualifier})` : ""}`);
             emitRecord(`  record:`, record);
+            if (!current.known) {
+              console.log(`  currently: UNKNOWN (${current.reason}); what this write replaces is unknown`);
+            } else {
+              const displaced = current[category];
+              console.log(`  currently at ${current.writeTarget}, where this write lands: mode=${current.mode?.mode ?? "none"}, posture=${current.posture?.mode ?? "none"}`);
+              console.log(`  this write replaces: ${displaced ? `${displaced.mode} (${category}, ${displaced.id})` : `no ${category} binding`}; any ${category === "mode" ? "posture" : "saved mode"} there is kept`);
+            }
             console.log(`\nRe-run with --confirm to apply.`);
           }
           process.exitCode = 2;
@@ -415,6 +481,9 @@ export function rigModeCommand(depsOverride?: RigModeDeps): Command {
         }
         const b = res.data.effective.binding;
         console.log(`Effective: ${b.mode} (resolved scope: ${res.data.effective.resolvedScope})`);
+        // A saved mode and a posture can be kept side by side; name the other one when both apply here.
+        const other = categoryOf(b.mode) === "mode" ? res.data.categories?.posture : res.data.categories?.mode;
+        if (other && other.id !== b.id) console.log(`  also kept: ${other.mode} (${categoryOf(other.mode)}, ${other.id}, set_at=${other.setAt})`);
         emitRecord(`  record:`, b.record);
         console.log(`  set_by:  ${b.setBy}`);
         console.log(`  set_at:  ${b.setAt}`);
@@ -458,13 +527,14 @@ export function rigModeCommand(depsOverride?: RigModeDeps): Command {
   // -- unset -------------------------------------------------------------
   cmd
     .command("unset <scope> [qualifier]")
-    .description("Delete one binding (operator-only). Scope: global_host | rig | project | mission | workstream | qitem.")
+    .description("Delete one binding (operator-only). Scope: global_host | rig | project | mission | workstream | qitem. Where a saved mode and a posture are both kept, this removes the latest set one, or the one --category names.")
     .option("--bearer <token>")
+    .option("--category <category>", "mode or posture: which binding to remove where both are kept")
     .option("--json", "JSON output for agents")
     .action(async (
       scopeArg: string,
       qualifierArg: string | undefined,
-      opts: { bearer?: string; json?: boolean },
+      opts: { bearer?: string; category?: string; json?: boolean },
     ) => {
       if (!(SCOPES as readonly string[]).includes(scopeArg)) {
         console.error(`Unknown scope '${scopeArg}'. Allowed: ${SCOPES.join(", ")}.`);
@@ -492,7 +562,23 @@ export function rigModeCommand(depsOverride?: RigModeDeps): Command {
         const headers: Record<string, string> = {};
         const bearer = opts.bearer ?? process.env.OPENRIG_AUTH_BEARER_TOKEN;
         if (bearer) headers.Authorization = `Bearer ${bearer}`;
-        const res = await client.delete<{ removed: boolean }>(`/api/rig-mode/bindings/${scope}${qualifierPath}`, { headers });
+        // One category is removed through its own path: a daemon that predates categories has no such route, so it
+        // answers 404 and removes nothing (its plain DELETE would remove whatever binding is stored there).
+        const categoryPath = opts.category !== undefined ? `/categories/${encodeURIComponent(opts.category)}` : "";
+        let res: Awaited<ReturnType<typeof client.delete<{ removed: boolean; category?: Category; remaining?: Binding | null }>>>;
+        try {
+          res = await client.delete(`/api/rig-mode/bindings/${scope}${qualifierPath}${categoryPath}`, { headers });
+        } catch (error) {
+          if (!(categoryPath && error instanceof DaemonResponseError && error.status === 404)) throw error;
+          res = { status: 404, data: { removed: false } };
+        }
+        if (categoryPath && res.status === 404) {
+          const message = "This daemon can't remove a binding by category (it predates categories); nothing was removed.";
+          if (opts.json) console.log(JSON.stringify({ ok: false, error: "category_unsupported", removed: false, hint: message }, null, 2));
+          else console.error(message);
+          process.exitCode = 1;
+          return;
+        }
         if (res.status >= 400) {
           if (opts.json) {
             console.log(JSON.stringify({ ok: false, ...(res.data as object) }, null, 2));
@@ -503,9 +589,12 @@ export function rigModeCommand(depsOverride?: RigModeDeps): Command {
           return;
         }
         if (opts.json) {
-          console.log(JSON.stringify({ ok: true, removed: res.data.removed }, null, 2));
+          console.log(JSON.stringify({ ok: true, removed: res.data.removed,
+            ...(res.data.category ? { category: res.data.category, remaining: res.data.remaining ?? null } : {}) }, null, 2));
         } else {
           console.log(res.data.removed ? `Removed ${scope}${qualifier ? `:${qualifier}` : ""}` : "Nothing to remove.");
+          // The other category kept at this target, if any.
+          if (res.data.remaining) console.log(`  still kept: ${res.data.remaining.mode} (${categoryOf(res.data.remaining.mode)}, ${res.data.remaining.id})`);
         }
       });
     });
@@ -530,9 +619,11 @@ export function rigModeCommand(depsOverride?: RigModeDeps): Command {
         }
         for (const mode of MODES) {
           console.log(`${mode}  (default scope: ${res.data.recommendedDefaultScope[mode]})`);
-          emitRecord("  ", res.data.recommendedModeDefaults[mode] as unknown as Record<string, string>);
+          emitRecord("  ", res.data.recommendedModeDefaults[mode] as unknown as Record<string, string>, false);
         }
-        console.log(`\ndefault stale rule: ${res.data.defaultStaleRule}`);
+        // The served default, not a stored field: nothing applies it, but it isn't stored either.
+        console.log(`\ndefault stale rule: ${res.data.defaultStaleRule}  (not applied)`);
+        console.log(NOT_APPLIED_LEGEND);
       });
     });
 

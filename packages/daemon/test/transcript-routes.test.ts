@@ -15,6 +15,7 @@ import { resumeMetadataSchema } from "../src/db/migrations/006_resume_metadata.j
 import { nodeSpecFieldsSchema } from "../src/db/migrations/007_node_spec_fields.js";
 import { agentspecRebootSchema } from "../src/db/migrations/014_agentspec_reboot.js";
 import { externalCliAttachmentSchema } from "../src/db/migrations/019_external_cli_attachment.js";
+import { sessionStopIntentSchema } from "../src/db/migrations/103_session_stop_intent.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { TranscriptStore } from "../src/domain/transcript-store.js";
@@ -24,7 +25,7 @@ import { vi } from "vitest";
 
 function setupDb(): Database.Database {
   const db = createDb();
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, agentspecRebootSchema, externalCliAttachmentSchema]);
+  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, agentspecRebootSchema, externalCliAttachmentSchema, sessionStopIntentSchema]);
   return db;
 }
 
@@ -276,7 +277,9 @@ describe("transcript routes", () => {
 
     const rig2 = rigRepo.createRig("other-rig");
     const node2 = rigRepo.addNode(rig2.id, "dev-impl2", { role: "worker", runtime: "claude-code" });
-    sessionRegistry.registerSession(node2.id, "dev-impl@my-rig");
+    // Legacy ambiguity is retained data, not a new registration that admission permits.
+    db.prepare("INSERT INTO sessions(id,node_id,session_name) VALUES (?,?,?)")
+      .run("legacy-ambiguous-session", node2.id, "dev-impl@my-rig");
 
     const store = new TranscriptStore({ transcriptsRoot: tmpDir, enabled: true });
     const app = createApp({ db, rigRepo, sessionRegistry, transcriptStore: store });
@@ -407,7 +410,9 @@ describe("transcript routes", () => {
 
     const rig2 = rigRepo.createRig("other-rig");
     const node2 = rigRepo.addNode(rig2.id, "dev-impl2", { role: "worker", runtime: "claude-code" });
-    sessionRegistry.registerSession(node2.id, "dev-impl@my-rig");
+    // Legacy ambiguity is retained data, not a new registration that admission permits.
+    db.prepare("INSERT INTO sessions(id,node_id,session_name) VALUES (?,?,?)")
+      .run("legacy-ambiguous-session", node2.id, "dev-impl@my-rig");
 
     const store = new TranscriptStore({ transcriptsRoot: tmpDir, enabled: true });
     const app = createApp({ db, rigRepo, sessionRegistry, transcriptStore: store });

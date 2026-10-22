@@ -7,6 +7,7 @@
 
 import type Database from "better-sqlite3";
 import { ulid } from "ulid";
+import { WorkflowScopeError, type WorkflowScope } from "./workflow-scope.js";
 import type {
   WorkflowFailureOccurrence,
   WorkflowFrontierBinding,
@@ -41,19 +42,23 @@ interface InstanceRow {
   lifecycle_operation_key?: string | null;
   compiled_input_digest?: string | null;
   lifecycle_binding_json?: string | null;
+  /** Migration 110 — optional at the row layer: legacy fixtures map to null (unscoped). */
+  scope_json?: string | null;
 }
 
 /** Defensive column probe (the detectQueueColumn house pattern) —
  *  older test fixtures bypass the canonical migration list, so the
  *  version column (migration 049) may be absent; the guard degrades
  *  to legacy unguarded updates there. Production always migrates. */
-function detectInstanceColumn(db: Database.Database, columnName: string): boolean {
+export function detectInstanceColumn(db: Database.Database, columnName: string, opts: { strict?: boolean } = {}): boolean {
   try {
     return db
       .prepare("PRAGMA table_info(workflow_instances)")
       .all()
       .some((row) => (row as { name?: string }).name === columnName);
-  } catch {
+  } catch (err) {
+    // The store's own probes tolerate a failed PRAGMA; a caller that must tell "no column" from "could not look" asks for strict.
+    if (opts.strict) throw err;
     return false;
   }
 }
@@ -71,6 +76,8 @@ export interface CreateWorkflowInstanceInput {
    * null/absent = unbound (today's behavior byte-identical).
    */
   boundRig?: string | null;
+  /** Already-normalized scope (workflow-scope.ts); null/absent = unscoped. */
+  scope?: WorkflowScope | null;
   lifecycle?: {
     operationKey: string;
     compiledInputDigest: string;
@@ -94,6 +101,7 @@ export class WorkflowInstanceStore {
   private readonly hasResumeColumns: boolean;
   private readonly hasBoundRigColumn: boolean;
   private readonly hasLifecycleColumns: boolean;
+  private readonly hasScopeColumn: boolean;
   private readonly hasFrontierBindingsTable: boolean;
   private readonly hasFailureOccurrencesTable: boolean;
 
@@ -105,6 +113,7 @@ export class WorkflowInstanceStore {
     this.hasResumeColumns = detectInstanceColumn(db, "resume_count");
     this.hasBoundRigColumn = detectInstanceColumn(db, "bound_rig");
     this.hasLifecycleColumns = detectInstanceColumn(db, "lifecycle_operation_key");
+    this.hasScopeColumn = detectInstanceColumn(db, "scope_json");
     this.hasFrontierBindingsTable = tableExists(db, "workflow_frontier_bindings");
     this.hasFailureOccurrencesTable = tableExists(db, "workflow_failure_occurrences");
   }
@@ -122,6 +131,11 @@ export class WorkflowInstanceStore {
       ? ", lifecycle_operation_key, compiled_input_digest, lifecycle_binding_json"
       : "";
     const lifecycleVals = this.hasLifecycleColumns ? ", ?, ?, ?" : "";
+    if (input.scope && !this.hasScopeColumn) {
+      throw new WorkflowScopeError("scope_unavailable", "workflow scope requires migration 110");
+    }
+    const scopeCol = this.hasScopeColumn ? ", scope_json" : "";
+    const scopeVal = this.hasScopeColumn ? ", ?" : "";
     const params: unknown[] = [
       instanceId,
       input.workflowName,
@@ -139,12 +153,13 @@ export class WorkflowInstanceStore {
         input.lifecycle ? JSON.stringify(input.lifecycle.binding) : null,
       );
     }
+    if (this.hasScopeColumn) params.push(input.scope ? JSON.stringify(input.scope) : null);
     this.db
       .prepare(
         `INSERT INTO workflow_instances (
            instance_id, workflow_name, workflow_version, created_by_session,
-           created_at, status, current_frontier_json, current_step_id, hop_count${boundRigCol}${lifecycleCols}
-         ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, 0${boundRigVal}${lifecycleVals})`,
+           created_at, status, current_frontier_json, current_step_id, hop_count${boundRigCol}${lifecycleCols}${scopeCol}
+         ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, 0${boundRigVal}${lifecycleVals}${scopeVal})`,
       )
       .run(...(params as never[]));
     return this.getByIdOrThrow(instanceId);
@@ -378,7 +393,11 @@ export class WorkflowInstanceStore {
            ${setVersion}${setHop}${setResume}${currentStepClause}status = ?, current_frontier_json = ?,
            last_continuation_decision_json = COALESCE(?, last_continuation_decision_json),
            fallback_synthesis = COALESCE(?, fallback_synthesis),
-           completed_at = COALESCE(?, completed_at)
+           -- Reopening a terminal run must clear its old completion marker;
+           -- otherwise active redrives still render as completed. Terminal
+           -- states retain their existing marker when no new timestamp is
+           -- supplied.
+           completed_at = CASE WHEN ? IN ('active', 'waiting') THEN NULL ELSE COALESCE(?, completed_at) END
          WHERE instance_id = ?${versionWhere}`;
     const stmt = this.db.prepare(sql);
     const params: unknown[] = [];
@@ -388,6 +407,7 @@ export class WorkflowInstanceStore {
       JSON.stringify(nextFrontier),
       opts.lastContinuationDecision ? JSON.stringify(opts.lastContinuationDecision) : null,
       opts.fallbackSynthesis ?? null,
+      nextStatus,
       opts.completedAt ?? null,
       instanceId,
     );
@@ -433,6 +453,7 @@ function rowToInstance(row: InstanceRow): WorkflowInstance {
     lifecycleBinding: row.lifecycle_binding_json
       ? (JSON.parse(row.lifecycle_binding_json) as Record<string, unknown>)
       : null,
+    scope: row.scope_json ? (JSON.parse(row.scope_json) as WorkflowScope) : null,
   };
 }
 

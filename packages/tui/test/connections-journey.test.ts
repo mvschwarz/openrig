@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { gatewayRoutes } from "../../daemon/src/routes/gateway.js";
 import { addHumanFragment, projectionPath } from "../../daemon/src/domain/gateway/human-registry.js";
-import { channelStateDigest, runChannelOperation } from "../../daemon/src/domain/gateway/channel-operations.js";
+import { channelStateDigest } from "../../daemon/src/domain/gateway/channel-operations.js";
 import { DEFAULT_CONFIG, saveConfig, configPathFor } from "../../daemon/src/domain/gateway/slack/config.js";
 import { SettingsStore } from "../../daemon/src/domain/user-settings/settings-store.js";
 import { DaemonClient } from "../src/daemon-client.js";
@@ -68,15 +68,17 @@ beforeEach(() => {
 });
 afterEach(() => { vi.unstubAllGlobals(); rmSync(home, { recursive: true, force: true }); });
 const hydrate = () => hydrateSnapshot(client, undefined, null, null, "demo", { section: "connections", viewTab: "table", drill: [] });
-async function verify(ready: boolean | null) {
-  return runChannelOperation({ actor: "tester@fixture", provenance: "claimed:v1", reason: "fixture check", action: "verify", subject: "slack",
-    before: { digest: channelStateDigest(config) }, run: async () => ({ value: null, after: { ready }, effect: "observed" }),
-  }, home);
+/** A verify receipt as earlier versions wrote it; such lines stay in existing ledgers. */
+function legacyVerifyReceipt(ready: boolean | null) {
+  mkdirSync(join(home, "state"), { recursive: true });
+  writeFileSync(join(home, "state/human-channel-operations.jsonl"), JSON.stringify({ id: "legacy", actor: "tester@fixture", provenance: "claimed:v1",
+    reason: "fixture check", action: "verify", subject: "slack", before: { digest: channelStateDigest(config) }, at: "2026-10-01T00:00:00.000Z",
+    after: { ready }, effect: "observed" }) + "\n", { flag: "a" });
 }
 
 describe("passive Connections journey", () => {
   it("reads real sources, preserves attribution, navigates to route and spec then returns to work without writes or external calls", async () => {
-    await verify(true);
+    legacyVerifyReceipt(true);
     const before = [configPathFor(home), projectionPath(home), join(home, "state/human-channel-operations.jsonl")].map((p) => readFileSync(p, "utf8"));
     let snap: FleetSnapshot = emptySnapshot();
     const view = createViewState({ instanceId: "fixture", getSnapshot: () => snap });
@@ -86,12 +88,13 @@ describe("passive Connections journey", () => {
     snap = await hydrate();
     snap.launchingCli = "fixture-cli";
     expect(snap.readErrors).toEqual([]);
-    expect(snap.connections).toMatchObject({ state: "unverified", running: { applied: "matching" }, verification: { state: "ready-at-check", actor: "tester@fixture" } });
+    expect(snap.connections).toMatchObject({ state: "unverified", running: { applied: "matching" } });
+    expect(snap.connections).not.toHaveProperty("verification");
     const content = connectionsLines(snap, 75);
     const rendered = renderScreen(view.get(), snap, { cols: 110, rows: 40 }).lines.join("\n");
     expect(rendered).toContain("CONNECTIONS");
     expect(rendered).toContain("fixture-cli");
-    expect(content.map((l) => l.text).join("\n")).toContain("ready-at-check");
+    expect(content.map((l) => l.text).join("\n")).not.toContain("last check");
     snap.pending.push({ qitemId: "request-1", sourceSession: "orch@demo", destinationSession: "alex@external", state: "pending", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "fixture decision", body: "", claimedAt: null, tsUpdated: "2026-09-07T00:00:00Z" });
     expect(connectionsLines(snap, 100).map((l) => l.text).join("\n")).toContain("request-1 · from orch@demo");
     const response = JSON.stringify(snap.connections);
@@ -110,13 +113,12 @@ describe("passive Connections journey", () => {
     expect([configPathFor(home), projectionPath(home), join(home, "state/human-channel-operations.jsonl")].map((p) => readFileSync(p, "utf8"))).toEqual(before);
   });
 
-  it.each(["disabled", "incomplete", "failed", "unavailable", "unapplied", "indeterminate"])("keeps %s distinct with an action", async (mode) => {
+  it.each(["disabled", "incomplete", "failed", "unavailable", "unapplied"])("keeps %s distinct with an action", async (mode) => {
     if (mode === "disabled") config.enabled = false;
     if (mode === "incomplete") config.channel = null;
     if (mode === "failed") gateway.state = "failed";
     if (mode === "unavailable") gateway.state = "stopped";
     if (mode === "unapplied") config.channel = "C-CHANGED";
-    if (mode === "indeterminate") await verify(null);
     saveConfig(config, home);
     if (mode === "disabled" || mode === "incomplete") {
       gateway.connector = { outboundReady: false, configurationDigest: channelStateDigest(config) };
@@ -177,16 +179,15 @@ describe("passive Connections journey", () => {
     expect(body).not.toContain(secret); expect(body).not.toContain(appSecret);
   });
 
-  it("a changed, failed, interrupted or corrupt verification cannot inherit old green", async () => {
-    await verify(true);
-    config.channel = "C-CHANGED"; saveConfig(config, home);
-    expect((await hydrate()).connections?.verification.state).toBe("changed");
-    await verify(false);
-    expect((await hydrate()).connections?.verification.state).toBe("failed");
-    await expect(runChannelOperation({ actor: "tester", provenance: "claimed:v1", reason: "fail", action: "verify", subject: "slack", before: { digest: channelStateDigest(config) }, run: async () => { throw new Error("fixture error"); } }, home)).rejects.toThrow();
-    expect((await hydrate()).connections?.verification.state).toBe("indeterminate");
+  it("a verify receipt left in the ledger by an earlier version doesn't change the Connections state", async () => {
+    for (const ready of [true, false, null]) {
+      legacyVerifyReceipt(ready);
+      const snap = await hydrate();
+      expect(snap.connections).toMatchObject({ state: "unverified", nextAction: "rig slack verify --json" });
+      expect(snap.connections).not.toHaveProperty("verification");
+    }
     writeFileSync(join(home, "state/human-channel-operations.jsonl"), "malformed");
-    expect((await hydrate()).connections?.verification.state).toBe("indeterminate");
+    expect((await hydrate()).connections).toMatchObject({ state: "unverified" });
   });
 
   it("route exclusion is distinct from connector readiness", async () => {

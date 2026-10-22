@@ -68,6 +68,39 @@ describe.skipIf(process.platform === "win32")("native tmux session launch enviro
       });
     });
 
+    // What a pane started in the session afterwards would have in its environment.
+    const nextPaneEnv = async (home: string, tmux: (args: string[]) => Promise<string>, session: string) => {
+      const file = path.join(home, `next-${Math.random().toString(36).slice(2)}.env`);
+      await tmux(["new-window", "-d", "-t", `=${session}:`, `env > ${shellQuote(file)}.part && mv ${shellQuote(file)}.part ${shellQuote(file)}`]);
+      for (let i = 0; i < 50 && !fs.existsSync(file); i++) await new Promise(r => setTimeout(r, 100));
+      return fs.readFileSync(file, "utf8").split("\n");
+    };
+
+    it(`${mode}: unsetting a name gives later panes the server's value, except the launching session's identity, which stays removed`, async () => {
+      await withServer(mode, async (adapter, home, tmux) => {
+        await tmux(["set-environment", "-g", "CLAUDECODE", "1"]);
+        await tmux(["set-environment", "-g", "CLAUDE_EFFORT", "from-parent"]);
+        await tmux(["set-environment", "-g", "PLAIN_NAME", "from-server"]);
+        await tmux(["set-environment", "-t", "=worker-long", "CLAUDE_EFFORT", "one-off"]);
+        await tmux(["set-environment", "-t", "=worker-long", "PLAIN_NAME", "one-off"]);
+        await adapter.unsetSessionEnv("worker-long", "CLAUDE_EFFORT");
+        await adapter.unsetSessionEnv("worker-long", "PLAIN_NAME");
+        const env = await nextPaneEnv(home, tmux, "worker-long");
+        expect(env).toContain("PLAIN_NAME=from-server");
+        expect(env.some(line => line.startsWith("CLAUDE_EFFORT="))).toBe(false);
+      });
+    });
+
+    it(`${mode}: a CLAUDE_EFFORT that is user configuration (no parent Claude Code session) is inherited as before`, async () => {
+      await withServer(mode, async (adapter, home, tmux) => {
+        await tmux(["set-environment", "-g", "-u", "CLAUDECODE"]); // the test runner may itself be inside Claude Code
+        await tmux(["set-environment", "-g", "CLAUDE_EFFORT", "user-setting"]);
+        await tmux(["set-environment", "-t", "=worker-long", "CLAUDE_EFFORT", "one-off"]);
+        await adapter.unsetSessionEnv("worker-long", "CLAUDE_EFFORT");
+        expect(await nextPaneEnv(home, tmux, "worker-long")).toContain("CLAUDE_EFFORT=user-setting");
+      });
+    });
+
     it(`${mode}: preserves absent/unset variables and invalid-key rejection`, async () => {
       await withServer(mode, async (adapter, _home, tmux) => {
         expect(await adapter.getSessionEnv("worker-long", "OPENRIG_UNSET_FIXTURE")).toBeUndefined();

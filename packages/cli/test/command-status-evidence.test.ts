@@ -22,15 +22,19 @@ const entries = [
 
 describe("command daemon status evidence", () => {
   for (const [name, makeCommand, args] of entries) {
-    it.each<DaemonStatus>([{ state: "unverified" }, { state: "running", healthy: false }])(`${name} preserves inconclusive status instead of asserting down`, async (status) => {
+    // Changed: an inconclusive status used to refuse ("state not confirmed"). A daemon that may be busy
+    // gets the command's real request instead; the request's own answer or timeout decides.
+    it.each<DaemonStatus>([
+      { state: "unverified", host: "127.0.0.1", port: 7433 },
+      { state: "running", healthy: false, host: "127.0.0.1", port: 7433 },
+    ])(`${name} makes its real request when the daemon may be busy, never asserting down`, async (status) => {
       vi.mocked(getDaemonStatus).mockResolvedValue(status);
       const error = vi.spyOn(console, "error").mockImplementation(() => {});
-      const clientFactory = vi.fn();
-      await makeCommand({ lifecycleDeps: {} as LifecycleDeps, clientFactory }).parseAsync(["node", "rig", ...args]);
-      expect(error.mock.calls.flat().join("\n")).toContain("state not confirmed");
+      const clientFactory = vi.fn(() => { throw new Error("stop at the request"); });
+      await makeCommand({ lifecycleDeps: {} as LifecycleDeps, clientFactory }).parseAsync(["node", "rig", ...args]).catch(() => {});
+      expect(clientFactory).toHaveBeenCalledWith("http://127.0.0.1:7433");
+      expect(error.mock.calls.flat().join("\n")).not.toContain("state not confirmed");
       expect(error.mock.calls.flat().join("\n")).not.toContain("Daemon not running.");
-      expect(process.exitCode).toBe(1);
-      expect(clientFactory).not.toHaveBeenCalled();
     });
 
     it(`${name} preserves positively stopped status`, async () => {

@@ -8,6 +8,22 @@ import { runAsyncSite } from "./sync-site-wrap.js";
 
 const execFileAsync = promisify(execFile);
 
+export type CodexCaptureDiagnostic = {
+  reason: "no_log_row" | "no_cli_thread" | "ambiguous_threads" | "sqlite_unreadable";
+  count?: number;
+};
+export type CodexCaptureReporter = (diagnostic: CodexCaptureDiagnostic) => void;
+
+/** A read's thread with whether it met no detected incompleteness: every versioned database found (discovery), and every
+ *  one opened and queried. `incomplete` names which part fell short. Not an atomic snapshot: databases can change during
+ *  the read, and rows inside the process's start second stay excluded by the reuse gate. */
+export interface CodexThreadEvidence {
+  thread?: string;
+  reason?: CodexCaptureDiagnostic["reason"];
+  fullyReadable: boolean;
+  incomplete?: "unreadable" | "discovery";
+}
+
 /** F1 (B12's completion): may return a plain value (test stubs stay sync) or a Promise — every
  *  caller awaits it, and the DEFAULT is async so the per-PID `ps eww` spawn no longer blocks the
  *  event loop (measured live: 28.9s/15min of burst blocking inside the 8-attempt capture loops). */
@@ -98,7 +114,7 @@ export class CodexThreadIdResolver {
       /** Explicit provider root; never search another home's logs on a miss. */
       codexHome?: string;
       resolveHomeDirByPid?: ResolveHomeDirByPid;
-      readFromLogs?: (pid: number, homeDir: string) => string | undefined;
+      readFromLogs?: (pid: number, homeDir: string, report?: CodexCaptureReporter, startSecond?: StartSecondRows) => string | undefined;
       /** Bounded cache size; oldest-inserted evicts first. Default 256. */
       maxCachedPids?: number;
       /** Freshness bound for UNSETTLED cache entries — identity-less
@@ -122,8 +138,15 @@ export class CodexThreadIdResolver {
    * call-graph discipline — is reachable ONLY via resolveUngatedLegacy, so a NEW identity-less
    * call site is a COMPILE error (the review-visible pin; see the codex-thread-id test).
    */
-  async resolve(pid: number, identity: string): Promise<string | undefined> {
-    return this.resolveInternal(pid, identity);
+  async resolve(pid: number, identity: string, report?: CodexCaptureReporter): Promise<string | undefined> {
+    return this.resolveWithDiagnostics(pid, identity, report);
+  }
+
+  /** {@link resolve} for a just-launched fork child: rows inside its start second count when they come from the one
+   *  process instance that logged nothing earlier ({@link StartSecondRows} "by-process"). Every other caller keeps
+   *  the strict gate. */
+  async resolveForkChild(pid: number, identity: string, report?: CodexCaptureReporter): Promise<string | undefined> {
+    return this.resolveWithDiagnostics(pid, identity, report, "by-process");
   }
 
   /**
@@ -135,23 +158,57 @@ export class CodexThreadIdResolver {
    * false, and every entry it writes stays bounded by homeTtlMs (60s) — see the settled-permanence
    * rule (e91d7a94) on the cache above.
    */
-  async resolveUngatedLegacy(pid: number): Promise<string | undefined> {
-    return this.resolveInternal(pid, undefined);
+  async resolveUngatedLegacy(pid: number, report?: CodexCaptureReporter): Promise<string | undefined> {
+    return this.resolveWithDiagnostics(pid, undefined, report);
   }
 
-  private async resolveInternal(pid: number, identity: string | undefined): Promise<string | undefined> {
+  /**
+   * {@link resolve} for the explicit `codexHome` read, with whether that read met no detected incompleteness. The thread
+   * and diagnostic are what `resolve` gives for the same home; only the readability is new. For a caller that must tell
+   * a complete read from a partial one (the in-place restart), never a cache or another home.
+   */
+  async resolveWithReadability(pid: number, identity: string): Promise<CodexThreadEvidence> {
+    const diagnostics: CodexCaptureDiagnostic[] = [];
+    const readability: Readability = { complete: true, unreadable: false };
+    const thread = this.opts.codexHome
+      ? readCodexThreadIdFromLogs(pid, "", undefined, lstartToMinTs(identity), this.opts.codexHome,
+        (diagnostic) => diagnostics.push(diagnostic), "exclude", readability)
+      : undefined;
+    if (!this.opts.codexHome) return { reason: "no_log_row", fullyReadable: false, incomplete: "discovery" };
+    const fullyReadable = readability.complete;
+    const incomplete = fullyReadable ? undefined : readability.unreadable ? "unreadable" as const : "discovery" as const;
+    return { ...(thread ? { thread } : { reason: diagnostics[0]?.reason ?? "no_log_row" }), fullyReadable, ...(incomplete ? { incomplete } : {}) };
+  }
+
+  private async resolveWithDiagnostics(pid: number, identity: string | undefined, report?: CodexCaptureReporter,
+    startSecond: StartSecondRows = "exclude"): Promise<string | undefined> {
+    const diagnostics: CodexCaptureDiagnostic[] = [];
+    const token = await this.resolveInternal(pid, identity, diagnostic => diagnostics.push(diagnostic), startSecond);
+    if (!token) {
+      // A default-home miss followed by a successful alternate-home read is not a failure.
+      const priority = { no_log_row: 0, no_cli_thread: 1, ambiguous_threads: 2, sqlite_unreadable: 3 };
+      const diagnostic = diagnostics.sort((a, b) => priority[b.reason] - priority[a.reason])[0];
+      report?.(diagnostic ?? { reason: "no_log_row" });
+    }
+    return token;
+  }
+
+  private async resolveInternal(pid: number, identity: string | undefined, report: CodexCaptureReporter,
+    startSecond: StartSecondRows): Promise<string | undefined> {
     // r2 round-4: the identity's start time gates EVERY log read — a retired
     // occupant's rows predate the current occupant's start and never match.
     const minTs = lstartToMinTs(identity);
-    if (this.opts.codexHome) return readCodexThreadIdFromLogs(pid, "", undefined, minTs, this.opts.codexHome);
-    const readFromLogs = this.opts.readFromLogs
-      ?? ((p: number, home: string) => readCodexThreadIdFromLogs(p, home, undefined, minTs));
-    const defaultHome = this.opts.defaultHome ?? safeUserHomeDir() ?? os.homedir();
+    if (this.opts.codexHome) return readCodexThreadIdFromLogs(pid, "", undefined, minTs, this.opts.codexHome, report, startSecond);
+    const injected = this.opts.readFromLogs;
+    const readFromLogs = injected
+      ? (p: number, home: string, report?: CodexCaptureReporter) => injected(p, home, report, startSecond)
+      : (p: number, home: string, report?: CodexCaptureReporter) => readCodexThreadIdFromLogs(p, home, undefined, minTs, undefined, report, startSecond);
+    const defaultHome = this.opts.defaultHome ?? os.homedir();
     const now = this.opts.now ?? Date.now;
     const ttl = this.opts.homeTtlMs ?? 60_000;
 
     // 1. Default home: no subprocess.
-    const fromDefault = readFromLogs(pid, defaultHome);
+    const fromDefault = readFromLogs(pid, defaultHome, report);
     if (fromDefault) return fromDefault;
 
     // 2. FRESH cached home for this (pid, identity): no subprocess. A reused
@@ -163,7 +220,7 @@ export class CodexThreadIdResolver {
     const cached = this.homeByKey.get(key);
     if (cached) {
       if (cached.settled || now() - cached.at <= ttl) {
-        return cached.home === defaultHome ? undefined : readFromLogs(pid, cached.home);
+        return cached.home === defaultHome ? undefined : readFromLogs(pid, cached.home, report);
       }
       this.homeByKey.delete(key);
     }
@@ -201,7 +258,7 @@ export class CodexThreadIdResolver {
     })();
     const home = await homePromise;
     if (!home || home === defaultHome) return undefined;
-    return readFromLogs(pid, home);
+    return readFromLogs(pid, home, report);
   }
 
   private cacheHome(key: string, home: string, settled: boolean): void {
@@ -222,24 +279,29 @@ export class CodexThreadIdResolver {
 // `true` is no longer assignable, and `tsc --noEmit` on packages/daemon FAILS. resolveUngatedLegacy is
 // the ONLY identity-less read path. Acceptance (r1): re-open resolve() to optional identity -> tsc fails.
 type ResolveRequiresIdentity =
-  Parameters<CodexThreadIdResolver["resolve"]> extends [pid: number, identity: string] ? true : never;
+  Parameters<CodexThreadIdResolver["resolve"]> extends [pid: number, identity: string, report?: CodexCaptureReporter] ? true : never;
 const _resolveRequiresIdentityPin: ResolveRequiresIdentity = true;
 void _resolveRequiresIdentityPin;
 
 function uniqueHomes(candidateHomes: Array<string | undefined>): string[] {
   const homes = candidateHomes.filter((home): home is string => Boolean(home));
-  const userHome = safeUserHomeDir();
-  if (userHome) homes.push(userHome);
+  // os.homedir() honors HOME. The passwd home must not bypass an explicit provider/test home.
+  homes.push(os.homedir());
   return [...new Set(homes)];
 }
 
-function safeUserHomeDir(): string | undefined {
-  try {
-    return os.userInfo().homedir;
-  } catch {
-    return undefined;
-  }
-}
+/** How a gated read treats rows logged inside the identity's own start second (see {@link lstartToMinTs}). */
+export type StartSecondRows =
+  /** Exclude them: the default, for every caller that can wait for a later row. */
+  | "exclude"
+  /** Attribute them by process instance: rows whose `process_uuid` logged nothing before the start second, when exactly
+   *  one such instance exists. A retired occupant that logged before the second, the reuse the gate exists for, stays
+   *  excluded, and two candidates stay ambiguous. For a just-launched fork child, whose only row can fall in its start
+   *  second and which writes nothing more until it has work. */
+  | "by-process";
+
+/** Whether a read met no detected incompleteness: every database it opened was read, and both discoveries were complete. */
+interface Readability { complete: boolean; unreadable: boolean }
 
 function readCodexThreadIdFromLogs(
   pid: number,
@@ -247,9 +309,23 @@ function readCodexThreadIdFromLogs(
   exists?: (path: string) => boolean,
   minTs?: number,
   codexHome?: string,
+  report?: CodexCaptureReporter,
+  startSecond: StartSecondRows = "exclude",
+  readability?: Readability,
 ): string | undefined {
+  let unreadable = false;
+  // Discovery completeness is tracked only when the caller asked for readability; every other caller is unchanged.
+  const logsDiscovery = readability ? { complete: true } : undefined;
+  const stateDiscovery = readability ? { complete: true } : undefined;
+  const settle = () => {
+    if (!readability) return;
+    readability.unreadable = unreadable;
+    readability.complete = !unreadable && logsDiscovery!.complete && stateDiscovery!.complete;
+  };
   const loggedIds = new Set<string>();
-  for (const dbPath of resolveCodexDbPaths(homeDir, "logs", exists, codexHome)) {
+  const sameSecond = new Map<string, Set<string>>(); // process_uuid -> thread ids logged in the start second
+  const loggedBefore = new Set<string>(); // process_uuids with a row before the start second
+  for (const dbPath of resolveCodexDbPaths(homeDir, "logs", exists, codexHome, logsDiscovery)) {
     try {
       const db = new Database(dbPath, { readonly: true });
       try {
@@ -258,16 +334,37 @@ function readCodexThreadIdFromLogs(
           "SELECT DISTINCT thread_id FROM logs WHERE process_uuid LIKE ? AND thread_id IS NOT NULL AND ts > ?"
         ).all(`pid:${pid}:%`, minTs ?? 0) as Array<{ thread_id: string }>;
         for (const row of rows) loggedIds.add(row.thread_id);
+        if (startSecond === "by-process" && minTs !== undefined) {
+          const inSecond = db.prepare(
+            "SELECT DISTINCT process_uuid, thread_id FROM logs WHERE process_uuid LIKE ? AND thread_id IS NOT NULL AND ts = ?"
+          ).all(`pid:${pid}:%`, minTs) as Array<{ process_uuid: string; thread_id: string }>;
+          for (const row of inSecond) {
+            const ids = sameSecond.get(row.process_uuid) ?? new Set<string>();
+            ids.add(row.thread_id);
+            sameSecond.set(row.process_uuid, ids);
+          }
+          const before = db.prepare(
+            "SELECT DISTINCT process_uuid FROM logs WHERE process_uuid LIKE ? AND ts < ?"
+          ).all(`pid:${pid}:%`, minTs) as Array<{ process_uuid: string }>;
+          for (const row of before) loggedBefore.add(row.process_uuid);
+        }
       } finally {
         db.close();
       }
-    } catch { /* Missing logs provide no process identity. */ }
+    } catch { unreadable = true; }
   }
-  if (!loggedIds.size) return undefined;
+  // An unreadable log database could hold an earlier row for a candidate or a second candidate: stay unresolved.
+  const startedInSecond = [...sameSecond.keys()].filter((uuid) => !loggedBefore.has(uuid));
+  if (!unreadable && startedInSecond.length === 1) for (const id of sameSecond.get(startedInSecond[0]!)!) loggedIds.add(id);
+  if (!loggedIds.size) {
+    report?.({ reason: unreadable ? "sqlite_unreadable" : "no_log_row" });
+    settle();
+    return undefined;
+  }
   // Native title generation logs another thread in the same process. Join only
   // PID-owned IDs to retained CLI conversations; recency cannot identify the TUI.
   const conversations = new Set<string>();
-  for (const dbPath of resolveCodexDbPaths(homeDir, "state", exists, codexHome)) {
+  for (const dbPath of resolveCodexDbPaths(homeDir, "state", exists, codexHome, stateDiscovery)) {
     try {
       const db = new Database(dbPath, { readonly: true });
       try {
@@ -276,10 +373,15 @@ function readCodexThreadIdFromLogs(
       } finally {
         db.close();
       }
-    } catch { /* Missing native state is not evidence of a conversation. */ }
+    } catch { unreadable = true; }
   }
   // Multiple retained conversations in one process need a stronger native signal.
-  return conversations.size === 1 ? [...conversations][0] : undefined;
+  settle();
+  if (conversations.size === 1) return [...conversations][0];
+  report?.(unreadable ? { reason: "sqlite_unreadable" }
+    : conversations.size > 1 ? { reason: "ambiguous_threads", count: conversations.size }
+    : { reason: "no_cli_thread" });
+  return undefined;
 }
 
 /** Parse `ps lstart` ("Sun Aug 23 19:30:00 2026", local time) to epoch
@@ -299,7 +401,13 @@ export function lstartToMinTs(identity: string | undefined): number | undefined 
   return Math.floor(parsed / 1000);
 }
 
-export function resolveCodexDbPaths(homeDir: string, kind: "logs" | "state", exists?: (path: string) => boolean, codexHome?: string): string[] {
+/**
+ * The versioned Codex databases of `kind`, newest first. `discovery`, when passed, is set false when the search may have
+ * missed one: the listing failed, or a listed database was dropped by (or threw in) the existence check. The returned
+ * paths are the same whether or not it's passed, the historical fallback included.
+ */
+export function resolveCodexDbPaths(homeDir: string, kind: "logs" | "state", exists?: (path: string) => boolean, codexHome?: string,
+  discovery?: { complete: boolean }): string[] {
   const codexDir = codexHome || nodePath.join(homeDir, ".codex");
   const discovered: Array<{ version: number; path: string }> = [];
 
@@ -314,8 +422,10 @@ export function resolveCodexDbPaths(homeDir: string, kind: "logs" | "state", exi
     }
   } catch {
     // Best effort only; fall back to the historical filename below.
+    if (discovery) discovery.complete = false;
   }
 
+  const listed = new Set(discovered.map((entry) => entry.path));
   if (discovered.length === 0) {
     discovered.push({ version: kind === "logs" ? 1 : 5, path: nodePath.join(codexDir, kind === "logs" ? "logs_1.sqlite" : "state_5.sqlite") });
   }
@@ -324,5 +434,12 @@ export function resolveCodexDbPaths(homeDir: string, kind: "logs" | "state", exi
     .sort((a, b) => b.version - a.version)
     .map((entry) => entry.path)
     .filter((path, index, paths) => paths.indexOf(path) === index)
-    .filter((path) => (exists ?? fs.existsSync)(path));
+    .filter((path) => {
+      let found: boolean;
+      try { found = (exists ?? fs.existsSync)(path); }
+      catch (error) { if (discovery && listed.has(path)) discovery.complete = false; throw error; }
+      // A database the listing named but the existence check dropped may hold rows: the search is incomplete.
+      if (!found && discovery && listed.has(path)) discovery.complete = false;
+      return found;
+    });
 }

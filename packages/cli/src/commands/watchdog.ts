@@ -38,6 +38,15 @@ function printResult(json: boolean, body: unknown, status: number): void {
   if (status >= 400) process.exitCode = status >= 500 ? 2 : 1;
 }
 
+/** A cadence flag read as it always has been (`parseInt`). When the value as typed is not the
+ *  number sent, say so on stderr, before the daemon answers, so stdout and exit codes are unchanged. */
+function cadenceSeconds(flag: string, value: string): number {
+  const seconds = Number.parseInt(value, 10);
+  if (Number.isNaN(seconds)) console.error(`Warning: ${flag} '${value}' is not a number.`);
+  else if (Number(value) !== seconds) console.error(`Warning: ${flag} '${value}' is being interpreted as ${seconds} seconds.`);
+  return seconds;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -159,18 +168,21 @@ export function watchdogCommand(depsOverride?: WatchdogDeps): Command {
           "",
         ].join("\n");
       }
+      const intervalSeconds = cadenceSeconds("--interval-seconds", opts.intervalSeconds);
+      const activeWakeIntervalSeconds = opts.activeWakeIntervalSeconds
+        ? cadenceSeconds("--active-wake-interval-seconds", opts.activeWakeIntervalSeconds)
+        : undefined;
+      const scanIntervalSeconds = opts.scanIntervalSeconds
+        ? cadenceSeconds("--scan-interval-seconds", opts.scanIntervalSeconds)
+        : undefined;
       await withClient(deps, async (client) => {
         const res = await client.post<unknown>("/api/watchdog/register", {
           policy: opts.policy,
           specYaml,
           targetSession: opts.targetSession,
-          intervalSeconds: Number.parseInt(opts.intervalSeconds, 10),
-          activeWakeIntervalSeconds: opts.activeWakeIntervalSeconds
-            ? Number.parseInt(opts.activeWakeIntervalSeconds, 10)
-            : undefined,
-          scanIntervalSeconds: opts.scanIntervalSeconds
-            ? Number.parseInt(opts.scanIntervalSeconds, 10)
-            : undefined,
+          intervalSeconds,
+          activeWakeIntervalSeconds,
+          scanIntervalSeconds,
           watchedFilePath,
           thresholdBytes,
           requiresJobId: opts.requiresJob,

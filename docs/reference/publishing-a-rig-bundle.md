@@ -21,7 +21,12 @@ Two rules matter most for strangers:
 - **Keep everything inside the folder.** Every `agent_ref` should be `local:` and point inside it. A path that exists on
   your machine won't exist on anyone else's.
 - **Never put credentials in it.** No tokens, keys or `.env` files. `rig bundle create` refuses well-known sensitive
-  file names (such as `.env`, `.pem` and `.key`) anyway.
+  file names (such as `.env`, `.pem` and `.key`) anyway. It also refuses contained `.claude/.credentials.json`,
+  `.codex/auth.json` and `.pi/agent/auth.json`, including nested copies in agents or a carried project. Remove them
+  and rebuild. Only if recipients should have these logins (for example, your own internal test bundle) and their
+  owner agrees, `rig bundle create --include-login-files` records the exact included login-file paths in the
+  manifest and consumers show a notice; anyone with the bundle could read those files.
+  Unrecorded login files and other sensitive paths still fail. See [harness login files](rig-bundle.md#harness-login-files).
 
 Two optional files sit beside `rig.yaml`:
 - **`bundle.yaml`** declares what people need before installing: setup steps (`preconditions`, shown before install
@@ -111,8 +116,11 @@ an issue there with the same three things. A maintainer then writes the full ent
 defined in the [bundle formats reference](bundle-formats.md), with the parts only a review can produce, such as the
 pinned commit and each configuration's package digest.
 
-Rig names are unique on the site. If `registry/<your-team>.yaml` already exists, openrig-registry's registry check says the name is taken;
-choose a distinct one, for example `<taken-name>-<your-name>`.
+Rig names are unique on the site. If `registry/<your-team>.yaml` already exists, openrig-registry's registry check
+still replies that your submission was received, and says the name is taken; choose a distinct one, for example
+`<taken-name>-<your-name>`. A team whose `rig.yaml` name matches a listed team's, such as an unchanged copy of one,
+passes the checks with a notice for the maintainer about the shared name. Whether it's listed is the maintainer's
+review decision, not the checks'.
 
 What happens next:
 - a maintainer pins your link to an exact commit, runs the same check, and reads everything your bundle gives to an

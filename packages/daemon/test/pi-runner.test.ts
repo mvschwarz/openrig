@@ -11,7 +11,7 @@ import {
   prepareRunnerSidecar,
   type RunnerIo,
 } from "../src/adapters/pi-runner.js";
-import { PI_RUNNER_READY_MARKER, PI_RUNNER_EXIT_MARKER, type PiRunnerState } from "../src/adapters/pi-runner-protocol.js";
+import { PI_RUNNER_READY_MARKER, PI_RUNNER_EXIT_MARKER, buildPiRunnerCommand, buildPiChildArgs, type PiRunnerState } from "../src/adapters/pi-runner-protocol.js";
 
 const SESSION = "devpi-a@some-rig";
 const SESSION_FILE = "/state/pi/devpi-a@some-rig/sessions/2026_0197.jsonl";
@@ -358,6 +358,69 @@ describe("RunnerCore assistant reply mirror", () => {
   });
 });
 
+describe.each(["pi", "omp"] as const)("%s terminal diagnostic fallbacks", runtime => {
+  const notice = (detail: string) => `[${runtime}-runner] ERROR ${detail}`;
+  const unusable = ["", " \n\t ", "\u001b[2J\u001b]0;title\u0007\u202e", null, undefined, {}, 7];
+  const failure = (errorMessage: unknown, error: unknown, eventError: unknown) => ({
+    type: "message_end", error: eventError,
+    message: { role: "assistant", stopReason: "error", errorMessage, error },
+  });
+
+  it.each(unusable)(
+    "skips unusable diagnostic %j before later message and event details", detail => {
+      expect(mapPiEvent(failure(detail, "message detail", "event detail"), runtime).errorNotice)
+        .toBe(notice("message detail"));
+      expect(mapPiEvent(failure(detail, detail, "event detail"), runtime).errorNotice)
+        .toBe(notice("event detail"));
+      expect(mapPiEvent(failure(detail, detail, detail), runtime).errorNotice)
+        .toBe(notice("request failed"));
+    },
+  );
+
+  it.each(unusable)("skips unusable finalError %j before a later retry detail", detail => {
+    expect(mapPiEvent({ type: "auto_retry_end", success: false, finalError: detail, error: "retry detail" }, runtime).errorNotice)
+      .toBe(notice("retry detail"));
+    expect(mapPiEvent({ type: "auto_retry_end", success: false, finalError: detail, error: detail }, runtime).errorNotice)
+      .toBe(notice("request failed"));
+  });
+
+  it("keeps the first usable detail and ignores errors on successful events", () => {
+    expect(mapPiEvent(failure("first detail", "message detail", "event detail"), runtime).errorNotice)
+      .toBe(notice("first detail"));
+    expect(mapPiEvent(failure("request failed", "message detail", "event detail"), runtime).errorNotice)
+      .toBe(notice("request failed"));
+    expect(mapPiEvent({ type: "auto_retry_end", success: false, finalError: "final detail", error: "retry detail" }, runtime).errorNotice)
+      .toBe(notice("final detail"));
+    expect(mapPiEvent({ type: "auto_retry_end", success: true, finalError: "", error: "retry detail" }, runtime).errorNotice)
+      .toBeUndefined();
+    const event = failure("", "message detail", "event detail");
+    expect(mapPiEvent({ ...event, message: { ...event.message, stopReason: "stop" } }, runtime).errorNotice)
+      .toBeUndefined();
+    expect(mapPiEvent({ ...event, type: "turn_end" }, runtime).errorNotice)
+      .toBe(runtime === "omp" ? notice("message detail") : undefined);
+  });
+
+  it("cleans and bounds the selected fallback just like the primary detail", () => {
+    const detail = "\u001b[2J\u001b]0;title\u0007bad\r\nrequest\u0000\u202e" + "x".repeat(1000);
+    const expected = notice(("bad request " + "x".repeat(1000)).slice(0, 400));
+    expect(mapPiEvent(failure("", detail, "event detail"), runtime).errorNotice).toBe(expected);
+    expect(mapPiEvent({ type: "auto_retry_end", success: false, finalError: "", error: detail }, runtime).errorNotice)
+      .toBe(expected);
+  });
+
+  it("coalesces fallback failures and resets for a later turn", () => {
+    const { io, lines } = fakeIo();
+    const core = new RunnerCore(io, { sessionName: SESSION, nodeId: "node-1", launchId: "launch-77" }, { runtime });
+    const event = failure("", "message detail", "event detail");
+    const retry = { type: "auto_retry_end", success: false, finalError: "", error: "retry detail" };
+    for (const next of [event, { ...event, type: "turn_end" }, retry, retry]) core.handlePiLine(JSON.stringify(next));
+    expect(lines.filter(line => line.startsWith(notice("")))).toEqual([notice("message detail")]);
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify(retry));
+    expect(lines.filter(line => line.startsWith(notice("")))).toEqual([notice("message detail"), notice("retry detail")]);
+  });
+});
+
 describe("RunnerCore terminal assistant failures", () => {
   const failure = (errorMessage?: unknown, content: unknown[] = []) => ({
     type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage, content },
@@ -423,6 +486,34 @@ describe("RunnerCore terminal assistant failures", () => {
     const { core, lines } = readyCore();
     core.handlePiLine(JSON.stringify(failure(detail)));
     expect(errors(lines)).toEqual(["[pi-runner] ERROR request failed"]);
+  });
+
+  it("extracts fallback error detail from message.error or event.error when errorMessage is missing", () => {
+    const { core, lines } = readyCore();
+    // Fallback to message.error
+    core.handlePiLine(JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", stopReason: "error", error: "backend stream broke" },
+    }));
+    // Fallback to event.error
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({
+      type: "message_end",
+      error: "upstream service unavailable",
+      message: { role: "assistant", stopReason: "error" },
+    }));
+    // auto_retry_end fallback to event.error
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({
+      type: "auto_retry_end",
+      success: false,
+      error: "retry limit reached",
+    }));
+    expect(errors(lines)).toEqual([
+      "[pi-runner] ERROR backend stream broke",
+      "[pi-runner] ERROR upstream service unavailable",
+      "[pi-runner] ERROR retry limit reached",
+    ]);
   });
 
   it("ignores malformed message envelopes and does not dump thinking or tool arguments", () => {
@@ -504,6 +595,82 @@ describe("parseRunnerArgs", () => {
 
   it("rejects unknown flags loudly", () => {
     expect(() => parseRunnerArgs([...base, "--approve", "--resume"])).toThrow(/unknown flag/);
+  });
+
+  it("accepts --thinking verbatim (Pi warns on a level it does not know)", () => {
+    expect(parseRunnerArgs([...base, "--approve", "--thinking", "high"]).thinking).toBe("high");
+    expect(parseRunnerArgs([...base, "--approve", "--thinking", "bogus"]).thinking).toBe("bogus");
+    expect(parseRunnerArgs([...base, "--approve"]).thinking).toBeUndefined();
+  });
+
+  it("a --thinking VALUE that looks like a control flag is a value, not a flag", () => {
+    const parsed = parseRunnerArgs([...base, "--approve", "--thinking", "--approval-mode"]);
+    expect(parsed.thinking).toBe("--approval-mode");
+    expect(parsed.trust).toBe("approve");
+    const cmdBase = { runnerEntryPath: "/r.js", sessionName: SESSION, stateRoot: "/sr", cwd: "/work", trust: "approve" as const, launchId: "L1", runtime: "pi" as const };
+    const cmd = buildPiRunnerCommand({ ...cmdBase, thinking: "none" });
+    expect(parseRunnerArgs(cmd.split(" ").slice(2).map((w) => w.replace(/^'|'$/g, ""))).thinking).toBe("none");
+  });
+
+  it("still refuses genuinely incompatible trust control flags", () => {
+    expect(() => parseRunnerArgs([...base, "--approve", "--approval-mode", "yolo"])).toThrow(/explicit trust flag is required/);
+    expect(() => parseRunnerArgs([...base, "--runtime", "omp", "--approval-mode", "yolo", "--approve"])).toThrow(/OMP requires --approval-mode/);
+    expect(() => parseRunnerArgs([...base, "--runtime", "omp", "--approve"])).toThrow(/OMP requires --approval-mode/);
+  });
+
+  it("a flag-looking value elsewhere does not count as a Pi trust flag", () => {
+    const parsed = parseRunnerArgs([...base, "--runtime", "omp", "--approval-mode", "yolo", "--model", "--approve"]);
+    expect(parsed.model).toBe("--approve");
+    expect(parsed.trust).toBe("approve");
+  });
+});
+
+describe("--thinking in the runner command and the pi child argv", () => {
+  const cmdBase = { runnerEntryPath: "/r.js", sessionName: SESSION, stateRoot: "/sr", cwd: "/work", trust: "approve" as const, launchId: "L1" };
+  const childBase = { sessionsDir: "/sd", sessionName: SESSION, trust: "approve" as const };
+
+  it("runner command carries --thinking after --model, only when non-blank, never for omp", () => {
+    const cmd = buildPiRunnerCommand({ ...cmdBase, runtime: "pi", model: "zai/glm", thinking: " high " });
+    expect(cmd).toContain("--model 'zai/glm' --thinking 'high'");
+    expect(cmd.indexOf("--thinking")).toBeGreaterThan(cmd.indexOf("--launch-id"));
+    for (const thinking of [undefined, "", "  "]) {
+      expect(buildPiRunnerCommand({ ...cmdBase, runtime: "pi", thinking })).toBe(buildPiRunnerCommand({ ...cmdBase, runtime: "pi" }));
+    }
+    expect(buildPiRunnerCommand({ ...cmdBase, runtime: "omp", thinking: "high" })).toBe(buildPiRunnerCommand({ ...cmdBase, runtime: "omp" }));
+    expect(buildPiRunnerCommand({ ...cmdBase, runtime: "omp", thinking: "high" })).not.toContain("--thinking");
+  });
+
+  it("only a value of set-effort's shape is sent: Pi's levels and unknown words go through, flag-shaped and spaced values are left out", () => {
+    for (const thinking of ["off", "minimal", "low", "medium", "high", "xhigh", "max", "none"]) {
+      expect(buildPiRunnerCommand({ ...cmdBase, runtime: "pi", thinking })).toContain(`--thinking '${thinking}'`);
+      expect(buildPiChildArgs({ ...childBase, thinking })).toEqual(expect.arrayContaining(["--thinking", thinking]));
+    }
+    for (const thinking of ["--cwd", "very high", "x".repeat(33)]) {
+      expect(buildPiRunnerCommand({ ...cmdBase, runtime: "pi", thinking })).toBe(buildPiRunnerCommand({ ...cmdBase, runtime: "pi" }));
+      expect(buildPiChildArgs({ ...childBase, thinking })).not.toContain("--thinking");
+    }
+  });
+
+  it("a suffixed model passes through unchanged next to --thinking", () => {
+    const cmd = buildPiRunnerCommand({ ...cmdBase, runtime: "pi", model: "openrouter/x:high", thinking: "low" });
+    expect(cmd).toContain("--model 'openrouter/x:high' --thinking 'low'");
+    const args = buildPiChildArgs({ ...childBase, runtime: "pi", model: "openrouter/x:high", thinking: "low" });
+    expect(args).toContain("openrouter/x:high");
+    expect(args.slice(args.indexOf("--model"), args.indexOf("--model") + 4)).toEqual(["--model", "openrouter/x:high", "--thinking", "low"]);
+  });
+
+  it("child argv: --thinking present with a value, absent when blank, never for omp", () => {
+    expect(buildPiChildArgs({ ...childBase, thinking: "xhigh" })).toEqual(expect.arrayContaining(["--thinking", "xhigh"]));
+    for (const thinking of [undefined, "", " "]) {
+      expect(buildPiChildArgs({ ...childBase, thinking })).not.toContain("--thinking");
+    }
+    expect(buildPiChildArgs({ ...childBase, runtime: "omp", thinking: "high" })).toEqual(buildPiChildArgs({ ...childBase, runtime: "omp" }));
+  });
+
+  it("parseRunnerArgs round-trips the command's --thinking into the child argv", () => {
+    const cmd = buildPiRunnerCommand({ ...cmdBase, runtime: "pi", thinking: "medium" });
+    const parsed = parseRunnerArgs(cmd.split(" ").slice(2).map((w) => w.replace(/^'|'$/g, "")));
+    expect(buildPiChildArgs({ ...childBase, thinking: parsed.thinking })).toEqual(expect.arrayContaining(["--thinking", "medium"]));
   });
 });
 

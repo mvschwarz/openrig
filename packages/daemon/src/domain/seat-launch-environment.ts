@@ -142,7 +142,22 @@ export class SeatLaunchEnvironment {
       // assignments preserve shell lookup; /usr/bin/env would bypass it.
       if (target.runtime === "claude-code") {
         const assignments = Object.entries(env).map(([key, value]) => `${key}=${shellQuote(value)}`);
-        return `${assignments.join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${command}`;
+        const launch = `${assignments.join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${command}`;
+        // ksh calls a function without exporting a leading assignment that isn't already
+        // exported, so it keeps the form above, where every assignment reaches Claude.
+        if (!["bash", "zsh", "sh", "dash"].includes(shell)) return launch;
+        // A file command must replace the staging subshell so tmux observes
+        // Claude as the foreground process. Keep aliases/functions intact and
+        // pass the original leading assignments through a subshell-local function.
+        // The constant eval defers function-name parsing until alias lookup is ruled out.
+        return [
+          'if _openrig_claude_executable=$(command -v claude) && [ -f "$_openrig_claude_executable" ] && [ -x "$_openrig_claude_executable" ]; then',
+          '  case "$_openrig_claude_executable" in',
+          "    */*) eval 'claude() { exec \"$_openrig_claude_executable\" \"$@\"; }' ;;",
+          '  esac',
+          'fi',
+          launch,
+        ].join("\n");
       }
       const assignments = Object.entries(env).map(([key, value]) => shellQuote(`${key}=${value}`));
       return `/usr/bin/env ${assignments.join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${command}`;

@@ -1,3 +1,4 @@
+import { physicalSessionName } from "../session-registry.js";
 import { readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -194,8 +195,9 @@ export class OperatingPostureService {
    *  rig-scoped read the rig's name alone. */
   private inferenceSignals(ctx: OperatingContext, destination: string | null): { rigName: string | null; cwd: string | null } {
     if (destination) {
+      const physical = physicalSessionName(this.db, destination);
       const seat = this.db.prepare("SELECT n.cwd FROM sessions s JOIN nodes n ON n.id = s.node_id WHERE s.session_name = ? ORDER BY s.created_at DESC, s.rowid DESC LIMIT 1")
-        .get(destination) as { cwd: string | null } | undefined;
+        .get(physical) as { cwd: string | null } | undefined;
       return { rigName: rigFromSession(destination), cwd: seat?.cwd ?? null };
     }
     const rig = ctx.rigId ? this.db.prepare("SELECT name FROM rigs WHERE id = ?").get(ctx.rigId) as { name: string } | undefined : undefined;

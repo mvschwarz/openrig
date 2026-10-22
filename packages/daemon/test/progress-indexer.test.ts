@@ -16,6 +16,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Hono } from "hono";
+import { progressRoutes } from "../src/routes/progress.js";
 import { ProgressIndexer, readProgressRootsFromEnv } from "../src/domain/progress/progress-indexer.js";
 
 describe("UI Enhancement Pack v0 — readProgressRootsFromEnv", () => {
@@ -136,6 +138,24 @@ describe("UI Enhancement Pack v0 — ProgressIndexer", () => {
     expect(indexer.scan().files).toHaveLength(0);
   });
 
+  it.each(["````markdown\n```\n- [~] hidden\n~~~\n```` trailing text\n- [ ] hidden too\n````", "~~~example\n```\n~~~ trailing text\n- [~] hidden\n~~~~", "```unterminated"])("HTTP progress totals exclude fenced examples: %s", async (fence) => {
+    const closed = !fence.includes("unterminated");
+    const content = `# Actual progress\n- [x] shipped\n${fence.split("\n")[0]}\n## Example heading\n- [x] example\n${fence.split("\n").slice(1).join("\n")}\n${closed ? "- [ ] actual remaining\n" : ""}`;
+    writeFileSync(join(tempDir, "PROGRESS.md"), content);
+    const indexer = new ProgressIndexer({ roots: [{ name: "fixture", canonicalPath: tempDir }] });
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("progressIndexer" as never, indexer as never); await next(); });
+    app.route("/api/progress", progressRoutes());
+    const response = await app.request("/api/progress/tree");
+    expect(response.status).toBe(200);
+    const result = await response.json();
+    expect(result.aggregate).toEqual({ totalFiles: 1, totalRows: closed ? 2 : 1, totalDone: 1, totalBlocked: 0, totalActive: closed ? 1 : 0 });
+    expect(result.files[0].rows).toEqual([
+      { line: 2, depth: 0, status: "done", text: "shipped", kind: "checkbox" },
+      ...(closed ? [{ line: content.split("\n").length - 1, depth: 0, status: "active", text: "actual remaining", kind: "checkbox" }] : []),
+    ]);
+  });
+
   it("aggregate counts sum across files", () => {
     mkdirSync(join(tempDir, "ws", "x"), { recursive: true });
     writeFileSync(join(tempDir, "ws", "PROGRESS.md"), "- [x] a\n- [ ] b\n");
@@ -146,5 +166,26 @@ describe("UI Enhancement Pack v0 — ProgressIndexer", () => {
     expect(result.aggregate.totalDone).toBe(2);
     expect(result.aggregate.totalActive).toBe(1);
     expect(result.aggregate.totalBlocked).toBe(1);
+  });
+
+  it("parses a CRLF PROGRESS.md exactly like its LF twin", () => {
+    mkdirSync(join(tempDir, "lf"), { recursive: true });
+    mkdirSync(join(tempDir, "crlf"), { recursive: true });
+    const lf = [
+      "---", "slice: foo", "---",
+      "# Title", "## Section A", "- [x] shipped", "- [ ] remaining", "  - [~] blocked child",
+      "```md", "- [x] example only", "```", "- [ ] after fence", "",
+    ].join("\n");
+    writeFileSync(join(tempDir, "lf", "PROGRESS.md"), lf);
+    writeFileSync(join(tempDir, "crlf", "PROGRESS.md"), lf.replace(/\n/g, "\r\n"));
+
+    const read = (name: string) => {
+      const file = new ProgressIndexer({ roots: [{ name, canonicalPath: join(tempDir, name) }] }).scan().files[0]!;
+      return { title: file.title, rows: file.rows, counts: file.counts };
+    };
+
+    const expected = read("lf");
+    expect(expected.rows.length).toBeGreaterThan(0);
+    expect(read("crlf")).toEqual(expected);
   });
 });

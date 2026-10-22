@@ -1,3 +1,4 @@
+import { currentClaudeMcpMenu } from "./claude-mcp-menu.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { codexPostureArg } from "../adapters/yolo-mode.js";
 
@@ -34,6 +35,8 @@ export function buildNativeResumeCommand(
   resumeToken: string | null,
   sessionName?: string | null,
   codexConfigProfile?: string | null,
+  /** Codex: the seat's recorded daemon choice; only a positive true adds --no-daemon (absent and false print as before). */
+  codexDaemonOptOut?: boolean,
 ): string | null {
   if (!resumeToken) return null;
   if (runtime === "claude-code") {
@@ -41,7 +44,7 @@ export function buildNativeResumeCommand(
     return `claude --resume ${shellQuote(resumeToken)}${nameSuffix}`;
   }
   if (runtime === "codex") {
-    return buildCodexResumeCore(resumeToken, codexConfigProfile);
+    return buildCodexResumeCore(resumeToken, codexConfigProfile, undefined, undefined, undefined, undefined, undefined, codexDaemonOptOut === true);
   }
   return null;
 }
@@ -117,14 +120,14 @@ export function assessNativeResumeProbe(
         detail: "Claude is waiting for workspace trust approval before the session can become interactive.",
       };
     }
-    if (looksLikeClaudeMcpApprovalPrompt(paneContent)) {
+    if (currentClaudeMcpMenu(paneContent) || looksLikeClaudeMcpApprovalPrompt(paneContent)) {
       return {
         status: "inconclusive",
         code: "mcp_gate",
         detail: "Claude is waiting for project MCP server approval before the session can become interactive.",
       };
     }
-    if (looksLikeClaudeLoginPrompt(paneContent)) {
+    if (hasCurrentClaudeLoginRefusal(paneContent)) {
       return {
         status: "failed",
         code: "login_required",
@@ -209,14 +212,17 @@ export function assessNativeResumeProbe(
         detail: "Codex is waiting for hook trust approval before the session can become interactive.",
       };
     }
-    if (looksLikeCodexTui(paneContent)) {
+    // Only the current-format panel can override TUI evidence. Legacy text
+    // retains its existing position after the TUI check, including scrollback.
+    const currentTrustPrompt = looksLikeCurrentCodexTrustPrompt(paneContent);
+    if (!currentTrustPrompt && looksLikeCodexTui(paneContent)) {
       return {
         status: "resumed",
         code: "active_runtime",
         detail: "Codex is running with an active interactive TUI in the probe pane.",
       };
     }
-    if (looksLikeCodexTrustPrompt(paneContent)) {
+    if (currentTrustPrompt || looksLikeCodexTrustPrompt(paneContent)) {
       return {
         status: "inconclusive",
         code: "trust_gate",
@@ -325,9 +331,42 @@ function looksLikeClaudeResumeSelectionPrompt(paneContent: string): boolean {
   return numberedOption;
 }
 
-function looksLikeClaudeLoginPrompt(paneContent: string): boolean {
-  return paneContent.includes("Not logged in")
-    && paneContent.includes("Run /login");
+// Claude's interactive refusals of a request for a missing, expired or revoked login (code.claude.com/docs/en/errors).
+// Only these exact messages count. A 401 reads "Please run /login · API Error: 401 …" with a varying tail, and a
+// reply or tool output can start with the same words, so this input can't tell a real one apart.
+const CLAUDE_LOGIN_REFUSALS = new Set([
+  "Not logged in · Please run /login",
+  "Login expired · Please run /login",
+  "OAuth token revoked · Please run /login",
+]);
+
+// A refusal blocks only as Claude's latest response. The persistent "Not logged in · Run /login" footer says only
+// that Claude holds no credential of its own, and a gateway can still authenticate its requests. Claude starts a
+// reply with ● or ⏺ at column 0 and a result with ⎿ two cells in, continuing either on indented rows up to a blank
+// row; an indented marker is quoted text. The last ❯ row is the input box only when no response follows it;
+// otherwise it is a submitted prompt and no box is drawn. A refusal counts when it is the last response after the
+// last submitted prompt, so older scrollback, quoted text and a refusal followed by a newer reply or prompt do not.
+function hasCurrentClaudeLoginRefusal(paneContent: string): boolean {
+  const lines = paneContent.split(/\r?\n/);
+  const isPrompt = (line: string) => /^\s*❯/.test(line);
+  const isResponse = (line: string) => /^[●⏺]/.test(line) || /^ {2}⎿/.test(line);
+  const prompts: number[] = [];
+  const responses: Array<{ at: number; text: string }> = [];
+  for (let at = 0; at < lines.length; at++) {
+    const line = lines[at]!;
+    if (isPrompt(line)) prompts.push(at);
+    if (!isResponse(line)) continue;
+    let text = line.replace(/^\s*[●⏺⎿]/, "");
+    // Claude wraps its own rows with a short hanging indent; a right-aligned footer is not a continuation.
+    for (let next = at + 1; next < lines.length && /^ {1,6}\S/.test(lines[next]!) && !isPrompt(lines[next]!)
+      && !isResponse(lines[next]!); next++) text += ` ${lines[next]}`;
+    responses.push({ at, text: text.replace(/\s+/g, " ").trim() });
+  }
+  const lastPrompt = prompts.at(-1) ?? -1;
+  const inputBox = responses.some(({ at }) => at > lastPrompt) ? lines.length : lastPrompt;
+  const turnStart = prompts.filter((at) => at < inputBox).at(-1) ?? -1;
+  const latest = responses.filter(({ at }) => at > turnStart && at < inputBox).at(-1)?.text;
+  return latest !== undefined && CLAUDE_LOGIN_REFUSALS.has(latest);
 }
 
 function looksLikeClaudeMcpApprovalPrompt(paneContent: string): boolean {
@@ -365,11 +404,7 @@ function looksLikeCodexTui(paneContent: string): boolean {
   // A custom row must not make an unresolved trust/update panel disappear.
   const hasCustomModelFooter = !looksLikeCodexTrustPrompt(current)
     && !hasCodexUpdateHeader(current) && !current.includes("Updating Codex")
-    && recentLines.split("\n").some((line) => {
-      const fields = line.trim().split(" · ");
-      return /^[ \t]{2,}\S/.test(line) && fields.length > 1
-        && fields.some((field) => /^gpt-\d[\w.-]*(?: [\w-]+)?$/i.test(field));
-    });
+    && recentLines.split("\n").some(isCodexModelFooterLine);
   return hasPromptLine && (current.includes("OpenAI Codex (v") || hasModelFooter || hasCustomModelFooter);
 }
 
@@ -395,8 +430,34 @@ function looksLikeCodexAuthRefusal(paneContent: string): boolean {
 }
 
 function looksLikeCodexTrustPrompt(paneContent: string): boolean {
+  // Preserve legacy wording semantics, including scrollback matching.
   return paneContent.includes("Do you trust the contents of this directory?")
     && paneContent.includes("Yes, continue");
+}
+
+function isCodexModelFooterLine(line: string): boolean {
+  // Preserve the existing default-footer shape, including multiple modifiers.
+  if (/^\s{2,}gpt-[^\n]+ · [^\n]+$/.test(line)) return true;
+  const fields = line.trim().split(" · ");
+  return /^[ \t]{2,}\S/.test(line) && fields.length > 1
+    && fields.some((field) => /^gpt-\d[\w.-]*(?: [\w-]+)?$/i.test(field));
+}
+
+function looksLikeCurrentCodexTrustPrompt(paneContent: string): boolean {
+  const headings = [...paneContent.matchAll(/^[ \t]*Trust this folder\?/gm)];
+  // A trailing partial redraw must not erase the latest complete panel.
+  for (let index = headings.length - 1; index >= 0; index--) {
+    const heading = headings[index]!;
+    const start = heading.index! + heading[0].length;
+    const panel = paneContent.slice(start, headings[index + 1]?.index);
+    const choice = /^[ \t]*(?:[›»]\s*)?\d+\.\s+Trust and continue[ \t]*$/m.exec(panel);
+    if (!choice) continue;
+    const afterChoice = paneContent.slice(start + choice.index + choice[0].length);
+    return !hasCodexComposer(afterChoice)
+      && !/(^|\n)\s{2,}gpt-[^\n]+ · [^\n]+(?:\n|$)/.test(afterChoice)
+      && !afterChoice.split("\n").some(isCodexModelFooterLine);
+  }
+  return false;
 }
 
 function looksLikeCodexHookReviewPrompt(paneContent: string): boolean {

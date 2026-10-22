@@ -148,8 +148,9 @@ describe("0.5.2-07 A2-3 — model-fidelity enumeration guard", () => {
     const columns = handover.match(/SELECT ([\w,\s]+) FROM nodes\b/)?.[1]?.split(/\s*,\s*/);
     expect(columns, "seat-handover-service lookupNode must SELECT effort").toContain("effort");
     expect(handover, "NodeRow must carry effort").toMatch(/effort: string \| null/);
-    expect(handover, "createSuccessor must forward effort onto the successor node").toMatch(
-      /effort: node\.effort/,
+    // OPR.0.7.0.7: the successor carries the shared resolver's effort (saved seat choice, else authored).
+    expect(handover, "createSuccessor must forward the resolved effort onto the successor node").toMatch(
+      /effort: readSeatEffort\(this\.db, node\.id\)\?\.effective/,
     );
     const launcher = read("domain/successor-session-launcher.ts");
     expect(launcher, "SuccessorNode must declare effort").toMatch(/effort\?: string \| null/);

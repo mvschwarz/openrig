@@ -37,6 +37,78 @@ interface TopPayload {
   windowHours: number;
 }
 
+interface CostPayload {
+  seats: Array<Record<string, unknown> & { seatSession: string; status: string }>;
+  note: string;
+}
+
+const tok = (t: unknown): string => {
+  const v = t as { input?: number | null; output?: number | null } | undefined;
+  return `tokens in ${v?.input ?? "?"} / out ${v?.output ?? "?"}`;
+};
+
+/** A real estimate below a cent prints as "<$0.01", never "$0.00" (which reads as zero); JSON keeps the exact value. */
+export function formatUsd(value: number): string {
+  return value > 0 && value < 0.005 ? "<$0.01" : `$${value.toFixed(2)}`;
+}
+
+/** A Pi seat: the model-priced estimate summed over its own persisted entries, with what isn't in it named. */
+function piCostLine(seat: CostPayload["seats"][number]): string {
+  const w = (seat["window"] ?? {}) as { piSessionId?: string; since?: string | null; asOf?: string | null };
+  const e = (seat["entries"] ?? {}) as { own?: number; ownWithoutCost?: number; errorOrAborted?: number;
+    inherited?: { count: number; costUsd: number | null }; unknownOrigin?: { count: number; costUsd: number | null } };
+  const t = (seat["tokens"] ?? {}) as { input?: number; output?: number };
+  const extras = [
+    e.ownWithoutCost ? `${e.ownWithoutCost} entr${e.ownWithoutCost === 1 ? "y" : "ies"} without a cost` : "",
+    e.errorOrAborted ? `${e.errorOrAborted} error/aborted turn${e.errorOrAborted === 1 ? "" : "s"} included` : "",
+    e.inherited?.count ? `${e.inherited.count} inherited from the fork, not counted${e.inherited.costUsd !== null ? ` (${formatUsd(e.inherited.costUsd)})` : ""}` : "",
+    e.unknownOrigin?.count ? `${e.unknownOrigin.count} of unknown origin, not counted${e.unknownOrigin.costUsd !== null ? ` (${formatUsd(e.unknownOrigin.costUsd)})` : ""}` : "",
+  ].filter(Boolean).join("; ");
+  const head = seat.status === "reported"
+    ? `${formatUsd(Number(seat["costUsd"]))} model-priced estimate (Pi persisted entries, ${e.own ?? 0} own entries) for Pi session ${w.piSessionId}${w.since ? ` since ${w.since}` : ""}${w.asOf ? `, last ${w.asOf}` : ""}`
+    : `cost: not reported (${seat["reason"]}) for Pi session ${w.piSessionId}`;
+  const charge = providerChargeText(seat["providerCharge"]);
+  return `${seat.seatSession}  ${head}${extras ? `; ${extras}` : ""}${charge ? `; ${charge}` : ""}  tokens in ${t.input ?? "?"} / out ${t.output ?? "?"}`;
+}
+
+/** OpenRouter's actual charge, beside the estimate: never summed with it, and named when it isn't there. */
+function providerChargeText(raw: unknown): string {
+  if (!raw || typeof raw !== "object") return "";
+  const c = raw as { status?: string; costUsd?: number; estimateForChargedUsd?: number | null;
+    requests?: { covered?: number; charged?: number; pending?: number; unavailable?: { count: number; reasons: Record<string, number> };
+      notCovered?: { count: number } }; accountContext?: { credentialSources?: string[]; workspaceIds?: string[] } };
+  const q = c.requests ?? {};
+  const top = (reasons: Record<string, number> | undefined) => Object.entries(reasons ?? {}).sort((a, b) => b[1] - a[1])[0]?.[0];
+  const notCovered = q.notCovered?.count ? `, ${q.notCovered.count} not covered` : "";
+  switch (c.status) {
+    case "reported":
+    case "partial": {
+      const beside = c.estimateForChargedUsd !== null && c.estimateForChargedUsd !== undefined ? `, Pi estimate for them ${formatUsd(c.estimateForChargedUsd)}` : "";
+      const rest = [q.pending ? `${q.pending} pending` : "", q.unavailable?.count ? `${q.unavailable.count} unavailable (${top(q.unavailable.reasons)})` : ""].filter(Boolean).join(", ");
+      const who = c.accountContext?.credentialSources?.length ? ` via ${c.accountContext.credentialSources.join(", ")}` : "";
+      return `OpenRouter charge ${formatUsd(Number(c.costUsd))} USD for ${q.charged} of ${q.covered} requests${who}${beside}${rest ? `; ${rest}` : ""}${notCovered} (provider-reported, not added to the estimate)`;
+    }
+    case "pending": return `OpenRouter charge pending for ${q.pending} request${q.pending === 1 ? "" : "s"}${notCovered}`;
+    case "unavailable": return `OpenRouter charge unavailable (${top(q.unavailable?.reasons)})${notCovered}`;
+    case "none": return q.covered ? `OpenRouter charge not looked up (usage.pi_openrouter_charge off, or not run yet)${notCovered}` : (q.notCovered?.count ? `OpenRouter charge: ${q.notCovered.count} request${q.notCovered.count === 1 ? "" : "s"} not covered` : "");
+    default: return "";
+  }
+}
+
+/** One labelled line per seat. Never prints a dollar figure the route didn't report. */
+export function costLine(seat: CostPayload["seats"][number]): string {
+  if (seat["runtime"] === "pi") return piCostLine(seat);
+  const w = (seat["window"] ?? {}) as { nativeSessionId?: string | null; since?: string; asOf?: string | null };
+  if (seat.status === "reported") {
+    const stale = seat["stale"] ? `, STALE (${seat["ageSeconds"] ?? "?"}s old; kept as history)` : "";
+    const resets = Number(seat["resets"]) > 0 ? `, ${seat["resets"]} reset${seat["resets"] === 1 ? "" : "s"}` : "";
+    return `${seat.seatSession}  ${formatUsd(Number(seat["costUsd"]))} client-side estimate (Claude statusline) for session ${w.nativeSessionId} since ${w.since}, as of ${w.asOf}${resets}${stale}  ${tok(seat["tokens"])}`;
+  }
+  if (seat.status === "absent") return `${seat.seatSession}  cost: not reported (${seat["reason"]})  ${tok(seat["tokens"])}`;
+  if (seat.status === "no-cost-method") return `${seat.seatSession}  ${tok(seat["tokens"])}  cost: ${seat["note"]}`;
+  return `${seat.seatSession}  cost: unknown (${seat["reason"]})`;
+}
+
 export function usageCommand(depsOverride?: StatusDeps): Command {
   const cmd = new Command("usage").description(
     "Per-seat token telemetry over time (series + top-N burn) — facts for the oversight detector",
@@ -109,6 +181,45 @@ export function usageCommand(depsOverride?: StatusDeps): Command {
     });
 
   cmd
+    .command("cost")
+    .description("what each seat's harness reports about cost, beside tokens: kind, source, window and coverage")
+    .option("--seat <session>", "one seat session")
+    .option("--json", "machine-readable (verbatim route payload)")
+    .addHelpText("after", `
+Claude seats show the statusline's cost.total_cost_usd: a client-side estimate, cumulative for one
+native session since its last reset (not an invoice). Codex seats show tokens and that the inspected
+method reports no cost. A missing figure reads as missing and an old one as stale, never as $0; no
+subscription window is shown in dollars. Earlier cost values stay in rig usage series --lane context --json.
+With usage.pi_cost_facts on (default off), Pi seats show Pi's model-priced estimate summed over
+their own persisted session entries, each counted once; entries a fork copied in are shown apart and
+not counted, and an entry without a cost is named, not counted as zero.
+With usage.pi_openrouter_charge on as well (default off), OpenRouter's actual charge for those requests
+is shown beside the estimate (never added to it), when the seat's OpenRouter key is the one OpenRig
+forwarded; requests it can't charge are counted with the reason. Changes to either Pi switch take
+effect when the seat next launches or resumes; a running seat keeps its launch selection. Outcomes
+recorded while the switches were on stay visible.`)
+    .action(async (opts: { seat?: string; json?: boolean }) => {
+      const deps = getDeps();
+      const client = await getClient(deps);
+      if (!client) return;
+      const params = new URLSearchParams();
+      if (opts.seat) params.set("seat", opts.seat);
+      const res = await client.get<CostPayload>(`/api/telemetry/usage/cost${params.size ? `?${params.toString()}` : ""}`);
+      if (handleHttpError(res, "usage cost", opts.json)) return;
+      if (opts.json) {
+        console.log(JSON.stringify(res.data, null, 2));
+        return;
+      }
+      const body = res.data;
+      if (body.seats.length === 0) {
+        console.log("no usage samples yet: no seat has reported tokens or cost");
+        return;
+      }
+      for (const seat of body.seats) console.log(costLine(seat));
+      console.log(body.note);
+    });
+
+  cmd
     .command("series")
     .description("raw per-seat usage samples, oldest first")
     .option("--seat <session>", "filter to one seat session")
@@ -128,7 +239,7 @@ export function usageCommand(depsOverride?: StatusDeps): Command {
       if (opts.until) params.set("until", opts.until);
       if (opts.limit) params.set("limit", opts.limit);
       const qs = params.toString();
-      const res = await client.get<{ rows: Array<Record<string, unknown>> }>(
+      const res = await client.get<{ rows: Array<Record<string, unknown>>; advisories?: string[] }>(
         `/api/telemetry/usage/series${qs ? `?${qs}` : ""}`,
       );
       if (handleHttpError(res, "usage series", opts.json)) return;
@@ -136,6 +247,8 @@ export function usageCommand(depsOverride?: StatusDeps): Command {
         console.log(JSON.stringify(res.data, null, 2));
         return;
       }
+      // An advisory (e.g. a bound that isn't a date or time) goes to stderr, so stdout stays the series.
+      for (const advisory of res.data.advisories ?? []) console.error(`note: ${advisory}`);
       const rows = res.data.rows;
       if (rows.length === 0) {
         console.log("no samples match — the series is empty for this filter");

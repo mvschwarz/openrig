@@ -1,6 +1,7 @@
 import { resolve, isAbsolute } from "node:path";
 import { statSync } from "node:fs";
 import { Command } from "commander";
+import { normalizeWorkflowScope, WorkflowScopeError } from "@openrig/daemon/workflow-scope";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, daemonStatusGuard } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
@@ -116,6 +117,37 @@ export function printWorkflowAdvisories(advisories: string[] | undefined): void 
   for (const line of advisories) {
     process.stderr.write(`⚠ workflow advisory: ${line}\n`);
   }
+}
+
+/** The scope flags shared by `workflow instantiate` and `workflow run`, as the `scope` object the daemon takes. What the
+ *  CLI can check without the daemon (id shapes, reserved or contradicting tags) is refused here as a usage error, using
+ *  the daemon's own normalizer. What only the daemon can check (an unknown --project) is not: the daemon creates the
+ *  instance unscoped and says so in the response advisories, which both verbs print. */
+function workflowScopeBody(
+  opts: { project?: string; mission?: string; slice?: string; tags?: string },
+  command: { error: (message: string, options?: { code?: string }) => never },
+) {
+  const tags = opts.tags ? opts.tags.split(",").map((t) => t.trim()).filter(Boolean) : undefined;
+  const scope = {
+    ...(opts.project ? { project: opts.project } : {}),
+    ...(opts.mission ? { mission: opts.mission } : {}),
+    ...(opts.slice ? { slice: opts.slice } : {}),
+    ...(tags && tags.length > 0 ? { tags } : {}),
+  };
+  if (Object.keys(scope).length === 0) return {};
+  try {
+    normalizeWorkflowScope(scope);
+  } catch (err) {
+    if (err instanceof WorkflowScopeError) command.error(`error: ${err.message} (${err.code})`, { code: "workflow.scope.invalid" });
+    throw err;
+  }
+  return { scope };
+}
+
+/** True when the daemon created the instance but could not apply the scope that was sent. */
+function scopeNotApplied(body: unknown): boolean {
+  const fields = (body as { scopeIgnored?: { fields?: unknown } } | null | undefined)?.scopeIgnored?.fields;
+  return Array.isArray(fields) && fields.includes("scope");
 }
 
 /** Preserve discovered workflow IDs while resolving explicit paths and local files. */
@@ -265,6 +297,10 @@ Examples:
     .requiredOption("--created-by <session>", "Session creating the instance (canonical <member>@<rig>)")
     .option("--entry-owner <session>", "Override default entry-step owner")
     .option("--rig <name>", "Bind the instance to this rig (overrides the spec's target.rig default; roles resolve to seats on this rig)")
+    .option("--project <id>", "Catalogued project this run works for; stamped as project:<id> on every packet it creates. A project the daemon does not know creates the instance UNSCOPED, with an advisory naming it")
+    .option("--mission <id>", "Mission this run works for; stamped as mission:<id> on every packet")
+    .option("--slice <id>", "Slice this run works for; stamped as slice:<id> on every packet. They show on the slice's Queue tab when the Projects view is scoped to the same project, so pass --project too")
+    .option("--tags <tags>", "Comma-separated tags stamped on every packet (composes with --project/--mission/--slice; workflow-owned tags are refused)")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Examples:
@@ -276,14 +312,25 @@ Examples:
       --root-objective "Run dogfood" \\
       --created-by driver@my-rig \\
       --entry-owner qa@my-rig --json
+
+  # packets show on slice 01-build's Queue tab in the Projects view
+  $ rig workflow instantiate ./my-spec.workflow.md \\
+      --root-objective "Build it" \\
+      --created-by driver@my-rig \\
+      --project my-project --mission m1 --slice 01-build --tags ticket-7
 `)
     .action(async (specPath: string, opts: {
       rootObjective: string;
       createdBy: string;
       entryOwner?: string;
       rig?: string;
+      project?: string;
+      mission?: string;
+      slice?: string;
+      tags?: string;
       json?: boolean;
-    }) => {
+    }, command: Command) => {
+      const scopeBody = workflowScopeBody(opts, command);
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const res = await client.post<{
@@ -297,6 +344,7 @@ Examples:
           createdBySession: opts.createdBy,
           entryOwnerSession: opts.entryOwner,
           targetRig: opts.rig,
+          ...scopeBody,
         });
         printResult(opts.json ?? false, res.data, res.status);
         printWorkflowAdvisories(res.data?.advisories);
@@ -306,8 +354,8 @@ Examples:
         const owner = asString(body.entryOwnerSession) ?? opts.entryOwner ?? "(default from spec)";
         const boundRig = asString(body.instance?.boundRig ?? undefined);
         printOutcomeSummary(opts.json ?? false, res.status, {
-          what: `Instantiated workflow from ${specPath} (instance ${instanceId})`,
-          state: `${body.instance?.status ?? "active"}${boundRig ? `; bound to rig ${boundRig}` : ""}; entry packet ${entryPacketId ?? "pending"} owned by ${owner}`,
+          what: `Instantiated workflow from ${specPath} (instance ${instanceId})${scopeNotApplied(res.data) ? " WITHOUT the scope you asked for" : ""}`,
+          state: `${body.instance?.status ?? "active"}${scopeNotApplied(res.data) ? "; UNSCOPED (scope not applied, see advisory above)" : ""}${boundRig ? `; bound to rig ${boundRig}` : ""}; entry packet ${entryPacketId ?? "pending"} owned by ${owner}`,
           next: entryPacketId
             ? `Inspect: rig workflow show ${instanceId} | Open packet: rig queue show ${entryPacketId}`
             : `Inspect: rig workflow show ${instanceId}`,
@@ -321,7 +369,7 @@ Examples:
     .requiredOption("--instance <id>", "Workflow instance id")
     .requiredOption("--current-packet <qitem-id>", "qitem being closed (must be on instance frontier)")
     .requiredOption("--exit <kind>", "Closure exit kind: handoff | waiting | done | failed")
-    .requiredOption("--actor-session <session>", "Session closing the packet (owner-as-author)")
+    .option("--actor-session <session>", "Your session, only when it can't be derived from the caller (a managed seat's is): recorded as claimed")
     .option("--result-note <text>", "Closure result note (audit context)")
     .option("--evidence-ref <ref>", "Record attributed progress evidence; a changed reference resets an intentional-wait reminder")
     .option("--wait-for-proof <scope>", "For waiting: watch a slice proof scope through its current attention revision")
@@ -338,28 +386,27 @@ Examples:
       --instance WF01ABC \\
       --current-packet QITEM-123 \\
       --exit handoff \\
-      --actor-session driver@my-rig \\
       --result-note "implementation green; ready for review"
 
   # close the run cleanly
   $ rig workflow project --instance WF01ABC --current-packet QITEM-9 \\
-      --exit done --actor-session orch-lead@my-rig
+      --exit done
 
   # block on an external gate
   $ rig workflow project --instance WF01ABC --current-packet QITEM-4 \\
-      --exit waiting --actor-session qa@my-rig \\
+      --exit waiting \\
       --blocked-on "founder-gate-2"
 
   # also wait for the current outcome of a slice (no copied readiness)
   $ rig workflow project --instance WF01ABC --current-packet QITEM-4 \\
-      --exit waiting --actor-session qa@my-rig \\
+      --exit waiting \\
       --blocked-on QITEM-3 --wait-for-proof release-example/slices/01-build
 `)
     .action(async (opts: {
       instance: string;
       currentPacket: string;
       exit: string;
-      actorSession: string;
+      actorSession?: string;
       resultNote?: string;
       evidenceRef?: string;
       waitForProof?: string;
@@ -405,6 +452,7 @@ Examples:
           nextQitemId?: string | null;
           nextOwnerSession?: string | null;
           instance?: { status?: string };
+          advisories?: string[];
         }>("/api/workflow/project", {
           instanceId: opts.instance,
           currentPacketId: opts.currentPacket,
@@ -426,6 +474,7 @@ Examples:
           nextOwnerSession: opts.nextOwner,
         });
         printResult(opts.json ?? false, res.data, res.status);
+        printWorkflowAdvisories(res.data?.advisories);
         const body = res.data ?? {};
         const closedId = asString(body.closurePriorPacketId) ?? opts.currentPacket;
         const nextId = asString(body.nextQitemId);
@@ -617,7 +666,7 @@ Examples:
 Read-only: reports where the instance is and how it got there so the
 frontier owner can continue truthfully. To actually advance, the packet
 OWNER closes it via:
-  $ rig workflow project --instance <id> --current-packet <qitem> --exit <exit> --actor-session <you>
+  $ rig workflow project --instance <id> --current-packet <qitem> --exit <exit>
 
 Examples:
   $ rig workflow continue WF01ABC
@@ -685,6 +734,10 @@ Examples:
     .requiredOption("--created-by <session>", "Session creating the instance (canonical <member>@<rig>)")
     .option("--entry-owner <session>", "Override default entry-step owner")
     .option("--rig <name>", "Bind the instance to this rig (overrides the spec's target.rig default; roles resolve to seats on this rig)")
+    .option("--project <id>", "Catalogued project this run works for; stamped as project:<id> on every packet it creates. A project the daemon does not know creates the instance UNSCOPED, with an advisory naming it")
+    .option("--mission <id>", "Mission this run works for; stamped as mission:<id> on every packet")
+    .option("--slice <id>", "Slice this run works for; stamped as slice:<id> on every packet. They show on the slice's Queue tab when the Projects view is scoped to the same project, so pass --project too")
+    .option("--tags <tags>", "Comma-separated tags stamped on every packet (composes with --project/--mission/--slice; workflow-owned tags are refused)")
     .option("--json", "Stream events as JSON lines for agents")
     .addHelpText("after", `
 Streams each step event as it happens; exits when the workflow reaches
@@ -703,8 +756,13 @@ Examples:
       createdBy: string;
       entryOwner?: string;
       rig?: string;
+      project?: string;
+      mission?: string;
+      slice?: string;
+      tags?: string;
       json?: boolean;
-    }) => {
+    }, command: Command) => {
+      const scopeBody = workflowScopeBody(opts, command);
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const res = await client.post<{
@@ -717,6 +775,7 @@ Examples:
           createdBySession: opts.createdBy,
           entryOwnerSession: opts.entryOwner,
           targetRig: opts.rig,
+          ...scopeBody,
         });
         printWorkflowAdvisories(res.data?.advisories);
         // The daemon returns the nested InstantiateResult shape
@@ -731,7 +790,7 @@ Examples:
           printResult(opts.json ?? false, res.data, res.status);
           return;
         }
-        if (!opts.json) console.log(`● instance ${instanceId} created — following`);
+        if (!opts.json) console.log(`● instance ${instanceId} created${scopeNotApplied(res.data) ? " UNSCOPED (scope not applied, see advisory above)" : ""} — following`);
         const code = await followInstance(client, instanceId, { json: opts.json ?? false });
         if (code !== 0) process.exitCode = code;
       });
@@ -767,7 +826,7 @@ Examples:
     .command("route <instanceId>")
     .description("Re-route the current frontier step to a new owner (same step, honest handoff closure; never advances)")
     .requiredOption("--to <session>", "New owner session (canonical <member>@<rig>)")
-    .requiredOption("--actor-session <session>", "Session performing the re-route (recorded as provenance)")
+    .option("--actor-session <session>", "Your session, only when it can't be derived from the caller (a managed seat's is): recorded as claimed")
     .option("--packet <qitem-id>", "Frontier packet to route (required when more than one is live)")
     .option("--reason <text>", "Why the step is being re-routed (recorded in the audit trail)")
     .option("--json", "JSON output for agents")
@@ -778,12 +837,11 @@ owner's stale close attempts are structurally rejected afterwards
 (packet_not_on_frontier).
 
 Examples:
-  $ rig workflow route WF01ABC --to dev2-driver@my-rig \\
-      --actor-session orch-lead@my-rig --reason "owner seat dead"
+  $ rig workflow route WF01ABC --to dev2-driver@my-rig --reason "owner seat dead"
 `)
     .action(async (instanceId: string, opts: {
       to: string;
-      actorSession: string;
+      actorSession?: string;
       packet?: string;
       reason?: string;
       json?: boolean;
@@ -808,7 +866,7 @@ Examples:
         printOutcomeSummary(opts.json ?? false, res.status, {
           what: `Re-routed step ${body.stepId ?? "?"} from ${body.fromSession ?? "?"} to ${body.toSession ?? opts.to} (packet ${body.closedPacketId ?? "?"} → ${body.newPacketId ?? "?"})`,
           state: `instance ${instanceId} = ${body.instanceStatus ?? "active"}; same step, new owner; no step advanced`,
-          next: `The new owner advances via: rig workflow project --instance ${instanceId} --current-packet ${body.newPacketId ?? "<packet>"} --exit <exit> --actor-session ${opts.to}`,
+          next: `The new owner advances via: rig workflow project --instance ${instanceId} --current-packet ${body.newPacketId ?? "<packet>"} --exit <exit>`,
         });
       });
     });
@@ -820,7 +878,7 @@ Examples:
   cmd
     .command("resume <instanceId>")
     .description("Redrive a FAILED instance from its failed step (completed steps never re-run; one fresh max_hops window)")
-    .requiredOption("--actor-session <session>", "Session performing the resume (recorded as provenance)")
+    .option("--actor-session <session>", "Your session, only when it can't be derived from the caller (a managed seat's is): recorded as claimed")
     .option("--occurrence <failed-qitem-id>", "Failure occurrence to redrive (required when more than one is unresolved)")
     .option("--decision <text>", "Durable instruction for the step owner (lands in the redrive packet)")
     .option("--json", "JSON output for agents")
@@ -832,11 +890,11 @@ resolved exception occurrence closes; a NEW failure of the same step
 raises a NEW occurrence honestly.
 
 Examples:
-  $ rig workflow resume WF01ABC --actor-session orch-lead@my-rig \\
+  $ rig workflow resume WF01ABC \\
       --decision "flaky fixture fixed in commit abc123 — retry"
 `)
     .action(async (instanceId: string, opts: {
-      actorSession: string;
+      actorSession?: string;
       occurrence?: string;
       decision?: string;
       json?: boolean;
@@ -859,7 +917,7 @@ Examples:
         printOutcomeSummary(opts.json ?? false, res.status, {
           what: `Redrove instance ${instanceId} from step ${body.stepId ?? "?"} (redrive #${body.resumeCount ?? "?"}; packet ${body.newPacketId ?? "?"} → ${body.ownerSession ?? "?"}; ${body.exceptionItemsClosed ?? 0} exception item(s) resolved)`,
           state: `instance ${instanceId} = active, rebound to ${body.stepId ?? "?"}; completed steps untouched; fresh max_hops window`,
-          next: `The owner advances via: rig workflow project --instance ${instanceId} --current-packet ${body.newPacketId ?? "<packet>"} --exit <exit> --actor-session ${body.ownerSession ?? "<owner>"}`,
+          next: `The owner advances via: rig workflow project --instance ${instanceId} --current-packet ${body.newPacketId ?? "<packet>"} --exit <exit>`,
         });
       });
     });
@@ -868,9 +926,9 @@ Examples:
     .command("abort <instanceId>")
     .description("Transactionally cancel every live packet and abort the whole workflow instance")
     .requiredOption("--reason <text>", "Why the whole instance is being aborted")
-    .requiredOption("--actor-session <session>", "Session performing the abort")
+    .option("--actor-session <session>", "Your session, only when it can't be derived from the caller (a managed seat's is): recorded as claimed")
     .option("--json", "JSON output for agents")
-    .action(async (instanceId: string, opts: { reason: string; actorSession: string; json?: boolean }) => {
+    .action(async (instanceId: string, opts: { reason: string; actorSession?: string; json?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const res = await client.post<{ closedPacketIds?: string[]; status?: string }>(

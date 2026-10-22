@@ -1,3 +1,4 @@
+import { packetScopeTags, readInstanceScope } from "./workflow-scope.js";
 import { findQueueRecovery, recoveryId, recoveryTag } from "./queue-recovery.js";
 // OPR.0.4.6.WF5 FR-2 class (b): detection-time exception items for
 // STUCK/OVERDUE instances.
@@ -73,7 +74,8 @@ export function makeEnsureStuckExceptionItem(deps: StuckExceptionDeps): EnsureSt
     const exception = classifyDeadlineVerdict(input.workflowName, input.verdict);
     if (!exception) return { outcome: "skipped-healthy" };
 
-    const previous = findQueueRecovery(deps.db, exception.deadlineEvidence!.packetId);
+    // A delivery failure notice at the sender does not own the workflow exception route.
+    const previous = findQueueRecovery(deps.db, exception.deadlineEvidence!.packetId, "slack-undeliverable");
     if (previous) return { outcome: "deduped", qitemId: previous.qitemId };
 
     // Honor historical occurrence rows, including their closed disposition.
@@ -132,6 +134,7 @@ export function makeEnsureStuckExceptionItem(deps: StuckExceptionDeps): EnsureSt
       `reason: ${exception.reason}\n` +
       `evidence: ${evidenceRef}\n` +
       `resolve: inspect the current owner and deadline; packet age alone does not establish idle. This item clears when the instance leaves the exception state.`;
+    const scopeTags = packetScopeTags(readInstanceScope(deps.db, e.instanceId), e.stepId);
     const createItem = (destination: string, tier: string) =>
       deps.queueRepo.create({
         qitemId: recoveryId(deps.db, e.packetId),
@@ -140,7 +143,7 @@ export function makeEnsureStuckExceptionItem(deps: StuckExceptionDeps): EnsureSt
         body,
         priority: "urgent",
         tier,
-        tags: [...workflowExceptionTags(exception.identity), recoveryTag(e.packetId)],
+        tags: [...workflowExceptionTags(exception.identity), recoveryTag(e.packetId), ...scopeTags],
         summary: exception.reason,
         evidenceRef,
       });

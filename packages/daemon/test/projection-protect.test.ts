@@ -10,7 +10,7 @@ import type { ResolvedStartupFile } from "../src/domain/runtime-adapter.js";
 // (target diverged from BOTH our last write and the source), atom-3 records the
 // last write. This atom makes the "not overwriting" the warning already claims
 // actually TRUE: operator_conflict skill files are held back from delivery, so
-// the adapter never overwrites an operator's edit — unless --force. hash_conflict
+// the adapter never overwrites an operator's edit unless an internal caller sets force. hash_conflict
 // (no manifest yet) stays the P17 overwrite-with-warning fallback (can't tell
 // operator-vs-stale apart without a recorded last hash).
 
@@ -76,10 +76,12 @@ describe("P20 atom-4 protect — operator_conflict skills held back from deliver
 });
 
 describe("P20 atom-4 warning branch — protect vs softened-overwrite tail by classification", () => {
-  it("operator_conflict warning states PROTECTED + --force, not 'will be overwritten'", () => {
+  it("operator_conflict warning names supported remedies and preserves protection", () => {
     const [w] = projectionConflictWarnings({ conflicts: [skillEntry({ classification: "operator_conflict" })] });
     expect(w).toMatch(/not overwrit|protected/i);
-    expect(w).toMatch(/--force/);
+    expect(w).toContain("fold the operator edit into the spec source");
+    expect(w).toContain("move the edited target aside");
+    expect(w).not.toContain("--force");
     expect(w).not.toMatch(/will be overwritten by re-projection/);
   });
 

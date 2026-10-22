@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -12,14 +13,17 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import {
   buildInternalLeakMessage,
   scanInternalLeaks,
 } from "./internal-leak-scanner.mjs";
 
-// Mirror canonical skills from packages/daemon/specs/agents/shared/skills/
-// to <repo-root>/skills/_canonical/. Hand-authored files at <repo-root>/skills/
+// Each shipped skill has one editable home in this repo: its copy under
+// packages/daemon/specs/agents/shared/skills/ when it has a spec edge, otherwise its copy under
+// packages/daemon/assets/plugins/openrig-core/skills/. `npm run mirror-skills` regenerates every
+// other declared copy (skills/_canonical/ and the plugin copies of spec skills) from that home, and
+// `--check` fails when a copy differs from it. Hand-authored files at <repo-root>/skills/
 // (README, CHANGELOG, LICENSE, plugin manifests) live alongside _canonical/
 // and are NEVER touched by the mirror — strict-ownership lets us add new
 // top-level files without coupling the script to the destination shape.
@@ -87,11 +91,26 @@ export function buildStaleMessage(changes) {
   ].join("\n");
 }
 
+// Every copy and comparison goes through rsync. macOS ships it; many Linux installs don't, and a
+// bare `spawnSync rsync ENOENT` stack doesn't say what to install.
+export const RSYNC_MISSING_MESSAGE =
+  "mirror-skills needs rsync on PATH. macOS includes it; on Debian or Ubuntu run `sudo apt-get install rsync`, " +
+  "on Fedora `sudo dnf install rsync`, on Alpine `apk add rsync`.";
+
+function rsync(args, exec) {
+  try {
+    return exec("rsync", args, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+  } catch (err) {
+    if (err && err.code === "ENOENT") throw new Error(RSYNC_MISSING_MESSAGE, { cause: err });
+    throw err;
+  }
+}
+
 function runRsync({ dryRun }, exec = execFileSync) {
-  return exec("rsync", rsyncArgs({ dryRun }), {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "inherit"],
-  });
+  return rsync(rsyncArgs({ dryRun }), exec);
 }
 
 function ensureTargetExists() {
@@ -108,14 +127,7 @@ export function checkMode(exec = execFileSync) {
 }
 
 export function checkModeAbsolute(sourceDir, targetDir, exec = execFileSync) {
-  const output = exec(
-    "rsync",
-    rsyncAbsoluteArgs({ sourceDir, targetDir, dryRun: true }),
-    {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "inherit"],
-    },
-  );
+  const output = rsync(rsyncAbsoluteArgs({ sourceDir, targetDir, dryRun: true }), exec);
   const changes = parseChanges(output);
   return { stale: changes.length > 0, changes, output };
 }
@@ -148,18 +160,90 @@ export function shipSetFromMembership(membership) {
     .sort();
 }
 
+// One editable home per shipped skill: its spec copy when the skill has a spec edge, otherwise its
+// plugin copy. Every other declared edge is generated from that home.
+export function authoringEdge(skillLayout) {
+  if (skillLayout?.edges?.includes("spec")) return "spec";
+  if (skillLayout?.edges?.includes("plugin")) return "plugin";
+  return null;
+}
+
+// Plans every read and write before anything is staged or replaced. An edge that holds no home is
+// replaced whole. On an edge that holds homes, only the generated skill folders are replaced, so
+// authored skills and anything undeclared beside them stay where they are.
+export function planSkillSources({ repoRoot, layout, shipping }) {
+  const problems = [];
+  const problem = (edge, path, reason, message) =>
+    problems.push({ edge, path, reason, message });
+  const skills = [];
+  for (const skill of shipping) {
+    const skillLayout = layout.skills[skill];
+    if (!skillLayout?.edges?.length) {
+      problem("-", skill, "layout-missing", `Missing shipping skill in edge layout: ${skill}`);
+      continue;
+    }
+    const home = authoringEdge(skillLayout);
+    if (!home) {
+      problem("-", skill, "no-home", `Shipping skill ${skill} has no spec or plugin edge to author it in`);
+      continue;
+    }
+    const paths = {};
+    for (const edge of skillLayout.edges) {
+      const path = skillPathOnEdge(layout, edge, skill);
+      if (path) paths[edge] = path;
+      else problem(edge, skill, "category-missing", `Missing category for shipping skill ${skill} on ${edge}`);
+    }
+    if (paths[home]) skills.push({ skill, home, paths });
+  }
+
+  const edgeRoot = (edge, path = "") => resolve(repoRoot, layout.edges[edge].path, path);
+  const homeEdges = new Set(skills.map(({ home }) => home));
+  const wholeEdges = Object.keys(layout.edges).sort().filter((edge) => !homeEdges.has(edge));
+  const homes = skills.map(({ skill, home, paths }) => ({
+    skill,
+    edge: home,
+    path: paths[home],
+    root: edgeRoot(home, paths[home]),
+  }));
+  for (const home of homes) {
+    if (!existsSync(home.root)) {
+      problem(home.edge, home.path, "source-missing", `Missing shipping skill source: ${layout.edges[home.edge].path}/${home.path}`);
+    }
+  }
+  const outputs = [
+    ...wholeEdges.map((edge) => ({ edge, path: ".", root: edgeRoot(edge) })),
+    ...skills.flatMap(({ home, paths }) =>
+      Object.entries(paths)
+        .filter(([edge]) => edge !== home && !wholeEdges.includes(edge))
+        .map(([edge, path]) => ({ edge, path, root: edgeRoot(edge, path) })),
+    ),
+  ];
+  for (const output of outputs) {
+    for (const home of homes.filter(({ root }) => overlaps(output.root, root))) {
+      problem(
+        output.edge,
+        output.path,
+        "overlap",
+        `Refusing to regenerate: the ${output.edge} output ${output.root} overlaps the source of ${home.skill} at ${home.root}`,
+      );
+    }
+  }
+  return { skills, wholeEdges, problems };
+}
+
 export async function stagePublicSkills({
-  canonRoot,
+  sourceFor,
   stagingRoot,
   membership,
   rules,
+  scan = scanInternalLeaks,
 }) {
   rmSync(stagingRoot, { recursive: true, force: true });
   mkdirSync(stagingRoot, { recursive: true });
 
   for (const skill of shipSetFromMembership(membership)) {
-    const sourceRoot = join(canonRoot, skill);
-    if (!existsSync(sourceRoot) || isInternalPath(skill, rules)) continue;
+    const sourceRoot = sourceFor(skill);
+    if (!sourceRoot || !existsSync(sourceRoot) || isInternalPath(skill, rules)) continue;
 
     for (const sourcePath of walkFiles(sourceRoot)) {
       const skillRelative = relative(sourceRoot, sourcePath).replaceAll("\\", "/");
@@ -185,23 +269,22 @@ export async function stagePublicSkills({
         );
       }
 
-      const findings = scanInternalLeaks({ path: publicPath, bytes, rules });
+      const findings = scan ? scan({ path: publicPath, bytes, rules }) : [];
       if (findings.length > 0) {
         throw new Error(buildInternalLeakMessage(findings));
       }
 
       const targetPath = join(stagingRoot, skillRelative === "." ? skill : publicPath);
       mkdirSync(dirname(targetPath), { recursive: true });
-      writeFileSync(targetPath, bytes, {
-        mode: lstatSync(sourcePath).mode & 0o777,
-      });
+      writeFileSync(targetPath, bytes);
+      // A create mode is masked by the umask; set the source's mode exactly.
+      chmodSync(targetPath, lstatSync(sourcePath).mode & 0o777);
     }
   }
 }
 
-// External-canon-pending skills: authored in the external skill canon and listed in the layout
-// ship set, but not yet mirrored into THIS repo (their SKILL.md isn't in git; the canon mirror-apply
-// on the cut checklist — run with the explicit canon-root path — lands them). Their layout-missing is
+// External-canon-pending skills: listed in the layout ship set but not yet in THIS repo (a pending
+// skill now lands as a reviewed PR that adds its source). Their layout-missing is
 // tolerated here — but ONLY these named few,
 // and ONLY while genuinely absent from disk. Any OTHER layout-demanded file missing from disk stays
 // LOUD (a future accidental deletion is never silently blessed), and a name that reappears on disk is
@@ -215,9 +298,14 @@ export async function checkGeneratedEdges({
   repoRoot = process.cwd(),
   layout,
   digests,
+  membership,
+  rules,
   externalCanonPending = EXTERNAL_CANON_PENDING,
 }) {
   validateGeneratedControls(layout, digests);
+  if (!membership || !rules) {
+    throw new Error("The check needs the membership and token rules to compare generated copies with their sources");
+  }
   const changes = [];
   const onDiskSkills = new Set();
 
@@ -303,11 +391,54 @@ export async function checkGeneratedEdges({
     }
   }
 
+  // Recorded digests can be re-pinned to anything on disk; this compares each copy with its source.
+  changes.push(
+    ...(await checkAuthoredSources({ repoRoot, layout, membership, rules, externalCanonPending })),
+  );
+
   return { stale: changes.length > 0, changes };
 }
 
+// Compares each shipped skill's home with what its public copies must hold: the home must already be
+// publishable (sanitizing it changes nothing), and every generated copy must equal the staged home.
+// Membership, layout and the token rules come from the product JSON; nothing outside the repo is read.
+export async function checkAuthoredSources({
+  repoRoot,
+  layout,
+  membership,
+  rules,
+  externalCanonPending = EXTERNAL_CANON_PENDING,
+}) {
+  const shipping = shipSetFromMembership(membership).filter(
+    (skill) => !externalCanonPending.has(skill),
+  );
+  const { skills, problems } = planSkillSources({ repoRoot, layout, shipping });
+  const changes = problems.map(({ edge, path, reason }) => ({ edge, path, reason }));
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "openrig-skill-sources-"));
+  try {
+    const stagingRoot = join(temporaryRoot, "staging");
+    await stageHomes({ repoRoot, layout, skills, stagingRoot, membership, rules, scan: null });
+    for (const { skill, home, paths } of skills) {
+      const sourceRoot = join(repoRoot, layout.edges[home].path, paths[home]);
+      if (!existsSync(sourceRoot)) continue;
+      const staged = join(stagingRoot, skill);
+      for (const { path } of treeDifferences(staged, sourceRoot)) {
+        changes.push({ edge: home, path: `${paths[home]}/${path}`, reason: "source-not-public" });
+      }
+      for (const [edge, path] of Object.entries(paths)) {
+        if (edge === home) continue;
+        for (const difference of treeDifferences(staged, join(repoRoot, layout.edges[edge].path, path))) {
+          changes.push({ edge, path: `${path}/${difference.path}`, reason: `copy-${difference.kind}` });
+        }
+      }
+    }
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+  return changes;
+}
+
 export async function regeneratePublicSkills({
-  canonRoot,
   repoRoot,
   membership,
   rules,
@@ -316,60 +447,56 @@ export async function regeneratePublicSkills({
 }) {
   validateAuthoringLayout(layout);
   const shipping = shipSetFromMembership(membership);
-  for (const skill of shipping) {
-    if (!existsSync(join(canonRoot, skill))) {
-      throw new Error(`Missing shipping skill in canon: ${skill}`);
-    }
-    if (!layout.skills[skill]?.edges?.length) {
-      throw new Error(`Missing shipping skill in edge layout: ${skill}`);
-    }
+  const { skills, wholeEdges, problems } = planSkillSources({ repoRoot, layout, shipping });
+  if (problems.length > 0) {
+    throw new Error(problems.map(({ message }) => message).join("\n"));
   }
 
   const temporaryRoot = mkdtempSync(join(tmpdir(), "openrig-public-skills-"));
   try {
+    // Every home is read and staged before any output is replaced.
     const stagingRoot = join(temporaryRoot, "staging");
-    await stagePublicSkills({
-      canonRoot,
-      stagingRoot,
-      membership,
-      rules,
-    });
+    await stageHomes({ repoRoot, layout, skills, stagingRoot, membership, rules });
+    const notPublic = skills.flatMap(({ skill, home, paths }) =>
+      treeDifferences(
+        join(stagingRoot, skill),
+        join(repoRoot, layout.edges[home].path, paths[home]),
+      ).map(({ path }) => `${layout.edges[home].path}/${paths[home]}/${path}`),
+    );
+    if (notPublic.length > 0) {
+      throw new Error(
+        [
+          "Skill sources hold text or files that their public copies would drop. Remove it from the source:",
+          ...notPublic.map((path) => `  ${path}`),
+        ].join("\n"),
+      );
+    }
 
     const changes = [];
+    const undeclared = [];
     for (const [edge, edgeConfig] of Object.entries(layout.edges).sort()) {
-      const projectedRoot = join(temporaryRoot, `edge-${edge}`);
-      mkdirSync(projectedRoot, { recursive: true });
-
-      for (const skill of shipping) {
-        const skillLayout = layout.skills[skill];
-        if (!skillLayout.edges.includes(edge)) continue;
-        const category =
-          edgeConfig.layout === "flat" ? null : skillLayout.category;
-        if (edgeConfig.layout !== "flat" && !category) {
-          throw new Error(`Missing category for shipping skill ${skill} on ${edge}`);
-        }
-        const destination = category
-          ? join(projectedRoot, category, skill)
-          : join(projectedRoot, skill);
-        copyTree(join(stagingRoot, skill), destination);
-      }
-
+      const outputs = skills.filter(({ home, paths }) => home !== edge && paths[edge]);
       const edgeRoot = join(repoRoot, edgeConfig.path);
-      mkdirSync(edgeRoot, { recursive: true });
-      const output = runRsyncAbsolute(projectedRoot, edgeRoot, exec);
-      for (const line of parseChanges(output)) {
-        changes.push({
-          edge,
-          path: rsyncChangePath(line),
-          reason: line.startsWith("*deleting ")
-            ? "delete"
-            : line.startsWith(".f") && line[5] === "p"
-              ? "mode"
-              : "write",
-        });
+      if (wholeEdges.includes(edge)) {
+        const projectedRoot = join(temporaryRoot, `edge-${edge}`);
+        mkdirSync(projectedRoot, { recursive: true });
+        for (const { skill, paths } of outputs) {
+          copyTree(join(stagingRoot, skill), join(projectedRoot, paths[edge]));
+        }
+        mkdirSync(edgeRoot, { recursive: true });
+        changes.push(...syncTree(projectedRoot, edgeRoot, edge, "", exec));
+        continue;
       }
+      for (const { skill, paths } of outputs) {
+        const staged = join(stagingRoot, skill);
+        const target = join(edgeRoot, paths[edge]);
+        mkdirSync(staged, { recursive: true });
+        mkdirSync(target, { recursive: true });
+        changes.push(...syncTree(staged, target, edge, paths[edge], exec));
+      }
+      undeclared.push(...undeclaredSkills(edgeRoot, edge, layout));
     }
-    return { changes };
+    return { changes, undeclared };
   } finally {
     rmSync(temporaryRoot, { recursive: true, force: true });
   }
@@ -412,7 +539,7 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
 
   const apply = dependencies.authoringApplyMode ?? authoringApplyMode;
   const log = dependencies.log ?? console.log;
-  const { changes } = await apply();
+  const { changes, undeclared = [] } = await apply();
   if (changes.length === 0) {
     log("Public skill edges already in sync; no changes.");
   } else {
@@ -421,10 +548,20 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
       log(`  ${edge}: ${path} (${reason})`);
     }
   }
+  if (undeclared.length > 0) {
+    log(`Left in place, not in the layout (${undeclared.length}); npm run mirror-skills:check fails until it is declared or removed:`);
+    for (const { edge, path } of undeclared) log(`  ${edge}: ${path}`);
+  }
 }
 
 if (import.meta.url === `file://${resolve(process.argv[1])}`) {
-  await main();
+  try {
+    await main();
+  } catch (err) {
+    if (err?.message !== RSYNC_MISSING_MESSAGE) throw err;
+    console.error(err.message);
+    process.exitCode = 1;
+  }
 }
 
 function readGeneratedCheckInputs() {
@@ -433,6 +570,8 @@ function readGeneratedCheckInputs() {
     repoRoot,
     layout: readJson(join(repoRoot, "scripts/skill-edge-layout.generated.json")),
     digests: readJson(join(repoRoot, "scripts/skill-edge-digests.generated.json")),
+    membership: readJson(join(repoRoot, "scripts/product-public-skills.generated.json")),
+    rules: readJson(join(repoRoot, "scripts/internal-tokens.generated.json")),
   };
 }
 
@@ -442,8 +581,7 @@ function readJson(path) {
 
 function defaultGenerateControlPlaneJson() {
   const repoRoot = process.cwd();
-  // Membership, rules and layout come from the product JSON. Only skill content
-  // still comes from OPENRIG_SKILL_CANON_ROOT; old YAML selectors are ignored.
+  // Membership, rules and layout come from the product JSON; old YAML selectors are ignored.
   execFileSync(
     process.execPath,
     [
@@ -459,15 +597,13 @@ function defaultGenerateControlPlaneJson() {
 
 function defaultReadAuthoringInputs() {
   const repoRoot = process.cwd();
-  const canonRoot = process.env.OPENRIG_SKILL_CANON_ROOT;
-  if (!canonRoot) {
-    throw new Error(
-      "The mirror apply requires OPENRIG_SKILL_CANON_ROOT — set it to the skill-canon root to run the real apply. This is an explicit-path authoring guard (the apply reads the canon from that path), not an authorization gate.",
+  if (process.env.OPENRIG_SKILL_CANON_ROOT) {
+    console.warn(
+      "OPENRIG_SKILL_CANON_ROOT is ignored: product skills regenerate from their sources in this repository. To bring in an outside skill change, edit the skill's source and open a pull request.",
     );
   }
   return {
     repoRoot,
-    canonRoot: resolve(canonRoot),
     membership: readJson(
       join(repoRoot, "scripts/product-public-skills.generated.json"),
     ),
@@ -480,7 +616,7 @@ function defaultReadAuthoringInputs() {
 
 function buildGeneratedStaleMessage(changes) {
   return [
-    "Generated skill edges are stale. Regenerate the control-plane manifests.",
+    "Skill edges don't match their sources, layout or recorded digests. Fix the source, then run: npm run mirror-skills",
     ...changes.map(
       ({ edge, path, reason }) => `  ${edge}: ${path} (${reason})`,
     ),
@@ -645,21 +781,89 @@ function copyTree(sourceRoot, targetRoot) {
     const targetPath = join(targetRoot, relative(sourceRoot, sourcePath));
     mkdirSync(dirname(targetPath), { recursive: true });
     copyFileSync(sourcePath, targetPath);
+    chmodSync(targetPath, lstatSync(sourcePath).mode & 0o777);
   }
 }
 
+function skillPathOnEdge(layout, edge, skill) {
+  if (layout.edges[edge].layout === "flat") return skill;
+  const category = layout.skills[skill]?.category;
+  return category ? `${category}/${skill}` : null;
+}
+
+function overlaps(left, right) {
+  return left === right || left.startsWith(right + sep) || right.startsWith(left + sep);
+}
+
+async function stageHomes({ repoRoot, layout, skills, stagingRoot, membership, rules, scan }) {
+  const sources = new Map(
+    skills.map(({ skill, home, paths }) => [skill, join(repoRoot, layout.edges[home].path, paths[home])]),
+  );
+  await stagePublicSkills({ sourceFor: (skill) => sources.get(skill), stagingRoot, membership, rules, scan });
+}
+
+// Files that differ between two trees, by bytes and permission bits.
+function treeDifferences(expectedRoot, actualRoot) {
+  const files = (root) =>
+    new Map(walkFiles(root).map((path) => [relative(root, path).replaceAll("\\", "/"), path]));
+  const expected = files(expectedRoot);
+  const actual = files(actualRoot);
+  const differences = [];
+  for (const [path, expectedPath] of expected) {
+    const actualPath = actual.get(path);
+    if (!actualPath) {
+      differences.push({ path, kind: "missing" });
+    } else if (
+      !readFileSync(expectedPath).equals(readFileSync(actualPath)) ||
+      (lstatSync(expectedPath).mode & 0o777) !== (lstatSync(actualPath).mode & 0o777)
+    ) {
+      differences.push({ path, kind: "diverged" });
+    }
+  }
+  for (const path of actual.keys()) {
+    if (!expected.has(path)) differences.push({ path, kind: "extra" });
+  }
+  return differences.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function syncTree(sourceRoot, targetRoot, edge, prefix, exec) {
+  return parseChanges(runRsyncAbsolute(sourceRoot, targetRoot, exec)).map((line) => {
+    const path = rsyncChangePath(line);
+    return {
+      edge,
+      path: !prefix ? path : path === "./" || path === "." ? `${prefix}/` : `${prefix}/${path}`,
+      reason: line.startsWith("*deleting ")
+        ? "delete"
+        : line.startsWith(".f") && line[5] === "p"
+          ? "mode"
+          : "write",
+    };
+  });
+}
+
+// Skill folders on an edge that the layout doesn't declare there. They're never deleted from an
+// edge that holds homes; the check reports them until they're declared or removed.
+function undeclaredSkills(edgeRoot, edge, layout) {
+  const declared = new Set(
+    Object.entries(layout.skills)
+      .filter(([, entry]) => entry.edges.includes(edge))
+      .map(([skill]) => skillPathOnEdge(layout, edge, skill)),
+  );
+  return walkFiles(edgeRoot)
+    .filter((path) => basename(path) === "SKILL.md")
+    .map((path) => relative(edgeRoot, dirname(path)).replaceAll("\\", "/"))
+    .filter((path) => !declared.has(path))
+    .map((path) => ({ edge, path }));
+}
+
 function runRsyncAbsolute(sourceRoot, targetRoot, exec) {
-  return exec(
-    "rsync",
+  return rsync(
     rsyncAbsoluteArgs({
       sourceDir: sourceRoot,
       targetDir: targetRoot,
       dryRun: false,
     }),
-    {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "inherit"],
-    },
+    exec,
   );
 }
 

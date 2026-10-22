@@ -159,6 +159,51 @@ describe("computeTopBurn — tokens/hour + window velocity, facts not judgments"
     expect(w.percentPerHour).toBe(20); // +40% over 2h
   });
 
+  it("a provider window that reset inside the span reports no velocity, never a negative one", () => {
+    store.appendProviderWindowSample(
+      { seatSession: "a@r", window: "five_hour", usedPercent: 90, resetsAt: "2026-08-07T11:00:00.000Z", asOf: "2026-08-07T10:00:00.000Z" },
+      "2026-08-07T10:00:00.000Z",
+    );
+    store.appendProviderWindowSample(
+      { seatSession: "a@r", window: "five_hour", usedPercent: 5, resetsAt: "2026-08-07T16:00:00.000Z", asOf: "2026-08-07T12:00:00.000Z" },
+      "2026-08-07T12:00:00.000Z",
+    );
+    seedContext(store, "a@r", "2026-08-07T10:00:00.000Z", 1000, 0);
+    seedContext(store, "a@r", "2026-08-07T12:00:00.000Z", 2000, 0);
+    const top = computeTopBurn(db, { windowHours: 4, nowIso: NOW });
+    const w = top.ranked[0]!.windows.find((x) => x.window === "five_hour")!;
+    expect(w.usedPercentFirst).toBe(90);
+    expect(w.usedPercentLast).toBe(5);
+    expect(w.percentPerHour).toBeNull(); // was (5 - 90) / 2 = -42.5
+  });
+
+  function providerSample(at: string, usedPercent: number, resetsAt: string | null) {
+    store.appendProviderWindowSample({ seatSession: "a@r", window: "five_hour", usedPercent, resetsAt, asOf: at }, at);
+  }
+  function fiveHour() {
+    seedContext(store, "a@r", "2026-08-07T10:00:00.000Z", 1000, 0);
+    seedContext(store, "a@r", "2026-08-07T12:00:00.000Z", 2000, 0);
+    return computeTopBurn(db, { windowHours: 4, nowIso: NOW }).ranked[0]!.windows.find((x) => x.window === "five_hour")!;
+  }
+
+  it("a window that reset and climbed past the old reading reports no rate across the reset", () => {
+    providerSample("2026-08-07T10:00:00.000Z", 10, "2026-08-07T11:00:00.000Z");
+    providerSample("2026-08-07T12:00:00.000Z", 30, "2026-08-07T16:00:00.000Z");
+    const w = fiveHour();
+    expect(w.usedPercentFirst).toBe(10); // the span's first reading
+    expect(w.usedPercentLast).toBe(30);
+    expect(w.percentPerHour).toBeNull(); // main gave +10%/h across two windows
+  });
+
+  it("rates only the latest window's readings after a reset", () => {
+    providerSample("2026-08-07T09:00:00.000Z", 95, "2026-08-07T09:30:00.000Z");
+    providerSample("2026-08-07T10:00:00.000Z", 10, "2026-08-07T14:30:00.000Z");
+    providerSample("2026-08-07T12:00:00.000Z", 30, "2026-08-07T14:30:30.000Z"); // within clock tolerance: same window
+    const w = fiveHour();
+    expect(w.usedPercentFirst).toBe(95);
+    expect(w.percentPerHour).toBe(10); // (30 - 10) / 2h within the current window
+  });
+
   it("topN caps the ranking; the cap is reported so truncation is never silent", () => {
     for (let i = 0; i < 5; i += 1) {
       seedContext(store, `s${i}@r`, "2026-08-07T10:00:00.000Z", 0, 0);

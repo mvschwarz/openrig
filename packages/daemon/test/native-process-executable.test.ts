@@ -34,6 +34,24 @@ describe("OS executable path witness", () => {
     else execute.mockResolvedValue({ stdout: mode === "malformed" ? "not json" : JSON.stringify([[12, "relative"], [13, "/a/../b"], [14, "/a\0b"], [999, "/a"]]) });
     expect((await readNativeExecutablePaths([12, 13, 14])).size).toBe(0);
   });
+  it("tells a caller only about an actual read timeout (#86)", async () => {
+    setPlatform("darwin");
+    const onTimeout = vi.fn();
+    // Node's own timeout kill: killed by Node with the kill signal.
+    execute.mockRejectedValueOnce(Object.assign(new Error("Command failed"), { killed: true, signal: "SIGTERM", code: null }));
+    expect((await readNativeExecutablePaths([12], { onTimeout })).size).toBe(0);
+    expect(onTimeout).toHaveBeenCalledOnce();
+    for (const error of [
+      Object.assign(new Error("denied"), { killed: false, signal: null, code: 1 }),
+      Object.assign(new Error("too much output"), { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" }),
+    ]) {
+      execute.mockRejectedValueOnce(error);
+      expect((await readNativeExecutablePaths([12], { onTimeout })).size).toBe(0);
+    }
+    execute.mockResolvedValueOnce({ stdout: "not json" });
+    expect((await readNativeExecutablePaths([12], { onTimeout })).size).toBe(0);
+    expect(onTimeout).toHaveBeenCalledOnce();
+  });
   it("does no work for an empty request or unsupported platform, and caps batch size", async () => {
     setPlatform("darwin");
     expect((await readNativeExecutablePaths([])).size).toBe(0);

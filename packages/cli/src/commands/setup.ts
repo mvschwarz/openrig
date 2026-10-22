@@ -55,6 +55,8 @@ export interface SetupDeps {
   platform?: NodeJS.Platform;
   /** Environment for CODEX_HOME and provider credential checks (default process.env). */
   env?: NodeJS.ProcessEnv;
+  /** Source of terminal.history_limit for the managed tmux block (default: the OpenRig config). */
+  configStore?: Pick<ConfigStore, "resolve">;
 }
 
 // Preserve the setup module's existing selector export.
@@ -464,14 +466,15 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   // 6. tmux config
   const TMUX_CONF = `${process.env["HOME"] ?? "~"}/.tmux.conf`;
   const MANAGED_MARKER = "# OpenRig managed block";
-  const MANAGED_BLOCK = [
-    MANAGED_MARKER,
-    "set -g mouse on",
-    "set -g history-limit 50000",
-    `# End ${MANAGED_MARKER}`,
-  ].join("\n");
 
   try {
+    const historyLimit = (deps.configStore ?? new ConfigStore()).resolve().terminal.historyLimit;
+    const MANAGED_BLOCK = [
+      MANAGED_MARKER,
+      "set -g mouse on",
+      `set -g history-limit ${historyLimit}`,
+      `# End ${MANAGED_MARKER}`,
+    ].join("\n");
     const existing = deps.readFile(TMUX_CONF);
     if (existing && existing.includes(MANAGED_MARKER)) {
       // Replace existing managed block
@@ -480,17 +483,27 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
         MANAGED_BLOCK,
       );
       deps.writeFile(TMUX_CONF, replaced);
-      steps.push({ id: "tmux_config", status: "applied", message: "Updated OpenRig managed tmux config block." });
+      steps.push({ id: "tmux_config", status: "applied", message: `Updated OpenRig managed tmux config block (history-limit ${historyLimit}).` });
     } else if (existing) {
       deps.writeFile(TMUX_CONF, existing.trimEnd() + "\n\n" + MANAGED_BLOCK + "\n");
-      steps.push({ id: "tmux_config", status: "applied", message: "Appended OpenRig managed tmux config block." });
+      steps.push({ id: "tmux_config", status: "applied", message: `Appended OpenRig managed tmux config block (history-limit ${historyLimit}).` });
     } else {
       deps.writeFile(TMUX_CONF, MANAGED_BLOCK + "\n");
-      steps.push({ id: "tmux_config", status: "applied", message: "Created .tmux.conf with OpenRig managed block." });
+      steps.push({ id: "tmux_config", status: "applied", message: `Created .tmux.conf with OpenRig managed block (history-limit ${historyLimit}).` });
     }
   } catch (err) {
     steps.push({ id: "tmux_config", status: "warn", message: `Could not update tmux config: ${(err as Error).message}` });
   }
+
+  // Informational only: never enable inheritance automatically or add a setup prompt.
+  const tmuxConfigs = [TMUX_CONF, `${process.env["XDG_CONFIG_HOME"] ?? `${process.env["HOME"] ?? "~"}/.config`}/tmux/tmux.conf`, "/etc/tmux.conf"];
+  const customTmux = tmuxConfigs.some(file => {
+    try {
+      const content = deps.readFile(file)?.replace(/# OpenRig managed block[\s\S]*?# End # OpenRig managed block/g, "") ?? "";
+      return content.split(/\r?\n/).some(line => line.trim() && !line.trim().startsWith("#"));
+    } catch { return false; }
+  });
+  if (customTmux) steps.push({ id: "tmux_environment", status: "warn", message: "Custom tmux configuration detected. New POSIX agents use the daemon and seat environment by default; shell startup still runs. If your setup intentionally relies on stored tmux globals, opt in with `rig config set terminal.inherit_tmux_environment true`. This affects future launches and successors, not running agents." });
 
   // 7. Verify
   const tmuxOk = steps.some((s) => s.id === "tmux_install" && (s.status === "pass" || s.status === "applied"));
@@ -688,6 +701,12 @@ export function setupCommand(depsOverride?: SetupDeps): Command {
     .option("--providers <list>", "The person's provider choice: claude, codex, or both. One not chosen is skipped (not installed or checked), never failed")
     .option("--policy <name>", `Record a deliberate permission-policy choice into an existing spec (${POLICY_CHOICES.join("|")})`)
     .option("--spec <path>", "Existing rig spec (file or directory) to record the --policy choice into")
+    .addHelpText("after", `
+tmux scrollback:
+  The OpenRig block in ~/.tmux.conf keeps terminal.history_limit rows per pane (default 10000).
+  To keep more:  rig config set terminal.history_limit 50000   then rerun  rig setup
+  A running tmux server keeps its old limit until it restarts or you run
+  tmux source-file ~/.tmux.conf; before tmux 3.7 that changes new panes only.`)
     .action(async (opts: { dryRun?: boolean; json?: boolean; full?: boolean; herdr?: boolean; ghostty?: boolean; providers?: string; policy?: string; spec?: string }) => {
       const providers = opts.providers === undefined ? undefined : parseSetupProviders(opts.providers);
       if (providers && "error" in providers) {

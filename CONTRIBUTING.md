@@ -40,7 +40,11 @@ repository, and we're happy to link to it.
 
 ## Setting up
 
-Node `^22 || ^24` and a working `tmux` are required. Then:
+Node `^22 || ^24`, a working `tmux` and `rsync` are required. macOS includes `rsync`; many Linux
+installs don't (`sudo apt-get install rsync` on Debian or Ubuntu). `npm test` and `npm run mirror-skills`
+use it. Use the npm that comes with your Node, which is npm 10 or newer (`npm --version` shows which you
+have). A separately packaged npm 9, such as Debian or Ubuntu's `npm` package, fails a fresh `npm ci` with
+`ENOENT` on `chmod` of `node_modules/@openrig/tui/dist/main.js`. Then:
 
 ```bash
 git clone https://github.com/mvschwarz/openrig.git
@@ -56,10 +60,11 @@ runs too. Use `npm install <package>` only when you're adding or changing a depe
 the lockfile change with it.
 
 `npm test` builds the daemon and runs repository checks before the package suites. Read the
-specific failure. A shipped skill may exist in more than one copy (see ARCHITECTURE.md): edit every copy, then run
-`node scripts/regen-edge-digests.mjs` and commit the digest file it changes (the full
-`npm run mirror-skills` apply needs maintainer-only inputs; see "A shipped skill" in
-[ARCHITECTURE.md](ARCHITECTURE.md#a-shipped-skill)). The repository checks include a docs guard: a
+specific failure. Each shipped skill has one editable home in this repository (see
+["A shipped skill" in ARCHITECTURE.md](ARCHITECTURE.md#a-shipped-skill)). Edit its home, run
+`npm run mirror-skills` to regenerate its other copies and refresh the digests, then run
+`npm run mirror-skills:check` and commit the result. The apply reads nothing outside the repository.
+The repository checks include a docs guard: a
 tracked file under `docs/` must be in `docs/as-built/`, `docs/reference/` or `docs/releases/`
 (`docs/DESIGN.md` is the one exception). They check that shipped first-run text names only teams, skills and
 commands that exist, and they validate the context-pack sources;

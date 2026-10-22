@@ -4,6 +4,7 @@ import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
+import { rigIdForHandle } from "../rig-handle.js";
 
 export interface ExportDeps extends StatusDeps {
   writeFile: (path: string, content: string) => void;
@@ -18,7 +19,7 @@ export function exportCommand(depsOverride?: ExportDeps): Command {
   };
 
   cmd
-    .argument("<rigId>", "Rig ID to export")
+    .argument("<rig>", "Rig name or ID to export")
     .option("-o, --output <path>", "Output file path", "rig.yaml")
     .action(async (rigId: string, opts: { output: string }) => {
       const deps = getDeps();
@@ -27,7 +28,9 @@ export function exportCommand(depsOverride?: ExportDeps): Command {
       if (!daemonStatusGuard(status)) return;
 
       const client = deps.clientFactory(getDaemonUrl(status));
-      const res = await client.getText(`/api/rigs/${encodeURIComponent(rigId)}/spec`);
+      const target = await rigIdForHandle(client, rigId);
+      if (!target.ok) { console.error(target.message); process.exitCode = 1; return; }
+      const res = await client.getText(`/api/rigs/${encodeURIComponent(target.id)}/spec`);
 
       if (res.status === 404) {
         console.error(`Rig '${rigId}' not found`);

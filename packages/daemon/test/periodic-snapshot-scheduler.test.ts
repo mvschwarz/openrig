@@ -9,6 +9,8 @@ import { SnapshotRepository } from "../src/domain/snapshot-repository.js";
 import { CheckpointStore } from "../src/domain/checkpoint-store.js";
 import { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import { PeriodicSnapshotScheduler } from "../src/domain/periodic-snapshot-scheduler.js";
+import { RigTeardownOrchestrator } from "../src/domain/rig-teardown.js";
+import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 
 describe("PeriodicSnapshotScheduler", () => {
@@ -149,6 +151,218 @@ describe("PeriodicSnapshotScheduler", () => {
 
   // OPR.0.4.3.20 FR-4 — refresh the live per-seat resume ledger before serialize.
   type Refresher = import("../src/domain/resume-metadata-refresher.js").ResumeMetadataRefresher;
+
+  it.each([false, true])("preserves the pre-down recovery source when a pending refresh rejects=%s", async (rejectRefresh) => {
+    const rigId = seedRunningRig("r-down-during-refresh");
+    const otherRigId = seedRunningRig("r-still-running");
+    const session = sessionRegistry.getSessionsForRig(rigId)[0]!;
+    sessionRegistry.updateResumeToken(session.id, "native", "saved-thread", "operator");
+    let release!: () => void;
+    const pending = new Promise<void>((resolve, reject) => {
+      release = () => rejectRefresh ? reject(new Error("discovery failed")) : resolve();
+    });
+    let entered!: () => void;
+    const refreshing = new Promise<void>((resolve) => { entered = resolve; });
+    const refresh = vi.fn(async (sessions: Array<{ nodeId: string }>) => {
+      if (sessions.some((s) => s.nodeId === session.nodeId)) {
+        entered();
+        await pending;
+      }
+    });
+    const periodic = new PeriodicSnapshotScheduler({
+      db, snapshotCapture, snapshotRepo, sessionRegistry,
+      resumeMetadataRefresher: { refresh } as unknown as Refresher,
+    });
+    const tick = periodic.tick();
+    await refreshing;
+    const teardown = new RigTeardownOrchestrator({
+      db, rigRepo, sessionRegistry, eventBus, snapshotCapture,
+      tmuxAdapter: { killSession: vi.fn(async () => ({ ok: true })) } as unknown as TmuxAdapter,
+    });
+    const down = await teardown.teardown(rigId);
+    expect(down.sessionsKilled).toBe(1);
+    expect(sessionRegistry.getSessionsForRig(rigId)[0]!.status).toBe("exited");
+    release();
+    await tick;
+
+    const selected = snapshotRepo.selectRestoreUsable(rigId);
+    expect(selected.ok).toBe(true);
+    if (!selected.ok) throw new Error(selected.message);
+    expect(selected.snapshot.id).toBe(down.snapshotId);
+    expect(selected.snapshot.data.activeOccupantsByNode?.[session.nodeId]).toEqual({ kind: "resolved", sessionId: session.id });
+    expect(selected.snapshot.data.sessions[0]!.resumeToken).toBe("saved-thread");
+    expect(snapshotRepo.listSnapshots(rigId, { kind: "auto-periodic" })).toHaveLength(0);
+    expect(snapshotRepo.listSnapshots(otherRigId, { kind: "auto-periodic" })).toHaveLength(1);
+  });
+
+  it("rechecks archived membership after refresh", async () => {
+    const rigId = seedRunningRig("r-archive-during-refresh");
+    const periodic = new PeriodicSnapshotScheduler({
+      db, snapshotCapture, snapshotRepo, sessionRegistry,
+      resumeMetadataRefresher: { refresh: vi.fn(async () => { rigRepo.archiveRig(rigId); }) } as unknown as Refresher,
+    });
+    await periodic.tick();
+    expect(snapshotRepo.listSnapshots(rigId, { kind: "auto-periodic" })).toHaveLength(0);
+  });
+
+  it("skips a partial shutdown during refresh even while a sibling is running", async () => {
+    const rigId = seedRunningRig("r-partial-down");
+    const node = rigRepo.addNode(rigId, "sibling", { role: "worker" });
+    const sibling = sessionRegistry.registerSession(node.id, "sibling@r-partial-down");
+    sessionRegistry.updateStatus(sibling.id, "running");
+    const preDown = snapshotCapture.captureSnapshot(rigId, "auto-pre-down");
+    const periodic = new PeriodicSnapshotScheduler({
+      db, snapshotCapture, snapshotRepo, sessionRegistry,
+      resumeMetadataRefresher: {
+        refresh: vi.fn(async () => { sessionRegistry.updateStatus(sibling.id, "exited"); }),
+      } as unknown as Refresher,
+    });
+    await periodic.tick();
+    expect(snapshotRepo.findLatestRestoreUsable(rigId)?.id).toBe(preDown.id);
+    expect(snapshotRepo.listSnapshots(rigId, { kind: "auto-periodic" })).toHaveLength(0);
+  });
+
+  it("preserves a pre-down snapshot created during a partial teardown refresh", async () => {
+    const rigId = seedRunningRig("r-partial-down-first-snapshot");
+    const node = rigRepo.addNode(rigId, "sibling", { role: "worker" });
+    const sibling = sessionRegistry.registerSession(node.id, "sibling@r-partial-down-first-snapshot");
+    sessionRegistry.updateStatus(sibling.id, "running");
+
+    let releaseRefresh!: () => void;
+    const refreshPending = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+    let secondKillStarted!: () => void;
+    const secondKillEntered = new Promise<void>((resolve) => { secondKillStarted = resolve; });
+    let releaseSecondKill!: () => void;
+    const secondKillPending = new Promise<void>((resolve) => { releaseSecondKill = resolve; });
+    let killCount = 0;
+    const killSession = vi.fn(async () => {
+      killCount++;
+      if (killCount === 2) {
+        secondKillStarted();
+        await secondKillPending;
+      }
+      return { ok: true };
+    });
+    let refreshStarted!: () => void;
+    const refreshEntered = new Promise<void>((resolve) => { refreshStarted = resolve; });
+    const periodic = new PeriodicSnapshotScheduler({
+      db, snapshotCapture, snapshotRepo, sessionRegistry,
+      resumeMetadataRefresher: {
+        refresh: vi.fn(async () => {
+          refreshStarted();
+          await refreshPending;
+        }),
+      } as unknown as Refresher,
+    });
+    const tick = periodic.tick();
+    await refreshEntered;
+
+    const teardown = new RigTeardownOrchestrator({
+      db, rigRepo, sessionRegistry, eventBus, snapshotCapture,
+      tmuxAdapter: { killSession } as unknown as TmuxAdapter,
+    });
+    const down = teardown.teardown(rigId);
+    await secondKillEntered;
+
+    // Teardown has captured the complete pre-down source and stopped only the
+    // first seat, leaving a running sibling while the refresh is pending.
+    releaseRefresh();
+    await tick;
+    releaseSecondKill();
+    const result = await down;
+
+    expect(result.sessionsKilled).toBe(2);
+    expect(result.snapshotId).not.toBeNull();
+    expect(snapshotRepo.listSnapshots(rigId, { kind: "auto-periodic" })).toHaveLength(0);
+    expect(snapshotRepo.findLatestRestoreUsable(rigId)?.id).toBe(result.snapshotId);
+  });
+
+  it("captures when the earlier restore-source lookup fails", async () => {
+    const rigId = seedRunningRig("r-restore-lookup-fails");
+    const node = rigRepo.addNode(rigId, "sibling", { role: "worker" });
+    const sibling = sessionRegistry.registerSession(node.id, "sibling@r-restore-lookup-fails");
+    sessionRegistry.updateStatus(sibling.id, "running");
+    snapshotCapture.captureSnapshot(rigId, "auto-pre-down");
+    const lookup = vi.spyOn(snapshotRepo, "findLatestRestoreUsable")
+      .mockImplementation(() => { throw new Error("lookup failed"); });
+    // A seat stops during refresh, so the tick reaches the lookup; the first seat keeps the rig running.
+    const periodic = new PeriodicSnapshotScheduler({
+      db, snapshotCapture, snapshotRepo, sessionRegistry,
+      resumeMetadataRefresher: { refresh: vi.fn(async () => { sessionRegistry.updateStatus(sibling.id, "exited"); }) } as unknown as Refresher,
+    });
+
+    await periodic.tick();
+
+    expect(lookup).toHaveBeenCalledWith(rigId);
+    expect(snapshotRepo.listSnapshots(rigId, { kind: "auto-periodic" })).toHaveLength(1);
+    lookup.mockRestore();
+  });
+
+  it("does not read the restore source on a tick where no seat changed", async () => {
+    const rigId = seedRunningRig("r-stable-tick");
+    snapshotCapture.captureSnapshot(rigId, "auto-pre-down");
+    const lookup = vi.spyOn(snapshotRepo, "findLatestRestoreUsable");
+    const periodic = new PeriodicSnapshotScheduler({
+      db, snapshotCapture, snapshotRepo, sessionRegistry,
+      resumeMetadataRefresher: { refresh: vi.fn(async () => {}) } as unknown as Refresher,
+    });
+
+    await periodic.tick();
+
+    expect(lookup).not.toHaveBeenCalled();
+    expect(snapshotRepo.listSnapshots(rigId, { kind: "auto-periodic" })).toHaveLength(1);
+    lookup.mockRestore();
+  });
+
+  it("skips a replacement during refresh and captures the next stable tick", async () => {
+    const rigId = seedRunningRig("r-replaced");
+    const original = sessionRegistry.getSessionsForRig(rigId)[0]!;
+    snapshotCapture.captureSnapshot(rigId, "auto-pre-down");
+    db.prepare("UPDATE sessions SET created_at = '2026-01-01 00:00:00' WHERE id = ?").run(original.id);
+    const refresh = vi.fn(async () => {}).mockImplementationOnce(async () => {
+      sessionRegistry.updateStatus(original.id, "superseded");
+      const replacement = sessionRegistry.registerSession(original.nodeId, original.sessionName);
+      sessionRegistry.updateStatus(replacement.id, "running");
+    });
+    const periodic = new PeriodicSnapshotScheduler({
+      db, snapshotCapture, snapshotRepo, sessionRegistry,
+      resumeMetadataRefresher: { refresh } as unknown as Refresher,
+    });
+    await periodic.tick();
+    expect(snapshotRepo.listSnapshots(rigId, { kind: "auto-periodic" })).toHaveLength(0);
+    await periodic.tick();
+    const snapshots = snapshotRepo.listSnapshots(rigId, { kind: "auto-periodic" });
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]!.data.activeOccupantsByNode?.[original.nodeId]).toEqual({
+      kind: "resolved", sessionId: sessionRegistry.getLatestLiveSessions(rigId)[0]!.sessionId,
+    });
+  });
+
+  it("captures a replacement during refresh when no earlier usable snapshot exists", async () => {
+    const rigId = seedRunningRig("r-replaced-without-snapshot");
+    const original = sessionRegistry.getSessionsForRig(rigId)[0]!;
+    db.prepare("UPDATE sessions SET created_at = '2026-01-01 00:00:00' WHERE id = ?").run(original.id);
+    let replacementId: string | undefined;
+    const refresh = vi.fn(async () => {
+      sessionRegistry.updateStatus(original.id, "superseded");
+      const replacement = sessionRegistry.registerSession(original.nodeId, original.sessionName);
+      sessionRegistry.updateStatus(replacement.id, "running");
+      replacementId = replacement.id;
+    });
+    const periodic = new PeriodicSnapshotScheduler({
+      db, snapshotCapture, snapshotRepo, sessionRegistry,
+      resumeMetadataRefresher: { refresh } as unknown as Refresher,
+    });
+
+    await periodic.tick();
+
+    const snapshots = snapshotRepo.listSnapshots(rigId, { kind: "auto-periodic" });
+    expect(snapshots).toHaveLength(1);
+    expect(replacementId).toBeDefined();
+    expect(snapshots[0]!.data.activeOccupantsByNode?.[original.nodeId]).toEqual({
+      kind: "resolved", sessionId: replacementId,
+    });
+  });
 
   it("FR-4: tick refreshes live tokens before capturing the periodic snapshot", async () => {
     const rigId = seedRunningRig("r-fr4");

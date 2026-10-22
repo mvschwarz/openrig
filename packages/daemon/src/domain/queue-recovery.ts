@@ -23,12 +23,13 @@ export function recoveryId(db: Database.Database, qitemId: string): string {
  * planner read that small index instead of scanning and parsing every row. */
 const RECOVERY_TAG_ROWS = `(tags LIKE '%"recovery-for:%' OR tags LIKE '%\\%')`;
 const RECOVERY_ORDER = "ORDER BY CASE WHEN state IN ('pending','in-progress','blocked') THEN 0 ELSE 1 END, ts_updated DESC, qitem_id DESC LIMIT 1";
-export function findQueueRecovery(db: Database.Database, qitemId: string): { qitemId: string; state: string } | null {
+export function findQueueRecovery(db: Database.Database, qitemId: string, excludeTag?: string): { qitemId: string; state: string } | null {
   const tag = recoveryTag(qitemId);
   const row = db.prepare(`SELECT qitem_id, state, ts_updated FROM queue_items
     WHERE ${RECOVERY_TAG_ROWS} AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)
+    ${excludeTag ? "AND NOT EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)" : ""}
     ${RECOVERY_ORDER}`)
-    .get(tag) as { qitem_id: string; state: string; ts_updated: string } | undefined;
+    .get(...(excludeTag ? [tag, excludeTag] : [tag])) as { qitem_id: string; state: string; ts_updated: string } | undefined;
   if (!row) return null;
   if (!["pending", "in-progress", "blocked"].includes(row.state)) {
     const changed = lastMeaningfulTransition(db, qitemId);

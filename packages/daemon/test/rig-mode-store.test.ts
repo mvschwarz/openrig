@@ -256,6 +256,9 @@ describe("RigModeStore — slice 09 persistence + resolution", () => {
       "listBindings",
       "deleteBinding",
       "resolveEffective",
+      // 04-A2: a saved mode and a posture kept side by side at one target.
+      "getBindings",
+      "removeBinding",
     ]);
     const actual = new Set(
       Object.getOwnPropertyNames(RigModeStore.prototype).filter((m) => m !== "constructor"),

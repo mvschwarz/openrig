@@ -171,6 +171,19 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "snapshots.periodic.retention_keep",
       // OPR.0.4.6.02 S1 — inner-tmux status-bar launch default (static bool).
       "terminal.status_bar",
+      "terminal.history_limit",
+      "terminal.inherit_tmux_environment",
+      // Slice 15 (OPR.0.7.0.15) — compact command-output defaults switch.
+      "output.compact",
+      // Slice 15 P5 — the whoami peer bound under output.compact.
+      "output.whoami_peers",
+      // Slice 01 (OPR.0.7.0.1) — Codex usage windows switch.
+      "provider.usage_windows",
+      "bundle.services_enabled",
+      "usage.pi_cost_facts",
+      "usage.pi_openrouter_charge",
+      "transport.verify_input_box",
+      "transport.local_user_guard",
       // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs.
       "retention.enabled",
       "retention.transitions_days",
@@ -246,6 +259,30 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "queue.pickup_stall_threshold_minutes" as never,
     );
     expect(setting).toMatchObject({ value: 3, source: "default", defaultValue: 3 });
+  });
+
+  it("local user guard is opt-in and resolves the file/env twins", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.resolveWithSource("transport.local_user_guard")).toMatchObject({ value: false, source: "default" });
+    store.set("transport.local_user_guard", "true");
+    expect(store.resolve().transport.localUserGuard).toBe(true);
+    try {
+      process.env.OPENRIG_TRANSPORT_LOCAL_USER_GUARD = "false";
+      expect(store.resolveWithSource("transport.local_user_guard")).toMatchObject({ value: false, source: "env" });
+    } finally { delete process.env.OPENRIG_TRANSPORT_LOCAL_USER_GUARD; }
+  });
+
+  it("transport.verify_input_box defaults off, resolves its env twin, and appears in the resolved config", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.resolveWithSource("transport.verify_input_box")).toMatchObject({ value: false, source: "default", defaultValue: false });
+    expect(store.resolve().transport).toEqual({ verifyInputBox: false, localUserGuard: false });
+    try {
+      process.env.OPENRIG_TRANSPORT_VERIFY_INPUT_BOX = "1";
+      expect(store.resolveWithSource("transport.verify_input_box")).toMatchObject({ value: true, source: "env" });
+      expect(store.resolve().transport).toEqual({ verifyInputBox: true, localUserGuard: false });
+    } finally {
+      delete process.env.OPENRIG_TRANSPORT_VERIFY_INPUT_BOX;
+    }
   });
 
   it("configures the launch readiness window with strict bounds and env precedence", () => {
@@ -620,6 +657,47 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     expect(existsSync(configPath)).toBe(false);
   });
 
+  it("reset(key) removes a section it leaves empty", () => {
+    const store = new ConfigStore(configPath);
+    store.set("transport.local_user_guard", "true");
+    store.reset("transport.local_user_guard");
+    const raw = JSON.parse(readFileSync(configPath, "utf8"));
+    expect(raw.transport).toBeUndefined();
+  });
+
+  it("reset(key) keeps the section when a sibling key remains", () => {
+    const store = new ConfigStore(configPath);
+    store.set("transport.local_user_guard", "true");
+    store.set("transport.verify_input_box", "true");
+    store.reset("transport.local_user_guard");
+    const raw = JSON.parse(readFileSync(configPath, "utf8"));
+    expect(raw.transport).toEqual({ verifyInputBox: true });
+  });
+
+  it("reset(key) leaves unrelated unknown keys elsewhere in the file alone", () => {
+    const store = new ConfigStore(configPath);
+    store.set("transport.local_user_guard", "true");
+    const raw1 = JSON.parse(readFileSync(configPath, "utf8"));
+    raw1.someOtherTool = { leaveMeAlone: true };
+    writeFileSync(configPath, JSON.stringify(raw1, null, 2) + "\n");
+    store.reset("transport.local_user_guard");
+    const raw2 = JSON.parse(readFileSync(configPath, "utf8"));
+    expect(raw2.someOtherTool).toEqual({ leaveMeAlone: true });
+    expect(raw2.transport).toBeUndefined();
+  });
+
+  it("reset(key) leaves a pre-existing unrelated empty object alone", () => {
+    const store = new ConfigStore(configPath);
+    store.set("transport.local_user_guard", "true");
+    const raw1 = JSON.parse(readFileSync(configPath, "utf8"));
+    raw1.unrelatedEmptySection = {};
+    writeFileSync(configPath, JSON.stringify(raw1, null, 2) + "\n");
+    store.reset("transport.local_user_guard");
+    const raw2 = JSON.parse(readFileSync(configPath, "utf8"));
+    expect(raw2.unrelatedEmptySection).toEqual({});
+    expect(raw2.transport).toBeUndefined();
+  });
+
   it("resolveAllWithSource returns every valid key with source + default", () => {
     const store = new ConfigStore(configPath);
     const all = store.resolveAllWithSource();
@@ -677,6 +755,61 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
   it("ui.preview.* keys reject non-numeric values", () => {
     const store = new ConfigStore(configPath);
     expect(() => store.set("ui.preview.refresh_interval_seconds", "soon")).toThrow(/expected a number/);
+  });
+
+  // Constraint gap (Slice 27 residue): daemon.port had no KEY_CONSTRAINTS
+  // entry, so `rig config set daemon.port 99999` stored 99999 and the next
+  // daemon start died with a raw ERR_SOCKET_BAD_PORT from serve(). The
+  // contract: refuse only ports that cannot be bound, checked on the value
+  // the runtime consumes (the same parseInt the boot path runs), never
+  // against a stricter input format than today's.
+  it("daemon.port refuses ports that cannot be bound; 0 and 65535 stay legal", () => {
+    const store = new ConfigStore(configPath);
+    for (const raw of ["-1", "65536", "99999"]) {
+      expect(() => store.set("daemon.port", raw), `daemon.port must reject ${raw}`)
+        .toThrow(/integer in \[0, 65535\]/);
+    }
+    store.set("daemon.port", "0");
+    expect(store.get("daemon.port")).toBe(0);
+    store.set("daemon.port", "65535");
+    expect(store.get("daemon.port")).toBe(65535);
+  });
+
+  it("daemon.port keeps resolving every input form that resolves today", () => {
+    const store = new ConfigStore(configPath);
+    for (const [raw, expected] of [
+      ["7433abc", 7433],
+      ["7433.5", 7433],
+      ["+7433", 7433],
+      ["1e4", 1],
+      ["0x1D11", 0],
+    ] as const) {
+      store.set("daemon.port", raw);
+      expect(store.get("daemon.port"), `${raw} must keep resolving to ${expected}`).toBe(expected);
+    }
+  });
+
+  it("unusable daemon.port in config.json falls back to the default instead of crashing the daemon at boot", () => {
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      writeFileSync(configPath, JSON.stringify({ daemon: { port: 99999 } }));
+      const store = new ConfigStore(configPath);
+      expect(store.get("daemon.port")).toBe(7433);
+      const warns = stderrSpy.mock.calls.map((c) => String(c[0]));
+      expect(warns.some((w) => w.includes("file value for daemon.port rejected"))).toBe(true);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("a quoted in-range port in config.json keeps its port, and the CLI target and daemon bind agree", () => {
+    writeFileSync(configPath, JSON.stringify({ daemon: { port: "7434" } }));
+    const store = new ConfigStore(configPath);
+    // Used as-is, exactly as before this constraint existed: the CLI's
+    // target stays "7434" and the daemon binds parseInt of the same value.
+    expect(store.get("daemon.port")).toBe("7434");
+    expect(Number.parseInt(String(store.get("daemon.port")), 10)).toBe(7434);
+    expect(store.resolve().daemon.port).toBe("7434");
   });
 
   it("OPENRIG_UI_PREVIEW_* env vars override file values", () => {
