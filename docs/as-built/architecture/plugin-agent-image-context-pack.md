@@ -123,11 +123,15 @@ is refused; the other content checks are advisory.
 
 `packages/daemon/src/domain/skill-catalog.ts` resolves a seat's skill loadout from the
 catalog at `skills.root` (`catalog.yaml`, schema `openrig.skill-catalog/v1`) and the system,
-topology and project selections. It projects skills into `<cwd>/.claude/skills` or
-`<cwd>/.agents/skills` and tracks what it owns in
-`<cwd>/.openrig/skill-loadouts/<runtime>.json`. Each projection reports `current`, `missing`,
-`shadowed`, `stale` or `conflicting`. `rig skill loadout --runtime <runtime>` inspects the
-composed projection and reconciles it only with `--apply`; `rig skill audit` is a separate
+topology and project selections. For a working directory it projects skills into
+`<cwd>/.claude/skills` or `<cwd>/.agents/skills` and tracks what it owns in
+`<cwd>/.openrig/skill-loadouts/<runtime>.json`. For a Claude or Codex team seat it takes a
+`location` instead: the seat's own storage outside the project, with its `skill-loadout.json`
+there, and for Claude the `openrig:<id>` names its generated plugin gives. Each projection
+reports `current`, `missing`, `shadowed`, `stale` or `conflicting`.
+`rig skill loadout --runtime <runtime>` inspects the composed projection for a working
+directory, `rig skill loadout --seat <session|self>` does the same for one seat's own skills,
+and both reconcile only with `--apply`; `rig skill audit` is a separate
 read-only provenance and freshness audit. Launch applies the selected loadout per seat.
 
 For a Claude Code or Codex seat, the profile resolver also adds each selected plugin's skills to

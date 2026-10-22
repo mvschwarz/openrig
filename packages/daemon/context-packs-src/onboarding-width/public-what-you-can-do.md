@@ -1008,9 +1008,11 @@ your circumstances is configuration, and the ones that are not, another agent ca
 - **`rig skill loadout --runtime <claude-code|codex>`** — inspect the exact catalog revision,
   selectors, target, and current/missing/shadowed/conflicting state for one working directory.
   `--apply` writes only the managed ownership set, is idempotent, and refuses local edits or
-  unowned collisions. Launch now delivers a selected plugin's skills into `.claude/skills/` or
-  `.agents/skills/`, so don't copy them by hand; read the `plugin_skill_*` warnings if one is
-  missing. TDD is no longer a default skill.
+  unowned collisions. `--seat <session|self>` does the same for one seat's own skills, which a
+  Claude or Codex team seat keeps in its own storage outside the project. Launch delivers a
+  selected plugin's skills there (into `.claude/skills/` or `.agents/skills/` only for a seat
+  without that storage), so don't copy them by hand; read the `plugin_skill_*` warnings if one
+  is missing. TDD is no longer a default skill.
 - **`rig startup-proof submit`** — answer an explicitly selected authenticated startup challenge.
   Startup adds no proof exercise by default. Declare `startup_proof` with `authenticated` or
   `none` in the applicable startup layers; see `docs/reference/rig-spec.md#startup-block/startup-proof-selection`.

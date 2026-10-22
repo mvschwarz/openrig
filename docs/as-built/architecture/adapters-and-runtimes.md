@@ -205,8 +205,12 @@ resume launches (`codex-runtime-adapter.ts:378`, `codex-resume.ts:103`).
   `<cwd>/CLAUDE.md` by default (`:194`, `:501`; default at
   `domain/managed-blocks.ts:17`, and the rig may select `CLAUDE.local.md`
   instead with `managed_blocks: { claude-code: <file> }`,
-  `managed-blocks.ts:15`); `skill_install` → `<cwd>/.claude/skills/<name>/`
-  (`:200`, `:582`); subagents → `.claude/agents`, plugins →
+  `managed-blocks.ts:15`); `skill_install` and skill resources → the seat's
+  skill root, `binding.seatSkillsRoot`, which is the `skills/` folder of the
+  seat's generated plugin in its own storage
+  (`domain/startup-orchestrator.ts:353–369`), or
+  `<cwd>/.claude/skills/<name>/` for a seat without one (`:215–216`,
+  `:849`); subagents → `.claude/agents`, plugins →
   `.claude/plugins/<id>` (only plugins that apply to Claude), runtime
   resources → `.claude/extensions/<id>` (`:584–586`); settings fragments
   merged into `.claude/settings.local.json` (`:594`) and MCP fragments into
@@ -249,9 +253,12 @@ resume launches (`codex-runtime-adapter.ts:378`, `codex-resume.ts:103`).
 
 - `readonly runtime = "codex"` (`:66`).
 - **Projects** to `.agents/` targets: `guidance_merge` → `<cwd>/AGENTS.md`
-  (`:309`, `:576`); `skill_install` → `<cwd>/.agents/skills/<name>/` (`:315`);
-  skills resolve under `.agents/skills/<id>` (`:664`); plugins go to
-  `.codex/plugins/<id>` (`:667`).
+  (`:309`, `:576`); `skill_install` and skill resources → the seat's skill
+  root, `binding.seatSkillsRoot`, which is the `skills/` folder beside the
+  seat's catalog in its own storage
+  (`domain/startup-orchestrator.ts:360–369`), or
+  `<cwd>/.agents/skills/<name>/` for a seat without one (`:563–564`,
+  `:1060`); plugins go to `.codex/plugins/<id>` (`:1063`).
 - **Launches/resumes**: fresh = `codex[ --no-daemon]<posture>[<network>] -C
   <cwd> …` (`:442`), then capture a fresh thread id (`:460`); resume is built
   by `buildCodexResumeCore` (`:441`) as `codex<daemon><posture> resume
