@@ -127,7 +127,7 @@ function setup() {
 describe("per-seat Claude Advisor (#1152)", () => {
   it("upgrades existing seats with no Advisor and retains their primary model", () => {
     const db = new Database(":memory:"); cleanups.push(() => db.close());
-    migrate(db, ALL_MIGRATIONS.filter(m => m.name !== "102_node_advisor.sql"));
+    migrate(db, ALL_MIGRATIONS.filter(m => m.name !== "125_node_advisor.sql"));
     const oldRepo = new RigRepository(db);
     const rig = oldRepo.createRig("pre-advisor");
     const node = oldRepo.addNode(rig.id, "owner", { runtime: "claude-code", model: "claude-sonnet-5-5" });

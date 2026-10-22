@@ -7,7 +7,7 @@ import { threadPartMapSchema } from "../../src/db/migrations/097_thread_part_map
 import { queueTransitionsQitemIdOrderSchema } from "../../src/db/migrations/098_queue_transitions_qitem_id_order.js";
 import { queueItemsRecoveryTagsSchema } from "../../src/db/migrations/099_queue_items_recovery_tags.js";
 import { resumeRotationSchema } from "../../src/db/migrations/101_claude_resume_rotation.js";
-import { nodeAdvisorSchema } from "../../src/db/migrations/102_node_advisor.js";
+import { nodeAdvisorSchema } from "../../src/db/migrations/125_node_advisor.js";
 import { sessionStopIntentSchema } from "../../src/db/migrations/103_session_stop_intent.js";
 import { nodeEffortChoiceSchema } from "../../src/db/migrations/104_node_effort_choice.js";
 import { seatEnvSchema } from "../../src/db/migrations/111_seat_env.js";
