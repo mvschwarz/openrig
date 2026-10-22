@@ -20,7 +20,7 @@ it("creates a terminal rig and grows another terminal through ordinary spec admi
     expect(grown.code, grown.stdout + grown.stderr).toBe(0);
     expect(JSON.parse(grown.stdout)).toMatchObject({ ok: true, source: "builtin:terminal", nodes: [{ status: "launched" }] });
 
-    const listed = await runRig(["ps", "--nodes", "--rig", rig.rigId, "--json"], daemon.readEnv, rigBin);
+    const listed = await runRig(["ps", "--nodes", "--rig", name, "--json"], daemon.readEnv, rigBin);
     expect(listed.code, listed.stdout + listed.stderr).toBe(0);
     expect(JSON.parse(listed.stdout).map((node: { logicalId: string; runtime: string; sessionStatus: string }) =>
       [node.logicalId, node.runtime, node.sessionStatus]).sort()).toEqual([

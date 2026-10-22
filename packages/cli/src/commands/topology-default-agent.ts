@@ -8,8 +8,9 @@ interface AgentLibraryEntry {
   sourcePath: string;
 }
 
-/** Resolve the shipped general-purpose agent already installed with the daemon. */
-export async function resolveDefaultAgentRef(client: DaemonClient): Promise<string> {
+/** Resolve the runtime's terminal seat or the shipped general-purpose agent. */
+export async function resolveDefaultAgentRef(client: DaemonClient, runtime: string): Promise<string> {
+  if (runtime === "terminal") return "builtin:terminal";
   const res = await client.get<AgentLibraryEntry[]>("/api/specs/library?kind=agent");
   const entry = res.data?.find(
     (candidate) =>
@@ -18,7 +19,7 @@ export async function resolveDefaultAgentRef(client: DaemonClient): Promise<stri
       && candidate.sourceType === "builtin",
   );
   if (!entry) {
-    throw new Error("The shipped default agent is unavailable. Reinstall OpenRig and retry.");
+    throw new Error(`The shipped default agent is unavailable for runtime "${runtime}". Use rig up <spec> with an explicit agent_ref, or reinstall OpenRig and retry.`);
   }
   return `path:${dirname(entry.sourcePath)}`;
 }
