@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, realpathSync, utimesSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { prepareHermeticEnv, type HermeticScaffold } from "./helpers/hermetic-env.js";
@@ -47,13 +47,34 @@ it("warns when another live daemon has the same database open and still starts",
   try {
     expect(await start(first, db)).not.toContain("Another live daemon");
     const pid = JSON.parse(readFileSync(join(first.openrigHome, "daemon.json"), "utf8")).pid;
+    // A matching stale record beside the DB does not attest the live holder's home.
+    const staleRecord = join(first.stateDir, "daemon.json");
+    copyFileSync(join(first.openrigHome, "daemon.json"), staleRecord);
+    const oldTime = new Date("2020-01-01T00:00:00Z");
+    utimesSync(staleRecord, oldTime, oldTime);
     const started = await start(second, db);
     expect(started).toContain("Another live daemon");
     expect(started).toContain(String(pid));
-    expect(started).toContain(realpathSync(first.openrigHome));
+    expect(started).toContain("current home unconfirmed");
+    expect(started).toContain("2020-01-01T00:00:00.000Z");
+    expect(started).toContain(staleRecord);
     expect(started).toContain(realpathSync(db));
     const status = await runRig(["status", "--json"], second.env, rigBin);
     expect(status.code, status.stdout + status.stderr).toBe(0);
     expect(JSON.parse(status.stdout).daemon.databaseWarnings.join("\n")).toContain("Another live daemon");
   } finally { await stop(second); await stop(first); }
+}, 120_000);
+
+it("explains a --db override without promising that unsetting OPENRIG_DB resets it", async () => {
+  const home = fixture();
+  delete home.env.OPENRIG_DB;
+  delete home.env.RIGGED_DB;
+  const db = join(home.stateDir, "explicit.sqlite");
+  try {
+    const result = await runRig(["daemon", "start", "--port", String(await findFreePort()), "--no-kernel", "--db", db], home.env, rigBin, 60_000);
+    expect(result.code, result.stdout + result.stderr).toBe(0);
+    expect(result.stderr).toContain("--db, db.path, OPENRIG_DB or RIGGED_DB");
+    expect(result.stderr).toContain("Remove or correct the selecting override");
+    expect(result.stderr).not.toContain("Unset OPENRIG_DB to use");
+  } finally { await stop(home); }
 }, 120_000);
