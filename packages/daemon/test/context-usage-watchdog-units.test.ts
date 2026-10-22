@@ -36,6 +36,7 @@ describe("context-usage-threshold token/percent units", () => {
   let generation: string;
   let sample: typeof FRESH_SAMPLE | null;
   let deliveries: Array<{ targetSession: string; message: string }>;
+  let clock: Date;
 
   beforeEach(() => {
     db = createDb();
@@ -66,6 +67,7 @@ describe("context-usage-threshold token/percent units", () => {
     generation = "gen-1";
     sample = { ...FRESH_SAMPLE };
     deliveries = [];
+    clock = new Date("2026-08-28T09:31:00.000Z");
   });
 
   afterEach(() => {
@@ -83,10 +85,11 @@ describe("context-usage-threshold token/percent units", () => {
       },
       resolveTargetGeneration: () => generation,
       resolveContextUsage: () => sample,
+      now: () => clock,
     });
   }
 
-  function register(input: { thresholdTokens?: number; thresholdPercent?: number } = {}, extraSpec = "") {
+  function register(input: { thresholdTokens?: number; thresholdPercent?: number; activeWakeIntervalSeconds?: number } = {}, extraSpec = "") {
     return repo.register({
       policy: "context-usage-threshold",
       specYaml:
@@ -97,6 +100,7 @@ describe("context-usage-threshold token/percent units", () => {
       registeredBySession: "ops@kernel",
       thresholdTokens: input.thresholdTokens ?? null,
       thresholdPercent: input.thresholdPercent ?? null,
+      activeWakeIntervalSeconds: input.activeWakeIntervalSeconds ?? null,
     });
   }
 
@@ -157,6 +161,29 @@ describe("context-usage-threshold token/percent units", () => {
     const fired = await engine().evaluate(repo.getByIdOrThrow(job.jobId));
     expect(fired.outcome).toMatchObject({ action: "send", message: "Hand over at the planned context level." });
     expect(deliveries[1]).toMatchObject({ continuityAction: { type: "create-cutover-baton", destination: "next@rig" } });
+  });
+
+  it("a notice doesn't hold back the threshold's own fire during the active-wake interval", async () => {
+    sample = { ...FRESH_SAMPLE, fresh: false };
+    const job = register({ thresholdTokens: 400_000, activeWakeIntervalSeconds: 3600 });
+    await engine().evaluate(repo.getByIdOrThrow(job.jobId));
+    expect(deliveries).toHaveLength(1);
+    clock = new Date(clock.getTime() + 60_000);
+    sample = { ...FRESH_SAMPLE };
+    const fired = await engine().evaluate(repo.getByIdOrThrow(job.jobId));
+    expect(fired.outcome).toMatchObject({ action: "send", message: "Hand over at the planned context level." });
+    expect(deliveries).toHaveLength(2);
+  });
+
+  it("tells the target about each reason once per occupant, even when the reasons alternate", async () => {
+    const noTokens = { ...FRESH_SAMPLE, contextWindowSize: null, usedTokens: null };
+    const stale = { ...FRESH_SAMPLE, fresh: false };
+    const job = register({ thresholdTokens: 1 });
+    for (const reading of [noTokens, stale, noTokens, stale]) {
+      sample = reading;
+      await engine().evaluate(repo.getByIdOrThrow(job.jobId));
+    }
+    expect(deliveries).toHaveLength(2);
   });
 
   it("registers token/percent jobs without a transcript and persists the units", () => {
