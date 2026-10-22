@@ -1,4 +1,6 @@
-import { lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /** Resolve existing path components, including a dangling final symlink, while
@@ -65,4 +67,51 @@ export function resolveDaemonDbPath(explicitDb: string | undefined | null, openr
     );
   }
   return dbPath;
+}
+
+const execFileAsync = promisify(execFile);
+async function lsof(args: string[]): Promise<string> {
+  try {
+    return (await execFileAsync("lsof", args, { timeout: 1000, maxBuffer: 64 * 1024 })).stdout;
+  } catch { return ""; }
+}
+
+/** Boot-time diagnostics only, never exclusion or permission to share a DB.
+ * Missing tools, inaccessible records and races leave ownership unknown. */
+export async function daemonDatabaseWarnings(dbPath: string, home: string, selectedBy?: string): Promise<string[]> {
+  if (dbPath === ":memory:") return [];
+  const warnings: string[] = [];
+  let db: string;
+  let resolvedHome: string;
+  try {
+    db = resolveForContainment(dbPath);
+    resolvedHome = resolveForContainment(home);
+  } catch { return warnings; }
+  if (selectedBy && !isWithin(resolvedHome, db)) {
+    warnings.push(`${selectedBy} selects database ${db} outside OPENRIG_HOME ${resolvedHome}. This explicit path is honoured. Unset ${selectedBy} to use this home's database, or set it to the intended database path.`);
+  }
+  // The OS supplies actual open-file holders; daemon.json and the listener must
+  // independently agree on the PID before a holder is described as a daemon.
+  const holders = await lsof(["-t", "--", db]);
+  const pids = [...new Set(holders.trim().split(/\s+/).map(Number))]
+    .filter(pid => Number.isSafeInteger(pid) && pid > 0 && pid !== process.pid).slice(0, 4);
+  const conflicts = await Promise.all(pids.map(async (pid) => {
+    const files = await lsof(["-a", "-p", String(pid), "-d", "1,2", "-Fn"]);
+    const homes = new Set([dirname(db)]);
+    for (const line of files.split("\n")) {
+      if (line.startsWith("n") && basename(line.slice(1)) === "daemon.log") homes.add(dirname(line.slice(1)));
+    }
+    for (const candidate of homes) {
+      try {
+        const record = JSON.parse(readFileSync(join(candidate, "daemon.json"), "utf8"));
+        if (record.pid !== pid || typeof record.db !== "string" || resolveForContainment(record.db) !== db
+          || !Number.isInteger(record.port) || record.port < 1 || record.port > 65535) continue;
+        const response = await fetch(`http://127.0.0.1:${record.port}/healthz`, { signal: AbortSignal.timeout(500) });
+        if (!response.ok || (await response.json() as { pid?: unknown }).pid !== pid) continue;
+        return `At startup: Another live daemon (pid ${pid}, OPENRIG_HOME ${resolveForContainment(candidate)}) had database ${db} open. This daemon's OPENRIG_HOME is ${resolvedHome}. Startup and database writes continue; use separate database paths for independent instances.`;
+      } catch { /* A stale/unreadable record or failed probe is not a live-daemon claim. */ }
+    }
+    return undefined;
+  }));
+  return [...warnings, ...conflicts.filter((message): message is string => message !== undefined)];
 }
