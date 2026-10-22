@@ -1219,7 +1219,12 @@ export class PodRigInstantiator {
       profileName: member.profile, specRoot: rigRoot, member, pod, rig: this.withRigStartupLayers(rigSpec, this.rigStartupLayers(rigSpec, rigRoot, rigId)),
       skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext() });
     if (!config.ok) return refuse(config.errors.join("; "));
-    if (!same(config.config.model, node.model) || !same(config.config.effort, node.effort) || !same(config.config.advisor, node.advisor) || !same(config.config.cwd, node.cwd) || !same(config.config.restorePolicy, node.restorePolicy)) {
+    // A seat whose first start failed before Advisor support recorded no Advisor, though its unchanged agent spec (the
+    // hash above) may name one. Its retry keeps the launch it recorded: no Advisor, stored and launched alike. Any
+    // other Advisor difference changes the launch and is refused below.
+    const launchConfig = node.advisor == null && member.advisor === undefined && config.config.advisor != null
+      ? { ...config, config: { ...config.config, advisor: undefined } } : config;
+    if (!same(launchConfig.config.model, node.model) || !same(launchConfig.config.effort, node.effort) || !same(launchConfig.config.advisor, node.advisor) || !same(launchConfig.config.cwd, node.cwd) || !same(launchConfig.config.restorePolicy, node.restorePolicy)) {
       return refuse("Resolved model, effort, advisor, cwd or restore policy differs from the failed first start.");
     }
     const preflight = await preflightValidatedSpec(rigSpec, { rigRoot, fsOps: this.deps.fsOps, skillsRoot: this.resolveSkillsRoot(),
@@ -1235,7 +1240,7 @@ export class PodRigInstantiator {
     const finalRefusal = eligible();
     if (finalRefusal) return refuse(finalRefusal);
     const result = await this.launchExistingAgentMember({ rigId, nodeId, qualifiedId: node.logicalId, rigSpec, rigRoot, pod, member,
-      resolveResult: resolved, configResult: config });
+      resolveResult: resolved, configResult: launchConfig });
     if (result.status !== "launched") return { ok: false, code: result.status, message: result.error ?? "First-start retry did not reach readiness." };
     return { ok: true, rigId, nodeId, logicalId: node.logicalId, status: "launched", sessionName: result.sessionName, warnings: result.warnings };
   }
