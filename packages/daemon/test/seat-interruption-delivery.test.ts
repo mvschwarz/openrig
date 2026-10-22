@@ -36,7 +36,7 @@ function frame(body: string): ComposerSnapshot {
 
 const seat = "worker@test";
 
-function fixture() {
+function fixture(opts: { unconfirmed?: boolean } = {}) {
   const db = new Database(":memory:");
   migrate(db, ALL_MIGRATIONS);
   db.exec(`INSERT INTO rigs(id,name) VALUES ('rig','test');
@@ -59,7 +59,8 @@ function fixture() {
   vi.spyOn(tmux, "listPanes").mockImplementation(async name => [{ id: guard.target(name).pane! } as never]);
   vi.spyOn(tmux, "getPaneCommand").mockResolvedValue("node");
   vi.spyOn(tmux, "captureComposerSnapshot").mockImplementation(async () => frame(body));
-  vi.spyOn(tmux, "capturePaneContent").mockImplementation(async () => `${typed.join("\n")}\n${frame(body).screen}`);
+  // Unconfirmed: the pane never shows what was typed, so a typed send can't be verified and reads as unconfirmed.
+  vi.spyOn(tmux, "capturePaneContent").mockImplementation(async () => `${opts.unconfirmed ? "" : typed.join("\n")}\n${frame(body).screen}`);
   const at = Date.now();
   const transport = new SessionTransport({ db, tmuxAdapter: tmux, rigRepo: new RigRepository(db), sessionRegistry: new SessionRegistry(db),
     now: () => new Date(at), sleep: async () => {},
@@ -246,6 +247,34 @@ describe("a level chosen while the seat is busy decides each combined wake's del
       expect(f.typed.join("\n")).not.toContain(`parked qitem ${parked.routine} is pending`);
       expect(f.held().map((h) => h.body).join("\n")).toContain(`parked qitem ${parked.routine} is pending`);
     });
+});
+
+describe("a combined wake's released members are each typed at most once in a drain", () => {
+  it("routine, urgent and urgent grouped at off, urgent-only before the lease frees, typed outcomes unconfirmed", async () => {
+    const f = fixture({ unconfirmed: true });
+    const offline = new QueueRepository(f.db, new EventBus(f.db), { validateRig: () => true });
+    offline.attachOutbox(new OutboxHandler(f.db));
+    const blocker = await offline.create({ sourceSession: "peer@test", destinationSession: "peer@test", body: "Vendor reply", nudge: false });
+    const parked: string[] = [];
+    for (const priority of ["routine", "urgent", "urgent"]) {
+      const row = await offline.create({ sourceSession: "peer@test", destinationSession: seat, body: `${priority} follow-up`, priority, nudge: false });
+      await offline.update({ qitemId: row.qitemId, actorSession: seat, state: "blocked", blockedOn: blocker.qitemId } as never);
+      parked.push(row.qitemId);
+    }
+    await offline.update({ qitemId: blocker.qitemId, actorSession: "peer@test", state: "done", closureReason: "no-follow-on" } as never);
+    let release!: () => void;
+    const busy = f.guard.operation(seat, () => new Promise<void>((r) => { release = r; }));
+    const drain = f.queue.drainPendingWakeIntents();
+    await new Promise((r) => setTimeout(r, 50));
+    await f.guard.set("a", { mode: "urgent-only" }, "person@test", "focus", 1);
+    release();
+    await busy;
+    await drain;
+    const [routine, ...urgent] = parked;
+    for (const id of urgent) expect(f.typed.filter((t) => t.includes(`parked qitem ${id} is pending`))).toHaveLength(1);
+    expect(f.typed.join("\n")).not.toContain(`parked qitem ${routine} is pending`);
+    expect(f.queue.getById(routine!)!.lastNudgeResult).toBe("retained:typing_guard");
+  });
 });
 
 describe("a returned result and its resume", () => {
