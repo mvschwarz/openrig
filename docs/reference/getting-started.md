@@ -795,7 +795,8 @@ when it's asked about a pane or session that has just closed. OpenRig checks eac
 seat's session closes, the next check can stop every agent on that tmux server, and tmux reports "server exited
 unexpectedly". This was reproduced with Ubuntu 22.04's `tmux 3.2a-4ubuntu0.3` for a closed pane, a closed session,
 and a closed pane in a window that stayed open. If `tmux -V` prints `tmux 3.2a`, put tmux 3.4 or later first on
-your `PATH`. One way is to build a current release from the tmux project, as #980's reporter did with 3.5a:
+your `PATH`. Newer versions weren't tested against this crash; #980's reporter runs 3.5a, and none of OpenRig's own
+machines runs 3.2a. One way to get one is to build a current release from the tmux project, as that reporter did:
 
 ```sh
 sudo apt install build-essential pkg-config bison libevent-dev libncurses-dev
