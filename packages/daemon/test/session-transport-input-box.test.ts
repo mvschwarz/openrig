@@ -984,6 +984,7 @@ describe("SessionTransport with transport.verify_input_box", () => {
       current = second;
       const after = await t.send(SESSION, texts.submit, { verify: true });
       expect(first.log.some((call) => call.startsWith("pid:"))).toBe(false);
+      expect(second.log.some((call) => call.startsWith("pid:"))).toBe(true);
     });
 
     it("a setting read that throws reads off", async () => {
