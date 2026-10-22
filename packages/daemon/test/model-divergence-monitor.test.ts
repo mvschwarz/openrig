@@ -427,6 +427,25 @@ describe("ModelDivergenceMonitor — a restart doesn't proclaim an unchanged div
     expect(warnings.join("\n")).toMatch(/could not read earlier proclamations.*db locked/);
   });
 
+  it("an alert no channel received is proclaimed again after a restart; a received one is not", async () => {
+    const db = createFullTestDb();
+    const bus = new EventBus(db);
+    const proclaimedInEventLog = (monitorModule as { proclaimedInEventLog?: (d: typeof db) => (id: string, nodeId: string) => boolean }).proclaimedInEventLog!;
+    const durable = {
+      recordProclamation: (p: { rigId: string; nodeId: string; sessionName: string; runtime: string | null; pinnedModel: string; effectiveModel: string; diagnosis: string | null; occurrenceId?: string; channels: Array<{ channel: string; target: string | null; status: string; detail?: string }> }) => {
+        bus.emit({ type: "seat.model_divergence", rigId: p.rigId, nodeId: p.nodeId, sessionName: p.sessionName, runtime: p.runtime,
+          pinnedModel: p.pinnedModel, effectiveModel: p.effectiveModel, diagnosis: p.diagnosis, occurrenceId: p.occurrenceId, channels: p.channels });
+      },
+      wasProclaimed: proclaimedInEventLog(db),
+    };
+    const unreachable = { ...durable, sendToSession: async () => ({ ok: false, error: "no route" }) };
+    expect(await makeMonitor(unreachable).monitor.checkOnce()).toHaveLength(1);
+    expect(await makeMonitor(unreachable).monitor.checkOnce()).toHaveLength(1); // nobody received it, so a restart alerts again
+    expect(await makeMonitor(durable).monitor.checkOnce()).toHaveLength(1);     // delivered this time
+    expect(await makeMonitor(durable).monitor.checkOnce()).toHaveLength(0);     // and a restart stays quiet
+    db.close();
+  });
+
   it("proclaimedInEventLog answers from the persisted seat.model_divergence event, per node", () => {
     const db = createFullTestDb();
     const bus = new EventBus(db);
@@ -435,9 +454,17 @@ describe("ModelDivergenceMonitor — a restart doesn't proclaim an unchanged div
     bus.emit({ type: "seat.model_divergence", rigId: "rig-1", nodeId: "n1", sessionName: "dev-impl@r", runtime: "codex",
       pinnedModel: "gpt-5.1-codex-mini", effectiveModel: "gpt-5.4-mini", diagnosis: null, occurrenceId: "occ-1", channels: [] });
     const was = proclaimedInEventLog!(db);
-    expect(was("occ-1", "n1")).toBe(true);
-    expect(was("occ-2", "n1")).toBe(false);
-    expect(was("occ-1", "n2")).toBe(false);
+    expect(was("occ-1", "n1")).toBe(false); // no channel received it
+    const event = (occurrenceId: string, status: string) => bus.emit({ type: "seat.model_divergence", rigId: "rig-1", nodeId: "n1",
+      sessionName: "dev-impl@r", runtime: "codex", pinnedModel: "gpt-5.1-codex-mini", effectiveModel: "gpt-5.4-mini", diagnosis: null, occurrenceId,
+      channels: [{ channel: "operator", target: "op@k", status: "failed" }, { channel: "slack", target: null, status: "deferred" }, { channel: "orchestrator", target: "orch-lead@r", status }] });
+    event("occ-2", "delivered");
+    event("occ-3", "retained");
+    event("occ-4", "failed");
+    expect(was("occ-2", "n1")).toBe(true);
+    expect(was("occ-3", "n1")).toBe(true);
+    expect(was("occ-4", "n1")).toBe(false);
+    expect(was("occ-2", "n2")).toBe(false);
     db.close();
   });
 });

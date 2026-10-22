@@ -89,8 +89,8 @@ export interface ModelDivergenceMonitorDeps {
   resolveOversightSeat: () => string | null;
   /** Durable record of the proclamation + its per-channel outcomes. */
   recordProclamation: (p: ModelDivergenceProclamation) => void;
-  /** Whether this occurrence was already proclaimed, by an earlier daemon too. The settled set lives in memory, so
-   *  without this a restart alerts again on an unchanged divergence. */
+  /** Whether this occurrence was already proclaimed to someone (a channel delivered or retained it), by an earlier daemon
+   *  too. The settled set lives in memory, so without this a restart alerts again on an unchanged divergence. */
   wasProclaimed?: (occurrenceId: string, nodeId: string) => boolean;
   /** Optional cause string when a rejection signal is known (diagnosis, NEVER the trigger). */
   diagnose?: (seat: PinnedSeat) => string | null;
@@ -103,9 +103,13 @@ export const SLACK_DEFERRAL_LINE = "human-via-Slack: deferred: M1 not landed";
 /** Polls a pinned generation may stay signal-less before it is loudly named as unchecked. */
 export const PENDING_VISIBILITY_POLLS = 10;
 
-/** `wasProclaimed` from the record a proclamation already writes: its `seat.model_divergence` event. */
+/** `wasProclaimed` from the record a proclamation already writes: its `seat.model_divergence` event. Only a proclamation
+ *  some channel delivered or retained counts, so an alert nobody received is proclaimed again after a restart. */
 export function proclaimedInEventLog(db: Pick<Database.Database, "prepare">): (occurrenceId: string, nodeId: string) => boolean {
-  const stmt = db.prepare("SELECT 1 FROM events WHERE node_id = ? AND type = 'seat.model_divergence' AND json_extract(payload, '$.occurrenceId') = ? LIMIT 1");
+  const stmt = db.prepare(`SELECT 1 FROM events
+    WHERE node_id = ? AND type = 'seat.model_divergence' AND json_extract(payload, '$.occurrenceId') = ?
+      AND EXISTS (SELECT 1 FROM json_each(payload, '$.channels') WHERE json_extract(value, '$.status') IN ('delivered', 'retained'))
+    LIMIT 1`);
   return (occurrenceId, nodeId) => stmt.get(nodeId, occurrenceId) !== undefined;
 }
 
