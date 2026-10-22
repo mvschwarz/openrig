@@ -224,8 +224,10 @@ Examples:
 
 A mixed change is refused whole: one reason makes the proposal incompatible, and
 nothing is adopted, not even its compatible parts. Say the mission source edits
-completed step review and adds an unstarted step docs:
+completed step review and adds an unstarted step docs that waits on the
+outstanding step ship:
   graph:    incompatible · authored input has not been adopted
+  ...
     step-changed: review (objective)
     step-added: docs
     Step review already has completed, live or failed work. ...
