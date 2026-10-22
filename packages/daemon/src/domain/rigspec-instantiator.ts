@@ -2142,8 +2142,15 @@ export class PodRigInstantiator {
         ...(input.member.appendSystemPromptFile ? { appendSystemPromptFile: beside(input.member.appendSystemPromptFile) } : {}),
         ...(input.member.pluginDirs?.length ? { pluginDirs: input.member.pluginDirs.map(beside) } : {}),
       });
-      if (!prepared.ok) return { status: "failed", error: prepared.message, sessionName: canonicalSessionName };
-      keptSkillWarnings.push(...(prepared.notes ?? []));
+      // A linked seat-storage ancestor: the seat starts without its additions, each named; nothing goes through the link.
+      // A missing or refused source still fails the seat.
+      const linked = !prepared.ok && prepared.code === "seat_storage_refused" ? seatSkillLocation(seatSkills).refuseMutation?.() : undefined;
+      if (!prepared.ok && !linked) return { status: "failed", error: prepared.message, sessionName: canonicalSessionName };
+      if (linked) {
+        const asked = [input.member.agentFile, input.member.appendSystemPromptFile, ...(input.member.pluginDirs ?? [])].filter((ref): ref is string => !!ref);
+        for (const ref of asked) keptSkillWarnings.push(`seat_launch_addition_not_delivered: ${ref}: ${linked}; the seat starts without it`);
+      }
+      keptSkillWarnings.push(...(prepared.ok ? prepared.notes ?? [] : []));
     }
     if (seatSkills && seatRuntime === "codex") {
       // A catalog that can't be written is this seat's named result, never an error that escapes the rig's launch.
