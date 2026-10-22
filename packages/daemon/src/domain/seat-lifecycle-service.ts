@@ -702,7 +702,9 @@ export class SeatLifecycleService {
         if (currentRuntime?.runtime !== runtime) throw new Error("Seat runtime changed while checking native options; selection was not changed.");
         const from = store.read(seat.nodeId);
         const changed = from?.runtime !== to?.runtime || from?.mode !== to?.mode;
-        if (changed) {
+        // A Codex re-selection is intent for its next rebuild, even when the saved value is
+        // unchanged. Audit inherit too: a cleared selection has no row to carry its timestamp.
+        if (changed || runtime === "codex") {
           store.write(seat.nodeId, to, input.actor.trim(), input.reason.trim());
           persisted = this.eventBus.persistWithinTransaction({ type: "node.permissions_changed", rigId: seat.rigId,
             nodeId: seat.nodeId, from, to, actor: input.actor.trim(), reason: input.reason.trim(), source: "seat_selection", effect: "future_launches_only" });
@@ -755,7 +757,8 @@ export class SeatLifecycleService {
     const before = this.rigRepo.getNodePolicyProvenance(seat.nodeId);
     const changed = from !== ref || !before || before.origin !== provenance.origin || before.resolvedTarget !== provenance.resolvedTarget
       || before.declaringDir !== provenance.declaringDir || before.launchPosture !== provenance.launchPosture;
-    if (changed) {
+    // Reaffirming the same Codex policy is also a deliberate choice for the next rebuild.
+    if (changed || resolved.entry.runtime === "codex") {
       let persisted: PersistedEvent | null = null;
       this.db.transaction(() => {
         this.rigRepo.setNodePermissionPolicy(seat.nodeId, ref);

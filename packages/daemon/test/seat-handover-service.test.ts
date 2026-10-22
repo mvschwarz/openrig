@@ -1,3 +1,4 @@
+import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 import { NativePermissionStore } from "../src/domain/native-permission-store.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
@@ -801,6 +802,35 @@ describe("SeatHandoverService", () => {
   });
 
   // OPR.0.5.5.5 (05-handover-sources-real) INVERTED the former B3 pin: fork and
+  it.each(["floor", "inherit", "policy", null] as const)("rebuild respects a deliberate same-mode selection (%s), not an old choice alone", async mode => {
+    const { node } = seedSeat();
+    const store = new NativePermissionStore(db);
+    const setter = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux() });
+    if (mode === "policy") {
+      await setter.setPolicy({ seatRef: "dev-impl@seat-rig", ref: "builtin:locked", actor: "old operator", reason: "earlier launch" });
+      db.prepare("UPDATE events SET created_at = '2026-04-19 00:00:00' WHERE type = 'node.policy_changed' AND node_id = ?").run(node.id);
+    } else if (mode !== "inherit") {
+      store.write(node.id, { runtime: "codex", mode: "floor" }, "old operator", "earlier launch");
+      db.prepare("UPDATE node_permission_selections SET updated_at = '2026-04-19 00:00:00' WHERE node_id = ?").run(node.id);
+    }
+    const envelope = { approvalPolicy: "never", sandboxPolicy: { type: "danger-full-access" } };
+    currentCodexPermissions.mockResolvedValue({ state: "observed", envelope, profile: null,
+      processStartedAt: "Mon Apr 20 12:00:00 2026", observedAt: "2026-04-20T12:01:00Z" });
+    if (mode !== null) {
+      const selected = mode === "policy"
+        ? await setter.setPolicy({ seatRef: "dev-impl@seat-rig", ref: "builtin:locked", actor: "person", reason: "choose successor permissions" })
+        : await setter.setPermissions({ seatRef: "dev-impl@seat-rig", mode, actor: "person", reason: "choose successor permissions" });
+      expect(selected).toMatchObject({ ok: true, changed: false });
+      expect(signalPaneProcess).not.toHaveBeenCalled();
+      expect(launchHarness).not.toHaveBeenCalled();
+    }
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", source: "rebuild", reason: "context wall" });
+    expect(result).toMatchObject({ ok: true, result: { sourceOutcome: { permissions: { state: mode === null ? "emitted" : "selection_used" } } } });
+    const binding = launchHarness.mock.calls[0]![0];
+    expect(binding.launchPosture).toBe("floor");
+    expect(binding.codexRebuildPermissions).toEqual(mode === null ? envelope : undefined);
+  });
+
   it.each(["observed", "unverified", "changed selection", "cleared selection", "profile change", "older selection"])(
     "rebuild permission result: %s", async state => {
       const { node } = seedSeat(state === "profile change" ? { codexConfigProfile: "next-profile" } : undefined);
