@@ -342,6 +342,20 @@ export interface SendVerifyFn {
   (sessionName: string, text: string, opts?: { verify?: boolean }): Promise<{ ok: boolean; outcome?: string; verified?: boolean }>;
 }
 
+/** The liveness probe's send through the transport: OpenRig's own message. Where the seat's interruption level would
+ *  hold it, it isn't sent: a held probe proves nothing and would only fill the seat's held messages. */
+export function attentionProbeSend(transport: () => {
+  retentionTarget(session: string, input?: { source: "openrig" | "agent"; urgent: boolean }): unknown;
+  send(session: string, text: string, opts: { verify?: boolean; openrigNotice?: true }): Promise<{ ok: boolean; outcome?: string; verified?: boolean }>;
+} | undefined): SendVerifyFn {
+  return async (session, text, opts) => {
+    const t = transport();
+    if (!t) return { ok: false, outcome: "failed" };
+    if (t.retentionTarget(session, { source: "openrig", urgent: false })) return { ok: false, outcome: "failed" };
+    return t.send(session, text, { verify: opts?.verify, openrigNotice: true });
+  };
+}
+
 export interface CaptureFn {
   (sessionName: string, opts?: { lines?: number }): Promise<{ ok: boolean; sessionName: string; content?: string; error?: string }>;
 }

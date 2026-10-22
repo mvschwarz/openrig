@@ -16,6 +16,7 @@ import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delive
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { SessionTransport } from "../src/domain/session-transport.js";
 import { makeWatchdogDeliver } from "../src/domain/watchdog-delivery.js";
+import { attentionProbeSend } from "../src/domain/seat-attention-reconciler.js";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
@@ -132,5 +133,39 @@ describe("queue wakes: who triggered the wake decides its source", () => {
     await vi.waitFor(() => expect(f.typed.join("\n")).toContain(`Blocker ${blocker.qitemId} resolved; parked qitem ${parked.qitemId} is pending`));
     const peer = await f.queue.create({ sourceSession: "peer@test", destinationSession: seat, body: "Another ask" });
     await vi.waitFor(() => expect(f.queue.getById(peer.qitemId)!.lastNudgeResult).toBe("retained:typing_guard"));
+  });
+
+  it("a row OpenRig creates itself (a stuck-sweep finding) wakes as OpenRig's: typed at openrig-urgent, held at sends-only", async () => {
+    const f = fixture();
+    await f.level("openrig-urgent");
+    const finding = await f.queue.create({ sourceSession: "peer@test", destinationSession: seat, body: "Stuck sweep: unclaimed", wakeTrigger: "openrig" });
+    await vi.waitFor(() => expect(f.typed.join("\n")).toContain(finding.qitemId));
+    await f.level("sends-only");
+    const later = await f.queue.create({ sourceSession: "peer@test", destinationSession: seat, body: "Stuck sweep: again", wakeTrigger: "openrig" });
+    const peerAsk = await f.queue.create({ sourceSession: "peer@test", destinationSession: seat, body: "A deliberate ask" });
+    await vi.waitFor(() => expect(f.queue.getById(later.qitemId)!.lastNudgeResult).toBe("retained:typing_guard"));
+    await vi.waitFor(() => expect(f.typed.join("\n")).toContain(peerAsk.qitemId));
+  });
+
+  it("OpenRig's own urgent row is marked urgent by OpenRig, not by the person it's about", async () => {
+    const f = fixture();
+    await f.level("urgent-only");
+    const escalation = await f.queue.create({ sourceSession: "workflow-owner@test", destinationSession: seat, body: "Workflow exception", priority: "urgent", wakeTrigger: "openrig" });
+    await vi.waitFor(() => expect(f.typed.join("\n")).toContain(escalation.qitemId));
+    expect(f.typed.join("\n")).toContain("Urgent (marked by OpenRig):");
+  });
+});
+
+describe("the attention-clear liveness probe", () => {
+  it("is OpenRig's: typed at openrig-urgent; where the level would hold it, it's neither sent nor kept as a held message", async () => {
+    const f = fixture();
+    const probe = attentionProbeSend(() => f.transport);
+    await f.level("openrig-urgent");
+    expect(await probe(seat, "# OpenRig attention-clear liveness probe 1", { verify: false })).toMatchObject({ ok: true });
+    expect(f.typed.at(-1)).toContain("liveness probe 1");
+    await f.level("sends-only");
+    expect(await probe(seat, "# OpenRig attention-clear liveness probe 2", { verify: false })).toEqual({ ok: false, outcome: "failed" });
+    expect(f.typed.join("\n")).not.toContain("liveness probe 2");
+    expect(f.held()).toEqual([]);
   });
 });
