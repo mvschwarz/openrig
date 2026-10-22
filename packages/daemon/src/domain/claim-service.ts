@@ -213,7 +213,7 @@ export class ClaimService {
     if (guard) await guard.operation(tmuxSession, write, async target => {
       new OutboxHandler(this.db).retain({ outboxId: `guard-claim-${target.nodeId}-${target.occupant ?? "unknown"}`,
         senderSession: "claim@system", destinationSession: tmuxSession, body: hint }, target);
-    });
+    }, { source: "openrig", urgent: false });
     else await write();
   }
 

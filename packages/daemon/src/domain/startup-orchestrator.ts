@@ -1198,6 +1198,7 @@ export class StartupOrchestrator {
         phase = "guarded_retry";
         diagnostic.retry = "threw"; // Replaced when the transport returns normally.
         retry = await this.sessionTransport.send(tmuxSession, "", {
+          openrigNotice: true,
           submitOnly: true,
           expectedStagedText: text,
           submitOnlyCaptureLines: STARTUP_SUBMIT_CAPTURE_LINES,
