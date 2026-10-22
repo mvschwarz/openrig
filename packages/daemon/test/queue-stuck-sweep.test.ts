@@ -1730,6 +1730,18 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
   const unclaimedFinding = async (qitemId: string) => (await findingsFor(qitemId))
     .filter((f) => (f.tags ?? []).includes(`stuck-sweep:unclaimed-obligation:${qitemId}`));
 
+  it("a row whose wake the seat's level or hold held isn't reported as unclaimed: it's held at the seat, not stuck", async () => {
+    const heldRow = await repo.create({ sourceSession: "asker@r", destinationSession: "worker@r", body: "held at a quiet seat", nudge: false });
+    const draftRow = await repo.create({ sourceSession: "asker@r", destinationSession: "worker@r", body: "held by a draft", nudge: false });
+    repo.recordNudgeAttempt(heldRow.qitemId, "retained:typing_guard");
+    repo.recordNudgeAttempt(draftRow.qitemId, "retained:draft_aware");
+    age(heldRow.qitemId); age(draftRow.qitemId);
+    expect(repo.waitingView(heldRow.qitemId)!.nextBackstop).toMatchObject({ held: true });
+    await sweep();
+    expect(await unclaimedFinding(heldRow.qitemId)).toEqual([]);
+    expect(await unclaimedFinding(draftRow.qitemId)).toHaveLength(1); // a draft can clear: still the sweep's
+  });
+
   it("a registered alias without an intent (owner@kernel) is suppressed like its @external address", async () => {
     const row = await repo.create({ sourceSession: "asker@r", destinationSession: "owner@kernel", body: "Pick option A or B",
       summary: "A or B?", evidenceRef: "rig queue show qitem-fixture" });
