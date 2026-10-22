@@ -329,9 +329,11 @@ Between off (always interrupt) and hold (full quiet):
                   item at priority urgent or critical).
   sends-only      deliberate sends from people and agents type; OpenRig's own
                   notices are held. A terminal member defaults to this.
-What a level lets through never types over a draft. Everything else is held, the
-sender is told, and held messages stay readable. Lifecycle work is refused at
-openrig-urgent and urgent-only, as at hold.
+What openrig-urgent and urgent-only let through never types over a draft.
+sends-only types like off: a terminal member's typing isn't protected, as today
+(its shell input can't be read). Everything else is held, the sender is told, and
+held messages stay readable. Lifecycle work is refused at openrig-urgent and
+urgent-only, as at hold.
 Messages use the existing outbox. Uncertain writes never replay automatically.
 Direct human input remains available. Other seats keep their own guard mode.
 
