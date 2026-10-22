@@ -10,7 +10,7 @@ import { occupantTenuresSchema } from "../src/db/migrations/060_occupant_tenures
 import { contextUsageWatchdogSchema } from "../src/db/migrations/074_context_usage_watchdog.js";
 import { contextUsageWatchdogGenerationSchema } from "../src/db/migrations/075_context_usage_watchdog_generation.js";
 import { idleGateFiredConditionSchema } from "../src/db/migrations/078_idle_gate_fired_condition.js";
-import { contextUsageWatchdogUnitsSchema } from "../src/db/migrations/102_context_usage_watchdog_units.js";
+import { contextUsageWatchdogUnitsSchema } from "../src/db/migrations/124_context_usage_watchdog_units.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";

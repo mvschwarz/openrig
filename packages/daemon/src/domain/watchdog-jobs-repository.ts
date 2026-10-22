@@ -347,7 +347,7 @@ export class WatchdogJobsRepository {
       ) {
         throw new WatchdogJobsError(
           "context_usage_schema_missing",
-          "context-usage-threshold token/percent units require migration 102_context_usage_watchdog_units",
+          "context-usage-threshold token/percent units require migration 124_context_usage_watchdog_units",
         );
       }
       this.validateThresholdUnits(input);

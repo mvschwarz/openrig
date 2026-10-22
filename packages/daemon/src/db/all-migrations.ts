@@ -107,7 +107,6 @@ import { queueTransitionsQitemIdOrderSchema } from "./migrations/098_queue_trans
 import { queueItemsRecoveryTagsSchema } from "./migrations/099_queue_items_recovery_tags.js";
 import { typingGuardModesSchema } from "./migrations/100_typing_guard_modes.js";
 import { resumeRotationSchema } from "./migrations/101_claude_resume_rotation.js";
-import { contextUsageWatchdogUnitsSchema } from "./migrations/102_context_usage_watchdog_units.js";
 import { sessionStopIntentSchema } from "./migrations/103_session_stop_intent.js";
 import { usageSamplesClientCostSchema } from "./migrations/105_usage_samples_client_cost.js";
 import { piUsageEntriesSchema } from "./migrations/107_pi_usage_entries.js";
@@ -125,6 +124,7 @@ import { seatIdentityPanePidSchema } from "./migrations/119_seat_identity_pane_p
 import { rigStartupLayersSchema } from "./migrations/121_rig_startup_layers.js";
 import { humanOperatingModesSchema } from "./migrations/122_human_operating_modes.js";
 import { queueDelegatedDecisionSchema } from "./migrations/123_queue_delegated_decision.js";
+import { contextUsageWatchdogUnitsSchema } from "./migrations/124_context_usage_watchdog_units.js";
 
 /** Ordered migrations; numbers may be reserved by independent changes. */
 
@@ -229,7 +229,6 @@ export const ALL_MIGRATIONS: Migration[] = [
   queueItemsRecoveryTagsSchema,
   typingGuardModesSchema,
   resumeRotationSchema,
-  contextUsageWatchdogUnitsSchema,
   sessionStopIntentSchema,
   nodeEffortChoiceSchema,
   usageSamplesClientCostSchema,
@@ -249,4 +248,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   rigStartupLayersSchema,
   humanOperatingModesSchema,
   queueDelegatedDecisionSchema,
+  contextUsageWatchdogUnitsSchema,
 ];
