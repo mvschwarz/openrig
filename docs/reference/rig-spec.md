@@ -584,6 +584,39 @@ edges:
 
 Cross-pod edges must reference different pods. An edge where both `from` and `to` are in the same pod is a validation error — use pod-local edges instead.
 
+### Changing edges on an existing rig
+
+Use `rig edge add` to ensure relationships between seats that already exist. It
+accepts a rig name or ID and **fully qualified logical IDs for both same-pod and
+cross-pod edges**. This command only changes edges; it does not create pods,
+restart sessions or change seat identity.
+
+```sh
+rig edge add my-rig orch.lead review.reviewer --kind delegates_to --plan --json
+rig edge add my-rig orch.lead review.reviewer --kind delegates_to --json
+```
+
+Run it once per edge. It returns `added` with the new edge's ID, or `present` with
+the existing edge's ID when that `{from, to, kind}` is already there, and then
+writes nothing. Existing duplicate rows from other creation paths are retained;
+this operation does not create more copies.
+
+Unknown endpoints, an invalid kind or a launch-order cycle leave the graph
+unchanged. Both endpoints must belong to the target rig. `--plan` performs the
+same validation and returns `would_add` for a new edge without writing anything.
+
+Each `added` receipt includes a rollback command,
+`rig edge remove <rig-id> <edge-id>`, which removes exactly that edge in that rig.
+Removal also supports `--plan` and `--json`. Removing an edge that is already gone changes nothing
+and returns `edge_not_found` (HTTP 404, exit 1), so a repeated removal reports not found, not success.
+Rig names resolve only among unarchived rigs, and an ambiguous name requires an
+explicit ID. These commands target the local daemon, as `rig add` does.
+
+Changes are persisted immediately and included in `rig export`. Existing snapshots
+remain unchanged, and restore reads the **selected snapshot's edges**. To restore
+the modified topology, run `rig snapshot <rig-id>` and use its returned ID with
+`rig restore <snapshot-id> --rig <rig-id>`.
+
 ---
 
 ## Startup Block

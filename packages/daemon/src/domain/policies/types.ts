@@ -28,8 +28,27 @@ export interface PolicyJob {
   registeredAt: string;
   watchedFilePath: string | null;
   thresholdBytes: number | null;
+  /** Issue #1180 — per-watchdog sampled-token threshold; null = not token-gated. */
+  thresholdTokens: number | null;
+  /** Issue #1180 — per-watchdog percent-of-seat-window threshold; null = not percent-gated. */
+  thresholdPercent: number | null;
+  /**
+   * Issue #1180 — the target seat's latest context-usage sample under its live
+   * occupant generation (tokens estimated from the seat's own reported window).
+   * Null = no usable sample; token/percent jobs tell their target once instead
+   * of firing on a frozen transcript-byte proxy.
+   */
+  contextUsageSample: {
+    usedTokens: number | null;
+    usedPercentage: number | null;
+    contextWindowSize: number | null;
+    sampledAt: string | null;
+    fresh: boolean;
+  } | null;
   requiresJobId: string | null;
   lastFiredGeneration: string | null;
+  /** The condition this job last told its target about (the receipt below), or null. */
+  lastFiredCondition: string | null;
   occupantGeneration: string | null;
   currentGenerationTranscriptPending: boolean;
   requiredReceiptSatisfied: boolean;
@@ -54,6 +73,12 @@ export type PolicyEvaluation =
        * that do not set this are unaffected.
        */
       conditionReceipt?: string;
+      /**
+       * A notice about the watch itself rather than its condition, such as a context watch that can't
+       * read its sample. Delivered like any send, but the engine records no threshold fire for it and
+       * runs no continuity action.
+       */
+      notice?: true;
     }
   | { action: "skip"; reason: string; notes?: Record<string, unknown> }
   | { action: "terminal"; reason: string; notes?: Record<string, unknown> };

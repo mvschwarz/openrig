@@ -2130,6 +2130,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // UNKNOWN (null) fails open → deliver. A drop of this line disables the gate silently (gen-bound
       // wakes would fire at the successor) — pinned in watchdog-target-gen-wiring.test.ts.
       resolveTargetGeneration: (s) => sessionRegistry.currentOccupantGenerationForSession(s),
+      // Issue #1180 — sampled context use for token/percent context watchdogs,
+      // generation-guarded against a predecessor's frozen telemetry.
+      resolveContextUsage: (s, occupantGeneration) =>
+        watchdogJobsRepoInstance.findContextUsageForSession(s, occupantGeneration),
       resolvePreDeliveryTerminalReason: ({ jobId }) =>
         queueRepoInstance.resolveWatchdogPreDeliveryTerminalReason(jobId),
       resolveQueueWait: (input) => queueRepoInstance.evaluateWaitReminder(input),

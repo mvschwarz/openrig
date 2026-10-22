@@ -484,7 +484,7 @@ the sections that were not read are `null`.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig watchdog` | — | — |
-| `rig watchdog register` | — | `--spec <path>`<br>`--policy <policy>` **required**<br>`--target-session <session>` **required**<br>`--interval-seconds <n>` **required**<br>`--registered-by <session>` **required**<br>`--threshold-bytes <n>`<br>`--threshold-mb <n>`<br>`--watched-file <path>`<br>`--requires-job <jobId>`<br>`--message <text>`<br>`--active-wake-interval-seconds <n>`<br>`--scan-interval-seconds <n>`<br>`--json` |
+| `rig watchdog register` | — | `--spec <path>`<br>`--policy <policy>` **required**<br>`--target-session <session>` **required**<br>`--interval-seconds <n>` **required**<br>`--registered-by <session>` **required**<br>`--threshold-bytes <n>`<br>`--threshold-mb <n>`<br>`--threshold-tokens <n>`<br>`--threshold-percent <n>`<br>`--watched-file <path>`<br>`--requires-job <jobId>`<br>`--message <text>`<br>`--active-wake-interval-seconds <n>`<br>`--scan-interval-seconds <n>`<br>`--json` |
 | `rig watchdog list` | — | `-a, --all`<br>`--full`<br>`--limit <n>`<br>`--json` |
 | `rig watchdog show <jobId>` | — | `--json` |
 | `rig watchdog status <jobId>` | — | `--json` |
@@ -784,6 +784,20 @@ Only Claude and Codex tenures can be woken.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig grow <rig-id> <members...>` | — | `--pod <pod>`<br>`--new-pod <pod>`<br>`--runtime <runtime>`<br>`--cwd <path>`<br>`--json` |
+
+### edge
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig edge` | — | — |
+| `rig edge add <rig> [from] [to]` | — | `--kind <kind>`<br>`--plan`<br>`--json` |
+| `rig edge remove <rig> <edge-id>` | — | `--plan`<br>`--json` |
+
+`add` requires `from`, `to` and `--kind`, and is idempotent: a repeat reports the
+existing edge and writes nothing. `remove` deletes the edge with that ID; a repeat changes nothing and
+returns `edge_not_found` (exit 1). See
+[changing edges on an existing rig](../reference/rig-spec.md#changing-edges-on-an-existing-rig)
+for input and receipt examples, rollback, and snapshot behavior.
 
 ### reconcile-session
 

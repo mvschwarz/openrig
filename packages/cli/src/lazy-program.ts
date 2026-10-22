@@ -82,6 +82,7 @@ export const COMMAND_LOADERS: ReadonlyMap<string, Load> = new Map<string, Load>(
   ["add", async () => (await import("./commands/add.js")).addMemberCommand()],
   ["create", async () => (await import("./commands/create.js")).createCommand()],
   ["grow", async () => (await import("./commands/grow.js")).growCommand()],
+  ["edge", async () => (await import("./commands/edge.js")).edgeCommand()],
   ["reconcile-session", async () => (await import("./commands/reconcile-session.js")).reconcileSessionCommand()],
   ["env", async () => (await import("./commands/env.js")).envCommand()],
   ["unclaim", async () => (await import("./commands/unclaim.js")).unclaimCommand()],
