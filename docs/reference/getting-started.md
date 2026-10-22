@@ -790,6 +790,23 @@ seats by itself: once a kernel exists, startup skips the built-in kernel boot an
 were all lost, not seats that failed. `rig status` then reads `Kernel: skipped` unless some of its seats are running
 and ready, so check `rig ps --nodes --rig kernel --full`.
 
+**When every agent stops at once on Ubuntu 22.04.** Ubuntu 22.04's packaged tmux, 3.2a, can exit its whole server
+when it's asked about a pane or session that has just closed. OpenRig checks each seat about once a second, so when a
+seat's session closes, the next check can stop every agent on that tmux server, and tmux reports "server exited
+unexpectedly". This was reproduced with Ubuntu 22.04's `tmux 3.2a-4ubuntu0.3` for a closed pane, a closed session,
+and a closed pane in a window that stayed open. If `tmux -V` prints `tmux 3.2a`, put tmux 3.4 or later first on
+your `PATH`. One way is to build a current release from the tmux project, as #980's reporter did with 3.5a:
+
+```sh
+sudo apt install build-essential pkg-config bison libevent-dev libncurses-dev
+# in the unpacked release tarball:
+./configure && make && sudo make install   # installs into /usr/local/bin
+```
+
+Then restart the daemon from a shell where `tmux -V` shows the new tmux. A tmux server that's already running keeps
+its version until it exits, so the change applies to servers started afterwards. If a crash already stopped your
+agents, recover as for lost tmux sessions in the table above.
+
 If a snapshot is unavailable, the startup view checks the selected seat's
 retained startup source and authoritative occupant relation. It reports a
 missing or ambiguous source instead of selecting an arbitrary historical row.
