@@ -556,7 +556,7 @@ export async function verifyRequiredListeners(input: {
 }): Promise<
   | { ok: true; verified: string[] }
   | { ok: false; missing: string[]; reason: string }
-  | { ok: "indeterminate"; reason: string }
+  | { ok: "indeterminate"; hosts: string[]; reason: string }
 > {
   const required = new Set(input.bind.hosts);
   required.add("127.0.0.1"); // loopback is required in EVERY mode's floor... except explicit
@@ -584,19 +584,19 @@ export async function verifyRequiredListeners(input: {
     else if (outcome === "unhealthy") missing.push(host);
     else indeterminate.push(host);
   }
-  if (indeterminate.length > 0) {
-    // Indeterminate beats missing in precedence: with ANY listener unverifiable, the
-    // gate has no complete evidence set and must not authorize a kill.
-    return {
-      ok: "indeterminate",
-      reason: `listener state could not be checked for ${indeterminate.join(", ")} (transient probe failure) — the gate acts only on positive evidence and takes no action.`,
-    };
-  }
   if (missing.length > 0) {
+    // A refused or unhealthy listener is positive evidence, whatever else could not be checked.
     return {
       ok: false,
       missing,
       reason: `required listener(s) not answering /healthz: ${missing.join(", ")} — binding evidence beats config echo; a reported host must prove itself.`,
+    };
+  }
+  if (indeterminate.length > 0) {
+    return {
+      ok: "indeterminate",
+      hosts: indeterminate,
+      reason: `listener state could not be checked for ${indeterminate.join(", ")} (transient probe failure) — the gate acts only on positive evidence and takes no action.`,
     };
   }
   return { ok: true, verified };
@@ -765,9 +765,9 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     lock.recordChild(pid!);
     let healthy = false;
     let lastProbe = "health endpoint not responding";
-    let listenerIndeterminate = false;
+    let unverified: string[] | null = null;
     for (let i = 0; i < HEALTHZ_RETRIES; i++) {
-      listenerIndeterminate = false;
+      unverified = null;
       try {
         const body = await readOwnedHealth(healthzUrl);
         if (body) {
@@ -788,7 +788,7 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
           } });
           if (gate.ok === false) throw new StartupIdentityError(`Daemon child ${pid} FAILED the listener adoption gate: ${gate.reason}`);
           if (gate.ok === true) { healthy = true; break; }
-          listenerIndeterminate = true;
+          unverified = gate.hosts;
           lastProbe = gate.reason;
         }
       } catch (error) {
@@ -798,8 +798,11 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
       }
       await Promise.race([new Promise((resolve) => setTimeout(resolve, HEALTHZ_DELAY_MS)), failed]);
     }
-    if (!healthy) {
-      if (listenerIndeterminate) {
+    // In the last round the child's own endpoint named its PID, and only another listener's check stayed
+    // uncertain: start, and say which listener is unverified.
+    const unverifiedSecondary = unverified !== null && !unverified.includes(probeHost);
+    if (!healthy && !unverifiedSecondary) {
+      if (unverified) {
         throw new StartupChildPendingError(`Daemon child ${pid} responds at ${healthzUrl}, but listener verification is incomplete: ${lastProbe} Child left running; startup reservation retained. Inspect 'rig daemon status', daemon-start.lock and daemon.log before recovery.`);
       }
       throw new Error(`${summarizeDaemonStartFailure(healthzUrl, deps.readFile(resolveLifecycleFile(deps, "daemon.log")))}. Last probe: ${lastProbe}`);
@@ -816,6 +819,9 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     } catch (error) {
       removeMatchingState(deps, STATE_FILE, state);
       throw error;
+    }
+    if (unverifiedSecondary) {
+      console.error(`Warning: daemon started (pid ${pid}), but its listener on ${unverified!.join(", ")} could not be verified: the check got no clear answer, not a refusal. Check /healthz on that address before relying on it.`);
     }
     return state;
   } catch (error) {

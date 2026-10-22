@@ -80,37 +80,91 @@ function writtenState(deps: LifecycleDeps): DaemonState {
 }
 
 describe("Daemon Lifecycle", () => {
-  it.each(["ECONNRESET", "ECONNREFUSED"])("handles secondary listener %s without confusing uncertainty with a missing listener", async (code) => {
-    await import("@openrig/daemon/instance-initialization");
-    vi.useFakeTimers();
+  // A started child whose own endpoint names its PID and reports `hosts`; `probe` scripts each later
+  // request: "ok" answers, any other value throws with that error code.
+  function listenerStart(hosts: string[], probe: (url: string) => string) {
     const release = vi.fn();
     let spawned = false;
     const deps = startableDeps({
       acquireStartLock: () => ({ recordChild: vi.fn(), release }),
       fetch: vi.fn(async (url) => {
         if (!spawned) throw Object.assign(new Error("refused"), { code: "ECONNREFUSED" });
-        if (String(url).includes("100.64.0.9")) throw Object.assign(new Error("secondary listener probe failed"), { code });
-        return { ok: true, json: async () => ({ pid: 12345, bind: { mode: "default", hosts: ["127.0.0.1", "100.64.0.9"], tailscaleDetected: true } }) };
+        const outcome = probe(String(url));
+        if (outcome !== "ok") throw Object.assign(new Error("listener probe failed"), { code: outcome });
+        return { ok: true, json: async () => ({ pid: 12345, bind: { mode: "default", hosts, tailscaleDetected: true } }) };
       }),
     });
     const spawn = deps.spawn;
     deps.spawn = vi.fn((...args) => { spawned = true; return spawn(...args); });
+    return { deps, release };
+  }
+  const stateWritten = (deps: LifecycleDeps) => (deps.writeFile as ReturnType<typeof vi.fn>).mock.calls.some(([file]) => file === STATE_FILE);
+
+  it("starts and records the daemon, warning by name, when only a secondary listener is uncertain (#1714)", async () => {
+    await import("@openrig/daemon/instance-initialization");
+    vi.useFakeTimers();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { deps, release } = listenerStart(["127.0.0.1", "100.64.0.9"], (url) => url.includes("100.64.0.9") ? "ECONNRESET" : "ok");
+      const result = startDaemon({ port: 7433, db: "openrig.sqlite" }, deps).catch((error: Error) => error);
+      await vi.runAllTimersAsync();
+      const outcome = await result;
+      expect(outcome instanceof Error ? outcome.message : "started").toBe("started");
+      expect(writtenState(deps)).toMatchObject({ pid: 12345, port: 7433 });
+      expect(deps.kill).not.toHaveBeenCalled();
+      expect(release).toHaveBeenCalledWith(false);
+      const warning = errors.mock.calls.map((args) => args.join(" ")).find((line) => line.includes("100.64.0.9"));
+      expect(warning).toMatch(/could not be verified/);
+      expect(warning).not.toMatch(/127\.0\.0\.1/);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it("a missing listener fails the start and cleans up, even while another listener is uncertain", async () => {
+    await import("@openrig/daemon/instance-initialization");
+    vi.useFakeTimers();
+    const { deps, release } = listenerStart(["127.0.0.1", "100.64.0.9", "100.64.0.10"], (url) =>
+      url.includes("100.64.0.9") ? "ECONNRESET" : url.includes("100.64.0.10") ? "ECONNREFUSED" : "ok");
     const result = startDaemon({ port: 7433, db: "openrig.sqlite" }, deps).catch((error: Error) => error);
     await vi.runAllTimersAsync();
     const error = await result;
-    expect(error).toBeInstanceOf(Error);
+    expect(error instanceof Error ? error.message : "started").toContain("FAILED the listener adoption gate");
+    expect((error as Error).message).toContain("100.64.0.10");
+    expect(deps.kill).toHaveBeenCalledWith(12345, "SIGTERM");
+    expect(release).toHaveBeenCalledWith(false);
+    expect(stateWritten(deps)).toBe(false);
+  });
+
+  it("a missing secondary listener alone fails the start and cleans up", async () => {
+    await import("@openrig/daemon/instance-initialization");
+    vi.useFakeTimers();
+    const { deps, release } = listenerStart(["127.0.0.1", "100.64.0.9"], (url) => url.includes("100.64.0.9") ? "ECONNREFUSED" : "ok");
+    const result = startDaemon({ port: 7433, db: "openrig.sqlite" }, deps).catch((error: Error) => error);
+    await vi.runAllTimersAsync();
+    const error = await result;
+    expect(error instanceof Error ? error.message : "started").toContain("FAILED the listener adoption gate");
     expect((error as Error).message).toContain("100.64.0.9");
-    expect((error as Error).message).not.toContain("127.0.0.1:7433/healthz not responding");
-    expect((deps.writeFile as ReturnType<typeof vi.fn>).mock.calls.some(([file]) => file === STATE_FILE)).toBe(false);
-    if (code === "ECONNRESET") {
-      expect((error as Error).message).toContain("startup reservation retained");
-      expect(deps.kill).not.toHaveBeenCalled();
-      expect(release).toHaveBeenCalledWith(true);
-    } else {
-      expect((error as Error).message).toContain("FAILED the listener adoption gate");
-      expect(deps.kill).toHaveBeenCalledWith(12345, "SIGTERM");
-      expect(release).toHaveBeenCalledWith(false);
-    }
+    expect(deps.kill).toHaveBeenCalledWith(12345, "SIGTERM");
+    expect(release).toHaveBeenCalledWith(false);
+    expect(stateWritten(deps)).toBe(false);
+  });
+
+  it("keeps the child and its reservation, without recording it, when the primary listener's own check is uncertain", async () => {
+    await import("@openrig/daemon/instance-initialization");
+    vi.useFakeTimers();
+    let primaryRequests = 0;
+    // Each round reads the primary endpoint (answers), then the gate probes it again (uncertain).
+    const { deps, release } = listenerStart(["127.0.0.1", "100.64.0.9"], (url) =>
+      url.includes("127.0.0.1") ? (++primaryRequests % 2 === 1 ? "ok" : "ECONNRESET") : "ok");
+    const result = startDaemon({ port: 7433, db: "openrig.sqlite" }, deps).catch((error: Error) => error);
+    await vi.runAllTimersAsync();
+    const error = await result;
+    expect(error instanceof Error ? error.message : "started").toContain("startup reservation retained");
+    expect((error as Error).message).toContain("127.0.0.1");
+    expect(deps.kill).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledWith(true);
+    expect(stateWritten(deps)).toBe(false);
   });
 
   // Test 1: start resolves absolute daemon path (not cwd-relative)

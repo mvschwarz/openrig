@@ -115,7 +115,20 @@ describe("S20 — the restored listener gate: adoption fails loudly on a dropped
     });
     expect(tailAttempts).toBe(1);
     expect(r.ok).toBe("indeterminate"); // NOT false — no SIGTERM evidence exists
-    if (r.ok === "indeterminate") expect(r.reason).toMatch(/indeterminate|could not be checked/i);
+    if (r.ok === "indeterminate") {
+      expect(r.reason).toMatch(/indeterminate|could not be checked/i);
+      expect(r.hosts).toEqual(["100.64.0.9"]);
+    }
+  });
+
+  it("a MISSING listener fails the gate even while another listener is indeterminate", async () => {
+    const r = await verifyRequiredListeners({
+      bind: { mode: "default", hosts: ["127.0.0.1", "100.64.0.9", "100.64.0.10"], tailscaleDetected: true },
+      port: 7433,
+      probe: async (url) => url.includes("100.64.0.9") ? "indeterminate" : url.includes("100.64.0.10") ? "unhealthy" : "healthy",
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok === false) expect(r.missing).toEqual(["100.64.0.10"]);
   });
 
   it("explicit mode requires exactly the declared host", async () => {
