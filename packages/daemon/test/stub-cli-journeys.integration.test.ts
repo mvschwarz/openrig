@@ -10,7 +10,7 @@ import { prepareHermeticEnv, type HermeticScaffold } from "./helpers/hermetic-en
 import { runRig, spawnScenarioDaemon, type ScenarioDaemon } from "./helpers/scenario-daemon.js";
 
 // Real CLI/daemon/SQLite/tmux with two scripted agents. These journeys exercise
-// ordinary user commands; they do not model a provider prompt or input consumption.
+// ordinary user commands; they do not model a provider prompt or agent acknowledgement.
 // Reuse one private fixture to keep the PR cost bounded. Each assertion uses its
 // own marker/selector. The stream and cwd cases restart this fixture's daemon.
 const here = dirname(fileURLToPath(import.meta.url));
@@ -66,7 +66,7 @@ describe("stub CLI journeys", () => {
     if (mode === "narrow soft-wrap") expect(JSON.stringify(target)).not.toContain(marker);
     expect(JSON.stringify(target).replace(/\\n/g, "")).toContain(marker);
     expect(JSON.stringify(sibling).replace(/\\n/g, "")).not.toContain(marker);
-    // Pane rendering is the contract here. The stub has no consuming input loop.
+    // Pane rendering is the contract here. The stub discards stdin without acknowledging it.
   }, 60_000);
 
   it("keeps the current-rig view exact while explicit scopes reach the other live rig", async () => {

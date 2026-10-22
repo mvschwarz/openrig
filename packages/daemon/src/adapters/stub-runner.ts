@@ -297,6 +297,8 @@ export function resolveStubActivityEndpoint(env: NodeJS.ProcessEnv): { baseUrl: 
 export const STUB_CLOCK_ANNOUNCEMENT = "OPENRIG_TEST_CLOCK_NOW active — timestamps are injected";
 
 export async function runStubRunner(args: StubRunnerArgs): Promise<void> {
+  // Discard input after the terminal echoes it, so repeated sends cannot fill its unread input queue.
+  process.stdin.resume();
   // PRD §5 (no wall-clock in the stub's OWN behavior): the runner's own stamps honor
   // the same A3-R3 injectable clock the compaction assets use — OPENRIG_TEST_CLOCK_NOW
   // (an ISO instant) when set, real wall-clock otherwise (absent = production).
