@@ -202,9 +202,27 @@ function blankPane(): HerdrPaneNode {
   return { type: "pane", label: "", command: ["sh"] };
 }
 
+/** Herdr's own agent label for a seat's runtime, or null when Herdr doesn't recognise it. */
+function herdrAgent(pane: ComposedPane): "claude" | "codex" | "pi" | null {
+  return pane.runtime === "claude-code" ? "claude" : pane.runtime === "codex" ? "codex" : pane.runtime === "pi" ? "pi" : null;
+}
+
 function herdrPaneCommand(pane: ComposedPane): string {
-  const agent = pane.runtime === "claude-code" ? "claude" : pane.runtime === "codex" ? "codex" : pane.runtime === "pi" ? "pi" : null;
+  const agent = herdrAgent(pane);
   return agent ? `env HERDR_AGENT=${agent} ${pane.paneCommand}` : pane.paneCommand;
+}
+
+/**
+ * The command Herdr reruns in a restored pane after a Herdr server restart, so the tile reattaches to
+ * its seat. Herdr takes it only for an agent it recognises, as an argv whose first element is a plain
+ * command and with no apostrophe or control character. Null when there is none to give: an ssh tile, a
+ * runtime Herdr doesn't recognise, or a name Herdr would refuse. Those tiles come back as shells.
+ */
+function herdrResumeArgv(pane: ComposedPane): string[] | null {
+  const agent = herdrAgent(pane);
+  if (!agent || !pane.attachArgv) return null;
+  const argv = ["env", `HERDR_AGENT=${agent}`, ...pane.attachArgv];
+  return argv.some((arg) => /['\u0000-\u001f\u007f]/.test(arg)) ? null : argv;
 }
 
 /**
@@ -321,6 +339,58 @@ export interface HerdrAdapterDeps {
   newLaunchToken?: () => string;
   /** Tab-name prefix (default `openrig`). */
   tabPrefix?: string;
+}
+
+/** The applied pane ids of a page, in its leaf order, when Herdr's reply echoes exactly the requested tree. */
+function appliedPaneIds(requested: HerdrLayoutNode, applied: unknown): string[] | null {
+  if (!applied || typeof applied !== "object") return null;
+  const node = applied as Record<string, unknown>;
+  if (requested.type === "pane") {
+    const command = node["command"];
+    const same = node["type"] === "pane" && Array.isArray(command) && command.length === requested.command.length
+      && command.every((arg, i) => arg === requested.command[i]);
+    return same && typeof node["pane_id"] === "string" && node["pane_id"] ? [node["pane_id"] as string] : null;
+  }
+  if (node["type"] !== "split") return null;
+  const first = appliedPaneIds(requested.first, node["first"]);
+  const second = first && appliedPaneIds(requested.second, node["second"]);
+  return first && second ? [...first, ...second] : null;
+}
+
+/**
+ * After a page applies, give Herdr each tile's reattach command, so a Herdr server restart brings the
+ * tile back instead of an empty shell. It's a session-only report under the runtime's own label: it
+ * leaves Herdr's screen detection in charge of the tile's state (a held `pane.report_agent` would
+ * replace it), and Herdr reruns the command only for an agent label it recognises. Herdr before 0.9.2
+ * ignores the command. Panes are matched by the reply's own tree; without one, nothing is reported.
+ * A refusal is a note, never a failed seat.
+ */
+async function reportResumeCommands(
+  transport: HerdrTransport,
+  applied: HerdrResult,
+  requested: HerdrLayoutNode,
+  pagePanes: ComposedPane[],
+  gone: Set<string>,
+  notes: string[],
+): Promise<void> {
+  const layout = applied["layout"];
+  const paneIds = layout && typeof layout === "object" ? appliedPaneIds(requested, (layout as Record<string, unknown>)["root"]) : null;
+  if (!paneIds) return;
+  const refused: string[] = [];
+  for (const [index, pane] of pagePanes.entries()) {
+    const argv = herdrResumeArgv(pane);
+    if (!argv || gone.has(pane.seat)) continue;
+    try {
+      await transport.request("pane.report_agent_session", {
+        pane_id: paneIds[index], source: "openrig", agent: herdrAgent(pane), resume_argv: argv,
+      });
+    } catch (err) {
+      refused.push(`${pane.seat} (${err instanceof Error ? err.message : String(err)})`);
+    }
+  }
+  if (refused.length > 0) {
+    notes.push(`herdr didn't take the restart command for ${refused.join(", ")}; after a Herdr restart, reopen this view.`);
+  }
 }
 
 /** Herdr lays out 4×4 per tab (OPR.0.6.0.8); cmux keeps the composer default. */
@@ -539,6 +609,7 @@ export class HerdrAdapter implements TerminalProvider {
         const gone = tabId
           ? await exitedSeats(this.transport, workspaceId, tabId, pagePanes, pagePlan.blanks, notes)
           : new Set<string>();
+        await reportResumeCommands(this.transport, applied, pagePlan.root, pagePanes, gone, notes);
         if (tabId) {
           appliedTabIds.push(tabId);
           if (pagePanes.some((pane) => !gone.has(pane.seat))) firstPopulatedTabId ??= tabId;

@@ -199,6 +199,7 @@ export function composeView(
       ...(m.runtime ? { runtime: m.runtime } : {}),
       label: m.label,
       paneCommand: `${localTmux} attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`,
+      attachArgv: [ctx.localTmux ?? "tmux", ...(ctx.localTmuxServer ?? []), "attach", ...(m.readOnly ? ["-r"] : []), "-t", m.tmuxSession],
       readOnly: m.readOnly,
     });
   }
