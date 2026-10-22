@@ -14,6 +14,7 @@ import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import { renderCaughtTransportError } from "../cli-error.js";
+import { resolveRigHandle } from "../rig-handle.js";
 import type { StatusDeps } from "./status.js";
 
 interface ForkResponse {
@@ -37,7 +38,7 @@ export function forkCommand(depsOverride?: StatusDeps): Command {
   const cmd = new Command("fork")
     .description("Fork a live seat's context into a new seat (composes the shipped agent-image fork path)")
     .argument("<source-session>", "Source session canonical name (e.g., dev-impl@openrig-delivery)")
-    .requiredOption("--rig <rig-id>", "Target rig id")
+    .requiredOption("--rig <rig>", "Target rig name or id")
     .requiredOption("--pod <pod-namespace>", "Target existing pod namespace")
     .requiredOption("--member <member-id>", "New member id for the forked successor")
     .option("--keep-image", "Also capture a durable, pinned agent image (default forks one-shot with no library growth)")
@@ -68,10 +69,18 @@ Examples:
         const status = await getDaemonStatus(deps.lifecycleDeps);
         if (!daemonStatusGuard(status)) return;
         const client = deps.clientFactory(getDaemonUrl(status));
+        const resolution = await resolveRigHandle(client, opts.rig);
+        if (resolution.kind === "ambiguous") {
+          const msg = `'${opts.rig}' matches ${resolution.ids.length} rigs. Refusing to fork: an ambiguous name could act on the wrong rig. Re-run with the specific id: ${resolution.ids.join(", ")}`;
+          if (opts.json) console.log(JSON.stringify({ ok: false, code: "rig_ambiguous", message: msg, candidates: resolution.ids }, null, 2));
+          else console.error(msg);
+          process.exitCode = 1;
+          return;
+        }
 
         const body: Record<string, unknown> = {
           sourceSession,
-          rigId: opts.rig,
+          rigId: resolution.kind === "resolved" ? resolution.id : opts.rig,
           pod: opts.pod,
           member: opts.member,
         };
