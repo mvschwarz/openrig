@@ -40,7 +40,8 @@ export interface EdgeOpSuccess {
 export interface RoutingChange {
   /** The target seat's orchestrator: where its stuck-row findings and recovery go. */
   orchestrator?: { seat: string; from: string | null; to: string | null };
-  /** The rig's representative: where a person's message to the rig goes. Null is none. */
+  /** The rig's representative: where a person's Slack message in the rig's mapped channel goes, unless that channel
+   *  names an inbound seat. Null is none. */
   representative?: { from: string | null; to: string | null };
 }
 

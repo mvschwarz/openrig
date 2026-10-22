@@ -616,8 +616,10 @@ Rig names resolve only among unarchived rigs, and an ambiguous name requires an
 explicit ID. These commands target the local daemon, as `rig add` does.
 
 A `delegates_to` edge also decides routing. A seat's stuck-row findings and recovery go to its most
-recently started parent, and a rig with exactly one delegation root sends a person's message to the rig
-to that root. When an added or removed edge changes either, the receipt says what moved in `routing`:
+recently started parent. A person's top-level Slack message in the rig's mapped channel goes to the rig's
+representative, its one delegation root, unless that channel names an `inbound` seat; with no single root it
+goes to Slack's inbound destination. When an added or removed edge changes either, the receipt says what
+moved in `routing`:
 `orchestrator: {seat, from, to}` and `representative: {from, to}`, where `null` is none. The plain output
 prints a `routing:` line for each. A change that moves nothing has no `routing`, and `--plan` doesn't
 preview it.

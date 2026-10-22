@@ -62,7 +62,7 @@ function report(result: EdgeOpResult, opts: { json?: boolean }): void {
       console.log(`         routing: ${orchestrator.seat}'s orchestrator (its stuck-row findings and recovery) is now ${orchestrator.to ?? "none"}, was ${orchestrator.from ?? "none"}`);
     }
     if (representative) {
-      console.log(`         routing: the rig's representative (a person's message to the rig) is now ${representative.to ?? "none, so it goes to the configured inbound destination"}, was ${representative.from ?? "none"}`);
+      console.log(`         routing: the rig's representative (where a person's Slack message in the rig's mapped channel goes, unless that channel names an inbound seat) is now ${representative.to ?? "none, so such a message goes to Slack's inbound destination"}, was ${representative.from ?? "none"}`);
     }
     if (result.outcome === "added" || result.outcome === "removed") {
       console.log(`         capture this topology with \`rig snapshot ${result.rigId}\`; restore uses the selected snapshot`);
