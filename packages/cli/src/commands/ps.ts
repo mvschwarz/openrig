@@ -1443,6 +1443,9 @@ function padRigRow(cells: string[], widths: number[]): string {
   return cells.map((cell, i) => i < widths.length ? fitRigCell(cell, widths[i]!) : cell).join(RIG_COLUMN_SEPARATOR);
 }
 
+// A cell filled to its width, or cut to it, still ends before the next column begins.
+const NODE_COLUMN_SEPARATOR = " ";
+
 export function padNodeRow(rig: string, pod: string, member: string, session: string, runtime: string, model: string, status: string, startup: string, oriented: string, lifecycle: string, terminal: string, work: string, activity: string, ctx: string, restore: string, error: string): string {
   return [
     fitCell(rig, 30),
@@ -1459,11 +1462,12 @@ export function padNodeRow(rig: string, pod: string, member: string, session: st
     // Slice 15 — distinct TERMINAL + WORK columns.
     fitCell(terminal, 9),
     fitCell(work, 6),
-    fitCell(activity, 12),
+    // Wide enough for a needs-input count, as in the compact table.
+    fitCell(activity, 17),
     fitCell(ctx, 6),
     fitCell(restore, 10),
     error,
-  ].join("");
+  ].join(NODE_COLUMN_SEPARATOR);
 }
 
 export function padCompactNodeRow(rig: string, session: string, lifecycle: string, activity: string, work: string, reason: string): string {
@@ -1474,7 +1478,7 @@ export function padCompactNodeRow(rig: string, session: string, lifecycle: strin
     fitCell(activity, 17),
     fitCell(work, 6),
     reason,
-  ].join("");
+  ].join(NODE_COLUMN_SEPARATOR);
 }
 
 // Slice 15 — render the terminal-active primitive honestly.
