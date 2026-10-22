@@ -615,6 +615,13 @@ and returns `edge_not_found` (HTTP 404, exit 1), so a repeated removal reports n
 Rig names resolve only among unarchived rigs, and an ambiguous name requires an
 explicit ID. These commands target the local daemon, as `rig add` does.
 
+A `delegates_to` edge also decides routing. A seat's stuck-row findings and recovery go to its most
+recently started parent, and a rig with exactly one delegation root sends a person's message to the rig
+to that root. When an added or removed edge changes either, the receipt says what moved in `routing`:
+`orchestrator: {seat, from, to}` and `representative: {from, to}`, where `null` is none. The plain output
+prints a `routing:` line for each. A change that moves nothing has no `routing`, and `--plan` doesn't
+preview it.
+
 Changes are persisted immediately and included in `rig export`. Existing snapshots
 remain unchanged, and restore reads the **selected snapshot's edges**. To restore
 the modified topology, run `rig snapshot <rig-id>` and use its returned ID with

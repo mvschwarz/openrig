@@ -149,6 +149,22 @@ describe("rig edge", () => {
     ]);
   });
 
+  it("prints the routing an added edge moved, before the snapshot step", async () => {
+    const routing = {
+      orchestrator: { seat: "dev-qa@rig", from: "orch-lead@rig", to: "orch-other@rig" },
+      representative: { from: "orch-lead@rig", to: null },
+    };
+    const post = vi.fn(async () => ({ status: 201, data: { ok: true, rigId: "rig-1", outcome: "added", edge, rollback: "rig edge remove rig-1 edge-1", routing } }));
+    const result = await run({ post } as never, ["add", "rig-1", "orch.lead", "dev.qa", "--kind", "delegates_to"]);
+    expect(result.out).toEqual([
+      "added    delegates_to orch.lead -> dev.qa  edge edge-1",
+      "         rollback: rig edge remove rig-1 edge-1",
+      "         routing: dev-qa@rig's orchestrator (its stuck-row findings and recovery) is now orch-other@rig, was orch-lead@rig",
+      "         routing: the rig's representative (a person's message to the rig) is now none, so it goes to the configured inbound destination, was orch-lead@rig",
+      "         capture this topology with `rig snapshot rig-1`; restore uses the selected snapshot",
+    ]);
+  });
+
   it("sends plan: true and prints the JSON receipt for a plan", async () => {
     const { id: _id, ...planned } = edge;
     const post = vi.fn(async () => ({ status: 200, data: { ok: true, rigId: "rig-1", outcome: "would_add", edge: planned } }));

@@ -4,6 +4,7 @@ import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { LegacyRigSpecCodec } from "../src/domain/rigspec-codec.js";
 import { LegacyRigSpecSchema } from "../src/domain/rigspec-schema.js";
 import type { LegacyRigSpec } from "../src/domain/types.js";
+import { defaultResolveOrchestrator, resolveRigRepresentative } from "../src/domain/queue-owner.js";
 
 // One typed edge on an existing rig, through the real route, converge op and repository.
 describe("POST and DELETE /api/rigs/:rigId/edges", () => {
@@ -166,5 +167,72 @@ describe("POST and DELETE /api/rigs/:rigId/edges", () => {
     expect(malformed.status).toBe(400);
     expect(await malformed.json()).toMatchObject({ ok: false, code: "validation_failed" });
     expect(state()).toEqual(before);
+  });
+});
+
+// A delegates_to change can move where a seat's stuck work goes, or who receives a person's
+// message to the rig. The receipt names what moved, as the queue's own resolvers read it.
+describe("an edge receipt names the routing it moves", () => {
+  let db: Database.Database;
+  let setup: ReturnType<typeof createTestApp>;
+  let rigId: string;
+  const ids: Record<string, string> = {};
+
+  beforeEach(() => {
+    db = createFullTestDb();
+    setup = createTestApp(db);
+    rigId = setup.rigRepo.createRig("route-rig").id;
+    // Sessions oldest first: a seat's chosen orchestrator is its most recently started parent.
+    const seats: Array<[string, string, string]> = [
+      ["ops.old", "ops-old@route-rig", "2026-09-01 00:00:00"],
+      ["orch.lead", "orch-lead@route-rig", "2026-10-01 00:00:00"],
+      ["dev.qa", "dev-qa@route-rig", "2026-10-02 00:00:00"],
+      ["dev.build", "dev-build@route-rig", "2026-10-03 00:00:00"],
+    ];
+    for (const [logicalId, session, createdAt] of seats) {
+      ids[logicalId] = setup.rigRepo.addNode(rigId, logicalId).id;
+      db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES (?, ?, ?, 'running', ?)")
+        .run(`s-${logicalId}`, ids[logicalId], session, createdAt);
+    }
+    // orch.lead is the rig's one delegation root, over dev.qa and dev.build.
+    setup.rigRepo.addEdge(rigId, ids["orch.lead"]!, ids["dev.qa"]!, "delegates_to");
+    setup.rigRepo.addEdge(rigId, ids["orch.lead"]!, ids["dev.build"]!, "delegates_to");
+  });
+
+  afterEach(() => { db.close(); });
+
+  const add = (from: string, to: string, kind = "delegates_to") => setup.app.request(`/api/rigs/${rigId}/edges`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ from, to, kind }),
+  });
+  type Receipt = { outcome: string; edge: { id: string }; routing?: unknown };
+
+  it("an add that changes a seat's chosen orchestrator says from whom to whom", async () => {
+    expect(defaultResolveOrchestrator(db, "dev-build@route-rig")).toBe("orch-lead@route-rig");
+    const receipt = await (await add("dev.qa", "dev.build")).json() as Receipt;
+    expect(receipt.outcome).toBe("added");
+    expect(receipt.routing).toEqual({ orchestrator: { seat: "dev-build@route-rig", from: "orch-lead@route-rig", to: "dev-qa@route-rig" } });
+    expect(defaultResolveOrchestrator(db, "dev-build@route-rig")).toBe("dev-qa@route-rig");
+  });
+
+  it("an add that gives the rig a second delegation root says it lost its representative, and the rollback says it's back", async () => {
+    expect(resolveRigRepresentative(db, "route-rig")).toBe("orch-lead@route-rig");
+    const added = await (await add("ops.old", "dev.build")).json() as Receipt;
+    expect(added.routing).toEqual({ representative: { from: "orch-lead@route-rig", to: null } });
+    expect(resolveRigRepresentative(db, "route-rig")).toBeNull();
+
+    const removed = await (await setup.app.request(`/api/rigs/${rigId}/edges/${added.edge.id}`, { method: "DELETE" })).json() as Receipt;
+    expect(removed.outcome).toBe("removed");
+    expect(removed.routing).toEqual({ representative: { from: null, to: "orch-lead@route-rig" } });
+  });
+
+  it("an ordinary add that moves nothing says nothing extra", async () => {
+    setup.rigRepo.addEdge(rigId, ids["orch.lead"]!, ids["ops.old"]!, "delegates_to");
+    // dev.build keeps its more recent parent, and the rig keeps its one root.
+    const delegation = await (await add("ops.old", "dev.build")).json() as Receipt;
+    expect(delegation.outcome).toBe("added");
+    expect(delegation).not.toHaveProperty("routing");
+    const other = await (await add("dev.qa", "dev.build", "collaborates_with")).json() as Receipt;
+    expect(other.outcome).toBe("added");
+    expect(other).not.toHaveProperty("routing");
   });
 });

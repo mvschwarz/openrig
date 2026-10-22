@@ -1,6 +1,7 @@
 import type { RigRepository } from "./rig-repository.js";
 import type { Edge, NodeWithBinding } from "./types.js";
 import { VALID_EDGE_KINDS } from "./rigspec-schema.js";
+import { defaultResolveOrchestrator, resolveRigRepresentative } from "./queue-owner.js";
 
 /** Edge-only mutations: no node, binding, session or snapshot writes. */
 const LAUNCH_DEPENDENCY_KINDS = new Set(["delegates_to", "spawned_by"]);
@@ -31,6 +32,16 @@ export interface EdgeOpSuccess {
   edge: EdgeReceipt;
   /** On "added": the command that removes exactly this edge. */
   rollback?: string;
+  /** On "added" or "removed": who work now routes to, present only when that moved. */
+  routing?: RoutingChange;
+}
+
+/** What a delegates_to change moved, as the queue's own resolvers read it before and after. */
+export interface RoutingChange {
+  /** The target seat's orchestrator: where its stuck-row findings and recovery go. */
+  orchestrator?: { seat: string; from: string | null; to: string | null };
+  /** The rig's representative: where a person's message to the rig goes. Null is none. */
+  representative?: { from: string | null; to: string | null };
 }
 
 interface EdgeOpError {
@@ -70,6 +81,30 @@ function createsLaunchCycle(edges: EdgeArc[], candidate: EdgeArc): boolean {
   return false;
 }
 
+type RoutingView = { seat: string | null; orchestrator: string | null; representative: string | null };
+
+/** The routing a delegates_to edge into `targetNodeId` can decide: that seat's orchestrator and the rig's representative. */
+function routingView(repo: RigRepository, rigName: string, targetNodeId: string): RoutingView {
+  const seat = (repo.db.prepare("SELECT session_name FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1")
+    .get(targetNodeId) as { session_name: string } | undefined)?.session_name ?? null;
+  return {
+    seat,
+    orchestrator: seat ? defaultResolveOrchestrator(repo.db, seat) : null,
+    representative: resolveRigRepresentative(repo.db, rigName),
+  };
+}
+
+function routingChange(before: RoutingView, after: RoutingView): RoutingChange | undefined {
+  const change: RoutingChange = {};
+  if (after.seat && before.orchestrator !== after.orchestrator) {
+    change.orchestrator = { seat: after.seat, from: before.orchestrator, to: after.orchestrator };
+  }
+  if (before.representative !== after.representative) {
+    change.representative = { from: before.representative, to: after.representative };
+  }
+  return change.orchestrator || change.representative ? change : undefined;
+}
+
 export function addRigEdge(
   repo: RigRepository,
   input: EdgeInput & { rigId: string; plan?: boolean },
@@ -97,10 +132,13 @@ export function addRigEdge(
       };
     }
     if (input.plan) return { ok: true, rigId: input.rigId, outcome: "would_add", edge };
+    const before = input.kind === "delegates_to" ? routingView(repo, rig.rig.name, to.id) : undefined;
     const added = repo.addEdge(input.rigId, from.id, to.id, input.kind);
+    const routing = before && routingChange(before, routingView(repo, rig.rig.name, to.id));
     return {
       ok: true, rigId: input.rigId, outcome: "added", edge: { ...edge, id: added.id },
       rollback: `rig edge remove ${input.rigId} ${added.id}`,
+      ...(routing ? { routing } : {}),
     };
   });
   // Reserve the writer before reading the graph, so another connection cannot
@@ -120,8 +158,10 @@ export function removeRigEdge(
     const node = (id: string) => rig.nodes.find((n) => n.id === id)!;
     const receipt: EdgeReceipt = { id: edge.id, kind: edge.kind, from: end(node(edge.sourceId)), to: end(node(edge.targetId)) };
     if (input.plan) return { ok: true, rigId: input.rigId, outcome: "would_remove", edge: receipt };
+    const before = edge.kind === "delegates_to" ? routingView(repo, rig.rig.name, edge.targetId) : undefined;
     repo.removeEdge(input.rigId, edge.id);
-    return { ok: true, rigId: input.rigId, outcome: "removed", edge: receipt };
+    const routing = before && routingChange(before, routingView(repo, rig.rig.name, edge.targetId));
+    return { ok: true, rigId: input.rigId, outcome: "removed", edge: receipt, ...(routing ? { routing } : {}) };
   });
   return input.plan ? transaction() : transaction.immediate();
 }
