@@ -9,6 +9,7 @@ import { watchdogHistorySchema } from "../src/db/migrations/032_watchdog_history
 import { occupantTenuresSchema } from "../src/db/migrations/060_occupant_tenures.js";
 import { contextUsageWatchdogSchema } from "../src/db/migrations/074_context_usage_watchdog.js";
 import { contextUsageWatchdogGenerationSchema } from "../src/db/migrations/075_context_usage_watchdog_generation.js";
+import { idleGateFiredConditionSchema } from "../src/db/migrations/078_idle_gate_fired_condition.js";
 import { contextUsageWatchdogUnitsSchema } from "../src/db/migrations/102_context_usage_watchdog_units.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
@@ -48,6 +49,7 @@ describe("context-usage-threshold token/percent units", () => {
       occupantTenuresSchema,
       contextUsageWatchdogSchema,
       contextUsageWatchdogGenerationSchema,
+      idleGateFiredConditionSchema,
       contextUsageWatchdogUnitsSchema,
     ]);
     db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-1', 'rig')").run();
@@ -84,12 +86,12 @@ describe("context-usage-threshold token/percent units", () => {
     });
   }
 
-  function register(input: { thresholdTokens?: number; thresholdPercent?: number } = {}) {
+  function register(input: { thresholdTokens?: number; thresholdPercent?: number } = {}, extraSpec = "") {
     return repo.register({
       policy: "context-usage-threshold",
       specYaml:
         `policy: context-usage-threshold\ntarget:\n  session: target@rig\n` +
-        `message: Hand over at the planned context level.\n`,
+        `message: Hand over at the planned context level.\n` + extraSpec,
       targetSession: "target@rig",
       intervalSeconds: 60,
       registeredBySession: "ops@kernel",
@@ -126,35 +128,35 @@ describe("context-usage-threshold token/percent units", () => {
     expect(deliveries).toHaveLength(1);
   });
 
-  it("skips loudly on a stale sample instead of firing on a frozen reading", async () => {
+  it.each([
+    { name: "no sample", reading: () => null, units: { thresholdPercent: 1 }, reason: "context_sample_unavailable" },
+    { name: "a stale sample", reading: () => ({ ...FRESH_SAMPLE, fresh: false }), units: { thresholdTokens: 1 }, reason: "context_sample_stale" },
+    { name: "no token count", reading: () => ({ ...FRESH_SAMPLE, contextWindowSize: null, usedTokens: null }), units: { thresholdTokens: 1 }, reason: "context_window_unknown" },
+  ])("tells the target once that it can't read its sample ($name), and fires nothing", async ({ reading, units, reason }) => {
+    sample = reading();
+    const job = register(units);
+    const first = await engine().evaluate(repo.getByIdOrThrow(job.jobId));
+    expect(first.outcome).toMatchObject({ action: "send", notes: { unreadable: reason } });
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]!.targetSession).toBe("target@rig");
+    expect(deliveries[0]!.message).toContain("can't read");
+    expect(repo.getByIdOrThrow(job.jobId).lastFiredGeneration).toBeNull();
+    const again = await engine().evaluate(repo.getByIdOrThrow(job.jobId));
+    expect(again).toMatchObject({ history: null, meaningful: false });
+    expect(deliveries).toHaveLength(1);
+  });
+
+  it("after that notice, a fresh sample still fires the threshold, and only the threshold runs the continuity action", async () => {
     sample = { ...FRESH_SAMPLE, fresh: false };
-    const job = register({ thresholdTokens: 1 });
-    const outcome = await engine().evaluate(repo.getByIdOrThrow(job.jobId));
-    expect(outcome.outcome.action).toBe("skip");
-    if (outcome.outcome.action === "skip") {
-      expect(outcome.outcome.reason).toBe("context_sample_stale");
-    }
-    expect(deliveries).toHaveLength(0);
-  });
-
-  it("skips loudly when no sample is available for the seat", async () => {
-    sample = null;
-    const job = register({ thresholdPercent: 1 });
-    const outcome = await engine().evaluate(repo.getByIdOrThrow(job.jobId));
-    expect(outcome.outcome.action).toBe("skip");
-    if (outcome.outcome.action === "skip") {
-      expect(outcome.outcome.reason).toBe("context_sample_unavailable");
-    }
-  });
-
-  it("skips loudly on a token threshold when the seat's window size is unknown", async () => {
-    sample = { ...FRESH_SAMPLE, contextWindowSize: null, usedTokens: null };
-    const job = register({ thresholdTokens: 1 });
-    const outcome = await engine().evaluate(repo.getByIdOrThrow(job.jobId));
-    expect(outcome.outcome.action).toBe("skip");
-    if (outcome.outcome.action === "skip") {
-      expect(outcome.outcome.reason).toBe("context_window_unknown");
-    }
+    const job = register({ thresholdTokens: 400_000 },
+      "context:\n  continuity_action:\n    type: create-cutover-baton\n    destination: next@rig\n    body: Take over.\n");
+    await engine().evaluate(repo.getByIdOrThrow(job.jobId));
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]).not.toHaveProperty("continuityAction");
+    sample = { ...FRESH_SAMPLE };
+    const fired = await engine().evaluate(repo.getByIdOrThrow(job.jobId));
+    expect(fired.outcome).toMatchObject({ action: "send", message: "Hand over at the planned context level." });
+    expect(deliveries[1]).toMatchObject({ continuityAction: { type: "create-cutover-baton", destination: "next@rig" } });
   });
 
   it("registers token/percent jobs without a transcript and persists the units", () => {
