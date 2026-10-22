@@ -240,6 +240,26 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
           nativeEffect: "unknown", sourceRefs });
         const managed = runtime === "claude-code" ? text(object(rig.managed_blocks)["claude-code"]) ?? "CLAUDE.md" : runtime === "codex" ? "AGENTS.md" : undefined;
         if (managed) write(seat, "managed_guidance", "seat_cwd", managed, sourceRefs, "merge managed blocks");
+        // OPR.0.7.0.9: a Claude member's own agent, prompt file and plugin folders, copied into its seat storage (never the
+        // project) and passed to its launches. A source the archive doesn't hold is unknown here, not present or absent.
+        if (runtime === "claude-code") {
+          const additions: Array<[kind: string, field: string, ref: unknown, dest: (ref: string) => string]> = [
+            // Named as Claude registers it: the agent's frontmatter name when the archive holds the file, else its file name.
+            ["launch_agent", "agent_file", member.agent_file, (ref) => {
+              const front = files.get(memberPath(rigRoot, ref) ?? "")?.match(/^---\r?\n([\s\S]*?)\r?\n---/)?.[1];
+              const name = front?.match(/^name:[ \t]*(.*)$/m)?.[1]?.trim().replace(/^(["'])(.*)\1$/, "$2");
+              return `plugin/agents/${name || path.basename(ref, ".md")}.md`;
+            }],
+            ["launch_system_prompt", "append_system_prompt_file", member.append_system_prompt_file, () => "additions/system-prompt.md"],
+            ...list(member.plugin_dirs).map((dir) => ["launch_plugin_dir", "plugin_dirs", dir, (ref: string) => `additions/plugins/${path.basename(ref)}`] as [string, string, unknown, (ref: string) => string]),
+          ];
+          for (const [kind, field, ref, dest] of additions) {
+            if (!text(ref)) continue;
+            const fact = fileFact(seat, kind, String(ref), rigRoot, [{ path: rigPath, field: `pods.${pod.id}.members.${member.id}.${field}` }]);
+            view.toldFiles.push(fact);
+            write(seat, kind, "openrig_seat_storage", dest(String(ref)), fact.sourceRefs, "copy");
+          }
+        }
         const startup = (block: StartupBlock | undefined, base: string, refs: SourceRef[]) => {
           for (const f of block?.files ?? []) {
             const fact = fileFact(seat, "startup", f.path, base, refs);
