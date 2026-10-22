@@ -106,7 +106,13 @@ time-bounded evidence. Rungs, top down, with each rung's retirement condition:
   without `agent_end`) leaves the seat working up to the 15 s window, then unknown, never idle. After a
   daemon restart, a runner seat takes its last recorded boundary from the hook store, for its
   current session and occupant generation only, so an idle seat still reads idle before it
-  posts again.
+  posts again, provided that report is fresh: a pi runner's idle boundary states an interval
+  (below) and lapses to unknown once it is older than two of them.
+  A pi runner also posts an idle `Stop` (`idle_heartbeat`) every three minutes while it waits, and states that
+  interval as `livenessSeconds` on every `Stop`: a newly ready runner reads idle at once, and an idle boundary that
+  carries an interval holds for two of them, then lapses to unknown, so a runner killed without saying so stops reading
+  idle. Silence never clears a pending attention prompt, and a runner that states no interval (omp, an older pi
+  runner) keeps the hold-until-the-next-boundary behaviour.
 
 Partial-coverage honesty: a source with partial lifecycle coverage gets identity-only
 trust, unless its inventory declares it positive-only. A positive-only source can report

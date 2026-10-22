@@ -386,6 +386,9 @@ export class RunnerCore {
   private sessionId: string | undefined;
   private lastEntryId: string | undefined;
   private ready = false;
+  private lastHeartbeatMs: number | null = null;
+  /** Hook event of the last activity this runner posted; null until it posts one. */
+  private lastPostedHook: string | null = null;
   private assistantErrorShown = false;
   private started = false;
   /** OMP failures/approvals survive the turn until agent_start, except typed
@@ -705,6 +708,21 @@ export class RunnerCore {
     this.io.postActivity(this.activityPayload("Notification", next === "transient_turn_error" ? "runtime_error" : next));
   }
 
+  /** Idle heartbeat. A Pi runner only reports when something happens, and the daemon reads any hook older than
+   *  its freshness window as `unknown` (`stale_runtime_hook`), so an idle seat read `unknown` five minutes after
+   *  its last turn, and a restored seat read `unknown` (`generation_mismatch`) until its first turn. Re-asserting
+   *  idle while ready, not mid-turn and not waiting on the operator keeps the verdict honest: a runner that dies
+   *  stops beating and the seat goes back to `unknown`. Pi only; the OMP identity handshake has its own retry. */
+  heartbeat(): void {
+    if (this.runtime !== "pi" || !this.ready || this.streaming || this.attention) return;
+    // `streaming` follows only agent_start/agent_end; turn_start, compaction and auto-retry also report the agent
+    // working. Beat only when the last thing posted was a Stop (or nothing yet), so a beat never lands mid-turn.
+    if (this.lastPostedHook !== null && this.lastPostedHook !== "Stop") return;
+    const now = Date.parse(this.io.now());
+    if (this.lastHeartbeatMs !== null && now - this.lastHeartbeatMs < IDLE_HEARTBEAT_MS) return;
+    this.io.postActivity(this.activityPayload("Stop", "idle_heartbeat"));
+  }
+
   private clearAttention(): void {
     this.attention = null;
     this.attentionIsLatest = false;
@@ -845,6 +863,9 @@ export class RunnerCore {
   private activitySequence = 0;
 
   private activityPayload(hookEvent: string, subtype: string | null): Record<string, unknown> {
+    this.lastPostedHook = hookEvent;
+    // Any posted Stop is an idle report, so the next beat is due a full interval after it, not just after a beat.
+    if (hookEvent === "Stop") this.lastHeartbeatMs = Date.parse(this.io.now());
     return {
       sequence: ++this.activitySequence,
       sessionName: this.identity.sessionName,
@@ -853,6 +874,8 @@ export class RunnerCore {
       runtime: this.runtime,
       hookEvent,
       subtype,
+      // A Pi runner's idle report holds only while it keeps beating; the daemon expires it after two missed beats.
+      ...(this.runtime === "pi" && hookEvent === "Stop" && subtype !== "pi_exited" ? { livenessSeconds: IDLE_HEARTBEAT_MS / 1000 } : {}),
       occurredAt: this.io.now(),
     };
   }
@@ -988,8 +1011,21 @@ export function prepareRunnerSidecar(
   return { catchUpSince: resuming ? prior?.lastEntryId : undefined };
 }
 
+/** Wraps an async send so calls run one after another in call order; a send that rejects doesn't hold up the ones behind it. */
+export function inOrder<A, R>(send: (arg: A) => Promise<R>): (arg: A) => Promise<R> {
+  let tail: Promise<unknown> = Promise.resolve();
+  return (arg) => {
+    const result = tail.then(() => send(arg));
+    tail = result.catch(() => undefined);
+    return result;
+  };
+}
+
 /** How often an OMP runner re-delivers an unconfirmed session identity. */
 const IDENTITY_RETRY_MS = 30_000;
+/** Below the daemon's 5 minute hook freshness window (AGENT_ACTIVITY_FRESHNESS_MS). */
+const IDLE_HEARTBEAT_MS = 3 * 60_000;
+const IDLE_HEARTBEAT_TICK_MS = 15_000;
 
 export interface ExecutableResolverOps {
   isExecutable(path: string): boolean;
@@ -1201,6 +1237,22 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     notice: (line) => { process.stdout.write(`${line}\n`); },
   });
 
+  // One activity post at a time: the daemon reads its newest record by arrival, so a beat still in flight when a turn
+  // starts must not land after the turn's first post. Each post's own 1.5 s timeout bounds the wait behind it.
+  const postInOrder = inOrder((payload: Record<string, unknown>): Promise<Record<string, unknown> | null> => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1500);
+    return fetch(new URL("/api/activity/hooks", endpoint!.baseUrl).toString(), {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${endpoint!.token}` },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    })
+      .then(async (response) => response.ok && runtime === "omp" ? await response.json() as Record<string, unknown> : null)
+      .catch(() => null)
+      .finally(() => clearTimeout(timeout));
+  });
+
   const io: RunnerIo = {
     sendRpc: (cmd) => {
       try { child.stdin.write(`${JSON.stringify(cmd)}\n`); } catch { /* exit handler reports */ }
@@ -1209,24 +1261,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     mirrorAppend: (text) => process.stdout.write(text),
     postActivity: (payload) => {
       if (!endpoint || typeof fetch !== "function") return;
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 1500);
-      const request = fetch(new URL("/api/activity/hooks", endpoint.baseUrl).toString(), {
-        method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${endpoint.token}` },
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      });
-      if (runtime !== "omp") {
-        request.catch(() => { /* best-effort — never blocks the loop */ }).finally(() => clearTimeout(timeout));
-        return;
-      }
+      const result = postInOrder(payload).catch(() => null);
       // OMP reads the acknowledgement so identity delivery can retry; null
       // (transport failure or a non-OK reply) means "not yet persisted".
-      return request
-        .then(async (response) => response.ok ? await response.json() as Record<string, unknown> : null)
-        .catch(() => null)
-        .finally(() => clearTimeout(timeout));
+      if (runtime === "omp") return result;
     },
     writeSidecar: (state) => {
       try {
@@ -1293,6 +1331,8 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   // Re-deliver OMP identity until the daemon confirms the resume token.
   const identityRetry = runtime === "omp" ? setInterval(() => core.retrySessionIdentity(), IDENTITY_RETRY_MS) : undefined;
   identityRetry?.unref();
+  const idleHeartbeat = runtime === "pi" ? setInterval(() => core.heartbeat(), IDLE_HEARTBEAT_TICK_MS) : undefined;
+  idleHeartbeat?.unref();
   // The last few stderr lines, so an OMP that exits during startup is
   // reported with its own words in the error, not only above it.
   const stderrTail: string[] = [];
@@ -1343,6 +1383,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     if (exited) return;
     exited = true;
     clearInterval(identityRetry);
+    clearInterval(idleHeartbeat);
     if (!core.isReady()) {
       const how = signal ? `signal ${signal}` : `exit code ${code ?? "unknown"}`;
       const output = stderrTail.length > 0 ? ` Its last output: ${stderrTail.join(" | ")}` : " It printed nothing on stderr.";

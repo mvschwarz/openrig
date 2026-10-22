@@ -137,6 +137,8 @@ describe("rig create", () => {
 
     expect(exitCode).toBe(1);
     expect(logs.join("\n")).toContain("shipped default agent is unavailable");
+    expect(logs.join("\n")).toContain('runtime "claude-code"');
+    expect(logs.join("\n")).toContain("rig up <spec>");
     expect(client.postText).not.toHaveBeenCalled();
   });
 

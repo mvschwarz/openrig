@@ -128,6 +128,8 @@ export type RigEvent =
       pinnedModel: string;
       effectiveModel: string;
       diagnosis: string | null;
+      /** Absent on events written before this field existed. When present, a restarted daemon doesn't proclaim it again. */
+      occurrenceId?: string;
       channels: Array<{ channel: string; target: string | null; status: string; detail?: string }>;
     }
   | { type: "rig.deleted"; rigId: string }
@@ -551,6 +553,8 @@ export interface AgentActivity {
   eventAt?: string | null;
   /** The emitter's own order for its posts (OpenRig's pi/omp runner), when it sent one. */
   sourceSequence?: number | null;
+  /** How often the emitter promises to report while idle; an idle report older than two of these no longer holds. */
+  livenessSeconds?: number | null;
   rawEvent?: string | null;
   rawSubtype?: string | null;
   runtime?: string | null;

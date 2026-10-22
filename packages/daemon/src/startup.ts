@@ -1,3 +1,4 @@
+import { daemonDatabaseWarnings } from "./daemon-db-path.js";
 import { physicalSessionName } from "./domain/session-registry.js";
 import { makeWatchdogDeliver } from "./domain/watchdog-delivery.js";
 import { fileURLToPath } from "node:url";
@@ -317,6 +318,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // Only the explicit selection overrides a pane rc or the legacy PID-home
   // reader. The resolved default remains the writer/network-reader/session root.
   const dbPath = opts?.dbPath ?? ":memory:";
+  const databaseWarnings = await daemonDatabaseWarnings(dbPath, OPENRIG_HOME,
+    process.env.OPENRIG_DB === dbPath ? "OPENRIG_DB" : process.env.RIGGED_DB === dbPath ? "RIGGED_DB" : undefined);
+  for (const warning of databaseWarnings) console.warn(`Warning: ${warning}`);
   const db = createDb(dbPath);
   migrate(db, ALL_MIGRATIONS);
 
@@ -1304,6 +1308,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
 
   const deps: AppDeps = {
+    databaseWarnings,
     rigRepo,
     sessionRegistry,
     daemonLifecycleStore,
@@ -2336,7 +2341,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // hardcoded); oversight = the fleet judgment seat, locally resolvable or a NAMED deferral
     // (no daemon-side cross-host send seam exists yet — the deferral names that, never silence).
     {
-      const { ModelDivergenceMonitor } = await import("./domain/model-divergence/model-divergence-monitor.js");
+      const { ModelDivergenceMonitor, proclaimedInEventLog } = await import("./domain/model-divergence/model-divergence-monitor.js");
       const OVERSIGHT_SEAT = "watch-lead@oversight";
       const modelDivergenceMonitor = new ModelDivergenceMonitor({
         processCensus: modelCensus,
@@ -2387,9 +2392,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
             pinnedModel: proclamation.pinnedModel,
             effectiveModel: proclamation.effectiveModel,
             diagnosis: proclamation.diagnosis,
+            occurrenceId: proclamation.occurrenceId,
             channels: proclamation.channels,
           });
         },
+        wasProclaimed: proclaimedInEventLog(db),
       });
       modelDivergenceMonitor.startPolling(60_000);
       deps.modelDivergenceMonitor = modelDivergenceMonitor;

@@ -124,7 +124,7 @@ export function growCommand(depsOverride?: StatusDeps): Command {
 
       let agentRef: string;
       try {
-        agentRef = await resolveDefaultAgentRef(client);
+        agentRef = await resolveDefaultAgentRef(client, opts.runtime);
       } catch (err) {
         console.error(err instanceof Error ? err.message : String(err));
         process.exitCode = 1;
@@ -135,7 +135,7 @@ export function growCommand(depsOverride?: StatusDeps): Command {
         id: member,
         agent_ref: agentRef,
         runtime: opts.runtime,
-        profile: "default",
+        profile: opts.runtime === "terminal" ? "none" : "default",
         cwd,
       }));
       let nodes: GrowNode[] = [];
