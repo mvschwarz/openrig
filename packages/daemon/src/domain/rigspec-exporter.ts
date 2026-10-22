@@ -220,14 +220,19 @@ export class RigSpecExporter {
     const rigEnv = this.rigRepo.getRigEnv(rigId);
     // #25: the selected Claude managed-block file is also a rig-row field.
     const claudeManagedBlockFile = this.rigRepo.getRigClaudeManagedBlockFile(rigId);
+    // #1631: the rig's culture file and rig startup block, as its spec declared them (migration 121). The paths stay
+    // as declared: relative to the stored root, which is the folder the rig's spec was launched from.
+    const startupLayers = this.rigRepo.getRigStartupLayers(rigId);
 
     return {
       version: "0.2",
       name: rig.rig.name,
+      ...(startupLayers?.cultureFile ? { cultureFile: startupLayers.cultureFile } : {}),
       ...(rigPermissionPolicy ? { permissionPolicy: rigPermissionPolicy } : {}),
       ...(this.rigRepo.getRigNonInterruptive(rigId) ? { nonInterruptive: true } : {}),
       ...(rigEnv ? { env: rigEnv } : {}),
       ...(claudeManagedBlockFile ? { managedBlocks: { "claude-code": claudeManagedBlockFile } } : {}),
+      ...(startupLayers?.startup ? { startup: startupLayers.startup } : {}),
       ...(workspace ? { workspace } : {}),
       pods: podSpecs,
       edges: crossPodEdges,
