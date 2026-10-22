@@ -229,7 +229,7 @@ describe("discoverSkillsForRuntime — SkillResource shape", () => {
   });
 });
 
-// #875 — seat_material: seat seats keep their loadout under the OpenRig home. The audit sees each
+// #875 — Claude team seats keep their loadout in their own storage under the OpenRig home. The audit sees each
 // seat's copy on its own (a stale copy in one seat is not hidden by a user-library skill), while
 // the resolver never treats a seat copy as a source.
 describe("seat-material skill roots", () => {

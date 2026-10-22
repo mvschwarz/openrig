@@ -33,7 +33,7 @@ export interface SkillDiscoveryPaths {
   /** Config-resolved managed catalog root. Defaults to the legacy
    *  <homedir>/.openrig/skills path when omitted for compatibility. */
   skillsRoot?: string;
-  /** #875 — skill folders of `seat_material: seat` Claude seats. Audited only
+  /** #875 — each Claude team seat's own skill folder under the OpenRig home (`listSeatSkillRoots`). Audited only
    *  (discoverSkillsWithProvenance); they are projection output, never a source. */
   seatSkillRoots?: string[];
 }

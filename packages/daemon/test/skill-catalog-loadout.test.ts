@@ -1012,7 +1012,7 @@ describe("plugin skills in the managed loadout", () => {
   });
 });
 
-// #875 — a seat_material: seat Claude seat keeps its loadout in its OpenRig seat directory.
+// #875 — a Claude team seat keeps its loadout in its own storage under the OpenRig home.
 describe("skill loadout kept outside the cwd", () => {
   it("projects into the given location, records plugin-qualified names and leaves the checkout clean", () => {
     const f = fixture();
