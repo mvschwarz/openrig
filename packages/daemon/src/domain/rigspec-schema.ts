@@ -30,6 +30,13 @@ import * as path from "node:path";
 // OPR.0.3.3.24: exported so the add_member converge op validates pod-local edge
 // kinds against the SAME canonical set as a rigspec pod-local edge (no second,
 // looser edge input path).
+/** The folder a member's plugin folder is copied to in its seat storage: its last path segment, with anything outside
+ *  [A-Za-z0-9@._-] as `_`. One rule for the schema's clash check, the launch's copy and the before-install view. */
+export function seatAdditionPluginFolder(dir: string): string {
+  const parts = dir.replace(/\\/g, "/").split("/").filter((part) => part && part !== ".");
+  return (parts.at(-1) ?? "").replace(/[^A-Za-z0-9@._-]/g, "_");
+}
+
 export const VALID_EDGE_KINDS = new Set(["delegates_to", "spawned_by", "can_observe", "collaborates_with", "escalates_to"]);
 
 /** SPEC-VALIDATION CAPABILITY REGISTRY (B8-family, r2-ruled expiry coupling). Behavioral sentinel,
@@ -1212,7 +1219,7 @@ function validateClaudeAdditions(member: Record<string, unknown>, prefix: string
       // Each folder is copied to a destination named by its last segment (as the launch does), so two that share one
       // would mix their files: report it here rather than at launch.
       const parts = (dir: string) => dir.replace(/\\/g, "/").split("/").filter((part) => part && part !== ".");
-      const destination = (dir: string) => (parts(dir).at(-1) ?? "").replace(/[^A-Za-z0-9@._-]/g, "_");
+      const destination = seatAdditionPluginFolder;
       const seen: Array<{ path: string; destination: string }> = [];
       dirs.forEach((dir, i) => {
         const label = `${prefix}.plugin_dirs[${i}]`;

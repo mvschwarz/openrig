@@ -5,6 +5,7 @@ import { parseAgentSpec, normalizeAgentSpec } from "./agent-manifest.js";
 import { parsePolicySpec, validatePolicySpec } from "./permission-policy/policy-spec.js";
 import { resolveConcreteHint } from "./runtime-adapter.js";
 import type { AgentSpec, StartupBlock } from "./types.js";
+import { seatAdditionPluginFolder } from "./rigspec-schema.js";
 import { normalizePreconditionsBlock } from "./bundle-types.js";
 
 type ObjectValue = Record<string, unknown>;
@@ -251,12 +252,14 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
               return `plugin/agents/${name || path.basename(ref, ".md")}.md`;
             }],
             ["launch_system_prompt", "append_system_prompt_file", member.append_system_prompt_file, () => "additions/system-prompt.md"],
-            ...list(member.plugin_dirs).map((dir) => ["launch_plugin_dir", "plugin_dirs", dir, (ref: string) => `additions/plugins/${path.basename(ref)}`] as [string, string, unknown, (ref: string) => string]),
+            ...list(member.plugin_dirs).map((dir) => ["launch_plugin_dir", "plugin_dirs", dir, (ref: string) => `additions/plugins/${seatAdditionPluginFolder(ref)}`] as [string, string, unknown, (ref: string) => string]),
           ];
           for (const [kind, field, ref, dest] of additions) {
             if (!text(ref)) continue;
             const fact = fileFact(seat, kind, String(ref), rigRoot, [{ path: rigPath, field: `pods.${pod.id}.members.${member.id}.${field}` }]);
             view.toldFiles.push(fact);
+            // A member plugin folder loads like any plugin (through CLAUDE_CODE_PLUGIN_DIRS), so its hooks run too.
+            if (kind === "launch_plugin_dir") { view.alsoRuns.push({ ...fact, trigger: "if selected runtime supports and loads this resource" }); hooks(fact); }
             write(seat, kind, "openrig_seat_storage", dest(String(ref)), fact.sourceRefs, "copy");
           }
         }

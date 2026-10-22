@@ -3,6 +3,7 @@ import fs from "node:fs";
 import nodePath from "node:path";
 import { SEAT_SKILL_PLUGIN_NAME, ensureSeatSkillPlugin, insideSeatStorage, insideSeatStorageFolder, recordSeatSkillWrite, seatSkillName, seatSkillPaths, writeInsideSeatStorage, type SeatSkillPaths } from "./seat-skill-storage.js";
 import { claudePathBounds } from "./native-process-lineage.js";
+import { seatAdditionPluginFolder } from "./rigspec-schema.js";
 
 // OPR.0.7.0.9 — a Claude seat's own launch additions: an agent, an appended system prompt file and plugin folders.
 // Their files are copied into the seat's own storage (slice 13's seat root), never into the shared project, and a
@@ -77,7 +78,6 @@ function agentName(file: string): string {
   return nodePath.basename(file).replace(/\.md$/, "");
 }
 
-const segment = (value: string): string => value.replace(/[^A-Za-z0-9@._-]/g, "_");
 
 /**
  * Copy what a seat asked for into its own storage and record it. Every source is checked first, so a missing one is a
@@ -123,7 +123,7 @@ export function prepareSeatLaunchAdditions(paths: SeatSkillPaths, input: SeatLau
 
   // Each plugin folder gets its own destination; two that would land in one (the same basename, names that sanitize
   // to one, or a folder named like the seat's plugin) would mix their files, so they're refused, named.
-  const pluginDests = pluginSources.map((dir) => segment(nodePath.basename(dir)));
+  const pluginDests = pluginSources.map(seatAdditionPluginFolder);
   const clash = pluginDests.find((name, i) => name === SEAT_SKILL_PLUGIN_NAME || pluginDests.indexOf(name) !== i);
   if (clash !== undefined) {
     const which = pluginSources.filter((_dir, i) => pluginDests[i] === clash);
