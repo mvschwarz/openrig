@@ -800,7 +800,8 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     }
     // In the last round the child's own endpoint named its PID, and only another listener's check stayed
     // uncertain: start, and say which listener is unverified.
-    const unverifiedSecondary = unverified !== null && !unverified.includes(probeHost);
+    const unverifiedSecondary = unverified !== null
+      && !unverified.some((host) => formatDaemonHostForUrl(host) === formatDaemonHostForUrl(probeHost));
     if (!healthy && !unverifiedSecondary) {
       if (unverified) {
         throw new StartupChildPendingError(`Daemon child ${pid} responds at ${healthzUrl}, but listener verification is incomplete: ${lastProbe} Child left running; startup reservation retained. Inspect 'rig daemon status', daemon-start.lock and daemon.log before recovery.`);

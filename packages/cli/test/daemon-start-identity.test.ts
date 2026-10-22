@@ -68,14 +68,23 @@ describe("child-bound startup", () => {
     await expect(startDaemon(opts, f.deps)).rejects.toThrow(/identity mismatch.*127.0.0.2/);
     expect(f.files.has(STATE_FILE)).toBe(false);
   });
-  it("does not convert an indeterminate required listener into success", async () => {
+  it("publishes the verified child, naming the unverified listener, when only a secondary listener stays uncertain", async () => {
     vi.useFakeTimers();
-    const f = fixture(); f.body.bind.hosts.push("127.0.0.2");
-    const fetch = f.deps.fetch;
-    f.deps.fetch = async (url) => { if (url.includes("127.0.0.2")) throw new Error("timeout"); return fetch(url); };
-    const result = startDaemon(opts, f.deps).catch((e: Error) => e);
-    await vi.runAllTimersAsync();
-    expect(await result).toBeInstanceOf(Error); expect(f.files.has(STATE_FILE)).toBe(false);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const f = fixture(); f.body.bind.hosts.push("127.0.0.2");
+      const fetch = f.deps.fetch;
+      f.deps.fetch = async (url) => { if (url.includes("127.0.0.2")) throw new Error("timeout"); return fetch(url); };
+      const result = startDaemon(opts, f.deps).catch((e: Error) => e);
+      await vi.runAllTimersAsync();
+      const outcome = await result;
+      expect(outcome instanceof Error ? outcome.message : outcome.pid).toBe(f.child.pid);
+      expect(JSON.parse(f.files.get(STATE_FILE)!)).toMatchObject({ pid: f.child.pid, port: opts.port });
+      expect(f.lock.release).toHaveBeenLastCalledWith(false);
+      expect(errors.mock.calls.flat().join(" ")).toMatch(/127\.0\.0\.2 could not be verified/);
+    } finally {
+      errors.mockRestore();
+    }
   });
   it("tracks child exit while the health response is pending", async () => {
     const f = fixture(); const fetch = f.deps.fetch;

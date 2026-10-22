@@ -150,14 +150,15 @@ describe("Daemon Lifecycle", () => {
     expect(stateWritten(deps)).toBe(false);
   });
 
-  it("keeps the child and its reservation, without recording it, when the primary listener's own check is uncertain", async () => {
+  // An explicit host is trimmed for its probes, so a spelling with spaces is still the primary.
+  it.each([undefined, "127.0.0.1 "])("keeps the child and its reservation, without recording it, when the primary listener's own check is uncertain (host %j)", async (host) => {
     await import("@openrig/daemon/instance-initialization");
     vi.useFakeTimers();
     let primaryRequests = 0;
     // Each round reads the primary endpoint (answers), then the gate probes it again (uncertain).
     const { deps, release } = listenerStart(["127.0.0.1", "100.64.0.9"], (url) =>
       url.includes("127.0.0.1") ? (++primaryRequests % 2 === 1 ? "ok" : "ECONNRESET") : "ok");
-    const result = startDaemon({ port: 7433, db: "openrig.sqlite" }, deps).catch((error: Error) => error);
+    const result = startDaemon({ port: 7433, db: "openrig.sqlite", ...(host ? { host } : {}) }, deps).catch((error: Error) => error);
     await vi.runAllTimersAsync();
     const error = await result;
     expect(error instanceof Error ? error.message : "started").toContain("startup reservation retained");
