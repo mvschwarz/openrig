@@ -91,7 +91,8 @@ describe("original wake continuation after prompt clearing", () => {
       }
     }
     if (kind !== "claimed-normal") {
-      repo.recordNudgeAttempt(id, kind === "pending-retained" ? "retained:typing_guard" : "failed:fixture");
+      // A wake refused at a native prompt by draft-aware delivery: retained, and it can clear (so it keeps its retries).
+      repo.recordNudgeAttempt(id, kind === "pending-retained" ? "retained:draft_aware" : "failed:fixture");
       if (kind === "claimed-failed") repo.transitionLog.append({ qitemId: id, state: "in-progress", actorSession: "watchdog@system", transitionNote: "parked-owner wake delivery failed: fixture" });
     }
     const tick = async (second: number) => {

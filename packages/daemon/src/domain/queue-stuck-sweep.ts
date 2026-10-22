@@ -553,6 +553,9 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       // hold with no live release job is stuck: nothing will ever release it.
       const quiet = quietHoldCustody(deps.db, row.qitemId, now);
       if (quiet && quiet.state !== "orphaned") continue;
+      // The seat's typing guard or interruption level held its wake on purpose: it's held and readable at the seat, not
+      // stuck. (A handed-off baton's one held notice is the wake ladder's.)
+      if (row.lastNudgeResult === "retained:typing_guard") continue;
       // The ladder check runs LAST here too: a row the ladder alone would have stopped is
       // ladder-suppressed, and its finding stays open (#1419).
       if (hasLiveLadder(deps.db, row.qitemId, now, suppressionMinutes)) {
