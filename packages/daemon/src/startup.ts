@@ -2514,8 +2514,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   deps.occupantInvalidator = new DefaultOccupantInvalidator({
     enforcer: compactionEnforcer ?? { invalidateOccupant: () => {} },
     contextUsage: contextUsageStore,
-    // (e/Class-B) watchdog store — armed jobs registered by the retiring generation stop at swap.
+    // (e/Class-B) watchdog store — armed jobs the retiring generation registered for its own seat stop at swap.
     watchdog: watchdogJobsRepoInstance,
+    // The names that reach a seat, so a job addressed to its logical or physical spelling counts as its own.
+    addresses: sessionRegistry,
     // (e/Class-B) queue store — in-progress items claimed by the retiring generation release to pending.
     queue: queueRepoInstance,
     log: (msg) => console.warn(msg),

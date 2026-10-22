@@ -333,9 +333,7 @@ export class WatchdogPolicyEngine {
 
     const parsed = this.parseSpec(job.specYaml);
     const isContextUsageThreshold = job.policy === "context-usage-threshold";
-    const target = isContextUsageThreshold
-      ? { session: job.targetSession }
-      : (parsed.target ?? { session: job.targetSession });
+    const target = watchdogJobTarget(job, parsed.target);
     const occupantGeneration = isContextUsageThreshold
       ? (this.resolveTargetGeneration?.(job.targetSession) ?? null)
       : null;
@@ -837,6 +835,17 @@ function parseContinuityAction(
     destination: value["destination"],
     body: value["body"],
   };
+}
+
+/** The seat a job is addressed to, before delivery resolves the name: a context-usage job measures and wakes its
+ *  stored target; every other policy prefers its spec's `target:`. A seat swap compares the same value (#1775). */
+export function watchdogJobTarget(
+  job: { policy: string; targetSession: string },
+  specTarget: { session: string } | null,
+): { session: string } {
+  return job.policy === "context-usage-threshold"
+    ? { session: job.targetSession }
+    : (specTarget ?? { session: job.targetSession });
 }
 
 /** Parse the operator-authored watchdog YAML before it reaches persistence. */

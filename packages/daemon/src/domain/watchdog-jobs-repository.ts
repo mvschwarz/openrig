@@ -760,28 +760,36 @@ export class WatchdogJobsRepository {
 
   /**
    * GHOST-STAGE (e/Class-B): at a seat swap, stop every ARMED (state='active') job registered by the
-   * RETIRING generation that wakes the retiring seat itself — a stale wake firing into the successor's
-   * context is the specimen; the successor re-arms its own. A job it registered for another seat wakes
-   * that seat, never the successor, so it keeps running (#1775). Gen-scoped, NEVER name-scoped alone (the
-   * successor shares the seat name, so a name-scoped stop would kill the successor's own jobs). A
-   * NULL/empty generation never matches (UNKNOWN ≠ retired — note-2). Returns the count stopped.
-   * Auditable (terminal_reason), not a hard delete — the row stays for forensics. Pre-063 dbs no-op.
-   * `keepJobIds` are left running: the queue's current park timers wake the seat that owns a
-   * still-blocked row, which the successor inherits.
+   * RETIRING generation that wakes the retiring seat itself (`wakesRetiringSeat`, which the caller
+   * decides from the job's delivery target) — a stale wake firing into the successor's context is the
+   * specimen; the successor re-arms its own. A job it registered for another seat wakes that seat, never
+   * the successor, so it keeps running (#1775). Gen-scoped, NEVER name-scoped alone (the successor shares
+   * the seat name, so a name-scoped stop would kill the successor's own jobs). A NULL/empty generation
+   * never matches (UNKNOWN ≠ retired — note-2). Returns the count stopped. Auditable (terminal_reason),
+   * not a hard delete — the row stays for forensics. Pre-063 dbs no-op. `keepJobIds` are left running:
+   * the queue's current park timers wake the seat that owns a still-blocked row, which the successor
+   * inherits.
    */
   dropArmedByRegisteringGeneration(
     generationUuid: string,
-    retiringSession: string,
+    wakesRetiringSeat: (job: WatchdogJob) => boolean,
     keepJobIds: readonly string[] = [],
   ): number {
-    if (!this.hasGenColumn || !generationUuid || !retiringSession) return 0;
-    const keep = keepJobIds.length > 0 ? ` AND job_id NOT IN (${keepJobIds.map(() => "?").join(", ")})` : "";
+    if (!this.hasGenColumn || !generationUuid) return 0;
+    const keep = new Set(keepJobIds);
+    const ids = (this.db
+      .prepare(`SELECT * FROM watchdog_jobs WHERE state = 'active' AND registered_by_generation_uuid = ?`)
+      .all(generationUuid) as JobRow[])
+      .map(rowToJob)
+      .filter((job) => !keep.has(job.jobId) && wakesRetiringSeat(job))
+      .map((job) => job.jobId);
+    if (ids.length === 0) return 0;
     const res = this.db
       .prepare(
         `UPDATE watchdog_jobs SET state = 'stopped', terminal_reason = 'registering generation retired (seat handover)'
-         WHERE state = 'active' AND registered_by_generation_uuid = ? AND target_session = ?${keep}`,
+         WHERE state = 'active' AND job_id IN (${ids.map(() => "?").join(", ")})`,
       )
-      .run(generationUuid, retiringSession, ...keepJobIds);
+      .run(...ids);
     return res.changes;
   }
 }

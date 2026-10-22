@@ -282,25 +282,27 @@ describe("WatchdogJobsRepository — generation stamps (Class-B)", () => {
     expect(repo.register(input({ registeredBySession: "unknown@rig" })).registeredByGeneration).toBeNull();
   });
 
+  const wakesSeat = (job: { targetSession: string }) => job.targetSession === "seat@rig";
+
   it("drops ONLY armed jobs of the retiring generation — the successor's own job (same name, live gen) survives", () => {
     genBySession.set("seat@rig", "gen-retired");
     const retired = repo.register(input({ targetSession: "seat@rig" }));
     genBySession.set("seat@rig", "gen-live"); // successor resumes into the SAME seat name, new gen
     const live = repo.register(input({ targetSession: "seat@rig" }));
 
-    const stopped = repo.dropArmedByRegisteringGeneration("gen-retired", "seat@rig");
+    const stopped = repo.dropArmedByRegisteringGeneration("gen-retired", wakesSeat);
     expect(stopped).toBe(1);
     expect(repo.getById(retired.jobId)!.state).toBe("stopped");
     expect(repo.getById(retired.jobId)!.terminalReason).toContain("retired");
     expect(repo.getById(live.jobId)!.state).toBe("active"); // NOT name-scoped — successor untouched
   });
 
-  it("#1775: a job the retiring generation registered for ANOTHER seat keeps running", () => {
+  it("#1775: a job the retiring generation registered for ANOTHER seat (the caller's predicate says no) keeps running", () => {
     genBySession.set("seat@rig", "gen-retired");
     const own = repo.register(input({ targetSession: "seat@rig" }));
     const forOther = repo.register(input({ targetSession: "a@rig" }));
 
-    expect(repo.dropArmedByRegisteringGeneration("gen-retired", "seat@rig")).toBe(1);
+    expect(repo.dropArmedByRegisteringGeneration("gen-retired", wakesSeat)).toBe(1);
     expect(repo.getById(own.jobId)!.state).toBe("stopped");
     expect(repo.getById(forOther.jobId)!.state).toBe("active");
   });
@@ -308,12 +310,12 @@ describe("WatchdogJobsRepository — generation stamps (Class-B)", () => {
   it("an empty generation is a no-op (never a catch-all drop)", () => {
     genBySession.set("seat@rig", "gen-1");
     repo.register(input({ targetSession: "seat@rig" }));
-    expect(repo.dropArmedByRegisteringGeneration("", "seat@rig")).toBe(0);
+    expect(repo.dropArmedByRegisteringGeneration("", wakesSeat)).toBe(0);
   });
 
   it("NULL-generation jobs are never matched (UNKNOWN != retired)", () => {
     const job = repo.register(input({ registeredBySession: "unknown@rig", targetSession: "unknown@rig" }));
-    expect(repo.dropArmedByRegisteringGeneration("gen-anything", "unknown@rig")).toBe(0);
+    expect(repo.dropArmedByRegisteringGeneration("gen-anything", () => true)).toBe(0);
     expect(repo.getById(job.jobId)!.state).toBe("active");
   });
 
@@ -323,7 +325,7 @@ describe("WatchdogJobsRepository — generation stamps (Class-B)", () => {
     const bareRepo = new WatchdogJobsRepository(bareDb, undefined, () => "gen-x");
     const job = bareRepo.register(input());
     expect(job.registeredByGeneration).toBeNull();
-    expect(bareRepo.dropArmedByRegisteringGeneration("gen-x", "seat@rig")).toBe(0);
+    expect(bareRepo.dropArmedByRegisteringGeneration("gen-x", () => true)).toBe(0);
     bareDb.close();
   });
 });
@@ -429,7 +431,7 @@ describe("WatchdogJobsRepository — W2c exact-tuple auto-registration", () => {
       registeredByGeneration: null,
       targetGeneration: null,
     });
-    expect(repo.dropArmedByRegisteringGeneration("retiring-generation")).toBe(0);
+    expect(repo.dropArmedByRegisteringGeneration("retiring-generation", () => true)).toBe(0);
     expect(repo.getById(first.jobId)?.state).toBe("active");
   });
 
