@@ -127,7 +127,7 @@ interface WatchdogPolicyEngineDeps {
   /**
    * Issue #1180 — the target seat's latest context-usage sample under its live
    * occupant generation (generation-guarded by the jobs repository). Null = no
-   * usable sample; token/percent context jobs then skip loudly.
+   * usable sample; token/percent context jobs then tell their target once instead of firing.
    */
   resolveContextUsage?: (
     sessionName: string,
@@ -202,6 +202,8 @@ const QUIET_SKIP_REASONS = new Set<string>([
   "active_wake_not_due",
   "context_usage_below_threshold",
   "threshold_receipt_stable",
+  // A context watch that already told its target it can't read the sample, and still can't: told once, not every scan.
+  "context_sample_unreadable_notified",
   // OPR.0.4.3.16 idle-gate-qitem routine no-ops — analogues of
   // no_actionable_artifacts. Suppressed from history/SSE so a per-second
   // scan does not spam when there is simply nothing to wake about. The
@@ -411,6 +413,7 @@ export class WatchdogPolicyEngine {
         : null,
       requiresJobId: job.requiresJobId,
       lastFiredGeneration: job.lastFiredGeneration,
+      lastFiredCondition: job.lastFiredCondition,
       occupantGeneration,
       currentGenerationTranscriptPending,
       requiredReceiptSatisfied,
@@ -563,7 +566,9 @@ export class WatchdogPolicyEngine {
     const preDeliveryTerminal = this.terminalBeforeDelivery(job, evaluatedAt);
     if (preDeliveryTerminal) return preDeliveryTerminal;
 
-    const continuityAction = parseContinuityAction(
+    // A notice about the watch itself is not the threshold: no fire receipt and no continuity action.
+    const thresholdFire = isContextUsageThreshold && !outcome.notice;
+    const continuityAction = outcome.notice ? undefined : parseContinuityAction(
       parsed.context["continuity_action"],
       job,
       occupantGeneration,
@@ -591,7 +596,7 @@ export class WatchdogPolicyEngine {
     // Plain wakes retain the proven at-most-once ordering. Structured
     // continuity custody is retry-safe by deterministic qitem id, so its
     // receipt waits until the durable action has completed.
-    if (isContextUsageThreshold && occupantGeneration && !continuityAction) {
+    if (thresholdFire && occupantGeneration && !continuityAction) {
       this.jobsRepo.recordThresholdFire(job.jobId, occupantGeneration, evaluatedAt);
     }
     const deliverySchedule = this.jobsRepo.getByIdOrThrow(job.jobId);
@@ -611,7 +616,7 @@ export class WatchdogPolicyEngine {
     ) {
       this.jobsRepo.recordThresholdFire(job.jobId, occupantGeneration, evaluatedAt);
     }
-    return this.recordAttempt({ job, outcome, evaluatedAt, deliverySchedule, delivery, isContextUsageThreshold, sentMessage: message });
+    return this.recordAttempt({ job, outcome, evaluatedAt, deliverySchedule, delivery, isContextUsageThreshold: thresholdFire, sentMessage: message });
   }
 
   /** The pre-transport guard: a job its owning domain can prove is no longer actionable is terminaled, not sent. */

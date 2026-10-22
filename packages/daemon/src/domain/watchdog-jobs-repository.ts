@@ -94,6 +94,8 @@ export interface WatchdogJob {
   requiresJobId: string | null;
   /** The latest occupant generation for which this threshold fired. */
   lastFiredGeneration: string | null;
+  /** The condition this job last told its target about; null when none. */
+  lastFiredCondition: string | null;
 }
 
 export interface RegisterWatchdogJobInput {
@@ -141,6 +143,7 @@ interface JobRow {
   threshold_percent?: number | null;
   requires_job_id?: string | null;
   last_fired_generation_uuid?: string | null;
+  last_fired_condition?: string | null;
 }
 
 export class WatchdogJobsError extends Error {
@@ -806,5 +809,6 @@ function rowToJob(row: JobRow): WatchdogJob {
     thresholdPercent: row.threshold_percent ?? null,
     requiresJobId: row.requires_job_id ?? null,
     lastFiredGeneration: row.last_fired_generation_uuid ?? null,
+    lastFiredCondition: row.last_fired_condition ?? null,
   };
 }

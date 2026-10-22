@@ -92,40 +92,39 @@ export function makeContextUsageThresholdPolicy(
       } else {
         // Token/percent jobs trigger on the seat's SAMPLED context use, not a
         // transcript-byte proxy (issue #1180). A seat only samples on a turn,
-        // so a missing or stale sample is a loud skip, never a fire — frozen
-        // telemetry must not hand a context over.
-        const sample = job.contextUsageSample;
-        if (!sample || (sample.usedPercentage == null && sample.usedTokens == null)) {
+        // so a missing or stale sample never fires — frozen telemetry must not
+        // hand a context over. The watch tells its target once per occupant and
+        // reason that it can't read the sample, then stays quiet while nothing
+        // changes; that notice is not the threshold, so a later fresh sample
+        // still fires.
+        const unreadable = (reason: string, detail: string, notes: Record<string, unknown>): PolicyEvaluation => {
+          const receipt = `unreadable:${job.occupantGeneration}:${reason}`;
+          if (job.lastFiredCondition === receipt) {
+            return { action: "skip", reason: "context_sample_unreadable_notified", notes: { ...notes, unreadable: reason } };
+          }
+          const level = unit === "percent" ? `${threshold}%` : `${threshold}-token`;
           return {
-            action: "skip",
-            reason: "context_sample_unavailable",
-            notes: {
-              targetSession: job.target.session,
-              occupantGeneration: job.occupantGeneration,
-            },
+            action: "send",
+            target: job.target,
+            message: `Context watch ${job.jobId} can't read ${job.target.session}'s context use (${detail}), so it can't tell ` +
+              `whether the ${level} threshold is reached. It acts on the next fresh sample, and won't repeat this for this occupant.`,
+            notes: { ...notes, unreadable: reason },
+            conditionReceipt: receipt,
+            notice: true,
           };
+        };
+        const sample = job.contextUsageSample;
+        const seat = { targetSession: job.target.session, occupantGeneration: job.occupantGeneration };
+        if (!sample || (sample.usedPercentage == null && sample.usedTokens == null)) {
+          return unreadable("context_sample_unavailable", "no sample for this occupant yet", seat);
         }
         if (!sample.fresh) {
-          return {
-            action: "skip",
-            reason: "context_sample_stale",
-            notes: {
-              targetSession: job.target.session,
-              occupantGeneration: job.occupantGeneration,
-              sampledAt: sample.sampledAt,
-            },
-          };
+          return unreadable("context_sample_stale", `its last sample, at ${sample.sampledAt}, is 10 or more minutes old`,
+            { ...seat, sampledAt: sample.sampledAt });
         }
         if (unit === "percent") {
           if (sample.usedPercentage == null) {
-            return {
-              action: "skip",
-              reason: "context_sample_unavailable",
-              notes: {
-                targetSession: job.target.session,
-                occupantGeneration: job.occupantGeneration,
-              },
-            };
+            return unreadable("context_sample_unavailable", "the sample has no percentage", seat);
           }
           observed = {
             value: sample.usedPercentage,
@@ -138,15 +137,8 @@ export function makeContextUsageThresholdPolicy(
           if (sample.usedTokens == null) {
             // compact-plan's fallback is percent; here the operator asked for a
             // token count, so an unknown window is honest insufficiency.
-            return {
-              action: "skip",
-              reason: "context_window_unknown",
-              notes: {
-                targetSession: job.target.session,
-                occupantGeneration: job.occupantGeneration,
-                usedPercentage: sample.usedPercentage,
-              },
-            };
+            return unreadable("context_window_unknown", "the sample has no token count or window size",
+              { ...seat, usedPercentage: sample.usedPercentage });
           }
           observed = {
             value: sample.usedTokens,
