@@ -20,6 +20,11 @@ interface ReconcileResponse {
     sessionId: string;
     projectionDrift: string[];
     continuity: string;
+    resumeMetadata?: {
+      capture: { outcome: string; reason?: string };
+      status: string;
+      guidance?: string;
+    };
     mode?: "repair-missing-pane";
     pane?: string;
   };
@@ -111,6 +116,11 @@ continuity remain unverified; ordinary sends still apply their existing checks.`
       }
       console.log(`Reconciled ${r.sessionName} into rig ${r.rigName}`);
       console.log(`  Node: ${r.logicalId} (node id unchanged - no relaunch, no input sent)`);
+      if (r.resumeMetadata) {
+        const { capture, status, guidance } = r.resumeMetadata;
+        console.log(`Resume metadata: ${status} (capture: ${capture.outcome}${capture.reason ? `; ${capture.reason}` : ""}).`);
+        if (guidance) console.log(guidance);
+      }
       if (r.projectionDrift.length > 0) {
         console.log("  Projection drift (unproven metadata):");
         for (const d of r.projectionDrift) console.log(`    - ${d}`);
