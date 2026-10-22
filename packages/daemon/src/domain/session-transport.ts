@@ -2173,7 +2173,10 @@ export class SessionTransport {
     if (!opts?.urgent) return this.sendClassified(sessionName, text, opts);
     // Shown on delivery, and kept with a held message: who marked it urgent.
     console.info(`[transport] urgent send to ${sessionName}, marked by ${opts.urgent.by}`);
-    const result = await this.sendClassified(sessionName, withUrgentLine(text, opts.urgent.by), opts);
+    // An explicit prompt answer is typed as keys, and a submit-only retry types no text at all: the label's letters would
+    // act as keystrokes (a menu shortcut, say). Their bytes stay exactly as given; the mark stays in the result and the log.
+    const rawKeys = opts.dangerouslyInteract === true || opts.submitOnly === true;
+    const result = await this.sendClassified(sessionName, rawKeys ? text : withUrgentLine(text, opts.urgent.by), opts);
     return { ...result, urgent: opts.urgent };
   }
 

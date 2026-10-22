@@ -967,6 +967,24 @@ describe("transport routes", () => {
       overrideReason: "why", detectedState: "idle", evidenceSource: "runtime_hook" });
   });
 
+  it("an urgent prompt answer types exactly its own bytes: the urgent label stays in the result, never in the keys", async () => {
+    seedRig();
+    const eventBus = new EventBus(db);
+    const agentActivityStore = new AgentActivityStore({ db, eventBus });
+    agentActivityStore.recordHookEvent({ runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "Stop" });
+    const typed: string[] = [];
+    const tmux = mockTmux({ sendText: async (_target, text) => { typed.push(text); return { ok: true }; } });
+    const app = createApp({ sessionTransport: new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, eventBus, agentActivityStore }) });
+    const res = await app.request("/api/transport/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@my-rig" },
+      body: JSON.stringify({ session: "dev-impl@my-rig", text: "1", dangerouslyInteract: true, reason: "pick option 1", urgent: true }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ urgent: { by: "orch@my-rig" } });
+    expect(typed).toEqual(["1"]);
+  });
+
   it("P21 I4: a body actorSession that DIFFERS from the header is SUPERSEDED (no identity_mismatch refusal)", async () => {
     seedRig();
     const app = createApp({ sessionTransport: new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux() }) });
