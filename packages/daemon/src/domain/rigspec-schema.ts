@@ -54,7 +54,7 @@ const RIG_KEYS = new Set([
 const POD_KEYS = new Set(["id", "label", "summary", "continuity_policy", "startup", "members", "edges"]);
 const MEMBER_KEYS = new Set([
   "id", "label", "agent_ref", "profile", "runtime", "codex_config_profile",
-  "model", "effort", "role", "permission_policy", "cwd", "restore_policy",
+  "model", "effort", "advisor", "role", "permission_policy", "cwd", "restore_policy",
   "compaction_strategy", "mechanic", "startup", "session_source", "starter_ref", "env",
   "agent_file", "append_system_prompt_file", "plugin_dirs",
 ]);
@@ -529,6 +529,9 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
       const warning = unknownLevelWarning("pi", member["effort"].trim());
       if (warning) advisories.push(`${prefix}.effort: ${warning}`);
     }
+  }
+  if (member["advisor"] !== undefined && (typeof member["advisor"] !== "string" || !member["advisor"].trim())) {
+    advisories.push(`${prefix}.advisor: ignored; advisor must be a non-blank text value`);
   }
   if (!member["cwd"] || typeof member["cwd"] !== "string") {
     errors.push(`${prefix}.cwd: required non-empty string`);
@@ -1238,6 +1241,7 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     codexConfigProfile: m["codex_config_profile"] as string | undefined,
     model: m["model"] as string | undefined,
     effort: typeof m["effort"] === "string" && m["effort"].trim() ? m["effort"].trim() : undefined,
+    advisor: typeof m["advisor"] === "string" && m["advisor"].trim() ? m["advisor"].trim() : undefined,
     role: m["role"] as string | undefined,
     permissionPolicy: m["permission_policy"] as string | undefined,
     env: normalizeSeatEnv(m["env"]),
@@ -1364,6 +1368,9 @@ export class LegacyRigSpecSchema {
             if (warning) advisories.push(`nodes.${nodeWhere}.effort: ${warning}`);
           }
         }
+        if (node["advisor"] !== undefined && (typeof node["advisor"] !== "string" || !node["advisor"].trim())) {
+          advisories.push(`nodes.${nodeWhere}.advisor: ignored; advisor must be a non-blank text value`);
+        }
 
         if (node["restore_policy"] != null && !LEGACY_KNOWN_RESTORE_POLICIES.has(node["restore_policy"] as string)) {
           errors.push(`node ${node["id"]}: unknown restorePolicy '${node["restore_policy"]}'`);
@@ -1416,6 +1423,7 @@ export class LegacyRigSpecSchema {
       role: (n["role"] as string) ?? undefined,
       model: (n["model"] as string) ?? undefined,
       effort: typeof n["effort"] === "string" && n["effort"].trim() ? n["effort"].trim() : undefined,
+      advisor: typeof n["advisor"] === "string" && n["advisor"].trim() ? n["advisor"].trim() : undefined,
       cwd: (n["cwd"] as string) ?? undefined,
       surfaceHint: (n["surface_hint"] as string) ?? undefined,
       workspace: (n["workspace"] as string) ?? undefined,

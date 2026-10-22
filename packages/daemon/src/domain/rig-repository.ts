@@ -133,6 +133,7 @@ interface NodeOptions {
   runtime?: string;
   model?: string;
   effort?: string;
+  advisor?: string;
   codexConfigProfile?: string;
   /** OPR.0.4.8.3 Seam B: per-seat permission_policy REF (builtin:<name> or spec-relative path). */
   permissionPolicy?: string;
@@ -527,6 +528,7 @@ export class RigRepository {
       this.db.prepare("UPDATE nodes SET effort = ? WHERE id = ?")
         .run(opts.effort, id);
     }
+    if (opts?.advisor) this.setNodeAdvisor(id, opts.advisor);
 
     if (opts?.env && this.hasNodeColumn("env_json")) {
       this.db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?")
@@ -577,6 +579,13 @@ export class RigRepository {
       .prepare("UPDATE nodes SET effort = NULL WHERE id = ?")
       .run(nodeId);
     return result.changes > 0;
+  }
+
+  /** Persist the resolved Advisor; null removes a previous spec's selection. */
+  setNodeAdvisor(nodeId: string, advisor: string | null): boolean {
+    if (!this.hasNodeColumn("advisor")) return false;
+    return this.db.prepare("UPDATE nodes SET advisor = ? WHERE id = ?")
+      .run(advisor, nodeId).changes > 0;
   }
 
   addEdge(rigId: string, sourceId: string, targetId: string, kind: string): Edge {
@@ -826,6 +835,7 @@ export class RigRepository {
       runtime: row.runtime,
       model: row.model,
       effort: row.effort ?? null,
+      advisor: row.advisor ?? null,
       effortChoice: row.effort_choice ?? null,
       codexConfigProfile: row.codex_config_profile ?? null,
       permissionPolicy: row.permission_policy ?? null,
@@ -917,6 +927,7 @@ interface NodeRow {
   runtime: string | null;
   model: string | null;
   effort?: string | null;
+  advisor?: string | null;
   effort_choice?: string | null;
   codex_config_profile?: string | null;
   permission_policy?: string | null;

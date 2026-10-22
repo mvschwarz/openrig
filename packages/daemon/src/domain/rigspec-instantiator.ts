@@ -117,6 +117,7 @@ export class RigInstantiator {
             runtime: specNode.runtime,
             model: specNode.model,
             effort: specNode.effort,
+            advisor: specNode.advisor,
             cwd: specNode.cwd,
             surfaceHint: specNode.surfaceHint,
             workspace: specNode.workspace,
@@ -307,7 +308,7 @@ import { RigSpecCodec as PodRigSpecCodec } from "./rigspec-codec.js";
 import { RigSpecSchema as PodRigSpecSchema, VALID_EDGE_KINDS } from "./rigspec-schema.js";
 import { rigPreflight, preflightValidatedSpec } from "./rigspec-preflight.js";
 import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
-import { resolveNodeConfig, selectedPluginPaths } from "./profile-resolver.js";
+import { resolveAdvisorModel, resolveNodeConfig, selectedPluginPaths } from "./profile-resolver.js";
 import { resolveStartup } from "./startup-resolver.js";
 import { planProjection, claudeConflictTargetPath, projectionConflictWarnings, filterProtectedProjections, type ProjectionPlan } from "./projection-planner.js";
 import { ProjectionManifestStore } from "./projection-manifest-store.js";
@@ -1226,7 +1227,7 @@ export class PodRigInstantiator {
     const initialRefusal = eligible();
     if (initialRefusal) return refuse(initialRefusal);
 
-    const retainedFields = new Set(["id", "label", "agent_ref", "profile", "runtime", "model", "effort", "cwd", "role", "codex_config_profile", "permission_policy", "restore_policy"]);
+    const retainedFields = new Set(["id", "label", "agent_ref", "profile", "runtime", "model", "effort", "advisor", "cwd", "role", "codex_config_profile", "permission_policy", "restore_policy"]);
     if (Object.keys(memberFragment).some(key => !retainedFields.has(key))) return refuse("Retry accepts only retained member fields; topology and startup overrides require a separate change.");
     const rawSpec = { version: "0.2", name: rig.rig.name, pods: [{ id: podRow.namespace, label: podRow.label, members: [memberFragment], edges: [] }], edges: [] };
     const validation = PodRigSpecSchema.validate(rawSpec);
@@ -1250,8 +1251,13 @@ export class PodRigInstantiator {
       profileName: member.profile, specRoot: rigRoot, member, pod, rig: this.withRigStartupLayers(rigSpec, this.rigStartupLayers(rigSpec, rigRoot, rigId)),
       skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext() });
     if (!config.ok) return refuse(config.errors.join("; "));
-    if (!same(config.config.model, node.model) || !same(config.config.effort, node.effort) || !same(config.config.cwd, node.cwd) || !same(config.config.restorePolicy, node.restorePolicy)) {
-      return refuse("Resolved model, effort, cwd or restore policy differs from the failed first start.");
+    // A seat whose first start failed before Advisor support recorded no Advisor, though its unchanged agent spec (the
+    // hash above) may name one. Its retry keeps the launch it recorded: no Advisor, stored and launched alike. Any
+    // other Advisor difference changes the launch and is refused below.
+    const launchConfig = node.advisor == null && member.advisor === undefined && config.config.advisor != null
+      ? { ...config, config: { ...config.config, advisor: undefined } } : config;
+    if (!same(launchConfig.config.model, node.model) || !same(launchConfig.config.effort, node.effort) || !same(launchConfig.config.advisor, node.advisor) || !same(launchConfig.config.cwd, node.cwd) || !same(launchConfig.config.restorePolicy, node.restorePolicy)) {
+      return refuse("Resolved model, effort, advisor, cwd or restore policy differs from the failed first start.");
     }
     const preflight = await preflightValidatedSpec(rigSpec, { rigRoot, fsOps: this.deps.fsOps, skillsRoot: this.resolveSkillsRoot(),
       ...this.systemWorldResolutionContext(), rigNameOverride: rig.rig.name, inheritedPermissionPolicy: this.inheritedPermissionPolicy(rigId), exec: this.deps.exec });
@@ -1266,7 +1272,7 @@ export class PodRigInstantiator {
     const finalRefusal = eligible();
     if (finalRefusal) return refuse(finalRefusal);
     const result = await this.launchExistingAgentMember({ rigId, nodeId, qualifiedId: node.logicalId, rigSpec, rigRoot, pod, member,
-      resolveResult: resolved, configResult: config, keepRecordedAdditions: true });
+      resolveResult: resolved, configResult: launchConfig, keepRecordedAdditions: true });
     if (result.status !== "launched") return { ok: false, code: result.status, message: result.error ?? "First-start retry did not reach readiness." };
     return { ok: true, rigId, nodeId, logicalId: node.logicalId, status: "launched", sessionName: result.sessionName, warnings: result.warnings };
   }
@@ -1553,6 +1559,7 @@ export class PodRigInstantiator {
             runtime: member.runtime,
             model: member.model ?? configResult.config.model,
             effort: member.effort ?? configResult.config.effort,
+            advisor: configResult.config.advisor,
             codexConfigProfile: member.codexConfigProfile,
             // OPR.0.4.8.3 Seam B: bootstrap inline addNode is the FOURTH node-creation
             // site (see the role wire note above) — same member-ref persistence as
@@ -1848,6 +1855,7 @@ export class PodRigInstantiator {
         runtime: member.runtime,
         model: member.model,
         effort: member.effort,
+        advisor: member.advisor,
         env: member.env,
         cwd: effectiveCwd,
         restorePolicy: "checkpoint_only",
@@ -1916,11 +1924,25 @@ export class PodRigInstantiator {
     cwdOverride?: string;
   }) {
     const effectiveCwd = resolveLaunchCwd(input.member.cwd, input.rigRoot, input.cwdOverride);
+    // Export and snapshot can run before launch. Resolve inherited Advisor values
+    // during creation; launch still re-resolves the original spec for later edits.
+    let advisor = resolveAdvisorModel(input.member.advisor);
+    if (advisor === undefined && input.member.agentRef !== "builtin:terminal") {
+      const resolved = resolveAgentRef(input.member.agentRef, input.rigRoot, this.deps.fsOps);
+      if (!resolved.ok) {
+        throw new Error(resolved.code === "validation_failed" ? resolved.errors.join("; ") : resolved.error);
+      }
+      const spec = resolved.resolved.spec;
+      const profile = spec.profiles[input.member.profile];
+      if (!profile) throw new Error(`Profile "${input.member.profile}" not found in spec "${spec.name}"`);
+      advisor = resolveAdvisorModel(undefined, profile.preferences?.advisor, spec.defaults?.advisor);
+    }
     const node = this.deps.rigRepo.addNode(input.rigId, input.qualifiedId, {
       role: input.member.role,
       runtime: input.member.runtime,
       model: input.member.model,
       effort: input.member.effort,
+      advisor,
       codexConfigProfile: input.member.codexConfigProfile,
       // OPR.0.4.8.3 Seam B: the member's OWN raw ref persists on the node (like role);
       // rig-level lives on the rig row; precedence applies at RESOLUTION, not storage.
@@ -2303,6 +2325,7 @@ export class PodRigInstantiator {
       // The seat's saved effort choice wins over the authored value just written by
       // updateNodeResolvedConfig; a seat without one launches with exactly that authored value.
       effort: (readSeatEffort(this.deps.rigRepo.db, input.nodeId) ?? { effective: configResult.config.effort ?? null }).effective ?? undefined,
+      advisor: configResult.config.advisor,
       codexConfigProfile: input.member.codexConfigProfile,
       // OPR.0.4.8.3 Seam B: resolved launch posture (member > rig > persisted > FLOOR)
       // binds per-seat explicitly; adapters thread it into the yolo-mode helpers.
@@ -2595,6 +2618,7 @@ export class PodRigInstantiator {
       resolvedSpecVersion: string;
       resolvedSpecHash: string;
       effort?: string;
+      advisor?: string;
     },
   ): void {
     try {
@@ -2627,6 +2651,8 @@ export class PodRigInstantiator {
       } else {
         this.deps.rigRepo.clearNodeEffort(nodeId);
       }
+      // Removing Advisor from the resolved spec must also remove its persisted launch flag.
+      this.deps.rigRepo.setNodeAdvisor(nodeId, config.advisor ?? null);
     } catch {
       /* best-effort */
     }

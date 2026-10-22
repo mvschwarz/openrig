@@ -301,6 +301,92 @@ describe("rig watchdog CLI (PL-004 Phase C)", () => {
     expect((request?.body as { specYaml: string }).specYaml).toContain("Prepare continuity now");
   });
 
+  it("registers token and percent context thresholds without a spec or transcript", async () => {
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ watchdogDeps: deps });
+    program.exitOverride();
+    await program.parseAsync([
+      "node",
+      "rig",
+      "watchdog",
+      "register",
+      "--policy",
+      "context-usage-threshold",
+      "--target-session",
+      "alice@rig",
+      "--threshold-tokens",
+      "600000",
+      "--interval-seconds",
+      "60",
+      "--registered-by",
+      "ops@kernel",
+      "--json",
+    ]);
+    const request = calls.find((call) => call.path === "/api/watchdog/register");
+    expect(request?.body).toMatchObject({
+      policy: "context-usage-threshold",
+      targetSession: "alice@rig",
+      thresholdTokens: 600_000,
+      thresholdBytes: undefined,
+    });
+    expect((request?.body as { specYaml: string }).specYaml).toContain("threshold_tokens: 600000");
+
+    const percentDeps = makeDeps();
+    const percentProgram = createProgram({ watchdogDeps: percentDeps.deps });
+    percentProgram.exitOverride();
+    await percentProgram.parseAsync([
+      "node",
+      "rig",
+      "watchdog",
+      "register",
+      "--policy",
+      "context-usage-threshold",
+      "--target-session",
+      "alice@rig",
+      "--threshold-percent",
+      "70",
+      "--interval-seconds",
+      "60",
+      "--registered-by",
+      "ops@kernel",
+      "--json",
+    ]);
+    const percentRequest = percentDeps.calls.find((call) => call.path === "/api/watchdog/register");
+    expect(percentRequest?.body).toMatchObject({ thresholdPercent: 70 });
+  });
+
+  it("rejects mixing threshold units", async () => {
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ watchdogDeps: deps });
+    program.exitOverride();
+    const previousExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      await program.parseAsync([
+        "node",
+        "rig",
+        "watchdog",
+        "register",
+        "--policy",
+        "context-usage-threshold",
+        "--target-session",
+        "alice@rig",
+        "--threshold-tokens",
+        "600000",
+        "--threshold-percent",
+        "70",
+        "--interval-seconds",
+        "60",
+        "--registered-by",
+        "ops@kernel",
+      ]);
+      expect(process.exitCode).toBe(1);
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+    expect(calls.find((call) => call.path === "/api/watchdog/register")).toBeUndefined();
+  });
+
   it("teaches conservative calibration and the margin rationale in register help", () => {
     const { deps } = makeDeps();
     const program = createProgram({ watchdogDeps: deps });

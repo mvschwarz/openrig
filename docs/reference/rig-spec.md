@@ -440,6 +440,7 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `label` | string | no | — | Human-readable member name. Shown in UI when present. |
 | `model` | string | no | — | Model override. Runtime-specific (e.g., `claude-opus-4-6` for Claude Code). |
 | `effort` | string | no | — | Reasoning effort override, trimmed. Claude gets `--effort`, Codex `-c model_reasoning_effort=…`, Pi `--thinking` (see "Pi" below). A non-string value is ignored with an advisory. |
+| `advisor` | string | no | — | Claude-only Advisor model for this seat. Overrides the AgentSpec profile/default; blank or non-string values are ignored with an advisory. |
 | `permission_policy` | string | no | — | Member-level permission policy; overrides the rig's. Not valid on terminal members. |
 | `env` | map | no | — | Launch environment for this seat, laid over the rig's `env`. Same rules as the rig-level field. Valid on terminal members too. See "Launch environment" below. |
 | `agent_file` | string | no | — | Claude members only. A Claude agent definition (a `.md` file with `name` in its frontmatter) for this seat. It's copied into the seat's own storage and launched as `--agent openrig:<name>`. A path beside the spec: no `..`, not absolute. |
@@ -452,6 +453,36 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `session_source` | object | no | — | Start the seat from an existing session: `fork` with `native_id`, `rebuild` with `artifact_set`, or `agent_image` with `image_name`. A Claude Code `fork` needs Claude Code 2.0.73 or later. Not valid on terminal members. |
 | `starter_ref` | object | no | — | `{ name }` of an agent starter (`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`) whose files lead the seat's startup. Not valid on terminal members or with a fork. |
 | `startup` | StartupBlock | no | — | Member-level startup files and actions. Applied only to this member. |
+
+### Claude Advisor (`runtime: claude-code`)
+
+Set `advisor` independently of the primary `model`:
+
+```yaml
+members:
+  - id: owner
+    agent_ref: local:agents/implementer
+    profile: default
+    runtime: claude-code
+    cwd: .
+    model: claude-sonnet-5-5
+    effort: medium
+    advisor: opus
+```
+
+OpenRig passes `--model claude-sonnet-5-5 --effort medium --advisor opus` to this
+Claude session. The primary model stays Sonnet. Advisor resolution uses the member's
+`advisor`, then the profile's `preferences.advisor`, then the agent's `defaults.advisor`.
+Blank candidates are skipped before applying this precedence. Materialization stores
+the resolved value, so node/graph output, exported specs and snapshots include it even
+before the first launch. Launching the original spec re-resolves its current preferences.
+The selection is supplied again on resume, restore, fresh restart and handover. A fork
+uses the resulting member's configuration and keeps its own conversation identity.
+
+This requires a Claude Code version that supports `--advisor`. OpenRig never writes
+`advisorModel` to user or project settings. Members sharing a checkout can therefore
+choose different Advisors. When Advisor is unset, no flag is emitted and Claude's
+own defaults/settings apply. Other runtimes ignore this field.
 
 ### Pi (`runtime: pi`)
 

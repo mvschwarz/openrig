@@ -484,7 +484,7 @@ the sections that were not read are `null`.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig watchdog` | — | — |
-| `rig watchdog register` | — | `--spec <path>`<br>`--policy <policy>` **required**<br>`--target-session <session>` **required**<br>`--interval-seconds <n>` **required**<br>`--registered-by <session>` **required**<br>`--threshold-bytes <n>`<br>`--threshold-mb <n>`<br>`--watched-file <path>`<br>`--requires-job <jobId>`<br>`--message <text>`<br>`--active-wake-interval-seconds <n>`<br>`--scan-interval-seconds <n>`<br>`--json` |
+| `rig watchdog register` | — | `--spec <path>`<br>`--policy <policy>` **required**<br>`--target-session <session>` **required**<br>`--interval-seconds <n>` **required**<br>`--registered-by <session>` **required**<br>`--threshold-bytes <n>`<br>`--threshold-mb <n>`<br>`--threshold-tokens <n>`<br>`--threshold-percent <n>`<br>`--watched-file <path>`<br>`--requires-job <jobId>`<br>`--message <text>`<br>`--active-wake-interval-seconds <n>`<br>`--scan-interval-seconds <n>`<br>`--json` |
 | `rig watchdog list` | — | `-a, --all`<br>`--full`<br>`--limit <n>`<br>`--json` |
 | `rig watchdog show <jobId>` | — | `--json` |
 | `rig watchdog status <jobId>` | — | `--json` |

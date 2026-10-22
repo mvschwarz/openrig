@@ -92,6 +92,8 @@ export function watchdogCommand(depsOverride?: WatchdogDeps): Command {
     .requiredOption("--registered-by <session>", "Registering session (for audit)")
     .option("--threshold-bytes <n>", "(context-usage-threshold) transcript byte threshold")
     .option("--threshold-mb <n>", "(context-usage-threshold) transcript threshold in decimal MB")
+    .option("--threshold-tokens <n>", "(context-usage-threshold) sampled-context token threshold; triggers from the seat's own usage sample")
+    .option("--threshold-percent <n>", "(context-usage-threshold) percent of the seat's context window; triggers from the seat's own usage sample")
     .option("--watched-file <path>", "(context-usage-threshold) explicit transcript file; recorded context path is the fallback")
     .option("--requires-job <jobId>", "(context-usage-threshold) require this earlier job's receipt for the same occupant")
     .option("--message <text>", "(context-usage-threshold) message delivered when the threshold fires")
@@ -109,6 +111,8 @@ export function watchdogCommand(depsOverride?: WatchdogDeps): Command {
       scanIntervalSeconds?: string;
       thresholdBytes?: string;
       thresholdMb?: string;
+      thresholdTokens?: string;
+      thresholdPercent?: string;
       watchedFile?: string;
       requiresJob?: string;
       message?: string;
@@ -122,8 +126,14 @@ export function watchdogCommand(depsOverride?: WatchdogDeps): Command {
         process.exitCode = 1;
         return;
       }
-      if (opts.thresholdBytes !== undefined && opts.thresholdMb !== undefined) {
-        console.error("Use only one of --threshold-bytes or --threshold-mb");
+      const byteFlagCount =
+        Number(opts.thresholdBytes !== undefined) + Number(opts.thresholdMb !== undefined);
+      const unitFlagCount =
+        Number(opts.thresholdTokens !== undefined) + Number(opts.thresholdPercent !== undefined);
+      if (byteFlagCount + unitFlagCount > 1) {
+        console.error(
+          "Use only one of --threshold-bytes, --threshold-mb, --threshold-tokens, or --threshold-percent",
+        );
         process.exitCode = 1;
         return;
       }
@@ -141,8 +151,40 @@ export function watchdogCommand(depsOverride?: WatchdogDeps): Command {
         process.exitCode = 1;
         return;
       }
-      if (isContextUsageThreshold && !opts.spec && thresholdBytes === undefined) {
-        console.error("Context threshold requires --threshold-bytes or --threshold-mb when --spec is omitted");
+      const thresholdTokens = opts.thresholdTokens !== undefined
+        ? Number(opts.thresholdTokens)
+        : undefined;
+      if (
+        isContextUsageThreshold &&
+        thresholdTokens !== undefined &&
+        (!Number.isInteger(thresholdTokens) || thresholdTokens <= 0)
+      ) {
+        console.error("--threshold-tokens must be a positive whole number of tokens");
+        process.exitCode = 1;
+        return;
+      }
+      const thresholdPercent = opts.thresholdPercent !== undefined
+        ? Number(opts.thresholdPercent)
+        : undefined;
+      if (
+        isContextUsageThreshold &&
+        thresholdPercent !== undefined &&
+        (!Number.isFinite(thresholdPercent) || thresholdPercent <= 0 || thresholdPercent > 100)
+      ) {
+        console.error("--threshold-percent must be a number from 0 (exclusive) to 100");
+        process.exitCode = 1;
+        return;
+      }
+      if (
+        isContextUsageThreshold &&
+        !opts.spec &&
+        thresholdBytes === undefined &&
+        thresholdTokens === undefined &&
+        thresholdPercent === undefined
+      ) {
+        console.error(
+          "Context threshold requires one of --threshold-bytes, --threshold-mb, --threshold-tokens, or --threshold-percent when --spec is omitted",
+        );
         process.exitCode = 1;
         return;
       }
@@ -162,7 +204,11 @@ export function watchdogCommand(depsOverride?: WatchdogDeps): Command {
           `  session: ${JSON.stringify(opts.targetSession)}`,
           ...(opts.message ? [`message: ${JSON.stringify(opts.message)}`] : []),
           "context:",
-          `  threshold_bytes: ${thresholdBytes}`,
+          ...(thresholdBytes !== undefined
+            ? [`  threshold_bytes: ${thresholdBytes}`]
+            : thresholdTokens !== undefined
+              ? [`  threshold_tokens: ${thresholdTokens}`]
+              : [`  threshold_percent: ${thresholdPercent}`]),
           ...(watchedFilePath ? [`  watched_file: ${JSON.stringify(watchedFilePath)}`] : []),
           ...(opts.requiresJob ? [`  requires: ${JSON.stringify(opts.requiresJob)}`] : []),
           "",
@@ -185,6 +231,8 @@ export function watchdogCommand(depsOverride?: WatchdogDeps): Command {
           scanIntervalSeconds,
           watchedFilePath,
           thresholdBytes,
+          thresholdTokens,
+          thresholdPercent,
           requiresJobId: opts.requiresJob,
           registeredBySession: opts.registeredBy,
         });

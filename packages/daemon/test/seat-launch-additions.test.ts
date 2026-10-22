@@ -289,8 +289,8 @@ describe("a seat's additions through a restore", () => {
     expect(readFileSync(prepared.additions.appendSystemPromptFile!, "utf8")).toBe("Answer in short sentences.\n");
     const calls = (claudeResume.resume as unknown as { mock: { calls: unknown[][] } }).mock.calls;
     expect(calls).toHaveLength(1);
-    // (sessionName, resumeType, resumeToken, cwd, posture, model, permissionMode, nodeId, effort, nonInterruptive, kernelAuthority, teamPermissionDefault, launchAdditions)
-    expect(calls[0]![12]).toEqual(prepared.additions);
+    // (sessionName, resumeType, resumeToken, cwd, posture, model, permissionMode, nodeId, effort, nonInterruptive, kernelAuthority, teamPermissionDefault, advisor, launchAdditions)
+    expect(calls[0]![13]).toEqual(prepared.additions);
     db.close();
   });
 });

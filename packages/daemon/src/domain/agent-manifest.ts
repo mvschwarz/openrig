@@ -183,7 +183,7 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
     }
   }
 
-  // Defaults lifecycle + effort advisory
+  // Defaults lifecycle + launch preference advisories
   if (obj["defaults"] && typeof obj["defaults"] === "object") {
     const defaults = obj["defaults"] as Record<string, unknown>;
     if (defaults["lifecycle"]) {
@@ -196,6 +196,9 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
     if (defaults["effort"] !== undefined && (typeof defaults["effort"] !== "string" || !(defaults["effort"] as string).trim())) {
       advisories.push(`defaults.effort: non-string value "${defaults["effort"]}" ignored; effort must be a text value`);
     }
+    if (defaults["advisor"] !== undefined && (typeof defaults["advisor"] !== "string" || !(defaults["advisor"] as string).trim())) {
+      advisories.push("defaults.advisor: ignored; advisor must be a non-blank text value");
+    }
   }
 
   // Startup
@@ -206,7 +209,7 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
     errors.push("profiles: must be a map (object), not an array or scalar");
   }
 
-  // Profile startup + lifecycle + effort advisory
+  // Profile startup + lifecycle + launch preference advisories
   if (obj["profiles"] && typeof obj["profiles"] === "object" && !Array.isArray(obj["profiles"])) {
     for (const [profileName, profileRaw] of Object.entries(obj["profiles"] as Record<string, unknown>)) {
       if (profileRaw && typeof profileRaw === "object") {
@@ -224,6 +227,9 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
           const prefsObj = prefs as Record<string, unknown>;
           if (prefsObj["effort"] !== undefined && (typeof prefsObj["effort"] !== "string" || !(prefsObj["effort"] as string).trim())) {
             advisories.push(`profiles.${profileName}.preferences.effort: non-string value "${prefsObj["effort"]}" ignored; effort must be a text value`);
+          }
+          if (prefsObj["advisor"] !== undefined && (typeof prefsObj["advisor"] !== "string" || !(prefsObj["advisor"] as string).trim())) {
+            advisories.push(`profiles.${profileName}.preferences.advisor: ignored; advisor must be a non-blank text value`);
           }
         }
       }
@@ -387,6 +393,9 @@ export function normalizeAgentSpec(raw: Record<string, unknown>): AgentSpec {
       effort: typeof defaults["effort"] === "string" && defaults["effort"].trim()
         ? defaults["effort"].trim()
         : undefined,
+      advisor: typeof defaults["advisor"] === "string" && defaults["advisor"].trim()
+        ? defaults["advisor"].trim()
+        : undefined,
       lifecycle: {
         ...lifecycle,
         compactionStrategy: lifecycle.compactionStrategy ?? "default-compaction",
@@ -523,6 +532,9 @@ function normalizeProfile(raw: Record<string, unknown>): ProfileSpec {
           model: (raw["preferences"] as Record<string, unknown>)["model"] as string | undefined,
           effort: typeof (raw["preferences"] as Record<string, unknown>)["effort"] === "string" && ((raw["preferences"] as Record<string, unknown>)["effort"] as string).trim()
             ? ((raw["preferences"] as Record<string, unknown>)["effort"] as string).trim()
+            : undefined,
+          advisor: typeof (raw["preferences"] as Record<string, unknown>)["advisor"] === "string" && ((raw["preferences"] as Record<string, unknown>)["advisor"] as string).trim()
+            ? ((raw["preferences"] as Record<string, unknown>)["advisor"] as string).trim()
             : undefined,
         }
       : undefined,

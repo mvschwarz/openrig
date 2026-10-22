@@ -60,6 +60,8 @@ export interface SuccessorNode {
   model?: string | null;
   /** #75: the seat's effort, from the shared resolver (OPR.0.7.0.7 seat-effort.ts). Carried to successor launch. */
   effort?: string | null;
+  /** The successor keeps the seat's session-scoped Claude Advisor. */
+  advisor?: string | null;
   /** 0.5.2-07 A4-profile: the seat's SPEC-pinned codex config profile (nodes.codex_config_profile).
    *  Same continuity rationale as model — populated by the caller from node provenance; absent → the
    *  adapter emits no -p flag (unchanged for legacy/unpinned seats). */
@@ -358,6 +360,7 @@ export class SuccessorSessionLauncher {
       model: node.model ?? undefined,
       // #75: the successor reads the seat's resolved effort (saved choice, else authored).
       effort: node.effort ?? undefined,
+      advisor: node.advisor ?? undefined,
       // 0.5.2-07 A4-profile: the successor reads the seat's SPEC-pinned codex config profile (adapter emits -p).
       codexConfigProfile: node.codexConfigProfile ?? undefined,
       ...(node.launchAdditions ? { launchAdditions: node.launchAdditions } : {}),
