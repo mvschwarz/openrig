@@ -216,6 +216,38 @@ describe("wakes delivered together each keep their own admission", () => {
     });
 });
 
+describe("a level chosen while the seat is busy decides each combined wake's delivery", () => {
+  it.each([["routine first", ["routine", "urgent"]], ["urgent first", ["urgent", "routine"]]] as const)(
+    "a group formed at off, then urgent-only before the lease frees (%s): only the urgent one types; the routine one is held on its own", async (_order, priorities) => {
+      const f = fixture();
+      const offline = new QueueRepository(f.db, new EventBus(f.db), { validateRig: () => true });
+      offline.attachOutbox(new OutboxHandler(f.db));
+      const blocker = await offline.create({ sourceSession: "peer@test", destinationSession: "peer@test", body: "Vendor reply", nudge: false });
+      const parked: Record<string, string> = {};
+      for (const priority of priorities) {
+        const row = await offline.create({ sourceSession: "peer@test", destinationSession: seat, body: `${priority} follow-up`, priority, nudge: false });
+        await offline.update({ qitemId: row.qitemId, actorSession: seat, state: "blocked", blockedOn: blocker.qitemId } as never);
+        parked[priority] = row.qitemId;
+      }
+      await offline.update({ qitemId: blocker.qitemId, actorSession: "peer@test", state: "done", closureReason: "no-follow-on" } as never);
+      // An earlier operation holds the seat's lease while the group forms at off.
+      let release!: () => void;
+      const busy = f.guard.operation(seat, () => new Promise<void>((r) => { release = r; }));
+      const drain = f.queue.drainPendingWakeIntents();
+      await new Promise((r) => setTimeout(r, 50));
+      await f.guard.set("a", { mode: "urgent-only" }, "person@test", "focus", 1); // chosen while the seat is busy
+      release();
+      await busy;
+      await drain;
+      await vi.waitFor(() => expect(f.queue.getById(parked.routine!)!.lastNudgeResult).toBe("retained:typing_guard"));
+      const urgentTyped = f.typed.filter((t) => t.includes(`parked qitem ${parked.urgent} is pending`));
+      expect(urgentTyped).toHaveLength(1);
+      expect(urgentTyped[0]!.split("\n").filter((l) => l.startsWith("Urgent (marked by")).length).toBe(1);
+      expect(f.typed.join("\n")).not.toContain(`parked qitem ${parked.routine} is pending`);
+      expect(f.held().map((h) => h.body).join("\n")).toContain(`parked qitem ${parked.routine} is pending`);
+    });
+});
+
 describe("a returned result and its resume", () => {
   it("at urgent-only, both routine: the arrival and the waiter's resume are both held, each its own readable record", async () => {
     const f = fixture();
