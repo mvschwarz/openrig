@@ -1328,12 +1328,31 @@ export class QueueRepository {
     // The group was formed on the first member's outcome, so its own source and urgency reach that same outcome at the
     // send; the other members' bodies keep their own frozen urgent lines.
     const trigger: WakeTrigger = group[0]!.tags?.includes(WAKE_TRIGGER_OPENRIG_TAG) ? "openrig" : "agent";
+    // The level can change while this send waits for the seat's lease. Under the lease, each member is admitted again with
+    // its own source and urgency; only those with the first member's outcome go with this send, and the others go back
+    // to their state before this claim (never marked delivered, held or failed) for their own delivery.
+    const released: OutboxEntry[] = [];
+    const recheckMembers = group.length < 2 ? undefined : (holds: (input: import("./seat-delivery-guard.js").AdmissionInput) => boolean, held: boolean) => {
+      const keep = group.filter((entry, i) => {
+        if (i === 0) return true;
+        const memberTrigger: WakeTrigger = entry.tags?.includes(WAKE_TRIGGER_OPENRIG_TAG) ? "openrig" : "agent";
+        const admission = this.wakeAdmission(entry.auditPointer!, memberTrigger);
+        return holds({ source: admission.source, urgent: admission.urgent }) === held;
+      });
+      for (const entry of group) {
+        if (keep.includes(entry)) continue;
+        this.db.prepare("UPDATE outbox_entries SET delivery_state = ? WHERE outbox_id = ? AND delivery_state = 'sending'").run(entry.deliveryState, entry.outboxId);
+        released.push(entry);
+      }
+      return { text: recoveryNotice + keep.map(entry => entry.body).join("\n"), outboxIds: keep.map(entry => entry.outboxId) };
+    };
     const outcome = await this.performWakeSend(
       qitemId, intent.destinationSession, intent.senderSession, undefined, recoveryNotice + group.map(entry => entry.body).join("\n"), group.map(entry => entry.outboxId),
-      trigger,
+      trigger, recheckMembers,
     );
     let reportedState: "delivered" | "indeterminate" | "failed" | "retained" = outcome.classified === "verified" ? "delivered" : outcome.classified;
     for (const intent of group) {
+      if (released.includes(intent)) continue;
       // A no-write retry cannot settle whether an earlier attempt landed.
       const earlierUnknown = intent.deliveryState === "indeterminate" && outcome.classified === "failed";
       const finalState = earlierUnknown ? "indeterminate" : outcome.classified === "verified" ? "delivered" : outcome.classified;
@@ -1377,6 +1396,10 @@ export class QueueRepository {
         });
       })();
       if (wakeEvent) this.eventBus.notifySubscribers(wakeEvent);
+    }
+    // Each released member is delivered on its own now, so this drain finishes only once every member has its outcome.
+    for (const entry of released) {
+      await this.deliverWakeIntent(entry.outboxId).catch((err) => console.error(`Queue wake delivery failed for ${entry.outboxId}:`, err));
     }
     return reportedState;
   }
@@ -1507,6 +1530,7 @@ export class QueueRepository {
     prebuiltText?: string,
     committedOutboxIds?: string[],
     trigger: WakeTrigger = "agent",
+    recheckMembers?: import("./session-transport.js").SendOpts["recheckMembers"],
   ): Promise<WakeAttemptOutcome> {
     // DEFECT FIX qitem-20260827065907-b9ae334c (S1-class, 3 live specimens): a virtual
     // @external destination has NO pane — the queue row ITSELF is the gateway
@@ -1569,7 +1593,8 @@ export class QueueRepository {
       const admission = this.wakeAdmission(qitemId, trigger);
       const res = await this.transport!.send(destinationSession, text, { verify: true, stampISO, actorSession: sourceSession, committedOutboxIds,
         deliveryId: committedOutboxIds ? undefined : deliveryId, auditPointer: qitemId, queueWake: true,
-        ...(trigger === "openrig" ? { openrigNotice: true as const } : {}), ...(admission.urgentBy ? { urgent: { by: admission.urgentBy } } : {}) });
+        ...(trigger === "openrig" ? { openrigNotice: true as const } : {}), ...(admission.urgentBy ? { urgent: { by: admission.urgentBy } } : {}),
+        ...(recheckMembers ? { recheckMembers } : {}) });
       // OPR.0.3.2.21.FR-4(c) — wording rename: the prior literal
       // "sent-unverified" read as a failure even in the common case
       // (delivery confirmed but the synchronous ack window expired,
