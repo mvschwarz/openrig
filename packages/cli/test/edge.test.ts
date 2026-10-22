@@ -1,7 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { DaemonResponseError, type DaemonClient } from "../src/client.js";
 import { STATE_FILE, type DaemonState, type LifecycleDeps } from "../src/daemon-lifecycle.js";
 import { createProgram } from "../src/index.js";
@@ -52,18 +49,10 @@ const edge = {
 };
 
 describe("rig edge", () => {
-  let scratch: string;
-  beforeEach(() => {
-    scratch = mkdtempSync(join(tmpdir(), "rig-edge-cli-"));
-    vi.stubEnv("OPENRIG_HOST_SELECTED", "local");
-  });
-  afterEach(() => {
-    vi.unstubAllEnvs();
-    rmSync(scratch, { recursive: true, force: true });
-  });
+  beforeEach(() => { vi.stubEnv("OPENRIG_HOST_SELECTED", "local"); });
+  afterEach(() => { vi.unstubAllEnvs(); });
 
-
-  it.each(["single", "batch", "remove"].flatMap((operation) =>
+  it.each(["add", "remove"].flatMap((operation) =>
     ["ECONNREFUSED", "EPERM"].map((causeCode) => ({ operation, causeCode })),
   ))("returns JSON without an edge request when the daemon is unavailable: $operation / $causeCode", async ({ operation, causeCode }) => {
     vi.stubEnv("OPENRIG_URL", "http://127.0.0.1:7433");
@@ -72,11 +61,9 @@ describe("rig edge", () => {
       fetch: vi.fn(async () => { throw Object.assign(new Error(causeCode), { code: causeCode }); }),
       sleep: vi.fn(async () => {}),
     };
-    const path = join(scratch, "edges.yaml");
-    writeFileSync(path, "edges:\n  - {from: orch.lead, to: dev.qa, kind: delegates_to}\n");
     const client = { get: vi.fn(), post: vi.fn(), delete: vi.fn() };
-    const args = operation === "single" ? ["add", "rig-1", "orch.lead", "dev.qa", "--kind", "delegates_to"]
-      : operation === "batch" ? ["add", "rig-1", "--file", path] : ["remove", "rig-1", "edge-1"];
+    const args = operation === "add" ? ["add", "rig-1", "orch.lead", "dev.qa", "--kind", "delegates_to"]
+      : ["remove", "rig-1", "edge-1"];
     const result = await run(client, [...args, "--json"], unavailable);
     expect(result.exitCode).toBe(1);
     expect(result.err).toEqual([]);
@@ -97,43 +84,9 @@ describe("rig edge", () => {
     expect(result.exitCode).toBe(1);
   });
 
-  it.each(["yaml", "json", "array"])("sends a %s file as one batch, preserving plan and JSON output", async (format) => {
-    const edges = [{ from: "orch.lead", to: "dev.qa", kind: "delegates_to" }];
-    const path = join(scratch, "edges");
-    writeFileSync(path, format === "yaml"
-      ? "edges:\n  - from: orch.lead\n    to: dev.qa\n    kind: delegates_to\n"
-      : JSON.stringify(format === "array" ? edges : { edges }));
-    const data = { ok: true, rigId: "rig-1", results: [{ ok: true, rigId: "rig-1", outcome: "would_add", edge }] };
-    const post = vi.fn(async () => ({ status: 200, data }));
-    const result = await run({ post } as never, ["add", "rig-1", "--file", path, "--plan", "--json"]);
-    expect(post).toHaveBeenCalledExactlyOnceWith("/api/rigs/rig-1/edges", { edges, plan: true });
-    expect(JSON.parse(result.out.join("\n"))).toEqual(data);
-    expect(result.exitCode).toBeUndefined();
-  });
-
-  it.each(["", "edges: [", "42", "null", "[]", "{}", "edges: {}"])("rejects an unusable file before posting: %j", async (content) => {
-    const path = join(scratch, "invalid.yaml");
-    writeFileSync(path, content);
-    const post = vi.fn();
-    const result = await run({ post }, ["add", "rig-1", "--file", path, "--json"]);
-    expect(JSON.parse(result.out.join("\n"))).toMatchObject({ ok: false, code: "validation_failed" });
-    expect(result.exitCode).toBe(1);
-    expect(post).not.toHaveBeenCalled();
-  });
-
-  it("reports an unreadable file without posting", async () => {
-    const post = vi.fn();
-    const result = await run({ post }, ["add", "rig-1", "--file", join(scratch, "missing.yaml"), "--json"]);
-    expect(JSON.parse(result.out.join("\n"))).toMatchObject({ ok: false, code: "file_read_failed" });
-    expect(result.exitCode).toBe(1);
-    expect(post).not.toHaveBeenCalled();
-  });
-
   it.each([
     { args: [] }, { args: ["orch.lead"] }, { args: ["orch.lead", "dev.qa"] },
-    { args: ["--file", "edges.yaml", "--kind", "delegates_to"] },
-    { args: ["orch.lead", "dev.qa", "--file", "edges.yaml"] },
-  ])("rejects incomplete or mixed single/batch arguments: $args", async ({ args }) => {
+  ])("rejects incomplete arguments before posting: $args", async ({ args }) => {
     const post = vi.fn();
     const result = await run({ post }, ["add", "rig-1", ...args, "--json"]);
     expect(JSON.parse(result.out.join("\n"))).toMatchObject({ ok: false, code: "validation_failed" });

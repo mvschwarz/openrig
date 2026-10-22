@@ -1,5 +1,4 @@
 import { Command } from "commander";
-import { readFileSync } from "node:fs";
 import { DaemonClient, DaemonResponseError, type DaemonResponse } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, daemonStatusGuard } from "../daemon-lifecycle.js";
 import { readSelectedHost } from "../host-selection.js";
@@ -22,7 +21,6 @@ interface EdgeSuccess {
 
 type EdgeOpResult =
   | EdgeSuccess
-  | { ok: true; rigId: string; results: EdgeSuccess[] }
   | { ok: false; code: string; message: string; candidates?: string[] };
 
 const NO_EDGE_ROUTE = "This daemon has no edge route. Upgrade it to a version with `rig edge`, then retry.";
@@ -31,34 +29,31 @@ function report(result: EdgeOpResult, opts: { json?: boolean }): void {
   if (opts.json) console.log(JSON.stringify(result, null, 2));
   else if (!result.ok) console.error(`${result.code}: ${result.message}`);
   else {
-    const results = "results" in result ? result.results : [result];
-    for (const receipt of results) {
-      const { edge } = receipt;
-      const line = `${edge.kind} ${edge.from.logicalId} -> ${edge.to.logicalId}`;
-      const id = edge.id ? `  edge ${edge.id}` : "";
-      switch (receipt.outcome) {
-        case "would_add":
-          console.log(`plan     add ${line} in rig ${receipt.rigId}`);
-          console.log(`         from node ${edge.from.nodeId}, to node ${edge.to.nodeId}`);
-          console.log("         nothing written (--plan)");
-          break;
-        case "added":
-          console.log(`added    ${line}${id}`);
-          console.log(`         rollback: ${receipt.rollback}`);
-          break;
-        case "present":
-          console.log(`present  ${line}${id} (already there; nothing written)`);
-          break;
-        case "would_remove":
-          console.log(`plan     remove ${line}${id} from rig ${receipt.rigId}`);
-          console.log("         nothing written (--plan)");
-          break;
-        case "removed":
-          console.log(`removed  ${line}${id}`);
-          break;
-      }
+    const { edge } = result;
+    const line = `${edge.kind} ${edge.from.logicalId} -> ${edge.to.logicalId}`;
+    const id = edge.id ? `  edge ${edge.id}` : "";
+    switch (result.outcome) {
+      case "would_add":
+        console.log(`plan     add ${line} in rig ${result.rigId}`);
+        console.log(`         from node ${edge.from.nodeId}, to node ${edge.to.nodeId}`);
+        console.log("         nothing written (--plan)");
+        break;
+      case "added":
+        console.log(`added    ${line}${id}`);
+        console.log(`         rollback: ${result.rollback}`);
+        break;
+      case "present":
+        console.log(`present  ${line}${id} (already there; nothing written)`);
+        break;
+      case "would_remove":
+        console.log(`plan     remove ${line}${id} from rig ${result.rigId}`);
+        console.log("         nothing written (--plan)");
+        break;
+      case "removed":
+        console.log(`removed  ${line}${id}`);
+        break;
     }
-    if (results.some((receipt) => receipt.outcome === "added" || receipt.outcome === "removed")) {
+    if (result.outcome === "added" || result.outcome === "removed") {
       console.log(`         capture this topology with \`rig snapshot ${result.rigId}\`; restore uses the selected snapshot`);
     }
   }
@@ -118,57 +113,27 @@ export function edgeCommand(depsOverride?: StatusDeps): Command {
 
   cmd
     .command("add")
-    .description("Ensure one edge, or an atomic batch from --file; existing edges are unchanged")
+    .description("Ensure one edge between two existing seats; an existing edge is unchanged")
     .argument("<rig>", "Target rig name or ID")
     .argument("[from]", "Source seat logical ID, such as orch.lead")
     .argument("[to]", "Target seat logical ID, such as review.reviewer")
     .option("--kind <kind>", "delegates_to, spawned_by, can_observe, collaborates_with or escalates_to")
-    .option("--file <path>", "YAML/JSON array of { from, to, kind }, optionally wrapped in { edges: [...] }")
-    .option("--plan", "Validate the entire request and show changes without writing")
+    .option("--plan", "Validate the request and show the change without writing")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Examples:
   rig edge add my-rig orch.lead review.reviewer --kind delegates_to
-  rig edge add my-rig --file ./edges.yaml --plan --json
+  rig edge add my-rig orch.lead review.reviewer --kind delegates_to --plan --json
 
-Use from, to and --kind together, or --file alone. Endpoints are fully qualified
-logical IDs for both same-pod and cross-pod edges. Repeated triples produce one
-receipt each; retrying reuses their IDs. No seats or sessions are changed.`)
-    .action(async (rig: string, from: string | undefined, to: string | undefined, opts: { kind?: string; file?: string; plan?: boolean; json?: boolean }) => {
-      let body: Record<string, unknown>;
-      if (opts.file !== undefined) {
-        if (from !== undefined || to !== undefined || opts.kind !== undefined) {
-          report({ ok: false, code: "validation_failed", message: "--file cannot be combined with from, to or --kind" }, opts);
-          return;
-        }
-        let content: string;
-        try { content = readFileSync(opts.file, "utf8"); }
-        catch {
-          report({ ok: false, code: "file_read_failed", message: `Cannot read file: ${opts.file}` }, opts);
-          return;
-        }
-        let parsed: unknown;
-        try {
-          const { parse } = await import("yaml");
-          parsed = parse(content);
-        } catch {
-          report({ ok: false, code: "validation_failed", message: "Invalid YAML/JSON in edge file" }, opts);
-          return;
-        }
-        const edges = Array.isArray(parsed) ? parsed
-          : parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>).edges : undefined;
-        if (!Array.isArray(edges) || edges.length === 0) {
-          report({ ok: false, code: "validation_failed", message: "Edge file must contain a non-empty array or { edges: [...] }" }, opts);
-          return;
-        }
-        body = { edges, plan: opts.plan === true };
-      } else {
-        if (!from || !to || !opts.kind) {
-          report({ ok: false, code: "validation_failed", message: "Supply from, to and --kind, or use --file for a batch" }, opts);
-          return;
-        }
-        body = { from, to, kind: opts.kind, plan: opts.plan === true };
+Endpoints are fully qualified logical IDs for both same-pod and cross-pod edges.
+Run it once per edge. A repeat reports the existing edge and its ID, and writes
+nothing. No seats or sessions are changed.`)
+    .action(async (rig: string, from: string | undefined, to: string | undefined, opts: { kind?: string; plan?: boolean; json?: boolean }) => {
+      if (!from || !to || !opts.kind) {
+        report({ ok: false, code: "validation_failed", message: "Supply from, to and --kind" }, opts);
+        return;
       }
+      const body = { from, to, kind: opts.kind, plan: opts.plan === true };
       await run(rig, opts, (client, rigId) => client.post<EdgeOpResult>(`/api/rigs/${encodeURIComponent(rigId)}/edges`, body));
     });
 

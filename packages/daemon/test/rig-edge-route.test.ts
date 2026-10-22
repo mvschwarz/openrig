@@ -115,4 +115,43 @@ describe("POST and DELETE /api/rigs/:rigId/edges", () => {
     expect(unknown.message).toContain("'dev.absent'");
     expect(state()).toEqual(before);
   });
+
+  it.each([null, [], "edge", {}, { from: "orch.lead", to: "dev.qa", kind: "delegates_to", plan: "true" }])(
+    "refuses a body that isn't one edge before any write: %j",
+    async (body) => {
+      const before = state();
+      const response = await setup.app.request(`/api/rigs/${rigId}/edges`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ ok: false, code: "validation_failed" });
+      expect(state()).toEqual(before);
+    },
+  );
+
+  it("concurrent repeats add one copy, and a duplicate row from another path is left as it is", async () => {
+    const edge = { from: "orch.lead", to: "dev.qa", kind: "delegates_to" };
+    const results = await Promise.all(Array.from({ length: 6 }, () => add(edge)));
+    expect(results.map((r) => r.status).sort()).toEqual([200, 200, 200, 200, 200, 201]);
+    const receipts = await Promise.all(results.map((r) => r.json() as Promise<{ edge: { id: string } }>));
+    expect(new Set(receipts.map((r) => r.edge.id)).size).toBe(1);
+    const added = state().edges.find((e) => e.id === receipts[0]!.edge.id)!;
+    setup.rigRepo.addEdge(rigId, added.sourceId, added.targetId, added.kind);
+    const withDuplicate = state();
+    expect((await add(edge)).status).toBe(200);
+    expect(state()).toEqual(withDuplicate);
+  });
+
+  it("removes an edge only through its own rig, and a malformed plan is never a write", async () => {
+    const edge = state().edges[0]!;
+    const other = setup.rigRepo.createRig("other-rig");
+    const before = state();
+    const foreign = await remove(edge.id, false, other.id);
+    expect(foreign.status).toBe(404);
+    expect(await foreign.json()).toMatchObject({ ok: false, code: "edge_not_found" });
+    const malformed = await setup.app.request(`/api/rigs/${rigId}/edges/${edge.id}?plan=true`, { method: "DELETE" });
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toMatchObject({ ok: false, code: "validation_failed" });
+    expect(state()).toEqual(before);
+  });
 });

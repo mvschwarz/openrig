@@ -318,9 +318,9 @@ native providers, restore or policy changes.
 
 `packages/daemon/test/rig-edge-cli.integration.test.ts` uses the same private
 scenario daemon and tmux helpers for edge repair. It removes a stub seat, re-adds
-its logical ID with the terminal runtime, then restores its cross-pod edges through
-`rig edge add --file`. It checks repeat IDs and edge counts, rejection without
-partial writes, unchanged sibling node/binding identities and pane PIDs, export,
+its logical ID with the terminal runtime, then restores its cross-pod edges with one
+`rig edge add` per edge. It checks repeat IDs and edge counts, refusal without a
+write, unchanged sibling node/binding identities and pane PIDs, export,
 snapshot capture and exact rollback. It models the cross-runtime replacement
 workaround without invoking Claude Code or Codex. The YAML runner has no bound
 edge/remove/add verbs, so this journey drives the real CLI directly:

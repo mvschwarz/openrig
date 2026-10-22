@@ -1,7 +1,7 @@
 import type { PodRigInstantiator, AddMemberOutcome } from "./rigspec-instantiator.js";
 import type { ClaimService, ReconcileSessionOutcome } from "./claim-service.js";
 import type { RigRepository } from "./rig-repository.js";
-import { addRigEdge, addRigEdges, removeRigEdge, type EdgeInput, type EdgeOpOutcome, type EdgeBatchOutcome } from "./rig-edge-ops.js";
+import { addRigEdge, removeRigEdge, type EdgeOpOutcome } from "./rig-edge-ops.js";
 
 /**
  * Topology-mutation converge spine (OPR.0.3.3.24, AC-6 scaffold).
@@ -38,13 +38,12 @@ export type TopologyOp =
   // diffTopology compares members only, so it never emits these; an operator applies exactly the edge it chose,
   // and removes one by the id the add returned.
   | { kind: "add_edge"; from: string; to: string; edgeKind: string; plan?: boolean }
-  | { kind: "add_edges"; edges: EdgeInput[]; plan?: boolean }
   | { kind: "remove_edge"; edgeId: string; plan?: boolean };
 
 export type TopologyOpKind = TopologyOp["kind"];
 
 /** The op-kinds converge() implements this release. The rest are classified-deferred. */
-export const SUPPORTED_OP_KINDS: readonly TopologyOpKind[] = ["add_member", "reconcile_session", "add_edge", "add_edges", "remove_edge"];
+export const SUPPORTED_OP_KINDS: readonly TopologyOpKind[] = ["add_member", "reconcile_session", "add_edge", "remove_edge"];
 
 export function isSupportedOpKind(kind: TopologyOpKind): boolean {
   return SUPPORTED_OP_KINDS.includes(kind);
@@ -57,7 +56,6 @@ export type ConvergeResult =
   | { kind: "add_member"; supported: true; outcome: AddMemberOutcome }
   | { kind: "reconcile_session"; supported: true; outcome: ReconcileSessionOutcome }
   | { kind: "add_edge" | "remove_edge"; supported: true; outcome: EdgeOpOutcome }
-  | { kind: "add_edges"; supported: true; outcome: EdgeBatchOutcome }
   | { kind: TopologyOpKind; detected: true; supported: false; reason: string };
 
 /** A member as DECLARED in the desired spec (one pod-scoped member fragment). */
@@ -163,12 +161,6 @@ export async function convergeOp(
         logicalId: op.logicalId,
       });
       return { kind: "reconcile_session", supported: true, outcome };
-    }
-    case "add_edges": {
-      if (!deps.rigRepo) {
-        return { kind: op.kind, supported: true, outcome: { ok: false, code: "unavailable", message: "Rig repository unavailable; cannot change edges." } };
-      }
-      return { kind: op.kind, supported: true, outcome: addRigEdges(deps.rigRepo, { rigId, edges: op.edges, plan: op.plan }) };
     }
     case "add_edge":
     case "remove_edge": {

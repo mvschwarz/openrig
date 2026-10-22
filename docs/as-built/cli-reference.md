@@ -768,11 +768,11 @@ Root: `rig`; declared option: `-V, --version`.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig edge` | — | — |
-| `rig edge add <rig> [from] [to]` | — | `--kind <kind>`<br>`--file <path>`<br>`--plan`<br>`--json` |
+| `rig edge add <rig> [from] [to]` | — | `--kind <kind>`<br>`--plan`<br>`--json` |
 | `rig edge remove <rig> <edge-id>` | — | `--plan`<br>`--json` |
 
-`add` requires either `from`, `to` and `--kind`, or `--file` alone. Single and batch
-additions are idempotent; a batch validates and writes atomically. See
+`add` requires `from`, `to` and `--kind`, and is idempotent: a repeat reports the
+existing edge and writes nothing. See
 [changing edges on an existing rig](../reference/rig-spec.md#changing-edges-on-an-existing-rig)
 for input and receipt examples, rollback, and snapshot behavior.
 

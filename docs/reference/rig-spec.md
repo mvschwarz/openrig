@@ -518,29 +518,18 @@ cross-pod edges**. This command only changes edges; it does not create pods,
 restart sessions or change seat identity.
 
 ```sh
+rig edge add my-rig orch.lead review.reviewer --kind delegates_to --plan --json
 rig edge add my-rig orch.lead review.reviewer --kind delegates_to --json
-rig edge add my-rig --file ./edges.yaml --plan --json
-rig edge add my-rig --file ./edges.yaml --json
 ```
 
-The batch file is YAML or JSON, either an array or an object with an `edges` array:
+Run it once per edge. It returns `added` with the new edge's ID, or `present` with
+the existing edge's ID when that `{from, to, kind}` is already there, and then
+writes nothing. Existing duplicate rows from other creation paths are retained;
+this operation does not create more copies.
 
-```yaml
-edges:
-  - {from: orch.lead, to: review.reviewer, kind: delegates_to}
-  - {from: review.reviewer, to: orch.lead, kind: escalates_to}
-```
-
-Single additions return `added` or `present` with the edge ID. Batch output has a
-`results` array, one receipt per distinct `{from, to, kind}` in input order.
-Repeating an addition reuses the existing ID. Existing duplicate rows from other
-creation paths are retained; this operation does not create more copies.
-
-The daemon validates the entire batch and commits it in one transaction. Unknown
-endpoints, invalid kinds or a launch-order cycle (including one formed by several
-batch entries together) leave the graph unchanged. Both endpoints must belong to
-the target rig. `--plan` performs the same validation and returns `would_add` for
-new edges without writing anything.
+Unknown endpoints, an invalid kind or a launch-order cycle leave the graph
+unchanged. Both endpoints must belong to the target rig. `--plan` performs the
+same validation and returns `would_add` for a new edge without writing anything.
 
 Each `added` receipt includes a rollback command,
 `rig edge remove <rig-id> <edge-id>`, which removes exactly that edge in that rig.

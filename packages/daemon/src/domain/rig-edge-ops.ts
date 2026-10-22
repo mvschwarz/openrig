@@ -35,14 +35,11 @@ export interface EdgeOpSuccess {
 
 interface EdgeOpError {
   ok: false;
-  code: "rig_not_found" | "node_not_found" | "invalid_kind" | "edge_cycle" | "edge_not_found" | "validation_failed" | "unavailable";
+  code: "rig_not_found" | "node_not_found" | "invalid_kind" | "edge_cycle" | "edge_not_found" | "unavailable";
   message: string;
 }
 
 export type EdgeOpOutcome = EdgeOpSuccess | EdgeOpError;
-export type EdgeBatchOutcome =
-  | { ok: true; rigId: string; results: EdgeOpSuccess[] }
-  | EdgeOpError;
 
 function end(node: NodeWithBinding): EdgeEnd {
   return { logicalId: node.logicalId, nodeId: node.id };
@@ -77,76 +74,34 @@ export function addRigEdge(
   repo: RigRepository,
   input: EdgeInput & { rigId: string; plan?: boolean },
 ): EdgeOpOutcome {
-  const batch = addRigEdges(repo, { rigId: input.rigId, edges: [input], plan: input.plan });
-  return batch.ok ? batch.results[0]! : batch;
-}
-
-/**
- * Validate the entire batch before inserting anything, including dependencies
- * introduced by earlier entries. One receipt per distinct (from, to, kind), in
- * input order. Existing duplicate rows are preserved, never multiplied.
- */
-export function addRigEdges(
-  repo: RigRepository,
-  input: { rigId: string; edges: EdgeInput[]; plan?: boolean },
-): EdgeBatchOutcome {
-  if (!Array.isArray(input.edges) || input.edges.length === 0 || !input.edges.every((edge) =>
-    edge !== null && typeof edge === "object" && !Array.isArray(edge)
-      && typeof edge.from === "string" && edge.from.length > 0
-      && typeof edge.to === "string" && edge.to.length > 0
-      && typeof edge.kind === "string" && edge.kind.length > 0)) {
-    return { ok: false, code: "validation_failed", message: "edges must be a non-empty array of { from, to, kind } with non-empty strings" };
-  }
-
-  const transaction = repo.db.transaction((): EdgeBatchOutcome => {
+  const transaction = repo.db.transaction((): EdgeOpOutcome => {
     const rig = repo.getRig(input.rigId);
     if (!rig) return { ok: false, code: "rig_not_found", message: `rig ${input.rigId} not found` };
-    const nodes = new Map(rig.nodes.map((node) => [node.logicalId, node]));
-    const graph: EdgeArc[] = [...rig.edges];
-    const prepared: EdgeReceipt[] = [];
-    const seen = new Set<string>();
-
-    for (const requested of input.edges) {
-      const key = JSON.stringify([requested.from, requested.to, requested.kind]);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      if (!VALID_EDGE_KINDS.has(requested.kind)) {
-        return { ok: false, code: "invalid_kind", message: `kind must be one of ${[...VALID_EDGE_KINDS].join(", ")} (got "${requested.kind}")` };
-      }
-      const from = nodes.get(requested.from);
-      const to = nodes.get(requested.to);
-      if (!from || !to) {
-        const missing = [...new Set([from ? null : requested.from, to ? null : requested.to].filter((id): id is string => id !== null))];
-        return { ok: false, code: "node_not_found", message: `no seat with logical id ${missing.map((id) => `'${id}'`).join(" or ")} in rig ${input.rigId}` };
-      }
-
-      const edge: EdgeReceipt = { kind: requested.kind, from: end(from), to: end(to) };
-      const existing = rig.edges.find((e) => e.sourceId === from.id && e.targetId === to.id && e.kind === requested.kind);
-      if (existing) {
-        prepared.push({ ...edge, id: existing.id });
-        continue;
-      }
-      const candidate = { sourceId: from.id, targetId: to.id, kind: requested.kind };
-      if (LAUNCH_DEPENDENCY_KINDS.has(requested.kind) && createsLaunchCycle(graph, candidate)) {
-        return {
-          ok: false, code: "edge_cycle",
-          message: `a ${requested.kind} edge from ${requested.from} to ${requested.to} would make launch order cycle, and launch and restore refuse a cycle`,
-        };
-      }
-      graph.push(candidate);
-      prepared.push(edge);
+    if (!VALID_EDGE_KINDS.has(input.kind)) {
+      return { ok: false, code: "invalid_kind", message: `kind must be one of ${[...VALID_EDGE_KINDS].join(", ")} (got "${input.kind}")` };
     }
-
-    const results = prepared.map((edge): EdgeOpSuccess => {
-      if (edge.id) return { ok: true, rigId: input.rigId, outcome: "present", edge };
-      if (input.plan) return { ok: true, rigId: input.rigId, outcome: "would_add", edge };
-      const added = repo.addEdge(input.rigId, edge.from.nodeId, edge.to.nodeId, edge.kind);
+    const from = rig.nodes.find((node) => node.logicalId === input.from);
+    const to = rig.nodes.find((node) => node.logicalId === input.to);
+    if (!from || !to) {
+      const missing = [...new Set([from ? null : input.from, to ? null : input.to].filter((id): id is string => id !== null))];
+      return { ok: false, code: "node_not_found", message: `no seat with logical id ${missing.map((id) => `'${id}'`).join(" or ")} in rig ${input.rigId}` };
+    }
+    const edge: EdgeReceipt = { kind: input.kind, from: end(from), to: end(to) };
+    const existing = rig.edges.find((e) => e.sourceId === from.id && e.targetId === to.id && e.kind === input.kind);
+    if (existing) return { ok: true, rigId: input.rigId, outcome: "present", edge: { ...edge, id: existing.id } };
+    const candidate = { sourceId: from.id, targetId: to.id, kind: input.kind };
+    if (LAUNCH_DEPENDENCY_KINDS.has(input.kind) && createsLaunchCycle(rig.edges, candidate)) {
       return {
-        ok: true, rigId: input.rigId, outcome: "added", edge: { ...edge, id: added.id },
-        rollback: `rig edge remove ${input.rigId} ${added.id}`,
+        ok: false, code: "edge_cycle",
+        message: `a ${input.kind} edge from ${input.from} to ${input.to} would make launch order cycle, and launch and restore refuse a cycle`,
       };
-    });
-    return { ok: true, rigId: input.rigId, results };
+    }
+    if (input.plan) return { ok: true, rigId: input.rigId, outcome: "would_add", edge };
+    const added = repo.addEdge(input.rigId, from.id, to.id, input.kind);
+    return {
+      ok: true, rigId: input.rigId, outcome: "added", edge: { ...edge, id: added.id },
+      rollback: `rig edge remove ${input.rigId} ${added.id}`,
+    };
   });
   // Reserve the writer before reading the graph, so another connection cannot
   // insert the same triple between the existence check and the insert.

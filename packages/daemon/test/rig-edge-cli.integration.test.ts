@@ -105,33 +105,33 @@ describe("edge repair CLI journey", () => {
     expect(identities(replaced).filter((n) => n.logicalId !== "review.reviewer")).toEqual(siblingIds);
     expect(panes().filter((line) => line.startsWith("orch-"))).toEqual(siblingPanes);
 
-    const edgeFile = join(scaffold!.root, "edges.yaml");
-    writeFileSync(edgeFile, stringify({ edges: [...repair, repair[0]] }));
-    const command = ["edge", "add", "edge-repair", "--file", edgeFile, "--json"];
+    // One command per edge, as an agent restoring a seat's edges would run them.
+    const commands = repair.map((e) => ["edge", "add", "edge-repair", e.from, e.to, "--kind", e.kind, "--json"]);
+    const each = async (extra: string[] = []) => {
+      const receipts: Array<{ outcome: string; edge: { id: string } }> = [];
+      for (const command of commands) receipts.push(await cli([...command, ...extra]));
+      return receipts;
+    };
     const beforePanes = panes();
-    const planned = await cli([...command, "--plan"]);
-    expect(planned.results.map((r: { outcome: string }) => r.outcome)).toEqual(["would_add", "would_add"]);
+    const planned = await each(["--plan"]);
+    expect(planned.map((r) => r.outcome)).toEqual(["would_add", "would_add"]);
     expect((await graph()).edges).toEqual(replaced.edges);
 
-    const fixed = await cli(command);
-    expect(fixed.results.map((r: { outcome: string }) => r.outcome)).toEqual(["added", "added"]);
+    const fixed = await each();
+    expect(fixed.map((r) => r.outcome)).toEqual(["added", "added"]);
     const after = await graph();
     expect(after.edges).toHaveLength(3);
     expect(after.edges).toEqual(expect.arrayContaining(replaced.edges));
-    const retry = await cli(command);
-    expect(retry.results.map((r: { outcome: string }) => r.outcome)).toEqual(["present", "present"]);
-    expect(retry.results.map((r: { edge: { id: string } }) => r.edge.id))
-      .toEqual(fixed.results.map((r: { edge: { id: string } }) => r.edge.id));
+    const retry = await each();
+    expect(retry.map((r) => r.outcome)).toEqual(["present", "present"]);
+    expect(retry.map((r) => r.edge.id)).toEqual(fixed.map((r) => r.edge.id));
     expect((await graph()).edges).toEqual(after.edges);
     expect(identities(await graph())).toEqual(identities(replaced));
     expect(panes()).toEqual(beforePanes);
 
-    // A valid first entry followed by an invalid endpoint cannot partially apply.
-    writeFileSync(edgeFile, stringify({ edges: [
-      { from: "orch.observer", to: "review.reviewer", kind: "can_observe" },
-      { from: "other.lead", to: "review.reviewer", kind: "delegates_to" },
-    ] }));
-    const refused = await runRig(command, daemon!.readEnv, rigBin);
+    // An endpoint the rig doesn't have is refused and writes nothing.
+    const refused = await runRig(["edge", "add", "edge-repair", "other.lead", "review.reviewer", "--kind", "delegates_to", "--json"],
+      daemon!.readEnv, rigBin);
     expect(refused.code).toBe(1);
     expect(JSON.parse(refused.stdout)).toMatchObject({ ok: false, code: "node_not_found" });
     expect((await graph()).edges).toEqual(after.edges);
@@ -144,7 +144,7 @@ describe("edge repair CLI journey", () => {
     const snapshot = await (await fetch(`${daemon!.baseUrl}/api/rigs/${rigId}/snapshots/${snapshots[0].id}`)).json();
     expect(snapshot.data.edges).toEqual(after.edges);
 
-    const rollbackId = fixed.results[0].edge.id;
+    const rollbackId = fixed[0].edge.id;
     expect(await cli(["edge", "remove", rigId!, rollbackId, "--plan", "--json"]))
       .toMatchObject({ ok: true, outcome: "would_remove" });
     expect((await graph()).edges).toEqual(after.edges);
