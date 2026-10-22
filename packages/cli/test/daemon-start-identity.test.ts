@@ -86,6 +86,72 @@ describe("child-bound startup", () => {
       errors.mockRestore();
     }
   });
+  describe("slow startup health", () => {
+    const later = <T>(ms: number, value: T) => new Promise<T>((resolve) => setTimeout(() => resolve(value), ms));
+    const settle = async (f: ReturnType<typeof fixture>) => {
+      const started = Date.now();
+      const result = startDaemon(opts, f.deps).catch((e: Error) => e);
+      await vi.runAllTimersAsync();
+      return { outcome: await result, elapsed: Date.now() - started };
+    };
+    it.each([
+      ["headers", 400], ["headers", 1000], ["JSON", 400], ["JSON", 1000],
+    ] as const)("accepts the child when its valid health %s take %ims", async (part, ms) => {
+      vi.useFakeTimers();
+      const f = fixture(); const fetch = f.deps.fetch;
+      f.deps.fetch = async (url) => (await fetch(url), part === "headers")
+        ? later(ms, { ok: true, json: async () => f.body })
+        : { ok: true, json: () => later(ms, f.body) };
+      const { outcome } = await settle(f);
+      expect(outcome instanceof Error ? outcome.message : outcome.pid).toBe(f.child.pid);
+      expect(JSON.parse(f.files.get(STATE_FILE)!)).toMatchObject({ pid: f.child.pid });
+    });
+    it("rejects a slow response naming another PID", async () => {
+      vi.useFakeTimers();
+      const f = fixture(); const fetch = f.deps.fetch;
+      f.deps.fetch = async (url) => (await fetch(url), later(1000, { ok: true, json: async () => ({ ...f.body, pid: 888 }) }));
+      const { outcome } = await settle(f);
+      expect((outcome as Error).message).toMatch(/identity mismatch.*observed 888/);
+      expect(f.files.has(STATE_FILE)).toBe(false);
+    });
+    it("gives up on a never-answering endpoint within one readiness deadline", async () => {
+      vi.useFakeTimers();
+      const f = fixture(); const fetch = f.deps.fetch;
+      f.deps.fetch = async (url) => (await fetch(url), new Promise(() => {}));
+      const { outcome, elapsed } = await settle(f);
+      expect((outcome as Error).message).toMatch(/Last probe: .*timed out|Last probe: .*healthz/);
+      expect(elapsed).toBeLessThanOrEqual(20_000);
+      expect(f.files.has(STATE_FILE)).toBe(false);
+      expect(f.deps.kill).toHaveBeenCalledWith(12345, "SIGTERM");
+    });
+    it("does not adopt a child whose ready answer arrives after the deadline", async () => {
+      vi.useFakeTimers();
+      const f = fixture(); const fetch = f.deps.fetch; let calls = 0;
+      // Synchronous work crosses the deadline before any timer runs: the clock jumps, then the
+      // listener check answers with the child's own identity.
+      f.deps.fetch = async (url) => {
+        const res = await fetch(url);
+        if (calls++ === 1) vi.setSystemTime(Date.now() + 21_000);
+        return res;
+      };
+      const { outcome } = await settle(f);
+      expect((outcome as Error).message).toMatch(/answered after the 20000ms startup readiness deadline/);
+      expect(f.files.has(STATE_FILE)).toBe(false);
+      expect(f.deps.kill).toHaveBeenCalledWith(12345, "SIGTERM");
+      expect(f.lock.release).toHaveBeenLastCalledWith(false);
+    });
+    it("retains the child when the deadline runs out during the primary listener's check", async () => {
+      vi.useFakeTimers();
+      const f = fixture(); const fetch = f.deps.fetch; let calls = 0;
+      // After spawn, each primary read names the child; each listener check after it never answers.
+      f.deps.fetch = async (url) => (await fetch(url), calls++ % 2 === 0 ? { ok: true, json: async () => f.body } : new Promise(() => {}));
+      const { outcome, elapsed } = await settle(f);
+      expect((outcome as Error).message).toMatch(/listener verification is incomplete.*reservation retained/);
+      expect(elapsed).toBeLessThanOrEqual(20_000);
+      expect(f.files.has(STATE_FILE)).toBe(false);
+      expect(f.deps.kill).not.toHaveBeenCalled();
+    });
+  });
   it("tracks child exit while the health response is pending", async () => {
     const f = fixture(); const fetch = f.deps.fetch;
     f.deps.fetch = async (url) => {

@@ -244,7 +244,16 @@ const DEFAULT_DB = "openrig.sqlite";
 // Fresh Linux hosts can take longer than a warmed dev machine to load native
 // modules, run startup reconciliation, and bind healthz. Keep the retry loop
 // bounded, but do not kill a healthy daemon during first-boot slack.
-const HEALTHZ_RETRIES = 80;
+// #1786: one elapsed deadline, started when the readiness loop begins (after the
+// child is spawned and its handlers are attached), covers every primary probe,
+// listener check and backoff (the 20s the old 80 x 250ms delays gave). Each probe
+// may take up to STARTUP_PROBE_TIMEOUT_MS, so a busy child that answers correctly
+// in a second is accepted, but no probe timer outlives the deadline. Timers cannot
+// preempt synchronous work in this process, so an answer that arrives late is
+// rejected rather than adopted; a failed start may then add up to
+// DAEMON_STOP_WAIT_MS of owned-child cleanup.
+const STARTUP_READINESS_DEADLINE_MS = 20_000;
+const STARTUP_PROBE_TIMEOUT_MS = 2_000;
 const HEALTHZ_DELAY_MS = 250;
 // OPR.0.4.7 slice-05 item-4: the WHOLE status health probe stays within ONE normal
 // CLI request window (~5s, matching DaemonClient's timeoutMs) — immediate connection
@@ -261,7 +270,7 @@ const STATUS_PROBE_MAX_ATTEMPTS = 5;
 const STATUS_PROBE_RETRY_DELAY_MS = 200;
 // Per-probe /healthz timeout for the SINGLE-SHOT callers that are NOT the status
 // settle path — checkPid classification and the start/stop recovery guards, plus
-// each iteration of startDaemon's own HEALTHZ_RETRIES poll loop. These keep their
+// startDaemon's pre-spawn checks (its readiness probes use STARTUP_PROBE_TIMEOUT_MS). These keep their
 // prior fixed-bound timing (the settle deadline above is status-probe-LOCAL); this
 // restores the timeout the removed HEALTHZ_PROBE_TIMEOUT_MS supplied to them.
 const HEALTHZ_PROBE_TIMEOUT_MS = 250;
@@ -734,6 +743,8 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
   };
   const healthzUrl = `http://${formatDaemonHostForUrl(probeHost)}:${port}/healthz`;
   type StartHealth = { databaseWarnings?: unknown; pid?: unknown; bind?: { mode: "explicit" | "default"; hosts: string[]; tailscaleDetected: boolean } };
+  let deadline = Number.POSITIVE_INFINITY;
+  const remaining = (): number => Math.max(0, deadline - Date.now());
   const readOwnedHealth = async (url: string): Promise<StartHealth | null> => {
     assertChild();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -741,7 +752,7 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
       return await Promise.race([
         failed,
         new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new HealthProbeTimeoutError(url)), HEALTHZ_PROBE_TIMEOUT_MS);
+          timer = setTimeout(() => reject(new HealthProbeTimeoutError(url)), Math.min(STARTUP_PROBE_TIMEOUT_MS, remaining()));
         }),
         (async () => {
           const res = await deps.fetch(url);
@@ -768,7 +779,8 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     let databaseWarnings: string[] = [];
     let lastProbe = "health endpoint not responding";
     let unverified: string[] | null = null;
-    for (let i = 0; i < HEALTHZ_RETRIES; i++) {
+    deadline = Date.now() + STARTUP_READINESS_DEADLINE_MS;
+    while (remaining() > 0) {
       unverified = null;
       try {
         const body = await readOwnedHealth(healthzUrl);
@@ -790,7 +802,13 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
             }
           } });
           if (gate.ok === false) throw new StartupIdentityError(`Daemon child ${pid} FAILED the listener adoption gate: ${gate.reason}`);
-          if (gate.ok === true) { healthy = true; break; }
+          // A probe can only finish late if this process was blocked; a late answer is not accepted,
+          // and the start fails through ordinary owned-child cleanup.
+          if (gate.ok === true) {
+            if (remaining() > 0) healthy = true;
+            else lastProbe = `child PID ${pid} answered after the ${STARTUP_READINESS_DEADLINE_MS}ms startup readiness deadline`;
+            break;
+          }
           unverified = gate.hosts;
           lastProbe = gate.reason;
         }
@@ -799,7 +817,7 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
         if (error instanceof StartupIdentityError) throw error;
         lastProbe = error instanceof Error ? error.message : String(error);
       }
-      await Promise.race([new Promise((resolve) => setTimeout(resolve, HEALTHZ_DELAY_MS)), failed]);
+      await Promise.race([new Promise((resolve) => setTimeout(resolve, Math.min(HEALTHZ_DELAY_MS, remaining()))), failed]);
     }
     // In the last round the child's own endpoint named its PID, and only another listener's check stayed
     // uncertain: start, and say which listener is unverified.
