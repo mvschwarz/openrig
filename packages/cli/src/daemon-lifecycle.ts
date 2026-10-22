@@ -941,8 +941,11 @@ export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-t
   }
 
   let notBefore = Date.parse(state.startedAt);
+  // Only a signalling stop names a request time: this process's clock just before kill, not delivery.
+  let requested = "";
   if (pidState !== "dead") {
     notBefore = Date.now();
+    requested = `; SIGTERM requested at ${new Date(notBefore).toISOString()}`;
     deps.kill(state.pid, "SIGTERM");
     // One signal. An already-exited target goes straight to the same judgment.
     const deadline = Date.now() + DAEMON_STOP_WAIT_MS;
@@ -952,7 +955,7 @@ export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-t
   }
   const present = deps.isProcessAlive(state.pid);
   const effect = await listener();
-  const observation = `targeted ${target}; checked ${check}; PID ${state.pid} ${present ? "present" : "absent"}; listener ${effect}`;
+  const observation = `targeted ${target}; checked ${check}; PID ${state.pid} ${present ? "present" : "absent"}; listener ${effect}${requested}`;
   if (present) {
     throw new Error(`Daemon did not exit after SIGTERM within ${DAEMON_STOP_WAIT_MS}ms; ${observation}` +
       (effect === "responding" ? " (still listening)" : "") + "; state file preserved.");
