@@ -720,7 +720,6 @@ export class RunnerCore {
     if (this.lastPostedHook !== null && this.lastPostedHook !== "Stop") return;
     const now = Date.parse(this.io.now());
     if (this.lastHeartbeatMs !== null && now - this.lastHeartbeatMs < IDLE_HEARTBEAT_MS) return;
-    this.lastHeartbeatMs = now;
     this.io.postActivity(this.activityPayload("Stop", "idle_heartbeat"));
   }
 
@@ -865,6 +864,8 @@ export class RunnerCore {
 
   private activityPayload(hookEvent: string, subtype: string | null): Record<string, unknown> {
     this.lastPostedHook = hookEvent;
+    // Any posted Stop is an idle report, so the next beat is due a full interval after it, not just after a beat.
+    if (hookEvent === "Stop") this.lastHeartbeatMs = Date.parse(this.io.now());
     return {
       sequence: ++this.activitySequence,
       sessionName: this.identity.sessionName,

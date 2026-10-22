@@ -82,7 +82,7 @@ describe("idle heartbeat", () => {
     c.advance(10 * 60_000); c.core.heartbeat();
     expect(c.beats()).toEqual([]);
     c.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
-    c.core.heartbeat();
+    c.advance(180_000); c.core.heartbeat();
     expect(c.beats()).toHaveLength(1);
   });
 
@@ -99,8 +99,21 @@ describe("idle heartbeat", () => {
     c.advance(10 * 60_000); c.core.heartbeat();
     expect(c.beats()).toEqual([]);
     c.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
-    c.core.heartbeat();
+    c.advance(180_000); c.core.heartbeat();
     expect(c.beats()).toHaveLength(1);
+  });
+
+  it("counts a Stop the turn posted as a report: the next beat is a full interval after agent_end", () => {
+    const c = clocked();
+    ready(c.core);
+    c.core.heartbeat();
+    c.advance(170_000);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    c.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    c.advance(60_000); c.core.heartbeat();
+    expect(c.beats()).toHaveLength(1);
+    c.advance(120_000); c.core.heartbeat();
+    expect(c.beats()).toHaveLength(2);
   });
 
   it("stays quiet after the pi child exits", () => {
@@ -116,7 +129,7 @@ describe("idle heartbeat", () => {
     ready(c.core);
     c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
     c.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
-    c.core.heartbeat();
+    c.advance(180_000); c.core.heartbeat();
     const stops = c.f.activity.filter(a => a.hookEvent === "Stop");
     expect(stops).toHaveLength(2);
     for (const stop of stops) expect(stop.livenessSeconds).toBe(180);

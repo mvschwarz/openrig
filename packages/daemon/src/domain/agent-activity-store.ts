@@ -57,6 +57,9 @@ interface EventPayloadRow {
   payload: string;
 }
 
+/** How many of a node's newest hook records a restart-restore orders by the emitter's own sequence. */
+const SOURCE_ORDER_WINDOW = 200;
+
 export class AgentActivityStore {
   readonly db: Database.Database;
   private readonly eventBus: EventBus;
@@ -234,12 +237,15 @@ export class AgentActivityStore {
   }
 
   /** The newest of a node's hook records by the emitter's order (time, then its sequence), for one session when named.
-   *  Not by arrival: a runner's posts aren't awaited, so any number of older ones can land after a newer one. Read once
-   *  per seat when a restart restores it. */
+   *  Not by arrival: a runner's posts aren't awaited, so older ones can land after a newer one. Only the last
+   *  SOURCE_ORDER_WINDOW records to arrive are ordered: a runner's heartbeat grows the history without bound, and a
+   *  late post can't be behind more than the handful still in flight. Read once per seat when a restart restores it. */
   private latestBySourceOrder(nodeId: string, sessionName: string | null): ReturnType<typeof parseActivityPayload> {
     const row = this.db.prepare(`
-      SELECT payload FROM events
-      WHERE node_id = ? AND type = 'agent.activity' AND (? IS NULL OR json_extract(payload, '$.sessionName') = ?)
+      SELECT payload FROM (
+        SELECT payload, seq FROM events
+        WHERE node_id = ? AND type = 'agent.activity' AND (? IS NULL OR json_extract(payload, '$.sessionName') = ?)
+        ORDER BY seq DESC LIMIT ${SOURCE_ORDER_WINDOW})
       ORDER BY json_extract(payload, '$.activity.eventAt') DESC,
         COALESCE(json_extract(payload, '$.activity.sourceSequence'), 0) DESC, seq DESC
       LIMIT 1`).get(nodeId, sessionName, sessionName) as EventPayloadRow | undefined;
