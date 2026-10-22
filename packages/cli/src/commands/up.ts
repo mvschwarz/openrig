@@ -740,6 +740,14 @@ team back with its conversations, run rig up <rig-name> --existing, not the spec
           console.log(`Dashboard: rig ui open`);
         }
         console.log(`Status: ${resStatus}`);
+        // A seat that failed to launch says why (its named error), as --json already carries it: in the import stage's
+        // result, or at the top level.
+        type NodeResult = { logicalId: string; status: string; error?: string };
+        const importDetail = stages.find((s) => s.stage === "import_rig") as { detail?: { nodes?: NodeResult[]; result?: { nodes?: NodeResult[] } } } | undefined;
+        const launchNodes = importDetail?.detail?.nodes ?? importDetail?.detail?.result?.nodes ?? (res.data["nodes"] as NodeResult[] | undefined) ?? [];
+        for (const n of launchNodes) {
+          if (n.status === "failed" && n.error) console.error(`  ${n.logicalId}: failed: ${n.error}`);
+        }
         for (const line of startupAttentionSummary(res.data)) console.log(line);
 
         // Surface warnings (e.g. transcript attach failures)

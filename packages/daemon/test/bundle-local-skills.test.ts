@@ -16,6 +16,8 @@ import { inspectSkillDirectory, reconcileSkillLoadout, resolveSkillLoadout } fro
 import { planProjection } from "../src/domain/projection-planner.js";
 import { RigSpecSchema } from "../src/domain/rigspec-schema.js";
 import { RigSpecCodec } from "../src/domain/rigspec-codec.js";
+import { seatSkillPaths } from "../src/domain/seat-skill-storage.js";
+import { prepareSeatLaunchAdditions } from "../src/domain/seat-launch-additions.js";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { PiRuntimeAdapter } from "../src/adapters/pi-runtime-adapter.js";
@@ -95,6 +97,33 @@ describe("bundle-local skills", () => {
     write("source/skills/undeclared/SKILL.md", skill("undeclared"));
     write("source/packages/legacy.txt", "Legacy single-file payload\n");
   }
+
+  it("carries a Claude member's agent, prompt file and plugin folder, so the installed seat gets its copies (OPR.0.7.0.9)", async () => {
+    write("source/rig.yaml", rigYaml.replace("runtime: pi", "runtime: claude-code\n        agent_file: claude/reviewer.md\n"
+      + "        append_system_prompt_file: claude/house.md\n        plugin_dirs: [claude/plugins/review]"));
+    write("source/agents/worker/agent.yaml", `name: worker\nversion: "1.0"\nprofiles:\n  default:\n    uses: {}\n`);
+    write("source/claude/reviewer.md", "---\nname: reviewer\ndescription: Reviews\n---\nReview carefully.\n");
+    write("source/claude/house.md", "House rules.\n");
+    write("source/claude/plugins/review/skills/check/SKILL.md", skill("check"));
+    const { response, outputPath } = await create();
+    expect(response.status, await response.text()).toBe(201);
+    const resolver = new PodBundleSourceResolver();
+    const extracted = await resolver.resolve(outputPath);
+    const installed = path.join(root, "installed");
+    expect(materializePodBundle(extracted.tempDir, installed)).toEqual({ ok: true });
+    resolver.cleanup(extracted.tempDir);
+    fs.rmSync(path.join(root, "source"), { recursive: true });
+    // What a launch does with the installed spec: resolve the member's paths beside it and copy them into the seat.
+    const member = RigSpecSchema.normalize(RigSpecCodec.parse(fs.readFileSync(path.join(installed, "rig.yaml"), "utf8")) as Record<string, unknown>).pods[0]!.members[0]!;
+    const seat = seatSkillPaths({ rigId: "rig-installed", logicalId: "dev.worker", runtime: "claude-code" }, path.join(root, "home"));
+    const beside = (rel: string) => path.resolve(installed, rel);
+    const prepared = prepareSeatLaunchAdditions(seat, { agentFile: beside(member.agentFile!),
+      appendSystemPromptFile: beside(member.appendSystemPromptFile!), pluginDirs: member.pluginDirs!.map(beside) });
+    expect(prepared, JSON.stringify(prepared)).toMatchObject({ ok: true, additions: { agent: "openrig:reviewer" } });
+    const additions = prepared.ok ? prepared.additions : undefined;
+    expect(fs.readFileSync(additions!.appendSystemPromptFile!, "utf8")).toBe("House rules.\n");
+    expect(fs.existsSync(path.join(additions!.pluginDirs[0]!, "skills/check/SKILL.md"))).toBe(true);
+  });
 
   it("carries the full declared skill directory and legacy file, without an undeclared sibling", async () => {
     seed();

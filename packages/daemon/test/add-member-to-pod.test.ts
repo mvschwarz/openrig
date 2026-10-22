@@ -1,6 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import fs, { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { prepareSeatLaunchAdditions, recordConversationPrompt, recordForkConversationPrompt, seatLaunchAdditions, systemPromptPendingNote } from "../src/domain/seat-launch-additions.js";
+import { seatSkillPaths } from "../src/domain/seat-skill-storage.js";
+import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type Database from "better-sqlite3";
-import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+import { createFullTestDb, createTestApp, mockTmuxAdapter } from "./helpers/test-app.js";
 import type { ExpansionRequest } from "../src/domain/types.js";
 
 // OPR.0.3.3.24 Chunk 2 — add_member converge op.
@@ -258,5 +264,88 @@ describe("PodRigInstantiator.addMemberToPod", () => {
     if (result.ok) return;
     expect(result.code).toBe("validation_failed");
     expect(setup.rigRepo.getRig(rig.id)!.nodes.some((n) => n.logicalId === "infra.server2")).toBe(false);
+  });
+});
+
+describe("a fork's launch additions through add-member (OPR.0.7.0.9)", () => {
+  let db: Database.Database;
+  let home: string;
+  let saved: string | undefined;
+  beforeEach(() => {
+    db = createFullTestDb();
+    saved = process.env["OPENRIG_HOME"];
+    home = mkdtempSync(join(tmpdir(), "add-member-additions-"));
+    process.env["OPENRIG_HOME"] = home;
+    mkdirSync(join(home, "agent"));
+    writeFileSync(join(home, "agent", "agent.yaml"), "name: impl\nversion: \"1.0.0\"\nprofiles:\n  default:\n    uses:\n      skills: []\n");
+    writeFileSync(join(home, "prompt.md"), "Source prompt.\n");
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    db.close();
+    if (saved === undefined) delete process.env["OPENRIG_HOME"]; else process.env["OPENRIG_HOME"] = saved;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  const sourceSeat = () => seatSkillPaths({ rigId: "src", logicalId: "dev.impl", runtime: "claude-code" });
+  const claude = (id: string) => ({ id, runtime: "claude-code", agent_ref: "local:agent", profile: "default", cwd: home });
+  async function claudeRig() {
+    const launchHarness = vi.fn(async () => ({ ok: true as const }));
+    const adapter = { runtime: "claude-code", listInstalled: vi.fn(async () => []), launchHarness,
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })), deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })) } as unknown as RuntimeAdapter;
+    const app = createTestApp(db, { tmux: mockTmuxAdapter(), adapters: { "claude-code": adapter },
+      podInstantiatorFsOps: { exists: fs.existsSync, readFile: (p: string) => fs.readFileSync(p, "utf8") } });
+    const rig = app.rigRepo.createRig("test-rig");
+    const pod = { id: "infra", label: "Infra", members: [{ id: "a_b", runtime: "terminal", agentRef: "builtin:terminal", profile: "none", cwd: "/tmp" }], edges: [] };
+    expect((await app.rigExpansionService.expand({ rigId: rig.id, pod })).ok).toBe(true);
+    return { app, rig, launchHarness };
+  }
+
+  it("a fork refused for its target leaves every seat's store, files and record, byte-identical", async () => {
+    const { app, rig } = await claudeRig();
+    expect(prepareSeatLaunchAdditions(sourceSeat(), { appendSystemPromptFile: join(home, "prompt.md") }).ok).toBe(true);
+    writeFileSync(join(home, "own.md"), "The existing seat's own prompt.\n");
+    expect(prepareSeatLaunchAdditions(seatSkillPaths({ rigId: rig.id, logicalId: "infra.a_b", runtime: "claude-code" }),
+      { appendSystemPromptFile: join(home, "own.md") }).ok).toBe(true);
+    const seats = join(home, "state", "seats");
+    const snapshot = () => (readdirSync(seats, { recursive: true }) as string[]).sort()
+      .map((f) => statSync(join(seats, f)).isFile() ? `${f}=${readFileSync(join(seats, f), "utf8")}` : f);
+    const before = snapshot();
+    for (const [rigId, pod, id, code] of [[rig.id, "infra", "a/b", "preflight_failed"], [rig.id, "infra", "a_b", "member_conflict"],
+      [rig.id, "nope", "x", "pod_not_found"], ["nonexistent", "infra", "x", "rig_not_found"]] as const) {
+      const result = await app.podInstantiator.addMemberToPod(rigId, pod, claude(id), home, { launchAdditionsFrom: sourceSeat() });
+      expect(result, `${rigId} ${pod}.${id}`).toMatchObject({ ok: false, code });
+    }
+    expect(snapshot()).toEqual(before);
+  });
+
+  it("a source record that isn't launch additions is named and not carried, and the fork still launches", async () => {
+    const { app, rig, launchHarness } = await claudeRig();
+    mkdirSync(sourceSeat().root, { recursive: true });
+    writeFileSync(join(sourceSeat().root, "launch-additions.json"), "{}\n");
+    const result = await app.podInstantiator.addMemberToPod(rig.id, "infra", claude("forked"), home, { launchAdditionsFrom: sourceSeat() });
+    expect(result).toMatchObject({ ok: true, result: { launchAdditions: { status: "not_carried", kept: false, omitted: [expect.stringContaining("launch-additions.json")] } } });
+    expect(launchHarness).toHaveBeenCalled();
+  });
+
+  it("a starting-prompt record that can't be written keeps the copies, names the gap, and the fork still launches", async () => {
+    const { app, rig, launchHarness } = await claudeRig();
+    expect(prepareSeatLaunchAdditions(sourceSeat(), { appendSystemPromptFile: join(home, "prompt.md") }).ok).toBe(true);
+    recordConversationPrompt(sourceSeat(), "parent");
+    const fork = seatSkillPaths({ rigId: rig.id, logicalId: "infra.forked", runtime: "claude-code" });
+    const write = fs.writeFileSync;
+    let records = 0;
+    vi.spyOn(fs, "writeFileSync").mockImplementation(((file: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
+      if (String(file).startsWith(join(fork.root, "launch-additions.json")) && ++records === 2) throw new Error("ENOSPC: no space left on device");
+      return (write as (...args: unknown[]) => void)(file, ...rest);
+    }) as typeof fs.writeFileSync);
+    const result = await app.podInstantiator.addMemberToPod(rig.id, "infra", claude("forked"), home, { launchAdditionsFrom: sourceSeat() });
+    expect(result).toMatchObject({ ok: true, result: { launchAdditions: { status: "partial", kept: true, omitted: [expect.stringContaining("ENOSPC")] } } });
+    expect(launchHarness).toHaveBeenCalled();
+    vi.restoreAllMocks();
+    expect(readFileSync(seatLaunchAdditions(fork)!.appendSystemPromptFile!, "utf8")).toBe("Source prompt.\n");
+    recordForkConversationPrompt(fork, "child", "parent");
+    expect(systemPromptPendingNote(fork, "child")).toContain("system_prompt_unknown");
   });
 });

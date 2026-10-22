@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import path from "node:path";
+import fs from "node:fs";
+import os from "node:os";
+import { seatSkillPaths } from "../src/domain/seat-skill-storage.js";
+import { prepareSeatLaunchAdditions } from "../src/domain/seat-launch-additions.js";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -330,6 +334,28 @@ describe("SeatLifecycleService.launchFresh", () => {
     }
     return { rig, node, session, sessionName };
   }
+
+  // OPR.0.7.0.9: the fresh-launch plan lists the seat's own launch additions (what its launch will pass), and null for
+  // a seat without any. It writes nothing.
+  it("lists the seat's launch additions, and none for a seat without them", async () => {
+    const seat = seedSeat({ clean: true });
+    const src = fs.mkdtempSync(path.join(os.tmpdir(), "fresh-plan-additions-"));
+    try {
+      fs.writeFileSync(path.join(src, "prompt.md"), "Short answers.\n");
+      const paths = seatSkillPaths({ rigId: seat.rig.id, logicalId: "dev.impl", runtime: "claude-code" });
+      const peer = rigRepo.addNode(seat.rig.id, "dev.peer", { runtime: "claude-code", cwd: "/project" });
+      sessionRegistry.registerSession(peer.id, "dev-peer@fresh-rig");
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, '[]', '[]', '[]', 'claude-code')").run(peer.id);
+      const prepared = prepareSeatLaunchAdditions(paths, { appendSystemPromptFile: path.join(src, "prompt.md") });
+      if (!prepared.ok) throw new Error(prepared.message);
+      const result = await service.planFresh({ seatRef: seat.sessionName, fresh: true });
+      expect(result).toMatchObject({ ok: true, launchAdditions: { appendSystemPromptFile: prepared.additions.appendSystemPromptFile, pluginDirs: [], missing: [], refused: [] } });
+      const none = await service.planFresh({ seatRef: "dev-peer@fresh-rig", fresh: true });
+      expect(none).toMatchObject({ ok: true, launchAdditions: null });
+    } finally {
+      fs.rmSync(src, { recursive: true, force: true });
+    }
+  });
 
   it.each([false, true])("previews fresh launch without changing target, siblings or startup state (live=%s)", async live => {
     const seat = seedSeat({ clean: !live });

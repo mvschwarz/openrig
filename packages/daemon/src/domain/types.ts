@@ -1152,6 +1152,11 @@ export interface RigSpecPodMember {
   /** OPR.0.4.8.3 Seam B: optional per-seat permission_policy REF (builtin:<name> or a spec-relative
    *  custom path). Absent = the floor. Overrides the rig-level ref. */
   permissionPolicy?: string;
+  /** OPR.0.7.0.9 — Claude members only: their own agent file, appended system prompt file and plugin folders,
+   *  as paths beside the spec. Copied into the seat's own storage at launch. */
+  agentFile?: string;
+  appendSystemPromptFile?: string;
+  pluginDirs?: string[];
   /** Non-secret launch environment for this seat; overrides the rig-level `env`. */
   env?: Record<string, string>;
   cwd: string;

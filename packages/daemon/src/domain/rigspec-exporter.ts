@@ -6,6 +6,7 @@ import type {
   RigSpec, RigSpecPod, RigSpecPodMember, RigSpecPodEdge, RigSpecCrossPodEdge,
 } from "./types.js";
 import { RigNotFoundError } from "./errors.js";
+import { seatLaunchAdditionsForNode } from "./seat-launch-additions.js";
 
 interface RigSpecExporterDeps {
   rigRepo: RigRepository;
@@ -30,6 +31,17 @@ export class RigSpecExporter {
     this.rigRepo = deps.rigRepo;
     this.sessionRegistry = deps.sessionRegistry;
     this.podRepo = deps.podRepo ?? null;
+  }
+
+  /** OPR.0.7.0.9 — seats whose launch additions (agent file, appended prompt file, plugin folders) an export doesn't
+   *  carry: the node records the seat's copies, not the spec's paths, so they must be named rather than dropped silently. */
+  launchAdditionsNotCarried(rigId: string): string[] {
+    const rig = this.rigRepo.getRig(rigId);
+    if (!rig) return [];
+    return rig.nodes.filter((node) => {
+      const additions = seatLaunchAdditionsForNode(this.db, node.id);
+      return !!additions && (!!additions.agent || !!additions.appendSystemPromptFile || additions.pluginDirs.length > 0);
+    }).map((node) => node.logicalId).sort();
   }
 
   exportRig(rigId: string): LegacyRigSpec | RigSpec {

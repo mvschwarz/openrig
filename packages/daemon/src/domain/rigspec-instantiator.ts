@@ -323,7 +323,8 @@ import type {
   ContinuityPolicyMaterializer,
 } from "./continuity-policy-materializer.js";
 import { isKeptPluginSkill, type ReconcileSkillLoadoutResult, type SkillLoadout, type SkillLoadoutLocation, type SkillRuntime } from "./skill-catalog.js";
-import { claudeSeatSkillsNote, ensureSeatSkillPlugin, seatCatalogKeptNote, migrateLegacyProjectSkills, refusedSeatSkillsRootForNode, seatSkillLocation, seatSkillPaths, seatSkillPathsForNode, seatSkillPluginDirForNode, writeSeatSkillCatalog } from "./seat-skill-storage.js";
+import { claudeSeatSkillsNote, ensureSeatSkillPlugin, seatCatalogKeptNote, migrateLegacyProjectSkills, refusedSeatSkillsRootForNode, seatSkillLocation, seatSkillPaths, seatSkillPathsForNode, seatSkillPluginDirForNode, writeSeatSkillCatalog, type SeatSkillPaths } from "./seat-skill-storage.js";
+import { carrySeatLaunchAdditions, prepareSeatLaunchAdditions, type SeatLaunchAdditionsCarry } from "./seat-launch-additions.js";
 import type { SystemWorldResolution } from "./system-world.js";
 import type { SeatEnv } from "./seat-env.js";
 
@@ -458,6 +459,8 @@ export interface AddMemberResult {
    *  (OPR.0.3.3.24 fence) - they record declared topology intent. */
   edges: Array<{ from: string; to: string; kind: string }>;
   warnings?: string[];
+  /** A fork's copy of its source seat's launch additions (OPR.0.7.0.9). */
+  launchAdditions?: SeatLaunchAdditionsCarry;
 }
 
 /**
@@ -908,6 +911,7 @@ export class PodRigInstantiator {
     rigRoot: string,
     targetRigId: string,
     cwdOverride?: string,
+    launchOpts?: { keepRecordedAdditions?: boolean },
   ): Promise<LaunchMaterializedOutcome> {
     const launchOrder = this.computePodLaunchOrder(rigSpec);
     const podWarnings: string[] = [];
@@ -945,6 +949,7 @@ export class PodRigInstantiator {
         qualifiedId: logicalId,
         nodeId: node.id,
         cwdOverride,
+        ...(launchOpts?.keepRecordedAdditions ? { keepRecordedAdditions: true } : {}),
       });
 
       if (launched.warnings?.length) {
@@ -992,7 +997,9 @@ export class PodRigInstantiator {
     podNamespace: string,
     memberFragment: Record<string, unknown>,
     rigRoot: string,
-    opts?: { cwdOverride?: string; edges?: Array<{ from: string; to: string; kind: string }> },
+    opts?: { cwdOverride?: string; edges?: Array<{ from: string; to: string; kind: string }>;
+      /** A fork's source seat: its launch additions are copied into this new seat once it is validated, and kept. */
+      launchAdditionsFrom?: SeatSkillPaths },
   ): Promise<AddMemberOutcome> {
     // 1. Resolve the rig.
     const rig = this.deps.rigRepo.getRig(rigId);
@@ -1130,9 +1137,15 @@ export class PodRigInstantiator {
       return { ok: false, code: "materialize_error", message };
     }
 
+    // A fork's launch additions go only into the seat just validated and created above (OPR.0.7.0.9).
+    const launchAdditions = opts?.launchAdditionsFrom && member.runtime === "claude-code"
+      ? carrySeatLaunchAdditions(opts.launchAdditionsFrom, seatSkillPaths({ rigId, logicalId: qualifiedId, runtime: member.runtime }))
+      : undefined;
+
     // 9. The shared launch effect owns startup projection + delivery +
     // readiness + `@rigged_*` for both expansion and ordinary growth.
-    const launchOutcome = await this.launchValidatedSpec(rigSpec, rigRoot, rigId, opts?.cwdOverride);
+    const launchOutcome = await this.launchValidatedSpec(rigSpec, rigRoot, rigId, opts?.cwdOverride,
+      launchAdditions?.kept ? { keepRecordedAdditions: true } : undefined);
     if (!launchOutcome.ok) {
       const message = "message" in launchOutcome
         ? launchOutcome.message
@@ -1160,6 +1173,7 @@ export class PodRigInstantiator {
         },
         edges: resolvedEdges,
         warnings: [...(materialized.result.warnings ?? []), ...(launchOutcome.result.warnings ?? [])],
+        ...(launchAdditions ? { launchAdditions } : {}),
       },
     };
   }
@@ -1252,7 +1266,7 @@ export class PodRigInstantiator {
     const finalRefusal = eligible();
     if (finalRefusal) return refuse(finalRefusal);
     const result = await this.launchExistingAgentMember({ rigId, nodeId, qualifiedId: node.logicalId, rigSpec, rigRoot, pod, member,
-      resolveResult: resolved, configResult: config });
+      resolveResult: resolved, configResult: config, keepRecordedAdditions: true });
     if (result.status !== "launched") return { ok: false, code: result.status, message: result.error ?? "First-start retry did not reach readiness." };
     return { ok: true, rigId, nodeId, logicalId: node.logicalId, status: "launched", sessionName: result.sessionName, warnings: result.warnings };
   }
@@ -1948,6 +1962,7 @@ export class PodRigInstantiator {
     nodeId: string;
     cwdOverride?: string;
     envOverride?: SeatEnv;
+    keepRecordedAdditions?: boolean;
   }): Promise<{ status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string; warnings?: string[] }> {
     return input.member.agentRef === "builtin:terminal"
       ? this.launchExistingTerminalMember(input)
@@ -2028,6 +2043,9 @@ export class PodRigInstantiator {
     force?: boolean;
     resolveResult?: ReturnType<typeof resolveAgentRef> extends infer T ? T : never;
     configResult?: ReturnType<typeof resolveNodeConfig> extends infer T ? T : never;
+    /** The first-start retry's member carries only retained fields, not the launch additions: keep the ones the first
+     *  start recorded rather than read an empty request as "none". */
+    keepRecordedAdditions?: boolean;
   }): Promise<{ status: "launched" | "failed" | "attention_required"; code?: string; error?: string; evidence?: string; sessionName?: string; warnings?: string[] }> {
     const guard = this.deps.tmuxAdapter?.deliveryGuard;
     if (guard && !guard.ownsLifecycle(input.nodeId)) {
@@ -2092,7 +2110,19 @@ export class PodRigInstantiator {
     const seatRuntime = configResult.config.runtime === "claude-code" || configResult.config.runtime === "codex" ? configResult.config.runtime : undefined;
     const seatSkills = seatRuntime ? seatSkillPaths({ rigId: input.rigId, logicalId: input.qualifiedId, runtime: seatRuntime }) : undefined;
     let loadoutReceipts = 0;
-    if (seatSkills && seatRuntime === "claude-code") keptSkillWarnings.push(...ensureSeatSkillPlugin(seatSkills));
+    if (seatSkills && seatRuntime === "claude-code") {
+      keptSkillWarnings.push(...ensureSeatSkillPlugin(seatSkills));
+      // OPR.0.7.0.9 — the member's own agent, prompt file and plugin folders, copied into the seat's storage. Asking for
+      // none removes an earlier request. A missing or refused source fails this seat by name; the rest still launch.
+      const beside = (path: string) => nodePath.resolve(input.rigRoot, path);
+      const prepared = input.keepRecordedAdditions ? { ok: true as const, notes: [] } : prepareSeatLaunchAdditions(seatSkills, {
+        ...(input.member.agentFile ? { agentFile: beside(input.member.agentFile) } : {}),
+        ...(input.member.appendSystemPromptFile ? { appendSystemPromptFile: beside(input.member.appendSystemPromptFile) } : {}),
+        ...(input.member.pluginDirs?.length ? { pluginDirs: input.member.pluginDirs.map(beside) } : {}),
+      });
+      if (!prepared.ok) return { status: "failed", error: prepared.message, sessionName: canonicalSessionName };
+      keptSkillWarnings.push(...(prepared.notes ?? []));
+    }
     if (seatSkills && seatRuntime === "codex") {
       // A catalog that can't be written is this seat's named result, never an error that escapes the rig's launch.
       try {

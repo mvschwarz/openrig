@@ -25,6 +25,7 @@ import type { SnapshotCapturer } from "../domain/agent-images/snapshot-capturer.
 import { evaluateProtection } from "../domain/agent-images/evidence-guard.js";
 import { discoverResumeToken } from "../domain/agent-images/resume-token-discovery.js";
 import { convergeOp } from "../domain/topology-converge.js";
+import { seatLaunchAdditionPathsForNode } from "../domain/seat-launch-additions.js";
 import type { PodRigInstantiator } from "../domain/rigspec-instantiator.js";
 import { AgentImageError, type AgentImageEntry } from "../domain/agent-images/agent-image-types.js";
 
@@ -64,6 +65,7 @@ interface ForkBody {
  *  id is resolved separately (discoverResumeToken) and kept daemon-local — it is
  *  deliberately NOT part of this shape so it can never leak into a response. */
 interface ForkSourceShape {
+  nodeId: string;
   runtime: string | null;
   agentRef: string | null;
   profile: string | null;
@@ -92,6 +94,7 @@ function resolveForkSourceNode(db: Database.Database, sourceSession: string): Fo
     .get(sourceSession) as Record<string, unknown> | undefined;
   if (!row) return null;
   return {
+    nodeId: row["id"] as string,
     runtime: (row["runtime"] as string | null) ?? null,
     agentRef: (row["agent_ref"] as string | null) ?? null,
     profile: (row["profile"] as string | null) ?? null,
@@ -279,11 +282,16 @@ export function agentImagesRoutes(deps: AgentImageRoutesDeps): Hono {
       session_source: sessionSource,
     };
 
+    // OPR.0.7.0.9: a Claude fork carries its source seat's launch additions (agent, prompt file, plugin folders). Add-member
+    // copies them only after it has validated and created the new seat, and its launch keeps them; a drop is named.
+    const additionsFrom = source.runtime === "claude-code" ? seatLaunchAdditionPathsForNode(db, source.nodeId) : undefined;
+
     const converged = await convergeOp(
       { instantiator: podInstantiator },
       rigId,
       { kind: "add_member", pod, member: memberFragment, edges: body.edges },
       rigRoot,
+      additionsFrom ? { launchAdditionsFrom: additionsFrom } : undefined,
     );
     if (converged.kind !== "add_member" || !converged.supported) {
       return c.json({ error: "fork_failed", message: "Unexpected converge result for fork add_member" }, 500);
@@ -301,7 +309,10 @@ export function agentImagesRoutes(deps: AgentImageRoutesDeps): Hono {
       // it honestly so the operator knows it was retained.
       return c.json({ ...outcome, ...(keptImage ? { image: keptImage } : {}) }, status);
     }
-    return c.json({ ...outcome, ...(keptImage ? { image: keptImage } : {}) }, 201);
+    const { launchAdditions: carry, ...result } = outcome.result;
+    return c.json({ ok: true, result, ...(keptImage ? { image: keptImage } : {}),
+      ...(carry ? { launchAdditions: carry.status } : {}),
+      ...(carry?.omitted.length ? { launchAdditionsNote: `launch additions left out of the fork: ${carry.omitted.join("; ")}` } : {}) }, 201);
   });
 
   router.post("/prune", async (c) => {

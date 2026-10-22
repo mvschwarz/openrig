@@ -56,6 +56,7 @@ const MEMBER_KEYS = new Set([
   "id", "label", "agent_ref", "profile", "runtime", "codex_config_profile",
   "model", "effort", "role", "permission_policy", "cwd", "restore_policy",
   "compaction_strategy", "mechanic", "startup", "session_source", "starter_ref", "env",
+  "agent_file", "append_system_prompt_file", "plugin_dirs",
 ]);
 const EDGE_KEYS = new Set(["kind", "from", "to"]);
 
@@ -564,6 +565,7 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
   }
 
   if (member["env"] !== undefined) errors.push(...validateSeatEnv(member["env"], `${prefix}.env`));
+  errors.push(...validateClaudeAdditions(member, prefix));
 
   // Terminal sentinel validation: exact triple required
   const isTerminalRuntime = member["runtime"] === "terminal";
@@ -1186,6 +1188,46 @@ function normalizeSessionSource(raw: unknown): import("./types.js").SessionSourc
   return undefined;
 }
 
+/** OPR.0.7.0.9 — a Claude member's own agent file, appended prompt file and plugin folders: paths beside the spec. */
+function validateClaudeAdditions(member: Record<string, unknown>, prefix: string): string[] {
+  const errors: string[] = [];
+  for (const key of ["agent_file", "append_system_prompt_file", "plugin_dirs"]) {
+    if (member[key] !== undefined && member["runtime"] !== "claude-code") {
+      errors.push(`${prefix}.${key}: only for Claude members (runtime claude-code)`);
+    }
+  }
+  for (const key of ["agent_file", "append_system_prompt_file"]) {
+    if (member[key] === undefined) continue;
+    const pathError = typeof member[key] === "string" && member[key].trim() ? validateSafePath(member[key], `${prefix}.${key}`) : `${prefix}.${key}: must be a path beside the spec`;
+    if (pathError) errors.push(pathError);
+  }
+  const dirs = member["plugin_dirs"];
+  if (dirs !== undefined) {
+    if (!Array.isArray(dirs)) {
+      errors.push(`${prefix}.plugin_dirs: must be a list of folders beside the spec`);
+    } else {
+      // Each folder is copied to a destination named by its last segment (as the launch does), so two that share one
+      // would mix their files: report it here rather than at launch.
+      const parts = (dir: string) => dir.replace(/\\/g, "/").split("/").filter((part) => part && part !== ".");
+      const destination = (dir: string) => (parts(dir).at(-1) ?? "").replace(/[^A-Za-z0-9@._-]/g, "_");
+      const seen: Array<{ path: string; destination: string }> = [];
+      dirs.forEach((dir, i) => {
+        const label = `${prefix}.plugin_dirs[${i}]`;
+        const pathError = typeof dir === "string" && dir.trim() ? validateSafePath(dir, label) : `${label}: must be a folder path beside the spec`;
+        if (pathError) { errors.push(pathError); return; }
+        const here = { path: parts(dir).join("/"), destination: destination(dir) };
+        const earlier = seen.findIndex((s) => s.path === here.path || s.destination === here.destination);
+        if (earlier >= 0) {
+          errors.push(seen[earlier]!.path === here.path ? `${label}: listed twice ("${dir}")`
+            : `${label}: would be copied where plugin_dirs[${earlier}] is (both named "${here.destination}"); rename one`);
+        }
+        seen.push(here);
+      });
+    }
+  }
+  return errors;
+}
+
 function normalizePod(raw: Record<string, unknown>): RigSpecPod {
   const members = (raw["members"] as Record<string, unknown>[]).map((m) => ({
     id: m["id"] as string,
@@ -1212,6 +1254,9 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     startup: m["startup"] ? normalizeStartupBlock(m["startup"]) : undefined,
     sessionSource: normalizeSessionSource(m["session_source"]),
     starterRef: normalizeStarterRef(m["starter_ref"]),
+    ...(typeof m["agent_file"] === "string" ? { agentFile: m["agent_file"] } : {}),
+    ...(typeof m["append_system_prompt_file"] === "string" ? { appendSystemPromptFile: m["append_system_prompt_file"] } : {}),
+    ...(Array.isArray(m["plugin_dirs"]) ? { pluginDirs: m["plugin_dirs"] as string[] } : {}),
   }));
 
   const edges = Array.isArray(raw["edges"])

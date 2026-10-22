@@ -24,6 +24,7 @@ import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RigSpec } from "../src/domain/types.js";
 import { seatSkillPaths } from "../src/domain/seat-skill-storage.js";
+import { seatLaunchAdditions } from "../src/domain/seat-launch-additions.js";
 
 function mockTmux(): TmuxAdapter {
   return {
@@ -405,6 +406,44 @@ profiles:
       expect(text).not.toContain("differs from what OpenRig last wrote");
       // Nothing was written through the link.
       expect(listTree(moved)).toEqual([]);
+    } finally {
+      if (savedHome === undefined) delete process.env["OPENRIG_HOME"]; else process.env["OPENRIG_HOME"] = savedHome;
+      db?.close(); fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("a Claude member's agent, prompt file and plugin folder from the spec become its launch additions; a missing one fails that seat by name (OPR.0.7.0.9)", async () => {
+    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "instantiator-additions-"));
+    const savedHome = process.env["OPENRIG_HOME"];
+    let db: ReturnType<typeof createFullTestDb> | undefined;
+    try {
+      process.env["OPENRIG_HOME"] = nodePath.join(root, "home");
+      const installed = nodePath.join(root, "installed");
+      const project = nodePath.join(root, "project");
+      for (const dir of ["agents/impl", "claude/plugins/review/skills/check", "claude/prompts"]) fs.mkdirSync(nodePath.join(installed, dir), { recursive: true });
+      fs.mkdirSync(project);
+      fs.writeFileSync(nodePath.join(installed, "agents/impl/agent.yaml"), 'name: impl\nversion: "1.0"\nprofiles:\n  default:\n    uses: {}\n');
+      fs.writeFileSync(nodePath.join(installed, "claude/reviewer.md"), "---\nname: reviewer\ndescription: Reviews\n---\nReview carefully.\n");
+      fs.writeFileSync(nodePath.join(installed, "claude/prompts/house.md"), "House rules.\n");
+      fs.writeFileSync(nodePath.join(installed, "claude/plugins/review/skills/check/SKILL.md"), "---\nname: check\n---\nCheck.\n");
+      const fixture = setup(undefined, undefined, undefined, undefined, undefined, {
+        fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf8"), exists: fs.existsSync },
+      });
+      db = fixture.db;
+      const member = { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "claude-code", cwd: project };
+      const rig = makeRigSpec({ pods: [{ id: "dev", label: "Dev", edges: [], members: [
+        { ...member, agentFile: "claude/reviewer.md", appendSystemPromptFile: "claude/prompts/house.md", pluginDirs: ["claude/plugins/review"] },
+        { ...member, id: "qa", agentFile: "claude/missing.md" },
+      ] }] } as never);
+      const result = await fixture.inst.instantiate(RigSpecCodec.serialize(rig), installed);
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      if (!result.ok) return;
+      const additions = seatLaunchAdditions(seatSkillPaths({ rigId: result.result.rigId, logicalId: "dev.impl", runtime: "claude-code" }));
+      expect(additions).toMatchObject({ agent: "openrig:reviewer", pluginDirs: [expect.stringContaining("review")] });
+      expect(fs.readFileSync(additions!.appendSystemPromptFile!, "utf8")).toBe("House rules.\n"); // the seat's own copy
+      const qa = result.result.nodes.find((n) => n.logicalId === "dev.qa");
+      expect(JSON.stringify(qa)).toMatch(/addition_missing: .*claude\/missing\.md/);
+      expect(JSON.stringify(qa)).not.toContain("addition_missing: addition_missing");
     } finally {
       if (savedHome === undefined) delete process.env["OPENRIG_HOME"]; else process.env["OPENRIG_HOME"] = savedHome;
       db?.close(); fs.rmSync(root, { recursive: true, force: true });

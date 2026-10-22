@@ -25,6 +25,7 @@ import { AppliedLaunchObservationStore } from "./applied-launch-observation-stor
 import { findOtherSessionOwner } from "./session-owner.js";
 import { seatCodexCorePluginDir, seatCorePluginDir, withPluginDirs } from "./claude-core-plugin-env.js";
 import { seatSkillPluginDirForNode } from "./seat-skill-storage.js";
+import { recordConversationPromptForNode, recordForkConversationPromptForNode, seatLaunchAdditionsForLaunch } from "./seat-launch-additions.js";
 
 /** A bounded labeled-from-record recap of the predecessor's last exchanges + the record path,
  *  resolved from the predecessor's provider transcript (claude transcript_path / codex rollout_path).
@@ -83,6 +84,8 @@ export interface SeatHandoverMutationResult {
   sourceOutcome?:
     | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
     | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string };
+  /** OPR.0.7.0.9: a seat launch addition the successor launched without (missing or refused), named. */
+  launchAdditionNotes?: string[];
 }
 
 export type SeatHandoverResult =
@@ -476,6 +479,14 @@ export class SeatHandoverService {
     const corePluginDir = seatCorePluginDir(node, this.db, undefined, this.pluginsDir);
     // OPR.0.7.0.13 — the successor is the same seat, so it gets the same skill storage.
     const seatSkillDir = seatSkillPluginDirForNode(this.db, node.id);
+    // OPR.0.7.0.9: the seat's own launch additions reach the successor as they do any launch; a missing or refused
+    // copy is named on the result.
+    const seatAdditions = node.runtime === "claude-code" ? seatLaunchAdditionsForLaunch(this.db, node.id) : { missing: [] as string[], refused: [] as string[] };
+    const additionPluginDirs = seatAdditions.additions?.pluginDirs ?? [];
+    const launchAdditionNotes = [
+      ...seatAdditions.missing.map((file) => `seat_launch_addition_missing: ${file} is not in this seat's storage; the successor launched without it`),
+      ...seatAdditions.refused.map((reason) => `seat_launch_addition_refused: ${reason}; the successor launched without it`),
+    ];
     const codexCorePluginDir = seatCodexCorePluginDir(node, this.db, undefined, this.pluginsDir);
     const launch = await this.successorLauncher.createSuccessor({
       // Seam B: the successor is the SAME seat continuing — persisted policy posture carries.
@@ -483,7 +494,7 @@ export class SeatHandoverService {
       // spec (else the running topology drifts from the founder-designed one at every handover).
       // A4-profile: likewise carry the codex config profile (adapter emits -p) — the restore path
       // already threads it; handover must too, or a profile-pinned codex seat reverts at handover.
-      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault, nonInterruptive: this.rigRepo.getRigNonInterruptive(statusResult.status.rig_id), launchPosture: effectivePosture, ...(effectivePermissionMode ? { permissionMode: effectivePermissionMode } : {}), model: node.model, effort: readSeatEffort(this.db, node.id)?.effective ?? undefined, codexConfigProfile: node.codex_config_profile ?? undefined, seatEnv: withPluginDirs(this.rigRepo.getEffectiveSeatEnv(node.id), [corePluginDir, seatSkillDir]), ...((corePluginDir || codexCorePluginDir) && node.cwd ? { seatProjectDir: node.cwd } : {}) },
+      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, ...(seatAdditions.additions ? { launchAdditions: seatAdditions.additions } : {}), kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault, nonInterruptive: this.rigRepo.getRigNonInterruptive(statusResult.status.rig_id), launchPosture: effectivePosture, ...(effectivePermissionMode ? { permissionMode: effectivePermissionMode } : {}), model: node.model, effort: readSeatEffort(this.db, node.id)?.effective ?? undefined, codexConfigProfile: node.codex_config_profile ?? undefined, seatEnv: withPluginDirs(this.rigRepo.getEffectiveSeatEnv(node.id), [corePluginDir, seatSkillDir, ...additionPluginDirs]), ...((corePluginDir || codexCorePluginDir) && node.cwd ? { seatProjectDir: node.cwd } : {}) },
       departingSessionName: latestSession.session_name,
       occupantGeneration,
       // OPR.0.5.5.5: a fork-sourced successor launches as a NATIVE FORK of the
@@ -560,6 +571,14 @@ export class SeatHandoverService {
     const launchToken = forkSource
       ? (forkOwnId ? { token: forkOwnId, resumeType: launch.resumeType } : null)
       : (launchedId ? { token: launchedId, resumeType: launch.resumeType } : null);
+    // OPR.0.7.0.9: the successor's conversation start: a fresh one starts with today's prompt; a fork inherits its
+    // parent's recorded start (or none).
+    if (seatAdditions.additions?.appendSystemPromptFile && launchToken) {
+      try {
+        if (forkSource) recordForkConversationPromptForNode(this.db, node.id, launchToken.token, forkSource.value);
+        else recordConversationPromptForNode(this.db, node.id, launchToken.token);
+      } catch { /* best-effort: without it, a later resume reports unknown */ }
+    }
     if (parsed.source.mode === "fork" && forkSource) {
       // A fork whose own conversation id wasn't captured at launch commits with no resume token and
       // says so: its exact resumability isn't established until the id is recorded.
@@ -634,6 +653,7 @@ export class SeatHandoverService {
       occupantGeneration,
       appliedLaunch: launch.appliedLaunch ?? null,
       sourceOutcome,
+      launchAdditionNotes,
       cleanup: () => this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId),
     });
   }
@@ -663,6 +683,7 @@ export class SeatHandoverService {
     appliedLaunch: AppliedLaunchObservation | null;
     /** OPR.0.5.5.5 — per-source execution outcome, threaded onto the result. */
     sourceOutcome?: SeatHandoverMutationResult["sourceOutcome"];
+    launchAdditionNotes?: string[];
     cleanup: (() => Promise<void>) | null;
   }): Promise<SeatHandoverResult> {
     const fail = async (result: SeatHandoverResult): Promise<SeatHandoverResult> => {
@@ -766,6 +787,7 @@ export class SeatHandoverService {
       occupantGeneration: input.occupantGeneration,
       appliedLaunch: input.appliedLaunch,
       sourceOutcome: input.sourceOutcome,
+      launchAdditionNotes: input.launchAdditionNotes,
     });
     if (!committed.ok) return fail(committed);
     this.tmuxAdapter.deliveryGuard?.rebindLifecycle(input.node.id);
@@ -976,6 +998,7 @@ export class SeatHandoverService {
     occupantGeneration: string | null;
     appliedLaunch: AppliedLaunchObservation | null;
       sourceOutcome?: SeatHandoverMutationResult["sourceOutcome"];
+      launchAdditionNotes?: string[];
   }): SeatHandoverResult {
     const handoverAt = this.now().toISOString();
     const tx = this.db.transaction(() => {
@@ -1075,6 +1098,7 @@ export class SeatHandoverService {
         reason: input.reason,
         operator: input.operator,
         ...(input.sourceOutcome ? { sourceOutcome: input.sourceOutcome } : {}),
+        ...(input.launchAdditionNotes?.length ? { launchAdditionNotes: input.launchAdditionNotes } : {}),
       });
       return { newSessionId: newSession.id, previousSessionIdsSuperseded, event };
     });
@@ -1152,6 +1176,7 @@ export class SeatHandoverService {
         handoverAt,
         eventSeq: committed.event.seq,
         ...(input.sourceOutcome ? { sourceOutcome: input.sourceOutcome } : {}),
+        ...(input.launchAdditionNotes?.length ? { launchAdditionNotes: input.launchAdditionNotes } : {}),
         sideEffects: {
           departingSessionKilled: false,
           startupContextDelivered: input.contextDelivered,

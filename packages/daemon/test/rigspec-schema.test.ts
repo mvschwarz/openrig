@@ -645,3 +645,32 @@ describe("malformed topology stays a validation result", () => {
     expect(result.errors).toContain('edges[0].from: "absent.worker" does not resolve to a pod member');
   });
 });
+
+describe("a Claude member's own agent, prompt file and plugin folders (OPR.0.7.0.9)", () => {
+  const withFields = (index: number, fields: Record<string, unknown>) => {
+    const rig = structuredClone(VALID_RIG);
+    Object.assign(rig.pods[0]!.members[index] as Record<string, unknown>, fields);
+    return rig;
+  };
+
+  it("reads the three named settings on a Claude member, as paths beside the spec", () => {
+    const rig = withFields(0, { agent_file: "agents/reviewer.md", append_system_prompt_file: "prompts/house.md", plugin_dirs: ["plugins/review"] });
+    expect(RigSpecSchema.validate(rig).valid).toBe(true);
+    expect(RigSpecSchema.normalize(rig).pods[0]!.members[0]).toMatchObject({
+      agentFile: "agents/reviewer.md", appendSystemPromptFile: "prompts/house.md", pluginDirs: ["plugins/review"] });
+  });
+
+  it("takes an empty plugin_dirs as none", () => {
+    expect(RigSpecSchema.validate(withFields(0, { plugin_dirs: [] })).valid).toBe(true);
+  });
+
+  it("says why it can't take them: another runtime, a path outside the spec's folder, or a malformed list", () => {
+    const errors = (rig: unknown) => RigSpecSchema.validate(rig).errors.join(" | ");
+    expect(errors(withFields(1, { agent_file: "agents/reviewer.md" }))).toMatch(/members\[1\]\.agent_file: only for Claude members/);
+    expect(errors(withFields(0, { append_system_prompt_file: "/etc/prompt.md" }))).toMatch(/append_system_prompt_file: absolute paths are not allowed/);
+    expect(errors(withFields(0, { plugin_dirs: ["../outside"] }))).toMatch(/plugin_dirs\[0\]: path traversal/);
+    expect(errors(withFields(0, { plugin_dirs: "plugins/review" }))).toMatch(/plugin_dirs: must be a list/);
+    expect(errors(withFields(0, { plugin_dirs: ["a", "./a"] }))).toMatch(/plugin_dirs\[1\]: listed twice/);
+    expect(errors(withFields(0, { plugin_dirs: ["x/review", "y/review"] }))).toMatch(/plugin_dirs\[1\]: would be copied where plugin_dirs\[0\] is/);
+  });
+});

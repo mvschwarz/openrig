@@ -4,6 +4,7 @@ import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-life
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { shellQuote } from "../cross-host-executor.js";
+import { seatLaunchAdditionLines, type SeatLaunchAdditionsView } from "../seat-launch-additions-lines.js";
 
 export type SeatDeps = StatusDeps;
 
@@ -812,6 +813,8 @@ Examples:
           const startup = data["startup"] as { projectionCount: number; fileCount: number; actionCount: number };
           console.log(`Startup: ${startup.projectionCount} projections, ${startup.fileCount} files, ${startup.actionCount} actions.`);
           for (const sibling of data["siblings"] as Array<{ logicalId: string }>) console.log(`Sibling ${sibling.logicalId}: unchanged.`);
+          // OPR.0.7.0.9: the seat's own launch additions, as the seat view shows them.
+          for (const line of seatLaunchAdditionLines(data["launchAdditions"] as SeatLaunchAdditionsView | null | undefined)) console.log(line);
           return;
         }
         const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;

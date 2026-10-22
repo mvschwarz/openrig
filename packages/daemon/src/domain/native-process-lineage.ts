@@ -217,6 +217,36 @@ export function codexCommandResumeToken(command: string): string | null | undefi
 
 type ClaudeArgvIds = { resume: string | null; "session-id": string | null };
 
+// OPR.0.7.0.9: a seat's launch additions, read the same way by both selectors. The options OpenRig already emitted
+// (`--model`, `--effort`, `--name`, `--permission-mode`, `--settings`) keep each selector's earlier handling exactly.
+// Returns the index of the option's last value token; null when its value is missing or malformed (no positive proof);
+// undefined when the argument isn't `--agent` or `--append-system-prompt-file`. `--agent` takes one registered-name
+// token. `ps` joins argv with spaces, so the prompt file's path runs to the next `--` option; OpenRig launches only a
+// path that reads back that way (`claudePathBounds`), so a value token opening with `--` or a settings-like `{` ends it.
+const CLAUDE_AGENT_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+const opensSpan = (token: string): boolean => token.startsWith("--") || /^["']?\{/.test(token);
+function claudeAdditionValueEnd(args: string[], index: number): number | null | undefined {
+  const arg = args[index]!;
+  const inline = arg.match(/^(--agent|--append-system-prompt-file)=([\s\S]*)$/);
+  const flag = inline ? inline[1]! : arg;
+  if (flag !== "--agent" && flag !== "--append-system-prompt-file") return undefined;
+  const value = inline ? inline[2]! : args[index + 1];
+  if (!value || value.startsWith("-")) return null;
+  if (flag === "--agent" && !CLAUDE_AGENT_NAME.test(value)) return null;
+  let end = inline ? index : index + 1;
+  if (flag === "--append-system-prompt-file") {
+    while (end + 1 < args.length && !opensSpan(args[end + 1]!)) end += 1;
+  }
+  return end;
+}
+
+/** Whether a path passed as `--append-system-prompt-file` reads back from `ps` as exactly that one value: its tokens
+ *  don't open with `-`/`--` or a settings-like `{`, so both identity selectors find where it ends. The launch-time check. */
+export function claudePathBounds(path: string): boolean {
+  const parts = tokens(path);
+  return parts.length > 0 && parts.join(" ") === path.trim() && !parts[0]!.startsWith("-") && !parts.some(opensSpan);
+}
+
 /** The conversation a parsed Claude argv names. A fork's --resume names its parent, so with
  *  --fork-session only the fork's own --session-id names it, and both must be present. Without
  *  --fork-session one identity names it and two prove nothing. undefined: no positive proof. */
@@ -245,6 +275,9 @@ function claudeSessionToken(args: string[]): string | null {
     if (["--permission-mode", "--model", "--name", "--effort"].includes(arg)) { index += 1; continue; }
     if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg)
       || arg.startsWith("--remote-control=") || arg === "--dangerously-skip-permissions") continue;
+    const additionEnd = claudeAdditionValueEnd(args, index);
+    if (additionEnd === null) return null;
+    if (additionEnd !== undefined) { index = additionEnd; continue; }
     if (arg === "--fork-session") { fork = true; continue; }
     const identity = arg.match(/^--(session-id|resume)(?:=(.*))?$/);
     if (!identity) return null; // Unknown argv is not positive identity proof.
@@ -277,6 +310,9 @@ function claudeSessionIdentity(args: string[]): string | null | { unparsed: true
     }
     if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg)
       || arg.startsWith("--remote-control=") || arg === "--dangerously-skip-permissions") continue;
+    const additionEnd = claudeAdditionValueEnd(args, index);
+    if (additionEnd === null) return unparsed;
+    if (additionEnd !== undefined) { index = additionEnd; continue; }
     if (arg === "--fork-session") { fork = true; continue; }
     const identity = arg.match(/^--(session-id|resume)(?:=(.*))?$/);
     if (!identity) return unparsed; // Unknown argv is not positive identity proof.

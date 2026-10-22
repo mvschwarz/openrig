@@ -2,6 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createFullTestDb, createTestApp, mockTmuxAdapter } from "./helpers/test-app.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
+import fs from "node:fs";
+import nodePath from "node:path";
+import os from "node:os";
+import { seatSkillPaths } from "../src/domain/seat-skill-storage.js";
+import { seatLaunchAdditions } from "../src/domain/seat-launch-additions.js";
 
 const root = "/fixture/first-start";
 const skillIds = ["development-team", "systematic-debugging", "test-driven-development", "verification-before-completion"];
@@ -189,5 +194,52 @@ describe("explicit first-start retry after projection failure", () => {
     expect(f.db.prepare("SELECT total_changes() AS n").get()).toEqual(changes);
     expect(f.adapter.launchHarness).not.toHaveBeenCalled();
     expect(f.adapter.project).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a Claude seat's first-start retry (OPR.0.7.0.9)", () => {
+  it("keeps the launch additions its first start recorded, though the retried member carries only retained fields", async () => {
+    const realRoot = fs.mkdtempSync(nodePath.join(os.tmpdir(), "retry-additions-"));
+    const saved = process.env["OPENRIG_HOME"];
+    try {
+      process.env["OPENRIG_HOME"] = nodePath.join(realRoot, "home");
+      const write = (rel: string, text: string) => { const p = nodePath.join(realRoot, rel); fs.mkdirSync(nodePath.dirname(p), { recursive: true }); fs.writeFileSync(p, text); };
+      write("agent/agent.yaml", `name: implementer\nversion: "1.0.0"\nresources:\n  skills:\n    - id: review\n      path: skills/review\nprofiles:\n  default:\n    uses:\n      skills: [review]\n`);
+      write("agent/skills/review/SKILL.md", "# review");
+      write("claude/house.md", "House rules.\n");
+      const db = createFullTestDb();
+      closers.push(() => db.close());
+      let projectionBlocked = true;
+      const adapter: RuntimeAdapter = {
+        runtime: "claude-code",
+        listInstalled: vi.fn(async () => []),
+        project: vi.fn(async () => ({ projected: [], skipped: [], failed: projectionBlocked ? [{ effectiveId: "review", error: "EACCES: projection ancestor" }] : [] })),
+        deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+        checkReady: vi.fn(async () => ({ ready: true })),
+        launchHarness: vi.fn(async () => ({ ok: true })),
+      };
+      const tmux = mockTmuxAdapter();
+      const setup = createTestApp(db, { tmux, adapters: { "claude-code": adapter },
+        podInstantiatorFsOps: { exists: fs.existsSync, readFile: (p: string) => fs.readFileSync(p, "utf8") } });
+      const rig = setup.rigRepo.createRig("first-start");
+      await setup.rigExpansionService.expand({ rigId: rig.id, pod: { id: "dev", label: "Dev", members: [{ id: "sibling", agentRef: "builtin:terminal", profile: "none", runtime: "terminal", cwd: realRoot }], edges: [] } });
+      const retained = { id: "impl", agent_ref: "local:agent", profile: "default", runtime: "claude-code", cwd: realRoot };
+      const added = await setup.podInstantiator.addMemberToPod(rig.id, "dev", { ...retained, append_system_prompt_file: "claude/house.md" }, realRoot);
+      expect(added, JSON.stringify(added)).toMatchObject({ ok: true, result: { node: { status: "failed" } } });
+      const seat = seatSkillPaths({ rigId: rig.id, logicalId: "dev.impl", runtime: "claude-code" });
+      expect(seatLaunchAdditions(seat)?.appendSystemPromptFile).toBeTruthy();
+      tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+      const lifecycle = new SeatLifecycleService({ ...setup, db, tmuxAdapter: tmux });
+      expect((await lifecycle.cleanSeat({ seatRef: "dev-impl@first-start", reason: "Projection failed before native launch; shell has exited" })).ok).toBe(true);
+      projectionBlocked = false;
+      const res = await setup.app.request(`/api/rigs/${rig.id}/nodes/dev.impl/launch`, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ retryStartupFrom: { member: retained, rigRoot: realRoot } }) });
+      expect(res.status, JSON.stringify(await res.clone().json())).toBe(201);
+      // The retried seat still launches with its own prompt file.
+      expect(fs.readFileSync(seatLaunchAdditions(seat)!.appendSystemPromptFile!, "utf8")).toBe("House rules.\n");
+    } finally {
+      if (saved === undefined) delete process.env["OPENRIG_HOME"]; else process.env["OPENRIG_HOME"] = saved;
+      fs.rmSync(realRoot, { recursive: true, force: true });
+    }
   });
 });

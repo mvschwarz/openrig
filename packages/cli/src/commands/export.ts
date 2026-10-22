@@ -41,6 +41,7 @@ export function exportCommand(depsOverride?: ExportDeps): Command {
       } else {
         deps.writeFile(opts.output, res.data);
         console.log(`Exported to ${opts.output}`);
+        for (const line of String(res.data).split("\n")) if (line.startsWith("# Not carried: ")) console.log(line.slice(2));
       }
     });
 

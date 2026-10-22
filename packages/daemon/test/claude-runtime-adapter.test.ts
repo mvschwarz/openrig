@@ -9,6 +9,7 @@ import type { ProjectionPlan, ProjectionEntry } from "../src/domain/projection-p
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { claudePostureFlag } from "../src/adapters/yolo-mode.js";
 import { resolveReadinessTimeoutMs } from "../src/domain/readiness-timeout.js";
+import { claudeCommandSessionToken } from "../src/domain/native-process-lineage.js";
 
 function mockTmux(): TmuxAdapter {
   return {
@@ -222,6 +223,64 @@ describe("launchHarness — the resume token is one shell argument", () => {
     const cmd = lastCmd(tmux);
     expect(argvOf(cmd)).toEqual(argvOf(cmd.replace(`'${token}'`, token)));
     expect(argvOf(cmd).slice(-4)).toEqual(["--resume", token, "--name", "seat"]);
+  });
+});
+
+// OPR.0.7.0.9: a seat's own launch additions (from its seat storage) reach every Claude launch builder: fresh, resume
+// and fork, managed and not. Without them the command is byte-identical (the tests above).
+describe("launchHarness — a seat's launch additions", () => {
+  const additions = { agent: "openrig:reviewer", appendSystemPromptFile: "/home/u/Open Rig/state/seats/r/dev.impl/claude-code/additions/system-prompt.md", pluginDirs: [] };
+  const binding = (): NodeBinding => ({ ...makeBinding(), launchAdditions: additions });
+  const lastCmd = (tmux: TmuxAdapter): string => {
+    const calls = (tmux.sendText as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    return (calls[calls.length - 1]?.[1] as string) ?? "";
+  };
+  const argvOf = (cmd: string): string[] =>
+    execFileSync("/bin/sh", ["-c", `claude() { printf '%s\\n' "$@"; }; ${cmd}`], { encoding: "utf8" }).split("\n").slice(0, -1);
+  const expected = ["--agent", "openrig:reviewer", "--append-system-prompt-file", additions.appendSystemPromptFile];
+  const between = (argv: string[], flag: string) => argv.slice(argv.indexOf("--agent"), argv.indexOf(flag));
+
+  it.each([
+    ["fresh", {}, "--session-id"],
+    ["resume", { resumeToken: "tok-1" }, "--resume"],
+    ["fork", { forkSource: { kind: "native_id" as const, value: "parent-1" } }, "--resume"],
+  ])("%s: the agent and the prompt file are passed, each one argument, before the identity", async (_name, opts, identityFlag) => {
+    const tmux = mockTmux();
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+    const result = await adapter.launchHarness(binding(), { name: "seat", ...opts });
+    expect(result.ok).toBe(true);
+    expect(between(argvOf(lastCmd(tmux)), identityFlag)).toEqual(expected);
+  });
+
+  it("managed: the same arguments reach the managed command", async () => {
+    const tmux = { ...mockTmux(), sendShellCommand: vi.fn(async () => ({ ok: true as const })) } as unknown as TmuxAdapter;
+    const seen: string[][] = [];
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, sessionIdFactory: () => "fresh-1",
+      claudeManagedLaunch: { prepare: async () => ({ command: (args: readonly string[]) => { seen.push([...args]); return "claude"; }, assertCurrent: () => {}, configDir: "/fixture" }) } as never });
+    const result = await adapter.launchHarness({ ...binding(), permissionMode: "acceptEdits" }, { name: "seat" });
+    expect(result.ok).toBe(true);
+    const args = seen[0]!;
+    expect(args.slice(args.indexOf("--agent"), args.indexOf("--session-id"))).toEqual(expected);
+  });
+});
+
+// OPR.0.7.0.9 (K1): the strict identity reader keeps its earlier behaviour for the flags OpenRig already emits. A saved
+// model `-custom`, a spec effort `-x` or a session name `-dev-impl@demo` still proves the session it launched, as it did
+// before this slice; only `--agent` and `--append-system-prompt-file` use the new value rule.
+describe("launchHarness — existing flags with a dash-led value keep their identity proof", () => {
+  const argvOf = (cmd: string): string[] =>
+    execFileSync("/bin/sh", ["-c", `claude() { printf '%s\\n' "$@"; }; ${cmd}`], { encoding: "utf8" }).split("\n").slice(0, -1);
+  it.each([
+    [{ model: "-custom" }, "seat"],
+    [{ effort: "-x" }, "seat"],
+    [{}, "-dev-impl@demo"],
+  ])("%j, name %s: the launched argv, as ps shows it, still names its session", async (fields, name) => {
+    const tmux = mockTmux();
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, sessionIdFactory: () => "11111111-1111-4111-8111-111111111111" });
+    expect((await adapter.launchHarness({ ...makeBinding(), ...fields }, { name })).ok).toBe(true);
+    const calls = (tmux.sendText as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    const argv = argvOf(calls[calls.length - 1]![1] as string);
+    expect(claudeCommandSessionToken(["claude", ...argv].join(" "))).toBe("11111111-1111-4111-8111-111111111111");
   });
 });
 

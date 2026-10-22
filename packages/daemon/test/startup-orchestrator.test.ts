@@ -19,6 +19,7 @@ import { assessNativeResumeProbe } from "../src/domain/native-resume-probe.js";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { seatSkillPaths } from "../src/domain/seat-skill-storage.js";
+import { prepareSeatLaunchAdditions, recordConversationPrompt, systemPromptPendingNote } from "../src/domain/seat-launch-additions.js";
 import * as nodeFs from "node:fs";
 import * as nodeOs from "node:os";
 import * as nodePath from "node:path";
@@ -327,6 +328,89 @@ describe("StartupOrchestrator", () => {
       const { result, cwd } = await start("none");
       expect(result.ok).toBe(true);
       expect(nodeFs.existsSync(nodePath.join(projectSkill(cwd), "SKILL.md"))).toBe(true);
+    });
+  });
+
+  // OPR.0.7.0.9: a seat's own launch additions, prepared in its seat storage, reach its launch binding; a peer gets
+  // none. The prompt a conversation starts with is recorded, and a resume after it changed reports it pending.
+  describe("a seat's launch additions at start", () => {
+    let savedHome: string | undefined;
+    const temps: string[] = [];
+    const temp = (name: string) => { const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), name)); temps.push(dir); return dir; };
+    beforeEach(() => { savedHome = process.env["OPENRIG_HOME"]; process.env["OPENRIG_HOME"] = temp("seat-additions-start-home-"); });
+    afterEach(() => {
+      if (savedHome === undefined) delete process.env["OPENRIG_HOME"]; else process.env["OPENRIG_HOME"] = savedHome;
+      for (const dir of temps.splice(0)) nodeFs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    function seat(logicalId: string, withAdditions: boolean) {
+      const rig = rigRepo.createRig(`additions-${logicalId}`);
+      const node = rigRepo.addNode(rig.id, logicalId, { runtime: "claude-code" });
+      const session = sessionRegistry.registerSession(node.id, `r01-${logicalId}`);
+      sessionRegistry.updateStatus(session.id, "running");
+      const paths = seatSkillPaths({ rigId: rig.id, logicalId, runtime: "claude-code" });
+      const src = temp("seat-additions-start-src-");
+      const prompt = nodePath.join(src, "prompt.md");
+      nodeFs.writeFileSync(prompt, "First instructions.\n");
+      if (withAdditions && !prepareSeatLaunchAdditions(paths, { appendSystemPromptFile: prompt }).ok) throw new Error("prepare");
+      return { seed: { rigId: rig.id, nodeId: node.id, sessionId: session.id }, paths, prompt };
+    }
+
+    function launching(token: string) {
+      const seen: NodeBinding[] = [];
+      const adapter = mockAdapter({ launchHarness: vi.fn(async (binding: NodeBinding) => { seen.push(binding); return { ok: true as const, resumeToken: token, resumeType: "claude_id" }; }) });
+      return { adapter, seen };
+    }
+
+    it("binds the seat's additions, and none for a peer", async () => {
+      const own = seat("impl", true);
+      const peer = seat("peer", false);
+      for (const [s, expected] of [[own, true], [peer, false]] as const) {
+        const { adapter, seen } = launching("conv-1");
+        expect((await createOrchestrator().startNode(makeInput(s.seed, { adapter }))).ok).toBe(true);
+        if (expected) expect(seen[0]!.launchAdditions?.appendSystemPromptFile).toBe(nodePath.join(s.paths.root, "additions", "system-prompt.md"));
+        else expect(seen[0]!.launchAdditions).toBeUndefined();
+      }
+    });
+
+    it("a seat root with ordinary spaces: the prompt file and the agent are both passed", async () => {
+      process.env["OPENRIG_HOME"] = nodePath.join(temp("seat-additions-start-spaced-"), "Application Support", "openrig");
+      const own = seat("impl", false);
+      const src = temp("seat-additions-start-agent-");
+      nodeFs.writeFileSync(nodePath.join(src, "reviewer.md"), "---\nname: reviewer\ndescription: d\n---\n");
+      expect(prepareSeatLaunchAdditions(own.paths, { appendSystemPromptFile: own.prompt, agentFile: nodePath.join(src, "reviewer.md") }).ok).toBe(true);
+      const { adapter, seen } = launching("conv-1");
+      const result = await createOrchestrator().startNode(makeInput(own.seed, { adapter }));
+      expect(seen[0]!.launchAdditions?.appendSystemPromptFile).toContain("Application Support");
+      expect(seen[0]!.launchAdditions?.agent).toBe("openrig:reviewer");
+      expect((result.warnings ?? []).some((w) => w.includes("seat_launch_addition"))).toBe(false);
+    });
+
+    it("a fork takes its parent's recorded start, not today's prompt", async () => {
+      const own = seat("impl", true);
+      recordConversationPrompt(own.paths, "parent-1");
+      nodeFs.writeFileSync(own.prompt, "Changed before the fork.\n");
+      expect(prepareSeatLaunchAdditions(own.paths, { appendSystemPromptFile: own.prompt }).ok).toBe(true);
+      const forked = launching("fork-1");
+      expect((await createOrchestrator().startNode(makeInput(own.seed, { adapter: forked.adapter, forkSource: { kind: "native_id", value: "parent-1" } }))).ok).toBe(true);
+      expect(systemPromptPendingNote(own.paths, "fork-1")).toMatch(/^system_prompt_pending: /);
+    });
+
+    it("a resume after the prompt changed says it's pending; a missing copy is left off the launch and named", async () => {
+      const own = seat("impl", true);
+      const fresh = launching("conv-1");
+      expect((await createOrchestrator().startNode(makeInput(own.seed, { adapter: fresh.adapter }))).ok).toBe(true);
+      nodeFs.writeFileSync(own.prompt, "Changed instructions.\n");
+      expect(prepareSeatLaunchAdditions(own.paths, { appendSystemPromptFile: own.prompt }).ok).toBe(true);
+      const resumed = launching("conv-1");
+      const result = await createOrchestrator().startNode(makeInput(own.seed, { adapter: resumed.adapter, resumeToken: "conv-1", resumeType: "claude_id" }));
+      expect(result.warnings?.some((w) => w.includes("system_prompt_pending: "))).toBe(true);
+
+      nodeFs.rmSync(nodePath.join(own.paths.root, "additions", "system-prompt.md"));
+      const again = launching("conv-2");
+      const missing = await createOrchestrator().startNode(makeInput(own.seed, { adapter: again.adapter }));
+      expect(again.seen[0]!.launchAdditions?.appendSystemPromptFile).toBeUndefined();
+      expect(missing.warnings?.some((w) => w.includes("seat_launch_addition_missing: ") && w.includes("system-prompt.md"))).toBe(true);
     });
   });
 

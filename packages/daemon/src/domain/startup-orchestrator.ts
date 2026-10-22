@@ -28,6 +28,7 @@ import { CommunityHarnessRuntimeAdapter } from "../adapters/community-harness-ru
 import { join } from "node:path";
 import { readFootprintAnswer, routerLineSkipReason, type FootprintAnswer, type RouterLineWriteResult } from "./footprint-choice.js";
 import { describeSkillRouterFootprint, refusedSeatSkillsRootForNode, seatCatalogKeptNote, seatRouterKeptNote, seatSkillPathsForNode, seatSkillPluginDirForNode, writeSeatSkillCatalog, writeSeatSkillRouter } from "./seat-skill-storage.js";
+import { recordConversationPromptForNode, recordForkConversationPromptForNode, seatLaunchAdditionsForLaunch, systemPromptPendingNoteForNode } from "./seat-launch-additions.js";
 
 // Expanded startup text can put the current input marker above 50 scrollback lines.
 const STARTUP_SUBMIT_CAPTURE_LINES = 200;
@@ -366,6 +367,13 @@ export class StartupOrchestrator {
       const refused = refusedSeatSkillsRootForNode(this.db, input.nodeId);
       if (refused) input = { ...input, binding: { ...input.binding, seatSkillsRoot: refused.skillsRoot, seatSkillsRefused: refused.reason } };
     }
+    // OPR.0.7.0.9: a Claude seat's own launch additions, the copies present in its seat storage; a missing copy is named.
+    if (input.adapter.runtime === "claude-code" && !input.binding.launchAdditions) {
+      const { additions, missing, refused } = seatLaunchAdditionsForLaunch(this.db, input.nodeId);
+      if (additions) input = { ...input, binding: { ...input.binding, launchAdditions: additions } };
+      for (const file of missing) warnings.push(`${input.sessionName ?? input.nodeId}: seat_launch_addition_missing: ${file} is not in this seat's storage; launched without it`);
+      for (const reason of refused) warnings.push(`${input.sessionName ?? input.nodeId}: seat_launch_addition_refused: ${reason}; launched without it`);
+    }
     const deliveryInput: StartupDeliveryInput = { ...input, warnings, submissionWarnings: [], startupAttemptId: randomUUID(), sendOrder: 0, submissionDiagnostics: [] };
     const errors: string[] = [];
     let continuityOutcome: "resumed" | "fresh" | "forked" | "rebuilt" = input.resumeToken
@@ -563,6 +571,20 @@ export class StartupOrchestrator {
               try {
                 this.sessionRegistry.updateResumeToken(input.sessionId, launchResult.resumeType ?? "", normalizedResumeToken, "scrape");
               } catch { /* best-effort */ }
+            }
+            // OPR.0.7.0.9: the prompt a new conversation starts with; on a resume, a changed prompt is pending.
+            if (input.adapter.runtime === "claude-code" && input.binding.launchAdditions?.appendSystemPromptFile) {
+              const resumed = launchResumeToken?.trim();
+              if (resumed) {
+                const pending = systemPromptPendingNoteForNode(this.db, input.nodeId, resumed);
+                if (pending) warnings.push(`${input.sessionName ?? input.nodeId}: ${pending}`);
+              } else if (normalizedResumeToken) {
+                // A fork starts from its parent's conversation: it takes the parent's recorded start (or none).
+                try {
+                  if (input.forkSource?.value) recordForkConversationPromptForNode(this.db, input.nodeId, normalizedResumeToken, input.forkSource.value);
+                  else recordConversationPromptForNode(this.db, input.nodeId, normalizedResumeToken);
+                } catch { /* best-effort */ }
+              }
             }
             break;
           }

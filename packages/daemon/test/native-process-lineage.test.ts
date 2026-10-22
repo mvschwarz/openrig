@@ -403,6 +403,37 @@ describe("Claude identity with inline settings in ps output", () => {
     expect((await observeClaudeDelivery(actualIdentity)).state).toBe("verified");
     expect(await verifyClaudePaneProcess({ ...actualIdentity, expectedToken: "different" })).toBeNull();
   });
+  // OPR.0.7.0.9: a seat's own launch additions are value-taking flags; identity proof must still hold. `ps` joins argv
+  // with spaces, so a prompt file path with ordinary spaces runs to the next `--` option. OpenRig launches only a path
+  // that reads back that way (its launch-time check), so a path holding a `--` or `{` token proves nothing here.
+  const spaced = "/home/u/Library/Application Support/openrig/state/seats/r/dev.impl/claude-code/additions/system-prompt.md";
+  it.each([
+    `--agent openrig:reviewer --session-id ${token}`,
+    `--append-system-prompt-file /home/u/.openrig/state/seats/r/dev.impl/claude-code/additions/system-prompt.md --resume ${token}`,
+    `--append-system-prompt-file ${spaced} --session-id ${token}`,
+    `--append-system-prompt-file ${spaced} --resume ${token}`,
+    `--agent openrig:a --append-system-prompt-file ${spaced} --resume parent-1 --fork-session --session-id ${token}`,
+    `--model opus --append-system-prompt-file /seat/additions/system-prompt.md --agent openrig:a --effort high --session-id ${token}`,
+    `--agent=openrig:reviewer --append-system-prompt-file=/fixture/prompt.md --session-id=${token}`,
+  ])("proves identity with a seat's launch additions: %s", async args => {
+    const actual = input(args);
+    expect((await verifyClaudePaneProcess(actual))?.process.pid).toBe(21);
+    expect((await observeClaudeDelivery(actual)).state).toBe("verified");
+    expect(await verifyClaudePaneProcess({ ...actual, expectedToken: "different" })).toBeNull();
+  });
+  it.each([
+    `--agent --session-id ${token}`,
+    `--append-system-prompt-file --session-id ${token}`,
+    `--plugin-dir /fixture/plugin --session-id ${token}`,
+    `--append-system-prompt-file /tmp/Backup -- 2026/additions/system-prompt.md --session-id ${token}`,
+    `--append-system-prompt-file /tmp/team --unexpected part/additions/system-prompt.md --session-id ${token}`,
+    `--append-system-prompt-file /tmp/a {b}/additions/system-prompt.md --session-id ${token}`,
+    `--agent openrig:two words --session-id ${token}`,
+    `--agent -openrig --session-id ${token}`,
+  ])("proves nothing for a missing, unbounded or malformed value, or a flag OpenRig doesn't emit: %s", async args => {
+    expect(await verifyClaudePaneProcess(input(args))).toBeNull();
+    expect((await observeClaudeDelivery(input(args))).state).not.toBe("verified");
+  });
 });
 
 describe("observeClaudeDelivery's idle-shell policy: delivery versus launch", () => {

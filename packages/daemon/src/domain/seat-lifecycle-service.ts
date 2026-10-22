@@ -46,6 +46,8 @@ import {
 } from "./seat-restart-in-place.js";
 import { CommunityHarnessRuntimeAdapter, seatAdapter } from "../adapters/community-harness-runtime-adapter.js";
 import { sessionCommunityHarnessSelect } from "./session-registry.js";
+import { seatLaunchAdditionsReport } from "./seat-launch-additions.js";
+import { seatSkillPaths } from "./seat-skill-storage.js";
 
 /**
  * S5 (OPR.0.5.4.7) — the seat-lifecycle verb surface: set-model, single-seat stop,
@@ -1138,6 +1140,9 @@ export class SeatLifecycleService {
       sessionName: canonicalSessionName, currentOccupant,
       stopRequired, wouldStop: blockers.length > 0 ? false : tmuxUnknown ? null : owned && input.stop === true,
       blockers, warnings, siblings,
+      // OPR.0.7.0.9: what this seat's launch passes of its own additions (null when none).
+      launchAdditions: node.runtime === "claude-code"
+        ? seatLaunchAdditionsReport(seatSkillPaths({ rigId: seat.rigId, logicalId: node.logicalId, runtime: "claude-code" })) : null,
       startup: { projectionCount: startup.plan.entries.length,
         fileCount: startup.resolvedStartupFiles.filter(f => f.appliesOn.includes("fresh_start")).length,
         actionCount: startup.startupActions.filter(a => a.appliesOn.includes("fresh_start")).length },

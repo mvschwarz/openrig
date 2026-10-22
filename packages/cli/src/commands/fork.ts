@@ -28,6 +28,9 @@ interface ForkResponse {
     warnings?: string[];
   };
   image?: { id: string; name: string; version: string; pinned: boolean };
+  /** OPR.0.7.0.9: whether the source seat's launch additions were carried into the fork, and why not if they weren't. */
+  launchAdditions?: "carried" | "partial" | "not_carried";
+  launchAdditionsNote?: string;
 }
 
 export function forkCommand(depsOverride?: StatusDeps): Command {
@@ -104,6 +107,9 @@ Examples:
         console.log(`Forked ${sourceSession} into rig ${opts.rig}`);
         console.log(`  Pod: ${data.result?.podNamespace ?? opts.pod}`);
         console.log(`  New seat: [${icon}] ${node?.logicalId ?? opts.member}${session}${error}`);
+        if (data.launchAdditions === "carried") console.log("  Launch additions: carried from the source seat");
+        if (data.launchAdditions === "partial") console.log("  Launch additions: partly carried from the source seat");
+        if (data.launchAdditionsNote) console.log(`  Warning: ${data.launchAdditionsNote}`);
         if (data.image) {
           console.log(`  Kept image: ${data.image.name} v${data.image.version} (pinned, protected from prune)`);
         } else {

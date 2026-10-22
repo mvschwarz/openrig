@@ -10,6 +10,7 @@ import {
   resolveSkillLoadout,
   type SkillRuntime,
 } from "@openrig/daemon/skill-loadout";
+import { seatLaunchAdditionLines, type SeatLaunchAdditionsView } from "../seat-launch-additions-lines.js";
 
 interface AuditFinding {
   class: string;
@@ -53,6 +54,8 @@ interface SeatInspection {
   /** OPR.0.7.0.13 (router): absent from an older daemon. */
   router?: { id: string; path: string; written: boolean; kept?: "edited" | "linked" } | null;
   bootstrapLine?: { state: "unasked" | "unknown" } | { state: "yes" | "no"; by: "saved" | "environment" } | null;
+  /** OPR.0.7.0.9: what the seat's launch passes of its own additions; absent from an older daemon. */
+  launchAdditions?: SeatLaunchAdditionsView | null;
 }
 
 interface SeatApplyResponse {
@@ -217,6 +220,7 @@ export function skillCommand(depsOverride?: StatusDeps): Command {
           : line.state === "yes" ? "on: the person's saved yes" : "off: the person's saved no";
       console.log(`bootstrap   ${said} (skills.router_line.enabled)`);
     }
+    for (const line of seatLaunchAdditionLines(seat.launchAdditions)) console.log(line);
     if (seat.delivery) console.log(`last sent   ${seat.delivery.outcome} at ${seat.delivery.at} (${seat.delivery.deliveryId}), to this occupant`);
     if (seat.confirmed && seat.confirmed.deliveryId !== seat.delivery?.deliveryId) console.log(`last confirmed delivered at ${seat.confirmed.at} (${seat.confirmed.deliveryId})`);
   }

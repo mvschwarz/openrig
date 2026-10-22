@@ -11,6 +11,7 @@ import { parseSkillFrontmatter } from "./skill-discovery.js";
 import { readFootprintAnswer, type FootprintAnswer } from "./footprint-choice.js";
 import type { SettingsStore } from "./user-settings/settings-store.js";
 import { seatSkillLocation, seatSkillPaths, writeSeatSkillCatalog, type SeatSkillPaths, SEAT_SKILL_ROUTER_ID, resolveSeatSkillRouter, writeSeatSkillRouter, type SeatSkillRouter } from "./seat-skill-storage.js";
+import { seatLaunchAdditionsReport, type SeatLaunchAdditionsReport } from "./seat-launch-additions.js";
 
 // OPR.0.7.0.13 (B) — the seat mode of `rig skill loadout`: inspect a seat's stored selection, or apply it and tell the
 // running seat. Disk state and delivery state are kept apart. A delivery is recorded against the catalog's digest AND
@@ -67,6 +68,9 @@ export interface SeatSkillInspection {
    *  `unknown` when the setting couldn't be read. Whether a launch could write the line is that launch's own result;
    *  this read writes nothing and infers nothing. Null when the caller didn't read the setting. */
   bootstrapLine: FootprintAnswer | { state: "unknown" } | null;
+  /** OPR.0.7.0.9: what a Claude seat's launch passes of its own additions, and any copy missing or refused; null when
+   *  it has none (or isn't a Claude seat). */
+  launchAdditions: SeatLaunchAdditionsReport | null;
 }
 
 /** The bootstrap line's saved answer for the seat report (see SeatSkillInspection.bootstrapLine). */
@@ -141,6 +145,7 @@ export function inspectSeatSkills(seat: SeatRef, occupant: string | null, db?: D
     skills: exists ? listSkills(paths) : [],
     router: exists ? resolveSeatSkillRouter(paths) : null,
     bootstrapLine,
+    launchAdditions: seat.runtime === "claude-code" ? seatLaunchAdditionsReport(paths) : null,
     catalogDigest: digest,
     occupant,
     ...(() => {

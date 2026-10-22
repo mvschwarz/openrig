@@ -1,5 +1,6 @@
 import type { PodRigInstantiator, AddMemberOutcome } from "./rigspec-instantiator.js";
 import type { ClaimService, ReconcileSessionOutcome } from "./claim-service.js";
+import type { SeatSkillPaths } from "./seat-skill-storage.js";
 
 /**
  * Topology-mutation converge spine (OPR.0.3.3.24, AC-6 scaffold).
@@ -126,12 +127,13 @@ export async function convergeOp(
   rigId: string,
   op: TopologyOp,
   rigRoot: string,
-  opts?: { cwdOverride?: string },
+  opts?: { cwdOverride?: string; launchAdditionsFrom?: SeatSkillPaths },
 ): Promise<ConvergeResult> {
   switch (op.kind) {
     case "add_member": {
       const outcome = await deps.instantiator.addMemberToPod(rigId, op.pod, op.member, rigRoot, {
         cwdOverride: opts?.cwdOverride,
+        ...(opts?.launchAdditionsFrom ? { launchAdditionsFrom: opts.launchAdditionsFrom } : {}),
         edges: op.edges,
       });
       return { kind: "add_member", supported: true, outcome };

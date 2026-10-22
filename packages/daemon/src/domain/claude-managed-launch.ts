@@ -10,6 +10,7 @@ import { shellQuote } from "../adapters/shell-quote.js";
 import { claudeClassicRendererEnvPrefix } from "../adapters/yolo-mode.js";
 import { parseClaudePermissionModes } from "./permission-drift.js";
 import { validateNativePermissionSelection } from "./native-permission-selection.js";
+import { seatLaunchAdditionsForLaunch } from "./seat-launch-additions.js";
 
 export interface ClaudeLaunchTarget {
   nodeId: string;
@@ -91,7 +92,8 @@ export class ClaudeManagedLaunch {
     // A seat that selected the shipped openrig-core plugin has the plugin variable in its pane (the launch, or a
     // handover's respawned pane, put it there). The session's own name list can predate that, so name it here too.
     if (seatCorePluginDir({ id: nodeId, runtime: "claude-code" }, this.db, undefined, this.pluginsDir)
-      || seatSkillPluginDirForNode(this.db, nodeId)) keys.add(CLAUDE_PLUGIN_DIRS_ENV);
+      || seatSkillPluginDirForNode(this.db, nodeId)
+      || (seatLaunchAdditionsForLaunch(this.db, nodeId).additions?.pluginDirs.length ?? 0) > 0) keys.add(CLAUDE_PLUGIN_DIRS_ENV);
     if (session && this.readSessionEnv) {
       // A one-off name is a convenience on top of the declared ones. If tmux can't be read, the
       // launch proceeds as it would for a seat with no one-off names.

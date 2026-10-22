@@ -132,6 +132,13 @@ function anchored(anchor: string, target: string, kind: "file" | "folder"): bool
   return true;
 }
 
+/** Whether folder `dir` is inside the seat storage at `root`, with no link on the way, itself included. */
+export function insideSeatStorageFolder(root: string, dir: string): boolean {
+  const seatRoot = nodePath.resolve(root);
+  if (!nodePath.resolve(dir).startsWith(seatRoot + nodePath.sep)) return false;
+  return anchored(seatsAnchor(seatRoot), dir, "folder");
+}
+
 /** Whether `file` is inside the seat storage at `root`, with no link on the way from the anchor all seats share. */
 export function insideSeatStorage(root: string, file: string): boolean {
   const seatRoot = nodePath.resolve(root);
@@ -144,7 +151,7 @@ export function insideSeatStorage(root: string, file: string): boolean {
  * created exclusively, and an existing one is replaced by a rename (which replaces the entry itself). Throws when the
  * path isn't inside the seat's storage.
  */
-function writeInsideSeatStorage(root: string, file: string, bytes: string | Buffer, mode?: number): void {
+export function writeInsideSeatStorage(root: string, file: string, bytes: string | Buffer, mode?: number): void {
   if (!insideSeatStorage(root, file)) throw new Error(`${file} is not inside this seat's storage`);
   const base = seatsAnchor(root);
   fs.mkdirSync(base, { recursive: true }); // the folder every seat shares, in the OpenRig home
@@ -460,10 +467,17 @@ export function recordSeatSkillWrite(skillsRoot: string, dest: string, source: s
   writeProjections(root, record);
 }
 
-/** Every file OpenRig recorded writing into this seat's skills: its recorded hash and source. */
+/** OPR.0.7.0.9: the seat's launch additions' locations, beside its skills: `additions/` (the prompt file and plugin
+ *  folders) and, for Claude, its generated plugin's `agents/`. The same record, restore and cleanup route covers them. */
+export function seatAdditionLocations(paths: SeatSkillPaths): string[] {
+  return [nodePath.join(paths.root, "additions"), ...(paths.skillsRoot === nodePath.join(paths.pluginDir, "skills") ? [nodePath.join(paths.pluginDir, "agents")] : [])];
+}
+
+/** Every file OpenRig recorded writing into this seat's skills or launch additions: its recorded hash and source. */
 function recordedSeatSkillFiles(paths: SeatSkillPaths): Map<string, { sha256: string; source: string }> {
   const out = new Map<string, { sha256: string; source: string }>();
-  const inside = (file: string) => file.startsWith(nodePath.resolve(paths.skillsRoot) + nodePath.sep);
+  const roots = [paths.skillsRoot, ...seatAdditionLocations(paths)].map((dir) => nodePath.resolve(dir) + nodePath.sep);
+  const inside = (file: string) => roots.some((root) => file.startsWith(root));
   try {
     const manifest = JSON.parse(fs.readFileSync(paths.manifestPath, "utf8")) as { skills?: unknown };
     for (const skill of Array.isArray(manifest.skills) ? manifest.skills as Array<Record<string, unknown>> : []) {
@@ -533,7 +547,11 @@ export function cleanSeatSkills(paths: SeatSkillPaths, opts: { dropRecords?: boo
       if (insideSeatStorage(paths.root, router) && recorded === sha256(fs.readFileSync(router)) && removeInsideSeatStorage(paths.root, router)) removedFiles.push(router);
     } catch {}
   }
-  for (const file of leftovers(paths.skillsRoot)) if (!out.kept.includes(file) && !out.refused.includes(file)) out.kept.push(file);
+  for (const dir of [paths.skillsRoot, ...seatAdditionLocations(paths)]) {
+    // A linked location is refused above, file by file; nothing is walked through it.
+    if (dir !== paths.skillsRoot && lexists(dir) && !anchored(seatsAnchor(paths.root), dir, "folder")) continue;
+    for (const file of leftovers(dir)) if (!out.kept.includes(file) && !out.refused.includes(file)) out.kept.push(file);
+  }
   // Nothing points at the storage any more: no Claude plugin, no Codex catalog (both are rebuilt on a restore). Each is
   // removed only while it is exactly what OpenRig wrote: the plugin manifest is a constant, and the catalog's digest
   // is recorded when OpenRig writes it. A differing or unrecorded one is someone's: kept and named.
@@ -548,7 +566,7 @@ export function cleanSeatSkills(paths: SeatSkillPaths, opts: { dropRecords?: boo
   owned(paths.pluginManifestPath, (bytes) => bytes.toString("utf8") === PLUGIN_MANIFEST);
   owned(paths.catalogPath, (bytes) => generated[paths.catalogPath] === sha256(bytes));
   if (opts.dropRecords && out.kept.length === 0 && out.refused.length === 0) {
-    for (const record of [paths.manifestPath, paths.projectionsPath]) {
+    for (const record of [paths.manifestPath, paths.projectionsPath, nodePath.join(paths.root, "launch-additions.json")]) {
       try { if (removeInsideSeatStorage(paths.root, record)) removedFiles.push(record); } catch {}
     }
   }

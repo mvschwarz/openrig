@@ -352,6 +352,21 @@ describe("SuccessorSessionLauncher", () => {
       });
     }
 
+    it("OPR.0.7.0.9 (K2): the seat's launch additions reach the successor's launch, fresh and fork", async () => {
+      checkReady.mockImplementation(async () => ({ ready: true }));
+      const launchAdditions = { agent: "openrig:reviewer", appendSystemPromptFile: "/seat/additions/system-prompt.md", pluginDirs: [] };
+      for (const forkSource of [undefined, { kind: "native_id" as const, value: "parent-1" }]) {
+        launchHarness.mockClear();
+        const res = await timedLauncher().createSuccessor({
+          node: { id: "n", runtime: "codex", cwd: "/w", launchAdditions }, departingSessionName: "a@r", ...(forkSource ? { forkSource } : {}),
+        });
+        expect(res.ok).toBe(true);
+        const [binding, opts] = launchHarness.mock.calls[0]! as [{ launchAdditions?: unknown }, { forkSource?: unknown }];
+        expect(binding.launchAdditions).toEqual(launchAdditions);
+        expect(opts.forkSource).toEqual(forkSource);
+      }
+    });
+
     it("uses the configured window for successor readiness", async () => {
       checkReady.mockImplementation(async () => ({ ready: Date.now() >= 40_000 }));
       const readinessSettings = {

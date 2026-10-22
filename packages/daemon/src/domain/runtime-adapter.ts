@@ -32,6 +32,8 @@ export interface NodeBinding extends Binding {
   /** OPR.0.7.0.13: set when `seatSkillsRoot` is a seat's storage that a link refused: why. Every skill meant for it is then
    *  refused and named (none is written there or into the project), and a selected plugin's bundled skills are named lost. */
   seatSkillsRefused?: string;
+  /** OPR.0.7.0.9: this seat's own launch additions, copies in its seat storage. Only the Claude adapters read them. */
+  launchAdditions?: import("./seat-launch-additions.js").SeatLaunchAdditions;
   /** #25: the rig's `managed_blocks.claude-code` file. Absent = CLAUDE.md. Only the Claude adapter reads it. */
   claudeManagedBlockFile?: import("./managed-blocks.js").ClaudeManagedBlockFile;
 }

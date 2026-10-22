@@ -427,6 +427,22 @@ describe("fresh launch preview", () => {
     expect(deps.lifecycleDeps.spawn).not.toHaveBeenCalled();
   });
 
+  it("OPR.0.7.0.9: the printed plan shows the seat's launch additions, as the seat view does", async () => {
+    const launchAdditions = { agent: "openrig:reviewer", agentPromptReplacesDefault: true, appendSystemPromptFile: "/s/additions/system-prompt.md",
+      pluginDirs: ["/s/additions/plugins/review"], missing: ["/s/gone"], refused: ["/s/linked is not inside this seat's storage"] };
+    const data = { ok: true, planOnly: true, complete: true, launchable: true, sessionName: "dev@fixture", currentOccupant: "absent",
+      startup: { projectionCount: 0, fileCount: 0, actionCount: 0 }, stopRequired: false, wouldStop: false, blockers: [], warnings: [], siblings: [],
+      launchAdditions };
+    const deps = makeDeps({ status: 200, data }, []);
+    const output = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "launch", "dev@fixture", "--fresh", "--plan"]).then(() => undefined));
+    const text = output.logs.join("\n");
+    expect(text).toContain("agent       openrig:reviewer (--agent; its prompt replaces Claude's default system prompt)");
+    expect(text).toContain("prompt      /s/additions/system-prompt.md (--append-system-prompt-file)");
+    expect(text).toContain("plugin dir  /s/additions/plugins/review (CLAUDE_CODE_PLUGIN_DIRS)");
+    expect(text).toContain("missing     /s/gone: not passed to the launch");
+    expect(text).toContain("refused     /s/linked is not inside this seat's storage: not passed to the launch");
+  });
+
   it("fails closed on an older daemon without ever posting to the launch endpoint", async () => {
     const calls: Array<{ path: string; body: unknown }> = [];
     const deps = makeDeps({ status: 404, data: { error: "Not Found" } }, calls);

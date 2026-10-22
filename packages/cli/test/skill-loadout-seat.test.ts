@@ -67,11 +67,24 @@ describe("rig skill loadout --seat", () => {
     expect(logs).toContain(lineLine);
   });
 
+  it("OPR.0.7.0.9: prints what the seat's launch passes of its own additions, and any copy missing or refused", async () => {
+    process.env["OPENRIG_SESSION_NAME"] = "dev-impl@team";
+    const launchAdditions = { agent: "openrig:reviewer", agentPromptReplacesDefault: true, appendSystemPromptFile: "/s/additions/system-prompt.md", pluginDirs: ["/s/additions/plugins/review"],
+      missing: ["/s/additions/plugins/gone"], refused: ["/s/additions/x can't be read back"] };
+    const { deps } = makeDeps({ status: 200, data: { ...inspection, launchAdditions } });
+    await skillCommand(deps).parseAsync(["node", "rig", "loadout", "--seat", "self"]);
+    expect(logs).toContain("agent       openrig:reviewer (--agent; its prompt replaces Claude's default system prompt)");
+    expect(logs).toContain("prompt      /s/additions/system-prompt.md (--append-system-prompt-file)");
+    expect(logs).toContain("plugin dir  /s/additions/plugins/review (CLAUDE_CODE_PLUGIN_DIRS)");
+    expect(logs).toContain("missing     /s/additions/plugins/gone: not passed to the launch");
+    expect(logs).toContain("refused     /s/additions/x can't be read back: not passed to the launch");
+  });
+
   it("an older daemon's report, without the router fields, prints as before", async () => {
     process.env["OPENRIG_SESSION_NAME"] = "dev-impl@team";
     const { deps } = makeDeps({ status: 200, data: inspection });
     await skillCommand(deps).parseAsync(["node", "rig", "loadout", "--seat", "self"]);
-    expect(logs.some((l) => l.startsWith("router") || l.startsWith("bootstrap"))).toBe(false);
+    expect(logs.some((l) => l.startsWith("router") || l.startsWith("bootstrap") || l.startsWith("agent") || l.startsWith("prompt"))).toBe(false);
   });
 
   it("says plainly that a shell without a seat identity is not an OpenRig seat, and shows no one else's skills", async () => {

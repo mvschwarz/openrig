@@ -70,6 +70,9 @@ export interface SuccessorNode {
   /** Set when the seat loads the openrig-core plugin: its launch project, handed to the successor as OPENRIG_SEAT_PROJECT_DIR
    *  (and, for a Codex seat, with OPENRIG_NODE). */
   seatProjectDir?: string;
+  /** OPR.0.7.0.9: the seat's own launch additions (copies in its seat storage), populated by the caller. The successor
+   *  is the same seat, so its launch passes them as an original launch does; absent = none. */
+  launchAdditions?: import("./seat-launch-additions.js").SeatLaunchAdditions;
 }
 
 export type SuccessorLaunchResult =
@@ -357,6 +360,7 @@ export class SuccessorSessionLauncher {
       effort: node.effort ?? undefined,
       // 0.5.2-07 A4-profile: the successor reads the seat's SPEC-pinned codex config profile (adapter emits -p).
       codexConfigProfile: node.codexConfigProfile ?? undefined,
+      ...(node.launchAdditions ? { launchAdditions: node.launchAdditions } : {}),
     };
 
     let launch: Awaited<ReturnType<RuntimeAdapter["launchHarness"]>>;
