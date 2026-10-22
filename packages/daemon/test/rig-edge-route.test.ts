@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+import { LegacyRigSpecCodec } from "../src/domain/rigspec-codec.js";
+import { LegacyRigSpecSchema } from "../src/domain/rigspec-schema.js";
+import type { LegacyRigSpec } from "../src/domain/types.js";
 
 // One typed edge on an existing rig, through the real route, converge op and repository.
 describe("POST and DELETE /api/rigs/:rigId/edges", () => {
@@ -140,6 +143,16 @@ describe("POST and DELETE /api/rigs/:rigId/edges", () => {
     const withDuplicate = state();
     expect((await add(edge)).status).toBe(200);
     expect(state()).toEqual(withDuplicate);
+  });
+
+  it.each(["collaborates_with", "escalates_to"])("a flat legacy rig's export still imports after adding a %s edge", async (kind) => {
+    const legacy = setup.rigRepo.createRig("legacy-rig");
+    for (const id of ["lead", "worker"]) setup.rigRepo.addNode(legacy.id, id, { runtime: "claude-code", cwd: "/workspace" });
+    const reimport = () => LegacyRigSpecSchema.validate(LegacyRigSpecCodec.parse(
+      LegacyRigSpecCodec.serialize(setup.rigSpecExporter.exportRig(legacy.id) as LegacyRigSpec)));
+    expect(reimport()).toMatchObject({ valid: true });
+    expect((await add({ from: "lead", to: "worker", kind }, legacy.id)).status).toBe(201);
+    expect(reimport()).toMatchObject({ valid: true, errors: [] });
   });
 
   it("removes an edge only through its own rig, and a malformed plan is never a write", async () => {
