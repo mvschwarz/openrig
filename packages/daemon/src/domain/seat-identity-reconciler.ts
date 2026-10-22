@@ -53,7 +53,7 @@ export function classifyPaneRuntimeMatch(
   // by the time readiness succeeds, but any check can still see a shell: before the launch, or after the agent exits.
   // Terminal seats deliberately run a shell and are not included.
   const expectsAgent = expectedRuntime === "claude-code" || expectedRuntime === "codex"
-    || expectedRuntime === "pi" || expectedRuntime === "omp";
+    || expectedRuntime === "pi" || expectedRuntime === "omp" || expectedRuntime === "omp-tui";
 
   // Positive same-runtime signal.
   if (expectedRuntime === "claude-code" && cmd.includes("claude")) return "match";

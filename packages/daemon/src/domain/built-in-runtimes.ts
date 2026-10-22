@@ -1,6 +1,6 @@
 /** The runtimes OpenRig ships. Any other runtime name names a community harness (`community-harness-presets.ts`), and a
  *  preset can't take one of these names. */
-export const BUILT_IN_RUNTIMES: ReadonlySet<string> = new Set(["claude-code", "codex", "pi", "omp", "terminal", "stub"]);
+export const BUILT_IN_RUNTIMES: ReadonlySet<string> = new Set(["claude-code", "codex", "pi", "omp", "omp-tui", "terminal", "stub"]);
 
 /** A runtime name that isn't built in names a community harness. */
 export function isCommunityHarnessRuntime(runtime: string | null | undefined): runtime is string {

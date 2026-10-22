@@ -18,6 +18,16 @@ describe("rig ps — model lines", () => {
     ]);
   });
 
+  it("keeps OMP native-TUI seats in the same honest no-model-reader summary", () => {
+    const lines = modelLines([
+      seat("a@k", "omp-tui", "anthropic/claude-opus-5-5:high"),
+      seat("b@k", "omp-tui", "anthropic/claude-opus-5-5:low"),
+    ] as never);
+    expect(lines).toEqual([
+      "Model (2 omp-tui seats): last observed UNKNOWN (unsupported-runtime: no model reader for omp-tui); configured anthropic/claude-opus-5-5:high, anthropic/claude-opus-5-5:low",
+    ]);
+  });
+
   it("keeps one line per seat for a lone seat, and for seats whose runtime has a model reader", () => {
     const observed = { status: "observed", model: "claude-opus-5-5", source: "claude-assistant-response", observedAt: "2026-10-21T10:00:00Z", generation: "current", reason: null };
     const lines = modelLines([

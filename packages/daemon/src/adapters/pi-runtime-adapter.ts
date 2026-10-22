@@ -7,7 +7,10 @@
 // mirrors a legible transcript to pane stdout); activity + session identity
 // come from Pi's typed RPC events + get_state via the runner's sidecar and
 // bus emission — never pane scraping (BR-1). TUI-native Pi is a SEPARATE
-// future contract, never a hidden mode here (BR-2).
+// contract (BR-2): its own runtime key (`omp-tui`) and its own adapter class
+// (OmpTuiRuntimeAdapter). The `pi`/`omp` runtime keys stay RPC-only — the
+// `childRuntime`/`uiMode` seams below exist so that separate contract can
+// reuse this class's plumbing, never to make this adapter a hidden mode.
 
 import nodePath from "node:path";
 import { randomUUID } from "node:crypto";
@@ -27,7 +30,7 @@ import { observePiResourceTrust, observeOmpApprovalMode } from "../domain/permis
 import {
   piSeatPaths, parsePiRunnerState, buildPiRunnerCommand, buildPendingRunnerState,
   PI_RUNNER_READY_MARKER, PI_RUNNER_ERROR_MARKER, PI_RUNNER_EXIT_MARKER,
-  type PiRunnerState, type RunnerRuntime,
+  type PiRunnerState, type RunnerRuntime, type RunnerUiMode,
 } from "./pi-runner-protocol.js";
 
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
@@ -66,7 +69,9 @@ export interface PiRuntimeAdapterDeps {
 }
 
 export class PiRuntimeAdapter implements RuntimeAdapter {
-  readonly runtime: RunnerRuntime = "pi";
+  readonly runtime: string = "pi";
+  protected get childRuntime(): RunnerRuntime { return "pi"; }
+  protected get uiMode(): RunnerUiMode { return "mirror"; }
   private tmux: TmuxAdapter;
   private seatLaunchEnvironment?: SeatLaunchEnvironment;
   private fs: PiAdapterFsOps;
@@ -104,10 +109,9 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     if (!state.sessionFile) return { ok: false, reason: "missing_sidecar" };
     // OMP announces a future path before its first persisted turn. A path
     // that does not exist cannot be used as a resume token.
-    if (this.runtime === "omp" && !this.fs.exists(state.sessionFile)) return { ok: false, reason: "missing_sidecar" };
+    if (this.childRuntime === "omp" && !this.fs.exists(state.sessionFile)) return { ok: false, reason: "missing_sidecar" };
     return { ok: true, sessionFile: state.sessionFile };
   }
-
   /** The seat's runner sidecar (null = absent or unparseable) and its sessions folder, with the
    *  runner entry path and state root this adapter launches with, for a reader that must tie the
    *  sidecar to the pane's live runner before trusting it. */
@@ -247,7 +251,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
 
     if (opts.resumeToken) {
       // Validity floor before we type anything into the pane.
-      const validation = validateResumeToken(this.runtime, opts.resumeToken);
+      const validation = validateResumeToken(this.childRuntime, opts.resumeToken);
       if (!validation.ok) {
         return { ok: false, error: `${this.runtime} resume: ${validation.error}` };
       }
@@ -275,29 +279,30 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       JSON.stringify(buildPendingRunnerState(launchId, new Date().toISOString(), prior)),
     );
 
-    const trust = this.runtime === "omp"
+    const trust = this.childRuntime === "omp"
       ? (yoloEnabled(process.env, binding.launchPosture) ? "approve" : "no-approve")
       : piTrust(this.trustPosture, process.env, binding.launchPosture);
-    const appliedLaunch = this.runtime === "omp"
+    const appliedLaunch = this.childRuntime === "omp"
       ? observeOmpApprovalMode(`--approval-mode ${trust === "approve" ? "yolo" : "always-ask"}`)
       : observePiResourceTrust(trust);
     const cmd = buildPiRunnerCommand({
-      runtime: this.runtime,
+      runtime: this.childRuntime,
+      ui: this.uiMode,
       runnerEntryPath: this.runnerEntryPath,
       sessionName,
       stateRoot: this.stateRoot,
       cwd: binding.cwd,
       model: binding.model,
       // The seat's resolved effort, sent as Pi's --thinking; OMP unchanged.
-      thinking: this.runtime === "pi" ? binding.effort : undefined,
+      thinking: this.childRuntime === "pi" ? binding.effort : undefined,
       // OPR.0.4.8.2: Pi RESOURCE TRUST (not a permission policy). YOLO forces `approve` on every
       // seat; otherwise the configured posture. Same decision used on the restore path (pi-resume).
       trust,
       sessionFile: opts.resumeToken,
       forkRef,
       launchId,
-      usageFacts: this.runtime === "pi" && this.usageFactsEnabled(),
-      openRouterCharge: this.runtime === "pi" && this.openRouterChargeEnabled(),
+      usageFacts: this.childRuntime === "pi" && this.usageFactsEnabled(),
+      openRouterCharge: this.childRuntime === "pi" && this.openRouterChargeEnabled(),
     });
 
     const command = this.runtime === "pi" && this.seatLaunchEnvironment
@@ -322,7 +327,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     if (!sessionFile) {
       return { ok: false, error: `${this.runtime} launch: the runner became ready but reported no session file` };
     }
-    if (this.runtime === "omp" && opts.resumeToken && sessionFile !== opts.resumeToken) {
+    if (this.childRuntime === "omp" && opts.resumeToken && sessionFile !== opts.resumeToken) {
       // An exact OMP resume must continue the requested history; a runner
       // that came up on any other file started a different session. Same
       // contract as the separate resume adapter's verifyResume.
@@ -333,14 +338,14 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       // parent's (runtime-adapter.ts fork rule).
       return { ok: false, error: `${this.runtime} fork: the runner reported the parent session file instead of the post-fork child` };
     }
-    const validation = validateResumeToken(this.runtime, sessionFile);
+    const validation = validateResumeToken(this.childRuntime, sessionFile);
     if (!validation.ok) {
       return { ok: false, error: `${this.runtime} launch: the runner reported a malformed session file (${validation.error})` };
     }
 
     // OMP lazily creates its JSONL on the first persisted turn. Readiness
     // is real, but until then there is no history to resume after a reboot.
-    if (this.runtime === "omp" && !this.fs.exists(validation.token)) return { ok: true, appliedLaunch };
+    if (this.childRuntime === "omp" && !this.fs.exists(validation.token)) return { ok: true, appliedLaunch };
     return { ok: true, resumeToken: validation.token, resumeType: `${this.runtime}_session_file`, appliedLaunch };
   }
 
@@ -369,10 +374,17 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       }
       return { ready: true };
     }
+    if (this.uiMode === "native") {
+      // The native TUI owns the pane, so the pane shows OMP's own screen: a
+      // runner-authored marker can never be there, and TUI pixels prove
+      // nothing either way. The sidecar — written from the bridge handshake —
+      // is the only readiness signal for a native-TUI seat.
+      return { ready: false, reason: `${this.runtime} is waiting for its TUI to report readiness`, code: "awaiting_runtime" };
+    }
     // Runner-authored pane marker as the secondary signal (FR-2) — still the
     // runner's own output, never Pi TUI heuristics; same foreground guard.
     const paneContent = (await this.tmux.capturePaneContent(binding.tmuxSession, 40)) ?? "";
-    const marker = this.runtime === "omp" ? "[omp-runner]" : "[pi-runner]";
+    const marker = this.childRuntime === "omp" ? "[omp-runner]" : "[pi-runner]";
     if (paneContent.includes(`${marker} ERROR`)) {
       return { ready: false, reason: `${this.runtime}-runner reported an error in the pane`, code: "runner_error" };
     }

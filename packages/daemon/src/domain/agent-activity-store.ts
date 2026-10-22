@@ -310,7 +310,7 @@ export class AgentActivityStore {
     if (!row) return null;
     // OMP identity is node-scoped so a reused session name on another node can
     // never receive this seat's resume token. Other runtimes keep main's lookup.
-    const sessionRow = (row.runtime === "omp"
+    const sessionRow = (row.runtime === "omp" || row.runtime === "omp-tui"
       ? this.db.prepare("SELECT id FROM sessions WHERE session_name = ? AND node_id = ? ORDER BY id DESC LIMIT 1").get(row.session_name, row.node_id)
       : this.db.prepare("SELECT id FROM sessions WHERE session_name = ? ORDER BY id DESC LIMIT 1").get(row.session_name)) as { id: string } | undefined;
     if (!sessionRow) return null;
@@ -352,7 +352,7 @@ export function hookEventState(rawEvent: string | null | undefined, rawSubtype: 
   if (rawEvent === "PermissionRequest") return seatRuntime === "codex" ? "unknown" : "needs_input";
   if (rawEvent === "PermissionPromptConfirmed") return "needs_input";
   if (rawEvent === "Notification") {
-    if (rawSubtype === "permission_prompt" || rawSubtype === "elicitation_dialog" || (seatRuntime === "omp" && rawSubtype === "runtime_error")) return "needs_input";
+    if (rawSubtype === "permission_prompt" || rawSubtype === "elicitation_dialog" || ((seatRuntime === "omp" || seatRuntime === "omp-tui") && rawSubtype === "runtime_error")) return "needs_input";
     return rawSubtype === "idle_prompt" ? "idle" : "unknown";
   }
   // The runner posts Stop when its child process exits: nothing is at a prompt, so it isn't idle.

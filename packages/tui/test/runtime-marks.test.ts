@@ -39,6 +39,11 @@ describe("row-scale mark family", () => {
     expect(runtimeMarkSegs(null)[0]!.token).toBe("dim"); // honest, never fabricated
   });
 
+  it("keeps OMP and OMP native-TUI in the same honest unknown-mark fallback", () => {
+    expect(markText(runtimeMarkSegs("omp-tui"))).toBe(markText(runtimeMarkSegs("omp")));
+    expect(markText(runtimeMarkSegs("omp-tui"))).toBe("?");
+  });
+
   it("both downscale candidates are OUTPUTS of the grid downsample (provably derived — guard finding 4)", async () => {
     const { clawdDownsample } = await import("../src/topology/runtime-marks.js");
     expect(clawdMiniA()).toEqual(clawdDownsample(2, 1)[0]);

@@ -592,6 +592,8 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
             console.log("Delivery: delivered (message landed; render confirmed)");
           } else if (outcome === "rendered-unconfirmed") {
             console.log(`Delivery: rendered-unconfirmed (landed; pane re-render not confirmed - confirm with: rig capture ${session})`);
+          } else if (outcome === "proxied") {
+            console.log("Delivery: proxied (message handed to seat's own OMP bridge and accepted there; pane was never typed into and no pane capture re-confirmation exists)");
           }
           for (const line of effectHumanLines(effect, session)) console.log(line);
         }
@@ -946,6 +948,8 @@ async function runHttpHostSend(
       console.log("Delivery: delivered (message landed; render confirmed)");
     } else if (outcome === "rendered-unconfirmed") {
       console.log(`Delivery: rendered-unconfirmed (landed; pane re-render not confirmed - confirm with: rig capture ${session})`);
+    } else if (outcome === "proxied") {
+      console.log("Delivery: proxied (message handed to seat's own OMP bridge and accepted there; pane was never typed into and no pane capture re-confirmation exists)");
     }
     // S3 wave-1 fix (r2 F2): honest cross-host limit — the verdict above is
     // the REMOTE transport's; the pane-effect check does not run cross-host.

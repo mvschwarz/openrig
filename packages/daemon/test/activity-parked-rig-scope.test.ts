@@ -87,6 +87,17 @@ describe("Wave-O B2 — parked diagnosis is RIG-SCOPED with the scope named", ()
     expect(body.rig.parked).toBe(true);
     expect(body.rig.scope).toEqual({ rig: "rig-b", resolvedFrom: "query-param" });
   });
+  it("an explicitly empty ?rig= refuses instead of falling through to caller session", async () => {
+    const res = await app.request("/api/activity/parked?rig=", {
+      headers: { "x-openrig-session": "dev-a@rig-a" },
+    });
+    expect(res.status).toBe(404);
+    const body = await res.json() as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("rig-a");
+    expect(body.error).toContain("rig-b");
+  });
+
 
   it("NO resolvable rig scope refuses with teaching — never a silent fleet-wide fold", async () => {
     const res = await app.request("/api/activity/parked");

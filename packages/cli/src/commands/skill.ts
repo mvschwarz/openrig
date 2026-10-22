@@ -231,6 +231,7 @@ export function skillCommand(depsOverride?: StatusDeps): Command {
         const outcome = delivery.transportOutcome ?? delivery.record.outcome;
         const what = outcome === "delivered" ? "delivered: the text landed and the transport re-confirmed it"
           : outcome === "rendered-unconfirmed" ? "rendered-unconfirmed: the text and Enter landed, but the transport couldn't re-confirm it"
+          : outcome === "proxied" ? "proxied: the text was handed to the seat's own OMP bridge and accepted there, not typed into the pane or re-confirmed by pane capture"
           : outcome === "retained" ? "retained: held by the typing guard, not yet sent"
           : `${outcome}${delivery.detail ? `: ${delivery.detail}` : ""}`;
         return `told seat   ${what}. This is what the transport saw, not the agent reading it. (${delivery.record.deliveryId})`;

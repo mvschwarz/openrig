@@ -842,6 +842,7 @@ queue-side surface, not `rig send`.
 `--verify` delivery outcomes (v0.3.3+):
 - `delivered` — text + Enter both succeeded and capture re-confirmed the body landed.
 - `rendered-unconfirmed` — text + Enter both succeeded but capture could not re-confirm the body (TUI redraw race or scroll). The message landed; the post-send re-check could not prove it. Treat as landed-but-unconfirmable, NOT failure.
+- `proxied` — the text was handed to the seat's own OMP bridge and accepted there. This proves bridge acceptance only: the pane was never typed into, and no pane capture re-confirmation exists. It does not prove the seat's agent read or acted on the message. Check for a direct reply or inspect the seat with `rig capture <session>` / transcript before deciding what to do next; do not treat this as pane delivery.
 - `failed` — the send transport itself failed.
 
 The legacy `Verified: yes/no` line is preserved verbatim (parser/test

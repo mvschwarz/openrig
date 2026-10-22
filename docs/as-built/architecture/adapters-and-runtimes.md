@@ -90,15 +90,17 @@ ends `attention_required`.
 
 ## 2. The runtime adapters
 
-**5** classes implement `RuntimeAdapter`
+**6** classes implement `RuntimeAdapter`
 (`git grep -l 'implements RuntimeAdapter' packages/daemon/src | wc -l`):
-`ClaudeCodeAdapter`, `CodexRuntimeAdapter`, `PiRuntimeAdapter`,
-`StubRuntimeAdapter` and `TerminalAdapter`. All live under
+`ClaudeCodeAdapter`, `CodexRuntimeAdapter`, `CommunityHarnessRuntimeAdapter`,
+`PiRuntimeAdapter`, `StubRuntimeAdapter` and `TerminalAdapter`. All live under
 `packages/daemon/src/adapters/` (Architecture Rule 1: **0** files there import
 Hono, `git grep -l 'from "hono' -- packages/daemon/src/adapters | wc -l`).
-`OmpRuntimeAdapter` (Oh My Pi) extends `PiRuntimeAdapter`, so the daemon wires
-**6** runtime keys — `claude-code`, `codex`, `pi`, `omp`, `stub`, `terminal`
-(`startup.ts:989`, and the same map at `:1259`;
+`OmpRuntimeAdapter` (Oh My Pi) extends `PiRuntimeAdapter`, and
+`OmpTuiRuntimeAdapter` (Oh My Pi with its own native TUI) extends
+`OmpRuntimeAdapter`, so the daemon wires **7** runtime keys — `claude-code`,
+`codex`, `pi`, `omp`, `omp-tui`, `stub`, `terminal`
+(`startup.ts:1067`, and the same map at `:1122`;
 `grep 'adapters: {' packages/daemon/src/startup.ts | grep -o -E '"[a-z-]+": ' | wc -l`).
 
 ### Launch posture
@@ -298,6 +300,9 @@ resume launches (`codex-runtime-adapter.ts:378`, `codex-resume.ts:103`).
 - `PiRuntimeAdapter` (`pi-runtime-adapter.ts:64`), `runtime` `"pi"` (`:65`).
 - `OmpRuntimeAdapter` (`omp-runtime-adapter.ts:7`) extends it with
   `runtime = "omp"` (`:8`).
+- `OmpTuiRuntimeAdapter` (`omp-tui-runtime-adapter.ts:16`) extends it with
+  `runtime = "omp-tui"` (`:17`), the same OMP process with OMP's own
+  interactive TUI in the seat pane.
 - `StubRuntimeAdapter` (`stub-runtime-adapter.ts:69`), `runtime` defaulting to
   `"stub"` (`:81`).
 
@@ -305,6 +310,105 @@ Pi and stub launch an OpenRig runner inside the seat's tmux pane (header
 comments `pi-runtime-adapter.ts:1–10`, `stub-runtime-adapter.ts:1–14`). Pi
 and Oh My Pi support fork and report `pi_session_file` or `omp_session_file`
 resume tokens; the stub refuses fork and reports `stub_session`.
+
+### The `omp-tui` shape: OMP's own TUI in the seat pane
+
+`runtime: omp-tui` keeps the RPC integration and changes who owns the pane.
+The runner launches interactive OMP under a pty (`script -qfec`, util-linux)
+and hands the pane's terminal to it, so the pane shows OMP's native TUI
+instead of a mirrored transcript. The runner itself writes only to
+`<seatRoot>/runner.log`; the pane belongs to the TUI. The native spawn uses
+`stdio: ["inherit", "inherit", "pipe"]` so `script` reads the pane's tty
+directly; a piped stdin leaves the child pty at size `0 0` with no
+`SIGWINCH`, so the TUI could neither size itself nor reflow on resize
+(measured: `stty size` reports `0 0` through a pipe, `30 100` on the
+inherited tty). The wiring lives in one place — the tested helper
+`piChildSpawnOptions` in `pi-runner-protocol.ts`, pinned by
+`test/omp-tui-args.test.ts` — so the pty contract cannot drift per call
+site. A second pin runs the real runner inside a 30x100 `script` pty with a
+fake `omp` on `PATH` and asserts the child reports that size
+(`test/omp-tui-native-pty.test.ts`); it exercises the runner's own spawn, so
+a call site that stops using the helper cannot slip past it either.
+
+Because the TUI cannot be scraped or typed into, an OpenRig-shipped extension
+(`omp-tui-extension.ts`, loaded by OMP through `--trusted-extension`) runs inside
+the OMP process and talks to the runner over a Unix socket
+(`<seatRoot>/omp-bridge.sock`):
+
+- **bridge role** (the extension): reports OMP's session events and the
+  session identity; applies the commands the runner relays (a Rig message, a
+  steer, a follow-up, an abort, a state read).
+- **control role** (the daemon): sends one command frame per Rig message.
+
+The frames reuse the RPC vocabulary (`{type:"response", id, success, data}`
+replies, unchanged OMP event names), so the runner feeds them into the same
+event path the RPC child used: activity, session identity and the readiness
+sidecar keep working unchanged. A Rig message therefore reaches OMP's own
+conversation instead of being typed into the pane
+(`SessionTransport.sendUnguarded` calls the adapter's `deliverMessage`).
+
+Delivery is acknowledged, not timed: the control frame carries a command id,
+the extension applies the command and answers with a `command_ack` frame for
+that id, and the runner routes the acknowledgement back to the control
+socket. `deliverMessage` waits for it (3 s) and fails when the bridge
+rejects the command, when the bridge is gone, or when the command queue
+overflows — a delivery is never reported as sent on a timer. The
+acknowledgement proves the extension dispatched the message into OMP's
+session API; OMP's own `sendUserMessage` is fire-and-forget and the pane is
+OMP's, so it proves nothing about a rendered or answered message. The
+transport therefore reports the outcome as `proxied`. Frames are
+newline-delimited JSON capped at 1 MiB (`MAX_BRIDGE_FRAME_BYTES`): an
+oversized or malformed frame closes that connection instead of buffering
+without bound.
+
+The native TUI is the only approval authority: the runner neither cancels
+`extension_ui_request` nor raises a permission prompt, and readiness waits
+for the bridge's identity frame instead of a `get_state` reply. Resume tokens
+stay the OMP session file, reported as `omp-tui_session_file`.
+
+The runner announces the session identity with the child runtime
+(`runtime: "omp"`), so the activity route accepts an `omp` emitter for an
+`omp-tui` seat and persists the token under the seat's runtime
+(`omp-tui_session_file`, provenance `bridge` in the
+`agent.session_identity` event). An `omp-tui` emitter for a plain `omp`
+seat is refused with `runtime_mismatch` — the seats stay exclusive.
+
+Manual check (one seat in a tmux pane, after `npm run build -w packages/daemon`):
+
+```bash
+node dist/adapters/pi-runner.js --runtime omp --approval-mode yolo \
+  --session-name ompui-check@rig --state-root <seatRoot>/state \
+  --cwd <workdir> --launch-id attempt-1 --ui native
+```
+
+The pane must show OMP's own TUI (logo, model bar, composer), not a
+mirrored transcript. `<seatRoot>/runner.log` records "bridge socket
+listening at …", "waiting for the bridge to report the session identity" and
+then "READY session=…", and the sidecar `runner-state.json` gets
+`ready: true` with the OMP session file. A Rig message then arrives through
+the control role of that same socket — the control client sends a command id
+and waits for the `command_ack` frame with that id — and OMP answers in the
+same conversation; the pane is never typed into.
+
+Rig-level check (a scratch `OPENRIG_HOME` + daemon on a spare port, so the
+operator's rig is untouched): start the daemon with `OPENRIG_URL` and
+`OPENRIG_PORT` pointing at itself (the seat's activity URL is derived from
+the daemon's own env), a rig spec with `runtime: omp-tui`, then
+`rig up --fresh`. Observed: the pane shows OMP's TUI with approval prompts
+and Enter approves the focused choice; `rig send <seat> "Reply with exactly:
+RIG_ROUNDTRIP_OK"` lands in the session JSONL as a user message carrying the
+OpenRig envelope (`From: <sessionName>`) and the agent replies in the same
+conversation; resizing the pane reflows the TUI; `rig down` +
+`rig up --existing` resumes the same session file (`sessions.resume_type =
+"omp-tui_session_file"`, result "fully_restored" / "resumed").
+
+Seat prerequisites: OMP reads its config from the seat's
+`PI_CODING_AGENT_DIR` (`<stateRoot>/<sessionName>/agent`) — copy
+`config.yml` and `models.yml` there. Provider credentials reach the seat
+only through the allowlisted provider env map or the seat's own `.env`: a
+custom provider not listed in `OMP_PROVIDER_ENV_VARS` must put its key in
+the seat's `.env` (mode 600).
+
 
 `createDaemon` constructs the adapters (`startup.ts:778`, `:779`, `:782`,
 `:783`, `:788`) and creates the terminal adapter inline in the runtime adapter
@@ -432,6 +536,6 @@ module.
   snapshot/restore (resume vs rebuild vs fresh).
 - `architecture-rules-and-event-system.md` — the full architecture rule list.
 - Source roots: `packages/daemon/src/domain/runtime-adapter.ts`,
-  `packages/daemon/src/adapters/{claude-code-adapter,codex-runtime-adapter,pi-runtime-adapter,omp-runtime-adapter,stub-runtime-adapter,terminal-adapter,yolo-mode,non-interruptive,kernel-authority}.ts`,
+  `packages/daemon/src/adapters/{claude-code-adapter,codex-runtime-adapter,pi-runtime-adapter,omp-runtime-adapter,omp-tui-runtime-adapter,omp-tui-extension,omp-bridge-protocol,omp-bridge-server,stub-runtime-adapter,terminal-adapter,yolo-mode,non-interruptive,kernel-authority}.ts`,
   `packages/daemon/src/domain/{native-resume-probe,resume-metadata-refresher,codex-thread-id,claude-managed-launch,codex-network-default,native-permission-store}.ts`,
   `packages/daemon/src/domain/permission-policy/policy-ref.ts`.

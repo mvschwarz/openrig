@@ -15,7 +15,7 @@ import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js
 import type { ResumeResult } from "./claude-resume.js";
 import { piTrust, yoloEnabled } from "./yolo-mode.js";
 import {
-  piSeatPaths, parsePiRunnerState, buildPiRunnerCommand, buildPendingRunnerState, type RunnerRuntime,
+  piSeatPaths, parsePiRunnerState, buildPiRunnerCommand, buildPendingRunnerState, type RunnerRuntime, type RunnerUiMode,
 } from "./pi-runner-protocol.js";
 import { observePiResourceTrust, observeOmpApprovalMode } from "../domain/permission-drift.js";
 
@@ -44,6 +44,8 @@ interface PiResumeOptions {
 
 export class PiResumeAdapter {
   protected readonly runtime: RunnerRuntime = "pi";
+  protected get childRuntime(): RunnerRuntime { return "pi"; }
+  protected get uiMode(): RunnerUiMode { return "mirror"; }
   /** Operator-facing name in resume messages; Pi keeps main's wording. */
   private get label(): string { return this.runtime === "pi" ? "Pi" : "OMP"; }
   constructor(
@@ -101,26 +103,27 @@ export class PiResumeAdapter {
       ? observeOmpApprovalMode(`--approval-mode ${trust === "approve" ? "yolo" : "always-ask"}`)
       : observePiResourceTrust(trust);
     const cmd = buildPiRunnerCommand({
-      runtime: this.runtime,
+      runtime: this.childRuntime,
       runnerEntryPath: this.paths.runnerEntryPath,
+      ui: resumeType === "omp-tui_session_file" ? "native" : this.uiMode,
       sessionName: tmuxSessionName,
       stateRoot: this.paths.stateRoot,
       cwd,
       // The model declaration must survive resume: the runner's provider-key
       // allowlist keys off the declared provider (VM leg finding).
       model: model ?? undefined,
-      thinking: this.runtime === "pi" ? effort ?? undefined : undefined,
+      thinking: this.childRuntime === "pi" ? effort ?? undefined : undefined,
       // OPR.0.4.8.2: Pi RESOURCE TRUST (not a permission policy). Same decision as the launch path:
       // YOLO forces `approve` on every restored seat; otherwise the configured posture.
       trust,
       sessionFile,
       launchId,
-      usageFacts: this.runtime === "pi" && (this.options.usageFactsEnabled?.() ?? false),
-      openRouterCharge: this.runtime === "pi" && (this.options.openRouterChargeEnabled?.() ?? false),
+      usageFacts: this.childRuntime === "pi" && (this.options.usageFactsEnabled?.() ?? false),
+      openRouterCharge: this.childRuntime === "pi" && (this.options.openRouterChargeEnabled?.() ?? false),
     });
 
-    const command = this.runtime === "pi" && this.options.seatLaunchEnvironment
-      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { runtime: this.runtime })
+    const command = this.childRuntime === "pi" && this.options.seatLaunchEnvironment
+      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { runtime: this.childRuntime })
       : cmd;
     // Short commands retain the direct path; long commands exec from a private script.
     let textResult = await this.tmux.sendShellCommand(tmuxSessionName, command, undefined, { stageIfLong: true, execInScript: true });

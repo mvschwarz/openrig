@@ -170,7 +170,7 @@ export interface SeatSkillApplyResult {
 }
 
 export interface SeatSkillSender {
-  send(sessionName: string, text: string, opts: { deliveryId: string; verify: boolean; waitForIdleMs?: number }): Promise<{ ok: boolean; outcome?: "delivered" | "rendered-unconfirmed" | "failed" | "retained" | "unknown"; error?: string; reason?: string }>;
+  send(sessionName: string, text: string, opts: { deliveryId: string; verify: boolean; waitForIdleMs?: number }): Promise<{ ok: boolean; outcome?: "delivered" | "rendered-unconfirmed" | "proxied" | "failed" | "retained" | "unknown"; error?: string; reason?: string }>;
 }
 
 /**
@@ -243,10 +243,17 @@ export async function applySeatSkills(input: {
     sent = { ok: false, outcome: "unknown", error: (error as Error).message };
   }
   const transportOutcome = sent.outcome ?? (sent.ok ? "unknown" : "failed");
-  // Only a confirmed delivery or a definite failure is final as such; rendering without confirmation, or not knowing,
-  // is indeterminate. A guard's retention has already moved the row to retained, which this leaves as it is.
-  const finalized = outbox.finalizeDelivery(deliveryId, transportOutcome === "delivered" ? "delivered"
-    : transportOutcome === "failed" ? "failed" : transportOutcome === "retained" ? "retained" : "indeterminate");
+  // Only confirmed pane delivery or a definite failure is final as such; proxy acceptance is not pane delivery.
+  let finalizedOutcome: "delivered" | "failed" | "retained" | "indeterminate";
+  switch (transportOutcome) {
+    case "delivered": finalizedOutcome = "delivered"; break;
+    case "failed": finalizedOutcome = "failed"; break;
+    case "retained": finalizedOutcome = "retained"; break;
+    case "proxied":
+    case "rendered-unconfirmed":
+    case "unknown": finalizedOutcome = "indeterminate"; break;
+  }
+  const finalized = outbox.finalizeDelivery(deliveryId, finalizedOutcome);
   return result({ state: "sent", record: recordOf(finalized, occupant), transportOutcome, ...(sent.error || sent.reason ? { detail: sent.error ?? sent.reason } : {}) });
 }
 

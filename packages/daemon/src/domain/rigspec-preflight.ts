@@ -480,14 +480,18 @@ function piAvailabilityFailure(err: unknown, warnings: string[]): string[] {
 
 /** Probe only OMP seats. An OMP spec must never depend on the Pi binary. */
 export async function verifyOmpRuntimeAvailable(rigSpec: PodRigSpec, exec: ExecFn): Promise<string[]> {
-  if (!rigSpec.pods.some((pod) => pod.members.some((member) => member.runtime === "omp"))) return [];
+  // The native-TUI seat runs the same OMP binary, so it needs the same probe.
+  const ompRuntimes = [...new Set(rigSpec.pods.flatMap((pod) => pod.members)
+    .map((member) => member.runtime)
+    .filter((runtime): runtime is string => runtime === "omp" || runtime === "omp-tui"))];
+  if (ompRuntimes.length === 0) return [];
   try {
     await exec(RUNTIME_COMMANDS["omp"]!);
     return [];
   } catch (err) {
     const timedOut = runtimeProbeTimeout(err);
     if (timedOut) return [timedOut];
-    return [`Runtime "omp" not available ('omp --version' failed: ${runtimeProbeFailure(err)}). If OMP is not installed, install Oh My Pi and ensure 'omp' is on PATH.`];
+    return [`Runtime "${ompRuntimes.join(", ")}" not available ('omp --version' failed: ${runtimeProbeFailure(err)}). If OMP is not installed, install Oh My Pi and ensure 'omp' is on PATH.`];
   }
 }
 

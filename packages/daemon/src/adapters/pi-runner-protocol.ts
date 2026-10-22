@@ -15,10 +15,15 @@
 // - The runner persists `runner-state.json` (the sidecar) from RPC
 //   `get_state`, and prints the READY marker to the pane; the daemon reads
 //   ONLY runner-authored surfaces — never Pi TUI heuristics (BR-1).
+// - The `omp-tui` runtime key selects a SEPARATE contract (BR-2): `--ui native`
+//   spawns the agent's OWN interactive TUI under a pty and an agent-side bridge
+//   extension relays typed events over a Unix socket. The `pi`/`omp` keys keep
+//   RPC mode, and their commands stay byte-for-byte unchanged.
 
 import nodePath from "node:path";
 import { shellQuote } from "./shell-quote.js";
 export type RunnerRuntime = "pi" | "omp";
+export type RunnerUiMode = "mirror" | "native";
 
 // ── Seat state layout ────────────────────────────────────────────────────────
 // <stateRoot>/<sessionName>/agent     → PI_CODING_AGENT_DIR (auth.json, models.json, skills, …)
@@ -199,7 +204,7 @@ export function providerFromModel(model: string | undefined): string | null {
  *  the runner's own env; only allowlisted names cross the boundary. */
 export function buildPiChildEnv(
   source: Record<string, string | undefined>,
-  opts: { agentDir: string; sessionsDir: string; model?: string; runtime?: RunnerRuntime; sessionName?: string; nodeId?: string; openrigHome?: string; openrigUrl?: string },
+  opts: { agentDir: string; sessionsDir: string; model?: string; runtime?: RunnerRuntime; sessionName?: string; nodeId?: string; openrigHome?: string; openrigUrl?: string; bridgeSocketPath?: string },
 ): Record<string, string> {
   const env: Record<string, string> = {};
   for (const name of [...PI_ENV_BASELINE_VARS, ...PI_ENV_OPENRIG_VARS]) {
@@ -234,6 +239,9 @@ export function buildPiChildEnv(
     if (opts.openrigHome) env.OPENRIG_HOME = opts.openrigHome;
     if (opts.openrigUrl) env.OPENRIG_URL = opts.openrigUrl;
   }
+  if (opts.bridgeSocketPath !== undefined) {
+    env.OPENRIG_OMP_BRIDGE_SOCKET = opts.bridgeSocketPath;
+  }
   return env;
 }
 
@@ -242,6 +250,7 @@ export function buildPiChildEnv(
 export interface PiRunnerLaunchOpts {
   /** Explicit runtime; omitted keeps the original Pi command byte-for-byte. */
   runtime?: RunnerRuntime;
+  ui?: RunnerUiMode;
   /** Absolute path to the compiled runner entry (daemon dist). */
   runnerEntryPath: string;
   /** The seat's canonical session name (identity + sidecar key). */
@@ -292,6 +301,9 @@ export function buildPiRunnerCommand(opts: PiRunnerLaunchOpts): string {
       ? ["--runtime", "omp", "--approval-mode", opts.trust === "approve" ? "yolo" : "always-ask"]
       : [`--${opts.trust}`]),
   ];
+  if (opts.ui === "native") {
+    parts.push("--ui", "native");
+  }
   if (opts.model?.trim()) {
     parts.push("--model", shellQuote(opts.model.trim()));
   }
@@ -325,14 +337,22 @@ export function buildPiChildArgs(opts: {
   sessionFile?: string;
   forkRef?: string;
   runtime?: RunnerRuntime;
+  ui?: RunnerUiMode;
+  bridgeExtensionPath?: string;
 }): string[] {
-  const args = [
-    "--mode", "rpc",
-    "--session-dir", opts.sessionsDir,
-    ...(opts.runtime === "omp"
-      ? ["--approval-mode", opts.trust === "approve" ? "yolo" : "always-ask"]
-      : ["--name", opts.sessionName, `--${opts.trust}`]),
-  ];
+  const args = opts.ui === "native"
+    ? [
+        "--session-dir", opts.sessionsDir,
+        "--approval-mode", opts.trust === "approve" ? "yolo" : "always-ask",
+        ...(opts.bridgeExtensionPath !== undefined ? ["--trusted-extension", opts.bridgeExtensionPath] : []),
+      ]
+    : [
+        "--mode", "rpc",
+        "--session-dir", opts.sessionsDir,
+        ...(opts.runtime === "omp"
+          ? ["--approval-mode", opts.trust === "approve" ? "yolo" : "always-ask"]
+          : ["--name", opts.sessionName, `--${opts.trust}`]),
+      ];
   if (opts.model?.trim()) {
     args.push("--model", opts.model.trim());
   }
@@ -350,4 +370,31 @@ export function buildPiChildArgs(opts: {
     args.push("--fork", opts.forkRef);
   }
   return args;
+}
+
+/** The runner's child-process spawn options, by UI mode.
+ *
+ *  The stdio wiring is the load-bearing part. Native mode hands `script` the
+ *  pane's own terminal: the pty then inherits the pane's termios and window
+ *  size, and `script` forwards SIGWINCH, so OMP's TUI renders at the pane's
+ *  width and reflows when the pane is resized. A piped stdin leaves the
+ *  child's terminal at 0x0 with no SIGWINCH, which breaks both. Mirror mode
+ *  keeps the pipes: there the runner owns the child's input and output. */
+export interface PiChildSpawnOptions {
+  cwd: string;
+  env: Record<string, string>;
+  stdio: ["inherit" | "pipe", "inherit" | "pipe", "pipe"];
+}
+
+/** The options the runner spawns its child with. The stdio array exists in
+ *  exactly one place, so the pty wiring cannot drift per call site. */
+export function piChildSpawnOptions(
+  ui: RunnerUiMode,
+  opts: { cwd: string; env: Record<string, string> },
+): PiChildSpawnOptions {
+  return {
+    cwd: opts.cwd,
+    env: opts.env,
+    stdio: ui === "native" ? ["inherit", "inherit", "pipe"] : ["pipe", "pipe", "pipe"],
+  };
 }

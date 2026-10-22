@@ -232,11 +232,21 @@ activityRoutes.post("/hooks", async (c) => {
     // session file that matches the seat's runner sidecar. Every refusal
     // reports tokenPersisted: false so the OMP runner keeps re-announcing.
     // Pi, Claude, Codex and terminal seats keep the paths below unchanged.
-    if (runtime === "omp" || resolved.runtime === "omp") {
+    // The native-TUI seat hosts the same OMP process: its runner reports the
+    // "omp" runtime, while the seat's own runtime is "omp-tui". The seat
+    // decides the resume type; the emitter only proves which process spoke.
+    const ompSeatRuntime = resolved.runtime === "omp" || resolved.runtime === "omp-tui";
+    if (runtime === "omp" || runtime === "omp-tui" || ompSeatRuntime) {
       if (sessionName !== resolved.sessionName) {
         return c.json({ ok: false, code: "session_not_found", tokenPersisted: false, error: "Session identity does not match the managed seat." }, 404);
       }
-      if (runtime !== resolved.runtime) {
+      // The seat's own runtime decides the resume type. The native-TUI seat's
+      // runner reports the OMP process it hosts; every other seat demands its
+      // own runtime back, so a foreign runtime never claims the seat.
+      const seatRuntime = resolved.runtime;
+      const emitterMatches = seatRuntime !== null
+        && (runtime === seatRuntime || (seatRuntime === "omp-tui" && runtime === "omp"));
+      if (seatRuntime === null || !emitterMatches) {
         return c.json({ ok: false, code: "runtime_mismatch", tokenPersisted: false, error: "Session identity runtime does not match the managed seat." }, 409);
       }
       // Same occupant-generation gate as Pi below, before any file eligibility.
@@ -260,7 +270,7 @@ activityRoutes.post("/hooks", async (c) => {
           error: "OMP session identity ignored: emitter is not the registered current occupant.",
         }, 409);
       }
-      const validation = validateResumeToken("omp", stringOrNull(body.sessionFile));
+      const validation = validateResumeToken(seatRuntime, stringOrNull(body.sessionFile));
       // OMP reports a path before its first turn is written. Persist only
       // materialized history; the runner can re-announce identity later.
       const adapters = c.get("runtimeAdapters" as never) as Record<string, unknown> | undefined;
@@ -270,16 +280,18 @@ activityRoutes.post("/hooks", async (c) => {
         ? sessionRegistry.updateResumeToken(resolved.sessionId, validation.resumeType, validation.token, "hook")
           || sessionRegistry.resumeTokenMatches(resolved.sessionId, validation.resumeType, validation.token)
         : false;
+      // The native TUI's identity arrives over the bridge socket, not over RPC.
+      const provenance = seatRuntime === "omp-tui" ? "bridge" : "rpc";
       eventBus.emit({
         type: "agent.session_identity",
         rigId: resolved.rigId,
         nodeId: resolved.nodeId,
         sessionName: resolved.sessionName,
-        runtime: "omp",
+        runtime: seatRuntime,
         sessionId,
-        provenance: "rpc",
+        provenance,
       });
-      return c.json({ ok: true, sessionId, provenance: "rpc", tokenPersisted });
+      return c.json({ ok: true, sessionId, provenance, tokenPersisted });
     }
 
     // OPR.0.4.6.PI1 FR-5 — Pi session identity arrives from the pi-runner's
@@ -581,12 +593,13 @@ activityRoutes.get("/parked", (c) => {
   // (AM-3: the scope that ran is part of the answer). No resolvable scope is an honest
   // refusal, never a silent fold of every rig on the daemon.
   const seatParam = c.req.query("seat") || undefined;
-  const rigParam = c.req.query("rig") || undefined;
+  // An explicit scope must not silently become a different scope when its value is empty.
+  const rigParam = c.req.query("rig");
   const callerSession = transportSenderSession(c);
   let scope: { rig: string; resolvedFrom: "seat-coordinate" | "query-param" | "caller-session" } | null = null;
   if (seatParam?.includes("@")) {
     scope = { rig: seatParam.split("@")[1]!, resolvedFrom: "seat-coordinate" };
-  } else if (rigParam) {
+  } else if (rigParam !== undefined) {
     scope = { rig: rigParam, resolvedFrom: "query-param" };
   } else if (callerSession?.includes("@")) {
     // Canonical local form name@rig; a cross-host stamp name@rig@host parses the same.

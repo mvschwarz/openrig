@@ -47,11 +47,14 @@ The footprint counts use non-test TypeScript files under each package's `src/`
 | `app.route(...)` mounts in `server.ts` | **69** | `grep -c 'app.route(' packages/daemon/src/server.ts` |
 | Top-level `rig` commands | **87** | `grep -c 'program.addCommand(' packages/cli/src/index.ts` |
 | MCP tools | **18**, all named `rig_*` | `grep -c 'server.tool(' packages/cli/src/mcp-server.ts` |
-| Runtime adapter classes | **5**: Claude Code, Codex, Pi, Stub, Terminal | `git grep -l 'implements RuntimeAdapter' packages/daemon/src \| wc -l` |
 
-`OmpRuntimeAdapter` (Oh My Pi) extends `PiRuntimeAdapter`, so the daemon wires
-six runtime keys — `claude-code`, `codex`, `pi`, `omp`, `stub`, `terminal`
-(`startup.ts:989`).
+Six classes implement `RuntimeAdapter` — Claude Code, Codex, Community Harness,
+Pi, Stub and Terminal (`git grep -l 'implements RuntimeAdapter'
+packages/daemon/src | wc -l`). `OmpRuntimeAdapter` (Oh My Pi) extends
+`PiRuntimeAdapter`, and `OmpTuiRuntimeAdapter` (the native-TUI seat) extends
+`OmpRuntimeAdapter`. The daemon therefore wires seven runtime keys:
+`claude-code`, `codex`, `pi`, `omp`, `omp-tui`, `stub` and `terminal`
+(`packages/daemon/src/startup.ts:1062`).
 
 ### The stack
 
@@ -77,7 +80,7 @@ Framework-free domain services (431 files under packages/daemon/src/domain)
       |
       +-- SQLite state (96 migrations)
       +-- tmux / cmux / resume adapters
-      +-- runtime adapters (Claude Code / Codex / Pi / Oh My Pi / Stub / Terminal)
+      +-- runtime adapters (Claude Code / Codex / Pi / Oh My Pi / Oh My Pi native TUI / Stub / Terminal)
       +-- rig environment services (compose adapter, service readiness, orchestrator)
       +-- transport / transcript / chat / ask layers
       +-- whoami identity service (including context usage)
@@ -196,11 +199,12 @@ injectWebSocket }` (`startup.ts:2506`). In source order, it:
    `QueueRepository` (`:428`) and `OutboxHandler` (`:443`).
 3. Constructs `TranscriptStore` (`:555`) and the rig environment services
    `ComposeServicesAdapter` and `ServiceOrchestrator` (`:644`–`645`).
-4. Constructs `StartupOrchestrator` (`:776`) and the runtime adapters:
-   `ClaudeCodeAdapter` (`:778`), `CodexRuntimeAdapter` (`:779`),
-   `PiRuntimeAdapter` (`:782`), `OmpRuntimeAdapter` (`:783`) and
-   `StubRuntimeAdapter` (`:788`); the terminal adapter is created inline in the
-   runtime adapter maps (`:989`, `:1259`).
+4. Constructs `StartupOrchestrator` (`:846`) and the runtime adapters:
+   `ClaudeCodeAdapter` (`:848`), `CodexRuntimeAdapter` (`:849`),
+   `PiRuntimeAdapter` (`:863`), `OmpRuntimeAdapter` (`:865`),
+   `OmpTuiRuntimeAdapter` (`:866`) and `StubRuntimeAdapter` (`:871`); the
+   terminal adapter is created inline in the runtime adapter maps
+   (`:1062`, `:1118`).
 5. Constructs `PodRigInstantiator` (`:985`), `PodBundleSourceResolver` (`:1014`)
    and `BootstrapOrchestrator` (`:1016`).
 6. Constructs `ContextUsageStore` (`:1095`), `ResumeMetadataRefresher`

@@ -395,11 +395,11 @@ describe("RigSpec schema (pod-aware)", () => {
   });
 
   // T14: legacy flat-node schema still validates
-  it("legacy flat-node schema still validates old specs", () => {
+  it("legacy flat-node schema accepts omp-tui runtime", () => {
     const legacySpec = {
       schema_version: 1, name: "test", version: "1.0",
       nodes: [
-        { id: "orchestrator", runtime: "claude-code", role: "orchestrator" },
+        { id: "orchestrator", runtime: "omp-tui", role: "orchestrator" },
         { id: "impl", runtime: "claude-code", role: "impl" },
       ],
       edges: [{ from: "orchestrator", to: "impl", kind: "delegates_to" }],

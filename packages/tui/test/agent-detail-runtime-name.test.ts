@@ -10,8 +10,12 @@ import { demoSnapshot } from "../src/demo-data.js";
 import { renderScreen } from "../src/render.js";
 import { createViewState } from "../src/state.js";
 
-function renderAgentDetail(name: string): string {
+function renderAgentDetail(name: string, runtime?: string): string {
   const snap = demoSnapshot();
+  if (runtime) {
+    const agent = snap.hosts[0]!.rigs[0]!.pods[0]!.agents.find((entry) => entry.name === name);
+    if (agent) agent.runtime = runtime;
+  }
   const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
   view.dispatch({
     type: "drill",
@@ -32,4 +36,10 @@ describe("agent-detail runtime field renders the NAME as the value (founder rule
     const out = renderAgentDetail("dev50.guard");
     expect(out).toMatch(/runtime:\s+codex/);
   });
+
+  it("an omp-tui agent's runtime field shows the complete runtime name as TEXT", () => {
+    const out = renderAgentDetail("dev50.driver", "omp-tui");
+    expect(out).toMatch(/runtime:\s+omp-tui/);
+  });
 });
+

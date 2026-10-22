@@ -1650,7 +1650,7 @@ export interface SendResult {
    *   set on the send_failed / submit_failed returns for vocabulary symmetry;
    *   their `ok:false` + HTTP mapping is unchanged.
    */
-  outcome?: "delivered" | "rendered-unconfirmed" | "failed" | "retained";
+  outcome?: "delivered" | "rendered-unconfirmed" | "failed" | "retained" | "proxied";
   outboxIds?: string[];
   delivery?: GuardedDeliverySummary;
   warning?: string;
@@ -1715,6 +1715,7 @@ export interface BroadcastResult {
 
 export interface TransportReadinessChecker {
   checkReady?(binding: NodeBinding, options?: ReadinessOptions): Promise<ReadinessResult>;
+  deliverMessage?(sessionName: string, text: string): Promise<{ ok: boolean; error?: string }>;
 }
 
 interface SessionTransportDeps {
@@ -2881,6 +2882,21 @@ export class SessionTransport {
     if (targetFailure) return observe(targetFailure);
     const copyModeFailure = await leavePaneMode("No text was sent.");
     if (copyModeFailure) return observe({ ...copyModeFailure, ...(waitMode ? waitEvidence : {}) });
+    const deliveryChecker = this.runtimeAdapters[runtime ?? ""];
+    if (deliveryChecker?.deliverMessage) {
+      let delivery: { ok: boolean; error?: string };
+      try {
+        delivery = await deliveryChecker.deliverMessage(sessionName, text);
+      } catch (error) {
+        delivery = { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+      if (!delivery.ok) {
+        return observe({ ok: false, sessionName, sent: false, reason: "proxied_delivery_failed",
+          error: delivery.error ?? "OMP TUI proxied delivery failed." });
+      }
+      return observe({ ok: true, sessionName, sent: true, verified: false, outcome: "proxied" });
+    }
+
 
     // 3. Deliver ordinary messages as paste, audited prompt answers as key input.
     if (observed) observed.sentHash = hashSentText(text);

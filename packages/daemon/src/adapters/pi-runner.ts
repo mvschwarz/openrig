@@ -15,6 +15,19 @@
 // a dead pi process prints the EXIT/ERROR marker and records `exited` in the
 // sidecar — never a silently frozen pane.
 //
+// Two UI contracts share this runner:
+//   mirror (default)     — the runner mirrors the agent's RPC events to pane
+//                          stdout and forwards pane stdin to
+//                          prompt/steer/follow_up.
+//   native (--ui native) — the runner spawns the agent's OWN interactive TUI
+//                          under a pty: the pane shows that TUI, never a
+//                          mirror, and pane stdin/stdout ARE the pty's. Typed
+//                          events arrive over the OMP bridge socket instead of
+//                          stdout (`--trusted-extension` +
+//                          OPENRIG_OMP_BRIDGE_SOCKET), and Rig messages are
+//                          proxied back in through that socket's control role
+//                          — the pane is never typed into.
+//
 // Only node builtins and local runner helpers are imported so the compiled
 // entry stays runnable as `node <dist>/adapters/pi-runner.js` with no daemon deps.
 
@@ -24,17 +37,19 @@ import readline from "node:readline";
 import { PassThrough } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { formatDaemonHostForUrl } from "./daemon-url.js";
 import { credentialTaint, judgeChargeProvenance, piCredentialEvidence, piCredentialNotice, type PiCredentialEvidence } from "./pi-readiness.js";
 import { extractPiUsageFacts, parsePiSessionHeader, tiesPiForkHeader, type PiSessionBoundary, type PiUsageFact } from "../domain/pi-usage-facts.js";
 import { OpenRouterChargeLookup, openRouterGenerationFetcher, type ChargeProvenance } from "./pi-openrouter-charge.js";
 import { OMP_MAX_FRAME_BYTES, OmpFrameDecoder, ompProtocolV2Limit } from "./omp-rpc-frame.js";
+import { ompBridgeSocketPath } from "./omp-bridge-protocol.js";
+import { OmpBridgeServer } from "./omp-bridge-server.js";
 import {
-  piSeatPaths, buildPiChildArgs, buildPiChildEnv, buildPendingRunnerState, parsePiRunnerState,
+  piSeatPaths, buildPiChildArgs, buildPiChildEnv, buildPendingRunnerState, parsePiRunnerState, piChildSpawnOptions,
   PI_RUNNER_READY_MARKER, PI_RUNNER_EXIT_MARKER, PI_RUNNER_ERROR_MARKER, PI_PROVIDER_ENV_VARS,
-  type PiRunnerState, type RunnerRuntime,
+  type PiRunnerState, type RunnerRuntime, type RunnerUiMode,
 } from "./pi-runner-protocol.js";
 
 // ── Submitted input boundaries ─────────────────────────────────────────────
@@ -423,9 +438,11 @@ export class RunnerCore {
   constructor(
     private io: RunnerIo,
     private identity: { sessionName: string; nodeId?: string; launchId?: string; generation?: string },
-    private opts: { catchUpSince?: string; runtime?: RunnerRuntime; usageFacts?: boolean; openRouterCharge?: boolean;
-      /** K4: the credential observation taken before Pi was spawned. */
-      launchCredentialEvidence?: PiCredentialEvidence } = {},
+  private opts: { catchUpSince?: string; runtime?: RunnerRuntime; usageFacts?: boolean; openRouterCharge?: boolean;
+    /** Native OMP TUI in the pane: the bridge reports the session identity, and the TUI is the approval authority. */
+    bridgeUi?: boolean;
+    /** K4: the credential observation taken before Pi was spawned. */
+    launchCredentialEvidence?: PiCredentialEvidence } = {},
   ) {
     // The durable cursor seeds from the carried-over value (FR-5) so this
     // instance's own sidecar writes never regress it to undefined before a
@@ -503,6 +520,13 @@ export class RunnerCore {
       record = result.frame;
     }
 
+
+    if (record.type === "command_ack") {
+      // A command acknowledgement is bridge control traffic: it carries the
+      // id of a command, not a session-entry id, so it must not be treated as
+      // an event (it would move the durable cursor onto a command id).
+      return;
+    }
     if (record.type === "response") {
       this.handleResponse(record);
       return;
@@ -590,6 +614,13 @@ export class RunnerCore {
       const wasReady = this.ready;
       this.ready = this.runtime === "pi" || !!this.sessionFile;
       if (!this.ready) {
+        if (this.opts.bridgeUi) {
+          // The bridge reports the session identity as soon as OMP's extension
+          // context knows it; a get_state reply that precedes that is not a
+          // failure. Wait for the identity instead of stopping the child.
+          this.io.mirrorLine("[omp-runner] waiting for the bridge to report the session identity");
+          return;
+        }
         this.io.mirrorLine("[omp-runner] ERROR rpc get_state returned no session file; cannot provide a resume token");
         this.io.stopChild?.();
         return;
@@ -608,12 +639,25 @@ export class RunnerCore {
     }
     if (record.id === CURSOR_REFRESH_ID || record.id === CATCH_UP_ID) {
       const data = (record.data ?? record) as Record<string, unknown>;
-      const entries = Array.isArray(data.entries) ? data.entries : (Array.isArray(record.entries) ? record.entries : []);
+      if (data.available === false) {
+        this.io.mirrorLine("[omp-runner] could not read the session entries from the bridge; catch-up did not complete");
+        return;
+      }
+      const entries = Array.isArray(data.entries) ? data.entries : Array.isArray(record.entries) ? record.entries : undefined;
+      if (!entries) {
+        this.io.mirrorLine("[omp-runner] the bridge reply carried no entries; catch-up could not be verified");
+        return;
+      }
+      if (data.truncated === true) {
+        this.io.mirrorLine("[omp-runner] the bridge reply did not enumerate every entry after the cursor; the cursor stayed at the last enumerated entry");
+      }
       const last = entries.at(-1);
       const lastId = last !== null && typeof last === "object" && typeof (last as Record<string, unknown>).id === "string"
         ? (last as Record<string, unknown>).id as string
         : undefined;
       if (lastId) {
+        // A truncated reply leaves omitted entries recoverable: next catch-up
+        // starts after this enumerated id rather than skipping the gap.
         this.lastEntryId = lastId;
         this.writeSidecar({});
       }
@@ -712,6 +756,12 @@ export class RunnerCore {
 
   private handleEvent(event: Record<string, unknown>): void {
     if (this.runtime === "omp" && event.type === "extension_ui_request") {
+      if (this.opts.bridgeUi) {
+        // The native TUI answers approvals itself; the runner is not the
+        // approval authority and must neither cancel nor raise attention.
+        this.io.mirrorLine("[omp-runner] approval request is being answered in OMP's own TUI");
+        return;
+      }
       const method = event.method;
       // RPC does not mount an interactive UI. Reply at once; otherwise the
       // child can wait forever for approval that cannot be given in the pane.
@@ -761,7 +811,9 @@ export class RunnerCore {
       // null in real runs). Refresh it from the source of truth after every
       // completed turn — get_entries returns append-order entries with stable
       // ids; the response handler advances the cursor from the tail.
-      this.io.sendRpc({ type: "get_entries", id: CURSOR_REFRESH_ID });
+      this.io.sendRpc(this.opts.bridgeUi
+        ? { type: "get_entries", since: this.lastEntryId, id: CURSOR_REFRESH_ID }
+        : { type: "get_entries", id: CURSOR_REFRESH_ID });
     }
     if (mapped.mirrorAppend) this.io.mirrorAppend(mapped.mirrorAppend);
     for (const line of mapped.mirrorLines) this.io.mirrorLine(line);
@@ -817,6 +869,26 @@ export class RunnerCore {
    *  leave a seat with history but no restorable token. */
   retrySessionIdentity(): void {
     if (this.runtime === "omp" && this.ready) this.postSessionIdentity();
+  }
+
+  /** Adopt the session identity the native TUI's bridge reported. The RPC
+   *  child answers get_state itself; a bridge-connected OMP reports the same
+   *  facts over the socket, and this is where the runner takes them. */
+  adoptSessionIdentity(identity: { sessionId?: string; sessionFile?: string }): void {
+    if (identity.sessionFile) this.sessionFile = identity.sessionFile;
+    if (identity.sessionId) this.sessionId = identity.sessionId;
+    if (!this.sessionFile || this.ready) return;
+    this.ready = true;
+    this.writeSidecar({});
+    this.io.mirrorLine(`${this.runtime === "omp" ? "[omp-runner] READY" : PI_RUNNER_READY_MARKER} session=${this.sessionFile}`);
+    this.postSessionIdentity();
+  }
+
+  /** A native OMP seat cannot answer status after its bridge disappears. */
+  markBridgeDisconnected(): void {
+    this.ready = false;
+    this.writeSidecar({});
+    this.io.mirrorLine("[omp-runner] NOT READY bridge disconnected");
   }
 
   private postSessionIdentity(): void {
@@ -888,6 +960,8 @@ interface RunnerArgs {
   /** OPR.0.7.0.2: report usage facts from persisted entries (the daemon passes it when usage.pi_cost_facts is on). */
   usageFacts?: boolean;
   openRouterCharge?: boolean;
+  /** Native OMP TUI in the pane (--ui native); omitted keeps the RPC mirror. */
+  ui?: RunnerUiMode;
 }
 
 export function parseRunnerArgs(argv: string[]): RunnerArgs {
@@ -919,6 +993,12 @@ export function parseRunnerArgs(argv: string[]): RunnerArgs {
       case "--fork": args.forkRef = next(); break;
       case "--usage-facts": args.usageFacts = true; break;
       case "--openrouter-charge": args.openRouterCharge = true; break;
+      case "--ui": {
+        const ui = next();
+        if (ui !== "mirror" && ui !== "native") throw new Error(`unsupported UI mode: ${ui}`);
+        args.ui = ui;
+        break;
+      }
       case "--approve": args.trust = "approve"; break;
       case "--no-approve": args.trust = "no-approve"; break;
       case "--approval-mode": {
@@ -942,6 +1022,9 @@ export function parseRunnerArgs(argv: string[]): RunnerArgs {
     throw new Error("an explicit trust flag is required: --approve or --no-approve");
   }
   if (args.sessionFile && args.forkRef) throw new Error("--session and --fork are mutually exclusive");
+  if (args.ui === "native" && args.runtime !== "omp") {
+    throw new Error("--ui native requires --runtime omp");
+  }
   return args as RunnerArgs;
 }
 
@@ -1067,6 +1150,47 @@ export function piLaunchCapabilityError(
   return `Pi invoked as ${command} (${version}; exact executable path unknown) rejects the managed --name/--${trust} flags. Install the current @earendil-works/pi-coding-agent (npm install -g @earendil-works/pi-coding-agent) and check 'command -v pi' in this pane; an older Pi installation may be shadowing it.`;
 }
 
+// ── Native-TUI helpers ───────────────────────────────────────────────────────
+
+/** Shell-quote one argv element for `script -c` (the native-TUI pty launcher). */
+function quoteShellArg(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Build one shell command line from argv for `script -c`. */
+function shellCommandLine(argv: string[]): string {
+  return argv.map(quoteShellArg).join(" ");
+}
+
+/** The pty launcher for native-TUI seats. `script` (util-linux) gives the
+ *  child a terminal without adding a dependency to the daemon. */
+function resolveScriptCommand(): string | null {
+  const candidates = ["/usr/bin/script", "/bin/script"];
+  // Hosts that install util-linux elsewhere (Homebrew, Linuxbrew) keep the
+  // launcher on PATH only.
+  for (const dir of (process.env.PATH ?? "").split(nodePath.delimiter)) {
+    if (dir) candidates.push(nodePath.join(dir, "script"));
+  }
+  for (const candidate of candidates) {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch { /* try the next location */ }
+  }
+  return null;
+}
+
+/** The compiled OMP-side extension shipped next to this runner. OMP loads it
+ *  with --trusted-extension, which requires an absolute path. The source tree
+ *  (.ts, for a runner executed from source) is accepted too: Bun loads it. */
+function ompTuiBridgeExtensionPath(): string | null {
+  const dir = nodePath.dirname(fileURLToPath(import.meta.url));
+  const compiled = nodePath.join(dir, "omp-tui-extension.js");
+  if (fs.existsSync(compiled)) return compiled;
+  const source = nodePath.join(dir, "omp-tui-extension.ts");
+  return fs.existsSync(source) ? source : null;
+}
+
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   let args: RunnerArgs;
   try {
@@ -1081,6 +1205,101 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   const paths = piSeatPaths(args.stateRoot, args.sessionName);
   fs.mkdirSync(paths.agentDir, { recursive: true });
   fs.mkdirSync(paths.sessionsDir, { recursive: true });
+  // ── Native-TUI mode wiring ────────────────────────────────────────────────
+  // `--ui native` means the seat pane shows OMP's OWN interactive TUI instead
+  // of the runner's RPC mirror. The runner becomes a conduit: it hands the
+  // pane's terminal to OMP under a pty, carries Rig messages to OMP over the
+  // bridge socket, and writes its own diagnostics to the seat log — the pane
+  // belongs to the TUI, and a stray runner line would garble its screen.
+  const uiMode = args.ui ?? "mirror";
+  const nativeTui = uiMode === "native";
+  const runnerLogPath = nodePath.join(paths.seatRoot, "runner.log");
+  const appendRunnerLog = (line: string): void => {
+    try {
+      fs.appendFileSync(runnerLogPath, `${line}\n`);
+    } catch { /* diagnostics only; never blocks the runner */ }
+  };
+  const report = (line: string): void => {
+    if (nativeTui) {
+      appendRunnerLog(line);
+      return;
+    }
+    process.stdout.write(`${line}\n`);
+  };
+  const reportError = (line: string): void => {
+    if (nativeTui) {
+      appendRunnerLog(line);
+      return;
+    }
+    process.stderr.write(`${line}\n`);
+  };
+  const recordLaunchFailure = (code: number): void => {
+    // Record the exit for this launch so the adapter fails it now instead of
+    // waiting out its readiness timeout. The durable cursor survives.
+    const at = new Date().toISOString();
+    try {
+      const pending = parsePiRunnerState(fs.readFileSync(paths.runnerStatePath, "utf8"));
+      const exitedState: PiRunnerState = { ready: false, launchId: args.launchId, lastEntryId: pending?.lastEntryId, updatedAt: at, exited: { code, at } };
+      fs.writeFileSync(paths.runnerStatePath, JSON.stringify(exitedState));
+    } catch { /* the pane ERROR marker still fails readiness */ }
+    process.exitCode = code;
+  };
+
+  let bridge: OmpBridgeServer | null = null;
+  let bridgeSocketPath: string | undefined;
+  let bridgeExtensionPath: string | undefined;
+  let coreRef: RunnerCore | null = null;
+  let bridgeUp = false;
+  if (nativeTui) {
+    if (runtime !== "omp") {
+      reportError(`${PI_RUNNER_ERROR_MARKER} --ui native requires --runtime omp`);
+      process.exitCode = 2;
+      return;
+    }
+    bridgeSocketPath = ompBridgeSocketPath(paths.seatRoot);
+    const extensionPath = ompTuiBridgeExtensionPath();
+    if (extensionPath === null) {
+      reportError("[omp-runner] ERROR launch: the compiled OMP bridge extension was not found next to the runner entry");
+      recordLaunchFailure(127);
+      return;
+    }
+    bridgeExtensionPath = extensionPath;
+    bridge = new OmpBridgeServer({
+      socketPath: bridgeSocketPath,
+      onBridgeFrame: (frame) => {
+        // The bridge's identity update is not an OMP event; it carries the
+        // session identity the sidecar and the resume token are built from.
+        if (frame.type === "session_identity") {
+          coreRef?.adoptSessionIdentity({
+            sessionId: typeof frame.sessionId === "string" ? frame.sessionId : undefined,
+            sessionFile: typeof frame.sessionFile === "string" ? frame.sessionFile : undefined,
+          });
+          return;
+        }
+        coreRef?.handlePiLine(JSON.stringify(frame));
+      },
+      onControlFrame: (frame) => {
+        // A control client's command is relayed verbatim to the bridge.
+        bridge?.sendToBridge(frame);
+      },
+      onBridgeReady: (handshake) => {
+        bridgeUp = true;
+        coreRef?.start();
+        coreRef?.adoptSessionIdentity({
+          sessionId: typeof handshake.sessionId === "string" ? handshake.sessionId : undefined,
+          sessionFile: typeof handshake.sessionFile === "string" ? handshake.sessionFile : undefined,
+        });
+      },
+      onBridgeClosed: () => {
+        bridgeUp = false;
+        coreRef?.markBridgeDisconnected();
+      },
+      onLog: (line) => report(line),
+    });
+    await bridge.start();
+    report(`[omp-runner] bridge socket listening at ${bridgeSocketPath}`);
+  }
+
 
   const { catchUpSince } = prepareRunnerSidecar(
     {
@@ -1104,6 +1323,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     nodeId: process.env.OPENRIG_NODE_ID,
     openrigHome: process.env.OPENRIG_HOME,
     openrigUrl: endpoint?.baseUrl ?? process.env.OPENRIG_URL,
+    bridgeSocketPath,
   });
   const childArgs = buildPiChildArgs({
     sessionsDir: paths.sessionsDir,
@@ -1114,10 +1334,12 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     sessionFile: args.sessionFile,
     forkRef: args.forkRef,
     runtime,
+    ui: uiMode,
+    bridgeExtensionPath,
   });
 
   if (runtime === "pi") {
-    console.log(`[pi-runner] seat ${args.sessionName}: ${piCredentialNotice({
+    report(`[pi-runner] seat ${args.sessionName}: ${piCredentialNotice({
       model: args.model, agentDir: paths.agentDir, env: childEnv,
       readFile: (file) => {
         if (fs.statSync(file).size > 1024 * 1024) throw new Error("Unbounded metadata");
@@ -1125,8 +1347,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       },
     })}`);
   }
-  console.log(`[${runtime}-runner] starting ${runtime} --mode rpc (seat ${args.sessionName})`);
-  console.log(`[${runtime}-runner] send text normally; prefixes: "/followup <text>" queues after the turn, "/abort" cancels`);
+  report(`[${runtime}-runner] starting ${runtime} ${nativeTui ? "--ui native (OMP's own TUI in this pane)" : "--mode rpc"} (seat ${args.sessionName})`);
+  if (!nativeTui) {
+    report(`[${runtime}-runner] send text normally; prefixes: "/followup <text>" queues after the turn, "/abort" cancels`);
+  }
 
   // OMP runs under a per-seat HOME. A HOME-dependent launcher on PATH (a mise
   // shim) cannot find its target there, so resolve the real binary first,
@@ -1135,16 +1359,8 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   if (runtime === "omp") {
     const resolved = resolveRuntimeExecutable("omp", process.env);
     if (!resolved.ok) {
-      console.error(`[omp-runner] ERROR launch: ${resolved.error}`);
-      // Record the exit for this launch so the adapter fails it now instead
-      // of waiting out its readiness timeout. The durable cursor survives.
-      const at = new Date().toISOString();
-      try {
-        const pending = parsePiRunnerState(fs.readFileSync(paths.runnerStatePath, "utf8"));
-        const exitedState: PiRunnerState = { ready: false, launchId: args.launchId, lastEntryId: pending?.lastEntryId, updatedAt: at, exited: { code: 127, at } };
-        fs.writeFileSync(paths.runnerStatePath, JSON.stringify(exitedState));
-      } catch { /* the pane ERROR marker still fails readiness */ }
-      process.exitCode = 127;
+      reportError(`[omp-runner] ERROR launch: ${resolved.error}`);
+      recordLaunchFailure(127);
       return;
     }
     command = resolved.path;
@@ -1171,14 +1387,29 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   // (or was added after it, and is then seen by the next one).
   const launchCredentialEvidence = args.openRouterCharge === true && runtime === "pi" ? credentialEvidence() : undefined;
 
-  const child = spawn(command, childArgs, {
-    cwd: args.cwd,
-    env: childEnv,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  // Native-TUI mode: OMP's own interactive TUI needs a terminal, and the seat
+  // pane is that terminal. The child runs under a pty and the runner only wires
+  // the two ends together.
+  let spawnCommand = command;
+  let spawnArgs: string[] = childArgs;
+  if (nativeTui) {
+    const launcher = resolveScriptCommand();
+    if (launcher === null) {
+      reportError("[omp-runner] ERROR launch: the native TUI needs the util-linux 'script' pty launcher, which was not found on this host");
+      recordLaunchFailure(127);
+      return;
+    }
+    spawnCommand = launcher;
+    spawnArgs = ["-qfec", shellCommandLine([command, ...childArgs]), "/dev/null"];
+  }
+  // The stdio wiring lives in one tested helper: native mode hands `script`
+  // the pane's own terminal, so the pty inherits the pane's termios and window
+  // size and `script` forwards SIGWINCH. A piped stdin leaves the child's
+  // terminal at 0x0, which breaks both the size and the reflow.
+  const child = spawn(spawnCommand, spawnArgs, piChildSpawnOptions(uiMode, { cwd: args.cwd, env: childEnv }));
 
   // The child may close its pipe before the first RPC write completes.
-  child.stdin.on("error", () => { /* spawn/exit handlers own the diagnosis */ });
+  child.stdin?.on("error", () => { /* spawn/exit handlers own the diagnosis */ });
 
   const chargeLookup = new OpenRouterChargeLookup({
     fetchGeneration: openRouterGenerationFetcher(() => childEnv["OPENROUTER_API_KEY"]),
@@ -1203,10 +1434,15 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 
   const io: RunnerIo = {
     sendRpc: (cmd) => {
-      try { child.stdin.write(`${JSON.stringify(cmd)}\n`); } catch { /* exit handler reports */ }
+      // Native mode: the command travels to OMP over the bridge socket.
+      if (nativeTui) {
+        bridge?.sendToBridge(cmd);
+        return;
+      }
+      try { child.stdin?.write(`${JSON.stringify(cmd)}\n`); } catch { /* exit handler reports */ }
     },
-    mirrorLine: (line) => process.stdout.write(`${line}\n`),
-    mirrorAppend: (text) => process.stdout.write(text),
+    mirrorLine: (line) => report(line),
+    mirrorAppend: (text) => report(text.replace(/\n$/, "")),
     postActivity: (payload) => {
       if (!endpoint || typeof fetch !== "function") return;
       const controller = new AbortController();
@@ -1275,21 +1511,28 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     sessionName: args.sessionName, nodeId: process.env.OPENRIG_NODE_ID, launchId: args.launchId,
     // Carry the emitting tenure; never infer it from a later daemon read or Pi event.
     generation: process.env.OPENRIG_OCCUPANT_GENERATION,
-  }, { catchUpSince, runtime, usageFacts: args.usageFacts === true, openRouterCharge: args.openRouterCharge === true, launchCredentialEvidence });
+  }, { catchUpSince, runtime, bridgeUi: nativeTui, usageFacts: args.usageFacts === true, openRouterCharge: args.openRouterCharge === true, launchCredentialEvidence });
+  coreRef = core;
 
   let transportUp = runtime === "pi";
-  readline.createInterface({ input: child.stdout }).on("line", (line) => {
-    if (runtime === "omp" && !core.isReady()) {
-      try {
-        const frame = JSON.parse(line) as { type?: string };
-        if (frame.type === "ready") {
-          transportUp = true;
-          core.start(frame as Record<string, unknown>);
-        }
-      } catch { /* surface non-JSON stdout through the core */ }
-    }
-    core.handlePiLine(line);
-  });
+  if (!nativeTui) {
+    // Mirror mode: the runner reads the child's output line by line. Native
+    // mode writes OMP's TUI screen straight to the pane, so the runner never
+    // reads or parses it.
+    const childLines = child.stdout ? readline.createInterface({ input: child.stdout }) : undefined;
+    childLines?.on("line", (line) => {
+      if (runtime === "omp" && !core.isReady()) {
+        try {
+          const frame = JSON.parse(line) as { type?: string };
+          if (frame.type === "ready") {
+            transportUp = true;
+            core.start(frame as Record<string, unknown>);
+          }
+        } catch { /* surface non-JSON stdout through the core */ }
+      }
+      core.handlePiLine(line);
+    });
+  }
   // Re-deliver OMP identity until the daemon confirms the resume token.
   const identityRetry = runtime === "omp" ? setInterval(() => core.retrySessionIdentity(), IDENTITY_RETRY_MS) : undefined;
   identityRetry?.unref();
@@ -1297,9 +1540,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   // reported with its own words in the error, not only above it.
   const stderrTail: string[] = [];
   let reportedPiCapability = false;
-  readline.createInterface({ input: child.stderr }).on("line", (line) => {
+  const stderrLines = child.stderr ? readline.createInterface({ input: child.stderr }) : undefined;
+  stderrLines?.on("line", (line) => {
     if (!line.trim()) return;
-    process.stdout.write(`[${runtime}:err] ${line}\n`);
+    report(`[${runtime}:err] ${line}`);
     stderrTail.push(line.length > OMP_STDERR_TAIL_CHARS ? `${line.slice(0, OMP_STDERR_TAIL_CHARS)}...` : line);
     if (stderrTail.length > OMP_STDERR_TAIL_LINES) stderrTail.shift();
     if (runtime === "pi" && !core.isReady() && !reportedPiCapability) {
@@ -1316,19 +1560,23 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       }
     }
   });
-  const input = createRunnerInput(process.stdin, process.stdout, (block) => core.handleUserBlock(block));
+  // In native-TUI mode the pane belongs to OMP's own TUI: the runner must not
+  // read the pane's stdin, because the pty plumbing forwards it to OMP.
+  const input = nativeTui
+    ? undefined
+    : createRunnerInput(process.stdin, process.stdout, (block) => core.handleUserBlock(block));
 
   if (runtime === "pi") {
     child.on("error", (err) => {
       console.error(`${PI_RUNNER_ERROR_MARKER} failed to spawn pi: ${err.message}`);
       const code = (err as NodeJS.ErrnoException).code === "ENOENT" ? 127 : 1;
       core.handlePiExit(code);
-      input.close();
+      input?.close();
       process.exitCode = code;
     });
     child.on("exit", (code) => {
       core.handlePiExit(code);
-      input.close();
+      input?.close();
       process.exitCode = code ?? 1;
     });
     core.start();
@@ -1343,19 +1591,22 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     if (exited) return;
     exited = true;
     clearInterval(identityRetry);
+    bridge?.close();
     if (!core.isReady()) {
       const how = signal ? `signal ${signal}` : `exit code ${code ?? "unknown"}`;
       const output = stderrTail.length > 0 ? ` Its last output: ${stderrTail.join(" | ")}` : " It printed nothing on stderr.";
-      console.error(transportUp
+      reportError(transportUp
         ? "[omp-runner] ERROR OMP did not establish a resumable RPC session. Authenticate this isolated seat using HOME=<seat-root> PI_CODING_AGENT_DIR=<seat-root>/agent omp and /login, or provide its declared model provider key in the OpenRig daemon environment. Default OMP credentials are not shared."
-        : `[omp-runner] ERROR OMP exited during startup, before its RPC transport started (${command}, ${how}).${output}`);
+        : nativeTui
+          ? `[omp-runner] ERROR OMP exited during startup, ${bridgeUp ? "after its TUI connected to the runner's bridge socket" : "before its TUI connected to the runner's bridge socket"} (${command}, ${how}).${output}`
+          : `[omp-runner] ERROR OMP exited during startup, before its RPC transport started (${command}, ${how}).${output}`);
     }
     core.handlePiExit(code);
-    input.close();
+    input?.close();
     process.exitCode = code ?? 1;
   };
   child.on("error", (err) => {
-    console.error(`[omp-runner] ERROR failed to spawn omp: ${err.message}`);
+    reportError(`[omp-runner] ERROR failed to spawn omp: ${err.message}`);
     recordExit(null);
   });
   // "close" fires once OMP's stdio is drained, so its stderr is in the tail

@@ -76,9 +76,10 @@ export async function isClaudeSidecarFromEarlierProcess(
  *   codex       → the thread id derived from live pid-keyed logs
  *   pi          → the pi-runner state sidecar's sessionFile (a file read)
  *   omp         → the OMP runner state sidecar's sessionFile (separate root)
+ *   omp-tui     → the OMP runner state sidecar's sessionFile (separate root)
  * Returns a structured outcome; never throws for a missing/invalid token
- * (those are honest skips). ANY unexpected throw from a dependency is the
- * caller's to swallow (capture must never fail or block its lifecycle op).
+ * (those are honest skips). ANY unexpected dependency throw is the caller's
+ * to swallow (capture must never fail or block its lifecycle op).
  */
 export async function deriveResumeToken(
   input: { runtime: string | null; sessionName: string },
@@ -111,7 +112,7 @@ export async function deriveResumeToken(
       return { outcome: "skipped", reason: "process_unreadable" };
     }
     if (!token) return { outcome: "skipped", reason: "probe_timeout" };
-  } else if (runtime === "pi" || runtime === "omp") {
+  } else if (runtime === "pi" || runtime === "omp" || runtime === "omp-tui") {
     const stateStore = runtime === "pi" ? deps.piRunnerStateStore : deps.ompRunnerStateStore;
     if (!stateStore) return { outcome: "noop" }; // dep absent — silent no-op
     const state = stateStore.readSessionFile(input.sessionName);
