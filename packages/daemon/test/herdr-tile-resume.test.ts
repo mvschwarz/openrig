@@ -25,8 +25,15 @@ function echoApplied(root: unknown): unknown {
   return walk(root as Record<string, unknown>);
 }
 
-function herdr(opts: { apply?: (root: unknown) => HerdrResult; liveLabels?: (labels: string[]) => string[]; refuse?: boolean } = {}) {
+/** `report` returns the herdr error a report gets on that attempt for that pane, or null to accept it. */
+function herdr(opts: {
+  apply?: (root: unknown) => HerdrResult;
+  liveLabels?: (labels: string[]) => string[];
+  report?: (paneId: string, attempt: number) => string | null;
+} = {}) {
   const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const attempts = new Map<string, number>();
+  const sleeps: number[] = [];
   let appliedLabels: string[] = [];
   const transport: HerdrTransport = {
     probe: async () => ({ alive: true, version: "0.9.5", protocol: 14 }),
@@ -48,13 +55,19 @@ function herdr(opts: { apply?: (root: unknown) => HerdrResult; liveLabels?: (lab
         const live = opts.liveLabels ? opts.liveLabels(appliedLabels) : appliedLabels;
         return { type: "pane_list", panes: live.map((label, i) => ({ pane_id: `w1:p${i + 1}`, tab_id: "w1:t1", label })) };
       }
-      if (method === "pane.report_agent_session" && opts.refuse) throw new Error("resume_not_accepted");
+      if (method === "pane.report_agent_session") {
+        const paneId = p["pane_id"] as string;
+        const attempt = (attempts.get(paneId) ?? 0) + 1;
+        attempts.set(paneId, attempt);
+        const error = opts.report?.(paneId, attempt) ?? null;
+        if (error) throw new Error(`herdr error: ${JSON.stringify({ code: error, message: error })}`);
+      }
       return { type: "ok" };
     },
   };
-  const adapter = new HerdrAdapter({ transportFactory: () => transport, newLaunchToken: () => "tok" });
+  const adapter = new HerdrAdapter({ transportFactory: () => transport, newLaunchToken: () => "tok", sleep: async (ms) => { sleeps.push(ms); } });
   const reports = () => requests.filter((r) => r.method === "pane.report_agent_session").map((r) => r.params);
-  return { adapter, requests, reports };
+  return { adapter, requests, reports, attempts, sleeps };
 }
 
 describe("Herdr tiles carry their reattach command, so a Herdr restart brings them back", () => {
@@ -65,7 +78,7 @@ describe("Herdr tiles carry their reattach command, so a Herdr restart brings th
     expect(res.opened).toEqual(["dev-impl@r"]);
     expect(reports()).toEqual([{
       pane_id: "w1:p1", source: "openrig", agent: "claude",
-      resume_argv: ["env", "HERDR_AGENT=claude", "/usr/bin/tmux", "-L", "openrig", "attach", "-t", "dev-impl@r"],
+      resume_argv: ["env", "HERDR_AGENT=claude", "OPENRIG_TILE=w1:p1", "/usr/bin/tmux", "-L", "openrig", "attach", "-t", "dev-impl@r"],
     }]);
     // A held state report would replace Herdr's screen detection of the agent in the tile.
     expect(requests.some((r) => r.method === "pane.report_agent")).toBe(false);
@@ -84,9 +97,9 @@ describe("Herdr tiles carry their reattach command, so a Herdr restart brings th
     expect(res.opened).toEqual(["qa@r", "shell@r", "remote@r", "pi@r"]);
     expect(reports()).toEqual([
       { pane_id: "w1:p1", source: "openrig", agent: "codex",
-        resume_argv: ["env", "HERDR_AGENT=codex", "/usr/bin/tmux", "-L", "openrig", "attach", "-r", "-t", "qa@r"] },
+        resume_argv: ["env", "HERDR_AGENT=codex", "OPENRIG_TILE=w1:p1", "/usr/bin/tmux", "-L", "openrig", "attach", "-r", "-t", "qa@r"] },
       { pane_id: "w1:p4", source: "openrig", agent: "pi",
-        resume_argv: ["env", "HERDR_AGENT=pi", "/usr/bin/tmux", "-L", "openrig", "attach", "-t", "pi@r"] },
+        resume_argv: ["env", "HERDR_AGENT=pi", "OPENRIG_TILE=w1:p4", "/usr/bin/tmux", "-L", "openrig", "attach", "-t", "pi@r"] },
     ]);
   });
 
@@ -104,27 +117,63 @@ describe("Herdr tiles carry their reattach command, so a Herdr restart brings th
     expect(reports().map((r) => [r["pane_id"], (r["resume_argv"] as string[]).at(-1)])).toEqual([["w1:p1", "a@r"], ["w1:p3", "c@r"]]);
   });
 
-  it("when Herdr refuses the report, the seat stays opened and a note says to reopen after a restart", async () => {
-    const { adapter } = herdr({ refuse: true });
+  it("a report Herdr refuses for another reason isn't retried: the seat stays opened and a note says to reopen after a restart", async () => {
+    const { adapter, attempts } = herdr({ report: () => "invalid_resume_argv" });
     const res = await adapter.openView(compose(member("dev-impl@r", "claude-code")));
     expect(res.ok).toBe(true);
     expect(res.opened).toEqual(["dev-impl@r"]);
-    expect(res.notes).toEqual(["herdr didn't take the restart command for dev-impl@r (resume_not_accepted); after a Herdr restart, reopen this view."]);
+    expect(attempts.get("w1:p1")).toBe(1);
+    expect(res.notes).toEqual([
+      'herdr didn\'t take the restart command for dev-impl@r (herdr error: {"code":"invalid_resume_argv","message":"invalid_resume_argv"}); after a Herdr restart, reopen this view.',
+    ]);
   });
 
-  it("a reply without the applied tree (an older Herdr) or with a different tree reports nothing", async () => {
+  // Herdr accepts the command only once its detector has recognised the agent in the pane, which runs
+  // after the pane starts; until then it answers resume_not_accepted.
+  it("detection that becomes ready after the first report: the refused report is retried and accepted, with no note", async () => {
+    const { adapter, attempts, sleeps, reports } = herdr({ report: (paneId, attempt) => (paneId === "w1:p2" && attempt < 3 ? "resume_not_accepted" : null) });
+    const res = await adapter.openView(compose(member("a@r", "claude-code"), member("b@r", "claude-code")));
+    expect(res.opened).toEqual(["a@r", "b@r"]);
+    expect([...attempts]).toEqual([["w1:p1", 1], ["w1:p2", 3]]);
+    expect(sleeps).toEqual([500, 500]);
+    expect(reports().map((r) => r["pane_id"])).toEqual(["w1:p1", "w1:p2", "w1:p2", "w1:p2"]);
+    expect(res.notes).toBeUndefined();
+  });
+
+  it("an agent Herdr never recognises: the report is tried for about 3 s, then a note; the seat stays opened", async () => {
+    const { adapter, attempts, sleeps } = herdr({ report: () => "resume_not_accepted" });
+    const res = await adapter.openView(compose(member("dev-impl@r", "claude-code")));
+    expect(res.opened).toEqual(["dev-impl@r"]);
+    expect(attempts.get("w1:p1")).toBe(7);
+    expect(sleeps).toEqual([500, 500, 500, 500, 500, 500]);
+    expect(res.notes).toEqual(["herdr hadn't recognised the agent in dev-impl@r yet, so those tiles have no restart command; after a Herdr restart, reopen this view."]);
+  });
+
+  // Herdr keeps one restore per identical command across the whole session, so each tile's command is made distinct.
+  it("two tiles of one seat get distinct restart commands, so a Herdr restart keeps both", async () => {
+    const { adapter, reports } = herdr();
+    await adapter.openView(compose(member("dev-impl@r", "claude-code"), member("dev-impl@r", "claude-code", { label: "second view" })));
+    const argvs = reports().map((r) => r["resume_argv"] as string[]);
+    expect(argvs).toHaveLength(2);
+    expect(argvs[0]).not.toEqual(argvs[1]);
+    expect(argvs.map((a) => a.filter((arg) => !arg.startsWith("OPENRIG_TILE=")))).toEqual([argvs[0]!.filter((arg) => !arg.startsWith("OPENRIG_TILE=")), argvs[0]!.filter((arg) => !arg.startsWith("OPENRIG_TILE="))]);
+    expect(argvs.map((a) => a[2])).toEqual(["OPENRIG_TILE=w1:p1", "OPENRIG_TILE=w1:p2"]);
+  });
+
+  it("a reply without the applied tree (an older Herdr) or with a different tree reports nothing, and says so", async () => {
     const older = herdr({ apply: () => ({ type: "layout_apply", layout: { workspace_id: "w1", tab_id: "w1:t1" } }) });
     const res = await older.adapter.openView(compose(member("dev-impl@r", "claude-code")));
     expect(res.opened).toEqual(["dev-impl@r"]);
     expect(older.reports()).toEqual([]);
-    expect(res.notes).toBeUndefined();
+    expect(res.notes).toEqual(["herdr's reply didn't show which pane is which, so these tiles have no restart command: dev-impl@r; after a Herdr restart, reopen this view."]);
 
     const other = herdr({ apply: (root) => {
       const applied = echoApplied(root) as Record<string, unknown>;
       return { type: "layout_apply", layout: { tab_id: "w1:t1", root: { ...applied, command: ["sh", "-c", "something else"] } } };
     } });
-    await other.adapter.openView(compose(member("dev-impl@r", "claude-code")));
+    const otherRes = await other.adapter.openView(compose(member("dev-impl@r", "claude-code")));
     expect(other.reports()).toEqual([]);
+    expect(otherRes.notes).toHaveLength(1);
   });
 });
 
