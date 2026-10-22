@@ -67,11 +67,13 @@ describe("topology-converge", () => {
   describe("supported-op-kind set", () => {
     // OPR.0.3.4.3 grew the supported set: add_member (slice 24) +
     // reconcile_session (the no-launch adopt). Identity-migrating kinds stay
-    // classified-deferred to the 0.4.0 identity theme.
-    it("supports exactly add_member + reconcile_session", () => {
-      expect(SUPPORTED_OP_KINDS).toEqual(["add_member", "reconcile_session"]);
-      expect(isSupportedOpKind("add_member")).toBe(true);
-      expect(isSupportedOpKind("reconcile_session")).toBe(true);
+    // classified-deferred to the 0.4.0 identity theme. add_edge and remove_edge
+    // change one typed edge and no seat identity.
+    it("supports member addition, session reconciliation and edge-only mutations", () => {
+      expect(SUPPORTED_OP_KINDS).toEqual(["add_member", "reconcile_session", "add_edge", "remove_edge"]);
+      for (const k of ["add_member", "reconcile_session", "add_edge", "remove_edge"] as const) {
+        expect(isSupportedOpKind(k)).toBe(true);
+      }
       for (const k of ["remove_member", "move_member", "fork_member", "change_runtime"] as const) {
         expect(isSupportedOpKind(k)).toBe(false);
       }

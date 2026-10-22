@@ -785,6 +785,20 @@ Only Claude and Codex tenures can be woken.
 |---|---|---|
 | `rig grow <rig-id> <members...>` | — | `--pod <pod>`<br>`--new-pod <pod>`<br>`--runtime <runtime>`<br>`--cwd <path>`<br>`--json` |
 
+### edge
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig edge` | — | — |
+| `rig edge add <rig> [from] [to]` | — | `--kind <kind>`<br>`--plan`<br>`--json` |
+| `rig edge remove <rig> <edge-id>` | — | `--plan`<br>`--json` |
+
+`add` requires `from`, `to` and `--kind`, and is idempotent: a repeat reports the
+existing edge and writes nothing. `remove` deletes the edge with that ID; a repeat changes nothing and
+returns `edge_not_found` (exit 1). See
+[changing edges on an existing rig](../reference/rig-spec.md#changing-edges-on-an-existing-rig)
+for input and receipt examples, rollback, and snapshot behavior.
+
 ### reconcile-session
 
 | Invocation | Aliases | Declared options |

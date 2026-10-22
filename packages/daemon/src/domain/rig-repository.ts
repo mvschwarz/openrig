@@ -592,6 +592,11 @@ export class RigRepository {
     );
   }
 
+  /** Removes exactly one edge row within the target rig; true when it existed. */
+  removeEdge(rigId: string, edgeId: string): boolean {
+    return this.db.prepare("DELETE FROM edges WHERE rig_id = ? AND id = ?").run(rigId, edgeId).changes > 0;
+  }
+
   getRig(rigId: string): RigWithRelations | null {
     const rigRow = this.db
       .prepare("SELECT * FROM rigs WHERE id = ?")

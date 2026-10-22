@@ -439,7 +439,7 @@ export function workflowRoutes(): Hono {
   app.get("/:instance_id/trace", (c) => {
     const instanceId = c.req.param("instance_id");
     try {
-      const result = getRuntime(c).continue(instanceId);
+      const result = getRuntime(c).continue(instanceId, { fullHistory: c.req.query("full") === "true" });
       return c.json(result);
     } catch (err) {
       return errorResponse(c, err);
