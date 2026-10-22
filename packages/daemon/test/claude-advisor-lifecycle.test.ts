@@ -328,3 +328,49 @@ describe("per-seat Claude Advisor (#1152)", () => {
     if (config.ok) expect(config.config.advisor).toBe(values.expected);
   });
 });
+
+describe("first-start retry of a seat that failed before Advisor support", () => {
+  // A seat whose first start failed at projection, before Advisor support existed: its unchanged agent spec names an
+  // Advisor, but the node recorded none (the migration leaves the new column empty).
+  async function failedBeforeAdvisor() {
+    const f = setup();
+    f.writeAgent("legacy", { advisor: "default-advisor" }, { advisor: "profile-advisor" });
+    f.spec.pods[0]!.members = [f.spec.pods[0]!.members[1]!];
+    const start = await f.inst.instantiate(RigSpecCodec.serialize(f.spec), f.root);
+    if (!start.ok) throw Error(JSON.stringify(start));
+    const rigId = start.result.rigId;
+    vi.spyOn(f.adapter, "project").mockResolvedValueOnce({ projected: [], skipped: [],
+      failed: [{ effectiveId: "fixture", error: "EACCES: projection ancestor" }] } as never);
+    const member = { id: "legacy", agent_ref: "local:agents/legacy", profile: "default", runtime: "claude-code", cwd: f.root,
+      model: "claude-sonnet-5-5" };
+    const added = await f.inst.addMemberToPod(rigId, "dev", member, f.root);
+    expect(added, JSON.stringify(added)).toMatchObject({ ok: true, result: { node: { status: "failed" } } });
+    const node = f.rigRepo.getRig(rigId)!.nodes.find(n => n.logicalId === "dev.legacy")!;
+    f.db.prepare("UPDATE nodes SET advisor = NULL WHERE id = ?").run(node.id);
+    const session = f.sessionRegistry.getSessionsForRig(rigId).find(s => s.nodeId === node.id)!;
+    f.sessionRegistry.updateStatus(session.id, "exited");
+    f.sessionRegistry.clearBinding(node.id);
+    f.live.delete(session.sessionName);
+    (f.tmux as { probeSession?: unknown }).probeSession = vi.fn(async () => ({ state: "absent" as const }));
+    f.commands.length = 0;
+    return { f, rigId, nodeId: node.id, member };
+  }
+
+  it("retries with the launch it recorded: no Advisor flag, and none stored", async () => {
+    const { f, rigId, nodeId, member } = await failedBeforeAdvisor();
+    const retried = await f.inst.retryFirstStart(rigId, nodeId, member, f.root);
+    expect(retried, JSON.stringify(retried)).toMatchObject({ ok: true, status: "launched" });
+    const launch = f.commands.find(c => c.command.includes("--session-id"))!.command;
+    expect(launch).toContain("--model 'claude-sonnet-5-5'");
+    expect(launch).not.toContain("--advisor");
+    expect(f.rigRepo.getRig(rigId)!.nodes.find(n => n.id === nodeId)!.advisor).toBeNull();
+  });
+
+  it("refuses a retry whose member now names an Advisor, and launches nothing", async () => {
+    const { f, rigId, nodeId, member } = await failedBeforeAdvisor();
+    const refused = await f.inst.retryFirstStart(rigId, nodeId, { ...member, advisor: "opus" }, f.root);
+    expect(refused).toMatchObject({ ok: false, code: "first_start_retry_refused", message: expect.stringContaining("advisor") });
+    expect(f.commands).toEqual([]);
+    expect(f.rigRepo.getRig(rigId)!.nodes.find(n => n.id === nodeId)!.advisor).toBeNull();
+  });
+});
