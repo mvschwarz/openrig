@@ -248,9 +248,11 @@ const DEFAULT_DB = "openrig.sqlite";
 // child is spawned and its handlers are attached), covers every primary probe,
 // listener check and backoff (the 20s the old 80 x 250ms delays gave). Each probe
 // may take up to STARTUP_PROBE_TIMEOUT_MS, so a busy child that answers correctly
-// in a second is accepted, but no probe timer outlives the deadline. Timers cannot
-// preempt synchronous work in this process, so an answer that arrives late is
-// rejected rather than adopted; a failed start may then add up to
+// in a second is accepted, but no probe timer outlives the deadline (a 2s startup
+// ceiling, not a universal header wait). The deadline only stops new probes and
+// backoff: timers cannot preempt synchronous work in this process, so a verified
+// answer already in hand when the clock passes it is still used, with the usual
+// liveness and publication rechecks. A failed start may add up to
 // DAEMON_STOP_WAIT_MS of owned-child cleanup.
 const STARTUP_READINESS_DEADLINE_MS = 20_000;
 const STARTUP_PROBE_TIMEOUT_MS = 2_000;
@@ -747,6 +749,8 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
   const remaining = (): number => Math.max(0, deadline - Date.now());
   const readOwnedHealth = async (url: string): Promise<StartHealth | null> => {
     assertChild();
+    // No new primary or listener fetch once the deadline has passed: a 0ms timer would still start one.
+    if (remaining() <= 0) throw new HealthProbeTimeoutError(url);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
@@ -802,13 +806,7 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
             }
           } });
           if (gate.ok === false) throw new StartupIdentityError(`Daemon child ${pid} FAILED the listener adoption gate: ${gate.reason}`);
-          // A probe can only finish late if this process was blocked; a late answer is not accepted,
-          // and the start fails through ordinary owned-child cleanup.
-          if (gate.ok === true) {
-            if (remaining() > 0) healthy = true;
-            else lastProbe = `child PID ${pid} answered after the ${STARTUP_READINESS_DEADLINE_MS}ms startup readiness deadline`;
-            break;
-          }
+          if (gate.ok === true) { healthy = true; break; }
           unverified = gate.hosts;
           lastProbe = gate.reason;
         }
