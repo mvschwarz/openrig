@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Hono } from "hono";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -8,6 +11,8 @@ import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { streamItemsSchema } from "../src/db/migrations/023_stream_items.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
+import { queueTransitionsArchiveSchema } from "../src/db/migrations/054_queue_transitions_archive.js";
+import { archiveIdentityProvenanceSchema } from "../src/db/migrations/082_archive_identity_provenance.js";
 import { watchdogJobsSchema } from "../src/db/migrations/031_watchdog_jobs.js";
 import { inboxEntriesSchema } from "../src/db/migrations/026_inbox_entries.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
@@ -17,7 +22,7 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { InboxHandler } from "../src/domain/inbox-handler.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
-import { CLOSURE_REASONS } from "../src/domain/hot-potato-enforcer.js";
+import { DONE_CLOSURE_REASONS } from "../src/domain/hot-potato-enforcer.js";
 import { queueRoutes } from "../src/routes/queue.js";
 import { setSelfHostId, getSelfHostId } from "../src/domain/hosts/fanout-contract.js";
 import { expectLimitParsing } from "./helpers/limit-query-cases.js";
@@ -27,9 +32,12 @@ function buildApp(opts: {
   queueRepo: QueueRepository;
   inboxHandler: InboxHandler;
   outboxHandler: OutboxHandler;
+  /** The configured missions root, for routes that resolve work nodes. */
+  slicesRoot?: string;
 }): Hono {
   const app = new Hono();
   app.use("*", async (c, next) => {
+    if (opts.slicesRoot) c.set("settingsStore" as never, { resolveOne: () => ({ value: opts.slicesRoot }) } as never);
     c.set("eventBus" as never, opts.eventBus);
     c.set("queueRepo" as never, opts.queueRepo);
     c.set("inboxHandler" as never, opts.inboxHandler);
@@ -56,11 +64,13 @@ describe("queue routes", () => {
       streamItemsSchema, // 067's stream_items ALTER needs its base table present
       queueItemsSchema,
       queueTransitionsSchema,
+      queueTransitionsArchiveSchema, // retention's archive; the archived-row fallback tests need it
       watchdogJobsSchema,
       inboxEntriesSchema,
       outboxEntriesSchema,
       queueTargetRepoSchema, // OPR.0.3.2.20: required for attention=1&targetRepo=X composition tests
       i3IdentityProvenanceSchema, // P21 §4 era-stamp column on the queue-spine stores (last: needs all 4 tables)
+      archiveIdentityProvenanceSchema, // the archive carries the same column, which retention requires
     ]);
     createWakeContractTable(db);
     bus = new EventBus(db);
@@ -249,6 +259,37 @@ describe("queue routes", () => {
     expect(queueRepo.list({ limit: 100 })).toHaveLength(2);
   });
 
+  it("handoffAdvisory guides callers to rig queue handoff commands", async () => {
+    const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "task", nudge: false });
+    const res = await app.request(`/api/queue/${source.qitemId}/update`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
+      body: JSON.stringify({ state: "done", closureReason: "handed_off_to", closureTarget: "next@r" }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.handoffAdvisory?.status).toBe("unverified");
+    expect(body.handoffAdvisory?.message).toContain("rig queue handoff");
+    expect(body.handoffAdvisory?.message).toContain("handoff-and-complete");
+    expect(body.handoffAdvisory?.message).toContain("a local handoff is atomic");
+    expect(body.handoffAdvisory?.message).toContain("across hosts the successor is created first and the source closed after");
+    expect(body.handoffAdvisory?.message).toContain("re-running the same handoff is idempotent");
+  });
+
+  it("handoffAdvisory is not hidden by candidate with malformed chain_of_record", async () => {
+    const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "task", nudge: false });
+    const candidate = await queueRepo.create({ sourceSession: "b@r", destinationSession: "next@r", body: "corrupted candidate", nudge: false });
+    db.prepare("UPDATE queue_items SET chain_of_record = 'not-valid-json' WHERE qitem_id = ?").run(candidate.qitemId);
+
+    const res = await app.request(`/api/queue/${source.qitemId}/update`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
+      body: JSON.stringify({ state: "done", closureReason: "handed_off_to", closureTarget: "next@r" }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.handoffAdvisory?.status).toBe("unverified");
+    expect(body.handoffAdvisory?.message).toContain("rig queue handoff");
+  });
+
   it("keeps legacy custody note appends and explicit reopen/repair available", async () => {
     const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "legacy", nudge: false });
     queueRepo.update({ qitemId: source.qitemId, actorSession: "b@r",
@@ -289,6 +330,523 @@ describe("queue routes", () => {
       ? db.prepare("SELECT target_session, interval_seconds, state FROM watchdog_jobs WHERE job_id = ?").get(wake.wake_ref)
       : undefined;
     expect(job).toMatchObject({ target_session: "b@r", interval_seconds: 45, state: "active" });
+  });
+
+  describe("update resolution", () => {
+    type Start = "pending" | "in-progress" | "blocked" | "done" | "canceled" | "handed-off" | "failed" | "denied";
+    const post = (qitemId: string, body: Record<string, unknown>, session = "b@r") => app.request(`/api/queue/${qitemId}/update`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": session },
+      body: JSON.stringify(body),
+    });
+    const show = async (qitemId: string) => (await app.request(`/api/queue/${qitemId}`)).json() as Promise<Record<string, any>>;
+    const closeWith = (state: Start): Record<string, unknown> =>
+      state === "done" ? { state, closureReason: "no-follow-on" }
+        : state === "handed-off" ? { state, closureReason: "handed_off_to", closureTarget: "next@r" }
+          : { state };
+    async function rowIn(start: Start) {
+      const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+      if (start === "pending") return row.qitemId;
+      queueRepo.claim({ qitemId: row.qitemId, destinationSession: "b@r" });
+      if (start === "blocked") queueRepo.update({ qitemId: row.qitemId, actorSession: "b@r", state: "blocked", blockedOn: "external:x", wakeAfterSeconds: 60, transitionNote: "continuation: wait" });
+      else if (start !== "in-progress") queueRepo.update({ qitemId: row.qitemId, actorSession: "b@r", ...closeWith(start) } as never);
+      return row.qitemId;
+    }
+    /** What a request did: its status and error, the row afterwards, and what it wrote to the log and event stream. */
+    async function observe(start: Start, body: Record<string, unknown>) {
+      const qitemId = await rowIn(start);
+      const transitionsBefore = queueRepo.listTransitions(qitemId).length;
+      const eventsBefore = bus.replayAll(0).length;
+      const res = await post(qitemId, body);
+      const payload = await res.json() as Record<string, any>;
+      const item = await show(qitemId);
+      return {
+        status: res.status, error: payload.error ?? null,
+        state: item.state, closureReason: item.closureReason, closureTarget: item.closureTarget,
+        resolution: item.resolution as string | null,
+        transitionsWritten: queueRepo.listTransitions(qitemId).length - transitionsBefore,
+        eventsWritten: bus.replayAll(0).length - eventsBefore,
+      };
+    }
+    /** The same request with and without `resolution`: the daemon answers both alike (main ignores the field). */
+    async function expectSameAsWithoutResolution(start: Start, body: Record<string, unknown>, resolution: unknown) {
+      const without = await observe(start, body);
+      const withField = await observe(start, { ...body, resolution });
+      expect(withField).toEqual(without);
+      return withField;
+    }
+
+    // Every row here is a request main answers 200, writing one transition and one event.
+    it.each([
+      ["in-progress", { state: "pending" }],
+      ["in-progress", { state: "in-progress", transitionNote: "still going" }],
+      ["in-progress", { state: "blocked", blockedOn: "external:x", wakeAfterSeconds: 60, transitionNote: "continuation: wait" }],
+      ["done", { state: "in-progress", reopen: true, transitionNote: "more to do" }],
+      ["canceled", { state: "pending", reopen: true, transitionNote: "more to do" }],
+      ["handed-off", { state: "in-progress", reopen: true, transitionNote: "more to do" }],
+      ["in-progress", { transitionNote: "just a note" }],
+      ["done", { transitionNote: "just a note" }],
+      ["canceled", { transitionNote: "just a note" }],
+      ["handed-off", { transitionNote: "just a note" }],
+      ["done", { state: "done", transitionNote: "again" }],
+      ["canceled", { state: "canceled", transitionNote: "again" }],
+      ["handed-off", { state: "handed-off", transitionNote: "again" }],
+      ["failed", { state: "failed" }],
+      ["denied", { state: "denied" }],
+      ["failed", { state: "done", closureReason: "no-follow-on" }],
+    ] as Array<[Start, Record<string, unknown>]>)("%s row, %j: text in resolution changes nothing about the answer or the writes", async (start, body) => {
+      const result = await expectSameAsWithoutResolution(start, body, "an outcome");
+      expect(result).toMatchObject({ status: 200, error: null, transitionsWritten: 1, eventsWritten: 1 });
+      expect(result.resolution).toBeNull();
+    });
+
+    // Main refuses these too (a repeat close that carries closure fields is not a note append), so the
+    // field makes no difference to the refusal; they are not part of the 200 table above.
+    it.each([
+      ["done", { state: "done", closureReason: "no-follow-on", transitionNote: "again" }],
+      ["handed-off", { state: "handed-off", closureReason: "handed_off_to", closureTarget: "next@r", transitionNote: "again" }],
+    ] as Array<[Start, Record<string, unknown>]>)("%s row repeat close with closure fields is refused as on main, with or without resolution", async (start, body) => {
+      const result = await expectSameAsWithoutResolution(start, body, "an outcome");
+      expect(result).toMatchObject({ status: 400, error: "note_append_fields_not_admitted", transitionsWritten: 0, eventsWritten: 0 });
+      expect(result.resolution).toBeNull();
+    });
+
+    it.each([[""], ["   "], ["\n\t "]])("blank text %j on an ordinary close is ignored: the row closes with no resolution", async (text) => {
+      const result = await expectSameAsWithoutResolution("in-progress", closeWith("done"), text);
+      expect(result).toMatchObject({ status: 200, state: "done", resolution: null, transitionsWritten: 1, eventsWritten: 1 });
+    });
+
+    it.each([[0], [42], [false], [true], [{}], [[]], [["text"]], [null]])("a non-string %j on an ordinary close is ignored: the row closes and resolution is unchanged", async (value) => {
+      const result = await expectSameAsWithoutResolution("in-progress", closeWith("done"), value);
+      expect(result).toMatchObject({ status: 200, state: "done", resolution: null, transitionsWritten: 1, eventsWritten: 1 });
+    });
+
+    it.each(["done", "canceled", "denied", "failed", "handed-off"] as const)("a %s close stores the text exactly as sent and show returns it", async (state) => {
+      const text = "Fixed in #42\n  second line, indented ✓ é中文 🚀  ";
+      const qitemId = await rowIn("in-progress");
+      const res = await post(qitemId, { ...closeWith(state), resolution: text, transitionNote: "closing" });
+      expect(res.status).toBe(200);
+      expect((await res.json()).resolution).toBe(text);
+      expect(await show(qitemId)).toMatchObject({ state, resolution: text });
+    });
+
+    it("a close without the field leaves the column as it was", async () => {
+      const qitemId = await rowIn("in-progress");
+      await post(qitemId, closeWith("done"));
+      expect((await show(qitemId)).resolution).toBeNull();
+    });
+
+    it("a closed row keeps its outcome when a later request sends another", async () => {
+      const qitemId = await rowIn("in-progress");
+      await post(qitemId, { ...closeWith("failed"), resolution: "first" });
+      expect((await post(qitemId, { ...closeWith("failed"), resolution: "second" })).status).toBe(200);
+      expect((await post(qitemId, { ...closeWith("done"), resolution: "third" })).status).toBe(200);
+      expect((await show(qitemId)).resolution).toBe("first");
+    });
+
+    it("an acknowledged reopen keeps the first outcome and the second close appends its own", async () => {
+      const qitemId = await rowIn("in-progress");
+      await post(qitemId, { ...closeWith("done"), resolution: "first outcome" });
+      expect((await post(qitemId, { state: "in-progress", reopen: true, transitionNote: "more to do", resolution: "ignored on reopen" })).status).toBe(200);
+      expect((await show(qitemId)).resolution).toBe("first outcome");
+      await post(qitemId, { ...closeWith("done"), resolution: "second outcome" });
+      expect((await show(qitemId)).resolution).toBe("first outcome\nsecond outcome");
+    });
+
+    it("a close appends its outcome after the fallback line", async () => {
+      const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+      queueRepo.routeToFallback(row.qitemId, "c@r", "b@r unreachable");
+      queueRepo.claim({ qitemId: row.qitemId, destinationSession: "c@r" });
+      expect((await post(row.qitemId, { ...closeWith("done"), resolution: "Handled by c" }, "c@r")).status).toBe(200);
+      expect((await show(row.qitemId)).resolution).toBe("fallback: b@r unreachable\nHandled by c");
+    });
+
+    describe("a fallback after a stored outcome", () => {
+      it("keeps the outcome and adds the fallback line after it", async () => {
+        const qitemId = await rowIn("in-progress");
+        await post(qitemId, { ...closeWith("done"), resolution: "Fixed in #42" });
+        await post(qitemId, { state: "in-progress", reopen: true, transitionNote: "more to do" });
+        queueRepo.routeToFallback(qitemId, "c@r", "b@r unreachable");
+        expect((await show(qitemId)).resolution).toBe("Fixed in #42\nfallback: b@r unreachable");
+      });
+
+      it("keeps an outcome that sits after an earlier fallback line", async () => {
+        const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+        queueRepo.routeToFallback(row.qitemId, "c@r", "first reason");
+        queueRepo.claim({ qitemId: row.qitemId, destinationSession: "c@r" });
+        await post(row.qitemId, { ...closeWith("done"), resolution: "Handled by c" }, "c@r");
+        await post(row.qitemId, { state: "in-progress", reopen: true, transitionNote: "more to do" }, "c@r");
+        queueRepo.routeToFallback(row.qitemId, "d@r", "second reason");
+        expect((await show(row.qitemId)).resolution).toBe("fallback: first reason\nHandled by c\nfallback: second reason");
+      });
+
+      it("keeps an outcome that is itself one 'fallback: ' line", async () => {
+        const qitemId = await rowIn("in-progress");
+        await post(qitemId, { ...closeWith("done"), resolution: "fallback: yes" });
+        await post(qitemId, { state: "in-progress", reopen: true, transitionNote: "more to do" });
+        queueRepo.routeToFallback(qitemId, "c@r", "b@r unreachable");
+        expect((await show(qitemId)).resolution).toBe("fallback: yes\nfallback: b@r unreachable");
+      });
+
+      it("replaces a fallback line whose reason has a newline, as main does", async () => {
+        const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+        queueRepo.routeToFallback(row.qitemId, "c@r", "line one\nline two");
+        expect((await show(row.qitemId)).resolution).toBe("fallback: line one\nline two");
+        queueRepo.routeToFallback(row.qitemId, "d@r", "second");
+        expect((await show(row.qitemId)).resolution).toBe("fallback: second");
+      });
+
+      it("keeps an outcome that follows a fallback line whose reason has a newline", async () => {
+        const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+        queueRepo.routeToFallback(row.qitemId, "c@r", "line one\nline two");
+        queueRepo.claim({ qitemId: row.qitemId, destinationSession: "c@r" });
+        await post(row.qitemId, { ...closeWith("done"), resolution: "Handled by c" }, "c@r");
+        await post(row.qitemId, { state: "in-progress", reopen: true, transitionNote: "more to do" }, "c@r");
+        queueRepo.routeToFallback(row.qitemId, "d@r", "second");
+        expect((await show(row.qitemId)).resolution).toBe("fallback: line one\nline two\nHandled by c\nfallback: second");
+      });
+
+      it("a fallback line added after an outcome is replaced by the next fallback, not piled up", async () => {
+        const qitemId = await rowIn("in-progress");
+        await post(qitemId, { ...closeWith("done"), resolution: "Fixed in #42" });
+        await post(qitemId, { state: "in-progress", reopen: true, transitionNote: "more to do" });
+        queueRepo.routeToFallback(qitemId, "c@r", "first");
+        queueRepo.routeToFallback(qitemId, "d@r", "second");
+        expect((await show(qitemId)).resolution).toBe("Fixed in #42\nfallback: second");
+      });
+
+      it("keeps an outcome whose last line matches an earlier fallback line", async () => {
+        const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+        queueRepo.routeToFallback(row.qitemId, "c@r", "first reason");
+        queueRepo.claim({ qitemId: row.qitemId, destinationSession: "c@r" });
+        await post(row.qitemId, { ...closeWith("done"), resolution: "kept prefix\nfallback: first reason" }, "c@r");
+        await post(row.qitemId, { state: "in-progress", reopen: true, transitionNote: "more to do" }, "c@r");
+        queueRepo.routeToFallback(row.qitemId, "d@r", "second reason");
+        expect((await show(row.qitemId)).resolution).toBe(
+          "fallback: first reason\nkept prefix\nfallback: first reason\nfallback: second reason");
+      });
+
+      it("keeps an outcome that is exactly an earlier fallback line", async () => {
+        const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+        queueRepo.routeToFallback(row.qitemId, "c@r", "first reason");
+        queueRepo.claim({ qitemId: row.qitemId, destinationSession: "c@r" });
+        await post(row.qitemId, { ...closeWith("done"), resolution: "fallback: first reason" }, "c@r");
+        await post(row.qitemId, { state: "in-progress", reopen: true, transitionNote: "more to do" }, "c@r");
+        queueRepo.routeToFallback(row.qitemId, "d@r", "second reason");
+        expect((await show(row.qitemId)).resolution).toBe(
+          "fallback: first reason\nfallback: first reason\nfallback: second reason");
+      });
+
+      it("replaces a fallback line that a close without an outcome came after, as main does", async () => {
+        const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+        queueRepo.routeToFallback(row.qitemId, "c@r", "first reason");
+        queueRepo.claim({ qitemId: row.qitemId, destinationSession: "c@r" });
+        await post(row.qitemId, closeWith("done"), "c@r");
+        await post(row.qitemId, { state: "in-progress", reopen: true, transitionNote: "more to do" }, "c@r");
+        queueRepo.routeToFallback(row.qitemId, "d@r", "second reason");
+        expect((await show(row.qitemId)).resolution).toBe("fallback: second reason");
+      });
+
+      // The fallback route takes any JSON value as the reason; main writes it into the line as JavaScript prints it.
+      it.each([
+        ["true", true], ["false", false], ["an object", { text: "reason" }], ["an array", ["reason"]],
+        ["a number", 7], ["a plain string", "plain"], ["a string with a newline", "line one\nline two"],
+      ])("a later fallback replaces a fallback line written for %s, as main does", async (_label, firstReason) => {
+        const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+        const fallback = (to: string, reason: unknown) => app.request(`/api/queue/${row.qitemId}/fallback`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ fallbackDestination: to, reason }),
+        });
+        expect((await fallback("c@r", firstReason)).status).toBe(200);
+        expect((await fallback("d@r", "next")).status).toBe(200);
+        expect((await show(row.qitemId)).resolution).toBe("fallback: next");
+      });
+
+      // The route takes any destination and any reason, and the reroute transition's note has both in it.
+      it.each([
+        ["a destination with ' ('", "c@r (x", "first"],
+        ["a destination with ' (' and ')'", "c@r (x) y", "first"],
+        ["a destination with ' \u2192 ('", "c@r \u2192 (x", "first"],
+        ["a reason with ' (' and ')'", "c@r", "a (b) c (d)"],
+        ["a destination and a reason with ' (' and ')'", "c@r (x)", "a (b) c)"],
+        ["an empty reason", "c@r (x", ""],
+      ])("a later fallback replaces the line written with %s", async (_label, firstDestination, firstReason) => {
+        const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+        const fallback = (to: string, reason: unknown) => app.request(`/api/queue/${row.qitemId}/fallback`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ fallbackDestination: to, reason }),
+        });
+        expect((await fallback(firstDestination, firstReason)).status).toBe(200);
+        expect((await fallback("d@r (y) \u2192 (z", "next")).status).toBe(200);
+        expect((await show(row.qitemId)).resolution).toBe("fallback: next");
+        expect((await fallback("e@r", "last")).status).toBe(200);
+        expect((await show(row.qitemId)).resolution).toBe("fallback: last");
+      });
+
+      // What the route stores can print differently from what it received (a number destination is stored as text
+      // with a ".0"), and create takes any chainOfRecord. The earlier line is found without either.
+      describe("whatever the route received for the destination, the chain and the reason", () => {
+        const createRow = (extra: Record<string, unknown> = {}) => app.request("/api/queue/create", {
+          method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
+          body: JSON.stringify({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false, ...extra }),
+        }).then(async (res) => { expect(res.status).toBe(201); return (await res.json() as { qitemId: string }).qitemId; });
+        const fallbackTo = (qitemId: string, to: unknown, reason: unknown) => app.request(`/api/queue/${qitemId}/fallback`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ fallbackDestination: to, reason }),
+        });
+
+        it.each([[1], [null], [{}], [["fallback-from:x"]], ["fallback-from:", 7]] as unknown[][])(
+          "a row created with chainOfRecord %j takes an outcome, then a fallback, as main does", async (...chain) => {
+            const qitemId = await createRow({ chainOfRecord: chain });
+            queueRepo.claim({ qitemId, destinationSession: "b@r" });
+            await post(qitemId, { ...closeWith("done"), resolution: "outcome" });
+            await post(qitemId, { state: "in-progress", reopen: true, transitionNote: "more to do" });
+            expect((await fallbackTo(qitemId, "c@r", "next")).status).toBe(200);
+            expect((await show(qitemId)).resolution).toBe("outcome\nfallback: next");
+          });
+
+        it.each([5, 1.5, 1e21, 123456789012345680000, "5", " lead@r ", "c@r\nd@r"])(
+          "a later fallback replaces the line written for the destination %j", async (destination) => {
+            const qitemId = await createRow();
+            expect((await fallbackTo(qitemId, destination, "first")).status).toBe(200);
+            expect((await fallbackTo(qitemId, "d@r", "next")).status).toBe(200);
+            expect((await show(qitemId)).resolution).toBe("fallback: next");
+          });
+
+        // Every pairing of an awkward first destination and first reason, reroute twice, as main does.
+        const destinations: unknown[] = ["c@r", "c@r (x", "c@r (x) \u2192 (y", " \u2192 ", ")", "(", 5, 2.5, "a\nb"];
+        const reasons: unknown[] = ["first", "", " (", ") (", "a (b) c", "x\nfallback: y", "fallback: ", true, { a: 1 }, ["r", 2], 7, 0.5];
+        it("a later fallback replaces the earlier line for every pairing of awkward destination and reason", async () => {
+          const wrong: string[] = [];
+          for (const destination of destinations) {
+            for (const reason of reasons) {
+              const qitemId = await createRow();
+              await fallbackTo(qitemId, destination, reason);
+              await fallbackTo(qitemId, "d@r (y)", "next");
+              const got = (await show(qitemId)).resolution;
+              if (got !== "fallback: next") wrong.push(`${JSON.stringify(destination)} / ${JSON.stringify(reason)} -> ${JSON.stringify(got)}`);
+            }
+          }
+          expect(wrong).toEqual([]);
+        });
+
+        it("keeps an outcome that looks like the line, whatever the destination and reason held", async () => {
+          const wrong: string[] = [];
+          for (const destination of destinations) {
+            for (const reason of reasons) {
+              const qitemId = await createRow();
+              await fallbackTo(qitemId, destination, reason);
+              const owner = () => queueRepo.getById(qitemId)!.destinationSession;
+              queueRepo.claim({ qitemId, destinationSession: owner() });
+              const first = (await show(qitemId)).resolution as string;
+              queueRepo.update({ qitemId, actorSession: owner(), state: "done", closureReason: "no-follow-on", resolution: first });
+              queueRepo.update({ qitemId, actorSession: owner(), state: "in-progress", reopen: true, transitionNote: "more to do" } as never);
+              await fallbackTo(qitemId, "d@r", "next");
+              const got = (await show(qitemId)).resolution;
+              if (got !== `${first}\n${first}\nfallback: next`) wrong.push(`${JSON.stringify(destination)} / ${JSON.stringify(reason)} -> ${JSON.stringify(got)}`);
+            }
+          }
+          expect(wrong).toEqual([]);
+        });
+      });
+
+      // The update route takes the actor and the note from the request, so a note-only update can carry both of a
+      // reroute's marks; only the reroute's own transition (written in-process, with no identity provenance) counts.
+      describe("a note-only update that carries a reroute's actor and note", () => {
+        const FORGED = { transitionNote: "fallback-routed: worker@rig \u2192 next@rig (user text)" };
+
+        it.each([
+          ["with the fallback actor", "system:queue-fallback"],
+          ["with an ordinary actor", "b@r"],
+        ])("is accepted as before and does not decide which line a fallback replaces, %s", async (_label, actor) => {
+          const qitemId = await rowIn("in-progress");
+          await post(qitemId, { ...closeWith("done"), resolution: "kept prefix\nfallback: user text" });
+          await post(qitemId, { state: "in-progress", reopen: true, transitionNote: "more to do" });
+          const forged = await post(qitemId, FORGED, actor);
+          expect(forged.status).toBe(200);
+          expect((await show(qitemId)).resolution).toBe("kept prefix\nfallback: user text");
+          queueRepo.routeToFallback(qitemId, "c@r", "next");
+          expect((await show(qitemId)).resolution).toBe("kept prefix\nfallback: user text\nfallback: next");
+        });
+
+        it("a real reroute before it is still the one found", async () => {
+          const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+          queueRepo.routeToFallback(row.qitemId, "c@r", "user text");
+          queueRepo.claim({ qitemId: row.qitemId, destinationSession: "c@r" });
+          expect((await post(row.qitemId, { transitionNote: "fallback-routed: x@r \u2192 y@r (something else)" }, "system:queue-fallback")).status).toBe(200);
+          queueRepo.routeToFallback(row.qitemId, "d@r", "next");
+          expect((await show(row.qitemId)).resolution).toBe("fallback: next");
+        });
+      });
+
+      describe("when the retention archiver has moved the row's transitions", () => {
+        /** Move every transition of the closed row into the archive, as the retention sweep does for an aged terminal row. */
+        async function archive(qitemId: string): Promise<void> {
+          // The sweep skips rows an active workflow still points at; this suite has no workflows.
+          db.exec("CREATE TABLE IF NOT EXISTS workflow_instances (instance_id TEXT PRIMARY KEY, status TEXT NOT NULL, current_frontier_json TEXT NOT NULL)");
+          const { archiveAgedTerminalTransitions } = await import("../src/domain/queue-retention.js");
+          const result = archiveAgedTerminalTransitions(db, { nowIso: new Date(Date.now() + 400 * 86_400_000).toISOString() });
+          expect(result.archivedQitems).toBeGreaterThan(0);
+          expect(db.prepare("SELECT COUNT(*) AS n FROM queue_transitions WHERE qitem_id = ?").get(qitemId)).toEqual({ n: 0 });
+        }
+
+        it("a fallback on the archived row replaces its earlier fallback line, as main does", async () => {
+          const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+          queueRepo.routeToFallback(row.qitemId, "c@r", "first");
+          queueRepo.claim({ qitemId: row.qitemId, destinationSession: "c@r" });
+          await post(row.qitemId, closeWith("done"), "c@r");
+          await archive(row.qitemId);
+          queueRepo.routeToFallback(row.qitemId, "d@r", "next");
+          expect((await show(row.qitemId)).resolution).toBe("fallback: next");
+        });
+
+        it("a reopened archived row is replaced the same way", async () => {
+          const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+          queueRepo.routeToFallback(row.qitemId, "c@r", "first");
+          queueRepo.claim({ qitemId: row.qitemId, destinationSession: "c@r" });
+          await post(row.qitemId, closeWith("done"), "c@r");
+          await archive(row.qitemId);
+          expect((await post(row.qitemId, { state: "in-progress", reopen: true, transitionNote: "more to do" }, "c@r")).status).toBe(200);
+          queueRepo.routeToFallback(row.qitemId, "d@r", "next");
+          expect((await show(row.qitemId)).resolution).toBe("fallback: next");
+        });
+
+        it("keeps an archived outcome that reads like the earlier fallback line", async () => {
+          const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+          queueRepo.routeToFallback(row.qitemId, "c@r", "first");
+          queueRepo.claim({ qitemId: row.qitemId, destinationSession: "c@r" });
+          await post(row.qitemId, { ...closeWith("done"), resolution: "kept\nfallback: first" }, "c@r");
+          await archive(row.qitemId);
+          queueRepo.routeToFallback(row.qitemId, "d@r", "next");
+          expect((await show(row.qitemId)).resolution).toBe("fallback: first\nkept\nfallback: first\nfallback: next");
+        });
+
+        it("finds the archived reroute by the row, without scanning the archive", async () => {
+          const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+          queueRepo.routeToFallback(row.qitemId, "c@r", "first");
+          queueRepo.claim({ qitemId: row.qitemId, destinationSession: "c@r" });
+          await post(row.qitemId, closeWith("done"), "c@r");
+          await archive(row.qitemId);
+          const lookup = queueRepo as unknown as { fallbackLineStart(qitemId: string, resolution: string): number | null };
+          const seen: string[] = [];
+          const prepare = db.prepare.bind(db);
+          db.prepare = ((sql: string) => { seen.push(sql); return prepare(sql); }) as typeof db.prepare;
+          let found: number | null = null;
+          try { found = lookup.fallbackLineStart(row.qitemId, "fallback: first"); } finally { db.prepare = prepare as typeof db.prepare; }
+          expect(found).toBe(0);
+          expect(seen.some((read) => /queue_transitions_archive/.test(read))).toBe(true);
+          const scans = seen.filter((read) => !/sqlite_master/.test(read)).flatMap((read) =>
+            (db.prepare(`EXPLAIN QUERY PLAN ${read}`).all(...(read.match(/\?/g) ?? []).map(() => "x")) as Array<{ detail: string }>)
+              .map((p) => p.detail).filter((d) => /^SCAN\b/.test(d)));
+          expect(scans).toEqual([]);
+        });
+      });
+
+      describe("on a database with a long history", () => {
+        /** The SQL the repository prepares while `run` executes. */
+        function preparedDuring(run: () => void): string[] {
+          const seen: string[] = [];
+          const prepare = db.prepare.bind(db);
+          db.prepare = ((sql: string) => { seen.push(sql); return prepare(sql); }) as typeof db.prepare;
+          try { run(); } finally { db.prepare = prepare as typeof db.prepare; }
+          return seen;
+        }
+
+        it("still replaces the row's own earlier fallback line among many unrelated events and rows", async () => {
+          const insertEvent = db.prepare("INSERT INTO events (type, payload) VALUES (?, ?)");
+          db.transaction(() => {
+            for (let i = 0; i < 3000; i++) insertEvent.run("qitem.fallback_routed", JSON.stringify({ qitemId: `qitem-other-${i}`, reason: "first reason" }));
+          })();
+          for (let i = 0; i < 20; i++) {
+            const other = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+            queueRepo.routeToFallback(other.qitemId, "c@r", "first reason");
+          }
+          const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+          queueRepo.routeToFallback(row.qitemId, "c@r", "first reason");
+          queueRepo.routeToFallback(row.qitemId, "d@r", "second reason");
+          expect((await show(row.qitemId)).resolution).toBe("fallback: second reason");
+        });
+
+        it("finds the row's earlier fallback line without scanning a table", async () => {
+          const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+          queueRepo.routeToFallback(row.qitemId, "c@r", "first reason");
+          const lookup = queueRepo as unknown as { fallbackLineStart(qitemId: string, resolution: string): number | null };
+          let found: number | null = null;
+          const sql = preparedDuring(() => { found = lookup.fallbackLineStart(row.qitemId, "fallback: first reason"); });
+          expect(found).toBe(0);
+          expect(sql.length).toBeGreaterThan(0);
+          const scans: string[] = [];
+          for (const read of sql.filter((r) => !/sqlite_master/.test(r))) {
+            expect(read).not.toMatch(/\bFROM\s+events\b/i);
+            const plan = db.prepare(`EXPLAIN QUERY PLAN ${read}`).all(...(read.match(/\?/g) ?? []).map(() => "x")) as Array<{ detail: string }>;
+            scans.push(...plan.map((p) => p.detail).filter((d) => /^SCAN\b/.test(d)));
+          }
+          expect(scans).toEqual([]);
+        });
+      });
+
+      it("still replaces a plain fallback line, as before", async () => {
+        const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+        queueRepo.routeToFallback(row.qitemId, "c@r", "first reason");
+        queueRepo.routeToFallback(row.qitemId, "d@r", "second reason");
+        expect((await show(row.qitemId)).resolution).toBe("fallback: second reason");
+      });
+
+      it("a row with no resolution gets the fallback line, as before", async () => {
+        const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+        queueRepo.routeToFallback(row.qitemId, "c@r", "b@r unreachable");
+        expect((await show(row.qitemId)).resolution).toBe("fallback: b@r unreachable");
+      });
+    });
+  });
+
+  describe("GET /:qitemId closing transition", () => {
+    const update = (qitemId: string, body: Record<string, unknown>) => app.request(`/api/queue/${qitemId}/update`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
+      body: JSON.stringify(body),
+    });
+    const show = async (qitemId: string) => (await app.request(`/api/queue/${qitemId}`)).json() as Promise<Record<string, any>>;
+
+    it("a closed row carries the transition that closed it: state, reason, actor, time and note", async () => {
+      const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+      queueRepo.claim({ qitemId: row.qitemId, destinationSession: "b@r" });
+      expect((await update(row.qitemId, { state: "done", closureReason: "no-follow-on", transitionNote: "shipped it" })).status).toBe(200);
+      const closing = (await show(row.qitemId)).closingTransition;
+      expect(closing).toMatchObject({ state: "done", closureReason: "no-follow-on", closureTarget: null, actorSession: "b@r", transitionNote: "shipped it" });
+      expect(Number.isNaN(Date.parse(closing.ts))).toBe(false);
+    });
+
+    it("a later note on the closed row does not replace the closing note", async () => {
+      const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+      queueRepo.claim({ qitemId: row.qitemId, destinationSession: "b@r" });
+      await update(row.qitemId, { state: "done", closureReason: "no-follow-on", transitionNote: "the report" });
+      expect((await update(row.qitemId, { transitionNote: "afterthought" })).status).toBe(200);
+      expect((await show(row.qitemId)).closingTransition).toMatchObject({ closureReason: "no-follow-on", transitionNote: "the report" });
+    });
+
+    it("a canceled row carries its note even with no closure reason", async () => {
+      const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+      expect((await update(row.qitemId, { state: "canceled", transitionNote: "no longer needed" })).status).toBe(200);
+      expect((await show(row.qitemId)).closingTransition).toMatchObject({ state: "canceled", closureReason: null, transitionNote: "no longer needed" });
+    });
+
+    it.each(["pending", "in-progress", "blocked"])("a %s row has no closing block", async (state) => {
+      const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+      if (state !== "pending") queueRepo.claim({ qitemId: row.qitemId, destinationSession: "b@r" });
+      if (state === "blocked") await update(row.qitemId, { state: "blocked", blockedOn: "external:x", transitionNote: "continuation: wait", wakeAfterSeconds: 60 });
+      const item = await show(row.qitemId);
+      expect(item.state).toBe(state);
+      expect(item).not.toHaveProperty("closingTransition");
+    });
+
+    it("a reopened row has no closing block until it closes again", async () => {
+      const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+      queueRepo.claim({ qitemId: row.qitemId, destinationSession: "b@r" });
+      await update(row.qitemId, { state: "done", closureReason: "no-follow-on", transitionNote: "first close" });
+      expect((await update(row.qitemId, { state: "in-progress", reopen: true, transitionNote: "more to do" })).status).toBe(200);
+      expect(await show(row.qitemId)).not.toHaveProperty("closingTransition");
+      await update(row.qitemId, { state: "done", closureReason: "no-follow-on", transitionNote: "second close" });
+      expect((await show(row.qitemId)).closingTransition).toMatchObject({ transitionNote: "second close" });
+    });
   });
 
   // 0.5.1-54 DR-1 — the create-path failed-nudge surface (the NAMED, human/agent-visible read path).
@@ -856,11 +1414,11 @@ describe("queue routes", () => {
     expect(update.status).toBe(400);
     const data = (await update.json()) as { error: string; validReasons: string[] };
     expect(data.error).toBe("missing_closure_reason");
-    expect(data.validReasons).toEqual(CLOSURE_REASONS);
+    expect(data.validReasons).toEqual(DONE_CLOSURE_REASONS);
   });
 
   it("POST /api/queue/:id/update accepts each valid closure reason", async () => {
-    for (const reason of CLOSURE_REASONS) {
+    for (const reason of DONE_CLOSURE_REASONS) {
       const create = await app.request("/api/queue/create", {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
@@ -868,7 +1426,7 @@ describe("queue routes", () => {
       });
       const item = (await create.json()) as { qitemId: string };
 
-      const requiresTarget = reason === "handed_off_to" || reason === "blocked_on" || reason === "escalation";
+      const requiresTarget = reason === "handed_off_to" || reason === "escalation";
       const closureTarget = reason === "handed_off_to" ? "c@r" : "downstream-target";
       if (reason === "handed_off_to") await queueRepo.create({
         sourceSession: "b@r", destinationSession: closureTarget,
@@ -889,6 +1447,22 @@ describe("queue routes", () => {
       expect(data.state).toBe("done");
       expect(data.closureReason).toBe(reason);
     }
+  });
+
+  it("POST /api/queue/:id/update rejects done + blocked_on as a client error", async () => {
+    const item = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "wait for work", nudge: false });
+    const update = await app.request(`/api/queue/${item.qitemId}/update`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
+      body: JSON.stringify({ state: "done", closureReason: "blocked_on", closureTarget: "qitem-child" }),
+    });
+    expect(update.status).toBe(400);
+    const data = (await update.json()) as { error: string; message: string; validReasons: string[] };
+    expect(data.error).toBe("invalid_closure_reason");
+    expect(data.message).toContain("state=done is terminal");
+    expect(data.message).toContain("rig queue block <id> --on <child>");
+    expect(data.validReasons).not.toContain("blocked_on");
+    expect(queueRepo.getByIdOrThrow(item.qitemId).state).toBe("pending");
   });
 
   it("POST /api/queue/:id/handoff returns closed + created in one transaction", async () => {
@@ -999,6 +1573,39 @@ describe("queue routes", () => {
     await expectLimitParsing(app, "/api/queue/outbox/list?senderSession=a@r");
   });
 
+  it("GET /api/queue/overdue refuses only a positive limit SQLite cannot bind; every limit main serves is still served", async () => {
+    for (const body of ["one", "two", "three"]) {
+      const res = await app.request("/api/queue/create", {
+        method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
+        body: JSON.stringify({ destinationSession: "b@r", body, nudge: false }),
+      });
+      expect(res.status).toBe(201);
+    }
+    const overdue = db.prepare("UPDATE queue_items SET state = 'in-progress', closure_required_at = ? WHERE body = ?");
+    overdue.run("2026-01-01T00:00:01.000Z", "one");
+    overdue.run("2026-01-01T00:00:02.000Z", "two");
+    overdue.run("2026-01-01T00:00:03.000Z", "three");
+    const bodies = async (query: string) => {
+      const res = await app.request(`/api/queue/overdue${query}`);
+      return { status: res.status, bodies: res.status === 200 ? ((await res.json()) as Array<{ body: string }>).map((q) => q.body) : await res.json() };
+    };
+    const all = { status: 200, bodies: ["one", "two", "three"] };
+    expect(await bodies("")).toEqual(all);
+    expect(await bodies("?limit=2")).toEqual({ status: 200, bodies: ["one", "two"] });
+
+    // A positive limit SQLite cannot bind was a 500; it is now a 400.
+    for (const limit of ["9223372036854775296", "99999999999999999999"]) {
+      expect({ limit, ...(await bodies(`?limit=${limit}`)) })
+        .toEqual({ limit, status: 400, bodies: { error: "limit must be an integer" } });
+    }
+    // Every limit main serves keeps its answer: the largest bindable value, and the values the
+    // route's normalization drops (non-numeric, non-positive, and magnitudes that parse to Infinity).
+    const nines = "9".repeat(400);
+    for (const limit of ["9223372036854775295", "abc", "-1", "0", "-99999999999999999999", nines, `-${nines}`]) {
+      expect({ limit, ...(await bodies(`?limit=${limit}`)) }).toEqual({ limit, ...all });
+    }
+  });
+
   it("GET /api/queue/list filters by destination + state", async () => {
     await app.request("/api/queue/create", {
       method: "POST",
@@ -1013,6 +1620,60 @@ describe("queue routes", () => {
     const res = await app.request("/api/queue/list?destinationSession=b@r");
     const data = (await res.json()) as unknown[];
     expect(data).toHaveLength(1);
+  });
+
+  it("GET /api/queue/list trims each state name and otherwise keeps today's matching", async () => {
+    const post = (path: string, session: string, body: Record<string, unknown>) => app.request(path, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": session }, body: JSON.stringify(body),
+    });
+    const create = async (body: Record<string, unknown>) =>
+      ((await (await post("/api/queue/create", "a@r", { nudge: false, ...body })).json()) as { qitemId: string }).qitemId;
+    const pending = await create({ destinationSession: "b@r", body: "pending" });
+    const inProgress = await create({ destinationSession: "b@r", body: "in progress" });
+    const done = await create({ destinationSession: "b@r", body: "done" });
+    expect((await post(`/api/queue/${inProgress}/claim`, "b@r", {})).status).toBe(200);
+    expect((await post(`/api/queue/${done}/claim`, "b@r", {})).status).toBe(200);
+    expect((await post(`/api/queue/${done}/update`, "b@r", { state: "done", closureReason: "no-follow-on", transitionNote: "done" })).status).toBe(200);
+    const gate = await create({
+      destinationSession: "human-founder@external", body: "approve me", tier: "human-gate",
+      summary: "approve", evidenceRef: "proof/evidence.md",
+    });
+
+    const ids = async (query: string) => {
+      const res = await app.request(`/api/queue/list?${query}`);
+      expect(res.status).toBe(200);
+      return ((await res.json()) as Array<{ qitemId: string }>).map((q) => q.qitemId).sort();
+    };
+    const plain = (rest: string) => ids(`destinationSession=b@r${rest}`);
+    const attention = (rest: string) => ids(`attention=1&destinationSession=human-founder@external${rest}`);
+    const state = (value: string) => `&state=${encodeURIComponent(value)}`;
+
+    // The fix: a space around a name no longer drops it.
+    expect(await plain(state("pending, in-progress"))).toEqual([pending, inProgress].sort());
+    expect(await plain(state(" pending , in-progress "))).toEqual([pending, inProgress].sort());
+    expect(await attention(state(" pending"))).toEqual([gate]);
+    expect(await plain(`&activeOnly=1${state(" done")}`)).toEqual([done]);
+
+    // Unchanged: an unknown name matches nothing, alone or beside a known one.
+    expect(await plain(state("pending,in-progress"))).toEqual([pending, inProgress].sort());
+    expect(await plain(state("pending,inprogress"))).toEqual([pending]);
+    expect(await plain(state("in_progress"))).toEqual([]);
+    expect(await attention(state("pending,inprogress"))).toEqual([gate]);
+    expect(await attention(state("in_progress"))).toEqual([]);
+
+    // Unchanged: only commas or spaces is an explicit filter that matches nothing, with or without activeOnly.
+    for (const value of [",", " ", " , "]) {
+      expect(await plain(state(value))).toEqual([]);
+      expect(await plain(`&activeOnly=1${state(value)}`)).toEqual([]);
+      expect(await attention(state(value))).toEqual([]);
+    }
+
+    // Unchanged: an absent or empty state keeps each path's default.
+    for (const rest of ["", "&state="]) {
+      expect(await plain(rest)).toEqual([pending, inProgress, done].sort());
+      expect(await plain(`&activeOnly=1${rest}`)).toEqual([pending, inProgress].sort());
+      expect(await attention(rest)).toEqual([gate]);
+    }
   });
 
   // OPR.0.3.2.20 — `?attention=1` filter for the For You priority
@@ -1689,6 +2350,56 @@ describe("queue routes", () => {
       expect(body.workCandidates.next).toEqual([expect.objectContaining({ missions: ["m"] })]);
       expect(body.workCandidates.candidates).toEqual([]);
       expect(counts()).toEqual(before);
+    });
+
+    // Plain whoami names every candidate and asks the agent to choose when no single work node is
+    // settled; ordinary unambiguous work and a seat with no rows carry no choice.
+    it("GET /api/queue/whoami names each in-progress candidate when current work is not settled", async () => {
+      const top = mkdtempSync(join(tmpdir(), "whoami-choice-"));
+      try {
+        const missions = join(top, "missions");
+        for (const [mission, slice] of [["release", "01-work"], ["release-b", "02-other"]]) {
+          mkdirSync(join(missions, mission!, "slices", slice!), { recursive: true });
+          writeFileSync(join(missions, mission!, "SPEC.md"), "---\nintent: x\n---\n", "utf8");
+        }
+        app = buildApp({ eventBus: bus, queueRepo, inboxHandler: inbox, outboxHandler: outbox, slicesRoot: missions });
+        const claimed = async (tags: string[]) => {
+          const item = await queueRepo.create({ sourceSession: "alice@r", destinationSession: "bob@r", body: "w", tags, nudge: false });
+          const res = await app.request(`/api/queue/${item.qitemId}/claim`, {
+            method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "bob@r" },
+            body: JSON.stringify({ destinationSession: "bob@r" }),
+          });
+          expect(res.status).toBe(200);
+          return item.qitemId;
+        };
+        const whoami = async () => (await (await app.request("/api/queue/whoami?session=bob@r")).json()) as {
+          currentWork: { workNodePath: string } | null; currentWorkBasis: string;
+          currentWorkChoice?: { instruction: string; candidates: Array<Record<string, unknown>> };
+        };
+
+        expect(await whoami()).not.toHaveProperty("currentWorkChoice");
+        const first = await claimed(["project:alpha", "mission:release", "slice:01-work"]);
+        const settled = await whoami();
+        expect(settled.currentWork?.workNodePath).toBe(join(missions, "release", "slices", "01-work"));
+        expect(settled).not.toHaveProperty("currentWorkChoice");
+
+        const second = await claimed(["project:beta", "mission:release-b", "slice:02-other"]);
+        const open = await whoami();
+        expect(open.currentWork).toBeNull();
+        expect(open.currentWorkBasis).toBe("2 distinct typed work nodes — refusing to guess");
+        expect(open.currentWorkChoice?.instruction).toMatch(/^OpenRig did not choose your current work\. Choose/);
+        expect(open.currentWorkChoice?.candidates).toEqual([
+          expect.objectContaining({ qitemId: first, projects: ["alpha"], mission: "release", slice: "01-work",
+            workNodePath: join(missions, "release", "slices", "01-work") }),
+          expect.objectContaining({ qitemId: second, projects: ["beta"], mission: "release-b", slice: "02-other",
+            workNodePath: join(missions, "release-b", "slices", "02-other") }),
+        ]);
+        const asked = (await (await app.request("/api/queue/whoami?session=bob@r&candidates=1")).json()) as Record<string, unknown>;
+        expect(asked).toHaveProperty("currentWorkChoice");
+        expect(asked).toHaveProperty("workCandidates");
+      } finally {
+        rmSync(top, { recursive: true, force: true });
+      }
     });
 
     // A set-aside row must stay in "held" however many newer pending rows the seat has: the two

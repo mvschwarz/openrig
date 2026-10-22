@@ -222,13 +222,14 @@ async function runCrossHostBroadcast(
  *  local route does, so per-target honesty prints identically. A partial
  *  fan-out sets a non-zero exit either way. */
 function renderBroadcastResults(data: Record<string, unknown>): void {
-  const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string }>) ?? [];
+  const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string; managedCompaction?: { notice?: unknown } }>) ?? [];
   for (const r of results) {
     if (r.ok) {
       console.log(`${r.sessionName}: sent`);
     } else {
       console.log(`${r.sessionName}: FAILED — ${r.error ?? "unknown error"}`);
     }
+    if (typeof r.managedCompaction?.notice === "string") console.log(`Notice: ${r.managedCompaction.notice}`);
   }
   console.log(`${data["sent"]}/${data["total"]} delivered`);
   // S2 (OPR.0.5.4.3): surface additive advisories (e.g. the unknown-sender

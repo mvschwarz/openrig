@@ -24,7 +24,8 @@ interface SeatStatusResponse {
   pod_namespace: string | null;
   runtime: string | null;
   current_occupant: string | null;
-  typingGuard?: { desired: boolean; effective: boolean; pending: boolean; heldCount: number };
+  typingGuard?: { desired: boolean; effective: boolean; pending: boolean; heldCount: number;
+    desiredMode?: string; effectiveMode?: string; };
   permissions?: {
     selectionState: "explicit" | "inherit" | "unknown";
     desired: { mode: string } | null;
@@ -38,6 +39,7 @@ interface SeatStatusResponse {
     };
   };
   session_status: string | null;
+  launch_cwd?: string | null;
   session_reason?: string | null;
   startup_status: string | null;
   occupant_lifecycle: string;
@@ -127,7 +129,7 @@ interface SeatHandoverMutationResult {
   eventSeq: number;
   /** OPR.0.5.5.5 — per-source execution record (wire mirror of the daemon shape). */
   sourceOutcome?:
-    | { mode: "fork"; forkedFrom: string }
+    | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
     | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string };
   sideEffects: {
     departingSessionKilled: false;
@@ -159,10 +161,13 @@ function printHuman(status: SeatStatusResponse): void {
   console.log(`Rig: ${status.rig_name}`);
   console.log(`Logical ID: ${status.logical_id}`);
   console.log(`Current occupant: ${display(status.current_occupant)}`);
+  if (status.launch_cwd !== undefined) console.log(`Working directory for future launches: ${display(status.launch_cwd)}`);
   if (status.typingGuard) {
     const g = status.typingGuard;
-    console.log(`Typing guard: ${g.effective ? "on" : "off"}${g.pending ? ` (activation pending; requested ${g.desired ? "on" : "off"})` : ""}; ${g.heldCount} retained`);
-    console.log("Automatic input pauses while on, including writing lifecycle. Disabling does not replay held messages.");
+    const mode = g.effectiveMode ?? (g.effective ? "on" : "off");
+    console.log(`Typing guard: ${mode === "hold" ? "on (hold)" : mode}${g.pending ? ` (activation pending; requested ${g.desiredMode ?? (g.desired ? "on" : "off")})` : ""}; ${g.heldCount} retained`);
+    if (mode === "draft-aware") console.log(`Draft-aware sends return immediately; inspect held messages with rig seat held-messages ${status.seat_ref}.`);
+    else console.log("Hold pauses all automatic input, including writing lifecycle. Changing mode does not replay held messages.");
   }
   console.log(`Session: ${display(status.session_status, "unknown")}`);
   const reason = sessionReason(status.session_reason);
@@ -226,6 +231,7 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
   // OPR.0.5.5.5 — the per-source execution record: what actually carried context.
   if (result.sourceOutcome?.mode === "fork") {
     console.log(`Native fork of ${result.sourceOutcome.forkedFrom}: the successor carries the incumbent conversation from its first byte.`);
+    if (result.sourceOutcome.forkId === "pending") console.log(`Fork id: PENDING. ${result.sourceOutcome.limit ?? ""}`.trim());
   } else if (result.sourceOutcome?.mode === "rebuild") {
     const outcome = result.sourceOutcome;
     if (outcome.primedArtifacts.length > 0) {
@@ -295,19 +301,23 @@ export function seatCommand(depsOverride?: SeatDeps & { readStdin?: () => Promis
     console.log(JSON.stringify(result.data, null, json ? undefined : 2));
     if (result.status >= 400) process.exitCode = result.status >= 500 ? 2 : 1;
   };
-  cmd.command("set-typing-guard").argument("<seat>").requiredOption("--enabled <boolean>", "true pauses all automatic terminal input; false permits new sends")
-    .requiredOption("--reason <text>").option("--json").description("Protect this seat's draft by retaining automatic delivery, even at an empty prompt")
+  cmd.command("set-typing-guard").argument("<seat>")
+    .option("--enabled <boolean>", "Compatibility: true selects hold; false selects off")
+    .option("--mode <mode>", "off, draft-aware or hold; choose this or --enabled")
+    .requiredOption("--reason <text>").option("--json").description("Choose how this seat's typing guard handles automatic input")
     .addHelpText("after", `
-This persistent, per-seat preference defaults off. On pauses ALL automatic terminal
-input, even at an empty prompt; it is not a typing detector or permission mode.
-Messages and wakes are retained in the existing outbox. Writing lifecycle operations
-refuse before effects; raw/force/submit-only options do not bypass protection.
-Direct human terminal input remains available. Other seats keep their own settings.
+This one persistent guard defaults off. Hold pauses ALL automatic input, including
+at an empty prompt; --enabled true keeps that existing behavior. Draft-aware holds
+when the current input contains a draft or cannot be read. It returns the exact
+reason and held message ID immediately, without automatic retry.
+Off (--enabled false) permits new automatic sends.
+Messages use the existing outbox. Uncertain writes never replay automatically.
+Direct human input remains available. Other seats keep their own guard mode.
 
 Activation can be pending while an already-started operation finishes. Read
-rig seat status <seat> and wait for effective=true before relying on protection.
+rig seat status <seat> and wait for pending=false before relying on the requested mode.
 Inspect retained bodies with rig seat held-messages <seat> (or --id <id>).
-Turning the guard off permits NEW sends; it never flushes or retries held messages.
+Changing modes never flushes held messages.
 Retire a reviewed record with rig seat retire-held-message <seat> <id> --reason <text>.
 Retirement preserves evidence and frees quota; it does not deliver or close work.
 
@@ -315,11 +325,23 @@ Active retention defaults: 100 records / 8 MiB per seat, 1 MiB per message.
 New admissions refuse at capacity. Already-committed queue intent is preserved even
 when a concurrent activation exceeds that cap; inspect and retire it explicitly.
 Protection covers OpenRig's managed input paths, not external tmux tools or another
-process writing directly to the terminal. Disable deliberately before lifecycle work.
+process writing directly to the terminal. Select off before writing lifecycle work
+on an active pane; freshly created or respawned lifecycle shells have separate proof.
+
+Examples:
+  rig seat set-typing-guard dev-impl@my-rig --mode draft-aware --reason "preserve my draft"
+  rig seat set-typing-guard dev-impl@my-rig --enabled true --reason "manual terminal"
 `)
-    .action(async (seat: string, opts: { enabled: string; reason: string; json?: boolean }) => {
-      if (opts.enabled !== "true" && opts.enabled !== "false") { console.error("--enabled must be true or false"); process.exitCode = 1; return; }
-      await guardRequest("POST", `/api/seat/set-typing-guard/${encodeURIComponent(seat)}`, { enabled: opts.enabled === "true", reason: opts.reason }, opts.json);
+    .action(async (seat: string, opts: { enabled?: string; mode?: string; reason: string; json?: boolean }) => {
+      if ((opts.enabled === undefined) === (opts.mode === undefined)
+        || opts.enabled !== undefined && !["true", "false"].includes(opts.enabled)
+        || opts.mode !== undefined && !["off", "draft-aware", "hold"].includes(opts.mode)) {
+        console.error("Choose --enabled true|false or --mode off|draft-aware|hold.");
+        process.exitCode = 1; return;
+      }
+      await guardRequest("POST", `/api/seat/set-typing-guard/${encodeURIComponent(seat)}`, {
+        ...(opts.mode === undefined ? { enabled: opts.enabled === "true" } : { mode: opts.mode }), reason: opts.reason,
+      }, opts.json);
     });
   cmd.command("held-messages").argument("<seat>").option("--limit <n>", "Page size", "100").option("--offset <n>", "Page offset", "0").option("--id <id>", "Read one retained or retired record by ID").option("--json")
     .description("Read retained messages outside the protected terminal; reading never delivers them")
@@ -506,7 +528,7 @@ identity remains unverified; a version number alone cannot clear it.
   // Thin CLI over the daemon's SeatLifecycleService; refusals print message +
   // guidance + match list exactly as the daemon named them.
   const runLifecycleVerb = async (
-    path: "set-model" | "set-permissions" | "launch" | "launch-plan" | "continue" | "stop" | "clean" | "restart" | "restart-plan" | "restart-verify",
+    path: "set-model" | "set-cwd" | "set-effort" | "set-permissions" | "launch" | "launch-plan" | "continue" | "stop" | "clean" | "restart" | "restart-plan" | "restart-verify",
     seat: string,
     body: Record<string, unknown>,
     opts: { json?: boolean },
@@ -527,7 +549,7 @@ identity remains unverified; a version number alone cannot clear it.
           ? await client.post<Record<string, unknown>>(route, body, { timeoutMs: 10_000 })
           : await client.post<Record<string, unknown>>(route, body);
     } catch (err) {
-      if ((path !== "launch" && path !== "launch-plan" && path !== "continue" && path !== "restart") || !(err instanceof DaemonTimeoutError)) throw err;
+      if ((path !== "launch" && path !== "launch-plan" && path !== "continue" && path !== "restart" && path !== "set-cwd") || !(err instanceof DaemonTimeoutError)) throw err;
       const error = path === "restart" ? {
         ok: false as const,
         code: "restart_outcome_unknown",
@@ -536,9 +558,9 @@ identity remains unverified; a version number alone cannot clear it.
         guidance: `Check the outcome before running it again: rig seat restart ${seat} --keep-conversation --plan refuses with restart_in_progress while it is still running, then shows its result as lastRestart.`,
       } : {
         ok: false as const,
-        code: path === "launch-plan" ? "launch_plan_timeout" : `${path}_outcome_unknown`,
+        code: path === "launch-plan" ? "launch_plan_timeout" : `${path.replaceAll("-", "_")}_outcome_unknown`,
         status: "unknown",
-        message: path === "launch-plan" ? "The read-only launch preview timed out; no launch was requested." : `The CLI timed out waiting for the daemon; the ${path === "continue" ? "continuation" : "launch"} may still be in progress.`,
+        message: path === "launch-plan" ? "The read-only launch preview timed out; no launch was requested." : `The CLI timed out waiting for the daemon; the ${path === "set-cwd" ? "directory change" : path === "continue" ? "continuation" : "launch"} may still be in progress.`,
         guidance: path === "launch-plan" ? "Retry the preview when the daemon responds." : `Check the outcome before retrying: rig seat status ${seat}`,
       };
       if (opts.json) console.log(JSON.stringify(error, null, 2));
@@ -558,14 +580,14 @@ identity remains unverified; a version number alone cannot clear it.
       return;
     }
     if (restartFailed) process.exitCode = 1;
-    if (path === "launch" || path === "launch-plan" || path === "continue" || path === "restart" || path === "restart-plan") {
+    if (path === "launch" || path === "launch-plan" || path === "continue" || path === "restart" || path === "restart-plan" || path === "set-cwd") {
       for (const warning of (res.data["warnings"] as string[] | undefined) ?? []) console.warn(`Warning: ${warning}`);
     }
     if (res.status >= 400) {
       const error = path === "continue" && res.data["code"] === "continuation_unavailable"
         ? {
           ...res.data,
-          message: "No verified pending fresh-context delivery exists for this occupant. It is unknown whether context was already delivered or was never pending.",
+          message: "No verified pending startup-context delivery exists for this occupant. It is unknown whether context was already delivered or was never pending.",
           guidance: `Inspect its current state: rig seat status ${shellQuote(seat)}`,
         }
         : res.data;
@@ -594,6 +616,79 @@ identity remains unverified; a version number alone cannot clear it.
     });
 
   cmd
+    .command("set-effort")
+    .argument("<seat>", "Canonical session name or logical seat ref")
+    .option("--effort <level>", "The runtime's own effort level (for example low, medium, high; Pi also accepts off, minimal, xhigh, max)")
+    .option("--clear", "Remove this seat's explicit choice and go back to its authored or default effort")
+    .requiredOption("--reason <text>", "Audit reason recorded on the node.effort_changed event")
+    .option("--operator <address>", "Operator recorded on the audit event")
+    .option("--json", "JSON output for agents")
+    .description("Save one seat's reasoning effort for its next managed continuation (audited); no restart")
+    .addHelpText("after", `
+Only this seat changes; its peers, model and account don't. The running process
+keeps its current effort until the seat's next managed continuation. Whether the
+native session then uses the level is a separate fact this command can't see.
+Works on Claude Code, Codex and Pi seats; Pi gets it as --thinking <level>. Levels
+are the runtime's own and are not translated; an unfamiliar one is saved with a warning.
+Examples:
+  rig seat set-effort dev-impl@my-rig --effort high --reason "long refactor"
+  rig seat set-effort dev.impl --clear --reason "back to the spec's effort" --json`)
+    .action(async (seat: string, opts: { effort?: string; clear?: boolean; reason: string; operator?: string; json?: boolean }) => {
+      if (Boolean(opts.clear) === (opts.effort !== undefined)) {
+        console.error("Pass exactly one of --effort <level> or --clear.");
+        process.exitCode = 1;
+        return;
+      }
+      const body = opts.clear ? { clear: true, reason: opts.reason, operator: opts.operator } : { effort: opts.effort, reason: opts.reason, operator: opts.operator };
+      await runLifecycleVerb("set-effort", seat, body, opts, (data) => {
+        const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
+        const saved = data["saved"] as { choice: string | null; authored: string | null; effective: string | null; source: string };
+        const name = `${s?.logicalId}@${s?.rigName}`;
+        const level = saved.source === "seat_choice" ? `${saved.effective} (this seat's choice)`
+          : saved.source === "authored" ? `${saved.effective} (authored)` : "no effort flag (runtime default)";
+        console.log(data["changed"] === false ? `Effort for ${name} already resolves to ${level}. No change recorded.` : `Effort for ${name}: ${level}.`);
+        console.log(String(data["effect"]));
+        const running = data["running"] === "yes" ? "running now" : data["running"] === "no" ? "not running now" : `running state unknown (${String(data["runningDetail"] ?? "probe failed")})`;
+        console.log(`Seat ${running}. Emitted at launch: not yet. Native effort: not observed.`);
+        if (data["warning"]) console.log(`Warning: ${String(data["warning"])}`);
+      });
+    });
+
+  cmd
+    .command("effort")
+    .argument("<seat>", "Canonical session name or logical seat ref")
+    .option("--json", "JSON output for agents")
+    .description("Show one seat's effort four ways: requested, saved, sent at launch, and what the native session records")
+    .addHelpText("after", `
+Read-only. The launch value is the flag on the running process's own command line.
+The native value is the effort the session recorded for a turn since that process
+started (Claude's transcript, Codex's rollout, Pi's thinkingLevel on its latest
+successful assistant turn: the level after Pi's own cap, recorded by Pi 0.99.0 or
+later); until the seat takes a turn, or where it can't be read, it is NOT VERIFIED,
+never assumed from the flag.
+Examples:
+  rig seat effort dev-impl@my-rig
+  rig seat effort dev.impl --json`)
+    .action(async (seat: string, opts: { json?: boolean }) => {
+      const deps = getDeps();
+      const daemon = await getDaemonStatus(deps.lifecycleDeps);
+      if (!daemonStatusGuard(daemon)) return;
+      const client = deps.clientFactory(getDaemonUrl(daemon));
+      const res = await client.get<Record<string, unknown>>(`/api/seat/effort/${encodeURIComponent(seat)}`);
+      if (opts.json) {
+        console.log(JSON.stringify(res.data, null, 2));
+        if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
+        return;
+      }
+      if (res.status >= 400) {
+        printSeatError(res.data as unknown as SeatStatusError, `Seat effort failed (HTTP ${res.status})`);
+        process.exitCode = res.status >= 500 ? 2 : 1;
+        return;
+      }
+      printEffortReport(res.data);
+    });
+
+  cmd
     .command("set-model")
     .argument("<seat>", "Canonical session name or logical seat ref")
     .requiredOption("--model <id>", "Target model id (e.g. the canonical id an alias pin migrates to)")
@@ -615,6 +710,57 @@ resume/successor launch reads it at call time. Examples:
         }
         console.log(`Model for ${s?.logicalId}@${s?.rigName}: ${String(data["from"] ?? "none")} -> ${String(data["to"])} (audited).`);
         console.log("The next managed resume/successor launch composes the new model.");
+      });
+    });
+
+  cmd
+    .command("set-cwd")
+    .argument("<seat>", "Canonical session name or logical seat ref")
+    .requiredOption("--cwd <directory>", "Absolute working directory on the daemon's host; created if missing")
+    .requiredOption("--reason <text>", "Audit reason for the future launch directory")
+    .option("--operator <address>", "Operator recorded on the audit event when no session identity is present")
+    .option("--json", "JSON output for agents")
+    .description("Save an existing seat's working directory for its next fresh launch or rebuild handover")
+    .addHelpText("after", `
+Saves the directory (and an audit event) for this seat's next launch. The seat's
+identity, address, queue and history are kept. set-cwd creates the folder if it's
+missing and writes nothing else there: the next launch writes the startup files,
+as it does today. Its preflight policy checks the resource copies and startup
+skills that launch would place there, as they are now: an operator-edited file,
+an unrecorded file with different content, or two sources for one destination
+refuses the change, naming those paths. It's a point-in-time check, not a
+guarantee against later changes; at adoption, launch applies its own policy.
+(A refusal may leave the new folder created; nothing else changes.)
+
+The saved directory doesn't move the running process. Adopt it with
+  rig seat launch <seat> --fresh --stop --reason <text>   (a blank conversation) or
+  rig seat handover <seat> --source rebuild --reason <text>   (carries durable context)
+Until then, background work can already use the saved directory. For a running
+Claude seat, for example, collector provisioning writes .openrig/context-collector.cjs
+and merges .claude/settings.local.json there (under its existing preservation
+rules), and managed compaction, manual or automatic, asks the seat to write its
+restore map there, which may be outside its current workspace, where a seat
+without bypass permissions may meet a write prompt. Adopting promptly is guidance; it doesn't protect against a poll or
+a compaction that runs before your next command.
+Before adopting, don't rig down/rig up or hand over by fork: those resume the
+existing conversation in the saved directory, and Claude keeps conversations per
+project directory, so a resume there may not find it (not run natively).
+rig seat restart --keep-conversation (Codex) isn't adoption: it respawns in the
+directory it observes from the running process.
+
+Files in the old directory are left as they are; other seats may still use them.
+Example:
+  rig seat set-cwd planning-lead@project --cwd /work/project/seats/planning-lead --reason "isolate planning"`)
+    .action(async (seat: string, opts: { cwd: string; reason: string; operator?: string; json?: boolean }) => {
+      await runLifecycleVerb("set-cwd", seat, { cwd: opts.cwd, reason: opts.reason, operator: opts.operator }, opts, data => {
+        const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
+        console.log(`Launch directory for ${s?.logicalId}@${s?.rigName}: ${String(data["to"])}${data["changed"] === false ? " (already selected)" : " (audited)"}.`);
+        console.log("set-cwd wrote nothing there but the folder: the next fresh launch or rebuild handover writes its startup files.");
+        console.log("The running process keeps its current directory. Adopt the new one promptly with either:");
+        console.log(`  rig seat launch ${seat} --fresh --stop --reason <text>   (a blank conversation)`);
+        console.log(`  rig seat handover ${seat} --source rebuild --reason <text>   (carries durable context)`);
+        console.log("Until then, background work can already use the saved directory, such as a Claude seat's managed compaction (see rig seat set-cwd --help).");
+        console.log("Files in the previous directory are left as they are; other seats may still use them.");
       });
     });
 
@@ -690,13 +836,21 @@ Examples:
     .description("Restart one Codex seat in place so it reads its Codex home's current account")
     .addHelpText("after", `
 The seat's own conversation resumes in its own pane with the settings the running
-Codex uses now (model, effort, profile, permissions, cwd, Codex home). A pending
-set-model or set-effort is not applied: a difference refuses as settings_drift.
+Codex uses now (model, effort, profile, permissions, cwd, Codex home), with one
+exception: an explicit effort choice saved with rig seat set-effort is applied, and
+--plan shows that change. With no saved choice (never set, or cleared with --clear),
+an effort difference refuses as settings_drift, as a pending set-model does; the
+next ordinary managed launch or resume resolves effort instead.
 This never switches an account (use rig auth switch first), never reads credentials,
 never launches fresh, forks or retries. Peers sharing the Codex home are reported,
 not restarted.
 Mid-turn activity and child processes are shown in --plan and the result; deciding
 whether to interrupt them is the operator's call.
+An adopted seat (origin=claimed) refuses with claimed_session. The stored conversation
+must match the one the running Codex's command line names (or, when it names none, the
+only one Codex has logged since it started); OpenRig can't tell which conversation
+Codex is on now. If it was changed inside the running Codex, the restart may refuse or
+resume the earlier one: check the pane with rig capture <seat> first.
 --plan starts no Codex process: the network override, --no-daemon and add-dirs are
 taken from the running Codex's own command line, not probed again. Building the
 command can create OpenRig's own seat-bin link, as every managed launch does.
@@ -743,8 +897,8 @@ Examples:
     .command("continue")
     .argument("<seat>", "Canonical session name or logical seat ref")
     .option("--json", "JSON output for agents")
-    .description("Deliver pending startup context after clearing a native prompt, in the same fresh conversation")
-    .addHelpText("after", "\nReview and answer the native prompt yourself first. This reuses the existing occupant and does not relaunch or replay an attempted delivery.")
+    .description("Deliver pending startup context to the same fresh or forked conversation")
+    .addHelpText("after", "\nResolve any native prompt first. A pending Codex fork must have a verified child identity. This reuses the existing occupant and does not relaunch or replay an attempted delivery.")
     .action(async (seat: string, opts: { json?: boolean }) => {
       await runLifecycleVerb("continue", seat, {}, opts, data => {
         console.log(String(data["message"]));
@@ -763,7 +917,10 @@ Siblings are untouched. A dead seat is refused (use rig seat clean); an adopted
 session is refused (use rig unclaim). Stopping ends that agent's session and any
 work in progress: check it first (rig capture <seat>) and stop only a seat you
 own or were asked to stop. rig seat launch <seat> --fresh --reason <text> starts
-a fresh occupant there; it does not resume the stopped conversation. Examples:
+a fresh occupant there; it does not resume the stopped conversation.
+An intentionally stopped seat does not degrade an otherwise running rig.
+Running counts still exclude the stopped seat; stopping every seat leaves the
+rig stopped. Examples:
   rig seat stop dev-impl@my-rig --reason "wave boundary retirement"
   rig seat stop dev.impl --reason "stuck occupant" --json`)
     .action(async (seat: string, opts: { reason: string; operator?: string; json?: boolean }) => {
@@ -969,6 +1126,22 @@ Examples:
     .action((seat: string, opts: HandoverActionOpts) => runSeatHandover(seat, opts, getDeps()));
 }
 
+function printEffortReport(data: Record<string, unknown>): void {
+  const seat = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
+  const requested = data["requested"] as { value: string | null; at: string; reason: string } | null;
+  const saved = data["saved"] as { effective: string | null; source: string };
+  const emitted = data["emitted"] as { state: string; value?: string | null; pid?: number; detail?: string };
+  const observed = data["observed"] as { state: string; value?: string; at?: string; source?: string; outcome?: string; detail?: string };
+  const precedence = data["precedence"] as { decided: boolean; detail: string };
+  console.log(`Effort for ${seat?.logicalId}@${seat?.rigName} (${String(data["runtime"])}):`);
+  console.log(`  Requested: ${requested ? `${requested.value ?? "cleared"} at ${requested.at} ("${requested.reason}")` : "never set with rig seat set-effort"}`);
+  console.log(`  Saved:     ${saved.effective ? `${saved.effective} (${saved.source === "seat_choice" ? "this seat's choice" : "authored"})` : "no effort flag (runtime default)"}`);
+  console.log(`  Launch:    ${emitted.state === "observed" ? `${emitted.value ?? "no effort flag"} (process ${emitted.pid})` : `unknown: ${emitted.detail}`}`);
+  console.log(`  Native:    ${observed.state === "observed" ? `${observed.value} sent with the latest turn, ${observed.outcome} (${observed.source}, ${observed.at})` : `NOT VERIFIED: ${observed.detail}`}`);
+  console.log(String(data["summary"]));
+  if (!precedence.decided) console.log(`Note: ${precedence.detail}`);
+}
+
 function printRestartReport(data: Record<string, unknown>): void {
   const seat = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
   console.log(`${data["outcome"] ? String(data["outcome"]) : "preview"}: ${seat?.logicalId}@${seat?.rigName} (${String(data["sessionName"])}, pane ${String(data["pane"])}, ${String(data["paneShape"])}).`);
@@ -978,11 +1151,14 @@ function printRestartReport(data: Record<string, unknown>): void {
   console.log(`Activity: ${activity.state}. ${activity.detail}`);
   const children = data["childProcesses"] as Array<{ pid: number; name: string }>;
   if (children.length > 0) console.log(`Child processes (stopped with Codex): ${children.map((child) => `${child.name} ${child.pid}`).join(", ")}.`);
+  const settings = data["settings"] as { note?: string } | undefined;
+  if (settings?.note) console.log(`Settings: ${settings.note}`);
   console.log(`Codex home: ${String(data["codexHome"])}.`);
-  console.log(`Billing route: ${(data["billingRoute"] as { detail: string }).detail}`);
-  const account = data["account"] as { credentialStore: { detail: string }; authFile: { detail: string }; startupGate: string | null };
+  const noDaemon = data["codexNoDaemonFlag"] as { detail: string } | undefined;
+  if (noDaemon) console.log(noDaemon.detail);
+  const account = data["account"] as { credentialStore: { detail: string }; authFile: { detail: string }; startupGate: string | null; startupGateKind?: string | null };
   console.log(`Account: unverified. ${account.credentialStore.detail} ${account.authFile.detail}`);
-  if (account.startupGate) console.log(`Codex startup gate: ${account.startupGate}`);
+  if (account.startupGate) console.log(`Codex startup gate${account.startupGateKind ? ` (${account.startupGateKind})` : ""}: ${account.startupGate}`);
   const stale = data["staleRestart"] as { startedAt: string; detail: string } | undefined;
   if (stale) console.log(`Stale restart from ${stale.startedAt}: ${stale.detail}`);
   const last = data["lastRestart"] as { outcome: string; finishedAt: string } | undefined;

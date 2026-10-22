@@ -17,7 +17,7 @@
 import type { ProcessRow } from "./model-divergence/current-generation-record.js";
 
 export interface ProcessCensusOpts {
-  /** The underlying enumeration (default: the shared `ps -Ao` lister). */
+  /** The underlying enumeration (default: the shared process-table lister). */
   list?: () => Promise<ProcessRow[]>;
   /** Reuse window for a successful census. Default 2000ms. */
   freshnessMs?: number;

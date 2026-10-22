@@ -1,8 +1,50 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import http from "node:http";
+import { DaemonClient } from "../src/client.js";
+import { ConfigStore } from "../src/config-store.js";
 import { waitForKernelReady } from "../src/daemon-lifecycle.js";
 
 describe("waitForKernelReady deadline bounds", () => {
+  it("guard off keeps the admitted final request after the clock crosses its deadline", async () => {
+    vi.stubEnv("OPENRIG_URL", ""); vi.stubEnv("RIGGED_URL", "");
+    vi.stubEnv("OPENRIG_TRANSPORT_LOCAL_USER_GUARD", "false");
+    vi.spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValueOnce(1).mockReturnValue(2);
+    const request = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ kernel_state: "ready" })));
+    try {
+      expect(await waitForKernelReady("http://127.0.0.1:43219", 2, 1)).toMatchObject({ ok: true });
+      expect(request).toHaveBeenCalledTimes(1);
+    } finally { vi.restoreAllMocks(); vi.unstubAllEnvs(); }
+  });
+
+  it("guard off resolves configuration before starting the readiness window", async () => {
+    vi.stubEnv("OPENRIG_URL", ""); vi.stubEnv("RIGGED_URL", "");
+    vi.stubEnv("OPENRIG_TRANSPORT_LOCAL_USER_GUARD", "false");
+    let now = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const setting = vi.spyOn(ConfigStore.prototype, "resolveWithSource").mockImplementation(() => {
+      now = 1000; // Synchronous configuration I/O may take the entire former window.
+      return { value: false } as never;
+    });
+    const request = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ kernel_state: "ready" })));
+    try {
+      expect(await waitForKernelReady("http://127.0.0.1:43219", 5, 1)).toMatchObject({ ok: true });
+      expect(setting).toHaveBeenCalledTimes(1); expect(request).toHaveBeenCalledTimes(1);
+    } finally { vi.restoreAllMocks(); vi.unstubAllEnvs(); }
+  });
+
+  it("unknown enabled ownership keeps the admitted final request after its check used the remainder", async () => {
+    vi.stubEnv("OPENRIG_URL", ""); vi.stubEnv("RIGGED_URL", "");
+    vi.stubEnv("OPENRIG_TRANSPORT_LOCAL_USER_GUARD", "true");
+    let now = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    vi.spyOn(DaemonClient.prototype, "assertLocalOwner").mockImplementation(async () => { now = 1000; });
+    const request = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ kernel_state: "ready" })));
+    try {
+      expect(await waitForKernelReady("http://127.0.0.1:43219", 5, 1)).toMatchObject({ ok: true });
+      expect(request).toHaveBeenCalledTimes(1);
+    } finally { vi.restoreAllMocks(); vi.unstubAllEnvs(); }
+  });
+
   it("bounds slow headers to the wait deadline", async () => {
     const server = http.createServer((_req, res) => {
       // Delay sending headers beyond the client wait deadline

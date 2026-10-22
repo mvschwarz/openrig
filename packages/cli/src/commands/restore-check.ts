@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { Command } from "commander";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, type LifecycleDeps } from "../daemon-lifecycle.js";
+import { daemonMayAnswer } from "../daemon-reachability.js";
 import { getOpenRigHome, isFixtureScopedHome, readOpenRigEnv } from "../openrig-compat.js";
 import { ConfigStore } from "../config-store.js";
 import { realDeps } from "./daemon.js";
@@ -245,7 +246,7 @@ Examples:
     .action(async (opts: { json?: boolean; full?: boolean; ready?: boolean; rig?: string; queue?: boolean; hooks?: boolean }) => {
       const deps = getDepsF();
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (status.state !== "running" || status.healthy === false) {
+      if (!daemonMayAnswer(status)) {
         // OPR.0.4.3.12 — fixture-home isolation guard. A leaked fixture
         // OPENRIG_HOME with a divergent daemon target makes getDaemonStatus
         // probe the WRONG port (connection-refused) and report the real

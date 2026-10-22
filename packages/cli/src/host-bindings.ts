@@ -23,6 +23,10 @@ export interface HostBinding {
   hostId: string;
   firstObservedAt: string;
   lastObservedAt: string;
+  /** The entry URL `hostId` was observed at. Recorded only with that identity: a contradicting
+   *  observation never attaches its URL here. Absent on bindings learned before it was recorded.
+   *  The daemon's queue forwards use a binding only while this equals the entry's current URL. */
+  observedUrl?: string;
   /** A later observation that CONTRADICTED the stored binding — kept visible, never adopted. */
   conflict?: { hostId: string; observedAt: string };
 }
@@ -61,6 +65,7 @@ export function loadHostBindings(path: string = defaultHostBindingsPath()): Host
         hostId: bb["hostId"],
         firstObservedAt: typeof bb["firstObservedAt"] === "string" ? bb["firstObservedAt"] : "",
         lastObservedAt: typeof bb["lastObservedAt"] === "string" ? bb["lastObservedAt"] : "",
+        ...(typeof bb["observedUrl"] === "string" && bb["observedUrl"].length > 0 ? { observedUrl: bb["observedUrl"] } : {}),
         ...(bb["conflict"] && typeof bb["conflict"] === "object"
           && typeof (bb["conflict"] as Record<string, unknown>)["hostId"] === "string"
           ? {
@@ -132,6 +137,8 @@ export type HostObservationOutcome =
 export function recordHostObservation(args: {
   alias: string;
   observedHostId: string;
+  /** The entry URL the id was read from; stored only with a matching, unconflicted identity. */
+  observedUrl?: string;
   now?: () => Date;
   path?: string;
 }): HostObservationOutcome {
@@ -141,23 +148,25 @@ export function recordHostObservation(args: {
   const lockDir = `${path}.lock`;
   const locked = acquireLock(lockDir);
   try {
-    return recordUnderLock(args.alias, args.observedHostId, at, path);
+    return recordUnderLock(args.alias, args.observedHostId, args.observedUrl, at, path);
   } finally {
     if (locked) releaseLock(lockDir);
   }
 }
 
-function recordUnderLock(alias: string, observedHostId: string, at: string, path: string): HostObservationOutcome {
+function recordUnderLock(alias: string, observedHostId: string, observedUrl: string | undefined, at: string, path: string): HostObservationOutcome {
   const file = loadHostBindings(path);
   const existing = file.bindings[alias];
 
   let result: HostObservationOutcome;
   if (!existing) {
-    const binding: HostBinding = { hostId: observedHostId, firstObservedAt: at, lastObservedAt: at };
+    const binding: HostBinding = { hostId: observedHostId, firstObservedAt: at, lastObservedAt: at, ...(observedUrl ? { observedUrl } : {}) };
     file.bindings[alias] = binding;
     result = { outcome: "bound", binding };
   } else if (existing.hostId === observedHostId) {
-    const binding: HostBinding = { ...existing, lastObservedAt: at };
+    // The same identity seen again: record (or backfill) where it was seen. Not while a conflict is
+    // recorded, so a flapping identity never gains a fresh URL for the stored id.
+    const binding: HostBinding = { ...existing, lastObservedAt: at, ...(observedUrl && !existing.conflict ? { observedUrl } : {}) };
     // A re-observation of the ORIGINAL id after a recorded conflict does not clear the conflict —
     // a flapping identity is more alarming than a stable contradiction, not less.
     file.bindings[alias] = binding;

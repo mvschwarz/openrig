@@ -351,7 +351,7 @@ describe("Slice-04 C4 — production reactive activity tap", () => {
     expect(signals.filter((signal) => signal.sourceClass === "provider_event")).toEqual([]);
   });
 
-  it("does not relabel a generic PermissionRequest/needs_input block as provider exhaustion", async () => {
+  it("keeps a pending PermissionRequest out of provider exhaustion signals", async () => {
     const fx = fixture();
     const result = fx.store.recordHookEvent({
       runtime: "codex",
@@ -361,7 +361,7 @@ describe("Slice-04 C4 — production reactive activity tap", () => {
       occurredAt: EVENT_AT,
     });
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.activity.state).toBe("needs_input");
+    if (result.ok) expect(result.activity).toMatchObject({ state: "unknown", reason: "permission_request_pending" });
     expect((await fx.service.getReadModel()).signals).toEqual([]);
   });
 

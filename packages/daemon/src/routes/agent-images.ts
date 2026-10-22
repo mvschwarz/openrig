@@ -1,3 +1,4 @@
+import { physicalSessionName } from "../domain/session-registry.js";
 // Fork Primitive + Starter Agent Images v0 (PL-016) — daemon HTTP
 // routes.
 //
@@ -80,6 +81,7 @@ interface ForkSourceShape {
 }
 
 function resolveForkSourceNode(db: Database.Database, sourceSession: string): ForkSourceShape | null {
+  sourceSession = physicalSessionName(db, sourceSession);
   // SELECT n.* so an older DB missing codex_config_profile simply yields
   // undefined for that key rather than throwing.
   const row = db

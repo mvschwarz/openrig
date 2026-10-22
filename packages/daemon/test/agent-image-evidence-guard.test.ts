@@ -71,6 +71,28 @@ describe("evaluateProtection (PL-016 Item 6)", () => {
     expect(result[0]!.reasons).toContain("pinned");
   });
 
+  it.each([false, true])("keeps same-name version statuses independent (reverse=%s)", (reverse) => {
+    const images = [makeImage({ name: "shared", version: "1", pinned: true }), makeImage({ name: "shared", version: "2" }),
+      makeImage({ name: "child", lineage: ["shared"] })];
+    if (reverse) images.reverse();
+    const statuses = evaluateProtection({ images, specRoots: [] });
+    expect(statuses.map((status) => status.imageId)).toEqual(images.map((image) => image.id));
+    expect(statuses.find((status) => status.imageId === "agent-image:shared:1")).toMatchObject({ protected: true, reasons: ["pinned"] });
+    expect(statuses.find((status) => status.imageId === "agent-image:shared:2")).toMatchObject({ protected: false, reasons: [] });
+    expect(statuses.find((status) => status.imageName === "child")?.reasons).toContain("lineage_descendant_of_protected");
+  });
+
+  it("retains name-based spec protection for every image version", () => {
+    writeFileSync(join(specRoot, "agent.yaml"), "session_source:\n  mode: agent_image\n  ref:\n    value: shared\n");
+    const images = [makeImage({ name: "shared", version: "1" }), makeImage({ name: "shared", version: "2" })];
+    const statuses = evaluateProtection({ images, specRoots: [specRoot] });
+    expect(statuses.map((status) => status.imageId)).toEqual(images.map((image) => image.id));
+    for (const status of statuses) {
+      expect(status.reasons).toContain("referenced_by_agent_spec");
+      expect(status.references).toContain(join(specRoot, "agent.yaml"));
+    }
+  });
+
   it("protects images referenced by an agent.yaml", () => {
     mkdirSync(join(specRoot, "agents", "x"), { recursive: true });
     writeFileSync(join(specRoot, "agents", "x", "agent.yaml"), `

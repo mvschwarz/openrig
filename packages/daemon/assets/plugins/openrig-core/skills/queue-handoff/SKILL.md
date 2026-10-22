@@ -29,8 +29,9 @@ without an owner.
   with the rig appearing dormant.
 - **Finishing a slice that has a clear next step.** Default-nudge:
   receiver gets a wake-ping plus the durable queue item.
-- **Blocked on another agent's work.** Park the qitem with
-  `closure_reason: blocked_on` and the blocker qitem id.
+- **Blocked on another agent's work.** Use `rig queue block <id> --on <child>`
+  (or `rig queue update <id> --state blocked --blocked-on <child>`). The item
+  stays active and returns to pending when its blocker completes.
 - **Escalating to the human.** Make the escalation a durable attention
   item, not just a chat message.
 
@@ -53,15 +54,19 @@ human. The qitem state machine enforces this:
 `pending → in-progress → done` requires `closure_reason` from one of:
 
 - `handed_off_to` — work continues at a different seat (target = new owner)
-- `blocked_on` — parked pending another qitem (target = blocker qitem id)
 - `denied` — receiver rejected the work
 - `canceled` — sender or receiver withdrew
 - `no-follow-on` — terminal completion, nothing else needed
 - `escalation` — kicked up to a higher tier (target = escalation target)
+- `superseded` — replaced by another qitem (target = successor qitem id)
 
-Three of those (`handed_off_to`, `blocked_on`, `escalation`) additionally
+Two of those (`handed_off_to`, `escalation`) additionally
 require `closure_target`. The daemon enforces this at the domain layer;
 every surface (CLI, MCP, future UI) inherits the same guarantee.
+
+`done` is terminal. `closure_reason: blocked_on` is valid only on an active
+`state=blocked` park record, as used by workflow writers; combining it with
+`state=done` is rejected. Use the block command above to wait on another qitem.
 
 **The drafted-park failure (draft ≠ throw).** The rule is about the *actual* pass, not the
 intention to pass. A turn that ends with a self-instruction **typed into your own prompt but left
@@ -113,6 +118,15 @@ NOT for live-loop handoffs where motion matters.
 reaching for `--notify`, stop — that flag does not exist on the
 shipped 0.3.1 CLI; you may be following a stale instruction that
 inverted the default-nudge polarity.
+
+## Every queue row
+
+- **`--summary "<what it is and why this seat>"`** on every `create`, `handoff` and `handoff-and-complete`: one or two plain sentences. It is the row's subject in RECENT, the story and the needs-you view, and a handoff does not inherit it from the source row.
+- **Scope tags `project:<id>`, `mission:<id>`, `slice:<id>`** on project work, set when you create the row (`--tags`; `create` also takes `--mission` and `--slice`). Tags can't be edited afterwards. A handoff keeps the source row's tags unless you pass `--tags` or `--gate`, either of which replaces them; repeat the scope tags in `--tags` when you use `--gate`.
+- **Pass work on with `handoff-and-complete`.** It closes your row as done and records the next row as its successor in one step. A `create` followed by `update --state done --closure-reason handed_off_to` records no successor, and the stuck sweep raises a recovery item for it.
+- **Close what you hold.** A row you claimed ends in a handoff or an `update --state done --closure-reason …`; `rig queue overdue` lists claimed rows past their deadline.
+- **Use the write's response.** Read the row back only when the response doesn't show what you need (an indeterminate outcome, a field the compact output left out, downstream wake or pickup, a team custody rule): openrig-user, "After a queue write".
+- **Brief for the model that will read it.** Before handing a peer open-ended work, check which model it runs: `delegating-work`, "Check what kind of agent you're handing it to".
 
 ## Queue-body hygiene (token + parse safety)
 

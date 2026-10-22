@@ -62,6 +62,21 @@ function fixture(
 }
 
 describe("retired hook evidence through the real HTTP route", () => {
+  it("passes the relay route a hook post names into its evidence, bounded to the known labels", async () => {
+    const f = fixture();
+    const seen: Array<unknown> = [];
+    const report = f.oracle.reportEvidence.bind(f.oracle);
+    f.oracle.reportEvidence = (evidence) => { seen.push(evidence.route); report(evidence); };
+    for (const relayRoute of ["plugin", "managed", "per-client-123", undefined]) {
+      const response = await f.app.request("/api/activity/hooks", { method: "POST",
+        headers: { authorization: "Bearer fixture-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ runtime: "claude-code", hookEvent: "Notification", subtype: "idle_prompt",
+          generation: f.generation, sessionName: f.session.sessionName, relayRoute }) });
+      expect(response.status).toBe(200);
+    }
+    expect(seen).toEqual(["plugin", "managed", "unrecognised", undefined]);
+  });
+
   it("an adopted differently named successor's first permission hook survives before the next sweep", async () => {
     const scratch = mkdtempSync(join(tmpdir(), "adopt-hook-"));
     const socket = join(scratch, "tmux.sock");

@@ -162,17 +162,35 @@ export interface RiggedConfig {
   // `rig config get/set terminal.status_bar` surface + twin parity.
   terminal: {
     statusBar: boolean;
+    /** Rows of tmux scrollback per pane; `rig setup` writes it into the managed `~/.tmux.conf` block. */
+    historyLimit: number;
+    inheritTmuxEnvironment: boolean;
   };
   // Slice 15 (OPR.0.7.0.15) — the ONE switch for compact command-output
   // defaults (default off: today's output). Read by the CLI only; the daemon
   // settings-store twin keeps the two registries in lockstep.
   output: {
     compact: boolean;
+    /** With compact on, how many peers `rig whoami --json` lists (edge peers first). */
+    whoamiPeers: number;
   };
-  // Slice 01 (OPR.0.7.0.1) — Codex usage windows in the provider view (default
+  // Slice 01 (OPR.0.7.0.1) — Codex and Claude usage windows in the provider view (default
   // off). Read by the daemon; the CLI key is the lockstep twin.
   provider: {
     usageWindows: boolean;
+  };
+  bundle: { servicesEnabled: boolean };
+  // Slice 02 (OPR.0.7.0.2) — Pi seats report model-priced cost from persisted session entries
+  // (default off). Read by the daemon at Pi launch; the CLI key is the lockstep twin.
+  usage: {
+    piCostFacts: boolean;
+    piOpenRouterCharge: boolean;
+  };
+  // A verified Claude Code or Codex send reports on input-box evidence (default off). Read by the daemon at
+  // each such send; the CLI key is the lockstep twin. localUserGuard is the optional CLI-side Mac check.
+  transport: {
+    verifyInputBox: boolean;
+    localUserGuard: boolean;
   };
   // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs (twin of the daemon
   // settings-store): enabled + the four bounded numeric tunables.
@@ -322,14 +340,28 @@ const DEFAULTS = {
   // OPR.0.4.6.02 S1 — inner-tmux status bar OFF at launch by default.
   terminal: {
     statusBar: false,
+    historyLimit: 10000,
+    inheritTmuxEnvironment: false,
   },
   // Slice 15 — compact command-output defaults OFF until the switch is on.
   output: {
     compact: false,
+    whoamiPeers: 8,
   },
   // Slice 01 — Codex usage windows OFF until the switch is on.
   provider: {
     usageWindows: false,
+  },
+  bundle: { servicesEnabled: false },
+  // Slice 02 — Pi cost facts OFF until the switch is on.
+  usage: {
+    piCostFacts: false,
+    piOpenRouterCharge: false,
+  },
+  // Input-box evidence for verified sends OFF until the switch is on.
+  transport: {
+    verifyInputBox: false,
+    localUserGuard: false,
   },
   // OPR.0.4.6.FS-1 W2 — retention defaults (twin of daemon getDefaultValue).
   retention: {
@@ -444,10 +476,20 @@ export const VALID_KEYS = [
   // boolean (default off), lockstep with the daemon settings-store twin
   // (the parity test pins both). Flip is future-launches-only (BR-1).
   "terminal.status_bar",
+  // The managed ~/.tmux.conf block's history-limit, written by `rig setup`; lockstep with the daemon twin.
+  "terminal.history_limit",
+  "terminal.inherit_tmux_environment",
   // Slice 15 — compact command-output defaults; lockstep with the daemon twin.
   "output.compact",
-  // Slice 01 — Codex usage windows in the provider view; lockstep with the daemon twin.
+  "output.whoami_peers",
+  // Slice 01 — Codex and Claude usage windows in the provider view; lockstep with the daemon twin.
   "provider.usage_windows",
+  // Service-backed archives, including packing, preview and durable-target admission; default off.
+  "bundle.services_enabled",
+  "usage.pi_cost_facts",
+  "usage.pi_openrouter_charge",
+  "transport.verify_input_box",
+  "transport.local_user_guard",
   // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs; CLI-settable twin,
   // lockstep with the daemon settings-store SETTINGS_VALID_KEYS.
   "retention.enabled",
@@ -544,8 +586,16 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "snapshots.periodic.retention_keep": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_RETENTION_KEEP" },
   // OPR.0.4.6.02 S1 — net-new key; OPENRIG_* primary only (no RIGGED_* legacy).
   "terminal.status_bar": { primary: "OPENRIG_TERMINAL_STATUS_BAR" },
+  "terminal.history_limit": { primary: "OPENRIG_TERMINAL_HISTORY_LIMIT" },
+  "terminal.inherit_tmux_environment": { primary: "OPENRIG_TERMINAL_INHERIT_TMUX_ENVIRONMENT" },
   "output.compact": { primary: "OPENRIG_OUTPUT_COMPACT" },
+  "output.whoami_peers": { primary: "OPENRIG_OUTPUT_WHOAMI_PEERS" },
   "provider.usage_windows": { primary: "OPENRIG_PROVIDER_USAGE_WINDOWS" },
+  "bundle.services_enabled": { primary: "OPENRIG_BUNDLE_SERVICES_ENABLED" },
+  "usage.pi_cost_facts": { primary: "OPENRIG_USAGE_PI_COST_FACTS" },
+  "usage.pi_openrouter_charge": { primary: "OPENRIG_USAGE_PI_OPENROUTER_CHARGE" },
+  "transport.local_user_guard": { primary: "OPENRIG_TRANSPORT_LOCAL_USER_GUARD" },
+  "transport.verify_input_box": { primary: "OPENRIG_TRANSPORT_VERIFY_INPUT_BOX" },
   // OPR.0.4.6.FS-1 W2 — retention knobs; net-new keys, OPENRIG_* primary only.
   "retention.enabled": { primary: "OPENRIG_RETENTION_ENABLED" },
   "retention.transitions_days": { primary: "OPENRIG_RETENTION_TRANSITIONS_DAYS" },
@@ -625,8 +675,16 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "snapshots.periodic.interval_seconds": ["snapshots", "periodic", "intervalSeconds"],
   "snapshots.periodic.retention_keep": ["snapshots", "periodic", "retentionKeep"],
   "terminal.status_bar": ["terminal", "statusBar"],
+  "terminal.history_limit": ["terminal", "historyLimit"],
+  "terminal.inherit_tmux_environment": ["terminal", "inheritTmuxEnvironment"],
   "output.compact": ["output", "compact"],
+  "output.whoami_peers": ["output", "whoamiPeers"],
   "provider.usage_windows": ["provider", "usageWindows"],
+  "bundle.services_enabled": ["bundle", "servicesEnabled"],
+  "usage.pi_cost_facts": ["usage", "piCostFacts"],
+  "usage.pi_openrouter_charge": ["usage", "piOpenRouterCharge"],
+  "transport.local_user_guard": ["transport", "localUserGuard"],
+  "transport.verify_input_box": ["transport", "verifyInputBox"],
   "retention.enabled": ["retention", "enabled"],
   "retention.transitions_days": ["retention", "transitionsDays"],
   "retention.watchdog_days": ["retention", "watchdogDays"],
@@ -710,6 +768,22 @@ function getNestedValue(obj: Record<string, unknown>, parts: string[]): unknown 
     current = (current as Record<string, unknown>)[part];
   }
   return current;
+}
+
+/**
+ * After a reset deletes a leaf key, remove any now-empty object literals along
+ * the leaf's own parent path, walking from the deepest parent toward the root.
+ * Stops as soon as a parent still has a key (a sibling, or an unrelated key),
+ * so unrelated empty objects elsewhere in the file are never touched. If the
+ * walk empties the root itself, it is left as `{}` rather than removed.
+ */
+function pruneEmptyAncestors(root: Record<string, unknown>, parentParts: string[]): void {
+  for (let depth = parentParts.length; depth >= 1; depth--) {
+    const obj = getNestedValue(root, parentParts.slice(0, depth));
+    if (obj == null || typeof obj !== "object" || Object.keys(obj).length > 0) break;
+    const grandparent = depth === 1 ? root : (getNestedValue(root, parentParts.slice(0, depth - 1)) as Record<string, unknown>);
+    delete grandparent[parentParts[depth - 1]!];
+  }
 }
 
 function setNestedValue(obj: Record<string, unknown>, parts: string[], value: unknown): void {
@@ -835,6 +909,12 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
       throw new Error(`Invalid value for runtime.readiness_timeout_seconds: must be an integer in [1, 600], got "${raw}"`);
     }
   },
+  // tmux trims a full pane by a tenth of the limit, so 2000 keeps the 1000-row transcript window.
+  "terminal.history_limit": (raw, coerced) => {
+    if (!/^\d+$/.test(raw.trim()) || typeof coerced !== "number" || !Number.isSafeInteger(coerced) || coerced < 2000 || coerced > 1_000_000) {
+      throw new Error(`Invalid value for terminal.history_limit: must be an integer in [2000, 1000000], got "${raw}"`);
+    }
+  },
   // daemon.port had no KEY_CONSTRAINTS entry, so `rig config set daemon.port
   // 99999` stored 99999 and the next daemon start died with a raw
   // ERR_SOCKET_BAD_PORT from serve(). The check range-validates the value
@@ -922,6 +1002,12 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
   // OPR.0.4.6.FS-1 W2 — retention numeric bounds. Lockstep with the daemon
   // settings-store KEY_CONSTRAINTS twin (same messages/bounds). retention.enabled
   // is a boolean (coerceValue enforces true/false) — no constraint entry.
+  // Slice 15 P5 — the whoami peer bound; lockstep with the daemon twin.
+  "output.whoami_peers": (raw, coerced) => {
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
+      throw new Error(`Invalid value for output.whoami_peers: must be an integer >= 1, got "${raw}"`);
+    }
+  },
   "retention.transitions_days": (raw, coerced) => {
     if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
       throw new Error(`Invalid value for retention.transitions_days: must be an integer >= 1, got "${raw}"`);
@@ -1155,12 +1241,24 @@ export class ConfigStore {
       },
       terminal: {
         statusBar: v("terminal.status_bar") as boolean,
+        historyLimit: v("terminal.history_limit") as number,
+        inheritTmuxEnvironment: v("terminal.inherit_tmux_environment") as boolean,
       },
       output: {
         compact: v("output.compact") as boolean,
+        whoamiPeers: v("output.whoami_peers") as number,
       },
       provider: {
         usageWindows: v("provider.usage_windows") as boolean,
+      },
+      bundle: { servicesEnabled: v("bundle.services_enabled") as boolean },
+      usage: {
+        piCostFacts: v("usage.pi_cost_facts") as boolean,
+        piOpenRouterCharge: v("usage.pi_openrouter_charge") as boolean,
+      },
+      transport: {
+        localUserGuard: v("transport.local_user_guard") as boolean,
+        verifyInputBox: v("transport.verify_input_box") as boolean,
       },
       retention: {
         enabled: v("retention.enabled") as boolean,
@@ -1374,6 +1472,7 @@ export class ConfigStore {
           throw new Error(`Invalid context-pressure policy: warning (${warning}) must be less than critical (${critical})`);
         }
       }
+      pruneEmptyAncestors(fileConfig, parentParts);
     }
     this.writeConfig(JSON.stringify(fileConfig, null, 2) + "\n");
   }

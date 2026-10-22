@@ -1,3 +1,4 @@
+import { physicalSessionName } from "./session-registry.js";
 import type Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
@@ -12,6 +13,7 @@ export interface ClassifierOccupant { nodeId: string; rigId: string; session: st
 
 // Same real running-session/tenure sources as startup liveness. No daemon pseudo-session.
 export function classifierOccupant(db: Database.Database, session: string): ClassifierOccupant | null {
+  session = physicalSessionName(db, session);
   const rows = db.prepare(`SELECT DISTINCT n.id AS nodeId, n.rig_id AS rigId, b.tmux_session AS session,
     o.generation_uuid AS generation FROM nodes n JOIN bindings b ON b.node_id=n.id
     JOIN sessions s ON s.node_id=n.id AND s.session_name=b.tmux_session AND s.status='running'

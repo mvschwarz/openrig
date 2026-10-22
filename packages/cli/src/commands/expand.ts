@@ -4,6 +4,7 @@ import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
+import { resolveRigHandle } from "../rig-handle.js";
 
 interface ExpandResult {
   ok: boolean;
@@ -22,7 +23,7 @@ export function expandCommand(depsOverride?: StatusDeps): Command {
   const getDeps = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
   cmd
-    .argument("<rig-id>", "ID of the target rig")
+    .argument("<rig>", "Name or ID of the target rig")
     .argument("<pod-fragment-path>", "Path to YAML pod fragment file")
     .option("--json", "JSON output for agents")
     .option("--rig-root <path>", "Root directory for agent resolution")
@@ -61,7 +62,20 @@ export function expandCommand(depsOverride?: StatusDeps): Command {
       if (opts.rigRoot) body["rigRoot"] = opts.rigRoot;
 
       const client = deps.clientFactory(getDaemonUrl(status));
-      const res = await client.post<ExpandResult>(`/api/rigs/${encodeURIComponent(rigId)}/expand`, body);
+      const resolution = await resolveRigHandle(client, rigId);
+      if (resolution.kind === "ambiguous") {
+        const msg = `'${rigId}' matches ${resolution.ids.length} rigs. Refusing to expand: an ambiguous name could act on the wrong rig. Re-run with the specific id, e.g. ${resolution.ids.map((id) => `rig expand ${id} ${fragmentPath}`).join("  |  ")}`;
+        if (opts.json) {
+          console.log(JSON.stringify({ ok: false, code: "rig_ambiguous", message: msg, candidates: resolution.ids }, null, 2));
+        } else {
+          console.error(msg);
+        }
+        process.exitCode = 1;
+        return;
+      }
+
+      const resolvedRigId = resolution.kind === "resolved" ? resolution.id : rigId;
+      const res = await client.post<ExpandResult>(`/api/rigs/${encodeURIComponent(resolvedRigId)}/expand`, body);
 
       const data = res.data;
 

@@ -215,6 +215,20 @@ describe("ClaimService FR-3 — adoption-boundary resume-token capture", () => {
     });
   });
 
+  it("bind honest-skips with process_unreadable when Codex discovery throws (matches the capture log reason)", async () => {
+    captureCodexThreadId.mockRejectedValue(new Error("ps failed with secret-text"));
+    const rig = rigRepo.createRig("test-rig");
+    const node = rigRepo.addNode(rig.id, "dev.qa", { runtime: "codex", cwd: "/projects/app" });
+    const discovered = seedDiscovery({ runtimeHint: "codex", tmuxSession: "dev-qa@test-rig" });
+
+    const result = await buildService().bind({ discoveredId: discovered.id, rigId: rig.id, logicalId: "dev.qa" });
+    expect(result.ok).toBe(true);
+
+    expect(tokenRow(node.id).resume_token).toBeNull();
+    expect(latestEvent()?.payload.reason).toBe("process_unreadable");
+    expect(JSON.stringify(latestEvent()?.payload)).not.toContain("secret-text");
+  });
+
   it("bind honest-skips when the Codex probe times out (undefined → reason=probe_timeout)", async () => {
     captureCodexThreadId.mockResolvedValue(undefined);
     const rig = rigRepo.createRig("test-rig");

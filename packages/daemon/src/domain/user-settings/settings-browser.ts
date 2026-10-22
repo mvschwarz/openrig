@@ -98,6 +98,7 @@ function application(key: string): string {
   if (key.startsWith("retention.")) return "Read on the retention sweep; last applied value unverified.";
   if (key.startsWith("policies.claude_compaction.")) return "Read by the compaction policy consumer; running action unverified.";
   if (key === "terminal.status_bar" || key.startsWith("runtime.")) return "Future launch behavior; existing sessions not verified.";
+  if (key === "terminal.history_limit") return "Written into ~/.tmux.conf by rig setup; a running tmux server keeps its old limit until it restarts or sources the file.";
   return "Resolved configuration; running application unverified.";
 }
 

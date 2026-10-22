@@ -854,7 +854,8 @@ describe("OPR.0.5.6.1 §7 — one vocabulary, no seen, no third timer engine", (
   it("ONE OUTCOME TUPLE at one definition site; the engine consumes S14 stamps and mints no transport literals (AM-F4)", async () => {
     const mod = await engine();
     expect(mod).not.toBeNull();
-    expect(mod!.DELIVERY_OUTCOMES).toEqual(["interrupt", "notify", "digest", "log"]);
+    // Quiet hours added the one outcome `hold`, still at this one definition site.
+    expect(mod!.DELIVERY_OUTCOMES).toEqual(["interrupt", "notify", "digest", "log", "hold"]);
     const raw = readFileSync(join(SRC_ROOT, "domain", "gateway", "delivery-rules-engine.ts"), "utf8");
     const source = stripComments(raw);
     // consumes, never mints: the S14 receipt literals may be REFERENCED via the

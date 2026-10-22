@@ -27,6 +27,7 @@ const PRODUCTION_CODE_ROOTS = [
 const NOTES_RESOLVER_FILES = new Set([
   "packages/cli/src/lib/scope/scope-fs.ts",
   "packages/daemon/src/domain/scope/node-file.ts",
+  "packages/daemon/assets/plugins/openrig-core/skills/refocusing/scripts/trace-to-root.py",
 ]);
 const CODE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".cjs", ".mjs", ".py"]);
 
@@ -201,11 +202,12 @@ describe("mission notes resolver parity", () => {
 });
 
 describe("shipped refocus notes resolution", () => {
-  it("uses the real CLI resolver for every locked outcome and reports command failure honestly", () => {
+  it("preserves every locked notes outcome without calling an unavailable CLI resolver", () => {
     const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "scope-notes-refocus-"));
     const workNode = path.join(root, "work-node");
     const bin = path.join(root, "bin");
     const rig = path.join(bin, "rig");
+    const calls = path.join(root, "rig-calls");
     const currentPath = path.join(workNode, "NOTES.md");
     const legacyPath = path.join(workNode, "MISSION_NOTES.md");
     fs.mkdirSync(workNode, { recursive: true });
@@ -218,6 +220,7 @@ const { scopeCommand } = await import(pathToFileURL(process.env.OPENRIG_TEST_SCO
 await scopeCommand().parseAsync(process.argv);
 `, "utf8");
     fs.writeFileSync(rig, `#!/bin/sh
+printf '%s\\n' "$*" >> "$OPENRIG_TEST_SCOPE_CALLS"
 if [ "\${OPENRIG_TEST_SCOPE_RESOLVE_FAIL:-}" = "1" ] && [ "$1" = "scope" ] && [ "$2" = "resolve-notes" ]; then
   printf '%s\n' 'forced resolver failure' >&2
   exit 23
@@ -232,6 +235,7 @@ exec "$OPENRIG_TEST_NODE" --import tsx "$OPENRIG_TEST_SCOPE_LAUNCHER" "$@"
       OPENRIG_TEST_NODE: process.execPath,
       OPENRIG_TEST_SCOPE_COMMAND: path.join(REPO_ROOT, "packages/cli/src/commands/scope.ts"),
       OPENRIG_TEST_SCOPE_LAUNCHER: launcher,
+      OPENRIG_TEST_SCOPE_CALLS: calls,
       OPENRIG_WORKSPACE_ROOT: workNode,
     } as NodeJS.ProcessEnv;
 
@@ -271,7 +275,8 @@ exec "$OPENRIG_TEST_NODE" --import tsx "$OPENRIG_TEST_SCOPE_LAUNCHER" "$@"
       expect(missing.status).toBe(0);
       expect(missing.stdout).toContain(`NOTES GAP — no readable mission notes at ${resolvedWorkNode}`);
 
-      const failed = spawnSync("python3", [
+      fs.writeFileSync(currentPath, "current notes\n", "utf8");
+      const local = spawnSync("python3", [
         TRACE_TO_ROOT,
         "--trees", "work",
         "--depth", "full",
@@ -281,9 +286,11 @@ exec "$OPENRIG_TEST_NODE" --import tsx "$OPENRIG_TEST_SCOPE_LAUNCHER" "$@"
         encoding: "utf8",
         env: { ...baseEnv, OPENRIG_TEST_SCOPE_RESOLVE_FAIL: "1" },
       });
-      expect(failed.status).toBe(0);
-      expect(failed.stdout).toContain("NOTES RESOLUTION GAP — resolver command exited 23");
-      expect(failed.stdout).not.toContain("NOTES GAP — no readable mission notes");
+      expect(local.status).toBe(0);
+      expect(local.stdout).toContain("current notes");
+      expect(local.stdout).not.toContain("NOTES RESOLUTION GAP");
+      expect(local.stdout).not.toContain("NOTES GAP — no readable mission notes");
+      expect(fs.existsSync(calls) ? fs.readFileSync(calls, "utf8") : "").not.toContain("scope resolve-notes");
     } finally {
       if (fs.existsSync(currentPath)) fs.chmodSync(currentPath, 0o600);
       fs.rmSync(root, { recursive: true, force: true });

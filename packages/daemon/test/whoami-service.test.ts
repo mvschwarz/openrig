@@ -211,16 +211,41 @@ describe("WhoamiService", () => {
     }
   });
 
-  it("PL-012: codex seat surfaces runtimeContext with runtime=codex (threadId null at v0)", () => {
+  it("PL-012: codex seat with no captured thread surfaces threadId null", () => {
     const { nodeB } = seedRig();
     const result = svc.resolve({ nodeId: nodeB.id });
     expect(result).not.toBeNull();
     expect(result!.runtimeContext?.runtime).toBe("codex");
     if (result!.runtimeContext?.runtime === "codex") {
-      // v0: threadId resolution requires pid plumbing; surface null
-      // honestly rather than fabricated.
       expect(result!.runtimeContext.threadId).toBeNull();
       expect(result!.runtimeContext.conversationId).toBeNull();
+    }
+  });
+
+  it("#122: codex seat surfaces its captured thread id from the stored resume token", () => {
+    const { nodeB, sessB } = seedRig();
+    sessionRegistry.updateResumeToken(sessB.id, "codex_id", "019a-codex-thread");
+    const result = svc.resolve({ nodeId: nodeB.id });
+    expect(result!.runtimeContext?.runtime).toBe("codex");
+    if (result!.runtimeContext?.runtime === "codex") {
+      expect(result!.runtimeContext.threadId).toBe("019a-codex-thread");
+      expect(result!.runtimeContext.conversationId).toBeNull();
+    }
+  });
+
+  it("#122: codex seat keeps threadId null for an unverified resume attempt or a failed probe", () => {
+    const { nodeB, sessB } = seedRig();
+    sessionRegistry.recordResumeAttempt(sessB.id, "codex_id", "019a-attempted");
+    const attempted = svc.resolve({ nodeId: nodeB.id });
+    expect(attempted!.runtimeContext?.runtime).toBe("codex");
+    if (attempted!.runtimeContext?.runtime === "codex") {
+      expect(attempted!.runtimeContext.threadId).toBeNull();
+    }
+
+    sessionRegistry.markResumeProbeResult(sessB.id, "not_resumable");
+    const failed = svc.resolve({ nodeId: nodeB.id });
+    if (failed!.runtimeContext?.runtime === "codex") {
+      expect(failed!.runtimeContext.threadId).toBeNull();
     }
   });
 

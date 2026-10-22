@@ -135,6 +135,15 @@ interface CachedSlice {
   expiresAt: number;
 }
 
+/** Which slice a frontmatter id names. An id counts only when exactly one slice
+ *  location declares it and no directory is named the same, so a copied SPEC or a
+ *  second mission's slice can never pull rows into another slice. */
+interface SliceIdAliases {
+  nameById: Map<string, string>;
+  idByName: Map<string, string>;
+  expiresAt: number;
+}
+
 interface SliceLocation {
   name: string;
   missionId: string | null;
@@ -274,6 +283,8 @@ export class SliceIndexer {
   private detailCache: Map<string, CachedSlice> = new Map();
   // qitem-ccf87c0d — batch membership index (see MembershipIndex doc).
   private membershipIndex: MembershipIndex | null = null;
+  // Slice id <-> directory name map, built once per cache window (same TTL as the listing).
+  private idAliases: SliceIdAliases | null = null;
   // qitem-ccf87c0d corrective — depth of open withMembershipBatch scopes.
   private batchDepth = 0;
   private compositionBasis: string | null = null;
@@ -333,6 +344,7 @@ export class SliceIndexer {
     this.detailCache.clear();
     this.missionStatusCache = null;
     this.membershipIndex = null;
+    this.idAliases = null;
   }
 
   /** VM-005 B1 (the narrow C-vii exception; arch ruling b8d91aee…) — the
@@ -471,14 +483,29 @@ export class SliceIndexer {
     this.compositionBasis = next;
   }
 
+  /** The `slice:` tag values that name this slice: its directory name and, when
+   *  its node file declares one that no other slice shares, its frontmatter id. */
+  sliceTagKeys(name: string): string[] {
+    const id = this.sliceIdAliases().idByName.get(name);
+    return id ? [name, id] : [name];
+  }
+
   // --- internals ---
 
   private readSliceLocations(): SliceLocation[] {
+    return this.walkSliceLocations().filter((location) => !this.missionId || location.missionId === this.missionId);
+  }
+
+  /** Every slice location under the roots, whatever mission this indexer is scoped to.
+   *  Directory names are deduplicated (first wins) unless `physical` asks for every folder. */
+  private walkSliceLocations(physical = false): SliceLocation[] {
     const locations: SliceLocation[] = [];
     const seen = new Set<string>();
     const addLocation = (location: SliceLocation) => {
-      if (seen.has(location.name)) return;
-      seen.add(location.name);
+      if (!physical) {
+        if (seen.has(location.name)) return;
+        seen.add(location.name);
+      }
       locations.push(location);
     };
 
@@ -517,7 +544,50 @@ export class SliceIndexer {
         });
       }
     }
-    return locations.filter(location => !this.missionId || location.missionId === this.missionId).sort((a, b) => a.name.localeCompare(b.name));
+    return locations.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  private sliceIdAliases(): SliceIdAliases {
+    const now = Date.now();
+    if (this.idAliases && this.idAliases.expiresAt > now) return this.idAliases;
+    // Claims are counted over every physical slice folder in every mission, not just the
+    // ones this indexer shows: a mission-scoped indexer must still see that another
+    // mission's slice shares the id, and so must one that hides a same-named folder.
+    // One slice found under two roots (same mission, same name) is still one claim.
+    const physical = this.walkSliceLocations(true);
+    const names = new Set(physical.map((location) => location.name));
+    const idOfPath = new Map<string, string | null>();
+    const claims = new Map<string, Set<string>>();
+    for (const location of physical) {
+      const id = this.readSliceId(location.slicePath);
+      idOfPath.set(location.slicePath, id);
+      if (!id || names.has(id)) continue;
+      const claimants = claims.get(id) ?? new Set<string>();
+      claimants.add(`${location.missionId ?? ""}/${location.name}`);
+      claims.set(id, claimants);
+    }
+    const nameById = new Map<string, string>();
+    const idByName = new Map<string, string>();
+    for (const location of this.readSliceLocations()) {
+      const id = idOfPath.get(location.slicePath);
+      if (!id || claims.get(id)?.size !== 1) continue;
+      nameById.set(id, location.name);
+      idByName.set(location.name, id);
+    }
+    this.idAliases = { nameById, idByName, expiresAt: now + this.cacheTtlMs };
+    return this.idAliases;
+  }
+
+  /** The `id:` the slice's node file declares, read the way the execution view reads it. */
+  private readSliceId(slicePath: string): string | null {
+    const nodeFile = resolveNodeFile(slicePath);
+    if (!nodeFile) return null;
+    try {
+      const id = parseFrontmatter(fs.readFileSync(nodeFile, "utf8"))["id"];
+      return typeof id === "string" && id.length > 0 ? id : null;
+    } catch {
+      return null;
+    }
   }
 
   private findSliceLocation(name: string): SliceLocation | null {
@@ -728,6 +798,7 @@ export class SliceIndexer {
         // Folder created mid-generation: rebuild so the fresh slice resolves
         // membership immediately (parity with the old per-slice queries).
         this.membershipIndex = null;
+        this.idAliases = null;
         index = this.ensureMembershipIndex(served);
       }
       // 1. Typed-tag matches (VM-004 authoritative): confirmed rows for this
@@ -866,12 +937,29 @@ export class SliceIndexer {
       const stmt = this.db.prepare(
         `SELECT qitem_id, tags FROM queue_items WHERE tags LIKE '%slice:%' ORDER BY ts_created DESC, qitem_id DESC`,
       );
+      const scanOrder = new Map<string, number>();
       for (const r of stmt.iterate() as Iterable<{ qitem_id: string; tags: string | null }>) {
         if (this.projectId && !belongsToProject(r.tags, this.projectId)) continue;
+        scanOrder.set(r.qitem_id, scanOrder.size);
         for (const tagged of parseScopeTags(r.tags).slices) {
           const bucket = typedBySlice.get(tagged);
           if (!bucket) typedBySlice.set(tagged, [r.qitem_id]);
           else if (bucket.length < 500) bucket.push(r.qitem_id);
+        }
+      }
+
+      // A tag may name a slice by its frontmatter id instead of its directory
+      // name. Fold such rows into that slice's bucket. The id map is read only
+      // when some tag matches no directory name.
+      const unresolved = [...typedBySlice.keys()].filter((key) => !knownSlices.has(key));
+      if (unresolved.length > 0) {
+        const { nameById } = this.sliceIdAliases();
+        for (const id of unresolved) {
+          const name = nameById.get(id);
+          if (!name) continue;
+          const merged = new Set([...(typedBySlice.get(name) ?? []), ...typedBySlice.get(id)!]);
+          const ordered = [...merged].sort((a, b) => scanOrder.get(a)! - scanOrder.get(b)!);
+          typedBySlice.set(name, ordered.slice(0, 500));
         }
       }
     }

@@ -23,6 +23,15 @@ Runtime, model and account belong in configuration. Changing a provider does not
 change the role's name. Keep machine and instance identifiers stable rather than
 renaming them whenever their workload changes.
 
+What a seat runs has its own words:
+
+| Term | Meaning | Example |
+| --- | --- | --- |
+| Runtime | What a seat runs: a harness, a terminal, or the stub (a scripted stand-in used in tests). It's the rig spec's `runtime` field and the TUI's runtime column | `claude-code`, `codex`, `terminal` |
+| Harness | The agent software around a model | Claude Code, Codex, Pi |
+| Community harness | A harness an outside contributor maintains. It's installed as a preset under `$OPENRIG_HOME/community-harnesses/`, listed by `rig community-harness list`, and OpenRig doesn't test it | A preset's name in a member's `runtime` |
+| Terminal | A seat with no agent: a shell for infrastructure processes | `runtime: terminal` |
+
 ## How the software teams grow
 
 | Team | Logical seats |

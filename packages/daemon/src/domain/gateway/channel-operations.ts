@@ -9,7 +9,6 @@ export interface ChannelState {
   enabled?: boolean;
   active?: boolean;
   digest?: string;
-  ready?: boolean | null;
 }
 
 export interface ChannelActor {
@@ -21,11 +20,11 @@ export interface ChannelActor {
 export interface ChannelOperation extends ChannelActor {
   id: string;
   at: string;
-  action: "enable" | "disable" | "configure" | "verify" | "binding";
+  action: "enable" | "disable" | "configure" | "binding";
   subject: string;
   before: ChannelState;
   after: ChannelState | null;
-  effect: "started" | "applied" | "no-op" | "observed" | "failed";
+  effect: "started" | "applied" | "no-op" | "failed";
 }
 
 export function channelStateDigest(value: unknown): string {
@@ -38,7 +37,7 @@ export async function runChannelOperation<T>(input: ChannelActor & {
   action: ChannelOperation["action"];
   subject: string;
   before: ChannelState;
-  run: () => Promise<{ value: T; after: ChannelState; effect: "applied" | "no-op" | "observed" }>;
+  run: () => Promise<{ value: T; after: ChannelState; effect: "applied" | "no-op" }>;
 }, home = getOpenRigHome()): Promise<{ value: T; receipt: ChannelOperation }> {
   if (!input.actor.trim() || !input.reason.trim()) throw new Error("channel operation requires actor and reason");
   const dir = join(home, "state");

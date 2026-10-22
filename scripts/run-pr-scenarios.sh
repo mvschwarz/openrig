@@ -9,20 +9,22 @@ CASES=(fixture library)
 MODES=(healthy lost-baton healthy)
 # Stub-script scenarios run once each, healthy only: their planted failures are
 # product-code mutations, kept as per-PR evidence outside CI.
-PASSING_CASES=(transcript capture)
+PASSING_CASES=(transcript capture daemon-restart refocus-active refocus-parked-off)
+EFFECT_CASES=(refocus-parked)
 OUT="$REPO_ROOT/dist/pr-scenarios"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --remote) REMOTE=true; shift ;;
     --case)
       case "${2:-}" in
-        fixture|library) CASES=("$2"); PASSING_CASES=();;
-        transcript|capture) CASES=(); PASSING_CASES=("$2");;
-        *) echo 'Expected --case fixture|library|transcript|capture' >&2; exit 2;;
+        fixture|library) CASES=("$2"); PASSING_CASES=(); EFFECT_CASES=();;
+        refocus-parked) CASES=(); PASSING_CASES=(); EFFECT_CASES=("$2");;
+        transcript|capture|daemon-restart|refocus-active|refocus-parked-off) CASES=(); PASSING_CASES=("$2"); EFFECT_CASES=();;
+        *) echo 'Expected --case fixture|library|transcript|capture|daemon-restart|refocus-parked|refocus-active|refocus-parked-off' >&2; exit 2;;
       esac
       shift 2 ;;
     --mode)
-      case "${2:-}" in healthy|lost-baton) MODES=("$2");; *) echo 'Expected --mode healthy|lost-baton' >&2; exit 2;; esac
+      case "${2:-}" in healthy|lost-baton|seeded) MODES=("$2");; *) echo 'Expected --mode healthy|lost-baton|seeded' >&2; exit 2;; esac
       shift 2 ;;
     --out) test -n "${2:-}" || exit 2; OUT="$2"; shift 2 ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
@@ -30,8 +32,15 @@ while [ "$#" -gt 0 ]; do
 done
 # The passing-only cases have no lost-baton form.
 if [ "${MODES[*]}" = lost-baton ]; then
-  test "${#CASES[@]}" -gt 0 || { echo 'transcript and capture run healthy only' >&2; exit 2; }
+  test "${#CASES[@]}" -gt 0 || { echo 'the passing-only cases run healthy only' >&2; exit 2; }
   PASSING_CASES=()
+  EFFECT_CASES=()
+fi
+EFFECT_MODES=(healthy seeded healthy)
+if [ "${MODES[*]}" = healthy ]; then EFFECT_MODES=(healthy); fi
+if [ "${MODES[*]}" = seeded ]; then
+  test "${#EFFECT_CASES[@]}" -gt 0 || { echo "seeded mode needs an effect case" >&2; exit 2; }
+  CASES=(); PASSING_CASES=(); EFFECT_MODES=(seeded)
 fi
 if "$REMOTE"; then
   case "${DOCKER_HOST:-}" in ssh://?*) ;; *) echo '--remote requires explicit DOCKER_HOST=ssh://...' >&2; exit 2;; esac
@@ -99,12 +108,15 @@ if (Object.hasOwn(PASSING_CASES, scenario)) {
   console.log(`${scenario}/${mode}: passing-only scenario passed`);
 } else {
   verifyRun(mode, Number(status), report, scenario);
-  console.log(`${scenario}/${mode}: ${mode === 'healthy' ? 'healthy scenario passed' : 'seeded durability regression caught at the expected assertion'}`);
+  console.log(`${scenario}/${mode}: ${mode === 'healthy' ? 'healthy scenario passed' : 'seeded regression caught at the expected assertion'}`);
 }
 JS
 }
 for scenario in ${CASES[@]+"${CASES[@]}"}; do
   for mode in "${MODES[@]}"; do run_case "$scenario" "$mode"; done
+done
+for scenario in ${EFFECT_CASES[@]+"${EFFECT_CASES[@]}"}; do
+  for mode in "${EFFECT_MODES[@]}"; do run_case "$scenario" "$mode"; done
 done
 for scenario in ${PASSING_CASES[@]+"${PASSING_CASES[@]}"}; do
   run_case "$scenario" healthy

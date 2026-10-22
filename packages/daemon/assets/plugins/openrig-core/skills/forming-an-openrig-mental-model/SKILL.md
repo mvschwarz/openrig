@@ -117,7 +117,9 @@ read only the pieces a task needs.
 
 The session-name format `{pod}-{member}@{rig}` is your address. When you
 run `rig whoami --json`, you get back your full topology context: rig name,
-pod, member, peers, edges, transcript path.
+pod, member, peers, edges, transcript path. With `output.compact` enabled,
+a large rig's peer list can be a bounded, edge-first selection: `peersNote`
+then says how many are not shown; `rig whoami --json --all-peers` lists them all.
 
 ---
 
@@ -232,7 +234,7 @@ OpenRig has a few load-bearing cultural principles. Internalize these:
 If you're booting into a new seat in an OpenRig rig:
 
 1. **`rig whoami --json`** — recover identity. Know your rig, pod, member,
-   peers.
+   peers (`--all-peers` when `peersNote` says some are not shown).
 2. **Read your role guidance** — typically delivered via startup files.
    `guidance/role.md` for your specific seat.
 3. **Read the rig's `CULTURE.md`** if it has one — the team operating
@@ -240,8 +242,9 @@ If you're booting into a new seat in an OpenRig rig:
 4. **Check what skills you have** — list `.claude/skills/` or
    `.agents/skills/` in your cwd. Each skill has a frontmatter description
    that tells you when to reach for it.
-5. **Check your peers** — `rig capture <peer-session>` to see what they're
-   doing.
+5. **Check your peers** — `rig ps --nodes` and the queue first (who is up,
+   who holds what). Capture a peer (`rig capture <peer-session>`) only when
+   you actually need to see its screen.
 6. **Check the transcripts** if you're returning to an in-flight workstream
    — `rig transcript <session> --tail 100` for recent context.
 7. **Ask `rig ask <rig> "<question>"`** if you need cross-cutting evidence

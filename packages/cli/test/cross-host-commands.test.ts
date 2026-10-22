@@ -388,6 +388,9 @@ function makeFailingLifecycleDeps(): never {
     spawnDetached: () => ({ pid: 0 }),
     isPidAlive: (_p: number) => false,
     fetchHealthDetail: async () => ({ ok: false, code: "unreachable" }),
+    // A refused connection is what makes the probe read "no daemon" (stopped).
+    fetch: async () => { throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }); },
+    sleep: async () => {},
   } as never;
 }
 
@@ -552,6 +555,22 @@ describe("whoami --host (cross-host short-circuit)", () => {
     expect(captureCalls.argv).toEqual([
       "rig", "whoami", "--node-id", "01ABC", "--session", "foo@rig", "--json",
     ]);
+  });
+
+  it.each(["--full", "--verbose"])("forwards %s over SSH as the full payload request", async (flag) => {
+    const calls: { argv?: readonly string[] } = {};
+    const fullPayload = '{"identity":{"rigName":"remote"},"contextUsage":{"availability":"known"},"workspace":{"root":"/fixture"}}\n';
+    const cmd = whoamiCommand(whoamiDeps({
+      run: async (_host, argv) => {
+        calls.argv = argv;
+        // The remote CLI receives the reconstructed argv and selects its view.
+        return { ok: true, failedStep: "none", stdout: argv.includes("--full") ? fullPayload : '{"identity":{"rigName":"remote"}}\n', stderr: "", remoteExitCode: 0 };
+      },
+    }));
+    await cmd.parseAsync(["--host", "vm-a", "--session", "worker@remote", "--json", flag], { from: "user" });
+    expect(calls.argv).toEqual(["rig", "whoami", "--session", "worker@remote", "--json", "--full"]);
+    expect(captured.stdoutWrites.join("")).toBe(fullPayload);
+    expect(process.exitCode).toBeUndefined();
   });
 
   it("argv reconstruction: bare `--host vm-a` produces ['rig','whoami'] with no extra flags", async () => {

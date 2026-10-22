@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
+import fs from "node:fs";
+import os from "node:os";
+import nodePath from "node:path";
 import { EventEmitter } from "node:events";
 import { Command } from "commander";
 import { formatRemoteUpFailure, upCommand } from "../src/commands/up.js";
@@ -526,6 +529,138 @@ describe("Up CLI", () => {
 
     server.removeAllListeners("request");
     for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+  });
+
+  it("up --env sends each KEY=VALUE as envOverride, splitting at the first equals sign", async () => {
+    let lastBody: Record<string, unknown> = {};
+    const origListeners = server.listeners("request");
+    server.removeAllListeners("request");
+    server.on("request", async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      if (req.url === "/api/up") {
+        lastBody = JSON.parse(body);
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "completed", runId: "r", rigId: "g", stages: [], errors: [] }));
+      }
+    });
+
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "up", "/tmp/rig.yaml", "--env", "DEBUG=1", "--env", "URL=http://x/?a=b"]);
+    });
+
+    expect(lastBody.envOverride).toEqual({ DEBUG: "1", URL: "http://x/?a=b" });
+
+    server.removeAllListeners("request");
+    for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+  });
+
+  it("up without --env sends no envOverride", async () => {
+    let lastBody: Record<string, unknown> = {};
+    const origListeners = server.listeners("request");
+    server.removeAllListeners("request");
+    server.on("request", async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      if (req.url === "/api/up") {
+        lastBody = JSON.parse(body);
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "completed", runId: "r", rigId: "g", stages: [], errors: [] }));
+      }
+    });
+
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "up", "/tmp/rig.yaml"]);
+    });
+
+    expect(lastBody).not.toHaveProperty("envOverride");
+
+    server.removeAllListeners("request");
+    for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+  });
+
+  it("up --env without an equals sign stops before contacting the daemon", async () => {
+    let called = false;
+    const origListeners = server.listeners("request");
+    server.removeAllListeners("request");
+    server.on("request", (_req: http.IncomingMessage, res: http.ServerResponse) => { called = true; res.writeHead(500); res.end(); });
+    try {
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "up", "/tmp/rig.yaml", "--env", "NOEQUALS"]);
+      });
+      expect(called).toBe(false);
+      expect(exitCode).toBe(1);
+      expect(logs.join("\n")).toContain("--env expects KEY=VALUE");
+    } finally {
+      server.removeAllListeners("request");
+      for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+    }
+  });
+
+  async function withListener(handler: (url: string) => { status: number; body: unknown }, run: (upCalls: () => number) => Promise<void>) {
+    let upCalls = 0;
+    const origListeners = server.listeners("request");
+    server.removeAllListeners("request");
+    server.on("request", async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      for await (const _chunk of req) { /* drain */ }
+      if (req.url === "/api/up") upCalls++;
+      const { status, body } = handler(req.url ?? "");
+      res.writeHead(status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(body));
+    });
+    try {
+      await run(() => upCalls);
+    } finally {
+      server.removeAllListeners("request");
+      for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+    }
+  }
+
+  it.each([
+    ["a lowercase name", "lower=x", "not a valid name"],
+    ["a reserved name", "OPENRIG_URL=http://elsewhere", "reserved"],
+    ["an empty value", "EMPTY=", "must not be empty"],
+  ])("up --env with %s stops before contacting the daemon", async (_label, assignment, fragment) => {
+    await withListener(() => ({ status: 500, body: {} }), async (upCalls) => {
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "up", "/tmp/rig.yaml", "--env", assignment]);
+      });
+      expect(upCalls()).toBe(0);
+      expect(exitCode).toBe(1);
+      expect(logs.join("\n")).toContain(fragment);
+    });
+  });
+
+  it.each([
+    ["a rig name", ["up", "my-rig", "--env", "DEBUG=1"]],
+    ["a rig name with --existing", ["up", "my-rig", "--existing", "--env", "DEBUG=1"]],
+  ])("up --env with %s says a restore takes no --env and does not call /api/up", async (_label, args) => {
+    await withListener((url) => ({ status: 200, body: url.startsWith("/api/rigs/summary") ? [{ id: "r1", name: "my-rig", lifecycleState: "stopped" }] : [] }), async (upCalls) => {
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", ...args]);
+      });
+      expect(upCalls()).toBe(0);
+      expect(exitCode).toBe(1);
+      expect(logs.join("\n")).toContain("A restore keeps the rig's own env: block");
+    });
+  });
+
+  it("up --env with a topology source says a topology takes no --env and does not call /api/up", async () => {
+    const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "up-topology-env-"));
+    try {
+      const manifest = nodePath.join(dir, "factory.rigtopology");
+      fs.writeFileSync(manifest, "rigs:\n  - source: ./a.yaml\n");
+      await withListener(() => ({ status: 200, body: {} }), async (upCalls) => {
+        const { logs, exitCode } = await captureLogs(async () => {
+          await makeCmd().parseAsync(["node", "rig", "up", manifest, "--env", "DEBUG=1"]);
+        });
+        expect(upCalls()).toBe(0);
+        expect(exitCode).toBe(1);
+        expect(logs.join("\n")).toContain("A topology launches several rigs");
+      });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   // OPR.0.3.2.22 Bug 3 — path-form `rig up <spec-inside-install>` without

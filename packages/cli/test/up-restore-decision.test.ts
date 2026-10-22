@@ -122,6 +122,21 @@ describe("rig up --existing — resume-original default (OPR.0.3.4.2)", () => {
     expect(upBodies).toHaveLength(1);
   });
 
+  it("a seat held back for a missing startup file shows why and how to fix it; the others show as restored", async () => {
+    const reason = "Not launched: Required startup file is missing for dev.qa: /work/startup.md Restore the missing startup file or capture a new snapshot before retrying restore.";
+    respond = () => ({
+      status: "restored", rigId: "rig-1", rigName: "myrig", rigResult: "partially_restored",
+      nodes: [{ logicalId: "dev.impl", status: "resumed" }, { logicalId: "dev.qa", status: "failed", error: reason }],
+      warnings: [],
+    });
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "up", "myrig", "--existing"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("dev.impl: resumed");
+    expect(output).toContain(`dev.qa: failed — ${reason}`);
+  });
+
   it("TTY ASK accepted: [y/N] offer names seat + reason, then re-runs as a deliberate fresh-prime", async () => {
     respond = (body) => Array.isArray(body.freshLogicalIds) && (body.freshLogicalIds as string[]).length > 0
       ? {

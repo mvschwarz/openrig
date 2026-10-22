@@ -1,5 +1,6 @@
 import type { Binding, StartupFile } from "./types.js";
 import type { ProjectionPlan } from "./projection-planner.js";
+import type { ClaudeResumeRotation } from "./native-process-lineage.js";
 
 // -- Bridge type: NodeBinding extends Binding with cwd --
 // Interim repo type. The current repo only has Binding in types.ts.
@@ -69,6 +70,8 @@ export interface ReadinessResult {
   ready: boolean;
   reason?: string;
   code?: string;
+  /** Ready because the pane's process proved the seat with no launch record (#1477): the screen alone would not have. */
+  provedWithoutLaunch?: boolean;
 }
 
 export const ATTENTION_REQUIRED_READINESS_CODES = new Set([
@@ -90,6 +93,10 @@ export function isAttentionRequiredReadinessCode(code: string | undefined): bool
   return !!code && ATTENTION_REQUIRED_READINESS_CODES.has(code);
 }
 
+/** `resumeRotation`: the rotation recorded with `resumeToken` (#1077), as `rig seat clear-attention` passes it, so a
+ *  seat whose Claude continued its conversation under a new id is proved by the process that recorded the rotation. */
+export interface ReadinessOptions { resumeToken?: string | null; resumeRotation?: ClaudeResumeRotation | null }
+
 // -- Harness launch result --
 
 export type HarnessLaunchRecovery = "retry_fresh" | "attention_required";
@@ -98,11 +105,36 @@ export type HarnessLaunchRecovery = "retry_fresh" | "attention_required";
 // pinned as the one it started, kept even when a later sample saw it replaced (#1077).
 export type HarnessLaunchResult =
   | { ok: true; resumeToken?: string; resumeType?: string; appliedLaunch?: import("./permission-drift.js").AppliedLaunchObservation;
-    launchedProcess?: import("./native-process-lineage.js").ClaudeLaunchedProcess }
+    launchedProcess?: import("./native-process-lineage.js").ClaudeLaunchedProcess;
+    /** Codex (#1524): the native process a managed resume was proven on from Codex's own records. Restore's join
+     *  compares the process it verifies later against this one before it reports the seat resumed. */
+    resumedProcess?: { pid: number; startedAt: string } }
   // `evidence` carries the last-N pane lines for `attention_required` outcomes
   // so the failure can flow honest evidence through to RestoreNodeResult's
   // attentionEvidence field. Omitted for non-attention recoveries.
-  | { ok: false; error: string; recovery?: HarnessLaunchRecovery; evidence?: string;
+  // `missingConversation` is set only when the runtime itself reported that the requested
+  // conversation doesn't exist; other `retry_fresh` failures (such as a pane back at its shell)
+  // leave it unset.
+  | { ok: false; error: string; recovery?: HarnessLaunchRecovery; evidence?: string; missingConversation?: true;
+    /** The native resume probe's code for the startup gate that stopped the launch (for example `hook_trust_gate`),
+     *  when one did. Reporting only: it changes no recovery decision. */
+    gate?: string;
+    /** Reporting only, with `gate: "update_gate"`: whether that screen offered a choice (an update prompt with a skip
+     *  option) rather than an update already in progress. */
+    gateChoice?: boolean;
+    /** Reporting only: what the resume verification itself typed into the pane. */
+    verifierInput?: "none" | "update_skip_key_sent" | "update_skip_key_failed";
+    /** Reporting only: the reported screen is the last one seen before the verification's own input (`verifierInput`);
+     *  nothing after that input was observed. */
+    screenBeforeInput?: true;
+    /** Codex (#1524), reporting only: a managed resume of a known conversation ended without proof and without a gate
+     *  on the newest screen (records unread or unknown, or the window ended, whatever the last frame showed). Not set
+     *  for a disproved resume (see `resumeMismatch`). The resumed Codex may still be running the conversation. */
+    resumeUnproven?: true;
+    /** Codex (#1524), reporting only: the resumed process's own records name a different conversation (`opened`). */
+    resumeMismatch?: { opened: string };
+    /** The native fork command was sent, but its child identity is not yet available. */
+    forkIdentityPending?: boolean;
     launchedProcess?: import("./native-process-lineage.js").ClaudeLaunchedProcess };
 
 // -- Shared concrete-hint resolver --
@@ -136,6 +168,10 @@ export function resolveConcreteHint(
 export interface ForkSource {
   kind: "native_id" | "artifact_path" | "name" | "last";
   value?: string;
+  /** Set only by a seat handover: a launch whose new id isn't captured yet still succeeds, with the id
+   *  pending, so the handover can commit the ready successor. Every other fork caller keeps the
+   *  refusal on a missed capture. */
+  pendingIdAllowed?: boolean;
 }
 
 /**
@@ -173,9 +209,18 @@ export interface RuntimeAdapter {
    */
   launchHarness(
     binding: NodeBinding,
-    opts: { name: string; resumeToken?: string; forkSource?: ForkSource },
+    opts: { name: string; resumeToken?: string; forkSource?: ForkSource;
+      /** Fresh successor in the retired occupant's pane; not an adopt, resume or fork. */
+      freshInPlace?: boolean },
   ): Promise<HarnessLaunchResult>;
 
-  /** Check if the runtime harness is responsive and ready. */
-  checkReady(binding: NodeBinding): Promise<ReadinessResult>;
+  /** Observe an already launched fork without sending input or starting another process. */
+  captureForkIdentity?(
+    binding: NodeBinding, parentToken: string,
+  ): Promise<{ resumeToken: string; resumeType: string } | null>;
+
+  /** Check if the runtime harness is responsive and ready. `options.resumeToken` is the seat's recorded conversation,
+   *  passed by a caller that holds the real binding (its pane) and has no launch to ask: the Claude adapter then
+   *  proves a banner-less auto-mode screen by that exact conversation (#1477). */
+  checkReady(binding: NodeBinding, options?: ReadinessOptions): Promise<ReadinessResult>;
 }

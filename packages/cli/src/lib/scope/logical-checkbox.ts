@@ -44,7 +44,7 @@ const CHECKBOX_LINE = /^(\s*)-?\s*\[(\s|x|X)\]\s+(.+)$/;
  *  blank line, or same/shallower prose terminates the item. */
 export function parseLogicalCheckboxes(block: string | null): LogicalCheckboxItem[] {
   if (!block) return [];
-  const lines = block.split("\n");
+  const lines = block.split(/\r?\n/);
   const out: LogicalCheckboxItem[] = [];
   let current: { checked: boolean; parts: string[]; indent: number; sourceLine: number } | null = null;
 

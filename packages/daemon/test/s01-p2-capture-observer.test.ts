@@ -369,9 +369,16 @@ describe("S01/S02 P2 capture observer", () => {
         regexResult: { outcome: "retained" },
       });
       expect(t.calls.capture).toBe(0);
-      // A readback of the same retained id is not a new retention.
-      await transport(t.adapter, o).send("dev-impl@obs-rig", "held text", { deliveryId: "d-1", actorSession: "orch@r" });
-      expect(o.stats().recorded).toBe(1);
+      // A repeated held request is a new attempt/observation, with the same held row and no input.
+      const repeated = await transport(t.adapter, o).send("dev-impl@obs-rig", "held text", { deliveryId: "d-1", actorSession: "orch@r" });
+      expect(repeated).toMatchObject({ outcome: "retained", sent: false, outboxIds: ["d-1"] });
+      expect(o.stats().recorded).toBe(2);
+      expect(await drainAll(o)).toMatchObject([{ seam: "retained_no_write", binding: obs!.binding }]);
+      expect(db.prepare("SELECT outbox_id, delivery_state FROM outbox_entries").all()).toEqual([
+        { outbox_id: "d-1", delivery_state: "retained" },
+      ]);
+      expect(t.calls.sendText).toHaveLength(0);
+      expect(t.calls.sendKeys).toBe(0);
     });
 
     it("a submit-only refusal under the guard is not a retained event", async () => {

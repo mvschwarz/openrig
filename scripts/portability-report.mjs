@@ -67,7 +67,7 @@ export function addedLines(diffText) {
       lineNumber += 1;
       remainingNewLines -= 1;
     } else if (raw.startsWith("+++ ")) {
-      file = raw === "+++ /dev/null" ? null : raw.replace(/^\+\+\+ b\//, "");
+      file = raw === "+++ /dev/null" ? null : raw.slice(4).split("\t", 1)[0].replace(/^b\//, "");
     } else if (raw.startsWith("@@")) {
       const hunk = /\+(\d+)(?:,(\d+))?/.exec(raw);
       lineNumber = Number(hunk?.[1] ?? 0);
@@ -162,7 +162,7 @@ export function main(argv = process.argv.slice(2)) {
     range = [`${from}..${to}`];
     label = `${from.slice(0, 8)}..${to.length > 12 ? to.slice(0, 8) : to}`;
   }
-  const diff = git(repo, ["diff", "-U0", "--no-color", "--diff-filter=ACMR", ...range]);
+  const diff = git(repo, ["-c", "core.quotePath=false", "diff", "-U0", "--no-color", "--diff-filter=ACMR", ...range]);
   const report = renderReport(findPortabilityIssues(addedLines(diff)), label, {
     locationsOnly: options.locationsOnly,
   });

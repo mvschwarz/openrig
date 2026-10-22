@@ -1,0 +1,28 @@
+# Packet-off control. Controlled hook invocation: real queue/current-work and real raw additionalContext, not native scheduling.
+scenario: refocus-parked-baton-packet-off
+topology: ./solo-stub.yaml
+env:
+  work_fixture: ./refocus-work
+  queue:
+    - id: refocus-baton
+      source: work-worker@solo-stub
+      destination: work-worker@solo-stub
+      tags: [mission:regression, slice:SCN.1]
+      state: blocked
+      blocked_on: external:scenario-release
+steps:
+  - up: {}
+  - expect:
+      surface: queue
+      within: 0ms
+      match:
+        - qitemId: refocus-baton
+          state: blocked
+          tags: [mission:regression, slice:SCN.1]
+  - emit: {seat: work-worker@solo-stub, behavior: refocus, packet: false}
+  - expect:
+      surface: hook_context
+      seat: work-worker@solo-stub
+      within: 0ms
+      contains: "FALLBACK — no current typed baton (no typed in-progress work (only in-progress rows are considered; a typed row that is pending or blocked is not current work))"
+  - down: {}

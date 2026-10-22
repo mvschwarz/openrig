@@ -46,7 +46,7 @@ If blocked on another agent:
 
 ## After startup or compaction
 
-Run `rig whoami --json` immediately. This tells you who you are, who your peers are, and how to reach them.
+Run `rig whoami --json` immediately. This tells you who you are, who your peers are, and how to reach them. If `peersNote` says some peers are not shown, `rig whoami --json --all-peers` lists them all.
 
 ## Culture
 

@@ -6,7 +6,9 @@ const { spawnSync } = require("node:child_process");
 
 // One issue per failure episode, after three unsuccessful attempts. Retrying an
 // uncertain stream write uses the same id; a successful delivery starts afresh.
-function recordRefocusResult({ home, seat, identity, failed }) {
+// `deadlineMs` is when the caller must be done, counted from process start: the
+// report gets up to 1.5 s of what is left before it.
+function recordRefocusResult({ home, seat, identity, failed, deadlineMs = 4_500, env = process.env }) {
   if (!seat || !identity) return;
   const key = crypto.createHash("sha256").update(JSON.stringify([seat, identity])).digest("hex");
   const file = path.join(home, "refocus", `${key}.health.json`);
@@ -26,7 +28,7 @@ function recordRefocusResult({ home, seat, identity, failed }) {
       "--hint-type", "issue", "--hint-tags", "issue,refocus",
       "--body", `Refocus failed on ${state.failures} consecutive attempts for ${seat}. Orientation remains unverified; inspect this seat's refocus hook diagnostics.`,
       "--json",
-    ], { encoding: "utf8", timeout: Math.max(1, Math.min(1_500, 4_500 - Math.floor(process.uptime() * 1_000))), maxBuffer: 64 * 1024, env: process.env });
+    ], { encoding: "utf8", timeout: Math.max(1, Math.min(1_500, deadlineMs - Math.floor(process.uptime() * 1_000))), maxBuffer: 64 * 1024, env });
     if (!result.error && result.status === 0) {
       state.reportedAt = new Date().toISOString();
       fs.writeFileSync(file, JSON.stringify(state), { mode: 0o600 });

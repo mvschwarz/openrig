@@ -1,9 +1,11 @@
+import { physicalSessionName } from "./session-registry.js";
 import { resolveNodeFile } from "./scope/node-file.js";
 import { belongsToProject } from "./workspace/project-catalog.js";
 import { inspectGraph } from "./workflow-reconciliation.js";
 import { createProofPolicyRead, readMissionReadiness, readProjectReadiness } from "./proof/judgments.js";
 import { lifecycleObligations, requiredLifecycleSteps } from "./lifecycle-obligations.js";
 import { QueueWakeRepository } from "./queue-wake-repository.js";
+import { isTypedGateBlocker } from "./queue-repository.js";
 // S27 (OPR.0.5.6.27) — the execution view: one JSON document answering the six
 // execution questions (who-where, sequencing, care-dial, done-ness-by-rung, park
 // honesty, parallelism health), EVERY field derived at read time.
@@ -132,6 +134,11 @@ function parseArrayField(v: unknown): string[] | Indeterminate {
 
 const SLICE_TAG = /^slice:(.+)$/;
 const CANDIDATE_TAG = /^candidate:(.+)$/;
+/** A recorded merge report: `merged:<pr-number>` on a row bound to the slice. */
+const MERGED_TAG = /^merged:(\d+)$/;
+/** `recorded_at` is when the row recorded the merge, not when it happened. `linked`
+ *  is true when the same row's `candidate:<sha>` resolves to the slice's built commit. */
+interface MergeReport { pr: string; row: string; recorded_at: string; linked: boolean }
 
 /** Candidate identity is a COMMIT, not a string. Production carries mixed forms —
  *  abbreviated tags (`dced9edb0`), full 40-hex artifact fields, and annotated
@@ -188,6 +195,26 @@ function missionReferences(missionsRoot: string | null, mission: string): string
     // A missing authored node is valid legacy state; the directory name still binds.
   }
   return [...references];
+}
+
+/** The mission: tags a row carries, as written. */
+function missionTags(raw: string | null): string[] {
+  return parseTags(raw).filter((t) => t.startsWith("mission:")).map((t) => t.slice("mission:".length));
+}
+
+/** A row that carries a mission: tag binds only to the mission that tag names, by exact
+ *  match; a body mention binds only a row with no mission: tag at all. The SQL LIKE that
+ *  selects candidates is a substring match, so `mission:AB` and a body that merely
+ *  mentions `A` both reach this check and are decided here. */
+function rowBindsToMission(raw: string | null, references: readonly string[]): boolean {
+  const tagged = missionTags(raw);
+  return tagged.length === 0 || tagged.some((t) => namesMission(t, references));
+}
+
+/** Exact match, folding ASCII case the way the SQL LIKE that selects candidates does. */
+function namesMission(tag: string, references: readonly string[]): boolean {
+  const fold = (value: string): string => value.replace(/[A-Z]/g, (c) => c.toLowerCase());
+  return references.some((reference) => fold(reference) === fold(tag));
 }
 
 interface SliceFacts {
@@ -308,11 +335,10 @@ function hasColumn(db: Database.Database, table: string, column: string): boolea
 function lifecycleProjectAction(input: {
   instanceId: string;
   packetId: string;
-  owner: string;
   acceptance: Record<string, unknown> | null;
   receiptRequired?: boolean;
 }): string {
-  const base = `rig workflow project --instance ${input.instanceId} --current-packet ${input.packetId} --exit <handoff|waiting|done|failed> --actor-session ${input.owner}${input.receiptRequired ? " --evidence-ref <agent-judged-receipt>" : ""}`;
+  const base = `rig workflow project --instance ${input.instanceId} --current-packet ${input.packetId} --exit <handoff|waiting|done|failed>${input.receiptRequired ? " --evidence-ref <agent-judged-receipt>" : ""}`;
   if (!input.acceptance) return base;
   const verdicts = Array.isArray(input.acceptance["verdicts"])
     ? input.acceptance["verdicts"].filter((value): value is string => typeof value === "string")
@@ -392,7 +418,7 @@ function readLifecycleExecutions(db: Database.Database, mission: string, project
         gate: step && isRecord(step["gate"]) ? step["gate"] : null,
         acceptance,
         targeted_action: matches.length === 1 && packet
-          ? lifecycleProjectAction({ instanceId, packetId, owner: String(packet.destination_session), acceptance, receiptRequired: stepId !== null && requiredLifecycleSteps(binding).includes(stepId) })
+          ? lifecycleProjectAction({ instanceId, packetId, acceptance, receiptRequired: stepId !== null && requiredLifecycleSteps(binding).includes(stepId) })
           : INDETERMINATE,
       };
     });
@@ -412,7 +438,7 @@ function readLifecycleExecutions(db: Database.Database, mission: string, project
             failure["status"] === "unresolved" &&
             row["status"] !== "completed" &&
             row["status"] !== "aborted"
-            ? `rig workflow resume ${instanceId} --occurrence ${String(failure["occurrence_id"])} --actor-session <you>`
+            ? `rig workflow resume ${instanceId} --occurrence ${String(failure["occurrence_id"])}`
             : null,
         }))
       : [];
@@ -594,7 +620,7 @@ function readWaveMap(db: Database.Database, missions: string[], project?: string
         ORDER BY ts_created DESC`,
     )
     .all(...missions.map((mission) => `%mission:${mission}%`)) as Array<{ qitem_id: string; body: string | null; tags: string | null }>;
-  const selectedRow = row.find(r => !project || belongsToProject(r.tags, project));
+  const selectedRow = row.find(r => missionTags(r.tags).some((t) => namesMission(t, missions)) && (!project || belongsToProject(r.tags, project)));
   if (!selectedRow?.body) return { rowId: INDETERMINATE, waves: [] };
   const block = selectedRow.body.match(WAVE_MAP_BLOCK);
   if (!block) return { rowId: INDETERMINATE, waves: [] };
@@ -729,10 +755,9 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
   const sliceIds = slices.map((s) => s.id).filter((x): x is string => x !== INDETERMINATE);
   const depCache = new Map<string, SliceFacts | null>();
 
-  // ---- queue rows bound to this mission (tag or body mention, per the binding law) ----
-  const missionLikes = mission === INDETERMINATE
-    ? ["%"]
-    : missionReferences(missionsRoot, mission).map((reference) => `%${reference}%`);
+  // ---- queue rows bound to this mission: its mission: tag by exact match, a body mention only for untagged rows ----
+  const missionRefs = mission === INDETERMINATE ? [] : missionReferences(missionsRoot, mission);
+  const missionLikes = mission === INDETERMINATE ? ["%"] : missionRefs.map((reference) => `%${reference}%`);
   const missionWhere = missionLikes.map(() => "(tags LIKE ? OR body LIKE ?)").join(" OR ");
   const candidateRows = deps.db
     .prepare(
@@ -747,7 +772,9 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     )
     .all(...missionLikes.flatMap((like) => [like, like])) as QueueRowLite[];
 
-  const rows = candidateRows.filter(row => !opts?.project || belongsToProject(row.tags, opts.project));
+  const rows = candidateRows
+    .filter(row => mission === INDETERMINATE || rowBindsToMission(row.tags, missionRefs))
+    .filter(row => !opts?.project || belongsToProject(row.tags, opts.project));
 
   const sliceOfRow = (r: QueueRowLite): string | null => {
     for (const t of parseTags(r.tags)) {
@@ -778,7 +805,20 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
       /* unreachable candidate — keep scanning */
     }
   }
-  for (const r of rows.filter((r) => r.state === "in-progress")) {
+  // A lane is a row doing the slice's work. A row parked on `external:<what>`
+  // is also listed, as a waiting lane: `external:` records an outside dependency
+  // (a review, a decision, a capacity limit, a lifecycle step). It does not mean an
+  // outside party owns the work, or that the parked seat is the slice's builder.
+  // It stays marked `waiting` so it is never mistaken for active work, and it
+  // yields to an in-progress lane on the same slice. Rows parked on a qitem, a
+  // human seat, or a fold:/auth: gate are not lanes.
+  const sliceKey = (slice: string): string => slices.find((s) => s.id === slice || s.dir === slice)?.dir ?? slice;
+  const activeSlices = new Set(
+    rows.filter((r) => r.state === "in-progress").flatMap((r) => sliceOfRow(r) ?? []).map(sliceKey),
+  );
+  const isExternalPark = (r: QueueRowLite): boolean =>
+    r.state === "blocked" && isTypedGateBlocker(r.blocked_on) && r.blocked_on!.startsWith("external:");
+  for (const r of rows.filter((r) => r.state === "in-progress" || (isExternalPark(r) && !activeSlices.has(sliceKey(sliceOfRow(r) ?? ""))))) {
     const slice = sliceOfRow(r);
     if (!slice) continue;
     const wtMatch = r.body?.match(WORKTREE_LINE);
@@ -836,6 +876,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
             source: "SeatActivityService arbitrated seat state (no answer floors INDETERMINATE, never idle/dead)",
           },
       pickup,
+      waiting: r.state === "blocked" ? { on: r.blocked_on } : null,
       source: { qitem_id: r.qitem_id },
     });
   }
@@ -899,6 +940,8 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     let candidateSha: string | null = null;
     let candidateRow: string | null = null;
     for (const r of candRows) {
+      // A row carrying a merged: tag reports a merge; it is not a build, so it never picks the built candidate.
+      if (parseTags(r.tags).some((t) => MERGED_TAG.test(t))) continue;
       for (const t of parseTags(r.tags)) {
         const m = t.match(CANDIDATE_TAG);
         if (m?.[1]) {
@@ -968,17 +1011,47 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     // The selected project has no binding to the OpenRig daemon's source.
     // Missing Git objects cannot establish applicability. Keep daemon ancestry
     // only on the legacy unscoped view, with its existing unknown/false rules.
-    const folded: Rung = isUnusableDeclaration
+    const ancestry: Rung = isUnusableDeclaration
       ? { value: INDETERMINATE, basis: `declared integration_ref unusable (${declaredRef})` }
       : !candidateSha
         ? { value: INDETERMINATE, basis: "no candidate sha to test" }
         : !repoCtx
           ? { value: INDETERMINATE, basis: "no reachable repo context (no EC-3 worktree on the board)" }
           : await gitAncestor(exec, repoCtx, builtResolved ?? candidateSha, targetRef, declaredRef);
+    // A merge report (`merged:<pr-number>` on a row bound to the slice) is recorded,
+    // not verified: it carries no repository, commit or landed commit. So it is
+    // always shown as its own signal and never turns the answer ancestry gave. It
+    // changes the answer only when the SAME row also carries a `candidate:<sha>`
+    // that resolves, through the repo context and a usable integration ref, to the
+    // slice's built commit. Squash and rebase merges leave the candidate off the
+    // integration ref, so only that link reads such a merge as merged, and only
+    // from ancestry's false: an answer ancestry could not give is never turned true.
+    const reports: MergeReport[] = [];
+    for (const r of candRows) { // newest first
+      const tags = parseTags(r.tags);
+      const pr = tags.map((t) => t.match(MERGED_TAG)?.[1]).find((n): n is string => !!n);
+      if (!pr) continue;
+      const token = extractShaToken(tags.map((t) => t.match(CANDIDATE_TAG)?.[1]).find((n): n is string => !!n) ?? null);
+      const resolved = token && repoCtx ? await resolveCommit(exec, repoCtx, token, commitCache) : null;
+      reports.push({ pr, row: r.qitem_id, recorded_at: r.ts_created, linked: !!builtResolved && resolved === builtResolved });
+    }
+    const report = reports.find((r) => r.linked) ?? reports[0] ?? null;
+    const reportNote = report
+      ? `merged:${report.pr} recorded on row ${report.row} at ${report.recorded_at}${report.linked ? "; that row is linked to the built candidate, but only a false from ancestry is turned true, so the answer stays as ancestry gives it" : "; that row is not linked to the built candidate, so it does not change this answer"}`
+      : null;
+    const folded: Rung & { merge_report?: MergeReport } = !report
+      ? ancestry
+      : report.linked && ancestry.value === false
+        ? {
+            value: true,
+            basis: `reported merged in #${report.pr} for candidate ${(builtResolved ?? "").slice(0, 9)}, recorded on row ${report.row} at ${report.recorded_at}; candidate is not an ancestor of ${targetRef} (${ancestry.basis})`,
+            merge_report: report,
+          }
+        : { ...ancestry, basis: `${ancestry.basis}; ${reportNote}`, merge_report: report };
     const adopted: Rung = opts?.project
       ? { value: "NOT_APPLICABLE", basis: "selected project has no binding to the OpenRig daemon source; daemon adoption is not project progress" }
       : !candidateSha || !repoCtx
-        ? { value: INDETERMINATE, basis: folded.basis }
+        ? { value: INDETERMINATE, basis: ancestry.basis }
         : buildInfo.commit
           ? await gitAncestor(exec, repoCtx, builtResolved ?? candidateSha, buildInfo.commit)
           : { value: INDETERMINATE, basis: "daemon build stamp absent (dev run) — adopted rung underivable" };
@@ -1145,7 +1218,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     });
 
   // ---- Q6 parallelism health ----
-  const inProgressSeats = new Set(rows.filter((r) => r.state === "in-progress").map((r) => r.destination_session));
+  const inProgressSeats = new Set(rows.filter((r) => r.state === "in-progress").map((r) => physicalSessionName(deps.db, r.destination_session)));
   // Idle capacity: the ROSTER comes from sessions (names only); idleness comes
   // from the ACTIVITY ORACLE — sessions.status is not consulted (it labeled
   // live working lanes `superseded` on the real board).
@@ -1193,7 +1266,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     sequenced.next_up_basis = `Attributed proof readiness ${readiness!.revision}; dependency eligibility ${derived.eligible}`;
   }
   const q6 = {
-    lanes_live: lanes.length,
+    lanes_live: lanes.filter((l) => l.waiting === null).length,
     lanes_possible: q2.filter((s) => s.next_up === true).length,
     idle_seats_with_capacity: { value: idleSeats, basis: idleBasis },
     heavy_slot_holder: heavyRow

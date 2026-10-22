@@ -14,18 +14,32 @@ if the person asks you to. When they say what they want built, give it to OpenRi
 building it yourself.
 
 Tell the person what you're about to run and why before you run it. Don't install system packages or change their
-machine without a yes. Starting OpenRig and a team writes files: Codex hooks and settings in
-`~/.codex/config.toml`, a discovery skill in `~/.claude/skills` and `~/.agents/skills`, and, in the repository, managed
-guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say so before you start OpenRig
-([the full list](https://github.com/mvschwarz/openrig#what-openrig-changes-on-your-machine)).
+machine without a yes, and don't start a team, including `rig up`, without their yes to what it will start; a yes they
+already gave for that same launch counts, so don't ask twice. Starting OpenRig and a team writes files: Codex hooks and settings in
+`~/.codex/config.toml`, Claude Code workspace trust in `~/.claude.json`, discovery skills in `~/.claude/skills` and
+`~/.agents/skills`, and, in the repository, managed guidance in `AGENTS.md` or `CLAUDE.md`, activity hooks in
+`.claude/settings.local.json` and a status line there unless the project already has its own, plus the team's skills
+and plugins. Unless a permission policy, a per-seat choice or (for Codex) a named profile applies, the kernel's own
+seats run with an operational default: Codex with `-s danger-full-access -a never`, and Claude Code with its file
+tools, web fetches and operational commands, including reads under the home folder, allowed without asking. Say so
+before you start OpenRig ([the full list](https://github.com/mvschwarz/openrig#what-openrig-changes-on-your-machine)).
+
+When you give the person a file or a command to run in their own terminal, use a path that exists on their side. A
+file a sandboxed agent writes under `/tmp` may not exist in the person's terminal (seen with Codex), so put files the
+person needs in their project or home folder and name that path.
 
 ## 1. Install OpenRig, if it isn't installed
 
 - **Check first:** `rig --version`. If it prints a version, go to step 2.
 - **What it needs:** macOS or Linux, Node.js 22 or 24, tmux, and Claude Code or Codex signed in. Check only what's
   missing: `node --version`, `tmux -V`, `claude auth status` or `codex login status`.
-- **Install:** `npm install -g @openrig/cli`, then `rig preflight` (Node, tmux, the daemon port and state folders)
-  and `rig doctor`.
+- **A check that needs the network** (`gh auth status`, a registry or other fetch) can fail falsely in a sandbox without
+  network access, such as Codex's default one. Re-run that one command with network access before you tell the person
+  to sign in again or fix anything.
+- **Install:** `npm install -g @openrig/cli`, then `rig setup --providers codex` (or `claude`, or `both`: the harness
+  the person uses). Setup checks Node, tmux and the logins. It installs tmux (with Homebrew, when present) or the chosen
+  harness (with npm) if either is missing, installs Herdr for the OpenRig view unless they decline it (`--no-herdr`),
+  and adds an OpenRig block to `~/.tmux.conf`, so say all of that first. It doesn't start the daemon. Then `rig doctor`.
 - **Then go on to step 2:** say it's installed and ask what they want worked on, and in which repository. A plain
   "install OpenRig" includes this. Stop here only if they say not to start a team.
 - **If something fails:** `rig context get help` is the help guide for the installed version. If `rig` itself won't
@@ -36,6 +50,8 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
 - **Start OpenRig:** `rig daemon status`, and `rig daemon start` if it isn't running. `rig preflight` and `rig doctor`
   don't start it. Starting it also starts OpenRig's own team, the kernel, whose operator sets up the person's team.
   Keep it.
+- **If the person uses Codex:** now that OpenRig is running, make the one-time offer under "Codex: one offer, once,
+  after OpenRig starts" at the end of this step.
 - **Show them OpenRig, the handoff:** once OpenRig is running, open the OpenRig TUI and operator for the person. Say
   you're opening it, then run `rig terminal open saved:kernel --window` on the daemon's desktop. This is the next step
   after installing or starting OpenRig, and the way back whenever they want their agents or OpenRig again. Don't wait
@@ -75,13 +91,38 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
 
   For any other failure, the table under "What can interrupt installation and the OpenRig view" in
   `rig context get reference/getting-started.md#open-the-kernel-conversations` says why and what to do next.
+- **Offer to join this session before the first send:** if this session hasn't already joined, recommend joining
+  OpenRig in a plain shell so the operator sees a named teammate instead of "unknown sender". Inside tmux, offer
+  joining as optional, with the effects below. Ask the person yes or no after this short explanation:
+  - This adds me as a named member of the team, with my name on messages.
+  - In a plain shell, joining writes no files in your project or personal settings.
+  - Inside tmux on 0.6.11, my sender and reply address is your existing tmux session name, even a number like `0`.
+    `rig attach --self` returns that address and `rig whoami` confirms it; `--display-name` does not change it.
+  - Inside tmux, other agents can type into this window, and stopping the team (`rig down`) also closes this tmux
+    session (both from source, not hand-tested). Transcript recording and, for Claude Code, writing
+    `.openrig/context-collector.cjs` and `.claude/settings.local.json` for the status line were hand-tested on 0.6.11.
+    Updating an existing `.claude/settings.local.json`, keeping its custom status line, is from source.
+  - In a plain shell, other agents reply through the task queue because they can't type into this window, and
+    stopping the team leaves this session running.
+
+  Attach only on their yes; if they decline, continue the operator handoff. For this first contact, use the kernel's
+  rig ID (the `rigId` of the `kernel` row in `rig ps --json`) and its `operator` pod:
+  `rig attach --self --rig <rigId> --pod operator --member person-agent --runtime <claude-code|codex> --print-env`.
+  `--node <logicalId>` binds to an existing seat instead. Attach once, and keep the variables it prints
+  (`OPENRIG_NODE_ID` and `OPENRIG_SESSION_NAME`). Each command may run in a fresh shell, so put them in front of every
+  later `rig` command. Check with `rig whoami --json`.
+  If they decline, a message that must still say who it's from can go as a queue item with a declared source,
+  `rig queue create --source <their id>@external --destination <seat> --summary "<one line>" --body-file <file>`: the
+  seat sees that name, recorded as declared, and can reply to them if they're registered (`rig gateway human list`).
+  A declared name is a claim, not a seat's own identity: for a team that acts only on seat identity, the attached
+  shell above is the route.
 - **Give the operator the goal:** ask what they want worked on, in which repository and on which branch, unless they've
   said. Find the `operator.agent` row in `rig ps --nodes --rig kernel --json`, take its `canonicalSessionName`
   (never the logical ID or a guessed name) and send:
   `rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>. Branch: <branch>.'`
   Or the person types the goal and folder in the operator's pane. If they give you a goal later, forward it the same
-  way. The operator helps them pick a team that fits their logins, starts it on their yes and gives the goal to the
-  team's lead. Before that yes, it says what launching into their folder changes for their own agent there; relay
+  way. The operator helps them pick a team that fits their logins, starts it (`rig up`) only on their yes to the plan it
+  shows, and gives the goal to the team's lead. Before that yes, it says what launching into their folder changes for their own agent there; relay
   that with the question. Show them where the operator answers, and don't build the project yourself.
 - **Relay the operator's questions:** the operator asks in its own pane, and the person may not be looking there.
   After each step you hand it, read its screen with `rig capture <canonicalSessionName>`. When it asks the person
@@ -94,16 +135,44 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
 - **See what's running:** `rig ps`, then `rig ps --nodes --rig <rig>` for a team's agents. If a team is already
   running in that repository, tell the operator.
 - **Check it's ready before you say so:** `rig ps --nodes --rig <rig>`. If an agent is stopped at a prompt or a menu,
-  read it with `rig capture <seat>@<rig>` and answer with the key that screen shows (`rig send --help` says how to
-  send a digit, a letter or Escape), or ask the person. Capture it again before sending anything more.
-- **Join this session to the team, if that helps:**
-  `rig attach --self --rig <rigId> --pod <pod> --member <name> --runtime <claude-code|codex> --print-env` adds this
-  session as a new member of a pod. `--node <logicalId>` binds it to an existing seat instead. Attach once, and keep
-  the variables it prints (`OPENRIG_NODE_ID` and `OPENRIG_SESSION_NAME`). Each command may run in a fresh shell, so put
-  them in front of every later `rig` command. Check with `rig whoami --json`.
-- **Replies:** other agents can't type into this session. Read work sent to you with
+  read it with `rig capture <seat>@<rig>`. A permission prompt is the person's to answer: show it to them, with any
+  others waiting, one line each (seat, exact action, the choices offered). Before sending their choice, capture that
+  seat again: if its prompt changed, don't reuse the answer. Then send exactly the choice they made for that prompt
+  (`rig send --help` says how to send a digit, a letter or Escape to a prompt). A yes to one prompt isn't a
+  yes to the next, and never pick a "don't ask again" choice they didn't pick. If they've told you outright to decide a
+  kind of future prompt (say, "approve prompts that only write inside my project"), you may decide each one: read its
+  whole action, answer only when it's clearly inside what they said, and tell them you answered under that instruction,
+  not that they said yes. Bring anything unclear or outside it back to them; a command's name or a path that looks like
+  their project doesn't show what the action touches. Their instruction changes no permission setting.
+  Another kind of menu you can answer with
+  the key that screen shows, or ask the person. Capture it again before sending anything more.
+- **Replies:** in a plain shell, other agents can't type into this session. Read work sent to you with
   `rig queue list --destination <your address>` and `rig queue show <id> --full`, and read an agent's screen with
   `rig capture <seat>@<rig>`.
+
+### Codex: one offer, once, after OpenRig starts
+
+First the agent resolves the person's real Codex folder (`CODEX_HOME`, or `~/.codex` when that isn't set) and puts the exact path in the
+offer, so the person sees the real file, not a placeholder:
+
+> Codex asks you to approve OpenRig commands. May I let six of them run without asking: `rig ps`, `rig capture`, `rig send`,
+> `rig queue`, `rig status` and `rig whoami`, each with whatever follows it? They would run outside Codex's sandbox, in every Codex
+> project and session you run on this computer, and `rig send` and `rig queue` can message your agents and change their task records, not
+> only read them. I'd add one file, `/home/you/.codex/rules/openrig.rules` (the resolved path). Codex reads it when it starts, so it
+> applies from your next Codex session. To undo, ask me to remove the OpenRig rules this added and keep your other rules.
+
+- **No, or no answer:** nothing is written, and Codex behaves as before.
+- **Yes:** the agent applies it the way OpenRig's existing permission steps already describe (`applying-a-permission-policy`, in the
+  installed OpenRig skills): read the existing rules first, keep any stricter rule, change no sandbox or approval setting, and record what
+  it added. The file is created only if it doesn't exist; if it does, the agent changes nothing and says what's there. A new file holds
+  exactly these two lines:
+  ```
+  # Added by OpenRig on the person's yes: these six rig command families run without a prompt. Ask to undo, or delete this file if it holds nothing else.
+  prefix_rule(pattern = ["rig", ["ps", "capture", "send", "queue", "status", "whoami"]], decision = "allow", justification = "OpenRig coordination commands the person approved once")
+  ```
+- **Undo** (the same skill's words: "Undo the OpenRig command allowances added by this setup; keep my other rules"): the agent removes
+  only the lines it recorded adding, keeps anything else in the file, and deletes the file only if it still holds nothing but those lines.
+  It applies from the next Codex session.
 
 ## 3. Follow the work to its result
 
@@ -118,7 +187,7 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
   actually did (the branch, commit, review or PR text), not just that you sent it.
 - **Give the team more work:** write the goal to a file: what to change, in which repository and branch, what done
   looks like, and that the result comes back to you (the branch or commit, the review, any PR text). Then
-  `rig queue create --source <your name> --destination <seat>@<rig> --body-file <file>`, and tell that agent with
+  `rig queue create --source <your name> --destination <seat>@<rig> --summary "<the goal in a sentence>" --body-file <file>`, and tell that agent with
   `rig send <seat>@<rig> "task <id> is yours"`. A message informs, and a queue task is the work someone owns.
   `--source` names you when this session hasn't joined the team.
 - **Then ask what's next.** If no team can take the work, fix that or ask the person. Don't quietly do it yourself.
@@ -132,4 +201,4 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
 - **Everything in the library:** `rig context list`.
 - **Exact syntax:** `rig <command> --help` is always current for the installed version.
 
-Written for OpenRig 0.6.7. When something here and `--help` disagree, `--help` wins.
+When something here and `rig <command> --help` disagree, `--help` wins.

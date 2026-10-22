@@ -52,7 +52,11 @@ describe("stub-runner restore (real-spawn observable)", () => {
     let pane = "";
     child = execFile("node", ["--import", "tsx", RUNNER,
       "--session-name", SEAT, "--cwd", dir, "--launch-id", "restore-1", "--posture", "floor"],
-      { env: { ...process.env, OPENRIG_HOME: home, OPENRIG_TEST_CLOCK_NOW: CLOCK } as NodeJS.ProcessEnv });
+      { env: {
+        ...process.env, OPENRIG_HOME: home, OPENRIG_TEST_CLOCK_NOW: CLOCK,
+        // Keep the packet out of the production default (/tmp/claude-compaction-restore).
+        OPENRIG_COMPACTION_OUT_ROOT: join(dir, "packets"),
+      } as NodeJS.ProcessEnv });
     child.stdout?.on("data", (d) => { pane += String(d); });
 
     // Wait until the injected restore directive has rendered to the pane (proves the real
@@ -65,5 +69,7 @@ describe("stub-runner restore (real-spawn observable)", () => {
     const marker = JSON.parse(readFileSync(markerPath, "utf8"));
     expect(marker.deliveredAt).toBe(CLOCK);
     expect(marker.deliveryCount).toBe(1);
+    // The packet was written under this test's own packets root, not the production default.
+    expect(dirname(marker.outputDir)).toBe(join(dir!, "packets"));
   }, 30_000);
 });

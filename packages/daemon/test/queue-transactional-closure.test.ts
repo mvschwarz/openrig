@@ -442,17 +442,17 @@ describe("W1 MF6 — timeout classifies as indeterminate; retry policy is honest
     expect(h.outbox.getById(`wake-intent-${created.qitemId}`)!.deliveryState).toBe("failed");
   });
 
-  it("retry policy is honest: a FAILED intent is NOT re-drained by the recovery sweep", async () => {
+  it("retries a current failed intent on the next recovery pass", async () => {
     h.outcome.mode = "notok";
     const { created } = await doHandoff();
     expect(h.outbox.getById(`wake-intent-${created.qitemId}`)!.deliveryState).toBe("failed");
     h.calls.length = 0;
     h.outcome.mode = "verified";
     const tally = await h.repo.drainPendingWakeIntents();
-    // recovery drains only `pending` — a terminal `failed` is left visible, not resent.
-    expect(tally).toEqual({ delivered: 0, indeterminate: 0, failed: 0, retained: 0 });
-    expect(h.calls).toHaveLength(0);
-    expect(h.outbox.getById(`wake-intent-${created.qitemId}`)!.deliveryState).toBe("failed");
+    expect(tally).toEqual({ delivered: 1, indeterminate: 0, failed: 0, retained: 0 });
+    expect(h.calls).toHaveLength(1);
+    expect(h.calls[0]!.text).toMatch(/delivery may repeat/);
+    expect(h.outbox.getById(`wake-intent-${created.qitemId}`)!.deliveryState).toBe("delivered");
   });
 });
 
@@ -529,7 +529,7 @@ describe("W1 MF4 — the intent freezes its emitting generation/envelope", () =>
     outcome.mode = "verified";
     await repo.drainPendingWakeIntents();
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.text).toBe(FROZEN); // verbatim
+    expect(calls[0]!.text).toContain(FROZEN); // original envelope, with recovery context beside it
     expect(calls[0]!.text).not.toContain("22222222"); // did NOT re-resolve to the current occupant
     db.close();
   });
@@ -562,7 +562,7 @@ describe("W1 — the drain never sends a wake for a nonexistent qitem", () => {
 // before finalize — same persisted state whether the send landed or not) must
 // reconcile to `indeterminate` at the recovery boundary, WITHOUT re-sending.
 describe("W1 re-seal BLOCKING 1 — abandoned `sending` claims reconcile to indeterminate", () => {
-  it("a claimed intent left `sending` by a crash becomes `indeterminate` on recovery, never re-sent", async () => {
+  it("preserves abandoned-claim uncertainty, then attempts the current wake with repeat context", async () => {
     const g = makeHarness({ deferTransport: true });
     const source = await g.repo.create({ nudge: false, sourceSession: "planner@rig", destinationSession: "driver@rig", body: "x" });
     const { created } = await g.repo.handoff({
@@ -579,12 +579,14 @@ describe("W1 re-seal BLOCKING 1 — abandoned `sending` claims reconcile to inde
     reopened.attachTransport(g.transport);
     g.outcome.mode = "verified";
     const reconciled = reopened.reconcileAbandonedWakeIntents();
+    expect(g.outbox.getById(intentId)!.deliveryState).toBe("indeterminate");
     const tally = await reopened.drainPendingWakeIntents();
 
     expect(reconciled).toBe(1);
-    expect(g.calls).toHaveLength(0); // NEVER re-sent
-    expect(tally.delivered).toBe(0); // reconciled to indeterminate ⇒ nothing pending to deliver
-    expect(g.outbox.getById(intentId)!.deliveryState).toBe("indeterminate");
+    expect(g.calls).toHaveLength(1);
+    expect(g.calls[0]!.text).toMatch(/delivery may repeat/);
+    expect(tally.delivered).toBe(1);
+    expect(g.outbox.getById(intentId)!.deliveryState).toBe("delivered");
     g.db.close();
   });
 });
@@ -618,7 +620,7 @@ describe("W1 — the executable drain selector is exact-case", () => {
 // The before-send and after-send/before-finalize windows share the same persisted
 // `sending` state, so one equivalence pin suffices.
 describe("W1 re-seal #3 — real file-backed close/reopen crash boundary", () => {
-  it("a claimed `sending` intent survives a db CLOSE/REOPEN and reconciles to indeterminate, never re-sent", async () => {
+  it("a claimed `sending` intent survives CLOSE/REOPEN and gets a current recovery attempt", async () => {
     const dbPath = join(tmpdir(), `w1-reopen-${Date.now()}-${process.pid}.sqlite`);
     try {
       // --- process 1: real handoff, claim the intent, then CRASH (close the db) ---
@@ -644,12 +646,14 @@ describe("W1 re-seal #3 — real file-backed close/reopen crash boundary", () =>
       expect(outbox2.getById(intentId)!.deliveryState).toBe("sending"); // survived the reopen
 
       const reconciled = repo2.reconcileAbandonedWakeIntents();
+      expect(outbox2.getById(intentId)!.deliveryState).toBe("indeterminate");
       const tally = await repo2.drainPendingWakeIntents();
 
       expect(reconciled).toBe(1);
-      expect(outbox2.getById(intentId)!.deliveryState).toBe("indeterminate");
-      expect(calls).toHaveLength(0); // NEVER re-sent across the restart
-      expect(tally).toEqual({ delivered: 0, indeterminate: 0, failed: 0, retained: 0 }); // no re-drive
+      expect(outbox2.getById(intentId)!.deliveryState).toBe("delivered");
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.text).toMatch(/delivery may repeat/);
+      expect(tally).toEqual({ delivered: 1, indeterminate: 0, failed: 0, retained: 0 });
       db2.close();
     } finally {
       for (const suffix of ["", "-journal", "-wal", "-shm"]) {

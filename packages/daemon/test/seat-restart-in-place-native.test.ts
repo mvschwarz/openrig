@@ -93,7 +93,9 @@ describe.runIf(available())("in-place restart, native (private tmux socket, stub
   /** Each word single-quoted for the harness's sh, so tmux receives them as separate argv words. */
   const argv = (...words: string[]) => words.map(q).join(" ");
 
-  async function setup(shape: "shell_backed" | "direct_native", opts: { running?: { networkOverride: boolean; daemonOptOut: boolean; addDirs: string[] }; quiet?: boolean; prelude?: string } = {}) {
+  async function setup(shape: "shell_backed" | "direct_native", opts: { running?: { networkOverride: boolean; daemonOptOut: boolean; addDirs: string[] }; quiet?: boolean; prelude?: string;
+    /** Shell-backed: type the launch the way OpenRig does (tmux adapter's staged `/bin/sh <script>`). */
+    staged?: boolean } = {}) {
     // One seat at a time: end the previous test's session and wait for its stub to exit.
     for (const name of sessions) await tmux(`kill-session -t ${q(name)}`).catch(() => {});
     for (let i = 0; i < 50 && stubPids().length > 0; i++) await sleep(100);
@@ -115,6 +117,8 @@ describe.runIf(available())("in-place restart, native (private tmux socket, stub
     const adapter = new CodexRuntimeAdapter({
       tmux: realTmux, launchPath,
       fsOps: { readFile: (p) => fs.readFileSync(p, "utf8"), writeFile: () => {}, exists: (p) => fs.existsSync(p), mkdirp: () => {}, homedir: root },
+      // #1524 (b): the stub keeps no Codex records, so stand in for them: the conversation, for a running stub process only.
+      readResumeEvidence: (pid) => stubPids().includes(pid) ? { threadId: TOKEN } : { reason: "no_log_row" },
     });
     const setupApp = createTestApp(db, { tmux: realTmux, adapters: { codex: adapter },
       appDeps: { seatActivityService: { getSeatState: () => ({ seatNodeId: "", activity: "working", needsInput: { count: 0, reason: null },
@@ -141,8 +145,14 @@ describe.runIf(available())("in-place restart, native (private tmux socket, stub
     if (shape === "shell_backed") {
       await tmux(`-f /dev/null new-session -d -s ${q(seat)} -x 120 -y 30 -c ${q(work)} ${env} ${argv(...cleanStart)}`);
       await sleep(200);
-      await tmux(`send-keys -t ${q(seat)} -l -- ${q(`${opts.prelude ?? ""}${preflight} && ${built.command} || echo PREFLIGHT-REFUSED`)}`);
-      await tmux(`send-keys -t ${q(seat)} Enter`);
+      const launch = `${opts.prelude ?? ""}${preflight} && ${built.command} || echo PREFLIGHT-REFUSED`;
+      if (opts.staged) {
+        const sent = await realTmux.sendShellCommand(seat, launch);
+        if (!sent.ok) throw new Error(sent.message);
+      } else {
+        await tmux(`send-keys -t ${q(seat)} -l -- ${q(launch)}`);
+        await tmux(`send-keys -t ${q(seat)} Enter`);
+      }
     } else {
       const script = `${preflight} || { echo PREFLIGHT-REFUSED; exec sleep 30; }; exec ${built.command}`;
       await tmux(`-f /dev/null new-session -d -s ${q(seat)} -x 120 -y 30 -c ${q(work)} ${env} ${argv(...cleanStart, "-c", script)}`);
@@ -195,6 +205,28 @@ describe.runIf(available())("in-place restart, native (private tmux socket, stub
     expect(verified.body).toMatchObject({ ok: true, outcome: "restarted_account_unverified", accountEvidence: { state: "not_requested" } });
   }, 60_000);
 
+  it("a Codex launched the way OpenRig launches it (staged sh script), restarted twice in the same pane", async () => {
+    const { pane, post } = await setup("shell_backed", { staged: true });
+    const shell = await panePid(pane);
+    const [oldStub] = stubPids();
+    const parentOf = (pid: number) => Number(fs.readFileSync(`/proc/${pid}/stat`, "utf8").replace(/^.*\) /, "").split(" ")[1]);
+    const script = parentOf(oldStub!);
+    expect(script, "a staged script sits between the shell and Codex").not.toBe(shell);
+    expect(parentOf(script)).toBe(shell);
+    expect(fs.readFileSync(`/proc/${script}/cmdline`, "utf8")).toMatch(/openrig-tmux-send-\d+-[0-9a-f-]+\.txt/);
+
+    for (const round of [1, 2]) {
+      const plan = await post("restart-plan");
+      expect(plan.body, `round ${round}: ${JSON.stringify(plan.body)}`).toMatchObject({ ok: true, paneShape: "shell_backed" });
+      const result = await post("restart", { reason: `native harness staged round ${round}` });
+      expect(result.status, JSON.stringify(result.body)).toBe(200);
+      expect(result.body).toMatchObject({ outcome: "restarted_account_unverified", pane, paneShape: "shell_backed" });
+      for (const pid of stubPids()) pids.add(pid);
+      expect(stubPids(), `round ${round}: only the replacement stub runs`).toEqual([result.body.newProcess.pid]);
+      expect(await panePid(pane), "same pane shell").toBe(shell);
+    }
+  }, 90_000);
+
   it("direct-native: respawned without -k, remain-on-exit put back after the verified replacement", async () => {
     const { seat, pane, post } = await setup("direct_native");
     const before = await panePid(pane);
@@ -206,11 +238,16 @@ describe.runIf(available())("in-place restart, native (private tmux socket, stub
     for (const pid of stubPids()) pids.add(pid);
     const after = await panePid(pane);
     expect(after).not.toBe(before);
-    expect(stubPids(), "only the replacement stub runs").toEqual([after]);
+    // The replacement is the respawned pane's root, or its child where the image's sh doesn't exec a lone
+    // command (review-r2's dash): compare with the reported process, and tie it to the pane separately.
+    const replacement = result.body.newProcess.pid as number;
+    expect(stubPids(), "only the replacement stub runs").toEqual([replacement]);
+    const parent = Number(fs.readFileSync(`/proc/${replacement}/stat`, "utf8").replace(/^.*\) /, "").split(" ")[1]);
+    expect([replacement, parent], "the replacement is the respawned pane's root or its direct child").toContain(after);
     // tmux resets the visible screen on respawn; the original's earlier output is kept in scrollback.
     const screen = await tmux(`capture-pane -p -t ${q(pane)} -S -300`);
     expect(screen, "the original's scrollback stays in the pane").toContain(`from pid ${before}`);
-    expect(screen).toContain(`stub conversation ${TOKEN} pid ${after}`);
+    expect(screen).toContain(`stub conversation ${TOKEN} pid ${replacement}`);
     expect((await tmux(`show-options -p -v -t ${q(pane)} remain-on-exit`)).trim(), "no pane-local setting left behind").toBe("");
     expect((await tmux(`list-panes -t ${q(seat)} -F '#{pane_id}'`)).trim()).toBe(pane);
   }, 60_000);

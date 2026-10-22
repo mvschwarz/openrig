@@ -3,6 +3,7 @@ import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
+import { resolveRigHandle } from "../rig-handle.js";
 
 type ShrinkResponse = {
   ok: boolean;
@@ -36,7 +37,7 @@ export function shrinkCommand(depsOverride?: StatusDeps): Command {
   }
 
   cmd
-    .argument("<rigId>", "Target rig ID")
+    .argument("<rig>", "Target rig name or ID")
     .argument("<podRef>", "Pod namespace or pod ID")
     .option("--fallback <live-seat>", "Reroute active qitems to this running seat before removing the pod")
     .option("--json", "JSON output")
@@ -48,9 +49,23 @@ export function shrinkCommand(depsOverride?: StatusDeps): Command {
         return;
       }
 
+      const resolution = await resolveRigHandle(client, rigId);
+      if (resolution.kind === "ambiguous") {
+        const msg = `'${rigId}' matches ${resolution.ids.length} rigs. Refusing to remove pod: an ambiguous name could act on the wrong rig. Re-run with the specific id, e.g. ${resolution.ids.map((id) => `rig shrink ${id} ${podRef}`).join("  |  ")}`;
+        if (opts.json) {
+          console.log(JSON.stringify({ ok: false, code: "rig_ambiguous", message: msg, candidates: resolution.ids }, null, 2));
+        } else {
+          console.error(msg);
+        }
+        process.exitCode = 1;
+        return;
+      }
+
+      const resolvedRigId = resolution.kind === "resolved" ? resolution.id : rigId;
+
       const fallbackQuery = opts.fallback ? `?fallback=${encodeURIComponent(opts.fallback)}` : "";
       const res = await client.delete<ShrinkResponse>(
-        `/api/rigs/${encodeURIComponent(rigId)}/pods/${encodeURIComponent(podRef)}${fallbackQuery}`,
+        `/api/rigs/${encodeURIComponent(resolvedRigId)}/pods/${encodeURIComponent(podRef)}${fallbackQuery}`,
       );
       if (opts.json) {
         console.log(JSON.stringify(res.data, null, 2));

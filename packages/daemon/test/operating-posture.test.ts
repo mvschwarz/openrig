@@ -310,6 +310,20 @@ it("picks the project the bundle's rig claims for a row that names only its miss
   expect(result.context!.sources).toContain(join(t.home, "workspace.yaml") + "#selected-by=rig:bundle-rig");
 });
 
+it.each(["0", "person-terminal", "custom@other-rig"])("keeps rig project inference with physical binding %s", async physical => {
+  const t = await inferenceSetup();
+  const address = t.seat("bundle-rig", join(t.home, "mine", "missions"));
+  const sessions = new SessionRegistry(t.db);
+  const nodeId = (t.db.prepare("SELECT node_id FROM sessions WHERE session_name=?").get(address) as { node_id: string }).node_id;
+  sessions.markSuperseded((t.db.prepare("SELECT id FROM sessions WHERE node_id=? ORDER BY id DESC LIMIT 1").get(nodeId) as { id: string }).id);
+  sessions.registerClaimedSession(nodeId, physical);
+  sessions.updateBinding(nodeId, { tmuxSession: physical, tmuxPane: "%42" });
+  await t.row("claimed", address, ["mission:release"]);
+  const result = t.service.resolve({ qitemId: "claimed" });
+  expect(result).toMatchObject({ posture: "human-led", source: "product-default", context: { projectId: "bundle", missionId: "release", paths: { project: join(t.home, "bundle") } } });
+  expect(result.context!.sources).toContain(join(t.home, "workspace.yaml") + "#selected-by=rig:bundle-rig");
+});
+
 it("picks the user's own project for its unclaimed rig by working folder, then as the only unclaimed entry", async () => {
   const t = await inferenceSetup();
   await t.row("by-folder", t.seat("user-rig", join(t.home, "mine", "missions")), ["mission:release"]);

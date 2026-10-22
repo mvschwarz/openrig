@@ -1,7 +1,7 @@
 // S10 — durability through failure, duplicate ABSENCE pinned (proof contract):
 //   1. induced Slack API TIMEOUT → the retry RECONCILES BY MARKER before any send: marker
 //      found → ack without repost (the timeout had landed); marker absent → send once. Never a
-//      blind repost; an unreadable channel stays retained (delay, never a duplicate).
+//      blind repost; when the history can't be read, the retry posts once (at least once).
 //   2. induced CRASH between persist and dispatch → the next activation's replay delivers
 //      EXACTLY once; a second replay re-acks without a second post.
 // Any duplicate human notification is the red.
@@ -99,6 +99,7 @@ describe("H1 — induced timeout → reconcile-by-marker, never a blind repost",
     const retry = await deliver(decision);
     expect(retry.ok).toBe(true);
     expect(slack.posted).toHaveLength(1); // delivered exactly once
+    expect(slack.posted[0]).not.toContain("may repeat"); // the scan confirmed it absent
   });
 
   it("F-B1r MARKER EFFECT: a HOSTILE qitemId timeout-that-landed reconciles by the ESCAPED marker — producer and scanner compare the SAME bytes, no repost, and no active syntax ever posts", async () => {
@@ -122,14 +123,29 @@ describe("H1 — induced timeout → reconcile-by-marker, never a blind repost",
     expect(outboundSeen.load().has("<!channel>")).toBe(true); // qitem seen via reconcile
   });
 
-  it("reconcile scan UNREADABLE: retained (a delay), NEVER a blind repost", async () => {
-    const slack = slackDouble({ timeoutFirstPost: true, timeoutLanded: true, historyReadable: false });
+  it("history unreadable after a lost response: the retry posts once, so the person still gets the message", async () => {
+    const slack = slackDouble({ timeoutFirstPost: true, timeoutLanded: false, historyReadable: false });
+    const { deliver, outboundSeen } = harness(slack.fetchImpl);
+    expect((await deliver(decision)).ok).toBe(false);
+    expect(slack.posted).toHaveLength(0);
+    expect(await deliver(decision)).toEqual({ ok: true });
+    expect(slack.posted).toHaveLength(1);
+    expect(slack.posted[0]).toContain("Delivery may repeat after an earlier unconfirmed attempt.");
+    expect(outboundSeen.load().has("qitem-dur-1")).toBe(true);
+    expect((await deliver(decision)).ok).toBe(true); // delivered re-ack
+    expect(slack.postCount()).toBe(2);
+  });
+
+  it("history unreadable for a message already at the size limit: the retry still posts it whole, without the repeat note", async () => {
+    const slack = slackDouble({ timeoutFirstPost: true, timeoutLanded: false, historyReadable: false });
     const { deliver } = harness(slack.fetchImpl);
-    await deliver(decision);
-    const retry = await deliver(decision);
-    expect(retry.ok).toBe(false);
-    expect((retry as { class: string }).class).toBe("reconcile-unreadable");
-    expect(slack.posted).toHaveLength(1); // the landed copy stays the only copy
+    const full: OutboundDecision = { ...decision, decisionId: "d-full-repeat", payload: { ...payload, summary: "x".repeat(900), body: "y".repeat(2900) } };
+    await deliver(full);
+    expect(await deliver(full)).toEqual({ ok: true });
+    expect(slack.posted).toHaveLength(1);
+    expect(slack.posted[0]).toContain("y".repeat(2900));
+    expect(slack.posted[0]).toContain("d-full-repeat");
+    expect(slack.posted[0]).not.toContain("may repeat");
   });
 });
 

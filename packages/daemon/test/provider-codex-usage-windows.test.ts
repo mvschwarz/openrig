@@ -187,7 +187,9 @@ describe("CodexUsageWindows: rows, failed refresh, identity, coalescing", () => 
     await s.windows.refresh();
     const rows = s.windows.project(at(2));
     expect(ids(rows)).toEqual([["unresolved", null, 100, false], ["unresolved", null, 20, true]]);
-    expect(rows[0]!.unresolved).toEqual({ note: "identity unresolved: not matched to, merged with or replacing any other row", keptReads: 3, droppedReads: 0 });
+    // LOW-4: the earlier unresolved row says it may be this same login; the latest keeps the plain note.
+    expect(rows[0]!.unresolved).toEqual({ note: "identity unresolved: from an earlier read, possibly this same login; not matched to, merged with or replacing any other row", keptReads: 3, droppedReads: 0 });
+    expect(rows[1]!.unresolved!.note).toBe("identity unresolved: not matched to, merged with or replacing any other row");
   });
 
   it("F1: a re-read of one workspace replaces only its own row", async () => {
@@ -255,7 +257,8 @@ describe("codexUsageReader against a fake codex app-server", () => {
 
   it("U3 failure reasons: rpc error, timeout, child exit", async () => {
     const fake = makeFakeCodex();
-    fake.setPlan({ mode: "rpc_error" });
+    // A signed-in account (a signed-out one is now not_signed_in: provider-sign-in-fact.test.ts).
+    fake.setPlan({ mode: "rpc_error", account: ACCOUNT_ANSWER });
     expect(await reader(fake)()).toMatchObject({ ok: false, reason: "rpc_error", detail: "codex app-server returned an error for account/rateLimits/read: backend unavailable" });
     fake.setPlan({ mode: "hang" });
     expect(await reader(fake, 400)()).toMatchObject({ ok: false, reason: "timeout", detail: "codex app-server did not answer within 400 ms" });

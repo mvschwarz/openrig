@@ -101,6 +101,22 @@ describe("A3 proof-5 — fragments -> generated projection; re-project; hand-edi
   beforeEach(() => { home = mkdtempSync(join(tmpdir(), "a3-humans-")); });
   afterEach(() => { rmSync(home, { recursive: true, force: true }); });
 
+  it("nobody registered (no fragments, no projection): still refused, saying so and naming rig gateway human add", () => {
+    const loaded = loadHumanRegistry(home);
+    expect(loaded).toEqual({
+      ok: false,
+      error: "no human configured yet — register one: rig gateway human add <entityId> --display-name … --binding … --delivery-class …",
+      noHumans: true,
+    });
+    expect(existsSync(projectionPath(home))).toBe(false); // a load never creates the projection
+  });
+
+  it("fragments present but the projection missing keeps the projection repair message", () => {
+    expect(addHumanFragment(fragment({ entityId: "mike" }), home).ok).toBe(true);
+    rmSync(projectionPath(home));
+    expect(loadHumanRegistry(home)).toEqual({ ok: false, error: `registry projection missing at ${projectionPath(home)} — re-project from the fragments` });
+  });
+
   it("two fragments (founder + one) -> projection lists BOTH, sorted, DO-NOT-EDIT header", () => {
     expect(addHumanFragment(fragment({ entityId: "mike", address: "mike@external" }), home).ok).toBe(true);
     expect(addHumanFragment(fragment({ entityId: "founder", displayName: "Founder", address: "founder@external" }), home).ok).toBe(true);

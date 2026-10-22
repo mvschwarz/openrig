@@ -36,6 +36,10 @@ interface PiResumeOptions {
   trustPosture?: "approve" | "no-approve";
   /** Launch-attempt id minting (tests inject; defaults to randomUUID). */
   newLaunchId?: () => string;
+  /** OPR.0.7.0.2: whether usage.pi_cost_facts is on, read at each resume (absent = off). */
+  usageFactsEnabled?: () => boolean;
+  /** OPR.0.7.0.2 K4: whether usage.pi_openrouter_charge is on, read at each resume (absent = off). */
+  openRouterChargeEnabled?: () => boolean;
 }
 
 export class PiResumeAdapter {
@@ -61,6 +65,8 @@ export class PiResumeAdapter {
     model?: string | null,
     // OPR.0.4.8.3 Seam B: persisted resolved posture (resource-trust wording for Pi).
     resolvedPosture?: "floor" | "full_bypass" | "auto",
+    // The seat's resolved effort, sent as Pi's --thinking (OMP unchanged).
+    effort?: string | null,
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: `${this.label} resume not available` };
@@ -103,11 +109,14 @@ export class PiResumeAdapter {
       // The model declaration must survive resume: the runner's provider-key
       // allowlist keys off the declared provider (VM leg finding).
       model: model ?? undefined,
+      thinking: this.runtime === "pi" ? effort ?? undefined : undefined,
       // OPR.0.4.8.2: Pi RESOURCE TRUST (not a permission policy). Same decision as the launch path:
       // YOLO forces `approve` on every restored seat; otherwise the configured posture.
       trust,
       sessionFile,
       launchId,
+      usageFacts: this.runtime === "pi" && (this.options.usageFactsEnabled?.() ?? false),
+      openRouterCharge: this.runtime === "pi" && (this.options.openRouterChargeEnabled?.() ?? false),
     });
 
     const command = this.runtime === "pi" && this.options.seatLaunchEnvironment

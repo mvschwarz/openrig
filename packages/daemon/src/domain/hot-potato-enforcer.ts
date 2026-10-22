@@ -2,17 +2,18 @@
  * Hot-potato strict-rejection contract (PL-004 Phase A).
  *
  * Load-bearing API contract: any code path that transitions a queue_item to
- * `done` MUST pass a valid `closure_reason` from the 6-value enum below. This
+ * `done` MUST pass a valid `closure_reason` from DONE_CLOSURE_REASONS. This
  * is enforced at this layer (NOT at the route, NOT at the CLI) so every
  * surface that reaches the queue inherits the same guarantee.
  *
- * The 6 valid closure reasons:
+ * The terminal closure reasons:
  *   - handed_off_to  : work continues with a different seat (closure_target = new owner)
- *   - blocked_on     : work is parked pending another qitem (closure_target = blocker qitem_id)
  *   - denied         : receiver rejected the work (closure_target = reason text)
  *   - canceled       : sender or receiver withdrew (closure_target = note)
  *   - no-follow-on   : terminal completion, nothing else needed
  *   - escalation     : kicked up to higher tier (closure_target = escalation target)
+ *   - superseded     : replaced by another qitem (closure_target = successor qitem_id)
+ * `blocked_on` remains valid for active blocked park records, never for `done`.
  */
 
 export const CLOSURE_REASONS = [
@@ -28,6 +29,8 @@ export const CLOSURE_REASONS = [
 ] as const;
 
 export type ClosureReason = (typeof CLOSURE_REASONS)[number];
+
+export const DONE_CLOSURE_REASONS = CLOSURE_REASONS.filter((reason) => reason !== "blocked_on");
 
 export interface ClosureRequest {
   state: string;
@@ -53,8 +56,8 @@ export type ClosureValidation = ClosureValidationOk | ClosureValidationErr;
 /**
  * Validate a state transition's closure obligation.
  * - If state !== "done": no closure_reason required; pass through any provided values.
- * - If state === "done": closure_reason REQUIRED, must be in CLOSURE_REASONS.
- *   handed_off_to / blocked_on / escalation also require closure_target.
+ * - If state === "done": closure_reason REQUIRED, must be in DONE_CLOSURE_REASONS.
+ *   handed_off_to / escalation also require closure_target.
  */
 export function validateClosure(req: ClosureRequest): ClosureValidation {
   if (req.state !== "done") {
@@ -69,8 +72,8 @@ export function validateClosure(req: ClosureRequest): ClosureValidation {
     return {
       ok: false,
       code: "missing_closure_reason",
-      message: `state=done requires closure_reason; valid values: ${CLOSURE_REASONS.join(", ")}`,
-      validReasons: CLOSURE_REASONS,
+      message: `state=done requires closure_reason; valid values: ${DONE_CLOSURE_REASONS.join(", ")}`,
+      validReasons: DONE_CLOSURE_REASONS,
     };
   }
 
@@ -78,13 +81,21 @@ export function validateClosure(req: ClosureRequest): ClosureValidation {
     return {
       ok: false,
       code: "invalid_closure_reason",
-      message: `closure_reason=${req.closureReason} is not valid; valid values: ${CLOSURE_REASONS.join(", ")}`,
-      validReasons: CLOSURE_REASONS,
+      message: `closure_reason=${req.closureReason} is not valid; valid values: ${DONE_CLOSURE_REASONS.join(", ")}`,
+      validReasons: DONE_CLOSURE_REASONS,
+    };
+  }
+
+  if (req.closureReason === "blocked_on") {
+    return {
+      ok: false,
+      code: "invalid_closure_reason",
+      message: "state=done is terminal and cannot use closure_reason=blocked_on. Use rig queue block <id> --on <child> (or rig queue update <id> --state blocked --blocked-on <child>) to wait for another queue item.",
+      validReasons: DONE_CLOSURE_REASONS,
     };
   }
 
   const requiresTarget = req.closureReason === "handed_off_to"
-    || req.closureReason === "blocked_on"
     || req.closureReason === "escalation";
 
   if (requiresTarget && !req.closureTarget) {

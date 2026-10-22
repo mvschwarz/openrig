@@ -79,7 +79,7 @@ describe("bundle view at the real CLI command boundary", () => {
       expect(events).toEqual(["/api/bundles/inspect", "header", "/api/up"]);
       expect(post.mock.calls[1]).toEqual([
         "/api/up", expect.objectContaining({ sourceRef: "/tmp/example.rigbundle", plan }),
-        plan ? undefined : { timeoutMs: 120_000 },
+        { timeoutMs: 120_000 },
       ]);
       expect(process.exitCode).toBe(1);
       expect(output).toHaveBeenCalledTimes(1);

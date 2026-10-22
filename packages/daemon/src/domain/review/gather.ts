@@ -1,3 +1,4 @@
+import { physicalSessionName } from "../session-registry.js";
 // Living Notes Packet 2 — the input gatherer (OPR.0.4.4.20).
 //
 // The impure shell around the pure composer: reads slice docs + proof
@@ -11,6 +12,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 import YAML from "yaml";
+import { findFrontmatterBlock } from "../frontmatter.js";
 import type Database from "better-sqlite3";
 import { sessionMemberLabel } from "../session-name.js";
 import type { SliceIndexer, SliceRecord } from "../slices/slice-indexer.js";
@@ -156,7 +158,7 @@ export class ReviewGatherer {
       mission: { name: mission, id: missionMeta.id, title: missionMeta.title, intent: missionMeta.intent },
       slices: composed,
       missionAttention: this.attentionForTag(`mission:${mission}`, `slice:`),
-      agents: this.agentsForSlices(slices.map((s) => s.name), { missionName: mission }),
+      agents: this.agentsForSlices(slices.flatMap((s) => this.indexer.sliceTagKeys(s.name)), { missionName: mission }),
       nowIso,
     });
   }
@@ -197,7 +199,7 @@ export class ReviewGatherer {
     if (scope.startsWith("slice:")) {
       const name = scope.slice("slice:".length);
       if (!this.indexer.get(name)) return null;
-      return composeAgentsBand(this.agentsForSlices([name]), scope, [], nowIso);
+      return composeAgentsBand(this.agentsForSlices(this.indexer.sliceTagKeys(name)), scope, [], nowIso);
     }
     const mission = scope.slice("mission:".length);
     const slices = this.indexer.list().filter((s) => s.missionId === mission);
@@ -207,7 +209,7 @@ export class ReviewGatherer {
     // dir-exists/zero-indexed mission no longer composes a confident-empty
     // band from an always-empty name list.
     return composeAgentsBand(
-      this.agentsForSlices(slices.map((s) => s.name), { missionName: mission }),
+      this.agentsForSlices(slices.flatMap((s) => this.indexer.sliceTagKeys(s.name)), { missionName: mission }),
       scope,
       [],
       nowIso,
@@ -226,8 +228,9 @@ export class ReviewGatherer {
     const proofMd = this.readFile(path.join(slice.slicePath, "PROOF.md"));
 
     const artifacts = readProofArtifacts(slice.slicePath);
+    const tagKeys = this.indexer.sliceTagKeys(name);
     const attention = this.attentionForTag(`slice:${name}`);
-    const agents = this.agentsForSlices([name]);
+    const agents = this.agentsForSlices(tagKeys);
     const frontmatter = this.parseFrontmatter(readme);
     const approval = this.gatherApproval(slice, frontmatter);
     const candidateRef = deriveCandidateSha(artifacts);
@@ -322,10 +325,10 @@ export class ReviewGatherer {
 
   private parseFrontmatter(content: string | null): Record<string, unknown> {
     if (!content) return {};
-    const m = content.match(/^---\n([\s\S]*?)\n---/);
-    if (!m) return {};
+    const block = findFrontmatterBlock(content);
+    if (!block) return {};
     try {
-      return (YAML.parse(m[1]!) ?? {}) as Record<string, unknown>;
+      return (YAML.parse(block.yaml) ?? {}) as Record<string, unknown>;
     } catch {
       return {};
     }
@@ -482,6 +485,9 @@ export class ReviewGatherer {
       : tagIsMission
         ? tag.slice("mission:".length)
         : null;
+    // A slice answers to its directory name and its frontmatter id alike.
+    const sliceKeys = tagIsSlice ? this.indexer.sliceTagKeys(tagName!) : [];
+    const likeKeys = tagIsSlice ? sliceKeys.map((key) => `slice:${key}`) : [tag];
     const hasEvidenceRef = this.columnExists("queue_items", "evidence_ref");
     const summaryCol = this.columnExists("queue_items", "summary") ? "summary" : "NULL AS summary";
     const rows = this.db
@@ -490,17 +496,17 @@ export class ReviewGatherer {
                 blocked_on, closure_required_at${hasEvidenceRef ? ", evidence_ref" : ""}
          FROM queue_items
          WHERE state IN (${ACTIVE_STATES.map(() => "?").join(",")})
-           AND tags LIKE ?
+           AND (${likeKeys.map(() => "tags LIKE ?").join(" OR ")})
            AND (tier = 'human-gate'
                 OR destination_session LIKE 'human%'
                 OR (state = 'blocked' AND blocked_on LIKE 'human%'))`,
       )
-      .all(...ACTIVE_STATES, `%${tag}%`) as Array<QitemRow & { evidence_ref?: string | null }>;
+      .all(...ACTIVE_STATES, ...likeKeys.map((key) => `%${key}%`)) as Array<QitemRow & { evidence_ref?: string | null }>;
     return rows
       .filter((r) => {
         // Row-level canonical confirm (authoritative over the prefilter).
         const scopes = parseScopeTags(r.tags);
-        if (tagIsSlice && !scopes.slices.has(tagName!)) return false;
+        if (tagIsSlice && !sliceKeys.some((key) => scopes.slices.has(key))) return false;
         if (tagIsMission && !scopes.missions.has(tagName!)) return false;
         // d2: excludeTagPrefix aligned to the canonical set (its documented
         // intent — "rows that carry a slice tag") so comma-legacy rows are
@@ -537,11 +543,12 @@ export class ReviewGatherer {
       });
   }
 
-  /** Sessions holding active work on the named slices (null = rig-wide).
+  /** Sessions holding active work on the slices named by `sliceTags`: each slice's
+   *  directory name and frontmatter id (null = rig-wide).
    *  Region membership derives from work-on-scope, never rig co-residency.
    *  Runtime/idle telemetry is honest-unknown at v1 (queue-derived only). */
   private agentsForSlices(
-    sliceNames: string[] | null,
+    sliceTags: string[] | null,
     opts: { missionName?: string | null } = {},
   ): AgentInput[] {
     const missionName = opts.missionName ?? null;
@@ -566,15 +573,16 @@ export class ReviewGatherer {
       // its slice tag isn't indexed. missionName is null for rig/slice
       // flows (byte-identical to pre-fix).
       if (
-        sliceNames !== null &&
-        !rowSlices.some((s) => sliceNames.includes(s)) &&
+        sliceTags !== null &&
+        !rowSlices.some((s) => sliceTags.includes(s)) &&
         !(missionName !== null && scopes.missions.has(missionName))
       )
         continue;
-      const entry = bySession.get(r.destination_session) ?? { rows: [], slices: new Set<string>() };
+      const owner = physicalSessionName(this.db, r.destination_session);
+      const entry = bySession.get(owner) ?? { rows: [], slices: new Set<string>() };
       entry.rows.push(r);
       for (const s of rowSlices) entry.slices.add(s);
-      bySession.set(r.destination_session, entry);
+      bySession.set(owner, entry);
     }
     return [...bySession.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
@@ -624,7 +632,8 @@ export class ReviewGatherer {
     const recent = new Map<string, { latest: QitemRow; slices: Set<string> }>();
     for (const r of rows) {
       if (isHumanSeatSession(r.destination_session)) continue;
-      if (known.has(r.destination_session)) continue;
+      const owner = physicalSessionName(this.db, r.destination_session);
+      if (known.has(owner)) continue;
       let tags: string[] = [];
       try {
         tags = (JSON.parse(r.tags ?? "[]") as string[]) ?? [];
@@ -633,10 +642,10 @@ export class ReviewGatherer {
       }
       const rowSlices = tags.filter((t) => t.startsWith("slice:")).map((t) => t.slice("slice:".length));
       if (rowSlices.length === 0) continue;
-      const entry = recent.get(r.destination_session) ?? { latest: r, slices: new Set<string>() };
+      const entry = recent.get(owner) ?? { latest: r, slices: new Set<string>() };
       if (r.ts_updated > entry.latest.ts_updated) entry.latest = r;
       for (const s of rowSlices) entry.slices.add(s);
-      recent.set(r.destination_session, entry);
+      recent.set(owner, entry);
     }
     const recentInputs: AgentInput[] = [...recent.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
@@ -837,11 +846,13 @@ export class ReviewGatherer {
     // LIMIT — a pre-confirmation LIMIT would recreate B2 here (a suffix-storm
     // could hide the true member and flip the phase signal); streaming + break
     // gives the same bounded cost with no truncation hole.
+    const keys = this.indexer.sliceTagKeys(name);
     const stmt = this.db.prepare(
-      `SELECT tags FROM queue_items WHERE state IN (${ACTIVE_STATES.map(() => "?").join(",")}) AND tags LIKE ?`,
+      `SELECT tags FROM queue_items WHERE state IN (${ACTIVE_STATES.map(() => "?").join(",")}) AND (${keys.map(() => "tags LIKE ?").join(" OR ")})`,
     );
-    for (const r of stmt.iterate(...ACTIVE_STATES, `%slice:${name}%`) as Iterable<{ tags: string | null }>) {
-      if (parseScopeTags(r.tags).slices.has(name)) return true;
+    for (const r of stmt.iterate(...ACTIVE_STATES, ...keys.map((key) => `%slice:${key}%`)) as Iterable<{ tags: string | null }>) {
+      const tagged = parseScopeTags(r.tags).slices;
+      if (keys.some((key) => tagged.has(key))) return true;
     }
     return false;
   }

@@ -4,9 +4,12 @@
 keeps, using today's queue commands.** The person speaks in sentences. They never see YAML, a job ID or a policy name
 unless they ask.
 
-> **Status (0.7.0, not on by default).** No agent's guidance points here yet, and no profile loads it. It's switched
-> on by adding one line to the kernel operator's role guidance, after a native run on a real install shows the
-> pattern holds. Until then, hand this page to an operator by hand (`docs/reference/keeping-a-watch.md`) to try it.
+> **Status (0.7.0).** The kernel operator's role guidance points here: when a person asks it to watch something or
+> remind them, it reads this page (installed at `$OPENRIG_HOME/reference/keeping-a-watch.md`) first. Every step below
+> was exercised with the CLI on an isolated private daemon: create, set aside, fire, re-arm, list, change, stop, a
+> daemon restart and a handover. A native run with a real operator, install and channel has **not** been run yet.
+> The usage warning's command and field names are checked against the served command on a test fixture; it hasn't
+> been run as a watch.
 
 ## The shape
 
@@ -146,11 +149,105 @@ under some conditions, with no delay guarantee. So:
 
 - **Re-arm promptly** after every fire.
 - **After a restart or handover, list your watches** (above) and re-arm any that show no timed backstop.
+- **Handing a watch to another session** (`rig queue handoff <task> --to <session>`) closes the old task and retires its
+  timer (unless another task shares that timer through `--wake-watchdog`; a watch set up as above never does). The new
+  task arrives pending, with its body and `watch` tag but no timer: the new owner sets it aside again with a fresh
+  timer, as in step 3.
+
+## A usage warning: "warn me when my allowance runs low"
+
+This is a conditional watch like any other: the same task, timer, re-arm, stop and human channel. Only the check is
+specific.
+
+**The check is `rig provider status --all-hosts --json`.** It returns what every registered machine already holds,
+this one included, and never starts a read on any account. With no host registry it covers this machine only, and
+says so. Use it rather than the single-machine `rig provider status --json`: one allowance used from several
+machines appears once, with each machine's own observation beside it, so you can't count it twice. If it answers that
+usage windows are off, tell the person that before setting the watch, as you would an unreachable channel.
+
+**Never put `--refresh` in the timer's check.** `rig provider status --all-hosts --refresh` starts a native read of the
+accounts on every machine. Run it only when the person asks for a fresh reading now.
+
+**Choose the allowance with the person once, and write its identity into the body.**
+- **The allowance:** its `items[].key` and `items[].provider`, read from one run of the check. Show them the allowance
+  by its label in the plain `rig provider status --all-hosts` view, never a key they have to type. An item whose key
+  is null (a login that hasn't been identified) can't be watched: say so, and offer to watch it once it's identified.
+- **For Codex, the login email too:** `items[].observations[].row.identity.email`, shown on each machine's line in the
+  plain view. The same Codex account can appear as more than one item with the same key, one per login email (or none)
+  it was seen under. So on each fire, use the one item whose key matches and whose observations carry the recorded
+  email. If none or several do, you can't tell. A Codex allowance whose login email is missing can't be pinned this
+  way, so it stays can't tell. A changed email isn't followed: if the person's login email changes, set the watch
+  again with them.
+- **The window:** `items[].observations[].row.windows[].window`. Claude's are `five_hour` and `weekly`; Codex's are
+  `primary` and `secondary`, with `items[].observations[].row.windows[].durationMins` saying which is which.
+- **The threshold:** on `items[].observations[].row.windows[].remainingPercent`. It's a percentage, and no absolute
+  amount is served. Remaining is 100 minus `items[].observations[].row.windows[].usedPercent`, never below 0. Both are
+  null when the machine reported no usage for the window.
+
+**What each part of the answer means:**
+
+| Field | What it tells you |
+|---|---|
+| `items[].linkage` | `single`: one machine saw it. `same`: several machines saw one allowance. Compare their observations; **never add or average them**. `conflict`: the machines' fresh observations disagree (their reset times are more than 60 s apart); every observation is kept and none is chosen. `unknown`: the same id seen under another login, or with no login email, and not merged with it. `items[].notes` says why. For Codex, the one item carrying the person's recorded key and email is still theirs: its `unknown` is about the other login's item (see the decision). Any other `unknown` item is not theirs to watch |
+| `items[].observations[].hostId`, `items[].observations[].readAt` | Which machine the observation is from, and when this daemon read it |
+| `items[].observations[].row.windows[].observedAt` | When that machine's reading was taken: the time to tell the person |
+| `items[].observations[].row.windows[].resetsAt` | When that window resets: tell the person this too |
+| `items[].observations[].row.windows[].freshness` | `fresh`, `stale` or `unavailable`, with `items[].observations[].row.windows[].freshnessReason` saying why. A reading is fresh for 15 minutes |
+| `items[].observations[].row.windows[].level` | The served level, with `items[].observations[].row.windows[].levelReason`. Compare the person's threshold, not this level. But **`unknown` means the number can't be used**: no usage was reported, the window's reset time has passed (the number is from before it), or Claude seats report different windows (possibly different logins) |
+| `items[].observations[].row.lastRefresh` | **Codex:** that machine's last native read. When `items[].observations[].row.lastRefresh.outcome` is `failed`, the reading it kept is older and reads `stale`. **Claude:** the last read of the daemon's own Claude login (its identity) only. Claude's windows come from the seats' status-line readings at their own times, so they can stay `fresh` beside a failed identity read |
+| `items[].observations[].row.identityNote` | **Claude:** which login the identity is (as of the last identity read) and which seats the windows came from. The windows aren't proven to be that login. Say so when you tell the person |
+| `hosts[].usage`, `hosts[].usageReason` | Whether each machine's usage was read: `served`, `off`, `older` or `unavailable`, and why. A machine that wasn't read contributes nothing, never a zero |
+| `hosts[].lastRefresh` | The last refresh started from here for that machine, per provider. A `failed` one sits beside the older observation the machine kept |
+| `seatAccounts[].seats[].configured`, `seatAccounts[].seats[].allowance` | The account each seat is **configured** to use. `seatAccounts[].seats[].allowance.linked` is always false: configuration isn't proof of which allowance a running seat draws on, or that a Claude seat's windows are the identity's login. Never tell the person a seat uses this allowance because of it |
+| `seatAccounts[].seats[].observed` | What the seat itself was seen reporting: whether its status line has sent windows and when (`seatAccounts[].seats[].observed.lastSampledAt`), and `seatAccounts[].seats[].observed.differsFrom`, the seats whose readings disagree with it. Observed facts, still not a link to an allowance |
+
+**The decision on each fire,** using the table in "Every time the timer fires". A usable reading is a `fresh`
+observation of the chosen window whose `level` isn't `unknown`.
+- **Met:** a usable reading is below the threshold. Tell them the lowest one, with its machine, `observedAt` and
+  `resetsAt`. If the linkage is `conflict`, also tell them the machines disagree, from `items[].notes`, rather than
+  presenting the lowest as the reading.
+- **Not met:** every usable reading is at or above the threshold, and there is at least one.
+- **Another login on the same Codex account:** when the item matched by key and recorded email has `items[].notes`
+  saying the account is also observed under another login email (or with none), its linkage reads `unknown` on one
+  machine, or `same` on several. Use its own usable readings as above. When you tell the person, say that login's
+  observations are unlinked: not added, and not merged.
+- **Can't tell:** no usable reading: none `fresh`, or the fresh ones' `level` is `unknown`, which includes a null
+  `remainingPercent`. Also when the allowance is missing from the answer or its key is null, or (Codex) no login email
+  was recorded, or no item, or more than one, carries both the key and the recorded email. Use the once-then-quiet
+  unknown rule, and give the reason (`freshnessReason`, `levelReason`, or the machine's `usageReason`).
+
+The task body, for the person's own allowance, window and threshold:
+
+```markdown
+Person's words: "Warn me when my Claude allowance drops below 20% of its 5-hour window; check every 30 minutes."
+Check: `rig provider status --all-hosts --json` (served readings only; never --refresh).
+Allowance: key <allowance key>, provider claude, window five_hour. Chosen with the person.
+(For Codex, also: login email <email shown in the label>.)
+Usable: a fresh observation of that window whose level isn't unknown.
+Met: a usable reading with remainingPercent below 20. Report the lowest, with its machine, observedAt and resetsAt.
+Never add machines' numbers. If the linkage is conflict, say the machines disagree (items[].notes).
+Claude: say the windows come from seats' status lines and aren't proven to be the identity's login (identityNote).
+Codex: the one item with the recorded key and email is theirs even if its linkage is unknown; say the other login's
+observations are unlinked (items[].notes).
+Can't tell: no usable reading (none fresh, or level unknown: give its levelReason), the allowance missing or its key
+null, or (Codex) no email recorded, or no item, or more than one, carries both the key and the recorded email. Give the
+reason.
+Interval: 30m.
+Tell them: <entityId>@external (human channel), once, when met.
+Stop: after telling them once, or when they say stop.
+Unknown: not said yet.
+```
 
 ## What not to use
 
 - **`rig watchdog register --policy periodic-reminder` for a person's watch.** It repeats every interval until it's
   stopped (the first fire comes one interval after you register it), and it stops when the agent that registered it
-  is replaced. It's fine for agent-to-agent reminders.
+  is replaced. It's fine for agent-to-agent reminders. Your own watch timers also show as `periodic-reminder` in
+  `rig watchdog list`: that's the one-shot timer `--wake-after` arms, not a registered repeating reminder. It's retired
+  when it fires or when the task stops being set aside. A wake held back because you were typing (a retained
+  delivery) wasn't delivered, so it doesn't use the timer up: it's tried again at each interval until an attempt goes
+  through (delivered or failed), which retires it. A timer another task shares through `--wake-watchdog` stays live
+  for that task when this task is handed off or stopped, and the same rule applies to its wake. None of this is a
+  delivery guarantee.
 - **Transcript bytes as "usage".** `context-usage-threshold` measures an agent's transcript, not an account's
-  allowance.
+  allowance. For an allowance, see "A usage warning" above.

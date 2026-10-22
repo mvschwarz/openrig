@@ -1,10 +1,10 @@
-import { closeSync, fstatSync, openSync, readSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { loadConfig, configPathFor, DEFAULT_CONFIG, type SlackConnectorConfig } from "./slack/config.js";
 import { resolveSecret } from "./slack/secrets.js";
 import { loadHumanRegistry } from "./human-registry.js";
-import { channelStateDigest, type ChannelOperation } from "./channel-operations.js";
+import { channelStateDigest } from "./channel-operations.js";
 import type { SettingsStore } from "../user-settings/settings-store.js";
 
 /** Shared passive read context. Raw values and the redactor stay inside the domain. */
@@ -68,16 +68,12 @@ export function connectionsProjection(home: string, gateway: Record<string, unkn
   const digest = cfg ? channelStateDigest(cfg) : null;
   const applied = !digest || typeof connector?.configurationDigest !== "string" ? "unverified"
     : connector.configurationDigest === digest ? "matching" : "changed";
-  const verification = latestVerification(home, digest);
-  verification.actor = text(verification.actor);
   // Authored intent describes delivery only after the running wire confirms application.
   const state = !cfg || !secretsAvailable || !gateway ? "unavailable"
     : gateway.state === "failed" ? "failed" : gateway.state !== "active" ? "unavailable"
     : applied === "changed" ? "unapplied" : applied === "unverified" ? "unverified"
     : !cfg.enabled ? "disabled" : !bot || !cfg.channel ? "incomplete"
-    : connector?.outboundReady !== true ? "unverified"
-    : verification.state === "failed" ? "failed" : verification.state === "indeterminate" ? "indeterminate"
-    : "unverified"; // Even a successful dated check is not current external reachability.
+    : "unverified"; // Nothing here reaches Slack; `rig slack verify` checks scopes and channel membership live, not an end-to-end post.
   // OPR.0.6.0.5: no Slack app yet (neither token resolves) → create one from the shipped manifest first.
   const noSlackApp = !!cfg && secretsAvailable && !bot && !app;
   const nextAction = state !== "unavailable" && state !== "failed" && noSlackApp ? "rig slack manifest --url"
@@ -104,7 +100,7 @@ export function connectionsProjection(home: string, gateway: Record<string, unkn
       inboundState: text(inbound?.state) ?? "unverified",
       // Delivery health beside the socket state: an open socket is not proof that events arrive.
       inboundDelivery: text(inbound?.delivery), inboundEventsMissingSince: text(inbound?.eventsMissingSince), applied },
-    state, nextAction, verification,
+    state, nextAction,
     registry: { state: registry.ok ? "available" : "unavailable", path: text(join(home, "gateway", "humans")) },
     humans: registry.ok ? registry.entities.map((h) => ({
       browserKey: browserKey(h.entityId),
@@ -115,33 +111,4 @@ export function connectionsProjection(home: string, gateway: Record<string, unkn
         kind: b.kind, ref: text(b.connectorRef), role: b.role, handle: text(b.handle), credentialReference: Boolean(b.secretsRef) })),
     })) : [],
   };
-}
-
-/** Bounded tail of the EXISTING audit log; no second cache or freshness policy. */
-function latestVerification(home: string, digest: string | null) {
-  const empty = { state: "unverified", at: null as string | null, actor: null as string | null };
-  const file = join(home, "state", "human-channel-operations.jsonl");
-  let fd: number | undefined;
-  try {
-    fd = openSync(file, "r");
-    const size = fstatSync(fd).size;
-    const start = Math.max(0, size - 64 * 1024);
-    const bytes = Buffer.alloc(size - start);
-    readSync(fd, bytes, 0, bytes.length, start);
-    const lines = bytes.toString("utf8").split("\n");
-    if (start) lines.shift();
-    for (const line of lines.reverse()) {
-      if (!line.trim()) continue;
-      const r = JSON.parse(line) as ChannelOperation;
-      if (r.action !== "verify" || r.subject !== "slack") continue;
-      if (!digest || r.before?.digest !== digest) return { ...empty, state: "changed" };
-      if (typeof r.at !== "string" || !Number.isFinite(Date.parse(r.at))) return { ...empty, state: "indeterminate" };
-      return { state: r.effect !== "observed" ? "indeterminate" : r.after?.ready === true ? "ready-at-check"
-        : r.after?.ready === false ? "failed" : "indeterminate", at: r.at,
-        // Actor is an identity; reason/connector responses are deliberately omitted.
-        actor: typeof r.actor === "string" ? r.actor.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 120) : null };
-    }
-    return empty;
-  } catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT" ? empty : { ...empty, state: "indeterminate" }; }
-  finally { if (fd !== undefined) closeSync(fd); }
 }

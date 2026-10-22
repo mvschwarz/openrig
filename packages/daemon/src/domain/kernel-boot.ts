@@ -5,7 +5,8 @@
 // and fires the in-process bootstrap pipeline IN THE BACKGROUND.
 // Short-circuits cleanly when:
 //   - OPENRIG_NO_KERNEL=1 is set (operator opt-out / test fixture)
-//   - A managed rig named `kernel` already exists in the DB
+//   - A managed rig named `kernel` already exists in the DB (restored instead when a reboot or
+//     crash left it down; see classifyManagedKernel)
 //   - Both runtimes are unauthenticated (auth_blocked terminal state)
 //   - The selected variant's spec file is missing
 //
@@ -58,6 +59,10 @@ export interface KernelBootDeps {
   /** Degraded-timer override (ms). Forward-fix #3 default 90s; tests
    *  pass short values to exercise the timer path quickly. */
   degradedTimeoutMs?: number;
+  /** Restore the existing kernel rig the way `rig up kernel --existing` does. Called only for a
+   *  kernel a reboot or crash left down (see `classifyManagedKernel`); resolves to the errors that
+   *  kept it from restoring, if any. Without it, an existing kernel is skipped as before. */
+  restoreLostKernel?: (rigId: string) => Promise<{ errors: string[] }>;
 }
 
 /** Entry point. Idempotent: safe to call on every daemon startup.
@@ -96,8 +101,17 @@ export async function bootKernelIfNeeded(deps: KernelBootDeps): Promise<KernelBo
   // (e.g., from a prior boot or operator-migrated substrate kernel),
   // the builtin path stays out of the way.
   if (kernelAlreadyManaged(deps.rigRepo)) {
-    log("info", "kernel-boot: kernel rig already managed; skipping builtin boot");
+    const managed = classifyManagedKernel(deps.rigRepo, deps.sessionRegistry);
+    if (managed.kind === "lost" && deps.restoreLostKernel) {
+      // Startup reconcile found none of its seats running and marked them detached: a reboot or
+      // crash took it down, not `rig down` (which marks them exited). Bring it back as it was.
+      log("info", "kernel-boot: kernel rig was lost (all seats detached); restoring it");
+      tracker.startBooting(null, deps.restoreLostKernel(managed.rigId), managed.seats, { existingRestore: true });
+      return tracker;
+    }
+    log("info", `kernel-boot: kernel rig already managed (${managed.kind}); skipping builtin boot`);
     tracker.setSkipped("kernel rig already managed");
+    if (managed.kind === "live") tracker.observeManagedKernel();
     return tracker;
   }
 
@@ -151,6 +165,49 @@ export function expectedKernelSeats(specPath: string): string[] | null {
     return seats.length > 0 ? seats : null;
   } catch {
     return null;
+  }
+}
+
+export type ManagedKernel =
+  | { kind: "live" | "lost"; rigId: string; seats: string[] }
+  | { kind: "stopped" | "unknown" };
+
+/** What startup reconcile left of the existing kernel rig, from each seat's newest session:
+ *  - live: some seat is still running;
+ *  - lost: every seat is detached, which reconcile does to a seat whose tmux session is gone, and
+ *    still bound to that session (an unclaimed seat is detached too, but its binding is cleared);
+ *  - stopped: some seat was stopped on purpose (`rig down kernel` or a seat stop marks it exited);
+ *  - unknown: anything else, including more than one current kernel rig or a seat with no session.
+ *  Only `lost` is restored, so a deliberate stop survives daemon restarts. */
+export function classifyManagedKernel(rigRepo: RigRepository, sessionRegistry: SessionRegistry): ManagedKernel {
+  try {
+    const rigs = rigRepo.findUnarchivedRigsByName("kernel");
+    if (rigs.length !== 1) return { kind: "unknown" };
+    const rigId = rigs[0]!.id;
+    const nodes = rigRepo.getRig(rigId)?.nodes ?? [];
+    if (nodes.length === 0) return { kind: "unknown" };
+    const latest = new Map<string, { status: string; createdAt: string; id: string; sessionName: string }>();
+    for (const session of sessionRegistry.getSessionsForRig(rigId)) {
+      const prior = latest.get(session.nodeId);
+      if (!prior || session.createdAt > prior.createdAt || (session.createdAt === prior.createdAt && session.id > prior.id)) {
+        latest.set(session.nodeId, session);
+      }
+    }
+    const statuses = nodes.map((node) => latest.get(node.id)?.status ?? null);
+    const seats = nodes.map((node) => node.logicalId);
+    if (statuses.some((status) => status === "running")) return { kind: "live", rigId, seats };
+    // Reconcile leaves a lost seat's binding in place; unclaiming a seat (which also marks it
+    // detached) clears it and releases ownership. Only seats still bound to their newest session are
+    // the daemon's to bring back.
+    const stillBound = nodes.every((node) => {
+      const session = latest.get(node.id);
+      return !!session && sessionRegistry.getBindingForNode(node.id)?.tmuxSession === session.sessionName;
+    });
+    if (statuses.every((status) => status === "detached") && stillBound) return { kind: "lost", rigId, seats };
+    if (statuses.some((status) => status === "exited")) return { kind: "stopped" };
+    return { kind: "unknown" };
+  } catch {
+    return { kind: "unknown" };
   }
 }
 

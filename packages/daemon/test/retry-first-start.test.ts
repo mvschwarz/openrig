@@ -59,6 +59,48 @@ async function failedAdd(memberOverrides?: Record<string, unknown>) {
 }
 
 describe("explicit first-start retry after projection failure", () => {
+  // A seat's saved effort choice (rig seat set-effort reaches a never-started seat) is what its first
+  // start sends; without one, the authored value just resolved, exactly as before.
+  it("a first start sends the seat's saved effort choice, and keeps the authored value apart", async () => {
+    const f = await failedAdd({ effort: "medium" });
+    f.rigRepo.setNodeEffortChoice(f.node.id, "high");
+    const res = await f.request({ ...f.effectiveMember });
+    expect(res.status, JSON.stringify(await res.clone().json())).toBe(201);
+    expect(vi.mocked(f.adapter.launchHarness).mock.calls[0]![0]).toMatchObject({ effort: "high" });
+    const node = f.rigRepo.getRig(f.rig.id)!.nodes.find(n => n.id === f.node.id)!;
+    expect(node).toMatchObject({ effort: "medium", effortChoice: "high" });
+  });
+
+  // tmux would create dev-pi@first.start as dev-pi@first_start, so the retry would launch a seat
+  // OpenRig could not reach. The preflight the retry shares refuses it before any launch.
+  it("a first start in a rig whose name has a dot is refused before launch", async () => {
+    const f = await failedAdd();
+    f.db.prepare("UPDATE rigs SET name = ? WHERE id = ?").run("first.start", f.rig.id);
+    const res = await f.request();
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    const body = JSON.stringify(await res.json());
+    expect(body).toContain("tmux would create it as");
+    expect(body).toContain("dev-pi@first_start");
+    expect(f.adapter.launchHarness).not.toHaveBeenCalled();
+  });
+
+  it("a first start without a saved choice sends the authored effort, as before", async () => {
+    const f = await failedAdd({ effort: "medium" });
+    const res = await f.request();
+    expect(res.status).toBe(201);
+    expect(vi.mocked(f.adapter.launchHarness).mock.calls[0]![0]).toMatchObject({ effort: "medium" });
+  });
+
+  it("the materialized-seat launch (launchBinding, used by the kernel first start) sends the saved choice too", async () => {
+    const f = await failedAdd({ effort: "medium" });
+    f.rigRepo.setNodeEffortChoice(f.node.id, "low");
+    const pod = { id: "dev", label: "Dev", members: [{ id: "pi", agentRef: "local:agent", profile: "default", runtime: "pi", model: "provider/model", cwd: root, effort: "medium" }], edges: [] };
+    const rigSpec = { version: "0.2", name: "first-start", pods: [pod], edges: [] };
+    const result = await f.podInstantiator.launchBinding({ rigId: f.rig.id, rigSpec: rigSpec as never, rigRoot: root, pod: pod as never, member: pod.members[0] as never, qualifiedId: "dev.pi", nodeId: f.node.id });
+    expect(result.status, JSON.stringify(result)).toBe("launched");
+    expect(vi.mocked(f.adapter.launchHarness).mock.calls.at(-1)![0]).toMatchObject({ effort: "low" });
+  });
+
   it("reprojects and delivers required startup on the same node without touching its sibling or history", async () => {
     const f = await failedAdd();
     const before = f.rigRepo.getRig(f.rig.id)!;

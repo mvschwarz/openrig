@@ -70,21 +70,25 @@ export class SnapshotRepository {
    * resume-tokenless rigs still resolve.
    */
   findLatestRestoreUsable(rigId: string): Snapshot | null {
-    const rows = this.db
+    // Rank by id alone: each capture's data can be large, and only the first usable one is needed. A row removed
+    // between the ranking and its read is skipped like an unusable one.
+    const ids = this.db
       .prepare(
-        "SELECT * FROM snapshots WHERE rig_id = ? ORDER BY (kind IN ('auto-pre-down', 'auto-periodic')) DESC, created_at DESC, rowid DESC"
+        "SELECT id FROM snapshots WHERE rig_id = ? ORDER BY (kind IN ('auto-pre-down', 'auto-periodic')) DESC, created_at DESC, rowid DESC"
       )
-      .all(rigId) as SnapshotRow[];
+      .all(rigId) as Array<{ id: string }>;
 
-    for (const row of rows) {
+    for (const { id } of ids) {
+      const row = this.rowById(id);
+      if (!row) continue;
       let data: SnapshotData;
       try {
-        data = JSON.parse(row.data) as SnapshotData;
+        data = decodeStoredSnapshotData(row.data);
       } catch {
         continue;
       }
       if (!isRestoreUsableSnapshotData(data)) continue;
-      return this.rowToSnapshot(row);
+      return { id: row.id, rigId: row.rig_id, kind: row.kind, status: row.status, data, createdAt: row.created_at };
     }
     return null;
   }
@@ -110,19 +114,21 @@ export class SnapshotRepository {
 
     // Equal second-resolution timestamps still have an insertion order. Scan
     // only newer rows, retaining restore's tolerant parse for damaged captures.
-    const candidates = this.db.prepare("SELECT * FROM snapshots WHERE rig_id = ? ORDER BY created_at DESC, rowid DESC")
-      .all(rigId) as SnapshotRow[];
+    const candidates = this.db.prepare("SELECT id, created_at FROM snapshots WHERE rig_id = ? ORDER BY created_at DESC, rowid DESC")
+      .all(rigId) as Array<Pick<SnapshotRow, "id" | "created_at">>;
     const selectedIndex = candidates.findIndex((candidate) => candidate.id === snapshot!.id);
     // A concurrent pruner can remove the selected row after it was read. Its
     // insertion position is then unknown, so only strictly newer timestamps count.
     const newerRows = selectedIndex < 0
       ? candidates.filter((row) => parseSqliteUtcMs(row.created_at) > parseSqliteUtcMs(snapshot!.createdAt))
       : candidates.slice(0, selectedIndex);
-    const newer = newerRows.flatMap((row) => {
-      const candidate = this.restoreUsableRow(row);
-      return candidate ? [candidate] : [];
-    })
-      .find((candidate) => isRestoreUsableSnapshotData(candidate.data));
+    // Read newer captures' data only until the first usable one.
+    let newer: Snapshot | undefined;
+    for (const { id } of newerRows) {
+      const row = this.rowById(id);
+      const candidate = row ? this.restoreUsableRow(row) : null;
+      if (candidate && isRestoreUsableSnapshotData(candidate.data)) { newer = candidate; break; }
+    }
     const mode = snapshotId ? "explicit" as const : "automatic" as const;
     return {
       ok: true,
@@ -189,6 +195,10 @@ export class SnapshotRepository {
       )`).run(rigId, kind, rigId, kind, effectiveKeep).changes;
   }
 
+  private rowById(id: string): SnapshotRow | undefined {
+    return this.db.prepare("SELECT * FROM snapshots WHERE id = ?").get(id) as SnapshotRow | undefined;
+  }
+
   private restoreUsableRow(row: SnapshotRow): Snapshot | null {
     let snapshot: Snapshot;
     try { snapshot = this.rowToSnapshot(row); }
@@ -205,10 +215,27 @@ export class SnapshotRepository {
       rigId: row.rig_id,
       kind: row.kind,
       status: row.status,
-      data: JSON.parse(row.data) as SnapshotData,
+      data: decodeStoredSnapshotData(row.data),
       createdAt: row.created_at,
     };
   }
+}
+
+/** Read historical selection provenance without rewriting saved snapshots or
+ * exposing the old key. An explicit current key (including null) takes priority. */
+export function decodeStoredSnapshotData(json: string): SnapshotData {
+  const data = JSON.parse(json) as SnapshotData;
+  if (Array.isArray(data?.sessions)) {
+    for (const session of data.sessions) {
+      if (!session || typeof session !== "object") continue;
+      const stored = session as typeof session & { agentApp?: unknown };
+      if (!("communityHarness" in stored) && typeof stored.agentApp === "string" && stored.agentApp.length > 0) {
+        stored.communityHarness = stored.agentApp;
+      }
+      delete stored.agentApp;
+    }
+  }
+  return data;
 }
 
 export function summarizeSnapshot(snapshot: Snapshot, nowMs: number = Date.now()): RestoreSnapshotSummary {

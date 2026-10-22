@@ -124,3 +124,38 @@ test("configured gate port does not accept a partial numeric prefix", () => {
   `], { env: { ...process.env, OPENRIG_GATE_LANE_PORT: "40404typo" }, encoding: "utf8" });
   assert.deepEqual(JSON.parse(stdout), { finite: false, ok: false, reason: "bind-error" });
 });
+
+
+test("a local probe connection cannot delay gate release", async () => {
+  const root = mkdtempSync(join(tmpdir(), "openrig-lock-probe-"));
+  const reservation = net.createServer();
+  await new Promise((resolve) => reservation.listen(0, "127.0.0.1", resolve));
+  const port = reservation.address().port;
+  await new Promise((resolve) => reservation.close(resolve));
+  const lane = await acquireGateLane({ port, holderInfoPath: join(root, "holder.json") });
+  assert.equal(lane.ok, true);
+  const client = net.connect(port, "127.0.0.1");
+  client.on("error", () => {});
+  let release;
+  let timer;
+  try {
+    await new Promise((resolve, reject) => {
+      client.once("connect", resolve);
+      client.once("error", reject);
+    });
+    release = lane.release();
+    const completed = await Promise.race([
+      release.then(() => true),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(false), 500); }),
+    ]);
+    assert.equal(completed, true, "an idle local connection must not keep the mutex owner alive");
+    const next = await acquireGateLane({ port, holderInfoPath: join(root, "holder.json") });
+    assert.equal(next.ok, true);
+    if (next.ok) await next.release();
+  } finally {
+    clearTimeout(timer);
+    client.destroy();
+    await (release ?? lane.release());
+    rmSync(root, { recursive: true, force: true });
+  }
+});

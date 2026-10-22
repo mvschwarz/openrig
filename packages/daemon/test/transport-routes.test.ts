@@ -506,7 +506,8 @@ describe("transport routes", () => {
     expect(body.sent).toBe(true);
     expect(body.attempts).toBe(2);
     expect(body.activity.state).toBe("idle");
-    expect(sendTextSpy).toHaveBeenCalledWith("dev-impl@my-rig", "hello");
+    // The route passes the caller's cancellation check, run by the adapter just before the paste.
+    expect(sendTextSpy).toHaveBeenCalledWith("dev-impl@my-rig", "hello", expect.any(Function));
   });
 
   it("POST /send rejects force with waitForIdleMs before sending", async () => {
@@ -928,21 +929,24 @@ describe("transport routes", () => {
     expect(delivered.every((t) => !t.includes("anyone@my-rig"))).toBe(true);
   });
 
-  it("P21 I4 → S2: --dangerously-interact with NO identity delivers; a non-needs_input target writes NO override audit row", async () => {
+  it("P21 I4 → S2: --dangerously-interact with NO identity delivers and audits its actual idle state", async () => {
     seedRig();
     const eventBus = new EventBus(db);
-    const app = createApp({ sessionTransport: new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux(), eventBus, agentActivityStore: new AgentActivityStore({ db, eventBus }) }) });
+    const agentActivityStore = new AgentActivityStore({ db, eventBus });
+    agentActivityStore.recordHookEvent({ runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "Stop" });
+    const app = createApp({ sessionTransport: new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux(), eventBus, agentActivityStore }) });
     const res = await app.request("/api/transport/send", {
       method: "POST",
       headers: { "Content-Type": "application/json" }, // NO X-OpenRig-Session
       body: JSON.stringify({ session: "dev-impl@my-rig", text: "drive it", dangerouslyInteract: true, reason: "why" }),
     });
-    // S2 (OPR.0.5.4.3): the 401 is retired. The idle target takes the normal
-    // send path; the override audit exists only on the needs_input branch, so
-    // no row is written here — unchanged posture, now unattributed-tolerant.
+    // Unknown-sender delivery stays accepted. Explicit interaction now audits
+    // every readiness state without inventing an actor or a positive prompt.
     expect(res.status).toBe(200);
-    const rows = db.prepare("SELECT * FROM events WHERE type = 'transport.prompt_override'").all();
-    expect(rows).toHaveLength(0);
+    const rows = db.prepare("SELECT payload FROM events WHERE type = 'transport.prompt_override'").all() as Array<{ payload: string }>;
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0]!.payload)).toMatchObject({ actorSession: null,
+      overrideReason: "why", detectedState: "idle", evidenceSource: "runtime_hook" });
   });
 
   it("P21 I4: a body actorSession that DIFFERS from the header is SUPERSEDED (no identity_mismatch refusal)", async () => {

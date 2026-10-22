@@ -7,6 +7,7 @@ import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-life
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { answerShowsAction, isPlanAnswer, notAPlanMessage, planSupportRefusal } from "../launch-plan-guard.js";
+import { resolveRigHandle } from "../rig-handle.js";
 
 type LaunchResponse = {
   ok: boolean;
@@ -48,8 +49,26 @@ function printSnapshotSelection(selection: LaunchResponse["snapshotSelection"]):
   if (newer?.snapshotId) console.log(`Newer usable alternative: ${newer.snapshotId}${newer.kind ? ` (${newer.kind})` : ""}`);
 }
 
+/** A rig name that matches more than one active rig stops before any request: it would fail as "not found" anyway,
+ *  and the candidates let the person re-run with the right id. */
+function refuseAmbiguousRig(handle: string, ids: string[], json: boolean | undefined, host?: string, count = ids.length): void {
+  const fact = `'${handle}' matches ${count} rigs${host ? ` on host ${host}` : ""}.`;
+  const consequence = "Nothing was launched.";
+  const action = `Re-run with the specific rig id: ${ids.join("  |  ")}`;
+  if (json) console.log(JSON.stringify({ ok: false, code: "rig_ambiguous", error: { fact, consequence, action, candidates: ids } }));
+  else {
+    console.error(`Error: ${fact}`);
+    console.error(`  ${consequence}`);
+    console.error(`  ${action}`);
+  }
+  process.exitCode = 1;
+}
+
+/** Build the launch command, allowing local launches that start seats a longer wait than previews. */
 export function launchCommand(depsOverride?: StatusDeps): Command {
-  const cmd = new Command("launch").description("Launch or relaunch a node in a running rig");
+  const cmd = new Command("launch")
+    .description("Launch a node in a running rig, unless it's already running")
+    .addHelpText("after", "\nA running node is left as it is. For a fresh occupant in a running seat, use\n`rig seat launch <seat> --fresh --stop --reason <why>` (`--plan` previews it).");
   const getDeps = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
   async function getClient(deps: StatusDeps): Promise<DaemonClient | null> {
@@ -59,7 +78,7 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
   }
 
   cmd
-    .argument("<rigId>", "Target rig ID")
+    .argument("<rig>", "Rig name or ID")
     .argument("[nodeRef]", "Node logical ID or node ID (single target)")
     .option("--seats <ids>", "Comma-separated logical IDs for subset launch")
     .option("--hold-reason <reason>", "Reason for holding non-target seats")
@@ -69,7 +88,7 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
     .option("--plan", "Show subset selection and non-target effects without mutation")
     .option("--json", "JSON output")
     .option("--host <id>", "Run on a remote host declared in ~/.openrig/hosts.yaml")
-    .action(async (rigId: string, nodeRef: string | undefined, opts: { json?: boolean; holdReason?: string; seats?: string; host?: string; snapshotId?: string; plan?: boolean; retryStartupFrom?: string; rigRoot?: string }) => {
+    .action(async (rigHandle: string, nodeRef: string | undefined, opts: { json?: boolean; holdReason?: string; seats?: string; host?: string; snapshotId?: string; plan?: boolean; retryStartupFrom?: string; rigRoot?: string }) => {
       // OPR.0.4.6.MH1 FR-2: selected-host routing — explicit --host wins;
       // else the persisted selection feeds the SHIPPED --host path; no
       // selection = today exactly.
@@ -117,15 +136,23 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
         return;
       }
 
+      // The rig is named by its id or by its name; resolution runs once, after the input checks, right before the
+      // request. An exact id wins (archived rigs included), then one active rig of that name. A missing handle or a
+      // lookup that can't be read keeps today's path: the handle goes to the daemon as an id.
+      let rigId = rigHandle;
+      let rigLabel = rigHandle;
+      // Set when the handle matched a rig's name: `rig seat launch` resolves `<logicalId>@<rig name>` within that rig.
+      let rigName: string | undefined;
+
       if (opts.host) {
-        const { runRemoteHttpOp } = await import("../remote-host-ops.js");
+        const { runRemoteHttpOp, lookupRemoteRigId } = await import("../remote-host-ops.js");
         const seatList = opts.seats
           ? opts.seats.split(",").map((s) => s.trim()).filter(Boolean)
           : (isSingleNodePlan && trimmedNodeRef ? [trimmedNodeRef] : []);
-        let apiPath: string;
         let body: unknown;
+        let route: "subset" | "single";
         if (seatList.length > 0) {
-          apiPath = `/api/rigs/${encodeURIComponent(rigId)}/nodes/launch-subset`;
+          route = "subset";
           body = {
             seats: seatList,
             ...(opts.holdReason ? { holdReason: opts.holdReason } : {}),
@@ -144,7 +171,7 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
             process.exitCode = 1;
             return;
           }
-          apiPath = `/api/rigs/${encodeURIComponent(rigId)}/nodes/${encodeURIComponent(nodeRef)}/launch`;
+          route = "single";
           body = retryBody ?? (opts.snapshotId ? { snapshotId: opts.snapshotId } : {});
         } else {
           console.error("Either a node reference or --seats is required for launch --host");
@@ -165,6 +192,16 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
             return;
           }
         }
+        // After the plan-support check, so a plan the daemon can't honour costs no lookup.
+        const lookup = await lookupRemoteRigId(opts.host, rigHandle, deps);
+        if (lookup.kind === "ambiguous") {
+          refuseAmbiguousRig(rigHandle, lookup.ids, opts.json, opts.host, lookup.count);
+          return;
+        }
+        if (lookup.kind === "resolved") rigId = lookup.rigId;
+        const apiPath = route === "subset"
+          ? `/api/rigs/${encodeURIComponent(rigId)}/nodes/launch-subset`
+          : `/api/rigs/${encodeURIComponent(rigId)}/nodes/${encodeURIComponent(nodeRef!)}/launch`;
         const result = await runRemoteHttpOp(opts.host, "POST", apiPath, body, deps, opts);
         const notAPlan = Boolean(opts.plan && !isPlanAnswer(result.data) && answerShowsAction(result.ok, result.data));
         if (notAPlan) {
@@ -207,6 +244,23 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
         ? opts.seats.split(",").map((s) => s.trim()).filter(Boolean)
         : (isSingleNodePlan && trimmedNodeRef ? [trimmedNodeRef] : []);
 
+      const resolveLocalRig = async (): Promise<boolean> => {
+        // A rig list that can't be matched (it throws on a malformed entry) keeps the raw handle, like a failed read.
+        const resolution = await resolveRigHandle(client, rigHandle).catch(() => ({ kind: "passthrough" as const, handle: rigHandle }));
+        if (resolution.kind === "ambiguous") {
+          refuseAmbiguousRig(rigHandle, resolution.ids, opts.json);
+          return false;
+        }
+        if (resolution.kind === "resolved") {
+          rigId = resolution.id;
+          if (resolution.byName) {
+            rigLabel = `${rigHandle} (${resolution.id})`;
+            rigName = rigHandle;
+          }
+        }
+        return true;
+      };
+
       if (seatList.length > 0) {
         const body: { seats: string[]; holdReason?: string; snapshotId?: string; plan?: boolean; nonTargetMode?: "unchanged" | "detach_and_hold" } = { seats: seatList };
         if (opts.holdReason) body.holdReason = opts.holdReason;
@@ -231,7 +285,9 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
           }
           body.plan = true;
         }
-        const res = await client.post<LaunchResponse>(`/api/rigs/${encodeURIComponent(rigId)}/nodes/launch-subset`, body);
+        if (!(await resolveLocalRig())) return;
+        const res = await client.post<LaunchResponse>(`/api/rigs/${encodeURIComponent(rigId)}/nodes/launch-subset`, body,
+          opts.plan ? undefined : { timeoutMs: 120_000 });
         const notAPlan = Boolean(opts.plan && !isPlanAnswer(res.data) && answerShowsAction(res.status >= 200 && res.status < 300, res.data));
         if (notAPlan) {
           console.error(notAPlanMessage());
@@ -319,10 +375,11 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
         return;
       }
 
+      if (!(await resolveLocalRig())) return;
       const body: Record<string, unknown> = retryBody ?? {};
       if (opts.snapshotId) body.snapshotId = opts.snapshotId;
 
-      const res = await client.post<LaunchResponse>(`/api/rigs/${encodeURIComponent(rigId)}/nodes/${encodeURIComponent(nodeRef)}/launch`, body);
+      const res = await client.post<LaunchResponse>(`/api/rigs/${encodeURIComponent(rigId)}/nodes/${encodeURIComponent(nodeRef)}/launch`, body, { timeoutMs: 120_000 });
       if (opts.json) {
         console.log(JSON.stringify(res.data, null, 2));
         if (res.status >= 400) process.exitCode = 1;
@@ -343,12 +400,13 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
         for (const w of res.data.warnings ?? []) console.warn(`Warning: ${w}`);
       };
       if (res.data.code === "already_running" || (res.data.alreadyRunning && res.data.alreadyRunning.length > 0)) {
-        console.log(`Node ${logicalId} is already running in rig ${rigId} (not relaunched)`);
+        console.log(`Node ${logicalId} is already running in rig ${rigLabel} (not relaunched)`);
+        console.log(`For a fresh occupant: rig seat launch ${rigName ? `${logicalId}@${rigName}` : logicalId} --fresh --stop --reason "<why>"`);
         printLaunchWarnings();
         return;
       }
       const sessionSuffix = res.data.sessionName ? ` (${res.data.sessionName})` : "";
-      console.log(`Launched node ${logicalId} in rig ${rigId}${sessionSuffix}`);
+      console.log(`Launched node ${logicalId} in rig ${rigLabel}${sessionSuffix}`);
       printLaunchWarnings();
     });
 

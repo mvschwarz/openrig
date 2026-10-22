@@ -221,9 +221,12 @@ describe("ClaudeResumeAdapter", () => {
     });
 
     it("retains positive returned-to-shell refusal", async () => {
+      // Positive: the pane's own shell owns the foreground, alone in its group, in both samples.
       const adapter = new ClaudeResumeAdapter(mockTmux({
-        getPaneCommand: async () => "zsh", capturePaneContent: async () => "$ ",
-      }), { pollMs: 0, maxWaitMs: 0 });
+        getPaneCommand: async () => "zsh", capturePaneContent: async () => "$ ", getPanePid: async () => 4321,
+      }), { pollMs: 0, maxWaitMs: 0, listProcesses: async () => [
+        { pid: 4321, ppid: 1, pgid: 4321, tpgid: 4321, command: "-zsh", executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000" },
+      ] });
       expect(await adapter.resume("worker", "claude_id", "retained-history", "/repo"))
         .toMatchObject({ ok: false, code: "retry_fresh" });
     });
@@ -419,7 +422,8 @@ describe("ClaudeResumeAdapter", () => {
 
     it.each([
       ["2.1.283", "attention_required"],
-      ["sh", "retry_fresh"],
+      // The shell label isn't a proven idle shell: another Claude holds the foreground, so the launch is kept.
+      ["sh", "attention_required"],
     ] as const)("does not accept the prompt behind %s when the native process carries another resume token", async (paneCommand, expectedCode) => {
       const tmux = mockTmux({
         getPanePid: vi.fn(async () => 1234),
