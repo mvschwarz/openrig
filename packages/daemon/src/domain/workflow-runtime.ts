@@ -1740,14 +1740,16 @@ export class WorkflowRuntime {
     boundaryObligations: LifecycleObligation[];
   } {
     const instance = this.instanceStore.getByIdOrThrow(instanceId);
-    const trail = options.fullHistory
-      ? this.trailLog.listForInstanceInAppendOrder(instanceId).reverse()
-      : this.trailLog.listForInstance(instanceId);
+    // The default's order either way. One row past the 50 shows whether the default cut anything;
+    // a negative LIMIT is SQLite's "no limit".
+    const read = this.trailLog.listForInstance(instanceId, options.fullHistory ? -1 : 51);
+    const cut = !options.fullHistory && read.length > 50;
+    const trail = cut ? read.slice(0, 50) : read;
     const inspected = this.inspect(instanceId);
     return {
       instance: this.withDeadline(instance),
       trail,
-      trailCompleteness: options.fullHistory ? "complete" : "recent",
+      trailCompleteness: cut ? "recent" : "complete",
       guidance: this.guidance(instanceId),
       reconciliation: this.inspectGraph(instanceId),
       frontier: inspected.frontier,
