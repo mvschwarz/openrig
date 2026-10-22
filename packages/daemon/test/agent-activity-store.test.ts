@@ -106,6 +106,17 @@ describe("AgentActivityStore", () => {
     expect(latest()).toMatchObject({ rawEvent: "UserPromptSubmit" });
   });
 
+  it("windows the node's newest records before choosing the session, so a new session never walks the older history", () => {
+    const { node, sessionName } = seedSession("codex");
+    const store = new AgentActivityStore({ db, eventBus, now: () => NOW });
+    store.recordHookEvent({ runtime: "codex", sessionName, hookEvent: "Stop", sourceSequence: 1, occurredAt: "2026-04-24T11:59:00.000Z" });
+    const firstSeq = (db.prepare("SELECT MAX(seq) AS s FROM events WHERE node_id = ?").get(node.id) as { s: number }).s;
+    for (let i = 0; i < 200; i++) store.recordHookEvent({ runtime: "codex", sessionName, hookEvent: "UserPromptSubmit", sourceSequence: 2 + i, occurredAt: "2026-04-24T11:59:30.000Z" });
+    db.prepare("UPDATE events SET payload = json_set(payload, '$.sessionName', 'earlier-session') WHERE node_id = ? AND seq > ?").run(node.id, firstSeq);
+    // The session's own record is older than the node's newest 200, which all belong to another session.
+    expect(store.getLatestForNode({ nodeId: node.id, sessionName, now: NOW, order: "source" })).toBeNull();
+  });
+
   it("does not let a hook claiming OMP escalate runtime_error on another runtime's seat", () => {
     const { node, sessionName } = seedSession("codex");
     const store = new AgentActivityStore({ db, eventBus, now: () => NOW });

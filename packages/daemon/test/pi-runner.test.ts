@@ -7,7 +7,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { PassThrough } from "node:stream";
 import {
-  createRunnerInput, MAX_PI_INPUT_BYTES, RunnerCore, mapPiEvent, parseRunnerArgs,
+  createRunnerInput, inOrder, MAX_PI_INPUT_BYTES, RunnerCore, mapPiEvent, parseRunnerArgs,
   prepareRunnerSidecar,
   type RunnerIo,
 } from "../src/adapters/pi-runner.js";
@@ -42,6 +42,36 @@ function readyCore(f = fakeIo()) {
   }));
   return { core, ...f };
 }
+
+// ── Activity posts arrive in the runner's own order ─────────────────────────
+
+describe("inOrder", () => {
+  it("starts a post only after the one before it settles, even when the first is slow", async () => {
+    const started: string[] = [];
+    const releases: Array<() => void> = [];
+    const send = inOrder((name: string) => new Promise<string>((resolve) => {
+      started.push(name);
+      releases.push(() => resolve(name));
+    }));
+    const first = send("beat");
+    const second = send("agent_start");
+    await Promise.resolve(); await Promise.resolve();
+    expect(started).toEqual(["beat"]);
+    releases[0]();
+    await first;
+    await Promise.resolve(); await Promise.resolve();
+    expect(started).toEqual(["beat", "agent_start"]);
+    releases[1]();
+    await expect(second).resolves.toBe("agent_start");
+  });
+
+  it("goes on to the next post when one fails", async () => {
+    const send = inOrder(async (n: number) => { if (n === 1) throw new Error("down"); return n; });
+    const failed = send(1);
+    await expect(send(2)).resolves.toBe(2);
+    await expect(failed).rejects.toThrow("down");
+  });
+});
 
 // ── Idle heartbeat ──────────────────────────────────────────────────────────
 

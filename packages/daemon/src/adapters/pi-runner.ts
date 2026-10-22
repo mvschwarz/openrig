@@ -1011,6 +1011,16 @@ export function prepareRunnerSidecar(
   return { catchUpSince: resuming ? prior?.lastEntryId : undefined };
 }
 
+/** Wraps an async send so calls run one after another in call order; a send that rejects doesn't hold up the ones behind it. */
+export function inOrder<A, R>(send: (arg: A) => Promise<R>): (arg: A) => Promise<R> {
+  let tail: Promise<unknown> = Promise.resolve();
+  return (arg) => {
+    const result = tail.then(() => send(arg));
+    tail = result.catch(() => undefined);
+    return result;
+  };
+}
+
 /** How often an OMP runner re-delivers an unconfirmed session identity. */
 const IDENTITY_RETRY_MS = 30_000;
 /** Below the daemon's 5 minute hook freshness window (AGENT_ACTIVITY_FRESHNESS_MS). */
@@ -1227,6 +1237,22 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     notice: (line) => { process.stdout.write(`${line}\n`); },
   });
 
+  // One activity post at a time: the daemon reads its newest record by arrival, so a beat still in flight when a turn
+  // starts must not land after the turn's first post. Each post's own 1.5 s timeout bounds the wait behind it.
+  const postInOrder = inOrder((payload: Record<string, unknown>): Promise<Record<string, unknown> | null> => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1500);
+    return fetch(new URL("/api/activity/hooks", endpoint!.baseUrl).toString(), {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${endpoint!.token}` },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    })
+      .then(async (response) => response.ok && runtime === "omp" ? await response.json() as Record<string, unknown> : null)
+      .catch(() => null)
+      .finally(() => clearTimeout(timeout));
+  });
+
   const io: RunnerIo = {
     sendRpc: (cmd) => {
       try { child.stdin.write(`${JSON.stringify(cmd)}\n`); } catch { /* exit handler reports */ }
@@ -1235,24 +1261,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     mirrorAppend: (text) => process.stdout.write(text),
     postActivity: (payload) => {
       if (!endpoint || typeof fetch !== "function") return;
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 1500);
-      const request = fetch(new URL("/api/activity/hooks", endpoint.baseUrl).toString(), {
-        method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${endpoint.token}` },
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      });
-      if (runtime !== "omp") {
-        request.catch(() => { /* best-effort — never blocks the loop */ }).finally(() => clearTimeout(timeout));
-        return;
-      }
+      const result = postInOrder(payload).catch(() => null);
       // OMP reads the acknowledgement so identity delivery can retry; null
       // (transport failure or a non-OK reply) means "not yet persisted".
-      return request
-        .then(async (response) => response.ok ? await response.json() as Record<string, unknown> : null)
-        .catch(() => null)
-        .finally(() => clearTimeout(timeout));
+      if (runtime === "omp") return result;
     },
     writeSidecar: (state) => {
       try {
