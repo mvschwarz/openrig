@@ -85,8 +85,9 @@ export function hasLiveHumanGate(item: {
 }
 
 const AUTO_UNPARK_WAKE_TAG = "queue:auto-unpark:blocker";
-/** A durable wake OpenRig's own scheduling triggered (an auto-unpark), not an agent's create or handoff: it keeps that
- *  source when it's replayed later. */
+/** A durable wake OpenRig's own scheduling triggered (an auto-unpark, a row OpenRig creates), not an agent's create or
+ *  handoff: it keeps that source when it's replayed later. Send, broadcast, queue create and the cross-host forward never
+ *  set it from a request; the trusted local outbox recorder (/api/queue/outbox/record) accepts caller tags by design. */
 const WAKE_TRIGGER_OPENRIG_TAG = "queue:wake-trigger:openrig";
 
 /** Who triggered a wake, which is its source at the seat's interruption level: an agent's create or handoff nudge, or
@@ -325,7 +326,7 @@ type WakeAttemptOutcome = {
 
 export interface QueueCreateInput {
   /** Internal: a row OpenRig creates itself (a sweep finding, a health notice, a mode-end notice) wakes as OpenRig's own
-   *  message at the destination's interruption level. Never accepted from the HTTP queue routes. */
+   *  message at the destination's interruption level. Queue create and the cross-host forward never take it from a request. */
   wakeTrigger?: WakeTrigger;
   qitemId?: string;
   sourceSession: string;
