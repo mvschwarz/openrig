@@ -104,12 +104,14 @@ export class SeatActivityService {
     return this.observeSeat(paneId, opts, null);
   }
 
-  /** pollSeat with the sweep's batched read: the seat's timestamp comes from `batch` when it has one, and
-   *  only a seat missing from it is read per target, so a sweep costs one tmux spawn instead of one per seat. */
+  /** pollSeat with the sweep's batched read: the seat's timestamp comes from `batch` when it has one, so a sweep costs
+   *  one tmux spawn instead of one per seat. A seat missing from a batch that was read is not asked about by target:
+   *  its session is gone, or its value is the same malformed one a per-target read returns, and tmux 3.2a (Ubuntu
+   *  22.04's) exits its whole server when asked about a vanished target. Only with no batch is each seat read per target. */
   private async observeSeat(paneId: string, opts: PollSeatOptions | undefined, batch: Map<string, number> | null): Promise<SeatActivity | null> {
     const silenceWindowSeconds = opts?.silenceWindowSeconds ?? this.defaultWindowSeconds;
     let lastActivityEpochSeconds: number | null = batch?.get(paneId) ?? null;
-    if (lastActivityEpochSeconds === null) {
+    if (lastActivityEpochSeconds === null && batch === null) {
       try {
         lastActivityEpochSeconds = await this.tmux.readPaneLastActivity(paneId);
       } catch {
@@ -297,8 +299,8 @@ export class SeatActivityService {
         }
       }
 
-      // One tmux call reads every session's window activity for this tick; a seat missing from it (or no
-      // batch at all) falls back to its own read, exactly as before.
+      // One tmux call reads every session's window activity for this tick; only with no batch at all does each seat
+      // fall back to its own read, as before.
       let batch: Map<string, number> | null = null;
       if (tmuxRows.length > 0 && this.tmux.readAllSessionWindowActivity) {
         try { batch = await this.tmux.readAllSessionWindowActivity(); } catch { batch = null; }

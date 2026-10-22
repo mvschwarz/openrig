@@ -100,13 +100,14 @@ describe("SeatActivityService sweep with the batch", () => {
     return { out, calls };
   }
 
-  it("same observations as the per-seat path; one tmux call plus per-seat reads only for the misses", async () => {
+  it("same observations as the per-seat path, in one tmux call, and no per-target query for a seat the batch lacks", async () => {
     const per = await sweep(false), bat = await sweep(true);
     expect(bat.out).toEqual(per.out);
     expect(per.calls).toHaveLength(5);                                   // one display-message per seat before
     expect(bat.calls.filter((c) => c.startsWith("tmux list-windows -a"))).toHaveLength(1);
-    // misses fall back: s3 (no valid timestamp) and gone@rig (no such session); s1, s2, s4 come from the batch
-    expect(bat.calls.filter((c) => c.startsWith("tmux display-message")).map((c) => c.match(/-t (\S+)/)![1]).map(unquote).sort()).toEqual(["=gone@rig:", "=s3@rig:"]);
+    // s1, s2, s4 come from the batch. gone@rig (no such session) and s3 (no valid timestamp, the same value a per-target
+    // read returns) are not asked about by target: tmux 3.2a exits its whole server on a query for a vanished target.
+    expect(bat.calls.filter((c) => c.startsWith("tmux display-message")).map((c) => c.match(/-t (\S+)/)![1]).map(unquote)).toEqual([]);
     expect(bat.out["s1@rig"]!.isActiveWithinWindow).toBe(true);
     expect(bat.out["s2@rig"]!.isActiveWithinWindow).toBe(false);
   });
