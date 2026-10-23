@@ -940,7 +940,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   // 27. rig_team — a rig's seats and its lead
   server.tool(
     "rig_team",
-    "Show a rig's team: its lead, the seat a person's message to the rig reaches (its one seat that delegates to others and that nothing delegates to), and each seat's pod, role, runtime, delegation (reportsTo, delegatesTo) and activity as the daemon reports it. Activity the daemon doesn't know reads unknown, never idle.",
+    "Show a rig's team: its lead, the rig's one delegates_to root (the seat that delegates to others and that nothing delegates to: the seat to delegate to), and each seat's pod, role, runtime, delegation (reportsTo, delegatesTo) and activity as the daemon reports it. Activity the daemon doesn't know reads unknown, never idle.",
     {
       rigId: z.string().describe("Rig name or identifier"),
     },

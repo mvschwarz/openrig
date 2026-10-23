@@ -353,7 +353,7 @@ rigsRoutes.get("/:id", (c) => {
   if (!rig) {
     return c.json({ error: "rig not found" }, 404);
   }
-  // The seat a person's message to the rig reaches (its one delegates_to root), resolved as the queue and Slack resolve it.
+  // The rig's one delegates_to root at its session: null when there's none or several, or the root has no session.
   return c.json({ ...rig, representative: resolveRigRepresentativeById(repo.db, rig.rig.id) });
 });
 

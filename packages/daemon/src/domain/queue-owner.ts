@@ -42,7 +42,7 @@ export function resolveRigRepresentative(db: Database.Database, rigName: string)
   return resolveRigRepresentativeById(db, rigs[0]!.id);
 }
 
-/** The same representative for a rig already known by id. */
+/** The same delegation-root rule for a rig already known by id, so another rig with the same name doesn't matter. */
 export function resolveRigRepresentativeById(db: Database.Database, rigId: string): string | null {
   const roots = db
     .prepare(
