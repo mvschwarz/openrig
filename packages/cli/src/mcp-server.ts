@@ -22,23 +22,24 @@ type TextResult = {
  * anything else (no match, or the rig list can't be read) goes to the daemon as given. `known` is false
  * only when the rig list was read and nothing matched.
  */
-async function rigIdFor(client: DaemonClient, handle: string): Promise<{ id: string; known: boolean } | TextResult> {
+async function rigIdFor(client: DaemonClient, handle: string): Promise<{ id: string; known: boolean; resolved: boolean } | TextResult> {
   const resolution = await resolveRigHandle(client, handle);
   if (resolution.kind === "ambiguous") {
     const message = `'${handle}' matches ${resolution.ids.length} rigs. Nothing was done; pass one of these ids instead.`;
     return { content: [{ type: "text", text: JSON.stringify({ ok: false, code: "rig_ambiguous", message, candidates: resolution.ids }) }], isError: true };
   }
-  if (resolution.kind === "resolved") return { id: resolution.id, known: true };
-  return { id: handle, known: resolution.kind === "passthrough" };
+  if (resolution.kind === "resolved") return { id: resolution.id, known: true, resolved: true };
+  return { id: handle, known: resolution.kind === "passthrough", resolved: false };
 }
 
-/** The rig id for a chatroom tool: rigIdFor's, and an error for a handle no rig has. History answers [] for an
- *  unknown id, which would read as an empty room. */
+/** The rig id for a chatroom tool: only a handle the rig list resolves. History answers [] for an unknown id, so a
+ *  handle no rig has, or one the list couldn't be read to check, would otherwise read as an empty room. */
 async function chatRigId(client: DaemonClient, handle: string): Promise<{ id: string } | TextResult> {
   const rig = await rigIdFor(client, handle);
   if ("content" in rig) return rig;
-  if (!rig.known) {
-    return { content: [{ type: "text", text: JSON.stringify({ error: `Rig '${handle}' not found: no rig has that name or id` }) }], isError: true };
+  if (!rig.resolved) {
+    const error = rig.known ? `Rig '${handle}' could not be checked: the rig list couldn't be read` : `Rig '${handle}' not found: no rig has that name or id`;
+    return { content: [{ type: "text", text: JSON.stringify({ error }) }], isError: true };
   }
   return rig;
 }
@@ -53,8 +54,9 @@ function transportRequestOptions(timeout?: { timeoutMs: number }): { timeoutMs?:
 }
 
 // Hints for a client deciding what to ask the person (MCP tool annotations), not enforcement. A read-only tool changes
-// nothing through OpenRig. An additive one adds a record or a seat. A destructive one can stop, replace or discard
-// something, or, for rig_send, types into an agent that may act on it.
+// nothing through OpenRig. An additive one only adds a record, a message or a seat. A destructive one can also change or
+// remove existing state (stop, replace, discard, refresh discovered facts, or end a row's wait), or, for rig_send, types
+// into an agent that may act on it.
 const READ_ONLY: ToolAnnotations = { readOnlyHint: true };
 const ADDITIVE: ToolAnnotations = { readOnlyHint: false, destructiveHint: false };
 const DESTRUCTIVE: ToolAnnotations = { readOnlyHint: false, destructiveHint: true };
@@ -112,12 +114,12 @@ export function createMcpServer(client: DaemonClient): McpServer {
       plan: z.boolean().optional().describe("Plan mode — preview without executing"),
       autoApprove: z.boolean().optional().describe("Auto-approve trusted actions"),
       targetRoot: z.string().optional().describe("Target root directory for package installation"),
-      cwd: z.string().refine((dir) => nodePath.isAbsolute(dir), "cwd must be an absolute path").optional().describe("Absolute working directory for a new launch's agents (as rig up --cwd)"),
+      cwd: z.string().refine((dir) => nodePath.isAbsolute(dir), "cwd must be an absolute path").optional().describe("Working directory for a new launch's agents. It must be absolute: this server has no caller directory to resolve a relative one against."),
       // The daemon drops the whole env block when any entry is invalid, so check it here the way rig up --env does.
       env: z.record(
         z.string().regex(/^[A-Z_][A-Z0-9_]*$/, "env names match ^[A-Z_][A-Z0-9_]*$").refine((name) => !name.startsWith("OPENRIG_"), "OPENRIG_* env names belong to OpenRig"),
         z.string().min(1, "env values must not be empty").refine((value) => !value.includes("\0"), "env values must not contain a NUL byte"),
-      ).optional().describe("Environment variables for this launch only, not saved with the rig (as rig up --env NAME=value)"),
+      ).optional().describe("Environment variables for a new launch from one rig spec or bundle, not saved with the rig (as rig up --env NAME=value). A .rigtopology or a restore by name doesn't use them."),
       rigName: z.string().min(1).optional().describe("A new launch's rig name instead of the spec's (as rig up --name)"),
       fresh: z.array(z.string()).optional().describe("When restoring an existing rig: the seats (logical ids, e.g. dev.impl) to start fresh instead of resuming (as rig up --fresh)"),
     },
@@ -267,7 +269,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
     "rig_discover",
     "Scan for tmux sessions to discover",
     {},
-    ADDITIVE,
+    DESTRUCTIVE,
     async () => {
       try {
         const res = await client.post("/api/discovery/scan", {});
@@ -633,7 +635,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
     "rig_queue_claim",
     "Claim a queue item assigned to this seat before working on it.",
     { qitemId: z.string().describe("The queue item to claim") },
-    ADDITIVE,
+    DESTRUCTIVE,
     async ({ qitemId }) => {
       try {
         return mapResult(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/claim`, {}));

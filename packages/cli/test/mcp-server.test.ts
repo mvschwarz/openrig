@@ -222,8 +222,9 @@ describe("MCP Server", () => {
     const { tools } = await mcpClient.listTools();
     const reads = ["rig_agent_validate", "rig_bundle_inspect", "rig_capture", "rig_chatroom_watch", "rig_ps", "rig_queue_list", "rig_queue_show",
       "rig_rig_nodes", "rig_rig_validate", "rig_snapshot_list", "rig_status", "rig_telemetry_events"];
-    const additive = ["rig_add", "rig_chatroom_send", "rig_discover", "rig_queue_claim", "rig_queue_create", "rig_snapshot_create"];
-    const destructive = ["rig_bind", "rig_down", "rig_queue_update", "rig_restore", "rig_send", "rig_up"];
+    const additive = ["rig_add", "rig_chatroom_send", "rig_queue_create", "rig_snapshot_create"];
+    // Discover refreshes and retires discovered facts; claim ends a blocked row's wait. Both change existing state.
+    const destructive = ["rig_bind", "rig_discover", "rig_down", "rig_queue_claim", "rig_queue_update", "rig_restore", "rig_send", "rig_up"];
     const hints = Object.fromEntries(tools.map((tool) => [tool.name, tool.annotations]));
     expect(Object.keys(hints).sort()).toEqual([...reads, ...additive, ...destructive].sort());
     for (const name of reads) expect(hints[name], name).toEqual({ readOnlyHint: true });
@@ -651,6 +652,18 @@ describe("MCP Server", () => {
     const missing = await mcpClient.callTool({ name: "rig_chatroom_watch", arguments: { rigName: "no-such-rig" } });
     expect(missing.isError).toBe(true);
     expect((missing.content as Array<{ text: string }>)[0]!.text).toContain("not found");
+    await cleanup();
+  });
+
+  it("the chatroom tools report a rig list they can't read, instead of an empty room", async () => {
+    const getFn = vi.fn(async (path: string) => (path.startsWith("/api/rigs/summary")
+      ? { status: 500, data: { error: "unavailable" } }
+      : { status: 200, data: [] }));
+    await setup({ get: getFn });
+    const read = await mcpClient.callTool({ name: "rig_chatroom_watch", arguments: { rigName: "my-rig" } });
+    expect(read.isError).toBe(true);
+    expect((read.content as Array<{ text: string }>)[0]!.text).toContain("could not be checked");
+    expect(getFn.mock.calls.some(([path]) => String(path).includes("/chat/history"))).toBe(false);
     await cleanup();
   });
 
