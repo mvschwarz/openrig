@@ -75,8 +75,9 @@ An ask lands on Steering, where the person sees and answers it; Slack doesn't
 alert them. Add `--alert` only for something only they can do, or an approval
 whose wait costs now: the same item stays on Steering and Slack posts it once.
 A sign-in, a credential or an approval that expires needs `--alert`. A question
-that can wait for their next look doesn't. An update (`--human-intent update`)
-posts as before and takes no `--alert`.
+that can wait for their next look doesn't: the person answers it in the TUI,
+choosing an option or typing a reply, and it comes back to you exactly as a Slack
+answer does. An update (`--human-intent update`) posts as before and takes no `--alert`.
 
 Before asking a **decision**, check whether the person has a mode on with a
 decision room: what they said the team may decide for them meanwhile.
@@ -132,8 +133,8 @@ posts as a new message.
 A **decision** with a few clear choices can carry `--human-questions-file <path>`:
 a JSON array of 1–4 questions, each
 `{"id", "question", "options": [{"id", "label", "recommended"?}]}` with 2–4
-options (labels up to 75 characters, at most one recommended). Slack shows each
-question as a row of buttons. Each click records that answer on the item, and
+options (labels up to 75 characters, at most one recommended). The TUI lists
+each question with its options, and Slack (when alerted) shows each as a row of buttons. Each click records that answer on the item, and
 the decision resolves once every question has one. You then receive one reply
 row listing the answers. In `humanAnswers`, clicked answers are option-id strings.
 A whole typed reply is an object:

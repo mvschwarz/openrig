@@ -49,6 +49,8 @@ import {
   type MissionControlVerb,
 } from "./mission-control-action-log.js";
 import { isHumanSeatSession } from "../human-route-enforcer.js";
+import { createHash } from "node:crypto";
+import { formatHumanAnswers, unansweredQuestions } from "../human-questions.js";
 
 export class MissionControlWriteContractError extends Error {
   constructor(
@@ -79,6 +81,9 @@ export interface MissionControlActionInput {
   /** OPR.0.4.4.19 FR-7 — required for `resolve`: the human's non-empty
    *  decision text. Lands durably in queue_transitions.transition_note. */
   decision?: string;
+  /** For `answer`: the question and option the person chose. Without them, `decision` is their typed answer. */
+  questionId?: string;
+  optionId?: string;
   /** Operator-supplied audit context. */
   auditNotes?: Record<string, unknown>;
   /**
@@ -98,6 +103,8 @@ export interface MissionControlActionResult {
   notifyAttempted: boolean;
   notifyResult: string | null;
   auditedAt: string;
+  /** For `answer`: recorded with questions still open, or answered (returned to the asker, and the ask closed). */
+  answer?: { outcome: "recorded" | "answered"; unanswered: string[] };
 }
 
 interface WriteContractDeps {
@@ -134,6 +141,9 @@ export class MissionControlWriteContract {
     }
     if (input.verb === "resolve") {
       return this.resolveParked(input);
+    }
+    if (input.verb === "answer") {
+      return this.answerAsk(input);
     }
 
     const source = this.requireMutableQitem(input.qitemId);
@@ -478,6 +488,90 @@ export class MissionControlWriteContract {
     };
   }
 
+  /**
+   * The person's answer to an ask addressed to them, with the meaning Slack's answers have: a choice (`questionId` +
+   * `optionId`) through recordHumanAnswer, which keeps a partial set pending and a complete one final, or their words
+   * (`decision`) through resolveDirectHumanReply, placed under the first unanswered question. Once it's answered, the
+   * asking seat gets one reply row and then the ask closes once, the order of Slack's own continuation, so a retry never
+   * leaves an ask closed with its answer not returned; the reply row's id comes from the ask, so a retry finds the same
+   * row. An ask that's already answered records, sends and closes nothing more.
+   */
+  private async answerAsk(input: MissionControlActionInput): Promise<MissionControlActionResult> {
+    const ask = this.queueRepo.getById(input.qitemId);
+    if (!ask) {
+      throw new MissionControlWriteContractError("qitem_not_found", `qitem ${input.qitemId} not found`, { qitemId: input.qitemId });
+    }
+    if (ask.state !== "pending") {
+      throw new MissionControlWriteContractError("qitem_already_terminal",
+        `qitem ${input.qitemId} is ${ask.state}, not waiting on an answer (it may already be answered), so nothing was recorded or sent.`,
+        { qitemId: input.qitemId, state: ask.state });
+    }
+    if (ask.destinationSession !== input.actorSession || ask.humanIntent === "update" || !this.queueRepo.isPersonAddress(ask.destinationSession)) {
+      throw new MissionControlWriteContractError("answer_not_recorded",
+        `qitem ${input.qitemId} isn't an ask to ${input.actorSession}, so ${input.actorSession} can't answer it.`, { qitemId: input.qitemId });
+    }
+    const before = snapshotQitem(ask);
+    const questions = ask.humanQuestions ?? [];
+    const chose = input.questionId !== undefined || input.optionId !== undefined;
+    const words = input.decision?.trim() ?? "";
+    let reply: string;
+    if (chose) {
+      const recorded = this.queueRepo.recordHumanAnswer({ qitemId: input.qitemId, actorSession: input.actorSession,
+        questionId: input.questionId ?? "", optionId: input.optionId ?? "" });
+      if (recorded.status !== "recorded") {
+        throw new MissionControlWriteContractError("answer_not_recorded", `The answer wasn't recorded: ${recorded.reason}.`,
+          { qitemId: input.qitemId, reason: recorded.reason });
+      }
+      const [just] = formatHumanAnswers(recorded.questions.filter((q) => q.id === input.questionId), recorded.answers);
+      if (!recorded.complete) {
+        return this.recordAnswer(input, before, just ?? `answered ${input.questionId}`, {
+          outcome: "recorded", unanswered: unansweredQuestions(recorded.questions, recorded.answers).map((q) => q.question) });
+      }
+      reply = `${formatHumanAnswers(recorded.questions, recorded.answers).join("\n")}\n\n---\nAnswers (question id → option id): ${JSON.stringify(recorded.answers)}\nIn reply to: ${input.qitemId} (its humanAnswers field holds the same)`;
+    } else {
+      if (!words) {
+        throw new MissionControlWriteContractError("decision_required",
+          "verb=answer needs a choice (questionId and optionId) or the person's words (decision)", { verb: input.verb });
+      }
+      const earlier = formatHumanAnswers(questions, ask.humanAnswers ?? {});
+      reply = `${words}\n\n---\n${earlier.length ? `Earlier answers: ${earlier.join("; ")}\n` : ""}In reply to: ${input.qitemId}${questions.length ? " (its humanAnswers field holds these words under its first unanswered question)" : ""}`;
+    }
+    const replyId = `qitem-human-answer-${createHash("sha256").update(input.qitemId).digest("hex").slice(0, 20)}`;
+    await this.queueRepo.create({
+      qitemId: replyId, sourceSession: input.actorSession, destinationSession: ask.sourceSession,
+      body: `${reply}\nAnswered by ${input.actorSession} in OpenRig.`,
+      summary: `${input.actorSession} answered: ${ask.summary ?? input.qitemId}`,
+      tags: ["human-answer", ...(ask.tags ?? []).filter((t) => /^(project|mission|slice):/.test(t))],
+      inboundReplyTo: input.qitemId, ...(input.notify === false ? { nudge: false } : {}),
+    });
+    const decision = chose ? formatHumanAnswers(questions, this.queueRepo.getById(input.qitemId)?.humanAnswers ?? {}).join("; ") : words;
+    if (!this.queueRepo.resolveDirectHumanReply({ qitemId: input.qitemId, actorSession: input.actorSession, decision })) {
+      throw new MissionControlWriteContractError("answer_not_closed",
+        `The answer went back to ${ask.sourceSession} as ${replyId}, but qitem ${input.qitemId} didn't close: it changed meanwhile.`,
+        { qitemId: input.qitemId, replyQitemId: replyId });
+    }
+    return this.recordAnswer(input, before, decision, { outcome: "answered", unanswered: [] }, replyId);
+  }
+
+  /** The audit row and event for one answer (its queue writes are the repository's own). */
+  private recordAnswer(input: MissionControlActionInput, before: Record<string, unknown>, reason: string,
+    answer: NonNullable<MissionControlActionResult["answer"]>, createdQitemId: string | null = null): MissionControlActionResult {
+    const evaluatedAt = this.now().toISOString();
+    const after = this.queueRepo.getById(input.qitemId);
+    let actionEntry: ReturnType<MissionControlActionLog["record"]> | null = null;
+    const persistedEvents: PersistedEvent[] = [];
+    this.db.transaction(() => {
+      actionEntry = this.actionLog.record({ actionVerb: "answer", qitemId: input.qitemId, actorSession: input.actorSession,
+        actedAt: evaluatedAt, beforeState: before, afterState: after ? snapshotQitem(after) : null, reason,
+        auditNotes: input.auditNotes ?? null, identityProvenance: input.identityProvenance ?? null });
+      persistedEvents.push(this.eventBus.persistWithinTransaction({ type: "mission_control.action_executed",
+        actionId: actionEntry.actionId, actionVerb: "answer", qitemId: input.qitemId, actorSession: input.actorSession }));
+    })();
+    for (const e of persistedEvents) this.eventBus.notifySubscribers(e);
+    return { actionId: actionEntry!.actionId, verb: "answer", qitemId: input.qitemId, closedQitem: after, createdQitemId,
+      notifyAttempted: false, notifyResult: null, auditedAt: evaluatedAt, answer };
+  }
+
   private requireMutableQitem(qitemId: string): QueueItem {
     const source = this.queueRepo.getById(qitemId);
     if (!source) {
@@ -560,6 +654,11 @@ function verbToClosure(input: MissionControlActionInput): ClosureMapping {
       throw new MissionControlWriteContractError(
         "internal_invariant",
         "resolve verb is non-closure and should have been routed to resolveParked",
+      );
+    case "answer":
+      throw new MissionControlWriteContractError(
+        "internal_invariant",
+        "answer verb should have been routed to answerAsk",
       );
   }
 }

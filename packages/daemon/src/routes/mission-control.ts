@@ -245,6 +245,8 @@ export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
         : err.code === "annotation_required" ? 400
         : err.code === "decision_required" ? 400
         : err.code === "qitem_not_leg1_parked" ? 409
+        : err.code === "answer_not_closed" ? 409
+        : err.code === "answer_not_recorded" ? 400
         : 500;
       return c.json(
         { error: err.code, message: err.message, ...(err.details ?? {}) },
@@ -322,6 +324,8 @@ export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
         annotation?: string;
         reason?: string;
         decision?: string;
+        questionId?: string;
+        optionId?: string;
         notify?: boolean;
         auditNotes?: Record<string, unknown>;
         hostId?: string;
@@ -426,6 +430,8 @@ export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
         annotation: body.annotation,
         reason: body.reason,
         decision: body.decision,
+        ...(typeof body.questionId === "string" ? { questionId: body.questionId } : {}),
+        ...(typeof body.optionId === "string" ? { optionId: body.optionId } : {}),
         notify: body.notify,
         auditNotes: body.auditNotes,
       });

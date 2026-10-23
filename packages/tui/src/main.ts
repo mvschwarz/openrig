@@ -33,6 +33,7 @@ import { restoreKeyAction, type RestoreInputEvent } from "./crash-cart/restore-i
 import { evaluateOneClickGate, restoreConfirmMessage } from "./crash-cart/one-click-gate.js";
 import { daemonStartArgs } from "./crash-cart/start-daemon.js";
 import { readLocal } from "./local-reading.js";
+import { replyAct } from "./attention/attention-model.js";
 import { StartupController } from "./startup.js";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -440,8 +441,12 @@ async function run(): Promise<void> {
         const result = await client.launchNode(action.rigId, action.agent);
         view.dispatch({ type: "notice", message: launchNodeNotice(action.agent, result) });
       } else if (action.act === "answer") {
-        await client.missionControlAction({ verb: action.verb, qitemId: action.qitemId, actorSession: action.actorSession });
-        view.dispatch({ type: "notice", message: `Approved ${action.qitemId} as ${action.actorSession}: the request is closed on its own row.` });
+        const { act: _act, type: _type, ...input } = action;
+        const result = await client.missionControlAction(input);
+        view.dispatch({ type: "notice", message: action.verb === "approve"
+          ? `Approved ${action.qitemId} as ${action.actorSession}: the request is closed on its own row.`
+          : result.answer?.outcome === "recorded" ? `Recorded on ${action.qitemId}. Still to answer: ${result.answer.unanswered.join("; ")}`
+          : `Answered ${action.qitemId} as ${action.actorSession}: the answer went back to the asker, and the request is closed.` });
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -479,6 +484,10 @@ async function run(): Promise<void> {
           notice: message => view.dispatch({ type: "notice", message }), draw,
         }).catch(error => view.dispatch({ type: "notice", message: String(error) }));
       } catch (err) { view.dispatch({ type: "notice", message: (err as Error).message }); }
+      return;
+    }
+    if (action.type === "attention-reply") {
+      perform(replyAct(snapshot.attentionRead, view.get().attentionOpen, action.text));
       return;
     }
     if (action.type === "act") {

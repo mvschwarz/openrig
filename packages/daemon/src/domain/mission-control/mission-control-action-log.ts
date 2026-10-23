@@ -23,6 +23,9 @@ export const MISSION_CONTROL_VERBS = [
   // parked qitem (state=blocked on a human seat). NON-CLOSURE: blocked →
   // in-progress only; the decision text lands in queue_transitions.
   "resolve",
+  // answer: the person's answer to an ask addressed to them (a choice or their words), recorded on that row and
+  // returned to the asking seat as Slack's answers are.
+  "answer",
 ] as const;
 
 export type MissionControlVerb = (typeof MISSION_CONTROL_VERBS)[number];

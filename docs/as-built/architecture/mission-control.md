@@ -6,7 +6,7 @@ topics: [coordination, observability]
 domains: [engineering-advisor, operating-advisor, orchestrator, human-operator]
 applies-when: |
   Need to know how the daemon-backed Mission Control surface works — the
-  seven views, the eight write verbs, the action audit table, the
+  seven views, the nine write verbs, the action audit table, the
   bearer-token middleware, or how queue observability maps to the
   coordination primitive's sources.
 siblings: [coordination-primitive.md, workflow-runtime.md, ../ui/project-and-for-you.md]
@@ -20,7 +20,7 @@ last-updated: 2026-10-08
 Mission Control is the daemon's queue-observability and operator-action
 surface, mounted at `/api/mission-control` over the coordination primitive's
 `queue_items` and `stream_items` (see `coordination-primitive.md`). It has
-seven views, eight verbs, a recent-ships cap of 10
+seven views, nine verbs, a recent-ships cap of 10
 (`mission-control-read-layer.ts:107`), and a daemon-backed action audit
 table. In the web UI the old `/mission-control` page now redirects to
 `/for-you`, and the For You feed carries the verb actions (§6).
@@ -85,14 +85,14 @@ There is no filesystem fallback. When no `StreamStore` is wired,
 > `rig` or `rig tui` is called the "mission-control TUI" in source
 > (`packages/tui/README.md:1`), but it does not call these routes.
 
-## 2. The eight verbs (the write contract)
+## 2. The nine verbs (the write contract)
 
-`MISSION_CONTROL_VERBS` (`mission-control-action-log.ts:14–26`) is the verb
+`MISSION_CONTROL_VERBS` (`mission-control-action-log.ts:14–29`) is the verb
 list. The verbs execute through `MissionControlWriteContract.act`
 (`mission-control-write-contract.ts:131`); the closure mapping is
 `verbToClosure` (`:509`).
 
-Verbs: **8** — `sed -n '/^export const MISSION_CONTROL_VERBS = \[/,/\] as const;/p' packages/daemon/src/domain/mission-control/mission-control-action-log.ts | grep -c '^  "'`
+Verbs: **9** — `sed -n '/^export const MISSION_CONTROL_VERBS = \[/,/\] as const;/p' packages/daemon/src/domain/mission-control/mission-control-action-log.ts | grep -c '^  "'`
 
 | Verb | Effect |
 |---|---|
@@ -104,6 +104,7 @@ Verbs: **8** — `sed -n '/^export const MISSION_CONTROL_VERBS = \[/,/\] as cons
 | `drop` | `state="done"`, `closure_reason="canceled"` |
 | `handoff` | same closure and new destination item as `route`; the 4-step shape (see below) |
 | `resolve` | only for a `blocked` item parked on a human seat: moves it to `in-progress` with the required decision text as the transition note; no closure and no new item (`:369`, `:386`, `:410–411`). After commit it sends a best-effort nudge with the decision text to the item's owner unless `notify: false` (`:450–467`); the CLI wrapper is `rig queue resolve <qitemId> --decision <text>` (`packages/cli/src/commands/queue.ts:828`) |
+| `answer` | only for a `pending` ask addressed to the acting person: a choice (`questionId` + `optionId`) through `QueueRepository.recordHumanAnswer`, or their words (`decision`) through `resolveDirectHumanReply`, each with its existing meaning (a partial choice set stays pending; words fill the first unanswered question). Once answered, one reply row goes to the asking seat (`human-answer` tag, `replyTo` the ask, an id derived from the ask) and then the ask closes once with `human-decision-resolved`, the order Slack's answer continuation uses. A closed ask answers 409 `qitem_already_terminal` and records nothing; a refused answer is 400 `answer_not_recorded`; an ask that changed between the reply row and its close is 409 `answer_not_closed`. The TUI's Feed sends it |
 
 `annotate` requires `annotation`, `hold` and `drop` require `reason`, `route`
 and `handoff` require `destinationSession`, and `resolve` requires a non-empty
@@ -117,7 +118,7 @@ mapping, so it returns 500 (`mission-control-action-log.ts:128–133`,
 a human seat. An unknown item returns 404 `qitem_not_found`
 (`routes/mission-control.ts:240–251`, `:330–341`).
 
-Each verb is one atomic daemon transaction: the queue mutation via
+Each verb except `answer` is one atomic daemon transaction (`answer`'s queue writes are the repository's own, in the order above, then its audit row and event): the queue mutation via
 `QueueRepository.updateWithinTransaction()` (`domain/queue-repository.ts:2371`,
 which keeps the hot-potato closure validation — see
 `coordination-primitive.md` §3), an audit row in `mission_control_actions`

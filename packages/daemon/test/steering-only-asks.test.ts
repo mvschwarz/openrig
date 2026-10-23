@@ -27,6 +27,8 @@ import { queueRoutes } from "../src/routes/queue.js";
 import { missionControlRoutes } from "../src/routes/mission-control.js";
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
+import { runWakeLadderTick } from "../src/domain/queue-wake-ladder.js";
+import type { AttentionRead } from "../src/attention-surface.js";
 
 const HUMAN = "human-founder";
 const registry = {
@@ -283,6 +285,114 @@ describe("an ask lands on Steering; Slack alerts only when it's marked alert-wor
     // Neither answered ask ever went to Slack (the row parked on the person alerts, as parks do).
     await runGateway();
     expect(posted(row) || posted(twin)).toBe(false);
+  });
+
+  /** The TUI itself over these readers: its daemon client, its Feed model, and an act's write as its driver loop sends it. */
+  async function tui(app: Hono) {
+    const { DaemonClient } = await import("../../tui/src/daemon-client.js");
+    const { attentionLines, replyAct } = await import("../../tui/src/attention/attention-model.js");
+    const { createViewState, emptySnapshot } = await import("../../tui/src/state.js");
+    const client = new DaemonClient({ baseUrl: "http://tui.test", fetchImpl: ((input: string, init?: RequestInit) => app.request(String(input), init)) as typeof fetch });
+    const open = async (row: QueueItem) => {
+      const id = `queue:${row.qitemId}`;
+      const read = await client.humanAttention(id) as AttentionRead;
+      const lines = attentionLines({ ...createViewState({ instanceId: "fixture" }).get(), attentionOpen: id }, { ...emptySnapshot(), attentionRead: read }, 400);
+      return { read, lines, act: (label: string) => lines.find((line) => line.text.includes(label))?.action };
+    };
+    const run = (action: unknown) => {
+      const { type: _type, act: _act, ...input } = action as { type: "act"; act: "answer" } & Parameters<typeof client.missionControlAction>[0];
+      return client.missionControlAction(input);
+    };
+    const reply = async (row: QueueItem, words: string) => run(replyAct((await open(row)).read, `queue:${row.qitemId}`, words));
+    return { open, run, reply };
+  }
+  const replies = (row: QueueItem) => repo.list({ limit: 500 }).filter((q) => q.replyTo === row.qitemId && (q.tags ?? []).includes("human-answer"));
+  const resolved = (row: QueueItem) => repo.listTransitions(row.qitemId).filter((t) => t.ownerNotificationKind === "human-decision-resolved").length;
+
+  it("a quiet ask's questions are answered in the TUI: each choice stays on its row, and the last returns them to the asker and closes it once", async () => {
+    const questions = [{ id: "q1", question: "Which name?", options: [{ id: "a", label: "Alpha" }, { id: "b", label: "Beta", recommended: true }] },
+      { id: "q2", question: "Ship today?", options: [{ id: "y", label: "Yes" }, { id: "n", label: "No" }] }];
+    const row = await repo.create({ sourceSession: "orch-lead@r", destinationSession: `${HUMAN}@kernel`, body: "two questions",
+      summary: "Name and date", evidenceRef: "/proof/q.md", humanQuestions: questions, nudge: false });
+    const app = readers();
+    const t = await tui(app);
+    // Both daemon attention readers serve the questions; the TUI lists them with one act per option, and no bare Approve.
+    const listed = await (await app.request("/api/queue/list?attention=1")).json() as Array<Record<string, unknown>>;
+    expect(listed.find((r) => r.qitemId === row.qitemId)).toMatchObject({ humanQuestions: questions });
+    const first = await t.open(row);
+    expect(first.read.items.find((i) => i.id === `queue:${row.qitemId}`)).toMatchObject({ humanQuestions: questions, humanAnswers: {},
+      asker: "orch-lead@r", answer: { verb: "answer", actorSession: `${HUMAN}@kernel` } });
+    expect(first.lines.map((l) => l.text).join("\n")).toContain("1. Which name? (unanswered)");
+    expect(first.act("Approve as")).toBeUndefined();
+    // One choice: kept on the row, which stays open, and nothing goes back yet.
+    expect(await t.run(first.act('Answer "Which name?": Beta'))).toMatchObject({ answer: { outcome: "recorded", unanswered: ["Ship today?"] } });
+    expect(repo.getById(row.qitemId)).toMatchObject({ state: "pending", humanAnswers: { q1: "b" } });
+    expect(replies(row)).toEqual([]);
+    const second = await t.open(row);
+    expect(second.lines.map((l) => l.text).join("\n")).toContain("1. Which name? (answered: Beta)");
+    expect(second.act('Answer "Which name?"')).toBeUndefined();
+    // The last choice: the answers go back to the asking seat once, and the ask closes on its own row.
+    expect(await t.run(second.act('Answer "Ship today?": Yes'))).toMatchObject({ answer: { outcome: "answered" } });
+    expect(repo.getById(row.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on", humanAnswers: { q1: "b", q2: "y" } });
+    expect(replies(row)).toHaveLength(1);
+    expect(replies(row)[0]).toMatchObject({ destinationSession: "orch-lead@r", sourceSession: `${HUMAN}@kernel` });
+    expect(replies(row)[0]!.body).toContain("Which name?: Beta\nShip today?: Yes");
+    expect(resolved(row)).toBe(1);
+    expect(onSteering()).not.toContain(row.qitemId);
+    // A repeated tap on the same view records, sends and closes nothing more.
+    await expect(t.run(second.act('Answer "Ship today?": No'))).rejects.toThrow();
+    expect(replies(row)).toHaveLength(1);
+    expect(resolved(row)).toBe(1);
+    expect(repo.getById(row.qitemId)!.humanAnswers).toEqual({ q1: "b", q2: "y" });
+    await runGateway();
+    expect(posts).toHaveLength(0);
+  });
+
+  it("a typed answer in the TUI goes back to the asker in the person's words and closes the ask once, an alias's ask too", async () => {
+    const typed = await ask({ questions: true });
+    const alias = await repo.create({ sourceSession: "orch-lead@r", destinationSession: "operator-admin@kernel", body: "what should we call it?",
+      summary: "Name it", evidenceRef: "/proof/name.md", nudge: false });
+    const t = await tui(readers());
+    const words = "Neither: call it Gamma";
+    expect(await t.reply(typed, words)).toMatchObject({ answer: { outcome: "answered" } });
+    expect(repo.getById(typed.qitemId)).toMatchObject({ state: "done",
+      humanAnswers: { q1: { kind: "typed-reply", text: words, placement: "first-unanswered", unansweredCount: 0 } } });
+    expect(replies(typed)).toHaveLength(1);
+    expect(replies(typed)[0]).toMatchObject({ destinationSession: "orch-lead@r" });
+    expect(replies(typed)[0]!.body).toContain(words);
+    expect(resolved(typed)).toBe(1);
+    // An ask to a registered person's alias, with no questions: their words close it the same way.
+    expect(await t.reply(alias, "Call it Delta")).toMatchObject({ answer: { outcome: "answered" } });
+    expect(repo.getById(alias.qitemId)).toMatchObject({ state: "done" });
+    expect(replies(alias)[0]!.body).toContain("Call it Delta");
+    expect(resolved(alias)).toBe(1);
+    // A repeat records, sends and closes nothing more.
+    await expect(t.reply(typed, "changed my mind")).rejects.toThrow();
+    expect(replies(typed)).toHaveLength(1);
+    expect(resolved(typed)).toBe(1);
+    expect((repo.getById(typed.qitemId)!.humanAnswers!.q1 as { text: string }).text).toBe(words);
+  });
+
+  it("the wake ladder leaves a quiet handoff to a person on Steering: past its window nothing posts, while an alerted one still escalates", async () => {
+    const work = () => repo.create({ sourceSession: "orch-lead@r", destinationSession: "dev@r", body: "work", nudge: false });
+    const quiet = (await repo.handoff({ qitemId: (await work()).qitemId, fromSession: "dev@r", toSession: `${HUMAN}@kernel`,
+      body: "handed quiet", summary: "Pick", evidenceRef: "/proof/l1.md", nudge: false })).created;
+    const urgent = (await repo.handoff({ qitemId: (await work()).qitemId, fromSession: "dev@r", toSession: `${HUMAN}@kernel`,
+      body: "handed urgent", summary: "Approve now", evidenceRef: "/proof/l2.md", humanAlert: true, nudge: false })).created;
+    // The wake a handoff to a person records: the gateway owns it, so the ladder reads it as unconfirmed.
+    for (const row of [quiet, urgent]) {
+      db.prepare("UPDATE queue_items SET last_nudge_result = ?, last_nudge_attempt = ? WHERE qitem_id = ?")
+        .run(`gateway-owned: '${HUMAN}@kernel' is a virtual paneless human destination`, new Date().toISOString(), row.qitemId);
+    }
+    const escalated: string[] = [];
+    const deliveryEngine = { dispatchEscalation: async (row: QueueItem) => { escalated.push(row.qitemId); return { decision: "post", resolved: true, dispatched: true }; } };
+    for (let k = 1; k <= 6; k++) {
+      await runWakeLadderTick({ db, queueRepo: repo, deliveryEngine: deliveryEngine as never, resolveOrchestrator: () => null, humanRung: "always",
+        attemptWake: async () => "gateway-owned: test", loadHumanRegistry: () => registry, now: new Date(Date.now() + k * 40 * 60_000), log: () => {} });
+    }
+    expect(escalated).toContain(urgent.qitemId);
+    expect(escalated).not.toContain(quiet.qitemId);
+    expect(onSteering()).toContain(quiet.qitemId);
   });
 
   it("stays unalerted across quiet hours, a restart, the gateway's retries and the stuck sweep", async () => {

@@ -1909,12 +1909,16 @@ export class QueueRepository {
       throw new QueueRepositoryError("invalid_human_notification", "humanAlert is true or false.");
     }
     if (humanAlert !== true) return;
-    const registry = this.loadHumanRegistryFn();
-    const person = isHumanSeatSessionRef(destination)
-      || (registry.ok && resolveRegisteredHumanAddress(destination, registry.entities) !== null);
-    if (!person || humanIntent === "update") {
+    if (!this.isPersonAddress(destination) || humanIntent === "update") {
       throw new QueueRepositoryError("invalid_human_notification", "humanAlert marks an ask to a person as alert-worthy: it needs a human destination, and an update isn't an ask.");
     }
+  }
+
+  /** A person by address or by the registry: a registered person may be addressed as their seat or an alias. */
+  isPersonAddress(destination: string): boolean {
+    if (isHumanSeatSessionRef(destination)) return true;
+    const registry = this.loadHumanRegistryFn();
+    return registry.ok && resolveRegisteredHumanAddress(destination, registry.entities) !== null;
   }
 
   private validateReplyTo(replyTo: string, humanIntent: QueueCreateInput["humanIntent"]): void {
@@ -3504,7 +3508,7 @@ export class QueueRepository {
       const item = this.getById(input.qitemId);
       if (item?.state !== "pending" || item.humanIntent === "update"
         || item.destinationSession !== input.actorSession
-        || parseSessionName(item.destinationSession).kind !== "external") return null;
+        || !this.isPersonAddress(item.destinationSession)) return null;
 
       const text = input.decision.trim();
       const unanswered = this.hasHumanQuestionsColumn && text && text !== "[file reply]"
@@ -4288,7 +4292,7 @@ export class QueueRepository {
     if (!this.hasQueueTransitionsTable) return false;
     const owners = listed?.owners ?? this.transitionLog.ownerNotificationsForQitems([qitemId]).get(qitemId) ?? [];
     const owner = this.currentAskNotification(qitemId, owners);
-    // A posting dial set to RECORD posts it: then it's a posted ask, reported by its receipt.
+    // Slack never posts a quiet ask; one that was posted anyway is a posted ask, reported by its receipt.
     return owner?.ownerNotificationKind === "human-required" && owner.ownerNotificationLevel === "RECORD"
       && !this.humanNotificationPostedThisEpisode(qitemId, listed);
   }

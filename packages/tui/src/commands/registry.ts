@@ -94,6 +94,8 @@ export const COMMAND_REGISTRY: readonly CommandEntry[] = [
   { name: "terminal", aliases: [], args: "<view>", description: "open a rig:name, pod:rig/pod, mission:id, slice:id or saved:id view in a new terminal (Herdr or plain tmux)", context: "standard", sample: "terminal rig:example",
     complete: ({ snapshot }) => snapshot.hosts.flatMap((h) => h.rigs.map((r) => `rig:${r.name}`)),
     build: view => view ? ({ type: "act", act: "open-terminal", view }) : ({ type: "error", message: "terminal needs a view, for example rig:<name>" }) },
+  { name: "reply", aliases: [], args: "<your words>", description: "answer the open Feed request in your own words, as the person it's addressed to; it goes back to the asker", context: "standard", sample: "reply Ship it on Friday",
+    build: text => text.trim() ? ({ type: "attention-reply", text }) : ({ type: "error", message: "reply needs your answer, for example reply Ship it on Friday" }) },
   { name: "attention", aliases: ["needs", "feed"], args: "", description: "inspect human requests and outcome/health updates", context: "standard", sample: "attention", build: () => ({ type: "jump", section: "needs" }) },
   { name: "read", aliases: [], args: "<root>/<path>[#heading]", description: "read a current file within an explicitly configured root", context: "standard", sample: "read workspace/README.md", complete: ({ snapshot }) => (snapshot.fileRoots ?? []).map((root) => `${root.name}/`), build: (value) => {
     const slash = value.indexOf("/");

@@ -777,6 +777,8 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       // a release whose post failed is an ordinary failed delivery.
       const quiet = quietHoldCustody(deps.db, row.qitemId, now);
       if (quiet && (quiet.state === "held" || quiet.state === "released")) continue;
+      // An ask handed to a person without an alert waits on them on Steering by design; escalating it would alert them.
+      if (deps.queueRepo.humanAskWithoutAlert(row.qitemId)) continue;
       activeLadders += 1;
 
       // Due-ness: the latest ladder marker (or the original nudge attempt) is older than
