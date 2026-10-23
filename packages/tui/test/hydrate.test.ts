@@ -228,16 +228,18 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     expect(statusGlyph(graph).glyph).toBe("◐");
     expect(statusGlyph({ ...graph, needsAttention: false }).glyph).not.toBe("◐");
   });
-  it("shows a hook-only prompt as needs_input with hook evidence", async () => {
+  it.each([
+    ["runtime_hook", "hook"], ["pane_heuristic", "pane"], [undefined, "unknown"],
+  ])("shows a raw prompt as needs_input with %s evidence labelled %s", async (evidenceSource, label) => {
     const base = (FIXTURES["/api/rigs/01JRIG/nodes"] as Array<Record<string, unknown>>)[0]!;
     const snap = await hydrateSnapshot(fixtureClient({}, { "/api/rigs/01JRIG/nodes": [{ ...base,
-      needsAttention: true, arbitratedNeedsInput: null, agentActivity: { state: "needs_input" },
+      needsAttention: true, arbitratedNeedsInput: null, agentActivity: { state: "needs_input", evidenceSource },
     }] }));
     const agent = snap.hosts[0]!.rigs[0]!.pods[0]!.agents[0]!;
     expect(agent.status).toBe("needs_input");
     const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
     view.dispatch({ type: "drill", resource: "agent", name: agent.name, target: { host: "mm2-openrig1", rig: "myrig" } });
-    expect(renderScreen(view.get(), snap, { cols: 180, rows: 60 }).lines.join("\n")).toContain("needs-input evidence hook");
+    expect(renderScreen(view.get(), snap, { cols: 180, rows: 60 }).lines.join("\n")).toContain(`needs-input evidence ${label}`);
   });
   it("leaves health unassessed when a focused view skips the projection read", async () => {
     const context = { section: "topology" as const, viewTab: "table" as const, drill: [] };

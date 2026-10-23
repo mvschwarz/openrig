@@ -377,7 +377,9 @@ function agentDetailLines(
     : null;
   const activityReason = agent.activity?.needsInput?.reason ?? agent.activity?.signalReason ?? null;
   const attention = agent.needsAttention == null ? "unknown" : agent.needsAttention ? "needed" : "not raised";
-  const inputEvidence = agent.arbitratedNeedsInput == null ? (agent.activity?.signalState === "needs_input" ? "hook" : "absent") : `${agent.arbitratedNeedsInput ? "observed input" : "observed clear"}${agent.needsInputEvidence ? ` · ${agent.needsInputEvidence.rung} · ${displayTime(agent.needsInputEvidence.observedAt, timeZone)}` : ""}`;
+  const rawInputSource = agent.activity?.signalSource === "runtime_hook" ? "hook"
+    : agent.activity?.signalSource === "pane_heuristic" ? "pane" : "unknown";
+  const inputEvidence = agent.arbitratedNeedsInput == null ? (agent.activity?.signalState === "needs_input" ? rawInputSource : "absent") : `${agent.arbitratedNeedsInput ? "observed input" : "observed clear"}${agent.needsInputEvidence ? ` · ${agent.needsInputEvidence.rung} · ${displayTime(agent.needsInputEvidence.observedAt, timeZone)}` : ""}`;
   const needsRows = needs.length > 0
     ? needs.flatMap((item) => [
       ...wrapDetailValue("qitem", item.qitemId ?? "no actionable qitem id served", contentWidth),
