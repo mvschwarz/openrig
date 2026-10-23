@@ -38,6 +38,9 @@ describe("subscription move report routes", () => {
     body: JSON.stringify(body),
   });
   const reports = () => queue.list({ tag: MOVE_REPORT_TAG, limit: 100 });
+  // The list is newest first by creation time, to the millisecond. Two creates in one millisecond tie and come back in
+  // either order, so a case that reads an order waits for the next millisecond between them.
+  const nextMillisecond = async () => { const now = Date.now(); while (Date.now() === now) await new Promise((r) => setTimeout(r, 1)); };
   const list = async (query = "") => {
     const res = await app.request(`/api/provider/moves${query}`);
     return { status: res.status, data: await res.json() as Record<string, any> };
@@ -100,6 +103,7 @@ describe("subscription move report routes", () => {
       follows: first, readings: [{ subject: "codex-2", basis: "observed", observedAt: "2026-10-23T13:00:00.000Z", summary: "weekly 3% used" }],
       seats: [{ seat: "dev-qa@team", result: "moved", accountEvidence: { state: "matched" }, toolTurn: { state: "observed" } }], peers: [],
     });
+    await nextMillisecond();
     const second = (await (await file({ to: ASKER, report: followUp })).json() as { qitemId: string }).qitemId;
     // A tagged item someone wrote by hand, holding a token: listed as unreadable, by where and what, never the value.
     const token = `Bearer ${"z".repeat(30)}`;
@@ -109,6 +113,7 @@ describe("subscription move report routes", () => {
     });
     // And one whose report has a token-shaped key: named by where it is, not by the key.
     const keyToken = `ghp_${"k".repeat(36)}`;
+    await nextMillisecond();
     const keyed = await queue.create({
       sourceSession: AGENT, destinationSession: ASKER, tags: [MOVE_REPORT_TAG], nudge: false,
       body: `\`\`\`openrig-subscription-move\n${JSON.stringify(moveReport({ peers: [{ seat: "x", note: "y", [keyToken]: "z" }] }))}\n\`\`\``,
