@@ -56,7 +56,8 @@ The compact human table's ATTN column renders `yes`, `no`, or `?` when the flag 
 unavailable. Compact JSON retains `needsAttention`; use `--full` or
 `--fields needsAttention,arbitratedNeedsInput,needsInputEvidence` with `--json` for the
 provenance. The TUI uses the served flag for attention glyphs and totals, and shows the
-needs-input evidence in seat detail. A missing flag from an older daemon stays unknown.
+needs-input evidence in seat detail, including a hook-only prompt. With an older daemon,
+attention stays unknown while its existing prompt, startup and error hints remain visible.
 
 ## Derived diagnoses — computed at read time, never stored
 

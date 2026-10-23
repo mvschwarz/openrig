@@ -707,7 +707,7 @@ export function formatDeclaredModel(model: string | null | undefined): string {
 
 export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, unknown>> {
   return nodes.map((n) => {
-    const attention = n.needsAttention === true;
+    const keepDiagnostics = n.needsAttention !== false;
     const observation = n.modelObservation == null ? null : modelObservation(n.modelObservation, n.sessionStatus === "running");
     const compact: Record<string, unknown> = {
       // identity (rigId/rigName + logicalId + session) — disambiguates under -A.
@@ -740,7 +740,7 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       oriented: n.oriented ?? "n-a",
       lifecycleState: n.lifecycleState,
       // Keep the current usage limit visible without classifying it as human attention.
-      agentActivity: attention || hasCurrentUsageLimit(n)
+      agentActivity: keepDiagnostics || hasCurrentUsageLimit(n)
         ? { state: n.agentActivity?.state ?? "unknown", reason: n.agentActivity?.reason }
         : { state: n.agentActivity?.state ?? "unknown" },
       // Work counts. Compact keeps the base pending-only key plus the active
@@ -768,7 +768,7 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
     }
     // held/attention reason (short) when present.
     if (n.heldReason) compact.heldReason = n.heldReason;
-    if (attention && n.latestError) {
+    if (keepDiagnostics && n.latestError) {
       compact.latestError = n.latestError;
     }
     return compact;
@@ -1357,8 +1357,7 @@ async function handleNodes(
   if (useCompact) {
     console.log(padCompactNodeRow("RIG", "SESSION", "LIFECYCLE", "ACTIVITY", "WORK", "REASON", "ATTN"));
     for (const n of humanList as NodeEntry[]) {
-      const attn = n.needsAttention === true;
-      const reason = missingSessionGuidance(n) ?? (attn || hasCurrentUsageLimit(n)
+      const reason = missingSessionGuidance(n) ?? (n.needsAttention !== false || hasCurrentUsageLimit(n)
         ? (n.latestError ? truncate(n.latestError, 40) : n.agentActivity?.reason ?? "—")
         : livenessUnconfirmed(n) ? "liveness unconfirmed" : "—");
       console.log(padCompactNodeRow(

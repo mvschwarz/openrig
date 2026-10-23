@@ -42,6 +42,7 @@ export interface AgentRow {
     needsInput: { count: number; reason: string | null } | null;
     decidedBy: string | null;
     signalReason: string | null;
+    signalState?: string | null;
     signalSource: string | null;
     eventAt: string | null;
   };

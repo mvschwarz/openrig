@@ -383,6 +383,24 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     expect(healthyNode.latestError).toBeUndefined();
   });
 
+  it.each([false, true])("keeps old-daemon diagnostics with unknown attention (failed: %s)", async (failed) => {
+    const node = RIG_B_NODES[0]!;
+    const original = { ...node };
+    Reflect.deleteProperty(node, "needsAttention");
+    Object.assign(node, { startupStatus: failed ? "failed" : "ready", latestError: failed ? "startup failure" : null,
+      agentActivity: { ...node.agentActivity, state: "needs_input", reason: "approval_pending" } });
+    try {
+      const json = await captureLogs(() => makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--rig", "openrig-comms", "--json"]).then(() => {}));
+      const entry = JSON.parse(json.logs.join(""))[0];
+      expect(entry).not.toHaveProperty("needsAttention");
+      expect(entry.agentActivity.reason).toBe("approval_pending");
+      if (failed) expect(entry.latestError).toBe("startup failure");
+      const text = await captureLogs(() => makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--rig", "openrig-comms"]).then(() => {}));
+      expect(text.logs.join("\n")).toContain(failed ? "startup failure" : "approval_pending");
+      expect(text.logs.find((line) => line.includes(node.canonicalSessionName))).toMatch(/\?\s+(startup failure|approval_pending)/);
+    } finally { Object.assign(node, original); }
+  });
+
   it.each([[false, false], [true, false], [false, true]])("shows current limits without hiding startup failures (stale: %s, failed: %s)", async (stale, failed) => {
     const node = RIG_B_NODES[0]!;
     const original = { agentActivity: node.agentActivity, startupStatus: node.startupStatus, latestError: node.latestError, needsAttention: node.needsAttention };

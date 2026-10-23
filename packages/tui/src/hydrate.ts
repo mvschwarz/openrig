@@ -257,6 +257,7 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
         : null,
       decidedBy: node.activityState?.decidedBy ?? null,
       signalReason: node.agentActivity?.reason ?? null,
+      signalState: node.agentActivity?.state ?? null,
       signalSource: node.agentActivity?.evidenceSource ?? null,
       eventAt: node.agentActivity?.eventAt ?? null,
     },
@@ -266,8 +267,13 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
       ? "detached"
       : node.startupStatus === "failed"
         ? "failed"
-      : node.needsAttention === true || identityDownranked
-        ? (node.arbitratedNeedsInput === true ? "needs_input" : "attention_required")
+      : identityDownranked || (node.needsAttention == null
+        && (node.lifecycleState === "attention_required" || node.startupStatus === "attention_required"))
+        ? "attention_required"
+      : node.needsAttention === true
+        ? ((node.arbitratedNeedsInput ?? node.agentActivity?.state === "needs_input") ? "needs_input" : "attention_required")
+      : node.needsAttention == null && (node.activityState?.display === "needs-input" || node.agentActivity?.state === "needs_input")
+        ? "needs_input"
         : node.sessionStatus === "running" || node.sessionStatus === "ready"
           ? (node.activityState?.display === "working"
             ? "active"
