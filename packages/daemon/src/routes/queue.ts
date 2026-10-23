@@ -1,5 +1,7 @@
 import type { SessionRegistry } from "../domain/session-registry.js";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
+import { classifierOccupant } from "../domain/classification-sources.js";
+import type { ClassifierLeaseManager } from "../domain/classifier-lease-manager.js";
 import { streamSSE } from "hono/streaming";
 import type { EventBus } from "../domain/event-bus.js";
 import type {
@@ -77,6 +79,22 @@ export function queueRoutes(): Hono {
 
   function getRepo(c: { get: (key: string) => unknown }): QueueRepository {
     return c.get("queueRepo" as never) as QueueRepository;
+  }
+  /** Optional stream-application fence; ordinary queue calls have no new check. */
+  function classificationRefusal(c: Context, actor: string, binding: unknown): Response | null {
+    if (binding === undefined) return null;
+    const b = binding as { leaseId?: unknown; expectedOccupant?: unknown } | null;
+    if (!b || typeof b.leaseId !== "string" || !b.leaseId || typeof b.expectedOccupant !== "string" || !b.expectedOccupant)
+      return c.json({ error: "invalid_classification_binding" }, 400);
+    const db = c.get("db" as never) as Database.Database;
+    if (classifierOccupant(db, actor)?.generation !== b.expectedOccupant)
+      return c.json({ error: "occupant_changed" }, 409);
+    try {
+      (c.get("classifierLeaseManager" as never) as ClassifierLeaseManager).requireActiveHolder(actor, b.leaseId);
+      return null;
+    } catch (error) {
+      return c.json({ error: (error as { code?: string }).code ?? "no_active_lease" }, 409);
+    }
   }
   function destinationAdvisory(c: { get: (key: string) => unknown }, sessionRef: string) {
     // This observation runs after the write commits. An unavailable lookup
@@ -495,6 +513,7 @@ export function queueRoutes(): Hono {
     const body = await c.req.json<{
       qitemId?: string;
       sourceSession?: string;
+      classificationBinding?: unknown;
       destinationSession?: string;
       body?: string;
       priority?: QueuePriority;
@@ -543,6 +562,8 @@ export function queueRoutes(): Hono {
     // before the first forward (Q-a) so every retry carries the same id. No
     // local row is ever written on the cross-host path.
     if (typeof body.hostId === "string" && !resolvesToLocalHost(body.hostId, getSelfHostId())) {
+      if (body.classificationBinding !== undefined)
+        return c.json({ error: "invalid_classification_binding", message: "Classifier-bound effects belong to this daemon's local queue." }, 400);
       const mintedId = body.qitemId ?? newQitemId();
       const { hostId: _dropped, ...rest } = body;
       const forwardBody: Record<string, unknown> = {
@@ -559,6 +580,8 @@ export function queueRoutes(): Hono {
     }
 
     try {
+      const fence = classificationRefusal(c, sourceSession, body.classificationBinding);
+      if (fence) return fence;
       const item = await getRepo(c).create({
         qitemId: body.qitemId,
         sourceSession,
@@ -648,6 +671,7 @@ export function queueRoutes(): Hono {
     const qitemId = c.req.param("qitemId");
     const body = await c.req.json<{
       actorSession?: string;
+      classificationBinding?: unknown;
       state?: QueueState;
       reopen?: boolean;
       transitionNote?: string;
@@ -669,6 +693,8 @@ export function queueRoutes(): Hono {
     const actorSession = identity.session;
 
     try {
+      const fence = classificationRefusal(c, actorSession, body.classificationBinding);
+      if (fence) return fence;
       const item = getRepo(c).update({
         qitemId,
         actorSession,

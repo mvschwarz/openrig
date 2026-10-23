@@ -65,9 +65,10 @@ export async function prepareWorker(client: Client, opts: WakeOptions, read = lo
 export async function runProjectWake(client: Client, opts: WakeOptions, read = localText, experiment?: {
   decide: (prepared: Awaited<ReturnType<typeof prepareWorker>>) => WorkerOptions["classify"];
   signal: AbortSignal; shouldStop: () => boolean; timeoutMs: number;
-  /** A decisions consumer's own candidate values, and fields it adds to each classification write. */
+  /** A decisions consumer's own candidate values, and fields it adds to each classification or abstention write. */
   candidates?: (prepared: Awaited<ReturnType<typeof prepareWorker>>) => ClassificationCandidates;
   classifyBody?: (input: Record<string, unknown>) => Record<string, unknown>;
+  abstainBody?: (input: Record<string, unknown>) => Record<string, unknown>;
 }) {
   const prepared = await prepareWorker(client, opts, read);
   const {snapshot, taxonomy} = prepared;
@@ -95,7 +96,7 @@ export async function runProjectWake(client: Client, opts: WakeOptions, read = l
     attempts: {
       eligible: input => get(`/api/projects/eligible?${new URLSearchParams(Object.entries(input).filter(([,v]) => v !== undefined).map(([k,v]): [string, string] => [k,String(v)]))}`),
       begin: input => post("/api/projects/attempts/begin", input),
-      abstain: input => post(`/api/projects/attempts/${encodeURIComponent(input.attemptId)}/abstain`, input),
+      abstain: input => post(`/api/projects/attempts/${encodeURIComponent(input.attemptId)}/abstain`, experiment?.abstainBody ? experiment.abstainBody({...input}) : input),
       fail: input => post(`/api/projects/attempts/${encodeURIComponent(input.attemptId)}/fail`, input),
     },
     classifier: {classify: input => post("/api/projects/project", experiment?.classifyBody ? experiment.classifyBody({...input}) : input)},

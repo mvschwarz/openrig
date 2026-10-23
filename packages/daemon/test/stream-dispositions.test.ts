@@ -51,8 +51,8 @@ describe("stream dispositions (slice 22): accepted judgment beside a write-once 
   it("rolls back the classification when the disposition can't be stored", () => {
     // An orphan row for S2 makes the disposition insert fail after the classification insert.
     db.pragma("foreign_keys = OFF");
-    db.prepare(`INSERT INTO stream_dispositions (stream_item_id, project_id, disposition, effect_operation, template_digest, template_text, request_json, provenance_json, accepted_at)
-      VALUES ('S2', 'orphan', 'no_action', 'none', ?, 'x', 'x', 'null', 'then')`).run(DIGEST);
+    db.prepare(`INSERT INTO stream_dispositions (stream_item_id, project_id, disposition, accepted_by, effect_operation, template_digest, template_text, request_json, provenance_json, accepted_at)
+      VALUES ('S2', 'orphan', 'no_action', 'intake@rig', 'none', ?, 'x', 'x', 'null', 'then')`).run(DIGEST);
     db.pragma("foreign_keys = ON");
     expect(() => classifier.classify({ streamItemId: "S2", classifierSession: "intake@rig", leaseId: lease(), action: "no_action",
       disposition: create({ disposition: "no_action", ownerSession: null, effect: { operation: "none", qitemId: null, destination: null } }) })).toThrow();
@@ -101,7 +101,7 @@ describe("stream dispositions (slice 22): accepted judgment beside a write-once 
       expect(posted.status).toBe(201);
       expect(await (await app.request("/api/projects/dispositions/unapplied")).json()).toMatchObject([{ streamItemId: "S1" }]);
       expect((await app.request("/api/projects/dispositions/S1/applied", json({ classifierSession: "other@rig", applied: {} }))).status).toBe(409);
-      const recorded = await app.request("/api/projects/dispositions/S1/applied", json({ classifierSession: "intake@rig", applied: { outcome: "created" } }));
+      const recorded = await app.request("/api/projects/dispositions/S1/applied", json({ classifierSession: "intake@rig", leaseId: lease(), applied: { outcome: "created" } }));
       expect(recorded.status).toBe(200);
       expect(await (await app.request("/api/projects/dispositions/S1")).json()).toMatchObject({ applied: { outcome: "created" } });
       expect((await app.request("/api/projects/dispositions/S2")).status).toBe(404);

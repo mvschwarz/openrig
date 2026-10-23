@@ -2,7 +2,7 @@ import type { ShadowCapture } from "../domain/shadow-capture.js";
 import type Database from "better-sqlite3";
 import type { StreamStore } from "../domain/stream-store.js";
 import { classifierOccupant, classificationSources } from "../domain/classification-sources.js";
-import { DispositionError, getDisposition, markApplied, unappliedDispositions } from "../domain/stream-dispositions.js";
+import { DispositionError, getDisposition, insertDisposition, markApplied, unappliedDispositions, validateDisposition } from "../domain/stream-dispositions.js";
 import { selectedProject } from "../domain/workspace/project-read.js";
 import { type Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
@@ -61,6 +61,7 @@ export function projectsRoutes(): Hono {
     if (err instanceof ProjectClassifierError) {
       const status = err.code === "idempotency_violation" ? 409
         : err.code === "project_not_found" ? 404
+        : err.code === "disposition_exists" ? 409
         : err.code === "attempt_mismatch" || err.code === "attempt_superseded" ? 409
         : err.code === "unknown_stream_item"
           || err.code === "invalid_field"
@@ -284,8 +285,18 @@ export function projectsRoutes(): Hono {
           classifierSession: actor.session,
           reason: body.reason as string,
         };
-        return c.json(verb === "abstain" ? ledger.abstain(input) : ledger.fail(input));
+        if (verb === "fail") return c.json(ledger.fail(input));
+        if (body.disposition === undefined) return c.json(ledger.abstain(input));
+        // Slice 22: a deferral to intake is stored in the same transaction as the automatic attempt's abstention.
+        const deferral = validateDisposition(body.disposition, undefined, "deferred");
+        const db = c.get("db" as never) as Database.Database;
+        return c.json(db.transaction(() => {
+          const attempt = ledger.abstain(input);
+          insertDisposition(db, null, attempt.streamItemId, deferral, new Date().toISOString(), actor.session);
+          return attempt;
+        })());
       } catch (err) {
+        if (err instanceof DispositionError) return c.json({ error: err.code, message: err.message }, err.code === "disposition_exists" ? 409 : err.code === "disposition_not_found" ? 404 : 400);
         return errorResponse(c, err);
       }
     });

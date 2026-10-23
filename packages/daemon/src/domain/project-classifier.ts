@@ -235,7 +235,12 @@ export class ProjectClassifier {
           tsProjected,
           input.identityProvenance ?? null,
         );
-      if (disposition) insertDisposition(this.db, projectId, input.streamItemId, disposition, tsProjected);
+      if (disposition) {
+        try { insertDisposition(this.db, projectId, input.streamItemId, disposition, tsProjected, input.classifierSession); } catch (error) {
+          if (error instanceof DispositionError) throw new ProjectClassifierError(error.code, error.message);
+          throw error;
+        }
+      }
 
       return this.eventBus.persistWithinTransaction({
         type: "project.classified",
