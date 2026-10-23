@@ -497,6 +497,26 @@ export interface QueueListOptions {
   compact?: boolean;
   rig?: string;
   activeOnly?: boolean;
+  /** A handoff's successor: items whose handed_off_from is this qitem id. Exact match. */
+  handedOffFrom?: string;
+  /** Items updated at or after this time: an ISO-8601 UTC timestamp in the stored form (toISOString). */
+  updatedSince?: string;
+}
+
+/** Adds the handoff-successor and updated-since filters both list paths share. */
+function pushFollowThroughFilters(
+  opts: { handedOffFrom?: string; updatedSince?: string } | undefined,
+  conditions: string[],
+  params: unknown[],
+): void {
+  if (opts?.handedOffFrom) {
+    conditions.push("handed_off_from = ?");
+    params.push(opts.handedOffFrom);
+  }
+  if (opts?.updatedSince) {
+    conditions.push("ts_updated >= ?");
+    params.push(opts.updatedSince);
+  }
 }
 
 /** The message a `--wake-after` park timer carries when its owner gives none. */
@@ -3748,6 +3768,7 @@ export class QueueRepository {
       conditions.push("target_repo = ?");
       params.push(opts.targetRepo);
     }
+    pushFollowThroughFilters(opts, conditions, params);
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     const columns = opts?.compact ? this.compactColumns() : "*";
@@ -3843,6 +3864,8 @@ export class QueueRepository {
     destinationSession?: string;
     sourceSession?: string;
     targetRepo?: string;
+    handedOffFrom?: string;
+    updatedSince?: string;
   }): QueueItem[] {
     const limit = opts?.limit ?? 100;
     const states = opts?.state
@@ -3889,6 +3912,7 @@ export class QueueRepository {
       conditions.push("target_repo = ?");
       params.push(opts.targetRepo);
     }
+    pushFollowThroughFilters(opts, conditions, params);
     params.push(limit);
 
     const sql = `

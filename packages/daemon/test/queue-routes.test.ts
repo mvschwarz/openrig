@@ -1622,6 +1622,38 @@ describe("queue routes", () => {
     expect(data).toHaveLength(1);
   });
 
+  it("GET /api/queue/list follows a handoff to its successor and filters by updatedSince", async () => {
+    const post = (path: string, session: string, body: Record<string, unknown>) => app.request(path, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": session }, body: JSON.stringify(body),
+    });
+    const source = ((await (await post("/api/queue/create", "a@r", { destinationSession: "a@r", body: "source", nudge: false })).json()) as { qitemId: string }).qitemId;
+    await post("/api/queue/create", "a@r", { destinationSession: "c@r", body: "unrelated", nudge: false });
+    const handoff = await post(`/api/queue/${source}/handoff`, "a@r", { toSession: "c@r", nudge: false });
+    expect(handoff.status).toBe(201);
+    const successor = ((await handoff.json()) as { created: { qitemId: string } }).created.qitemId;
+    const ids = async (query: string) => {
+      const res = await app.request(`/api/queue/list?${query}`);
+      expect(res.status).toBe(200);
+      return ((await res.json()) as Array<{ qitemId: string }>).map((q) => q.qitemId);
+    };
+
+    expect(await ids(`handedOffFrom=${source}`)).toEqual([successor]);
+    expect(await ids("handedOffFrom=qitem-none")).toEqual([]);
+
+    // Rows store ts_updated as toISOString(); any ISO-8601 time is normalized to that form first.
+    expect(await ids(`destinationSession=c@r&updatedSince=${encodeURIComponent("2999-01-01T00:00:00Z")}`)).toEqual([]);
+    expect((await ids(`destinationSession=c@r&updatedSince=${encodeURIComponent("2000-01-01T02:00:00+02:00")}`)).length).toBe(2);
+    const invalid = await app.request("/api/queue/list?updatedSince=yesterday");
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toMatchObject({ error: "updated_since_invalid" });
+
+    // The attention path takes the same filters.
+    await post("/api/queue/create", "a@r", { destinationSession: "human-founder@external", body: "approve", tier: "human-gate", summary: "approve", evidenceRef: "proof/e.md", nudge: false });
+    expect((await ids("attention=1")).length).toBe(1);
+    expect(await ids(`attention=1&updatedSince=${encodeURIComponent("2999-01-01T00:00:00Z")}`)).toEqual([]);
+    expect(await ids(`attention=1&handedOffFrom=${source}`)).toEqual([]);
+  });
+
   it("GET /api/queue/list trims each state name and otherwise keeps today's matching", async () => {
     const post = (path: string, session: string, body: Record<string, unknown>) => app.request(path, {
       method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": session }, body: JSON.stringify(body),

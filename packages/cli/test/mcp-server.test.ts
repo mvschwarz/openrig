@@ -41,8 +41,9 @@ describe("MCP Server", () => {
     if (cleanup) await cleanup();
   });
 
-  // T1: MCP server lists all 26 tools: the original 18, the five queue tools, the telemetry events read, restore status and whoami
-  it("lists all 26 tools", async () => {
+  // T1: MCP server lists all 31 tools: the original 18, the five queue tools, the telemetry events read, restore status, whoami,
+  // and the team, slice, mission and two context reads
+  it("lists all 31 tools", async () => {
     await setup();
     const result = await mcpClient.listTools();
     const names = result.tools.map((t) => t.name).sort();
@@ -54,8 +55,11 @@ describe("MCP Server", () => {
       "rig_capture",
       "rig_chatroom_send",
       "rig_chatroom_watch",
+      "rig_context_get",
+      "rig_context_pack",
       "rig_discover",
       "rig_down",
+      "rig_mission",
       "rig_ps",
       "rig_queue_claim",
       "rig_queue_create",
@@ -67,9 +71,11 @@ describe("MCP Server", () => {
       "rig_rig_nodes",
       "rig_rig_validate",
       "rig_send",
+      "rig_slices",
       "rig_snapshot_create",
       "rig_snapshot_list",
       "rig_status",
+      "rig_team",
       "rig_telemetry_events",
       "rig_up",
       "rig_whoami",
@@ -223,7 +229,8 @@ describe("MCP Server", () => {
     await setup();
     const { tools } = await mcpClient.listTools();
     const reads = ["rig_agent_validate", "rig_bundle_inspect", "rig_capture", "rig_chatroom_watch", "rig_ps", "rig_queue_list", "rig_queue_show",
-      "rig_restore_status", "rig_rig_nodes", "rig_rig_validate", "rig_snapshot_list", "rig_status", "rig_telemetry_events", "rig_whoami"];
+      "rig_restore_status", "rig_rig_nodes", "rig_rig_validate", "rig_snapshot_list", "rig_status", "rig_telemetry_events", "rig_whoami",
+      "rig_team", "rig_slices", "rig_mission", "rig_context_pack", "rig_context_get"];
     const additive = ["rig_add", "rig_chatroom_send", "rig_queue_create", "rig_snapshot_create"];
     // Discover refreshes and retires discovered facts; claim ends a blocked row's wait. Both change existing state.
     const destructive = ["rig_bind", "rig_discover", "rig_down", "rig_queue_claim", "rig_queue_update", "rig_restore", "rig_send", "rig_up"];
@@ -337,6 +344,95 @@ describe("MCP Server", () => {
     const unreachable = await mcpClient.callTool({ name: "rig_queue_claim", arguments: { qitemId: "qitem-1" } });
     expect((unreachable.content as Array<{ text: string }>)[0]!.text).toBe("Cannot reach the OpenRig daemon at http://127.0.0.1:9999");
     expect(unreachable.structuredContent).toEqual({ ok: false, code: "daemon_unreachable", message: "Cannot reach the OpenRig daemon at http://127.0.0.1:9999" });
+    await cleanup();
+  });
+
+  it("rig_queue_show names where a handed-on item went, and says when it can't tell", async () => {
+    const lists: string[] = [];
+    const getFn = vi.fn(async (path: string) => {
+      if (path === "/api/queue/qitem-remote") return { status: 200, data: { qitemId: "qitem-remote", state: "handed-off", closureReason: "handed_off_to", closureTarget: "qitem-20261023-abc@mm2-host" } };
+      if (path === "/api/queue/qitem-done") return { status: 200, data: { qitemId: "qitem-done", state: "done", closureReason: "handed_off_to", closureTarget: "qa@team" } };
+      if (path === "/api/queue/qitem-old") return { status: 200, data: { qitemId: "qitem-old", state: "handed-off", closureReason: "handed_off_to", closureTarget: "qa@team" } };
+      if (path.endsWith("/transitions")) return { status: 200, data: [] };
+      if (path.startsWith("/api/queue/list")) {
+        lists.push(path);
+        // A daemon without the filter answers the unfiltered list; the newer one answers only the successors.
+        if (path.includes("handedOffFrom=qitem-old")) return { status: 200, data: [{ qitemId: "qitem-unrelated", handedOffFrom: null }] };
+        return { status: 200, data: [
+          { qitemId: "qitem-next", destinationSession: "qa@team", state: "pending", handedOffFrom: "qitem-done" },
+          { qitemId: "qitem-earlier", destinationSession: "dev@team", state: "done", handedOffFrom: "qitem-done" },
+        ] };
+      }
+      return { status: 404, data: {} };
+    });
+    await setup({ get: getFn });
+    const successor = async (qitemId: string) => ((await mcpClient.callTool({ name: "rig_queue_show", arguments: { qitemId } })).structuredContent as { successor: unknown }).successor;
+
+    // A cross-host handoff is named from its closure target, not fetched.
+    expect(await successor("qitem-remote")).toEqual({ qitemId: "qitem-20261023-abc", host: "mm2-host" });
+    expect(lists).toEqual([]);
+    // A handoff-and-complete closes the source done, and it still has a successor: the newest, with the others named.
+    expect(await successor("qitem-done")).toEqual({ qitemId: "qitem-next", destinationSession: "qa@team", state: "pending", otherSuccessors: ["qitem-earlier"] });
+    // A daemon that ignored the filter can't say which item is the successor.
+    expect(await successor("qitem-old")).toEqual({ unknown: true, code: "filter_unsupported" });
+
+    const listed = await mcpClient.callTool({ name: "rig_queue_list", arguments: { handedOffFrom: "qitem-old" } });
+    expect(listed.isError).toBe(true);
+    expect(listed.structuredContent).toMatchObject({ ok: false, code: "filter_unsupported" });
+    // handedOffFrom reads any state and any rig, so neither default narrows it.
+    expect(lists.at(-1)).not.toContain("activeOnly");
+    expect(lists.at(-1)).not.toContain("rig=");
+    await cleanup();
+  });
+
+  it("rig_team says why there's no lead: none authored, or a daemon that doesn't report one", async () => {
+    const detail = { rig: { id: "rig-1", name: "my-rig" }, nodes: [{ id: "n1", logicalId: "dev.impl" }], edges: [] };
+    let served: Record<string, unknown> = { ...detail, representative: null };
+    const getFn = vi.fn(async (path: string) => {
+      if (path.startsWith("/api/rigs/summary")) return { status: 200, data: [{ id: "rig-1", name: "my-rig" }] };
+      if (path === "/api/rigs/rig-1") return { status: 200, data: served };
+      if (path === "/api/rigs/rig-1/nodes") return { status: 200, data: [{ logicalId: "dev.impl", canonicalSessionName: "dev-impl@my-rig", agentActivity: { state: "idle" }, activityState: null }] };
+      return { status: 404, data: {} };
+    });
+    await setup({ get: getFn });
+    const team = async () => (await mcpClient.callTool({ name: "rig_team", arguments: { rigId: "my-rig" } })).structuredContent as { lead: unknown; leadNote?: string; seats: Array<{ activity: string }> };
+
+    const none = await team();
+    expect(none.lead).toBeNull();
+    expect(none.leadNote).toContain("No single lead");
+    expect(none.seats[0]!.activity).toBe("idle");
+    served = detail;
+    expect((await team()).leadNote).toContain("doesn't report");
+    await cleanup();
+  });
+
+  it("the context reads return bounded summaries, cut long text and say so, and keep a route's hint as the message", async () => {
+    const slice = (name: string, missionId: string) => ({ name, missionId, displayName: name, status: "active", description: null, qitemCount: 2, lastActivityAt: null, slicePath: `/abs/${name}`, readiness: { big: true } });
+    const getFn = vi.fn(async (path: string) => {
+      if (path === "/api/slices") return { status: 200, data: { slices: [slice("s1", "m1"), slice("s2", "m1"), slice("s3", "m2")], totalCount: 3 } };
+      if (path === "/api/slices?filter=done") return { status: 503, data: { error: "slices_root_not_configured", hint: "Run rig config init-workspace" } };
+      if (path === "/api/missions/m1") return { status: 200, data: { missionId: "m1", missionPath: "/abs/m1", status: "active", readiness: { big: true }, slices: [slice("s1", "m1")] } };
+      if (path.startsWith("/api/context-packs/library/by-ref")) return { status: 200, data: { relativePath: "world", name: "world", version: "1", purpose: "the world", sourcePath: "/abs", files: [{ path: "a.md", role: "atom", summary: null, estimatedTokens: 10, absolutePath: "/abs/a.md" }] } };
+      if (path.startsWith("/api/context-packs/library/resolve-address")) return { status: 200, data: { address: "world/a.md", packRef: "world", filePath: "a.md", text: "x".repeat(50_000) } };
+      return { status: 404, data: {} };
+    });
+    await setup({ get: getFn });
+    const call = async (name: string, args: Record<string, unknown>) => await mcpClient.callTool({ name, arguments: args });
+
+    const slices = (await call("rig_slices", { missionId: "m1", limit: 1 })).structuredContent as { slices: Array<Record<string, unknown>>; totalCount: number; truncated: boolean };
+    expect(slices).toMatchObject({ totalCount: 2, truncated: true });
+    expect(slices.slices).toEqual([{ name: "s1", missionId: "m1", displayName: "s1", status: "active", description: null, qitemCount: 2, lastActivityAt: null }]);
+    expect((await call("rig_slices", { filter: "done" })).structuredContent).toEqual({ ok: false, code: "slices_root_not_configured", message: "Run rig config init-workspace", status: 503 });
+
+    const mission = (await call("rig_mission", { missionId: "m1" })).structuredContent as Record<string, unknown>;
+    expect(mission).toEqual({ missionId: "m1", status: "active", slices: [expect.objectContaining({ name: "s1" })] });
+
+    const pack = (await call("rig_context_pack", { ref: "world" })).structuredContent as Record<string, unknown>;
+    expect(pack).toEqual({ ref: "world", name: "world", version: "1", purpose: "the world", files: [{ path: "a.md", role: "atom", summary: null, estimatedTokens: 10 }] });
+
+    const got = (await call("rig_context_get", { address: "world/a.md" })).structuredContent as { text: string; truncated?: boolean; totalChars?: number };
+    expect(got.text.length).toBe(48_000);
+    expect(got).toMatchObject({ truncated: true, totalChars: 50_000 });
     await cleanup();
   });
 
@@ -457,7 +553,7 @@ describe("MCP Server", () => {
 
     // Verify server is responsive
     const result = await mcpClient.listTools();
-    expect(result.tools.length).toBe(26);
+    expect(result.tools.length).toBe(31);
 
     // Clean disconnect
     await cleanup();
@@ -471,7 +567,7 @@ describe("MCP Server", () => {
     await client2.connect(ct2);
 
     const result2 = await client2.listTools();
-    expect(result2.tools.length).toBe(26);
+    expect(result2.tools.length).toBe(31);
 
     await client2.close();
     await server2.close();
