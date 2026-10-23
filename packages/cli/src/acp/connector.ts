@@ -15,7 +15,6 @@ export interface AcpQueueRow {
   body: string;
   resolution?: string | null;
   tags?: string[] | null;
-  handedOffTo?: string | null;
 }
 
 /** The queue verbs the connector uses, as the calling seat. `rig acp` wires these to the daemon's queue API. */
@@ -119,7 +118,7 @@ export async function runAcpAssignment(queue: AcpQueue, options: AcpRunOptions):
     const toolCall = request.toolCall ?? {};
     for (;;) {
       if (turnOver || cancelRequestedAt) return { outcome: { outcome: "cancelled" } };
-      let askId = await queue.create({
+      const askId = await queue.create({
         destination: permissionsTo,
         summary: `Permission for ${row.qitemId}: ${String(toolCall.title ?? toolCall.toolCallId ?? "a tool call")} (${String(toolCall.kind ?? "other")})`,
         tags: ["acp-permission", ...(row.tags ?? []).filter((tag) => /^(project|mission|slice):/.test(tag))],
@@ -139,11 +138,6 @@ export async function runAcpAssignment(queue: AcpQueue, options: AcpRunOptions):
           const stale = `Stale: the turn of ${row.qitemId} was cancelled; ${FINAL_STATES.has(ask.state) ? "this answer was" : "any answer here is"} not sent`;
           await queue.update(askId, FINAL_STATES.has(ask.state) ? { note: stale } : { state: "canceled", note: stale }).catch(() => {});
           return { outcome: { outcome: "cancelled" } };
-        }
-        if (ask.state === "handed-off" && ask.handedOffTo) {
-          void queue.update(row.qitemId, { note: `ACP request ${requestId}: ${askId} was handed to ${ask.handedOffTo}; waiting on that row` }).catch(() => {});
-          askId = ask.handedOffTo;
-          continue;
         }
         if (!FINAL_STATES.has(ask.state)) continue;
         const chosen = chooseOption(offered, ask.resolution);
@@ -215,6 +209,7 @@ export async function runAcpAssignment(queue: AcpQueue, options: AcpRunOptions):
       : left.length === 0 ? "settled: no process carrying this run's marker remains"
         : `incomplete: ${left.length} process(es) carrying this run's marker still run (${left.map((p) => p.pid).join(", ")}); stop them with the runtime's own stop, or rig acp stop ${options.runId} -- <its stop command>`;
     await queue.update(row.qitemId, { note: `ACP run ${options.runId} detached: agent ${exit === "still-running" ? "still running after stdin closed" : `exited (code ${exit.code ?? "none"}, signal ${exit.signal ?? "none"})`}; ${settled}` }).catch(() => {});
+    peer.release(); // a still-running agent keeps running, but holds nothing that keeps this process alive
   }
 }
 
@@ -256,7 +251,7 @@ function permissionBody(qitemId: string, runId: string, sessionId: string, reque
     "**Options the agent offered:**",
     ...offered.map((option) => `- \`${option.optionId}\`: ${option.name ?? ""}${option.kind ? ` (${option.kind})` : ""}`),
     "",
-    `Answer on this row with \`${answerCommand("<this row>")}\`; if it's handed on, the new row is followed.`,
+    `Answer on this row with \`${answerCommand("<this row>")}\`; don't hand it off.`,
     "The agent's own settings and policy decide what it asks; your answer goes back to this one request, once. The turn waits until you answer.",
   ].filter((line) => line !== undefined).join("\n");
 }

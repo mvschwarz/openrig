@@ -30,7 +30,6 @@ export function daemonAcpQueue(client: DaemonClient): AcpQueue {
       return {
         qitemId: String(row.qitemId), state: String(row.state), destinationSession: String(row.destinationSession),
         body: typeof row.body === "string" ? row.body : "", resolution: (row.resolution as string | null) ?? null, tags: (row.tags as string[] | null) ?? null,
-        handedOffTo: (row.handedOffTo as string | null) ?? null,
       };
     },
     async claim(qitemId) { ok(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/claim`, {}), `queue claim ${qitemId}`); },
@@ -87,7 +86,7 @@ for you to judge, then close or hand on with your own resolution.
 
 A permission request becomes a row to --permissions-to, listing the options the agent offered. Answer it with
   ${answerCommand("<that row>")}
-on that row (a handoff is followed). OpenRig holds no policy of its own: the agent's settings decide what it
+on that row; don't hand it off. OpenRig holds no policy of its own: the agent's settings decide what it
 asks, and the owner decides the answer.
 
 Ctrl-C (or rig acp cancel <runId>) asks the agent to cancel the turn; a second Ctrl-C detaches without waiting.

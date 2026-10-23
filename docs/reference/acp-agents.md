@@ -30,8 +30,8 @@ option's id:
 rig queue update <permission row> --state done --closure-reason no-follow-on --resolution allow-once
 ```
 
-If you hand the permission row to another seat instead, the new row is followed. The answer goes back to that one
-request, once. The turn waits for it; there's no deadline. An answer that isn't one
+Answer on the permission row itself; don't hand it off, because the run waits on that row. The answer goes back to
+that one request, once. The turn waits for it; there's no deadline. An answer that isn't one
 of the offered options is noted and the question is asked again. If the turn is cancelled first, the permission row
 is closed as stale and nothing is sent. Whoever answers can follow their own written policy; that choice is theirs.
 

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { answerCommand, classify, chooseOption, runAcpAssignment, type AcpQueue, type AcpQueueRow, type AcpRunOptions } from "../src/acp/connector.js";
 
 const FAKE_AGENT = fileURLToPath(new URL("./fixtures/fake-acp-agent.mjs", import.meta.url));
+const DETACH_RUNNER = fileURLToPath(new URL("./fixtures/acp-detach-runner.ts", import.meta.url));
 const SEAT = "builder@studio";
 const dirs: string[] = [];
 const leftovers: number[] = [];
@@ -50,13 +52,8 @@ function memoryQueue(body: string, destinationSession = SEAT) {
   const asksFor = (seat: string) => [...rows.values()].filter((row) => row.qitemId.startsWith("qitem-ask-") && row.destinationSession === seat);
   /** What the documented answer command does: close the row done, with a closure reason and the chosen option. */
   const answer = (id: string, resolution: string) => close(id, { state: "done", closureReason: "no-follow-on", resolution });
-  const handOff = (id: string, to: string) => {
-    const next = create(to, rows.get(id)!.body, rows.get(id)!.tags ?? []);
-    Object.assign(rows.get(id)!, { state: "handed-off", handedOffTo: next });
-    return next;
-  };
   const holdAskReads = () => { let open!: () => void; readGate = new Promise((resolve) => { open = resolve; }); return () => { readGate = undefined; open(); }; };
-  return { queue, rows, task, asksFor, answer, handOff, holdAskReads };
+  return { queue, rows, task, asksFor, answer, holdAskReads };
 }
 
 function options(extra: Partial<AcpRunOptions> = {}): AcpRunOptions {
@@ -117,19 +114,6 @@ describe("rig acp run", () => {
     expect(q.task().notes.join("\n")).toContain('closed done without an offered option ("yes please"); asking again');
   });
 
-  it("follows a permission row the owner handed to another seat, to that seat's answer", async () => {
-    const q = memoryQueue("scenario:permission");
-    const handed = setInterval(() => {
-      const [first] = q.asksFor(SEAT);
-      if (first?.state === "pending") { clearInterval(handed); q.handOff(first.qitemId, "lead@studio"); }
-    }, 5);
-    const stop = owner(q, "lead@studio", ["allow-once"]);
-    try {
-      expect((await runAcpAssignment(q.queue, options())).text).toBe("permission allow-once");
-    } finally { stop(); clearInterval(handed); }
-    expect(q.task().notes.join("\n")).toMatch(/qitem-ask-1 was handed to qitem-ask-2; waiting on that row/);
-  });
-
   it("keeps a cancel's request, the agent's acknowledgement and unknown upstream spend apart", async () => {
     const q = memoryQueue("scenario:slow");
     const outcome = await runAcpAssignment(q.queue, options({ cancelRequested: new Promise((resolve) => setTimeout(resolve, 80)) }));
@@ -169,17 +153,24 @@ describe("rig acp run", () => {
     expect(q.task().notes.join("\n")).not.toContain("sent to the agent once");
   });
 
-  it("settles a detach as unknown even when the agent keeps running with its output open", async () => {
-    vi.stubEnv("FAKE_ACP_IGNORE_EOF", "1");
-    const q = memoryQueue("scenario:hang");
-    const outcome = await runAcpAssignment(q.queue, options({ detachRequested: new Promise((resolve) => setTimeout(resolve, 80)), exitWaitMs: 200 }));
-    expect(outcome).toMatchObject({ kind: "unknown", summary: "detached before the turn ended; the agent may still be working" });
-    const last = q.task().notes.at(-1)!;
-    expect(last).toContain("agent still running after stdin closed");
-    const pids = /still run \(([\d, ]+)\)/.exec(last)?.[1]?.split(", ").map(Number) ?? [];
-    leftovers.push(...pids);
-    expect(pids.length).toBeGreaterThan(0); // reported, not killed
-  });
+  it("after a detach, the CLI process ends on its own while the agent it left keeps running", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acp-detach-"));
+    dirs.push(dir);
+    const runner = spawn(process.execPath, ["--import", "tsx", DETACH_RUNNER, FAKE_AGENT, join(dir, "run.jsonl")],
+      { env: { ...process.env, FAKE_ACP_IGNORE_EOF: "1" }, stdio: ["ignore", "pipe", "inherit"] });
+    let out = "";
+    runner.stdout.on("data", (data: Buffer) => { out += data.toString(); });
+    const code = await new Promise<number | null>((resolve, reject) => {
+      const timer = setTimeout(() => { runner.kill("SIGKILL"); reject(new Error("the runner didn't end: something still holds its event loop")); }, 20_000);
+      runner.once("exit", (exitCode) => { clearTimeout(timer); resolve(exitCode); });
+    });
+    const result = JSON.parse(out.trim().split("\n").at(-1)!) as { kind: string; summary: string; pids: number[] };
+    leftovers.push(...result.pids); // rig acp leaves the agent running; the test stops its own fixture afterwards
+    expect(code).toBe(0);
+    expect(result).toMatchObject({ kind: "unknown", summary: "detached before the turn ended; the agent may still be working" });
+    expect(result.pids.length).toBeGreaterThan(0);
+    for (const pid of result.pids) expect(() => process.kill(pid, 0)).not.toThrow();
+  }, 30_000);
 
   it("reads an end_turn with no output and zero usage as unknown, not done", async () => {
     const q = memoryQueue("scenario:empty");

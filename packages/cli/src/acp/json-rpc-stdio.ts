@@ -39,10 +39,12 @@ export class StdioJsonRpcPeer {
   private readonly requestHandlers = new Map<string, IncomingRequestHandler>();
   private readonly notificationHandlers = new Map<string, NotificationHandler>();
   private ended = false;
+  private readonly lines: ReturnType<typeof createInterface>;
   readonly exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
 
   constructor(private readonly child: ChildProcessWithoutNullStreams, private readonly record: PacketRecorder = () => {}) {
-    createInterface({ input: child.stdout }).on("line", (line) => this.receive(line));
+    this.lines = createInterface({ input: child.stdout });
+    this.lines.on("line", (line) => this.receive(line));
     this.exited = new Promise((resolve) => child.once("close", (code, signal) => {
       this.ended = true;
       for (const [id, request] of this.pending) {
@@ -81,6 +83,14 @@ export class StdioJsonRpcPeer {
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<"still-running">((resolve) => { timer = setTimeout(() => resolve("still-running"), timeoutMs); });
     try { return await Promise.race([this.exited, timeout]); } finally { clearTimeout(timer); }
+  }
+
+  /** Drop this side's hold on the agent (its pipes and process handle) without signalling it, so a detached agent that
+   *  keeps running doesn't keep the caller's process alive. */
+  release(): void {
+    this.lines.close();
+    for (const stream of [this.child.stdin, this.child.stdout, this.child.stderr]) stream.destroy();
+    this.child.unref();
   }
 
   private send(packet: Record<string, unknown>): void {
