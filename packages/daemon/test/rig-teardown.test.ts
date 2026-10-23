@@ -564,7 +564,7 @@ describe("RigTeardownOrchestrator", () => {
   ] as const)("returns a %s seat's %s to its original bytes after the seat-skills line was on", async (runtime, fileName) => {
     const writer = { exists: (p: string) => fs.existsSync(p), readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c) };
     const asset = fs.readFileSync(path.join(import.meta.dirname, "../assets/guidance/openrig-seat-skills.md"), "utf-8");
-    const shapes = { "no trailing newline": "# Notes\nkeep these", "one trailing newline": "# Notes\nkeep these\n", "two trailing newlines": "# Notes\nkeep these\n\n", "a new file": null };
+    const shapes = { "no trailing newline": "# Notes\nkeep these", "one trailing newline": "# Notes\nkeep these\n", "two trailing newlines": "# Notes\nkeep these\n\n", "an empty file": "", "a new file": null };
     for (const [shape, original] of Object.entries(shapes)) {
       for (const starts of [1, 2]) {
         const label = `${shape}, ${starts} start(s)`;
@@ -586,6 +586,28 @@ describe("RigTeardownOrchestrator", () => {
         if (original === null) expect(fs.existsSync(guidance), label).toBe(false);
         else expect(fs.readFileSync(guidance, "utf-8"), label).toBe(original);
       }
+    }
+  });
+
+  // What down can't tell apart: blank lines a person adds right after OpenRig's last block look like the writer's, so they
+  // go with it; text a person adds there is kept, with its own newlines.
+  it("removes blank lines a person added right after the seat-skills block, and keeps text they added there", async () => {
+    const writer = { exists: (p: string) => fs.existsSync(p), readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c) };
+    const asset = fs.readFileSync(path.join(import.meta.dirname, "../assets/guidance/openrig-seat-skills.md"), "utf-8");
+    const original = "# Notes\nkeep these\n";
+    for (const [added, expected] of [["\n\n\n", original], ["\nperson tail\n", `${original}\nperson tail\n`]] as const) {
+      const cwd = fs.mkdtempSync(path.join(tmpDir, "claude-code-"));
+      const guidance = path.join(cwd, "CLAUDE.md");
+      fs.writeFileSync(guidance, original);
+      mergeManagedBlock(writer, guidance, "openrig-seat-skills.md", asset);
+      fs.appendFileSync(guidance, added);
+      const rig = rigRepo.createRig(`after-block-${expected.length}`);
+      const node = rigRepo.addNode(rig.id, "dev", { runtime: "claude-code", cwd });
+      sessionRegistry.updateStatus(sessionRegistry.registerSession(node.id, `dev@${rig.name}`).id, "running");
+
+      await buildTeardown().teardown(rig.id);
+
+      expect(fs.readFileSync(guidance, "utf-8"), JSON.stringify(added)).toBe(expected);
     }
   });
 

@@ -146,8 +146,8 @@ export function removeManagedBlocksFromFile(
       return `\u0000openrig-kept-${kept.length - 1}\u0000`;
     });
   }
-  // Blocks the writer added come out with exactly its separators, so the person's bytes are as they were; a file in any
-  // other shape is cleaned and its blank lines normalized, as before.
+  // OpenRig's blocks and the newlines its writer adds come out exactly, so an unchanged file gets its bytes back; a file in
+  // any other shape is cleaned and its blank lines normalized, as before.
   const exact = removeBlocksAsWritten(working);
   const cleaned = (exact ?? stripManagedBlocks(working)).replace(/\u0000openrig-kept-(\d+)\u0000/g, (_m, i: string) => kept[Number(i)]!);
   // A file the writer created goes when nothing else is left; a file that was there before keeps its bytes, even empty.
@@ -169,9 +169,10 @@ const CURRENT_BLOCK = /(?:\n|^)\s*(<!-- BEGIN OpenRig MANAGED BLOCK: [\s\S]*?<!-
 
 /**
  * `content` with OpenRig's blocks taken out as `mergeManagedBlock` put them in: each block, the separator it wrote before
- * the first (none when that block started a new file), and the newlines between and after blocks, which only the writer
- * puts there (a later merge ends the file with one more). Text a person added around a block stays as it is. Null when
- * the file isn't in that shape, such as a legacy block, or text against a block without the writer's separator.
+ * the first (none when that block started a new file), and the newline-only text between and after blocks, where the
+ * writer puts its separators (a later merge ends the file with one more). Text a person adds is kept. Blank lines a
+ * person adds right next to a block, between blocks or after the last, go with it: they can't be told from the writer's.
+ * Null when the file isn't in that shape, such as a legacy block, or text against a block without the writer's separator.
  */
 function removeBlocksAsWritten(content: string): string | null {
   if (content.includes("<!-- BEGIN RIGGED MANAGED BLOCK:")) return null;
