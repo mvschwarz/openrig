@@ -3,7 +3,7 @@ import { getSelfHostId, LOCAL_HOST_ID } from "../domain/hosts/fanout-contract.js
 import { loadHostRegistry } from "../domain/hosts/hosts-registry-reader.js";
 import type { ProviderService } from "../domain/provider/provider-service.js";
 import type { ProviderKind } from "../domain/provider/provider-types.js";
-import { checkMoveReport, MOVE_REPORT_TAG, readMoveReport, renderMoveReport, type MoveReport } from "../domain/provider/subscription-move-report.js";
+import { checkMoveReport, credentialRefusal, findCredential, MOVE_REPORT_TAG, readMoveReport, renderMoveReport, type MoveReport } from "../domain/provider/subscription-move-report.js";
 import { QueueRepositoryError, type QueueRepository } from "../domain/queue-repository.js";
 import { requireSenderIdentity, resolveRecordedProvenance } from "./require-sender-identity.js";
 import {
@@ -269,7 +269,9 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
   });
 
   // Slice 18 — subscription move reports: queue items tagged subscription-move, filed by the agent that moved a Codex
-  // home, read back by it and by the Fleet app. Filing one checks and keeps the report; it never switches or restarts.
+  // home and read back by it (and by the Fleet app, once its page is connected). Filing one checks and keeps the report;
+  // it never switches or restarts.
+  const NOTHING_RECORDED = "Nothing was recorded, and the move itself is unchanged. Correct the report and file it again; don't repeat the switch or restart.";
   const queueOf = (c: Context): QueueRepository | null => (c.get("queueRepo" as never) as QueueRepository | undefined) ?? null;
 
   router.get("/moves", (c) => {
@@ -289,6 +291,8 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
     }
     for (const move of moves) move.followedBy = moves.filter((later) => later.report.follows === move.qitemId).map((later) => later.qitemId);
     const shown = seat ? moves.filter((move) => [...move.report.seats, ...(move.report.peers ?? [])].some((entry) => entry.seat === seat)) : moves;
+    // A bounded recent window: the newest `limit` tagged items, before the seat filter. `truncated` says the window was
+    // full, so older reports may exist; it isn't a seat's complete history.
     return c.json({ moves: shown, unreadable, truncated: items.length === limit }, 200);
   });
 
@@ -302,6 +306,12 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
       return c.json({ error: "invalid JSON body" }, 400);
     }
     const body = (raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {}) as { to?: unknown; report?: unknown; evidenceRef?: unknown };
+    // Before anything else, and over everything the queue would keep or echo: nothing in a recognized credential format
+    // is persisted or repeated back, in a value or a key.
+    const credential = findCredential(body.to, "to") ?? findCredential(body.evidenceRef, "evidenceRef") ?? findCredential(body.report);
+    if (credential) {
+      return c.json({ error: "move_report_invalid", errors: [credentialRefusal(credential)], message: NOTHING_RECORDED }, 400);
+    }
     if (typeof body.to !== "string" || body.to.trim() === "") {
       return c.json({ error: "to_required", message: "to must name the seat the report goes to: whoever asked for the move, or the person" }, 400);
     }
@@ -310,7 +320,7 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
       return c.json({
         error: "move_report_invalid",
         errors: check.errors,
-        message: "Nothing was recorded, and the move itself is unchanged. Correct the report and file it again; don't repeat the switch or restart.",
+        message: NOTHING_RECORDED,
       }, 400);
     }
     const identity = requireSenderIdentity(c, { verb: "a subscription move report" });
@@ -330,7 +340,7 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
       return c.json({ qitemId: item.qitemId, report: check.report }, 201);
     } catch (error) {
       if (!(error instanceof QueueRepositoryError)) throw error;
-      return c.json({ error: error.code, message: `${error.message} Nothing was recorded, and the move itself is unchanged; don't repeat the switch or restart.` }, 400);
+      return c.json({ error: error.code, message: `${error.message} ${NOTHING_RECORDED}` }, 400);
     }
   });
 

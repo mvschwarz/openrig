@@ -1,8 +1,8 @@
 // Slice 18 — the report an agent files after it moves (or tries to move) a Codex home between subscriptions. The
 // agent decides and moves (`rig auth switch`, `rig seat restart --keep-conversation`, then `--verify` after a real
 // turn); this only checks and keeps what it reports. The report is a queue item to whoever asked, tagged
-// `subscription-move`, whose body carries the report as one fenced JSON block, so the Fleet app and the agent can
-// read it back. It holds labels and references, never credentials, and it decides nothing: a refused report changes
+// `subscription-move`, whose body carries the report as one fenced JSON block, so the agent (and the Fleet app, once its
+// page is connected) can read it back. It holds labels and references, never credentials, and it decides nothing: a refused report changes
 // nothing about the move, and nothing here switches or restarts anything.
 
 export const MOVE_REPORT_TAG = "subscription-move";
@@ -65,11 +65,13 @@ const CREDENTIAL_FORMATS: ReadonlyArray<{ kind: string; pattern: RegExp }> = [
   { kind: "JWT", pattern: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/ },
 ];
 
-/** Where a string in `value` has a recognized credential format: its path and the format, never the value. */
-export function findCredential(value: unknown, path = "report"): { path: string; kind: string } | null {
+/** Where `value` has a recognized credential format, in a string or in an object key: the path to it and the format,
+ *  never the value. A key is checked before what it holds, so a path only ever names keys that passed. */
+export function findCredential(value: unknown, path = "report"): { path: string; kind: string; inKey: boolean } | null {
+  const format = (text: string) => CREDENTIAL_FORMATS.find((candidate) => candidate.pattern.test(text));
   if (typeof value === "string") {
-    const hit = CREDENTIAL_FORMATS.find((format) => format.pattern.test(value));
-    return hit ? { path, kind: hit.kind } : null;
+    const hit = format(value);
+    return hit ? { path, kind: hit.kind, inKey: false } : null;
   }
   if (Array.isArray(value)) {
     for (const [index, item] of value.entries()) {
@@ -80,11 +82,18 @@ export function findCredential(value: unknown, path = "report"): { path: string;
   }
   if (value && typeof value === "object") {
     for (const [key, item] of Object.entries(value)) {
+      const named = format(key);
+      if (named) return { path, kind: named.kind, inKey: true };
       const hit = findCredential(item, `${path}.${key}`);
       if (hit) return hit;
     }
   }
   return null;
+}
+
+/** The refusal for a credential `findCredential` found, saying where and which format without repeating it. */
+export function credentialRefusal(hit: { path: string; kind: string; inKey: boolean }): string {
+  return `${hit.path} ${hit.inKey ? "has a key that looks like" : "holds what looks like"} a ${hit.kind}; a report holds labels and references only, never credentials`;
 }
 
 const isObject = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
@@ -96,9 +105,7 @@ export type MoveReportCheck = { ok: true; report: MoveReport } | { ok: false; er
 /** Check a report's shape. It checks what the report claims, not whether the move was authorized or happened. */
 export function checkMoveReport(raw: unknown): MoveReportCheck {
   const credential = findCredential(raw);
-  if (credential) {
-    return { ok: false, errors: [`${credential.path} holds what looks like a ${credential.kind}; a report holds labels and references only, never credentials`] };
-  }
+  if (credential) return { ok: false, errors: [credentialRefusal(credential)] };
   if (!isObject(raw)) return { ok: false, errors: ["the report must be a JSON object"] };
   const errors: string[] = [];
   if (raw.version !== 1) errors.push("version must be 1");
@@ -217,11 +224,23 @@ export function renderMoveReport(report: MoveReport): { summary: string; body: s
   return { summary, body: lines.join("\n") };
 }
 
-const FENCED = new RegExp(`\`\`\`${MOVE_REPORT_FENCE}\\n([\\s\\S]*?)\\n\`\`\``);
+const OPENING = `\`\`\`${MOVE_REPORT_FENCE}\n`;
+
+/** The report's block: the LAST opening fence at the start of a line, up to the next fence line. The block is written
+ *  last, after the prose, so a fence quoted in the prose (say a reason quoting an earlier report) comes before it;
+ *  inside the block, JSON escapes every newline, so no fence line can occur there. */
+function reportBlock(body: string): string | undefined {
+  let at = body.lastIndexOf(OPENING);
+  while (at > 0 && body[at - 1] !== "\n") at = body.lastIndexOf(OPENING, at - 1);
+  if (at < 0) return undefined;
+  const start = at + OPENING.length;
+  const end = body.indexOf("\n```", start);
+  return end < 0 ? undefined : body.slice(start, end);
+}
 
 /** Read a report back from a queue item's body, with the same check as when it was filed. */
 export function readMoveReport(body: string): MoveReportCheck {
-  const block = FENCED.exec(body)?.[1];
+  const block = reportBlock(body);
   if (block === undefined) return { ok: false, errors: [`no ${MOVE_REPORT_FENCE} block`] };
   let raw: unknown;
   try {

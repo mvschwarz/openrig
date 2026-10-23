@@ -1044,7 +1044,7 @@ moving Claude seats, aren't supported moves yet: say so instead of improvising.
    - **A slow reply isn't a failure:** never restart a seat a second time. Follow up at your next look.
 5. **Report every move, partial or unconfirmed included,** with
    `rig provider moves report --file <move.json> --to <whoever asked>` (`--help` shows the shape). It becomes a queue
-   item to them, and the Fleet app shows it. It holds:
+   item to them; the Fleet app reads these reports once its page is connected to them. It holds:
    - the home and machine, and from and to, as labels;
    - your reason, and the policy version you followed (or `{ "none": true }`);
    - each reading you acted on, `observed` with its observation time, `expected` with the reset it rests on, or
@@ -1058,7 +1058,9 @@ moving Claude seats, aren't supported moves yet: say so instead of improvising.
    its evidence with `--evidence-ref` (for example, the saved `--verify --json` output). Never put credentials in a
    report: a value in a recognized credential format is refused. **A refused report changes nothing about the move:**
    correct it and file it again; never repeat the switch or a restart because a report was refused. Asked "why did
-   these seats move?", even after your own restart, answer from `rig provider moves --seat <seat>`.
+   these seats move?", even after your own restart, answer from `rig provider moves --seat <seat>`. It reads the newest
+   reports (50 by default, `--limit` up to 200) and then filters them, so it's a recent window, not a seat's whole
+   history: raise `--limit` when you need older ones.
 6. **When a sign-in is needed:**
    - Ask the person once, durably: a queue item to their seat, naming the machine and the subscription.
    - Move nothing onto that subscription until it's done.

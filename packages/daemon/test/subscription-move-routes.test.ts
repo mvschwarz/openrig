@@ -76,6 +76,24 @@ describe("subscription move report routes", () => {
     expect(reports()).toEqual([]);
   });
 
+  it("refuses a credential anywhere the queue would keep or repeat it, and never repeats it back", async () => {
+    const token = `Bearer ${"t".repeat(30)}`, keyToken = `ghp_${"k".repeat(36)}`;
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ to: ASKER, report: moveReport(), evidenceRef: `https://evidence.example/move?auth=${token}` }, "evidenceRef holds what looks like a bearer token"],
+      [{ to: `${token}@kernel`, report: moveReport() }, "to holds what looks like a bearer token"],
+      [{ to: ASKER, report: moveReport({ [keyToken]: "ordinary" }) }, "report has a key that looks like a GitHub token"],
+    ];
+    for (const [body, error] of cases) {
+      const res = await file(body);
+      const text = await res.text();
+      expect(res.status).toBe(400);
+      expect(JSON.parse(text)).toMatchObject({ error: "move_report_invalid", errors: [expect.stringContaining(error)], message: expect.stringContaining("the move itself is unchanged") });
+      expect(text).not.toContain("t".repeat(30));
+      expect(text).not.toContain("k".repeat(36));
+    }
+    expect(reports()).toEqual([]);
+  });
+
   it("reads reports newest first, chains follow-ups, filters by seat or peer, and names unreadable items", async () => {
     const first = (await (await file({ to: ASKER, report: moveReport() })).json() as { qitemId: string }).qitemId;
     const followUp = moveReport({
@@ -89,14 +107,24 @@ describe("subscription move report routes", () => {
       sourceSession: AGENT, destinationSession: ASKER, tags: [MOVE_REPORT_TAG], nudge: false,
       body: `\`\`\`openrig-subscription-move\n${JSON.stringify(moveReport({ reason: token }))}\n\`\`\``,
     });
+    // And one whose report has a token-shaped key: named by where it is, not by the key.
+    const keyToken = `ghp_${"k".repeat(36)}`;
+    const keyed = await queue.create({
+      sourceSession: AGENT, destinationSession: ASKER, tags: [MOVE_REPORT_TAG], nudge: false,
+      body: `\`\`\`openrig-subscription-move\n${JSON.stringify(moveReport({ peers: [{ seat: "x", note: "y", [keyToken]: "z" }] }))}\n\`\`\``,
+    });
 
     const all = await list();
     expect(all.status).toBe(200);
     expect(all.data.moves.map((move: { qitemId: string }) => move.qitemId)).toEqual([second, first]);
     expect(all.data.moves[1]).toMatchObject({ reportedBy: AGENT, reportedTo: ASKER, state: "pending", followedBy: [second] });
     expect(all.data.moves[0].report.follows).toBe(first);
-    expect(all.data.unreadable).toEqual([{ qitemId: handMade.qitemId, reason: expect.stringContaining("report.reason holds what looks like a bearer token") }]);
+    expect(all.data.unreadable).toEqual([
+      { qitemId: keyed.qitemId, reason: expect.stringContaining("report.peers[0] has a key that looks like a GitHub token") },
+      { qitemId: handMade.qitemId, reason: expect.stringContaining("report.reason holds what looks like a bearer token") },
+    ]);
     expect(JSON.stringify(all.data)).not.toContain("z".repeat(30));
+    expect(JSON.stringify(all.data)).not.toContain("k".repeat(36));
     expect(all.data.truncated).toBe(false);
 
     expect((await list("?seat=dev-lead%40team")).data.moves.map((move: { qitemId: string }) => move.qitemId)).toEqual([first]);

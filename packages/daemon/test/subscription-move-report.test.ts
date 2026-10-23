@@ -65,6 +65,16 @@ describe("subscription move report", () => {
     }
   });
 
+  it("refuses a key in a recognized credential format, whatever it holds, without repeating the key", () => {
+    const keyToken = `ghp_${"k".repeat(36)}`;
+    for (const value of ["ordinary", `Bearer ${"v".repeat(30)}`]) {
+      const errors = errorsOf(moveReport({ seats: [{ seat: "dev-impl@team", result: "unknown", missing: "x", [keyToken]: value }] }));
+      expect(errors).toEqual(["report.seats[0] has a key that looks like a GitHub token; a report holds labels and references only, never credentials"]);
+      expect(errors.join(" ")).not.toContain(keyToken.slice(4, 20));
+      expect(errors.join(" ")).not.toContain("v".repeat(30));
+    }
+  });
+
   it("doesn't treat labels, home paths or account names as credentials", () => {
     for (const value of [
       "/home/ubuntu/codexhomes/primaryaccountsharedbybuildmachines/sessions",
@@ -91,6 +101,18 @@ describe("subscription move report", () => {
     expect(body).toContain("- codex-2: expected full since 2026-10-22T00:00:00.000Z (not measured; last reading 2026-10-20T09:00:00.000Z)");
     expect(body).toContain("- dev-lead@team: not restarted; account unverified");
     expect(readMoveReport(body)).toEqual({ ok: true, report });
+  });
+
+  it("reads back the report itself when its prose quotes an earlier report's block, whole or cut short", () => {
+    const earlier = checkMoveReport(moveReport({ reason: "the first move" }));
+    if (!earlier.ok) throw new Error(earlier.errors.join("; "));
+    const earlierBody = renderMoveReport(earlier.report).body;
+    for (const quoted of [earlierBody, earlierBody.slice(0, earlierBody.indexOf("\"readings\""))]) {
+      const report = moveReport({ follows: "qitem-earlier", reason: `following up the report below:\n${quoted}` });
+      const check = checkMoveReport(report);
+      if (!check.ok) throw new Error(check.errors.join("; "));
+      expect(readMoveReport(renderMoveReport(check.report).body)).toEqual({ ok: true, report });
+    }
   });
 
   it("reads a body without the block, or with a broken one, as unreadable without quoting it", () => {

@@ -118,7 +118,7 @@ describe("rig provider moves", () => {
       "  dev-lead@team: not restarted; account unverified",
       "  followed by qitem-2",
       "unreadable: qitem-x: no openrig-subscription-move block",
-      "(more reports exist: raise --limit)",
+      "(only the newest 5 reports were read; older ones may exist: raise --limit)",
     ]);
     const json = await run(["moves", "--json"], port);
     expect(JSON.parse(json.out)).toEqual(answer.body);

@@ -508,9 +508,9 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
   };
   const moves = cmd
     .command("moves")
-    .description("Subscription move reports on this daemon, newest first: from and to, why, and each seat's result")
-    .option("--seat <seat>", "Only reports that restarted or listed this seat")
-    .option("--limit <n>", "How many reports to read, newest first (default 50, at most 200)")
+    .description("Recent subscription move reports on this daemon, newest first: from and to, why, and each seat's result")
+    .option("--seat <seat>", "Only reports that restarted or listed this seat, among the reports read")
+    .option("--limit <n>", "How many of the newest reports to read, before --seat filters them (default 50, at most 200)")
     .option("--json", "Output as parseable JSON")
     .action(async (opts: { seat?: string; limit?: string; json?: boolean }) => {
       const client = await getClient(getDeps());
@@ -540,7 +540,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
         if (followedBy.length > 0) console.log(`  followed by ${followedBy.join(", ")}`);
       }
       for (const item of unreadable) console.log(`unreadable: ${item.qitemId}: ${item.reason}`);
-      if (truncated) console.log("(more reports exist: raise --limit)");
+      if (truncated) console.log(`(only the newest ${opts.limit ?? 50} reports were read; older ones may exist: raise --limit)`);
     });
   moves
     .command("report")
