@@ -188,6 +188,15 @@ describe("gateway human lifecycle (S12, amended A1: single-human surface): list 
     expect(showHuman("mike", home)).toMatchObject({ ok: true, record: { slackSubscription: { value: "every-ask", source: "default" } } });
   });
 
+  it("a hand-written preset that isn't a plain string is refused, never projected as a quiet subscription", () => {
+    // Hand-edit the fragment, then any set re-validates and re-projects it.
+    const fragment = join(humansDir(home), "mike.yaml");
+    writeFileSync(fragment, `${readFileSync(fragment, "utf8")}subscriptions:\n  - destination: { connector: slack }\n    filter: { preset: [every-ask] }\n`);
+    const res = setHumanField("mike", "display-name", "Mike M", home);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error).toContain("must be { preset: every-ask|urgent-only }");
+  });
+
   it("set with a bad enum fails loud NAMING the allowed set and leaves fragment AND projection byte-unchanged", () => {
     const fragBefore = sha(join(humansDir(home), "mike.yaml"));
     const projBefore = sha(projectionPath(home));

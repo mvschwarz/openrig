@@ -77,7 +77,8 @@ function validateSubscriptions(value: unknown): { ok: true; subscriptions: Atten
     if (!isObj(destination) || unknownKey(destination, new Set(["connector"])) || destination.connector !== "slack") {
       return { ok: false, error: `${where}.destination must be { connector: slack } (the person's Slack binding)` };
     }
-    if (!isObj(filter) || unknownKey(filter, new Set(["preset"])) || !(SUBSCRIPTION_PRESETS as readonly string[]).includes(String(filter.preset))) {
+    if (!isObj(filter) || unknownKey(filter, new Set(["preset"])) || typeof filter.preset !== "string"
+      || !(SUBSCRIPTION_PRESETS as readonly string[]).includes(filter.preset)) {
       return { ok: false, error: `${where}.filter must be { preset: ${SUBSCRIPTION_PRESETS.join("|")} }` };
     }
     if (subscriptions.some((s) => s.destination.connector === "slack")) return { ok: false, error: `${where}: one Slack subscription per person` };
