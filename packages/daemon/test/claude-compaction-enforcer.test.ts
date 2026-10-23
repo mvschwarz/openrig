@@ -1183,7 +1183,8 @@ describe("ClaudeCompactionEnforcer", () => {
         const { transport, send } = makeSessionTransport();
         let releasePrep!: () => void;
         send.mockImplementationOnce(() => new Promise((resolve) => { releasePrep = () => resolve({ ok: true }); }));
-        const enforcer = new ClaudeCompactionEnforcer(settings, transport, { openrigHome: HOME });
+        // Holding the first prep open across the later calls (and a busy CI) must not consume its 50ms budget.
+        const enforcer = new ClaudeCompactionEnforcer(settings, transport, { openrigHome: HOME, now: () => 1_700_000_000_000 });
 
         // First call suspended mid-prep → stage=preparing, send #1 fired.
         const first = enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20 });
