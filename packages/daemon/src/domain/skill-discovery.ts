@@ -122,13 +122,47 @@ export function parseSkillFrontmatter(content: string): ParseResult {
   };
 }
 
+/** Raw scan outcomes shared by the members of one preflight (#1653), keyed by everything a scan reads. Only a caller
+ *  that names a scope gets one; every other call scans fresh. Results that depend on a member's selection are never
+ *  stored here. */
+export type ScanCache = Map<string, { value: unknown } | { error: unknown }>;
+
+// One scope at a time: the preflight's worker serves one preflight, and a new scope replaces the old one.
+let scoped: { scope: string; cache: ScanCache } | undefined;
+
+export function scanCacheFor(scope: string | undefined): ScanCache | undefined {
+  if (scope === undefined) return undefined;
+  if (scoped?.scope !== scope) scoped = { scope, cache: new Map() };
+  return scoped.cache;
+}
+
+export function releaseScanCache(scope: string): void {
+  if (scoped?.scope === scope) scoped = undefined;
+}
+
+/** Run `scan` once per key in `cache`, failures included; each caller gets its own copy of the result. */
+export function memoizeScan<T>(cache: ScanCache | undefined, key: string, scan: () => T): T {
+  if (!cache) return scan();
+  let entry = cache.get(key);
+  if (!entry) {
+    try { entry = { value: scan() }; } catch (error) { entry = { error }; }
+    cache.set(key, entry);
+  }
+  if ("error" in entry) throw entry.error;
+  return structuredClone(entry.value) as T;
+}
+
 /** Discover skills for a runtime by scanning the canonical filesystem
  *  paths and structurally validating each candidate. Returns the
  *  accepted skills as SkillResource records (id from frontmatter; path
  *  pointing at the skill directory) plus a list of rejections so the
  *  caller can surface clear errors when validation fails. */
-export function discoverSkillsForRuntime(paths: SkillDiscoveryPaths): SkillDiscoveryResult {
+export function discoverSkillsForRuntime(paths: SkillDiscoveryPaths, cache?: ScanCache): SkillDiscoveryResult {
   const scanRoots = listScanRoots(paths);
+  return memoizeScan(cache, JSON.stringify(["discovery", paths.runtime, scanRoots]), () => scanSkillRoots(scanRoots));
+}
+
+function scanSkillRoots(scanRoots: string[]): SkillDiscoveryResult {
   const skills: SkillResource[] = [];
   const rejected: SkillRejection[] = [];
   const seenIds = new Set<string>();

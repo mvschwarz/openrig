@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { resolveNodeConfig, type ResolutionContext } from "../src/domain/profile-resolver.js";
 import { resolveNodeConfigAsync, withNodeConfigResolver } from "../src/domain/profile-resolution-worker.js";
 import { preflightValidatedSpec } from "../src/domain/rigspec-preflight.js";
+import { releaseScanCache } from "../src/domain/skill-discovery.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -81,6 +82,45 @@ function startScanGate(root: string, deadlineMs = 5000) {
   const writer = fork(helper, [gate, String(deadlineMs)], { execArgv: [], stdio: ["ignore", "ignore", "pipe", "ipc"] });
   const writerExited = once(writer, "exit");
   return { writer, writerExited };
+}
+
+const MALFORMED = {
+  name: ["---\ndescription: Test skill\n---\nBody\n", "frontmatter missing required `name` field"],
+  description: ["---\nname: ghost\n---\nBody\n", "frontmatter missing required `description` field"],
+  mapping: ["---\njust text\n---\nBody\n", "frontmatter is not a YAML mapping"],
+  body: ["---\nname: ghost\ndescription: Test skill\n---\n", "SKILL.md body is empty (the runtime would have nothing to load)"],
+  delimiters: ["no frontmatter\n", "no YAML frontmatter delimited by --- lines"],
+} as const;
+
+function writeAt(dir: string, content: string): string {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "SKILL.md"), content);
+  return dir;
+}
+
+function gitIn(cwd: string, ...args: string[]): void {
+  execFileSync("git", ["-C", cwd, ...args], { stdio: "ignore" });
+}
+
+/** A committed managed catalog, plus a git on PATH that logs each call the preflight worker makes. */
+function catalogWithGitLog(root: string): { catalog: string; log: string; bin: string } {
+  const catalog = join(root, "catalog");
+  mkdirSync(catalog, { recursive: true });
+  gitIn(catalog, "init", "-q");
+  gitIn(catalog, "config", "user.email", "test@openrig.invalid");
+  gitIn(catalog, "config", "user.name", "OpenRig Test");
+  writeFileSync(join(catalog, "catalog.yaml"), "schema: openrig.skill-catalog/v1\nsystem: []\n");
+  writeAt(join(catalog, "managed"), "---\nname: managed\ndescription: Managed skill\n---\nBody\n");
+  gitIn(catalog, "add", ".");
+  gitIn(catalog, "commit", "-qm", "fixture");
+  const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+  const bin = join(root, "bin");
+  const log = join(root, "git.log");
+  mkdirSync(bin);
+  writeFileSync(log, "");
+  writeFileSync(join(bin, "git"), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nexec '${realGit}' "$@"\n`);
+  chmodSync(join(bin, "git"), 0o755);
+  return { catalog, log, bin };
 }
 
 describe("profile resolution outside the daemon request thread", () => {
@@ -181,5 +221,109 @@ describe("profile resolution outside the daemon request thread", () => {
     // A malformed internal input throws before producing a normal validation result.
     ctx.baseSpec.spec = null as unknown as ResolutionContext["baseSpec"]["spec"];
     await expect(resolveNodeConfigAsync(ctx)).rejects.toThrow(/profiles/);
+  });
+
+  it("scans each identical skill library and catalog once per preflight, in the worker", async () => {
+    const root = mkdtempSync(join(tmpdir(), "profile-worker-shared-"));
+    const other = mkdtempSync(join(tmpdir(), "profile-worker-other-"));
+    roots.push(root, other);
+    const { catalog, log, bin } = catalogWithGitLog(root);
+    // "ghost" fails the folder lookup (its SKILL.md is malformed), so each member needs the full scan.
+    const ghost = writeAt(join(root, ".agents", "skills", "ghost"), MALFORMED.name[0]);
+    writeAt(join(root, ".agents", "skills", "renamed-folder"), "---\nname: renamed\ndescription: Test\n---\nBody\n");
+    const otherGhost = writeAt(join(other, ".agents", "skills", "ghost"), MALFORMED.body[0]);
+    const claudeGhost = writeAt(join(root, ".claude", "skills", "ghost"), MALFORMED.mapping[0]);
+    const member = (id: string, runtime = "codex", cwd = root, profile = "default") => ({ id, agentRef: "local:agent", profile, runtime, cwd });
+    const pod = (id: string, members: ReturnType<typeof member>[]) => ({ id, label: id, members, edges: [] });
+    const rig = { version: "0.2", name: "shared", edges: [], pods: [
+      pod("dev", [member("one"), member("two"), member("three"), member("alt", "codex", root, "alt")]),
+      pod("ops", [member("elsewhere", "codex", other), member("claude", "claude-code")]),
+    ] } as unknown as Parameters<typeof preflightValidatedSpec>[0];
+    // The parent reads each member's agent.yaml just before posting that member to the worker. Rewriting the shared
+    // library's "ghost" there makes every further scan of it visible in that member's rejection reason.
+    const edits = [MALFORMED.description, MALFORMED.delimiters];
+    let reads = 0;
+    const preflight = () => preflightValidatedSpec(rig, {
+      rigRoot: root,
+      skillsRoot: catalog,
+      fsOps: {
+        exists: path => path === join(root, "agent", "agent.yaml"),
+        readFile: () => {
+          if (reads++ > 0) writeFileSync(join(ghost, "SKILL.md"), edits[Math.min(reads - 2, edits.length - 1)]![0]);
+          return "name: worker\nversion: '1.0.0'\nresources:\n  skills: []\nprofiles:\n"
+            + "  default:\n    uses:\n      skills: [ghost]\n  alt:\n    uses:\n      skills: [renamed]\n";
+        },
+      },
+    });
+    const rejected = (id: string, [, reason]: readonly [string, string], at: string) =>
+      `${id}: Profile uses skills: "ghost" rejected — ${reason} (at ${at})`;
+    const catalogScans = () => readFileSync(log, "utf8").split("\n")
+      .filter(line => line === `-C ${catalog} rev-parse --show-toplevel`).length;
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    try {
+      const first = await preflight();
+      expect(reads).toBe(6);
+      // Each member's own selection is still resolved: "alt" finds its skill in the shared scan, and members with a
+      // different cwd or runtime get their own scan and their own rejection.
+      expect(first.errors).toEqual([
+        rejected("dev.one", MALFORMED.name, ghost),
+        rejected("dev.two", MALFORMED.name, ghost),
+        rejected("dev.three", MALFORMED.name, ghost),
+        rejected("ops.elsewhere", MALFORMED.body, otherGhost),
+        rejected("ops.claude", MALFORMED.mapping, claudeGhost),
+      ]);
+      expect(catalogScans()).toBe(1);
+
+      // A second preflight reads the library and catalog again.
+      const second = await preflight();
+      expect(second.errors[0]).toBe(rejected("dev.one", MALFORMED.delimiters, ghost));
+      expect(catalogScans()).toBe(2);
+    } finally {
+      process.env.PATH = path;
+    }
+  });
+
+  it("shares raw scans only within a scope, keeping each member's selection", () => {
+    const root = mkdtempSync(join(tmpdir(), "profile-worker-scope-"));
+    roots.push(root);
+    const { catalog } = catalogWithGitLog(root);
+    writeAt(join(catalog, "second"), "---\nname: second\ndescription: Managed skill\n---\nBody\n");
+    gitIn(catalog, "add", ".");
+    gitIn(catalog, "commit", "-qm", "second");
+    const withProject = (dir: string, skills: string[]): ResolutionContext => {
+      const ctx = fixture();
+      mkdirSync(join(root, dir));
+      writeFileSync(join(root, dir, "project.yaml"), `install:\n  skills: [${skills.join(", ")}]\n`);
+      ctx.member = { ...ctx.member, cwd: join(root, dir) };
+      ctx.baseSpec.spec.profiles.default!.uses.skills = [];
+      return { ...ctx, skillsRoot: catalog };
+    };
+    const a = withProject("a", ["managed"]);
+    const b = withProject("b", ["second"]);
+    const scope = "scope-test";
+    try {
+      for (const ctx of [a, b]) {
+        const scoped = resolveNodeConfig({ ...ctx, scanScope: scope });
+        expect(scoped.ok).toBe(true);
+        expect(scoped).toEqual(resolveNodeConfig(ctx));
+      }
+      const selected = (ctx: ResolutionContext) => {
+        const result = resolveNodeConfig(ctx);
+        return result.ok ? result.config.skillLoadout?.entries.map(entry => [entry.id, entry.selectedBy]) : result.errors;
+      };
+      expect(selected({ ...a, scanScope: scope })).toEqual([["managed", ["project"]]]);
+      expect(selected({ ...b, scanScope: scope })).toEqual([["second", ["project"]]]);
+
+      // An uncommitted edit is seen at once without a scope, and by the next scope, but not inside the scope that
+      // already took the inventory.
+      writeFileSync(join(catalog, "second", "SKILL.md"), "---\nname: second\ndescription: Edited\n---\nBody\n");
+      expect(selected(b)).toEqual([]);
+      expect(selected({ ...b, scanScope: scope })).toEqual([["second", ["project"]]]);
+      expect(selected({ ...b, scanScope: "next-scope" })).toEqual([]);
+    } finally {
+      releaseScanCache(scope);
+      releaseScanCache("next-scope");
+    }
   });
 });

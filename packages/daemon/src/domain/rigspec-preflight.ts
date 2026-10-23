@@ -141,6 +141,8 @@ import { RigSpecSchema } from "./rigspec-schema.js";
 import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
 import type { ResolutionContext, ResolutionResult } from "./profile-resolver.js";
 import { withNodeConfigResolver } from "./profile-resolution-worker.js";
+import { releaseScanCache } from "./skill-discovery.js";
+import { randomUUID } from "node:crypto";
 import { getOpenRigInstallCwdError, resolveAuthoredCwd, resolveLaunchCwd } from "./cwd-resolution.js";
 import nodePath from "node:path";
 import { loadCommunityHarnessPreset } from "./community-harness-presets.js";
@@ -291,7 +293,14 @@ export async function rigPreflight(input: RigPreflightInput & { exec?: (cmd: str
  * with no YAML round-trip; rigPreflight(yaml) is the parse/normalize front over it.
  */
 export async function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: PreflightSpecContext): Promise<PreflightResult> {
-  return withNodeConfigResolver(resolve => preflightMembers(rigSpec, preflightCtx, resolve));
+  // Members share raw skill scans of identical inputs within this preflight only (#1653). The worker's copy ends
+  // with the worker; the release covers the in-process fallback.
+  const scanScope = randomUUID();
+  try {
+    return await withNodeConfigResolver(resolve => preflightMembers(rigSpec, preflightCtx, context => resolve({ ...context, scanScope })));
+  } finally {
+    releaseScanCache(scanScope);
+  }
 }
 
 async function preflightMembers(

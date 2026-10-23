@@ -10,7 +10,7 @@ import type {
 import type { ResolvedAgentSpec, ResourceCollision } from "./agent-resolver.js";
 import { resolveAuthoredCwd } from "./cwd-resolution.js";
 import { resolveStartup } from "./startup-resolver.js";
-import { discoverSkillsForRuntime, findNamedSkillsForRuntime, parseSkillFrontmatter, type SkillRuntime } from "./skill-discovery.js";
+import { discoverSkillsForRuntime, findNamedSkillsForRuntime, parseSkillFrontmatter, scanCacheFor, type SkillRuntime } from "./skill-discovery.js";
 import { inspectSkillDirectory, resolvePluginSkills, resolveSkillLoadout, type SkillLoadout } from "./skill-catalog.js";
 import { resolvePluginPath } from "./projection-planner.js";
 
@@ -91,6 +91,9 @@ export interface ResolutionContext {
   /** A selected System World that could not be resolved. This is a launch
    *  refusal, never a silent fallback to the legacy catalog selector. */
   systemWorldError?: string;
+  /** One preflight's identity (#1653): its members share raw skill-library and catalog scans of identical inputs.
+   *  Absent, every resolution reads the filesystem fresh. */
+  scanScope?: string;
 }
 
 export type ResolutionResult =
@@ -196,6 +199,7 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
   // skill-discovery.listScanRoots; here we only enforce that
   // rig-local declarations are not overwritten by discovery.
   let rejectedSkillsByBasename: Map<string, { path: string; reason: string }> = new Map();
+  const scanCache = scanCacheFor(ctx.scanScope);
   if (runtime === "claude-code" || runtime === "codex" || runtime === "pi") {
     const discoveryPaths = {
       runtime: runtime as SkillRuntime,
@@ -208,7 +212,7 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
     // machine, once per member, froze the daemon on a large user folder; it now runs only for a name not found that way.
     const wanted = new Set(profile.uses.skills.filter((ref) => !pool.skills.has(ref)));
     const named = findNamedSkillsForRuntime(discoveryPaths, wanted);
-    const discovery = named.length === wanted.size ? { skills: named, rejected: [] } : discoverSkillsForRuntime(discoveryPaths);
+    const discovery = named.length === wanted.size ? { skills: named, rejected: [] } : discoverSkillsForRuntime(discoveryPaths, scanCache);
     for (const discovered of discovery.skills) {
       if (pool.skills.has(discovered.id)) continue; // rig-local-wins
       pool.skills.set(discovered.id, [{
@@ -239,6 +243,7 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
     topologySkills: profile.uses.skills,
     projectRoot: cwd,
     allowMissingTopology: true,
+    scanCache,
   });
   // Discovery reads only the working tree, so it can't find a catalog skill whose folder or SKILL.md was deleted or
   // whose name was edited. A profile skill the catalog skipped for uncommitted content is named below, not missing.

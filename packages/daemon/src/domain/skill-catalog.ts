@@ -15,7 +15,7 @@ import {
 } from "node:fs";
 import nodePath from "node:path";
 import { parse as parseYaml } from "yaml";
-import { parseSkillFrontmatter } from "./skill-discovery.js";
+import { memoizeScan, parseSkillFrontmatter, type ScanCache } from "./skill-discovery.js";
 
 const CATALOG_SCHEMA = "openrig.skill-catalog/v1";
 const MANIFEST_SCHEMA = "openrig.skill-loadout/v1";
@@ -366,6 +366,8 @@ export function resolveSkillLoadout(input: {
   projectRoot?: string;
   projectSkills?: string[];
   allowMissingTopology?: boolean;
+  /** Shares the raw catalog inventory, never this selection's result. */
+  scanCache?: ScanCache;
 }): ResolveSkillLoadoutResult {
   const errors: SkillCatalogFailure[] = [];
   let system: string[] = [];
@@ -412,7 +414,7 @@ export function resolveSkillLoadout(input: {
 
   let catalog: ReturnType<typeof scanCatalog>;
   try {
-    catalog = scanCatalog(input.catalogRoot);
+    catalog = memoizeScan(input.scanCache, JSON.stringify(["catalog", input.catalogRoot]), () => scanCatalog(input.catalogRoot));
   } catch (err) {
     return { ok: false, errors: [{ code: "catalog_unavailable", message: (err as Error).message, path: input.catalogRoot }] };
   }
