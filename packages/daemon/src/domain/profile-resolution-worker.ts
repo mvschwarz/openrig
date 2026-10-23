@@ -5,8 +5,10 @@ import { resolveNodeConfig, type ResolutionContext, type ResolutionResult } from
 
 // Keep the resolver's filesystem and catalog semantics in one place. In particular, a missing named skill can
 // require a full library scan, and catalog inspection runs synchronous git commands. Neither belongs on the
-// daemon's request thread during preflight (#1653). Reuse the imported module within a preflight, but read fresh
-// filesystem state for every member. In particular, do not cache scans by their root directory's mtime.
+// daemon's request thread during preflight (#1653). Reuse the imported module within a preflight. Its members share
+// the raw catalog scan and the full skill-scan fallback, keyed by the context's scanScope and dropped when the
+// preflight ends; the named-skill lookup and each member's own resolution read fresh. Never cache across
+// preflights, or by a root directory's mtime.
 const SOURCE = new URL(`data:text/javascript,${encodeURIComponent(`
 import { parentPort, workerData } from "node:worker_threads";
 let resolver;
