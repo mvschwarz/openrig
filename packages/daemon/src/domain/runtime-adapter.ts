@@ -13,6 +13,8 @@ export interface NodeBinding extends Binding {
   /** Claude-only, session-scoped Advisor model. */
   advisor?: string;
   codexConfigProfile?: string;
+  /** Rebuild only: a process/conversation-bound native predecessor policy. */
+  codexRebuildPermissions?: import("./codex-rebuild-permissions.js").CodexPermissionEnvelope;
   /** OPR.0.4.8.3 Seam B: the seat's RESOLVED launch posture from its permission_policy
    * attachment (member > rig precedence, resolved by the core resolver at materialize /
    * restore). Absent = no policy attached → the env-driven floor/YOLO decision stands.
@@ -130,6 +132,7 @@ export type HarnessLaunchResult =
   // conversation doesn't exist; other `retry_fresh` failures (such as a pane back at its shell)
   // leave it unset.
   | { ok: false; error: string; recovery?: HarnessLaunchRecovery; evidence?: string; missingConversation?: true;
+    probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence;
     /** The native resume probe's code for the startup gate that stopped the launch (for example `hook_trust_gate`),
      *  when one did. Reporting only: it changes no recovery decision. */
     gate?: string;

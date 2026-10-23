@@ -49,7 +49,7 @@ describe("GHOST-STAGE (e) DefaultOccupantInvalidator", () => {
       log: (m) => logs.push(m),
     }).invalidateRetiringOccupant({ retiringSessionName: "seat@rig", successorSessionName: "seat@rig", retiringGeneration: "gen-retired" });
     // No queue dep wired, so no park timers are kept.
-    expect(dropArmedByRegisteringGeneration).toHaveBeenCalledWith("gen-retired", []);
+    expect(dropArmedByRegisteringGeneration).toHaveBeenCalledWith("gen-retired", expect.any(Function), []);
     expect(logs.some((l) => /stopped 2 armed watchdog/.test(l))).toBe(true);
   });
 

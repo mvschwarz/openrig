@@ -13,9 +13,10 @@ import type {
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
 import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
+import { resumeProbeEvidence } from "../domain/native-resume-probe-evidence.js";
 import { resolveReadinessTimeoutMs } from "../domain/readiness-timeout.js";
 import { subtreeNamesClaudeExecutable, claudeCommandSessionToken, listNativeProcesses, observeClaudeDelivery, observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, verifyClaudePaneProcess, verifyCodexPaneProcess, verifyPaneIdleShell, witnessedClaudeVersionLabel, type ClaudeLaunchedProcess, type NativeProcessLister, type VersionLabelWitnessWait } from "../domain/native-process-lineage.js";
-import { mergeManagedBlock, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, type ClaudeManagedBlockFile } from "../domain/managed-blocks.js";
+import { isPerSeatRoleGuidance, mergeManagedBlock, perSeatRoleSkipWarning, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, type ClaudeManagedBlockFile } from "../domain/managed-blocks.js";
 import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix } from "./claude-resume-launch.js";
 import { shellQuote } from "./shell-quote.js";
 import { validateClaudeActivityHookDelivery, claudeActivityRelayPath, CLAUDE_ACTIVITY_RELAY_RELATIVE_PATH, parseManagedClaudeNodeCommand } from "../domain/claude-activity-hooks.js";
@@ -604,6 +605,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (probe.code === "no_conversation_found") {
         return {
           ok: false,
+          probe: await resumeProbeEvidence(probe, paneContent, this.tmux, tmuxSession),
           error: "Claude resume failed: no conversation found for the requested session",
           recovery: "retry_fresh",
           missingConversation: true,
@@ -620,6 +622,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (probe.status === "attention_required") {
         return {
           ok: false,
+          probe: await resumeProbeEvidence(probe, paneContent, this.tmux, tmuxSession),
           error: probe.detail,
           recovery: "attention_required",
           evidence: paneContent.split("\n").slice(-12).join("\n"),
@@ -635,7 +638,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         }
         const enterResult = await this.tmux.sendKeys(tmuxSession, ["Enter"]);
         if (!enterResult.ok) {
-          return { ok: false, error: `Claude trust prompt auto-drive failed: ${enterResult.message}` };
+          return { ok: false, error: `Claude trust prompt auto-drive failed: ${enterResult.message}`,
+            probe: await resumeProbeEvidence(probe, paneContent, this.tmux, tmuxSession) };
         }
         await this.sleep(200);
         continue;
@@ -688,10 +692,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     if (finalProbe.status === "resumed") {
       return { ok: true };
     }
+    const probeEvidence = await resumeProbeEvidence(finalProbe, finalContent, this.tmux, tmuxSession);
 
     if (finalProbe.status === "attention_required" || finalProbe.code === "claude_auto_identity_required") {
       return {
         ok: false,
+        probe: probeEvidence,
         error: finalProbe.detail,
         recovery: "attention_required",
         evidence: finalContent.split("\n").slice(-12).join("\n"),
@@ -702,6 +708,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     if (finalProbe.code === "no_conversation_found") {
       return {
         ok: false,
+        probe: probeEvidence,
         error: "Claude resume failed: no conversation found for the requested session",
         recovery: "retry_fresh",
         missingConversation: true,
@@ -711,6 +718,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     if (await this.paneReturnedToShell(binding, finalCommand)) {
       return {
         ok: false,
+        probe: probeEvidence,
         error: "Claude resume failed: pane returned to shell instead of entering Claude",
         recovery: "retry_fresh",
       };
@@ -726,11 +734,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       return {
         ok: false,
         error: `Claude resume did not finish within ${Math.round(attempts * pollMs / 1000)}s; Claude may still be starting, so the launch was kept`,
+        probe: probeEvidence,
         recovery: "attention_required",
         evidence: finalContent.split("\n").slice(-12).join("\n"),
       };
     }
-    return { ok: false, error: "Claude resume failed: timed out waiting for Claude to become active" };
+    return { ok: false, error: "Claude resume failed: timed out waiting for Claude to become active", probe: probeEvidence };
   }
 
   private projectEntry(entry: ProjectionEntry, cwd: string, managedBlockFile: ClaudeManagedBlockFile, warnings: string[], seatSkillsRoot?: string, seatSkillsRefused?: string): boolean {
@@ -741,7 +750,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     if (entry.category === "guidance" && entry.mergeStrategy === "managed_block") {
       const targetPath = nodePath.join(cwd, managedBlockFile);
       const content = this.fs.readFile(entry.absolutePath);
-      return this.mergeGuidance(targetPath, entry.effectiveId, content, warnings);
+      return this.mergeGuidance(targetPath, entry.effectiveId, content, warnings, entry.absolutePath);
     }
 
     // HG-1.3 plugin runtime applicability filter (per DESIGN.md §5.1):
@@ -908,17 +917,19 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
    * ProjectionResult and StartupDeliveryResult report honest counts instead
    * of claiming a merge that never landed.
    */
-  private mergeGuidance(targetPath: string, blockId: string, content: string, warnings: string[]): boolean {
+  private mergeGuidance(targetPath: string, blockId: string, content: string, warnings: string[], sourcePath?: string): boolean {
     // The `rig-role` managed block is authored per seat but delivered through a
     // projection path that pairs (target-file × spec) without seat correlation,
     // so multiple pod-mates' role bodies collide into one CLAUDE.md. The fix
     // is to route per-seat content through the `send_text` startup path
     // instead, which preserves seat identity. Here we refuse the merge loudly
     // so the collision can't land silently. See ADR-0006.
-    if (blockId === "rig-role") {
+    if (isPerSeatRoleGuidance(blockId, sourcePath)) {
       console.log(
-        `[openrig] skip: effectiveId is rig-role, per-seat delivery via send_text path required (target=${targetPath})`
+        `[openrig] skip: effectiveId is ${blockId}, a seat's own role; per-seat delivery via send_text path required (target=${targetPath})`
       );
+      const warning = perSeatRoleSkipWarning(blockId, targetPath);
+      if (warning) warnings.push(warning);
       return false;
     }
     mergeManagedBlock(this.fs, targetPath, blockId, content, {

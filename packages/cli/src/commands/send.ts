@@ -242,6 +242,7 @@ export function sendCommand(depsOverride?: SendDeps): Command {
     .option("--raw", "Send exact text/keystrokes without the From/To messaging envelope (still guarded against interactive prompts)")
     .option("--dangerously-interact", "DANGEROUS: type an answer as keystrokes into an interactive prompt (implies --raw; requires --reason). Letters can select menu shortcuts; CR/ESC act as keys. Enter is added only for the complete visibly staged answer.")
     .option("--reason <text>", "Why the prompt is being driven (required with --dangerously-interact; recorded in the audit log)")
+    .option("--urgent", "Mark this message urgent: it types at seats whose interruption level holds other messages. Anyone may mark one; the recipient sees who did")
     .option("--host <id>", "Send on a remote host declared in ~/.openrig/hosts.yaml (ssh hosts shell out; http hosts go CLI-direct to the remote daemon)")
     .option("--from <session>", "DEPRECATED + IGNORED (P21 I4). The rendered From:/actor now DERIVES from the transport identity ($OPENRIG_SESSION_NAME, stamped as X-OpenRig-Session) — never a caller-supplied string, which was specimen-5's forgeable surface. Cross-host origin is carried by the relay re-stamping from its authenticated context.")
     .option("--context <ref>", "Deliver a context pack by its path-like ref (e.g. packs/compaction-restore). The resolved content is sent; an oversized ref is flagged as 'walk-sized'.")
@@ -323,7 +324,7 @@ result and verify verdict are the REMOTE's, verbatim. A target of the form
 agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
 (explicit --host > target sugar > persisted selection; a conflict between
 --host and the sugar is an error).`)
-    .action(async (session: string | undefined, text: string | undefined, opts: { to?: string[]; pod?: string; rig?: string; verify?: boolean; force?: boolean; waitForIdle?: string; raw?: boolean; dangerouslyInteract?: boolean; reason?: string; host?: string; from?: string; context?: string; json?: boolean }) => {
+    .action(async (session: string | undefined, text: string | undefined, opts: { to?: string[]; pod?: string; rig?: string; verify?: boolean; force?: boolean; waitForIdle?: string; raw?: boolean; dangerouslyInteract?: boolean; reason?: string; urgent?: boolean; host?: string; from?: string; context?: string; json?: boolean }) => {
       // OPR.0.4.6.MH1 FR-2: selected-host routing — explicit --host wins;
       // else the persisted selection feeds the SHIPPED --host path; no
       // selection = today exactly. OPR.0.4.6.MH4 §4: the raw flag is kept
@@ -506,6 +507,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
         res = await client.post<Record<string, unknown>>("/api/transport/send", {
           session, text: outboundText, verify: opts.verify, force: opts.force, waitForIdleMs,
           dangerouslyInteract: opts.dangerouslyInteract, reason: opts.reason, actorSession: senderSession ?? null,
+          ...(opts.urgent ? { urgent: true } : {}),
         }, transportRequestOptions(waitForIdleMs));
       } catch (err) {
         if (err instanceof DaemonConnectionError) {
@@ -759,7 +761,7 @@ async function runCrossHostSend(
   hostId: string,
   session: string,
   text: string,
-  opts: { verify?: boolean; force?: boolean; waitForIdle?: string; raw?: boolean; dangerouslyInteract?: boolean; reason?: string; from?: string; json?: boolean },
+  opts: { verify?: boolean; force?: boolean; waitForIdle?: string; raw?: boolean; dangerouslyInteract?: boolean; reason?: string; urgent?: boolean; from?: string; json?: boolean },
   deps: SendDeps,
   waitForIdleMs?: number,
   hint?: string,
@@ -800,6 +802,7 @@ async function runCrossHostSend(
   if (opts.raw) argv.push("--raw");
   if (opts.dangerouslyInteract) argv.push("--dangerously-interact");
   if (opts.reason !== undefined) argv.push("--reason", opts.reason);
+  if (opts.urgent) argv.push("--urgent");
   // Sender provenance: the ssh relay re-runs `rig send` on the remote, which
   // would otherwise resolve ITS OWN session and degrade the envelope sender
   // to "unknown". Carry the origin so the remote envelope names the originating
@@ -869,7 +872,7 @@ async function runHttpHostSend(
   host: HttpHostEntry,
   session: string,
   text: string,
-  opts: { verify?: boolean; force?: boolean; waitForIdle?: string; raw?: boolean; dangerouslyInteract?: boolean; reason?: string; from?: string; json?: boolean },
+  opts: { verify?: boolean; force?: boolean; waitForIdle?: string; raw?: boolean; dangerouslyInteract?: boolean; reason?: string; urgent?: boolean; from?: string; json?: boolean },
   deps: SendDeps,
   waitForIdleMs?: number,
   hint?: string,
@@ -891,6 +894,7 @@ async function runHttpHostSend(
   const result = await runRemoteHttpOp(host.id, "POST", "/api/transport/send", {
     session, text: outboundText, verify: opts.verify, force: opts.force, waitForIdleMs,
     dangerouslyInteract: opts.dangerouslyInteract, reason: opts.reason, actorSession: senderSession ?? null,
+    ...(opts.urgent ? { urgent: true } : {}),
   }, deps, { timeoutMs: (waitForIdleMs ?? 0) + CROSS_HOST_SEND_TIMEOUT_MS });
 
   // A send that may have reached the remote is unconfirmed, not unreachable: it may have been delivered, and a
@@ -969,7 +973,7 @@ async function runFanOutSend(params: {
   // ba41fea2 — `from` was omitted here while the caller already forwarded it
   // at runtime, so an explicit --from was silently dropped on fan-out only
   // (single-seat + both cross-host paths always honored it).
-  opts: { verify?: boolean; force?: boolean; raw?: boolean; dangerouslyInteract?: boolean; reason?: string; from?: string; json?: boolean };
+  opts: { verify?: boolean; force?: boolean; raw?: boolean; dangerouslyInteract?: boolean; reason?: string; urgent?: boolean; from?: string; json?: boolean };
   deps: SendDeps;
   /** P18: the seat identity resolved from the seat env, or `undefined` when unresolvable (env-less send
    *  DELIVERS with the `<unknown sender>` marker + null actorSession — no refusal). */
@@ -995,6 +999,7 @@ async function runFanOutSend(params: {
     dangerouslyInteract: opts.dangerouslyInteract,
     reason: opts.reason,
     actorSession: senderSession ?? null,
+    ...(opts.urgent ? { urgent: true } : {}),
   };
   if (toList) body.sessions = toList;
   else if (pod) body.pod = pod;

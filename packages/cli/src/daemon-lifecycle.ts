@@ -39,6 +39,7 @@ export interface DaemonEventLoopEvidence {
 }
 
 export interface DaemonStatus {
+  databaseWarnings?: string[];
   /** RULING 1ae863d2 — C3 3-state semantics (canonical: daemon crash-cart-detect.ts, kept in
    *  lockstep): "stopped" requires POSITIVE evidence (connection refused); a probe TIMEOUT or
    *  other non-refusal failure is "unverified" — never a down assertion. */
@@ -243,7 +244,18 @@ const DEFAULT_DB = "openrig.sqlite";
 // Fresh Linux hosts can take longer than a warmed dev machine to load native
 // modules, run startup reconciliation, and bind healthz. Keep the retry loop
 // bounded, but do not kill a healthy daemon during first-boot slack.
-const HEALTHZ_RETRIES = 80;
+// #1786: one elapsed deadline, started when the readiness loop begins (after the
+// child is spawned and its handlers are attached), covers every primary probe,
+// listener check and backoff (the 20s the old 80 x 250ms delays gave). Each probe
+// may take up to STARTUP_PROBE_TIMEOUT_MS, so a busy child that answers correctly
+// in a second is accepted, but no probe timer outlives the deadline (a 2s startup
+// ceiling, not a universal header wait). The deadline only stops new probes and
+// backoff: timers cannot preempt synchronous work in this process, so a verified
+// answer already in hand when the clock passes it is still used, with the usual
+// liveness and publication rechecks. A failed start may add up to
+// DAEMON_STOP_WAIT_MS of owned-child cleanup.
+const STARTUP_READINESS_DEADLINE_MS = 20_000;
+const STARTUP_PROBE_TIMEOUT_MS = 2_000;
 const HEALTHZ_DELAY_MS = 250;
 // OPR.0.4.7 slice-05 item-4: the WHOLE status health probe stays within ONE normal
 // CLI request window (~5s, matching DaemonClient's timeoutMs) — immediate connection
@@ -260,7 +272,7 @@ const STATUS_PROBE_MAX_ATTEMPTS = 5;
 const STATUS_PROBE_RETRY_DELAY_MS = 200;
 // Per-probe /healthz timeout for the SINGLE-SHOT callers that are NOT the status
 // settle path — checkPid classification and the start/stop recovery guards, plus
-// each iteration of startDaemon's own HEALTHZ_RETRIES poll loop. These keep their
+// startDaemon's pre-spawn checks (its readiness probes use STARTUP_PROBE_TIMEOUT_MS). These keep their
 // prior fixed-bound timing (the settle deadline above is status-probe-LOCAL); this
 // restores the timeout the removed HEALTHZ_PROBE_TIMEOUT_MS supplied to them.
 const HEALTHZ_PROBE_TIMEOUT_MS = 250;
@@ -732,15 +744,19 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     if (hasExited()) throw new Error(`Daemon child ${pid} exited before startup completed`);
   };
   const healthzUrl = `http://${formatDaemonHostForUrl(probeHost)}:${port}/healthz`;
-  type StartHealth = { pid?: unknown; bind?: { mode: "explicit" | "default"; hosts: string[]; tailscaleDetected: boolean } };
+  type StartHealth = { databaseWarnings?: unknown; pid?: unknown; bind?: { mode: "explicit" | "default"; hosts: string[]; tailscaleDetected: boolean } };
+  let deadline = Number.POSITIVE_INFINITY;
+  const remaining = (): number => Math.max(0, deadline - Date.now());
   const readOwnedHealth = async (url: string): Promise<StartHealth | null> => {
     assertChild();
+    // No new primary or listener fetch once the deadline has passed: a 0ms timer would still start one.
+    if (remaining() <= 0) throw new HealthProbeTimeoutError(url);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
         failed,
         new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new HealthProbeTimeoutError(url)), HEALTHZ_PROBE_TIMEOUT_MS);
+          timer = setTimeout(() => reject(new HealthProbeTimeoutError(url)), Math.min(STARTUP_PROBE_TIMEOUT_MS, remaining()));
         }),
         (async () => {
           const res = await deps.fetch(url);
@@ -764,13 +780,16 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     assertChild();
     lock.recordChild(pid!);
     let healthy = false;
+    let databaseWarnings: string[] = [];
     let lastProbe = "health endpoint not responding";
     let unverified: string[] | null = null;
-    for (let i = 0; i < HEALTHZ_RETRIES; i++) {
+    deadline = Date.now() + STARTUP_READINESS_DEADLINE_MS;
+    while (remaining() > 0) {
       unverified = null;
       try {
         const body = await readOwnedHealth(healthzUrl);
         if (body) {
+          databaseWarnings = readDatabaseWarnings(body.databaseWarnings);
           const bind = body.bind;
           if (!bind || !["explicit", "default"].includes(bind.mode) || !Array.isArray(bind.hosts)
             || bind.hosts.length === 0 || !bind.hosts.every((host) => typeof host === "string" && host.length > 0)
@@ -796,7 +815,7 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
         if (error instanceof StartupIdentityError) throw error;
         lastProbe = error instanceof Error ? error.message : String(error);
       }
-      await Promise.race([new Promise((resolve) => setTimeout(resolve, HEALTHZ_DELAY_MS)), failed]);
+      await Promise.race([new Promise((resolve) => setTimeout(resolve, Math.min(HEALTHZ_DELAY_MS, remaining()))), failed]);
     }
     // In the last round the child's own endpoint named its PID, and only another listener's check stayed
     // uncertain: start, and say which listener is unverified.
@@ -821,6 +840,7 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
       removeMatchingState(deps, STATE_FILE, state);
       throw error;
     }
+    for (const warning of databaseWarnings) console.error(`Warning: ${warning}`);
     if (unverifiedSecondary) {
       console.error(`Warning: daemon started (pid ${pid}), but its listener on ${unverified!.join(", ")} could not be verified: the check got no clear answer, not a refusal. Check /healthz on that address before relying on it.`);
     }
@@ -921,8 +941,11 @@ export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-t
   }
 
   let notBefore = Date.parse(state.startedAt);
+  // Only a signalling stop names a request time: this process's clock just before kill, not delivery.
+  let requested = "";
   if (pidState !== "dead") {
     notBefore = Date.now();
+    requested = `; SIGTERM requested at ${new Date(notBefore).toISOString()}`;
     deps.kill(state.pid, "SIGTERM");
     // One signal. An already-exited target goes straight to the same judgment.
     const deadline = Date.now() + DAEMON_STOP_WAIT_MS;
@@ -932,7 +955,7 @@ export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-t
   }
   const present = deps.isProcessAlive(state.pid);
   const effect = await listener();
-  const observation = `targeted ${target}; checked ${check}; PID ${state.pid} ${present ? "present" : "absent"}; listener ${effect}`;
+  const observation = `targeted ${target}; checked ${check}; PID ${state.pid} ${present ? "present" : "absent"}; listener ${effect}${requested}`;
   if (present) {
     throw new Error(`Daemon did not exit after SIGTERM within ${DAEMON_STOP_WAIT_MS}ms; ${observation}` +
       (effect === "responding" ? " (still listening)" : "") + "; state file preserved.");
@@ -1016,7 +1039,7 @@ export async function getDaemonStatus(
       const res = await probeHealthzWithSettle(deps, `${openrigUrl}/healthz`);
       const ev = await readHealthEvidence(res);
       const url = new URL(openrigUrl);
-      return { state: "running", port: Number(url.port) || DEFAULT_PORT, host: url.hostname || DEFAULT_HOST, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop };
+      return { state: "running", port: Number(url.port) || DEFAULT_PORT, host: url.hostname || DEFAULT_HOST, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop, ...(ev.databaseWarnings ? { databaseWarnings: ev.databaseWarnings } : {}) };
     } catch (err) {
       // 1ae863d2: refusal = positive down; anything else (timeout/wedged/blocked) = unverified.
       return isRefusedError(err) ? { state: "stopped" } : { state: "unverified", ...endpoint, ...probeErrorCodeOf(err) };
@@ -1036,6 +1059,7 @@ export async function getDaemonStatus(
         healthy: ev.healthy,
         reason: ev.reason,
         eventLoop: ev.eventLoop,
+        ...(ev.databaseWarnings ? { databaseWarnings: ev.databaseWarnings } : {}),
       };
     } catch (err) {
       // 1ae863d2: the resolved home has NO daemon state — before asserting anything,
@@ -1068,7 +1092,7 @@ export async function getDaemonStatus(
     try {
       const res = await probeHealthzWithSettle(deps, `http://${formatDaemonHostForUrl(host)}:${state.port}/healthz`);
       const ev = await readHealthEvidence(res);
-      return { state: "running", port: state.port, host, pid: state.pid, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop };
+      return { state: "running", port: state.port, host, pid: state.pid, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop, ...(ev.databaseWarnings ? { databaseWarnings: ev.databaseWarnings } : {}) };
     } catch (err) {
       // 1ae863d2: refusal = positive down; anything else (timeout/wedged/blocked) = unverified.
       return isRefusedError(err) ? { state: "stopped" } : { state: "unverified", pid: state.pid, port: state.port, host, ...probeErrorCodeOf(err) };
@@ -1079,6 +1103,7 @@ export async function getDaemonStatus(
   let healthy = false;
   let reason: DaemonStatus["reason"];
   let eventLoop: DaemonEventLoopEvidence | undefined;
+  let databaseWarnings: string[] | undefined;
   let probeFailure: Pick<DaemonStatus, "probeErrorCode"> = {};
   try {
     const res = await probeHealthzWithSettle(deps, `http://${formatDaemonHostForUrl(host)}:${state.port}/healthz`);
@@ -1086,6 +1111,7 @@ export async function getDaemonStatus(
     healthy = ev.healthy;
     reason = ev.reason;
     eventLoop = ev.eventLoop;
+    databaseWarnings = ev.databaseWarnings;
   } catch (err) {
     // OPR.0.4.3.21 — pid alive but healthz timed out: the honest wedged-loop
     // signal. Report process-present/unhealthy (NOT "stopped") with the
@@ -1095,7 +1121,7 @@ export async function getDaemonStatus(
   }
 
   // pid alive = running (state file preserved either way)
-  return { state: "running", port: state.port, host, pid: state.pid, healthy, reason, eventLoop, ...probeFailure };
+  return { state: "running", port: state.port, host, pid: state.pid, healthy, reason, eventLoop, ...(databaseWarnings ? { databaseWarnings } : {}), ...probeFailure };
 }
 
 /** #275 — keep the OS code of a failed health probe (absent for a timeout). */
@@ -1123,6 +1149,10 @@ export function tailLogs(deps: LifecycleDeps, opts: { follow: boolean }): void {
   child.unref();
 }
 
+function readDatabaseWarnings(value: unknown): string[] {
+  return Array.isArray(value) && value.every(item => typeof item === "string") ? value : [];
+}
+
 /**
  * OPR.0.4.3.21 — read event-loop wedge evidence from a healthz probe result.
  * A plain `{ ok: true }` (mocks, or a monitor-less daemon) → healthy with no
@@ -1132,11 +1162,13 @@ export function tailLogs(deps: LifecycleDeps, opts: { follow: boolean }): void {
  */
 async function readHealthEvidence(
   res: { ok: boolean; json?: () => Promise<unknown> },
-): Promise<{ healthy: boolean; reason?: DaemonStatus["reason"]; eventLoop?: DaemonEventLoopEvidence }> {
+): Promise<{ healthy: boolean; reason?: DaemonStatus["reason"]; eventLoop?: DaemonEventLoopEvidence; databaseWarnings?: string[] }> {
   if (!res.ok) return { healthy: false };
   if (!res.json) return { healthy: true };
   try {
-    const body = (await res.json()) as { eventLoop?: Partial<DaemonEventLoopEvidence> } | null;
+    const body = (await res.json()) as { eventLoop?: Partial<DaemonEventLoopEvidence>; databaseWarnings?: unknown } | null;
+    const warnings = readDatabaseWarnings(body?.databaseWarnings);
+    const context = warnings.length ? { databaseWarnings: warnings } : {};
     const el = body?.eventLoop;
     if (el && typeof el.healthy === "boolean" && typeof el.lagMeanMs === "number") {
       const eventLoop: DaemonEventLoopEvidence = {
@@ -1147,9 +1179,10 @@ async function readHealthEvidence(
         healthy: el.healthy,
       };
       return el.healthy
-        ? { healthy: true, eventLoop }
-        : { healthy: false, reason: "event-loop-starved", eventLoop };
+        ? { healthy: true, eventLoop, ...context }
+        : { healthy: false, reason: "event-loop-starved", eventLoop, ...context };
     }
+    return { healthy: true, ...context };
   } catch {
     // Body absent / not JSON — treat as plain healthy (res.ok already true).
   }

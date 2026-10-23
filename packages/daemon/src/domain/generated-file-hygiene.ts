@@ -68,7 +68,7 @@ export function excludeNewGeneratedFiles(cwd: string, createdFiles: string[]): s
       const relative = path.relative(root, canonical);
       if (/[\r\n]/.test(relative)) { warn(file, "Git exclude cannot represent this filename on one line"); continue; }
       if (own.some(item => item.tracked && item.name === relative) || ignored.has(file)) continue;
-      const fromCwd = path.relative(path.resolve(cwd), canonical).split(path.sep).join("/");
+      const fromCwd = path.relative(fs.realpathSync(cwd), canonical).split(path.sep).join("/");
       if (!corePluginDirectories.some(directory => fromCwd.startsWith(`${directory}/`))) {
         const message = `${file} was created by OpenRig and is untracked. If you do not want to commit it, add this line to ${exclude}: ${patternFor(relative)} (shared by linked worktrees).`;
         warnings.push(message);

@@ -22,7 +22,7 @@ function fixture(manualPrepWaitMs:number|null=1000,guardDb?:Database.Database){
  let onSleep:(()=>Promise<void>)|undefined;
  const db=guardDb??({prepare:()=>({get:()=>undefined,all:()=>[]})} as any);
  const writes:string[]=[],keys:string[][]=[];
- const policy={enabled:true,thresholdPercent:80,preCompactInstruction:'Write a restore map.',compactInstruction:'',messageInline:'',messageFilePath:'',postRestoreAuditInstruction:''};
+ const policy={preparationRoot:'',enabled:true,thresholdPercent:80,preCompactInstruction:'Write a restore map.',compactInstruction:'',messageInline:'',messageFilePath:'',postRestoreAuditInstruction:''};
  const tmux={probeSession:vi.fn(async()=>({state:'present'})),sendText:vi.fn(async(_:string,text:string)=>{writes.push(text);return{ok:true};}),sendKeys:vi.fn(async(_:string,k:string[])=>{keys.push(k);return{ok:true};})};
  const guard=new SeatDeliveryGuard(db,()=>({nodeId:'node-one',session:seat,pane:'%1',occupant:generation}));
  Object.assign(tmux,{deliveryGuard:guard});
@@ -506,6 +506,182 @@ it('legacy fallback parent is created before asking the seat to edit its temp fi
  expect(statSync(dirname(a.mapPath)).isDirectory()).toBe(true);
  writeFileSync(a.mapPath+'.tmp',`# legacy map\n${a.marker}\n`);
  await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(1);
+});
+
+
+for (const mode of ['manual', 'automatic'] as const) it(`configured preparation root: ${mode} publishes outside the launch workspace`, async () => {
+ const f=fixture(),cwd=join(f.home,'denied launch directory'),root=join(f.home,'allowed maps');
+ mkdirSync(cwd);f.policy.preparationRoot=root;
+ // A writable cwd is still selected away from: POSIX writability cannot prove Claude permission.
+ mkdirSync(join(cwd,'.claude'));writeFileSync(join(cwd,'.claude','settings.json'),JSON.stringify({permissions:{deny:[`Edit(${cwd}/**)`]}}));
+ if(mode==='manual'){
+  f.onSleep(async()=>{stageMap(f);});
+  expect((await routeFixture(f,cwd)()).status).toBe(200);
+ }else{
+  await f.e.maybeAutoCompact({...input,cwd});stageMap(f);
+  await f.e.maybeAutoCompact({...input,cwd});
+ }
+ const a=f.e.getPreparationState(seat)!;
+ expect(a.mapPath).toBe(join(root,seat,a.attemptId,'RESTORE-MAP.md'));
+ expect(readFileSync(join(root,'.gitignore'),'utf8')).toBe('*\n');
+ expect(existsSync(join(cwd,'.openrig'))).toBe(false);
+ expect(readFileSync(a.mapPath,'utf8')).toContain(a.marker);
+ expect(existsSync(a.mapPath+'.tmp')).toBe(false);
+ expect(compacts(f)).toHaveLength(1);
+ expect(f.writes[0]).toContain(JSON.stringify(a.mapPath+'.tmp'));
+ f.policy.preparationRoot=join(f.home,'new maps');
+ await f.e.maybeAutoCompact({...input,cwd,usedPercentage:20});
+ await f.e.maybeAutoCompact({...input,cwd,usedPercentage:20});
+ expect(f.writes.at(-1)).toContain(`This attempt's restore map is ${a.mapPath}; read it.`);
+ expect(f.writes.at(-1)).toContain("read this preparation attempt's restore map and use the restore packet as a lookup");
+ expect(f.writes.at(-1)).not.toContain('read your newest restore map');
+ expect(f.writes.at(-1)).not.toContain(f.policy.preparationRoot);
+});
+
+it('configured preparation root: stays bound to the attempt while later seats use new settings',async()=>{
+ const f=fixture(),root=join(f.home,'maps');f.policy.preparationRoot=root;
+ await f.e.maybeAutoCompact(input);const first=f.e.getPreparationState(seat)!;
+ f.policy.preparationRoot=join(f.home,'new maps');
+ await f.e.maybeAutoCompact({...input,sessionName:'sibling@demo'});
+ expect(f.e.getPreparationState('sibling@demo')!.mapPath).toContain(join(f.policy.preparationRoot,'sibling@demo'));
+ expect(f.e.getPreparationState(seat)!.mapPath).toBe(first.mapPath);
+ stageMap(f);await f.e.maybeAutoCompact(input);
+ expect(readFileSync(first.mapPath,'utf8')).toContain(first.marker);
+});
+
+for(const mode of ['manual','automatic'] as const)it(`configured preparation root: ${mode} keeps the bounded command and carries the original long path and instruction into restore`,async()=>{
+ const f=fixture();
+ const root=join(f.home,...Array.from({length:8},()=> 'allowed-map-directory-'.repeat(4)));
+ const instruction='Keep the outstanding decision and its supporting source. '.repeat(30).trim();
+ f.policy.preparationRoot=root;f.policy.compactInstruction=instruction;
+ const finish=()=>{
+  stageMap(f);
+  f.policy.preparationRoot=join(f.home,'later maps');
+  f.policy.compactInstruction='A later instruction belongs to a later attempt.';
+ };
+ if(mode==='manual'){
+  f.onSleep(async()=>{finish();});
+  expect((await f.e.triggerManualCompact(input,{operatorInitiated:true})).triggered).toBe(true);
+ }else{
+  await f.e.maybeAutoCompact(input);finish();await f.e.maybeAutoCompact(input);
+ }
+ const attempt=f.e.getPreparationState(seat)!;
+ expect(attempt.mapPath).toBe(join(root,seat,attempt.attemptId,'RESTORE-MAP.md'));
+ expect(compacts(f)).toHaveLength(1);
+ expect(compacts(f)[0]!.length).toBeLessThanOrEqual(600);
+ expect(compacts(f)[0]).not.toContain(attempt.mapPath);
+ expect(compacts(f)[0]).not.toContain(instruction);
+ const unsampled={sessionName:seat,runtime:'claude-code'};
+ await f.e.drainPendingPostCompactStage(unsampled);
+ await f.e.drainPendingPostCompactStage(unsampled);
+ const restore=f.writes.at(-1)!;
+ expect(restore).toContain(`This attempt's restore map is ${attempt.mapPath}; read it.`);
+ expect(restore).toContain(instruction);
+ expect(restore).not.toContain(f.policy.preparationRoot);
+ expect(restore).not.toContain(f.policy.compactInstruction);
+});
+
+it('configured preparation root: skip-map still uses an optional map completed at this attempt path',async()=>{
+ const f=fixture();f.policy.preparationRoot=join(f.home,'allowed maps');
+ expect((await f.e.triggerManualCompact(input,{operatorInitiated:true,skipMap:true})).triggered).toBe(true);
+ const attempt=f.e.getPreparationState(seat)!;stageMap(f);
+ f.policy.preparationRoot=join(f.home,'later maps');
+ const unsampled={sessionName:seat,runtime:'claude-code'};
+ await f.e.drainPendingPostCompactStage(unsampled);
+ await f.e.drainPendingPostCompactStage(unsampled);
+ expect(f.writes.at(-1)).toContain(`This attempt's restore map is ${attempt.mapPath}.tmp; read it.`);
+ expect(f.writes.at(-1)).not.toContain('No restore map was required');
+ expect(f.writes.at(-1)).not.toContain(f.policy.preparationRoot);
+ expect(existsSync(attempt.mapPath)).toBe(false);
+ expect(compacts(f)).toHaveLength(1);
+});
+
+for(const mode of ['manual','automatic'] as const)it(`configured preparation root: ${mode} restore without a usage sample retains the published map until audit`,async()=>{
+ const f=fixture();f.policy.preparationRoot=join(f.home,'original maps');
+ if(mode==='manual'){
+  f.onSleep(async()=>{stageMap(f);});
+  expect((await f.e.triggerManualCompact(input,{operatorInitiated:true})).triggered).toBe(true);
+ }else{
+  await f.e.maybeAutoCompact(input);stageMap(f);await f.e.maybeAutoCompact(input);
+ }
+ const a=f.e.getPreparationState(seat)!;
+ f.policy.preparationRoot=join(f.home,'later maps');
+ const send=vi.spyOn(f.transport,'send');
+ const unsampled={sessionName:seat,runtime:'claude-code'};
+ expect((await f.e.drainPendingPostCompactStage(unsampled)).triggered).toBe(true);
+ expect(f.e.getPreparationState(seat)?.mapPath).toBe(a.mapPath);
+ expect((await f.e.drainPendingPostCompactStage(unsampled)).triggered).toBe(true);
+ expect(f.writes.at(-1)).toContain(`This attempt's restore map is ${a.mapPath}; read it.`);
+ expect(f.writes.at(-1)).not.toContain(f.policy.preparationRoot);
+ expect(f.e.getPreparationState(seat)?.mapPath).toBe(a.mapPath);
+ expect((await f.e.drainPendingPostCompactStage(unsampled)).triggered).toBe(true);
+ expect(send.mock.calls).toHaveLength(3);
+ for(const call of send.mock.calls)expect(call[2]).toMatchObject({readinessFromPaneOnly:true});
+ expect(f.e.getPreparationState(seat)).toBeNull();
+ expect(f.e.hasPendingPostCompactStage(seat)).toBe(false);
+ expect(readFileSync(a.mapPath,'utf8')).toContain(a.marker);
+ expect(compacts(f)).toHaveLength(1);
+});
+
+for(const kind of ['file','ignore','symlink'] as const) it(`configured preparation root: ${kind} conflict stops without fallback or rewriting`,async()=>{
+ const f=fixture(),root=join(f.home,'maps'),cwd=join(f.home,'cwd');mkdirSync(cwd);
+ f.policy.preparationRoot=root;
+ if(kind==='file')writeFileSync(root,'keep');
+ else{
+  mkdirSync(root);
+  if(kind==='ignore')writeFileSync(join(root,'.gitignore'),'keep');
+  else{writeFileSync(join(f.home,'outside'),'keep');symlinkSync(join(f.home,'outside'),join(root,'.gitignore'));}
+ }
+ expect(await f.e.maybeAutoCompact({...input,cwd})).toEqual({triggered:false,reason:'preparation_directory_unavailable'});
+ expect(f.e.getPreparationState(seat)).toMatchObject({status:'stopped',reason:'preparation_directory_unavailable'});
+ expect(f.e.getPreparationState(seat)!.mapPath).toContain(root);
+ expect(f.writes).toHaveLength(0);
+ expect(existsSync(join(cwd,'.openrig'))).toBe(false);
+ expect(existsSync(join(f.home,'compaction'))).toBe(false);
+ expect(readFileSync(kind==='file'?root:join(root,'.gitignore'),'utf8')).toBe('keep');
+});
+
+it('configured preparation root: manual reports directory failure; explicit skip-map still works',async()=>{
+ const f=fixture(),root=join(f.home,'maps');writeFileSync(root,'keep');f.policy.preparationRoot=root;
+ expect(await f.e.triggerManualCompact(input,{operatorInitiated:true})).toMatchObject({triggered:false,reason:'preparation_directory_unavailable'});
+ expect(f.writes).toHaveLength(0);
+ expect((await f.e.triggerManualCompact(input,{operatorInitiated:true,skipMap:true})).triggered).toBe(true);
+ expect(readFileSync(root,'utf8')).toBe('keep');
+ await f.e.maybeAutoCompact({...input,usedPercentage:20});
+ await f.e.maybeAutoCompact({...input,usedPercentage:20});
+ expect(f.writes.at(-1)).toContain("No restore map was required for this compaction (--skip-map)");
+ expect(f.writes.at(-1)).not.toContain("This attempt's restore map is");
+});
+
+for(const mode of ['manual','automatic'] as const)for(const end of ['expiry','cancel','disable','replacement'] as const)it(`configured preparation root: ${mode} ${end} never publishes a late map`,async()=>{
+ const f=fixture();f.policy.preparationRoot=join(f.home,'maps');
+ const disarm=()=>{
+  if(end==='expiry')f.advance(mode==='manual'?1001:AUTO_PREP_WAIT_MS_DEFAULT+1);
+  if(end==='cancel')f.e.cancelPreparation(seat);
+  if(end==='disable')f.policy.enabled=false;
+  if(end==='replacement')f.generation('generation-two');
+  f.e.reconcilePreparations();stageMap(f);
+ };
+ if(mode==='manual'){
+  f.onSleep(async()=>{disarm();});
+  expect((await f.e.triggerManualCompact(input,{operatorInitiated:true})).triggered).toBe(false);
+ }else{
+  await f.e.maybeAutoCompact(input);disarm();
+ }
+ f.policy.enabled=true;await f.e.maybeAutoCompact(input);
+ const a=f.e.getPreparationState(seat)!;
+ expect(a).toMatchObject({status:'stopped',reason:{expiry:'preparation_incomplete',cancel:'preparation_cancelled',disable:'disabled',replacement:'stale_generation'}[end]});
+ expect(existsSync(a.mapPath)).toBe(false);expect(existsSync(a.mapPath+'.tmp')).toBe(true);
+ expect(compacts(f)).toHaveLength(0);expect(f.writes).toHaveLength(1);
+});
+
+it.skipIf(process.getuid?.()===0)('configured preparation root: an unwritable descendant stops without fallback',async()=>{
+ const f=fixture(),root=join(f.home,'maps'),parent=join(root,seat);mkdirSync(parent,{recursive:true});chmodSync(parent,0o500);
+ f.policy.preparationRoot=root;
+ try{
+  expect(await f.e.maybeAutoCompact(input)).toEqual({triggered:false,reason:'preparation_directory_unavailable'});
+  expect(f.writes).toHaveLength(0);expect(existsSync(join(f.home,'compaction'))).toBe(false);
+ }finally{chmodSync(parent,0o700);}
 });
 
 // Manual preparation owns this bounded attention wait; generic sends still refuse attention.

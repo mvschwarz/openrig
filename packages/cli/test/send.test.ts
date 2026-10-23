@@ -589,6 +589,24 @@ describe("Send CLI", () => {
     }
   });
 
+  it("send --urgent marks the message urgent; without it nothing is marked", async () => {
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "the build is red", "--urgent"]);
+    });
+    expect(lastSendBody?.urgent).toBe(true);
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "routine"]);
+    });
+    expect("urgent" in (lastSendBody ?? {})).toBe(false);
+  });
+
+  it("send --urgent --dangerously-interact posts the exact answer with both marks; the daemon keeps the label out of the keys", async () => {
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "1", "--dangerously-interact", "--reason", "pick 1", "--urgent"]);
+    });
+    expect(lastSendBody).toMatchObject({ text: "1", dangerouslyInteract: true, urgent: true });
+  });
+
   it("send --dangerously-interact --reason posts the override fields with raw (exact) text", async () => {
     await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "1", "--dangerously-interact", "--reason", "unblock stuck prompt"]);
@@ -637,6 +655,19 @@ describe("Send CLI", () => {
     expect(argv[ri + 1]).toBe("why now");
   });
 
+
+  it("send --host over ssh forwards --urgent, so the remote seat's level sees the mark", async () => {
+    let captured: readonly string[] | null = null;
+    const deps: SendDeps = {
+      ...runningDeps(port),
+      hostRegistryLoader: () => ({ ok: true, registry: { hosts: [{ id: "vm-test", transport: "ssh", target: "vm.local" }] } }),
+      crossHostRun: async (_host, argv) => { captured = argv; return { ok: true, stdout: "remote ok", stderr: "" }; },
+    };
+    await captureLogs(async () => {
+      await makeCmd(deps).parseAsync(["node", "rig", "send", "dev-impl@my-rig", "the build is red", "--host", "vm-test", "--urgent"]);
+    });
+    expect(captured).toContain("--urgent");
+  });
 
   it.each(["\r", "\x1b", "\t", " "])("preserves an explicit interaction byte in SSH argv (%#)", async answer => {
     let captured: readonly string[] = [];

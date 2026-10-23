@@ -761,8 +761,9 @@ async function run(): Promise<void> {
   draw();
   // Probe the daemon-down verdict once on launch: bare `rig` with the daemon down renders the cockpit.
   // (Key-triggered re-probe after `s start daemon` / `r retry` is the follow-on increment.)
+  // --demo renders its labeled fixture without a daemon, so it never probes for one.
   if (startup) void startup.refresh();
-  else void refreshCrashCart();
+  else if (!demo) void refreshCrashCart();
   // A merely-open TUI must impose no steady-state fleet load. The initial
   // hydrate establishes honest state; navigation, commands, and socket-driven
   // mutations request later truth through the same single-flight owner.

@@ -34,7 +34,7 @@ type LaunchResponse = {
 // OPR.0.4.3.20 FR-7 — a launched-entry status that means NO session is running (the
 // operator must act). These are NOT successful launches — never print "Launched" for
 // them; exit non-zero. Mirrors the daemon's NON_RUNNING_LAUNCH_STATUSES.
-const NON_RUNNING_LAUNCH_STATUSES = new Set(["awaiting-decision", "attention_required", "failed"]);
+const NON_RUNNING_LAUNCH_STATUSES = new Set(["awaiting-decision", "attention_required", "failed", "left_attached"]);
 function launchStatusRunning(status: string): boolean {
   return !NON_RUNNING_LAUNCH_STATUSES.has(status);
 }

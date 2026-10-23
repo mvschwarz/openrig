@@ -39,6 +39,16 @@ export function isQueueWait(specYaml: string): boolean {
   catch { return false; }
 }
 
+/** A caller's new interval for a wait, in the wait's own terms: the delay now, the delay an event wake restarts
+ * from, and a ceiling no lower than either. The rest of the packet, the delivered notice included, is kept. */
+export function retuneQueueWait(specYaml: string, intervalSeconds: number): string {
+  const spec = JSON.parse(specYaml);
+  const state = spec.context.queue_wait as WaitState;
+  state.initialSeconds = intervalSeconds;
+  state.maxSeconds = Math.max(state.maxSeconds, intervalSeconds);
+  return JSON.stringify(spec);
+}
+
 /** The exact blocker owns progress signals. Ignore delivery receipts; do not
  * interpret its notes. Our own waiting acknowledgments are on a different row. */
 function blockerTransition(db: Database.Database, blocker: string | null): number | null {

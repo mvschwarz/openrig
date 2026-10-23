@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, appendFileSync, renameSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync, appendFileSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
@@ -17,7 +17,7 @@ const cleanup: Array<() => void> = [];
 afterEach(() => { vi.restoreAllMocks(); for (const fn of cleanup.splice(0).reverse()) fn(); });
 function fixture(runtime = "claude-code") {
   const db = createFullTestDb(); cleanup.push(() => db.close());
-  const dir = mkdtempSync(join(tmpdir(), "observed-model-")); cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "observed-model-"))); cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
   const rigs = new RigRepository(db), sessions = new SessionRegistry(db), identities = new SeatIdentityStore(db);
   const rig = rigs.createRig("studio");
   const node = rigs.addNode(rig.id, "editor", { runtime, model: "configured-model", cwd: dir });

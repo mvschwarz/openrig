@@ -37,6 +37,7 @@ const verdictPip: Record<SeatIntendedAction, StatusPipStatus> = {
   "resume-original": "running",
   "fresh-primed": "info",
   "awaiting-decision": "warning",
+  "leave-attached": "info",
 };
 
 // Token state → tone. stale / unverified are DISTINCT from missing (FR-6): a

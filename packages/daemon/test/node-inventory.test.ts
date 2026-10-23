@@ -165,7 +165,7 @@ describe("Node Inventory Projection", () => {
 
     const entries = getNodeInventory(db, "rig-1");
     const entry = entries.find((e) => e.logicalId === "dev.impl");
-    expect(entry?.resumeCommand).toBe("claude --resume 'abc-123-def'");
+    expect(entry?.resumeCommand).toBe("claude --permission-mode acceptEdits --resume 'abc-123-def'");
   });
 
   // Test 6: resumeCommand is null when no resume token
@@ -190,7 +190,7 @@ describe("Node Inventory Projection", () => {
     expect(entry?.recoveryGuidance).toBeNull();
     const detail = getNodeDetail(db, "rig-1", "dev.impl");
     expect(detail?.recoveryGuidance?.summary).toContain("native Claude resume");
-    expect(detail?.recoveryGuidance?.commands).toContain("claude --resume 'abc-123-def' --name 'dev-impl@test-rig'");
+    expect(detail?.recoveryGuidance?.commands).toContain("claude --permission-mode acceptEdits --resume 'abc-123-def' --name 'dev-impl@test-rig'");
     expect(detail?.recoveryGuidance?.commands).toContain("cd /project");
     expect(detail?.recoveryGuidance?.commands).toContain("claude --resume");
     expect(detail?.recoveryGuidance?.notes).toContain("Look for session name: dev-impl@test-rig");

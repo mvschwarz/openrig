@@ -561,6 +561,28 @@ describe("RigTeardownOrchestrator", () => {
     expect(sessions.some((s) => s.status === "running")).toBe(true);
   });
 
+  it.each([false, true])("leaves a seat joined with rig attach as an external CLI claimed and running, and still stops the tmux seat (delete=%s)", async (del) => {
+    const { rigId, nodeId } = seedRig();
+    sessionRegistry.updateBinding(nodeId, { tmuxSession: "r01-dev" });
+    const desktop = rigRepo.addNode(rigId, "desktop", { runtime: "claude-code" });
+    sessionRegistry.updateBinding(desktop.id, { attachmentType: "external_cli", externalSessionName: "desktop@test-rig" });
+    const claimed = sessionRegistry.registerClaimedSession(desktop.id, "desktop@test-rig");
+    const tmux = mockTmux();
+    tmux.probeSession = vi.fn(async (name: string) => ({ state: name === "r01-dev" ? "present" : "absent" }));
+
+    const result = await buildTeardown(tmux).teardown(rigId, { delete: del });
+
+    if (!del) {
+      // The claim is untouched: not recorded as stopped, and its binding kept, while the tmux seat beside it is stopped.
+      expect(db.prepare("SELECT status, intentionally_stopped AS stopped FROM sessions WHERE id = ?").get(claimed.id)).toEqual({ status: "running", stopped: 0 });
+      expect(sessionRegistry.getBindingForNode(desktop.id)).toMatchObject({ attachmentType: "external_cli" });
+      expect(sessionRegistry.getBindingForNode(nodeId)).toBeNull();
+    }
+    expect(tmux.probeSession).not.toHaveBeenCalledWith("desktop@test-rig");
+    expect(tmux.killSession).not.toHaveBeenCalledWith("desktop@test-rig");
+    expect(result).toMatchObject({ sessionsKilled: 1, errors: [], deleted: del, leftRunning: ["desktop@test-rig"] });
+  });
+
   // T13: Stale session (tmux gone) -> benign
   it("stale session (tmux already gone) treated as success", async () => {
     const { rigId } = seedRig();

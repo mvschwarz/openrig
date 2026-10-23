@@ -13,6 +13,7 @@ const EVENT_LABELS = {
   SessionStart: "session_start",
   UserPromptSubmit: "user_prompt_submit",
   Stop: "stop",
+  PostCompact: "post_compact",
   PermissionRequest: "permission_request",
 };
 

@@ -165,6 +165,9 @@ unseen — which makes messages the one delivery channel that never gets skipped
   the failure. `--provider herdr` or `--provider cmux` adds tiles inside a workspace that is
   already visible, without opening a window; in `--json` output, `reusedWorkspace` with no new
   tiles means an existing view was reused, which is success.
+  Add `--session <name>` to select a Herdr session for that request; `--session default`
+  explicitly selects its default session. `rig terminal status --session <name>` inspects
+  the same endpoint. Omitting the flag keeps the daemon's configured endpoint.
   In the TUI, **TERMINALS** keeps Saved views prominent and Derived groups collapsed until
   expanded. Names load before detailed readiness. Select a view to inspect its members,
   layout and pages; preview is passive. Saved membership requires deliberate setup.
@@ -926,7 +929,9 @@ your circumstances is configuration, and the ones that are not, another agent ca
   better than `unknown`. A Codex account's last reading, its reset and its last observed exhaustion
   survive a daemon restart as history (`retained: "before_restart"`), never a current reading; a
   window whose reset has passed shows an `expectation`, which is planning, not a reading. Run `rig provider status --refresh`
-  before telling anyone an account has room.
+  before telling anyone an account has room. An agent that moves a Codex home between subscriptions files
+  what it did with `rig provider moves report` (a queue item to whoever asked, checked and never a move itself), and
+  `rig provider moves` reads the reports back.
 - **Codex configuration fragments** — a `codex_config_fragment` must open with a table header and
   never overrides a user-declared table; see `docs/reference/agent-spec.md`.
 - **`rig env`** — the real services behind a rig: are they up, what are they saying, how do you

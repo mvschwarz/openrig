@@ -26,7 +26,13 @@ interface SeatStatusResponse {
   runtime: string | null;
   current_occupant: string | null;
   typingGuard?: { desired: boolean; effective: boolean; pending: boolean; heldCount: number;
-    desiredMode?: string; effectiveMode?: string; };
+    desiredMode?: string; effectiveMode?: string; desiredLevel?: string; effectiveLevel?: string; };
+  terminalPolicy?: {
+    state: string; label?: string; source?: string; actor?: string | null; instruction?: string;
+    helpers?: string[]; rules?: Record<string, Record<string, string>>;
+    rigDefault?: { config: unknown; appliesTo: string };
+    supported?: { compaction: string; model: string }; limits?: string; error?: string;
+  };
   permissions?: {
     selectionState: "explicit" | "inherit" | "unknown";
     desired: { mode: string } | null;
@@ -37,6 +43,14 @@ interface SeatStatusResponse {
       effectiveMode: string;
       source: string;
       fallbackReason?: string;
+    };
+    /** The daemon's planned account (permission-account.ts); older daemons don't send it. */
+    account?: {
+      summary: string;
+      overrides: string[];
+      openRigAdds: { claudeAllow: string[]; claudeAsk: string[]; notes: string[] };
+      unknown: string[];
+      controls: string[];
     };
   };
   session_status: string | null;
@@ -131,7 +145,7 @@ interface SeatHandoverMutationResult {
   /** OPR.0.5.5.5 — per-source execution record (wire mirror of the daemon shape). */
   sourceOutcome?:
     | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
-    | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string };
+    | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string; permissions?: { state: string; detail: string } };
   sideEffects: {
     departingSessionKilled: false;
     startupContextDelivered: boolean;
@@ -157,6 +171,12 @@ function sessionReason(reason: string | null | undefined): string | null {
   return reason === "session_missing" ? "tmux session missing; restore or relaunch the seat" : null;
 }
 
+const LEVEL_WORDS: Record<string, string> = {
+  "openrig-urgent": "OpenRig's own messages and anything marked urgent type.",
+  "urgent-only": "Only messages marked urgent type.",
+  "sends-only": "Deliberate sends from people and agents type; OpenRig's own notices are held.",
+};
+
 function printHuman(status: SeatStatusResponse): void {
   console.log(`Seat ${status.seat_ref}`);
   console.log(`Rig: ${status.rig_name}`);
@@ -165,15 +185,32 @@ function printHuman(status: SeatStatusResponse): void {
   if (status.launch_cwd !== undefined) console.log(`Working directory for future launches: ${display(status.launch_cwd)}`);
   if (status.typingGuard) {
     const g = status.typingGuard;
-    const mode = g.effectiveMode ?? (g.effective ? "on" : "off");
-    console.log(`Typing guard: ${mode === "hold" ? "on (hold)" : mode}${g.pending ? ` (activation pending; requested ${g.desiredMode ?? (g.desired ? "on" : "off")})` : ""}; ${g.heldCount} retained`);
+    const mode = g.effectiveLevel ?? g.effectiveMode ?? (g.effective ? "on" : "off");
+    const requested = g.desiredLevel ?? g.desiredMode ?? (g.desired ? "on" : "off");
+    console.log(`Typing guard: ${mode === "hold" ? "on (hold)" : mode}${g.pending ? ` (activation pending; requested ${requested})` : ""}; ${g.heldCount} retained`);
     if (mode === "draft-aware") console.log(`Draft-aware sends return immediately; inspect held messages with rig seat held-messages ${status.seat_ref}.`);
+    else if (LEVEL_WORDS[mode]) console.log(`${LEVEL_WORDS[mode]} Other automatic input is held, readable with rig seat held-messages ${status.seat_ref}. Changing it does not replay held messages.`);
+    else if (mode === "off") console.log("Off: automatic input types as it arrives.");
     else console.log("Hold pauses all automatic input, including writing lifecycle. Changing mode does not replay held messages.");
   }
   console.log(`Session: ${display(status.session_status, "unknown")}`);
   const reason = sessionReason(status.session_reason);
   if (reason) console.log(`Reason: ${reason}`);
-  if (status.permissions) {
+  if (status.permissions?.account) {
+    const p = status.permissions;
+    const a = p.account!;
+    console.log("Permissions, planned for the next fresh managed launch (not observed):");
+    console.log(`  ${a.summary}`);
+    if (a.overrides.length) console.log(`  This seat's choice is used instead of the ${a.overrides.join(" and the ")}.`);
+    for (const note of a.openRigAdds.notes) console.log(`  ${note}`);
+    if (a.openRigAdds.claudeAllow.length) console.log("  The exact allowance and ask lists are in --json, under permissions.account.openRigAdds.");
+    console.log(`  Last launch arguments (observed): ${p.lastLaunchArguments?.value ?? "unknown"}${p.lastLaunchArguments?.approvalPolicy ? `; approval=${p.lastLaunchArguments.approvalPolicy}` : ""}`);
+    for (const item of a.unknown) console.log(`  Unknown: ${item}`);
+    if (a.controls.length) {
+      console.log("  To change it, for future launches only:");
+      for (const control of a.controls) console.log(`    ${control}`);
+    }
+  } else if (status.permissions) {
     const p = status.permissions;
     const formatSource = (source: string): string => {
       if (source === "member_spec") return "from the member's permission_policy";
@@ -191,6 +228,19 @@ function printHuman(status: SeatStatusResponse): void {
     console.log(`Last launch arguments: ${p.lastLaunchArguments?.value ?? "unknown"}${p.lastLaunchArguments?.approvalPolicy ? `; approval=${p.lastLaunchArguments.approvalPolicy}` : ""}`);
     console.log("Native permission effect: unverified by this status read");
     if (p.error) console.log(`Permission selection unavailable: ${p.error}`);
+  }
+  if (status.terminalPolicy) {
+    const p = status.terminalPolicy;
+    console.log(`Terminal interaction (${p.state}; managed checks): ${p.label ?? "unknown"}${p.source ? ` [${p.source}]` : ""}`);
+    for (const [scope, rules] of Object.entries(p.rules ?? {}))
+      console.log(`  ${scope}: compaction=${rules.compaction}; model/effort=${rules.model}`);
+    if (p.helpers?.length) console.log(`  Named helpers: ${p.helpers.join(", ")}`);
+    if (p.instruction) console.log(`  Instruction: ${p.instruction}${p.actor ? ` (recorded by ${p.actor})` : ""}`);
+    if (p.rigDefault) console.log(`  Rig default (${p.rigDefault.appliesTo}): ${JSON.stringify(p.rigDefault.config)}`);
+    if (p.supported) console.log(`  Compaction: ${p.supported.compaction}; model/effort: ${p.supported.model}`);
+    console.log("  Enforced: managed compaction and saved model/effort changes. Other interventions: guidance-only.");
+    if (p.limits) console.log(`  ${p.limits}`);
+    if (p.error) console.log(`  Unknown: ${p.error}`);
   }
   console.log(`Startup: ${display(status.startup_status, "unknown")}`);
   console.log(`Occupant lifecycle: ${status.occupant_lifecycle}`);
@@ -235,6 +285,7 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
     if (result.sourceOutcome.forkId === "pending") console.log(`Fork id: PENDING. ${result.sourceOutcome.limit ?? ""}`.trim());
   } else if (result.sourceOutcome?.mode === "rebuild") {
     const outcome = result.sourceOutcome;
+    if (outcome.permissions) console.log(`Codex rebuild permissions: ${outcome.permissions.state}. ${outcome.permissions.detail}`);
     if (outcome.primedArtifacts.length > 0) {
       console.log(`Rebuild primed from ${outcome.primedArtifacts.length} durable artifact${outcome.primedArtifacts.length === 1 ? "" : "s"}:`);
       for (const artifact of outcome.primedArtifacts) console.log(`  - ${artifact.address} — ${artifact.label}`);
@@ -304,7 +355,7 @@ export function seatCommand(depsOverride?: SeatDeps & { readStdin?: () => Promis
   };
   cmd.command("set-typing-guard").argument("<seat>")
     .option("--enabled <boolean>", "Compatibility: true selects hold; false selects off")
-    .option("--mode <mode>", "off, draft-aware or hold; choose this or --enabled")
+    .option("--mode <mode>", "off, draft-aware, openrig-urgent, urgent-only, sends-only or hold; choose this or --enabled")
     .requiredOption("--reason <text>").option("--json").description("Choose how this seat's typing guard handles automatic input")
     .addHelpText("after", `
 This one persistent guard defaults off. Hold pauses ALL automatic input, including
@@ -312,6 +363,19 @@ at an empty prompt; --enabled true keeps that existing behavior. Draft-aware hol
 when the current input contains a draft or cannot be read. It returns the exact
 reason and held message ID immediately, without automatic retry.
 Off (--enabled false) permits new automatic sends.
+
+Between off (always interrupt) and hold (full quiet):
+  openrig-urgent  OpenRig's own messages (watchdogs, scheduled wakes, notices) and
+                  anything marked urgent type; other agents' messages are held.
+  urgent-only     only messages marked urgent type (rig send --urgent, or a queue
+                  item at priority urgent or critical).
+  sends-only      deliberate sends from people and agents type; OpenRig's own
+                  notices are held. A terminal member defaults to this.
+What openrig-urgent and urgent-only let through never types over a draft.
+sends-only types like off: a terminal member's typing isn't protected, as today
+(its shell input can't be read). Everything else is held, the sender is told, and
+held messages stay readable. Lifecycle work is refused at openrig-urgent and
+urgent-only, as at hold.
 Messages use the existing outbox. Uncertain writes never replay automatically.
 Direct human input remains available. Other seats keep their own guard mode.
 
@@ -331,13 +395,14 @@ on an active pane; freshly created or respawned lifecycle shells have separate p
 
 Examples:
   rig seat set-typing-guard dev-impl@my-rig --mode draft-aware --reason "preserve my draft"
+  rig seat set-typing-guard review-r1@my-rig --mode urgent-only --reason "reviewing by hand"
   rig seat set-typing-guard dev-impl@my-rig --enabled true --reason "manual terminal"
 `)
     .action(async (seat: string, opts: { enabled?: string; mode?: string; reason: string; json?: boolean }) => {
       if ((opts.enabled === undefined) === (opts.mode === undefined)
         || opts.enabled !== undefined && !["true", "false"].includes(opts.enabled)
-        || opts.mode !== undefined && !["off", "draft-aware", "hold"].includes(opts.mode)) {
-        console.error("Choose --enabled true|false or --mode off|draft-aware|hold.");
+        || opts.mode !== undefined && !["off", "draft-aware", "openrig-urgent", "urgent-only", "sends-only", "hold"].includes(opts.mode)) {
+        console.error("Choose --enabled true|false or --mode off|draft-aware|openrig-urgent|urgent-only|sends-only|hold.");
         process.exitCode = 1; return;
       }
       await guardRequest("POST", `/api/seat/set-typing-guard/${encodeURIComponent(seat)}`, {
@@ -529,7 +594,7 @@ identity remains unverified; a version number alone cannot clear it.
   // Thin CLI over the daemon's SeatLifecycleService; refusals print message +
   // guidance + match list exactly as the daemon named them.
   const runLifecycleVerb = async (
-    path: "set-model" | "set-cwd" | "set-effort" | "set-permissions" | "launch" | "launch-plan" | "continue" | "stop" | "clean" | "restart" | "restart-plan" | "restart-verify",
+    path: "set-terminal-policy" | "set-model" | "set-cwd" | "set-effort" | "set-permissions" | "launch" | "launch-plan" | "continue" | "stop" | "clean" | "restart" | "restart-plan" | "restart-verify",
     seat: string,
     body: Record<string, unknown>,
     opts: { json?: boolean },
@@ -598,6 +663,29 @@ identity remains unverified; a version number alone cannot clear it.
     }
     printOk(res.data);
   };
+
+  const terminalPolicy = cmd.command("set-terminal-policy")
+    .argument("<seat>", "Canonical session name or logical seat ref")
+    .requiredOption("--preset <preset>", "no-peer-interventions, help-within-instructions, full-control")
+    .option("--helper <addresses...>", "Named helpers covered by the delegated instruction")
+    .option("--rig-default", "Set this rig's default for newly added seats only, leaving existing seats unchanged")
+    .requiredOption("--reason <text>", "Delegating instruction and audit reason")
+    .option("--operator <address>", "Audit attribution outside a managed seat")
+    .option("--json", "JSON output for agents")
+    .description("Choose terminal interventions; managed compaction and saved model/effort changes are checked")
+    .addHelpText("after", "\nReplaces the complete choice. Exceptions take allow or deny; model covers effort too.\nPeer presets never change self/OpenRig authority unless its exception is supplied. No native permissions or interruption levels change.\nOther interventions are guidance-only. The existing dangerous send override and its guards are unchanged.");
+  for (const scope of ["peer", "self", "openrig"]) for (const action of ["compaction", "model"])
+    terminalPolicy.option(`--${scope}-${action} <decision>`, `Explicit ${scope} ${action} exception: allow or deny`);
+  terminalPolicy.action(async (seat: string, opts: Record<string, unknown> & { json?: boolean }) => {
+    const exceptions: Record<string, Record<string, unknown>> = {};
+    for (const scope of ["peer", "self", "openrig"]) for (const action of ["compaction", "model"]) {
+      const value = opts[scope + action[0]!.toUpperCase() + action.slice(1)];
+      if (value !== undefined) (exceptions[scope] ??= {})[action] = value;
+    }
+    await runLifecycleVerb("set-terminal-policy", seat, { preset: opts.preset, helpers: opts.helper ?? [],
+      exceptions, rigDefault: opts.rigDefault === true, reason: opts.reason, operator: opts.operator }, opts,
+      data => { console.log(String(data["effect"])); console.log(`Read the account: rig seat status ${shellQuote(seat)}`); });
+  });
 
   cmd
     .command("set-permissions")

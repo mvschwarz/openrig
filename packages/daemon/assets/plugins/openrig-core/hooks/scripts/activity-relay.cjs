@@ -278,10 +278,9 @@ function settingsRelayReports(hookEvent, providerPayload, env = process.env) {
 function pluginRunIsRedundant(providerPayload, argv = process.argv, env = process.env) {
   if (!argv.includes("--from-plugin")) return false;
   const hookEvent = firstString(providerPayload.hookEvent, providerPayload.hookEventName, providerPayload.hook_event_name, providerPayload.event, providerPayload.eventName);
-  // Codex: the plugin's run always reports. Whether Codex runs the daemon's managed relay for this event depends on hook
-  // state merged from every user layer (a selected profile included) and session flags, which this script can't see, so it
-  // never assumes so. With both routes active an event is reported twice; it is never lost.
-  if (firstString(env.OPENRIG_RUNTIME, env.RIGGED_RUNTIME) === "codex") return false;
+  // Codex activity has one producer: OpenRig's managed inline hooks. The plugin supplies refocus and skills, but its
+  // activity entries are no-ops. Do not infer merged native hook state here or bypass a person's inline-hook disable.
+  if (firstString(env.OPENRIG_RUNTIME, env.RIGGED_RUNTIME) === "codex") return true;
   return settingsRelayReports(hookEvent, providerPayload, env);
 }
 

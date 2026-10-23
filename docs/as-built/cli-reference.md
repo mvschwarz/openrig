@@ -25,7 +25,8 @@ below `rig` (including groups and the hidden `restore apply` command), and
 **1,084 explicitly registered option objects**, including the root version
 option. Aliases do not add command objects; short/long spellings of one
 option do not add option objects. Commander-generated help is additional.
-These are source counts, not a claim about a deployed release.
+These are counts for that source snapshot, not a claim about a deployed release.
+The terminal rows below also include the later named-session options.
 
 ## Reading this reference
 
@@ -299,7 +300,7 @@ the sections that were not read are `null`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig up <source>` | — | `--non-interruptive`<br>`--no-non-interruptive`<br>`--plan`<br>`--yes`<br>`--cwd <path>`<br>`--env <KEY=VALUE>` (repeatable)<br>`--target <root>`<br>`--preset <name>`<br>`--seat <member=runtime>` (repeatable)<br>`--existing`<br>`--fresh <seats...>`<br>`--json`<br>`--host <id>` |
+| `rig up <source>` | — | `--non-interruptive`<br>`--no-non-interruptive`<br>`--plan`<br>`--yes`<br>`--cwd <path>`<br>`--env <KEY=VALUE>` (repeatable)<br>`--name <rig>`<br>`--target <root>`<br>`--preset <name>`<br>`--seat <member=runtime>` (repeatable)<br>`--existing`<br>`--fresh <seats...>`<br>`--json`<br>`--host <id>` |
 
 ### down
 
@@ -353,6 +354,15 @@ the sections that were not read are `null`.
 | `rig mcp` | — | — |
 | `rig mcp serve` | — | `--port <port>` |
 
+### acp
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig acp` | — | — |
+| `rig acp run <qitemId> <agent...>` | — | `--cwd <dir>`<br>`--permissions-to <session>`<br>`--load-session <id>`<br>`--poll-seconds <n>` |
+| `rig acp cancel <runId>` | — | — |
+| `rig acp stop <runId> [stopCommand...]` | — | — |
+
 ### agent
 
 | Invocation | Aliases | Declared options |
@@ -380,7 +390,7 @@ the sections that were not read are `null`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig send [session] [text]` | — | `--to <sessions>` (repeatable)<br>`--pod <name>`<br>`--rig <name>`<br>`--verify`<br>`--force`<br>`--wait-for-idle <seconds>`<br>`--raw`<br>`--dangerously-interact`<br>`--reason <text>`<br>`--host <id>`<br>`--from <session>`<br>`--context <ref>`<br>`--json` |
+| `rig send [session] [text]` | — | `--to <sessions>` (repeatable)<br>`--pod <name>`<br>`--rig <name>`<br>`--verify`<br>`--force`<br>`--wait-for-idle <seconds>`<br>`--raw`<br>`--dangerously-interact`<br>`--reason <text>`<br>`--urgent`<br>`--host <id>`<br>`--from <session>`<br>`--context <ref>`<br>`--json` |
 
 ### stream
 
@@ -475,9 +485,12 @@ the sections that were not read are `null`.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig terminal` | — | — |
-| `rig terminal open <view>` | — | `--provider <name>`<br>`--window`<br>`--expected-plan <id>`<br>`--json` |
+| `rig terminal open <view>` | — | `--provider <name>`<br>`--session <name>`<br>`--window`<br>`--expected-plan <id>`<br>`--json` |
 | `rig terminal views` | — | `--json` |
-| `rig terminal status` | — | `--provider <name>`<br>`--json` |
+| `rig terminal status` | — | `--provider <name>`<br>`--session <name>`<br>`--json` |
+
+See [named terminal sessions](../reference/terminal-sessions.md) to select a
+Herdr session per request, including session-bound previews and window reuse.
 
 ### watchdog
 
@@ -489,6 +502,7 @@ the sections that were not read are `null`.
 | `rig watchdog show <jobId>` | — | `--json` |
 | `rig watchdog status <jobId>` | — | `--json` |
 | `rig watchdog stop <jobId>` | — | `--reason <text>`<br>`--json` |
+| `rig watchdog update <jobId>` | — | `--interval-seconds <n>`<br>`--message <text>`<br>`--spec <path>`<br>`--json` |
 
 ### workflow
 
@@ -722,6 +736,8 @@ Only Claude and Codex tenures can be woken.
 | `rig provider signals` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
 | `rig provider precheck` | — | `--seat <s>` **required**<br>`--to-account <a>` **required**<br>`--json` |
 | `rig provider switch` | — | `--seat <s>` **required**<br>`--to-account <a>` **required**<br>`--force-unsafe`<br>`--json` |
+| `rig provider moves` | — | `--seat <seat>`<br>`--limit <n>`<br>`--json` |
+| `rig provider moves report` | — | `--file <path>` **required**<br>`--to <seat>` **required**<br>`--follows <qitemId>`<br>`--evidence-ref <ref>`<br>`--json` |
 
 ### usage
 
@@ -854,7 +870,7 @@ for input and receipt examples, rollback, and snapshot behavior.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig setup` | — | `--dry-run`<br>`--json`<br>`--full`<br>`--no-herdr`<br>`--ghostty`<br>`--no-ghostty`<br>`--providers <list>`<br>`--policy <name>`<br>`--spec <path>` |
+| `rig setup` | — | `--dry-run`<br>`--json`<br>`--full`<br>`--no-herdr`<br>`--ghostty`<br>`--no-ghostty`<br>`--providers <list>`<br>`--policy <name>`<br>`--spec <path>`<br>`--router-line <answer>` |
 
 ### restore-check
 
