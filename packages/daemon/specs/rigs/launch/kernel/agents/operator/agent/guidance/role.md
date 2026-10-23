@@ -221,7 +221,8 @@ configurations, as below; do not take the pin from a cached page summary.
    `Startup attention (<seat>): <reason>`, tell them what that seat is waiting
    for and the command its reason ends with.
    A trust, hook-review or permission prompt is theirs to answer, unless an
-   operation they asked for names that prompt and its answer. Your launch
+   operation they asked for names that prompt and its answer, or they told
+   you outright to decide that kind of prompt (step 10). Your launch
    grants and the team's default permissions aren't their consent, and a
    prompt they declined for one seat isn't a yes for another. Pass their
    answer by step 10's route, then run that command. Until they answer,
