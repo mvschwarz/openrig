@@ -47,6 +47,9 @@ describe("rig up --existing — resume-original default (OPR.0.3.4.2)", () => {
   let upBodies: Array<Record<string, unknown>> = [];
   /** Per-test response factory keyed on the freshLogicalIds in the request. */
   let respond: (body: Record<string, unknown>) => Record<string, unknown>;
+  /** One-seat fresh launches the prompt's "y" sends, and the daemon's answer to each. */
+  let launches: Array<{ seat: string; body: Record<string, unknown> }> = [];
+  let launchAnswer: () => { status: number; data: Record<string, unknown> };
 
   beforeAll(async () => {
     server = http.createServer((req, res) => {
@@ -60,6 +63,14 @@ describe("rig up --existing — resume-original default (OPR.0.3.4.2)", () => {
           res.end(JSON.stringify(respond(body)));
           return;
         }
+        const launch = req.method === "POST" && req.url?.match(/^\/api\/seat\/launch\/(.+)$/);
+        if (launch) {
+          launches.push({ seat: decodeURIComponent(launch[1]!), body: JSON.parse(raw || "{}") });
+          const answer = launchAnswer();
+          res.writeHead(answer.status, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(answer.data));
+          return;
+        }
         res.writeHead(404).end();
       });
     });
@@ -71,6 +82,8 @@ describe("rig up --existing — resume-original default (OPR.0.3.4.2)", () => {
 
   beforeEach(() => {
     upBodies = [];
+    launches = [];
+    launchAnswer = () => ({ status: 200, data: { ok: true, sessionName: "dev-impl@myrig" } });
     respond = () => ({ status: "restored", rigId: "rig-1", rigName: "myrig", rigResult: "fully_restored", nodes: [], warnings: [] });
   });
 
@@ -158,16 +171,11 @@ describe("rig up --existing — resume-original default (OPR.0.3.4.2)", () => {
     expect(output).toContain(`dev.qa: failed — ${reason}`);
   });
 
-  it("TTY ASK accepted: [y/N] offer names seat + reason, then re-runs as a deliberate fresh-prime", async () => {
-    respond = (body) => Array.isArray(body.freshLogicalIds) && (body.freshLogicalIds as string[]).length > 0
-      ? {
-          status: "restored", rigId: "rig-1", rigName: "myrig", rigResult: "partially_restored",
-          nodes: [{ logicalId: "dev.impl", status: "fresh-primed" }], warnings: [],
-        }
-      : {
-          status: "restored", rigId: "rig-1", rigName: "myrig", rigResult: "partially_restored",
-          nodes: [{ logicalId: "dev.impl", status: "awaiting-decision", error: "no token available" }], warnings: [],
-        };
+  it("TTY ASK accepted: [y/N] offer names seat + reason, then starts that one seat fresh", async () => {
+    respond = () => ({
+      status: "restored", rigId: "rig-1", rigName: "myrig", rigResult: "partially_restored",
+      nodes: [{ logicalId: "orch.lead", status: "resumed" }, { logicalId: "dev.impl", status: "awaiting-decision", error: "no token available" }], warnings: [],
+    });
     const prompt = vi.fn(async () => true);
 
     const { logs } = await captureLogs(async () => {
@@ -179,10 +187,25 @@ describe("rig up --existing — resume-original default (OPR.0.3.4.2)", () => {
     expect(question).toContain("dev.impl");
     expect(question).toContain("no token available");
     expect(question).toContain("[y/N]");
-    // The accepted seat was re-run as operation B.
-    expect(upBodies).toHaveLength(2);
-    expect(upBodies[1]!.freshLogicalIds).toEqual(["dev.impl"]);
-    expect(logs.join("\n")).toContain("dev.impl: fresh-primed");
+    // #1332: the sibling is running, so the accepted seat starts alone through the printed command's route,
+    // not through a second whole-rig restore (which the daemon refuses while siblings run).
+    expect(upBodies).toHaveLength(1);
+    expect(launches).toEqual([{ seat: "dev.impl@myrig", body: { fresh: true, reason: "fresh-prime after restore" } }]);
+    expect(logs.join("\n")).toContain("dev.impl: fresh-primed (dev-impl@myrig)");
+  });
+
+  it("#1332 TTY ASK accepted: a refused one-seat launch is printed with the daemon's guidance", async () => {
+    respond = () => ({
+      status: "restored", rigId: "rig-1", rigName: "myrig", rigResult: "partially_restored",
+      nodes: [{ logicalId: "orch.lead", status: "resumed" }, { logicalId: "dev.impl", status: "awaiting-decision", error: "no token available" }], warnings: [],
+    });
+    launchAnswer = () => ({ status: 409, data: { ok: false, code: "seat_live", message: "The seat's pane is still running.", guidance: "Add --stop to replace it deliberately." } });
+    const { logs } = await captureLogs(async () => {
+      await makeCmd(vi.fn(async () => true)).parseAsync(["node", "rig", "up", "myrig", "--existing"]);
+    });
+    expect(launches).toHaveLength(1);
+    expect(logs.join("\n")).toContain("dev.impl: not started -- The seat's pane is still running.");
+    expect(logs.join("\n")).toContain("Add --stop to replace it deliberately.");
   });
 
   it("TTY ASK declined: no second POST, no session started", async () => {

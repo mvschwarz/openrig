@@ -10,7 +10,7 @@ import { DaemonClient, DaemonConnectionError, DaemonTimeoutError } from "../clie
 import { getDaemonStatus, getDaemonUrl, startDaemon, type LifecycleDeps, daemonStatusGuard } from "../daemon-lifecycle.js";
 import { shouldAutoStartDaemon } from "../daemon-reachability.js";
 import { prepareDaemonAutoStart } from "../daemon-auto-start.js";
-import { freshSeatCommand } from "../fresh-seat-command.js";
+import { freshSeatCommand, launchFreshSeat } from "../fresh-seat-command.js";
 import type { StartOptions } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -727,27 +727,12 @@ team back with its conversations, run rig up <rig-name> --existing, not the spec
               if (yes) accepted.push(n.logicalId);
             }
             if (accepted.length > 0) {
-              let freshRes: { status: number; data: Record<string, unknown> };
-              try {
-                freshRes = await client.post<Record<string, unknown>>("/api/up", {
-                  sourceRef,
-                  plan: false,
-                  autoApprove: opts.yes ?? false, nonInterruptive: opts.nonInterruptive,
-                  cwdOverride: opts.cwd ? nodePath.resolve(opts.cwd) : defaultLibraryCwdOverride,
-                  envOverride: envOverrideBody,
-                  targetRoot,
-                  freshLogicalIds: accepted,
-                }, { timeoutMs: LONG_RUNNING_UP_TIMEOUT_MS });
-              } catch (err) {
-                if (err instanceof DaemonConnectionError) {
-                  printHonestTimeout(err);
-                  return;
-                }
-                throw err;
-              }
-              const freshNodes = (freshRes.data["nodes"] as Array<{ logicalId: string; status: string }>) ?? [];
-              for (const n of freshNodes.filter((fn) => accepted.includes(fn.logicalId))) {
-                console.log(`  ${n.logicalId}: ${n.status}`);
+              // Each accepted seat starts alone, as the printed command does: a whole-rig restore naming it
+              // is refused while the siblings this restore resumed are running.
+              for (const id of accepted) {
+                const launched = await launchFreshSeat(client, id, rigName ?? source);
+                (launched.ok ? console.log : console.error)(`  ${id}: ${launched.message}`);
+                if (launched.guidance) console.error(`    ${launched.guidance}`);
               }
             } else {
               console.log(`  No fresh sessions started. When you decide, start a seat fresh with:`);

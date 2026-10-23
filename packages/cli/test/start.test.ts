@@ -47,6 +47,7 @@ describe("rig start (OPR.0.3.4.1)", () => {
   let upBodies: Array<Record<string, unknown>> = [];
   let nodesReads = 0;
   let routes: Record<string, (req: http.IncomingMessage, body: Record<string, unknown>) => Record<string, unknown>>;
+  let launches: Array<{ seat: string; body: Record<string, unknown> }> = [];
 
   beforeAll(async () => {
     server = http.createServer((req, res) => {
@@ -112,6 +113,16 @@ describe("rig start (OPR.0.3.4.1)", () => {
           res.end(JSON.stringify(httpStatus ? cleanData : data));
           return;
         }
+        const launchMatch = method === "POST" && url.match(/^\/api\/seat\/launch\/(.+)$/);
+        if (launchMatch) {
+          launches.push({ seat: decodeURIComponent(launchMatch[1]!), body });
+          const data = routes["/api/seat/launch/:seat"]?.(req, body) ?? { ok: true };
+          const httpStatus = (data as Record<string, unknown>)._httpStatus as number | undefined;
+          const { _httpStatus: _, ...cleanData } = data as Record<string, unknown>;
+          res.writeHead(httpStatus ?? 200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(cleanData));
+          return;
+        }
         res.writeHead(404).end();
       });
     });
@@ -123,6 +134,7 @@ describe("rig start (OPR.0.3.4.1)", () => {
 
   beforeEach(() => {
     upBodies = [];
+    launches = [];
     nodesReads = 0;
     routes = {};
   });
@@ -552,6 +564,23 @@ describe("rig start (OPR.0.3.4.1)", () => {
     expect(output).toContain(`dev.ops.impl: awaiting-decision -- to fresh-prime: rig seat launch dev.ops.impl@legacy-rig --fresh --reason "fresh-prime after restore"`);
     expect(output).toContain(`dev.ops-impl: awaiting-decision -- to fresh-prime: rig seat launch dev.ops-impl@legacy-rig --fresh --reason "fresh-prime after restore"`);
     expect(output).not.toContain("rig up --existing");
+  });
+
+  it("#1332 answering y after a partial restore starts that one seat fresh, not a second whole-rig restore", async () => {
+    setupCandidateRig("legacy-rig");
+    const plan = routes["/api/rigs/:id/up"]!;
+    routes["/api/rigs/:id/up"] = (req, body) => body.plan === true ? plan(req, body) : {
+      status: "restored", rigId: "rig-1", rigName: "legacy-rig", rigResult: "partially_restored",
+      nodes: [{ logicalId: "orch.lead", status: "resumed" }, { logicalId: "dev.ops.impl", status: "awaiting-decision", error: "no token available" }],
+      warnings: [],
+    };
+    routes["/api/seat/launch/:seat"] = () => ({ ok: true, sessionName: "dev-ops.impl@legacy-rig" });
+    const { logs } = await captureLogs(async () => {
+      await makeCmd(vi.fn(async () => true)).parseAsync(["node", "rig", "start", "--last"]);
+    });
+    expect(launches).toEqual([{ seat: "dev.ops.impl@legacy-rig", body: { fresh: true, reason: "fresh-prime after restore" } }]);
+    expect(upBodies.filter((b) => b.plan !== true && Array.isArray(b.freshLogicalIds))).toEqual([]);
+    expect(logs.join("\n")).toContain("dev.ops.impl: fresh-primed (dev-ops.impl@legacy-rig)");
   });
 
   // ---- KERNEL INVARIANT ----

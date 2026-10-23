@@ -12,7 +12,7 @@ import {
   waitForKernelReady,
   type LifecycleDeps, daemonStatusGuard } from "../daemon-lifecycle.js";
 import { shouldAutoStartDaemon } from "../daemon-reachability.js";
-import { freshSeatCommand } from "../fresh-seat-command.js";
+import { freshSeatCommand, launchFreshSeat } from "../fresh-seat-command.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
@@ -572,27 +572,13 @@ status); a restore that returned without a ready kernel exits 1.
                 if (yes) accepted.push(n.logicalId);
               }
               if (accepted.length > 0) {
-                try {
-                  const freshRes = await client.post<Record<string, unknown>>(
-                    `/api/rigs/${encodeURIComponent(rigId)}/up`,
-                    { plan: false, freshLogicalIds: accepted },
-                    { timeoutMs: LONG_RUNNING_UP_TIMEOUT_MS },
-                  );
-                  if (freshRes.status >= 400) {
-                    const freshError = String(freshRes.data["error"] ?? "fresh-prime failed");
-                    console.error(`    Fresh-prime for ${rigName}: ${freshError} (HTTP ${freshRes.status})`);
-                  } else {
-                    const freshNodes = (freshRes.data["nodes"] as Array<{ logicalId: string; status: string }>) ?? [];
-                    for (const fn of freshNodes.filter((fn) => accepted.includes(fn.logicalId))) {
-                      if (!opts.json) console.log(`    ${fn.logicalId}: ${fn.status}`);
-                    }
-                  }
-                } catch (err) {
-                  if (err instanceof DaemonConnectionError) {
-                    console.error(`    Fresh-prime timed out for ${rigName}; the daemon may still be processing. Verify with: rig ps`);
-                  } else {
-                    throw err;
-                  }
+                // Each accepted seat starts alone, as the printed command does: a whole-rig restore naming it
+                // is refused while the siblings this restore resumed are running.
+                for (const id of accepted) {
+                  const launched = await launchFreshSeat(client, id, rigName);
+                  if (opts.json) continue;
+                  (launched.ok ? console.log : console.error)(`    ${id}: ${launched.message}`);
+                  if (launched.guidance) console.error(`      ${launched.guidance}`);
                 }
               } else if (!opts.json) {
                 console.log(`    No fresh sessions started for ${rigName}.`);
