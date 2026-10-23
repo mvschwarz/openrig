@@ -198,7 +198,7 @@ export interface QueueItem {
   deliveryFailureDetail?: string;
   tags: string[] | null;
   blockedOn: string | null;
-  /** S04 — the DERIVED pickup receipt (unclaimed/working/stalled-after-claim/parked/terminal).
+  /** S04 — the DERIVED pickup receipt (unclaimed/working/needs-input/stalled-after-claim/parked/terminal).
    *  Never stored: computed at projection time from state + claimed_at + the transition log
    *  + heartbeat; a closed row is terminal, never stalled. */
   pickup?: PickupReceipt;
@@ -4573,6 +4573,7 @@ export class QueueRepository {
       lastMeaningfulAt: meaningful?.at,
       activity: activity?.activity,
       needsInput: activity?.needsInput.count,
+      needsInputReason: activity?.needsInput.reason,
       claimedAt: row.claimed_at,
       lastHeartbeat: row.last_heartbeat,
       postClaimMotionCount: 0, // this reader supplies the current meaningful timestamp
