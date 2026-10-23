@@ -354,6 +354,15 @@ the sections that were not read are `null`.
 | `rig mcp` | — | — |
 | `rig mcp serve` | — | `--port <port>` |
 
+### acp
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig acp` | — | — |
+| `rig acp run <qitemId> <agent...>` | — | `--cwd <dir>`<br>`--permissions-to <session>`<br>`--load-session <id>`<br>`--poll-seconds <n>` |
+| `rig acp cancel <runId>` | — | — |
+| `rig acp stop <runId> [stopCommand...]` | — | — |
+
 ### agent
 
 | Invocation | Aliases | Declared options |
