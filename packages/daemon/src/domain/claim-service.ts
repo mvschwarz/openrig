@@ -1,5 +1,6 @@
 import { shellQuote } from "../adapters/shell-quote.js";
 import { resumeTypeForRuntime, validateResumeToken } from "./resume-token-validation.js";
+import { OutboxHandler } from "./outbox-handler.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import { SessionAddressConflict, type SessionRegistry } from "./session-registry.js";
@@ -230,11 +231,18 @@ export class ClaimService {
   }): Promise<void> {
     if (!this.sessionTransport) return;
     const hint = `--- OpenRig: You have been adopted into rig "${meta.rigName}" as ${meta.logicalId}. Run: rig whoami --json ---`;
+    const guard = this.tmuxAdapter?.deliveryGuard;
+    const target = guard?.maybeTarget(tmuxSession);
     // One held copy per occupant, however often the hint is retried.
-    const target = this.tmuxAdapter?.deliveryGuard?.maybeTarget(tmuxSession);
+    const deliveryId = target ? `guard-claim-${target.nodeId}-${target.occupant ?? "unknown"}` : undefined;
+    // A claim runs under its lifecycle lease, and a send inside that lease isn't re-checked against the level (a terminal
+    // member's default holds OpenRig notices), so the hint checks the level itself.
+    if (guard && target && deliveryId && guard.holdsInput(target.nodeId, { source: "openrig", urgent: false })) {
+      new OutboxHandler(this.db).retain({ outboxId: deliveryId, senderSession: "claim@system", destinationSession: tmuxSession, body: hint }, target);
+      return;
+    }
     const result = await this.sessionTransport.send(tmuxSession, hint, {
-      actorSession: "claim@system", openrigNotice: true,
-      ...(target ? { deliveryId: `guard-claim-${target.nodeId}-${target.occupant ?? "unknown"}` } : {}),
+      actorSession: "claim@system", openrigNotice: true, ...(deliveryId ? { deliveryId } : {}),
     });
     if (!result.ok) console.warn(`[claim] identity hint not typed into ${tmuxSession}: ${result.reason ?? "send_failed"}. ${result.error ?? ""}`.trim());
   }

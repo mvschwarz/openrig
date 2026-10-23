@@ -27,11 +27,11 @@ function frame(body: string): ComposerSnapshot {
     cursor: { x: 2 + stringWidth(body), y: 2, width: 240, height: 60 }, inMode: false };
 }
 
-function fixture(opts: { prompt: boolean }) {
+function fixture(opts: { prompt: boolean; runtime?: string }) {
   const db = new Database(":memory:");
   migrate(db, ALL_MIGRATIONS);
   db.exec(`INSERT INTO rigs(id,name) VALUES ('rig','test');
-    INSERT INTO nodes(id,rig_id,logical_id,runtime) VALUES ('a','rig','worker','${opts.prompt ? "codex" : "claude-code"}');
+    INSERT INTO nodes(id,rig_id,logical_id,runtime) VALUES ('a','rig','worker','${opts.runtime ?? (opts.prompt ? "codex" : "claude-code")}');
     INSERT INTO bindings(id,node_id,tmux_session,tmux_pane) VALUES ('ba','a','${seat}','%1');
     INSERT INTO sessions(id,node_id,session_name,status) VALUES ('sa','a','${seat}','running');
     INSERT INTO occupant_tenures(id,node_id,generation_ordinal,generation_uuid,kind) VALUES ('ga','a',1,'g1','fresh');`);
@@ -87,6 +87,17 @@ describe("claim hint at a waiting native prompt (OPR.0.7.1.21 I7)", () => {
     expect(await f.claim.bind({ discoveredId: discovered.id, rigId: "rig", logicalId: "worker" })).toMatchObject({ ok: true });
     expect(f.submitted).toEqual([]);
     expect(f.commands.filter(c => c.includes("paste-buffer") || c.includes("send-keys"))).toEqual([]);
+  });
+
+  it("a real claim into an unconfigured terminal member holds the hint instead of typing it into the shell", async () => {
+    const f = fixture({ prompt: false, runtime: "terminal" });
+    f.db.exec("DELETE FROM bindings WHERE node_id='a'");
+    const discovered = new DiscoveryRepository(f.db).upsertDiscoveredSession({
+      tmuxSession: "adopted@test", tmuxPane: "%2", runtimeHint: "terminal", confidence: "high", cwd: "/tmp" });
+    expect(await f.claim.bind({ discoveredId: discovered.id, rigId: "rig", logicalId: "worker" })).toMatchObject({ ok: true });
+    expect(f.submitted).toEqual([]);
+    expect(f.held()).toHaveLength(1);
+    expect(f.held()[0]).toMatchObject({ senderSession: "claim@system", body: expect.stringContaining("rig whoami --json") });
   });
 
   it("still types the hint once at an idle prompt at off", async () => {
