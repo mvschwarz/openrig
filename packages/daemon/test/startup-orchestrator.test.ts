@@ -819,9 +819,10 @@ describe("StartupOrchestrator", () => {
       }
       return { delivered: pending.length - failed.length, failed };
     };
-    function harness(readiness: (typed: string[]) => ReadinessResult) {
+    function harness(readiness: (typed: string[]) => ReadinessResult, enterFails: (typed: string[]) => boolean = () => false) {
       const typed: string[] = [];
-      const t = mockTmux({ sendText: vi.fn(async (_session: string, text: string) => { typed.push(text); return { ok: true as const }; }) });
+      const t = mockTmux({ sendText: vi.fn(async (_session: string, text: string) => { typed.push(text); return { ok: true as const }; }),
+        sendKeys: vi.fn(async () => enterFails(typed) ? { ok: false as const, code: "unknown", message: "tmux: Enter failed" } : { ok: true as const }) });
       const adapter = mockAdapter({ deliverStartup: vi.fn(deliverStartup), checkReady: vi.fn(async () => readiness(typed)) });
       return { typed, orchestrator: createOrchestrator({ tmux: t, readFile: read }), adapter };
     }
@@ -866,6 +867,39 @@ describe("StartupOrchestrator", () => {
       expect(orchestrator.pendingStartupContext(seed.nodeId, seed.sessionId)).toBeNull();
       expect(isRecoverableStartupFailure(db, seed.nodeId, seed.sessionId)).toBe(false); // a later reconcile can't mark it ready
       expect(readyEvents(seed.nodeId)).toEqual({ n: 0 });
+    });
+
+    it("counts a one-shot whose text was typed but whose Enter failed, so continuing isn't offered", async () => {
+      const seed = seedSession();
+      const lastIsSetup = (t: string[]) => t.at(-1) === "/setup-once";
+      const { typed, orchestrator, adapter } = harness((t) => t.includes("/setup-once") ? LOGIN : { ready: true }, lastIsSetup);
+      const result = await orchestrator.startNode(makeInput(seed, { adapter, resolvedStartupFiles: files, startupActions: [
+        makeIdentityAction(),
+        makeAction({ value: "/setup-once", idempotent: false, phase: "after_files", appliesOn: ["fresh_start"] }),
+        makeAction({ value: "/later", phase: "after_files", appliesOn: ["fresh_start"] }),
+      ] }));
+
+      expect(sent(typed)).toEqual(["role.md", "a.md", "b.md", "/setup-once"]);
+      expect(result).toMatchObject({ ok: false, startupStatus: "attention_required" });
+      expect(errorsOf(result)).toEqual([LOGIN.reason, "Action failed (slash_command): tmux: Enter failed",
+        expect.stringMatching(/^1 later startup input wasn't sent\. .*a one-shot startup action already ran and must not run twice/)]);
+      expect(orchestrator.pendingStartupContext(seed.nodeId, seed.sessionId)).toBeNull();
+      expect(isRecoverableStartupFailure(db, seed.nodeId, seed.sessionId)).toBe(false);
+    });
+
+    it("keeps a resumed conversation and never tells it to relaunch blank", async () => {
+      const seed = seedSession();
+      const { typed, orchestrator, adapter } = harness((t) => t.length > 0 ? LOGIN : { ready: true });
+      const result = await orchestrator.startNode(makeInput(seed, { adapter, isRestore: true, resumeToken: "existing-token",
+        resolvedStartupFiles: files.slice(0, 2) }));
+
+      expect(sent(typed)).toEqual(["role.md"]);
+      expect(result).toMatchObject({ ok: false, startupStatus: "attention_required" });
+      expect(errorsOf(result)).toEqual([LOGIN.reason,
+        "1 later startup input wasn't sent. The seat's conversation is kept, but it hasn't read that input; continuing isn't offered for a resumed start."]);
+      expect(errorsOf(result).join("\n")).not.toContain("--fresh");
+      expect(orchestrator.pendingStartupContext(seed.nodeId, seed.sessionId)).toBeNull();
+      expect(isRecoverableStartupFailure(db, seed.nodeId, seed.sessionId)).toBe(false);
     });
 
     it("keeps the hold when a later file can't be read, listing that error beside it", async () => {

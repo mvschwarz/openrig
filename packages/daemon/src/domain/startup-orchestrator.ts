@@ -673,7 +673,7 @@ export class StartupOrchestrator {
     // Once a startup turn was refused, the result says what's owed, whatever error comes later. Continuing replays the
     // whole fresh startup, so it's offered only for a fresh start (not a restore) that typed no one-shot action.
     const owed = (also: string[] = [], refused = deliveryInput.refusedTurn) => refused
-      ? this.owedStartup(deliveryInput, refused, isFreshLaunch && !input.isRestore && !deliveryInput.oneShotSent, also) : null;
+      ? this.owedStartup(deliveryInput, refused, continuityOutcome, isFreshLaunch && !input.isRestore && !deliveryInput.oneShotSent, also) : null;
     const shouldChallenge = isFreshLaunch
       && input.adapter.runtime !== "terminal" && startupProof.mode === "authenticated";
     if (isFreshLaunch && !shouldChallenge) {
@@ -1034,22 +1034,23 @@ export class StartupOrchestrator {
       if (input.isRestore && !action.idempotent) continue;
 
       // Execute via tmux
+      const heldBefore = input.heldInputs ?? 0;
       try {
         if (!input.binding.tmuxSession) {
           errors.push(`No tmux session for action: ${action.value}`);
           continue;
         }
 
-        const heldBefore = input.heldInputs ?? 0;
         const sendError = await this.sendInteractiveText(input, action.value, phase, actionIndex);
         if (sendError) {
           errors.push(`Action failed (${action.type}): ${sendError.error}`);
-        } else if (!action.idempotent && (input.heldInputs ?? 0) === heldBefore) {
-          input.oneShotSent = true;
         }
       } catch (err) {
         errors.push(`Action error (${action.type}): ${(err as Error).message}`);
       }
+      // A one-shot that wasn't held may have reached the seat even when its send reported an error (the text typed, the
+      // Enter failed): uncertain delivery is never replayed.
+      if (!action.idempotent && (input.heldInputs ?? 0) === heldBefore) input.oneShotSent = true;
     }
 
     return errors.length > 0 ? { ok: false, errors } : { ok: true };
@@ -1182,9 +1183,10 @@ export class StartupOrchestrator {
   }
 
   /** The result of a start whose turn the runtime refused: the seat hasn't read its startup context, which never reads as
-   *  delivered. `continuable` keeps it pending for `rig seat continue` (the whole startup again); otherwise the seat says
-   *  why not, and names the fresh launch that delivers it. Later errors (`also`) are listed, never in its place. */
-  private owedStartup(input: StartupDeliveryInput, refused: ReadinessResult, continuable: boolean, also: string[]): StartupResult {
+   *  delivered. `continuable` keeps it pending for `rig seat continue` (the whole startup again). Otherwise the seat says
+   *  why not: a new conversation names the fresh launch that delivers it; a resumed or forked one keeps its conversation,
+   *  and is never told to relaunch blank. Later errors (`also`) are listed, never in its place. */
+  private owedStartup(input: StartupDeliveryInput, refused: ReadinessResult, continuity: string, continuable: boolean, also: string[]): StartupResult {
     const held = input.heldInputs
       ? `${input.heldInputs} later startup input${input.heldInputs === 1 ? " wasn't" : "s weren't"} sent. ` : "";
     const why = input.oneShotSent ? "a one-shot startup action already ran and must not run twice"
@@ -1194,7 +1196,9 @@ export class StartupOrchestrator {
       ...also,
       continuable
         ? `${held}The seat hasn't read its startup context. Continuing delivers the whole startup again, the refused turn included.`
-        : `${held}The seat hasn't read all of its startup context, and continuing isn't offered: ${why}. To deliver it, launch the seat fresh: rig seat launch ${shellQuote(input.binding.tmuxSession ?? "<seat>")} --fresh --stop --reason "<why>".`,
+        : continuity !== "fresh"
+          ? `${held}The seat's conversation is kept, but it hasn't read ${input.heldInputs ? (input.heldInputs === 1 ? "that input" : "those inputs") : "all of its startup context"}; continuing isn't offered for a ${continuity} start.`
+          : `${held}The seat hasn't read all of its startup context, and continuing isn't offered: ${why}. To deliver it, launch the seat fresh: rig seat launch ${shellQuote(input.binding.tmuxSession ?? "<seat>")} --fresh --stop --reason "<why>".`,
     ], undefined, continuable, undefined, false, "post_delivery_readiness", true);
   }
 
