@@ -30,6 +30,8 @@ function makeDeps(overrides?: Partial<SetupDeps>): SetupDeps {
     exists: () => false,
     platform: "darwin",
     mkdirp: vi.fn(),
+    // Never the person's real config: a path that doesn't exist reads as unanswered.
+    routerLineStore: new ConfigStore(join(tmpdir(), "setup-router-line-none", "config.json")),
     ...overrides,
   };
 }
@@ -1079,10 +1081,13 @@ describe("rig setup: the router-line question", () => {
     expect(routerStep(again)).toMatchObject({ status: "pass", message: `Saved answer: ${choice}.` });
   });
 
-  it("a dry run saves nothing", async () => {
+  it("a dry run saves nothing, and reports a saved answer as skipped like every dry-run step", async () => {
     const result = await runSetup(makeDeps({ routerLineStore: store }), { dryRun: true, routerLine: "yes" });
     expect(routerStep(result)).toMatchObject({ status: "skipped", message: "Dry run: would save your router-line answer: yes." });
     expect(store.resolveWithSource("skills.router_line.enabled").source).toBe("default");
+    store.set("skills.router_line.enabled", "true");
+    const saved = await runSetup(makeDeps({ routerLineStore: store }), { dryRun: true });
+    expect(routerStep(saved)).toMatchObject({ status: "skipped", message: "Dry run: Saved answer: yes." });
   });
 
   it("says when the environment overrides the saved answer", async () => {

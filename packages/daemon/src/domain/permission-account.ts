@@ -97,6 +97,12 @@ export function planPermissionAccount(db: Database.Database, nodeId: string, sea
   if (refs.nonInterruptive && posture === "full_bypass") openRigAdds.notes.push("Non-interruptive: supported harness warnings are accepted or hidden with launch flags.");
 
   const overrides = explicit ? [refs.member ? `member policy ${refs.member}` : null, refs.rig ? `rig policy ${refs.rig}` : null].filter((v): v is string => !!v) : [];
+  // The resolver's own fallback (Codex has no auto mode), and a named Codex profile that supplies the argument under a
+  // policy or seat choice; the floor's own wording already names its profile.
+  const notes = [
+    (source === "member_policy" || source === "rig_policy") && resolved.fallbackReason ? resolved.fallbackReason : null,
+    profile && source !== "floor" && nativeArgument === `-p ${profile}` ? `the named Codex profile ${profile} governs its sandbox and approvals` : null,
+  ].filter((n): n is string => !!n).map((n) => `; ${n}`).join("");
   const where: Record<PermissionAccountSource, string> = {
     explicit: `this seat's own choice (${explicit?.actor ?? "unknown"}: ${explicit?.reason ?? ""})`,
     member_policy: `the member's policy ${refs.member ?? ""}`.trim(),
@@ -112,6 +118,6 @@ export function planPermissionAccount(db: Database.Database, nodeId: string, sea
   return {
     basis: "planned", runtime, source, nativeArgument, overrides, openRigAdds, unknown, controls,
     ...(explicit ? { explicit: { mode: explicit.mode, actor: explicit.actor, reason: explicit.reason, updatedAt: explicit.updatedAt } } : {}),
-    summary: `Next launch: ${nativeArgument}, from ${where[source]}${adds}.`,
+    summary: `Next launch: ${nativeArgument}, from ${where[source]}${notes}${adds}.`,
   };
 }

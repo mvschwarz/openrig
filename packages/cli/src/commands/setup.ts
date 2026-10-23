@@ -123,8 +123,8 @@ function routerLineStep(deps: SetupDeps, choice: "yes" | "no" | undefined, dryRu
     ? { id: "router_line", status: "skipped",
         message: `${answer.answer === "unreadable" ? "The saved answer couldn't be read, so" : "Not answered, so"} it isn't a yes: OpenRig doesn't add the line. Show the person the line and files below, then save their answer.`,
         fixHint: "rig setup --router-line yes, or rig setup --router-line no" }
-    : { id: "router_line", status: "pass",
-        message: `${answer.by === "environment" ? "From the environment (OPENRIG_SKILLS_ROUTER_LINE_ENABLED), not a saved answer" : "Saved answer"}: ${answer.answer}.` };
+    : { id: "router_line", status: dryRun ? "skipped" : "pass",
+        message: `${dryRun ? "Dry run: " : ""}${answer.by === "environment" ? "From the environment (OPENRIG_SKILLS_ROUTER_LINE_ENABLED), not a saved answer" : "Saved answer"}: ${answer.answer}.` };
   return { step, preview: preview(answer) };
 }
 

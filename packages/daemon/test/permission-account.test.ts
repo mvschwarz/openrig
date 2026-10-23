@@ -72,6 +72,22 @@ describe("the planned permission account", () => {
     expect(account.summary).toContain("the named Codex profile careful governs its sandbox and approvals");
   });
 
+  it("keeps the resolver's explanation when a Codex member asks for auto, which Codex doesn't have", () => {
+    const { db, node } = seat("codex");
+    db.prepare("UPDATE nodes SET permission_policy = ? WHERE id = ?").run("builtin:auto", node.id);
+    const account = planPermissionAccount(db, node.id, "dev-builder@workshop", "codex", env);
+    expect(account).toMatchObject({ source: "member_policy", nativeArgument: "-s workspace-write" });
+    expect(account.summary).toContain("Codex has no auto mode and launches at the floor");
+  });
+
+  it("names a Codex profile that supplies the argument under a policy, keeping the policy as the source", () => {
+    const { db, node } = seat("codex");
+    db.prepare("UPDATE nodes SET permission_policy = ?, codex_config_profile = ? WHERE id = ?").run("none", "careful", node.id);
+    const account = planPermissionAccount(db, node.id, "dev-builder@workshop", "codex", env);
+    expect(account).toMatchObject({ source: "member_policy", nativeArgument: "-p careful" });
+    expect(account.summary).toContain("the named Codex profile careful governs its sandbox and approvals");
+  });
+
   it("says the daemon's OPENRIG_YOLO decides when no policy or choice is recorded", () => {
     const { db, node } = seat("claude-code");
     const account = planPermissionAccount(db, node.id, "dev-builder@workshop", "claude-code", { OPENRIG_YOLO: "1" } as NodeJS.ProcessEnv);
