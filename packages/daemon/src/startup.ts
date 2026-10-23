@@ -625,6 +625,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     HOME: daemonHome,
     USER: process.env.USER,
     LOGNAME: process.env.LOGNAME,
+    // The local agent socket path, not a credential value (same class as
+    // USER/LOGNAME): without it, git over SSH inside every managed seat fails
+    // against a passphrase-protected key (#1159). Nothing is derived when the
+    // daemon itself lacks the socket.
+    SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK,
     CODEX_HOME: codexHome,
   };
   // OPR.0.4.6.02 S1 — ONE shared tmux option-defaults applier, injected into
