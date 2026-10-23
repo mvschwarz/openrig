@@ -51,7 +51,7 @@ interface DeliveryResultBase {
 /** The gateway (Slack connector) owns delivery; its ledger is the receipt. */
 export interface GatewayDeliveryResult extends DeliveryResultBase {
   receiptSource: "gateway";
-  /** not-alerted: an ask placed on Steering without a Slack alert, so no post is owed. */
+  /** not-alerted: an ask placed on Steering without a Slack alert, below Slack's posting dial, so no post is owed yet. */
   outcome: "posted" | "transport-failed" | "never-posted" | "still-pending" | "indeterminate" | "not-alerted";
   /** null means no receipt can presently settle connector acceptance. */
   connectorAccepted: boolean | null;
@@ -246,7 +246,7 @@ export async function waitForDeliveryOutcome(
       // An ask placed on Steering without an alert owes no post, so there's no receipt to wait for.
       if (outcome == null && stringField(row, "ownerNotificationLevel") === "RECORD") {
         return { ...gateway, outcome: "not-alerted", connectorAccepted: null,
-          detail: "on Steering for the person, with no Slack alert (--alert sends one)", nextAction: null };
+          detail: "on Steering for the person, below Slack's posting dial, so not posted; --alert sends an alert. If the dial is set to post it, rig queue show reports its receipt.", nextAction: `rig queue show ${qitemId} --json` };
       }
       if (outcome === "posted") {
         // #96: a --reply-to update reports whether it joined the earlier item's thread.
@@ -1212,6 +1212,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .option("--target-repo <name>", "PL-007: typed repo scope for the new qitem")
     .option("--summary <text>", "OPR.0.4.1.18: short human-readable 1-2 sentence subject of the new qitem — what it is and why this seat — shown on every surface that lists it (RECENT, the story, the needs-you view); --body stays source of truth. Not inherited from the source row. Warned-if-missing.")
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-5: durable-artifact pointer for the new qitem. Required by the daemon when the new qitem is human-routed; optional otherwise.")
+    .option("--alert", "For a handoff to a person: also send one Slack alert, for something only they can do or an approval whose wait costs now. Without it the item waits on Steering, with no Slack alert")
     .option("--host <id>", QUEUE_HOST_OPTION_HELP)
     .option("--no-nudge", "Suppress the default nudge to the new destination")
     .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
@@ -1229,6 +1230,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       targetRepo?: string;
       summary?: string;
       evidenceRef?: string;
+      alert?: boolean;
       host?: string;
       nudge?: boolean;
       json?: boolean;
@@ -1280,6 +1282,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           body: resolvedBody,
           summary: opts.summary,
           evidenceRef: opts.evidenceRef,
+          ...(opts.alert ? { humanAlert: true } : {}),
           transitionNote: opts.note,
           priority: opts.priority,
           tier: opts.tier,
@@ -1313,6 +1316,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .option("--target-repo <name>", "PL-007: typed repo scope for the new qitem")
     .option("--summary <text>", "OPR.0.4.1.18: short human-readable 1-2 sentence subject of the new qitem — what it is and why this seat — shown on every surface that lists it (RECENT, the story, the needs-you view); --body stays source of truth. Not inherited from the source row. Warned-if-missing.")
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-5: durable-artifact pointer for the new qitem. Required by the daemon when the new qitem is human-routed; optional otherwise.")
+    .option("--alert", "For a handoff to a person: also send one Slack alert, for something only they can do or an approval whose wait costs now. Without it the item waits on Steering, with no Slack alert")
     .option("--host <id>", QUEUE_HOST_OPTION_HELP)
     .option("--no-nudge", "Suppress the default nudge to the new destination")
     .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
@@ -1330,6 +1334,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       targetRepo?: string;
       summary?: string;
       evidenceRef?: string;
+      alert?: boolean;
       host?: string;
       nudge?: boolean;
       json?: boolean;
@@ -1379,6 +1384,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           body: resolvedBody,
           summary: opts.summary,
           evidenceRef: opts.evidenceRef,
+          ...(opts.alert ? { humanAlert: true } : {}),
           transitionNote: opts.note,
           priority: opts.priority,
           tier: opts.tier,

@@ -21,6 +21,8 @@ import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.j
 import { HumanQuietStore } from "../src/domain/gateway/human-quiet-windows.js";
 import { QUIET_RELEASE_POLICY, runQuietRelease } from "../src/domain/policies/quiet-release.js";
 import { createStuckSweepStatus, runStuckSweep, STUCK_SWEEP_FINDING_TAG } from "../src/domain/queue-stuck-sweep.js";
+import { Hono } from "hono";
+import { attentionRoutes } from "../src/routes/attention.js";
 
 const HUMAN = "human-founder";
 const registry = {
@@ -28,6 +30,11 @@ const registry = {
   entities: [{
     entityId: HUMAN, class: "human" as const, displayName: "Founder", address: `${HUMAN}@external`,
     connectorBindings: [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "env:SLACK_BOT_TOKEN", role: "primary" as const, handle: "UFOUNDER" }],
+    prefs: { deliveryClass: "B", availability: "available" },
+  }, {
+    // A registered person addressed as a kernel alias, which no human-* name pattern matches.
+    entityId: "operator-admin", class: "human" as const, displayName: "Operator", address: "operator-admin@external",
+    connectorBindings: [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "env:SLACK_BOT_TOKEN", role: "primary" as const, handle: "UOPERATOR" }],
     prefs: { deliveryClass: "B", availability: "available" },
   }],
 };
@@ -138,6 +145,65 @@ describe("an ask lands on Steering; Slack alerts only when it's marked alert-wor
       .toMatchObject({ status: "recorded", answers: { q1: "a" } });
     expect(repo.getById(urgent.qitemId)!.humanAnswers).toEqual({ q1: "a" });
     expect(posts).toHaveLength(1);
+  });
+
+  it("a handoff to a person lands on Steering too, and --alert on it alerts the same item once", async () => {
+    const work = () => repo.create({ sourceSession: "orch-lead@r", destinationSession: "dev@r", body: "work", nudge: false });
+    const quiet = (await repo.handoff({ qitemId: (await work()).qitemId, fromSession: "dev@r", toSession: `${HUMAN}@kernel`,
+      body: "handed body quiet", summary: "Pick", evidenceRef: "/proof/h1.md", nudge: false })).created;
+    const urgent = (await repo.handoffAndComplete({ qitemId: (await work()).qitemId, fromSession: "dev@r", toSession: `${HUMAN}@kernel`,
+      body: "handed body urgent", summary: "Approve now", evidenceRef: "/proof/h2.md", humanAlert: true, nudge: false })).created;
+    expect(owner(quiet)).toMatchObject({ ownerNotificationKind: "human-required", ownerNotificationLevel: "RECORD" });
+    expect(owner(urgent)).toMatchObject({ ownerNotificationKind: "human-required", ownerNotificationLevel: "ALERT" });
+    await runGateway();
+    expect(posts).toHaveLength(1);
+    expect(posted(urgent)).toBe(true);
+    expect(onSteering()).toEqual(expect.arrayContaining([quiet.qitemId, urgent.qitemId]));
+    await expect(repo.handoff({ qitemId: (await work()).qitemId, fromSession: "dev@r", toSession: "qa@r", body: "x", humanAlert: true, nudge: false }))
+      .rejects.toThrow(/humanAlert/);
+  });
+
+  it("a quiet ask to a registered person's alias is on Steering and the Feed, which say it wasn't sent to Slack", async () => {
+    const row = await repo.create({ sourceSession: "orch-lead@r", destinationSession: "operator-admin@kernel", body: "alias ask body",
+      summary: "Alias ask", evidenceRef: "/proof/alias.md", nudge: false });
+    expect(owner(row)).toMatchObject({ ownerNotificationKind: "human-required", ownerNotificationLevel: "RECORD" });
+    expect(onSteering()).toContain(row.qitemId);
+    expect(repo.waitingView(row.qitemId)!.nextBackstop).toMatchObject({ mechanism: expect.stringMatching(/^none \(on Steering/) });
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("queueRepo" as never, repo as never); await next(); });
+    app.route("/api/attention", attentionRoutes());
+    const read = await (await app.request(`/api/attention?item=${encodeURIComponent(`queue:${row.qitemId}`)}`)).json() as {
+      items: Array<{ id: string; recipient: string }>; detail: { lines: string[] } | null };
+    expect(read.items).toContainEqual(expect.objectContaining({ id: `queue:${row.qitemId}`, recipient: "operator-admin@kernel" }));
+    expect(read.detail!.lines).toContain("Slack: not sent: on Steering only (an alert-worthy ask is created with --alert)");
+    await runGateway();
+    expect(posts).toHaveLength(0);
+  });
+
+  it("a quiet ask rerouted to an agent returns to agent rules: off Steering, and the unclaimed sweep watches it", async () => {
+    const row = await ask();
+    repo.routeToFallback(row.qitemId, "dev@r", "the person is unavailable");
+    expect(repo.humanAskWithoutAlert(row.qitemId)).toBe(false);
+    expect(onSteering()).not.toContain(row.qitemId);
+    expect(repo.waitingView(row.qitemId)!.nextBackstop?.mechanism ?? "").not.toMatch(/on Steering/);
+    const past = new Date(Date.now() - 120 * 60_000).toISOString();
+    db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?").run(past, row.qitemId);
+    db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = ?").run(past, row.qitemId);
+    await runStuckSweep({ db, queueRepo: repo, status: createStuckSweepStatus(), resolveOrchestrator: () => null,
+      unclaimedAgeMinutes: 60, log: () => {}, isRegisteredHost: () => false });
+    const findings = repo.list({ limit: 500 }).filter((item) => (item.tags ?? []).includes(STUCK_SWEEP_FINDING_TAG)
+      && (item.tags ?? []).some((tag) => tag.endsWith(`:${row.qitemId}`)));
+    expect(findings.length).toBeGreaterThan(0);
+  });
+
+  it("with Slack's posting dial set to RECORD the ask posts, and its receipt is reported as posted", async () => {
+    saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-OWNER", secretsEnvFile: join(home, "slack.env"), minimumLevelThatPosts: "RECORD" }, home);
+    const row = await ask();
+    await runGateway();
+    expect(posts).toHaveLength(1);
+    expect(repo.deliveryOutcomeFor(row.qitemId)).toMatchObject({ outcome: "posted" });
+    expect(repo.humanAskWithoutAlert(row.qitemId)).toBe(false);
+    expect(repo.waitingView(row.qitemId)!.nextBackstop).toMatchObject({ mechanism: expect.stringMatching(/^none \(posted to the human/) });
   });
 
   it("stays unalerted across quiet hours, a restart, the gateway's retries and the stuck sweep", async () => {

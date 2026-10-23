@@ -260,7 +260,10 @@ describe("pair-request — the target-side issuance handshake (FR-6)", () => {
   });
 
   it("issuance mints the ONE human approval moment: a human-routed qitem with code + summary + evidence_ref", async () => {
+    const create = vi.spyOn(repo, "create");
     const { code, approvalQitemId } = await issue();
+    // An approval that expires is alert-worthy: it isn't left only on Steering.
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ humanAlert: true }));
     const item = repo.getById(approvalQitemId)!;
     expect(item.destinationSession).toBe("alex@external");
     expect(item.tier).toBe("human-gate");

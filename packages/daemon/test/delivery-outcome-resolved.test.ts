@@ -37,7 +37,7 @@ describe("delivery outcome: a resolved notice on a closed row opens no delivery 
   const latestKey = (id: string) => `${id}:${repo.transitionLog.latestOwnerNotificationForQitem(id)!.transitionId}`;
   async function askHuman() {
     const item = await repo.create({ sourceSession: "lead@rig", destinationSession: "human-founder@external", body: "decide?",
-      summary: "decision", priority: "routine" as never, humanIntent: "decision" as never } as never);
+      summary: "decision", priority: "routine" as never, humanIntent: "decision" as never, humanAlert: true } as never);
     const id = (item as unknown as { qitemId: string }).qitemId;
     expect(repo.transitionLog.latestOwnerNotificationForQitem(id)?.ownerNotificationKind).toBe("human-required");
     return id;
@@ -61,6 +61,15 @@ describe("delivery outcome: a resolved notice on a closed row opens no delivery 
     directReplyClose(id);
     age();
     expect(repo.deliveryOutcomeFor(id)?.outcome).toBe("never-posted");
+  });
+
+  it("an ask on Steering without an alert, closed by the person, reads no delivery at all: nothing was owed", async () => {
+    const item = await repo.create({ sourceSession: "lead@rig", destinationSession: "human-founder@external", body: "decide?",
+      summary: "decision", priority: "routine" as never, humanIntent: "decision" as never } as never);
+    const id = (item as unknown as { qitemId: string }).qitemId;
+    directReplyClose(id);
+    age();
+    expect(repo.deliveryOutcomeFor(id)).toBeNull();
   });
 
   it("unchanged while the row is active: a resolved notice on an active row is its own episode (posted when delivered)", async () => {

@@ -191,6 +191,8 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
         sourceSession: PAIR_SOURCE_SESSION,
         destinationSession: humans[0]!.address,
         tier: "human-gate",
+        // An approval that expires: worth an alert, not only a place on Steering.
+        humanAlert: true,
         summary: `Host pairing request ${code} from ${requester}`,
         evidenceRef: `pair-request:${pairId}`,
         body: [

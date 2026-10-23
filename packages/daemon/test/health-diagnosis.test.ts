@@ -285,6 +285,8 @@ it("human escalation requires both an admitted agent disposition and ready deliv
   const first = await service.notify(id, "owner@rig");
   const second = await service.notify(id, "owner@rig");
   expect(second.qitemId).toBe(first.qitemId);
+  // Selected for the person by the health policy: an alert, not only a place on Steering.
+  expect(t.queue.transitionLog.latestOwnerNotificationForQitem(first.qitemId)).toMatchObject({ ownerNotificationKind: "human-required", ownerNotificationLevel: "ALERT" });
   expect(first.deliveryOutcome).not.toBe("posted");
   expect(t.queue.list({ limit: 100 })).toHaveLength(2);
   const key = `${first.qitemId}:${t.queue.transitionLog.latestOwnerNotificationForQitem(first.qitemId)!.transitionId}`;

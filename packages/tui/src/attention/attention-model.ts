@@ -78,6 +78,6 @@ export function attentionLines(state: ViewState, snap: FleetSnapshot, width: num
     }
     lines.push({ text: "" }, { text: `Read at ${read.readAt}` }, ...read.sources.map(s => ({ text: `${s.source}: ${s.state} · ${s.detail}` })));
   }
-  lines.push({ text: "" }, { text: "Viewing is not approval. Required Slack decisions still apply." });
+  lines.push({ text: "" }, { text: "Viewing is not approval. Each request's detail says whether it went to Slack and where to answer it." });
   return wrapDetailLines(lines, width);
 }
