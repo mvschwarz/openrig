@@ -141,9 +141,9 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
     if (seat) enforcer.recoverSeat({ sessionName: session, cwd: seat.cwd, runtime: seat.runtime });
     const preparation = enforcer.getPreparationState(session);
     const stranded = enforcer.getStrandedCompaction(session);
-    const held = enforcer.getHeldRestore(session);
+    const owedRestore = enforcer.getOwedRestore(session);
     return c.json({ ok: true, session, state: enforcer.getManualCompactionState(session), preparation,
-      ...(held ? { held } : {}),
+      ...(owedRestore ? { owedRestore } : {}),
       ...(preparation ? { compact: compactResultText(preparation.compact) } : {}),
       ...(preparation?.reason === "occupant_generation_unavailable"
         ? { guidance: manualReasonMessage(session, preparation.reason) } : {}),

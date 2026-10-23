@@ -519,6 +519,9 @@ function readCompactionRecord(file: string): CompactionRecord | null {
   } catch { return null; }
 }
 
+/** Input-box readings that hold nothing typed: an owed step after an uncertain /compact may go in. A harness suggestion isn't input. */
+const INPUT_BOX_CLEAR = new Set(["empty", "likely-suggestion"]);
+
 function strandedSummary(record: CompactionRecord): StrandedCompaction {
   return { attemptId: record.attemptId, mapPath: record.mapPath, phase: record.phase, recordedAt: new Date(record.updatedAt).toISOString() };
 }
@@ -560,8 +563,8 @@ export class ClaudeCompactionEnforcer {
   /** Seats whose owed restore steps follow a /compact whose outcome is unknown: its text may wait unsubmitted in the input
    *  box, where any Enter would submit it, so each step goes only into an empty box. */
   private readonly afterUncertainCompact = new Set<string>();
-  /** Seats whose owed restore step is held because the input box isn't empty, with what the box read. */
-  private readonly heldForInput = new Map<string, string>();
+  /** What the input box last read for such a seat, before an owed step (absent until the first check). */
+  private readonly lastInputBox = new Map<string, string>();
   private readonly restartRecoveryWindowMs: number;
   private readonly daemonInstance: string;
   private readonly resolveOccupantGeneration?: (sessionName: string) => string | null;
@@ -635,8 +638,8 @@ export class ClaudeCompactionEnforcer {
    */
   observedCompaction(sessionName: string): ObservedCompaction | null {
     const owed = this.pendingPostCompactRestore.get(sessionName);
-    const held = this.getHeldRestore(sessionName);
-    if (held) return { stage: owed === "compliance_prompt" ? "restoring" : owed === "restore_prompt" ? "compacted" : "compacting", detail: held.detail };
+    const held = this.getOwedRestore(sessionName);
+    if (held?.held) return { stage: owed === "compliance_prompt" ? "restoring" : owed === "restore_prompt" ? "compacted" : "compacting", detail: held.detail };
     if (owed === "compliance_prompt") return { stage: "restoring", detail: "mid-restore: the restore request was sent and the post-restore audit is still owed" };
     if (owed === "restore_prompt") return { stage: "compacted", detail: "compacted, with its restore not yet requested" };
     const attempt = this.pendingPreCompactPrep.get(sessionName);
@@ -672,12 +675,21 @@ export class ClaudeCompactionEnforcer {
     this.recoverAfterRestart(seat, preparationRoot);
   }
 
-  /** An owed restore step held because the seat's input box isn't empty (see `afterUncertainCompact`), or null. */
-  getHeldRestore(sessionName: string): { stage: PendingPostCompactStage; inputBox: string; detail: string } | null {
+  /** The restore step OpenRig owes this seat next, or null. After a /compact whose outcome is unknown (see
+   *  `afterUncertainCompact`) it also gives what the input box last read (`not_checked` before the first check) and
+   *  whether the step is held for it. */
+  getOwedRestore(sessionName: string): { stage: PendingPostCompactStage; held: boolean; inputBox?: string; detail: string } | null {
     const stage = this.pendingPostCompactRestore.get(sessionName);
-    const inputBox = this.heldForInput.get(sessionName);
-    if (!stage || inputBox === undefined) return null;
-    return { stage, inputBox, detail: `held: OpenRig owes this seat its restore steps after a /compact whose result was lost, and waits while its input box isn't empty (it reads ${inputBox}). The seat may have /compact text waiting, which any Enter would submit, so check the pane. A seat whose own status line keeps the box unreadable stays held.` };
+    if (!stage) return null;
+    const step = { turn_boundary: "post-compaction turn boundary", restore_prompt: "restore request", compliance_prompt: "post-restore audit" }[stage];
+    if (!this.afterUncertainCompact.has(sessionName)) {
+      return { stage, held: false, detail: `OpenRig owes this seat its ${step} next, sent on a poll once the pane is idle.` };
+    }
+    const inputBox = this.lastInputBox.get(sessionName) ?? "not_checked";
+    const held = inputBox !== "not_checked" && !INPUT_BOX_CLEAR.has(inputBox);
+    return { stage, held, inputBox, detail: held
+      ? `held: OpenRig owes this seat its restore steps after a /compact whose result was lost, and waits while its input box isn't empty (it reads ${inputBox}). The seat may have /compact text waiting, which any Enter would submit, so check the pane. A seat whose own status line keeps the box unreadable stays held.`
+      : `OpenRig owes this seat its ${step} next, after a /compact whose result was lost. Each step goes only into an empty input box, sent on a poll once the pane is idle (the box last read ${inputBox}).` };
   }
 
   /** An open record from before a restart that was too old to resume, while no later attempt has replaced it. */
@@ -794,11 +806,8 @@ export class ClaudeCompactionEnforcer {
     if (this.afterUncertainCompact.has(input.sessionName)) {
       const box = await this.inputBoxStatus(input.sessionName);
       if (!isCurrent()) return { triggered: false, reason: "preparation_stopped" };
-      if (box !== "empty" && box !== "likely-suggestion") {
-        this.heldForInput.set(input.sessionName, box);
-        return { triggered: false, reason: "input_box_not_empty" };
-      }
-      this.heldForInput.delete(input.sessionName);
+      this.lastInputBox.set(input.sessionName, box);
+      if (!INPUT_BOX_CLEAR.has(box)) return { triggered: false, reason: "input_box_not_empty" };
     }
     if (pendingStage === "turn_boundary") {
       const boundary = await this.sessionTransport.send(
@@ -878,7 +887,7 @@ export class ClaudeCompactionEnforcer {
       this.persistStage(input.sessionName, "done");
       this.records.delete(input.sessionName);
       this.afterUncertainCompact.delete(input.sessionName);
-      this.heldForInput.delete(input.sessionName);
+      this.lastInputBox.delete(input.sessionName);
       this.restoreCarry.delete(input.sessionName);
       // The attempt is finished, including one stopped after a lost /compact result whose restore this was.
       const finished = this.pendingPreCompactPrep.get(input.sessionName);
@@ -1490,7 +1499,7 @@ export class ClaudeCompactionEnforcer {
       this.pendingStageGeneration.delete(session);
       this.restoreCarry.delete(session);
       this.afterUncertainCompact.delete(session);
-      this.heldForInput.delete(session);
+      this.lastInputBox.delete(session);
       this.setManualStage(session, "cancelled", "compaction_cancelled");
     } else {
       this.stopPreparation(session, "preparation_cancelled");
@@ -1528,7 +1537,7 @@ export class ClaudeCompactionEnforcer {
     this.records.delete(sessionName);
     this.stranded.delete(sessionName);
     this.afterUncertainCompact.delete(sessionName);
-    this.heldForInput.delete(sessionName);
+    this.lastInputBox.delete(sessionName);
     this.lastAutoCompactAt.delete(sessionName);
     this.postCompactRestoreCooldownUntil.delete(sessionName);
     this.triggeredAboveThreshold.delete(sessionName);

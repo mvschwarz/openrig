@@ -86,6 +86,12 @@ it('a restart after /compact still delivers the turn boundary, the restore reque
  const again=f.daemon();await staleTick(again);expect(boundaries(f)).toHaveLength(1);
 });
 
+it('after a restart, rig compact --state shows an owed restore at first look, before any poll',async()=>{
+ const f=fixture();await compactedBy(f);
+ const restarted=f.daemon();
+ expect((await stateOf(restarted)).owedRestore).toMatchObject({stage:'turn_boundary',held:false});
+});
+
 it('a restart between the turn boundary and the restore request resumes at the restore request',async()=>{
  const f=fixture();const first=await compactedBy(f);await staleTick(first);expect(boundaries(f)).toHaveLength(1);
  const restarted=f.daemon();await staleTick(restarted);
@@ -172,9 +178,13 @@ it('without a restart, the restore steps after a lost /compact result wait while
  // What the seat receives first: nothing whose Enter could submit the /compact text that may wait in its box.
  expect(boundaries(f)).toHaveLength(0);
  expect(e.observedCompaction(seat)?.detail).toContain('may have /compact text waiting');
- expect(e.getHeldRestore(seat)).toMatchObject({stage:'turn_boundary',inputBox:'typed'});
- f.hooks.box='empty';for(let i=0;i<3;i++)await staleTick(e);
- expect(boundaries(f)).toHaveLength(1);expect(restores(f)).toHaveLength(1);expect(e.getHeldRestore(seat)).toBeNull();
+ expect(e.getOwedRestore(seat)).toMatchObject({stage:'turn_boundary',held:true,inputBox:'typed'});
+ // An empty box with the seat still busy: nothing is sent, and the step still reads as owed, not idle.
+ f.hooks.box='empty';f.hooks.busy=true;await staleTick(e);f.hooks.busy=false;
+ expect(boundaries(f)).toHaveLength(0);
+ expect((await stateOf(e)).owedRestore).toMatchObject({stage:'turn_boundary',held:false,inputBox:'empty'});
+ for(let i=0;i<3;i++)await staleTick(e);
+ expect(boundaries(f)).toHaveLength(1);expect(restores(f)).toHaveLength(1);expect(e.getOwedRestore(seat)).toBeNull();
 });
 
 it('after a restart, the restore steps after an in-flight /compact wait while the input box is unreadable, and rig compact --state says so',async()=>{
@@ -183,9 +193,12 @@ it('after a restart, the restore steps after an in-flight /compact wait while th
  const record=recordFile(first);
  writeFileSync(record,JSON.stringify({...JSON.parse(readFileSync(record,'utf8')),compactSending:true}));
  f.hooks.box='unrecognized';
- const restarted=f.daemon();for(let i=0;i<2;i++)await staleTick(restarted);
+ const restarted=f.daemon();
+ // A first look before any poll: the owed step shows, with the box not yet checked.
+ expect((await stateOf(restarted)).owedRestore).toMatchObject({stage:'turn_boundary',held:false,inputBox:'not_checked'});
+ for(let i=0;i<2;i++)await staleTick(restarted);
  expect(boundaries(f)).toHaveLength(0);
- expect((await stateOf(restarted)).held).toMatchObject({stage:'turn_boundary',inputBox:'unrecognized',detail:expect.stringContaining('check the pane')});
+ expect((await stateOf(restarted)).owedRestore).toMatchObject({stage:'turn_boundary',held:true,inputBox:'unrecognized',detail:expect.stringContaining('check the pane')});
  // A harness suggestion in the box isn't input.
  f.hooks.box='likely-suggestion';await staleTick(restarted);
  expect(boundaries(f)).toHaveLength(1);
