@@ -694,7 +694,7 @@ team back with its conversations, run rig up <rig-name> --existing, not the spec
           // OPR.0.3.4.2 — the five-term vocabulary renders distinctly; the
           // awaiting-decision reason is part of the line (not a dead end), and so is a failed seat's (such as a seat held
           // back for a missing startup file, with its fix).
-          if ((n.status === "awaiting-decision" || n.status === "failed") && n.error) {
+          if ((n.status === "awaiting-decision" || n.status === "failed" || n.status === "left_attached") && n.error) {
             console.log(`  ${n.logicalId}: ${n.status} — ${n.error}`);
           } else {
             console.log(`  ${n.logicalId}: ${n.status}`);

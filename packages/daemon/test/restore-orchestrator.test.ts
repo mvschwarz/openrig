@@ -734,6 +734,37 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
+  it("a full restore leaves a seat joined with rig attach as an external CLI attached, and still launches the tmux seat beside it", async () => {
+    const rig = rigRepo.createRig("r99");
+    const worker = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+    const desk = rigRepo.addNode(rig.id, "desk", { role: "worker", runtime: "claude-code" });
+    const old = sessionRegistry.registerSession(worker.id, "r99-worker");
+    sessionRegistry.updateStatus(old.id, "running");
+    sessionRegistry.updateBinding(desk.id, { attachmentType: "external_cli", externalSessionName: "desk-app@r99" });
+    const claimed = sessionRegistry.registerClaimedSession(desk.id, "desk-app@r99");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
+    const hasSession = vi.fn(async () => false);
+    const tmux = { ...mockTmux(), hasSession } as unknown as TmuxAdapter;
+
+    const result = await createOrchestrator({ tmux }).restore(snap.id, { freshLogicalIds: ["worker"] });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes.find((n) => n.logicalId === "desk")).toMatchObject({
+      status: "left_attached", error: expect.stringContaining("rig unclaim desk-app@r99"),
+    });
+    expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(claimed.id)).toEqual({ status: "running" });
+    expect(sessionRegistry.getBindingForNode(desk.id)).toMatchObject({ attachmentType: "external_cli", externalSessionName: "desk-app@r99" });
+    expect(hasSession).not.toHaveBeenCalledWith("desk-app@r99");
+    expect(result.result.nodes.find((n) => n.logicalId === "worker")?.status).toBe("fresh-primed");
+    expect((tmux.createSession as ReturnType<typeof vi.fn>).mock.calls.flat().join(" ")).not.toContain("desk");
+    // A seat left attached doesn't count against the rig.
+    expect(rollupRestoreRigResult([
+      { nodeId: "a", logicalId: "a", status: "resumed" },
+      { nodeId: "b", logicalId: "b", status: "left_attached" },
+    ])).toBe("fully_restored");
+  });
+
   it("still blocks restore when tmux sessions are genuinely alive (inverse invariant)", async () => {
     const rig = rigRepo.createRig("live-rig");
     const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });

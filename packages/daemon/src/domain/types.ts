@@ -490,8 +490,9 @@ export interface RestoreNodeResult {
   // `failed` (genuine harness error only). `awaiting-decision` is never
   // emitted while a session is live. (`fresh` is retained for the legacy
   // continuity-restoring skip path only; `rebuilt`/`operator_recovered` sit
-  // outside the five-term split.)
-  status: "resumed" | "rebuilt" | "fresh" | "fresh-primed" | "awaiting-decision" | "failed" | "attention_required" | "operator_recovered";
+  // outside the five-term split.) `left_attached`: a seat joined with `rig attach` as an external CLI, which
+  // restore leaves as it is; nothing was launched, and OpenRig can't see whether that app still runs.
+  status: "resumed" | "rebuilt" | "fresh" | "fresh-primed" | "awaiting-decision" | "failed" | "attention_required" | "operator_recovered" | "left_attached";
   error?: string;
   /** Pane evidence captured when status is `attention_required` (L3, optional). */
   attentionEvidence?: string | null;

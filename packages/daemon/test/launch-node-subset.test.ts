@@ -357,6 +357,24 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     expect(tmux.hasSession).not.toHaveBeenCalledWith("guard-desktop@test-rig");
   });
 
+  it("leaves a targeted seat joined with rig attach as an external CLI attached, and still launches the tmux target beside it", async () => {
+    const { rigId, nodeIds } = seedPodAwareRig();
+    seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext("claude-code") });
+    sessionRegistry.updateBinding(nodeIds[1]!, { attachmentType: "external_cli", externalSessionName: "guard-desktop@test-rig" });
+    const claimed = sessionRegistry.registerClaimedSession(nodeIds[1]!, "guard-desktop@test-rig");
+    const adapter = readyAdapter("claude-code");
+
+    const result = await orchestrator.launchNodeSubset(rigId, ["dev.driver", "dev.guard"], { adapters: { "claude-code": adapter } });
+
+    expect(result.launched).toEqual([
+      expect.objectContaining({ logicalId: "dev.driver", status: "fresh-primed" }),
+      expect.objectContaining({ logicalId: "dev.guard", status: "left_attached", error: expect.stringContaining("rig unclaim guard-desktop@test-rig") }),
+    ]);
+    expect(adapter.launchHarness).toHaveBeenCalledOnce();
+    expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(claimed.id)).toEqual({ status: "running" });
+    expect(sessionRegistry.getBindingForNode(nodeIds[1]!)).toMatchObject({ attachmentType: "external_cli", externalSessionName: "guard-desktop@test-rig" });
+  });
+
   it("uses operator hold reason when provided", async () => {
     const { rigId, nodeIds } = seedPodAwareRig();
     seedSnapshot(rigId, nodeIds);

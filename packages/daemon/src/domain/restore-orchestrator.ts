@@ -112,12 +112,14 @@ export function rollupRestoreRigResult(nodes: RestoreNodeResult[]): RestoreRigRe
 }
 
 /** OPR.0.4.3.20 FR-7 — restore/launch statuses that mean NO session is running and
- *  the operator must act. The launch API + CLI must NOT report these as a successful
+ *  the operator must act, or (`left_attached`) that nothing was launched in an external seat's place.
+ *  The launch API + CLI must NOT report these as a successful
  *  launch (a subset/single launch that lands `awaiting-decision` is not "Launched"). */
 export const NON_RUNNING_LAUNCH_STATUSES: ReadonlySet<string> = new Set([
   "awaiting-decision",
   "attention_required",
   "failed",
+  "left_attached",
 ]);
 
 /** True when a restore/launch status means a session is actually running (a real
@@ -686,7 +688,7 @@ export class RestoreOrchestrator {
     const held: Array<{ nodeId: string; logicalId: string; reason: string }> = [];
     const holdReasonText = opts?.holdReason ?? "excluded_from_subset";
     for (const node of nonTargetNodes) {
-      // A seat joined with `rig attach` as an external CLI has no tmux session to check, and OpenRig doesn't launch or stop it.
+      // A seat joined with `rig attach` as an external CLI has no tmux session to check, and restore leaves it attached.
       if (this.sessionRegistry.getBindingForNode(node.id)?.attachmentType === "external_cli") continue;
       const sessions = this.sessionRegistry.getSessionsForRig(rigId)
         .filter((s) => s.nodeId === node.id && s.status === "running");
@@ -762,6 +764,8 @@ export class RestoreOrchestrator {
 
     for (const session of this.sessionRegistry.getSessionsForRig(rigId)) {
       if (session.status !== "running" || (selectedIds && !selectedIds.has(session.nodeId))) continue;
+      // An external CLI's claim has no tmux session; restore leaves it attached (restoreNodeWithCompensation).
+      if (this.sessionRegistry.getBindingForNode(session.nodeId)?.attachmentType === "external_cli") continue;
       try {
         // Replacement must preserve unknown transport state before any reconciliation write.
         if (selectedIds) {
@@ -956,6 +960,14 @@ export class RestoreOrchestrator {
     const node = entry.node;
     const liveNode = this.rigRepo.getRig(rigId)?.nodes.find(current => current.logicalId === node.logicalId);
     const nodeId = node.id;
+
+    // A seat joined with `rig attach` as an external CLI keeps its attachment: launching here would replace it.
+    const external = this.sessionRegistry.getBindingForNode(nodeId);
+    if (external?.attachmentType === "external_cli") {
+      const name = external.externalSessionName ?? node.logicalId;
+      return { nodeId, logicalId: node.logicalId, status: "left_attached",
+        error: `${name} joined with rig attach as an external CLI, so nothing was launched in its place and its attachment is unchanged. OpenRig can't see whether that app is still running. To run this seat under OpenRig instead, release it with: rig unclaim ${name}, then launch it.` };
+    }
 
     // OPR.0.5.7.1 (bought ordering blocker, baton 0efd154d): D1 present-map
     // ambiguity must be DETECTED before any continuity_state short-circuit —
