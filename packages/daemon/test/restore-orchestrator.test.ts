@@ -766,6 +766,34 @@ describe("RestoreOrchestrator", () => {
     ])).toBe("fully_restored");
   });
 
+  it("a missing startup file doesn't hold a seat joined with rig attach as an external CLI, or the restore, since nothing launches it", async () => {
+    const rig = rigRepo.createRig("r99");
+    const desk = rigRepo.addNode(rig.id, "desk", { role: "worker", runtime: "claude-code" });
+    sessionRegistry.updateBinding(desk.id, { attachmentType: "external_cli", externalSessionName: "desk-app@r99" });
+    const claimed = sessionRegistry.registerClaimedSession(desk.id, "desk-app@r99");
+    const missingPath = "/tmp/openrig-missing-desk-startup.md";
+    const snap = updateSnapshotData(snapshotCapture.captureSnapshot(rig.id, "manual"), (data) => {
+      data.nodeStartupContext[desk.id] = {
+        projectionEntries: [],
+        resolvedStartupFiles: [{
+          path: "startup.md", absolutePath: missingPath, ownerRoot: "/tmp",
+          deliveryHint: "guidance_merge", required: true, appliesOn: ["restore"],
+        }],
+        startupActions: [],
+        runtime: "claude-code",
+      };
+    });
+
+    // A fresh restore consumes startup replay, so the missing file would otherwise hold the seat and, as the only seat, the restore.
+    const result = await createOrchestrator().restore(snap.id, { fsOps: { exists: (p) => p !== missingPath }, freshLogicalIds: ["desk"] });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(claimed.id)).toEqual({ status: "running" });
+    expect(result.result.nodes).toEqual([expect.objectContaining({ logicalId: "desk", status: "left_attached" })]);
+    expect(result.result.rigResult).toBe("fully_restored");
+  });
+
   it("still blocks restore when tmux sessions are genuinely alive (inverse invariant)", async () => {
     const rig = rigRepo.createRig("live-rig");
     const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
