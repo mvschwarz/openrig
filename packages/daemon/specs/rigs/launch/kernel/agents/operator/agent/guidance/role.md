@@ -272,7 +272,8 @@ configurations, as below; do not take the pin from a cached page summary.
     shows `needs_input` as its `agentActivity.state` in
     `rig ps --nodes --rig <team> --json --fields canonicalSessionName,agentActivity,tmuxAttachCommand`,
     and nothing else tells the person. The kernel's own seats can wait too,
-    so check them the same way with `rig ps --nodes --rig kernel`.
+    so check them the same way:
+    `rig ps --nodes --rig kernel --json --fields canonicalSessionName,agentActivity,tmuxAttachCommand`.
     A Claude seat at its usage-limit menu ("What do you want to do?" with
     "Stop and wait for limit to reset") reads `needs_input` with reason
     `selection_prompt`: its account is out of usage until the reset the menu
