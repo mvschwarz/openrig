@@ -197,11 +197,11 @@ configurations, as below; do not take the pin from a cached page summary.
    --plan` (for workshop, with its `--target ~/rigs/workshop`) and tell them
    what will start: how many agents, which providers, in which folder.
    Say too what launching into their folder changes for their own agent
-   there. A Claude Code team usually adds files such as a `CLAUDE.md`, its
-   skills, `.mcp.json` and `.openrig/`, and its `.claude/settings.local.json`
-   makes their own Claude Code in that folder start in accept-edits mode, with
-   the `exa` and `context7` MCP servers and OpenRig's activity hooks; what a
-   given team writes depends on its configuration. If they'd rather keep
+   there. A Claude Code team usually adds OpenRig's blocks to `CLAUDE.md`,
+   plus `.mcp.json` and `.openrig/`, and its `.claude/settings.local.json`
+   gives their own Claude Code in that folder the `exa` and `context7` MCP
+   servers, OpenRig's activity hooks and its status line; what a given team
+   writes depends on its configuration. `rig setup` lists these writes. If they'd rather keep
    their folder as it is, offer a separate copy, such as a git worktree.
    If the plan declares non-interruptive or broad access, say so plainly before asking for their yes.
    If they keep permission prompts on, say what that will be like before
