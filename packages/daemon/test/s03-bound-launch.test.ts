@@ -84,7 +84,7 @@ describe("S03 production managed capability selection", () => {
       process: { env: { PATH: f.env.PATH, ...names, UNRELATED_VALUE: "not-forwarded" } },
       OPENRIG_HOME: f.env.OPENRIG_HOME, openRigPort: "1", openRigHost: "127.0.0.1",
       resolvedActivityHookUrl: "http://127.0.0.1:1", resolvedActivityHookToken: "synthetic-only",
-      providerAuthEnv: {}, daemonHome: f.env.HOME, codexHome: path.join(f.root, "codex"),
+      providerAuthEnv: {}, daemonHome: f.env.HOME, codexHome: path.join(f.root, "codex"), seatDbPath: path.join(f.root, "instance.sqlite"),
     });
     for (const key of Object.keys(f.env)) delete f.env[key];
     Object.assign(f.env, sessionEnv);
