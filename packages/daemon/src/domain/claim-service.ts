@@ -18,7 +18,22 @@ import {
 } from "./pane-binding-observation.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
-import { SessionTransport } from "./session-transport.js";
+import { SessionTransport, type SendResult } from "./session-transport.js";
+
+/** Describe a failed identity-hint send by what the transport positively reported about the seat's input. Only
+ *  `inputPhase: "not_reached"` establishes that nothing was written; an `attempted` write may have landed, a `written`
+ *  text may sit unsubmitted, and a result without a phase does not say. The transport's reason and error are kept. */
+function describeHintFailure(tmuxSession: string, result: SendResult): string {
+  const detail = [result.reason ?? "send_failed", result.error ?? ""].join(". ").trim();
+  if (result.sent === true || result.inputPhase === "written") {
+    return `identity hint text was written into ${tmuxSession}, but submission is not confirmed: ${detail}`;
+  }
+  if (result.inputPhase === "not_reached") return `identity hint not typed into ${tmuxSession}: ${detail}`;
+  if (result.inputPhase === "attempted") {
+    return `identity hint may have been typed into ${tmuxSession}: the text write was issued and reported a failure, so it may or may not have landed: ${detail}`;
+  }
+  return `could not establish whether identity hint was typed into ${tmuxSession}: the send did not report input placement: ${detail}`;
+}
 
 export type ClaimResult =
   | { ok: true; nodeId: string; sessionId: string }
@@ -244,7 +259,7 @@ export class ClaimService {
     const result = await this.sessionTransport.send(tmuxSession, hint, {
       actorSession: "claim@system", openrigNotice: true, ...(deliveryId ? { deliveryId } : {}),
     });
-    if (!result.ok) console.warn(`[claim] identity hint not typed into ${tmuxSession}: ${result.reason ?? "send_failed"}. ${result.error ?? ""}`.trim());
+    if (!result.ok) console.warn(`[claim] ${describeHintFailure(tmuxSession, result)}`);
   }
 
   private maybeProvisionContextCollector(runtime: string | null | undefined, cwd: string | null | undefined, tmuxSession: string): void {

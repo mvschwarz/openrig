@@ -15,6 +15,7 @@ import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
+import type { SendResult, SessionTransport } from "../src/domain/session-transport.js";
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const close of cleanup.splice(0).reverse()) close(); vi.restoreAllMocks(); });
@@ -107,5 +108,53 @@ describe("claim hint at a waiting native prompt (OPR.0.7.1.21 I7)", () => {
     expect(f.submitted).toHaveLength(1);
     expect(f.submitted[0]).toContain("rig whoami --json");
     expect(f.held()).toEqual([]);
+  });
+});
+
+// The transport's send is stubbed to return each evidence state, so the warning is checked against exactly what the
+// transport reported. Only a positive not_reached may be described as not typed.
+describe("identity hint warning states only what the send established", () => {
+  async function warningFor(result: Omit<SendResult, "sessionName">): Promise<string> {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const f = fixture({ prompt: false });
+    await f.level("off");
+    const transport = (f.claim as unknown as { sessionTransport: SessionTransport }).sessionTransport;
+    vi.spyOn(transport, "send").mockResolvedValue({ sessionName: seat, ...result } as SendResult);
+    await f.hint();
+    expect(warn).toHaveBeenCalledTimes(1);
+    return String(warn.mock.calls[0]?.[0]);
+  }
+
+  it("says not typed only when the transport positively established no write", async () => {
+    const message = await warningFor({ ok: false, sent: false, inputPhase: "not_reached", reason: "target_runtime_conflict",
+      error: "Refused: pane changed. No text was sent." });
+    expect(message).toBe(`[claim] identity hint not typed into ${seat}: target_runtime_conflict. Refused: pane changed. No text was sent.`);
+  });
+
+  it("does not say not typed when a text write was attempted and may have landed", async () => {
+    const message = await warningFor({ ok: false, sent: false, inputPhase: "attempted", reason: "delivery_indeterminate",
+      error: "The delivery attempt ended without a reliable write result. Repeating the request may duplicate input." });
+    expect(message).toContain("may have been typed into");
+    expect(message).toContain("delivery_indeterminate");
+    expect(message).toContain("without a reliable write result");
+    expect(message).not.toContain("not typed");
+  });
+
+  it("reports written text with submission unconfirmed, keeping the transport's Enter detail", async () => {
+    const message = await warningFor({ ok: false, sent: true, outcome: "failed", inputPhase: "written", reason: "submit_refused",
+      error: `Text was written to '${seat}' but Enter was not sent: refused` });
+    expect(message).toContain("written into");
+    expect(message).toContain("submission is not confirmed");
+    expect(message).toContain("Enter was not sent: refused");
+    expect(message).not.toContain("not typed");
+    expect(message).not.toContain("may have been typed");
+  });
+
+  it("says insufficient evidence neutrally when no input phase was reported", async () => {
+    const message = await warningFor({ ok: false, sent: false, reason: "send_failed", error: "tmux failed" });
+    expect(message).toContain("could not establish whether identity hint was typed");
+    expect(message).toContain("send_failed. tmux failed");
+    expect(message).not.toContain("not typed");
+    expect(message).not.toContain("written");
   });
 });
