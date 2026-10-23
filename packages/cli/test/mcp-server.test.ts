@@ -41,15 +41,16 @@ describe("MCP Server", () => {
     if (cleanup) await cleanup();
   });
 
-  // T1: MCP server lists all 31 tools: the original 18, the five queue tools, the telemetry events read, restore status, whoami,
-  // and the team, slice, mission and two context reads
-  it("lists all 31 tools", async () => {
+  // T1: MCP server lists all 34 tools: the original 18, the five queue tools, the telemetry events read, restore status, whoami,
+  // the team, slice, mission and two context reads, the artifact read, and the decision room and delegated decision
+  it("lists all 34 tools", async () => {
     await setup();
     const result = await mcpClient.listTools();
     const names = result.tools.map((t) => t.name).sort();
     expect(names).toEqual([
       "rig_add",
       "rig_agent_validate",
+      "rig_artifact_read",
       "rig_bind",
       "rig_bundle_inspect",
       "rig_capture",
@@ -59,10 +60,12 @@ describe("MCP Server", () => {
       "rig_context_pack",
       "rig_discover",
       "rig_down",
+      "rig_human_decision_room",
       "rig_mission",
       "rig_ps",
       "rig_queue_claim",
       "rig_queue_create",
+      "rig_queue_decide",
       "rig_queue_list",
       "rig_queue_show",
       "rig_queue_update",
@@ -230,10 +233,11 @@ describe("MCP Server", () => {
     const { tools } = await mcpClient.listTools();
     const reads = ["rig_agent_validate", "rig_bundle_inspect", "rig_capture", "rig_chatroom_watch", "rig_ps", "rig_queue_list", "rig_queue_show",
       "rig_restore_status", "rig_rig_nodes", "rig_rig_validate", "rig_snapshot_list", "rig_status", "rig_telemetry_events", "rig_whoami",
-      "rig_team", "rig_slices", "rig_mission", "rig_context_pack", "rig_context_get"];
+      "rig_team", "rig_slices", "rig_mission", "rig_context_pack", "rig_context_get", "rig_artifact_read", "rig_human_decision_room"];
     const additive = ["rig_add", "rig_chatroom_send", "rig_queue_create", "rig_snapshot_create"];
     // Discover refreshes and retires discovered facts; claim ends a blocked row's wait. Both change existing state.
-    const destructive = ["rig_bind", "rig_discover", "rig_down", "rig_queue_claim", "rig_queue_update", "rig_restore", "rig_send", "rig_up"];
+    // A delegated decision closes the person's ask.
+    const destructive = ["rig_bind", "rig_discover", "rig_down", "rig_queue_claim", "rig_queue_decide", "rig_queue_update", "rig_restore", "rig_send", "rig_up"];
     const hints = Object.fromEntries(tools.map((tool) => [tool.name, tool.annotations]));
     expect(Object.keys(hints).sort()).toEqual([...reads, ...additive, ...destructive].sort());
     for (const name of reads) expect(hints[name], name).toEqual({ readOnlyHint: true });
@@ -443,6 +447,7 @@ describe("MCP Server", () => {
     expect(instructions).toContain("rig_queue_create");
     expect(instructions).toContain("not idle");
     expect(instructions).toContain("reserved for a person");
+    expect(instructions).toContain("beside their answers and never as one");
     await cleanup();
   });
 
@@ -553,7 +558,7 @@ describe("MCP Server", () => {
 
     // Verify server is responsive
     const result = await mcpClient.listTools();
-    expect(result.tools.length).toBe(31);
+    expect(result.tools.length).toBe(34);
 
     // Clean disconnect
     await cleanup();
@@ -567,7 +572,7 @@ describe("MCP Server", () => {
     await client2.connect(ct2);
 
     const result2 = await client2.listTools();
-    expect(result2.tools.length).toBe(31);
+    expect(result2.tools.length).toBe(34);
 
     await client2.close();
     await server2.close();

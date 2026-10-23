@@ -25,6 +25,7 @@ const IMPL = "impl@team";
 describe("MCP queue tools on the daemon's queue routes", () => {
   let db: Database.Database;
   let home: string;
+  let shared: string;
   let server: ServerType;
   let url: string;
   const closers: Array<() => Promise<void>> = [];
@@ -36,11 +37,14 @@ describe("MCP queue tools on the daemon's queue routes", () => {
     migrate(db, ALL_MIGRATIONS);
     home = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-queue-"));
     process.env.OPENRIG_HOME = home;
+    // One shared root, canonical as the daemon resolves it at startup (a temp directory can sit behind a symlink).
+    shared = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mcp-shared-")));
     const inert = async () => ({ ok: false, error: "inert fixture" });
     const { app } = createTestApp(db, {
       appDeps: {
         sessionTransport: { resolveSessions: async () => ({ ok: false, code: "not_found", error: "inert fixture" }), send: inert, capture: inert, broadcast: inert } as never,
         queueRepo: new QueueRepository(db, new EventBus(db), { validateRig: () => true }),
+        filesAllowlist: [{ name: "proof", canonicalPath: shared }],
       },
     });
     server = await new Promise<ServerType>((resolve) => {
@@ -54,6 +58,7 @@ describe("MCP queue tools on the daemon's queue routes", () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     db.close();
     fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(shared, { recursive: true, force: true });
     if (saved.home === undefined) delete process.env.OPENRIG_HOME; else process.env.OPENRIG_HOME = saved.home;
     if (saved.session === undefined) delete process.env.OPENRIG_SESSION_NAME; else process.env.OPENRIG_SESSION_NAME = saved.session;
   });
@@ -158,5 +163,73 @@ describe("MCP queue tools on the daemon's queue routes", () => {
     const created = await desk("rig_queue_create", { destination: IMPL, body: "fixture" });
     const row = db.prepare("SELECT source_session FROM queue_items WHERE qitem_id = ?").get(created.data.qitemId) as { source_session: string };
     expect(row.source_session).toMatch(/^desk@team/);
+  });
+
+  it("reads a finished task's artifact through a shared root, and says plainly when it can't", async () => {
+    const desk = await connectAs(DESK);
+    const impl = await connectAs(IMPL);
+    const report = path.join(shared, "report.md");
+    fs.writeFileSync(report, "RESULT: the fixture path was stale.\n");
+    /** A task the assignee closes with this evidenceRef (none: an open task). */
+    const finished = async (evidenceRef?: string) => {
+      const qitemId = (await desk("rig_queue_create", { destination: IMPL, body: "Write up the failure." })).data.qitemId as string;
+      if (evidenceRef === undefined) return qitemId;
+      expect((await impl("rig_queue_claim", { qitemId })).isError).toBe(false);
+      expect((await impl("rig_queue_update", { qitemId, state: "done", closureReason: "no-follow-on", evidenceRef })).isError).toBe(false);
+      return qitemId;
+    };
+
+    const read = await desk("rig_artifact_read", { qitemId: await finished(report) });
+    expect(read.isError).toBe(false);
+    expect(read.structured).toMatchObject({ available: true, source: "evidenceRef", root: "proof", path: "report.md", binary: false,
+      text: "RESULT: the fixture path was stale.\n", truncated: false });
+    expect((await desk("rig_artifact_read", { root: "proof", path: "report.md" })).structured).toMatchObject({ source: "path", text: "RESULT: the fixture path was stale.\n" });
+
+    // A long file is read on from nextOffset; the daemon's own containment refuses a path out of the root.
+    fs.writeFileSync(path.join(shared, "long.md"), `${"a".repeat(48_000)}TAIL`);
+    expect((await desk("rig_artifact_read", { root: "proof", path: "long.md" })).structured).toMatchObject({ truncated: true, nextOffset: 48_000, totalChars: 48_004 });
+    expect((await desk("rig_artifact_read", { root: "proof", path: "long.md", offset: 48_000 })).structured).toMatchObject({ text: "TAIL", truncated: false });
+    expect((await desk("rig_artifact_read", { root: "proof", path: "../outside.md" })).structured).toMatchObject({ ok: false, code: "path_escape", status: 400 });
+
+    const outside = path.join(home, "notes.md");
+    fs.writeFileSync(outside, "not shared");
+    // The reference names a file where the daemon runs, which may be another machine: a link on this machine that leads into
+    // the root says nothing about what the same path is there, so it isn't followed.
+    fs.mkdirSync(path.join(shared, "old"));
+    fs.writeFileSync(path.join(shared, "old", "report.md"), "not shared");
+    fs.symlinkSync(path.join(shared, "old"), path.join(home, "alias"));
+    const linked = path.join(home, "alias", "report.md");
+    for (const [evidenceRef, reason] of [[outside, "outside every shared root"], [linked, "outside every shared root"],
+      ["https://example.com/report", "a link"], [undefined, "no evidenceRef"]] as const) {
+      const none = await desk("rig_artifact_read", { qitemId: await finished(evidenceRef) });
+      expect(none.isError).toBe(false);
+      expect(none.structured).toMatchObject({ available: false, evidenceRef: evidenceRef ?? null, roots: ["proof"] });
+      expect((none.structured as { reason: string }).reason).toContain(reason);
+      expect(JSON.stringify(none.data)).not.toContain("not shared");
+    }
+  });
+
+  it("asks for a revision linked to the work it revises", async () => {
+    const desk = await connectAs(DESK);
+    const original = (await desk("rig_queue_create", { destination: IMPL, body: "Write up the failure." })).data.qitemId as string;
+    const revision = await desk("rig_queue_create", { destination: IMPL, body: "Also cover the README.", revises: original });
+    expect(revision.isError).toBe(false);
+    const shown = await desk("rig_queue_show", { qitemId: revision.data.qitemId as string });
+    expect(shown.data.item).toMatchObject({ chainOfRecord: [original], body: `Revision of ${original}.\n\nAlso cover the README.` });
+
+    // Revising an item that doesn't exist creates nothing.
+    const before = (db.prepare("SELECT COUNT(*) AS n FROM queue_items").get() as { n: number }).n;
+    expect((await desk("rig_queue_create", { destination: IMPL, body: "x", revises: "qitem-not-here" })).structured).toMatchObject({ ok: false, code: "qitem_not_found", status: 404 });
+    expect((db.prepare("SELECT COUNT(*) AS n FROM queue_items").get() as { n: number }).n).toBe(before);
+  });
+
+  it("decides nothing for a task that wasn't asked of a person", async () => {
+    const desk = await connectAs(DESK);
+    const qitemId = (await desk("rig_queue_create", { destination: IMPL, body: "Pick a layout." })).data.qitemId as string;
+    expect((await desk("rig_human_decision_room", { qitemId })).structured).toMatchObject({ ok: false, code: "not-a-decision" });
+    const refused = await desk("rig_queue_decide", { qitemId, applicationId: "app-1", choices: [{ chosen: "layout A" }], reason: "it's ready", reversible: true });
+    expect(refused.isError).toBe(true);
+    expect(refused.structured).toMatchObject({ ok: false, code: "not-a-decision", status: 409 });
+    expect((await desk("rig_queue_show", { qitemId })).data.item).toMatchObject({ state: "pending", delegatedDecision: null });
   });
 });

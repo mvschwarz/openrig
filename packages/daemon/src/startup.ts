@@ -1,3 +1,4 @@
+import { TerminalPolicyStore } from "./domain/terminal-policy.js";
 import { daemonDatabaseWarnings } from "./daemon-db-path.js";
 import { physicalSessionName } from "./domain/session-registry.js";
 import { makeWatchdogDeliver } from "./domain/watchdog-delivery.js";
@@ -2462,6 +2463,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         // so a stage minted by a retired generation is refused for the successor. null = UNKNOWN → the
         // gate is inert (never compares a stale generation as if live).
         {
+          terminalPolicies: new TerminalPolicyStore(db),
           resolveOccupantGeneration: (sessionName) =>
             sessionRegistry.currentOccupantGenerationForSession(sessionName),
           onPostRestoreComplete: (receipt) => {

@@ -160,6 +160,22 @@ describe("transport routes", () => {
     expect(rows[0]!["identity_provenance"]).toBe("transport:v1"); // era-stamp from the run, not hardcoded-lying
   });
 
+  // #1813: a single send that landed left its audit row pending for ever, while broadcast marks each recipient's row. The
+  // case is review-r2's.
+  it("A3 — a DERIVED send that landed marks its outbox row delivered, as broadcast's rows are", async () => {
+    seedRig();
+    const res = await sendApp().request("/api/transport/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@my-rig" },
+      body: JSON.stringify({ session: "dev-impl@my-rig", text: "hello" }),
+    });
+    expect(res.status).toBe(200);
+    const rows = outboxRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!["delivery_state"]).toBe("delivered");
+    expect(rows[0]!["delivered_at"]).toEqual(expect.any(String));
+  });
+
   it("an urgent send names who marked it, from the sender's identity, never the body; a send to the sender's own seat says so", async () => {
     seedRig();
     const res = await sendApp().request("/api/transport/send", {

@@ -11,6 +11,7 @@ import { resolveDaemonPath } from "../daemon-lifecycle.js";
 import { ConfigStore } from "../config-store.js";
 import { buildTmuxControlFailure, probeTmuxControl } from "../tmux-health.js";
 import { checkClaudeAuth, checkCodexAuth } from "../provider-auth.js";
+import { describeSkillRouterFootprint } from "@openrig/daemon/router-line";
 
 export interface SetupStep {
   id: string;
@@ -41,9 +42,23 @@ export interface SetupResult {
   ready: boolean;
   steps: SetupStep[];
   runtimeConfig: RuntimeConfigDisclosure[];
+  /** The one line OpenRig can add to shared guidance files, and the person's answer (slice 20). */
+  routerLine: RouterLinePreview;
   verification?: {
     checks: VerificationCheck[];
   };
+}
+
+export interface RouterLinePreview {
+  /** No answer is never a yes. `unreadable` reads as unanswered. */
+  answer: "unasked" | "yes" | "no" | "unreadable";
+  by?: "saved" | "environment";
+  line: string;
+  files: string;
+  ifNo: string;
+  limit: string;
+  answerWith: string;
+  scope: string;
 }
 
 export interface SetupDeps {
@@ -57,6 +72,60 @@ export interface SetupDeps {
   env?: NodeJS.ProcessEnv;
   /** Source of terminal.history_limit for the managed tmux block (default: the OpenRig config). */
   configStore?: Pick<ConfigStore, "resolve">;
+  /** Where the router-line answer is read and saved (default: the OpenRig config). */
+  routerLineStore?: Pick<ConfigStore, "resolveWithSource" | "set">;
+}
+
+const ROUTER_LINE_KEY = "skills.router_line.enabled";
+
+function readRouterLineAnswer(store: Pick<ConfigStore, "resolveWithSource">): Pick<RouterLinePreview, "answer" | "by"> {
+  try {
+    // The mapping footprint-choice.ts uses on the daemon side: the default is unasked, the file is the person's saved
+    // answer (an explicit false is kept), the environment's is never the person's.
+    const { value, source } = store.resolveWithSource(ROUTER_LINE_KEY);
+    if (source === "default") return { answer: "unasked" };
+    return { answer: value === true ? "yes" : "no", by: source === "env" ? "environment" : "saved" };
+  } catch {
+    return { answer: "unreadable" };
+  }
+}
+
+/** The router-line question: the exact preview, the saved answer, and the step that reports or saves it. */
+function routerLineStep(deps: SetupDeps, choice: "yes" | "no" | undefined, dryRun: boolean): { step: SetupStep; preview: RouterLinePreview } {
+  const store = deps.routerLineStore ?? new ConfigStore();
+  const { line, ifNo } = describeSkillRouterFootprint([]);
+  const preview = (answer: Pick<RouterLinePreview, "answer" | "by">): RouterLinePreview => ({
+    ...answer,
+    line,
+    files: "Each Claude seat's CLAUDE.md (or CLAUDE.local.md when its rig chooses that file) and each Codex seat's AGENTS.md, in the seat's working folder, at its next start.",
+    ifNo,
+    limit: "Switching to no later stops new writes but doesn't remove a line already written; rig down removes OpenRig's blocks from these files, unless a seat of another active rig, or a still-running seat of this one, uses the file.",
+    answerWith: "rig setup --router-line yes, or rig setup --router-line no (saved as skills.router_line.enabled; change it any time with either)",
+    scope: "This choice covers only this line. OpenRig's other writes, listed under \"OpenRig may modify\", don't depend on it.",
+  });
+  if (choice && dryRun) {
+    return { step: { id: "router_line", status: "skipped", message: `Dry run: would save your router-line answer: ${choice}.` }, preview: preview(readRouterLineAnswer(store)) };
+  }
+  if (choice) {
+    try {
+      store.set(ROUTER_LINE_KEY, choice === "yes" ? "true" : "false");
+    } catch (error) {
+      return { step: { id: "router_line", status: "warn", message: `Couldn't save the router-line answer: ${(error as Error).message}`, fixHint: `rig config set ${ROUTER_LINE_KEY} ${choice === "yes" ? "true" : "false"}` }, preview: preview(readRouterLineAnswer(store)) };
+    }
+    const after = readRouterLineAnswer(store);
+    if (after.by === "environment") {
+      return { step: { id: "router_line", status: "warn", message: `Saved your answer (${choice}), but OPENRIG_SKILLS_ROUTER_LINE_ENABLED in this environment overrides it (${after.answer}).`, fixHint: "Unset OPENRIG_SKILLS_ROUTER_LINE_ENABLED where the daemon runs." }, preview: preview(after) };
+    }
+    return { step: { id: "router_line", status: "applied", message: choice === "yes" ? "Saved: yes. Seats add the line to their guidance file at their next start." : "Saved: no. Seats don't add the line." }, preview: preview(after) };
+  }
+  const answer = readRouterLineAnswer(store);
+  const step: SetupStep = answer.answer === "unasked" || answer.answer === "unreadable"
+    ? { id: "router_line", status: "skipped",
+        message: `${answer.answer === "unreadable" ? "The saved answer couldn't be read, so" : "Not answered, so"} it isn't a yes: OpenRig doesn't add the line. Show the person the line and files below, then save their answer.`,
+        fixHint: "rig setup --router-line yes, or rig setup --router-line no" }
+    : { id: "router_line", status: dryRun ? "skipped" : "pass",
+        message: `${dryRun ? "Dry run: " : ""}${answer.by === "environment" ? "From the environment (OPENRIG_SKILLS_ROUTER_LINE_ENABLED), not a saved answer" : "Saved answer"}: ${answer.answer}.` };
+  return { step, preview: preview(answer) };
 }
 
 // Preserve the setup module's existing selector export.
@@ -98,19 +167,49 @@ const BASE_RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure[] = [
     runtime: "claude-code",
     path: ".claude/settings.local.json",
     purpose:
-      "Apply context-collector statusLine config and the acceptEdits floor fragment. The team and kernel launch defaults pass allow/ask lists per launch and save none; a selected Claude settings fragment can merge native settings, rules included; the harness-native permissions are the control surface.",
+      "Merge the context collector's statusLine, OpenRig's activity hooks, and any Claude settings fragment a team selects, rules included. The team and kernel launch defaults pass allow/ask lists per launch and save none; the harness-native permissions are the control surface.",
+  },
+  {
+    scope: "project",
+    runtime: "claude-code",
+    path: ".openrig/context-collector.cjs",
+    purpose: "The context collector script the statusLine runs.",
   },
   {
     scope: "project",
     runtime: "claude-code",
     path: ".mcp.json",
-    purpose: "Apply selected Claude MCP runtime-resource fragments.",
+    purpose: "Merge MCP fragments a team selects.",
+  },
+  {
+    scope: "project",
+    runtime: "claude-code",
+    path: "CLAUDE.md (or CLAUDE.local.md when the rig chooses it)",
+    purpose: "OpenRig managed blocks at each start: the rig's culture, the OpenRig Start identity pointer, the onboarding pages at a fresh start (onboarding.default_pack.enabled), and guidance files a team merges. The router line is added only on a yes. rig down removes the blocks unless a seat of another active rig, or a still-running seat of this one, uses the file.",
+  },
+  {
+    scope: "project",
+    runtime: "codex",
+    path: "AGENTS.md",
+    purpose: "The same OpenRig managed blocks, for Codex seats.",
+  },
+  {
+    scope: "project",
+    runtime: "codex",
+    path: ".codex/plugins/<plugin>",
+    purpose: "Plugins a Codex seat loads, including openrig-core.",
+  },
+  {
+    scope: "project",
+    runtime: "codex",
+    path: ".git/info/exclude",
+    purpose: "Ignore entries for the openrig-core plugin files OpenRig newly creates in a git checkout. For another new file, such as a new guidance file, it prints how to ignore it instead.",
   },
   {
     scope: "global",
     runtime: "codex",
     path: "$CODEX_HOME/config.toml (default: ~/.codex/config.toml)",
-    purpose: "Pre-trust managed workspaces and apply selected Codex config runtime-resource fragments.",
+    purpose: "Pre-trust managed workspaces; OpenRig's activity hooks and their trust; the openrig marketplace and openrig-core plugin; and config fragments a team selects, MCP servers among them. These reach your own Codex sessions that use the same Codex home.",
   },
 ];
 
@@ -317,7 +416,7 @@ function notSelectedSteps(provider: SetupProvider, chosen: readonly SetupProvide
   ];
 }
 
-export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?: boolean; policy?: string; specPath?: string; herdr?: boolean; ghostty?: boolean; providers?: readonly SetupProvider[]; doctorDeps?: DoctorDeps }): Promise<SetupResult> {
+export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?: boolean; policy?: string; specPath?: string; herdr?: boolean; ghostty?: boolean; providers?: readonly SetupProvider[]; doctorDeps?: DoctorDeps; routerLine?: "yes" | "no" }): Promise<SetupResult> {
   const profile = opts.full ? "full" : "core";
   const platform = deps.platform ?? process.platform;
   const runtimeConfig = [...BASE_RUNTIME_CONFIG_DISCLOSURE];
@@ -345,7 +444,9 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
     if (opts.policy !== undefined) {
       steps.push({ id: "policy_record", status: "skipped", message: `Dry run: would record permission_policy for '${opts.policy}'.` });
     }
-    return { profile, platform, ready: false, steps, runtimeConfig };
+    const routerLine = routerLineStep(deps, opts.routerLine, true);
+    steps.push(routerLine.step);
+    return { profile, platform, ready: false, steps, runtimeConfig, routerLine: routerLine.preview };
   }
 
   // Core steps
@@ -505,6 +606,10 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   });
   if (customTmux) steps.push({ id: "tmux_environment", status: "warn", message: "Custom tmux configuration detected. New POSIX agents use the daemon and seat environment by default; shell startup still runs. If your setup intentionally relies on stored tmux globals, opt in with `rig config set terminal.inherit_tmux_environment true`. This affects future launches and successors, not running agents." });
 
+  // The router-line question: report the saved answer, or save the one the person gave. Not answering is never a yes.
+  const routerLine = routerLineStep(deps, opts.routerLine, false);
+  steps.push(routerLine.step);
+
   // 7. Verify
   const tmuxOk = steps.some((s) => s.id === "tmux_install" && (s.status === "pass" || s.status === "applied"));
   const anyFail = steps.some((s) => s.status === "fail");
@@ -570,7 +675,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   const stepsFailed = steps.some((s) => s.status === "fail");
   const verificationFailed = verification?.checks.some((c) => c.status === "fail") ?? false;
   const ready = !stepsFailed && !verificationFailed;
-  return { profile, platform, ready, steps, runtimeConfig, ...(verification ? { verification } : {}) };
+  return { profile, platform, ready, steps, runtimeConfig, routerLine: routerLine.preview, ...(verification ? { verification } : {}) };
 }
 
 function buildDefaultDoctorDeps(setupDeps: SetupDeps): DoctorDeps {
@@ -689,6 +794,23 @@ export function permissionPolicyMenuLines(): string[] {
   ];
 }
 
+/** The router-line preview as printed: the exact line, where it goes, the answer, what a no gives up. */
+export function routerLineLines(preview: RouterLinePreview): string[] {
+  const answer = preview.answer === "yes" || preview.answer === "no"
+    ? `${preview.answer}${preview.by === "environment" ? ", from the environment" : ", saved"}`
+    : "not given, so it isn't a yes";
+  return [
+    "",
+    `The one line OpenRig can add to shared guidance files (answer: ${answer}):`,
+    `  Line: ${preview.line}`,
+    `  Files: ${preview.files}`,
+    `  If no (this line only): ${preview.ifNo}`,
+    `  ${preview.limit}`,
+    `  ${preview.scope}`,
+    `  Answer: ${preview.answerWith}`,
+  ];
+}
+
 export function setupCommand(depsOverride?: SetupDeps): Command {
   const cmd = new Command("setup").description("Prepare the machine for OpenRig");
 
@@ -702,22 +824,29 @@ export function setupCommand(depsOverride?: SetupDeps): Command {
     .option("--providers <list>", "The person's provider choice: claude, codex, or both. One not chosen is skipped (not installed or checked), never failed")
     .option("--policy <name>", `Record a deliberate permission-policy choice into an existing spec (${POLICY_CHOICES.join("|")})`)
     .option("--spec <path>", "Existing rig spec (file or directory) to record the --policy choice into")
+    .option("--router-line <answer>", "The person's yes or no on the one line OpenRig can add to shared guidance files; saved as skills.router_line.enabled. No answer is never a yes")
     .addHelpText("after", `
 tmux scrollback:
   The OpenRig block in ~/.tmux.conf keeps terminal.history_limit rows per pane (default 10000).
   To keep more:  rig config set terminal.history_limit 50000   then rerun  rig setup
   A running tmux server keeps its old limit until it restarts or you run
   tmux source-file ~/.tmux.conf; before tmux 3.7 that changes new panes only.`)
-    .action(async (opts: { dryRun?: boolean; json?: boolean; full?: boolean; herdr?: boolean; ghostty?: boolean; providers?: string; policy?: string; spec?: string }) => {
+    .action(async (opts: { dryRun?: boolean; json?: boolean; full?: boolean; herdr?: boolean; ghostty?: boolean; providers?: string; policy?: string; spec?: string; routerLine?: string }) => {
       const providers = opts.providers === undefined ? undefined : parseSetupProviders(opts.providers);
       if (providers && "error" in providers) {
         console.error(providers.error);
         process.exitCode = 1;
         return;
       }
+      const routerLine = opts.routerLine?.trim().toLowerCase();
+      if (routerLine !== undefined && routerLine !== "yes" && routerLine !== "no") {
+        console.error(`--router-line takes yes or no, got "${opts.routerLine}".`);
+        process.exitCode = 1;
+        return;
+      }
       const deps = depsOverride ?? defaultDeps();
       const doctorDeps = opts.dryRun ? undefined : buildDefaultDoctorDeps(deps);
-      const result = await runSetup(deps, { dryRun: opts.dryRun, full: opts.full, policy: opts.policy, specPath: opts.spec, herdr: opts.herdr, ghostty: opts.ghostty, providers, doctorDeps });
+      const result = await runSetup(deps, { dryRun: opts.dryRun, full: opts.full, policy: opts.policy, specPath: opts.spec, herdr: opts.herdr, ghostty: opts.ghostty, providers, doctorDeps, routerLine });
 
       if (opts.json) {
         console.log(JSON.stringify({ ...result, nextSteps: goldenPathNextSteps() }, null, 2));
@@ -764,7 +893,8 @@ tmux scrollback:
       console.log("");
       for (const line of goldenPathNextSteps()) console.log(line);
 
-      // This printed menu records no choice and changes no native permissions.
+      // The router-line question the person answers; then the permission menu, which records no choice.
+      for (const line of routerLineLines(result.routerLine)) console.log(line);
       console.log("");
       for (const line of permissionPolicyMenuLines()) console.log(line);
       if (!opts.dryRun && !result.ready) process.exitCode = 1;

@@ -273,6 +273,16 @@ function seatLifecycleStatus(code: string): 400 | 404 | 409 | 500 | 502 {
   return 409;
 }
 
+seatRoutes.post("/set-terminal-policy/:seatRef", async c => {
+  const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
+  const actor = transportSenderSession(c) ?? (typeof body.operator === "string" ? body.operator : "");
+  if (body.rigDefault !== undefined && typeof body.rigDefault !== "boolean") return c.json({ error: "rigDefault must be boolean" }, 400);
+  const result = seatLifecycleService(c).setTerminalPolicy({ seatRef: c.req.param("seatRef"),
+    preset: body.preset, helpers: body.helpers, exceptions: body.exceptions,
+    reason: typeof body.reason === "string" ? body.reason : "", actor, rigDefault: body.rigDefault === true });
+  return c.json(result, result.ok ? 200 : result.code === "invalid_terminal_policy" || result.code === "actor_required" ? 400 : seatLifecycleStatus(result.code));
+});
+
 seatRoutes.post("/set-permissions/:seatRef", async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
   const actor = transportSenderSession(c) ?? (typeof body?.operator === "string" ? body.operator.trim() : undefined);
@@ -303,7 +313,7 @@ seatRoutes.post("/set-model/:seatRef", async (c) => {
     seatRef: c.req.param("seatRef")!,
     model: typeof body["model"] === "string" ? body["model"] : "",
     reason: typeof body["reason"] === "string" ? body["reason"] : "",
-    operator: typeof body["operator"] === "string" ? body["operator"] : null,
+    operator: transportSenderSession(c) ?? (typeof body["operator"] === "string" ? body["operator"] : null),
   });
   if (result.ok) return c.json(result);
   return c.json(result, seatLifecycleStatus(result.code));
@@ -331,7 +341,7 @@ seatRoutes.post("/set-effort/:seatRef", async (c) => {
     seatRef: c.req.param("seatRef")!,
     effort: clear ? null : typeof body["effort"] === "string" ? body["effort"] : "",
     reason: typeof body["reason"] === "string" ? body["reason"] : "",
-    operator: typeof body["operator"] === "string" ? body["operator"] : null,
+    operator: transportSenderSession(c) ?? (typeof body["operator"] === "string" ? body["operator"] : null),
   });
   if (result.ok) return c.json(result);
   return c.json(result, seatLifecycleStatus(result.code));
