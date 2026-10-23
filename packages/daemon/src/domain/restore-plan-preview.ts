@@ -34,8 +34,9 @@ export interface RestorePlanPreviewNode {
   /** Consent version, not a guessed native conversation id. */
   occupantSessionId?: string | null;
   hasHistory?: boolean;
-  /** The slice-02 vocabulary, as a forecast: what apply mode WOULD do. */
-  intendedAction: "resume-original" | "fresh-primed" | "awaiting-decision";
+  /** The slice-02 vocabulary, as a forecast: what apply mode WOULD do. `leave-attached`: a seat joined with `rig attach` as
+   *  an external CLI, which restore leaves as it is (its result is `left_attached`). */
+  intendedAction: "resume-original" | "fresh-primed" | "awaiting-decision" | "leave-attached";
   reason?: string;
   // OPR.0.4.3.20 FR-6 — per-seat token state + freshness (read-only forecast).
   /** present = verified + fresh; missing = no token; stale = probe failed OR
@@ -133,6 +134,12 @@ function runtimePromptFor(runtime: string | null, tokenState: ResumeTokenState):
   return undefined;
 }
 
+/** Why restore leaves a seat joined with `rig attach` as an external CLI as it is: said by its result and by this forecast. */
+export function leftAttachedReason(name: string): string {
+  return `${name} is joined with rig attach as an external CLI, so restore leaves it attached: nothing is launched in its place, and OpenRig `
+    + `can't see whether that app is still running. To run this seat under OpenRig instead, release it with: rig unclaim ${name}, then launch it.`;
+}
+
 /** Forecast one seat's restore action — mirrors the orchestrator's pre-launch
  *  classification (OPR.0.3.4.2) without touching anything. A fresh-listed
  *  seat (operation B, `--fresh <seat>`) forecasts `fresh-primed` BEFORE any
@@ -172,7 +179,7 @@ function intendedActionFor(
   const policy = effectiveRestorePolicy(seat, occupant?.restorePolicy);
   // As apply: a community harness is launch-only, so even a reported conversation forecasts a decision, not a resume.
   if (policy === "resume_if_possible" && occupant && communityHarnessOf(occupant.communityHarness, seat.currentRuntime)) {
-    return { intendedAction: "awaiting-decision", reason: communityLaunchOnlyRestoreReason(seat.currentRuntime, absentHistory.logicalId) };
+    return { intendedAction: "awaiting-decision", reason: communityLaunchOnlyRestoreReason(seat.currentRuntime, absentHistory.logicalId, absentHistory.rigName) };
   }
   const sourceRecorded = !!occupant?.resumeType && occupant.resumeType !== "none";
   if (policy === "resume_if_possible" && sourceRecorded && occupant?.resumeToken) {
@@ -280,7 +287,11 @@ export function buildRestorePlanPreview(
       recordedSessions: sessionRows.filter((row) => row.nodeId === savedNodeId),
     };
     const stoppedCurrent = sessionRows.some(row => row.nodeId === savedNodeId && row.stoppedCurrent);
-    const { intendedAction, reason } = runtimeError
+    // Restore checks the live binding before anything else (restoreNodeWithCompensation), and so does its forecast.
+    const attached = node.binding?.attachmentType === "external_cli";
+    const { intendedAction, reason } = attached
+      ? { intendedAction: "leave-attached" as const, reason: leftAttachedReason(node.binding?.externalSessionName ?? node.logicalId) }
+      : runtimeError
       ? { intendedAction: "awaiting-decision" as const, reason: runtimeError }
       : intendedActionFor(resolution, freshRequested, seat,
         { logicalId: node.logicalId, rigName: rig.rig.name, row: absentSeatResumeHistory(sessionRows, savedNodeId), stoppedCurrent });
@@ -288,7 +299,7 @@ export function buildRestorePlanPreview(
     // RESOLVED occupant only — never from a historical row.
     const occupant = resolution.kind === "resolved" ? resolution.session : null;
     const { tokenState, provenance, lastVerified } = tokenStateFor(occupant, nowMs);
-    const runtimePrompt = runtimePromptFor(node.runtime, tokenState);
+    const runtimePrompt = attached ? undefined : runtimePromptFor(node.runtime, tokenState);
     return {
       logicalId: node.logicalId,
       occupantSessionId: occupant?.id ?? null,
@@ -302,7 +313,7 @@ export function buildRestorePlanPreview(
       // silent); runtime mismatches and broken relations cannot be resolved
       // by a fresh request, so --fresh must not be suggested as their remedy.
       // A terminal has no token to find and relaunches fresh on its own.
-      freshRequired: stoppedCurrent || runtimeError || resolution.kind === "ambiguous" ? false : tokenState === "missing" && !isOrdinaryTerminalSeat(seat),
+      freshRequired: attached || stoppedCurrent || runtimeError || resolution.kind === "ambiguous" ? false : tokenState === "missing" && !isOrdinaryTerminalSeat(seat),
       ...(runtimePrompt ? { runtimePrompt } : {}),
     };
   });

@@ -126,6 +126,7 @@ import { humanOperatingModesSchema } from "./migrations/122_human_operating_mode
 import { queueDelegatedDecisionSchema } from "./migrations/123_queue_delegated_decision.js";
 import { contextUsageWatchdogUnitsSchema } from "./migrations/124_context_usage_watchdog_units.js";
 import { nodeAdvisorSchema } from "./migrations/125_node_advisor.js";
+import { operationCorrelationSchema } from "./migrations/127_operation_correlation.js";
 
 /** Ordered migrations; numbers may be reserved by independent changes. */
 
@@ -251,4 +252,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   queueDelegatedDecisionSchema,
   contextUsageWatchdogUnitsSchema,
   nodeAdvisorSchema,
+  operationCorrelationSchema,
 ];

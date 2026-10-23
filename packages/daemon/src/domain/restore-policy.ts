@@ -1,3 +1,5 @@
+import { freshSeatLaunchCommand } from "./active-occupant.js";
+
 /** What restore knows about one saved seat when it reads the seat's restore policy. */
 export interface RestoreSeatFacts {
   /** The runtime the snapshot saved the seat with. */
@@ -28,8 +30,8 @@ export function isOrdinaryTerminalSeat(seat: RestoreSeatFacts): boolean {
  *  any other seat, is read as saved. */
 /** Why a community harness's seat waits for a decision at restore: its preset is launch-only, so nothing resumes it, a
  *  conversation its launcher reported included. Apply returns this; the preview forecasts it. */
-export function communityLaunchOnlyRestoreReason(runtime: string | null | undefined, logicalId: string): string {
-  return `Resume is unsupported for community harness "${runtime}": its preset is launch-only. No session was started, and the earlier conversation is left as it is. Re-run with --fresh ${logicalId} only if you want a new conversation.`;
+export function communityLaunchOnlyRestoreReason(runtime: string | null | undefined, logicalId: string, rigName: string): string {
+  return `Resume is unsupported for community harness "${runtime}": its preset is launch-only. No session was started, and the earlier conversation is left as it is. Only if you want a new conversation, run: ${freshSeatLaunchCommand(logicalId, rigName)}.`;
 }
 
 export function effectiveRestorePolicy(seat: RestoreSeatFacts, policy: string | null | undefined): string {

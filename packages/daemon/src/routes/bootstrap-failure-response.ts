@@ -14,7 +14,7 @@ export function bootstrapFailureResponse(result: BootstrapResult, mode: "plan" |
     if (failedStage?.status === "blocked") httpStatus = 409;
     else if (failedStage?.stage === "resolve_spec") {
       const detail = failedStage.detail as { code?: string } | undefined;
-      if (detail?.code === "file_not_found" || detail?.code === "parse_error" || detail?.code === "validation_failed" || detail?.code === "bundle_error" || detail?.code === "cycle_error" || detail?.code === "invalid_cwd") httpStatus = 400;
+      if (detail?.code === "file_not_found" || detail?.code === "parse_error" || detail?.code === "validation_failed" || detail?.code === "bundle_error" || detail?.code === "cycle_error" || detail?.code === "invalid_cwd" || detail?.code === "rig_name_compose_project") httpStatus = 400;
     }
     return { body: result, status: httpStatus };
   }
@@ -36,7 +36,7 @@ export function bootstrapFailureResponse(result: BootstrapResult, mode: "plan" |
     const detail = s.detail as { code?: string } | undefined;
     const code = detail?.code;
     if (!code) return false;
-    const isResolveSpec4xx = s.stage === "resolve_spec" && (code === "file_not_found" || code === "parse_error" || code === "validation_failed" || code === "bundle_error" || code === "target_conflict" || code === "cycle_error" || code === "invalid_cwd");
+    const isResolveSpec4xx = s.stage === "resolve_spec" && (code === "file_not_found" || code === "parse_error" || code === "validation_failed" || code === "bundle_error" || code === "target_conflict" || code === "cycle_error" || code === "invalid_cwd" || code === "rig_name_compose_project");
     const isImportRig4xx = s.stage === "import_rig" && (code === "validation_failed" || code === "preflight_failed" || code === "cycle_error" || code === "service_boot_failed" || code === "compose_project_conflict");
     if (isResolveSpec4xx || isImportRig4xx) {
       topLevelCode ??= code;

@@ -101,6 +101,26 @@ describe("51-06 D2 — non-park queue update metadata reject", () => {
     expect(res.evidenceRef).toBe("/proof/park.md");
   });
 
+  it("a done close stores evidence_ref, and queue show returns it on the closed row", async () => {
+    const id = await mkItem();
+    repo.update({ qitemId: id, actorSession: "dev-x@rig", state: "in-progress" });
+    const res = repo.update({ qitemId: id, actorSession: "dev-x@rig", state: "done", closureReason: "no-follow-on", evidenceRef: "/proof/result.md" });
+    expect(res).toMatchObject({ state: "done", evidenceRef: "/proof/result.md" });
+    const shown = await app.request(`/api/queue/${id}`);
+    expect(shown.status).toBe(200);
+    expect(((await shown.json()) as { state: string; evidenceRef?: string | null })).toMatchObject({ state: "done", evidenceRef: "/proof/result.md" });
+  });
+
+  it("a canceled close still refuses evidence_ref, before any mutation", async () => {
+    const id = await mkItem();
+    let err: unknown;
+    try { repo.update({ qitemId: id, actorSession: "dev-x@rig", state: "canceled", evidenceRef: "/proof/x.md" }); }
+    catch (e) { err = e; }
+    expect((err as QueueRepositoryError).code).toBe(REJECT_CODE);
+    expect((err as QueueRepositoryError).meta?.invalidFields).toEqual(["evidenceRef"]);
+    expect(repo.getByIdOrThrow(id)).toMatchObject({ state: "pending", evidenceRef: null });
+  });
+
   it("ROUTE: POST /:id/update non-park + summary -> HTTP 400 naming invalidFields", async () => {
     // P21 I3: create/update derive the sender from the transport header; header==body claim ⇒ tolerated.
     const created = await app.request("/api/queue/create", { method: "POST", headers: { "content-type": "application/json", "X-OpenRig-Session": "orch@rig" }, body: JSON.stringify({ sourceSession: "orch@rig", destinationSession: "dev-x@rig", body: "r" }) });

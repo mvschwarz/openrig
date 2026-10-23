@@ -5,7 +5,7 @@ import type { SliceIndexer } from "../domain/slices/slice-indexer.js";
 import type { EventBus } from "../domain/event-bus.js";
 import { JudgmentError, evidenceAt, readSliceReadiness, readMissionReadiness, readProjectReadiness, recordJudgment, resolveProofScope, resolveProjectRoot, type JudgeInput } from "../domain/proof/judgments.js";
 import { requireSenderIdentity, resolveRecordedProvenance } from "./require-sender-identity.js";
-import { projectById } from "../domain/workspace/project-read.js";
+import { projectById, sameProjectRoot } from "../domain/workspace/project-read.js";
 import { ProjectReadError } from "../domain/workspace/project-catalog.js";
 
 // #132 — `<project-id>:<scope>` names a scope inside one workspace-catalog project. Project ids share the
@@ -71,7 +71,7 @@ export function proofRoutes(): Hono {
     catch (e) { throw catalogError(e); }
     // A judgment carries the root its prepared read resolved: if the catalog now maps the id elsewhere, refuse
     // rather than record against a different project.
-    if (typeof expectedRoot === "string" && expectedRoot !== p.root) throw new JudgmentError("project_changed", `Project ${id} now resolves to ${p.root}, not the ${expectedRoot} the prepared read used; read the proof again`, 409);
+    if (typeof expectedRoot === "string" && !sameProjectRoot(expectedRoot, p.root)) throw new JudgmentError("project_changed", `Project ${id} now resolves to ${p.root}, not the ${expectedRoot} the prepared read used; read the proof again`, 409);
     return { root: p.missionsRoot, evidenceRoot: p.root, scope, owner: null, project: { id: p.id, root: p.root } };
   };
   // Catalog-project reads have no source watcher (it observes the daemon's selected workspace only), so their

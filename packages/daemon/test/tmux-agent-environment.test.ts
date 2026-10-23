@@ -138,6 +138,32 @@ describe.skipIf(process.platform === "win32")("#1178 initial-shell environment p
       expect(await tmux(["show-environment","-g","SSH_AUTH_SOCK"])).toBe("SSH_AUTH_SOCK=/stale/server-agent.sock");
     } finally {await tmux(["kill-server"]).catch(()=>{});vi.unstubAllEnvs();rmSync(home,{recursive:true,force:true,maxRetries:5,retryDelay:20});}
   });
+  it.each([false, true])("a seat keeps its database and tmux directory when inspection fails=%s", async inspectionFails => {
+    const home = mkdtempSync(path.join(tmpdir(), "tmux-instance-")), socket = path.join(home, "owned.sock");
+    const observed = path.join(home, "observed");
+    const env = { ...process.env, HOME: home }; delete env.TMUX; delete env.TMUX_TMPDIR;
+    const tmux = async (args: string[]) => (await exec("tmux", ["-S", socket, ...args], { env })).stdout.trim();
+    const adapter = new TmuxAdapter(async () => "", undefined, args => {
+      if (inspectionFails && args.includes("default-shell")) throw Error("synthetic inspection failure");
+      return tmux(args.slice(1));
+    });
+    const selected = { HOME: home, PATH: process.env.PATH!, OPENRIG_NODE_ID: "owned", OPENRIG_DB: path.join(home, "selected db.sqlite"), TMUX_TMPDIR: path.join(home, "tmux directory") };
+    adapter.launchEnvironment = () => ({ inheritTmuxEnvironment: false, env: selected });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await tmux(["-f", "/dev/null", "new-session", "-d", "-s", "anchor", "sleep 60"]);
+      await tmux(["set-environment", "-g", "OPENRIG_DB", "/stale.sqlite"]);
+      await tmux(["set-environment", "-g", "TMUX_TMPDIR", "/stale-tmux"]);
+      await tmux(["set-option", "-g", "default-shell", "/bin/bash"]);
+      await tmux(["set-option", "-g", "default-command", `printf '%s|%s\\n' "$OPENRIG_DB" "$TMUX_TMPDIR" > ${shellQuote(observed)}; exec /bin/bash --noprofile --norc`]);
+      const result = await adapter.createSession("seat", home, selected);
+      expect(result.ok).toBe(true);
+      expect(result.warnings?.some(w => w.includes("Scoped tmux environment unavailable")) ?? false).toBe(inspectionFails);
+      expect(await waitFile(observed)).toEqual([selected.OPENRIG_DB, selected.TMUX_TMPDIR]);
+      expect(await tmux(["show-environment", "-g", "OPENRIG_DB"])).toBe("OPENRIG_DB=/stale.sqlite");
+    } finally { warn.mockRestore(); await tmux(["kill-server"]).catch(() => {}); rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }); }
+  });
+
   it.each(["create","respawn"])("returns the scoped-environment fallback warning to %s callers",async mode=>{
     const adapter=new TmuxAdapter(async()=>"",undefined,async args=>{
       if(args.includes("default-shell"))throw Error("unavailable inspection");

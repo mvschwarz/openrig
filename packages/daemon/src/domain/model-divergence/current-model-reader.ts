@@ -1,3 +1,4 @@
+import { observeCodexRebuildPermissions } from "../codex-rebuild-permissions.js";
 import { realpathSync, statSync } from "node:fs";
 import type { SessionRegistry } from "../session-registry.js";
 import type { SeatIdentityStore } from "../seat-identity-store.js";
@@ -55,6 +56,13 @@ export class CurrentModelReader {
   readonly processCensus: ProcessCensus;
   private readonly facts = new Map<string, { key: string; signature: string; fact: NativeModelObservation | null }>();
   constructor(private readonly deps: Deps) { this.processCensus = deps.census; }
+
+  /** Rebuild continuity uses a fresh process read before and after the bounded native record read. */
+  currentCodexPermissions(nodeId: string, sessionName: string, cwd: string) {
+    return observeCodexRebuildPermissions({ nodeId, sessionName, cwd, sessions: this.deps.sessions,
+      tmux: this.deps.native, readThreadId: this.deps.native.readThreadIdByPid,
+      rollout: thread => this.deps.codexRollout(thread, sessionName, true) });
+  }
 
   private async select(seat: Seat, native: CurrentGenerationDeps, target = seat.sessionName, reporting = false): Promise<Selection> {
     if (seat.runtime === "codex") {

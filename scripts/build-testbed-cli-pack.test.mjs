@@ -30,6 +30,19 @@ const DAEMON_SURFACES = [
   "daemon/dist/gateway-slack-surface.js",
 ];
 
+function assertReleaseGuidance(version, note) {
+  const [heading, intro] = note.trim().split(/\n\s*\n/, 2);
+  assert.equal(heading, `# What changed in OpenRig ${version}`, 'packaged whats-new heading is stale');
+  assert.ok(intro.includes(`just upgraded to ${version}.`), 'packaged whats-new introduction is stale');
+}
+
+test("whats-new names its package version, and rejects stale heading or introduction", () => {
+  const note = '# What changed in OpenRig 0.7.0\n\nThis note is for an agent on an install that was just upgraded to 0.7.0.';
+  assertReleaseGuidance('0.7.0', note);
+  assert.throws(() => assertReleaseGuidance('0.7.0', note.replace('OpenRig 0.7.0', 'OpenRig 0.6.12')), /heading is stale/);
+  assert.throws(() => assertReleaseGuidance('0.7.0', note.replace('upgraded to 0.7.0', 'upgraded to 0.6.12')), /introduction is stale/);
+});
+
 test("pre-check: @openrig/cli, ships the `rig` bin, and does not depend on the unpublished @openrig/daemon", () => {
   const pkg = JSON.parse(readFileSync(join(CLI_DIR, "package.json"), "utf8"));
   assert.equal(pkg.name, "@openrig/cli", "must pack @openrig/cli, not the root openrig");
@@ -61,6 +74,8 @@ test("package proof: the tarball ships the daemon surfaces and no packaged JS im
         `the shipped daemon must include ${surface} (a value-import resolution target)`);
     }
     const packed = JSON.parse(execFileSync("tar", ["-xzOf", tgzPath, "package/package.json"], { encoding: "utf8" }));
+    const note = execFileSync("tar", ["-xzOf", tgzPath, "package/daemon/context-packs/reference/whats-new.md"], { encoding: "utf8" });
+    assertReleaseGuidance(packed.version, note);
     assert.equal(packed.dependencies?.["@openrig/daemon"], undefined, "the packed manifest must not depend on @openrig/daemon");
     assert.equal(packed.bundledDependencies, undefined, "the packed manifest must not bundle dependencies");
 

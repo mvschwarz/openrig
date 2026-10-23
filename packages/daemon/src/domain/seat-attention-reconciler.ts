@@ -342,6 +342,20 @@ export interface SendVerifyFn {
   (sessionName: string, text: string, opts?: { verify?: boolean }): Promise<{ ok: boolean; outcome?: string; verified?: boolean }>;
 }
 
+/** The liveness probe's send through the transport: OpenRig's own message. Where the seat's interruption level would
+ *  hold it, it isn't sent: a held probe proves nothing and would only fill the seat's held messages. */
+export function attentionProbeSend(transport: () => {
+  retentionTarget(session: string, input?: { source: "openrig" | "agent"; urgent: boolean }): unknown;
+  send(session: string, text: string, opts: { verify?: boolean; openrigNotice?: true }): Promise<{ ok: boolean; outcome?: string; verified?: boolean }>;
+} | undefined): SendVerifyFn {
+  return async (session, text, opts) => {
+    const t = transport();
+    if (!t) return { ok: false, outcome: "failed" };
+    if (t.retentionTarget(session, { source: "openrig", urgent: false })) return { ok: false, outcome: "failed" };
+    return t.send(session, text, { verify: opts?.verify, openrigNotice: true });
+  };
+}
+
 export interface CaptureFn {
   (sessionName: string, opts?: { lines?: number }): Promise<{ ok: boolean; sessionName: string; content?: string; error?: string }>;
 }
@@ -363,7 +377,8 @@ interface ClearAttentionDeps {
         to: "operator_recovered";
         evidence: { tmux: boolean; fgProcess: string; resumeTokenUsed: boolean; paneState: "usable" };
       }
-    | { ok: false; code: string; detail: string }
+    | { ok: false; code: string; detail: string; attemptId?: number;
+        probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence }
   >;
 }
 
@@ -412,6 +427,15 @@ export class SeatAttentionReconciler {
     if (derivedOutcome?.source === "restore.completed") {
       const reconcile = this.deps.reconcileRestoreOutcome;
       if (!reconcile) {
+        eventBus.emit({
+          type: "seat.attention_clear_refused",
+          rigId: session.rigId,
+          nodeId: session.nodeId,
+          sessionId: session.id,
+          sessionName,
+          attentionClass: "restore_outcome",
+          code: "strict_reconciler_unavailable",
+        });
         return {
           ok: false,
           code: "not_demonstrably_responsive",
@@ -420,6 +444,17 @@ export class SeatAttentionReconciler {
       }
       const restored = await reconcile(session.rigId, session.nodeId);
       if (!restored.ok) {
+        eventBus.emit({
+          type: "seat.attention_clear_refused",
+          rigId: session.rigId,
+          nodeId: session.nodeId,
+          sessionId: session.id,
+          sessionName,
+          attentionClass: "restore_outcome",
+          code: restored.code,
+          ...(restored.attemptId !== undefined ? { attemptId: restored.attemptId } : {}),
+          ...(restored.probe ? { probe: restored.probe } : {}),
+        });
         return {
           ok: false,
           code: "not_demonstrably_responsive",

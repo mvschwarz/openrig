@@ -83,7 +83,8 @@ configurations, as below; do not take the pin from a cached page summary.
 1. **Goal first.** Use a goal and folder already supplied, including a handoff
    from the installing agent; do not ask for them again. If the goal is missing,
    ask once: "What would you like to build or change?" If they already named a
-   team, use it and skip the questions it answers.
+   team, use it and skip the questions it answers. Keep any choice the
+   handoff carries, such as a trust or hook-review prompt they declined.
 2. **Where it works.** If the folder is missing, ask which folder the team should
    work in (usually a clone of their repository) and use its absolute path. Your
    own working directory is OpenRig's workspace, not their project, so never launch with
@@ -196,11 +197,11 @@ configurations, as below; do not take the pin from a cached page summary.
    --plan` (for workshop, with its `--target ~/rigs/workshop`) and tell them
    what will start: how many agents, which providers, in which folder.
    Say too what launching into their folder changes for their own agent
-   there. A Claude Code team usually adds files such as a `CLAUDE.md`, its
-   skills, `.mcp.json` and `.openrig/`, and its `.claude/settings.local.json`
-   makes their own Claude Code in that folder start in accept-edits mode, with
-   the `exa` and `context7` MCP servers and OpenRig's activity hooks; what a
-   given team writes depends on its configuration. If they'd rather keep
+   there. A Claude Code team usually adds OpenRig's blocks to `CLAUDE.md`,
+   plus `.mcp.json` and `.openrig/`, and its `.claude/settings.local.json`
+   gives their own Claude Code in that folder the `exa` and `context7` MCP
+   servers, OpenRig's activity hooks and its status line; what a given team
+   writes depends on its configuration. `rig setup` lists these writes. If they'd rather keep
    their folder as it is, offer a separate copy, such as a git worktree.
    If the plan declares non-interruptive or broad access, say so plainly before asking for their yes.
    If they keep permission prompts on, say what that will be like before
@@ -208,6 +209,9 @@ configurations, as below; do not take the pin from a cached page summary.
    don't already cover, the asks come often, especially early, and each one
    needs their answer, in the seat's pane or through you. Their yes starts
    the team; it isn't a yes to those later asks.
+   For a team that already exists, `rig seat status <seat>` shows each seat's
+   planned permissions: the native mode, where it comes from, what OpenRig
+   adds and what isn't known. Read it to them as planned, not observed.
    Use `applying-a-permission-policy`; for an unset policy, recommend the team
    default rather than `none`. Starting the team, `rig up` without `--plan`,
    waits on their yes to this plan; a yes they already gave for this same
@@ -215,9 +219,18 @@ configurations, as below; do not take the pin from a cached page summary.
 7. **Report readiness honestly.** Read each seat's `startupStatus` in
    `rig ps --nodes --rig <team> --json`: `pending` means still starting, not
    ready; only `ready` is ready; `attention_required` and `failed` need the
-   person or a fix. If `rig up` reports `Status: partial` with
+   person or a fix. `ready` says the seat started; it can still wait at a
+   prompt afterwards (step 10). If `rig up` reports `Status: partial` with
    `Startup attention (<seat>): <reason>`, tell them what that seat is waiting
    for and the command its reason ends with.
+   A trust, hook-review or permission prompt is theirs to answer, unless an
+   operation they asked for names that prompt and its answer, or they told
+   you outright to decide that kind of prompt (step 10). Your launch
+   grants and the team's default permissions aren't their consent, and a
+   prompt they declined for one seat isn't a yes for another. Pass their
+   answer by step 10's route, then run that command. Until they answer,
+   report the seat as not ready and what it waits on; never answer it with
+   `tmux send-keys`.
    Relay any untracked-file warnings from `rig up` to the person, including the
    paths and suggested local exclude lines. Those files were created by the
    launch, so describe them as OpenRig additions rather than pre-existing work.
@@ -261,7 +274,15 @@ configurations, as below; do not take the pin from a cached page summary.
 10. **Tell them when a seat waits on them.** A team seat waiting at a prompt
     shows `needs_input` as its `agentActivity.state` in
     `rig ps --nodes --rig <team> --json --fields canonicalSessionName,agentActivity,tmuxAttachCommand`,
-    and nothing else tells the person.
+    and nothing else tells the person. The kernel's own seats can wait too,
+    so check them the same way:
+    `rig ps --nodes --rig kernel --json --fields canonicalSessionName,agentActivity,tmuxAttachCommand`.
+    A Claude seat at its usage-limit menu ("What do you want to do?" with
+    "Stop and wait for limit to reset") reads `needs_input` with reason
+    `selection_prompt`: its account is out of usage until the reset the menu
+    names. Tell them it's a usage limit, which seat, and when it resets, with
+    the menu's choices in its own words. One of them may spend usage credits,
+    so the choice is theirs.
     When you see one, tell them where they already are: which seat, what its
     prompt asks (`rig capture <session>` with the seat's
     `canonicalSessionName` shows it) and the seat's `tmuxAttachCommand`, or

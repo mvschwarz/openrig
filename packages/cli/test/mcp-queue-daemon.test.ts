@@ -70,7 +70,7 @@ describe("MCP queue tools on the daemon's queue routes", () => {
       // The env is read per request at DaemonClient's one stamping point, as in a server process of its own.
       process.env.OPENRIG_SESSION_NAME = seat;
       const result = await client.callTool({ name, arguments: args });
-      return { isError: result.isError === true, data: JSON.parse((result.content as Array<{ text: string }>)[0]!.text) };
+      return { isError: result.isError === true, data: JSON.parse((result.content as Array<{ text: string }>)[0]!.text), structured: result.structuredContent };
     };
   }
 
@@ -98,6 +98,59 @@ describe("MCP queue tools on the daemon's queue routes", () => {
 
     const mine = await desk("rig_queue_list", { mine: true, all: true });
     expect(JSON.stringify(mine.data)).toContain(qitemId);
+  });
+
+  it("keeps the assignee's answer as the item's resolution, reopens the item only deliberately, and names queue errors by their code", async () => {
+    const desk = await connectAs(DESK);
+    const impl = await connectAs(IMPL);
+    const qitemId = (await desk("rig_queue_create", { destination: IMPL, body: "Name the stale fixture." })).data.qitemId as string;
+    expect((await impl("rig_queue_claim", { qitemId })).isError).toBe(false);
+    expect((await impl("rig_queue_update", { qitemId, state: "done", closureReason: "no-follow-on", resolution: "ANSWER: fixtures/old.json" })).isError).toBe(false);
+
+    const closed = await desk("rig_queue_show", { qitemId });
+    expect(closed.data.item).toMatchObject({ state: "done", resolution: "ANSWER: fixtures/old.json" });
+
+    // Moving a closed item back takes reopen and a note; without reopen the daemon refuses it.
+    const refused = await impl("rig_queue_update", { qitemId, state: "pending", note: "one more detail" });
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused.data)).toContain("terminal_reopen_requires_ack");
+    // The queue answers { error: <code>, message: <how to fix it> }: the structured result keeps both.
+    expect(refused.data.message).toEqual(expect.stringMatching(/\S/));
+    expect(refused.structured).toEqual({ ok: false, code: "terminal_reopen_requires_ack", message: refused.data.message, status: 409 });
+    expect((await desk("rig_queue_show", { qitemId: "qitem-not-here" })).structured).toMatchObject({ ok: false, code: "qitem_not_found", status: 404 });
+    expect((await impl("rig_queue_update", { qitemId, state: "pending", reopen: true, note: "one more detail" })).isError).toBe(false);
+    expect((await desk("rig_queue_show", { qitemId })).data.item).toMatchObject({ state: "pending" });
+  });
+
+  it("follows a handed-on task to the item that carries it, and finds finished work by time", async () => {
+    const desk = await connectAs(DESK);
+    const impl = await connectAs(IMPL);
+    const qitemId = (await desk("rig_queue_create", { destination: IMPL, body: "Fix the stale fixture." })).data.qitemId as string;
+    expect((await impl("rig_queue_claim", { qitemId })).isError).toBe(false);
+    // An open item has no successor key: its result reads as before.
+    expect("successor" in (await desk("rig_queue_show", { qitemId })).data).toBe(false);
+
+    // The assignee hands it on with the CLI's route; the MCP tools don't hand off.
+    const handoff = await fetch(`${url}/api/queue/${qitemId}/handoff`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": IMPL },
+      body: JSON.stringify({ toSession: "qa@team", nudge: false }),
+    });
+    expect(handoff.status).toBe(201);
+    const next = ((await handoff.json()) as { created: { qitemId: string } }).created.qitemId;
+
+    const shown = await desk("rig_queue_show", { qitemId });
+    expect(shown.data.item).toMatchObject({ state: "handed-off" });
+    expect(shown.structured).toMatchObject({ successor: { qitemId: next, destinationSession: "qa@team", state: "pending" } });
+    expect(shown.data.successor).toEqual((shown.structured as { successor: unknown }).successor);
+    const onward = await desk("rig_queue_list", { handedOffFrom: qitemId });
+    expect((onward.structured as { items: Array<{ qitemId: string }> }).items.map((item) => item.qitemId)).toEqual([next]);
+
+    const since = async (time: string) => ((await desk("rig_queue_list", { destination: "qa@team", since: time })).structured as { items: unknown[] }).items.length;
+    expect(await since("2000-01-01T00:00:00Z")).toBe(1);
+    expect(await since("2999-01-01T00:00:00Z")).toBe(0);
+    const invalid = await desk("rig_queue_list", { destination: "qa@team", since: "yesterday" });
+    expect(invalid.isError).toBe(true);
+    expect(invalid.structured).toMatchObject({ ok: false, code: "updated_since_invalid", status: 400 });
   });
 
   it("records the configured seat as the source even when nothing else names it", async () => {

@@ -35,6 +35,9 @@ import { buildRestorePlanPreview } from "../src/domain/restore-plan-preview.js";
 import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
 import { observeClaudePermission, observeCodexSandbox, observePiResourceTrust, observeOmpApprovalMode, type AppliedLaunchObservation } from "../src/domain/permission-drift.js";
 import { SeatIdentityReconciler } from "../src/domain/seat-identity-reconciler.js";
+import { createHash } from "node:crypto";
+import { SeatAttentionReconciler } from "../src/domain/seat-attention-reconciler.js";
+import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 
 function setupDb(): Database.Database {
   return createFullTestDb();
@@ -729,6 +732,66 @@ describe("RestoreOrchestrator", () => {
       const ids = result.result.nodes.map((n) => n.logicalId).sort();
       expect(ids).toEqual(["dev.impl", "dev.qa"]);
     }
+  });
+
+  it("a full restore leaves a seat joined with rig attach as an external CLI attached, and still launches the tmux seat beside it", async () => {
+    const rig = rigRepo.createRig("r99");
+    const worker = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+    const desk = rigRepo.addNode(rig.id, "desk", { role: "worker", runtime: "claude-code" });
+    const old = sessionRegistry.registerSession(worker.id, "r99-worker");
+    sessionRegistry.updateStatus(old.id, "running");
+    sessionRegistry.updateBinding(desk.id, { attachmentType: "external_cli", externalSessionName: "desk-app@r99" });
+    const claimed = sessionRegistry.registerClaimedSession(desk.id, "desk-app@r99");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
+    const hasSession = vi.fn(async () => false);
+    const tmux = { ...mockTmux(), hasSession } as unknown as TmuxAdapter;
+
+    const result = await createOrchestrator({ tmux }).restore(snap.id, { freshLogicalIds: ["worker"] });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // The claim isn't marked detached, nothing is launched in the app's place, and its binding is as it was.
+    expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(claimed.id)).toEqual({ status: "running" });
+    expect(hasSession).not.toHaveBeenCalledWith("desk-app@r99");
+    expect((tmux.createSession as ReturnType<typeof vi.fn>).mock.calls.flat().join(" ")).not.toContain("desk");
+    expect(sessionRegistry.getBindingForNode(desk.id)).toMatchObject({ attachmentType: "external_cli", externalSessionName: "desk-app@r99" });
+    expect(result.result.nodes.find((n) => n.logicalId === "worker")?.status).toBe("fresh-primed");
+    expect(result.result.nodes.find((n) => n.logicalId === "desk")).toMatchObject({
+      status: "left_attached", error: expect.stringContaining("rig unclaim desk-app@r99"),
+    });
+    // A seat left attached doesn't count against the rig.
+    expect(rollupRestoreRigResult([
+      { nodeId: "a", logicalId: "a", status: "resumed" },
+      { nodeId: "b", logicalId: "b", status: "left_attached" },
+    ])).toBe("fully_restored");
+  });
+
+  it("a missing startup file doesn't hold a seat joined with rig attach as an external CLI, or the restore, since nothing launches it", async () => {
+    const rig = rigRepo.createRig("r99");
+    const desk = rigRepo.addNode(rig.id, "desk", { role: "worker", runtime: "claude-code" });
+    sessionRegistry.updateBinding(desk.id, { attachmentType: "external_cli", externalSessionName: "desk-app@r99" });
+    const claimed = sessionRegistry.registerClaimedSession(desk.id, "desk-app@r99");
+    const missingPath = "/tmp/openrig-missing-desk-startup.md";
+    const snap = updateSnapshotData(snapshotCapture.captureSnapshot(rig.id, "manual"), (data) => {
+      data.nodeStartupContext[desk.id] = {
+        projectionEntries: [],
+        resolvedStartupFiles: [{
+          path: "startup.md", absolutePath: missingPath, ownerRoot: "/tmp",
+          deliveryHint: "guidance_merge", required: true, appliesOn: ["restore"],
+        }],
+        startupActions: [],
+        runtime: "claude-code",
+      };
+    });
+
+    // A fresh restore consumes startup replay, so the missing file would otherwise hold the seat and, as the only seat, the restore.
+    const result = await createOrchestrator().restore(snap.id, { fsOps: { exists: (p) => p !== missingPath }, freshLogicalIds: ["desk"] });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(claimed.id)).toEqual({ status: "running" });
+    expect(result.result.nodes).toEqual([expect.objectContaining({ logicalId: "desk", status: "left_attached" })]);
+    expect(result.result.rigResult).toBe("fully_restored");
   });
 
   it("still blocks restore when tmux sessions are genuinely alive (inverse invariant)", async () => {
@@ -2596,6 +2659,9 @@ describe("RestoreOrchestrator", () => {
       expect(nodeResult!.status).toBe("awaiting-decision");
       expect(nodeResult!.error).toContain("Original session unresumable");
       expect(nodeResult!.error).toContain("The blank session was rolled back; no session is running");
+      // The one-seat command, not a whole-rig re-run, which is refused while sibling seats run.
+      expect(nodeResult!.error).toContain(`deliberately start only this seat fresh: rig seat launch '${node.logicalId}@test-rig' --fresh --reason "<why>".`);
+      expect(nodeResult!.error).not.toContain("Re-run with --fresh");
       expect(launchHarness).toHaveBeenCalledTimes(1);
       expect(launchHarness.mock.calls[0]![1].resumeToken).toBe("stale-claude-token");
 
@@ -2754,7 +2820,7 @@ describe("RestoreOrchestrator", () => {
       launchHarness,
     };
 
-    const reason = `Resume is unsupported for community harness "synth-harness": its preset is launch-only. No session was started, and the earlier conversation is left as it is. Re-run with --fresh dev.impl only if you want a new conversation.`;
+    const reason = `Resume is unsupported for community harness "synth-harness": its preset is launch-only. No session was started, and the earlier conversation is left as it is. Only if you want a new conversation, run: rig seat launch 'dev.impl@test-rig' --fresh --reason "<why>".`;
     const savedSnap = snapshotRepo.getSnapshot(snap.id)!;
     expect(buildRestorePlanPreview(rigRepo.getRig(rig.id)!, savedSnap, savedSnap.data.sessions).nodes[0]).toMatchObject({ intendedAction: "awaiting-decision", reason });
     const orch = createOrchestrator();
@@ -2764,7 +2830,7 @@ describe("RestoreOrchestrator", () => {
     if (result.ok) {
       const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
       expect(nodeResult!.status).toBe("awaiting-decision");
-      expect(nodeResult!.error).toBe(`Resume is unsupported for community harness "synth-harness": its preset is launch-only. No session was started, and the earlier conversation is left as it is. Re-run with --fresh dev.impl only if you want a new conversation.`);
+      expect(nodeResult!.error).toBe(`Resume is unsupported for community harness "synth-harness": its preset is launch-only. No session was started, and the earlier conversation is left as it is. Only if you want a new conversation, run: rig seat launch 'dev.impl@test-rig' --fresh --reason "<why>".`);
       expect(launchHarness).not.toHaveBeenCalled();
     }
   });
@@ -3924,6 +3990,50 @@ describe("RestoreOrchestrator", () => {
       expect(tmux.sendText).not.toHaveBeenCalled();
     });
 
+    it.each(["available", "error", "timeout"] as const)("persists the strict attention refusal probe with geometry=%s (#1480)", async geometry => {
+      const missingGeometry = geometry !== "available";
+      const tmux = mockTmuxForReconciler();
+      const content = "❯ fixture-private-restore-prompt\n● OAuth token revoked · Please run /login\n\n❯";
+      vi.mocked(tmux.hasSession).mockResolvedValue(true);
+      vi.mocked(tmux.getPaneCommand).mockResolvedValue("sh");
+      let captured = false;
+      vi.mocked(tmux.capturePaneContent).mockImplementation(async () => { captured = true; return content; });
+      // Identity resolves before capture; fail only the later diagnostic geometry read.
+      const listPanes = tmux.listPanes;
+      tmux.listPanes = async (...args) => {
+        if (geometry === "timeout" && captured) return new Promise<never>(() => {});
+        if (geometry === "error" && captured) throw new Error("fixture-private-geometry-error");
+        return listPanes(...args);
+      };
+      const seeded = seedFailedAttempt({ restoreOutcome: "attention_required", withResumeToken: true });
+      sessionRegistry.updateStartupStatus(sessionRegistry.getSessionsForRig(seeded.rig.id)[0]!.id, "ready");
+      const before = db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").get();
+      const attempt = db.prepare("SELECT seq FROM events WHERE type = 'restore.started'").get() as { seq: number };
+      const restore = createOrchestrator({ tmux, listProcesses: async () => managedClaudeRows("tok-abc-123") });
+      const reconciler = new SeatAttentionReconciler({ db, sessionRegistry, eventBus,
+        agentActivityStore: new AgentActivityStore({ db, eventBus }),
+        reconcileRestoreOutcome: (rigId, nodeId) => restore.reconcileNodeRuntimeTruth(rigId, nodeId),
+      });
+      const result = await reconciler.clearAttention(seeded.sessionName, { reason: "operator explanation" });
+      expect(result).toMatchObject({ ok: false, code: "not_demonstrably_responsive",
+        detail: expect.stringContaining("pane_not_usable: Pane state is failed (login_required)") });
+      const events = db.prepare("SELECT payload FROM events WHERE type = 'seat.attention_clear_refused'").all() as { payload: string }[];
+      expect(events).toHaveLength(1);
+      expect(JSON.parse(events[0]!.payload)).toEqual({ type: "seat.attention_clear_refused", rigId: seeded.rig.id, nodeId: seeded.nodeId,
+        sessionId: sessionRegistry.getSessionsForRig(seeded.rig.id)[0]!.id,
+        sessionName: seeded.sessionName, attentionClass: "restore_outcome", code: "pane_not_usable", attemptId: attempt.seq,
+        probe: { status: "failed", code: "login_required",
+          loginRefusal: { message: "OAuth token revoked · Please run /login", row: "response" },
+          capture: { lines: 4, bytes: Buffer.byteLength(content), sha256: createHash("sha256").update(content).digest("hex"),
+            columns: missingGeometry ? null : 80, rows: missingGeometry ? null : 24 } },
+      });
+      expect(events[0]!.payload).not.toContain("fixture-private");
+      expect(db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").get()).toEqual(before);
+      expect(db.prepare("SELECT * FROM events WHERE type IN ('restore.outcome_reconciled', 'seat.attention_cleared')").all()).toHaveLength(0);
+      expect(tmux.sendText).not.toHaveBeenCalled();
+      expect(tmux.sendKeys).not.toHaveBeenCalled();
+    });
+
     // #1077 — the seat launched with --resume tok-abc-123 and Claude continued as a new id. The
     // strict reconciler keeps main's exact current-token path and accepts the launch token only as
     // the alternative a qualified rotation names: the launched process's own first hook, a resume.
@@ -4269,7 +4379,7 @@ describe("RestoreOrchestrator", () => {
       if (!result.ok) return;
       const node = result.result.nodes[0]!;
       expect(node.status).toBe("awaiting-decision");
-      expect(node.error).toContain("--fresh worker");
+      expect(node.error).toMatch(/rig seat launch 'worker@[^']+' --fresh --reason "<why>"/);
       // ZERO session started: launchNode never called, session count unchanged.
       expect(launchSpy).not.toHaveBeenCalled();
       expect(after.c).toBe(before.c);

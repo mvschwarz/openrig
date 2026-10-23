@@ -976,6 +976,7 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(findings[0]!.body).toContain(foreign);
     expect(findings[0]!.body).toMatch(/verification.required|indeterminate/i);
     expect(findings[0]!.body).not.toMatch(/does not exist|dangling/i);
+    expect(findings[0]!.summary).toMatch(new RegExp(`^Custody not checked on host vps-unknown for ${row.qitemId} \\(\\d+ min\\)$`));
   });
 
   it("CUSTODY-VERIFIED DISPOSITION: a durable custody-verified note on the closed row silences the bare-id local miss", async () => {
@@ -1174,7 +1175,7 @@ describe.each(["done", "handed-off"] as const)("#318 seat-target closure without
       state: "pending",
       destinationSession: "worker@r",
     });
-    expect(findings[0]!.summary).toContain("successor-verification-required");
+    expect(findings[0]!.summary).toMatch(new RegExp(`^Custody not checked: no successor of ${row.qitemId} in this store \\(\\d+ min\\)$`));
     expect(findings[0]!.body).toContain("- next@r");
     expect(findings[0]!.body).toContain("OPENRIG_URL=<registered-host> rig queue list --destination next@r");
     expect(findings[0]!.body).toContain("custody-verified: <target>");
@@ -1729,6 +1730,18 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
 
   const unclaimedFinding = async (qitemId: string) => (await findingsFor(qitemId))
     .filter((f) => (f.tags ?? []).includes(`stuck-sweep:unclaimed-obligation:${qitemId}`));
+
+  it("a row whose wake the seat's level or hold held isn't reported as unclaimed: it's held at the seat, not stuck", async () => {
+    const heldRow = await repo.create({ sourceSession: "asker@r", destinationSession: "worker@r", body: "held at a quiet seat", nudge: false });
+    const draftRow = await repo.create({ sourceSession: "asker@r", destinationSession: "worker@r", body: "held by a draft", nudge: false });
+    repo.recordNudgeAttempt(heldRow.qitemId, "retained:typing_guard");
+    repo.recordNudgeAttempt(draftRow.qitemId, "retained:draft_aware");
+    age(heldRow.qitemId); age(draftRow.qitemId);
+    expect(repo.waitingView(heldRow.qitemId)!.nextBackstop).toMatchObject({ held: true });
+    await sweep();
+    expect(await unclaimedFinding(heldRow.qitemId)).toEqual([]);
+    expect(await unclaimedFinding(draftRow.qitemId)).toHaveLength(1); // a draft can clear: still the sweep's
+  });
 
   it("a registered alias without an intent (owner@kernel) is suppressed like its @external address", async () => {
     const row = await repo.create({ sourceSession: "asker@r", destinationSession: "owner@kernel", body: "Pick option A or B",

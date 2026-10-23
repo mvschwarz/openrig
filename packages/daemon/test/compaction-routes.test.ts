@@ -118,6 +118,8 @@ describe("compaction routes — POST /api/compaction/trigger", () => {
 
   function buildApp(opts?: { wireEnforcer?: boolean; completeMap?: boolean; bearerToken?: string }): AppParts {
     const sentTexts: string[] = [];
+    let clock = Date.now();
+    const sleep = async (ms: number) => { clock += ms; };
     const transport = new SessionTransport({
       db,
       rigRepo,
@@ -129,10 +131,14 @@ describe("compaction routes — POST /api/compaction/trigger", () => {
         if (opts?.completeMap !== false && marker && target) { const file = JSON.parse(target[1]!); mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, "# Fixture map\n" + marker); }
         return { ok: true as const };
       }),
-      sleep: async () => undefined,
+      now: () => new Date(clock),
+      sleep,
       waitForIdlePollMs: 1,
     });
-    const enforcer = new ClaudeCompactionEnforcer(makeSettings(), transport, { openrigHome: stateDir, manualPrepWaitMs: 50, resolveOccupantGeneration: () => "fixture-generation" });
+    const enforcer = new ClaudeCompactionEnforcer(makeSettings(), transport, {
+      openrigHome: stateDir, manualPrepWaitMs: 1000, resolveOccupantGeneration: () => "fixture-generation",
+      now: () => clock, sleep,
+    });
     const app = new Hono();
     app.use("*", async (c, next) => {
       c.set("sessionTransport" as never, transport);

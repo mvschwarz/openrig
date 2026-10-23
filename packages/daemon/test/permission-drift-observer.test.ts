@@ -35,7 +35,7 @@ describe("PermissionDriftObserver", () => {
         commandPath: { state: "available" },
         enforcement: { axis: "permission", state: "unknown", expected: "acceptEdits", effective: null },
         configuration: {
-          comparison: "drift",
+          comparison: "aligned",
           expected: "acceptEdits",
           observed: { defaultMode: "manual" },
           sourcePath: "/work/project/.claude/settings.local.json",

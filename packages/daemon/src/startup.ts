@@ -1,3 +1,4 @@
+import { daemonDatabaseWarnings } from "./daemon-db-path.js";
 import { physicalSessionName } from "./domain/session-registry.js";
 import { makeWatchdogDeliver } from "./domain/watchdog-delivery.js";
 import { fileURLToPath } from "node:url";
@@ -317,6 +318,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // Only the explicit selection overrides a pane rc or the legacy PID-home
   // reader. The resolved default remains the writer/network-reader/session root.
   const dbPath = opts?.dbPath ?? ":memory:";
+  const seatDbPath = dbPath === ":memory:" ? dbPath : nodePath.resolve(dbPath);
+  const databaseWarnings = await daemonDatabaseWarnings(dbPath, OPENRIG_HOME,
+    process.env.OPENRIG_DB === dbPath ? "OPENRIG_DB" : process.env.RIGGED_DB === dbPath ? "RIGGED_DB" : undefined);
+  for (const warning of databaseWarnings) console.warn(`Warning: ${warning}`);
   const db = createDb(dbPath);
   migrate(db, ALL_MIGRATIONS);
 
@@ -611,6 +616,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const launchSessionEnv: Record<string, string | undefined> = {
     PATH: process.env.PATH,
     OPENRIG_HOME,
+    OPENRIG_DB: seatDbPath,
+    TMUX_TMPDIR: process.env.TMUX_TMPDIR,
     OPENRIG_PORT: openRigPort,
     OPENRIG_HOST: openRigHost,
     OPENRIG_URL: resolvedActivityHookUrl,
@@ -899,6 +906,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     const realFs = {
       readFile: (p: string) => fs.readFileSync(p, "utf-8"),
       writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"),
+      copyFileExclusive: (src: string, dest: string) => fs.copyFileSync(src, dest, fs.constants.COPYFILE_EXCL),
       exists: (p: string) => fs.existsSync(p),
       mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }),
       listFiles: (dir: string) => {
@@ -1286,15 +1294,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       });
     });
   }
-  const { SeatAttentionReconciler } = await import("./domain/seat-attention-reconciler.js");
+  const { SeatAttentionReconciler, attentionProbeSend } = await import("./domain/seat-attention-reconciler.js");
   const seatAttentionReconciler = new SeatAttentionReconciler({
     sessionRegistry, eventBus, agentActivityStore, db, tmux: tmuxAdapter,
     reconcileRestoreOutcome: (rigId, nodeId) => restoreOrchestrator.reconcileNodeRuntimeTruth(rigId, nodeId),
-    sendVerify: async (session, text, opts) => {
-      const transport = deps.sessionTransport;
-      if (!transport) return { ok: false, outcome: "failed" };
-      return transport.send(session, text, { verify: opts?.verify });
-    },
+    sendVerify: attentionProbeSend(() => deps.sessionTransport),
     capture: async (session, opts) => {
       const transport = deps.sessionTransport;
       if (!transport) return { ok: false, sessionName: session, error: "transport_unavailable" };
@@ -1308,6 +1312,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
 
   const deps: AppDeps = {
+    databaseWarnings,
     rigRepo,
     sessionRegistry,
     daemonLifecycleStore,
@@ -1920,10 +1925,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // built, those scopes honestly return not-found rather than throwing.
   {
     const { TerminalService } = await import("./domain/terminal/terminal-service.js");
-    const { HerdrAdapter } = await import("./domain/terminal/herdr-adapter.js");
-    const { createHerdrSocketRpc, createHerdrSocketTransport, resolveHerdrSocketPath } = await import(
-      "./domain/terminal/herdr-transport.js"
-    );
+    const { createHerdrProviders } = await import("./domain/terminal/herdr-sessions.js");
     const { CmuxProviderAdapter } = await import("./domain/terminal/cmux-provider-adapter.js");
     const { CmuxLayoutService } = await import("./domain/cmux-layout-service.js");
     const { TerminalViewsStore } = await import("./domain/terminal/terminal-views-store.js");
@@ -1949,12 +1951,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       logicalId: e.logicalId,
     });
 
-    const herdrSocketPath = resolveHerdrSocketPath();
-    const herdrProvider = new HerdrAdapter({
-      // FB4: herdr speaks its unix control socket (there is no `layout` CLI).
-      transportFactory: createHerdrSocketTransport(createHerdrSocketRpc(herdrSocketPath)),
-      launch: { socketPath: herdrSocketPath, ...(process.env["HERDR_SESSION"] ? { session: process.env["HERDR_SESSION"] } : {}) },
-    });
+    const { defaultProvider: herdrProvider, sessionProvider: herdrSessionProvider } = createHerdrProviders();
     const cmuxProvider = new CmuxProviderAdapter({
       cmuxAdapter,
       // One gridded workspace per composed page — the same grid machinery as
@@ -1968,6 +1965,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
     deps.terminalService = new TerminalService({
       resolveProvider: (name) => providerMap[name] ?? null,
+      resolveSessionProvider: (name, session) => name === "herdr" ? herdrSessionProvider(session) : null,
       viewsStore: new TerminalViewsStore(),
       listRigSeatsBatch: (names) => {
         const rigs = rigRepo.listRigs();
@@ -2340,7 +2338,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // hardcoded); oversight = the fleet judgment seat, locally resolvable or a NAMED deferral
     // (no daemon-side cross-host send seam exists yet — the deferral names that, never silence).
     {
-      const { ModelDivergenceMonitor } = await import("./domain/model-divergence/model-divergence-monitor.js");
+      const { ModelDivergenceMonitor, proclaimedInEventLog } = await import("./domain/model-divergence/model-divergence-monitor.js");
       const OVERSIGHT_SEAT = "watch-lead@oversight";
       const modelDivergenceMonitor = new ModelDivergenceMonitor({
         processCensus: modelCensus,
@@ -2362,7 +2360,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           try {
             const previous = deliveryId ? outboxHandlerInstance.getById(deliveryId) : null;
             const payload = previous?.guardBinding ? previous.body : message;
-            const result = await sessionTransport.send(target, payload, { deliveryId, actorSession: "model-monitor@system", auditPointer: deliveryId });
+            const result = await sessionTransport.send(target, payload, { deliveryId, actorSession: "model-monitor@system", openrigNotice: true, auditPointer: deliveryId });
             return result.ok ? { ok: true, outcome: result.outcome } : { ok: false, error: result.error };
           } catch (err) {
             return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -2391,9 +2389,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
             pinnedModel: proclamation.pinnedModel,
             effectiveModel: proclamation.effectiveModel,
             diagnosis: proclamation.diagnosis,
+            occurrenceId: proclamation.occurrenceId,
             channels: proclamation.channels,
           });
         },
+        wasProclaimed: proclaimedInEventLog(db),
       });
       modelDivergenceMonitor.startPolling(60_000);
       deps.modelDivergenceMonitor = modelDivergenceMonitor;
@@ -2507,8 +2507,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   deps.occupantInvalidator = new DefaultOccupantInvalidator({
     enforcer: compactionEnforcer ?? { invalidateOccupant: () => {} },
     contextUsage: contextUsageStore,
-    // (e/Class-B) watchdog store — armed jobs registered by the retiring generation stop at swap.
+    // (e/Class-B) watchdog store — armed jobs the retiring generation registered for its own seat stop at swap.
     watchdog: watchdogJobsRepoInstance,
+    // The names that reach a seat, so a job addressed to its logical or physical spelling counts as its own.
+    addresses: sessionRegistry,
     // (e/Class-B) queue store — in-progress items claimed by the retiring generation release to pending.
     queue: queueRepoInstance,
     log: (msg) => console.warn(msg),

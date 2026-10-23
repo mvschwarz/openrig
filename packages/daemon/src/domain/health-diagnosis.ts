@@ -157,11 +157,12 @@ export class HealthDiagnosisService {
       if (old) {
         // Reserve before awaiting transport: restart or another evaluation cannot re-send blindly.
         this.receipt(qitemId, actor, { action: "presented", finding, authority: this.deps.authority(finding) });
-        await this.deps.queue.maybeNudge(qitemId, old.row.destinationSession, true, actor);
+        // Re-presenting a finding is OpenRig's own scheduling.
+        await this.deps.queue.maybeNudge(qitemId, old.row.destinationSession, true, actor, undefined, "openrig");
       } else {
         const packet: Packet = { schema: "openrig.health-diagnosis/v0alpha1", finding, policyVersion: effective.version,
           authority: this.deps.authority(finding), presentedAt: this.now(), instructions: `${instructions} ${correctionGuidance}${finding.ceremony ? " This is provisional suspicion, not a confirmed warning. Resolve product progress from normal scope/proof/workflow evidence and the selected SDLC boundary; do not count approvals, C1 pairing, proof files, commits, tests or generic closures as outcomes. In the existing disposition, optionally include progress: {basis, conclusion: established|false-positive|indeterminate, outcomes: [{id, observedAt, evidenceRefs}], boundedAuthority: boolean|null, boundary, evidenceRefs, missingFacts}. Bind basis to the CURRENT finding.ceremony.basis from diagnosis show; establish a complete outcome census for the exact transition window or return indeterminate with the missing fact. This census assesses that window, not whether a specific challenged rule remains useful; it is not a prerequisite to recording a correction. Outcome and bounded-authority semantics are your attributed judgment. An empty outcomes list means you affirm no outcomes, never that you could not find them. No separate checkpoint is needed." : ""} Read current context and disposition with rig health diagnosis show ${qitemId} --full --json (complete retained evidence; may be large).` };
-        await this.deps.queue.create({ qitemId, sourceSession: actor, destinationSession: policy.owner, body: JSON.stringify(packet, null, 2),
+        await this.deps.queue.create({ qitemId, sourceSession: actor, destinationSession: policy.owner, wakeTrigger: "openrig", body: JSON.stringify(packet, null, 2),
           tags: ["health-diagnosis", finding.id, `policy:${effective.version}`, ...(finding.ceremony ? [`health-lineage:${finding.ceremony.lineageId}`] : [])], summary: `System Health: inspect ${finding.detector}`, evidenceRef: finding.id });
       }
     }
@@ -256,7 +257,7 @@ export class HealthDiagnosisService {
     if (automatic && current.row.destinationSession !== this.deps.policy.read().policy.diagnosis.owner) throw new Error("health_diagnosis_owner_required");
     if (current.finding.ceremony && (current.finding.status !== "active" || current.finding.ceremony.stage !== "confirmed")) throw new Error("health_human_requires_confirmed_active_episode");
     if (healthHash(this.deps.policy.read().policy.human) !== healthHash(human)) throw new Error("health_human_policy_changed");
-    const row = this.deps.queue.getById(id) ?? await this.deps.queue.create({ qitemId: id, sourceSession: actor, destinationSession: human.address, identityProvenance,
+    const row = this.deps.queue.getById(id) ?? await this.deps.queue.create({ qitemId: id, sourceSession: actor, destinationSession: human.address, identityProvenance, wakeTrigger: "openrig",
       body: JSON.stringify({ diagnosis: qitemId, finding: diagnosis.finding, disposition: diagnosis.disposition }, null, 2),
       summary: `System Health: ${diagnosis.finding.summary}`, evidenceRef: qitemId, tags: ["health-human", diagnosis.finding.id] });
     return { qitemId: row.qitemId, deliveryOutcome: row.deliveryOutcome ?? "pending", nextInspection: `rig queue transitions ${row.qitemId}` };

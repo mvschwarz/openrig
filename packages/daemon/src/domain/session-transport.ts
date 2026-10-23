@@ -33,7 +33,8 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import { latestHookPermissionPending, latestHookWaitsOnPerson, type AgentActivityStore } from "./agent-activity-store.js";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity } from "./types.js";
-import { DeliveryGuardError, type GuardTarget, type SeatDeliveryGuard } from "./seat-delivery-guard.js";
+import { DeliveryGuardError, type AdmissionInput, type GuardTarget, type SeatDeliveryGuard } from "./seat-delivery-guard.js";
+import { withUrgentLine } from "./urgent-line.js";
 import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "../lib/pane-envelope.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
@@ -180,6 +181,10 @@ const CLAUDE_STATUS_WARNINGS = [
   /^✘ Auto-update failed: no write permission to npm prefix · Run claude doctor$/,
   /^tmux focus-events off · add 'set -g focus-events on' to ~\/\.tmux\.conf and re…$/,
   /^You've used (?:\d|[1-9]\d)% of your weekly limit · resets \d{1,2}(?::\d{2})?(?:am|pm) \(UTC\)$/,
+  // #1641: Claude 2.1.293's update banner, whatever installer it names.
+  /^Update available! Run: \S.*$/,
+  // The context hint, as Claude prints it; reported as the last line below the mode bar on one seat.
+  /^new task\? \/clear to save \d+(?:\.\d+)?k tokens$/,
 ];
 // Current Claude status rows need not end in "thinking)" or show "esc to interrupt".
 // Completed summaries such as "✻ Crunched for 2s" lack the live ellipsis/timer shape.
@@ -1544,6 +1549,16 @@ export interface SendOpts {
   identityProvenance?: string;
   /** Internal wake provenance, never accepted from the public transport route. */
   queueWake?: boolean;
+  /** Internal: this send is OpenRig's own (a watchdog, a scheduler wake, a notice, the compaction enforcer). Never accepted
+   *  from HTTP send options. It marks the send's source for the seat's interruption level and changes nothing else. */
+  openrigNotice?: true;
+  /** Marked urgent, and by whom (the authenticated sender, or the queue item's source). A seat's interruption level lets an
+   *  urgent message type; it's shown on delivery. */
+  urgent?: { by: string };
+  /** Internal, for a combined queue wake: called under the seat's lease, where delivery is decided (`held` is that
+   *  decision), with how the seat's level would treat each input now. It returns the members that still go with this send:
+   *  their text and outbox ids. Never accepted from HTTP. */
+  recheckMembers?: (holds: (input: AdmissionInput) => boolean, held: boolean) => { text: string; outboxIds: string[] };
   /** Internal observation of a completed input effect; never a permission callback. */
   onInputEffect?: (phase: "pasted" | "submitted") => void;
   /** Internal managed lifecycle prerequisite; never accepted from HTTP send options. */
@@ -1630,6 +1645,8 @@ export interface BroadcastOpts extends SendOpts {
 export interface SendResult {
   ok: boolean;
   sessionName: string;
+  /** Present when the send was marked urgent: who marked it. */
+  urgent?: { by: string };
   verified?: boolean;
   /** Audited prompt answer: consumers must never automatically retry Enter.
    * Neither value establishes model consumption. Absent for ordinary sends. */
@@ -2118,10 +2135,12 @@ export class SessionTransport {
 
   get deliveryGuard() { return this.tmuxAdapter.deliveryGuard; }
 
-  retentionTarget(sessionName: string) {
+  /** With an input, whether the seat's level would hold that input; without one, whether its mode holds everything. */
+  retentionTarget(sessionName: string, input?: AdmissionInput) {
     const guard = this.tmuxAdapter.deliveryGuard;
     const target = guard?.maybeTarget(sessionName);
     if (!guard || !target) return null;
+    if (input) return guard.holdsInput(target.nodeId, input) ? target : null;
     const pref = guard.preference(target.nodeId);
     return pref.desired || pref.effective ? target : null;
   }
@@ -2159,7 +2178,19 @@ export class SessionTransport {
   }
 
   private async sendWithoutCompactionNotice(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
+    if (!opts?.urgent) return this.sendClassified(sessionName, text, opts);
+    // Shown on delivery, and kept with a held message: who marked it urgent.
+    console.info(`[transport] urgent send to ${sessionName}, marked by ${opts.urgent.by}`);
+    // An explicit prompt answer is typed as keys, and a submit-only retry types no text at all: the label's letters would
+    // act as keystrokes (a menu shortcut, say). Their bytes stay exactly as given; the mark stays in the result and the log.
+    const rawKeys = opts.dangerouslyInteract === true || opts.submitOnly === true;
+    const result = await this.sendClassified(sessionName, rawKeys ? text : withUrgentLine(text, opts.urgent.by), opts);
+    return { ...result, urgent: opts.urgent };
+  }
+
+  private async sendClassified(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     const guard = this.tmuxAdapter.deliveryGuard;
+    const admission: AdmissionInput = { source: opts?.openrigNotice ? "openrig" : "agent", urgent: !!opts?.urgent };
     if (!guard) {
       // No guard, so no recorded delivery to read back: a caller already gone ends the send here.
       if (callerSignal(opts)?.aborted) return callerCancelled(sessionName);
@@ -2170,7 +2201,9 @@ export class SessionTransport {
       return result;
     }
     const outbox = new OutboxHandler(this.db);
-    const ids = opts?.committedOutboxIds ?? [opts?.deliveryId ?? `guard-send-${randomUUID()}`];
+    let ids = opts?.committedOutboxIds ?? [opts?.deliveryId ?? `guard-send-${randomUUID()}`];
+    // A combined wake's members are re-checked under the lease, against the configuration that decides this send.
+    const recheck = (held: boolean) => opts?.recheckMembers?.((input) => guard.holdsInput(guard.target(sessionName).nodeId, input), held) ?? null;
     const retainedResult = (reason = "typing_guard_enabled"): SendResult => ({ ok: true, sessionName, outcome: "retained", sent: false, verified: false,
       outboxIds: ids, reason, warning: `Retained, not delivered. Inspect with rig seat held-messages ${sessionName}; changing protection does not replay held messages.` });
     try {
@@ -2221,23 +2254,28 @@ export class SessionTransport {
         }
       }
       const result = await guard.operation(sessionName, async () => {
-        if (this.guardedDelivery && !sendOpts?.submitOnly && guard.needsInputCheck(sessionName)) {
-          if (callerSignal(sendOpts)?.aborted) return callerCancelled(sessionName);
-          return this.guardedDelivery.send(sessionName, text, sendOpts ?? {},
-            sendOpts?.committedOutboxIds ?? [`guard-send-${randomUUID()}`]);
+        const members = recheck(false);
+        const memberText = members?.text ?? text;
+        const memberOpts = members ? { ...sendOpts, committedOutboxIds: members.outboxIds } : sendOpts;
+        if (this.guardedDelivery && !memberOpts?.submitOnly && guard.needsInputCheck(sessionName)) {
+          if (callerSignal(memberOpts)?.aborted) return callerCancelled(sessionName);
+          return this.guardedDelivery.send(sessionName, memberText, memberOpts ?? {},
+            memberOpts?.committedOutboxIds ?? [`guard-send-${randomUUID()}`]);
         }
-        return this.sendUnguarded(sessionName, text, sendOpts);
+        return this.sendUnguarded(sessionName, memberText, memberOpts);
       }, async target => {
         if (opts?.submitOnly) return { ok: false, sessionName, sent: false, reason: "typing_guard_enabled", error: "Typing guard prevents submit-only; no Enter was sent." };
         // Nothing is retained yet: a caller that went away while this send waited for the lease ends it here.
         if (callerSignal(opts)?.aborted) return callerCancelled(sessionName);
+        const members = recheck(true);
+        if (members) ids = members.outboxIds;
         this.db.transaction(() => {
           for (const id of ids) {
             const prior = opts?.committedOutboxIds ? outbox.getById(id) : null;
             if (opts?.committedOutboxIds && (!prior || prior.destinationSession !== sessionName)) throw new Error("Committed wake target/ID mismatch");
             outbox.retain(prior ? { ...prior, outboxId: id, tags: prior.tags ?? undefined, auditPointer: prior.auditPointer ?? undefined } : {
               outboxId: id, senderSession: opts?.actorSession ?? "unknown", destinationSession: sessionName, body: text, auditPointer: opts?.auditPointer,
-              identityProvenance: opts?.identityProvenance,
+              identityProvenance: opts?.identityProvenance, ...(opts?.urgent ? { urgency: "urgent" } : {}),
             }, target, !!opts?.committedOutboxIds);
           }
         })();
@@ -2257,7 +2295,7 @@ export class SessionTransport {
           });
         }
         return retainedResult();
-      });
+      }, admission);
       if (result.ok && result.sent !== false) {
         await this.reconcileStartupReadiness(sessionName).catch(() => {});
       }

@@ -12,6 +12,15 @@ interface PeriodicReminderContext {
   message?: string;
 }
 
+type ReminderSpec = { message?: string | null; context: Record<string, unknown> };
+const reminderMessage = (spec: ReminderSpec) => spec.message ?? (spec.context as PeriodicReminderContext).message;
+
+/** What the spec lacks to be evaluated, or null. A job update checks a new spec with this too. */
+export function periodicReminderSpecProblem(spec: ReminderSpec): { field: string; message: string } | null {
+  return reminderMessage(spec)
+    ? null : { field: "message", message: "periodic-reminder: message is required (top-level message or context.message)" };
+}
+
 export const periodicReminderPolicy: Policy = {
   name: "periodic-reminder",
   async evaluate(job: PolicyJob): Promise<PolicyEvaluation> {
@@ -22,15 +31,14 @@ export const periodicReminderPolicy: Policy = {
         field: "target.session",
       });
     }
-    const context = job.context as PeriodicReminderContext;
-    const message = job.message ?? context.message;
-    if (!message) {
-      throw Object.assign(new Error("periodic-reminder: message is required (top-level message or context.message)"), {
+    const problem = periodicReminderSpecProblem(job);
+    if (problem) {
+      throw Object.assign(new Error(problem.message), {
         code: "policy_spec_invalid",
         policy: "periodic-reminder",
-        field: "message",
+        field: problem.field,
       });
     }
-    return { action: "send", target: job.target, message };
+    return { action: "send", target: job.target, message: reminderMessage(job)! };
   },
 };

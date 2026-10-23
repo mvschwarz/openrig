@@ -19,13 +19,17 @@ import type {
   SnapshotData,
   SessionSourceSpec,
   StartupBlock,
+  StartupFile,
 } from "./types.js";
 
-/** A rig's own startup layers: its `culture_file` and rig `startup` block as declared, and the absolute root they resolve against. */
+/** A rig's own startup layers: its `culture_file` and rig `startup` block as declared, and the absolute root they resolve against.
+ *  `podStartupFiles` holds each pod's declared startup files by pod id, resolved against the same root; a seat added to an
+ *  existing pod inherits them. Files only: pod startup actions are not inherited. */
 export interface RigStartupLayers {
   root: string;
   cultureFile?: string;
   startup?: StartupBlock;
+  podStartupFiles?: Record<string, StartupFile[]>;
 }
 
 /**

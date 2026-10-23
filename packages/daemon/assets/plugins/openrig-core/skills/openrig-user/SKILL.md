@@ -1289,6 +1289,8 @@ Notes:
 - for tmux-backed self-attach, `rig whoami --json` is the right verification
 - for raw/external self-attach, `rig ps --nodes --json` is currently the more reliable verification surface
 - if the current shell is outside tmux, pass `--display-name <name>` when you want a stable human session label recorded
+- to read a seat's identity or state later, use `rig whoami` or `rig seat status`, not `rig attach --json` output or a file holding a
+  seat's environment. Don't print `OPENRIG_ACTIVITY_*` values: the activity token is a credential, and it doesn't identify the seat
 
 ### Adopt a topology and bind live sessions
 
@@ -1482,6 +1484,7 @@ Current shipped MCP tools:
 - `rig_chatroom_watch`
 - `rig_add`
 - `rig_queue_create`, `rig_queue_show`, `rig_queue_list`, `rig_queue_claim`, `rig_queue_update`
+- `rig_telemetry_events`: one bounded page of event metadata, as `rig telemetry events` reads it
 
 The server acts as one seat: the `OPENRIG_SESSION_NAME` in its environment. Every request carries that identity, so
 no tool call names a sender. Without it, writes that need an actor are refused with `actor_required`.

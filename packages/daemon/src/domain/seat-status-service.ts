@@ -4,6 +4,7 @@ import { parseSessionName } from "./session-name.js";
 import type { NodeInventoryEntry, SeatIdentityVerdict } from "./types.js";
 import { NativePermissionStore, type StoredNativePermissionSelection, type ResolvedSeatPermission } from "./native-permission-store.js";
 import { AppliedLaunchObservationStore, type StoredAppliedLaunchObservation } from "./applied-launch-observation-store.js";
+import { planPermissionAccount, type PermissionAccount } from "./permission-account.js";
 
 const SEAT_LOOKUP_GUIDANCE = "List seats with: rig ps --nodes";
 
@@ -34,6 +35,8 @@ export interface SeatStatus {
     nativeEffect: "unverified";
     error?: string;
     effective?: ResolvedSeatPermission;
+    /** The planned account for the next fresh managed launch (permission-account.ts); absent when it can't be read. */
+    account?: PermissionAccount;
   };
 }
 
@@ -125,17 +128,18 @@ export class SeatStatusService {
       previous_occupant: entry.previousOccupant,
       handover_at: entry.handoverAt,
       restore_outcome: entry.restoreOutcome,
-      permissions: this.permissionStatus(entry.nodeId, entry.runtime),
+      permissions: this.permissionStatus(entry.nodeId, entry.runtime, entry.canonicalSessionName ?? deriveCanonicalFromEntry(entry) ?? seatRef),
     };
   }
 
-  private permissionStatus(nodeId: string, runtime?: string | null): SeatStatus["permissions"] {
+  private permissionStatus(nodeId: string, runtime: string | null | undefined, seat: string): SeatStatus["permissions"] {
     const lastLaunchArguments = new AppliedLaunchObservationStore(this.rigRepo.db).readCurrent(nodeId);
     try {
       const store = new NativePermissionStore(this.rigRepo.db);
       const desired = store.read(nodeId);
       const effective = runtime ? store.resolve(nodeId, runtime) : undefined;
-      return { selectionState: desired ? "explicit" : "inherit", desired, lastLaunchArguments, nativeEffect: "unverified", ...(effective ? { effective } : {}) };
+      const account = planPermissionAccount(this.rigRepo.db, nodeId, seat, runtime ?? null);
+      return { selectionState: desired ? "explicit" : "inherit", desired, lastLaunchArguments, nativeEffect: "unverified", ...(effective ? { effective } : {}), account };
     } catch (error) {
       return { selectionState: "unknown", desired: null, lastLaunchArguments, nativeEffect: "unverified", error: (error as Error).message };
     }

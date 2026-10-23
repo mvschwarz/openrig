@@ -73,18 +73,18 @@ describe("S03 future native permission selections (offline; no native effect cla
     expect(db.prepare("SELECT COUNT(*) n FROM schema_migrations WHERE name LIKE '088_%'").get()).toEqual({ n: 1 });
     expect(db.pragma("foreign_key_check")).toEqual([]);
   });
-  it("audits one seat atomically without changing siblings, sessions or native history", async () => {
-    const f = fixture(); const before = lineage(f.db);
+  it.each(["codex", "claude-code"])("audits %s selections without changing siblings, sessions or native history", async runtime => {
+    const f = fixture(runtime); const before = lineage(f.db);
     expect(await f.service.setPermissions(input("full_bypass"))).toMatchObject({ ok: true, changed: true, to: { mode: "full_bypass" } });
     expect(lineage(f.db)).toBe(before); expect(f.store.read(f.sibling.id)).toBeNull();
     const events = f.db.prepare("SELECT payload FROM events WHERE type='node.permissions_changed'").all() as { payload: string }[];
     expect(events).toHaveLength(1);
     expect(JSON.parse(events[0]!.payload)).toMatchObject({ nodeId: f.node.id, actor: input("").actor, reason: input("").reason, source: "seat_selection", effect: "future_launches_only" });
     expect(await f.service.setPermissions(input("full_bypass"))).toMatchObject({ ok: true, changed: false });
-    expect(f.db.prepare("SELECT COUNT(*) n FROM events WHERE type='node.permissions_changed'").get()).toEqual({ n: 1 });
+    expect(f.db.prepare("SELECT COUNT(*) n FROM events WHERE type='node.permissions_changed'").get()).toEqual({ n: runtime === "codex" ? 2 : 1 });
     expect(await f.service.setPermissions(input("inherit"))).toMatchObject({ ok: true, changed: true, to: null });
     expect(f.store.read(f.node.id)).toBeNull(); expect(lineage(f.db)).toBe(before);
-    expect(f.db.prepare("SELECT COUNT(*) n FROM events WHERE type='node.permissions_changed'").get()).toEqual({ n: 2 });
+    expect(f.db.prepare("SELECT COUNT(*) n FROM events WHERE type='node.permissions_changed'").get()).toEqual({ n: runtime === "codex" ? 3 : 2 });
   });
   it("rolls back the selection if the audit append fails", async () => {
     const f = fixture(); vi.spyOn(f.eventBus, "persistWithinTransaction").mockImplementation(() => { throw new Error("audit unavailable"); });

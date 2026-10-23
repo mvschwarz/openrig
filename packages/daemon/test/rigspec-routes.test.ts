@@ -129,6 +129,31 @@ describe("Rigspec export routes", () => {
     }
   });
 
+  it("GET /api/rigs/:rigId/spec encodes non-ASCII X-Rig-Root header safely", async () => {
+    const rig = rigRepo.createRig("non-ascii-rig");
+    const pod = new PodRepository(db).createPod(rig.id, "dev", "Dev");
+    rigRepo.addNode(rig.id, "dev.worker", {
+      runtime: "claude-code",
+      podId: pod.id,
+      agentRef: "local:agents/worker",
+      profile: "default",
+      cwd: "/workspace/app",
+    });
+    rigRepo.setRigStartupLayers(rig.id, {
+      root: "/fixtures/项目/team",
+      cultureFile: "culture.md",
+      startup: {
+        files: [{ kind: "file", path: "start.md", orientation: "role", deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start"] }],
+        actions: [],
+      },
+    });
+
+    const res = await app.request(`/api/rigs/${rig.id}/spec`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-rig-root")).toBe(encodeURIComponent("/fixtures/项目/team"));
+    expect(decodeURIComponent(res.headers.get("x-rig-root")!)).toBe("/fixtures/项目/team");
+  });
+
   it("GET nonexistent rig -> 404", async () => {
     const res = await app.request("/api/rigs/nonexistent/spec");
     expect(res.status).toBe(404);

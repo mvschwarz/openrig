@@ -41,6 +41,18 @@ function expandPoolSides(
   return [spec];
 }
 
+/** What the spec lacks to be evaluated, or null. A job update checks a new spec with this too. */
+export function edgeArtifactRequiredSpecProblem(spec: Pick<PolicyJob, "context">): { field: string; message: string } | null {
+  const context = spec.context as EdgeArtifactRequiredContext;
+  for (const side of ["source", "target"] as const) {
+    const pool = context[side];
+    if (!pool?.path && !Array.isArray(pool?.paths)) {
+      return { field: `context.${side}.path`, message: `edge-artifact-required: context.${side}.path is required` };
+    }
+  }
+  return null;
+}
+
 export const edgeArtifactRequiredPolicy: Policy = {
   name: "edge-artifact-required",
   async evaluate(job: PolicyJob): Promise<PolicyEvaluation> {
@@ -51,29 +63,17 @@ export const edgeArtifactRequiredPolicy: Policy = {
         field: "target.session",
       });
     }
+    const problem = edgeArtifactRequiredSpecProblem(job);
+    if (problem) {
+      throw Object.assign(new Error(problem.message), {
+        code: "policy_spec_invalid",
+        policy: "edge-artifact-required",
+        field: problem.field,
+      });
+    }
     const context = job.context as EdgeArtifactRequiredContext;
     const source = context.source;
     const target = context.target;
-    if (!source?.path && !Array.isArray(source?.paths)) {
-      throw Object.assign(
-        new Error("edge-artifact-required: context.source.path is required"),
-        {
-          code: "policy_spec_invalid",
-          policy: "edge-artifact-required",
-          field: "context.source.path",
-        },
-      );
-    }
-    if (!target?.path && !Array.isArray(target?.paths)) {
-      throw Object.assign(
-        new Error("edge-artifact-required: context.target.path is required"),
-        {
-          code: "policy_spec_invalid",
-          policy: "edge-artifact-required",
-          field: "context.target.path",
-        },
-      );
-    }
     const sourcePools = expandPoolSides(source);
     const targetPools = expandPoolSides(target).map((p) => ({
       ...p,
