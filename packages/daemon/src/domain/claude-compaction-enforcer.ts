@@ -580,7 +580,7 @@ export class ClaudeCompactionEnforcer {
     const nodeId = input.nodeId ?? this.sessionTransport.deliveryGuard?.maybeTarget(input.sessionName)?.nodeId;
     if (!this.terminalPolicies || !nodeId) return null;
     try { this.terminalPolicies.check(nodeId, "compaction", actor); return null; }
-    catch (error) { return error instanceof TerminalPolicyRefusal ? "terminal_policy_refused" : "terminal_policy_unavailable"; }
+    catch (error) { return error instanceof TerminalPolicyRefusal ? "terminal_policy_refused" : actor.source === "openrig" ? null : "terminal_policy_unavailable"; }
   }
 
   private checkAttemptPolicy(input: EnforcerInput, attempt: PreparationAttempt): void {

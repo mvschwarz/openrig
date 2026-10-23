@@ -23,7 +23,7 @@ import type { ClaudeCompactionPolicy, SettingsStore } from "../src/domain/user-s
 import type { ContextUsage } from "../src/domain/types.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { compactionRoutes } from "../src/routes/compaction.js";
-import { createFullTestDb } from "./helpers/test-app.js";
+import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 
 const POLICY: ClaudeCompactionPolicy = {
   enabled: true,
@@ -168,6 +168,22 @@ describe("compaction routes — POST /api/compaction/trigger", () => {
     expect(await enforcer.maybeAutoCompact({ nodeId: claudeNodeId, sessionName: "dev-impl@my-rig", runtime: "claude-code", usedPercentage: 90 })).toEqual({ triggered: true });
     expect(sentTexts).toHaveLength(1);
     expect(enforcer.getPreparationState("dev-impl@my-rig")?.policyActor).toEqual({ source: "openrig" });
+  });
+
+  it("keeps automatic compaction running with an unreadable policy while the account reports unknown", async () => {
+    const { claudeNodeId } = seed();
+    db.prepare("UPDATE seat_terminal_policies SET config_json='{' WHERE node_id=?").run(claudeNodeId);
+    usageStore.persist(claudeNodeId, knownUsage("dev-impl@my-rig", 90));
+    const { app, enforcer, sentTexts } = buildApp();
+    const peer = await app.request("/api/compaction/trigger", { method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "dev-qa@my-rig" },
+      body: JSON.stringify({ session: "dev-impl@my-rig" }) });
+    expect(await peer.json()).toMatchObject({ reason: "terminal_policy_unavailable" });
+    for (let tick = 0; tick < 2; tick++) expect(await enforcer.maybeAutoCompact({ nodeId: claudeNodeId,
+      sessionName: "dev-impl@my-rig", runtime: "claude-code", usedPercentage: 90 })).toEqual({ triggered: true });
+    expect(sentTexts[1]).toContain("/compact");
+    const account = await createTestApp(db).app.request("/api/seat/status/dev-impl@my-rig");
+    expect(await account.json()).toMatchObject({ terminalPolicy: { state: "unknown" } });
   });
 
   it("honours an explicit self-compaction exception without changing peer or OpenRig authority", async () => {
