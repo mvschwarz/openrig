@@ -344,6 +344,19 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     expect(payload.reason).toBe("excluded_from_subset");
   });
 
+  it("doesn't hold a non-target seat joined with rig attach as an external CLI, since it has no tmux session to check", async () => {
+    const { rigId, nodeIds } = seedPodAwareRig();
+    seedSnapshot(rigId, nodeIds);
+    sessionRegistry.updateBinding(nodeIds[1]!, { attachmentType: "external_cli", externalSessionName: "guard-desktop@test-rig" });
+    const claimed = sessionRegistry.registerClaimedSession(nodeIds[1]!, "guard-desktop@test-rig");
+
+    await orchestrator.launchNodeSubset(rigId, ["dev.driver"]);
+
+    expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'node.held'").get()).toEqual({ n: 0 });
+    expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(claimed.id)).toEqual({ status: "running" });
+    expect(tmux.hasSession).not.toHaveBeenCalledWith("guard-desktop@test-rig");
+  });
+
   it("uses operator hold reason when provided", async () => {
     const { rigId, nodeIds } = seedPodAwareRig();
     seedSnapshot(rigId, nodeIds);

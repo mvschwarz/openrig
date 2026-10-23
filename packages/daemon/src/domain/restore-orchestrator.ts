@@ -686,6 +686,8 @@ export class RestoreOrchestrator {
     const held: Array<{ nodeId: string; logicalId: string; reason: string }> = [];
     const holdReasonText = opts?.holdReason ?? "excluded_from_subset";
     for (const node of nonTargetNodes) {
+      // A seat joined with `rig attach` as an external CLI has no tmux session to check, and OpenRig doesn't launch or stop it.
+      if (this.sessionRegistry.getBindingForNode(node.id)?.attachmentType === "external_cli") continue;
       const sessions = this.sessionRegistry.getSessionsForRig(rigId)
         .filter((s) => s.nodeId === node.id && s.status === "running");
 

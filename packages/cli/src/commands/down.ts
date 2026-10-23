@@ -17,6 +17,8 @@ interface TeardownResult {
   errors: string[];
   /** Team skill files kept in seats' own storage: edited, or never recorded as OpenRig's. */
   keptSkills?: string[];
+  /** Seats joined with `rig attach` as an external CLI, which OpenRig doesn't stop. */
+  leftRunning?: string[];
 }
 
 interface DownAgentEntry {
@@ -200,6 +202,10 @@ rig up <rig> --existing brings it back, resuming each seat's conversation where 
       if (result.keptSkills && result.keptSkills.length > 0) {
         console.log(`Kept ${result.keptSkills.length} team skill file(s) in the seats' own storage: edited, or not recorded as OpenRig's:`);
         for (const file of result.keptSkills) console.log(`  ${file}`);
+      }
+
+      if (result.leftRunning && result.leftRunning.length > 0) {
+        console.log(`Left running: ${result.leftRunning.join(", ")}. Joined with rig attach as an external CLI, so OpenRig doesn't stop it.`);
       }
 
       // Exit code: errors first, then deleted, then alreadyStopped

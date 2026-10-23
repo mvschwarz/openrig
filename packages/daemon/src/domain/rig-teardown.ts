@@ -25,6 +25,9 @@ export interface TeardownResult {
   /** OPR.0.7.0.13: team skill files left in seats' own storage because they were edited, or were never recorded as
    *  OpenRig's. Present only when something was kept. */
   keptSkills?: string[];
+  /** Seats joined with `rig attach` as an external CLI. OpenRig doesn't stop them, so they keep their claim. Present only
+   *  when one was left running. */
+  leftRunning?: string[];
 }
 
 interface TeardownOptions {
@@ -164,7 +167,15 @@ export class RigTeardownOrchestrator {
 
     // 5. Kill each live session
     let killFailures = 0;
+    const external = new Set<string>();
     for (const session of liveSessions) {
+      // OpenRig neither launches nor stops a seat joined with `rig attach` as an external CLI, and it has no tmux session:
+      // a missing one isn't a stop. Keep its claim, as the historical path below does for non-tmux bindings.
+      if (this.deps.sessionRegistry.getBindingForNode(session.nodeId)?.attachmentType === "external_cli") {
+        external.add(session.nodeId);
+        (result.leftRunning ??= []).push(session.sessionName);
+        continue;
+      }
       // An archived rig may retain a stale row for a name now owned by a live rig.
       // That name cannot identify the archived rig's tmux session for a kill.
       const ownedByAnotherRig = archived.archived_at !== null && findOtherSessionOwner(
@@ -244,7 +255,7 @@ export class RigTeardownOrchestrator {
       this.deps.eventBus.emit({ type: "rig.stopped", rigId });
     }
 
-    this.cleanupSeatSkills(rigId, skillSeats, settled, result);
+    this.cleanupSeatSkills(rigId, skillSeats, settled, result, external);
     return result;
   }
 
@@ -269,9 +280,11 @@ export class RigTeardownOrchestrator {
 
   /** OPR.0.7.0.13: once a seat's consumer is confirmed gone, remove the unchanged skill files OpenRig wrote into its
    *  own storage and report what was kept. The records go only with the rig itself, so a restore can rebuild them. */
-  private cleanupSeatSkills(rigId: string, seats: ReadonlyArray<{ id: string; logicalId: string; runtime: string }>, settled: ReadonlySet<string>, result: TeardownResult): void {
+  private cleanupSeatSkills(rigId: string, seats: ReadonlyArray<{ id: string; logicalId: string; runtime: string }>, settled: ReadonlySet<string>, result: TeardownResult, external: ReadonlySet<string> = new Set()): void {
     const kept: string[] = [];
     for (const seat of seats) {
+      // An external seat left running keeps its skills; leftRunning already says so.
+      if (external.has(seat.id)) continue;
       if (!settled.has(seat.id)) {
         const paths = seatSkillPaths({ rigId, logicalId: seat.logicalId, runtime: seat.runtime });
         if (fs.existsSync(paths.root)) result.errors.push(`Seat skills for ${seat.logicalId} kept: its consumer isn't confirmed stopped`);
