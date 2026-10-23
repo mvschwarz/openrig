@@ -133,7 +133,17 @@ function escapeRegex(value: string): string {
  *  shared guidance that happens to be named `role` and comes from another file still merges. */
 export function isPerSeatRoleGuidance(blockId: string, sourcePath?: string): boolean {
   if (blockId === "rig-role") return true;
-  return blockId === "role" && sourcePath !== undefined && /(^|[\\/])guidance[\\/]role\.md$/.test(sourcePath);
+  return blockId === "role" && sourcePath !== undefined && PER_SEAT_ROLE_PATH.test(sourcePath);
+}
+
+/** An agent's own role file: `guidance/role.md`. */
+const PER_SEAT_ROLE_PATH = /(^|[\\/])guidance[\\/]role\.md$/;
+
+/** A startup file that is a seat's own role: marked `orientation: role`, or at the per-seat `guidance/role.md` path.
+ *  With the `auto` hint it is delivered by send_text, never merged into a guidance file pod-mates share (ADR-0006),
+ *  where each launch would overwrite the last seat's role. An explicit hint is kept as written. */
+export function isPerSeatRoleStartupFile(path: string, orientation?: string): boolean {
+  return orientation === "role" || PER_SEAT_ROLE_PATH.test(path);
 }
 
 /** The warning a skipped legacy `role` leaves in the projection result: a spec saved before `rig-role` may have had no

@@ -121,7 +121,7 @@ export class StubRuntimeAdapter implements RuntimeAdapter {
       try {
         if (!this.fsOps) throw new Error("no fsOps configured — cannot read startup file content");
         const content = this.fsOps.readFile(file.absolutePath);
-        const hint = file.deliveryHint === "auto" ? resolveConcreteHint(file.path, content) : file.deliveryHint;
+        const hint = file.deliveryHint === "auto" ? resolveConcreteHint(file.path, content, file.orientation) : file.deliveryHint;
 
         switch (hint) {
           case "guidance_merge": {

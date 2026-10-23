@@ -1,0 +1,61 @@
+#!/bin/sh
+# A reference launcher for Cursor's CLI as an OpenRig community harness. Copy it, own it, and change it: OpenRig
+# doesn't ship or run it. It follows docs/reference/community-harness-presets.md:
+#   - a new launch: `cursor-agent create-chat` prints a new chat id; the launcher reports it, then reopens that chat;
+#   - a resume (OPENRIG_RESUME_REF set): it reopens the chat it was asked for and reports that id, or, when Cursor holds
+#     no such chat, reports it missing and starts nothing.
+# Cursor's chat-id facts come from the probe in OpenRig issue #352, and the chat store's location from Cursor's own CLI
+# (2026.10.22).
+set -eu
+
+producer="openrig-cursor-launch 2"
+cursor="${OPENRIG_CURSOR_AGENT:-cursor-agent}"
+
+# Each seat gets its own Cursor config folder unless CURSOR_CONFIG_DIR is already set. Cursor keeps cli-config.json
+# (`--model`, approval settings) and the chats there, so a seat doesn't rewrite the person's own ~/.cursor. Cursor's
+# login isn't in it: Cursor keeps that in ~/.config/cursor/auth.json on Linux and in the Keychain on macOS.
+CURSOR_CONFIG_DIR="${CURSOR_CONFIG_DIR:-${OPENRIG_HOME:-$HOME/.openrig}/state/cursor/${OPENRIG_NODE_ID:-${OPENRIG_SESSION_NAME:-default}}}"
+export CURSOR_CONFIG_DIR
+mkdir -p "$CURSOR_CONFIG_DIR"
+
+# Write this attempt's record, all at once, where OpenRig asked for it (nothing when it didn't ask).
+report() {
+  [ -n "${OPENRIG_LAUNCH_RESULT:-}" ] || return 0
+  tmp="$OPENRIG_LAUNCH_RESULT.$$.tmp"
+  printf '%s\n' "$1" > "$tmp"
+  mv "$tmp" "$OPENRIG_LAUNCH_RESULT"
+}
+plain_id() { case "$1" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; *) return 0 ;; esac; }
+# Where Cursor keeps a chat: <config folder>/chats/<md5 of the working directory>/<chat id>/store.db. Cursor hashes
+# its process's working directory, which is the physical path, so this hashes `pwd -P`.
+chat_store() {
+  if command -v md5sum >/dev/null 2>&1; then sum=$(pwd -P | tr -d '\n' | md5sum | cut -d' ' -f1)
+  else sum=$(pwd -P | tr -d '\n' | md5 -q); fi
+  printf '%s/chats/%s/%s/store.db' "$CURSOR_CONFIG_DIR" "$sum" "$1"
+}
+
+if [ -n "${OPENRIG_RESUME_REF:-}" ]; then
+  id="$OPENRIG_RESUME_REF"
+  plain_id "$id" || { echo "openrig-cursor-launch: refusing an unusual chat id" >&2; exit 2; }
+  # Cursor's `--resume` with an id it doesn't hold exits 0 on a new, empty chat, so check first. Gone: say so, start nothing.
+  if [ ! -f "$(chat_store "$id")" ]; then
+    report "{\"format\":1,\"attempt\":\"${OPENRIG_LAUNCH_ATTEMPT:-}\",\"harness\":\"cursor\",\"error\":\"missing\",\"producer\":\"$producer\"}"
+    echo "openrig-cursor-launch: Cursor has no chat $id in $CURSOR_CONFIG_DIR for $(pwd -P); starting nothing" >&2
+    exit 1
+  fi
+else
+  # create-chat prints the id but doesn't exit (see #352): read the first line, then stop it.
+  out=$(mktemp)
+  "$cursor" create-chat > "$out" 2>/dev/null &
+  pid=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$out" ]; do sleep 0.1; i=$((i + 1)); done
+  kill "$pid" 2>/dev/null || true
+  id=$(head -n 1 "$out" | tr -d '\r\n\t ')
+  rm -f "$out"
+  # No usable id: report nothing, so OpenRig shows the identity as unavailable, and start Cursor on its own chat.
+  plain_id "$id" || exec "$cursor" --trust "$@"
+fi
+
+report "{\"format\":1,\"attempt\":\"${OPENRIG_LAUNCH_ATTEMPT:-}\",\"harness\":\"cursor\",\"nativeRef\":\"$id\",\"producer\":\"$producer\"}"
+exec "$cursor" --resume "$id" --trust "$@"

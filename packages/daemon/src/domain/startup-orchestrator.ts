@@ -447,7 +447,7 @@ export class StartupOrchestrator {
     let postLaunchFiles: ResolvedStartupFile[] = [];
     for (const f of applicableFiles) {
       const hint = f.deliveryHint === "auto"
-        ? resolveConcreteHint(f.path, this.safeReadFile(f.absolutePath))
+        ? resolveConcreteHint(f.path, this.safeReadFile(f.absolutePath), f.orientation)
         : f.deliveryHint;
       if (hint === "send_text") {
         postLaunchFiles.push(f);

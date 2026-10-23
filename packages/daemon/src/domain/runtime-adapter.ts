@@ -1,3 +1,4 @@
+import { isPerSeatRoleStartupFile } from "./managed-blocks.js";
 import type { Binding, StartupFile } from "./types.js";
 import type { ProjectionPlan } from "./projection-planner.js";
 import type { ClaudeResumeRotation } from "./native-process-lineage.js";
@@ -164,7 +165,10 @@ export type HarnessLaunchResult =
 export function resolveConcreteHint(
   path: string,
   content: string,
+  orientation?: string,
 ): "guidance_merge" | "skill_install" | "send_text" {
+  // A seat's own role never merges into the file its pod-mates share.
+  if (isPerSeatRoleStartupFile(path, orientation)) return "send_text";
   if (path.endsWith("SKILL.md") || content.startsWith("# SKILL")) return "skill_install";
   if (path.endsWith(".md")) return "guidance_merge";
   return "send_text";
