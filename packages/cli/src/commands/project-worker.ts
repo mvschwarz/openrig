@@ -13,6 +13,11 @@ type SourceSnapshot = {
   sources: { project: unknown; scopes: {id: string; source: string; hash: string}[];
     roster: {session: string; nodeId: string; generation: string}[];
     recent: {streamItemId: string; body: string; evidenceRef: string}[] };
+  /** Routing candidates (durable seats and their open work), versioned apart from `version`. */
+  routing?: { owners: {session: string; logicalId: string; role: string | null}[]; ownersTruncated: boolean;
+    work: {qitemId: string; destination: string; state: string; summary: string}[]; workTruncated: boolean } | null;
+  routingVersion?: string | null;
+  routingUnavailable?: string | null;
 };
 const hash = (text: string) => `sha256:${createHash("sha256").update(text).digest("hex")}`;
 function localText(file: string): string {
@@ -60,9 +65,13 @@ export async function prepareWorker(client: Client, opts: WakeOptions, read = lo
 export async function runProjectWake(client: Client, opts: WakeOptions, read = localText, experiment?: {
   decide: (prepared: Awaited<ReturnType<typeof prepareWorker>>) => WorkerOptions["classify"];
   signal: AbortSignal; shouldStop: () => boolean; timeoutMs: number;
+  /** A decisions consumer's own candidate values, and fields it adds to each classification write. */
+  candidates?: (prepared: Awaited<ReturnType<typeof prepareWorker>>) => ClassificationCandidates;
+  classifyBody?: (input: Record<string, unknown>) => Record<string, unknown>;
 }) {
   const prepared = await prepareWorker(client, opts, read);
-  const {snapshot, candidates, taxonomy} = prepared;
+  const {snapshot, taxonomy} = prepared;
+  const candidates = experiment?.candidates ? experiment.candidates(prepared) : prepared.candidates;
   const {session, generation} = snapshot.occupant;
   const suffix = (url: string) => `${url}${url.includes("?") ? "&" : "?"}expectedOccupant=${encodeURIComponent(generation)}`;
   const get = async <T>(url: string): Promise<T> => response(await client.get<T>(suffix(url)));
@@ -89,7 +98,7 @@ export async function runProjectWake(client: Client, opts: WakeOptions, read = l
       abstain: input => post(`/api/projects/attempts/${encodeURIComponent(input.attemptId)}/abstain`, input),
       fail: input => post(`/api/projects/attempts/${encodeURIComponent(input.attemptId)}/fail`, input),
     },
-    classifier: {classify: input => post("/api/projects/project", input)},
+    classifier: {classify: input => post("/api/projects/project", experiment?.classifyBody ? experiment.classifyBody({...input}) : input)},
     stream: {getById: id => get(`/api/stream/${encodeURIComponent(id)}`)},
     classify: experiment ? experiment.decide(prepared) : async request => {
       if (snapshot.unavailable.length) return {kind: "abstain", reason: `candidate sources unavailable: ${snapshot.unavailable.join("; ")}`};

@@ -74,8 +74,27 @@ export function classificationSources(db: Database.Database, project: ProjectRea
     evidenceRef: `stream:${item.streamItemId}:${sourceHash(item.body)}`,
   }));
   const sources = { project: { id: project.id, root: project.root, missionsRoot: project.missionsRoot, files: projectSources }, scopes, rosterSource: "bindings + running sessions + latest occupant_tenures in the classifier rig", roster: roster.slice(0,1000), recent };
+  // Versioned on its own so open-work churn can't stale the `version` that occupant-written decisions bind to.
+  // A failure here leaves the other sources usable; the decisions consumer then defers to intake.
+  let routing: ReturnType<typeof routingCandidates> | null = null, routingUnavailable: string | null = null;
+  try { routing = routingCandidates(db, occupant.rigId); } catch (error) { routingUnavailable = error instanceof Error ? error.message : "routing candidates unavailable"; }
   return { occupant, observedAt, version: sourceHash(JSON.stringify({sources, unavailable})), sources, unavailable,
-    duplicateCoverage: "Most recent 100 nonarchived items; a retrieval miss is unknown, not no duplicate." };
+    duplicateCoverage: "Most recent 100 nonarchived items; a retrieval miss is unknown, not no duplicate.",
+    routing, routingVersion: routing ? sourceHash(JSON.stringify(routing)) : null, routingUnavailable };
+}
+
+/** Routing candidates for the decisions consumer: the rig's seats, running or not (running occupants alone
+ *  aren't the ownership registry), and the open work they hold, newest first. Past a cap is unknown, not absent. */
+export function routingCandidates(db: Database.Database, rigId: string) {
+  const seats = db.prepare(`SELECT b.tmux_session AS session, n.logical_id AS logicalId, n.role AS role FROM nodes n JOIN bindings b ON b.node_id=n.id
+    WHERE n.rig_id=? AND b.tmux_session IS NOT NULL ORDER BY b.tmux_session LIMIT 201`).all(rigId) as {session: string; logicalId: string; role: string | null}[];
+  const owners = seats.slice(0, 200);
+  const open = owners.length ? db.prepare(`SELECT qitem_id AS qitemId, destination_session AS destination, state, summary, substr(body,1,160) AS excerpt
+    FROM queue_items WHERE state IN ('pending','in-progress','blocked') AND destination_session IN (${owners.map(() => "?").join(",")})
+    ORDER BY ts_updated DESC, qitem_id DESC LIMIT 31`).all(...owners.map(x => x.session)) as {qitemId: string; destination: string; state: string; summary: string | null; excerpt: string}[] : [];
+  return { ownersSource: "nodes with bindings in the classifier rig, running or not", owners, ownersTruncated: seats.length > 200,
+    workSource: "open queue rows those seats hold, newest 30",
+    work: open.slice(0, 30).map(({excerpt, ...row}) => ({...row, summary: (row.summary ?? excerpt).slice(0, 160)})), workTruncated: open.length > 30 };
 }
 
 function readBounded(file: string, limit: number): string {

@@ -2,6 +2,7 @@ import type { ShadowCapture } from "../domain/shadow-capture.js";
 import type Database from "better-sqlite3";
 import type { StreamStore } from "../domain/stream-store.js";
 import { classifierOccupant, classificationSources } from "../domain/classification-sources.js";
+import { DispositionError, getDisposition, markApplied, unappliedDispositions } from "../domain/stream-dispositions.js";
 import { selectedProject } from "../domain/workspace/project-read.js";
 import { type Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
@@ -68,7 +69,8 @@ export function projectsRoutes(): Hono {
           || err.code === "invalid_needs_human"
           || err.code === "invalid_duplicate_of"
           || err.code === "candidate_set_version_required"
-          || err.code === "attempt_versions_required" ? 400
+          || err.code === "attempt_versions_required"
+          || err.code === "invalid_disposition" ? 400
         : 500;
       return c.json({ error: err.code, message: err.message, ...(err.meta ?? {}) }, status as 200);
     }
@@ -205,6 +207,7 @@ export function projectsRoutes(): Hono {
       classifierVersion?: string;
       taxonomyVersion?: string;
       candidateSetVersion?: string;
+      disposition?: unknown;
     }>().catch(() => ({} as never));
     if (!body.streamItemId) return c.json({ error: "streamItemId is required" }, 400);
     const actor = sender(c, body.classifierSession);
@@ -230,6 +233,7 @@ export function projectsRoutes(): Hono {
         classifierVersion: body.classifierVersion,
         taxonomyVersion: body.taxonomyVersion,
         candidateSetVersion: body.candidateSetVersion,
+        disposition: body.disposition,
       });
       return c.json(project, 201);
     } catch (err) {
@@ -302,6 +306,31 @@ export function projectsRoutes(): Hono {
         afterSortKey: c.req.query("afterSortKey") || undefined,
       }));
     } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  // Slice 22: accepted routing judgments. The consumer applies unapplied ones at wake start, and
+  // only the active lease holder records an effect's outcome.
+  app.get("/dispositions/unapplied", (c) => {
+    const parsed = queryLimit(c);
+    if (!parsed.ok) return parsed.response;
+    const limit = Math.min(Math.max(parsed.limit ?? 50, 1), 100);
+    return c.json(unappliedDispositions(c.get("db" as never) as Database.Database, limit));
+  });
+  app.get("/dispositions/:streamItemId", (c) => {
+    const found = getDisposition(c.get("db" as never) as Database.Database, c.req.param("streamItemId"));
+    return found ? c.json(found) : c.json({ error: "disposition_not_found" }, 404);
+  });
+  app.post("/dispositions/:streamItemId/applied", async (c) => {
+    const body = await c.req.json<{ classifierSession?: string; leaseId?: string; applied?: unknown }>().catch(() => ({} as never));
+    const actor = sender(c, body.classifierSession);
+    if (!actor.ok) return actor.response;
+    try {
+      getLease(c).requireActiveHolder(actor.session, body.leaseId as string);
+      return c.json(markApplied(c.get("db" as never) as Database.Database, c.req.param("streamItemId"), body.applied, new Date().toISOString()));
+    } catch (err) {
+      if (err instanceof DispositionError) return c.json({ error: err.code, message: err.message }, err.code === "disposition_not_found" ? 404 : 400);
       return errorResponse(c, err);
     }
   });

@@ -5,7 +5,8 @@ import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-life
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { experimentStatus, setExperiment, readBounded, JevRun, streamDecision, classifyCapture } from "./project-jev.js";
-import { decisionsStatus, readDecisionsSettings, type DecisionsSettings } from "../decisions/decisions.js";
+import { DecisionRun, decisionsStatus, readDecisionsSettings, type DecisionsSettings } from "../decisions/decisions.js";
+import { runDecideWake } from "../decisions/stream-consumer.js";
 import fs from "node:fs";
 
 /**
@@ -117,9 +118,33 @@ export function projectCommand(depsOverride?: ProjectDeps): Command {
       .requiredOption("--evidence-epoch <epoch>", "Owner-authorized evidence epoch; candidate changes do not retry terminal attempts")
       .option("--decisions <file>", "JSON decisions bound to candidateSetVersion and each item's bodyHash")
       .option("--experiment <file>", "Opt-in experimental Jev config; replaces --decisions for one bounded wake")
+      .option("--decide", "Typed decisions for eligible stream items (decisions.enabled with consumer stream): accepted answers become owned work or a recorded disposition; everything else stays with you")
       .option("--limit <count>", "Items per bounded wake (1..100)", "20")
       .option("--json", "JSON output")
-      .action(async (opts: WakeOptions & {experiment?: string}) => {
+      .action(async (opts: WakeOptions & {experiment?: string; decide?: boolean}) => {
+        if (opts.decide) {
+          if (verb !== "wake" || opts.decisions || opts.experiment) {
+            printResult(true, {error: "decide_usage", message: "--decide is for wake only and can't be combined with --decisions or --experiment"}, 400); return;
+          }
+          const deps = getDeps(), limit = Number(opts.limit ?? 20);
+          if (!Number.isInteger(limit) || limit < 1 || limit > 100) { printResult(true, {error: "decide_usage", message: "limit must be an integer in 1..100"}, 400); return; }
+          const decisions = new DecisionRun({ consumer: "stream", settings: deps.decisionsSettings, env: deps.experimentEnv, send: deps.experimentFetch,
+            budget: { maxCalls: limit, deadlineMs: Math.min(600_000, limit * 10_000) } });
+          if (decisions.unavailable) {
+            printResult(true, {decisions: decisions.unavailable, status: decisionsStatus((deps.decisionsSettings ?? readDecisionsSettings)(), deps.experimentEnv, deps.workerRead)}, 200); return;
+          }
+          process.once("SIGINT", decisions.stop); process.once("SIGTERM", decisions.stop);
+          try {
+            await withClient(deps, async client => {
+              try {
+                const result = await runDecideWake(client, opts, decisions, deps.workerRead);
+                console.log(JSON.stringify(result));
+                if (["unavailable", "lease_lost"].includes(result.result.state)) process.exitCode = 1;
+              } catch (error) { printResult(true, {error: "worker_unavailable", message: error instanceof Error ? error.message : "unavailable", phase: "prepare", nextWakeAt: new Date(Date.now() + 60_000).toISOString()}, 409); }
+            });
+          } finally { process.removeListener("SIGINT", decisions.stop); process.removeListener("SIGTERM", decisions.stop); }
+          return;
+        }
         let run: JevRun | undefined;
         try {
           if (opts.experiment) {
