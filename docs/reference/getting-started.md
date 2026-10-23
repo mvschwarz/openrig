@@ -582,8 +582,8 @@ rig ps --nodes --rig starter
 
 Preview the selected seats, models and resources. Plan checks resolution and
 preflight for the working directory. The kernel is already your entry point; this step starts the chosen project
-team. Read readiness for the project seats, not only daemon health. Have the person answer a named authentication, trust or permission
-prompt before giving that seat work; a launch default, or their answer for another seat, isn't their answer to this one. When a seat stops at such a prompt, `rig up` reports
+team. Read readiness for the project seats, not only daemon health. Have the person answer a named authentication, trust, hook-review or
+permission prompt before giving that seat work; a launch default, or their answer for another seat, isn't their answer to this one. When a seat stops at such a prompt, `rig up` reports
 `Status: partial`, prints `Startup attention (<seat>): <reason>` and exits 1;
 `rig ps --nodes` repeats it as "Startup details". The reason ends with the command
 to run once the prompt is answered: `rig seat continue <seat>`, which delivers the
