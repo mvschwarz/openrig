@@ -126,3 +126,12 @@ export function stripManagedBlocks(content: string): string {
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+/** A seat's own role guidance, which is delivered per seat through send_text and never merged into a guidance file
+ *  pod-mates share (ADR-0006). Its id is `rig-role`. Projections saved before that id still carry `role` and are
+ *  restored from that saved selection, so `role` counts too when its source is the agent's own `guidance/role.md`;
+ *  shared guidance that happens to be named `role` and comes from another file still merges. */
+export function isPerSeatRoleGuidance(blockId: string, sourcePath?: string): boolean {
+  if (blockId === "rig-role") return true;
+  return blockId === "role" && sourcePath !== undefined && /(^|[\\/])guidance[\\/]role\.md$/.test(sourcePath);
+}

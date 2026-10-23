@@ -20,6 +20,7 @@ import {
   mergeManagedBlock,
   stripManagedBlocks,
   type ManagedBlockMergeFsOps,
+  isPerSeatRoleGuidance,
 } from "./managed-blocks.js";
 import { resolveConcreteHint } from "./runtime-adapter.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
@@ -28,9 +29,6 @@ import type { NodeStartupSnapshot } from "./types.js";
 const LEGACY_BLOCK_START = (id: string) => `<!-- BEGIN RIGGED MANAGED BLOCK: ${id} -->`;
 const LEGACY_BLOCK_END = (id: string) => `<!-- END RIGGED MANAGED BLOCK: ${id} -->`;
 
-/** The per-seat role block is delivered through send_text, never merged into a shared file
- *  (ADR-0006); the adapters skip it, and so does this. */
-const NEVER_MERGED = new Set(["rig-role"]);
 
 export interface GuidanceItem {
   blockId: string;
@@ -107,7 +105,8 @@ export function seatGuidance(
     if (hint !== "guidance_merge") continue;
     items.set(f.path, { blockId: f.path, sourcePath: f.absolutePath });
   }
-  for (const id of NEVER_MERGED) items.delete(id);
+  // A seat's own role goes through send_text, never into a shared file (ADR-0006); the adapters skip it too.
+  for (const [id, item] of items) if (isPerSeatRoleGuidance(item.blockId, item.sourcePath)) items.delete(id);
   return { targetPath, items: [...items.values()] };
 }
 
