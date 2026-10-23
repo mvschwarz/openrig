@@ -48,10 +48,11 @@ function readRun(runId: string): RunFile | undefined {
   try { return JSON.parse(readFileSync(join(runsDir(), `${runId}.json`), "utf8")) as RunFile; } catch { return undefined; }
 }
 
-/** A process's start time, the discriminator the CLI already uses for daemon ownership (pids get reused). */
+/** A process's start time, the discriminator the CLI already uses for daemon ownership (pids get reused). `ps` from PATH,
+ *  as the other process readers use it: the setuid /bin/ps can't run in a sandbox (macOS CI runs a plain copy). */
 export function processStart(pid: number): string | undefined {
   try {
-    return processIdentity(execFileSync("/bin/ps", ["-o", "uid=,lstart=", "-p", String(pid)], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } }))?.start;
+    return processIdentity(execFileSync("ps", ["-o", "uid=", "-o", "lstart=", "-p", String(pid)], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } }))?.start;
   } catch { return undefined; }
 }
 
