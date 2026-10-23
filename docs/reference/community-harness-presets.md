@@ -113,12 +113,20 @@ Agent's CLI.
   flags and then reopens it, refusing any creation flag (model, provider, `--max-turns`) that differs. So the preset's
   command carries none, and each seat's `config.yaml`, in its Hermes home, sets them before the seat's first start:
   the model and provider, and `agent.max_turns` if you want a cap (nothing else sets it once the flag is gone).
+- **Let Hermes run `rig` as the seat:** Hermes runs every tool command in one gateway per machine, with that gateway's
+  environment, and swaps in a session's own values only for its toolchain names and the names its profile lists in
+  `terminal.client_env_passthrough`. So put the seat's OpenRig variables in that list, in each seat's `config.yaml`
+  ([`config.yaml.example`](community-harness-examples/hermes/config.yaml.example)). Without it, `rig` inside Hermes
+  runs as whichever seat started the gateway, or as no seat; with it, each seat runs `rig` as itself. To check, ask the
+  seat's Hermes to run `rig whoami --json`. The launcher warns when a seat's `config.yaml` doesn't pass
+  `OPENRIG_SESSION_NAME`. This covers Hermes's CLI and TUI, whose clients pass their environment; its ACP clients pass
+  none.
 - **The preset:** it declares `names_conversation` but not `resume`, until reopening a named session, and a missing one,
   have been checked with a real Hermes.
 - **Stopping:** Hermes's CLI is a client of a gateway, so closing a seat's pane detaches it. Hermes finishes any turn it
   accepted, and the seat's gateway exits once idle. The preset says so in its limits.
 
-Copy both and maintain them as your own.
+Copy them and maintain them as your own.
 
 **Not supported for community harnesses:** restarting a seat in place (`rig seat restart` is for Codex seats) and
 switching harness on a running seat. Each says so before anything changes.

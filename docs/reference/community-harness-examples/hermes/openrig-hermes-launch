@@ -18,6 +18,12 @@ HERMES_HOME="${OPENRIG_HOME:-$HOME/.openrig}/state/hermes/${OPENRIG_NODE_ID:-${O
 export HERMES_HOME
 mkdir -p "$HERMES_HOME"
 
+# Hermes's tools see its shared gateway's environment except for the names a profile passes through, so a seat whose
+# config.yaml doesn't pass OPENRIG_SESSION_NAME would run `rig` as another seat, or as none (see config.yaml.example).
+if ! grep -qs OPENRIG_SESSION_NAME "$HERMES_HOME/config.yaml"; then
+  echo "openrig-hermes-launch: $HERMES_HOME/config.yaml doesn't pass OPENRIG_SESSION_NAME to Hermes's tools, so rig run from Hermes won't act as this seat; see config.yaml.example" >&2
+fi
+
 if [ -n "${OPENRIG_RESUME_REF:-}" ]; then
   exec "$hermes" chat -c "$OPENRIG_RESUME_REF"
 fi
