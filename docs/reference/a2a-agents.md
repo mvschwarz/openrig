@@ -49,6 +49,7 @@ returns an echo artifact. Its README explains startup; it does not implement the
 controls described later. Use a peer that supports those operations when testing them.
 
 Save as `a2a_client.py`. This client also works without an OpenRig row, for the inbound recipe below.
+Streaming reads have no deadline so quiet worker waits keep their stream; connection, write and pool waits are bounded to 10 seconds.
 
 ```python
 import asyncio
@@ -92,7 +93,8 @@ async def main():
             card = await A2ACardResolver(httpx_client=http, base_url=os.environ['A2A_URL']).get_agent_card()
         log.write(json.dumps({'card': MessageToDict(card), 'message': MessageToDict(message)}) + '\n')
         log.flush()
-        client = await create_client(agent=card, client_config=ClientConfig(streaming=True))
+        client = await create_client(agent=card, client_config=ClientConfig(
+            streaming=True, httpx_client=httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=None))))
         try:
             async for chunk in client.send_message(SendMessageRequest(message=message)):
                 event = MessageToDict(chunk)  # SDK 1.1.0 yields StreamResponse, not a tuple.
