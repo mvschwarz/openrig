@@ -87,10 +87,12 @@ switching harness on a running seat. Each says so before anything changes.
 
 [`community-harness-examples/cursor/`](community-harness-examples/cursor/) has a preset and a small launcher for Cursor's
 CLI.
-- **The launcher:** it reports the chat `cursor-agent create-chat` makes, then reopens it, with its own Cursor config
-  folder per seat.
-- **The preset:** it declares `launch_result` but not `resume`, until Cursor's behaviour for a missing chat id has been
-  checked.
+- **The launcher:** it reports the chat `cursor-agent create-chat` makes, then reopens it. Each seat gets its own Cursor
+  config folder unless `CURSOR_CONFIG_DIR` is already set. Cursor keeps its chats and `cli-config.json` there, and its
+  login elsewhere.
+- **The preset:** it declares `launch_result` and `resume`. Cursor's `--resume` with an id it doesn't hold starts a new,
+  empty chat without saying so, so on a resume the launcher first checks that the chat's store exists. When it doesn't, the
+  launcher reports `error: "missing"` and starts nothing.
 
 Copy both and maintain them as your own.
 
