@@ -180,7 +180,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
             body: body.text,
             identityProvenance: "transport:v1",
           });
-          // The send landed (its text and Enter both succeeded), so its row says delivered, as broadcast's rows do.
+          // The input was dispatched successfully; mark its audit row as broadcast does.
           outbox.markDelivered(entry.outboxId);
         } catch (err) {
           console.warn(`[transport/send] outbox auto-record failed (send already delivered): ${(err as Error).message}`);
