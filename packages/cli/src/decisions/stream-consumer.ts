@@ -216,6 +216,10 @@ export async function runDecideWake(client: Client, opts: WakeOptions, run: Deci
       // Intake already has custody of a deferred item (an earlier template, or an abstention that didn't land): never ask again.
       const existing = await read<{ disposition?: string }>(client, `/api/projects/dispositions/${encodeURIComponent(id)}`);
       if (existing.status === 200) { reasons.set(id, `already ${existing.data.disposition ?? "recorded"}; intake has it`); return { kind: "abstain", reason: reasons.get(id)! }; }
+      if (existing.status !== 404) {
+        stop = true; reasons.set(id, `not attempted: disposition lookup HTTP ${existing.status}`);
+        throw Error(reasons.get(id)!);
+      }
       if (!routing) {
         stop = true; reasons.set(id, `not attempted: routing candidates unavailable (${routingGap})`);
         throw Error(reasons.get(id)!);

@@ -19,7 +19,7 @@ const ROUTING = {
 type Rec = Record<string, any>;
 
 /** A fake daemon: worker sources, the attempt ledger, classifications and deferrals, the lease, and queue effects. */
-function daemon(items: string[] = ["S1"], opts: { createStatus?: number[]; notes?: string[]; workState?: string; work?: Rec[]; leaseLost?: boolean; rows?: Record<string, Rec> } = {}) {
+function daemon(items: string[] = ["S1"], opts: { dispositionStatus?: number; createStatus?: number[]; notes?: string[]; workState?: string; work?: Rec[]; leaseLost?: boolean; rows?: Record<string, Rec> } = {}) {
   const lease = { leaseId: "lease-1", classifierSession: "intake@rig", state: "active", acquiredAt: new Date().toISOString(),
     lastHeartbeat: new Date().toISOString(), expiresAt: new Date(Date.now() + 90_000).toISOString() };
   const done = new Set<string>(), classified: Rec[] = [], failed: Rec[] = [], abstained: Rec[] = [], applied: { url: string; body: Rec }[] = [];
@@ -38,7 +38,7 @@ function daemon(items: string[] = ["S1"], opts: { createStatus?: number[]; notes
     }
     if (path.startsWith("/api/stream/")) { const id = path.split("/").pop()!; return { status: 200, data: { streamItemId: id, sourceSession: "poster@rig", body: `The queue test ${id} is flaky again\nmore detail`, hintTags: ["tests"] } }; }
     if (path === "/api/projects/dispositions/unapplied") { applying = true; return { status: 200, data: [...dispositions.values()].filter(d => !d.applied && d.disposition !== "deferred") }; }
-    if (path.startsWith("/api/projects/dispositions/")) { const d = dispositions.get(path.split("/")[4]!); return d ? { status: 200, data: d } : { status: 404, data: { error: "disposition_not_found" } }; }
+    if (path.startsWith("/api/projects/dispositions/")) { if (opts.dispositionStatus) return { status: opts.dispositionStatus, data: { error: "lookup_unavailable" } }; const d = dispositions.get(path.split("/")[4]!); return d ? { status: 200, data: d } : { status: 404, data: { error: "disposition_not_found" } }; }
     if (path === "/api/queue/q-1") return { status: 200, data: { qitemId: "q-1", state: opts.workState ?? "in-progress" } };
     if (path === "/api/queue/q-1/transitions") return { status: 200, data: (opts.notes ?? []).map(transitionNote => ({ transitionNote })) };
     if (path.startsWith("/api/queue/")) { const row = rows[decodeURIComponent(path.split("/")[3]!)]; return row ? { status: 200, data: row } : { status: 404, data: { error: "qitem_not_found" } }; }
@@ -162,6 +162,19 @@ describe("stream consumer in the intake turn", () => {
     expect(send).not.toHaveBeenCalled();
     expect(d.abstained).toEqual([expect.not.objectContaining({ disposition: expect.anything() })]);
     expect(out.decisions.forIntake).toMatchObject([{ streamItemId: "S1", reason: expect.stringContaining("already deferred") }]);
+  });
+
+  it.each([204, 403, 503])("a disposition lookup HTTP %s stops the wake without re-asking an earlier deferral", async status => {
+    const d = daemon(["S1", "S2"], { dispositionStatus: status }), send = provider({ disposition: "create", owner: "dev-lead@rig" });
+    const previous = { streamItemId: "S1", disposition: "deferred", applied: { outcome: "deferred_to_intake" } };
+    d.dispositions.set("S1", structuredClone(previous));
+    const out = await wake(d, send);
+    expect(send).not.toHaveBeenCalled();
+    expect([...d.dispositions.values()]).toEqual([previous]);
+    expect([d.classified, d.abstained, d.creates, d.notes]).toEqual([[], [], [], []]);
+    expect(out.result).toMatchObject({ state: "stopped", outcomes: [{ streamItemId: "S1", status: "error" }] });
+    expect(out.decisions.notAttempted).toMatchObject([{ streamItemId: "S1", reason: `not attempted: disposition lookup HTTP ${status}` }]);
+    expect([...d.done]).toEqual([]);
   });
 
   it("when the run stops before sending (budget), the wake stops and the rest stay eligible, not deferred", async () => {
