@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach, afterAll } from "vitest";
 import http from "node:http";
 import { Command } from "commander";
 import { downCommand } from "../src/commands/down.js";
@@ -66,14 +66,23 @@ describe("Down CLI", () => {
   let downCallCount: number;
   let inventory: { status: number; data: unknown } | null;
   let events: string[];
+  let callerIdentity: { rigId: string; attachmentType?: string } | null = null;
+  const stdinTTY = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
 
   beforeAll(async () => {
+    Object.defineProperty(process.stdin, "isTTY", { value: false, configurable: true });
     responseOverride = null;
     summaryOverride = null;
     downCallCount = 0;
     server = http.createServer(async (req, res) => {
       let body = "";
       for await (const chunk of req) body += chunk;
+
+      if (req.url?.startsWith("/api/whoami?") && req.method === "GET") {
+        res.writeHead(callerIdentity ? 200 : 404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(callerIdentity ? { identity: callerIdentity } : { error: "unknown seat" }));
+        return;
+      }
 
       if (req.url?.split("?")[0] === "/api/rigs/summary" && req.method === "GET") {
         if (summaryOverride === null) {
@@ -119,7 +128,12 @@ describe("Down CLI", () => {
     port = (server.address() as { port: number }).port;
   });
 
-  afterAll(() => { server.close(); });
+  afterAll(() => {
+    server.close();
+    if (stdinTTY) Object.defineProperty(process.stdin, "isTTY", stdinTTY);
+    else delete (process.stdin as { isTTY?: boolean }).isTTY;
+  });
+  afterEach(() => { vi.unstubAllEnvs(); });
 
   beforeEach(() => {
     responseOverride = null;
@@ -128,18 +142,89 @@ describe("Down CLI", () => {
     lastBody = undefined;
     inventory = null;
     events = [];
+    callerIdentity = null;
   });
 
-  function makeCmd(): Command {
+  function makeCmd(promptYesNo?: (question: string) => Promise<boolean>): Command {
     const prog = new Command();
     prog.exitOverride();
-    prog.addCommand(downCommand(runningDeps(port)));
+    const deps = { ...runningDeps(port), promptYesNo };
+    prog.addCommand(downCommand(deps));
     return prog;
   }
 
   function node(logicalId: string, fields: Record<string, unknown> = {}) {
     return { logicalId, nodeKind: "agent", sessionStatus: "running", canonicalSessionName: `${logicalId}@team`, ...fields };
   }
+
+  function insideRig(rigId = "rig-1", attachmentType = "tmux") {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "lead@team");
+    callerIdentity = { rigId, attachmentType };
+  }
+
+  it.each([{ flags: [] }, { flags: ["--force"] }])("warns without stopping its caller's rig when headless ($flags)", async ({ flags }) => {
+    insideRig();
+    const { logs, exitCode } = await captureLogs(() => makeCmd().parseAsync(["down", "rig-1", ...flags], { from: "user" }).then(() => {}));
+    expect(downCallCount).toBe(0);
+    expect(exitCode).toBe(1);
+    expect(logs.join("\n")).toContain("your own session");
+    expect(logs.join("\n")).toContain("--yes");
+  });
+
+  it("returns a structured confirmation request without stopping in JSON mode", async () => {
+    insideRig();
+    const { logs, exitCode } = await captureLogs(() => makeCmd().parseAsync(["down", "rig-1", "--json"], { from: "user" }).then(() => {}));
+    expect(downCallCount).toBe(0);
+    expect(exitCode).toBe(1);
+    expect(logs).toHaveLength(1);
+    const result = JSON.parse(logs[0]!);
+    expect(result.error.code).toBe("own_rig_confirmation_required");
+    expect(result.error.consequence).toContain("your own session");
+    expect(result.error.action).toContain("--yes");
+  });
+
+  it.each([false, true])("asks before stopping its caller's rig (answer %s)", async answer => {
+    insideRig();
+    const ask = vi.fn(async (_question: string) => { expect(downCallCount).toBe(0); return answer; });
+    const { exitCode } = await captureLogs(() => makeCmd(ask).parseAsync(["down", "rig-1"], { from: "user" }).then(() => {}));
+    expect(ask).toHaveBeenCalledOnce();
+    expect(ask.mock.calls[0]?.[0]).toContain("[y/N]");
+    expect(downCallCount).toBe(answer ? 1 : 0);
+    expect(exitCode).toBe(answer ? undefined : 1);
+  });
+
+  it("accepts --yes for its resolved rig name and keeps delete/force/snapshot semantics", async () => {
+    insideRig();
+    summaryOverride = [{ id: "rig-1", name: "team" }];
+    const { logs, exitCode } = await captureLogs(() => makeCmd().parseAsync(["down", "team", "--yes", "--delete", "--force", "--snapshot", "--json"], { from: "user" }).then(() => {}));
+    expect(downCallCount).toBe(1);
+    expect(lastBody).toEqual({ rigId: "rig-1", delete: true, force: true, snapshot: true });
+    expect(exitCode).toBeUndefined();
+    expect(JSON.parse(logs[0]!).warning.consequence).toContain("your own session");
+  });
+
+  it("discloses that OpenRig does not stop an externally attached caller", async () => {
+    insideRig("rig-1", "external_cli");
+    const { logs } = await captureLogs(() => makeCmd().parseAsync(["down", "rig-1", "--json"], { from: "user" }).then(() => {}));
+    expect(downCallCount).toBe(0);
+    expect(JSON.parse(logs[0]!).error.consequence).toContain("OpenRig doesn't stop externally attached sessions");
+  });
+
+  it("stops another rig without asking, even when the caller session name suggests the target", async () => {
+    insideRig("other-rig");
+    const ask = vi.fn(async () => false);
+    const { exitCode } = await captureLogs(() => makeCmd(ask).parseAsync(["down", "rig-1"], { from: "user" }).then(() => {}));
+    expect(ask).not.toHaveBeenCalled();
+    expect(downCallCount).toBe(1);
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("keeps teardown available when the caller cannot be resolved", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "unresolved@team");
+    const { exitCode } = await captureLogs(() => makeCmd().parseAsync(["down", "rig-1"], { from: "user" }).then(() => {}));
+    expect(downCallCount).toBe(1);
+    expect(exitCode).toBeUndefined();
+  });
 
   it("names live agent sessions and served activity before teardown without prompting", async () => {
     inventory = { status: 200, data: [
@@ -235,6 +320,21 @@ describe("Down CLI", () => {
       `To restore: rig up ${quotedName} --existing`,
     ]);
     expect(exitCode).toBeUndefined();
+  });
+
+  it("names each edited OpenRig guidance block it kept", async () => {
+    responseOverride = {
+      status: 200,
+      body: {
+        rigId: "rig-1", sessionsKilled: 1, snapshotId: null, deleted: false, deleteBlocked: false, alreadyStopped: false, errors: [],
+        keptGuidance: ["/work/project/CLAUDE.md: openrig-seat-skills.md"],
+      },
+    };
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "down", "rig-1"]);
+    });
+    expect(logs).toContain("Kept 1 edited OpenRig block(s) in guidance files; remove them by hand if you don't want them:");
+    expect(logs).toContain("  /work/project/CLAUDE.md: openrig-seat-skills.md");
   });
 
   it.each([

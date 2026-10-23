@@ -33,12 +33,12 @@ blanket-replaced: `rigged` → `rig` is a per-occurrence question, not a global
 substitution.
 
 **Axis 1 — MCP tool names are `rig_*`.** `packages/cli/src/mcp-server.ts`
-registers **23** tools, all named `rig_*`
+registers **24** tools, all named `rig_*`
 (`grep -c 'server.tool(' packages/cli/src/mcp-server.ts`), including
 `rig_rig_nodes` (`mcp-server.ts:290`), `rig_send` (`:307`),
 `rig_capture` (`:341`), `rig_chatroom_send` (`:366`) and `rig_chatroom_watch`
-(`:402`), and the five queue tools `rig_queue_create`, `_show`, `_list`, `_claim`
-and `_update`. No `rigged_*` name other than the tmux keys below remains in product
+(`:402`), the five queue tools `rig_queue_create`, `_show`, `_list`, `_claim`
+and `_update`, and `rig_telemetry_events`. No `rigged_*` name other than the tmux keys below remains in product
 source: **0** hits
 (`git grep -n 'rigged_' -- ':(glob)packages/*/src/**' | grep -v -c '@rigged_'`).
 

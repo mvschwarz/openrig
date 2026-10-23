@@ -1,3 +1,4 @@
+import { TerminalPolicyStore } from "../src/domain/terminal-policy.js";
 // OPR.0.4.3.14 — manual compaction trigger route (POST /api/compaction/trigger).
 //
 // Proves: the route resolves the target + reads the EXISTING context-usage
@@ -22,7 +23,7 @@ import type { ClaudeCompactionPolicy, SettingsStore } from "../src/domain/user-s
 import type { ContextUsage } from "../src/domain/types.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { compactionRoutes } from "../src/routes/compaction.js";
-import { createFullTestDb } from "./helpers/test-app.js";
+import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 
 const POLICY: ClaudeCompactionPolicy = {
   enabled: true,
@@ -38,12 +39,12 @@ function makeSettings(): SettingsStore {
   return { resolveClaudeCompactionPolicy: () => POLICY } as unknown as SettingsStore;
 }
 
-function idleTmux(sendText?: (target: string, text: string) => Promise<{ ok: true }>): TmuxAdapter {
+function idleTmux(sendText?: (target: string, text: string) => Promise<{ ok: true }>, sendKeys?: () => Promise<{ ok: true }>): TmuxAdapter {
   return {
     hasSession: async () => true,
     probeSession: async () => ({ state: "present" as const }),
     sendText: sendText ?? (async () => ({ ok: true as const })),
-    sendKeys: async () => ({ ok: true as const }),
+    sendKeys: sendKeys ?? (async () => ({ ok: true as const })),
     capturePaneContent: async () => "idle\n❯ ",
     createSession: async () => ({ ok: true as const }),
     killSession: async () => ({ ok: true as const }),
@@ -116,8 +117,10 @@ describe("compaction routes — POST /api/compaction/trigger", () => {
     return { claudeNodeId: claude.id, codexNodeId: codex.id };
   }
 
-  function buildApp(opts?: { wireEnforcer?: boolean; completeMap?: boolean; bearerToken?: string }): AppParts {
+  function buildApp(opts?: { wireEnforcer?: boolean; completeMap?: boolean; bearerToken?: string; afterPreparation?: () => void; afterPreparationSubmit?: () => void | Promise<void> }): AppParts {
     const sentTexts: string[] = [];
+    let clock = Date.now();
+    const sleep = async (ms: number) => { clock += ms; };
     const transport = new SessionTransport({
       db,
       rigRepo,
@@ -127,12 +130,18 @@ describe("compaction routes — POST /api/compaction/trigger", () => {
         const marker = text.match(/<!-- openrig-compaction-complete .*? -->/)?.[0];
         const target = text.match(/Write this attempt's complete restore map to ("(?:[^"\\]|\\.)*")/);
         if (opts?.completeMap !== false && marker && target) { const file = JSON.parse(target[1]!); mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, "# Fixture map\n" + marker); }
+        if (marker && target) opts?.afterPreparation?.();
         return { ok: true as const };
-      }),
-      sleep: async () => undefined,
+      }, async () => { await opts?.afterPreparationSubmit?.(); return { ok: true as const }; }),
+      now: () => new Date(clock),
+      sleep,
       waitForIdlePollMs: 1,
     });
-    const enforcer = new ClaudeCompactionEnforcer(makeSettings(), transport, { openrigHome: stateDir, manualPrepWaitMs: 50, resolveOccupantGeneration: () => "fixture-generation" });
+    const enforcer = new ClaudeCompactionEnforcer(makeSettings(), transport, {
+      terminalPolicies: new TerminalPolicyStore(db),
+      openrigHome: stateDir, manualPrepWaitMs: 1000, resolveOccupantGeneration: () => "fixture-generation",
+      now: () => clock, sleep,
+    });
     const app = new Hono();
     app.use("*", async (c, next) => {
       c.set("sessionTransport" as never, transport);
@@ -144,6 +153,94 @@ describe("compaction routes — POST /api/compaction/trigger", () => {
     app.route("/api/compaction", compactionRoutes({ bearerToken: opts?.bearerToken }));
     return { app, sentTexts, enforcer };
   }
+
+  it("keeps OpenRig's compaction authority while a no-peer preset refuses a peer trigger", async () => {
+    const { claudeNodeId } = seed();
+    new TerminalPolicyStore(db).write(claudeNodeId, { preset: "no-peer-interventions", helpers: [], exceptions: {} }, "person", "No peer interventions");
+    usageStore.persist(claudeNodeId, knownUsage("dev-impl@my-rig", 90));
+    const { app, sentTexts, enforcer } = buildApp();
+    const refused = await app.request("/api/compaction/trigger", { method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "dev-qa@my-rig" },
+      body: JSON.stringify({ session: "dev-impl@my-rig" }) });
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({ reason: "terminal_policy_refused" });
+    expect(sentTexts).toEqual([]);
+    expect(await enforcer.maybeAutoCompact({ nodeId: claudeNodeId, sessionName: "dev-impl@my-rig", runtime: "claude-code", usedPercentage: 90 })).toEqual({ triggered: true });
+    expect(sentTexts).toHaveLength(1);
+    expect(enforcer.getPreparationState("dev-impl@my-rig")?.policyActor).toEqual({ source: "openrig" });
+  });
+
+  it("keeps automatic compaction running with an unreadable policy while the account reports unknown", async () => {
+    const { claudeNodeId } = seed();
+    db.prepare("UPDATE seat_terminal_policies SET config_json='{' WHERE node_id=?").run(claudeNodeId);
+    usageStore.persist(claudeNodeId, knownUsage("dev-impl@my-rig", 90));
+    const { app, enforcer, sentTexts } = buildApp();
+    const peer = await app.request("/api/compaction/trigger", { method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "dev-qa@my-rig" },
+      body: JSON.stringify({ session: "dev-impl@my-rig" }) });
+    expect(await peer.json()).toMatchObject({ reason: "terminal_policy_unavailable" });
+    for (let tick = 0; tick < 2; tick++) expect(await enforcer.maybeAutoCompact({ nodeId: claudeNodeId,
+      sessionName: "dev-impl@my-rig", runtime: "claude-code", usedPercentage: 90 })).toEqual({ triggered: true });
+    expect(sentTexts[1]).toContain("/compact");
+    const account = await createTestApp(db).app.request("/api/seat/status/dev-impl@my-rig");
+    expect(await account.json()).toMatchObject({ terminalPolicy: { state: "unknown" } });
+  });
+
+  it("honours an explicit self-compaction exception without changing peer or OpenRig authority", async () => {
+    const { claudeNodeId } = seed();
+    new TerminalPolicyStore(db).write(claudeNodeId, { preset: "full-control", helpers: [], exceptions: { self: { compaction: "deny" } } }, "person", "Do not compact yourself");
+    usageStore.persist(claudeNodeId, knownUsage("dev-impl@my-rig", 42));
+    const { app, sentTexts } = buildApp();
+    const response = await app.request("/api/compaction/trigger", { method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "dev-impl@my-rig" },
+      body: JSON.stringify({ session: "dev-impl@my-rig", skipMap: true }) });
+    expect(response.status).toBe(409);
+    expect(sentTexts).toEqual([]);
+  });
+
+  it("lets an authorised peer finish compaction while automatic compaction is denied", async () => {
+    const { claudeNodeId } = seed();
+    new TerminalPolicyStore(db).write(claudeNodeId, { preset: "full-control", helpers: [],
+      exceptions: { openrig: { compaction: "deny" } } }, "person", "Only compact on request");
+    usageStore.persist(claudeNodeId, knownUsage("dev-impl@my-rig", 90));
+    const { app, enforcer, sentTexts } = buildApp({ afterPreparationSubmit: async () => {
+      if (sentTexts.length === 1) expect(await enforcer.maybeAutoCompact({ nodeId: claudeNodeId,
+        sessionName: "dev-impl@my-rig", runtime: "claude-code", usedPercentage: 90 }))
+        .toEqual({ triggered: false, reason: "terminal_policy_refused" });
+    } });
+    const response = await app.request("/api/compaction/trigger", { method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "dev-qa@my-rig" },
+      body: JSON.stringify({ session: "dev-impl@my-rig" }) });
+    expect(response.status).toBe(200);
+    expect(sentTexts).toHaveLength(2);
+    expect(sentTexts[1]).toContain("/compact");
+  });
+
+  it("does not submit compact when its initiating actor loses authority during preparation", async () => {
+    const { claudeNodeId } = seed();
+    const store = new TerminalPolicyStore(db);
+    usageStore.persist(claudeNodeId, knownUsage("dev-impl@my-rig", 42));
+    const { app, sentTexts } = buildApp({ afterPreparationSubmit: () => store.write(claudeNodeId,
+      { preset: "no-peer-interventions", helpers: [], exceptions: {} }, "person", "Stop peer compaction") });
+    const response = await app.request("/api/compaction/trigger", { method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "dev-qa@my-rig" },
+      body: JSON.stringify({ session: "dev-impl@my-rig" }) });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ reason: "terminal_policy_refused", preparation: { delivery: "delivered", compact: "not_sent" } });
+    expect(sentTexts.some(text => text.startsWith("/compact"))).toBe(false);
+  });
+
+  it("keeps a policy refusal after preparation paste uncertain instead of claiming no input", async () => {
+    const { claudeNodeId } = seed();
+    usageStore.persist(claudeNodeId, knownUsage("dev-impl@my-rig", 42));
+    const { app } = buildApp({ afterPreparation: () => new TerminalPolicyStore(db).write(claudeNodeId,
+      { preset: "no-peer-interventions", helpers: [], exceptions: {} }, "person", "Stop peer compaction") });
+    const response = await app.request("/api/compaction/trigger", { method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "dev-qa@my-rig" },
+      body: JSON.stringify({ session: "dev-impl@my-rig" }) });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ preparation: { delivery: "uncertain", compact: "not_sent" } });
+  });
 
   it("known below-threshold usage permits manual preparation, then /compact follows", async () => {
     const { claudeNodeId } = seed();

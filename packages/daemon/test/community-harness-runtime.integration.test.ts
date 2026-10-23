@@ -174,7 +174,7 @@ describe("a community harness from a data preset", () => {
     const launched = await rig(["launch", rigId, "work.worker", "--json"], 60_000);
     expect(launched.code).not.toBe(0);
     expect(JSON.parse(launched.stdout)).toMatchObject({ status: "awaiting-decision",
-      error: `Resume is unsupported for community harness "synth-harness": its preset is launch-only. No session was started, and the earlier conversation is left as it is. Re-run with --fresh work.worker only if you want a new conversation.` });
+      error: `Resume is unsupported for community harness "synth-harness": its preset is launch-only. No session was started, and the earlier conversation is left as it is. Only if you want a new conversation, run: rig seat launch 'work.worker@community-harness-rig' --fresh --reason "<why>".` });
     expect(() => capture()).toThrow();
     // A new conversation stays the person's deliberate choice.
     const fresh = await rig(["up", "community-harness-rig", "--existing", "--fresh", "work.worker", "--json"], 120_000);

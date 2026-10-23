@@ -97,6 +97,11 @@ function createMockDaemon() {
         res.end("internal server error");
         return;
       }
+      if (rigId === "rig-with-startup") {
+        res.writeHead(200, { "Content-Type": "text/yaml", "X-Rig-Root": encodeURIComponent("/installed/项目/kernel") });
+        res.end("version: '0.2'\nname: rig-with-startup\nculture_file: missing-culture.md\nstartup:\n  files:\n    - path: missing-start.md\n      required: true\n    - path: optional-start.md\n      required: false\n");
+        return;
+      }
       res.writeHead(200, { "Content-Type": "text/yaml" });
       res.end("schema_version: 1\nname: test-rig\nnodes: []\n");
       return;
@@ -246,6 +251,22 @@ describe("rig export + import", () => {
     program.addCommand(exportCommand(deps));
     await captureLogs(() => program.parseAsync(["node", "rig", "export", "rig-1"]));
     expect(writeFile).toHaveBeenCalledWith("rig.yaml", expect.any(String));
+  });
+
+  it("export: warns when culture_file or startup files do not resolve relative to output directory", async () => {
+    const writeFile = vi.fn();
+    const exists = vi.fn((p: string) => !p.includes("missing-culture.md") && !p.includes("missing-start.md") && !p.includes("optional-start.md"));
+    const deps = exportDeps({ writeFile, exists });
+    const program = new Command();
+    program.addCommand(exportCommand(deps));
+
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "export", "rig-with-startup", "-o", "specs/exported.yaml"]));
+    expect(writeFile).toHaveBeenCalled();
+    const output = logs.join("\n");
+    expect(output).toContain("Referenced file 'missing-culture.md' (came from /installed/项目/kernel) does not exist relative to");
+    expect(output).toContain("Referenced file 'missing-start.md' (came from /installed/项目/kernel) does not exist relative to");
+    expect(output).toContain("fails its startup until the file is copied next to it (or the export is imported with --rig-root /installed/项目/kernel)");
+    expect(output).not.toContain("optional-start.md");
   });
 
   // Test 3: export rig not found (404)

@@ -94,6 +94,7 @@ export interface ContinuityQueueWriter {
     destinationSession: string;
     body: string;
     nudge?: boolean;
+    wakeTrigger?: "agent" | "openrig";
   }): Promise<{ qitemId: string }>;
 }
 
@@ -355,6 +356,8 @@ export async function createContinuityCutoverBaton(
     destinationSession: action.destination,
     body: action.body,
     nudge: true,
+    // A watchdog's continuity action materializes this baton: OpenRig's own scheduling.
+    wakeTrigger: "openrig",
   });
 }
 

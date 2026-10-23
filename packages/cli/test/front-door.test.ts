@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
 import { runFrontDoor, resolveTuiPath, probeFrontDoor, type FrontDoorIo } from "../src/front-door.js";
+import { diagnoseRuntimePosture, observeClaudePermission } from "../../daemon/src/domain/permission-drift.js";
 import { DaemonClient, DaemonConnectionError, DaemonResponseError, DaemonTimeoutError } from "../src/client.js";
 
 // A GUARANTEED-refused local port (bind an ephemeral port, capture it, close → connecting refuses).
@@ -187,6 +188,35 @@ describe("bare-rig front door — first-impression degrade (never a stack trace)
       expect(deps.errLines).toEqual([]);
     },
   );
+
+  it.each([{}, { permissions: {} }, { permissions: { defaultMode: "auto" } }, { permissions: { defaultMode: "denyAll" } }])(
+    "opens the TUI from a managed Claude seat with manual defaults %j", async settings => {
+      const diagnostic = diagnoseRuntimePosture({ runtime: "claude-code", cwd: "/work",
+        applied: observeClaudePermission("--permission-mode acceptEdits"),
+        fs: { readFile: () => JSON.stringify(settings), cwdReadable: () => true,
+          commandAvailable: () => true, claudePermissionModes: () => ["acceptEdits", "auto"] } });
+      const deps = io({ probeDaemon: async () => ({ state: "diagnostic", diagnostic }) });
+      await runFrontDoor(["node", "rig"], deps);
+      expect(deps.launches).toBe(1);
+      expect(deps.exits).toEqual([0]);
+      expect(deps.errLines).toEqual([]);
+    });
+
+  it.each(["unreadable", "invalid rules", "conflicting rules"])(
+    "keeps %s settings diagnostic with a managed launch flag", async problem => {
+      const diagnostic = diagnoseRuntimePosture({ runtime: "claude-code", cwd: "/work",
+        applied: observeClaudePermission("--permission-mode acceptEdits"),
+        fs: { readFile: () => {
+          if (problem === "unreadable") throw Object.assign(new Error("denied"), { code: "EACCES" });
+          return JSON.stringify({ permissions: problem === "invalid rules" ? { ask: 3 }
+            : { allow: ["Read(/**)"], deny: ["Read(/**)"] } });
+        }, cwdReadable: () => true, commandAvailable: () => true,
+        claudePermissionModes: () => ["acceptEdits"] } });
+      const deps = io({ probeDaemon: async () => ({ state: "diagnostic", diagnostic }) });
+      await runFrontDoor(["node", "rig"], deps);
+      expect(deps.launches).toBe(0);
+      expect(deps.exits).toEqual([1]);
+    });
 
   it("front-door unreadable settings stays UNKNOWN_EFFECTIVE and never becomes daemon-down", async () => {
     const deps = io({

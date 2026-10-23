@@ -20,10 +20,11 @@ export const SENDER_IDENTITY_HEADER = "X-OpenRig-Session";
  * buggy/stale caller cannot write false history by fat-fingering or stale-copying a body field.
  * Absent env ⇒ no header ⇒ the daemon DELIVERS and labels the write `claimed:v1` (P18 deliver-and-label;
  * a write with no actor at all is 400 actor_required — parameter completeness, not a refusal). One
- * chokepoint: `DaemonClient.fetch` stamps this on every request; callers never set it by hand.
+ * chokepoint: `DaemonClient.fetch` stamps this on every request; callers never set it by hand. A client built for one
+ * authenticated caller (`sessionName`) carries that caller's seat instead of the process env.
  */
-export function senderIdentityHeaders(originSelfHostId?: string): Record<string, string> {
-  const session = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
+export function senderIdentityHeaders(originSelfHostId?: string, sessionName?: string): Record<string, string> {
+  const session = (sessionName ?? readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME"))?.trim();
   if (!session) return {};
   // Preserve qualified senders; append only a locally derived instance id.
   const value =
@@ -111,6 +112,7 @@ export class DaemonResponseError extends Error {
 export interface DaemonResponse<T = unknown> {
   status: number;
   data: T;
+  headers?: Headers;
 }
 
 /**
@@ -136,6 +138,8 @@ interface DaemonClientOptions {
   ownerProbe?: (baseUrl: string, timeoutMs?: number) => Promise<LocalDaemonOwner>;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  /** The seat this client acts as, for a client built per authenticated caller; default: the process env. */
+  sessionName?: string;
 }
 
 /** Routing state published by daemon start, not a health check or sibling-home discovery. */
@@ -164,9 +168,10 @@ export class DaemonClient {
   remoteTarget = false;
   private identity?: Promise<Record<string, string>>;
   private originUnknown = false;
+  private readonly sessionName?: string;
 
   private async identityHeaders(): Promise<Record<string, string>> {
-    const localHeaders = senderIdentityHeaders();
+    const localHeaders = senderIdentityHeaders(undefined, this.sessionName);
     const session = localHeaders[SENDER_IDENTITY_HEADER];
     if (!session || session.split("@").length >= 3) return localHeaders;
     const directTarget = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
@@ -193,7 +198,7 @@ export class DaemonClient {
       } catch { /* Unproved locality: carry the known origin, never the endpoint's identity. */ }
       finally { clearTimeout(timer); controller.abort(); }
     }
-    return senderIdentityHeaders(origin);
+    return senderIdentityHeaders(origin, this.sessionName);
   }
 
   constructor(baseUrl?: string, options?: DaemonClientOptions) {
@@ -219,6 +224,7 @@ export class DaemonClient {
     this.fetchImpl = options?.fetchImpl ?? fetch;
     this.ownerProbe = options?.ownerProbe ?? ((url, timeoutMs) => assessLocalDaemonOwner(url, { fetchImpl: this.fetchImpl, timeoutMs }));
     this.timeoutMs = options?.timeoutMs ?? 5_000;
+    this.sessionName = options?.sessionName;
   }
 
   /** Shared with raw CLI data readers. Constructor URLs alone do not establish explicit intent. */
@@ -357,7 +363,11 @@ export class DaemonClient {
 
   private async requestText(path: string, init: RequestInit, options?: DaemonRequestOptions): Promise<DaemonResponse<string>> {
     let data = "";
-    const res = await this.fetch(path, init, options, async (response) => { data = await response.text(); });
-    return { status: res.status, data };
+    let headers: Headers | undefined;
+    const res = await this.fetch(path, init, options, async (response) => {
+      headers = response.headers;
+      data = await response.text();
+    });
+    return { status: res.status, data, headers };
   }
 }

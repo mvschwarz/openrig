@@ -79,7 +79,11 @@ describe("rig reconcile-session", () => {
             res.end(JSON.stringify({ ok: false, code: "session_not_found", message: 'No live tmux session named "dead-session@my-rig".' }));
           } else {
             res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify(OK_RESPONSE));
+            const resumeMetadata = url.includes("capture-miss")
+              ? { capture: { outcome: "skipped", reason: "not_obtained" }, status: "missing",
+                  guidance: "After confirming the live conversation identity, pipe its verified token to rig seat set-resume-token dev-impl@my-rig --token-stdin --reason \"verified live conversation\"." }
+              : url.includes("capture-ok") ? { capture: { outcome: "captured" }, status: "recorded" } : undefined;
+            res.end(JSON.stringify({ ...OK_RESPONSE, result: { ...OK_RESPONSE.result, ...(resumeMetadata ? { resumeMetadata } : {}) } }));
           }
         } else {
           res.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: false, error: "Not found" }));
@@ -162,6 +166,33 @@ describe("rig reconcile-session", () => {
     expect(parsed.result.continuity).toBe("unverified");
     expect(parsed.result.projectionDrift).toHaveLength(1);
   });
+
+  it.each([false, true].flatMap(json => [false, true].map(captured => ({ json, captured }))))(
+    "shows capture result and repair guidance without failing the binding (json=$json, captured=$captured)",
+    async ({ json, captured }) => {
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "reconcile-session", captured ? "capture-ok@my-rig" : "capture-miss@my-rig", "--no-launch", ...(json ? ["--json"] : [])]);
+      });
+      const output = logs.join("\n");
+      expect(exitCode).toBeUndefined();
+      if (json) {
+        const result = JSON.parse(output);
+        expect(result.ok).toBe(true);
+        expect(result.result.resumeMetadata).toMatchObject({ status: captured ? "recorded" : "missing", capture: { outcome: captured ? "captured" : "skipped" } });
+      } else {
+        expect(output).toContain("Reconciled");
+        expect(output).toContain(`Resume metadata: ${captured ? "recorded" : "missing"}`);
+        expect(output).toContain(`capture: ${captured ? "captured" : "skipped"}`);
+        if (!captured) expect(output).toContain("not_obtained");
+      }
+      if (!captured) {
+        expect(output).toContain("After confirming the live conversation");
+        expect(output).toContain("rig seat set-resume-token");
+        expect(output).toContain("--token-stdin --reason");
+        expect(output).not.toContain("timed out");
+      } else expect(output).not.toContain("set-resume-token");
+    },
+  );
 
   it("wired via createProgram", async () => {
     const program = createProgram();

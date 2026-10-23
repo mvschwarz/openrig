@@ -37,6 +37,7 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import * as preflight from "../src/domain/rigspec-preflight.js";
 import type { ExecFn } from "../src/adapters/tmux.js";
 import type { FsOps } from "../src/domain/package-resolver.js";
+import { createTestApp } from "./helpers/test-app.js";
 
 const RIG_YAML = `
 version: "0.2"
@@ -373,6 +374,25 @@ describe("v2 bundle apply: launch root lifetime and --target", () => {
     expect(result.stages).toContainEqual(expect.objectContaining({ stage: "services_plan", detail: expect.objectContaining({ targetRoot: target, materialised: false, services: [expect.objectContaining({ name: "demo", image: "example/demo:1" })] }) }));
     expect(fs.existsSync(target)).toBe(false);
     expect(podInstantiator.instantiate).not.toHaveBeenCalled();
+  });
+
+  it("previews a target-bound service install through the bundle install route without writing or launching", async () => {
+    vi.stubEnv("OPENRIG_BUNDLE_SERVICES_ENABLED", "true");
+    const target = path.join(workDir, "route-plan-target");
+    const { app, podInstantiator: installer } = createTestApp(db, { podInstantiatorFsOps: realFsOps() });
+    const launch = vi.spyOn(installer, "instantiate");
+    vi.spyOn(preflight, "rigPreflight").mockResolvedValue({ ready: true, errors: [], warnings: [] } as never);
+    const response = await app.request("/api/bundles/install", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bundlePath: await buildV2Bundle(workDir, true), plan: true, targetRoot: target }) });
+    const result = await response.json();
+    expect(response.status, JSON.stringify(result)).toBe(200);
+    expect(result.status).toBe("planned");
+    expect(result.stages).toContainEqual(expect.objectContaining({ stage: "services_plan", detail: expect.objectContaining({
+      targetRoot: target, materialised: false, services: [expect.objectContaining({ name: "demo", image: "example/demo:1" })],
+    }) }));
+    expect(fs.existsSync(target)).toBe(false);
+    expect(launch).not.toHaveBeenCalled();
   });
 
   it("checks target conflicts in a service plan without writing", async () => {

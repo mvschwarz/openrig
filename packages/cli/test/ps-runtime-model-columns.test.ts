@@ -53,6 +53,39 @@ describe("rig ps — runtime + declared model", () => {
     expect(header).not.toContain("MODEL");
   });
 
+  it("padCompactNodeRow leaves padding between count suffix and WORK", () => {
+    const row = padCompactNodeRow("my-rig", "dev-driver@my-rig", "running", "needs-input x1", "yes", "—");
+    expect(row).not.toContain("needs-input x1yes");
+    expect(row.slice(22 + 38 + 11 + 3, 22 + 38 + 11 + 3 + 17)).toBe("needs-input x1   ");
+    expect(row.slice(22 + 38 + 11 + 17 + 4, 22 + 38 + 11 + 17 + 4 + 6)).toBe("yes   ");
+  });
+
+  // A cell filled to its width, or cut to it, ends one space before the next column, so no two columns run together.
+  const filledCells = (widths: number[]) => widths.map((width, i) => String.fromCharCode(97 + i).repeat(width));
+
+  it("padCompactNodeRow keeps every column apart when each cell fills its width", () => {
+    const cells = filledCells([22, 38, 11, 17, 6]);
+    const row = (padCompactNodeRow as (...cells: string[]) => string)(...cells, "reason");
+    expect(row.split(" ")).toEqual([...cells, "reason"]);
+  });
+
+  it("padNodeRow keeps every column apart when each cell fills its width", () => {
+    const cells = filledCells([30, 10, 14, 34, 12, 17, 10, 10, 9, 11, 9, 6, 17, 6, 10]);
+    const row = (padNodeRow as (...cells: string[]) => string)(...cells, "error");
+    expect(row.split(" ")).toEqual([...cells, "error"]);
+  });
+
+  it("a 38-character session, needs-input (screen) and the --full count each stay apart from the next column", () => {
+    const session = "release-notes-historian@example-rig-01";
+    expect(session).toHaveLength(38);
+    expect(padCompactNodeRow("example-rig-01", session, "running", "idle", "no", "—")).toContain(`${session} running`);
+    expect(padCompactNodeRow("my-rig", "dev-driver@my-rig", "running", "needs-input (screen)", "yes", "—"))
+      .toContain("needs-input (scr… yes");
+    const full = padNodeRow("my-rig#1", "dev", "driver", "dev-driver@my-rig", "codex", "—", "running", "ready", "yes",
+      "running", "active", "yes", "needs-input x1", "40%", "n-a", "—");
+    expect(full).toMatch(/needs-input x1 +40%/);
+  });
+
   it("RED: the compact PROJECTION carries runtime and model (node-inventory has both; ps dropped them)", () => {
     const [compact] = compactNodeProjection([node({ runtime: "codex", model: "gpt-5.6-sol" })] as never);
     expect(compact.runtime).toBe("codex");

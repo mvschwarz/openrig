@@ -125,47 +125,34 @@ describe("waiting face names the next action the existing ladder can actually ta
 
   // ── #344: a guard-refused wake must keep the unclaimed baton's retry path ──
 
-  it("counts a typing-guard refusal after a closed recovery as fresh evidence, reopening the retry path (#344)", async () => {
-    // Every wake this episode is refused by the typing guard: no pane input is
-    // written, and the nudge records the retained vocabulary.
+  it("a baton whose wake was held only by a draft keeps its retry path (#344): the draft can clear", async () => {
     queue = new QueueRepository(db, new EventBus(db), {
       validateRig: () => true,
-      transport: { send: async () => ({ outcome: "retained" }) },
+      transport: { send: async () => ({ outcome: "retained", reason: "draft_input_busy" }) },
     });
-    const source = await queue.create({ sourceSession: "owner@rig", destinationSession: "owner@rig", body: "Prepare result", nudge: false });
-    const id = (await queue.handoff({ qitemId: source.qitemId, fromSession: "owner@rig", toSession: "worker@rig", body: "Continue exact work", nudge: false })).created.qitemId;
-    // A terminal recovery disposition closes BEFORE the next wake attempt.
-    const recovery = await queue.create({ sourceSession: "owner@rig", destinationSession: "orch@rig", body: "Inspect failed delivery", tags: [recoveryTag(id)], nudge: false });
-    await queue.update({ qitemId: recovery.qitemId, actorSession: "orch@rig", state: "done", closureReason: "no-follow-on", resolution: "Do not retry this episode" });
-    // The ladder's later retry is refused again — the refusal is NEWER than the
-    // recovery and must count as evidence about the original obligation.
-    advance(60);
-    queue.recordNudgeAttempt(id, "retained:typing_guard");
-    expect(view(id).nextBackstop).toMatchObject({
-      mechanism: "queue-wake-ladder:retry",
-      dueAt: "2026-09-08T00:06:00.000Z",
-    });
+    queue.attachOutbox(new OutboxHandler(db));
+    const id = await handoff();
+    expect(queue.getByIdOrThrow(id).lastNudgeResult).toBe("retained:draft_aware");
+    expect(view(id).nextBackstop).toMatchObject({ mechanism: "queue-wake-ladder:retry", dueAt: "2026-09-08T00:05:00.000Z" });
     advance(301);
     expect((await tick()).actions).toContainEqual({ qitemId: id, action: "retry", target: "worker@rig" });
   });
 
-  it("keeps an unclaimed baton whose wake was guard-refused inside the retry ladder (#344)", async () => {
+  it("a baton the seat's typing guard holds on purpose reads as held and is never re-nudged; one notice goes out after the window", async () => {
     queue = new QueueRepository(db, new EventBus(db), {
       validateRig: () => true,
-      transport: { send: async () => ({ outcome: "retained" }) },
+      transport: { send: async () => ({ outcome: "retained", reason: "typing_guard_enabled" }) },
     });
     queue.attachOutbox(new OutboxHandler(db));
     const id = await handoff();
-    // The handoff nudge was refused by the typing guard: retained:typing_guard.
     expect(queue.getByIdOrThrow(id).lastNudgeResult).toBe("retained:typing_guard");
-    // A safe refusal still protects the prompt, but the baton keeps a retry path
-    // (each retry is another guard probe; when the prompt clears it verifies).
-    expect(view(id).nextBackstop).toMatchObject({
-      mechanism: "queue-wake-ladder:retry",
-      dueAt: "2026-09-08T00:05:00.000Z",
-    });
+    expect(view(id).nextBackstop).toMatchObject({ held: true, note: expect.stringContaining("Held by worker@rig's typing guard: nothing was typed") });
     advance(301);
-    expect((await tick()).actions).toContainEqual({ qitemId: id, action: "retry", target: "worker@rig" });
+    expect((await tick()).actions.filter((a) => a.qitemId === id)).toEqual([]); // no re-nudge, and not yet escalated
+    advance(30 * 60);
+    const later = (await tick()).actions.filter((a) => a.qitemId === id);
+    expect(later.some((a) => a.action === "retry")).toBe(false);
+    expect(later.some((a) => a.action.startsWith("escalate-"))).toBe(true); // the one held notice
   });
 
   it("does not let a retained nudge claim ownership of a claimed parked-owner row (#344 follow-up)", async () => {

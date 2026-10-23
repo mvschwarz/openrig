@@ -1,3 +1,5 @@
+import type { TerminalActor, TerminalPolicyStore } from "./terminal-policy.js";
+import { TerminalPolicyRefusal } from "./terminal-policy.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
 import type { SessionTransport, SendResult } from "./session-transport.js";
 import type { ClaudeCompactionPolicy, SettingsStore } from "./user-settings/settings-store.js";
@@ -67,6 +69,7 @@ const PREP_SEND_ATTEMPTS_MAX = 3;
 export const POST_COMPACT_SEND_WAIT_MS_DEFAULT = 10_000;
 
 export interface EnforcerInput {
+  nodeId?: string;
   sessionName: string;
   /** Registered launch workspace, shared by the manual route and context monitor. */
   cwd?: string | null;
@@ -112,6 +115,8 @@ export type ManualCompactionOutcome =
   | { triggered: false; stage: "skipped-or-failed"; reason: string; preparation?: Pick<PreparationState, "attemptId" | "mapPath" | "delivery" | "compact"> };
 
 export type EnforcerSkipReason =
+  | "terminal_policy_refused"
+  | "terminal_policy_unavailable"
   | "typing_guard_enabled"
   | "guard_target_unknown"
   | "guard_target_changed"
@@ -129,6 +134,7 @@ export type EnforcerSkipReason =
   | "preparation_pending"
   | "preparation_incomplete"
   | "preparation_stopped"
+  | "preparation_directory_unavailable"
   | "occupant_generation_unavailable"
   | "no_pending_stage"
   | "waiting_for_idle"
@@ -363,7 +369,8 @@ export function buildPostCompactRestorePrompt(input: {
     // refused at the source. Tell the seat NOT to seek it out (it is not its state).
     pieces.push("A post-compaction instruction file declaring a DIFFERENT seat was present and has been IGNORED — it is not yours; do NOT read or follow it. Rely on the per-seat marker and the JSONL transcript for restore.");
   }
-  pieces.push("Load/read the claude-compaction-restore skill, follow the marker's restoreInstruction and postCompactInstruction when present, read your newest restore map and use the restore packet as a lookup, then reply with: restored from packet at <path>; resumed at step <X>.");
+  const restoreMap = input.attemptMapPath ? "this preparation attempt's restore map" : "your newest restore map";
+  pieces.push(`Load/read the claude-compaction-restore skill, follow the marker's restoreInstruction and postCompactInstruction when present, read ${restoreMap} and use the restore packet as a lookup, then reply with: restored from packet at <path>; resumed at step <X>.`);
   pieces.push(`During this restore, read ${path.join(input.openrigHome, "plugins", "openrig-core", "skills", "refocusing", "SKILL.md")} and consume the current topology and work traces delivered with this restore request, if present; do not rerun Python just to duplicate a delivered trace. Missing trace delivery is a named gap. Read required notes and full sources with the native file-read tool; a pointer, compact summary or truncated extract is not a full source read. Name any missing source, the current user outcome, and your next action from the files you actually read, not from the compact summary.`);
   return pieces.join(" ");
 }
@@ -402,6 +409,7 @@ export interface ObservedCompaction {
   detail: string;
 }
 export interface PreparationState {
+  policyActor?: TerminalActor;
   attemptId: string;
   occupantGeneration: string | null;
   mapPath: string;
@@ -421,6 +429,8 @@ export interface PreparationState {
 interface PreparationAttempt extends PreparationState {
   sends: number;
   policyWasEnabled: boolean;
+  /** The explicit preparation root selected when this attempt began; null keeps the default flow. */
+  preparationRoot: string | null;
   controller: AbortController;
   /** The policy's compaction instruction when the attempt began; the /compact command uses this one. */
   compactInstruction: string;
@@ -470,10 +480,13 @@ export class ClaudeCompactionEnforcer {
     saturationBoundPercentage: number;
   }) => Promise<void> | void;
 
+  private readonly terminalPolicies?: TerminalPolicyStore;
+
   constructor(
     settingsStore: SettingsStore,
     sessionTransport: SessionTransport,
     opts?: {
+      terminalPolicies?: TerminalPolicyStore;
       dedupWindowMs?: number;
       openrigHome?: string;
       postCompactRestoreCooldownMs?: number;
@@ -492,6 +505,7 @@ export class ClaudeCompactionEnforcer {
       }) => Promise<void> | void;
     },
   ) {
+    this.terminalPolicies = opts?.terminalPolicies;
     this.settingsStore = settingsStore;
     this.sessionTransport = sessionTransport;
     this.dedupWindowMs = opts?.dedupWindowMs ?? DEDUP_WINDOW_MS_DEFAULT;
@@ -562,6 +576,18 @@ export class ClaudeCompactionEnforcer {
     });
   }
 
+  private terminalPolicyReason(input: EnforcerInput, actor: TerminalActor): "terminal_policy_refused" | "terminal_policy_unavailable" | null {
+    const nodeId = input.nodeId ?? this.sessionTransport.deliveryGuard?.maybeTarget(input.sessionName)?.nodeId;
+    if (!this.terminalPolicies || !nodeId) return null;
+    try { this.terminalPolicies.check(nodeId, "compaction", actor); return null; }
+    catch (error) { return error instanceof TerminalPolicyRefusal ? "terminal_policy_refused" : actor.source === "openrig" ? null : "terminal_policy_unavailable"; }
+  }
+
+  private checkAttemptPolicy(input: EnforcerInput, attempt: PreparationAttempt): void {
+    const reason = this.terminalPolicyReason(input, attempt.policyActor ?? { source: "openrig" });
+    if (reason) throw new DeliveryGuardError(reason, "This seat's terminal policy does not allow this managed compaction. Read rig seat status <seat> to see or change the explicit choice; the existing override path is unchanged.");
+  }
+
   private async withDeliveryGuard(
     input: EnforcerInput,
     run: () => Promise<EnforcerOutcome>,
@@ -594,6 +620,7 @@ export class ClaudeCompactionEnforcer {
     const isCurrent = () => this.pendingPostCompactRestore.get(input.sessionName) === pendingStage
       && this.pendingPreCompactPrep.get(input.sessionName) === attempt;
     const sendOpts = {
+      openrigNotice: true as const,
       beforeWrite: () => {
         if (!isCurrent()) throw new DeliveryGuardError("compaction_cancelled", "Managed compaction was cancelled or replaced; no further input is authorized.");
       },
@@ -773,6 +800,13 @@ export class ClaudeCompactionEnforcer {
       return { triggered: false, reason: "already_triggered_above_threshold" };
     }
 
+    const policyRefusal = this.terminalPolicyReason(input, { source: "openrig" });
+    if (policyRefusal) {
+      const existing = this.pendingPreCompactPrep.get(input.sessionName);
+      if (existing?.mode === "automatic" && existing.compact === "not_sent") this.stopPreparation(input.sessionName, policyRefusal, existing);
+      return { triggered: false, reason: policyRefusal };
+    }
+
     // Before any preparation prompt or /compact copy: a protected seat with no recorded pane cannot take input.
     // An attempt already under way stops as not sent; none is begun.
     if (this.paneUnknownProtected(input.sessionName)) {
@@ -794,7 +828,7 @@ export class ClaudeCompactionEnforcer {
     if (attempt?.status === "stopped") return { triggered: false, reason: "preparation_stopped" };
     if (!attempt) {
       attempt = this.beginPreparation(input, "automatic");
-      if (attempt.status === "stopped") return { triggered: false, reason: "occupant_generation_unavailable" };
+      if (attempt.status === "stopped") return { triggered: false, reason: attempt.reason === "preparation_directory_unavailable" ? attempt.reason : "occupant_generation_unavailable" };
     }
     if (attempt.status === "sending") {
       await this.deliverPreparation(input, attempt);
@@ -828,14 +862,14 @@ export class ClaudeCompactionEnforcer {
    */
   async triggerManualCompact(
     input: EnforcerInput,
-    opts: { operatorInitiated?: boolean; skipMap?: boolean } = {},
+    opts: { operatorInitiated?: boolean; skipMap?: boolean; actor?: TerminalActor } = {},
   ): Promise<ManualCompactionOutcome> {
     // Do not hold a delivery/lifecycle lease while a seat writes its map or goes idle.
     // Each actual send takes the existing guard; final checks bind the attempt across awaits.
     return this.triggerManualCompactUnchecked(input, opts);
   }
 
-  private async triggerManualCompactUnchecked(input: EnforcerInput, opts: { operatorInitiated?: boolean; skipMap?: boolean }): Promise<ManualCompactionOutcome> {
+  private async triggerManualCompactUnchecked(input: EnforcerInput, opts: { operatorInitiated?: boolean; skipMap?: boolean; actor?: TerminalActor }): Promise<ManualCompactionOutcome> {
     this.reconcilePreparations();
     const active = this.pendingPreCompactPrep.get(input.sessionName);
     const stage = this.manualCompactionState.get(input.sessionName)?.stage;
@@ -848,8 +882,11 @@ export class ClaudeCompactionEnforcer {
     if (input.usedPercentage == null) return this.recordManualFailure(input.sessionName, "no_usage_data");
     // The preparation prompt cannot be written to such a seat either, so the whole attempt is refused up front.
     if (this.paneUnknownProtected(input.sessionName)) return this.recordManualFailure(input.sessionName, "pane_unknown_protected");
-    const attempt = this.beginPreparation(input, "manual", opts.skipMap === true);
-    if (attempt.status === "stopped") return this.recordManualFailure(input.sessionName, "occupant_generation_unavailable");
+    const actor = opts.actor ?? { source: "caller" as const, session: null };
+    const policyRefusal = this.terminalPolicyReason(input, actor);
+    if (policyRefusal) return this.recordManualFailure(input.sessionName, policyRefusal);
+    const attempt = this.beginPreparation(input, "manual", opts.skipMap === true, actor);
+    if (attempt.status === "stopped") return this.recordManualFailure(input.sessionName, attempt.reason ?? "occupant_generation_unavailable");
     const failed = (reason: string): ManualCompactionOutcome => {
       // A cancelled request may settle after an explicit retry. Its receipt must
       // not stop or overwrite the successor attempt's state.
@@ -893,28 +930,33 @@ export class ClaudeCompactionEnforcer {
     return { triggered: true, stage: "compact-sent" };
   }
 
-  private beginPreparation(input: EnforcerInput, mode: "automatic" | "manual", skipMap = false): PreparationAttempt {
+  private beginPreparation(input: EnforcerInput, mode: "automatic" | "manual", skipMap = false, policyActor: TerminalActor = { source: "openrig" }): PreparationAttempt {
     const attemptId = randomUUID();
+    const startedAt = this.now();
+    const policy = this.settingsStore.resolveClaudeCompactionPolicy();
+    const preparationRoot = policy.preparationRoot || null;
     const fallbackMapPath = path.join(this.openrigHome, "compaction", "preparation", sanitizeSessionKey(input.sessionName), attemptId, "RESTORE-MAP.md");
     const occupantGeneration = this.resolveOccupantGeneration?.(input.sessionName)
       ?? this.sessionTransport.deliveryGuard?.maybeTarget(input.sessionName)?.occupant ?? null;
     const attempt: PreparationAttempt = {
-      attemptId, occupantGeneration, mode, status: "sending", delivery: "pending", compact: "not_sent", sends: 0,
-      deadlineAt: mode === "manual" ? this.now() + this.manualPrepWaitMs : null,
-      mapPath: fallbackMapPath,
+      policyActor, attemptId, occupantGeneration, mode, status: "sending", delivery: "pending", compact: "not_sent", sends: 0,
+      deadlineAt: mode === "manual" ? startedAt + this.manualPrepWaitMs : null,
+      mapPath: preparationRoot ? path.join(preparationRoot, sanitizeSessionKey(input.sessionName), attemptId, "RESTORE-MAP.md") : fallbackMapPath,
       marker: `<!-- openrig-compaction-complete ${JSON.stringify({ attemptId, session: input.sessionName, occupantGeneration })} -->`,
-      policyWasEnabled: this.settingsStore.resolveClaudeCompactionPolicy().enabled,
+      policyWasEnabled: policy.enabled,
+      preparationRoot,
       controller: new AbortController(),
-      compactInstruction: this.settingsStore.resolveClaudeCompactionPolicy().compactInstruction ?? "",
+      compactInstruction: policy.compactInstruction ?? "",
     };
     this.pendingPreCompactPrep.set(input.sessionName, attempt);
     // A map cannot satisfy an unknown occupant. Keep the failed attempt visible and
     // disarmed; explicit skip-map still bypasses only the artifact prerequisite.
     if (occupantGeneration === null && !skipMap) this.stopPreparation(input.sessionName, "occupant_generation_unavailable");
-    if (attempt.status !== "stopped" && input.cwd && path.isAbsolute(input.cwd)) {
-      // Keep writes inside Claude's existing edit workspace, without adding permissions.
-      // This folder holds private working context; ignore its entire contents in Git.
-      const root = path.join(input.cwd, ".openrig", "compaction");
+    if (skipMap && preparationRoot) return attempt;
+    if (attempt.status !== "stopped" && (preparationRoot || (input.cwd && path.isAbsolute(input.cwd)))) {
+      // An explicit root can be outside a workspace denied by Claude file permissions.
+      // The daemon cannot prove those permissions; the operator grants access to this root.
+      const root = preparationRoot ?? path.join(input.cwd!, ".openrig", "compaction");
       try {
         fs.mkdirSync(root, { recursive: true });
         const ignorePath = path.join(root, ".gitignore");
@@ -933,11 +975,15 @@ export class ClaudeCompactionEnforcer {
             }
           } finally { fs.closeSync(fd); }
         }
-        const parent = path.join(root, "preparation", sanitizeSessionKey(input.sessionName), attemptId);
+        const parent = path.join(preparationRoot ?? path.join(root, "preparation"), sanitizeSessionKey(input.sessionName), attemptId);
         fs.mkdirSync(parent, { recursive: true });
         fs.accessSync(parent, fs.constants.W_OK | fs.constants.X_OK);
         attempt.mapPath = path.join(parent, "RESTORE-MAP.md");
-      } catch { /* Preserve the existing instance-home path for legacy or unwritable workspaces. */ }
+      } catch {
+        // An explicit location is a permission choice: never silently move it back into
+        // the denied workspace or instance home. Keep the selected path visible in --state.
+        if (preparationRoot) this.stopPreparation(input.sessionName, "preparation_directory_unavailable");
+      }
     }
     if (attempt.status !== "stopped" && attempt.mapPath === fallbackMapPath) {
       // The cwd path already creates its parent. Prepare the legacy fallback too;
@@ -980,11 +1026,24 @@ export class ClaudeCompactionEnforcer {
         overflowCompactInstruction: composed.instructionInCommand ? null : attempt.compactInstruction,
         usedPercentage: input.usedPercentage!, thresholdPercent: policy.thresholdPercent,
         preCompactInstruction: policy.preCompactInstruction, preparation: attempt, constructedAt: this.now(),
-      }));
-    } catch { prep = null; }
-    const notSent = prep?.outcome === "retained"
-      || ["target_needs_input", "session_missing", "typing_guard_enabled", "mid_work", "tmux_unavailable"].includes(prep?.reason ?? "")
-      || (prep?.sent === false && ["target_runtime_not_running", "target_runtime_unverified", "target_runtime_conflict", "transport_unavailable"].includes(prep.reason ?? ""));
+      }), { openrigNotice: true, beforeWrite: () => {
+        this.reconcilePreparations();
+        if (this.pendingPreCompactPrep.get(input.sessionName) !== attempt || attempt.controller.signal.aborted || attempt.status === "stopped")
+          throw new DeliveryGuardError("preparation_stopped", "This compaction attempt ended before preparation input.");
+        this.checkAttemptPolicy(input, attempt);
+      } });
+    } catch (error) {
+      if (error instanceof DeliveryGuardError) {
+        const written = (error as { inputWritten?: boolean }).inputWritten === true;
+        const attempted = (error as { inputAttempted?: boolean }).inputAttempted === true;
+        prep = { ok: false, sent: written, reason: error.code,
+          inputPhase: written ? "written" as const : attempted ? "attempted" as const : "not_reached" as const };
+      } else prep = null;
+    }
+    const writeAttempted = prep?.inputPhase === "attempted" || prep?.inputPhase === "written" || prep?.sent === true;
+    const notSent = !writeAttempted && (prep?.outcome === "retained"
+      || ["preparation_stopped", "terminal_policy_refused", "terminal_policy_unavailable", "target_needs_input", "session_missing", "typing_guard_enabled", "mid_work", "tmux_unavailable"].includes(prep?.reason ?? "")
+      || (prep?.sent === false && ["target_runtime_not_running", "target_runtime_unverified", "target_runtime_conflict", "transport_unavailable"].includes(prep.reason ?? "")));
     // Record this attempt's effect even if cancellation/retry happened during the await.
     // Neither a failed response nor its loss proves no paste/Enter. Never replay uncertainty.
     attempt.delivery = prep?.ok && prep.outcome !== "retained" ? "delivered" : notSent ? "not_sent" : "uncertain";
@@ -1001,6 +1060,7 @@ export class ClaudeCompactionEnforcer {
   private async sendPreparedCompact(input: EnforcerInput, attempt: PreparationAttempt, skipMap: boolean): Promise<{ok: boolean; reason?: string}> {
     const check = () => {
       this.reconcilePreparations();
+      this.checkAttemptPolicy(input, attempt);
       if (this.pendingPreCompactPrep.get(input.sessionName) !== attempt || attempt.status !== "waiting" || attempt.controller.signal.aborted)
         throw new DeliveryGuardError(attempt.reason ?? "preparation_stopped", "Compaction preparation ended; no further input is authorized.");
       if (!skipMap && !this.mapReady(attempt, true)) throw new DeliveryGuardError("preparation_incomplete", "This attempt's restore map is incomplete; /compact was not submitted.");
@@ -1012,7 +1072,7 @@ export class ClaudeCompactionEnforcer {
       // deadline. (The automatic path used to send into a seat still finishing its preparation turn.)
       // Idle comes from a live pane read: the newest hook can predate the rest of the preparation turn.
       return this.sessionTransport.send(input.sessionName, composed.command,
-        { beforeWrite: check, ...(attempt.deadlineAt !== null ? { waitForIdleMs: Math.max(1, Math.min(this.compactSendIdleWaitMs, attempt.deadlineAt - this.now())), readinessFromPaneOnly: true } : {}) });
+        { openrigNotice: true, beforeWrite: check, ...(attempt.deadlineAt !== null ? { waitForIdleMs: Math.max(1, Math.min(this.compactSendIdleWaitMs, attempt.deadlineAt - this.now())), readinessFromPaneOnly: true } : {}) });
     };
     let result: Pick<SendResult, "ok" | "reason" | "outcome" | "sent" | "inputPhase">;
     let guardRefused = false;
@@ -1047,10 +1107,11 @@ export class ClaudeCompactionEnforcer {
     }
     attempt.compact = "submitted_unconfirmed";
     if (attempt.controller.signal.aborted) return { ok: false, reason: attempt.reason };
-    // Whatever the command could not carry, the restore request carries instead.
-    if (skipMap || !composed.mapPathInCommand || !composed.instructionInCommand) {
+    // Whatever the command could not carry, the restore request carries instead. An explicitly
+    // selected preparation root also keeps its exact map in that request, even when the command fit it.
+    if (skipMap || attempt.preparationRoot !== null || !composed.mapPathInCommand || !composed.instructionInCommand) {
       this.restoreCarry.set(input.sessionName, {
-        mapPath: !skipMap && !composed.mapPathInCommand ? attempt.mapPath : null,
+        mapPath: !skipMap && (attempt.preparationRoot !== null || !composed.mapPathInCommand) ? attempt.mapPath : null,
         compactInstruction: composed.instructionInCommand ? null : attempt.compactInstruction,
         ...(skipMap ? { skipMap: { mapPath: attempt.mapPath, marker: attempt.marker } } : {}),
       });
@@ -1122,7 +1183,8 @@ export class ClaudeCompactionEnforcer {
     this.reconcilePreparations();
     const attempt = this.pendingPreCompactPrep.get(session);
     if (!attempt) return null;
-    const { controller: _controller, sends: _sends, policyWasEnabled: _enabled, compactInstruction: _instruction, stoppedAt: _stoppedAt, cancelled: _cancelled, ...state } = attempt;
+    const { controller: _controller, sends: _sends, policyWasEnabled: _enabled, preparationRoot: _preparationRoot,
+      compactInstruction: _instruction, stoppedAt: _stoppedAt, cancelled: _cancelled, ...state } = attempt;
     return state;
   }
 

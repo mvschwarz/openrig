@@ -1,3 +1,4 @@
+import type { CodexPermissionEnvelope } from "../src/domain/codex-rebuild-permissions.js";
 import { mockShellCommand } from "./helpers/shell-command-mock.js";
 import fs from "node:fs";
 import os from "node:os";
@@ -54,6 +55,19 @@ function mockFs(files?: Record<string, string>): CodexAdapterFsOps {
     listFiles: (dir: string) => Object.keys(store).filter((k) => k.startsWith(dir + "/")).map((k) => k.slice(dir.length + 1)),
     _store: store,
   } as CodexAdapterFsOps & { _store: Record<string, string> };
+}
+
+/** Model file and directory Git markers through the adapter's filesystem seam. */
+function mockProjectFs(files: Record<string, string>, markers: Record<string, "file" | "directory">): CodexAdapterFsOps {
+  const ops = mockFs(files);
+  const exists = ops.exists;
+  ops.exists = (path) => path in markers || exists(path);
+  ops.statMode = (path) => {
+    const kind = markers[path];
+    if (!kind) throw new Error(`Cannot stat ${path}`);
+    return kind === "directory" ? fs.constants.S_IFDIR : fs.constants.S_IFREG;
+  };
+  return ops;
 }
 
 function makeBinding(cwd = "/project"): NodeBinding {
@@ -537,6 +551,353 @@ describe("Codex runtime adapter", () => {
     expect(result.ok).toBe(true);
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText).toHaveBeenCalledWith("r01-qa", expectedProfileFreshLaunchCommand("fleet"));
+  });
+
+  it("omits generated writable roots for a read-only profile on fresh, resume and fork launches", async () => {
+    const codexHome = "/private/codex";
+    const fsOps = mockFs({ [`${codexHome}/locked.config.toml`]: 'sandbox_mode = "read-only"\napproval_policy = "never"\n' });
+    const resolveGitAddDirs = vi.fn(async () => ["/project/.git"]);
+    const options = [
+      { name: "dev-qa@test-rig" },
+      { name: "dev-qa@test-rig", resumeToken: "sess-456" },
+      { name: "dev-qa@test-rig", forkSource: { kind: "native_id" as const, value: "parent-thread-id" } },
+    ];
+    for (const opts of options) {
+      const proof = provenCodexResume("sess-456");
+      const tmux = mockTmux({ getPanePid: proof.getPanePid });
+      const adapter = new CodexRuntimeAdapter({
+        tmux, fsOps, codexHome, resolveGitAddDirs,
+        listProcesses: proof.listProcesses as never, readResumeEvidence: proof.readResumeEvidence,
+        sleep: async () => {},
+        verifyProfilePreflight: async (profile) => ({ ok: true, profile }),
+      });
+      const binding = { ...makeBinding(), codexConfigProfile: "locked", model: "gpt-5.5", effort: "high" };
+
+      await adapter.launchHarness(binding, opts);
+
+      const command = vi.mocked(tmux.sendText).mock.calls[0]?.[1];
+      expect(command).toContain("-p 'locked'");
+      expect(command).toContain("-m 'gpt-5.5'");
+      expect(command).toContain("model_reasoning_effort=\"high\"");
+      expect(command).not.toContain("--add-dir");
+      expect(command).not.toContain("workspace-write");
+      expect(command).not.toContain("danger-full-access");
+    }
+    expect(resolveGitAddDirs).not.toHaveBeenCalled();
+  });
+
+  it.each(['sandbox_mode = "workspace-write"\n', 'sandbox_mode = [\n'])(
+    "ignores above-root config %s on fresh, resume and fork launches", async aboveRootConfig => {
+      const codexHome = "/private/codex";
+      const fsOps = mockProjectFs({
+        [`${codexHome}/locked.config.toml`]: 'sandbox_mode = "read-only"\n',
+        "/workspace/.codex/config.toml": aboveRootConfig,
+      }, { "/workspace/repo/.git": "file" });
+      const resolveGitAddDirs = vi.fn(async () => ["/outside/repo-metadata"]);
+      for (const opts of [
+        { name: "dev-qa@test-rig" },
+        { name: "dev-qa@test-rig", resumeToken: "sess-456" },
+        { name: "dev-qa@test-rig", forkSource: { kind: "native_id" as const, value: "parent-thread-id", pendingIdAllowed: true } },
+      ]) {
+        const proof = provenCodexResume("sess-456");
+        const tmux = mockTmux({ getPanePid: proof.getPanePid });
+        const adapter = new CodexRuntimeAdapter({
+          tmux, fsOps, codexHome, resolveGitAddDirs,
+          listProcesses: proof.listProcesses as never, readResumeEvidence: proof.readResumeEvidence,
+          sleep: async () => {}, verifyProfilePreflight: async profile => ({ ok: true, profile }),
+        });
+        expect(await adapter.launchHarness({ ...makeBinding("/workspace/repo/src"), codexConfigProfile: "locked" }, opts)).toMatchObject({ ok: true });
+        expect(vi.mocked(tmux.sendText).mock.calls[0]?.[1]).not.toContain("--add-dir");
+      }
+      expect(resolveGitAddDirs).not.toHaveBeenCalled();
+    },
+  );
+
+  it("accepts a .git directory with HEAD as the root and skips an incomplete nearer .git directory", async () => {
+    const codexHome = "/private/codex";
+    const fsOps = mockProjectFs({
+      [`${codexHome}/locked.config.toml`]: 'sandbox_mode = "read-only"\n',
+      "/workspace/.codex/config.toml": 'sandbox_mode = "workspace-write"\n',
+      "/workspace/repo/.git/HEAD": "ref: refs/heads/main\n",
+      "/workspace/repo/.codex/config.toml": 'sandbox_mode = "workspace-write"\n',
+    }, { "/workspace/repo/.git": "directory", "/workspace/repo/src/.git": "directory" });
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({
+      tmux, fsOps, codexHome, resolveGitAddDirs: async () => ["/outside/repo-metadata"],
+      listProcesses: () => [], sleep: async () => {}, verifyProfilePreflight: async profile => ({ ok: true, profile }),
+    });
+    expect(await adapter.launchHarness({ ...makeBinding("/workspace/repo/src"), codexConfigProfile: "locked" }, { name: "dev-qa@test-rig" })).toMatchObject({ ok: true });
+    const command = vi.mocked(tmux.sendText).mock.calls[0]?.[1];
+    expect(command).toContain("--add-dir '/outside/repo-metadata'");
+    expect(command).toContain(`--add-dir '${testQueueRoot()}'`);
+  });
+
+  it("keeps roots when permission-only marker mode cannot prove an incomplete .git is a file", async () => {
+    const codexHome = "/private/codex";
+    const fsOps = mockProjectFs({
+      [`${codexHome}/locked.config.toml`]: 'sandbox_mode = "read-only"\n',
+      "/workspace/repo/.codex/config.toml": 'sandbox_mode = "workspace-write"\n',
+    }, { "/workspace/repo/.git": "file", "/workspace/repo/src/.git": "directory" });
+    const statMode = fsOps.statMode!;
+    fsOps.statMode = path => path === "/workspace/repo/src/.git" ? 0o755 : statMode(path);
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({
+      tmux, fsOps, codexHome, resolveGitAddDirs: async () => ["/outside/repo-metadata"],
+      listProcesses: () => [], sleep: async () => {}, verifyProfilePreflight: async profile => ({ ok: true, profile }),
+    });
+    expect(await adapter.launchHarness({ ...makeBinding("/workspace/repo/src"), codexConfigProfile: "locked" }, { name: "dev-qa@test-rig" })).toMatchObject({ ok: true });
+    expect(vi.mocked(tmux.sendText).mock.calls[0]?.[1]).toContain("--add-dir '/outside/repo-metadata'");
+  });
+
+  it("retains roots when custom project markers or marker metadata make discovery uncertain", async () => {
+    const codexHome = "/private/codex";
+    for (const fsOps of [
+      mockProjectFs({ [`${codexHome}/locked.config.toml`]: 'sandbox_mode = "read-only"\n',
+        [`${codexHome}/config.toml`]: 'project_root_markers = [".repo"]\n' }, { "/workspace/repo/.git": "file" }),
+      mockFs({ [`${codexHome}/locked.config.toml`]: 'sandbox_mode = "read-only"\n', "/workspace/repo/.git": "gitdir: elsewhere" }),
+    ]) {
+      const tmux = mockTmux();
+      const adapter = new CodexRuntimeAdapter({
+        tmux, fsOps, codexHome, resolveGitAddDirs: async () => ["/outside/repo-metadata"],
+        listProcesses: () => [], sleep: async () => {}, verifyProfilePreflight: async profile => ({ ok: true, profile }),
+      });
+      expect(await adapter.launchHarness({ ...makeBinding("/workspace/repo/src"), codexConfigProfile: "locked" }, { name: "dev-qa@test-rig" })).toMatchObject({ ok: true });
+      expect(vi.mocked(tmux.sendText).mock.calls[0]?.[1]).toContain("--add-dir '/outside/repo-metadata'");
+    }
+  });
+
+  it.each([
+    ["default system", "/etc/codex", "/etc/codex/config.toml"],
+    ["custom system directory", "/private/system-codex", "/private/system-codex/config.toml"],
+    ["legacy managed", "/etc/codex", "/etc/codex/managed_config.toml"],
+  ])("keeps roots for %s project markers loaded before discovery", async (_label, codexSystemConfigDir, layerPath) => {
+    const codexHome = "/private/codex";
+    const fsOps = mockProjectFs({
+      [`${codexHome}/locked.config.toml`]: 'sandbox_mode = "read-only"\n',
+      [layerPath]: 'project_root_markers = [".repo"]\n',
+      "/workspace/.codex/config.toml": 'sandbox_mode = "workspace-write"\n',
+    }, { "/workspace/repo/.git": "file", "/workspace/.repo": "file" });
+    const writeFile = vi.spyOn(fsOps, "writeFile");
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({
+      tmux, fsOps, codexHome, codexSystemConfigDir, resolveGitAddDirs: async () => ["/outside/repo-metadata"],
+      listProcesses: () => [], sleep: async () => {}, verifyProfilePreflight: async profile => ({ ok: true, profile }),
+    });
+    expect(await adapter.launchHarness({ ...makeBinding("/workspace/repo/src"), codexConfigProfile: "locked" }, { name: "dev-qa@test-rig" })).toMatchObject({ ok: true });
+    expect(vi.mocked(tmux.sendText).mock.calls[0]?.[1]).toContain("--add-dir '/outside/repo-metadata'");
+    expect(writeFile).not.toHaveBeenCalledWith(layerPath, expect.anything());
+  });
+
+  it.each([
+    ["named permissions", 'default_permissions = ":workspace"\n'],
+    ["malformed markers", "project_root_markers = [\n"],
+    ["unreadable config", "present but unreadable"],
+  ])("keeps roots for %s in a fixed system layer", async (label, systemConfig) => {
+    const codexHome = "/private/codex";
+    const tmux = mockTmux();
+    const fsOps = mockProjectFs({
+      [`${codexHome}/locked.config.toml`]: 'sandbox_mode = "read-only"\n',
+      "/etc/codex/config.toml": systemConfig,
+    }, { "/workspace/repo/.git": "file" });
+    if (label === "unreadable config") {
+      const readFile = fsOps.readFile;
+      fsOps.readFile = path => {
+        if (path === "/etc/codex/config.toml") throw new Error("injected read failure");
+        return readFile(path);
+      };
+    }
+    const adapter = new CodexRuntimeAdapter({
+      tmux, codexHome, fsOps,
+      resolveGitAddDirs: async () => ["/outside/repo-metadata"],
+      listProcesses: () => [], sleep: async () => {}, verifyProfilePreflight: async profile => ({ ok: true, profile }),
+    });
+    expect(await adapter.launchHarness({ ...makeBinding("/workspace/repo/src"), codexConfigProfile: "locked" }, { name: "dev-qa@test-rig" })).toMatchObject({ ok: true });
+    expect(vi.mocked(tmux.sendText).mock.calls[0]?.[1]).toContain("--add-dir '/outside/repo-metadata'");
+  });
+
+  it("keeps generated roots when a project layer makes a read-only profile writable", async () => {
+    const codexHome = "/private/codex";
+    const projectPath = "/project/.codex/config.toml";
+    const projectContent = 'sandbox_mode = "workspace-write"\n';
+    const fsOps = mockProjectFs({
+      [`${codexHome}/locked.config.toml`]: 'sandbox_mode = "read-only"\n',
+      [projectPath]: projectContent,
+    }, { "/project/.git": "file" });
+    const writeFile = vi.spyOn(fsOps, "writeFile");
+    const options = [
+      { name: "dev-qa@test-rig" },
+      { name: "dev-qa@test-rig", resumeToken: "sess-456" },
+      { name: "dev-qa@test-rig", forkSource: { kind: "native_id" as const, value: "parent-thread-id", pendingIdAllowed: true } },
+    ];
+    for (const opts of options) {
+      const proof = provenCodexResume("sess-456");
+      const tmux = mockTmux({ getPanePid: proof.getPanePid });
+      const adapter = new CodexRuntimeAdapter({
+        tmux, fsOps, codexHome, resolveGitAddDirs: async () => ["/project/.git"],
+        listProcesses: proof.listProcesses as never, readResumeEvidence: proof.readResumeEvidence,
+        sleep: async () => {}, verifyProfilePreflight: async (profile) => ({ ok: true, profile }),
+      });
+
+      const result = await adapter.launchHarness({ ...makeBinding("/project/src"), codexConfigProfile: "locked" }, opts);
+
+      expect(result, JSON.stringify(opts)).toMatchObject({ ok: true });
+      const command = vi.mocked(tmux.sendText).mock.calls[0]?.[1];
+      expect(command).toContain("-p 'locked'");
+      if (!opts.resumeToken && !opts.forkSource) expect(command).toContain("--add-dir '/project/.git'");
+      expect(command).toContain(`--add-dir '${testQueueRoot()}'`);
+    }
+    expect(fsOps.readFile(projectPath)).toBe(projectContent);
+    expect(writeFile).not.toHaveBeenCalledWith(projectPath, expect.anything());
+  });
+
+  it("keeps generated roots when a project config layer cannot be parsed", async () => {
+    const codexHome = "/private/codex";
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({
+      tmux, codexHome, fsOps: mockFs({
+        [`${codexHome}/locked.config.toml`]: 'sandbox_mode = "read-only"\n',
+        "/project/.codex/config.toml": "sandbox_mode = [\n",
+      }),
+      resolveGitAddDirs: async () => ["/project/.git"],
+      listProcesses: () => [], sleep: async () => {},
+      verifyProfilePreflight: async (profile) => ({ ok: true, profile }),
+    });
+
+    const result = await adapter.launchHarness({ ...makeBinding(), codexConfigProfile: "locked" }, { name: "dev-qa@test-rig" });
+
+    expect(result.ok).toBe(true);
+    const command = vi.mocked(tmux.sendText).mock.calls[0]?.[1];
+    expect(command).toContain("--add-dir '/project/.git'");
+    expect(command).toContain(`--add-dir '${testQueueRoot()}'`);
+  });
+
+  it("does not treat the lower-priority user config as a project override", async () => {
+    const codexHome = "/home/test/.codex";
+    const resolveGitAddDirs = vi.fn(async () => ["/home/test/project/.git"]);
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({
+      tmux, codexHome, fsOps: mockFs({
+        [`${codexHome}/locked.config.toml`]: 'sandbox_mode = "read-only"\n',
+        [`${codexHome}/config.toml`]: 'sandbox_mode = "workspace-write"\n',
+      }),
+      resolveGitAddDirs, listProcesses: () => [], sleep: async () => {},
+      verifyProfilePreflight: async (profile) => ({ ok: true, profile }),
+    });
+
+    const result = await adapter.launchHarness({ ...makeBinding("/home/test/project"), codexConfigProfile: "locked" }, { name: "dev-qa@test-rig" });
+
+    expect(result.ok).toBe(true);
+    expect(vi.mocked(tmux.sendText).mock.calls[0]?.[1]).not.toContain("--add-dir");
+    expect(resolveGitAddDirs).not.toHaveBeenCalled();
+  });
+
+  it("keeps generated roots when named permissions or unreadable user config leave the sandbox uncertain", async () => {
+    const codexHome = "/home/test/.codex";
+    for (const files of [
+      { [`${codexHome}/locked.config.toml`]: 'sandbox_mode = "read-only"\ndefault_permissions = ":workspace"\n' },
+      { [`${codexHome}/locked.config.toml`]: 'sandbox_mode = "read-only"\n',
+        [`${codexHome}/config.toml`]: 'default_permissions = ":workspace"\n' },
+      { [`${codexHome}/locked.config.toml`]: 'sandbox_mode = "read-only"\n',
+        [`${codexHome}/config.toml`]: 'default_permissions = [\n' },
+    ]) {
+      const tmux = mockTmux();
+      const adapter = new CodexRuntimeAdapter({
+        tmux, codexHome, fsOps: mockFs(files),
+        resolveGitAddDirs: async () => ["/home/test/project/.git"],
+        listProcesses: () => [], sleep: async () => {},
+        verifyProfilePreflight: async (profile) => ({ ok: true, profile }),
+      });
+
+      const result = await adapter.launchHarness({ ...makeBinding("/home/test/project"), codexConfigProfile: "locked" }, { name: "dev-qa@test-rig" });
+
+      expect(result.ok).toBe(true);
+      const command = vi.mocked(tmux.sendText).mock.calls[0]?.[1];
+      expect(command).toContain("--add-dir '/home/test/project/.git'");
+      expect(command).toContain(`--add-dir '${testQueueRoot()}'`);
+    }
+  });
+
+  it("keeps generated roots when an untrusted read-only child can leave a writable parent active", async () => {
+    const codexHome = "/private/codex";
+    const userPath = `${codexHome}/config.toml`;
+    const userContent = '[projects."/project"]\ntrust_level = "trusted"\n[projects."/project/src"]\ntrust_level = "untrusted"\n';
+    const fsOps = mockProjectFs({
+      [`${codexHome}/locked.config.toml`]: 'sandbox_mode = "read-only"\n',
+      [userPath]: userContent,
+      "/project/.codex/config.toml": 'sandbox_mode = "workspace-write"\n',
+      "/project/src/.codex/config.toml": 'sandbox_mode = "read-only"\n',
+    }, { "/project/.git": "file" });
+    const writeFile = vi.spyOn(fsOps, "writeFile");
+    const resolveGitAddDirs = vi.fn(async () => ["/outside/repo-metadata"]);
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({
+      tmux, codexHome, fsOps,
+      resolveGitAddDirs, listProcesses: () => [], sleep: async () => {},
+      verifyProfilePreflight: async (profile) => ({ ok: true, profile }),
+    });
+
+    const result = await adapter.launchHarness({ ...makeBinding("/project/src"), codexConfigProfile: "locked" }, { name: "dev-qa@test-rig" });
+
+    expect(result.ok).toBe(true);
+    const command = vi.mocked(tmux.sendText).mock.calls[0]?.[1];
+    expect(command).toContain("--add-dir '/outside/repo-metadata'");
+    expect(command).toContain(`--add-dir '${testQueueRoot()}'`);
+    expect(resolveGitAddDirs).toHaveBeenCalled();
+    expect(fsOps.readFile(userPath)).toBe(userContent);
+    expect(writeFile).not.toHaveBeenCalledWith(userPath, expect.anything());
+  });
+
+  it("keeps generated writable roots for writable, absent and unreadable profiles, and an overriding posture", async () => {
+    const codexHome = "/private/codex";
+    const files = mockFs({
+      [`${codexHome}/writable.config.toml`]: 'sandbox_mode = "workspace-write"\n',
+      [`${codexHome}/malformed.config.toml`]: 'sandbox_mode = [\n',
+      [`${codexHome}/locked.config.toml`]: 'sandbox_mode = "read-only"\n',
+    });
+    for (const [profile, launchPosture] of [
+      ["writable", undefined], ["missing", undefined], ["malformed", undefined], ["locked", "full_bypass"],
+    ] as const) {
+      const tmux = mockTmux();
+      const adapter = new CodexRuntimeAdapter({
+        tmux, fsOps: files, codexHome,
+        resolveGitAddDirs: async () => ["/project/.git"],
+        listProcesses: () => [], sleep: async () => {},
+        verifyProfilePreflight: async (selected) => ({ ok: true, profile: selected }),
+      });
+      const binding = { ...makeBinding(), codexConfigProfile: profile, launchPosture };
+
+      await adapter.launchHarness(binding, { name: "dev-qa@test-rig" });
+
+      const command = vi.mocked(tmux.sendText).mock.calls[0]?.[1];
+      expect(command).toContain(`--add-dir '/project/.git'`);
+      expect(command).toContain(`--add-dir '${testQueueRoot()}'`);
+      if (launchPosture) expect(command).toContain("-s danger-full-access -a never");
+      else expect(command).toContain(`-p '${profile}'`);
+    }
+  });
+
+  it("preserves a running launch's carried add-dirs without reading its now read-only profile", async () => {
+    const codexHome = "/private/codex";
+    const profilePath = `${codexHome}/locked.config.toml`;
+    const fsOps = mockFs({ [profilePath]: 'sandbox_mode = "read-only"\n' });
+    const readFile = vi.spyOn(fsOps, "readFile");
+    const verifyProfilePreflight = vi.fn(async (profile: string) => ({ ok: true, profile }));
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps, codexHome, verifyProfilePreflight });
+    const binding = { ...makeBinding(), codexConfigProfile: "locked" };
+
+    const result = await adapter.buildResumeCommand(binding, {
+      name: "dev-qa@test-rig", resumeToken: "sess-456",
+      running: { addDirs: ["/carried/git", "/carried/queue"], daemonOptOut: true, networkOverride: false },
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.core).toContain("--add-dir '/carried/git'");
+    expect(result.core).toContain("--add-dir '/carried/queue'");
+    expect(result.core).not.toContain(testQueueRoot());
+    expect(readFile).not.toHaveBeenCalledWith(profilePath);
+    expect(verifyProfilePreflight).not.toHaveBeenCalled();
   });
 
   it("launchHarness passes the disposable proof Codex model on fresh launch", async () => {
@@ -2051,5 +2412,46 @@ describe("Codex runtime adapter", () => {
     expect(result.failed).toEqual([]);
     expect(result.projected).toEqual(["reviewer"]);
     expect(fs.readFileSync(nodePath.join(cwd, ".agents", "reviewer.yaml"), "utf-8")).toBe("name: reviewer");
+  });
+});
+
+
+describe("rebuild permission continuity", () => {
+  it.each(["read-only", "danger-full-access"] as const)("emits the observed %s policy over a named read-only profile", async type => {
+    const tmux = mockTmux();
+    const codexHome = "/private/codex";
+    const adapter = new CodexRuntimeAdapter({ tmux, codexHome,
+      fsOps: mockFs({ [`${codexHome}/locked.config.toml`]: 'sandbox_mode = "read-only"\n' }),
+      verifyProfilePreflight: async profile => ({ ok: true, profile }), sleep: async () => {} });
+    const result = await adapter.launchHarness({ ...makeBinding(), codexConfigProfile: "locked", codexRebuildPermissions: {
+      approvalPolicy: "never", sandboxPolicy: { type } } }, { name: "dev-review@test-rig" });
+    expect(result).toMatchObject({ ok: true, appliedLaunch: { state: "observed", value: type, approvalPolicy: "never" } });
+    expect(vi.mocked(tmux.sendText).mock.calls[0]![1]).toContain(` -p 'locked' -s ${type} -a never`);
+    expect(vi.mocked(tmux.sendText).mock.calls[0]![1]).not.toContain("--add-dir");
+  });
+
+  it("emits the predecessor policy without adding fresh network/git/team/queue grants", async () => {
+    const tmux = mockTmux();
+    const readNetworkDefault = vi.fn(async () => ({ apply: true, elapsedMs: 0 }));
+    const resolveGitAddDirs = vi.fn(async () => ["/repo/.git"]);
+    const prepareTeamWorkspace = vi.fn(() => ["/workspace", "/shared-docs"]);
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {},
+      readNetworkDefault, resolveGitAddDirs, prepareTeamWorkspace });
+    const envelope = { approvalPolicy: "on-request", sandboxPolicy: { type: "workspace-write",
+      network_access: false, exclude_tmpdir_env_var: true, exclude_slash_tmp: false,
+      writable_roots: ["/kept dir", "/kept'quote"] } } satisfies CodexPermissionEnvelope;
+    const binding = { ...makeBinding("/repo/review"), teamPermissionDefault: true,
+      codexRebuildPermissions: envelope };
+    expect((await adapter.launchHarness(binding, { name: "dev-review@test-rig" })).ok).toBe(true);
+    const command = vi.mocked(tmux.sendText).mock.calls[0]![1];
+    expect(command).toContain(" -s workspace-write -a on-request");
+    expect(command).toContain("sandbox_workspace_write.network_access=false");
+    expect(command).toContain("sandbox_workspace_write.exclude_tmpdir_env_var=true");
+    expect(command).toContain("sandbox_workspace_write.exclude_slash_tmp=false");
+    expect(command).toContain("sandbox_workspace_write.writable_roots=");
+    expect(command).not.toContain("--add-dir");
+    expect(readNetworkDefault).not.toHaveBeenCalled();
+    expect(resolveGitAddDirs).not.toHaveBeenCalled();
+    expect(prepareTeamWorkspace).not.toHaveBeenCalled();
   });
 });

@@ -576,9 +576,9 @@ describe("POST /api/sessions/:sessionName/reconcile (OPR.0.3.4.3)", () => {
     });
   }
 
-  it("returns 200 with the reconcile result for a live detached seat", async () => {
+  it.each(["terminal", "codex"])("returns 200 with capture information for a live detached %s seat", async runtime => {
     const rig = setup.rigRepo.createRig("route-rig");
-    const node = setup.rigRepo.addNode(rig.id, "dev.impl", { runtime: "terminal", podId: null });
+    const node = setup.rigRepo.addNode(rig.id, "dev.impl", { runtime, podId: null });
     const sess = setup.sessionRegistry.registerSession(node.id, "dev-impl@route-rig");
     setup.sessionRegistry.markDetached(sess.id);
 
@@ -588,6 +588,10 @@ describe("POST /api/sessions/:sessionName/reconcile (OPR.0.3.4.3)", () => {
     expect(body.ok).toBe(true);
     expect(body.result.nodeId).toBe(node.id);
     expect(body.result.continuity).toBe("unverified");
+    expect(body.result.resumeMetadata).toMatchObject({
+      capture: { outcome: runtime === "terminal" ? "exempt" : "noop" }, status: runtime === "terminal" ? "not_applicable" : "missing",
+    });
+    if (runtime === "codex") expect(body.result.resumeMetadata.guidance).toContain("rig seat set-resume-token");
   });
 
   it("returns 404 for an unmapped session name", async () => {

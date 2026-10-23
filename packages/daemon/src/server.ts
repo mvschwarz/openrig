@@ -33,6 +33,7 @@ import type { DiscoveryRepository } from "./domain/discovery-repository.js";
 import type { ClaimService } from "./domain/claim-service.js";
 import type { SelfAttachService } from "./domain/self-attach-service.js";
 import { rigsRoutes } from "./routes/rigs.js";
+import { OPERATION_CONTRACT, OPERATION_KINDS } from "./domain/operation-correlation.js";
 import { sessionsRoutes, nodesRoutes, sessionAdminRoutes } from "./routes/sessions.js";
 import { adaptersRoutes } from "./routes/adapters.js";
 import { eventsRoute } from "./routes/events.js";
@@ -145,6 +146,8 @@ import { createRouteTimingMiddleware } from "./domain/route-timing-recorder.js";
 import { browserBoundary, type BrowserBoundaryOptions } from "./middleware/browser-boundary.js";
 
 export interface AppDeps {
+  /** Boot-time DB context observations, not a live exclusion guarantee. */
+  databaseWarnings?: string[];
   proofSourceWatch?: import("./domain/proof/source-watch.js").ProofSourceWatch;
   /** S20 — effective bind plan for the health surface (absent = legacy body). */
   bindPlan?: { mode: "explicit" | "default"; hosts: string[]; tailscaleDetected: boolean; ignoredRoutingHost?: string };
@@ -673,7 +676,8 @@ export function createApp(deps: AppDeps): Hono {
     const stamp = stampFields();
     // Self-report for the optional CLI effective-user check, not authentication.
     const euid = process.geteuid?.();
-    const processIdentity = { pid: process.pid, ...(euid === undefined ? {} : { euid }) };
+    const databaseContext = deps.databaseWarnings?.length ? { databaseWarnings: deps.databaseWarnings } : {};
+    const processIdentity = { ...databaseContext, pid: process.pid, ...(euid === undefined ? {} : { euid }) };
     // 51-09 increment 3 (arch ruling 2e1b737f; local always-suffix rendering since
     // superseded by the 2026-08-27 root invariant) — expose the daemon's boot-reconciled
     // self-host id so the CLI edge can detect cross-host targets, self-resolve a
@@ -726,6 +730,7 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   app.route("/api/rigs", rigsRoutes);
+  app.get("/api/operations/capabilities", (c) => c.json({ contract: OPERATION_CONTRACT, kinds: OPERATION_KINDS }));
   app.route("/api/rigs/:rigId/sessions", sessionsRoutes);
   // Slice 24 — per-rig CMUX workspace launcher.
   app.route("/api/rigs/:rigId/cmux", rigCmuxRoutes);

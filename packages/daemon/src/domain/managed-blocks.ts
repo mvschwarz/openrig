@@ -33,6 +33,14 @@ export interface MergeManagedBlockOptions {
   warnings?: string[];
 }
 
+/** The exact text of a managed block as `mergeManagedBlock` writes it: the markers around the content. */
+export function managedBlockText(blockId: string, content: string): string {
+  return `${MANAGED_BLOCK_START(blockId)}\n${content}\n${MANAGED_BLOCK_END(blockId)}`;
+}
+
+/** What `mergeManagedBlock` puts between a file's existing text and a block it adds at the end. */
+export const MANAGED_BLOCK_APPEND_SEPARATOR = "\n\n";
+
 export function mergeManagedBlock(
   fs: ManagedBlockMergeFsOps,
   targetPath: string,
@@ -42,7 +50,7 @@ export function mergeManagedBlock(
 ): void {
   const begin = MANAGED_BLOCK_START(blockId);
   const end = MANAGED_BLOCK_END(blockId);
-  const block = `${begin}\n${content}\n${end}`;
+  const block = managedBlockText(blockId, content);
 
   if (!fs.exists(targetPath)) {
     fs.mkdirp?.(nodePath.dirname(targetPath));
@@ -89,27 +97,67 @@ export function mergeManagedBlock(
     return;
   }
 
-  fs.writeFile(targetPath, `${existing}\n\n${block}`);
+  fs.writeFile(targetPath, `${existing}${MANAGED_BLOCK_APPEND_SEPARATOR}${block}`);
 }
 
-export function removeManagedBlocksFromFile(fs: ManagedBlockCleanupFsOps, targetPath: string): boolean {
+/** Each `blockId` block in `content` (current markers): the whole block and the text between its markers. */
+function managedBlockPattern(blockId: string): RegExp {
+  return new RegExp(`${escapeRegex(MANAGED_BLOCK_START(blockId))}([\\s\\S]*?)${escapeRegex(MANAGED_BLOCK_END(blockId))}`, "g");
+}
+
+/** Whether a block's body still holds `written`: the same bytes, ignoring only the writer's own framing (newlines at either
+ *  end, and CRLF line endings). A person's spaces count, so an indented line is an edit. */
+export function managedBlockBodyMatches(body: string, written: string): boolean {
+  const frame = (text: string) => text.replace(/\r\n/g, "\n").replace(/^\n+|\n+$/g, "");
+  return frame(body) === frame(written);
+}
+
+/** Whether `content` holds a `blockId` block whose body is anything but `written`: someone edited it. */
+export function hasEditedManagedBlock(content: string, blockId: string, written: string): boolean {
+  return [...content.matchAll(managedBlockPattern(blockId))].some((m) => !managedBlockBodyMatches(m[1]!, written));
+}
+
+/** What a removal did: whether the file changed, and the ids of blocks kept because they were edited. */
+export interface ManagedBlockRemoval { changed: boolean; keptEdited: string[] }
+
+/**
+ * Remove OpenRig's managed blocks from a guidance file. A block named in `writtenBodies` is removed only while its body is
+ * still what OpenRig writes there; an edited one is kept, in place, and named in `keptEdited`. Blocks with no known body
+ * are removed as before.
+ */
+export function removeManagedBlocksFromFile(
+  fs: ManagedBlockCleanupFsOps,
+  targetPath: string,
+  writtenBodies: Readonly<Record<string, string>> = {},
+): ManagedBlockRemoval {
   if (!fs.exists(targetPath)) {
-    return false;
+    return { changed: false, keptEdited: [] };
   }
 
   const original = fs.readFile(targetPath);
-  const cleaned = stripManagedBlocks(original);
+  const keptEdited: string[] = [];
+  const kept: string[] = [];
+  let working = original;
+  for (const [id, body] of Object.entries(writtenBodies)) {
+    working = working.replace(managedBlockPattern(id), (whole: string, inner: string) => {
+      if (managedBlockBodyMatches(inner, body)) return whole;
+      if (!keptEdited.includes(id)) keptEdited.push(id);
+      kept.push(whole);
+      return `\u0000openrig-kept-${kept.length - 1}\u0000`;
+    });
+  }
+  const cleaned = stripManagedBlocks(working).replace(/\u0000openrig-kept-(\d+)\u0000/g, (_m, i: string) => kept[Number(i)]!);
   if (cleaned.length === 0) {
     fs.deleteFile(targetPath);
-    return true;
+    return { changed: true, keptEdited };
   }
 
   if (cleaned !== original.trim()) {
     fs.writeFile(targetPath, `${cleaned}\n`);
-    return true;
+    return { changed: true, keptEdited };
   }
 
-  return false;
+  return { changed: false, keptEdited };
 }
 
 export function stripManagedBlocks(content: string): string {
@@ -125,4 +173,31 @@ export function stripManagedBlocks(content: string): string {
 
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** A seat's own role guidance, which is delivered per seat through send_text and never merged into a guidance file
+ *  pod-mates share (ADR-0006). Its id is `rig-role`. Projections saved before that id still carry `role` and are
+ *  restored from that saved selection, so `role` counts too when its source is the agent's own `guidance/role.md`;
+ *  shared guidance that happens to be named `role` and comes from another file still merges. */
+export function isPerSeatRoleGuidance(blockId: string, sourcePath?: string): boolean {
+  if (blockId === "rig-role") return true;
+  return blockId === "role" && sourcePath !== undefined && PER_SEAT_ROLE_PATH.test(sourcePath);
+}
+
+/** An agent's own role file: `guidance/role.md`. */
+const PER_SEAT_ROLE_PATH = /(^|[\\/])guidance[\\/]role\.md$/;
+
+/** A startup file that is a seat's own role: marked `orientation: role`, or at the per-seat `guidance/role.md` path.
+ *  With the `auto` hint it is delivered by send_text, never merged into a guidance file pod-mates share (ADR-0006),
+ *  where each launch would overwrite the last seat's role. An explicit hint is kept as written. */
+export function isPerSeatRoleStartupFile(path: string, orientation?: string): boolean {
+  return orientation === "role" || PER_SEAT_ROLE_PATH.test(path);
+}
+
+/** The warning a skipped legacy `role` leaves in the projection result: a spec saved before `rig-role` may have had no
+ *  other route for it. A `rig-role` skip is the designed path, so it adds none. */
+export function perSeatRoleSkipWarning(blockId: string, targetPath: string): string | undefined {
+  if (blockId === "rig-role") return undefined;
+  return `${blockId}: not merged into ${targetPath}, the guidance file pod-mates share, because guidance/role.md is a seat's own role. `
+    + "A seat's role reaches it only as a send_text startup file; a seat whose spec has none starts without its role.";
 }

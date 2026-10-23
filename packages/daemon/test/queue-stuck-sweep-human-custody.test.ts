@@ -97,7 +97,7 @@ describe("#514 custody findings for a human decision", () => {
       const [finding] = findings(row.qitemId);
       expect(finding).toMatchObject({ sourceSession: "asker@r", destinationSession: "closer@r", state: "pending",
         evidenceRef: `rig queue show ${row.qitemId}` });
-      expect(finding!.summary).toContain("successor-verification-required");
+      expect(finding!.summary).toContain(`Custody not checked: no successor of ${row.qitemId} in this store`);
       expect(finding!.body).toContain("rig queue list --destination next@r");
       expect(finding!.tags).toContain(STUCK_SWEEP_FINDING_TAG);
       expect(repo.transitionLog.latestOwnerNotificationForQitem(finding!.qitemId)).toBeNull();

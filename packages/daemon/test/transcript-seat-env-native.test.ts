@@ -53,8 +53,8 @@ describe.skipIf(process.platform === "win32")("native transcript seat environmen
         if (prior[index] === undefined) delete process.env[key]; else process.env[key] = prior[index];
       }
       await runFile("tmux", ["-S", socket, "kill-server"], { env }).catch(() => {});
-      fs.rmSync(temp, { recursive: true, force: true });
-      fs.rmSync(socketDir, { recursive: true, force: true });
+      await fs.promises.rm(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+      await fs.promises.rm(socketDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
     }
   });
 });

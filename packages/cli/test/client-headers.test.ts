@@ -111,6 +111,12 @@ describe("DaemonClient sender-identity header (P18)", () => {
     expect(senderIdentityHeaders()).toEqual({ [SENDER_IDENTITY_HEADER]: "dev50-driver@rig" });
   });
 
+  it("carries an authenticated caller's seat instead of the process env when the client is built for that caller", () => {
+    process.env.OPENRIG_SESSION_NAME = "env-seat@rig";
+    expect(senderIdentityHeaders(undefined, "alice@team")).toEqual({ [SENDER_IDENTITY_HEADER]: "alice@team" });
+    expect(senderIdentityHeaders("mm2-openrig1", "alice@team")).toEqual({ [SENDER_IDENTITY_HEADER]: "alice@team@mm2-openrig1" });
+  });
+
   it("emits NO header when the seat env is absent (the daemon refuses; the CLI never fabricates)", () => {
     delete process.env.OPENRIG_SESSION_NAME;
     delete process.env.RIGGED_SESSION_NAME;

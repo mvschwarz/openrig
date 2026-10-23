@@ -168,6 +168,12 @@ The read API adds `GET /api/scopes/projects` and optional `project` and
 detail also requires the selected mission directory. Existing reads without a
 project parameter keep their legacy contract.
 
+`GET /api/scopes?counts=1` is the light list: each mission's slices with only
+their `dirName`, `id`, `displayName`, `status`, `stage` and `locks` (and
+`sourcePath` for a selected project), read from each slice's node file alone. It
+leaves out readiness and proof pairing, which are most of the work and bytes of
+the default list. `detail=1` takes precedence when both are given.
+
 ## UI Mapping
 
 - `workspace.root` maps to the Project workspace.

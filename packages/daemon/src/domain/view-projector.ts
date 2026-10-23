@@ -201,7 +201,7 @@ export class ViewProjector {
         const activity = this.executionDeps?.seatActivity?.getSeatStateBySession(String(r.destination_session));
         const receipt = derivePickup({
           lastMeaningfulAt: lastMeaningfulTransition(this.db, String(r.qitem_id))?.at,
-          activity: activity?.activity, needsInput: activity?.needsInput.count,
+          activity: activity?.activity, needsInput: activity?.needsInput.count, needsInputReason: activity?.needsInput.reason,
           state: String(r.state),
           claimedAt: (r.claimed_at as string | null) ?? null,
           lastHeartbeat: (r.last_heartbeat as string | null) ?? null,
@@ -211,6 +211,7 @@ export class ViewProjector {
           ...r,
           pickup_state: receipt.state,
           ...(receipt.evidence ? { pickup_evidence: receipt.evidence } : {}),
+          ...(receipt.stall ? { pickup_stall: receipt.stall } : {}),
         };
       });
       return { viewName: name, generatedAt: this.now().toISOString(), rows: projected, rowCount: projected.length };

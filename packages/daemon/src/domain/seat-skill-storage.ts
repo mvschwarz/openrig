@@ -4,6 +4,7 @@ import nodePath from "node:path";
 import { getOpenRigHome } from "../openrig-compat.js";
 import type { ReconcileSkillLoadoutResult, SkillLoadout, SkillLoadoutLocation, SkillRuntime } from "./skill-catalog.js";
 import { parseSkillFrontmatter } from "./skill-discovery.js";
+import { MANAGED_BLOCK_APPEND_SEPARATOR, hasEditedManagedBlock, managedBlockText } from "./managed-blocks.js";
 
 // OPR.0.7.0.13 — where a team seat's skills live: storage OpenRig owns, outside the person's project and their own
 // skill folders, so a person's own agent opened in the project sees none of the team's skills.
@@ -683,19 +684,35 @@ export function writeSeatSkillCatalog(paths: SeatSkillPaths): SeatSkillCatalog {
   return { path: paths.catalogPath, digest, count };
 }
 
+/** The startup file, and the managed block id, that carry the bootstrap line into a seat's guidance file. */
+export const SEAT_SKILLS_BOOTSTRAP_BLOCK_ID = "openrig-seat-skills.md";
+
 /** OPR.0.7.0.13 (router, R1.1): the one constant bootstrap line, verbatim. The guidance asset carries exactly this text. */
 export const SEAT_SKILLS_BOOTSTRAP_LINE = "OpenRig seat skills: if `OPENRIG_SESSION_NAME` is set, run `rig skill loadout --seat self` and use the router skill it names; if it isn't set, this line doesn't apply to you.";
+
+/** Whether guidance text holds the seat-skills block with anything but the line: a person edited it. A start leaves such a
+ *  block as it is, and down keeps it (both by `managedBlockBodyMatches`). */
+export function seatSkillsLineEdited(content: string): boolean {
+  return hasEditedManagedBlock(content, SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, SEAT_SKILLS_BOOTSTRAP_LINE);
+}
 
 export interface FootprintSeat { seat: string; runtime: string; cwd: string; claudeManagedBlockFile?: string | null }
 export interface SkillRouterFootprint {
   line: string;
+  /** The exact text written: the line between OpenRig's markers, which let it be removed cleanly. */
+  written: string;
+  /** Where `written` goes in the file, and what's put before it. */
+  placement: string;
+  /** The exact bytes added to a file that already has text: `written` after the separator. */
+  appended: string;
   files: Array<{ path: string; runtime: "claude-code" | "codex"; seats: string[] }>;
   notCovered: Array<{ seat: string; runtime: string; reason: string }>;
   ifNo: string;
 }
 
 /**
- * Slice 20 seam: the exact preview of the bootstrap line's footprint, before any write: the line verbatim and each file
+ * Slice 20 seam: the exact preview of the bootstrap line's footprint, before any write: the line verbatim, the exact text
+ * written (the line between OpenRig's markers) and where it goes, and each file
  * it would go into (a Claude seat's rig file, `CLAUDE.md` or `CLAUDE.local.md`; a Codex seat's `AGENTS.md`), one entry
  * per file with every seat sharing it. Pure: no filesystem or settings read. The file rule is main's
  * `seatGuidanceFile` (restore-guidance.ts), repeated here until this branch carries it.
@@ -711,8 +728,13 @@ export function describeSkillRouterFootprint(seats: FootprintSeat[]): SkillRoute
     entry.seats.push(s.seat);
     byPath.set(path, entry);
   }
+  // The guidance asset carries the line and a newline; the managed-block writer puts its markers around that.
+  const written = managedBlockText(SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, `${SEAT_SKILLS_BOOTSTRAP_LINE}\n`);
   return {
     line: SEAT_SKILLS_BOOTSTRAP_LINE,
+    written,
+    placement: "Added at the end of the file after two newlines. A file that doesn't exist yet holds only this, and a file that already has it gets it replaced in place.",
+    appended: `${MANAGED_BLOCK_APPEND_SEPARATOR}${written}`,
     files: [...byPath.values()],
     notCovered,
     ifNo: "Nothing is written into these files. Each seat still has its own skills and router; a Codex seat still gets its skill list in its startup text, and any agent can run `rig skill loadout --seat self`, but nothing in the project points there.",

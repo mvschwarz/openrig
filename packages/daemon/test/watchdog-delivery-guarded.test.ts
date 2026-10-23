@@ -50,7 +50,7 @@ function fixture(saved?: Buffer) {
   if (!saved) {
     migrate(db, ALL_MIGRATIONS);
     db.exec(`INSERT INTO rigs(id,name) VALUES ('rig','test');
-      INSERT INTO nodes(id,rig_id,logical_id,runtime) VALUES ('a','rig','worker','terminal');
+      INSERT INTO nodes(id,rig_id,logical_id,runtime) VALUES ('a','rig','worker','claude-code');
       INSERT INTO bindings(id,node_id,tmux_session,tmux_pane) VALUES ('ba','a','worker@test','%1');
       INSERT INTO sessions(id,node_id,session_name,status) VALUES ('sa','a','worker@test','running');
       INSERT INTO occupant_tenures(id,node_id,generation_ordinal,generation_uuid,kind) VALUES ('ga','a',1,'g1','fresh');`);

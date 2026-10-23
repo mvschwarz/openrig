@@ -88,6 +88,39 @@ Readiness has its own attention codes (`runtime-adapter.ts:74–87`):
 When `checkReady` reports one, the readiness wait returns at once and startup
 ends `attention_required`.
 
+### Evidence for a failed Claude resume
+
+Previously, a failed Claude launch recorded its error without the probe code or
+the captured input's identity, and a refused strict full-restore attention clear
+had no corresponding refusal event. Probe-backed Claude launch failures now
+carry an optional `probe` in `HarnessLaunchResult` and `node.startup_failed`.
+Strict full-restore refusals emit `seat.attention_clear_refused`; a
+`pane_not_usable` refusal includes that probe and the restore attempt ID.
+A missing strict reconciler emits `strict_reconciler_unavailable` without
+inventing an attempt ID or probe evidence, and still refuses the clear.
+
+`native-resume-probe-evidence.ts` records the status, code, a closed-set login
+refusal and row kind when matched, and the exact capture's line count, byte
+count and SHA-256. Its new fields contain no captured pane text or free-form
+probe detail. Existing attention evidence and recovery decisions keep their
+previous behavior. MCP approval detection still takes precedence over the
+login-refusal check.
+
+Pane dimensions are optional, observed after the capture. Their read has a
+250 ms deadline so a hung `listPanes` cannot indefinitely delay the failure
+result or its event. On timeout, error, ambiguous pane identity or invalid
+dimensions, the unavailable dimensions are `null`; late results are ignored.
+The deadline bounds this diagnostic wait, not the underlying tmux command.
+
+`native-resume-probe-evidence.test.ts` covers unavailable and late geometry;
+`startup-orchestrator.test.ts` and `restore-orchestrator.test.ts` exercise the
+real adapter/orchestrator and SQLite event paths with available, failing and
+never-settling geometry reads. `seat-attention-reconciler.test.ts` checks that
+a missing strict reconciler records its refusal without changing restore
+history or sending input. These use synthetic terminal captures, not a
+live Claude session. The stub scenario runtime cannot draw Claude's native
+login-refusal UI, and its scenario runner does not bind the restore action.
+
 ## 2. The runtime adapters
 
 **5** classes implement `RuntimeAdapter`
