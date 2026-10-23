@@ -196,6 +196,8 @@ export class WatchdogJobsRepository {
   private readonly hasThresholdUnitsColumns: boolean;
   /** Per job, the spec and interval a caller's update replaced, for a delivery still in flight (see updateInPlace). */
   private readonly updatedFrom = new Map<string, Array<{ specYaml: string; intervalSeconds: number }>>();
+  /** Per job, the schedule its delivery in flight started under (see deliverySchedule). */
+  private readonly inFlight = new Map<string, { specYaml: string; intervalSeconds: number }>();
   constructor(
     private readonly db: Database.Database,
     private readonly now: () => Date = () => new Date(),
@@ -706,7 +708,25 @@ export class WatchdogJobsRepository {
     this.writeSchedule(jobId, specYaml, intervalSeconds, lastEvaluationAt);
     // Bounded: only deliveries in flight at the time of an update can match, and a job's next evaluation clears it.
     const replaced = [...(this.updatedFrom.get(jobId) ?? []), { specYaml: before.specYaml, intervalSeconds: before.intervalSeconds }];
-    this.updatedFrom.set(jobId, replaced.slice(-8));
+    const kept = replaced.slice(-8);
+    // However many updates land, the schedule the delivery in flight started under stays until that delivery is
+    // accounted for. A real reschedule still forgets it, because it clears this record.
+    const started = this.inFlight.get(jobId);
+    const isStarted = (s: { specYaml: string; intervalSeconds: number }) =>
+      s.specYaml === started?.specYaml && s.intervalSeconds === started.intervalSeconds;
+    if (started && replaced.some(isStarted) && !kept.some(isStarted)) kept.unshift(started);
+    this.updatedFrom.set(jobId, kept);
+  }
+
+  /** A job's schedule read as its delivery starts; scheduleUnchanged keeps matching it until deliveryAccounted. */
+  deliverySchedule(jobId: string): WatchdogJob {
+    const job = this.getByIdOrThrow(jobId);
+    this.inFlight.set(jobId, { specYaml: job.specYaml, intervalSeconds: job.intervalSeconds });
+    return job;
+  }
+
+  deliveryAccounted(jobId: string): void {
+    this.inFlight.delete(jobId);
   }
 
   /** True when `snapshot`, read before a delivery, is still the job's schedule or one only an update replaced. */

@@ -597,7 +597,7 @@ export class WatchdogPolicyEngine {
     if (thresholdFire && occupantGeneration && !continuityAction) {
       this.jobsRepo.recordThresholdFire(job.jobId, occupantGeneration, evaluatedAt);
     }
-    const deliverySchedule = this.jobsRepo.getByIdOrThrow(job.jobId);
+    const deliverySchedule = this.jobsRepo.deliverySchedule(job.jobId);
     const delivery = await this.deliver(
       {
         targetSession: outcome.target.session,
@@ -698,7 +698,7 @@ export class WatchdogPolicyEngine {
   }
 
   private async deliverDigest(seat: string, digest: HeldReminder[]): Promise<void> {
-    const schedules = digest.map((held) => this.jobsRepo.getByIdOrThrow(held.job.jobId));
+    const schedules = digest.map((held) => this.jobsRepo.deliverySchedule(held.job.jobId));
     const members = digest.map((held) => ({ jobId: held.job.jobId, occurrenceId: held.occurrenceId }));
     const digestId = `digest-${createHash("sha256").update(JSON.stringify(members.map((m) => m.occurrenceId).sort())).digest("hex")}`;
     const lines = digest.map(({ entry }) => {
@@ -724,7 +724,7 @@ export class WatchdogPolicyEngine {
   /** A held reminder sent on its own, exactly as `evaluate` would have sent it: an ordinary park reminder with its
    *  continuation's preview, anything else verbatim. */
   private async deliverAlone(seat: string, held: HeldReminder, entry: ParkReminderEntry | null): Promise<void> {
-    const schedule = this.jobsRepo.getByIdOrThrow(held.job.jobId);
+    const schedule = this.jobsRepo.deliverySchedule(held.job.jobId);
     const message = entry ? withContinuationPreview(held.outcome.message, entry.qitemId, entry.continuation) : held.outcome.message;
     const delivery = await this.deliver(
       { targetSession: seat, message },
@@ -801,6 +801,7 @@ export class WatchdogPolicyEngine {
       && (isContextUsageThreshold || current.lastEvaluationAt === evaluatedAt)) {
       this.onWakeAttempt?.({ jobId: job.jobId, deliveryStatus: delivery.status });
     }
+    this.jobsRepo.deliveryAccounted(job.jobId);
     return {
       job: this.jobsRepo.getByIdOrThrow(job.jobId),
       outcome,
