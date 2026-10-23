@@ -401,21 +401,22 @@ interface WorkChoiceCandidate {
 
 /** After the plain answer, the candidates the agent must choose between, one line each, so a
  *  refused current work is never just a count. Prints nothing when the daemon sent no choice
- *  (current work is settled, nothing is in progress, or the daemon predates the field). */
+ *  (current work is settled, nothing is in progress, or the daemon predates the field).
+ *  On stderr, so the answer on stdout still parses as JSON. */
 export function printCurrentWorkChoice(data: unknown): void {
   const choice = (data as { currentWorkChoice?: { instruction?: string; candidates?: WorkChoiceCandidate[];
     unknown?: Array<{ qitemId?: string | null; reason?: string }> } } | null)?.currentWorkChoice;
   if (!choice) return;
-  console.log("");
-  console.log(choice.instruction ?? "OpenRig did not choose your current work.");
+  console.error("");
+  console.error(choice.instruction ?? "OpenRig did not choose your current work.");
   for (const [index, c] of (choice.candidates ?? []).entries()) {
     const project = c.projects?.length ? `project ${c.projects.join(", ")}` : "no project tag";
     const where = c.workNodePath ?? "no folder found";
     const why = c.unresolved ? ` (${c.unresolved})` : "";
-    console.log(`  ${index + 1}. ${project} · mission ${c.mission ?? "?"} · slice ${c.slice ?? "none"} · ${where}${why} · from row ${c.qitemId ?? "unknown"}`);
+    console.error(`  ${index + 1}. ${project} · mission ${c.mission ?? "?"} · slice ${c.slice ?? "none"} · ${where}${why} · from row ${c.qitemId ?? "unknown"}`);
   }
   for (const u of choice.unknown ?? []) {
-    console.log(`  - row ${u.qitemId ?? "unknown"}: work not named (${u.reason ?? "no reason given"})`);
+    console.error(`  - row ${u.qitemId ?? "unknown"}: work not named (${u.reason ?? "no reason given"})`);
   }
 }
 
@@ -1459,13 +1460,11 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
         // Slice 15 P2: with output.compact on, the empty fields are left out and counted.
         const compact = compactOutputEnabled() ? compactShow(transformed) : null;
         printResult(json, compact ? compact.item : transformed, res.status);
+        // Notices go to stderr, as transitions' does, so stdout stays one JSON document an agent can parse.
         if (!json && bodyTruncated) {
-          console.log(`… (bounded preview — complete body is ${bodyBytes} bytes; full record ${view.fullJsonBytes} JSON bytes: ${fullCommand})`);
+          console.error(`… (bounded preview — complete body is ${bodyBytes} bytes; full record ${view.fullJsonBytes} JSON bytes: ${fullCommand})`);
         }
-        if (compact && compact.emptyOmitted.length > 0) {
-          const notice = showEmptyNotice(compact.emptyOmitted, fullCommand);
-          if (json) console.error(notice); else console.log(notice);
-        }
+        if (compact && compact.emptyOmitted.length > 0) console.error(showEmptyNotice(compact.emptyOmitted, fullCommand));
       });
     });
 
