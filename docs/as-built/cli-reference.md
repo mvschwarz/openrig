@@ -193,6 +193,11 @@ the sections that were not read are `null`.
 | `rig gateway human list` | — | `--json` |
 | `rig gateway human show <entityId>` | — | `--json` |
 | `rig gateway human set <entityId> <field> <value>` | — | `--reason <reason>`<br>`--actor <actor>` |
+| `rig gateway human quiet` | — | — |
+| `rig gateway human quiet set <entityId>` | — | `--daily <window>`<br>`--until <time>`<br>`--tz <zone>`<br>`--actor <actor>`<br>`--json` |
+| `rig gateway human quiet end <entityId>` | — | `--actor <actor>`<br>`--json` |
+| `rig gateway human quiet clear <entityId>` | — | `--actor <actor>`<br>`--json` |
+| `rig gateway human quiet show <entityId>` | — | `--json` |
 | `rig gateway human mode` | — | — |
 | `rig gateway human mode save <entityId> <name>` | — | `--availability <value>`<br>`--expected-back <when>`<br>`--decision-room <words>`<br>`--exclude <item...>`<br>`--quiet <rule>`<br>`--tz <zone>`<br>`--account <where>`<br>`--actor <actor>`<br>`--json` |
 | `rig gateway human mode saved <entityId> [name]` | — | `--json` |
@@ -289,7 +294,7 @@ the sections that were not read are `null`.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig bundle` | — | — |
-| `rig bundle create <spec>` | — | `-o, --output <path>` **required**<br>`--name <name>`<br>`--bundle-version <ver>`<br>`--include-packages <refs...>`<br>`--rig-root <root>`<br>`--context-pack <dir>` (repeatable)<br>`--project-dir <dir>`<br>`--preset <name>`<br>`--seat <member=runtime>` (repeatable)<br>`--notes <text>`<br>`--min-daemon-version <ver>`<br>`--min-cli-version <ver>`<br>`--allow-drift`<br>`--json` |
+| `rig bundle create <spec>` | — | `-o, --output <path>` **required**<br>`--name <name>`<br>`--bundle-version <ver>`<br>`--include-login-files`<br>`--include-packages <refs...>`<br>`--rig-root <root>`<br>`--context-pack <dir>` (repeatable)<br>`--project-dir <dir>`<br>`--preset <name>`<br>`--seat <member=runtime>` (repeatable)<br>`--notes <text>`<br>`--min-daemon-version <ver>`<br>`--min-cli-version <ver>`<br>`--allow-drift`<br>`--json` |
 | `rig bundle configurations <spec>` | — | `--json` |
 | `rig bundle inspect <path>` | — | `--preset <name>`<br>`--seat <member=runtime>` (repeatable)<br>`--json` |
 | `rig bundle install <path>` | — | `--preset <name>`<br>`--seat <member=runtime>` (repeatable)<br>`--non-interruptive`<br>`--no-non-interruptive`<br>`--plan`<br>`--yes`<br>`--target <root>`<br>`--cwd <path>`<br>`--skip-version-check`<br>`--force`<br>`--json` |
@@ -306,7 +311,7 @@ the sections that were not read are `null`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig down <rig>` | — | `--delete`<br>`--force`<br>`--snapshot`<br>`--json`<br>`--host <id>` |
+| `rig down <rig>` | — | `--delete`<br>`--force`<br>`--snapshot`<br>`--yes`<br>`--json`<br>`--host <id>` |
 
 ### archive
 
@@ -354,7 +359,7 @@ the sections that were not read are `null`.
 | `rig mcp` | — | — |
 | `rig mcp serve` | — | `--port <port>`<br>`--http`<br>`--bind <host:port>` |
 | `rig mcp token` | — | — |
-| `rig mcp token add <name>` | — | `--seat <session>`<br>`--rig <name...>`<br>`--root <name...>`<br>`--workspace`<br>`--owner` |
+| `rig mcp token add <name>` | — | `--seat <session>` **required**<br>`--rig <name...>`<br>`--root <name...>`<br>`--workspace`<br>`--owner` |
 | `rig mcp token list` | — | `--json` |
 | `rig mcp token revoke <name>` | — | — |
 
@@ -445,7 +450,7 @@ the sections that were not read are `null`.
 | `rig slack verify` | — | `--json` |
 | `rig slack channel-map` | — | — |
 | `rig slack channel-map list` | — | `--json` |
-| `rig slack channel-map set <match> <channel>` | — | `--reason <reason>`<br>`--actor <actor>` |
+| `rig slack channel-map set <match> <channel>` | — | `--inbound <seat>`<br>`--reason <reason>`<br>`--actor <actor>` |
 | `rig slack channel-map remove <match>` | — | `--reason <reason>`<br>`--actor <actor>` |
 | `rig slack enable` | — | `--reason <reason>`<br>`--actor <actor>` |
 | `rig slack disable` | — | `--reason <reason>` **required**<br>`--actor <actor>` |
@@ -537,7 +542,7 @@ Herdr session per request, including session-bound previews and window reuse.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig capture [session]` | — | `--rig <name>`<br>`--pod <name>`<br>`--lines <n>`<br>`--host <id>`<br>`--json` |
+| `rig capture [session]` | — | `--rig <name>`<br>`--pod <name>`<br>`--lines <n>`<br>`--history-plus-pane`<br>`--host <id>`<br>`--json` |
 
 ### broadcast
 
@@ -623,7 +628,7 @@ Only Claude and Codex tenures can be woken.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig skill` | — | — |
-| `rig skill loadout` | — | `--runtime <runtime>` (folder mode; **required** there)<br>`--seat <session>` (seat mode; `self` is this seat)<br>`--wait-for-idle <ms>`<br>`--cwd <path>`<br>`--project-root <path>`<br>`--topology <ids>`<br>`--apply`<br>`--json` |
+| `rig skill loadout` | — | `--runtime <runtime>` (folder mode; **required** there)<br>`--seat <session>` (seat mode; `self` is this seat)<br>`--wait-for-idle <ms>`<br>`--resend`<br>`--cwd <path>`<br>`--project-root <path>`<br>`--topology <ids>`<br>`--apply`<br>`--json` |
 | `rig skill audit` | — | `--json` |
 
 ### agent-image
@@ -640,6 +645,13 @@ Only Claude and Codex tenures can be woken.
 | `rig agent-image unpin <name-or-id>` | — | `--json` |
 | `rig agent-image prune` | — | `--dry-run`<br>`--force`<br>`--json` |
 | `rig agent-image sync` | — | `--json` |
+
+### community-harness
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig community-harness` | — | — |
+| `rig community-harness list` | — | `--json` |
 
 ### fork
 
@@ -664,7 +676,7 @@ Only Claude and Codex tenures can be woken.
 | `rig mode show` | — | `--json` |
 | `rig mode effective` | — | `--rig <id>`<br>`--project <id>`<br>`--mission <id>`<br>`--workstream <id>`<br>`--qitem <id>`<br>`--json` |
 | `rig mode cite` | — | `--rig <id>`<br>`--project <id>`<br>`--mission <id>`<br>`--workstream <id>`<br>`--qitem <id>` |
-| `rig mode unset <scope> [qualifier]` | — | `--bearer <token>`<br>`--json` |
+| `rig mode unset <scope> [qualifier]` | — | `--bearer <token>`<br>`--category <category>`<br>`--json` |
 | `rig mode defaults` | — | `--json` |
 
 ### policy
@@ -686,7 +698,7 @@ Only Claude and Codex tenures can be woken.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig whoami` | — | `--node-id <id>`<br>`--session <name>`<br>`--host <id>`<br>`--all-hosts`<br>`--hosts <ids>`<br>`--json`<br>`--full`<br>`--verbose` |
+| `rig whoami` | — | `--node-id <id>`<br>`--session <name>`<br>`--host <id>`<br>`--all-hosts`<br>`--hosts <ids>`<br>`--json`<br>`--full`<br>`--verbose`<br>`--all-peers` |
 
 ### config
 
@@ -734,7 +746,7 @@ Only Claude and Codex tenures can be woken.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig provider` | — | — |
-| `rig provider status` | — | `--json`<br>`--refresh`<br>`--provider <p>` |
+| `rig provider status` | — | `--json`<br>`--refresh`<br>`--provider <p>`<br>`--all-hosts`<br>`--hosts <ids>` |
 | `rig provider accounts` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
 | `rig provider bindings` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
 | `rig provider signals` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
@@ -749,6 +761,7 @@ Only Claude and Codex tenures can be woken.
 |---|---|---|
 | `rig usage` | — | — |
 | `rig usage top` | — | `--window <duration>`<br>`--top <n>`<br>`--json` |
+| `rig usage cost` | — | `--seat <session>`<br>`--json` |
 | `rig usage series` | — | `--seat <session>`<br>`--lane <lane>`<br>`--since <iso>`<br>`--until <iso>`<br>`--limit <n>`<br>`--json` |
 
 ### telemetry
@@ -1007,6 +1020,6 @@ off, draft-aware and hold modes, immediate refusal results and held-message insp
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig proof` | — | `--workspace <path>` |
-| `rig proof show [scope]` | — | `--json` |
-| `rig proof judge <scope-item>` | — | `--verdict <verdict>` **required**<br>`--reason <text>` **required**<br>`--evidence <ref>` (repeatable)<br>`--subject <kind:ref>`<br>`--comparison <ref>`<br>`--revision <revision>`<br>`--operation-id <id>`<br>`--replace`<br>`--json` |
+| `rig proof show [scope]` | — | `--project <id>`<br>`--json` |
+| `rig proof judge <scope-item>` | — | `--project <id>`<br>`--verdict <verdict>` **required**<br>`--reason <text>` **required**<br>`--evidence <ref>` (repeatable)<br>`--subject <kind:ref>`<br>`--comparison <ref>`<br>`--revision <revision>`<br>`--operation-id <id>`<br>`--replace`<br>`--json` |
 | `rig proof add <slice-path>` | — | `--mission <name>`<br>`--artifact-type <type>` **required**<br>`--verdict <verdict>` **required**<br>`--candidate-sha <sha>` **required**<br>`--money-evidence <line>` **required**<br>`--slice-id <dot-id>`<br>`--file <path>`<br>`--body <text>`<br>`--name <filename>`<br>`--replace`<br>`--evidences <refs>`<br>`--self-check <text>`<br>`--media <refs>`<br>`--json` |
