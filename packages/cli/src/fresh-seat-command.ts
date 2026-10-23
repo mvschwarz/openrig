@@ -24,9 +24,11 @@ export async function launchFreshSeat(client: DaemonClient, logicalId: string, r
       { fresh: true, reason: FRESH_REASON }, { timeoutMs: 120_000 });
     if (res.status < 400 && res.data["ok"] !== false) return { ok: true, message: `fresh-primed (${String(res.data["sessionName"] ?? ref)})` };
     const guidance = res.data["guidance"];
+    // attention_required means a new process may be running, so "not started" would overclaim.
+    const outcome = res.data["status"] === "attention_required" ? "needs attention" : "not started";
     return {
       ok: false,
-      message: `not started -- ${String(res.data["message"] ?? res.data["error"] ?? `HTTP ${res.status}`)}`,
+      message: `${outcome} -- ${String(res.data["message"] ?? res.data["error"] ?? `HTTP ${res.status}`)}`,
       ...(typeof guidance === "string" ? { guidance } : {}),
     };
   } catch (err) {

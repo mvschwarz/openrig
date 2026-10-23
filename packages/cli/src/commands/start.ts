@@ -576,7 +576,8 @@ status); a restore that returned without a ready kernel exits 1.
                 // is refused while the siblings this restore resumed are running.
                 for (const id of accepted) {
                   const launched = await launchFreshSeat(client, id, rigName);
-                  if (opts.json) continue;
+                  // --json keeps stdout for the result; a refusal still reaches stderr.
+                  if (opts.json && launched.ok) continue;
                   (launched.ok ? console.log : console.error)(`    ${id}: ${launched.message}`);
                   if (launched.guidance) console.error(`      ${launched.guidance}`);
                 }

@@ -2596,6 +2596,9 @@ describe("RestoreOrchestrator", () => {
       expect(nodeResult!.status).toBe("awaiting-decision");
       expect(nodeResult!.error).toContain("Original session unresumable");
       expect(nodeResult!.error).toContain("The blank session was rolled back; no session is running");
+      // The one-seat command, not a whole-rig re-run, which is refused while sibling seats run.
+      expect(nodeResult!.error).toContain(`deliberately start only this seat fresh: rig seat launch '${node.logicalId}@test-rig' --fresh --reason "<why>".`);
+      expect(nodeResult!.error).not.toContain("Re-run with --fresh");
       expect(launchHarness).toHaveBeenCalledTimes(1);
       expect(launchHarness.mock.calls[0]![1].resumeToken).toBe("stale-claude-token");
 
@@ -2755,7 +2758,7 @@ describe("RestoreOrchestrator", () => {
     if (result.ok) {
       const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
       expect(nodeResult!.status).toBe("awaiting-decision");
-      expect(nodeResult!.error).toBe(`Resume is unsupported for community harness "synth-harness": its preset is launch-only. No session was started, and the earlier conversation is left as it is. Re-run with --fresh dev.impl only if you want a new conversation.`);
+      expect(nodeResult!.error).toBe(`Resume is unsupported for community harness "synth-harness": its preset is launch-only. No session was started, and the earlier conversation is left as it is. Only if you want a new conversation, run: rig seat launch 'dev.impl@test-rig' --fresh --reason "<why>".`);
       expect(launchHarness).not.toHaveBeenCalled();
     }
   });
@@ -4260,7 +4263,7 @@ describe("RestoreOrchestrator", () => {
       if (!result.ok) return;
       const node = result.result.nodes[0]!;
       expect(node.status).toBe("awaiting-decision");
-      expect(node.error).toContain("--fresh worker");
+      expect(node.error).toMatch(/rig seat launch 'worker@[^']+' --fresh --reason "<why>"/);
       // ZERO session started: launchNode never called, session count unchanged.
       expect(launchSpy).not.toHaveBeenCalled();
       expect(after.c).toBe(before.c);

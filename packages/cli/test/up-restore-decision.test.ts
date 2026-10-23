@@ -208,6 +208,20 @@ describe("rig up --existing — resume-original default (OPR.0.3.4.2)", () => {
     expect(logs.join("\n")).toContain("Add --stop to replace it deliberately.");
   });
 
+  it("an attention_required answer reads as needing attention, not as not started", async () => {
+    respond = () => ({
+      status: "restored", rigId: "rig-1", rigName: "myrig", rigResult: "partially_restored",
+      nodes: [{ logicalId: "orch.lead", status: "resumed" }, { logicalId: "dev.impl", status: "awaiting-decision", error: "no token available" }], warnings: [],
+    });
+    // The daemon's answer when the new process could not be confirmed stopped: it may be running.
+    launchAnswer = () => ({ status: 409, data: { ok: false, code: "attention_required", status: "attention_required", message: "The seat requires attention." } });
+    const { logs } = await captureLogs(async () => {
+      await makeCmd(vi.fn(async () => true)).parseAsync(["node", "rig", "up", "myrig", "--existing"]);
+    });
+    expect(logs.join("\n")).toContain("dev.impl: needs attention -- The seat requires attention.");
+    expect(logs.join("\n")).not.toContain("not started");
+  });
+
   it("TTY ASK declined: no second POST, no session started", async () => {
     respond = () => ({
       status: "restored", rigId: "rig-1", rigName: "myrig", rigResult: "partially_restored",

@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import { resolveActiveOccupantRow, resolveActiveSnapshotSession } from "./active-occupant.js";
+import { freshSeatLaunchCommand, resolveActiveOccupantRow, resolveActiveSnapshotSession } from "./active-occupant.js";
 import { readFreshOccupantRelations } from "./fresh-occupant-relation.js";
 import type { RigWithRelations, Session, Snapshot, SnapshotData } from "./types.js";
 
@@ -98,8 +98,7 @@ export function snapshotMatchesCurrentOccupants(db: Database.Database, rig: RigW
 }
 
 export function stoppedSnapshotReason(logicalId: string, rigName: string): string {
-  const seat = `'${`${logicalId}@${rigName}`.replace(/'/g, `'"'"'`)}'`;
-  return `Seat '${logicalId}' was deliberately stopped in the current generation and this snapshot. It remains stopped. To explicitly start this seat in a new conversation, run: rig seat launch ${seat} --fresh --reason "<why>".`;
+  return `Seat '${logicalId}' was deliberately stopped in the current generation and this snapshot. It remains stopped. To explicitly start this seat in a new conversation, run: ${freshSeatLaunchCommand(logicalId, rigName)}.`;
 }
 
 /**

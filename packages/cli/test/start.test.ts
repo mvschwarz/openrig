@@ -583,6 +583,22 @@ describe("rig start (OPR.0.3.4.1)", () => {
     expect(logs.join("\n")).toContain("dev.ops.impl: fresh-primed (dev-ops.impl@legacy-rig)");
   });
 
+  it("with --json, a refused one-seat launch after y still reaches stderr", async () => {
+    setupCandidateRig("legacy-rig");
+    const plan = routes["/api/rigs/:id/up"]!;
+    routes["/api/rigs/:id/up"] = (req, body) => body.plan === true ? plan(req, body) : {
+      status: "restored", rigId: "rig-1", rigName: "legacy-rig", rigResult: "partially_restored",
+      nodes: [{ logicalId: "orch.lead", status: "resumed" }, { logicalId: "dev.ops.impl", status: "awaiting-decision", error: "no token available" }],
+      warnings: [],
+    };
+    routes["/api/seat/launch/:seat"] = () => ({ _httpStatus: 409, ok: false, code: "seat_live", message: "The seat's pane is still running." });
+    const { logs } = await captureLogs(async () => {
+      await makeCmd(vi.fn(async () => true)).parseAsync(["node", "rig", "start", "--last", "--json"]);
+    });
+    expect(launches).toHaveLength(1);
+    expect(logs.join("\n")).toContain("dev.ops.impl: not started -- The seat's pane is still running.");
+  });
+
   // ---- KERNEL INVARIANT ----
 
   it("kernel failure -> honest hard-fail, restore NOT attempted", async () => {
