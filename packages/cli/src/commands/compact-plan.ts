@@ -55,6 +55,12 @@ interface CompactPlanThresholds {
   thresholdPercent: number;
 }
 
+interface AutomaticCompactionSetting {
+  enabled: boolean | null;
+  thresholdPercent: number | null;
+  unavailableReason: string | null;
+}
+
 interface CompactPlanSeatPolicy {
   oneSeatAtATime: true;
   autoCompactAllowed: false;
@@ -117,8 +123,12 @@ interface CompactPlanResult {
     thresholdTokens: number;
     /** The plan's own fallback percentage; not the automatic compaction setting. */
     thresholdPercent: number;
-    /** `policies.claude_compaction.threshold_percent`, shown only for comparison. */
-    automaticCompactionThresholdPercent: number;
+    /** Whether `policies.claude_compaction.enabled` is on; null when the config could not be read. */
+    automaticCompactionEnabled: boolean | null;
+    /** `policies.claude_compaction.threshold_percent`, shown only for comparison; null when the config could not be read. */
+    automaticCompactionThresholdPercent: number | null;
+    /** Why the automatic compaction setting is unknown; null when it was read. */
+    automaticCompactionUnavailableReason: string | null;
     oneSeatAtATime: true;
     autoCompactAllowed: false;
     explicitAuthorizationRequired: true;
@@ -313,7 +323,7 @@ function buildPlan(
   nodes: NodeEntry[],
   thresholds: CompactPlanThresholds,
   incompleteRigs: IncompleteRig[],
-  automaticCompactionThresholdPercent: number,
+  automaticCompaction: AutomaticCompactionSetting,
 ): CompactPlanResult {
   const candidates: CandidateEntry[] = [];
   const blocked: BlockedEntry[] = [];
@@ -348,7 +358,9 @@ function buildPlan(
       defaultThresholdPercent: PERCENT_FALLBACK_THRESHOLD,
       thresholdTokens: thresholds.thresholdTokens,
       thresholdPercent: thresholds.thresholdPercent,
-      automaticCompactionThresholdPercent,
+      automaticCompactionEnabled: automaticCompaction.enabled,
+      automaticCompactionThresholdPercent: automaticCompaction.thresholdPercent,
+      automaticCompactionUnavailableReason: automaticCompaction.unavailableReason,
       oneSeatAtATime: true,
       autoCompactAllowed: false,
       explicitAuthorizationRequired: true,
@@ -362,6 +374,19 @@ function buildPlan(
   };
 }
 
+function automaticCompactionSummary(policy: CompactPlanResult["policy"]): string {
+  const enabled = policy.automaticCompactionEnabled;
+  const thresholdPercent = policy.automaticCompactionThresholdPercent;
+  if (enabled == null || thresholdPercent == null) {
+    const reason = policy.automaticCompactionUnavailableReason;
+    return `Automatic compaction: couldn't be read${reason ? `: ${reason}` : ""}; run \`rig config\` to check it.`;
+  }
+  if (enabled) {
+    return `Automatic compaction: on, at ${thresholdPercent}% (policies.claude_compaction.threshold_percent).`;
+  }
+  return `Automatic compaction: off (its threshold setting policies.claude_compaction.threshold_percent is ${thresholdPercent}%).`;
+}
+
 function printHuman(plan: CompactPlanResult): void {
   console.log("READ-ONLY PLAN - does not compact");
   if (plan.incompleteRigs.length > 0) {
@@ -369,7 +394,7 @@ function printHuman(plan: CompactPlanResult): void {
   }
   console.log("Policy: read_only_plan; one-seat-at-a-time marshal triage; autoCompactAllowed=false; explicit authorization required.");
   console.log(`Plan thresholds (this plan's own, not the automatic compaction setting): ${plan.policy.thresholdTokens} estimated tokens; ${plan.policy.thresholdPercent}% when context window size is missing.`);
-  console.log(`Automatic compaction setting (policies.claude_compaction.threshold_percent, separate from this plan): ${plan.policy.automaticCompactionThresholdPercent}%.`);
+  console.log(automaticCompactionSummary(plan.policy));
   console.log(`Summary: ${plan.summary.candidateCount} candidates | ${plan.summary.blockedCount} blocked | ${plan.summary.skippedCount} skipped`);
   console.log();
 
@@ -432,15 +457,22 @@ Examples:
         return;
       }
 
-      let automaticCompactionThresholdPercent: number;
+      let automaticCompaction: AutomaticCompactionSetting;
       try {
-        automaticCompactionThresholdPercent = new ConfigStore(deps.configPath)
-          .resolve().policies.claudeCompaction.thresholdPercent;
+        const config = new ConfigStore(deps.configPath).resolve();
+        automaticCompaction = {
+          enabled: config.policies.claudeCompaction.enabled,
+          thresholdPercent: config.policies.claudeCompaction.thresholdPercent,
+          unavailableReason: null,
+        };
       } catch (err) {
-        console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
-        console.error("Fix: check the config file with: rig config");
-        process.exitCode = 2;
-        return;
+        // The plan is still useful without the setting; report it as unknown rather than
+        // showing a default the person may not have configured, and keep the plan.
+        automaticCompaction = {
+          enabled: null,
+          thresholdPercent: null,
+          unavailableReason: err instanceof Error ? err.message : String(err),
+        };
       }
 
       const status = await getDaemonStatus(deps.lifecycleDeps);
@@ -513,7 +545,7 @@ Examples:
           }
         }
 
-        const plan = buildPlan(allNodes, thresholds.value, incompleteRigs, automaticCompactionThresholdPercent);
+        const plan = buildPlan(allNodes, thresholds.value, incompleteRigs, automaticCompaction);
         if (opts.json) {
           console.log(JSON.stringify(plan, null, 2));
         } else {
