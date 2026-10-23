@@ -254,24 +254,29 @@ describe("MCP Server", () => {
   it("rig_restore says it only starts the restore, and rig_restore_status follows the attempt", async () => {
     const getFn = vi.fn(async (path: string) => {
       if (path.startsWith("/api/rigs/summary")) return { status: 200, data: [{ id: "rig-1", name: "my-rig" }] };
-      if (path === "/api/rigs/rig-1/restore/status/7") return { status: 409, data: { error: "attempt 7 is still running", code: "attempt_incomplete" } };
+      if (path === "/api/rigs/rig-1/restore/status/7") return { status: 409, data: { error: "Restore attempt 7 has no terminal completion event", code: "attempt_incomplete" } };
       if (path === "/api/rigs/rig-1/restore/status/8") return { status: 200, data: { ok: true, attemptId: 8, rigResult: "fully_restored" } };
       return { status: 404, data: { error: "unexpected" } };
     });
     await setup({ get: getFn });
     const { tools } = await mcpClient.listTools();
     expect(tools.find((tool) => tool.name === "rig_restore")?.description).toContain("rig_restore_status");
+    // No completion event can also mean the attempt stopped, so the description doesn't promise it's still running.
+    expect(tools.find((tool) => tool.name === "rig_restore_status")?.description).toContain("stopped before it finished");
 
-    const running = await mcpClient.callTool({ name: "rig_restore_status", arguments: { rigId: "my-rig", attemptId: 7 } });
-    expect(running.isError).toBe(true);
-    expect(running.structuredContent).toEqual({ ok: false, code: "attempt_incomplete", message: "attempt 7 is still running", status: 409 });
+    const incomplete = await mcpClient.callTool({ name: "rig_restore_status", arguments: { rigId: "my-rig", attemptId: 7 } });
+    expect(incomplete.isError).toBe(true);
+    expect(incomplete.structuredContent).toEqual({ ok: false, code: "attempt_incomplete", message: "Restore attempt 7 has no terminal completion event", status: 409 });
 
     const done = await mcpClient.callTool({ name: "rig_restore_status", arguments: { rigId: "my-rig", attemptId: 8 } });
     expect(done.isError).toBeFalsy();
     expect(done.structuredContent).toEqual({ ok: true, attemptId: 8, rigResult: "fully_restored" });
 
+    // Arguments the input schema refuses never reach the tool: the SDK answers with its own text-only error.
     const invalid = await mcpClient.callTool({ name: "rig_restore_status", arguments: { rigId: "my-rig", attemptId: 0 } });
     expect(invalid.isError).toBe(true);
+    expect(invalid.structuredContent).toBeUndefined();
+    expect((invalid.content as Array<{ text: string }>)[0]!.text).toContain("Invalid arguments for tool rig_restore_status");
     await cleanup();
   });
 
@@ -302,8 +307,9 @@ describe("MCP Server", () => {
     }
   });
 
-  it("the queue tools return structured content; every error carries one shape and keeps its old text", async () => {
-    const missing = { error: "qitem qitem-x not found", code: "qitem_not_found" };
+  it("the queue tools return structured content; every error a tool returns carries one shape and keeps its old text", async () => {
+    // The queue's missing-item read answers with its code alone, as GET /api/queue/:qitemId does.
+    const missing = { error: "qitem_not_found" };
     const getFn = vi.fn(async (path: string) => {
       if (path === "/api/queue/qitem-1") return { status: 200, data: { qitemId: "qitem-1", state: "done" } };
       if (path === "/api/queue/qitem-1/transitions") return { status: 200, data: [{ state: "done" }] };
@@ -322,7 +328,7 @@ describe("MCP Server", () => {
     const notFound = await mcpClient.callTool({ name: "rig_queue_show", arguments: { qitemId: "qitem-x" } });
     expect(notFound.isError).toBe(true);
     expect((notFound.content as Array<{ text: string }>)[0]!.text).toBe(JSON.stringify(missing));
-    expect(notFound.structuredContent).toEqual({ ok: false, code: "qitem_not_found", message: "qitem qitem-x not found", status: 404 });
+    expect(notFound.structuredContent).toEqual({ ok: false, code: "qitem_not_found", message: "qitem_not_found", status: 404 });
 
     const unreachable = await mcpClient.callTool({ name: "rig_queue_claim", arguments: { qitemId: "qitem-1" } });
     expect((unreachable.content as Array<{ text: string }>)[0]!.text).toBe("Cannot reach the OpenRig daemon at http://127.0.0.1:9999");

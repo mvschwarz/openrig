@@ -70,7 +70,7 @@ describe("MCP queue tools on the daemon's queue routes", () => {
       // The env is read per request at DaemonClient's one stamping point, as in a server process of its own.
       process.env.OPENRIG_SESSION_NAME = seat;
       const result = await client.callTool({ name, arguments: args });
-      return { isError: result.isError === true, data: JSON.parse((result.content as Array<{ text: string }>)[0]!.text) };
+      return { isError: result.isError === true, data: JSON.parse((result.content as Array<{ text: string }>)[0]!.text), structured: result.structuredContent };
     };
   }
 
@@ -100,7 +100,7 @@ describe("MCP queue tools on the daemon's queue routes", () => {
     expect(JSON.stringify(mine.data)).toContain(qitemId);
   });
 
-  it("keeps the assignee's answer as the item's resolution, and reopens the item only deliberately", async () => {
+  it("keeps the assignee's answer as the item's resolution, reopens the item only deliberately, and names queue errors by their code", async () => {
     const desk = await connectAs(DESK);
     const impl = await connectAs(IMPL);
     const qitemId = (await desk("rig_queue_create", { destination: IMPL, body: "Name the stale fixture." })).data.qitemId as string;
@@ -114,6 +114,10 @@ describe("MCP queue tools on the daemon's queue routes", () => {
     const refused = await impl("rig_queue_update", { qitemId, state: "pending", note: "one more detail" });
     expect(refused.isError).toBe(true);
     expect(JSON.stringify(refused.data)).toContain("terminal_reopen_requires_ack");
+    // The queue answers { error: <code>, message: <how to fix it> }: the structured result keeps both.
+    expect(refused.data.message).toEqual(expect.stringMatching(/\S/));
+    expect(refused.structured).toEqual({ ok: false, code: "terminal_reopen_requires_ack", message: refused.data.message, status: 409 });
+    expect((await desk("rig_queue_show", { qitemId: "qitem-not-here" })).structured).toMatchObject({ ok: false, code: "qitem_not_found", status: 404 });
     expect((await impl("rig_queue_update", { qitemId, state: "pending", reopen: true, note: "one more detail" })).isError).toBe(false);
     expect((await desk("rig_queue_show", { qitemId })).data.item).toMatchObject({ state: "pending" });
   });

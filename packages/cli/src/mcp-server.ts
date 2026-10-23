@@ -17,9 +17,10 @@ type TextResult = {
   structuredContent?: Record<string, unknown>;
 };
 
-/** The one error shape every tool's error result carries in structuredContent; its text stays as it always was. ok is
+/** The one error shape every error a tool returns carries in structuredContent; its text stays as it always was. ok is
  *  false, code is stable (the daemon's own when it sends one), message is readable, and status is the HTTP status when
- *  there was one. */
+ *  there was one. Arguments a tool's input schema refuses never reach the tool: the MCP SDK answers those itself, with
+ *  its own text-only error. */
 function errorResult(text: string, code: string, message: string, extra: Record<string, unknown> = {}): TextResult {
   return { content: [{ type: "text", text }], isError: true, structuredContent: { ok: false, code, message, ...extra } };
 }
@@ -92,15 +93,15 @@ const DESTRUCTIVE: ToolAnnotations = { readOnlyHint: false, destructiveHint: tru
 
 /** What each tool calls and what it does, kept beside the registrations. The MCP contract tests check that it names every
  *  registered tool, that each tool's annotations match its effect, and that each route is mounted in the daemon. Tools that
- *  take a rig name also read GET /api/rigs/summary to resolve it. `next` is the tool that follows the result. */
-export const MCP_OPERATIONS: ReadonlyArray<{ tool: string; routes: readonly string[]; effect: "read" | "additive" | "destructive"; next?: string }> = [
+ *  take a rig name also read GET /api/rigs/summary to resolve it. */
+export const MCP_OPERATIONS: ReadonlyArray<{ tool: string; routes: readonly string[]; effect: "read" | "additive" | "destructive" }> = [
   { tool: "rig_up", routes: ["POST /api/up"], effect: "destructive" },
   { tool: "rig_down", routes: ["POST /api/down"], effect: "destructive" },
   { tool: "rig_ps", routes: ["GET /api/ps"], effect: "read" },
   { tool: "rig_status", routes: ["GET /healthz"], effect: "read" },
   { tool: "rig_snapshot_create", routes: ["POST /api/rigs/:rigId/snapshots"], effect: "additive" },
   { tool: "rig_snapshot_list", routes: ["GET /api/rigs/:rigId/snapshots"], effect: "read" },
-  { tool: "rig_restore", routes: ["POST /api/rigs/:rigId/restore/:snapshotId"], effect: "destructive", next: "rig_restore_status" },
+  { tool: "rig_restore", routes: ["POST /api/rigs/:rigId/restore/:snapshotId"], effect: "destructive" },
   { tool: "rig_restore_status", routes: ["GET /api/rigs/:rigId/restore/status/:attemptId"], effect: "read" },
   { tool: "rig_discover", routes: ["POST /api/discovery/scan"], effect: "destructive" },
   { tool: "rig_bind", routes: ["POST /api/discovery/:id/bind"], effect: "destructive" },
@@ -113,7 +114,7 @@ export const MCP_OPERATIONS: ReadonlyArray<{ tool: string; routes: readonly stri
   { tool: "rig_chatroom_send", routes: ["POST /api/rigs/:rigId/chat/send"], effect: "additive" },
   { tool: "rig_chatroom_watch", routes: ["GET /api/rigs/:rigId/chat/history"], effect: "read" },
   { tool: "rig_add", routes: ["POST /api/rigs/:rigId/pods/:podNamespace/members"], effect: "additive" },
-  { tool: "rig_queue_create", routes: ["POST /api/queue/create"], effect: "additive", next: "rig_queue_show" },
+  { tool: "rig_queue_create", routes: ["POST /api/queue/create"], effect: "additive" },
   { tool: "rig_queue_show", routes: ["GET /api/queue/:qitemId", "GET /api/queue/:qitemId/transitions"], effect: "read" },
   { tool: "rig_queue_list", routes: ["GET /api/queue/list"], effect: "read" },
   { tool: "rig_queue_claim", routes: ["POST /api/queue/:qitemId/claim"], effect: "destructive" },
@@ -144,9 +145,13 @@ function mapResult(
 ): TextResult {
   const text = JSON.stringify(res.data);
   const data = (res.data ?? {}) as Record<string, unknown>;
-  const daemonCode = typeof data.code === "string" ? data.code : undefined;
-  const said = (fallback: string): string => typeof data.error === "string" ? data.error
-    : typeof data.message === "string" ? data.message : fallback;
+  // The daemon answers errors two ways: { error: <prose>, code } (restore, up), and the queue's { error: <code>,
+  // message: <prose> }, whose missing-item reads send the code alone. A snake_case error is the code.
+  const error = typeof data.error === "string" ? data.error : undefined;
+  const errorIsCode = error !== undefined && /^[a-z][a-z0-9]*(_[a-z0-9]+)+$/.test(error);
+  const daemonCode = typeof data.code === "string" ? data.code : errorIsCode ? error : undefined;
+  const prose = typeof data.message === "string" ? data.message : undefined;
+  const said = (fallback: string): string => (errorIsCode ? prose ?? error : error ?? prose) ?? fallback;
 
   // Level 1: HTTP error
   if (res.status >= 400) {
@@ -340,7 +345,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   // 7b. rig_restore_status — follow a restore attempt rig_restore started
   server.tool(
     "rig_restore_status",
-    "Read where a restore attempt stands: the receipt for the attemptId rig_restore returned. An attempt still running answers attempt_incomplete.",
+    "Read where a restore attempt stands: the receipt for the attemptId rig_restore returned. An attempt with no completion yet (still running, or stopped before it finished) answers attempt_incomplete; it isn't a receipt.",
     {
       rigId: z.string().describe("Rig name or identifier"),
       attemptId: z.number().int().positive().describe("The attemptId rig_restore returned"),

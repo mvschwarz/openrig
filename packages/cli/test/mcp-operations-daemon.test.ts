@@ -73,7 +73,6 @@ describe("MCP operation table against the daemon", () => {
     const hints = Object.fromEntries(tools.map((tool) => [tool.name, tool.annotations]));
     for (const op of MCP_OPERATIONS) {
       expect(hints[op.tool], op.tool).toEqual(HINTS[op.effect]);
-      if (op.next) expect(hints[op.next], `${op.tool} → ${op.next}`).toBeDefined();
     }
   });
 
