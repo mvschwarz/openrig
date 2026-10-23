@@ -1041,7 +1041,9 @@ moving Claude seats, aren't supported moves yet: say so instead of improvising.
    - **Another machine** is reached through its SSH entry in `rig host list`. An entry registered only over HTTP
      can't run these commands; use the machine's SSH entry, or run them on that machine.
    - Then restart each chosen seat: `rig seat restart <seat> --keep-conversation --reason "<why>"`, with `--host <id>`
-     for a seat on another machine (the restart runs there, and its audit names you).
+     for a seat on another machine (the restart runs there, and its audit names you). If the connection drops, the
+     answer is `remote-outcome-unknown`: the switch or restart may have run there, so read what it names (for a
+     restart, `--plan`'s `lastRestart`) before anything else.
    - After it completes a real tool-using turn, check it: `rig seat restart <seat> --keep-conversation --verify
      --expect-account <the target's Account line>`. `--verify` only checks; it never restarts. Only that check
      reports `moved`, and anything less is unconfirmed.

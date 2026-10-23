@@ -21,8 +21,11 @@ const REGISTRY = {
 
 let ran: Array<{ host: string; argv: readonly string[]; origin?: string }>;
 let reply: CrossHostResult;
+const ORIGIN = `${SEAT}@host-a`;
+let selfHostId: string | undefined = "host-a";
 const host = {
   hostRegistryLoader: () => REGISTRY,
+  selfHostId: async () => selfHostId,
   crossHostRun: async (entry: HostEntry, argv: readonly string[], opts?: { originTriple?: string }) => {
     ran.push({ host: entry.id, argv, origin: opts?.originTriple });
     return reply;
@@ -55,6 +58,7 @@ const auth = (args: string[]) => capture(() =>
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), "move-host-"));
   ran = [];
+  selfHostId = "host-a";
   reply = { ok: true, failedStep: "none", stdout: "activated_profile: codex-2\n", stderr: "", remoteExitCode: 0 };
 });
 afterEach(() => fs.rmSync(home, { recursive: true, force: true }));
@@ -80,7 +84,7 @@ describe("rig auth --codex-home", () => {
 describe("rig auth --host", () => {
   it("runs the same switch on that machine's SSH entry, as this seat, with the exact home, and passes its output on", async () => {
     const res = await auth(["switch", "codex-2", "--host", "box-ssh", "--codex-home", "/home/ubuntu/.codex"]);
-    expect(ran).toEqual([{ host: "box-ssh", origin: SEAT, argv: ["rig", "auth", "switch", "codex-2", "--runtime", "codex", "--codex-home", "/home/ubuntu/.codex"] }]);
+    expect(ran).toEqual([{ host: "box-ssh", origin: ORIGIN, argv: ["rig", "auth", "switch", "codex-2", "--runtime", "codex", "--codex-home", "/home/ubuntu/.codex"] }]);
     expect(res.out).toBe("activated_profile: codex-2");
     expect(res.err).toBe("[via host=box-ssh (box.local)]");
     expect(res.code).toBeUndefined();
@@ -110,15 +114,40 @@ describe("rig auth --host", () => {
     expect(ran).toEqual([]);
   });
 
-  it("a refusal on that machine comes back as its own output and status; a connection failure says so", async () => {
+  it("whatever the remote shell answered comes back as its own output and status", async () => {
     reply = { ok: false, failedStep: "remote-command-failed", stdout: "", stderr: "rig auth: profile_not_found codex-9\n", remoteExitCode: 1 };
     const refused = await auth(["switch", "codex-9", "--host", "box-ssh", "--codex-home", "/h"]);
     expect(refused.code).toBe(1);
     expect(refused.err).toContain("rig auth: profile_not_found codex-9");
-    reply = { ok: false, failedStep: "ssh-unreachable", sshStderr: "connect timed out" };
-    const unreachable = await auth(["switch", "codex-2", "--host", "box-ssh", "--codex-home", "/h"]);
-    expect(unreachable.code).toBe(1);
-    expect(unreachable.err).toContain("ssh to host=box-ssh (target=box.local) failed: connect timed out");
+    // A machine whose login shell has no rig: its own words and its 127, plus the existing hint.
+    reply = { ok: false, failedStep: "remote-command-not-found", stdout: "", stderr: "sh: rig: command not found\n", remoteExitCode: 127, hint: "The remote login PATH does not resolve `rig`." };
+    const missing = await auth(["status", "--host", "box-ssh"]);
+    expect(missing.code).toBe(127);
+    expect(missing.err).toContain("sh: rig: command not found");
+    expect(missing.err).toContain("The remote login PATH does not resolve `rig`.");
+    reply = { ok: false, failedStep: "remote-daemon-unreachable", stdout: '{"ok":false,"code":"daemon_not_running"}\n', stderr: "", remoteExitCode: 1 };
+    const noDaemon = await auth(["status", "--host", "box-ssh"]);
+    expect(noDaemon.out).toBe('{"ok":false,"code":"daemon_not_running"}');
+    expect(noDaemon.code).toBe(1);
+  });
+
+  it("a lost connection during a switch is an unknown outcome with the read to check; during a read, a failure", async () => {
+    reply = { ok: false, failedStep: "ssh-unreachable", sshStderr: "Connection to box.local closed by remote host." };
+    const lost = await auth(["switch", "codex-2", "--host", "box-ssh", "--codex-home", "/home/ubuntu/.codex"]);
+    expect(lost.code).toBe(1);
+    expect(lost.err).toContain("remote-outcome-unknown: the connection to host=box-ssh (box.local) failed or dropped, so whether rig auth switch ran there is unknown");
+    expect(lost.err).toContain("Check before repeating it: rig auth status --host box-ssh --codex-home /home/ubuntu/.codex");
+    const read = await auth(["status", "--host", "box-ssh"]);
+    expect(read.err).toContain("ssh to host=box-ssh (target=box.local) failed");
+    expect(read.err).not.toContain("remote-outcome-unknown");
+  });
+
+  it("carries this host's id in the origin, keeps a full triple as given, and falls back to the seat name", async () => {
+    await auth(["status", "--host", "box-ssh"]);
+    selfHostId = undefined;
+    await auth(["status", "--host", "box-ssh"]);
+    await capture(() => authCommand({ env: { HOME: home, RIGGED_SESSION_NAME: "old@rig@host-z" }, host }).parseAsync(["status", "--host", "box-ssh"], { from: "user" }));
+    expect(ran.map((r) => r.origin)).toEqual([ORIGIN, SEAT, "old@rig@host-z"]);
   });
 });
 
@@ -133,7 +162,7 @@ describe("rig seat restart --host", () => {
   it("runs the restart on that machine with its reason, naming this seat as the operator, and passes the JSON on", async () => {
     reply = { ok: true, failedStep: "none", stdout: '{"ok":true,"outcome":"restarted_account_unverified"}\n', stderr: "", remoteExitCode: 0 };
     const res = await restart(["dev-impl@team", "--keep-conversation", "--reason", "take codex-2", "--host", "box-ssh", "--json"]);
-    expect(ran).toEqual([{ host: "box-ssh", origin: SEAT, argv: ["rig", "seat", "restart", "dev-impl@team", "--keep-conversation", "--reason", "take codex-2", "--operator", SEAT, "--json"] }]);
+    expect(ran).toEqual([{ host: "box-ssh", origin: ORIGIN, argv: ["rig", "seat", "restart", "dev-impl@team", "--keep-conversation", "--reason", "take codex-2", "--operator", ORIGIN, "--json"] }]);
     expect(JSON.parse(res.out)).toEqual({ ok: true, outcome: "restarted_account_unverified" });
   });
 
@@ -146,6 +175,19 @@ describe("rig seat restart --host", () => {
       ["dev-impl@team", "--keep-conversation", "--verify", "--expect-account", "two@example.com"],
       ["dev-impl@team", "--keep-conversation", "--reason", "r", "--operator", "person@kernel"],
     ]);
+  });
+
+  it("a lost connection during a restart is an unknown outcome, in JSON with --json, naming the plan to read; not for a plan", async () => {
+    reply = { ok: false, failedStep: "ssh-unreachable", sshStderr: "client_loop: send disconnect: Broken pipe" };
+    const lost = await restart(["dev-impl@team", "--keep-conversation", "--reason", "r", "--host", "box-ssh", "--json"]);
+    expect(lost.code).toBe(1);
+    expect(JSON.parse(lost.out)).toMatchObject({
+      ok: false, code: "remote-outcome-unknown", cross_host: { host: "box-ssh", target: "box.local" },
+      check: "rig seat restart dev-impl@team --keep-conversation --plan --host box-ssh (its lastRestart says whether this restart ran); don't restart it again on this result alone",
+    });
+    const plan = await restart(["dev-impl@team", "--keep-conversation", "--plan", "--host", "box-ssh", "--json"]);
+    expect(JSON.parse(plan.out)).toMatchObject({ ok: false, failedStep: "ssh-unreachable" });
+    expect(plan.out).not.toContain("remote-outcome-unknown");
   });
 
   it("checks its own options before anything goes out", async () => {

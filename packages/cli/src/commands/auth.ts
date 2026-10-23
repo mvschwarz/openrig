@@ -17,7 +17,8 @@ import {
   SEAT_REGISTRY_DISCLAIMER,
   type CodexAuthPaths,
 } from "../lib/codex-auth.js";
-import { runOnSshHost, type RunOnHostDeps } from "../lib/run-on-host.js";
+import { localSelfHostId, originFor, runOnSshHost, type RunOnHostDeps } from "../lib/run-on-host.js";
+import { realDeps } from "./daemon.js";
 
 export interface AuthCommandDeps {
   /** env source (default process.env) — tests point CODEX_HOME at a fixture. */
@@ -54,9 +55,16 @@ export function authCommand(depsOverride?: AuthCommandDeps): Command {
     .option("--codex-home <dir>", "The Codex home to act on (default: CODEX_HOME, else ~/.codex)")
     .option("--host <id>", "Run it on this registered machine instead, over its SSH entry, as this seat");
   type HomeOpts = { runtime: string; codexHome?: string; host?: string };
-  const onHost = (verb: string, args: string[], opts: HomeOpts) => runOnSshHost(opts.host!, `auth ${verb}`,
-    ["auth", verb, ...args, "--runtime", opts.runtime, ...(opts.codexHome ? ["--codex-home", opts.codexHome] : [])],
-    env.OPENRIG_SESSION_NAME?.trim() || undefined, depsOverride?.host);
+  const onHost = async (verb: string, args: string[], opts: HomeOpts) => {
+    const seat = (env.OPENRIG_SESSION_NAME ?? env.RIGGED_SESSION_NAME)?.trim() || undefined;
+    const origin = await originFor(seat, depsOverride?.host?.selfHostId ?? (() => localSelfHostId(realDeps())));
+    const home = opts.codexHome ? ["--codex-home", opts.codexHome] : [];
+    await runOnSshHost(opts.host!, `auth ${verb}`, ["auth", verb, ...args, "--runtime", opts.runtime, ...home], {
+      origin,
+      // A switch changes that home; status and list only read.
+      ...(verb === "switch" ? { changes: { check: `rig auth status --host ${opts.host} --codex-home ${opts.codexHome} (a switch copies the same saved profile again if repeated)` } } : {}),
+    }, depsOverride?.host);
+  };
 
   const auth = new Command("auth").description(
     "Manage agent auth profiles (CLI-local; runtime via --runtime). Tokens are never printed, logged, or stored.",

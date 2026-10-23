@@ -4,7 +4,7 @@ import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-life
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { shellQuote } from "../cross-host-executor.js";
-import { runOnSshHost, type RunOnHostDeps } from "../lib/run-on-host.js";
+import { localSelfHostId, originFor, runOnSshHost, type RunOnHostDeps } from "../lib/run-on-host.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 import { seatLaunchAdditionLines, type SeatLaunchAdditionsView } from "../seat-launch-additions-lines.js";
 
@@ -912,8 +912,10 @@ Examples:
         return;
       }
       if (opts.host) {
-        const origin = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim() || undefined;
-        const operator = opts.operator ?? (opts.plan || opts.verify ? undefined : origin);
+        const seatName = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim() || undefined;
+        const origin = await originFor(seatName, depsOverride?.host?.selfHostId ?? (() => localSelfHostId(getDeps().lifecycleDeps)));
+        const changes = !opts.plan && !opts.verify;
+        const operator = opts.operator ?? (changes ? origin : undefined);
         await runOnSshHost(opts.host, "seat restart", [
           "seat", "restart", seat, "--keep-conversation",
           ...(opts.plan ? ["--plan"] : []),
@@ -922,7 +924,11 @@ Examples:
           ...(opts.reason !== undefined ? ["--reason", opts.reason] : []),
           ...(operator ? ["--operator", operator] : []),
           ...(opts.json ? ["--json"] : []),
-        ], origin, depsOverride?.host);
+        ], {
+          origin,
+          json: opts.json,
+          ...(changes ? { changes: { check: `rig seat restart ${seat} --keep-conversation --plan --host ${opts.host} (its lastRestart says whether this restart ran); don't restart it again on this result alone` } } : {}),
+        }, depsOverride?.host);
         return;
       }
       if (opts.verify) {
