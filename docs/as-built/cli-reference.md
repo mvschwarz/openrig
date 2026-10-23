@@ -714,10 +714,10 @@ Only Claude and Codex tenures can be woken.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig auth` | — | — |
-| `rig auth status` | — | `--runtime <runtime>` |
-| `rig auth list` | — | `--runtime <runtime>` |
+| `rig auth status` | — | `--runtime <runtime>`<br>`--codex-home <dir>`<br>`--host <id>` |
+| `rig auth list` | — | `--runtime <runtime>`<br>`--codex-home <dir>`<br>`--host <id>` |
 | `rig auth save <profile>` | — | `--runtime <runtime>` |
-| `rig auth switch <profile>` | — | `--runtime <runtime>` |
+| `rig auth switch <profile>` | — | `--runtime <runtime>`<br>`--codex-home <dir>`<br>`--host <id>` |
 | `rig auth validate <profile>` | — | `--runtime <runtime>` |
 | `rig auth seats` | — | — |
 | `rig auth seats list` | — | `--runtime <runtime>` |

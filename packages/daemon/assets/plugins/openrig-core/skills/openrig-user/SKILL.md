@@ -1034,10 +1034,14 @@ moving Claude seats, aren't supported moves yet: say so instead of improvising.
      home. Moving the home moves them all.
    - Skip a seat that's mid-turn, running a service, or about to finish, and record why.
 4. **Move the home.**
-   - On that machine, `CODEX_HOME=<that home> rig auth switch <profile> --runtime codex`. `rig auth` acts on
-     `CODEX_HOME`, or on the default home, and `rig auth status` prints which home it means: check it before
-     switching.
-   - Then restart each chosen seat: `rig seat restart <seat> --keep-conversation --reason "<why>"`.
+   - `rig auth switch <profile> --runtime codex --codex-home <that home>`, on that machine, or from here with
+     `--host <that machine's SSH entry>`. Without `--codex-home`, `rig auth` acts on `CODEX_HOME`, or on the default
+     home; `rig auth status --codex-home <home>` (with `--host` for another machine) prints which home it means:
+     check it before switching. A remote switch always names its home, and copies a profile already saved there.
+   - **Another machine** is reached through its SSH entry in `rig host list`. An entry registered only over HTTP
+     can't run these commands; use the machine's SSH entry, or run them on that machine.
+   - Then restart each chosen seat: `rig seat restart <seat> --keep-conversation --reason "<why>"`, with `--host <id>`
+     for a seat on another machine (the restart runs there, and its audit names you).
    - After it completes a real tool-using turn, check it: `rig seat restart <seat> --keep-conversation --verify
      --expect-account <the target's Account line>`. `--verify` only checks; it never restarts. Only that check
      reports `moved`, and anything less is unconfirmed.
