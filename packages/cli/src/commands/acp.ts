@@ -5,8 +5,9 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { DaemonClient, type DaemonResponse } from "../client.js";
 import { daemonStatusGuard, getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
+import { processIdentity } from "../local-daemon-owner.js";
 import { getOpenRigHome, readOpenRigEnv } from "../openrig-compat.js";
-import { runAcpAssignment, type AcpQueue } from "../acp/connector.js";
+import { answerCommand, runAcpAssignment, type AcpQueue } from "../acp/connector.js";
 import { findRunProcesses } from "../acp/run-processes.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -14,7 +15,7 @@ import type { StatusDeps } from "./status.js";
 const runsDir = () => join(getOpenRigHome(), "acp", "runs");
 const newId = (prefix: string, bytes: number) => `${prefix}-${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}-${randomBytes(bytes).toString("hex")}`;
 
-interface RunFile { runId: string; qitemId: string; pid: number; agent: string[]; startedAt: string }
+interface RunFile { runId: string; qitemId: string; pid: number; processStart?: string; agent: string[]; startedAt: string; endedAt?: string }
 
 /** The connector's queue verbs over the daemon API, acting as the calling seat (the client stamps its session). */
 export function daemonAcpQueue(client: DaemonClient): AcpQueue {
@@ -29,11 +30,12 @@ export function daemonAcpQueue(client: DaemonClient): AcpQueue {
       return {
         qitemId: String(row.qitemId), state: String(row.state), destinationSession: String(row.destinationSession),
         body: typeof row.body === "string" ? row.body : "", resolution: (row.resolution as string | null) ?? null, tags: (row.tags as string[] | null) ?? null,
+        handedOffTo: (row.handedOffTo as string | null) ?? null,
       };
     },
     async claim(qitemId) { ok(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/claim`, {}), `queue claim ${qitemId}`); },
     async update(qitemId, change) {
-      ok(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/update`, { transitionNote: change.note, resolution: change.resolution, state: change.state }), `queue update ${qitemId}`);
+      ok(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/update`, { transitionNote: change.note, state: change.state }), `queue update ${qitemId}`);
     },
     async create(row) {
       const qitemId = newId("qitem", 8);
@@ -47,12 +49,16 @@ function readRun(runId: string): RunFile | undefined {
   try { return JSON.parse(readFileSync(join(runsDir(), `${runId}.json`), "utf8")) as RunFile; } catch { return undefined; }
 }
 
-/** The pid is the run's only if that process is still `rig acp run` for the run's row (pids get reused). */
-function liveConnector(run: RunFile): boolean {
+/** A process's start time, the discriminator the CLI already uses for daemon ownership (pids get reused). */
+export function processStart(pid: number): string | undefined {
   try {
-    const command = execFileSync("ps", ["-o", "command=", "-p", String(run.pid)], { encoding: "utf8" });
-    return /\bacp\b/.test(command) && command.includes(run.qitemId);
-  } catch { return false; }
+    return processIdentity(execFileSync("/bin/ps", ["-o", "uid=,lstart=", "-p", String(pid)], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } }))?.start;
+  } catch { return undefined; }
+}
+
+/** The run is live only while it hasn't ended and its pid is still the process that started it. */
+function liveConnector(run: RunFile): boolean {
+  return !run.endedAt && run.processStart !== undefined && processStart(run.pid) === run.processStart;
 }
 
 export function acpCommand(depsOverride?: StatusDeps): Command {
@@ -74,16 +80,18 @@ export function acpCommand(depsOverride?: StatusDeps): Command {
     .option("--load-session <id>", "Continue an earlier session; if the agent can't load it, nothing new is started")
     .option("--poll-seconds <n>", "How often to look for a permission answer", "2")
     .addHelpText("after", `
-Runs as this seat, the row's custodian; the agent is recorded as executor. The row gets the binding (agent,
-session), progress, each permission request and its answer, and the outcome: completed, stopped, cancelled,
-failed or unknown. The outcome is the agent's report, not a judgment of the work; the row stays yours to hand on.
+Runs as this seat, the row's custodian; the agent is recorded as executor. The row's notes get the binding
+(agent, session), progress, each permission request and its answer, and the outcome: completed, stopped,
+cancelled, failed or unknown. The outcome is the agent's report, not a judgment of the work: the row stays open
+for you to judge, then close or hand on with your own resolution.
 
 A permission request becomes a row to --permissions-to, listing the options the agent offered. Answer it with
-  rig queue update <that row> --state done --resolution <optionId>
-OpenRig holds no policy of its own: the agent's settings decide what it asks, and the owner decides the answer.
+  ${answerCommand("<that row>")}
+on that row (a handoff is followed). OpenRig holds no policy of its own: the agent's settings decide what it
+asks, and the owner decides the answer.
 
 Ctrl-C (or rig acp cancel <runId>) asks the agent to cancel the turn; a second Ctrl-C detaches without waiting.
-Ending the run closes the agent's stdin and reports whether every process it launched has exited.
+Ending the run closes the agent's stdin and reports whether any process carrying the run's marker remains.
 
 Example:
   rig acp run qitem-20261023-abc --cwd ~/work/app -- openclaw acp --url ws://127.0.0.1:18789 --token-file ~/.openclaw/gateway.token
@@ -96,7 +104,9 @@ Guide: rig context get reference/acp-agents.md`)
       if (!client) return;
       const runId = newId("acp", 4);
       mkdirSync(runsDir(), { recursive: true });
-      writeFileSync(join(runsDir(), `${runId}.json`), `${JSON.stringify({ runId, qitemId, pid: process.pid, agent, startedAt: new Date().toISOString() } satisfies RunFile)}\n`);
+      const runFile: RunFile = { runId, qitemId, pid: process.pid, processStart: processStart(process.pid), agent, startedAt: new Date().toISOString() };
+      const writeRun = (run: RunFile) => writeFileSync(join(runsDir(), `${runId}.json`), `${JSON.stringify(run)}\n`);
+      writeRun(runFile);
       let cancel!: () => void;
       let detach!: () => void;
       const cancelRequested = new Promise<void>((done) => { cancel = done; });
@@ -121,6 +131,7 @@ Guide: rig context get reference/acp-agents.md`)
         process.exitCode = 1;
       } finally {
         process.removeListener("SIGINT", onInterrupt);
+        writeRun({ ...runFile, endedAt: new Date().toISOString() });
       }
     });
 

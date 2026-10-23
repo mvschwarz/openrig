@@ -15,13 +15,15 @@ export interface AcpQueueRow {
   body: string;
   resolution?: string | null;
   tags?: string[] | null;
+  handedOffTo?: string | null;
 }
 
 /** The queue verbs the connector uses, as the calling seat. `rig acp` wires these to the daemon's queue API. */
 export interface AcpQueue {
   show(qitemId: string): Promise<AcpQueueRow>;
   claim(qitemId: string): Promise<void>;
-  update(qitemId: string, change: { note: string; resolution?: string; state?: string }): Promise<void>;
+  /** A note, optionally with a state change. A note-only update stores no resolution (the queue keeps one only on close). */
+  update(qitemId: string, change: { note: string; state?: string }): Promise<void>;
   create(row: { destination: string; body: string; summary: string; tags: string[] }): Promise<string>;
 }
 
@@ -45,6 +47,8 @@ export interface AcpRunOptions {
   cancelRequested?: Promise<void>;
   /** Resolves when the custodian detaches without waiting (a second Ctrl-C): stdin closes and the turn reads unknown. */
   detachRequested?: Promise<void>;
+  /** How long to wait for the agent to exit after its stdin closes (default 5 s). */
+  exitWaitMs?: number;
 }
 
 export type AcpOutcomeKind = "completed" | "stopped" | "cancelled" | "failed" | "unknown";
@@ -54,6 +58,10 @@ export interface AcpOutcome { kind: AcpOutcomeKind; summary: string; text: strin
 export const INTERRUPTION_MARKERS = ["[OpenClaw interruption]"];
 const FINAL_STATES = new Set(["done", "canceled", "handed-off", "failed", "denied"]);
 const NOTE_TEXT_LIMIT = 6000;
+/** The command a permission row's owner runs; `done` needs a closure reason. */
+export const answerCommand = (row: string) => `rig queue update ${row} --state done --closure-reason no-follow-on --resolution <optionId>`;
+
+class DetachedBeforeTurnEnd extends Error {}
 
 interface PermissionOption { optionId: string; name?: string; kind?: string }
 
@@ -111,11 +119,11 @@ export async function runAcpAssignment(queue: AcpQueue, options: AcpRunOptions):
     const toolCall = request.toolCall ?? {};
     for (;;) {
       if (turnOver || cancelRequestedAt) return { outcome: { outcome: "cancelled" } };
-      const askId = await queue.create({
+      let askId = await queue.create({
         destination: permissionsTo,
         summary: `Permission for ${row.qitemId}: ${String(toolCall.title ?? toolCall.toolCallId ?? "a tool call")} (${String(toolCall.kind ?? "other")})`,
         tags: ["acp-permission", ...(row.tags ?? []).filter((tag) => /^(project|mission|slice):/.test(tag))],
-        body: permissionBody(row.qitemId, options.runId, sessionId!, requestId, toolCall, offered),
+        body: permissionBody(row.qitemId, options.runId, sessionId!, requestId, toolCall, offered, options.logPath),
       });
       await queue.update(row.qitemId, { note: `ACP request ${requestId} (session ${sessionId}): permission asked of ${permissionsTo} as ${askId}; the turn waits for that answer` });
       progress(`\n[permission] asked ${permissionsTo} as ${askId}\n`);
@@ -126,10 +134,21 @@ export async function runAcpAssignment(queue: AcpQueue, options: AcpRunOptions):
           return { outcome: { outcome: "cancelled" } };
         }
         const ask = await queue.show(askId);
+        // The answer point: a cancel that landed during the read above still wins, and nothing is awaited between here and the reply.
+        if (turnOver || cancelRequestedAt) {
+          const stale = `Stale: the turn of ${row.qitemId} was cancelled; ${FINAL_STATES.has(ask.state) ? "this answer was" : "any answer here is"} not sent`;
+          await queue.update(askId, FINAL_STATES.has(ask.state) ? { note: stale } : { state: "canceled", note: stale }).catch(() => {});
+          return { outcome: { outcome: "cancelled" } };
+        }
+        if (ask.state === "handed-off" && ask.handedOffTo) {
+          void queue.update(row.qitemId, { note: `ACP request ${requestId}: ${askId} was handed to ${ask.handedOffTo}; waiting on that row` }).catch(() => {});
+          askId = ask.handedOffTo;
+          continue;
+        }
         if (!FINAL_STATES.has(ask.state)) continue;
         const chosen = chooseOption(offered, ask.resolution);
         if (chosen) {
-          await queue.update(row.qitemId, { note: `ACP request ${requestId}: ${permissionsTo} answered ${chosen.optionId} on ${askId}; sent to the agent once` });
+          void queue.update(row.qitemId, { note: `ACP request ${requestId}: ${permissionsTo} answered ${chosen.optionId} on ${askId}; sent to the agent once` }).catch(() => {});
           return { outcome: { outcome: "selected", optionId: chosen.optionId } };
         }
         await queue.update(row.qitemId, { note: `ACP request ${requestId}: ${askId} closed ${ask.state} without an offered option (${JSON.stringify(ask.resolution ?? null)}); asking again` });
@@ -141,8 +160,7 @@ export async function runAcpAssignment(queue: AcpQueue, options: AcpRunOptions):
   const record = async (outcome: AcpOutcome): Promise<AcpOutcome> => {
     const shown = outcome.text.length > NOTE_TEXT_LIMIT ? `${outcome.text.slice(0, NOTE_TEXT_LIMIT)}\n… (truncated; the full transcript is in ${options.logPath})` : outcome.text;
     await queue.update(row.qitemId, {
-      resolution: `${outcome.kind}: ${outcome.summary}`,
-      note: `ACP run ${options.runId} ${outcome.kind}: ${outcome.summary}${shown ? `\n\n${shown}` : ""}\nThis is the agent's result, not an owner's judgment of it.`,
+      note: `ACP run ${options.runId} outcome ${outcome.kind}: ${outcome.summary}${shown ? `\n\n${shown}` : ""}\nThis is the agent's report, not a judgment of the work; the row stays open for you to judge and close with your own resolution.`,
     });
     return outcome;
   };
@@ -169,8 +187,12 @@ export async function runAcpAssignment(queue: AcpQueue, options: AcpRunOptions):
       peer.notify("session/cancel", { sessionId });
       await queue.update(row.qitemId, { note: `ACP run ${options.runId}: cancel requested at ${cancelRequestedAt}; upstream inference and spend are unknown unless the provider shows them` });
     });
-    void options.detachRequested?.then(() => { void peer.end(0); });
-    const response = await peer.request("session/prompt", { sessionId, prompt: [{ type: "text", text: row.body }] }) as { stopReason?: string };
+    // A detach settles the turn here even when the agent keeps its stdout open after stdin closes.
+    const detached = new Promise<never>((_, reject) => {
+      void options.detachRequested?.then(() => { void peer.end(0); reject(new DetachedBeforeTurnEnd()); });
+    });
+    detached.catch(() => {});
+    const response = await Promise.race([peer.request("session/prompt", { sessionId, prompt: [{ type: "text", text: row.body }] }), detached]) as { stopReason?: string };
     turnOver = true;
     return await record(classify(response.stopReason, text, usage, cancelRequestedAt, sessionId));
   } catch (error) {
@@ -178,17 +200,20 @@ export async function runAcpAssignment(queue: AcpQueue, options: AcpRunOptions):
     if (error instanceof JsonRpcRequestError) {
       return await record({ kind: "failed", sessionId, text, summary: `${error.method} returned error ${error.error.code} ${error.error.message}${error.error.data === undefined ? "" : ` ${JSON.stringify(error.error.data)}`}` });
     }
+    if (error instanceof DetachedBeforeTurnEnd) {
+      return await record({ kind: "unknown", sessionId, text, summary: "detached before the turn ended; the agent may still be working" });
+    }
     if (error instanceof JsonRpcTransportClosed) {
       return await record({ kind: "unknown", sessionId, text, summary: "the agent's connection closed before the turn ended" });
     }
     return await record({ kind: "failed", sessionId, text, summary: `the agent couldn't be run: ${(error as Error).message}` });
   } finally {
     turnOver = true;
-    const exit = await peer.end(5000);
+    const exit = await peer.end(options.exitWaitMs ?? 5000);
     const left = await findRunProcesses(options.runId).catch(() => undefined);
     const settled = left === undefined ? "unknown (the process table couldn't be read)"
-      : left.length === 0 ? "settled: no process from this run remains"
-        : `incomplete: ${left.length} process(es) this run launched still run (${left.map((p) => p.pid).join(", ")}); stop them with the runtime's own stop, or rig acp stop ${options.runId} -- <its stop command>`;
+      : left.length === 0 ? "settled: no process carrying this run's marker remains"
+        : `incomplete: ${left.length} process(es) carrying this run's marker still run (${left.map((p) => p.pid).join(", ")}); stop them with the runtime's own stop, or rig acp stop ${options.runId} -- <its stop command>`;
     await queue.update(row.qitemId, { note: `ACP run ${options.runId} detached: agent ${exit === "still-running" ? "still running after stdin closed" : `exited (code ${exit.code ?? "none"}, signal ${exit.signal ?? "none"})`}; ${settled}` }).catch(() => {});
   }
 }
@@ -217,20 +242,21 @@ export function chooseOption(offered: PermissionOption[], answer: string | null 
   return byKind.length === 1 ? byKind[0] : undefined;
 }
 
-function permissionBody(qitemId: string, runId: string, sessionId: string, requestId: string | number, toolCall: Record<string, unknown>, offered: PermissionOption[]): string {
+function permissionBody(qitemId: string, runId: string, sessionId: string, requestId: string | number, toolCall: Record<string, unknown>, offered: PermissionOption[], logPath: string): string {
+  const input = toolCall.rawInput === undefined ? undefined : JSON.stringify(toolCall.rawInput);
   const where = Array.isArray(toolCall.locations) ? (toolCall.locations as Array<{ path?: string }>).map((l) => l.path).filter(Boolean).join(", ") : "";
   return [
     `# The ACP agent working on ${qitemId} asks permission`,
     "",
     `- **Action:** ${String(toolCall.title ?? "(no title)")} (kind ${String(toolCall.kind ?? "other")}, tool call ${String(toolCall.toolCallId ?? "?")})`,
     where ? `- **Target:** ${where}` : undefined,
-    toolCall.rawInput === undefined ? undefined : `- **Input:** \`${JSON.stringify(toolCall.rawInput).slice(0, 2000)}\``,
+    input === undefined ? undefined : input.length > 2000 ? `- **Input:** \`${input.slice(0, 2000)}\` … (truncated; the full input is in ${logPath})` : `- **Input:** \`${input}\``,
     `- **Asked by:** ACP run ${runId}, session ${sessionId}, request ${requestId}`,
     "",
     "**Options the agent offered:**",
     ...offered.map((option) => `- \`${option.optionId}\`: ${option.name ?? ""}${option.kind ? ` (${option.kind})` : ""}`),
     "",
-    `Answer with \`rig queue update <this row> --state done --resolution <optionId>\`. The agent's own settings and policy`,
-    "decide what it asks; your answer goes back to this one request, once. The turn waits until you answer.",
+    `Answer on this row with \`${answerCommand("<this row>")}\`; if it's handed on, the new row is followed.`,
+    "The agent's own settings and policy decide what it asks; your answer goes back to this one request, once. The turn waits until you answer.",
   ].filter((line) => line !== undefined).join("\n");
 }

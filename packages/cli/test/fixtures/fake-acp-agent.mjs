@@ -6,8 +6,10 @@
 //   slow           a chunk every 20 ms until cancelled (then stopReason cancelled) or 200 chunks
 //   empty          a zero usage_update and end_turn with no content (an upstream failure the agent didn't surface)
 //   error          a JSON-RPC error carrying the original code, message and data
+//   hang           never answers the prompt
 // FAKE_ACP_LOAD=1 advertises loadSession. FAKE_ACP_COMPANION_PID_FILE starts a detached companion that outlives
-// stdin close (like Hermes's gateway) and writes its pid there.
+// stdin close (like Hermes's gateway) and writes its pid there. FAKE_ACP_IGNORE_EOF=1 keeps the agent itself running
+// after its stdin closes, with stdout still open.
 import { spawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
@@ -29,6 +31,7 @@ async function prompt(id, { sessionId, prompt }) {
   session.cancelled = false;
   const text = (prompt ?? []).filter((block) => block.type === "text").map((block) => block.text).join("\n");
   const [, name = "reply", arg = ""] = /^scenario:(\S+)\s*(.*)/.exec(text) ?? [];
+  if (name === "hang") return;
   if (name === "error") return send({ id, error: { code: -32603, message: "Internal error", data: { details: "context length exceeded" } } });
   if (name === "empty") {
     update(sessionId, { sessionUpdate: "usage_update", used: 0, size: 1000 });
@@ -98,6 +101,8 @@ function handle(packet) {
       if (id !== undefined) send({ id, error: { code: -32601, message: "Method not found" } });
   }
 }
+
+if (process.env.FAKE_ACP_IGNORE_EOF === "1") setInterval(() => {}, 60_000);
 
 createInterface({ input: process.stdin }).on("line", (line) => {
   if (line.trim()) handle(JSON.parse(line));
