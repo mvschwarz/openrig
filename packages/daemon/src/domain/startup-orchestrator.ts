@@ -567,10 +567,15 @@ export class StartupOrchestrator {
             }
             const notice = nonInterruptiveNotice(input.adapter.runtime, input.binding);
             if (notice) warnings.push(`${input.sessionName ?? input.nodeId}: ${notice}`);
+            for (const note of launchResult.warnings ?? []) warnings.push(`${input.sessionName ?? input.nodeId}: ${note}`);
             const normalizedResumeToken = launchResult.resumeToken?.trim();
             if (normalizedResumeToken) {
               try {
-                this.sessionRegistry.updateResumeToken(input.sessionId, launchResult.resumeType ?? "", normalizedResumeToken, "scrape");
+                if (launchResult.resumeProvenance === "launcher") {
+                  this.sessionRegistry.recordLauncherReportedToken(input.sessionId, launchResult.resumeType ?? "", normalizedResumeToken);
+                } else {
+                  this.sessionRegistry.updateResumeToken(input.sessionId, launchResult.resumeType ?? "", normalizedResumeToken, "scrape");
+                }
               } catch { /* best-effort */ }
             }
             // OPR.0.7.0.9: the prompt a new conversation starts with; on a resume, a changed prompt is pending.

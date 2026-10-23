@@ -6,6 +6,75 @@ import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { resolveRigHandle } from "../rig-handle.js";
 import { shellQuote } from "../cross-host-executor.js";
+import { resolveIdentitySource } from "./whoami.js";
+
+interface DownOptions {
+  delete?: boolean;
+  force?: boolean;
+  snapshot?: boolean;
+  yes?: boolean;
+  json?: boolean;
+  host?: string;
+}
+
+interface DownDeps extends StatusDeps {
+  promptYesNo?: (question: string) => Promise<boolean>;
+}
+
+interface OwnRigWarning {
+  fact: string;
+  consequence: string;
+  action: string;
+}
+
+async function confirmOwnRig(
+  rigId: string,
+  opts: DownOptions,
+  deps: DownDeps,
+  readIdentity: (path: string) => Promise<unknown>,
+): Promise<OwnRigWarning | false | undefined> {
+  const source = resolveIdentitySource({});
+  if (!source) return;
+  // A local session name can identify a different seat on the selected host.
+  if (opts.host && !source.nodeId) return;
+  const params = new URLSearchParams(source.nodeId ? { nodeId: source.nodeId } : { sessionName: source.sessionName! });
+  params.set("compact", "1");
+  let caller: { identity?: { rigId?: string; attachmentType?: string } } | undefined;
+  try { caller = await readIdentity(`/api/whoami?${params}`) as typeof caller; }
+  catch { return; } // An unresolved caller is not proof of membership; keep the existing teardown path.
+  if (caller?.identity?.rigId !== rigId) return;
+
+  const warning: OwnRigWarning = {
+    fact: `Your current seat belongs to rig ${rigId}.`,
+    consequence: caller.identity.attachmentType === "external_cli"
+      ? "OpenRig doesn't stop externally attached sessions. This stops the rig's managed sessions and their work."
+      : "This ends your own session and stops the rig's other managed seats and their work. OpenRig doesn't stop externally attached sessions.",
+    action: ["rig", "down", shellQuote(rigId), "--yes", ...(opts.delete ? ["--delete"] : []),
+      ...(opts.force ? ["--force"] : []), ...(opts.snapshot ? ["--snapshot"] : []),
+      ...(opts.json ? ["--json"] : []), ...(opts.host ? ["--host", shellQuote(opts.host)] : [])].join(" "),
+  };
+  if (!opts.json) console.error(`Warning: ${warning.fact} ${warning.consequence}`);
+  if (opts.yes) return warning;
+
+  if (deps.promptYesNo || (process.stdin.isTTY && process.stderr.isTTY)) {
+    const question = `${opts.json ? `${warning.fact} ${warning.consequence}\n` : ""}Stop this rig? [y/N] `;
+    let accepted: boolean;
+    if (deps.promptYesNo) accepted = await deps.promptYesNo(question);
+    else {
+      const { createInterface } = await import("node:readline");
+      const rl = createInterface({ input: process.stdin, output: process.stderr });
+      accepted = await new Promise<boolean>(resolve => {
+        rl.once("close", () => resolve(false));
+        rl.question(question, answer => { resolve(/^y(es)?$/i.test(answer.trim())); rl.close(); });
+      });
+    }
+    if (accepted) return warning;
+  }
+  if (opts.json) console.log(JSON.stringify({ rigId, error: { code: "own_rig_confirmation_required", ...warning } }));
+  else console.error(`Nothing stopped. To proceed: ${warning.action}`);
+  process.exitCode = 1;
+  return false;
+}
 
 interface TeardownResult {
   rigId: string;
@@ -62,14 +131,16 @@ const LONG_RUNNING_TIMEOUT_MS = 45_000;
  * @param depsOverride - injectable deps for testing
  * @returns Commander command
  */
-export function downCommand(depsOverride?: StatusDeps): Command {
+export function downCommand(depsOverride?: DownDeps): Command {
   const cmd = new Command("down").description("Tear down a rig")
     .addHelpText("after", `
 rig down stops every agent in the rig: their sessions end, and any work in progress stops with them.
 Before running it, check who is working (rig ps --nodes --rig <rig>) and that the person asked for it;
 don't stop a team you didn't start unless asked. OpenRig snapshots the rig first (best-effort), and
 rig up <rig> --existing brings it back, resuming each seat's conversation where its harness allows. With
---delete the rig record is removed too, so it can't be brought back that way.`);
+--delete the rig record is removed too, so it can't be brought back that way.
+When your resolved seat belongs to this rig, confirm before stopping it. Without a terminal,
+the command warns and exits without stopping; re-run with --yes to confirm explicitly.`);
   const getDepsF = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
   cmd
@@ -77,9 +148,10 @@ rig up <rig> --existing brings it back, resuming each seat's conversation where 
     .option("--delete", "Delete rig record after stopping")
     .option("--force", "Kill sessions immediately")
     .option("--snapshot", "Take snapshot before teardown")
+    .option("--yes", "Confirm stopping the rig your current seat belongs to")
     .option("--json", "JSON output for agents")
     .option("--host <id>", "Run on a remote host declared in ~/.openrig/hosts.yaml")
-    .action(async (rigHandle: string, opts: { delete?: boolean; force?: boolean; snapshot?: boolean; json?: boolean; host?: string }) => {
+    .action(async (rigHandle: string, opts: DownOptions) => {
       // OPR.0.4.6.MH1 FR-2: selected-host routing — explicit --host wins;
       // else the persisted selection feeds the SHIPPED --host path; no
       // selection = today exactly.
@@ -101,9 +173,14 @@ rig up <rig> --existing brings it back, resuming each seat's conversation where 
             return inventory.ok ? inventory.data : undefined;
           });
         }
+        const warning = await confirmOwnRig(rigIdResult.rigId, opts, deps, async path => {
+          const identity = await runRemoteHttpOp(opts.host!, "GET", path, undefined, deps, { timeoutMs: 2_000 });
+          return identity.ok ? identity.data : undefined;
+        });
+        if (warning === false) return;
         const result = await runRemoteHttpOp(opts.host, "POST", `/api/down`, { rigId: rigIdResult.rigId, delete: opts.delete, force: opts.force, snapshot: opts.snapshot }, deps, opts);
         if (opts.json) {
-          console.log(JSON.stringify(result));
+          console.log(JSON.stringify(warning ? { ...result, warning } : result));
           if (!result.ok) process.exitCode = 1;
         } else if (result.ok) {
           console.log(JSON.stringify(result.data, null, 2));
@@ -170,6 +247,11 @@ rig up <rig> --existing brings it back, resuming each seat's conversation where 
         });
       }
 
+      const warning = await confirmOwnRig(rigId, opts, deps, async path => {
+        const identity = await client.get<unknown>(path, { timeoutMs: 2_000 });
+        return identity.status === 200 ? identity.data : undefined;
+      });
+      if (warning === false) return;
       const res = await client.post<TeardownResult | { error: string }>("/api/down", {
         rigId,
         delete: opts.delete ?? false,
@@ -178,7 +260,7 @@ rig up <rig> --existing brings it back, resuming each seat's conversation where 
       }, { timeoutMs: LONG_RUNNING_TIMEOUT_MS });
 
       if (opts.json) {
-        console.log(JSON.stringify(res.data));
+        console.log(JSON.stringify(warning ? { ...res.data, warning } : res.data));
         if (res.status >= 400) {
           process.exitCode = 2;
         } else {

@@ -929,7 +929,9 @@ your circumstances is configuration, and the ones that are not, another agent ca
   better than `unknown`. A Codex account's last reading, its reset and its last observed exhaustion
   survive a daemon restart as history (`retained: "before_restart"`), never a current reading; a
   window whose reset has passed shows an `expectation`, which is planning, not a reading. Run `rig provider status --refresh`
-  before telling anyone an account has room.
+  before telling anyone an account has room. An agent that moves a Codex home between subscriptions files
+  what it did with `rig provider moves report` (a queue item to whoever asked, checked and never a move itself), and
+  `rig provider moves` reads the reports back.
 - **Codex configuration fragments** — a `codex_config_fragment` must open with a table header and
   never overrides a user-declared table; see `docs/reference/agent-spec.md`.
 - **`rig env`** — the real services behind a rig: are they up, what are they saying, how do you

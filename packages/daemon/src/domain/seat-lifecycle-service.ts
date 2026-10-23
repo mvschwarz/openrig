@@ -1,3 +1,4 @@
+import { parseTerminalPolicy, TerminalPolicyRefusal, TerminalPolicyStore, type TerminalAction } from "./terminal-policy.js";
 import type { NativeProcessLister } from "./native-process-lineage.js";
 import type { CurrentModelReader } from "./model-divergence/current-model-reader.js";
 import type Database from "better-sqlite3";
@@ -99,6 +100,8 @@ interface ResolvedSeat {
 export interface SeatRefusal {
   ok: false;
   code:
+    | "terminal_policy_refused"
+    | "terminal_policy_unavailable"
     | "seat_ref_required"
     | "seat_not_found"
     | "seat_ambiguous"
@@ -323,6 +326,48 @@ export class SeatLifecycleService {
     this.piRecords = deps.piRecords ?? null;
   }
 
+  private terminalPolicyCheck(nodeId: string, action: TerminalAction, operator?: string | null) {
+    try {
+      const decision = new TerminalPolicyStore(this.db).check(nodeId, action, { source: "caller", session: operator ?? null });
+      return { ok: true as const, ...decision };
+    } catch (error) {
+      const refusal: SeatRefusal = { ok: false, code: error instanceof TerminalPolicyRefusal ? "terminal_policy_refused" : "terminal_policy_unavailable",
+        message: (error as Error).message,
+        ...(error instanceof TerminalPolicyRefusal ? { actorClass: error.actorClass } : {}) };
+      return refusal;
+    }
+  }
+
+  setTerminalPolicy(input: { seatRef: string; preset: unknown; helpers?: unknown; exceptions?: unknown;
+    reason: string; actor: string; rigDefault?: boolean }) {
+    const required = this.requireReason(input.reason);
+    if (required) return required;
+    if (!input.actor.trim()) return { ok: false as const, code: "actor_required", message: "Supply the caller identity or --operator for the audit." };
+    const resolved = this.resolveSeat(input.seatRef);
+    if ("code" in resolved) return resolved;
+    let config: ReturnType<typeof parseTerminalPolicy>;
+    try { config = parseTerminalPolicy(input); }
+    catch (error) { return { ok: false as const, code: "invalid_terminal_policy", message: (error as Error).message }; }
+    try {
+      const store = new TerminalPolicyStore(this.db);
+      const seat = this.describe(resolved);
+      let persisted: PersistedEvent | null = null;
+      this.db.transaction(() => {
+        store.write(seat.nodeId, config, input.actor.trim(), input.reason.trim(), input.rigDefault);
+        persisted = this.eventBus.persistWithinTransaction({ type: "node.terminal_policy_changed", rigId: seat.rigId,
+          nodeId: seat.nodeId, scope: input.rigDefault ? "rig_default" : "seat", config,
+          actor: input.actor.trim(), reason: input.reason.trim() });
+      })();
+      if (persisted) this.eventBus.notifySubscribers(persisted);
+      return { ok: true as const, seat, config,
+        effect: input.rigDefault ? "Saved for newly added seats in this rig only; existing seats are unchanged."
+          : "Saved for managed compaction and future saved model/effort changes. No input, relaunch, native permission or interruption-level change.",
+        account: store.account(seat.nodeId, resolved.entry.runtime ?? null) };
+    } catch (error) {
+      return { ok: false as const, code: "terminal_policy_unavailable" as const, message: (error as Error).message };
+    }
+  }
+
   async setModel(input: { seatRef: string; model: string; reason: string; operator?: string | null }): Promise<SetModelResult> {
     const required = this.requireReason(input.reason);
     if (required) return required;
@@ -342,9 +387,12 @@ export class SeatLifecycleService {
 
     let persisted: PersistedEvent | null = null;
     const tx = this.db.transaction(() => {
+      const decision = this.terminalPolicyCheck(seat.nodeId, "model", input.operator);
+      if (!decision.ok) return decision;
       this.rigRepo.setNodeModel(resolved.nodeId, model);
       persisted = this.eventBus.persistWithinTransaction({
         type: "node.model_changed",
+        actorClass: decision.actorClass,
         rigId: seat.rigId,
         nodeId: seat.nodeId,
         logicalId: seat.logicalId,
@@ -354,7 +402,8 @@ export class SeatLifecycleService {
         operator: input.operator ?? null,
       });
     });
-    tx();
+    const refused = tx();
+    if (refused) return refused;
     if (persisted) this.eventBus.notifySubscribers(persisted);
 
     return { ok: true, seat, from, to: model, changed: true };
@@ -496,11 +545,14 @@ export class SeatLifecycleService {
     let changed = false;
     if (from.choice !== requested) {
       let persisted: PersistedEvent | null = null;
-      this.db.transaction(() => {
+      const refused = this.db.transaction(() => {
+        const decision = this.terminalPolicyCheck(seat.nodeId, "model", input.operator);
+        if (!decision.ok) return decision;
         if (!this.rigRepo.setNodeEffortChoice(seat.nodeId, requested)) return;
         changed = true;
         persisted = this.eventBus.persistWithinTransaction({
           type: "node.effort_changed",
+          actorClass: decision.actorClass,
           rigId: seat.rigId,
           nodeId: seat.nodeId,
           logicalId: seat.logicalId,
@@ -510,6 +562,7 @@ export class SeatLifecycleService {
           operator: input.operator ?? null,
         });
       })();
+      if (refused) return refused;
       if (persisted) this.eventBus.notifySubscribers(persisted);
       if (!changed) {
         return { ok: false, code: "effort_unavailable", message: `The effort choice for seat "${input.seatRef}" was not saved (no node row was updated); nothing changed.` };

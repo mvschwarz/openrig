@@ -47,6 +47,10 @@ describe("ClaimService", () => {
       sendText: sendTextSpy,
       sendKeys: sendKeysSpy,
       startPipePane: startPipePaneSpy,
+      // The identity hint goes through the session transport, which probes the session and reads the pane first.
+      probeSession: vi.fn(async () => ({ state: "present" })),
+      hasSession: vi.fn(async () => true),
+      capturePaneContent: vi.fn(async () => ""),
     } as unknown as TmuxAdapter;
     transcriptStore = new TranscriptStore({ transcriptsRoot: "/tmp/openrig-claim-service-transcripts", enabled: true });
     claimService = new ClaimService({

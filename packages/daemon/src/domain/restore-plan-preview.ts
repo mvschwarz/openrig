@@ -16,7 +16,9 @@ import { resolveActiveSnapshotSession, deriveRehydrateOccupantsByNode, deriveReh
 import type { RigWithRelations, Snapshot } from "./types.js";
 import { readFreshOccupantRelations } from "./fresh-occupant-relation.js";
 import { parseSqliteUtcMs } from "./sqlite-time.js";
-import { effectiveRestorePolicy, isOrdinaryTerminalSeat, type RestoreSeatFacts } from "./restore-policy.js";
+import { communityLaunchOnlyRestoreReason, effectiveRestorePolicy, isOrdinaryTerminalSeat, type RestoreSeatFacts } from "./restore-policy.js";
+import { communityHarnessOf } from "./built-in-runtimes.js";
+import { sessionCommunityHarnessSelect } from "./session-registry.js";
 import { assessSnapshotCurrentOccupants, stoppedSnapshotReason } from "./rehydrate-eligibility.js";
 
 /** OPR.0.4.3.20 FR-6 — a present token whose last verification is older than this
@@ -77,6 +79,8 @@ export interface PreviewSessionRow {
   restorePolicy: string | null;
   resumeType: string | null;
   resumeToken: string | null;
+  /** The community harness the session was launched for, if any (its preset is launch-only at restore). */
+  communityHarness?: string | null;
   // OPR.0.4.3.20 FR-6 — provenance + verification freshness (nullable/degrading
   // for pre-45 rows and old snapshots → rendered as unverified, never a crash).
   resumeProvenance?: string | null;
@@ -173,6 +177,10 @@ function intendedActionFor(
   }
   const occupant = resolution.kind === "resolved" ? resolution.session : null;
   const policy = effectiveRestorePolicy(seat, occupant?.restorePolicy);
+  // As apply: a community harness is launch-only, so even a reported conversation forecasts a decision, not a resume.
+  if (policy === "resume_if_possible" && occupant && communityHarnessOf(occupant.communityHarness, seat.currentRuntime)) {
+    return { intendedAction: "awaiting-decision", reason: communityLaunchOnlyRestoreReason(seat.currentRuntime, absentHistory.logicalId, absentHistory.rigName) };
+  }
   const sourceRecorded = !!occupant?.resumeType && occupant.resumeType !== "none";
   if (policy === "resume_if_possible" && sourceRecorded && occupant?.resumeToken) {
     return { intendedAction: "resume-original" };
@@ -204,6 +212,7 @@ export function collectPreviewSessionRows(
       restorePolicy: s.restorePolicy ?? null,
       resumeType: s.resumeType ?? null,
       resumeToken: s.resumeToken ?? null,
+      communityHarness: s.communityHarness ?? null,
       // OPR.0.4.3.20 FR-6 — degrade to null for snapshots serialized pre-45.
       resumeProvenance: s.resumeProvenance ?? null,
       resumeLastVerified: s.resumeLastVerified ?? null,
@@ -216,13 +225,14 @@ export function collectPreviewSessionRows(
   if (nodeIds.length === 0) return [];
   const placeholders = nodeIds.map(() => "?").join(",");
   const rows = db.prepare(
-    `SELECT id, node_id, restore_policy, resume_type, resume_token, resume_provenance, resume_last_verified, resume_last_probe_status, status FROM sessions WHERE node_id IN (${placeholders})`
-  ).all(...nodeIds) as Array<{ id: string; node_id: string; restore_policy: string | null; resume_type: string | null; resume_token: string | null; resume_provenance: string | null; resume_last_verified: string | null; resume_last_probe_status: string | null; status: string | null }>;
+    `SELECT s.id, s.node_id, s.restore_policy, s.resume_type, s.resume_token, s.resume_provenance, s.resume_last_verified, s.resume_last_probe_status, s.status, ${sessionCommunityHarnessSelect(db)} AS community_harness FROM sessions s WHERE s.node_id IN (${placeholders})`
+  ).all(...nodeIds) as Array<{ id: string; node_id: string; restore_policy: string | null; resume_type: string | null; resume_token: string | null; resume_provenance: string | null; resume_last_verified: string | null; resume_last_probe_status: string | null; status: string | null; community_harness: string | null }>;
   const sessions = rows.map((r) => ({
     nodeId: r.node_id,
     restorePolicy: r.restore_policy,
     resumeType: r.resume_type,
     resumeToken: r.resume_token,
+    communityHarness: r.community_harness,
     resumeProvenance: r.resume_provenance,
     resumeLastVerified: r.resume_last_verified,
     resumeLastProbeStatus: r.resume_last_probe_status,

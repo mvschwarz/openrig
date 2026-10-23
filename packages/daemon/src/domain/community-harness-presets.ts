@@ -1,6 +1,7 @@
 // Community harnesses: another community harness runs in a seat from a small data preset the person installs, one YAML file
 // per harness under $OPENRIG_HOME/community-harnesses/<name>.yaml. A preset names the harness, the command that starts it in the seat's
-// pane, its maintainer and the limits it declares. OpenRig hasn't tested these harnesses: it shows them as community harnesses,
+// pane, its maintainer and the limits it declares. With `launch_result: true`, its launcher reports the harness's own
+// conversation id for each launch (see `community-harness-launch-result.ts`); OpenRig records it as reported, not observed. OpenRig hasn't tested these harnesses: it shows them as community harnesses,
 // never confirms their identity, and reads their activity only from what the screen shows. Built-in runtime names are
 // reserved, so a preset can't replace one.
 import { existsSync, readFileSync, readdirSync } from "node:fs";
@@ -12,7 +13,7 @@ import { BUILT_IN_RUNTIMES, isCommunityHarnessRuntime } from "./built-in-runtime
 export { BUILT_IN_RUNTIMES, isCommunityHarnessRuntime };
 
 export const COMMUNITY_HARNESS_PRESET_FORMAT = 1;
-const FIELDS = ["format", "name", "command", "maintainer", "limits"] as const;
+const FIELDS = ["format", "name", "command", "maintainer", "limits", "launch_result"] as const;
 const NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
 export interface CommunityHarnessPreset {
@@ -20,6 +21,8 @@ export interface CommunityHarnessPreset {
   command: string;
   maintainer: string;
   limits: string[];
+  /** The launcher writes one launch-result record per launch (the harness's own conversation id). */
+  launchResult: boolean;
   path: string;
 }
 
@@ -55,7 +58,9 @@ function parsePreset(name: string, path: string, text: string): CommunityHarness
   if (!Array.isArray(limits) || limits.some(limit => typeof limit !== "string" || !limit.trim())) {
     return bad("limits must be a list of non-empty strings");
   }
-  return { ok: true, preset: { name, command: raw.command as string, maintainer: raw.maintainer as string, limits: limits as string[], path } };
+  if (raw.launch_result !== undefined && typeof raw.launch_result !== "boolean") return bad("launch_result must be true or false");
+  return { ok: true, preset: { name, command: raw.command as string, maintainer: raw.maintainer as string, limits: limits as string[],
+    launchResult: raw.launch_result === true, path } };
 }
 
 /** The first shell construct in a preset command, or null when it's one program with its arguments. The command is
@@ -128,19 +133,26 @@ export interface CommunityHarnessLabel {
   testedByOpenRig: false;
   maintainer: string | null;
   limits: string[];
-  identity: "not confirmed";
+  /** "reported" when its launcher reported the conversation it created (what it says, not proof the harness used it). */
+  identity: "not confirmed" | "reported by its launcher, not observed";
+  /** The conversation id its launcher reported for this launch. */
+  reportedConversation?: string;
   needsInput: "from the screen only: no harness prompt pattern";
   /** Set when the preset is missing or can't be used. */
   presetError?: string;
 }
 
-export function communityHarnessLabel(runtime: string, dir: string = communityHarnessesDir()): CommunityHarnessLabel {
+export function communityHarnessLabel(runtime: string, dir: string = communityHarnessesDir(),
+  session?: { resumeType: string | null; resumeToken: string | null }): CommunityHarnessLabel {
+  const reported = session?.resumeType === `community:${runtime}` && session.resumeToken ? session.resumeToken : undefined;
   const found = loadCommunityHarnessPreset(runtime, dir);
   return {
     harness: runtime, community: true, testedByOpenRig: false,
     maintainer: found.ok ? found.preset.maintainer : null,
     limits: found.ok ? found.preset.limits : [],
-    identity: "not confirmed", needsInput: "from the screen only: no harness prompt pattern",
+    identity: reported ? "reported by its launcher, not observed" : "not confirmed",
+    ...(reported ? { reportedConversation: reported } : {}),
+    needsInput: "from the screen only: no harness prompt pattern",
     ...(found.ok ? {} : { presetError: found.message }),
   };
 }

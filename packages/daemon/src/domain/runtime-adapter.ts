@@ -118,6 +118,10 @@ export type HarnessLaunchRecovery = "retry_fresh" | "attention_required";
 // pinned as the one it started, kept even when a later sample saw it replaced (#1077).
 export type HarnessLaunchResult =
   | { ok: true; resumeToken?: string; resumeType?: string; appliedLaunch?: import("./permission-drift.js").AppliedLaunchObservation;
+    /** Where resumeToken came from, when not a pane scrape: a community harness's launcher reported it. */
+    resumeProvenance?: "launcher";
+    /** Launch notes for the person, such as a community harness whose launch identity is unavailable. */
+    warnings?: string[];
     launchedProcess?: import("./native-process-lineage.js").ClaudeLaunchedProcess;
     /** Codex (#1524): the native process a managed resume was proven on from Codex's own records. Restore's join
      *  compares the process it verifies later against this one before it reports the seat resumed. */

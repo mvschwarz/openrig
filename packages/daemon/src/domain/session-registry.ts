@@ -539,6 +539,20 @@ export class SessionRegistry {
     return true;
   }
 
+  /** A community harness's launcher reported the conversation this launch created: record it with provenance
+   *  `launcher` and no verification stamp. A report isn't a verification, so the session doesn't read as resumable. */
+  recordLauncherReportedToken(sessionId: string, type: string, token: string): boolean {
+    if (typeof token !== "string" || token.trim().length === 0) return false;
+    this.db
+      .prepare(
+        "UPDATE sessions SET resume_type = ?, resume_token = ?, resume_provenance = 'launcher', " +
+          "resume_last_verified = NULL, resume_last_probe_status = NULL, " +
+          `${CLEAR_ROTATION_ON_TOKEN_CHANGE} WHERE id = ?`,
+      )
+      .run(type, token, token, token, sessionId);
+    return true;
+  }
+
   /** Record a Claude SessionStart hook's session id, with the evidence of how it began (#1077).
    *
    * The write itself follows `updateResumeToken`'s hook rank. The first hook carrying the node's

@@ -86,7 +86,7 @@ const LAUNCH_DEPENDENCY_KINDS = new Set(["delegates_to", "spawned_by"]);
 // usability, and lifecycle projection. Imported and re-exported here so the
 // existing export surface and the execution call sites below are unchanged.
 import { resolveActiveSnapshotSession, activeOccupantAmbiguityError, absentSeatResumeHistory, absentSeatResumeHistoryError, freshSeatLaunchCommand } from "./active-occupant.js";
-import { effectiveRestorePolicy, type RestoreSeatFacts } from "./restore-policy.js";
+import { effectiveRestorePolicy, type RestoreSeatFacts, communityLaunchOnlyRestoreReason } from "./restore-policy.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { seatAdapter } from "../adapters/community-harness-runtime-adapter.js";
 import { pluginPathsOf } from "./claude-core-plugin-env.js";
@@ -1051,7 +1051,7 @@ export class RestoreOrchestrator {
           nodeId,
           logicalId: node.logicalId,
           status: "awaiting-decision",
-          error: `Resume is unsupported for community harness "${node.runtime}": its preset is launch-only. No session was started, and the earlier conversation is left as it is. Only if you want a new conversation, run: ${this.freshSeatCommand(rigId, data, node.logicalId)}.`,
+          error: communityLaunchOnlyRestoreReason(node.runtime, node.logicalId, this.rigRepo.getRig(rigId)?.rig.name ?? data.rig.name),
         };
       }
       if (policy === "resume_if_possible" && snapSession && !snapSession.resumeToken && !freshRequested) {

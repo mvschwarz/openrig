@@ -33,11 +33,12 @@ export function defaultResolveOrchestrator(db: Database.Database, session: strin
 
 /** A rig's representative, the seat a person's message to "the rig" reaches: the rig's one
  *  delegation root, the node that delegates to others and that nothing delegates to, at its
- *  CURRENT canonical session binding. Null when the rig name is ambiguous or absent, when the rig
- *  has no such root or several, or when the root has no session; the caller falls back to its
- *  configured destination rather than guessing. */
+ *  CURRENT canonical session binding. The name matches active rigs only, as the CLI's rig handles
+ *  do, so an archived earlier generation of a relaunched rig doesn't make its name ambiguous. Null
+ *  when no active rig or several have the name, when the rig has no such root or several, or when
+ *  the root has no session; the caller falls back to its configured destination rather than guessing. */
 export function resolveRigRepresentative(db: Database.Database, rigName: string): string | null {
-  const rigs = db.prepare("SELECT id FROM rigs WHERE name = ?").all(rigName) as Array<{ id: string }>;
+  const rigs = db.prepare("SELECT id FROM rigs WHERE name = ? AND archived_at IS NULL").all(rigName) as Array<{ id: string }>;
   if (rigs.length !== 1) return null;
   return resolveRigRepresentativeById(db, rigs[0]!.id);
 }

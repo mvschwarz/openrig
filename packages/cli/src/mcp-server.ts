@@ -11,7 +11,7 @@ import { CLI_VERSION } from "./version.js";
 
 const LONG_RUNNING_UP_TIMEOUT_MS = 120_000;
 const WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS = 5_000;
-/** The most text rig_context_get returns; a longer file or section is cut, and says so. */
+/** The most text rig_context_get and rig_artifact_read return in one call; a longer file or section is cut, and says so. */
 const CONTEXT_TEXT_LIMIT = 48_000;
 
 type TextResult = {
@@ -133,6 +133,35 @@ function sliceSummary(slice: SliceEntry): Record<string, unknown> {
   };
 }
 
+type SharedRoot = { name: string; path: string };
+type FileRead = { root?: string; path?: string; content?: string; binary?: boolean; size?: number; mtime?: string; truncated?: boolean; truncatedAtBytes?: number | null; totalBytes?: number };
+
+/** The shared root an absolute path falls under as written, and its path inside that root. The reference names a file
+ *  where the daemon runs, which may be another machine, so it's never resolved through this machine's filesystem; the
+ *  daemon still checks containment itself when the file is read. */
+function underSharedRoot(roots: SharedRoot[], absolute: string): { root: string; path: string } | null {
+  for (const root of roots) {
+    const inside = nodePath.relative(root.path, absolute);
+    if (inside && inside !== ".." && !inside.startsWith(`..${nodePath.sep}`) && !nodePath.isAbsolute(inside)) return { root: root.name, path: inside };
+  }
+  return null;
+}
+
+/** A file the daemon read through a shared root, as text from offset: at most CONTEXT_TEXT_LIMIT characters, with
+ *  nextOffset when more of what the daemon read remains, and its byte cut when the file was longer than the daemon reads. */
+function artifactView(source: string, read: FileRead, offset: number): Record<string, unknown> {
+  const base = { available: true, source, root: read.root, path: read.path, size: read.size, mtime: read.mtime };
+  if (read.binary) return { ...base, binary: true, note: "A binary file: not shown as text." };
+  const text = read.content ?? "";
+  const end = offset + CONTEXT_TEXT_LIMIT;
+  return {
+    ...base, binary: false, offset, text: text.slice(offset, end), totalChars: text.length,
+    truncated: text.length > end || read.truncated === true,
+    ...(text.length > end ? { nextOffset: end } : {}),
+    ...(read.truncated ? { truncatedAtBytes: read.truncatedAtBytes, totalBytes: read.totalBytes } : {}),
+  };
+}
+
 /**
  * The rig id for a tool's rig argument, resolved as the rig CLI commands resolve it: an id, or a name one
  * active rig has, gives that rig's id; a name two active rigs share is an error result with their ids;
@@ -201,7 +230,7 @@ export const MCP_OPERATIONS: ReadonlyArray<{ tool: string; routes: readonly stri
   { tool: "rig_chatroom_send", routes: ["POST /api/rigs/:rigId/chat/send"], effect: "additive" },
   { tool: "rig_chatroom_watch", routes: ["GET /api/rigs/:rigId/chat/history"], effect: "read" },
   { tool: "rig_add", routes: ["POST /api/rigs/:rigId/pods/:podNamespace/members"], effect: "additive" },
-  { tool: "rig_queue_create", routes: ["POST /api/queue/create"], effect: "additive" },
+  { tool: "rig_queue_create", routes: ["POST /api/queue/create", "GET /api/queue/:qitemId"], effect: "additive" },
   { tool: "rig_queue_show", routes: ["GET /api/queue/:qitemId", "GET /api/queue/:qitemId/transitions", "GET /api/queue/list"], effect: "read" },
   { tool: "rig_queue_list", routes: ["GET /api/queue/list"], effect: "read" },
   { tool: "rig_queue_claim", routes: ["POST /api/queue/:qitemId/claim"], effect: "destructive" },
@@ -213,6 +242,9 @@ export const MCP_OPERATIONS: ReadonlyArray<{ tool: string; routes: readonly stri
   { tool: "rig_mission", routes: ["GET /api/missions/:missionId"], effect: "read" },
   { tool: "rig_context_pack", routes: ["GET /api/context-packs/library/by-ref"], effect: "read" },
   { tool: "rig_context_get", routes: ["GET /api/context-packs/library/resolve-address"], effect: "read" },
+  { tool: "rig_artifact_read", routes: ["GET /api/queue/:qitemId", "GET /api/files/roots", "GET /api/files/read"], effect: "read" },
+  { tool: "rig_human_decision_room", routes: ["GET /api/queue/:qitemId", "GET /api/gateway/human/:entityId/decision-room"], effect: "read" },
+  { tool: "rig_queue_decide", routes: ["POST /api/queue/:qitemId/delegated-decision"], effect: "destructive" },
 ];
 
 // Short guidance a client may show the model (the server's MCP instructions).
@@ -220,7 +252,7 @@ const INSTRUCTIONS = [
   "This server reaches an OpenRig team as one seat: the one named by OPENRIG_SESSION_NAME where the server was configured (rig_whoami shows it; rig_team shows a rig's seats and its lead). The daemon attributes this server's writes to that seat.",
   "To hand work to a seat, use rig_queue_create and keep its qitemId; read the answer later with rig_queue_show, which names the next item when the work was handed on. Queue items are durable: they outlive this conversation and this server.",
   "Tools marked read-only change nothing. A seat whose activity is unknown is not idle, and an accepted request (a restore's attemptId) is not a finished one.",
-  "A question reserved for a person is theirs to answer: don't answer it on their behalf.",
+  "A question reserved for a person is theirs to answer: don't answer it on their behalf. rig_queue_decide records a decision only inside the decision room of the mode they have on, beside their answers and never as one.",
 ].join("\n");
 
 /**
@@ -735,7 +767,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   // 19. rig_queue_create — hand a task to a seat
   server.tool(
     "rig_queue_create",
-    "Hand a task to another seat as a durable queue item. Returns its qitemId: read the answer later with rig_queue_show. If the call times out, check rig_queue_show with the same qitemId before retrying; never retry with a new id.",
+    "Hand a task to another seat as a durable queue item. Returns its qitemId: read the answer later with rig_queue_show. If the call times out, check rig_queue_show with the same qitemId before retrying; never retry with a new id. To ask for a revision of earlier work, name it in revises: the new item opens with 'Revision of <id>' and records it in its chainOfRecord.",
     {
       destination: z.string().describe("Destination seat (e.g. dev-impl@my-rig)"),
       body: z.string().describe("The task: what to do and what to return"),
@@ -744,13 +776,29 @@ export function createMcpServer(client: DaemonClient): McpServer {
       priority: z.string().optional().describe("Priority (as rig queue create --priority)"),
       tier: z.string().optional().describe("Tier (as rig queue create --tier)"),
       qitemId: z.string().optional().describe("Request id to reuse when retrying the same create (default: a new id)"),
+      revises: z.string().optional().describe("The qitemId of the work this asks to revise"),
     },
     ADDITIVE,
-    async ({ destination, body, summary, tags, priority, tier, qitemId }) => {
+    async ({ destination, body, summary, tags, priority, tier, qitemId, revises }) => {
+      // A revision carries its original's lineage as a handoff does: the original's chain, then the original.
+      let lineage: { chainOfRecord: string[]; body: string } | undefined;
+      if (revises) {
+        try {
+          const original = await client.get(`/api/queue/${encodeURIComponent(revises)}`);
+          if (original.status >= 400) return mapResult(original);
+          const prior = (original.data ?? {}) as { qitemId?: unknown; chainOfRecord?: unknown };
+          const originalId = typeof prior.qitemId === "string" ? prior.qitemId : revises;
+          const chain = Array.isArray(prior.chainOfRecord) ? prior.chainOfRecord.filter((link): link is string => typeof link === "string") : [];
+          lineage = { chainOfRecord: [...chain, originalId], body: `Revision of ${originalId}.\n\n${body}` };
+        } catch (err) {
+          return caught(err);
+        }
+      }
       const id = qitemId ?? `qitem-${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}-${randomBytes(8).toString("hex")}`;
       try {
         const res = await client.post("/api/queue/create", {
-          qitemId: id, destinationSession: destination, body, summary, tags, priority, tier,
+          qitemId: id, destinationSession: destination, body: lineage?.body ?? body, summary, tags, priority, tier,
+          ...(lineage ? { chainOfRecord: lineage.chainOfRecord } : {}),
         });
         return mapResult(res, undefined, { structured: true });
       } catch (err) {
@@ -764,7 +812,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   // 20. rig_queue_show — one item with its transitions: a delegated task's answer is its own record
   server.tool(
     "rig_queue_show",
-    "Read one queue item and its transitions. For a task you handed off, this is where its answer is: the state, the closure reason and target, and the notes the assignee recorded. When the item was handed on, successor names the next item (on another host: its id and host); follow it with rig_queue_show. null means none was found.",
+    "Read one queue item and its transitions. For a task you handed off, this is where its answer is: the state, the closure reason and target, the notes the assignee recorded, and evidenceRef when it names an artifact (read it with rig_artifact_read). When the item was handed on, successor names the next item (on another host: its id and host); follow it with rig_queue_show. null means none was found. A revision names the work it revises in chainOfRecord.",
     {
       qitemId: z.string().describe("The qitemId returned by rig_queue_create (or any queue item)"),
     },
@@ -1048,6 +1096,105 @@ export function createMcpServer(client: DaemonClient): McpServer {
           text: cut ? text.slice(0, CONTEXT_TEXT_LIMIT) : text,
           ...(cut ? { truncated: true, totalChars: text.length } : {}),
         } }, undefined, { structured: true });
+      } catch (err) {
+        return caught(err);
+      }
+    },
+  );
+
+  // 32. rig_artifact_read — a result's artifact, read through the daemon's shared roots
+  server.tool(
+    "rig_artifact_read",
+    `Read a finished item's artifact (its evidenceRef), or a named file, through the daemon's shared roots (OPENRIG_FILES_ALLOWLIST), as text: at most ${CONTEXT_TEXT_LIMIT} characters from offset; nextOffset reads on. An artifact outside every shared root, a link, or an item with no evidenceRef comes back as available: false with the reason and the shared roots' names; nothing outside those roots is read.`,
+    {
+      qitemId: z.string().optional().describe("Read this item's evidenceRef"),
+      root: z.string().optional().describe("A shared root's name: with path, the file to read; with qitemId, the root a relative evidenceRef is under"),
+      path: z.string().optional().describe("With root: the file's path inside that root"),
+      offset: z.number().int().min(0).optional().describe("The character to start from (default 0)"),
+    },
+    READ_ONLY,
+    async ({ qitemId, root, path, offset }) => {
+      try {
+        const read = async (source: string, rootName: string, inside: string): Promise<TextResult> => {
+          const res = await client.get(`/api/files/read?${new URLSearchParams({ root: rootName, path: inside }).toString()}`);
+          if (res.status >= 400) return mapResult(res);
+          return mapResult({ status: 200, data: artifactView(source, (res.data ?? {}) as FileRead, offset ?? 0) }, undefined, { structured: true });
+        };
+        if (!qitemId) {
+          if (root && path) return await read("path", root, path);
+          const message = "Name an item (qitemId), or a file (root and path).";
+          return errorResult(JSON.stringify({ ok: false, error: message }), "artifact_required", message);
+        }
+        const item = await client.get(`/api/queue/${encodeURIComponent(qitemId)}`);
+        if (item.status >= 400) return mapResult(item);
+        const ref = ((item.data ?? {}) as { evidenceRef?: unknown }).evidenceRef;
+        const rootsRes = await client.get("/api/files/roots");
+        if (rootsRes.status >= 400) return mapResult(rootsRes);
+        const roots = ((rootsRes.data ?? {}) as { roots?: SharedRoot[] }).roots ?? [];
+        const unavailable = (reason: string) => mapResult({ status: 200, data: {
+          available: false, qitemId, reason, evidenceRef: typeof ref === "string" ? ref : null, roots: roots.map((entry) => entry.name),
+        } }, undefined, { structured: true });
+        if (typeof ref !== "string" || !ref.trim()) return unavailable("This item names no artifact: it has no evidenceRef.");
+        if (/^[a-z][a-z0-9+.-]*:\/\//i.test(ref)) return unavailable("The evidenceRef is a link, not a file in a shared root: open it where it lives.");
+        if (roots.length === 0) return unavailable("This daemon shares no roots (OPENRIG_FILES_ALLOWLIST is empty), so no artifact can be read through it.");
+        if (!nodePath.isAbsolute(ref)) {
+          return root ? await read("evidenceRef", root, ref) : unavailable("The evidenceRef is a relative path: name the shared root it's under (root).");
+        }
+        const shared = underSharedRoot(roots, ref);
+        if (!shared) return unavailable("The evidenceRef is outside every shared root as the daemon lists them, so it isn't read. If it reaches a root through a link, read the file with root and path.");
+        return await read("evidenceRef", shared.root, shared.path);
+      } catch (err) {
+        return caught(err);
+      }
+    },
+  );
+
+  // 33. rig_human_decision_room — before deciding a question asked of a person: the room their mode gives the team
+  server.tool(
+    "rig_human_decision_room",
+    "Before deciding a question you asked a person: the decision room of the mode they have on, in their own words (what the team may decide for them meanwhile, and what it may not), or none, with why. You judge whether your decision falls inside it; with none, the question stays theirs to answer.",
+    {
+      qitemId: z.string().describe("Your pending ask to the person (a queue item addressed to <person>@external)"),
+    },
+    READ_ONLY,
+    async ({ qitemId }) => {
+      try {
+        const item = await client.get(`/api/queue/${encodeURIComponent(qitemId)}`);
+        if (item.status >= 400) return mapResult(item);
+        const row = (item.data ?? {}) as { destinationSession?: unknown; humanIntent?: unknown };
+        // A person is addressed as <entityId>@external, the daemon's external session form; an update asks nothing.
+        const person = typeof row.destinationSession === "string" ? /^([A-Za-z0-9._:-]+)@external$/.exec(row.destinationSession) : null;
+        if (!person || row.humanIntent === "update") {
+          const message = `${qitemId} isn't a decision asked of a person: it's ${row.humanIntent === "update" ? "an update" : "addressed"} to ${String(row.destinationSession)}`;
+          return errorResult(JSON.stringify({ ok: false, error: "not-a-decision", message }), "not-a-decision", message);
+        }
+        const res = await client.get(`/api/gateway/human/${encodeURIComponent(person[1]!)}/decision-room`);
+        if (res.status >= 400) return mapResult(res);
+        return mapResult({ status: 200, data: { qitemId, ...(res.data as Record<string, unknown>), entityId: person[1] } }, undefined, { structured: true });
+      } catch (err) {
+        return caught(err);
+      }
+    },
+  );
+
+  // 34. rig_queue_decide — a decision made on a person's behalf, inside their decision room, beside their answers
+  server.tool(
+    "rig_queue_decide",
+    "Record a decision you made on a person's behalf, on your own pending ask to them, inside the decision room of the mode they have on: read it first with rig_human_decision_room and pass its applicationId. It's recorded beside their answers, never as one, and the ask closes. The daemon refuses it when they have no room, their mode changed since you read it, the ask is a permission prompt or an approval gate, they've started answering, or another seat asked. This server never answers as the person.",
+    {
+      qitemId: z.string().describe("Your pending ask to the person"),
+      applicationId: z.string().describe("decisionRoom.applicationId from rig_human_decision_room: the room you judged against"),
+      choices: z.array(z.object({
+        questionId: z.string().optional().describe("The question's id, when the ask has structured questions"),
+        chosen: z.string().describe("The option's id; for an ask without questions, the choice in words"),
+      })).describe("One choice per structured question; for an ask without questions, one choice without questionId"),
+      reason: z.string().describe("Why this choice"),
+      reversible: z.boolean().describe("Whether the decision can be undone"),
+    },
+    DESTRUCTIVE,
+    async ({ qitemId, applicationId, choices, reason, reversible }) => {
+      try {
+        return mapResult(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/delegated-decision`, { applicationId, choices, reason, reversible }), undefined, { structured: true });
       } catch (err) {
         return caught(err);
       }

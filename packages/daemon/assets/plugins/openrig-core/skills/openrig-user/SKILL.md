@@ -981,8 +981,8 @@ to keep work running, through the Fleet app. Until that bundle is available, the
 subscriptions can use this section. If that's you, you decide which subscription or home moves, and when. You decide
 from:
 - the usage and assignment readings, and their freshness;
-- your earlier move reports;
-- the person's standing preferences.
+- your earlier move reports (`rig provider moves`);
+- the person's account policy, or their standing preferences when there's no policy.
 
 You say why, and you see the outcome through. OpenRig gives you the facts and the tools; it never decides for you,
 and there's no threshold to obey.
@@ -998,24 +998,41 @@ and there's no threshold to obey.
 **The unit is a Codex home, with every seat on it.** Moving some seats on a shared home to a different account, and
 moving Claude seats, aren't supported moves yet: say so instead of improvising.
 
+0. **Load the person's account policy.**
+   - It's the context pack named `account-policy`: check `rig context list` for it, then read it with
+     `rig context get account-policy`. Its manifest's `version` is the version you follow and report.
+   - Follow it, and record the version in each report. A line the person approved ("move the build box's seats without
+     asking", "never move the reviewers") is standing authorization: act on it, don't ask again.
+   - A line grants only what the person actually gave. "Agents may do sign-ins" is usable only where a sign-in route
+     and access already exist; otherwise ask, and record that the preference couldn't be used.
+   - Something the policy doesn't cover: use your judgment or ask the way the policy says, record why, and propose a
+     one-line addition.
+   - **No policy** is never a reason to stop: work from this section, report the policy as `{ "none": true }`, and
+     offer once to write one with them (below).
 1. **Know the subscriptions.**
    - Each subscription is reached through a saved profile on a home (`rig auth list` and `rig auth save`) on each
      machine. Which seats use which profile is `rig auth seats`, and that's metadata: not proof of a live account.
    - Check you can read each subscription's usage, and name any you can't.
 2. **Read before deciding.**
    - Use `rig provider status --all-hosts --json` (add `--refresh` for fresh native readings). Each allowance has
-     its windows, reset times and when it was observed.
+     its windows, reset times and when it was observed, and when it was last observed exhausted.
    - **One allowance seen on two machines is one allowance:** never add its headroom twice.
    - **A stale reading** is usable only with its age recorded, or after a refresh.
-   - **An unknown or unavailable reading is never room.**
+   - **An unknown or unavailable reading is never observed room.**
+   - **After a known reset,** a window carries an `expectation` (expected full since that reset). You may plan on it,
+     but it isn't measured: report it as expected, and take a fresh reading when you can.
    - **Equal reset times don't mean the same account.**
    - **A seat's link to a subscription is observed, configured or unknown.** Only an observed link shows the seat
      actually uses it; a configured one (a profile, a registry row) is a claim.
+   - **A sign-in state of `unknown` isn't `needs_sign_in`.** An otherwise authorized move can go ahead, and its uptake
+     evidence settles it. A known `needs_sign_in` is step 6.
 3. **Decide, and leave seats alone for a reason.**
+   - **Balance, don't chase:** spread machines across the subscriptions with room rather than moving every machine onto
+     the one that just reset. `rig usage top` on each machine shows which work hardest: a high-use machine is worth a
+     subscription of its own, and lower-use machines can share one. Keep a backup where the policy says so.
    - `rig seat restart <seat> --keep-conversation --plan` shows what a restart keeps, and every peer on the same
      home. Moving the home moves them all.
    - Skip a seat that's mid-turn, running a service, or about to finish, and record why.
-   - The person's standing preferences ("never move the reviewers") are yours to follow and record.
 4. **Move the home.**
    - On that machine, `CODEX_HOME=<that home> rig auth switch <profile> --runtime codex`. `rig auth` acts on
      `CODEX_HOME`, or on the default home, and `rig auth status` prints which home it means: check it before
@@ -1025,16 +1042,25 @@ moving Claude seats, aren't supported moves yet: say so instead of improvising.
      --expect-account <the target's Account line>`. `--verify` only checks; it never restarts. Only that check
      reports `moved`, and anything less is unconfirmed.
    - **A slow reply isn't a failure:** never restart a seat a second time. Follow up at your next look.
-5. **Report every move, partial or unconfirmed included,** to whoever asked for it (a queue item to their seat):
-   - the home and machine;
-   - from and to, as labels;
-   - your reason;
-   - each reading you acted on, with its observation time;
-   - each seat's result (`moved`, `unconfirmed` or `unknown`) with its evidence or what's missing;
+5. **Report every move, partial or unconfirmed included,** with
+   `rig provider moves report --file <move.json> --to <whoever asked>` (`--help` shows the shape). It becomes a queue
+   item to them; the Fleet app reads these reports once its page is connected to them. It holds:
+   - the home and machine, and from and to, as labels;
+   - your reason, and the policy version you followed (or `{ "none": true }`);
+   - each reading you acted on, `observed` with its observation time, `expected` with the reset it rests on, or
+     `unavailable`;
+   - each seat's result: `moved` only with the verify check's matched account and observed tool turn, kept as separate
+     facts; otherwise `unconfirmed` or `unknown`, with what's missing;
    - the peers, for example "not restarted; account unverified".
 
    A home switched with every seat left as a peer is still a move to report. A follow-up that confirms an earlier
-   unconfirmed seat says which report it follows. Never put credentials in a report.
+   unconfirmed seat is a new report with `--follows <the earlier report's qitemId>`. A report to a person's seat names
+   its evidence with `--evidence-ref` (for example, the saved `--verify --json` output). Never put credentials in a
+   report: a value in a recognized credential format is refused. **A refused report changes nothing about the move:**
+   correct it and file it again; never repeat the switch or a restart because a report was refused. Asked "why did
+   these seats move?", even after your own restart, answer from `rig provider moves --seat <seat>`. It reads the newest
+   reports (50 by default, `--limit` up to 200) and then filters them, so it's a recent window, not a seat's whole
+   history: raise `--limit` when you need older ones.
 6. **When a sign-in is needed:**
    - Ask the person once, durably: a queue item to their seat, naming the machine and the subscription.
    - Move nothing onto that subscription until it's done.
@@ -1044,6 +1070,41 @@ moving Claude seats, aren't supported moves yet: say so instead of improvising.
 
 **What wakes you:** a watchdog, a usage-limit park on the queue, or the person asking. How often you look is your
 judgment within those.
+
+**If there's no policy yet.** Start from what you can see, and ask only what you can't; keep it to a few minutes, and
+never run it as a form. "Whatever you think" or "skip" is an answer: write down the default you'll use.
+1. **Look first:** `rig auth list` and `rig auth seats` on each machine you can reach, `rig provider status
+   --all-hosts --json`, and `rig usage top` on each machine. Draft what you can.
+2. **Confirm what you saw,** in one message ("three Codex subscriptions and one Claude one, on two machines; the build
+   box uses about four times the tokens of the laptop; any I can't see?").
+3. **Ask how they want them used,** offering the common shape: the busiest machine gets its own subscription, the
+   rest share, and one stays spare.
+4. **Ask what you may do on your own:** move a machine's Codex seats without asking; machines or seats to ask about
+   first or never move; sign-ins (may agents, and through which browser or profile, or always ask). Say what's
+   supported today: moves are by Codex home, Claude moves aren't supported yet, and a sign-in preference is used only
+   where a sign-in route and access exist.
+5. **Ask how to reach them** (their seat's queue, a chat channel, the Fleet app), for what, and what to do when they
+   don't answer. A channel they name is a preference: check the route with `messaging-the-human`, and use a queue
+   item to their seat if it isn't ready.
+6. **Ask what to do when things go wrong:** nothing has room, a sign-in is needed while they're away, a move didn't
+   confirm.
+7. **Show the draft in plain words,** let them correct it, and save it as a context pack named `account-policy` in
+   the context library where you run (`rig config get context.root`): a folder with `manifest.yaml` (`version: "1"`,
+   `name: account-policy`, `taxonomy: world`, a `purpose`, and `files: [{ path: POLICY.md, role: policy }]`) and
+   `POLICY.md`, installed with `rig context add <folder>` and read back with `rig context get account-policy`. To share
+   one policy across machines, use a Git repository: `rig context add <repo> --git`. Labels and references only:
+   never tokens, passwords, cookies or recovery codes.
+
+   `POLICY.md` has these parts, in their words: subscriptions (label, provider, plan, how each is reached); how they
+   want them used; what agents may do on their own; how to reach them; when things go wrong; and a dated **Changes**
+   list. Fill it from what you saw and what they said, never from another person's setup.
+
+**Changing the policy.** When they say what changed, copy `POLICY.md` aside as the before copy, edit it, add a dated
+line under **Changes**, and raise `version` in `manifest.yaml`. Keep one place where it's edited: edited where it's
+installed, run `rig context sync`; kept in a separate folder, replace it with `rig context rm account-policy` and
+`rig context add <folder>`; Git-backed, edit and commit in the checkout `rig context source inspect account-policy`
+reports, then `rig context source update account-policy` (it never pushes). Read it back with
+`rig context get account-policy`; your next decision follows the new version.
 
 ## Context packs and paced delivery (0.5.0)
 

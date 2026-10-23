@@ -27,6 +27,12 @@ interface SeatStatusResponse {
   current_occupant: string | null;
   typingGuard?: { desired: boolean; effective: boolean; pending: boolean; heldCount: number;
     desiredMode?: string; effectiveMode?: string; desiredLevel?: string; effectiveLevel?: string; };
+  terminalPolicy?: {
+    state: string; label?: string; source?: string; actor?: string | null; instruction?: string;
+    helpers?: string[]; rules?: Record<string, Record<string, string>>;
+    rigDefault?: { config: unknown; appliesTo: string };
+    supported?: { compaction: string; model: string }; limits?: string; error?: string;
+  };
   permissions?: {
     selectionState: "explicit" | "inherit" | "unknown";
     desired: { mode: string } | null;
@@ -222,6 +228,19 @@ function printHuman(status: SeatStatusResponse): void {
     console.log(`Last launch arguments: ${p.lastLaunchArguments?.value ?? "unknown"}${p.lastLaunchArguments?.approvalPolicy ? `; approval=${p.lastLaunchArguments.approvalPolicy}` : ""}`);
     console.log("Native permission effect: unverified by this status read");
     if (p.error) console.log(`Permission selection unavailable: ${p.error}`);
+  }
+  if (status.terminalPolicy) {
+    const p = status.terminalPolicy;
+    console.log(`Terminal interaction (${p.state}; managed checks): ${p.label ?? "unknown"}${p.source ? ` [${p.source}]` : ""}`);
+    for (const [scope, rules] of Object.entries(p.rules ?? {}))
+      console.log(`  ${scope}: compaction=${rules.compaction}; model/effort=${rules.model}`);
+    if (p.helpers?.length) console.log(`  Named helpers: ${p.helpers.join(", ")}`);
+    if (p.instruction) console.log(`  Instruction: ${p.instruction}${p.actor ? ` (recorded by ${p.actor})` : ""}`);
+    if (p.rigDefault) console.log(`  Rig default (${p.rigDefault.appliesTo}): ${JSON.stringify(p.rigDefault.config)}`);
+    if (p.supported) console.log(`  Compaction: ${p.supported.compaction}; model/effort: ${p.supported.model}`);
+    console.log("  Enforced: managed compaction and saved model/effort changes. Other interventions: guidance-only.");
+    if (p.limits) console.log(`  ${p.limits}`);
+    if (p.error) console.log(`  Unknown: ${p.error}`);
   }
   console.log(`Startup: ${display(status.startup_status, "unknown")}`);
   console.log(`Occupant lifecycle: ${status.occupant_lifecycle}`);
@@ -575,7 +594,7 @@ identity remains unverified; a version number alone cannot clear it.
   // Thin CLI over the daemon's SeatLifecycleService; refusals print message +
   // guidance + match list exactly as the daemon named them.
   const runLifecycleVerb = async (
-    path: "set-model" | "set-cwd" | "set-effort" | "set-permissions" | "launch" | "launch-plan" | "continue" | "stop" | "clean" | "restart" | "restart-plan" | "restart-verify",
+    path: "set-terminal-policy" | "set-model" | "set-cwd" | "set-effort" | "set-permissions" | "launch" | "launch-plan" | "continue" | "stop" | "clean" | "restart" | "restart-plan" | "restart-verify",
     seat: string,
     body: Record<string, unknown>,
     opts: { json?: boolean },
@@ -644,6 +663,29 @@ identity remains unverified; a version number alone cannot clear it.
     }
     printOk(res.data);
   };
+
+  const terminalPolicy = cmd.command("set-terminal-policy")
+    .argument("<seat>", "Canonical session name or logical seat ref")
+    .requiredOption("--preset <preset>", "no-peer-interventions, help-within-instructions, full-control")
+    .option("--helper <addresses...>", "Named helpers covered by the delegated instruction")
+    .option("--rig-default", "Set this rig's default for newly added seats only, leaving existing seats unchanged")
+    .requiredOption("--reason <text>", "Delegating instruction and audit reason")
+    .option("--operator <address>", "Audit attribution outside a managed seat")
+    .option("--json", "JSON output for agents")
+    .description("Choose terminal interventions; managed compaction and saved model/effort changes are checked")
+    .addHelpText("after", "\nReplaces the complete choice. Exceptions take allow or deny; model covers effort too.\nPeer presets never change self/OpenRig authority unless its exception is supplied. No native permissions or interruption levels change.\nOther interventions are guidance-only. The existing dangerous send override and its guards are unchanged.");
+  for (const scope of ["peer", "self", "openrig"]) for (const action of ["compaction", "model"])
+    terminalPolicy.option(`--${scope}-${action} <decision>`, `Explicit ${scope} ${action} exception: allow or deny`);
+  terminalPolicy.action(async (seat: string, opts: Record<string, unknown> & { json?: boolean }) => {
+    const exceptions: Record<string, Record<string, unknown>> = {};
+    for (const scope of ["peer", "self", "openrig"]) for (const action of ["compaction", "model"]) {
+      const value = opts[scope + action[0]!.toUpperCase() + action.slice(1)];
+      if (value !== undefined) (exceptions[scope] ??= {})[action] = value;
+    }
+    await runLifecycleVerb("set-terminal-policy", seat, { preset: opts.preset, helpers: opts.helper ?? [],
+      exceptions, rigDefault: opts.rigDefault === true, reason: opts.reason, operator: opts.operator }, opts,
+      data => { console.log(String(data["effect"])); console.log(`Read the account: rig seat status ${shellQuote(seat)}`); });
+  });
 
   cmd
     .command("set-permissions")

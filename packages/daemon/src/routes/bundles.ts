@@ -1227,7 +1227,7 @@ bundleRoutes.post("/install", async (c) => {
     // Plan mode: no run lifecycle
     try {
       const result = await bootstrapOrchestrator.bootstrap({
-        mode: "plan", sourceRef: bundlePath, sourceKind: "rig_bundle", cwdOverride,
+        mode: "plan", sourceRef: bundlePath, sourceKind: "rig_bundle", targetRoot, cwdOverride,
       });
       if (result.status === "planned") {
         eventBus.emit({ type: "bootstrap.planned", runId: result.runId, sourceRef: bundlePath, stages: result.stages.length });

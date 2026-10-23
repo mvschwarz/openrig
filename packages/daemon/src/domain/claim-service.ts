@@ -18,6 +18,7 @@ import {
 } from "./pane-binding-observation.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
+import { SessionTransport } from "./session-transport.js";
 
 export type ClaimResult =
   | { ok: true; nodeId: string; sessionId: string }
@@ -143,6 +144,8 @@ export class ClaimService {
   private resumeTokenCapturer: ClaimServiceDeps["resumeTokenCapturer"] | null;
   private piRunnerStateStore: ClaimServiceDeps["piRunnerStateStore"] | null;
   private ompRunnerStateStore: ClaimServiceDeps["ompRunnerStateStore"] | null;
+  /** Delivers the claim hint the way the startup retry is delivered (startup-orchestrator.ts builds the same transport). */
+  private sessionTransport: SessionTransport | null;
 
   constructor(deps: ClaimServiceDeps) {
     if (deps.db !== deps.rigRepo.db) throw new Error("ClaimService: rigRepo must share the same db handle");
@@ -163,6 +166,9 @@ export class ClaimService {
     this.resumeTokenCapturer = deps.resumeTokenCapturer ?? null;
     this.piRunnerStateStore = deps.piRunnerStateStore ?? null;
     this.ompRunnerStateStore = deps.ompRunnerStateStore ?? null;
+    this.sessionTransport = this.tmuxAdapter ? new SessionTransport({
+      db: deps.db, rigRepo: deps.rigRepo, sessionRegistry: deps.sessionRegistry, tmuxAdapter: this.tmuxAdapter, eventBus: deps.eventBus,
+    }) : null;
   }
 
   private async observeBindingPane(
@@ -215,22 +221,30 @@ export class ClaimService {
     }
   }
 
-  /** Best-effort: send a short identity hint into the adopted session after claim. */
+  /**
+   * Best-effort: send a short identity hint into the adopted session after claim. It goes through the delivery path as
+   * an OpenRig notice, so the seat's level types or holds it, and at every level the prompt guard refuses it while the
+   * seat is waiting at a native prompt (slice 21 I7).
+   */
   private async deliverClaimHint(tmuxSession: string, meta: {
     rigName: string; logicalId: string;
   }): Promise<void> {
-    if (!this.tmuxAdapter) return;
+    if (!this.sessionTransport) return;
     const hint = `--- OpenRig: You have been adopted into rig "${meta.rigName}" as ${meta.logicalId}. Run: rig whoami --json ---`;
-    const write = async () => {
-      const sent = await this.tmuxAdapter!.sendText(tmuxSession, hint);
-      if (sent.ok) await this.tmuxAdapter!.sendKeys(tmuxSession, ["Enter"]);
-    };
-    const guard = this.tmuxAdapter.deliveryGuard;
-    if (guard) await guard.operation(tmuxSession, write, async target => {
-      new OutboxHandler(this.db).retain({ outboxId: `guard-claim-${target.nodeId}-${target.occupant ?? "unknown"}`,
-        senderSession: "claim@system", destinationSession: tmuxSession, body: hint }, target);
-    }, { source: "openrig", urgent: false });
-    else await write();
+    const guard = this.tmuxAdapter?.deliveryGuard;
+    const target = guard?.maybeTarget(tmuxSession);
+    // One held copy per occupant, however often the hint is retried.
+    const deliveryId = target ? `guard-claim-${target.nodeId}-${target.occupant ?? "unknown"}` : undefined;
+    // A claim runs under its lifecycle lease, and a send inside that lease isn't re-checked against the level (a terminal
+    // member's default holds OpenRig notices), so the hint checks the level itself.
+    if (guard && target && deliveryId && guard.holdsInput(target.nodeId, { source: "openrig", urgent: false })) {
+      new OutboxHandler(this.db).retain({ outboxId: deliveryId, senderSession: "claim@system", destinationSession: tmuxSession, body: hint }, target);
+      return;
+    }
+    const result = await this.sessionTransport.send(tmuxSession, hint, {
+      actorSession: "claim@system", openrigNotice: true, ...(deliveryId ? { deliveryId } : {}),
+    });
+    if (!result.ok) console.warn(`[claim] identity hint not typed into ${tmuxSession}: ${result.reason ?? "send_failed"}. ${result.error ?? ""}`.trim());
   }
 
   private maybeProvisionContextCollector(runtime: string | null | undefined, cwd: string | null | undefined, tmuxSession: string): void {

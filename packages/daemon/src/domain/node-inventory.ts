@@ -745,7 +745,7 @@ function buildInventoryEntry(
     attachmentType: (row.binding_attachment_type as NodeInventoryEntry["attachmentType"]) ?? null,
     nodeKind: deriveNodeKind(row.runtime),
     runtime: row.runtime,
-    ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!) } : {}),
+    ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!, undefined, { resumeType: row.resume_type, resumeToken: row.resume_token }) } : {}),
     sessionStatus,
     storedSessionStatus: row.session_status,
     intentionallyStopped: row.intentionally_stopped === 1
