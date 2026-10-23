@@ -95,10 +95,10 @@ describe("S14 owner notifications — system notices, not remembered tags", () =
       evidenceRef: "/proof/direct.md",
       nudge: false,
     });
-    // A direct ask lands on Steering (RECORD) unless it's marked alert-worthy.
+    // A direct ask posts by default (slack-asks all: ALERT), as an alerted one does.
     expect(db.prepare(
       "SELECT owner_notification_kind, owner_notification_level FROM queue_transitions WHERE qitem_id=? ORDER BY transition_id DESC LIMIT 1",
-    ).get(direct.qitemId)).toEqual({ owner_notification_kind: "human-required", owner_notification_level: "RECORD" });
+    ).get(direct.qitemId)).toEqual({ owner_notification_kind: "human-required", owner_notification_level: "ALERT" });
     const alerted = await repo.create({
       sourceSession: "orch-lead@v-openrig-build",
       destinationSession: "human-founder@kernel",
@@ -123,7 +123,7 @@ describe("S14 owner notifications — system notices, not remembered tags", () =
     });
     expect(db.prepare(
       "SELECT owner_notification_kind, owner_notification_level FROM queue_transitions WHERE qitem_id=? ORDER BY transition_id DESC LIMIT 1",
-    ).get(handed.created.qitemId)).toEqual({ owner_notification_kind: "human-required", owner_notification_level: "RECORD" });
+    ).get(handed.created.qitemId)).toEqual({ owner_notification_kind: "human-required", owner_notification_level: "ALERT" });
   });
 
   it("defaults to posting NOTICE and interrupting ALERT, refuses an unknown level, and has no tag classifier", () => {

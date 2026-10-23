@@ -42,7 +42,27 @@ const ALLOWED_BINDING_KEYS = new Set(["kind", "connectorRef", "secretsRef", "rol
 // connector (e.g. a Slack user id). Constrained so it can never forge a session ref (no ':' / '@'
 // / whitespace) — it is compared to an inbound sender id and spliced into teaching text.
 export const HANDLE_PATTERN = /^[A-Za-z0-9._-]+$/;
-const ALLOWED_PREFS_KEYS = new Set(["deliveryClass", "away", "availability"]);
+const ALLOWED_PREFS_KEYS = new Set(["deliveryClass", "away", "availability", "slackAsks"]);
+/** How a person's plain asks reach Slack: `all` (every ask posts there too) or `alerts-only` (only asks marked
+ *  alert-worthy post; the rest wait on Steering and the TUI). */
+export const SLACK_ASKS_MODES = ["all", "alerts-only"] as const;
+export type SlackAsks = (typeof SLACK_ASKS_MODES)[number];
+/** Unset means this: every ask posts, as before Steering-only asks existed, so nothing changes on upgrade. */
+export const DEFAULT_SLACK_ASKS: SlackAsks = "all";
+
+export function slackAsksFor(prefs: Pick<HumanPrefs, "slackAsks"> | undefined): SlackAsks {
+  return prefs?.slackAsks ?? DEFAULT_SLACK_ASKS;
+}
+
+/** The tag an ask created or handed off with humanAlert (`--alert`) carries: it stands out in Slack, as an interrupt,
+ *  under every setting. */
+export const HUMAN_ALERT_TAG = "human-alert";
+
+/** The ask's tags, with HUMAN_ALERT_TAG added when it's marked alert-worthy. */
+export function withHumanAlertTag(tags: string[] | null | undefined, humanAlert: boolean | undefined): string[] | null {
+  if (humanAlert !== true) return tags ?? null;
+  return (tags ?? []).includes(HUMAN_ALERT_TAG) ? [...(tags ?? [])] : [...(tags ?? []), HUMAN_ALERT_TAG];
+}
 // OPR.0.5.6.1 — the availability enum the delivery rules engine consumes.
 // Legacy `away: true` reads as availability=away ONLY when availability is
 // whole-field-absent (the D1 convention); a present-but-conflicting pair is
@@ -78,6 +98,8 @@ export interface HumanPrefs {
   away?: boolean;
   /** OPR.0.5.6.1 — availability mode (available | focus | away | off). */
   availability?: "available" | "focus" | "away" | "off";
+  /** Whether plain asks post to Slack (`all`) or only alert-worthy ones (`alerts-only`); unset reads as DEFAULT_SLACK_ASKS. */
+  slackAsks?: SlackAsks;
 }
 
 export interface HumanFragment {
@@ -188,6 +210,9 @@ export function validateHumanFragment(raw: unknown): ValidateResult {
   if (prefs.availability !== undefined && !HUMAN_AVAILABILITY_MODES.has(String(prefs.availability))) {
     return { ok: false, error: `prefs.availability "${String(prefs.availability)}" must be one of available|focus|away|off` };
   }
+  if (prefs.slackAsks !== undefined && !(SLACK_ASKS_MODES as readonly string[]).includes(String(prefs.slackAsks))) {
+    return { ok: false, error: `prefs.slackAsks "${String(prefs.slackAsks)}" must be one of ${SLACK_ASKS_MODES.join("|")}` };
+  }
   // Two spellings of one truth are refused: a present availability is the
   // authority; legacy away may only AGREE with it (away:true + availability=away).
   if (prefs.availability !== undefined && prefs.away === true && prefs.availability !== "away") {
@@ -196,6 +221,7 @@ export function validateHumanFragment(raw: unknown): ValidateResult {
   const validatedPrefs: HumanPrefs = { deliveryClass: prefs.deliveryClass as HumanPrefs["deliveryClass"] };
   if (prefs.away !== undefined) validatedPrefs.away = prefs.away;
   if (prefs.availability !== undefined) validatedPrefs.availability = prefs.availability as HumanPrefs["availability"];
+  if (prefs.slackAsks !== undefined) validatedPrefs.slackAsks = prefs.slackAsks as SlackAsks;
 
   return {
     ok: true,
@@ -446,6 +472,7 @@ export interface EffectiveHumanRecord {
   prefs: {
     deliveryClass: ProvenancedValue<HumanPrefs["deliveryClass"]>;
     away: ProvenancedValue<boolean>;
+    slackAsks: ProvenancedValue<SlackAsks>;
   };
   connectorBindings: Array<HumanConnectorBinding & { inboundResolvable: boolean }>;
 }
@@ -563,6 +590,7 @@ export function showHuman(entityId: string, home: string = getOpenRigHome()): Sh
           value: f.fragment.prefs.away === true,
           source: rawPrefs.away !== undefined ? "authored" : "default",
         },
+        slackAsks: { value: slackAsksFor(f.fragment.prefs), source: rawPrefs.slackAsks !== undefined ? "authored" : "default" },
       },
       connectorBindings: f.fragment.connectorBindings.map((b) => ({ ...b, inboundResolvable: b.handle !== undefined })),
     },
@@ -570,7 +598,7 @@ export function showHuman(entityId: string, home: string = getOpenRigHome()): Sh
 }
 
 const SETTABLE_FIELDS_TEACHING =
-  "settable fields: display-name, delivery-class, away, availability (available|focus|away|off, or unset), binding.<n> (binding.<n> takes a full kind:connectorRef:secretsRef:role[:handle=<id>] spec)";
+  "settable fields: display-name, delivery-class, away, availability (available|focus|away|off, or unset), slack-asks (all|alerts-only, or unset for all), binding.<n> (binding.<n> takes a full kind:connectorRef:secretsRef:role[:handle=<id>] spec)";
 
 /** Cross-fragment handle-uniqueness: the same pre-write check add runs (one platform id =
  *  one human), extracted so set enforces it identically. */
@@ -658,6 +686,11 @@ export function setHumanField(
     // other value goes through the add-time validator below: the closed enum, and agreement with legacy `away`.
     if (value === "unset") delete rawPrefs.availability;
     else rawPrefs.availability = value;
+    raw.prefs = rawPrefs;
+  } else if (field === "slack-asks") {
+    // `unset` returns to the default (DEFAULT_SLACK_ASKS); the add-time validator checks any other value.
+    if (value === "unset") delete rawPrefs.slackAsks;
+    else rawPrefs.slackAsks = value;
     raw.prefs = rawPrefs;
   } else if (field.startsWith("binding.")) {
     const idxRaw = field.slice("binding.".length);

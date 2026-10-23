@@ -174,6 +174,19 @@ describe("gateway human lifecycle (S12, amended A1: single-human surface): list 
     if (!bad.ok) expect(bad.error).toContain("true|false");
   });
 
+  it("set slack-asks: the default is all, alerts-only is authored, unset returns to the default, and anything else is refused", () => {
+    expect(showHuman("mike", home)).toMatchObject({ ok: true, record: { prefs: { slackAsks: { value: "all", source: "default" } } } });
+    expect(setHumanField("mike", "slack-asks", "alerts-only", home).ok).toBe(true);
+    expect(showHuman("mike", home)).toMatchObject({ ok: true, record: { prefs: { slackAsks: { value: "alerts-only", source: "authored" } } } });
+    const loaded = loadHumanRegistry(home);
+    expect(loaded.ok && loaded.entities.find((e) => e.entityId === "mike")!.prefs.slackAsks).toBe("alerts-only");
+    const bad = setHumanField("mike", "slack-asks", "some", home);
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.error).toContain("all|alerts-only");
+    expect(setHumanField("mike", "slack-asks", "unset", home).ok).toBe(true);
+    expect(showHuman("mike", home)).toMatchObject({ ok: true, record: { prefs: { slackAsks: { value: "all", source: "default" } } } });
+  });
+
   it("set with a bad enum fails loud NAMING the allowed set and leaves fragment AND projection byte-unchanged", () => {
     const fragBefore = sha(join(humansDir(home), "mike.yaml"));
     const projBefore = sha(projectionPath(home));

@@ -67,9 +67,8 @@ describe("complete human notifications", () => {
     const alerted = await repo.create({ ...request, humanAlert: true });
     const update = await repo.create({ ...request, humanIntent: "update", tags: ["escalation"], humanDetail: "Retained supplemental context." });
     const rows = await makeQueuePorts(repo, { loadHumanRegistry: () => registry }).listHumanAlerts({});
-    // An omitted intent is a decision: it waits on Steering (RECORD), and Slack sees it only when it's marked alert-worthy.
-    expect(repo.transitionLog.latestOwnerNotificationForQitem(legacy.qitemId)).toMatchObject({ ownerNotificationKind: "human-required", ownerNotificationLevel: "RECORD" });
-    expect(rows.find((q) => q.qitemId === legacy.qitemId)).toBeUndefined();
+    // An omitted intent is a decision: by default (slack-asks all) it posts, as an alerted one does.
+    expect(rows.find((q) => q.qitemId === legacy.qitemId)).toMatchObject({ ownerNotificationKind: "human-required", ownerNotificationLevel: "ALERT" });
     expect(rows.find((q) => q.qitemId === alerted.qitemId)).toMatchObject({ ownerNotificationKind: "human-required", ownerNotificationLevel: "ALERT" });
     expect(rows.find((q) => q.qitemId === update.qitemId)).toMatchObject({ humanIntent: "update", humanDetail: "Retained supplemental context.", ownerNotificationKind: "human-update", ownerNotificationLevel: "NOTICE" });
     expect(repo.listAttention().map((q) => q.qitemId).sort()).toEqual([legacy.qitemId, alerted.qitemId].sort());

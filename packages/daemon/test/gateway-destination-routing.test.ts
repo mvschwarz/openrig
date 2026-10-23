@@ -579,9 +579,9 @@ describe("GET /api/queue/:qitemId carries the owner notification level", () => {
   const PANE_PERSON = { ...FOUNDER_FRAGMENT, entityId: "dev-a", displayName: "Dev A", address: "dev-a@external" } as unknown as HumanFragment;
 
   it.each([
-    ["a registered person with a pane", "dev-a@rig1", [FOUNDER_FRAGMENT, PANE_PERSON], "pane-bound", "RECORD"],
+    ["a registered person with a pane", "dev-a@rig1", [FOUNDER_FRAGMENT, PANE_PERSON], "pane-bound", "ALERT"],
     ["a seat with a pane and no registration", "dev-a@rig1", [FOUNDER_FRAGMENT], "pane-bound", null],
-    ["a registered person's alias", "human-founder@kernel", [FOUNDER_FRAGMENT], "gateway-routable", "RECORD"],
+    ["a registered person's alias", "human-founder@kernel", [FOUNDER_FRAGMENT], "gateway-routable", "ALERT"],
   ] as const)("%s reads level %s", async (_label, destinationSession, entities, destinationClass, level) => {
     const h = makeHarness({ entities: () => [...entities] });
     const app = new Hono();

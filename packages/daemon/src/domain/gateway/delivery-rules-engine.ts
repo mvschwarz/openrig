@@ -90,6 +90,9 @@ export interface QuietHoldRef {
 export interface DeliveryDecisionInput {
   level: OwnerNotificationLevel | null;
   escalation: boolean;
+  /** An ask marked alert-worthy (`--alert`): it interrupts like delivery class A, and the dials, availability and quiet
+   *  hours treat it as any interrupt. Unlike escalation, it never skips quiet hours or availability. */
+  alerted?: boolean;
   human: {
     entityId: string;
     deliveryClass: "A" | "B" | "C" | "D";
@@ -132,7 +135,7 @@ export function decideDelivery(input: DeliveryDecisionInput): DeliveryDecision {
   // The register base, lifted by escalation (escalation never digests).
   let outcome: DeliveryOutcome =
     input.escalation ? "interrupt"
-    : deliveryClass === "A" ? "interrupt"
+    : deliveryClass === "A" || input.alerted ? "interrupt"
     : deliveryClass === "B" ? "notify"
     : "digest";
 

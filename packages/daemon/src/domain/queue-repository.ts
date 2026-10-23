@@ -4,7 +4,7 @@ import { quietCustodyBackstop, quietHoldCustody } from "./quiet-hold-custody.js"
 import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import type { EventBus } from "./event-bus.js";
-import { loadHumanRegistry, resolveRegisteredHumanAddress, type LoadResult } from "./gateway/human-registry.js";
+import { loadHumanRegistry, resolveRegisteredHumanAddress, slackAsksFor, withHumanAlertTag, type LoadResult } from "./gateway/human-registry.js";
 import { resolveExternal } from "./gateway/external-admission.js";
 import type { PersistedEvent } from "./types.js";
 import { QueueTransitionLog, type OwnerNotificationLevel, type QueueTransition, type RecentQueueTransitionScope } from "./queue-transition-log.js";
@@ -1107,10 +1107,13 @@ export class QueueRepository {
 
     const destinationHuman = resolveRegisteredHumanAddress(input.destinationSession, registry.entities);
     if (input.action === "create" && destinationHuman !== null) {
-      // An ask lands on Steering (RECORD: below the posting dial, so no post is owed) unless it's marked alert-worthy.
+      // An ask posts to Slack (ALERT) unless the person chose alerts-only: then a plain ask lands on Steering and the TUI
+      // (RECORD: below the posting dial, so no post is owed), and only one marked alert-worthy posts.
+      const person = registry.entities.find((entity) => entity.address === destinationHuman);
+      const posts = input.humanAlert === true || slackAsksFor(person?.prefs) === "all";
       return input.humanIntent === "update"
         ? { kind: "human-update", level: "NOTICE" }
-        : { kind: "human-required", level: input.humanAlert === true ? "ALERT" : "RECORD" };
+        : { kind: "human-required", level: posts ? "ALERT" : "RECORD" };
     }
     return null;
   }
@@ -1833,7 +1836,8 @@ export class QueueRepository {
     const ts = new Date().toISOString();
     const priority = input.priority ?? "routine";
     const tier = input.tier ?? null;
-    const tags = input.tags ? JSON.stringify(input.tags) : null;
+    const taggedAsk = withHumanAlertTag(input.tags, input.humanAlert);
+    const tags = taggedAsk ? JSON.stringify(taggedAsk) : null;
     const chain = input.chainOfRecord ? JSON.stringify(input.chainOfRecord) : null;
     const expiresAt = input.expiresAt ?? null;
     const targetRepo = input.targetRepo ?? null;
@@ -1960,7 +1964,8 @@ export class QueueRepository {
     const body = input.body ?? source.body;
     const priority = input.priority ?? source.priority;
     const tier = input.tier ?? source.tier;
-    const tags = input.tags ? JSON.stringify(input.tags) : (source.tags ? JSON.stringify(source.tags) : null);
+    const handedTags = withHumanAlertTag(input.tags ?? source.tags, input.humanAlert);
+    const tags = handedTags ? JSON.stringify(handedTags) : null;
     const chain = JSON.stringify([...(source.chainOfRecord ?? []), source.qitemId]);
     const targetRepo = input.targetRepo === undefined ? source.targetRepo : input.targetRepo;
 
@@ -2139,7 +2144,8 @@ export class QueueRepository {
     const body = input.body ?? source.body;
     const priority = input.priority ?? source.priority;
     const tier = input.tier ?? source.tier;
-    const tags = input.tags ? JSON.stringify(input.tags) : (source.tags ? JSON.stringify(source.tags) : null);
+    const handedTags = withHumanAlertTag(input.tags ?? source.tags, input.humanAlert);
+    const tags = handedTags ? JSON.stringify(handedTags) : null;
     const chain = JSON.stringify([...(source.chainOfRecord ?? []), source.qitemId]);
     const targetRepo = input.targetRepo === undefined ? source.targetRepo : input.targetRepo;
 

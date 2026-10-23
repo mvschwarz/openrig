@@ -31,22 +31,25 @@ import { runWakeLadderTick } from "../src/domain/queue-wake-ladder.js";
 import type { AttentionRead } from "../src/attention-surface.js";
 
 const HUMAN = "human-founder";
-const registry = {
+/** The people, with their slack-asks setting (absent = the default). */
+const registryWith = (slackAsks?: "all" | "alerts-only") => ({
   ok: true as const,
   entities: [{
     entityId: HUMAN, class: "human" as const, displayName: "Founder", address: `${HUMAN}@external`,
     connectorBindings: [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "env:SLACK_BOT_TOKEN", role: "primary" as const, handle: "UFOUNDER" }],
-    prefs: { deliveryClass: "B", availability: "available" },
+    prefs: { deliveryClass: "B" as const, availability: "available" as const, ...(slackAsks ? { slackAsks } : {}) },
   }, {
     // A registered person addressed as a kernel alias, which no human-* name pattern matches.
     entityId: "operator-admin", class: "human" as const, displayName: "Operator", address: "operator-admin@external",
     connectorBindings: [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "env:SLACK_BOT_TOKEN", role: "primary" as const, handle: "UOPERATOR" }],
-    prefs: { deliveryClass: "B", availability: "available" },
+    prefs: { deliveryClass: "B" as const, availability: "available" as const, ...(slackAsks ? { slackAsks } : {}) },
   }],
-};
+});
+// Most cases here are a person who chose Steering for plain asks (alerts-only); the default cases reset it.
+let registry = registryWith("alerts-only");
 const QUESTION = [{ id: "q1", question: "A or B?", options: [{ id: "a", label: "A" }, { id: "b", label: "B" }] }];
 
-describe("an ask lands on Steering; Slack alerts only when it's marked alert-worthy", () => {
+describe("an ask to a person is on Steering and the TUI; Slack gets it by their slack-asks setting", () => {
   let db: Database.Database;
   let repo: QueueRepository;
   let bus: EventBus;
@@ -59,6 +62,7 @@ describe("an ask lands on Steering; Slack alerts only when it's marked alert-wor
     db = createDb();
     migrate(db, ALL_MIGRATIONS);
     unreachable = null;
+    registry = registryWith("alerts-only");
     repo = newRepo();
     home = mkdtempSync(join(tmpdir(), "steering-only-"));
     const secrets = join(home, "slack.env");
@@ -143,6 +147,7 @@ describe("an ask lands on Steering; Slack alerts only when it's marked alert-wor
     expect(posts).toHaveLength(1);
     expect(posted(urgent)).toBe(true);
     expect(posted(quiet)).toBe(false);
+    expect(JSON.stringify(posts[0])).toContain("<@UFOUNDER>"); // an alerted ask stands out: an interrupt, with a mention
     const receipts = (row: QueueItem) => repo.listTransitions(row.qitemId).filter((t) => t.transitionNote?.startsWith("slack-owner-notification-posted "));
     expect(receipts(urgent)).toHaveLength(1);
     expect(receipts(urgent)[0]!.transitionNote).toContain(`notification_key=${urgent.qitemId}:`);
@@ -205,7 +210,7 @@ describe("an ask lands on Steering; Slack alerts only when it's marked alert-wor
     const read = await (await app.request(`/api/attention?item=${encodeURIComponent(`queue:${row.qitemId}`)}`)).json() as {
       items: Array<{ id: string; recipient: string }>; detail: { lines: string[] } | null };
     expect(read.items).toContainEqual(expect.objectContaining({ id: `queue:${row.qitemId}`, recipient: "operator-admin@kernel" }));
-    expect(read.detail!.lines).toContain("Slack: not sent: created without --alert, so it's on Steering only");
+    expect(read.detail!.lines).toContain("Slack: not sent: created without --alert, and this person takes only alerted asks in Slack (slack-asks alerts-only)");
     await runGateway();
     expect(posts).toHaveLength(0);
   });
@@ -476,5 +481,31 @@ describe("an ask lands on Steering; Slack alerts only when it's marked alert-wor
     await runGateway();
     expect(posts).toHaveLength(1);
     expect(onSteering()).toContain(quiet.qitemId);
+  });
+
+  it("by default (no slack-asks set, as on upgrade) every ask posts to Slack as before, and an alerted one stands out", async () => {
+    registry = registryWith(); // a person with Slack configured before the setting existed
+    const plain = await ask();
+    const urgent = await ask({ alert: true });
+    expect(owner(plain)).toMatchObject({ ownerNotificationKind: "human-required", ownerNotificationLevel: "ALERT" });
+    expect(owner(urgent)).toMatchObject({ ownerNotificationKind: "human-required", ownerNotificationLevel: "ALERT" });
+    expect(repo.getById(urgent.qitemId)!.tags).toContain("human-alert");
+    // Not a quiet ask: the stuck sweep, the ladder and the waiting view treat it as before.
+    expect(repo.humanAskWithoutAlert(plain.qitemId)).toBe(false);
+    // The classification is the create's: choosing alerts-only afterwards doesn't take back an ask already made.
+    registry = registryWith("alerts-only");
+    await runGateway();
+    expect(posts).toHaveLength(2);
+    expect(posted(plain)).toBe(true);
+    expect(posted(urgent)).toBe(true);
+    const postOf = (row: QueueItem) => JSON.stringify(posts.find((p) => JSON.stringify(p).includes(String(row.body))));
+    expect(postOf(urgent)).toContain("<@UFOUNDER>");
+    expect(postOf(plain)).not.toContain("<@UFOUNDER>");
+    expect(repo.deliveryOutcomeFor(plain.qitemId)).toMatchObject({ outcome: "posted" });
+    expect(repo.waitingView(plain.qitemId)!.nextBackstop?.mechanism ?? "").not.toMatch(/on Steering/);
+    // Both are on Steering and the Feed, as every ask to a person is.
+    expect(onSteering()).toEqual(expect.arrayContaining([plain.qitemId, urgent.qitemId]));
+    const read = await feed(readers(), plain);
+    expect(read.detail!.lines).toContain("Slack: posted (posted isn't read)");
   });
 });

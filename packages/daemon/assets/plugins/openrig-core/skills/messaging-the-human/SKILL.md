@@ -71,13 +71,19 @@ rig queue create --destination <entityId>@external \
   --evidence-ref <durable-evidence> --verify --json
 ```
 
-An ask lands on Steering, where the person sees and answers it; Slack doesn't
-alert them. Add `--alert` only for something only they can do, or an approval
-whose wait costs now: the same item stays on Steering and Slack posts it once.
-A sign-in, a credential or an approval that expires needs `--alert`. A question
-that can wait for their next look doesn't: the person answers it in the TUI,
-choosing an option or typing a reply, and it comes back to you exactly as a Slack
-answer does. An update (`--human-intent update`) posts as before and takes no `--alert`.
+An ask is on Steering and the TUI, where the person can answer it, choosing an
+option or typing a reply; it comes back to you exactly as a Slack answer does.
+Whether it also posts to Slack is the person's own setting (`rig gateway human
+show <id>`, `slack-asks`): by default (`all`) every ask posts, and with
+`alerts-only` only an ask marked `--alert` does. So forgetting `--alert` never
+hides an ask from someone who reads Slack.
+
+Add `--alert` when the ask is urgent: something only they can do, or an approval
+whose wait costs now. A sign-in, a credential or an approval that expires needs
+it; a question that can wait for their next look doesn't. An alerted ask stands
+out in Slack (an interrupt with a mention, within their quiet hours and
+availability), and it's the only kind that reaches someone on `alerts-only`.
+An update (`--human-intent update`) posts as before and takes no `--alert`.
 
 Before asking a **decision**, check whether the person has a mode on with a
 decision room: what they said the team may decide for them meanwhile.
@@ -156,8 +162,8 @@ well would issue another notification for the same decision.
 
 The row persists before bounded delivery verification. Read its qitem ID and
 verification result; `posted` proves connector posting, **not human readership**.
-`not-alerted` means the ask is on Steering without a Slack post, as asked; it isn't
-a failure. `transport-failed`, `never-posted`, or a pending/indeterminate result
+`not-alerted` means the person takes only alerted asks in Slack (`alerts-only`), so the
+ask is on Steering and the TUI without a Slack post, as they chose; it isn't a failure. `transport-failed`, `never-posted`, or a pending/indeterminate result
 leaves the row intact. Inspect that same row and its next action; never create a second row
 or blindly resend because verification timed out.
 
