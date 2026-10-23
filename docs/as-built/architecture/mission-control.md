@@ -103,7 +103,7 @@ Verbs: **8** — `sed -n '/^export const MISSION_CONTROL_VERBS = \[/,/\] as cons
 | `hold` | `state="blocked"`, `closure_reason="blocked_on"` |
 | `drop` | `state="done"`, `closure_reason="canceled"` |
 | `handoff` | same closure and new destination item as `route`; the 4-step shape (see below) |
-| `resolve` | only for a `blocked` item parked on a human seat: moves it to `in-progress` with the required decision text as the transition note; no closure and no new item (`:369`, `:386`, `:410–411`). After commit it sends a best-effort nudge with the decision text to the item's owner unless `notify: false` (`:450–467`); the CLI wrapper is `rig queue resolve <qitemId> --decision <text>` (`packages/cli/src/commands/queue.ts:828`) |
+| `resolve` | for a `blocked` item parked on a human seat or a well-formed typed gate (`external:`, `fold:`, `auth:`): moves it to `in-progress` with required decision/satisfaction evidence in the transition note; typed waits are recorded as blocker resolutions, not human decisions. Qitem dependencies, malformed gates and non-blocked items are refused; no closure and no new item (`:369`, `:386`, `:410–411`). After commit it sends a best-effort nudge with the decision text to the item's owner unless `notify: false` (`:450–467`); the CLI wrapper is `rig queue resolve <qitemId> --decision <text>` (`packages/cli/src/commands/queue.ts:828`) |
 
 `annotate` requires `annotation`, `hold` and `drop` require `reason`, `route`
 and `handoff` require `destinationSession`, and `resolve` requires a non-empty

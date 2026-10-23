@@ -157,6 +157,20 @@ describe("mission-control routes Phase B (PL-005)", () => {
   });
 
   describe("POST /action client-error mapping", () => {
+    it.each(["external:qa", "fold:review", "auth:access"])("resolve accepts typed blocker %s through the existing action route", async (blockedOn) => {
+      const { app } = buildApp({ bus, queueRepo, bearerToken: "secret", withDispatcher: false });
+      const created = await queueRepo.create({ sourceSession: "s@r", destinationSession: "d@r", body: "x", nudge: false });
+      queueRepo.update({ qitemId: created.qitemId, actorSession: "d@r", state: "blocked", blockedOn });
+      const res = await app.request("/api/mission-control/action", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer secret", "X-OpenRig-Session": "operator@r" },
+        body: JSON.stringify({ verb: "resolve", qitemId: created.qitemId, decision: "condition verified", notify: false }),
+      });
+      expect(res.status).toBe(200);
+      expect(queueRepo.getById(created.qitemId)).toMatchObject({ state: "in-progress", destinationSession: "d@r", closureReason: null });
+      expect(queueRepo.transitionLog.listForQitem(created.qitemId).some((t) => t.transitionNote === `Blocker ${blockedOn} resolved: condition verified`)).toBe(true);
+    });
+
     it("resolve without decision returns 400 decision_required", async () => {
       const { app } = buildApp({ bus, queueRepo, bearerToken: null, withDispatcher: false });
       const created = await queueRepo.create({ sourceSession: "s@r", destinationSession: "d@r", body: "x" });

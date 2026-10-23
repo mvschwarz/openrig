@@ -1152,8 +1152,8 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
   // in-progress on the SAME item) — never a closure, never a new owner.
   cmd
     .command("resolve <qitemId>")
-    .description("Resolve a leg-1 parked qitem (state=blocked on a human seat): records the decision text durably in queue_transitions, unparks blocked -> in-progress, and nudges the owner. Non-closure.")
-    .requiredOption("--decision <text>", "The human's decision text (non-empty; lands in transition_note + the audit row)")
+    .description("Resolve a qitem blocked on a human seat or a typed gate (external:, fold:, auth:): records the decision or satisfaction evidence durably, unparks blocked -> in-progress, and nudges the owner. Non-closure; qitem dependencies are not resolved by this command.")
+    .requiredOption("--decision <text>", "The human decision or typed-gate satisfaction evidence (non-empty; lands in transition_note + the audit row)")
     .option("--actor <session>", "(deprecated, ignored) resolver is derived from the seat env (X-OpenRig-Session)")
     .option("--bearer <token>", "Operator bearer token for the mission-control write gate (or set OPENRIG_AUTH_BEARER_TOKEN; loopback daemons without a configured bearer need none)")
     .option("--no-notify", "Skip the best-effort owner nudge (the unpark still commits)")
