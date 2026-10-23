@@ -232,6 +232,8 @@ type StartupDeliveryInput = StartupInput & {
   refusedTurn?: ReadinessResult;
   /** How many startup inputs were held after that refusal, and so are still owed. */
   heldInputs?: number;
+  /** A one-shot (non-idempotent) startup action was typed, so the startup must not be delivered again as a whole. */
+  oneShotSent?: boolean;
 };
 
 export type StartupResult = { warnings?: string[] } & (
@@ -668,6 +670,10 @@ export class StartupOrchestrator {
     // A successful new lean launch replaces the occupant's proof boundary even
     // if readiness later fails. Failed launches and resume/adopt retain history.
     const isFreshLaunch = continuityOutcome === "fresh" && (!input.skipHarnessLaunch || input.continueFreshStartup === true);
+    // Once a startup turn was refused, the result says what's owed, whatever error comes later. Continuing replays the
+    // whole fresh startup, so it's offered only for a fresh start (not a restore) that typed no one-shot action.
+    const owed = (also: string[] = [], refused = deliveryInput.refusedTurn) => refused
+      ? this.owedStartup(deliveryInput, refused, isFreshLaunch && !input.isRestore && !deliveryInput.oneShotSent, also) : null;
     const shouldChallenge = isFreshLaunch
       && input.adapter.runtime !== "terminal" && startupProof.mode === "authenticated";
     if (isFreshLaunch && !shouldChallenge) {
@@ -826,11 +832,11 @@ export class StartupOrchestrator {
           for (const f of deliveryResult.failed) {
             errors.push(`Post-launch file delivery failed: ${f.path}: ${f.error}`);
           }
-          return this.fail(deliveryInput, "failed", errors, undefined, false, undefined, false, "post_launch_files", true);
+          return owed(errors) ?? this.fail(deliveryInput, "failed", errors, undefined, false, undefined, false, "post_launch_files", true);
         }
       } catch (err) {
         errors.push(`Post-launch delivery error: ${(err as Error).message}`);
-        return this.fail(deliveryInput, "failed", errors, undefined, false, undefined, false, "post_launch_files", true);
+        return owed(errors) ?? this.fail(deliveryInput, "failed", errors, undefined, false, undefined, false, "post_launch_files", true);
       }
     }
 
@@ -844,24 +850,18 @@ export class StartupOrchestrator {
     // 8. Execute after_files actions
     const afterFilesResult = await this.executeActions(deliveryInput, "after_files");
     if (!afterFilesResult.ok) {
-      return this.fail(deliveryInput, "failed", afterFilesResult.errors, undefined, false, undefined, false, "after_files", true);
+      return owed(afterFilesResult.errors) ?? this.fail(deliveryInput, "failed", afterFilesResult.errors, undefined, false, undefined, false, "after_files", true);
     }
 
     // 9. Execute after_ready actions (skipping any preload actions already
     // delivered ahead of role.md by the restore-order bundling above).
     const afterReadyResult = await this.executeActions(deliveryInput, "after_ready", consumedActions);
     if (!afterReadyResult.ok) {
-      return this.fail(deliveryInput, "failed", afterReadyResult.errors, undefined, false, undefined, false, "after_ready", true);
+      return owed(afterReadyResult.errors) ?? this.fail(deliveryInput, "failed", afterReadyResult.errors, undefined, false, undefined, false, "after_ready", true);
     }
 
-    // A startup turn the runtime refused held every later input back: the seat never read them, so they're owed, not
-    // delivered. A fresh start keeps its context pending for `rig seat continue`; a restore delivers it again.
-    if (deliveryInput.refusedTurn) {
-      return this.fail(deliveryInput, "attention_required", [
-        deliveryInput.refusedTurn.reason ?? "The runtime refused a startup turn.",
-        `Startup paused after a refused turn: ${deliveryInput.heldInputs} startup input${deliveryInput.heldInputs === 1 ? "" : "s"} weren't sent and are owed to this seat${isFreshLaunch ? "" : "; restoring the seat delivers them again"}.`,
-      ], undefined, isFreshLaunch, undefined, false, "post_delivery_readiness", true);
-    }
+    const held = owed();
+    if (held) return held;
 
     // Delivering the first native prompt can reveal a provider refusal or
     // interactive gate. Bundled identity/preload prompts consume their files,
@@ -870,6 +870,10 @@ export class StartupOrchestrator {
       try {
         const readiness = await input.adapter.checkReady(input.binding);
         if (!readiness.ready && isAttentionRequiredReadinessCode(readiness.code)) {
+          // A fresh Claude start whose last startup turn was refused hasn't read what that turn sent: it's owed too.
+          const refusedLast = input.adapter.runtime === "claude-code" && isFreshLaunch && deliveryInput.sendOrder > 0
+            ? owed([], readiness) : null;
+          if (refusedLast) return refusedLast;
           const hasRemainingIdentityWork = hasClaudeResumeIdentityWork(
             this.sessionRegistry,
             input.sessionId,
@@ -920,8 +924,9 @@ export class StartupOrchestrator {
     return { ok: true, startupStatus: "ready", continuityOutcome, ...(submission ? { submission } : {}), ...(routerLine ? { routerLine } : {}), ...(resumedProcess ? { resumedProcess } : {}) };
   }
 
-  /** A failed attempt can continue only when it stopped before sending context.
-   * Any newer pending/ready/failure event consumes that permission, including a
+  /** A failed attempt can continue only when it stopped before sending context, or when the runtime positively refused
+   * the turn its context went to (an attention code after it) and no one-shot action was typed: a refused turn wasn't
+   * read. Any newer pending/ready/failure event consumes that permission, including a
    * daemon loss during delivery: uncertain delivery is never blindly replayed.
    */
   canContinueStartup(nodeId: string, sessionId: string): boolean {
@@ -1035,9 +1040,12 @@ export class StartupOrchestrator {
           continue;
         }
 
+        const heldBefore = input.heldInputs ?? 0;
         const sendError = await this.sendInteractiveText(input, action.value, phase, actionIndex);
         if (sendError) {
           errors.push(`Action failed (${action.type}): ${sendError.error}`);
+        } else if (!action.idempotent && (input.heldInputs ?? 0) === heldBefore) {
+          input.oneShotSent = true;
         }
       } catch (err) {
         errors.push(`Action error (${action.type}): ${(err as Error).message}`);
@@ -1173,6 +1181,23 @@ export class StartupOrchestrator {
       : `Startup submission unverified in ${input.binding.tmuxSession}: ${reason}`));
   }
 
+  /** The result of a start whose turn the runtime refused: the seat hasn't read its startup context, which never reads as
+   *  delivered. `continuable` keeps it pending for `rig seat continue` (the whole startup again); otherwise the seat says
+   *  why not, and names the fresh launch that delivers it. Later errors (`also`) are listed, never in its place. */
+  private owedStartup(input: StartupDeliveryInput, refused: ReadinessResult, continuable: boolean, also: string[]): StartupResult {
+    const held = input.heldInputs
+      ? `${input.heldInputs} later startup input${input.heldInputs === 1 ? " wasn't" : "s weren't"} sent. ` : "";
+    const why = input.oneShotSent ? "a one-shot startup action already ran and must not run twice"
+      : "this start was a restore, and continuing delivers a fresh start's context";
+    return this.fail(input, "attention_required", [
+      refused.reason ?? "The runtime refused a startup turn.",
+      ...also,
+      continuable
+        ? `${held}The seat hasn't read its startup context. Continuing delivers the whole startup again, the refused turn included.`
+        : `${held}The seat hasn't read all of its startup context, and continuing isn't offered: ${why}. To deliver it, launch the seat fresh: rig seat launch ${shellQuote(input.binding.tmuxSession ?? "<seat>")} --fresh --stop --reason "<why>".`,
+    ], undefined, continuable, undefined, false, "post_delivery_readiness", true);
+  }
+
   /** Whether the runtime refused the last startup turn: an attention readiness code now (Claude's "Login expired ·
    *  Please run /login" as its latest response reads login_required). An unavailable observation holds nothing back. */
   private async refusedTurn(input: StartupDeliveryInput): Promise<ReadinessResult | undefined> {
@@ -1186,7 +1211,7 @@ export class StartupOrchestrator {
 
   private async sendInteractiveText(input: StartupDeliveryInput, text: string, source: StartupSubmissionDiagnostic["source"], actionIndex?: number): Promise<StartupSendFailure | null> {
     // After a refused turn nothing more is typed into the seat. The held input is counted, and startNode reports it as
-    // owed before it would mark the seat ready, so returning here never reads as delivered.
+    // owed (ahead of any later error) before it would mark the seat ready, so returning here never reads as delivered.
     if (input.adapter.runtime === "claude-code" && input.sendOrder > 0 && (input.refusedTurn ??= await this.refusedTurn(input))) {
       input.heldInputs = (input.heldInputs ?? 0) + 1;
       return null;
