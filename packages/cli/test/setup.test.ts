@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { createProgram } from "../src/index.js";
 import { Command } from "commander";
 import { parse as parseYaml } from "yaml";
-import { setupCommand, runSetup, goldenPathNextSteps, permissionPolicyMenuLines, parseSetupProviders, type SetupDeps, type SetupResult, type SetupStep } from "../src/commands/setup.js";
+import { setupCommand, runSetup, goldenPathNextSteps, permissionPolicyMenuLines, parseSetupProviders, routerLineLines, type SetupDeps, type SetupResult, type SetupStep } from "../src/commands/setup.js";
 import { ConfigStore } from "../src/config-store.js";
 import type { DoctorDeps } from "../src/commands/doctor.js";
 
@@ -1069,6 +1069,17 @@ describe("rig setup: the router-line question", () => {
     expect(result.routerLine.ifNo).toContain("Nothing is written into these files");
     expect(set).not.toHaveBeenCalled();
     expect(store.resolveWithSource("skills.router_line.enabled").source).toBe("default");
+  });
+
+  it("shows the exact text written, with OpenRig's markers, and prints it as written", async () => {
+    const result = await runSetup(makeDeps({ routerLineStore: store }), {});
+    const { written, line } = result.routerLine;
+    expect(written).toBe(`<!-- BEGIN OpenRig MANAGED BLOCK: openrig-seat-skills.md -->\n${line}\n\n<!-- END OpenRig MANAGED BLOCK: openrig-seat-skills.md -->`);
+    expect(result.routerLine.placement).toContain("after two newlines");
+    const printed = routerLineLines(result.routerLine);
+    expect(printed[1]).toContain("plus OpenRig's markers so it can be removed cleanly");
+    const from = printed.indexOf("  Written exactly:") + 1;
+    expect(printed.slice(from, from + written.split("\n").length).map((row) => row.slice(4)).join("\n")).toBe(written);
   });
 
   it.each([["yes", true], ["no", false]] as const)("saves --router-line %s and reads it back as the person's answer", async (choice, value) => {

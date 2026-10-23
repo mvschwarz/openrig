@@ -227,7 +227,8 @@ It is optional for this selected-provider path, not a requirement to fix an unus
 provider.
 
 Setup also prints the one line OpenRig can add to each seat's `CLAUDE.md` or
-`AGENTS.md`, which files it goes in, and what a no gives up. Show the person,
+`AGENTS.md`, plus OpenRig's markers around it so it can be removed cleanly: the
+exact text it writes, which files it goes in, and what a no gives up. Show the person,
 ask, and save their answer with `rig setup --router-line yes` or
 `rig setup --router-line no`. No answer isn't a yes: with nothing saved and
 nothing set in the environment, the line isn't added. The answer covers only

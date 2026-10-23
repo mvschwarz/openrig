@@ -1,4 +1,4 @@
-// OPR.0.7.0.13 / slice 20 seam: the person's saved answer on the one-line seat-skills bootstrap, read from
+// OPR.0.7.0.13 / slice 20 seam: the person's saved answer on the seat-skills bootstrap (one line plus OpenRig's markers), read from
 // `skills.router_line.enabled` and the settings store's own provenance. No ledger: `default` is unasked, `file` is the
 // person's saved yes or no (an explicit false is persisted), `env` is the environment's, never the person's answer.
 // Limits: a malformed hand-edited value resolves to the default, so it reads as unasked; a full config reset returns to

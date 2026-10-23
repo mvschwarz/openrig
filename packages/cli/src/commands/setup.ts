@@ -42,7 +42,7 @@ export interface SetupResult {
   ready: boolean;
   steps: SetupStep[];
   runtimeConfig: RuntimeConfigDisclosure[];
-  /** The one line OpenRig can add to shared guidance files, and the person's answer (slice 20). */
+  /** The one line OpenRig can add to shared guidance files, with its markers, and the person's answer (slice 20). */
   routerLine: RouterLinePreview;
   verification?: {
     checks: VerificationCheck[];
@@ -54,6 +54,10 @@ export interface RouterLinePreview {
   answer: "unasked" | "yes" | "no" | "unreadable";
   by?: "saved" | "environment";
   line: string;
+  /** The exact text written: the line between OpenRig's markers. */
+  written: string;
+  /** Where that text goes in the file. */
+  placement: string;
   files: string;
   ifNo: string;
   limit: string;
@@ -93,10 +97,12 @@ function readRouterLineAnswer(store: Pick<ConfigStore, "resolveWithSource">): Pi
 /** The router-line question: the exact preview, the saved answer, and the step that reports or saves it. */
 function routerLineStep(deps: SetupDeps, choice: "yes" | "no" | undefined, dryRun: boolean): { step: SetupStep; preview: RouterLinePreview } {
   const store = deps.routerLineStore ?? new ConfigStore();
-  const { line, ifNo } = describeSkillRouterFootprint([]);
+  const { line, written, placement, ifNo } = describeSkillRouterFootprint([]);
   const preview = (answer: Pick<RouterLinePreview, "answer" | "by">): RouterLinePreview => ({
     ...answer,
     line,
+    written,
+    placement,
     files: "Each Claude seat's CLAUDE.md (or CLAUDE.local.md when its rig chooses that file) and each Codex seat's AGENTS.md, in the seat's working folder, at its next start. A file that is a link isn't written through; the start reports it as linked.",
     ifNo,
     limit: "Switching to no later stops new writes but doesn't remove a line already written; rig down removes OpenRig's blocks from these files, unless a seat of another active rig, or a still-running seat of this one, uses the file. A line someone edited is kept, and rig down names it.",
@@ -801,8 +807,11 @@ export function routerLineLines(preview: RouterLinePreview): string[] {
     : "not given, so it isn't a yes";
   return [
     "",
-    `The one line OpenRig can add to shared guidance files (answer: ${answer}):`,
+    `The one line OpenRig can add to shared guidance files, plus OpenRig's markers so it can be removed cleanly (answer: ${answer}):`,
     `  Line: ${preview.line}`,
+    "  Written exactly:",
+    ...preview.written.split("\n").map((row) => `    ${row}`),
+    `  Where: ${preview.placement}`,
     `  Files: ${preview.files}`,
     `  If no (this line only): ${preview.ifNo}`,
     `  ${preview.limit}`,
@@ -824,7 +833,7 @@ export function setupCommand(depsOverride?: SetupDeps): Command {
     .option("--providers <list>", "The person's provider choice: claude, codex, or both. One not chosen is skipped (not installed or checked), never failed")
     .option("--policy <name>", `Record a deliberate permission-policy choice into an existing spec (${POLICY_CHOICES.join("|")})`)
     .option("--spec <path>", "Existing rig spec (file or directory) to record the --policy choice into")
-    .option("--router-line <answer>", "The person's yes or no on the one line OpenRig can add to shared guidance files; saved as skills.router_line.enabled. No answer is never a yes")
+    .option("--router-line <answer>", "The person's yes or no on the one line (plus OpenRig's markers) OpenRig can add to shared guidance files; saved as skills.router_line.enabled. No answer is never a yes")
     .addHelpText("after", `
 tmux scrollback:
   The OpenRig block in ~/.tmux.conf keeps terminal.history_limit rows per pane (default 10000).

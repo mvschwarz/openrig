@@ -33,6 +33,14 @@ export interface MergeManagedBlockOptions {
   warnings?: string[];
 }
 
+/** The exact text of a managed block as `mergeManagedBlock` writes it: the markers around the content. */
+export function managedBlockText(blockId: string, content: string): string {
+  return `${MANAGED_BLOCK_START(blockId)}\n${content}\n${MANAGED_BLOCK_END(blockId)}`;
+}
+
+/** What `mergeManagedBlock` puts between a file's existing text and a block it adds at the end. */
+export const MANAGED_BLOCK_APPEND_SEPARATOR = "\n\n";
+
 export function mergeManagedBlock(
   fs: ManagedBlockMergeFsOps,
   targetPath: string,
@@ -42,7 +50,7 @@ export function mergeManagedBlock(
 ): void {
   const begin = MANAGED_BLOCK_START(blockId);
   const end = MANAGED_BLOCK_END(blockId);
-  const block = `${begin}\n${content}\n${end}`;
+  const block = managedBlockText(blockId, content);
 
   if (!fs.exists(targetPath)) {
     fs.mkdirp?.(nodePath.dirname(targetPath));
@@ -89,7 +97,7 @@ export function mergeManagedBlock(
     return;
   }
 
-  fs.writeFile(targetPath, `${existing}\n\n${block}`);
+  fs.writeFile(targetPath, `${existing}${MANAGED_BLOCK_APPEND_SEPARATOR}${block}`);
 }
 
 /** What a removal did: whether the file changed, and the ids of blocks kept because they were edited. */
