@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { verifyMcpStdio } from './mcp-stdio.mjs';
 
 export const RESULT_PREFIX = 'OPENRIG_SCENARIO_RESULT=';
 export const SCENARIO = 'queue-baton-survives-restart';
@@ -37,6 +38,7 @@ export function verifyPassingRun(exitCode, report, caseName) {
   assert.equal(exitCode, 0);
   assert.equal(report.result.verdict, 'PASS');
   if (caseName === 'daemon-restart') {
+    verifyMcpStdio(report.mcp);
     const proof = report.preservation;
     assert.equal(proof?.failedBackupUnchanged, true);
     assert.match(proof.editedSha256, /^[0-9a-f]{64}$/);

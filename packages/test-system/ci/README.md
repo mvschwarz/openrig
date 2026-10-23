@@ -76,6 +76,13 @@ content, and capture resolving a seat by member-name prefix). The read-only inst
 can't carry them, so they stay per-PR evidence outside CI. A green run here shows the
 passing leg only.
 
+The existing `daemon-restart` case also connects the installed `rig mcp serve` over
+stdio, using its shipped SDK. It checks whoami with a configured stub seat and with
+none, queue create/show attribution, the missing-item daemon code in structured
+content, and the four server instruction lines. The captured MCP results and direct
+daemon error readback are in the case report. Both MCP children close before teardown;
+this adds no container, YAML verb, provider client or model call.
+
 The other library scenarios are **unadmitted**. Several need step-time `emit`,
 `policy`, `mutate`, or `restore`. Others have incomplete assertions or setup:
 clean-lifecycle has no post-down residue assertion, ps-scope neither brings up its
