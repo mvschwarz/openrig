@@ -47,6 +47,7 @@ describe("remote down operation outcomes", () => {
   });
 
   it("asks before stopping a resolved caller's rig over --host and preserves the host in the proceed command", async () => {
+    vi.stubEnv("OPENRIG_NODE_ID", "caller-node-id");
     vi.stubEnv("OPENRIG_SESSION_NAME", "lead@owned-rig");
     callerRig = "owned-rig-id";
     const deps: StatusDeps & Pick<RemoteHostDeps, "hostRegistryLoader"> = {
@@ -72,6 +73,37 @@ describe("remote down operation outcomes", () => {
       if (stdinTTY) Object.defineProperty(process.stdin, "isTTY", stdinTTY);
       else delete (process.stdin as { isTTY?: boolean }).isTTY;
       log.mockRestore();
+    }
+  });
+
+  it("stops a remote namesake rig without asking when the local caller has only a session name", async () => {
+    vi.stubEnv("OPENRIG_NODE_ID", "");
+    vi.stubEnv("RIGGED_NODE_ID", "");
+    vi.stubEnv("OPENRIG_SESSION_NAME", "lead@owned-rig");
+    // The remote host has a different seat with the same rig/session names as the local caller.
+    callerRig = "owned-rig-id";
+    outcome = { rigId: "owned-rig-id", sessionsKilled: 1, errors: [] };
+    const ask = vi.fn(async () => false);
+    const deps: StatusDeps & Pick<RemoteHostDeps, "hostRegistryLoader"> & { promptYesNo: typeof ask } = {
+      lifecycleDeps: { readFile: () => null } as StatusDeps["lifecycleDeps"],
+      clientFactory: baseUrl => new DaemonClient(baseUrl),
+      hostRegistryLoader: () => ({ ok: true, registry: { hosts: [{ id: "other-host", transport: "http", url }] } }),
+      promptYesNo: ask,
+    };
+    const originalExit = process.exitCode;
+    process.exitCode = undefined;
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await downCommand(deps).parseAsync(["owned-rig", "--host", "other-host", "--json"], { from: "user" });
+      expect(ask).not.toHaveBeenCalled();
+      expect(teardownCalls).toBe(1);
+      expect(process.exitCode).toBeUndefined();
+      expect(JSON.parse(String(log.mock.calls[0]?.[0]))).not.toHaveProperty("warning");
+    } finally {
+      process.exitCode = originalExit;
+      log.mockRestore();
+      error.mockRestore();
     }
   });
 

@@ -203,11 +203,11 @@ describe("Down CLI", () => {
     expect(JSON.parse(logs[0]!).warning.consequence).toContain("your own session");
   });
 
-  it("discloses that an externally attached caller stays running", async () => {
+  it("discloses that OpenRig does not stop an externally attached caller", async () => {
     insideRig("rig-1", "external_cli");
     const { logs } = await captureLogs(() => makeCmd().parseAsync(["down", "rig-1", "--json"], { from: "user" }).then(() => {}));
     expect(downCallCount).toBe(0);
-    expect(JSON.parse(logs[0]!).error.consequence).toContain("Your externally attached session stays running");
+    expect(JSON.parse(logs[0]!).error.consequence).toContain("OpenRig doesn't stop externally attached sessions");
   });
 
   it("stops another rig without asking, even when the caller session name suggests the target", async () => {

@@ -35,6 +35,8 @@ async function confirmOwnRig(
 ): Promise<OwnRigWarning | false | undefined> {
   const source = resolveIdentitySource({});
   if (!source) return;
+  // A local session name can identify a different seat on the selected host.
+  if (opts.host && !source.nodeId) return;
   const params = new URLSearchParams(source.nodeId ? { nodeId: source.nodeId } : { sessionName: source.sessionName! });
   params.set("compact", "1");
   let caller: { identity?: { rigId?: string; attachmentType?: string } } | undefined;
@@ -45,8 +47,8 @@ async function confirmOwnRig(
   const warning: OwnRigWarning = {
     fact: `Your current seat belongs to rig ${rigId}.`,
     consequence: caller.identity.attachmentType === "external_cli"
-      ? "Your externally attached session stays running. This stops the rig's managed sessions and their work."
-      : "This ends your own session and stops the rig's other managed seats and their work. External CLI sessions joined with rig attach stay running.",
+      ? "OpenRig doesn't stop externally attached sessions. This stops the rig's managed sessions and their work."
+      : "This ends your own session and stops the rig's other managed seats and their work. OpenRig doesn't stop externally attached sessions.",
     action: ["rig", "down", shellQuote(rigId), "--yes", ...(opts.delete ? ["--delete"] : []),
       ...(opts.force ? ["--force"] : []), ...(opts.snapshot ? ["--snapshot"] : []),
       ...(opts.json ? ["--json"] : []), ...(opts.host ? ["--host", shellQuote(opts.host)] : [])].join(" "),
