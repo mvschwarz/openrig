@@ -95,9 +95,22 @@ describe("S14 owner notifications — system notices, not remembered tags", () =
       evidenceRef: "/proof/direct.md",
       nudge: false,
     });
+    // A direct ask lands on Steering (RECORD) unless it's marked alert-worthy.
     expect(db.prepare(
       "SELECT owner_notification_kind, owner_notification_level FROM queue_transitions WHERE qitem_id=? ORDER BY transition_id DESC LIMIT 1",
-    ).get(direct.qitemId)).toEqual({ owner_notification_kind: "human-required", owner_notification_level: "ALERT" });
+    ).get(direct.qitemId)).toEqual({ owner_notification_kind: "human-required", owner_notification_level: "RECORD" });
+    const alerted = await repo.create({
+      sourceSession: "orch-lead@v-openrig-build",
+      destinationSession: "human-founder@kernel",
+      body: "direct decision whose wait costs now",
+      summary: "Urgent founder decision",
+      evidenceRef: "/proof/urgent.md",
+      humanAlert: true,
+      nudge: false,
+    });
+    expect(db.prepare(
+      "SELECT owner_notification_kind, owner_notification_level FROM queue_transitions WHERE qitem_id=? ORDER BY transition_id DESC LIMIT 1",
+    ).get(alerted.qitemId)).toEqual({ owner_notification_kind: "human-required", owner_notification_level: "ALERT" });
 
     const handed = await repo.handoff({
       qitemId: ordinary.qitemId,
@@ -110,7 +123,7 @@ describe("S14 owner notifications — system notices, not remembered tags", () =
     });
     expect(db.prepare(
       "SELECT owner_notification_kind, owner_notification_level FROM queue_transitions WHERE qitem_id=? ORDER BY transition_id DESC LIMIT 1",
-    ).get(handed.created.qitemId)).toEqual({ owner_notification_kind: "human-required", owner_notification_level: "ALERT" });
+    ).get(handed.created.qitemId)).toEqual({ owner_notification_kind: "human-required", owner_notification_level: "RECORD" });
   });
 
   it("defaults to posting NOTICE and interrupting ALERT, refuses an unknown level, and has no tag classifier", () => {

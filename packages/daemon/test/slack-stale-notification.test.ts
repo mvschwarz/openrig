@@ -22,7 +22,7 @@ import { DEFAULT_CONFIG, saveConfig } from "../src/domain/gateway/slack/config.j
 import type { FetchImpl } from "../src/domain/gateway/slack/slack-api.js";
 
 const registry = { ok: true as const, entities: [{ entityId: "human-founder", class: "human" as const, displayName: "Founder", address: "human-founder@external", connectorBindings: [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "env:SLACK_BOT_TOKEN", role: "primary" as const, handle: "UFOUNDER" }], prefs: { deliveryClass: "A" as const } }] };
-const request = { sourceSession: "author@rig", destinationSession: "human-founder@external", summary: "Stale on replay?", body: "A decision whose first post fails.", nudge: false };
+const request = { humanAlert: true, sourceSession: "author@rig", destinationSession: "human-founder@external", summary: "Stale on replay?", body: "A decision whose first post fails.", nudge: false };
 const reply = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
 const isPost = (url: string | URL) => String(url).endsWith("chat.postMessage");
 

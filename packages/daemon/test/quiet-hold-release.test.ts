@@ -389,7 +389,7 @@ describe("after QA: changed circumstances and a second person", () => {
   }
   let n = 0;
   const ask = (extra: Record<string, unknown> = {}) => repo.create({ sourceSession: "asker@r", destinationSession: "person@external",
-    body: `Full question ${++n}: choose the window`, summary: `Choose ${n}`, evidenceRef: `/proof/${n}.md`, humanIntent: "decision", ...extra, nudge: false } as never) as Promise<QueueItem>;
+    body: `Full question ${++n}: choose the window`, summary: `Choose ${n}`, evidenceRef: `/proof/${n}.md`, humanIntent: "decision", ...(extra.humanIntent === "update" ? {} : { humanAlert: true }), ...extra, nudge: false } as never) as Promise<QueueItem>;
   const alertFor = async (row: QueueItem) =>
     (await makeQueuePorts(repo, { loadHumanRegistry: registry } as never).listHumanAlerts({ minimumLevel: "RECORD" })).find((a) => a.qitemId === row.qitemId)!;
   const quietOn = () => { const now = new Date(); quiet.setUntil("person", { until: new Date(now.getTime() + 3_600_000), timezone: "UTC", setBy: "t", now }); };

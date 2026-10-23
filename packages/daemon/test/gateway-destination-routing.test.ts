@@ -104,7 +104,7 @@ describe("OPR.0.5.6.14 — one destination resolver, no fall-through", () => {
     // Registration does not replay an older unclassified obligation. Its explicit
     // failed-routing record remains for an operator to reconcile deliberately.
     expect(await ports.listHumanAlerts({})).toHaveLength(0);
-    const registered = await fixture.repo.create({ sourceSession: "dev-a@rig1", destinationSession: alias,
+    const registered = await fixture.repo.create({ sourceSession: "dev-a@rig1", destinationSession: alias, humanAlert: true,
       summary: "Registered legacy spelling", evidenceRef: EVIDENCE, body: "new explicit request" });
     await vi.waitFor(() => expect(fixture.repo.getById(registered.qitemId)!.lastNudgeResult).not.toBeNull());
     const alerts = await ports.listHumanAlerts({});
@@ -414,14 +414,14 @@ describe("OPR.0.5.6.14 — the delivery ledger is universal and consulted", () =
 
   it("UNDELIVERED TELLS THE TRUTH from the ledger, not the nudge literal (the 34a6ad0b contradiction dies)", async () => {
     // Row A: gateway-routed, POSTED (receipt transition present) but nudge literal failed.
-    const a = await h.repo.create({ sourceSession: "s@r", destinationSession: "human-founder@external", body: "a", summary: "a", evidenceRef: EVIDENCE, nudge: false });
+    const a = await h.repo.create({ sourceSession: "s@r", destinationSession: "human-founder@external", humanAlert: true, body: "a", summary: "a", evidenceRef: EVIDENCE, nudge: false });
     h.db.prepare("UPDATE queue_items SET last_nudge_result = 'failed: stale poison literal', last_nudge_attempt = datetime('now') WHERE qitem_id = ?").run(a.qitemId);
     receipt(a.qitemId, "posted", "level=ALERT kind=unclassified message_ts=111.22 thread_ts=111.22");
     // Row B: gateway-routed, TRANSPORT-FAILED transition.
-    const b = await h.repo.create({ sourceSession: "s@r", destinationSession: "human-founder@external", body: "b", summary: "b", evidenceRef: EVIDENCE, nudge: false });
+    const b = await h.repo.create({ sourceSession: "s@r", destinationSession: "human-founder@external", humanAlert: true, body: "b", summary: "b", evidenceRef: EVIDENCE, nudge: false });
     receipt(b.qitemId, "transport-failed", "class=http-500 error=internal-server-error");
     // Row C: gateway-routed, NO receipt, older than the post window.
-    const c = await h.repo.create({ sourceSession: "s@r", destinationSession: "human-founder@external", body: "c", summary: "c", evidenceRef: EVIDENCE, nudge: false });
+    const c = await h.repo.create({ sourceSession: "s@r", destinationSession: "human-founder@external", humanAlert: true, body: "c", summary: "c", evidenceRef: EVIDENCE, nudge: false });
     ageCurrentEpisode(c.qitemId);
 
     const und = h.repo.findUndelivered({});
@@ -495,6 +495,7 @@ describe("OPR.0.5.6.14 — the delivery ledger is universal and consulted", () =
     const direct = await h.repo.create({
       sourceSession: "s@r",
       destinationSession: "human-founder@external",
+      humanAlert: true,
       body: "direct no-nudge human",
       summary: "direct",
       evidenceRef: EVIDENCE,
@@ -509,7 +510,7 @@ describe("OPR.0.5.6.14 — the delivery ledger is universal and consulted", () =
   });
 
   it("THE ROW FACE READS DELIVERY: gateway-routed rows surface posted/transport-failed/never-posted; pane-bound rows keep their exact keys", async () => {
-    const posted = await h.repo.create({ sourceSession: "s@r", destinationSession: "human-founder@external", body: "p", summary: "p", evidenceRef: EVIDENCE, nudge: false });
+    const posted = await h.repo.create({ sourceSession: "s@r", destinationSession: "human-founder@external", humanAlert: true, body: "p", summary: "p", evidenceRef: EVIDENCE, nudge: false });
     receipt(posted.qitemId, "posted", "level=ALERT kind=unclassified message_ts=222.33 thread_ts=222.33");
     const face = h.repo.getById(posted.qitemId) as unknown as { deliveryOutcome?: string | null };
     expect(face.deliveryOutcome, "a posted gateway row answers 'did it reach them' in one read").toMatch(/posted/);
@@ -524,15 +525,15 @@ describe("OPR.0.5.6.14 — the delivery ledger is universal and consulted", () =
   });
 
   it("UNDELIVERED LIMIT IS HONEST: posted rows cannot consume the window and hide a later gateway failure", async () => {
-    const posted = await h.repo.create({ sourceSession: "s@r", destinationSession: "human-founder@external", body: "p", summary: "p", evidenceRef: EVIDENCE, nudge: false });
+    const posted = await h.repo.create({ sourceSession: "s@r", destinationSession: "human-founder@external", humanAlert: true, body: "p", summary: "p", evidenceRef: EVIDENCE, nudge: false });
     receipt(posted.qitemId, "posted", "level=ALERT kind=unclassified message_ts=444.55 thread_ts=444.55");
-    const failed = await h.repo.create({ sourceSession: "s@r", destinationSession: "human-founder@external", body: "f", summary: "f", evidenceRef: EVIDENCE, nudge: false });
+    const failed = await h.repo.create({ sourceSession: "s@r", destinationSession: "human-founder@external", humanAlert: true, body: "f", summary: "f", evidenceRef: EVIDENCE, nudge: false });
     receipt(failed.qitemId, "transport-failed", "class=http-500 error=failed");
     expect(h.repo.findUndelivered({ limit: 1 }).map((item) => item.qitemId)).toEqual([failed.qitemId]);
   });
 
   it("FLOOR: the receipt-bound episode dedupe stands — a second identical receipt write is a no-op", async () => {
-    const row = await h.repo.create({ sourceSession: "s@r", destinationSession: "human-founder@external", body: "d", summary: "d", evidenceRef: EVIDENCE, nudge: false });
+    const row = await h.repo.create({ sourceSession: "s@r", destinationSession: "human-founder@external", humanAlert: true, body: "d", summary: "d", evidenceRef: EVIDENCE, nudge: false });
     const key = currentEpisodeKey(row.qitemId);
     const note = "slack-owner-notification-posted notification_key=" + key + " level=ALERT kind=unclassified message_ts=333.44 thread_ts=333.44";
     h.repo.update({ qitemId: row.qitemId, actorSession: "daemon@kernel", transitionNote: note });
@@ -578,9 +579,9 @@ describe("GET /api/queue/:qitemId carries the owner notification level", () => {
   const PANE_PERSON = { ...FOUNDER_FRAGMENT, entityId: "dev-a", displayName: "Dev A", address: "dev-a@external" } as unknown as HumanFragment;
 
   it.each([
-    ["a registered person with a pane", "dev-a@rig1", [FOUNDER_FRAGMENT, PANE_PERSON], "pane-bound", "ALERT"],
+    ["a registered person with a pane", "dev-a@rig1", [FOUNDER_FRAGMENT, PANE_PERSON], "pane-bound", "RECORD"],
     ["a seat with a pane and no registration", "dev-a@rig1", [FOUNDER_FRAGMENT], "pane-bound", null],
-    ["a registered person's alias", "human-founder@kernel", [FOUNDER_FRAGMENT], "gateway-routable", "ALERT"],
+    ["a registered person's alias", "human-founder@kernel", [FOUNDER_FRAGMENT], "gateway-routable", "RECORD"],
   ] as const)("%s reads level %s", async (_label, destinationSession, entities, destinationClass, level) => {
     const h = makeHarness({ entities: () => [...entities] });
     const app = new Hono();
@@ -602,7 +603,7 @@ describe("GET /api/queue/:qitemId carries the owner notification level", () => {
     app.use("*", async (c, next) => { c.set("queueRepo" as never, h.repo); await next(); });
     app.route("/api/queue", queueRoutes());
     const item = await h.repo.create({
-      sourceSession: "s@r", destinationSession: "dev-a@rig1", nudge: false,
+      sourceSession: "s@r", destinationSession: "dev-a@rig1", nudge: false, humanAlert: true,
       summary: "Decide", evidenceRef: EVIDENCE, body: "b",
     });
     const alerts = await makeQueuePorts(h.repo, { loadHumanRegistry: () => ({ ok: true, entities: [FOUNDER_FRAGMENT, PANE_PERSON] }) }).listHumanAlerts({});

@@ -69,7 +69,7 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
     });
 
     it("accepts a reference still waiting on the human: delivery decides the thread, not create", async () => {
-      const decision = await repo.create(request);
+      const decision = await repo.create({ ...request, humanAlert: true });
       const work = await park();
       const a = await repo.create({ ...request, humanIntent: "update", replyTo: decision.qitemId });
       const b = await repo.create({ ...request, humanIntent: "update", replyTo: work.qitemId });
@@ -90,7 +90,7 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
     });
 
     it("#822: an inbound reply's thread item is recorded only when it exists; the public replyTo rule is unchanged", async () => {
-      const decision = await repo.create(request);
+      const decision = await repo.create({ ...request, humanAlert: true });
       const inbound = { sourceSession: human, destinationSession: "author@rig", body: "thanks", nudge: false };
       const a = await repo.create({ ...inbound, inboundReplyTo: decision.qitemId });
       const b = await repo.create({ ...inbound, inboundReplyTo: "no-such-qitem" });
@@ -101,7 +101,7 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
 
     it("accepts an earlier update or an already-made decision and records the reference", async () => {
       const earlierUpdate = await repo.create({ ...request, humanIntent: "update" });
-      const decision = await repo.create(request);
+      const decision = await repo.create({ ...request, humanAlert: true });
       resolveDecision(decision.qitemId);
       const a = await repo.create({ ...request, humanIntent: "update", replyTo: earlierUpdate.qitemId });
       const b = await repo.create({ ...request, humanIntent: "update", replyTo: decision.qitemId });
@@ -142,7 +142,7 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
     }
 
     it("posts the update under the resolved decision's root and opens no root of its own", async () => {
-      const decision = await repo.create(request);
+      const decision = await repo.create({ ...request, humanAlert: true });
       await deliver(decision.qitemId);
       expect(posts[0]?.thread_ts).toBeUndefined();
       resolveDecision(decision.qitemId);
@@ -247,7 +247,7 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
 
     it("a decision the human answered by replying in Slack still takes the update in its root", async () => {
       const humanReply = await connectInbound();
-      const decision = await repo.create(request);
+      const decision = await repo.create({ ...request, humanAlert: true });
       await deliver(decision.qitemId);
       await humanReply("1.1", "902.1");
       await vi.waitFor(() => expect(repo.getById(decision.qitemId)?.state).toBe("done"));
@@ -265,7 +265,7 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
 
     it("#822: an answer to a reply the person typed in an OpenRig thread posts in that thread", async () => {
       const humanReply = await connectInbound();
-      const decision = await repo.create(request);
+      const decision = await repo.create({ ...request, humanAlert: true });
       await deliver(decision.qitemId);
       await humanReply("1.1", "903.1");
       await vi.waitFor(() => expect(repo.getById(decision.qitemId)?.state).toBe("done"));
@@ -283,7 +283,7 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
 
     it("interaction provenance: a completed button answer keeps its ask's thread for the seat's follow-up", async () => {
       await connectInbound();
-      const decision = await repo.create({ ...request, humanIntent: "decision", humanQuestions: [
+      const decision = await repo.create({ ...request, humanAlert: true, humanIntent: "decision", humanQuestions: [
         { id: "q1", question: "Ship the fix?", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] },
       ] });
       await deliver(decision.qitemId);
@@ -323,7 +323,7 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
 
     it("interaction provenance: a reaction row keeps its resolved ask's thread for the seat's follow-up", async () => {
       await connectInbound();
-      const decision = await repo.create(request);
+      const decision = await repo.create({ ...request, humanAlert: true });
       await deliver(decision.qitemId);
       resolveDecision(decision.qitemId);
       const reactionId = await reactToAsk(decision.qitemId, "911.1");
@@ -337,7 +337,7 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
 
     it("interaction provenance: a reaction still neither answers nor closes a live human gate", async () => {
       await connectInbound();
-      const decision = await repo.create({ ...request, humanIntent: "decision", humanQuestions: [
+      const decision = await repo.create({ ...request, humanAlert: true, humanIntent: "decision", humanQuestions: [
         { id: "q1", question: "Ship the fix?", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] },
       ] });
       await deliver(decision.qitemId);
@@ -429,7 +429,7 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
 
     it("#822: a reply's seat parking it on the person still asks in a fresh root, and the answer there resolves the park", async () => {
       const humanReply = await connectInbound();
-      const decision = await repo.create(request);
+      const decision = await repo.create({ ...request, humanAlert: true });
       await deliver(decision.qitemId);
       await humanReply("1.1", "905.1");
       await vi.waitFor(() => expect(repo.getById(decision.qitemId)?.state).toBe("done"));
@@ -490,7 +490,7 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
     });
 
     it("posts top-level, not refused, when the referenced decision is still open, and says so on the row", async () => {
-      const decision = await repo.create(request);
+      const decision = await repo.create({ ...request, humanAlert: true });
       await deliver(decision.qitemId);
       const update = await repo.create({ ...request, humanIntent: "update", body: "FYI.", replyTo: decision.qitemId });
       await deliver(update.qitemId);
@@ -509,7 +509,7 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
     });
 
     it("re-checks at delivery: a decision reopened after the update was queued gets no shared thread", async () => {
-      const decision = await repo.create(request);
+      const decision = await repo.create({ ...request, humanAlert: true });
       await deliver(decision.qitemId);
       resolveDecision(decision.qitemId);
       const update = await repo.create({ ...request, humanIntent: "update", replyTo: decision.qitemId });
@@ -547,7 +547,7 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
     });
 
     it("falls back when the referenced root belongs to a different seat: a reply there would reach that seat", async () => {
-      const decision = await repo.create(request);
+      const decision = await repo.create({ ...request, humanAlert: true });
       await deliver(decision.qitemId);
       resolveDecision(decision.qitemId);
       const update = await repo.create({ ...request, sourceSession: "other@rig", humanIntent: "update", replyTo: decision.qitemId });

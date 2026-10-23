@@ -1583,7 +1583,7 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
 
   async function ask(destinationSession = "human-owner@external"): Promise<QueueItem> {
     return repo.create({ sourceSession: "asker@r", destinationSession, body: "Pick option A or B", summary: "A or B?",
-      evidenceRef: "rig queue show qitem-fixture", humanIntent: "decision" } as never);
+      evidenceRef: "rig queue show qitem-fixture", humanIntent: "decision", humanAlert: true } as never);
   }
   const currentKey = (id: string) => `${id}:${repo.transitionLog.latestOwnerNotificationForQitem(id)!.transitionId}`;
   const receipt = (id: string, kind: "posted" | "transport-failed", key = currentKey(id)) => repo.update({
@@ -1745,7 +1745,7 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
 
   it("a registered alias without an intent (owner@kernel) is suppressed like its @external address", async () => {
     const row = await repo.create({ sourceSession: "asker@r", destinationSession: "owner@kernel", body: "Pick option A or B",
-      summary: "A or B?", evidenceRef: "rig queue show qitem-fixture" });
+      summary: "A or B?", evidenceRef: "rig queue show qitem-fixture", humanAlert: true });
     receipt(row.qitemId, "posted");
     age(row.qitemId);
     expect(repo.humanNotificationPostedThisEpisode(row.qitemId)).toBe(true);

@@ -78,7 +78,7 @@ describe("custody of asks held for quiet hours", () => {
   }
   let n = 0;
   const ask = () => repo.create({ sourceSession: "asker@r", destinationSession: "person@external", body: `Question ${++n}: pick one`,
-    summary: `Pick ${n}`, evidenceRef: `/proof/${n}.md`, humanIntent: "decision", nudge: false } as never) as Promise<QueueItem>;
+    summary: `Pick ${n}`, evidenceRef: `/proof/${n}.md`, humanIntent: "decision", humanAlert: true, nudge: false } as never) as Promise<QueueItem>;
   const alertFor = async (row: QueueItem) =>
     (await makeQueuePorts(repo, { loadHumanRegistry: registry } as never).listHumanAlerts({ minimumLevel: "RECORD" })).find((a) => a.qitemId === row.qitemId)!;
   const quietOn = () => { const now = new Date(); quiet.setUntil("person", { until: new Date(now.getTime() + 24 * 3_600_000), timezone: "UTC", setBy: "t", now }); };

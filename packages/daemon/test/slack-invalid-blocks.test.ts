@@ -19,7 +19,7 @@ import { runStuckSweep } from "../src/domain/queue-stuck-sweep.js";
 import type { OutboundDecision } from "../src/domain/gateway/protocol.js";
 
 const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
-const request = { sourceSession: "author@rig", destinationSession: "human-founder@external", summary: "Approve the change?", body: "Please review the evidence.", nudge: false };
+const request = { humanAlert: true, sourceSession: "author@rig", destinationSession: "human-founder@external", summary: "Approve the change?", body: "Please review the evidence.", nudge: false };
 const decision: OutboundDecision = { kind: "outbound_decision", decisionId: "d-rejected", op: "post_message", entityBindingRef: request.destinationSession, payload: { ...request, qitemId: "q-rejected" } };
 const registry = { ok: true as const, entities: [{ entityId: "human-founder", class: "human" as const, displayName: "Founder", address: request.destinationSession, connectorBindings: [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "env:SLACK_BOT_TOKEN", role: "primary" as const, handle: "UFOUNDER" }], prefs: { deliveryClass: "A" as const } }] };
 

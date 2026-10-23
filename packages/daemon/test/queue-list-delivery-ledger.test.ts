@@ -50,18 +50,18 @@ describe("queue list: delivery ledgers", () => {
     const rows: Array<{ id: string; ok: Outcome; failed: Outcome }> = [];
     const add = (id: string, ok: Outcome, failed: Outcome = null) => rows.push({ id, ok, failed });
     for (let i = 0; i < 2; i++) {
-      const posted = await create("human-founder@external", { humanIntent: "decision" });
+      const posted = await create("human-founder@external", { humanIntent: "decision", humanAlert: true });
       receipt(posted, "posted");
       add(posted, "posted");
-      const failed = await create("human-founder@external", { humanIntent: "decision" });
+      const failed = await create("human-founder@external", { humanIntent: "decision", humanAlert: true });
       receipt(failed, "transport-failed");
       add(failed, "transport-failed");
-      add(await create("human-founder@external", { humanIntent: "decision" }), "never-posted");
-      const closed = await create("human-founder@external", { humanIntent: "decision" });
+      add(await create("human-founder@external", { humanIntent: "decision", humanAlert: true }), "never-posted");
+      const closed = await create("human-founder@external", { humanIntent: "decision", humanAlert: true });
       receipt(closed, "posted");
       closeByHuman(closed);
       add(closed, "posted");
-      const unposted = await create("human-founder@external", { humanIntent: "decision" });
+      const unposted = await create("human-founder@external", { humanIntent: "decision", humanAlert: true });
       closeByHuman(unposted);
       add(unposted, "never-posted");
       const parked = await create("dev@rig");
@@ -79,21 +79,21 @@ describe("queue list: delivery ledgers", () => {
       add(legacyUnposted, "never-posted", "never-posted");
       add(await create("dev@rig"), null);
       // A closed row whose posted ask lives in the archive table: the resolved notice falls back to it.
-      const archivedAsk = await create("human-founder@external", { humanIntent: "decision" });
+      const archivedAsk = await create("human-founder@external", { humanIntent: "decision", humanAlert: true });
       const ask = repo.transitionLog.latestOwnerNotificationForQitem(archivedAsk)!.transitionId;
       receipt(archivedAsk, "posted");
       closeByHuman(archivedAsk);
       archive(ask);
       add(archivedAsk, "posted");
       // A newer ask in the archive table than the live receipt's: the receipt is an earlier episode's.
-      const archivedLatest = await create("human-founder@external", { humanIntent: "decision" });
+      const archivedLatest = await create("human-founder@external", { humanIntent: "decision", humanAlert: true });
       receipt(archivedLatest, "posted");
       const asksAgain = db.prepare(`INSERT INTO queue_transitions (qitem_id, ts, state, transition_note, actor_session, owner_notification_kind, owner_notification_level)
         VALUES (?, ?, 'pending', 'asks again', 'lead@rig', 'human-required', 'ALERT')`).run(archivedLatest, new Date().toISOString());
       archive(Number(asksAgain.lastInsertRowid));
       add(archivedLatest, "never-posted");
       for (const odd of [`q%${i}`, `q_${i}`, `q\\${i}`, `q"${i}`]) {
-        await create("human-founder@external", { qitemId: odd, humanIntent: "decision" });
+        await create("human-founder@external", { qitemId: odd, humanIntent: "decision", humanAlert: true });
         receipt(odd, i === 0 ? "posted" : "transport-failed");
         add(odd, i === 0 ? "posted" : "transport-failed");
       }
@@ -101,7 +101,7 @@ describe("queue list: delivery ledgers", () => {
     for (const table of ["queue_transitions", "queue_transitions_archive"]) db.prepare(`UPDATE ${table} SET ts = datetime('now', '-1 hour')`).run();
     db.prepare("UPDATE queue_items SET ts_created = datetime('now', '-1 hour')").run();
     // Inside the post window: no verdict yet.
-    add(await create("human-founder@external", { humanIntent: "decision" }), null);
+    add(await create("human-founder@external", { humanIntent: "decision", humanAlert: true }), null);
     const legacyFresh = await create("dev@rig", { nudge: false });
     repo.recordNudgeAttempt(legacyFresh, "gateway-owned: slack");
     add(legacyFresh, null);
@@ -152,7 +152,7 @@ describe("queue list: delivery ledgers", () => {
   });
 
   it("reads a row's latest owner notification and its latest outbound one, not its whole history", async () => {
-    const id = await create("human-founder@external", { humanIntent: "decision" });
+    const id = await create("human-founder@external", { humanIntent: "decision", humanAlert: true });
     const insert = db.prepare(`INSERT INTO queue_transitions (qitem_id, ts, state, transition_note, actor_session, owner_notification_kind, owner_notification_level)
       VALUES (?, ?, 'pending', ?, 'lead@rig', ?, 'ALERT')`);
     for (let n = 0; n < 6; n++) insert.run(id, new Date().toISOString(), `notice ${n}`, n % 2 ? "human-decision-resolved" : "human-required");
@@ -165,7 +165,7 @@ describe("queue list: delivery ledgers", () => {
     /** A pending ask to the human, past its post window, with no receipt yet: the next registry load commits its
      *  posted receipt, as a second connection could while the ledger works out its episode. */
     async function askPostedDuringRegistryLoad(): Promise<string> {
-      const id = await create("human-founder@external", { humanIntent: "decision" });
+      const id = await create("human-founder@external", { humanIntent: "decision", humanAlert: true });
       db.prepare("UPDATE queue_transitions SET ts = datetime('now', '-1 hour') WHERE qitem_id = ?").run(id);
       db.prepare("UPDATE queue_items SET ts_created = datetime('now', '-1 hour') WHERE qitem_id = ?").run(id);
       const key = latestKey(id);

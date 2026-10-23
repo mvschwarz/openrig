@@ -137,7 +137,8 @@ part of OpenRig.
 
 ## One channel per rig or seat (optional)
 
-By default every human-bound item posts to the one channel from `rig slack setup --channel`.
+An ask to a person posts to Slack only when it's marked alert-worthy (`rig queue create --alert`); otherwise it waits on
+Steering. By default every post goes to the one channel from `rig slack setup --channel`.
 To follow each rig separately, post a rig's items, or a single seat's, to its own channel:
 
 ```bash

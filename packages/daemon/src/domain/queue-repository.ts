@@ -348,6 +348,9 @@ export interface QueueCreateInput {
   targetRepo?: string | null;
   /** Explicit human delivery intent; omission preserves legacy decisions. */
   humanIntent?: "decision" | "update" | null;
+  /** An ask to a person lands on Steering with no Slack alert; true also sends one alert, for something only they can do
+   *  or an approval whose wait costs now. Its classification is stored with the create, so nothing later re-decides it. */
+  humanAlert?: boolean;
   /** Explicit supplemental thread content, never an automatic split of the primary body. */
   humanDetail?: string | null;
   /** #96 — post this update into the named earlier qitem's Slack thread. Updates only; if
@@ -1087,6 +1090,7 @@ export class QueueRepository {
     nextBlockedOn?: string | null;
     explicitKind?: QueueUpdateInput["ownerNotificationKind"];
     humanIntent?: "decision" | "update" | null;
+    humanAlert?: boolean;
   }): { kind: string; level: OwnerNotificationLevel } | null {
     if (input.explicitKind === "human-decision-resolved") {
       return { kind: input.explicitKind, level: "NOTICE" };
@@ -1101,9 +1105,10 @@ export class QueueRepository {
 
     const destinationHuman = resolveRegisteredHumanAddress(input.destinationSession, registry.entities);
     if (input.action === "create" && destinationHuman !== null) {
+      // An ask lands on Steering (RECORD: below the posting dial, so no post is owed) unless it's marked alert-worthy.
       return input.humanIntent === "update"
         ? { kind: "human-update", level: "NOTICE" }
-        : { kind: "human-required", level: "ALERT" };
+        : { kind: "human-required", level: input.humanAlert === true ? "ALERT" : "RECORD" };
     }
     return null;
   }
@@ -1821,6 +1826,18 @@ export class QueueRepository {
       if (!this.hasHumanQuestionsColumn) throw new QueueRepositoryError("invalid_human_questions", "humanQuestions require the current queue schema; they were not saved.");
       humanQuestions = parsed.questions;
     }
+    if (input.humanAlert != null && typeof input.humanAlert !== "boolean") {
+      throw new QueueRepositoryError("invalid_human_notification", "humanAlert is true or false.");
+    }
+    if (input.humanAlert === true) {
+      // A person, by address or by the registry (a registered person may be addressed as their seat), as the classifier reads it.
+      const registry = this.loadHumanRegistryFn();
+      const person = isHumanSeatSessionRef(input.destinationSession)
+        || (registry.ok && resolveRegisteredHumanAddress(input.destinationSession, registry.entities) !== null);
+      if (!person || input.humanIntent === "update") {
+        throw new QueueRepositoryError("invalid_human_notification", "humanAlert marks an ask to a person as alert-worthy: it needs a human destination, and an update isn't an ask.");
+      }
+    }
     const id = input.qitemId ?? newQitemId();
     const ts = new Date().toISOString();
     const priority = input.priority ?? "routine";
@@ -1869,6 +1886,7 @@ export class QueueRepository {
     const notification = this.classifyOwnerNotification({
       action: "create",
       humanIntent: input.humanIntent,
+      humanAlert: input.humanAlert,
       destinationSession: input.destinationSession,
       nextState: "pending",
     });
@@ -4166,6 +4184,8 @@ export class QueueRepository {
   ): { notificationKey: string; startedAt: string } | "inactive" | null {
     let transition = owners[0];
     if (!transition) return null;
+    // An ask placed on Steering without an alert owes no post, so it has no delivery to report.
+    if (transition.ownerNotificationLevel === "RECORD") return "inactive";
     // A human-decision-resolved notice written BY the transition that closed the row (a human's direct reply closing
     // it) is never posted: the Slack outbound lists active rows only (listHumanAlerts), and that human just answered.
     // It opens no new delivery episode; the delivery that happened is the latest OUTBOUND notice's, to that human.
@@ -4223,6 +4243,14 @@ export class QueueRepository {
     // The ledger's episode exists only when the destination resolves to a registered human (aliases included).
     const ledger = listed ? listed.ledger : this.deliveryLedger(qitemId, owners);
     return ledger !== null && ledger.outcome === "posted" && ledger.episode?.notificationKey === `${qitemId}:${owner.transitionId}`;
+  }
+
+  /** True when this row's current ask was placed on Steering without a Slack alert (human-required at RECORD): it waits on
+   *  the person there by design, like a posted ask, so it isn't stuck and nothing re-offers it. */
+  humanAskWithoutAlert(qitemId: string, listed?: ListedLedger): boolean {
+    if (!this.hasQueueTransitionsTable) return false;
+    const owner = (listed?.owners ?? this.transitionLog.ownerNotificationsForQitems([qitemId]).get(qitemId) ?? [])[0];
+    return owner?.state === "pending" && owner.ownerNotificationKind === "human-required" && owner.ownerNotificationLevel === "RECORD";
   }
 
   /** owners: the row's owner notifications as ownerNotificationsForQitems gives them, when the caller read them. */
@@ -4536,9 +4564,12 @@ export class QueueRepository {
     if (view && ["pending", "in-progress"].includes(view.state)) {
       // #514 — the unclaimed sweep skips a pending ask already posted to its human in the current
       // episode (same predicate as runStuckSweep), so the view must not promise that sweep.
-      const awaitingHuman = view.state === "pending" && this.humanNotificationPostedThisEpisode(qitemId, listed);
+      const onSteering = view.state === "pending" && this.humanAskWithoutAlert(qitemId, listed);
+      const awaitingHuman = onSteering || (view.state === "pending" && this.humanNotificationPostedThisEpisode(qitemId, listed));
       if (awaitingHuman) {
-        view.nextBackstop = { owner: view.owner, mechanism: "none (posted to the human; awaiting their decision)", dueAt: null, intervalSeconds: null };
+        view.nextBackstop = { owner: view.owner, mechanism: onSteering
+          ? "none (on Steering for the human, with no Slack alert; awaiting their decision)"
+          : "none (posted to the human; awaiting their decision)", dueAt: null, intervalSeconds: null };
       }
       // Quiet hours: a held ask is owned by its window's release job until it posts.
       const quiet = awaitingHuman ? null : quietCustodyBackstop(view.owner, quietHoldCustody(this.db, qitemId));

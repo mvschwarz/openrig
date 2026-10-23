@@ -109,7 +109,8 @@ describe("#192 channel map through the real Slack wire", () => {
     return posts.at(-1)!;
   }
   const ask = (sourceSession: string, extra: Record<string, unknown> = {}) =>
-    repo.create({ sourceSession, destinationSession: human, summary: "Merge it?", body: "Approve or hold?", nudge: false, ...extra });
+    repo.create({ sourceSession, destinationSession: human, summary: "Merge it?", body: "Approve or hold?", nudge: false,
+      ...(extra.humanIntent === "update" ? {} : { humanAlert: true }), ...extra });
 
   it("a seat entry posts to its channel, a rig entry covers the rig's other seats, everything else uses the default", async () => {
     rewire(MAP);
