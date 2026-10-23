@@ -133,6 +133,36 @@ function sliceSummary(slice: SliceEntry): Record<string, unknown> {
   };
 }
 
+type Scope = { session(value: unknown): boolean; item(row: unknown): boolean; rig(name: unknown): boolean; root(name: unknown): boolean };
+
+/** What an authenticated non-owner caller may reach: its own seat, its rigs' seats, the items they send or own, and its
+ *  shared roots. A person (<entityId>@external) is never in a non-owner's scope. */
+function scopeFor(access: McpAccess, seatOf: () => string | undefined): Scope {
+  const rigs = new Set(access.rigs);
+  const session = (value: unknown): boolean => {
+    if (typeof value !== "string" || !value) return false;
+    const seat = seatOf();
+    if (seat && (value === seat || value.startsWith(`${seat}@`))) return true;
+    const rig = value.split("@")[1];
+    return rig !== undefined && rig !== "external" && rigs.has(rig);
+  };
+  return {
+    session,
+    item: (row) => {
+      const item = (row ?? {}) as { sourceSession?: unknown; destinationSession?: unknown };
+      return session(item.sourceSession) || session(item.destinationSession);
+    },
+    rig: (name) => typeof name === "string" && rigs.has(name),
+    root: (name) => typeof name === "string" && access.roots.includes(name),
+  };
+}
+
+/** A target outside an authenticated caller's scope. It names the kind of target only, never the record. */
+function outOfScope(what: string): TextResult {
+  const message = `${what} is outside what this connection may reach.`;
+  return errorResult(JSON.stringify({ ok: false, error: "out_of_scope", message }), "out_of_scope", message);
+}
+
 type SharedRoot = { name: string; path: string };
 type FileRead = { root?: string; path?: string; content?: string; binary?: boolean; size?: number; mtime?: string; truncated?: boolean; truncatedAtBytes?: number | null; totalBytes?: number };
 
@@ -207,49 +237,61 @@ const READ_ONLY: ToolAnnotations = { readOnlyHint: true };
 const ADDITIVE: ToolAnnotations = { readOnlyHint: false, destructiveHint: false };
 const DESTRUCTIVE: ToolAnnotations = { readOnlyHint: false, destructiveHint: true };
 
+/** Who an authenticated HTTP caller must be to be offered a tool: work tools (the work loop, orientation, and
+ *  communication with seats) reach a team within the caller's scope; workspace tools read the work tree and context when
+ *  the caller's grant includes them; owner tools administer the instance (launch, stop, snapshot and restore, discover and
+ *  bind, add seats, validate or inspect local files by path, the event log) and are offered only to an owner grant for now.
+ *  A local caller (stdio, or HTTP with no auth configured) is the owner. */
+export type McpAccessClass = "work" | "workspace" | "owner";
+
+/** An authenticated HTTP caller: the seat it acts as comes with it (the DaemonClient built for it); this is what it may
+ *  reach. A session is in scope when it is the caller's seat or a seat of one of its rigs; an item, when its source or
+ *  destination is. */
+export type McpAccess = { principal: string; owner: boolean; rigs: readonly string[]; roots: readonly string[]; workspace: boolean };
+
 /** What each tool calls and what it does, kept beside the registrations. The MCP contract tests check that it names every
  *  registered tool, that each tool's annotations match its effect, and that each route is mounted in the daemon. Tools that
  *  take a rig name also read GET /api/rigs/summary to resolve it. */
-export const MCP_OPERATIONS: ReadonlyArray<{ tool: string; routes: readonly string[]; effect: "read" | "additive" | "destructive" }> = [
-  { tool: "rig_up", routes: ["POST /api/up"], effect: "destructive" },
-  { tool: "rig_down", routes: ["POST /api/down"], effect: "destructive" },
-  { tool: "rig_ps", routes: ["GET /api/ps"], effect: "read" },
-  { tool: "rig_status", routes: ["GET /healthz"], effect: "read" },
-  { tool: "rig_snapshot_create", routes: ["POST /api/rigs/:rigId/snapshots"], effect: "additive" },
-  { tool: "rig_snapshot_list", routes: ["GET /api/rigs/:rigId/snapshots"], effect: "read" },
-  { tool: "rig_restore", routes: ["POST /api/rigs/:rigId/restore/:snapshotId"], effect: "destructive" },
-  { tool: "rig_restore_status", routes: ["GET /api/rigs/:rigId/restore/status/:attemptId"], effect: "read" },
-  { tool: "rig_discover", routes: ["POST /api/discovery/scan"], effect: "destructive" },
-  { tool: "rig_bind", routes: ["POST /api/discovery/:id/bind"], effect: "destructive" },
-  { tool: "rig_bundle_inspect", routes: ["POST /api/bundles/inspect"], effect: "read" },
-  { tool: "rig_agent_validate", routes: ["POST /api/agents/validate"], effect: "read" },
-  { tool: "rig_rig_validate", routes: ["POST /api/rigs/import/validate"], effect: "read" },
-  { tool: "rig_rig_nodes", routes: ["GET /api/rigs/:rigId/nodes"], effect: "read" },
-  { tool: "rig_send", routes: ["POST /api/transport/send"], effect: "destructive" },
-  { tool: "rig_capture", routes: ["POST /api/transport/capture"], effect: "read" },
-  { tool: "rig_chatroom_send", routes: ["POST /api/rigs/:rigId/chat/send"], effect: "additive" },
-  { tool: "rig_chatroom_watch", routes: ["GET /api/rigs/:rigId/chat/history"], effect: "read" },
-  { tool: "rig_add", routes: ["POST /api/rigs/:rigId/pods/:podNamespace/members"], effect: "additive" },
-  { tool: "rig_queue_create", routes: ["POST /api/queue/create", "GET /api/queue/:qitemId"], effect: "additive" },
-  { tool: "rig_queue_show", routes: ["GET /api/queue/:qitemId", "GET /api/queue/:qitemId/transitions", "GET /api/queue/list"], effect: "read" },
-  { tool: "rig_queue_list", routes: ["GET /api/queue/list"], effect: "read" },
-  { tool: "rig_queue_claim", routes: ["POST /api/queue/:qitemId/claim"], effect: "destructive" },
-  { tool: "rig_queue_update", routes: ["POST /api/queue/:qitemId/update"], effect: "destructive" },
-  { tool: "rig_telemetry_events", routes: ["GET /api/telemetry/v1/events"], effect: "read" },
-  { tool: "rig_whoami", routes: ["GET /api/whoami"], effect: "read" },
-  { tool: "rig_team", routes: ["GET /api/rigs/:rigId", "GET /api/rigs/:rigId/nodes"], effect: "read" },
-  { tool: "rig_slices", routes: ["GET /api/slices"], effect: "read" },
-  { tool: "rig_mission", routes: ["GET /api/missions/:missionId"], effect: "read" },
-  { tool: "rig_context_pack", routes: ["GET /api/context-packs/library/by-ref"], effect: "read" },
-  { tool: "rig_context_get", routes: ["GET /api/context-packs/library/resolve-address"], effect: "read" },
-  { tool: "rig_artifact_read", routes: ["GET /api/queue/:qitemId", "GET /api/files/roots", "GET /api/files/read"], effect: "read" },
-  { tool: "rig_human_decision_room", routes: ["GET /api/queue/:qitemId", "GET /api/gateway/human/:entityId/decision-room"], effect: "read" },
-  { tool: "rig_queue_decide", routes: ["POST /api/queue/:qitemId/delegated-decision"], effect: "destructive" },
+export const MCP_OPERATIONS: ReadonlyArray<{ tool: string; routes: readonly string[]; effect: "read" | "additive" | "destructive"; access: McpAccessClass }> = [
+  { tool: "rig_up", routes: ["POST /api/up"], effect: "destructive", access: "owner" },
+  { tool: "rig_down", routes: ["POST /api/down"], effect: "destructive", access: "owner" },
+  { tool: "rig_ps", routes: ["GET /api/ps"], effect: "read", access: "work" },
+  { tool: "rig_status", routes: ["GET /healthz"], effect: "read", access: "work" },
+  { tool: "rig_snapshot_create", routes: ["POST /api/rigs/:rigId/snapshots"], effect: "additive", access: "owner" },
+  { tool: "rig_snapshot_list", routes: ["GET /api/rigs/:rigId/snapshots"], effect: "read", access: "owner" },
+  { tool: "rig_restore", routes: ["POST /api/rigs/:rigId/restore/:snapshotId"], effect: "destructive", access: "owner" },
+  { tool: "rig_restore_status", routes: ["GET /api/rigs/:rigId/restore/status/:attemptId"], effect: "read", access: "owner" },
+  { tool: "rig_discover", routes: ["POST /api/discovery/scan"], effect: "destructive", access: "owner" },
+  { tool: "rig_bind", routes: ["POST /api/discovery/:id/bind"], effect: "destructive", access: "owner" },
+  { tool: "rig_bundle_inspect", routes: ["POST /api/bundles/inspect"], effect: "read", access: "owner" },
+  { tool: "rig_agent_validate", routes: ["POST /api/agents/validate"], effect: "read", access: "owner" },
+  { tool: "rig_rig_validate", routes: ["POST /api/rigs/import/validate"], effect: "read", access: "owner" },
+  { tool: "rig_rig_nodes", routes: ["GET /api/rigs/:rigId/nodes"], effect: "read", access: "work" },
+  { tool: "rig_send", routes: ["POST /api/transport/send"], effect: "destructive", access: "work" },
+  { tool: "rig_capture", routes: ["POST /api/transport/capture"], effect: "read", access: "work" },
+  { tool: "rig_chatroom_send", routes: ["POST /api/rigs/:rigId/chat/send"], effect: "additive", access: "work" },
+  { tool: "rig_chatroom_watch", routes: ["GET /api/rigs/:rigId/chat/history"], effect: "read", access: "work" },
+  { tool: "rig_add", routes: ["POST /api/rigs/:rigId/pods/:podNamespace/members"], effect: "additive", access: "owner" },
+  { tool: "rig_queue_create", routes: ["POST /api/queue/create", "GET /api/queue/:qitemId"], effect: "additive", access: "work" },
+  { tool: "rig_queue_show", routes: ["GET /api/queue/:qitemId", "GET /api/queue/:qitemId/transitions", "GET /api/queue/list"], effect: "read", access: "work" },
+  { tool: "rig_queue_list", routes: ["GET /api/queue/list"], effect: "read", access: "work" },
+  { tool: "rig_queue_claim", routes: ["POST /api/queue/:qitemId/claim"], effect: "destructive", access: "work" },
+  { tool: "rig_queue_update", routes: ["POST /api/queue/:qitemId/update"], effect: "destructive", access: "work" },
+  { tool: "rig_telemetry_events", routes: ["GET /api/telemetry/v1/events"], effect: "read", access: "owner" },
+  { tool: "rig_whoami", routes: ["GET /api/whoami"], effect: "read", access: "work" },
+  { tool: "rig_team", routes: ["GET /api/rigs/:rigId", "GET /api/rigs/:rigId/nodes"], effect: "read", access: "work" },
+  { tool: "rig_slices", routes: ["GET /api/slices"], effect: "read", access: "workspace" },
+  { tool: "rig_mission", routes: ["GET /api/missions/:missionId"], effect: "read", access: "workspace" },
+  { tool: "rig_context_pack", routes: ["GET /api/context-packs/library/by-ref"], effect: "read", access: "workspace" },
+  { tool: "rig_context_get", routes: ["GET /api/context-packs/library/resolve-address"], effect: "read", access: "workspace" },
+  { tool: "rig_artifact_read", routes: ["GET /api/queue/:qitemId", "GET /api/files/roots", "GET /api/files/read"], effect: "read", access: "work" },
+  { tool: "rig_human_decision_room", routes: ["GET /api/queue/:qitemId", "GET /api/gateway/human/:entityId/decision-room"], effect: "read", access: "work" },
+  { tool: "rig_queue_decide", routes: ["POST /api/queue/:qitemId/delegated-decision"], effect: "destructive", access: "work" },
 ];
 
 // Short guidance a client may show the model (the server's MCP instructions).
 const INSTRUCTIONS = [
-  "This server reaches an OpenRig team as one seat: the one named by OPENRIG_SESSION_NAME where the server was configured (rig_whoami shows it; rig_team shows a rig's seats and its lead). The daemon attributes this server's writes to that seat.",
+  "This server reaches an OpenRig team as one seat: the one named by OPENRIG_SESSION_NAME where the server was configured, or, over authenticated HTTP, the seat of the caller's grant (rig_whoami shows which, and whether the caller is authenticated; rig_team shows a rig's seats and its lead). The daemon attributes this server's writes to that seat.",
   "To hand work to a seat, use rig_queue_create and keep its qitemId; read the answer later with rig_queue_show, which names the next item when the work was handed on. Queue items are durable: they outlive this conversation and this server.",
   "Tools marked read-only change nothing. A seat whose activity is unknown is not idle, and an accepted request (a restore's attemptId) is not a finished one.",
   "A question reserved for a person is theirs to answer: don't answer it on their behalf. rig_queue_decide records a decision only inside the decision room of the mode they have on, beside their answers and never as one.",
@@ -302,14 +344,43 @@ function mapResult(
  * @param client - DaemonClient connected to the daemon
  * @returns McpServer instance (not yet connected to a transport)
  */
-export function createMcpServer(client: DaemonClient): McpServer {
+export function createMcpServer(client: DaemonClient, options: { seat?: string; access?: McpAccess } = {}): McpServer {
   const server = new McpServer({
     name: "openrig",
     version: CLI_VERSION,
   }, { instructions: INSTRUCTIONS });
+  const { access } = options;
+  // The seat this server acts as: the authenticated caller's, else OPENRIG_SESSION_NAME where it was configured.
+  const seatOf = (): string | undefined => options.seat ?? readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
+  const accessClass = new Map(MCP_OPERATIONS.map((op) => [op.tool, op.access]));
+  // A local caller (no access) is offered every tool; an authenticated one, its class's.
+  const offered = (tool: string): boolean => {
+    if (!access || access.owner) return true;
+    const kind = accessClass.get(tool);
+    return kind === "work" || (kind === "workspace" && access.workspace);
+  };
+  const scope = access && !access.owner ? scopeFor(access, seatOf) : null;
+  const caller = access ? { authenticated: true, principal: access.principal } : { authenticated: false, identity: "declared" };
+  /** For an authenticated non-owner: the error for an item it can't reach (or can't read), else null. */
+  const itemOutOfScope = async (qitemId: string): Promise<TextResult | null> => {
+    if (!scope) return null;
+    const item = await client.get(`/api/queue/${encodeURIComponent(qitemId)}`);
+    if (item.status >= 400) return mapResult(item);
+    return scope.item(item.data) ? null : outOfScope(`Item ${qitemId}`);
+  };
+  /** For an authenticated non-owner: the error for a rig handle outside its rigs (or one the rig list can't resolve), else null. */
+  const rigOutOfScope = async (handle: string): Promise<TextResult | null> => {
+    if (!scope) return null;
+    const rig = await rigIdFor(client, handle);
+    if ("content" in rig) return rig;
+    if (!rig.resolved) return outOfScope(`Rig ${handle}`);
+    const detail = await client.get(`/api/rigs/${encodeURIComponent(rig.id)}`);
+    if (detail.status >= 400) return mapResult(detail);
+    return scope.rig(((detail.data ?? {}) as RigDetail).rig?.name) ? null : outOfScope(`Rig ${handle}`);
+  };
 
   // 1. rig_up — launch from a spec, bundle or topology, or restore an existing rig by name
-  server.tool(
+  if (offered("rig_up")) server.tool(
     "rig_up",
     "Launch a rig from a rig spec (.yaml), a .rigbundle or a .rigtopology, or restore an existing rig by its name from its latest snapshot",
     {
@@ -342,7 +413,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 2. rig_down — rig teardown
-  server.tool(
+  if (offered("rig_down")) server.tool(
     "rig_down",
     "Tear down a rig",
     {
@@ -370,7 +441,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 3. rig_ps — list running rigs
-  server.tool(
+  if (offered("rig_ps")) server.tool(
     "rig_ps",
     "List rigs and their status",
     {},
@@ -378,6 +449,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
     async () => {
       try {
         const res = await client.get("/api/ps");
+        if (scope && res.status < 400 && Array.isArray(res.data)) return mapResult({ ...res, data: res.data.filter((entry) => scope.rig((entry as { name?: unknown }).name)) });
         return mapResult(res);
       } catch (err) {
         return caught(err);
@@ -386,7 +458,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 4. rig_status — daemon health
-  server.tool(
+  if (offered("rig_status")) server.tool(
     "rig_status",
     "Check daemon health",
     {},
@@ -402,7 +474,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 5. rig_snapshot_create — create snapshot
-  server.tool(
+  if (offered("rig_snapshot_create")) server.tool(
     "rig_snapshot_create",
     "Create a snapshot for a rig",
     {
@@ -422,7 +494,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 6. rig_snapshot_list — list snapshots
-  server.tool(
+  if (offered("rig_snapshot_list")) server.tool(
     "rig_snapshot_list",
     "List snapshots for a rig",
     {
@@ -447,7 +519,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 7. rig_restore — restore from snapshot
-  server.tool(
+  if (offered("rig_restore")) server.tool(
     "rig_restore",
     "Start restoring a rig from a snapshot. It answers at once with an attemptId while the restore runs in the background; follow the attempt with rig_restore_status.",
     {
@@ -468,7 +540,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 7b. rig_restore_status — follow a restore attempt rig_restore started
-  server.tool(
+  if (offered("rig_restore_status")) server.tool(
     "rig_restore_status",
     "Read where a restore attempt stands: the receipt for the attemptId rig_restore returned. An attempt with no completion yet (still running, or stopped before it finished) answers attempt_incomplete; it isn't a receipt.",
     {
@@ -488,7 +560,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 8. rig_discover — scan for sessions
-  server.tool(
+  if (offered("rig_discover")) server.tool(
     "rig_discover",
     "Scan for tmux sessions to discover",
     {},
@@ -504,7 +576,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 9. rig_bind — bind discovered session to a rig node (existing or new in pod)
-  server.tool(
+  if (offered("rig_bind")) server.tool(
     "rig_bind",
     "Bind a discovered session to an existing node or create a new node in a pod",
     {
@@ -532,7 +604,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 10. rig_bundle_inspect — inspect a bundle
-  server.tool(
+  if (offered("rig_bundle_inspect")) server.tool(
     "rig_bundle_inspect",
     "Inspect a .rigbundle file",
     {
@@ -556,7 +628,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 11. rig_agent_validate — validate an AgentSpec
-  server.tool(
+  if (offered("rig_agent_validate")) server.tool(
     "rig_agent_validate",
     "Validate an AgentSpec (agent.yaml) from YAML text",
     {
@@ -574,7 +646,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 12. rig_rig_validate — validate a RigSpec
-  server.tool(
+  if (offered("rig_rig_validate")) server.tool(
     "rig_rig_validate",
     "Validate a RigSpec (rig.yaml) from YAML text",
     {
@@ -592,7 +664,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 13. rig_rig_nodes — node inventory for a rig
-  server.tool(
+  if (offered("rig_rig_nodes")) server.tool(
     "rig_rig_nodes",
     "Get node inventory for a rig — session names, status, attach commands, resume commands",
     {
@@ -601,6 +673,8 @@ export function createMcpServer(client: DaemonClient): McpServer {
     READ_ONLY,
     async ({ rigId }) => {
       try {
+        const denied = await rigOutOfScope(rigId);
+        if (denied) return denied;
         const rig = await rigIdFor(client, rigId);
         if ("content" in rig) return rig;
         const res = await client.get(`/api/rigs/${encodeURIComponent(rig.id)}/nodes`);
@@ -612,7 +686,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 14. rig_send — send message to agent session
-  server.tool(
+  if (offered("rig_send")) server.tool(
     "rig_send",
     "Send a message to an agent's terminal using reliable two-step send",
     {
@@ -629,6 +703,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
           const message = "waitForIdleSeconds cannot be combined with force";
           return errorResult(JSON.stringify({ ok: false, error: message }), "invalid_arguments", message);
         }
+        if (scope && !scope.session(session)) return outOfScope(`Session ${session}`);
         const waitForIdleMs = waitForIdleSeconds === undefined ? undefined : Math.ceil(waitForIdleSeconds * 1000);
         const res = await client.post("/api/transport/send", {
           session,
@@ -645,7 +720,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 15. rig_capture — capture terminal output from agent session
-  server.tool(
+  if (offered("rig_capture")) server.tool(
     "rig_capture",
     "Capture terminal output from an agent session",
     {
@@ -657,6 +732,12 @@ export function createMcpServer(client: DaemonClient): McpServer {
     READ_ONLY,
     async ({ session, rig, pod, lines }) => {
       try {
+        if (scope) {
+          if (session && !scope.session(session)) return outOfScope(`Session ${session}`);
+          if (pod && !rig) return outOfScope(`Pod ${pod} without its rig`);
+          const denied = rig ? await rigOutOfScope(rig) : null;
+          if (denied) return denied;
+        }
         const body: Record<string, unknown> = {};
         if (session) body.session = session;
         if (rig) body.rig = rig;
@@ -672,7 +753,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 16. rig_chatroom_send — send message to rig chatroom
-  server.tool(
+  if (offered("rig_chatroom_send")) server.tool(
     "rig_chatroom_send",
     "Send a message to a rig's chatroom as this server's seat",
     {
@@ -682,6 +763,8 @@ export function createMcpServer(client: DaemonClient): McpServer {
     ADDITIVE,
     async ({ rigName, body }) => {
       try {
+        const denied = await rigOutOfScope(rigName);
+        if (denied) return denied;
         const rig = await chatRigId(client, rigName);
         if ("content" in rig) return rig;
         // P21: no body sender — the daemon derives it from the transport header (X-OpenRig-Session,
@@ -697,7 +780,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 17. rig_chatroom_watch — a rig's recent chatroom history (the name is kept; it reads history, it doesn't stream)
-  server.tool(
+  if (offered("rig_chatroom_watch")) server.tool(
     "rig_chatroom_watch",
     "Read a rig's recent chatroom messages: the most recent ones (default 20), oldest first, optionally one topic's or one sender's. It returns what is there now and doesn't wait for new messages.",
     {
@@ -709,6 +792,8 @@ export function createMcpServer(client: DaemonClient): McpServer {
     READ_ONLY,
     async ({ rigName, topic, sender, limit }) => {
       try {
+        const denied = await rigOutOfScope(rigName);
+        if (denied) return denied;
         const rig = await chatRigId(client, rigName);
         if ("content" in rig) return rig;
         const params = new URLSearchParams({ limit: String(limit ?? 20) });
@@ -725,7 +810,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   // 18. rig_add — add a single member to an existing pod (the add_member
   // converge op). Agent parity for `rig add`: the ergonomics live ON the
   // converge interface, so every future reshape verb inherits this surface.
-  server.tool(
+  if (offered("rig_add")) server.tool(
     "rig_add",
     "Add a single member to an existing pod in a running rig (the add_member converge op). Identity-migration-free: mints a fresh seat, nothing existing re-keys.",
     {
@@ -765,7 +850,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   // DaemonClient, so the identity is configured once, where the server is set up.
 
   // 19. rig_queue_create — hand a task to a seat
-  server.tool(
+  if (offered("rig_queue_create")) server.tool(
     "rig_queue_create",
     "Hand a task to another seat as a durable queue item. Returns its qitemId: read the answer later with rig_queue_show. If the call times out, check rig_queue_show with the same qitemId before retrying; never retry with a new id. To ask for a revision of earlier work, name it in revises: the new item opens with 'Revision of <id>' and records it in its chainOfRecord.",
     {
@@ -780,12 +865,14 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
     ADDITIVE,
     async ({ destination, body, summary, tags, priority, tier, qitemId, revises }) => {
+      if (scope && !scope.session(destination)) return outOfScope(`Destination ${destination}`);
       // A revision carries its original's lineage as a handoff does: the original's chain, then the original.
       let lineage: { chainOfRecord: string[]; body: string } | undefined;
       if (revises) {
         try {
           const original = await client.get(`/api/queue/${encodeURIComponent(revises)}`);
           if (original.status >= 400) return mapResult(original);
+          if (scope && !scope.item(original.data)) return outOfScope(`Item ${revises}`);
           const prior = (original.data ?? {}) as { qitemId?: unknown; chainOfRecord?: unknown };
           const originalId = typeof prior.qitemId === "string" ? prior.qitemId : revises;
           const chain = Array.isArray(prior.chainOfRecord) ? prior.chainOfRecord.filter((link): link is string => typeof link === "string") : [];
@@ -810,7 +897,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 20. rig_queue_show — one item with its transitions: a delegated task's answer is its own record
-  server.tool(
+  if (offered("rig_queue_show")) server.tool(
     "rig_queue_show",
     "Read one queue item and its transitions. For a task you handed off, this is where its answer is: the state, the closure reason and target, the notes the assignee recorded, and evidenceRef when it names an artifact (read it with rig_artifact_read). When the item was handed on, successor names the next item (on another host: its id and host); follow it with rig_queue_show. null means none was found. A revision names the work it revises in chainOfRecord.",
     {
@@ -822,11 +909,13 @@ export function createMcpServer(client: DaemonClient): McpServer {
         const id = encodeURIComponent(qitemId);
         const item = await client.get(`/api/queue/${id}`);
         if (item.status >= 400) return mapResult(item);
+        if (scope && !scope.item(item.data)) return outOfScope(`Item ${qitemId}`);
         const transitions = await client.get(`/api/queue/${id}/transitions`);
         if (transitions.status >= 400) return mapResult(transitions);
         const row = (item.data ?? {}) as { state?: unknown; closureReason?: unknown; closureTarget?: unknown };
         const handedOn = row.state === "handed-off" || row.closureReason === "handed_off_to";
-        const successor = handedOn ? await successorOf(client, qitemId, row.closureTarget) : undefined;
+        let successor = handedOn ? await successorOf(client, qitemId, row.closureTarget) : undefined;
+        if (scope && successor && "destinationSession" in successor && !scope.session(successor.destinationSession)) successor = { unknown: true, code: "out_of_scope" };
         return mapResult({ status: 200, data: { item: item.data, transitions: transitions.data, ...(handedOn ? { successor } : {}) } }, undefined, { structured: true });
       } catch (err) {
         return caught(err);
@@ -835,7 +924,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 21. rig_queue_list — list queue items
-  server.tool(
+  if (offered("rig_queue_list")) server.tool(
     "rig_queue_list",
     "List queue items. owned: assigned to this seat. mine: this seat is the source or the destination. Without a scope, this seat's rig. Without state, open items only (all adds closed ones); a state filter returns exactly those states, closed ones included. since finds work updated after a time; handedOffFrom finds where a handed-off item went.",
     {
@@ -853,10 +942,16 @@ export function createMcpServer(client: DaemonClient): McpServer {
     async ({ owned, mine, destination, source, state, all, since, handedOffFrom, limit }) => {
       try {
         const params = new URLSearchParams();
-        const sessionName = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
+        const sessionName = seatOf();
         if ((owned || mine) && !sessionName) {
           const message = "owned and mine need this server's seat: set OPENRIG_SESSION_NAME in its env, or filter by destination or source";
           return errorResult(JSON.stringify({ ok: false, error: message }), "seat_required", message);
+        }
+        if (scope) {
+          if (destination && !owned && !scope.session(destination)) return outOfScope(`Destination ${destination}`);
+          if (source && !scope.session(source)) return outOfScope(`Source ${source}`);
+          const defaultRig = sessionName?.split("@")[1];
+          if (!owned && !mine && !destination && !source && !handedOffFrom && !scope.rig(defaultRig)) return outOfScope(`Rig ${defaultRig ?? "(none)"}`);
         }
         if (owned) params.set("destinationSession", sessionName!);
         else if (mine) params.set("as", sessionName!);
@@ -876,6 +971,8 @@ export function createMcpServer(client: DaemonClient): McpServer {
           const message = `The daemon didn't apply ${ignored}, so this list isn't filtered by it; it needs a newer daemon.`;
           return errorResult(JSON.stringify({ ok: false, error: message }), "filter_unsupported", message);
         }
+        // An authenticated caller sees only the rows in its scope, whatever the filters matched.
+        if (scope && res.status < 400 && Array.isArray(res.data)) return mapResult({ ...res, data: res.data.filter((row) => scope.item(row)) }, undefined, { structured: true });
         return mapResult(res, undefined, { structured: true });
       } catch (err) {
         return caught(err);
@@ -884,13 +981,15 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 22. rig_queue_claim — take an item assigned to this seat
-  server.tool(
+  if (offered("rig_queue_claim")) server.tool(
     "rig_queue_claim",
     "Claim a queue item assigned to this seat before working on it.",
     { qitemId: z.string().describe("The queue item to claim") },
     DESTRUCTIVE,
     async ({ qitemId }) => {
       try {
+        const denied = await itemOutOfScope(qitemId);
+        if (denied) return denied;
         return mapResult(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/claim`, {}), undefined, { structured: true });
       } catch (err) {
         return caught(err);
@@ -899,7 +998,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 23. rig_queue_update — record progress, block, or close with the answer
-  server.tool(
+  if (offered("rig_queue_update")) server.tool(
     "rig_queue_update",
     "Update a queue item: add a note, block it, close it, or reopen a closed one. To answer a task, close it with state done, a closure reason and the answer in resolution, which the item keeps; note records why this transition happened.",
     {
@@ -918,6 +1017,8 @@ export function createMcpServer(client: DaemonClient): McpServer {
     DESTRUCTIVE,
     async ({ qitemId, state, closureReason, closureTarget, note, resolution, reopen, summary, evidenceRef, blockedOn, wakeAfterSeconds }) => {
       try {
+        const denied = await itemOutOfScope(qitemId);
+        if (denied) return denied;
         return mapResult(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
           state, closureReason, closureTarget, summary, evidenceRef, blockedOn, wakeAfterSeconds, transitionNote: note, resolution, reopen,
         }), undefined, { structured: true });
@@ -928,7 +1029,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 24. rig_telemetry_events — one bounded page of event metadata, the page `rig telemetry events` reads
-  server.tool(
+  if (offered("rig_telemetry_events")) server.tool(
     "rig_telemetry_events",
     "Read one bounded page of event metadata: seq, rig, node, type and time, never payloads. Without a cursor it starts at the newest event and returns no rows; start retained reads the retained past instead. Continue with page.nextCursor and the same filters. coverage.gaps names any history it could not read, including a daemon restart, after which the old cursor can't continue.",
     {
@@ -963,22 +1064,24 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 26. rig_whoami — which seat this server acts as
-  server.tool(
+  if (offered("rig_whoami")) server.tool(
     "rig_whoami",
-    "Show which OpenRig seat this server acts as (OPENRIG_SESSION_NAME where it was configured): its rig, pod, peers and edges. This is the configured seat, not a verified caller.",
+    "Show which OpenRig seat this server acts as: its rig, pod, peers and edges, and caller: authenticated (a validated HTTP credential, with its principal) or declared (OPENRIG_SESSION_NAME where the server was configured, which nothing verifies).",
     {},
     READ_ONLY,
     async () => {
       try {
-        const seat = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
+        const seat = seatOf();
         if (!seat) {
-          const none = { ok: true, seat: null, message: "This server has no seat: OPENRIG_SESSION_NAME isn't set where it was configured, so its writes aren't attributed to a seat." };
+          const none = { ok: true, seat: null, caller, message: "This server has no seat: OPENRIG_SESSION_NAME isn't set where it was configured, so its writes aren't attributed to a seat." };
           return { content: [{ type: "text" as const, text: JSON.stringify(none) }], structuredContent: none };
         }
         const params = new URLSearchParams({ sessionName: seat, compact: "1" });
         const targetRepo = readOpenRigEnv("OPENRIG_TARGET_REPO", "RIGGED_TARGET_REPO")?.trim();
         if (targetRepo) params.set("targetRepo", targetRepo);
-        return mapResult(await client.get(`/api/whoami?${params.toString()}`), undefined, { structured: true });
+        const res = await client.get(`/api/whoami?${params.toString()}`);
+        if (res.status >= 400) return mapResult(res);
+        return mapResult({ ...res, data: { ...(res.data as Record<string, unknown>), caller } }, undefined, { structured: true });
       } catch (err) {
         return caught(err);
       }
@@ -986,7 +1089,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 27. rig_team — a rig's seats and its lead
-  server.tool(
+  if (offered("rig_team")) server.tool(
     "rig_team",
     "Show a rig's team: its lead, the rig's one delegates_to root (the seat that delegates to others and that nothing delegates to: the seat to delegate to), and each seat's pod, role, runtime, delegation (reportsTo, delegatesTo) and activity as the daemon reports it. Activity the daemon doesn't know reads unknown, never idle.",
     {
@@ -1000,6 +1103,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
         const id = encodeURIComponent(rig.id);
         const detail = await client.get(`/api/rigs/${id}`);
         if (detail.status >= 400) return mapResult(detail);
+        if (scope && !scope.rig(((detail.data ?? {}) as RigDetail).rig?.name)) return outOfScope(`Rig ${rigId}`);
         const nodes = await client.get(`/api/rigs/${id}/nodes`);
         if (nodes.status >= 400) return mapResult(nodes);
         return mapResult({ status: 200, data: teamView((detail.data ?? {}) as RigDetail, nodes.data) }, undefined, { structured: true });
@@ -1010,7 +1114,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 28. rig_slices — the work tree's slices, as summaries
-  server.tool(
+  if (offered("rig_slices")) server.tool(
     "rig_slices",
     "List the work tree's slices, most recently active first: name, mission, status, description and how many queue items name it. Paths and readiness detail are left out.",
     {
@@ -1033,7 +1137,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 29. rig_mission — one mission's status and slices
-  server.tool(
+  if (offered("rig_mission")) server.tool(
     "rig_mission",
     "Read one mission: its status and its slices as summaries.",
     {
@@ -1053,7 +1157,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 30. rig_context_pack — one context pack's files
-  server.tool(
+  if (offered("rig_context_pack")) server.tool(
     "rig_context_pack",
     "Show one context pack: its purpose and the files it declares (path, role, summary, estimated tokens), so a file can be read with rig_context_get as <pack>/<file>.",
     {
@@ -1076,7 +1180,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 31. rig_context_get — one context file or section, as rig context get reads it
-  server.tool(
+  if (offered("rig_context_get")) server.tool(
     "rig_context_get",
     `Read one context file or one section of it, as rig context get does: <pack>/<file>, or <pack>/<file>#<h2-slug>[/<h3-slug>]. Text over ${CONTEXT_TEXT_LIMIT} characters is cut (truncated: true); address a section to read the rest.`,
     {
@@ -1103,7 +1207,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 32. rig_artifact_read — a result's artifact, read through the daemon's shared roots
-  server.tool(
+  if (offered("rig_artifact_read")) server.tool(
     "rig_artifact_read",
     `Read a finished item's artifact (its evidenceRef), or a named file, through the daemon's shared roots (OPENRIG_FILES_ALLOWLIST), as text: at most ${CONTEXT_TEXT_LIMIT} characters from offset; nextOffset reads on. An artifact outside every shared root, a link, or an item with no evidenceRef comes back as available: false with the reason and the shared roots' names; nothing outside those roots is read.`,
     {
@@ -1120,6 +1224,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
           if (res.status >= 400) return mapResult(res);
           return mapResult({ status: 200, data: artifactView(source, (res.data ?? {}) as FileRead, offset ?? 0) }, undefined, { structured: true });
         };
+        if (scope && root && !scope.root(root)) return outOfScope(`Root ${root}`);
         if (!qitemId) {
           if (root && path) return await read("path", root, path);
           const message = "Name an item (qitemId), or a file (root and path).";
@@ -1127,10 +1232,11 @@ export function createMcpServer(client: DaemonClient): McpServer {
         }
         const item = await client.get(`/api/queue/${encodeURIComponent(qitemId)}`);
         if (item.status >= 400) return mapResult(item);
+        if (scope && !scope.item(item.data)) return outOfScope(`Item ${qitemId}`);
         const ref = ((item.data ?? {}) as { evidenceRef?: unknown }).evidenceRef;
         const rootsRes = await client.get("/api/files/roots");
         if (rootsRes.status >= 400) return mapResult(rootsRes);
-        const roots = ((rootsRes.data ?? {}) as { roots?: SharedRoot[] }).roots ?? [];
+        const roots = (((rootsRes.data ?? {}) as { roots?: SharedRoot[] }).roots ?? []).filter((entry) => !scope || scope.root(entry.name));
         const unavailable = (reason: string) => mapResult({ status: 200, data: {
           available: false, qitemId, reason, evidenceRef: typeof ref === "string" ? ref : null, roots: roots.map((entry) => entry.name),
         } }, undefined, { structured: true });
@@ -1150,7 +1256,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 33. rig_human_decision_room — before deciding a question asked of a person: the room their mode gives the team
-  server.tool(
+  if (offered("rig_human_decision_room")) server.tool(
     "rig_human_decision_room",
     "Before deciding a question you asked a person: the decision room of the mode they have on, in their own words (what the team may decide for them meanwhile, and what it may not), or none, with why. You judge whether your decision falls inside it; with none, the question stays theirs to answer.",
     {
@@ -1161,6 +1267,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
       try {
         const item = await client.get(`/api/queue/${encodeURIComponent(qitemId)}`);
         if (item.status >= 400) return mapResult(item);
+        if (scope && !scope.item(item.data)) return outOfScope(`Item ${qitemId}`);
         const row = (item.data ?? {}) as { destinationSession?: unknown; humanIntent?: unknown };
         // A person is addressed as <entityId>@external, the daemon's external session form; an update asks nothing.
         const person = typeof row.destinationSession === "string" ? /^([A-Za-z0-9._:-]+)@external$/.exec(row.destinationSession) : null;
@@ -1178,7 +1285,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   );
 
   // 34. rig_queue_decide — a decision made on a person's behalf, inside their decision room, beside their answers
-  server.tool(
+  if (offered("rig_queue_decide")) server.tool(
     "rig_queue_decide",
     "Record a decision you made on a person's behalf, on your own pending ask to them, inside the decision room of the mode they have on: read it first with rig_human_decision_room and pass its applicationId. It's recorded beside their answers, never as one, and the ask closes. The daemon refuses it when they have no room, their mode changed since you read it, the ask is a permission prompt or an approval gate, they've started answering, or another seat asked. This server never answers as the person.",
     {
@@ -1194,6 +1301,8 @@ export function createMcpServer(client: DaemonClient): McpServer {
     DESTRUCTIVE,
     async ({ qitemId, applicationId, choices, reason, reversible }) => {
       try {
+        const denied = await itemOutOfScope(qitemId);
+        if (denied) return denied;
         return mapResult(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/delegated-decision`, { applicationId, choices, reason, reversible }), undefined, { structured: true });
       } catch (err) {
         return caught(err);

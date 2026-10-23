@@ -352,7 +352,11 @@ the sections that were not read are `null`.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig mcp` | — | — |
-| `rig mcp serve` | — | `--port <port>` |
+| `rig mcp serve` | — | `--port <port>`<br>`--http`<br>`--bind <host:port>` |
+| `rig mcp token` | — | — |
+| `rig mcp token add <name>` | — | `--seat <session>`<br>`--rig <name...>`<br>`--root <name...>`<br>`--workspace`<br>`--owner` |
+| `rig mcp token list` | — | `--json` |
+| `rig mcp token revoke <name>` | — | — |
 
 ### acp
 

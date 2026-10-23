@@ -302,7 +302,8 @@ describe("MCP Server", () => {
       await setup({ get: getFn });
       const seated = await mcpClient.callTool({ name: "rig_whoami", arguments: {} });
       expect(getFn).toHaveBeenCalledWith("/api/whoami?sessionName=dev-impl%40my-rig&compact=1");
-      expect(seated.structuredContent).toEqual(identity);
+      // A local server's seat is declared (the env), not authenticated, and says so.
+      expect(seated.structuredContent).toEqual({ ...identity, caller: { authenticated: false, identity: "declared" } });
       await cleanup();
 
       vi.stubEnv("OPENRIG_SESSION_NAME", "");
@@ -310,7 +311,7 @@ describe("MCP Server", () => {
       await setup({ get: quietGet });
       const unseated = await mcpClient.callTool({ name: "rig_whoami", arguments: {} });
       expect(unseated.isError).toBeFalsy();
-      expect(unseated.structuredContent).toMatchObject({ ok: true, seat: null });
+      expect(unseated.structuredContent).toMatchObject({ ok: true, seat: null, caller: { authenticated: false } });
       expect(quietGet).not.toHaveBeenCalled();
       await cleanup();
     } finally {

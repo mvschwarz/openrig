@@ -75,6 +75,8 @@ describe("MCP operation table against the daemon", () => {
     const hints = Object.fromEntries(tools.map((tool) => [tool.name, tool.annotations]));
     for (const op of MCP_OPERATIONS) {
       expect(hints[op.tool], op.tool).toEqual(HINTS[op.effect]);
+      // Every tool says who an authenticated HTTP caller must be to be offered it.
+      expect(["work", "workspace", "owner"], op.tool).toContain(op.access);
     }
   });
 
