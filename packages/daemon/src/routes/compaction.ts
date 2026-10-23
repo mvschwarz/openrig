@@ -141,7 +141,9 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
     if (seat) enforcer.recoverSeat({ sessionName: session, cwd: seat.cwd, runtime: seat.runtime });
     const preparation = enforcer.getPreparationState(session);
     const stranded = enforcer.getStrandedCompaction(session);
+    const held = enforcer.getHeldRestore(session);
     return c.json({ ok: true, session, state: enforcer.getManualCompactionState(session), preparation,
+      ...(held ? { held } : {}),
       ...(preparation ? { compact: compactResultText(preparation.compact) } : {}),
       ...(preparation?.reason === "occupant_generation_unavailable"
         ? { guidance: manualReasonMessage(session, preparation.reason) } : {}),
@@ -170,7 +172,9 @@ function manualOutcomeMessage(sessionName: string, outcome: Extract<ManualCompac
   const effect = prep.delivery === "delivered" ? "Preparation was sent" : "Preparation may have reached the seat (delivery is unconfirmed)";
   const detail = outcome.reason === "preparation_incomplete"
     ? manualReasonMessage(sessionName, outcome.reason)
-    : `/compact was not confirmed (${outcome.reason}). This attempt is disarmed.`;
+    : outcome.restoreOwed
+      ? `/compact was not confirmed (${outcome.reason}) and is never sent again. Its restore steps follow in case it ran; the restore request tells the seat to say so and skip if it didn't compact.`
+      : `/compact was not confirmed (${outcome.reason}). This attempt is disarmed.`;
   return `${effect} for '${sessionName}' (attempt ${prep.attemptId}). ${detail} Its map remains at ${prep.mapPath} if written. Inspect rig compact ${shellQuote(sessionName)} --state before an explicit retry.`;
 }
 

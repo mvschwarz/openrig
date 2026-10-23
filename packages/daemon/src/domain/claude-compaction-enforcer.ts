@@ -37,6 +37,10 @@ import * as path from "node:path";
  *   second one (`recoverAfterRestart`). A prompt or /compact is marked in
  *   flight at its write, so a restart never sends it again. A restart between
  *   a post-compact stage's send and its record can send that one stage again.
+ * - A /compact whose outcome is unknown owes its restore steps, with or
+ *   without a restart. Its text may wait unsubmitted in the input box, where
+ *   any Enter would submit it, so each step goes only into an empty box and
+ *   is held, visibly, while the box holds text or can't be read.
  * - Definite pre-write prep failures retry at most three times. Uncertain
  *   delivery never replays. Unfinished preparation stops visibly until an
  *   explicit retry; it cannot arm a delayed compact after its deadline.
@@ -117,7 +121,9 @@ export interface ManualCompactionStatus {
 
 export type ManualCompactionOutcome =
   | { triggered: true; stage: "compact-sent" }
-  | { triggered: false; stage: "skipped-or-failed"; reason: string; preparation?: Pick<PreparationState, "attemptId" | "mapPath" | "delivery" | "compact"> };
+  | { triggered: false; stage: "skipped-or-failed"; reason: string; preparation?: Pick<PreparationState, "attemptId" | "mapPath" | "delivery" | "compact">;
+      /** /compact's result was lost, so its restore steps follow in case it ran. */
+      restoreOwed?: true };
 
 export type EnforcerSkipReason =
   | "terminal_policy_refused"
@@ -143,7 +149,8 @@ export type EnforcerSkipReason =
   | "occupant_generation_unavailable"
   | "no_pending_stage"
   | "waiting_for_idle"
-  | "pane_unknown_protected";
+  | "pane_unknown_protected"
+  | "input_box_not_empty";
 
 /** Out-of-contract thresholds (0, 101, NaN, a non-integer) are treated as disabled. */
 export function isValidThresholdPercent(value: unknown): boolean {
@@ -484,6 +491,8 @@ interface CompactionRecord {
   operatorInitiated?: boolean;
   /** The /compact send had begun (its map published) when this was written; its outcome isn't known. */
   compactSending?: true;
+  /** The owed restore steps follow a /compact whose outcome is unknown, so each goes only into an empty input box. */
+  uncertainCompact?: true;
   updatedAt: number;
 }
 
@@ -503,6 +512,7 @@ function readCompactionRecord(file: string): CompactionRecord | null {
       && (r.deadlineAt === null || Number.isFinite(r.deadlineAt)) && Number.isInteger(r.sends) && r.sends >= 0 && r.sends <= PREP_SEND_ATTEMPTS_MAX
       && text(r.mapPath) && text(r.marker) && text(r.compactInstruction) && textOrNull(r.preparationRoot) && Number.isFinite(r.updatedAt)
       && (r.operatorInitiated === undefined || typeof r.operatorInitiated === "boolean") && (r.compactSending === undefined || r.compactSending === true)
+      && (r.uncertainCompact === undefined || r.uncertainCompact === true)
       && (carry === undefined || (typeof carry === "object" && carry !== null && textOrNull(carry.mapPath) && textOrNull(carry.compactInstruction)
         && (carry.skipMap === undefined || (text(carry.skipMap?.mapPath) && text(carry.skipMap?.marker)))));
     return valid ? r : null;
@@ -547,6 +557,11 @@ export class ClaudeCompactionEnforcer {
   private readonly recovered = new Set<string>();
   /** Open records too old to resume: the seat's restore may still be owed. */
   private readonly stranded = new Map<string, CompactionRecord>();
+  /** Seats whose owed restore steps follow a /compact whose outcome is unknown: its text may wait unsubmitted in the input
+   *  box, where any Enter would submit it, so each step goes only into an empty box. */
+  private readonly afterUncertainCompact = new Set<string>();
+  /** Seats whose owed restore step is held because the input box isn't empty, with what the box read. */
+  private readonly heldForInput = new Map<string, string>();
   private readonly restartRecoveryWindowMs: number;
   private readonly daemonInstance: string;
   private readonly resolveOccupantGeneration?: (sessionName: string) => string | null;
@@ -620,10 +635,16 @@ export class ClaudeCompactionEnforcer {
    */
   observedCompaction(sessionName: string): ObservedCompaction | null {
     const owed = this.pendingPostCompactRestore.get(sessionName);
+    const held = this.getHeldRestore(sessionName);
+    if (held) return { stage: owed === "compliance_prompt" ? "restoring" : owed === "restore_prompt" ? "compacted" : "compacting", detail: held.detail };
     if (owed === "compliance_prompt") return { stage: "restoring", detail: "mid-restore: the restore request was sent and the post-restore audit is still owed" };
     if (owed === "restore_prompt") return { stage: "compacted", detail: "compacted, with its restore not yet requested" };
-    if (owed === "turn_boundary") return { stage: "compacting", detail: "being compacted: /compact was submitted and the post-compaction steps haven't started" };
     const attempt = this.pendingPreCompactPrep.get(sessionName);
+    if (owed === "turn_boundary") {
+      return { stage: "compacting", detail: attempt?.compact === "uncertain"
+        ? "possibly being compacted: /compact may have been submitted (its result was lost) and the post-compaction steps haven't started"
+        : "being compacted: /compact was submitted and the post-compaction steps haven't started" };
+    }
     if (attempt?.status === "sending" || attempt?.status === "waiting") {
       return { stage: "preparing", detail: `preparing for a managed compaction: /compact hasn't been sent yet${attempt.supersedes
         ? `; it replaces a compaction from before an OpenRig restart whose restore steps may still have been owed (map ${attempt.supersedes.mapPath})` : ""}` };
@@ -649,6 +670,14 @@ export class ClaudeCompactionEnforcer {
     let preparationRoot: string | null = null;
     try { preparationRoot = this.settingsStore.resolveClaudeCompactionPolicy().preparationRoot || null; } catch { /* default roots */ }
     this.recoverAfterRestart(seat, preparationRoot);
+  }
+
+  /** An owed restore step held because the seat's input box isn't empty (see `afterUncertainCompact`), or null. */
+  getHeldRestore(sessionName: string): { stage: PendingPostCompactStage; inputBox: string; detail: string } | null {
+    const stage = this.pendingPostCompactRestore.get(sessionName);
+    const inputBox = this.heldForInput.get(sessionName);
+    if (!stage || inputBox === undefined) return null;
+    return { stage, inputBox, detail: `held: OpenRig owes this seat its restore steps after a /compact whose result was lost, and waits while its input box isn't empty (it reads ${inputBox}). The seat may have /compact text waiting, which any Enter would submit, so check the pane. A seat whose own status line keeps the box unreadable stays held.` };
   }
 
   /** An open record from before a restart that was too old to resume, while no later attempt has replaced it. */
@@ -759,6 +788,18 @@ export class ClaudeCompactionEnforcer {
         return { triggered: false, reason: "stale_generation" };
       }
     }
+    // After a /compact whose outcome is unknown, its text may still wait unsubmitted in the input box, and this step's Enter
+    // would submit it. So each step goes only into a box holding nothing typed (a harness suggestion isn't input); while it
+    // holds text or can't be read, the step waits for the next poll, and the notice and --state say why.
+    if (this.afterUncertainCompact.has(input.sessionName)) {
+      const box = await this.inputBoxStatus(input.sessionName);
+      if (!isCurrent()) return { triggered: false, reason: "preparation_stopped" };
+      if (box !== "empty" && box !== "likely-suggestion") {
+        this.heldForInput.set(input.sessionName, box);
+        return { triggered: false, reason: "input_box_not_empty" };
+      }
+      this.heldForInput.delete(input.sessionName);
+    }
     if (pendingStage === "turn_boundary") {
       const boundary = await this.sessionTransport.send(
         input.sessionName,
@@ -836,8 +877,12 @@ export class ClaudeCompactionEnforcer {
       this.pendingPostCompactRestore.delete(input.sessionName);
       this.persistStage(input.sessionName, "done");
       this.records.delete(input.sessionName);
+      this.afterUncertainCompact.delete(input.sessionName);
+      this.heldForInput.delete(input.sessionName);
       this.restoreCarry.delete(input.sessionName);
-      if (this.pendingPreCompactPrep.get(input.sessionName)?.status === "compact-sent") this.pendingPreCompactPrep.delete(input.sessionName);
+      // The attempt is finished, including one stopped after a lost /compact result whose restore this was.
+      const finished = this.pendingPreCompactPrep.get(input.sessionName);
+      if (finished?.status === "compact-sent" || finished?.compact === "uncertain") this.pendingPreCompactPrep.delete(input.sessionName);
       this.pendingStageGeneration.delete(input.sessionName); // GHOST-STAGE (b): stage completed → drop its gen
       this.postCompactRestoreCooldownUntil.set(
         input.sessionName,
@@ -1001,7 +1046,7 @@ export class ClaudeCompactionEnforcer {
     if (policyRefusal) return this.recordManualFailure(input.sessionName, policyRefusal);
     const attempt = this.beginPreparation(input, "manual", opts.skipMap === true, actor, requestedAt);
     if (attempt.status === "stopped") return this.recordManualFailure(input.sessionName, attempt.reason ?? "occupant_generation_unavailable");
-    const failed = (reason: string): ManualCompactionOutcome => {
+    const failed = (reason: string): Extract<ManualCompactionOutcome, { triggered: false }> => {
       // A cancelled request may settle after an explicit retry. Its receipt must
       // not stop or overwrite the successor attempt's state.
       if (this.pendingPreCompactPrep.get(input.sessionName) === attempt) {
@@ -1038,7 +1083,11 @@ export class ClaudeCompactionEnforcer {
     }
     const compact = await this.sendPreparedCompact(input, attempt, opts.skipMap === true);
     if (!compact.ok) {
-      return failed(compact.reason ?? "send_failed");
+      const outcome = failed(compact.reason ?? "send_failed");
+      // A /compact whose result was lost still owes its restore steps, and this request authorizes them.
+      if (!this.pendingPostCompactRestore.has(input.sessionName) || this.pendingPreCompactPrep.get(input.sessionName) !== attempt) return outcome;
+      this.setManualStage(input.sessionName, "compact-sent", outcome.reason, opts.operatorInitiated === true);
+      return { ...outcome, restoreOwed: true };
     }
     this.setManualStage(input.sessionName, "compact-sent", undefined, opts.operatorInitiated === true);
     return { triggered: true, stage: "compact-sent" };
@@ -1241,21 +1290,43 @@ export class ClaudeCompactionEnforcer {
       }
       // A compact may have been sent despite a lost result. Never replay automatically.
       attempt.compact = notSent ? "not_sent" : "uncertain";
+      // It may have run, so its restore steps are owed, as after a submitted /compact; the restore request tells a seat that
+      // didn't compact to say so and skip. Not when the attempt was cancelled, stopped or replaced during the send.
+      if (!notSent && !attempt.controller.signal.aborted && this.pendingPreCompactPrep.get(input.sessionName) === attempt) {
+        this.owePostCompactRestore(input.sessionName, attempt, carry);
+        this.afterUncertainCompact.add(input.sessionName);
+        this.persist(input.sessionName, attempt.attemptId, { restoreCarry: carry, operatorInitiated, uncertainCompact: true });
+      }
       const reason = attempt.reason ?? result.reason ?? "delivery_uncertain";
       this.stopPreparation(input.sessionName, reason, attempt);
       return { ok: false, reason };
     }
     attempt.compact = "submitted_unconfirmed";
     if (attempt.controller.signal.aborted) return { ok: false, reason: attempt.reason };
-    if (carry) this.restoreCarry.set(input.sessionName, carry);
-    else this.restoreCarry.delete(input.sessionName);
     attempt.status = "compact-sent";
-    this.lastAutoCompactAt.set(input.sessionName, this.now());
-    this.triggeredAboveThreshold.add(input.sessionName);
-    this.pendingPostCompactRestore.set(input.sessionName, "turn_boundary");
-    this.pendingStageGeneration.set(input.sessionName, attempt.occupantGeneration);
+    this.owePostCompactRestore(input.sessionName, attempt, carry);
     this.persist(input.sessionName, attempt.attemptId, { phase: "turn_boundary", restoreCarry: carry, operatorInitiated });
     return { ok: true };
+  }
+
+  /** What the seat's input box holds now, as `rig capture --json` reads it (`empty`, `likely-suggestion`, `typed`, ...), or
+   *  why it couldn't be read. Never throws. */
+  private async inputBoxStatus(sessionName: string): Promise<string> {
+    try {
+      const capture = await this.sessionTransport.capture(sessionName, { inputBox: true });
+      return capture.inputBox?.status ?? capture.reason ?? "unknown";
+    } catch { return "unknown"; }
+  }
+
+  /** /compact was submitted, or may have been: its restore steps are owed next, and no new automatic compaction starts
+   *  until they finish. */
+  private owePostCompactRestore(sessionName: string, attempt: PreparationAttempt, carry: RestoreCarry | undefined): void {
+    if (carry) this.restoreCarry.set(sessionName, carry);
+    else this.restoreCarry.delete(sessionName);
+    this.lastAutoCompactAt.set(sessionName, this.now());
+    this.triggeredAboveThreshold.add(sessionName);
+    this.pendingPostCompactRestore.set(sessionName, "turn_boundary");
+    this.pendingStageGeneration.set(sessionName, attempt.occupantGeneration);
   }
 
   /** The map the restore request names. With --skip-map: a map the seat completed at the attempt path
@@ -1358,8 +1429,9 @@ export class ClaudeCompactionEnforcer {
     if (record.occupantGeneration !== null && live !== null && live !== record.occupantGeneration) return;
     const stale = this.now() - record.updatedAt > this.restartRecoveryWindowMs;
     // A /compact whose send had begun, or whose outcome was lost, is never sent again; its restore steps are owed in case it
-    // ran. The restore request tells a seat that didn't compact to say so and skip.
+    // ran, each only into an empty input box. The restore request tells a seat that didn't compact to say so and skip.
     const phase = (record.phase === "preparing" && record.compactSending) || record.phase === "compact_uncertain" ? "turn_boundary" : record.phase;
+    const inFlight = phase !== record.phase;
     if (phase === "preparing") {
       if (stale) return; // Its preparation deadline passed long ago; a fresh attempt may begin.
       this.records.set(session, newest);
@@ -1380,6 +1452,10 @@ export class ClaudeCompactionEnforcer {
     this.records.set(session, newest);
     this.pendingPostCompactRestore.set(session, phase);
     this.pendingStageGeneration.set(session, record.occupantGeneration);
+    if (inFlight || record.uncertainCompact) {
+      this.afterUncertainCompact.add(session);
+      this.persist(session, record.attemptId, { uncertainCompact: true });
+    }
     if (record.restoreCarry) this.restoreCarry.set(session, record.restoreCarry);
     // As after a /compact this daemon sent: no new automatic compaction until the owed stages finish.
     this.lastAutoCompactAt.set(session, this.now());
@@ -1413,6 +1489,8 @@ export class ClaudeCompactionEnforcer {
       this.pendingPostCompactRestore.delete(session);
       this.pendingStageGeneration.delete(session);
       this.restoreCarry.delete(session);
+      this.afterUncertainCompact.delete(session);
+      this.heldForInput.delete(session);
       this.setManualStage(session, "cancelled", "compaction_cancelled");
     } else {
       this.stopPreparation(session, "preparation_cancelled");
@@ -1449,6 +1527,8 @@ export class ClaudeCompactionEnforcer {
     this.persistStage(sessionName, "ended");
     this.records.delete(sessionName);
     this.stranded.delete(sessionName);
+    this.afterUncertainCompact.delete(sessionName);
+    this.heldForInput.delete(sessionName);
     this.lastAutoCompactAt.delete(sessionName);
     this.postCompactRestoreCooldownUntil.delete(sessionName);
     this.triggeredAboveThreshold.delete(sessionName);

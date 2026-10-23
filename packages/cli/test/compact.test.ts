@@ -16,7 +16,7 @@ it('state and cancel reach an authenticated daemon; a missing bearer stays rejec
  vi.stubEnv('OPENRIG_TERMINAL_BEARER_TOKEN','synthetic-compaction-test-token');
  const app=new Hono();const records:{path:string;status:number;authorized:boolean}[]=[];
  app.use('*',async(c,next)=>{
-  c.set('compactionEnforcer' as never,{getManualCompactionState:()=>null,getPreparationState:()=>({status:'waiting'}),getStrandedCompaction:()=>null,cancelPreparation:()=>({status:'stopped'})} as never);
+  c.set('compactionEnforcer' as never,{getManualCompactionState:()=>null,getPreparationState:()=>({status:'waiting'}),getStrandedCompaction:()=>null,getHeldRestore:()=>null,cancelPreparation:()=>({status:'stopped'})} as never);
   c.set('sessionTransport' as never,{resolveSessions:async()=>({ok:true,sessions:['writer@demo']})} as never);await next();
  });
  app.route('/api/compaction',compactionRoutes({bearerToken:'synthetic-compaction-test-token'}));

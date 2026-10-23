@@ -199,17 +199,19 @@ it('late completion of cancelled manual request cannot overwrite an explicit ret
  expect(f.e.getManualCompactionState(seat)?.stage).toBe('compact-sent');
 });
 
-it('uncertain compact receipt never replays an already submitted command',async()=>{
+it('uncertain compact receipt never replays an already submitted command, and its restore steps follow into an empty box',async()=>{
  const f=fixture();await f.e.maybeAutoCompact(input);stageMap(f);
  const send=f.transport.send.bind(f.transport);
  vi.spyOn(f.transport,'send').mockImplementationOnce(async(...args)=>{await send(...args);throw new Error('receipt lost after input');});
+ vi.spyOn(f.transport,'capture').mockResolvedValue({ok:true,sessionName:seat,inputBox:{status:'empty'}} as any);
  await f.e.maybeAutoCompact(input);f.advance(60_001);
  await f.e.maybeAutoCompact(input);await f.e.maybeAutoCompact(input);
- expect(compacts(f)).toHaveLength(1);expect(f.e.getPreparationState(seat)?.status).toBe('stopped');
+ // What the seat receives: the turn boundary and its restore request, never a second /compact.
+ expect(compacts(f)).toHaveLength(1);expect(f.writes.some(t=>t.includes('restoring this Claude session after compaction'))).toBe(true);
  // Past the retry cooldown too: a /compact that may have run is never followed by a fresh preparation.
- const stopped=f.e.getPreparationState(seat)!.attemptId;const sent=f.writes.length;
+ const prompts=f.writes.filter(t=>t.includes('Write a restore map.')).length;
  f.advance(AUTO_RETRY_AFTER_STOP_MS_DEFAULT+1);await f.e.maybeAutoCompact(input);await f.e.maybeAutoCompact(input);
- expect(compacts(f)).toHaveLength(1);expect(f.writes).toHaveLength(sent);expect(f.e.getPreparationState(seat)?.attemptId).toBe(stopped);
+ expect(compacts(f)).toHaveLength(1);expect(f.writes.filter(t=>t.includes('Write a restore map.'))).toHaveLength(prompts);
 });
 
 it('skip-map cannot bypass typing guard or a changed occupant',async()=>{

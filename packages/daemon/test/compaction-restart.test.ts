@@ -20,8 +20,9 @@ function fixture(){
  let clock=10000,generation='generation-one';
  const db={prepare:()=>({get:()=>undefined,all:()=>[]})} as any;
  const writes:string[]=[];
- // onWrite sees each text as it is written; busy holds the seat non-idle; failCompact loses a /compact's result.
- const hooks:{onWrite?:(text:string)=>void;busy?:boolean;failCompact?:boolean}={};
+ // onWrite sees each text as it is written; busy holds the seat non-idle; failCompact loses a /compact's result; box is
+ // what the seat's input box reads.
+ const hooks:{onWrite?:(text:string)=>void;busy?:boolean;failCompact?:boolean;box?:string}={};
  const policy={preparationRoot:'',enabled:true,thresholdPercent:80,preCompactInstruction:'Write a restore map.',compactInstruction:'',messageInline:'',messageFilePath:'',postRestoreAuditInstruction:''};
  const tmux={probeSession:vi.fn(async()=>({state:'present'})),sendKeys:vi.fn(async()=>({ok:true})),sendText:vi.fn(async(_:string,text:string)=>{
   writes.push(text);hooks.onWrite?.(text);
@@ -34,6 +35,7 @@ function fixture(){
  (transport as any).claudeDeliveryObservation=async()=>({state:'unknown',detail:'injected process observation'});
  (transport as any).classifySendReadiness=async()=>({state:hooks.busy?'running':'idle',reason:'fixture',evidenceSource:'fixture'});
  (transport as any).diagnoseProducerLink=async()=>'fixture';
+ (transport as any).capture=async()=>({ok:true,sessionName:seat,content:'',inputBox:{status:hooks.box??'empty'}});
  const settings={resolveClaudeCompactionPolicy:()=>policy};
  // A daemon process: a new one shares the instance home, the seat and the clock, and nothing held in memory.
  const daemon=(instance=randomUUID())=>new ClaudeCompactionEnforcer(settings as any,transport,{openrigHome:home,daemonInstance:instance,now:()=>clock,sleep:async(ms)=>{clock+=ms;},resolveOccupantGeneration:()=>generation});
@@ -54,6 +56,17 @@ function completeMap(e:ClaudeCompactionEnforcer){
 /** What the context monitor does for a seat whose sample is stale (an idle seat after /compact). */
 async function staleTick(e:ClaudeCompactionEnforcer){
  if(e.hasPendingPostCompactStage(seat,{cwd:null,runtime:'claude-code'}))await e.drainPendingPostCompactStage({sessionName:seat,runtime:'claude-code'});
+}
+/** What rig compact --state returns for the seat, read through the route. */
+async function stateOf(e:ClaudeCompactionEnforcer){
+ const app=new Hono();
+ app.use('*',async(c,next)=>{
+  c.set('compactionEnforcer' as never,e);
+  c.set('db' as never,{prepare:()=>({get:()=>({node_id:'node-one',runtime:'claude-code',cwd:null})})});
+  await next();
+ });
+ app.route('/api/compaction',compactionRoutes());
+ return(await app.request(`/api/compaction/state?session=${encodeURIComponent(seat)}`)).json();
 }
 async function compactedBy(f:F){
  const e=f.daemon();await e.maybeAutoCompact(high);completeMap(e);await e.maybeAutoCompact(high);
@@ -131,6 +144,53 @@ it('a restart after a /compact whose result was lost owes its restore steps, and
  expect(boundaries(f)).toHaveLength(1);expect(restores(f)).toHaveLength(1);expect(compacts(f)).toHaveLength(1);
 });
 
+it('without a restart, a /compact whose result was lost gets its restore steps, and the stopped attempt is then cleared',async()=>{
+ const f=fixture();const e=f.daemon();await e.maybeAutoCompact(high);completeMap(e);
+ f.hooks.failCompact=true;await e.maybeAutoCompact(high);f.hooks.failCompact=false;
+ expect(e.getPreparationState(seat)).toMatchObject({status:'stopped',compact:'uncertain'});
+ for(let i=0;i<3;i++)await staleTick(e);
+ // What the seat receives: the restore steps, with no second /compact.
+ expect(boundaries(f)).toHaveLength(1);expect(restores(f)).toHaveLength(1);expect(audits(f)).toHaveLength(1);
+ expect(compacts(f)).toHaveLength(1);
+ // Finished, it no longer holds the seat's automatic compaction off.
+ expect(e.getPreparationState(seat)).toBeNull();
+});
+
+it("without a restart, a manual /compact whose result was lost gets its restore on the operator's authority, with automatic compaction off",async()=>{
+ const f=fixture();f.policy.enabled=false;const e=f.daemon();
+ f.hooks.onWrite=(text)=>{if(text.includes('Write a restore map.'))completeMap(e);};
+ f.hooks.failCompact=true;const outcome=await e.triggerManualCompact({...high,cwd:null},{operatorInitiated:true});f.hooks.failCompact=false;
+ for(let i=0;i<3;i++)await staleTick(e);
+ expect(boundaries(f)).toHaveLength(1);expect(restores(f)).toHaveLength(1);expect(compacts(f)).toHaveLength(1);
+ expect(outcome).toMatchObject({triggered:false,restoreOwed:true});
+});
+
+it('without a restart, the restore steps after a lost /compact result wait while the input box holds text, and say so',async()=>{
+ const f=fixture();const e=f.daemon();await e.maybeAutoCompact(high);completeMap(e);
+ f.hooks.failCompact=true;await e.maybeAutoCompact(high);f.hooks.failCompact=false;
+ f.hooks.box='typed';for(let i=0;i<3;i++)await staleTick(e);
+ // What the seat receives first: nothing whose Enter could submit the /compact text that may wait in its box.
+ expect(boundaries(f)).toHaveLength(0);
+ expect(e.observedCompaction(seat)?.detail).toContain('may have /compact text waiting');
+ expect(e.getHeldRestore(seat)).toMatchObject({stage:'turn_boundary',inputBox:'typed'});
+ f.hooks.box='empty';for(let i=0;i<3;i++)await staleTick(e);
+ expect(boundaries(f)).toHaveLength(1);expect(restores(f)).toHaveLength(1);expect(e.getHeldRestore(seat)).toBeNull();
+});
+
+it('after a restart, the restore steps after an in-flight /compact wait while the input box is unreadable, and rig compact --state says so',async()=>{
+ const f=fixture();const first=f.daemon();await first.maybeAutoCompact(high);
+ const attempt=completeMap(first);renameSync(attempt.mapPath+'.tmp',attempt.mapPath);
+ const record=recordFile(first);
+ writeFileSync(record,JSON.stringify({...JSON.parse(readFileSync(record,'utf8')),compactSending:true}));
+ f.hooks.box='unrecognized';
+ const restarted=f.daemon();for(let i=0;i<2;i++)await staleTick(restarted);
+ expect(boundaries(f)).toHaveLength(0);
+ expect((await stateOf(restarted)).held).toMatchObject({stage:'turn_boundary',inputBox:'unrecognized',detail:expect.stringContaining('check the pane')});
+ // A harness suggestion in the box isn't input.
+ f.hooks.box='likely-suggestion';await staleTick(restarted);
+ expect(boundaries(f)).toHaveLength(1);
+});
+
 it('a restart after an automatic /compact waited for a busy seat and sent nothing owes no restore, and the map compacts once',async()=>{
  const f=fixture();const first=f.daemon();await first.maybeAutoCompact(high);completeMap(first);
  f.hooks.busy=true;expect(await first.maybeAutoCompact(high)).toMatchObject({reason:'waiting_for_idle'});f.hooks.busy=false;
@@ -170,14 +230,7 @@ it('an open record older than the recovery window is not resumed: rig compact --
  const f=fixture();await compactedBy(f);f.advance(RESTART_RECOVERY_WINDOW_MS_DEFAULT+1);
  const restarted=f.daemon();
  // A first look at the seat after the restart, before any poll.
- const app=new Hono();
- app.use('*',async(c,next)=>{
-  c.set('compactionEnforcer' as never,restarted);
-  c.set('db' as never,{prepare:()=>({get:()=>({node_id:'node-one',runtime:'claude-code',cwd:null})})});
-  await next();
- });
- app.route('/api/compaction',compactionRoutes());
- const state=await(await app.request(`/api/compaction/state?session=${encodeURIComponent(seat)}`)).json();
+ const state=await stateOf(restarted);
  await staleTick(restarted);
  expect(boundaries(f)).toHaveLength(0);
  expect(state.stranded).toMatchObject({phase:'turn_boundary',detail:expect.stringContaining('restore request naming mapPath')});
