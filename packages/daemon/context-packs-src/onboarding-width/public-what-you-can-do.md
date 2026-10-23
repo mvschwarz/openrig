@@ -11,7 +11,7 @@ not know exists.** So the point of what follows is not skill. It is recognition:
 lands, something rhymes, and you go check instead of building.
 
 Eighty-eight top-level verbs ship (capability canon refreshed through
-`capability-delta-v0.6.14`). This marker describes the pack's teaching, not publication or live
+`capability-delta-v0.7.0`). This marker describes the pack's teaching, not publication or live
 adoption. Read this once for shape, and let it make you suspicious that a thing already exists.
 Model-divergence proclamations are live product (trust them; pins use canonical
 model IDs).
@@ -418,7 +418,14 @@ not have to tear one down to change it, and you rarely have to start from nothin
   before launch; and a Claude seat slow to draw its screen ends `attention_required` with its pane
   kept, not failed. An `env:` block on the rig or a member in `rig.yaml` reaches every seat and
   carries into restores and handovers, and `rig up <spec> --env KEY=VALUE` adds one for a single
-  launch; the values aren't secret (they're stored and exported).
+  launch; the values aren't secret (they're stored and exported). **New seats don't inherit the
+  tmux server's global environment** (`terminal.inherit_tmux_environment`, default false), so a
+  value set with `tmux set-environment -g` no longer reaches them. A new seat starts from the
+  daemon's values for the names in tmux's `update-environment`, a fixed set (`LANG`, `LC_*`, `TZ`,
+  `TMPDIR`, `XDG_*`, `CLAUDE_CONFIG_DIR`), the launch environment (`PATH`, `HOME`, `USER`,
+  `CODEX_HOME`, `OPENRIG_*` and the allowlisted provider auth variables) and its own `env`. Put an
+  account or key in the seat's `env` or `rig up --env`, or set the key to true. Running seats are
+  untouched, and `rig setup` warns when it sees a custom tmux configuration.
 - **`rig community-harness list`**: list installed community-harness presets and declared limits
   (not tested by OpenRig; launch-only).
 - **`rig down`** — stop a rig's seats and take it out of the running set. It ends the agents'
@@ -435,6 +442,10 @@ not have to tear one down to change it, and you rarely have to start from nothin
   exactly one existing seat. It uses no resume, fork, rebuild, snapshot, or restore packet;
   siblings and durable work stay put, and unmanaged ambiguity refuses. With `--stop`, a seat with a
   still-live older session is refused before anything is stopped; `--plan` previews it.
+- **A new seat's first startup message is OpenRig's identity context, not a task.** A seat with
+  nothing else to start with (no role file, no restore, no obligations) is asked to run
+  `rig whoami --json`, reply with its identity and readiness, and wait for an assignment.
+  Repository history and tool descriptions aren't assignments.
 - **`rig seat restart <seat> --keep-conversation --reason <why>`** — restart one Codex seat in its
   own pane on the same conversation, so it starts again on whatever account its Codex home now
   holds; it doesn't switch accounts itself. It refuses with nothing stopped unless the seat is a
@@ -451,6 +462,12 @@ not have to tear one down to change it, and you rarely have to start from nothin
 - **`rig add`** / **`rig expand`** — graft one more member, or a whole new pod, onto a rig that is
   already running. `rig add`, `rig grow` and `rig remove` take the rig's name or ID; a name two active rigs share is refused
   with `rig_ambiguous` and the candidates. `rig grow --new-pod` and `rig expand` are one ingress; choose by input shape.
+- **A rig's name works wherever a rig is named.** `archive`, `unarchive`, `release`, `shrink`,
+  `expand`, `snapshot` (and `snapshot list`), `export`, `restore --rig` and `restore status --rig`
+  take its name, as `launch`, `add`, `grow` and `remove` do, and so do the MCP tools `rig_down`,
+  `rig_snapshot_create`, `rig_snapshot_list`, `rig_restore`, `rig_rig_nodes`, `rig_add` and
+  `rig_bind`. A name two rigs share returns `rig_ambiguous` with the candidates. Don't look the id
+  up first.
 - **`rig remove`** / **`rig shrink`** — take a seat, or an entire pod, out of a running topology.
   If it holds active work, pass `--fallback <live-seat>` to reroute before mutation; without a
   valid fallback the command refuses rather than strand the rows.
@@ -497,6 +514,11 @@ version, from checking the environment to a useful report to the OpenRig team.
   `daemon-shutdown.json` and log when completion is incomplete or unverified. No target is a
   distinct no-op, and a timeout never proves down. Use command help for exact limits and recovery.
   `/healthz` reports the daemon's effective UID as `euid`, beside `pid`.
+- **A busy daemon isn't a down one.** The CLI refuses only when the daemon is confirmed down
+  (stopped, stale, a refused probe), its probe is blocked, or it's a sibling home; a busy daemon
+  gets the real request. A write that then times out says its outcome is **unknown**: check its
+  effect before any retry, and don't restart the daemon because it didn't answer. `rig up` and
+  `rig start` no longer start a second daemon over a busy one.
 - **`rig doctor`** — is the *installation* wired up correctly, or are you chasing a bug that is
   really a broken install. It checks Claude and Codex installs, and a login or configured provider
   credential, the way setup does; it fails for a harness the person doesn't use, which they can
@@ -545,6 +567,11 @@ version, from checking the environment to a useful report to the OpenRig team.
   continue from the receipt. There is no `rig upgrade` verb, and `rig down` is not part of a
   continuity-preserving upgrade. After an upgrade, `rig context get reference/whats-new.md` says
   what behaves differently for an agent; the skill's last step reads it and tells the person.
+  Startup keeps a copy of every OpenRig plugin or skill file it replaces: before the refresh writes
+  the new copies, it saves each replaced file under `$OPENRIG_HOME/backups/managed-refresh/` and
+  logs `preserved previous contents of <file> at <copy> before managed refresh`, whether or not you
+  edited it (about 22 copies on the first start after a stock upgrade, so a copy doesn't mean
+  anything was changed). An edit you made isn't lost: reapply it from the copy.
 - **A seat's `compaction_strategy` is declared, not improvised at the wall.** Pair a threshold-
   managed seat with the `context-usage-threshold` watchdog above so continuity is arranged while
   the seat can still act.
@@ -614,6 +641,18 @@ version, from checking the environment to a useful report to the OpenRig team.
   hooks; a seat can give a slow refocus more time with `OPENRIG_REFOCUS_BUDGET_MS` (4500 to 52000).
   The refocus work packet stays off by default for Claude Code and Codex;
   `OPENRIG_REFOCUS_WORK_PACKET=1` turns it on, with each field bounded.
+- **Codex seats get `openrig-core` too: its refocus after a compaction and its skills, with no
+  first-launch review stop.** OpenRig installs the plugin into Codex on boot and on a fresh launch.
+  On a first install, with no existing registration or cache, it trusts the plugin's six hooks by
+  their exact definition, after checking the packaged, vendored and installed copies byte for byte.
+  A fresh Codex seat starts ready unaided, and a 0.6.14 Codex home upgrades and resumes ready.
+  Activity still comes only from the four inline activity hooks, so events aren't duplicated. Your
+  choice stands: an install you left untrusted or declined stays in Codex's own review through
+  restart and upgrade, a plugin or hook you disabled stays disabled, and nothing outside those six
+  hooks is trusted. Limits: the files are checked only when trust is granted, so a later edit to a
+  cached hook keeps that trust, as with any hook trusted in Codex; the trust covers that
+  `CODEX_HOME`, so your own Codex sessions there load the plugin too, and its hooks do nothing
+  outside an OpenRig seat; adding your own Codex hook can trigger a re-review of one OpenRig hook.
 - **Know what compaction costs before you reach for it.** On some runtimes what comes back has
   enough context left to believe it knows everything and not enough to actually know anything — and
   **the compacted agent is the only one who knows it happened**, while every other seat keeps
@@ -836,6 +875,31 @@ reaching them is ordinary work rather than an escalation.
   to the external participant, not a separate outbound route.
 - **`rig gateway human add`** — register a person and their connector binding. Registration or
   connector changes do not themselves authorize a message.
+- **`rig gateway human quiet set <id> --daily HH:MM-HH:MM`** (or `--until <HH:MM|ISO>`, with
+  `--tz`) — hold a person's routine asks while they're away, and post each one once when they're
+  back. While quiet, a routine ask is held: nothing posts and nobody is mentioned, the row notes
+  `delivery-decision: quiet-hold …`, and its `waiting.nextBackstop` reads
+  `quiet-release:<windowId>`. Asks tagged `escalation` or `wake-escalation` still go through, and if
+  quiet hours can't be read, nothing posts to that person. `end` ("I'm back"; a daily rule stays for
+  tomorrow), `clear` and `show` manage it. Reach for it when a person says routine asks can wait;
+  don't build a hold yourself.
+- **`rig gateway human mode save <id> <name>` / `apply` / `current` / `end` / `account`** — a
+  person's agreed modes ("asleep", "out of office"). `save` takes `--availability
+  available|focus|away|off`, `--expected-back`, `--decision-room "<their words>"`, `--exclude`,
+  `--quiet`, `--tz` and `--account <where>`. `apply <id> <name> --until <time>` ends the mode on
+  time and files a `mode-scheduled-end` row for the kernel operator, falling back to the seat that
+  applied it. The account says, from records only, which effects ended, were kept or failed: never
+  tell the person "back to normal" while one reads `kept`, `pending` or `failed`. `rig mode`, the
+  rig's own posture, is a different thing.
+- **`rig gateway human mode room <id>`**, then **`rig gateway human mode decide <qitemId>
+  --application <id> --reason "<why>" (--reversible|--irreversible) [--choose q=opt…]`** — decide
+  your own pending ask on a person's behalf, inside the decision room their mode gives. It's
+  recorded as delegated, never as their answer, and the ask closes. Only the agent that asked can
+  decide. A permission prompt or an approval gate is never decided this way (`permission-prompt`);
+  other refusals include `no-active-mode`, `mode-changed`, `no-decision-room`,
+  `not-the-asking-agent` and `person-answering`. A late Slack click names who decided, and under
+  which mode. Check the room before you ask a person who has a mode on: the ask is created first,
+  so without quiet hours it can post before you decide it.
 - **During local-daemon outage, remote HTTP sender attribution still uses the originating
   instance's durable identity.** A selected remote or forwarded endpoint never becomes the origin.
   Missing local identity remains explicitly unknown; transport success is not operation success.

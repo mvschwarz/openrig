@@ -8,10 +8,10 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
-## [0.7.0] (unreleased)
+## [0.7.0] - 2026-10-23
 
-0.7.0 isn't published yet. This entry is its accepted release notes; when it
-ships, it will be built from the commit tagged `v0.7.0`.
+Published 2026-10-23 as `@openrig/cli@0.7.0`, built from the commit tagged
+`v0.7.0` (`c99450f3`). This entry is its release notes.
 
 0.7.0 makes a running team easier to live with. A person can set quiet hours
 and modes ("asleep", "out of office") so routine questions wait until they're
