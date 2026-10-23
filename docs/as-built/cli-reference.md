@@ -736,6 +736,8 @@ Only Claude and Codex tenures can be woken.
 | `rig provider signals` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
 | `rig provider precheck` | — | `--seat <s>` **required**<br>`--to-account <a>` **required**<br>`--json` |
 | `rig provider switch` | — | `--seat <s>` **required**<br>`--to-account <a>` **required**<br>`--force-unsafe`<br>`--json` |
+| `rig provider moves` | — | `--seat <seat>`<br>`--limit <n>`<br>`--json` |
+| `rig provider moves report` | — | `--file <path>` **required**<br>`--to <seat>` **required**<br>`--follows <qitemId>`<br>`--evidence-ref <ref>`<br>`--json` |
 
 ### usage
 
