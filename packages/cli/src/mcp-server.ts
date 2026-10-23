@@ -146,11 +146,12 @@ function mapResult(
   const text = JSON.stringify(res.data);
   const data = (res.data ?? {}) as Record<string, unknown>;
   // The daemon answers errors two ways: { error: <prose>, code } (restore, up), and the queue's { error: <code>,
-  // message: <prose> }, whose missing-item reads send the code alone. A snake_case error is the code.
+  // message: <prose> }, whose missing-item reads send the code alone. So an error beside a message is the code, and so
+  // is a snake_case error on its own.
   const error = typeof data.error === "string" ? data.error : undefined;
-  const errorIsCode = error !== undefined && /^[a-z][a-z0-9]*(_[a-z0-9]+)+$/.test(error);
-  const daemonCode = typeof data.code === "string" ? data.code : errorIsCode ? error : undefined;
   const prose = typeof data.message === "string" ? data.message : undefined;
+  const errorIsCode = error !== undefined && (prose !== undefined || /^[a-z][a-z0-9]*(_[a-z0-9]+)+$/.test(error));
+  const daemonCode = typeof data.code === "string" ? data.code : errorIsCode ? error : undefined;
   const said = (fallback: string): string => (errorIsCode ? prose ?? error : error ?? prose) ?? fallback;
 
   // Level 1: HTTP error

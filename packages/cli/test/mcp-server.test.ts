@@ -314,6 +314,7 @@ describe("MCP Server", () => {
       if (path === "/api/queue/qitem-1") return { status: 200, data: { qitemId: "qitem-1", state: "done" } };
       if (path === "/api/queue/qitem-1/transitions") return { status: 200, data: [{ state: "done" }] };
       if (path === "/api/queue/qitem-x") return { status: 404, data: missing };
+      if (path === "/api/queue/qitem-y") return { status: 409, data: { error: "not-found", message: "No pending decision has that id." } };
       if (path.startsWith("/api/queue/list")) return { status: 200, data: [{ qitemId: "qitem-1" }] };
       return { status: 404, data: {} };
     });
@@ -329,6 +330,9 @@ describe("MCP Server", () => {
     expect(notFound.isError).toBe(true);
     expect((notFound.content as Array<{ text: string }>)[0]!.text).toBe(JSON.stringify(missing));
     expect(notFound.structuredContent).toEqual({ ok: false, code: "qitem_not_found", message: "qitem_not_found", status: 404 });
+    // An error beside a message is the route's code, whatever its spelling, and the message stays readable.
+    const paired = await mcpClient.callTool({ name: "rig_queue_show", arguments: { qitemId: "qitem-y" } });
+    expect(paired.structuredContent).toEqual({ ok: false, code: "not-found", message: "No pending decision has that id.", status: 409 });
 
     const unreachable = await mcpClient.callTool({ name: "rig_queue_claim", arguments: { qitemId: "qitem-1" } });
     expect((unreachable.content as Array<{ text: string }>)[0]!.text).toBe("Cannot reach the OpenRig daemon at http://127.0.0.1:9999");
