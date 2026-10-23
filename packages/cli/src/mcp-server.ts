@@ -3,7 +3,7 @@ import { z } from "zod";
 import { randomBytes } from "node:crypto";
 import nodePath from "node:path";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
-import { terminalAuthHeaders, type DaemonClient, type DaemonResponse } from "./client.js";
+import { DaemonConnectionError, DaemonTimeoutError, terminalAuthHeaders, type DaemonClient, type DaemonResponse } from "./client.js";
 import { readOpenRigEnv } from "./openrig-compat.js";
 import { resolveRigHandle } from "./rig-handle.js";
 import { CLI_VERSION } from "./version.js";
@@ -14,7 +14,36 @@ const WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS = 5_000;
 type TextResult = {
   content: Array<{ type: "text"; text: string }>;
   isError?: true;
+  structuredContent?: Record<string, unknown>;
 };
+
+/** The one error shape every tool's error result carries in structuredContent; its text stays as it always was. ok is
+ *  false, code is stable (the daemon's own when it sends one), message is readable, and status is the HTTP status when
+ *  there was one. */
+function errorResult(text: string, code: string, message: string, extra: Record<string, unknown> = {}): TextResult {
+  return { content: [{ type: "text", text }], isError: true, structuredContent: { ok: false, code, message, ...extra } };
+}
+
+/** A request that threw (the daemon unreachable, a timeout): its message as the text, as before, with a code. */
+function caught(err: unknown): TextResult {
+  const message = (err as Error).message;
+  const code = err instanceof DaemonTimeoutError ? "daemon_timeout"
+    : err instanceof DaemonConnectionError ? "daemon_unreachable"
+      : typeof (err as { code?: unknown }).code === "string" ? (err as { code: string }).code
+        : "request_failed";
+  return errorResult(message, code, message);
+}
+
+function rigNotFound(handle: string): TextResult {
+  const message = `Rig '${handle}' not found: no rig has that name or id`;
+  return errorResult(JSON.stringify({ error: message }), "rig_not_found", message);
+}
+
+/** structuredContent is an object, so a list comes back as { items }. */
+function structured(data: unknown): Record<string, unknown> {
+  if (data && typeof data === "object" && !Array.isArray(data)) return data as Record<string, unknown>;
+  return Array.isArray(data) ? { items: data } : { value: data };
+}
 
 /**
  * The rig id for a tool's rig argument, resolved as the rig CLI commands resolve it: an id, or a name one
@@ -26,7 +55,7 @@ async function rigIdFor(client: DaemonClient, handle: string): Promise<{ id: str
   const resolution = await resolveRigHandle(client, handle);
   if (resolution.kind === "ambiguous") {
     const message = `'${handle}' matches ${resolution.ids.length} rigs. Nothing was done; pass one of these ids instead.`;
-    return { content: [{ type: "text", text: JSON.stringify({ ok: false, code: "rig_ambiguous", message, candidates: resolution.ids }) }], isError: true };
+    return errorResult(JSON.stringify({ ok: false, code: "rig_ambiguous", message, candidates: resolution.ids }), "rig_ambiguous", message, { candidates: resolution.ids });
   }
   if (resolution.kind === "resolved") return { id: resolution.id, known: true, resolved: true };
   return { id: handle, known: resolution.kind === "passthrough", resolved: false };
@@ -39,7 +68,7 @@ async function chatRigId(client: DaemonClient, handle: string): Promise<{ id: st
   if ("content" in rig) return rig;
   if (!rig.resolved) {
     const error = rig.known ? `Rig '${handle}' could not be checked: the rig list couldn't be read` : `Rig '${handle}' not found: no rig has that name or id`;
-    return { content: [{ type: "text", text: JSON.stringify({ error }) }], isError: true };
+    return errorResult(JSON.stringify({ error }), rig.known ? "rig_list_unavailable" : "rig_not_found", error);
   }
   return rig;
 }
@@ -61,6 +90,46 @@ const READ_ONLY: ToolAnnotations = { readOnlyHint: true };
 const ADDITIVE: ToolAnnotations = { readOnlyHint: false, destructiveHint: false };
 const DESTRUCTIVE: ToolAnnotations = { readOnlyHint: false, destructiveHint: true };
 
+/** What each tool calls and what it does, kept beside the registrations. The MCP contract tests check that it names every
+ *  registered tool, that each tool's annotations match its effect, and that each route is mounted in the daemon. Tools that
+ *  take a rig name also read GET /api/rigs/summary to resolve it. `next` is the tool that follows the result. */
+export const MCP_OPERATIONS: ReadonlyArray<{ tool: string; routes: readonly string[]; effect: "read" | "additive" | "destructive"; next?: string }> = [
+  { tool: "rig_up", routes: ["POST /api/up"], effect: "destructive" },
+  { tool: "rig_down", routes: ["POST /api/down"], effect: "destructive" },
+  { tool: "rig_ps", routes: ["GET /api/ps"], effect: "read" },
+  { tool: "rig_status", routes: ["GET /healthz"], effect: "read" },
+  { tool: "rig_snapshot_create", routes: ["POST /api/rigs/:rigId/snapshots"], effect: "additive" },
+  { tool: "rig_snapshot_list", routes: ["GET /api/rigs/:rigId/snapshots"], effect: "read" },
+  { tool: "rig_restore", routes: ["POST /api/rigs/:rigId/restore/:snapshotId"], effect: "destructive", next: "rig_restore_status" },
+  { tool: "rig_restore_status", routes: ["GET /api/rigs/:rigId/restore/status/:attemptId"], effect: "read" },
+  { tool: "rig_discover", routes: ["POST /api/discovery/scan"], effect: "destructive" },
+  { tool: "rig_bind", routes: ["POST /api/discovery/:id/bind"], effect: "destructive" },
+  { tool: "rig_bundle_inspect", routes: ["POST /api/bundles/inspect"], effect: "read" },
+  { tool: "rig_agent_validate", routes: ["POST /api/agents/validate"], effect: "read" },
+  { tool: "rig_rig_validate", routes: ["POST /api/rigs/import/validate"], effect: "read" },
+  { tool: "rig_rig_nodes", routes: ["GET /api/rigs/:rigId/nodes"], effect: "read" },
+  { tool: "rig_send", routes: ["POST /api/transport/send"], effect: "destructive" },
+  { tool: "rig_capture", routes: ["POST /api/transport/capture"], effect: "read" },
+  { tool: "rig_chatroom_send", routes: ["POST /api/rigs/:rigId/chat/send"], effect: "additive" },
+  { tool: "rig_chatroom_watch", routes: ["GET /api/rigs/:rigId/chat/history"], effect: "read" },
+  { tool: "rig_add", routes: ["POST /api/rigs/:rigId/pods/:podNamespace/members"], effect: "additive" },
+  { tool: "rig_queue_create", routes: ["POST /api/queue/create"], effect: "additive", next: "rig_queue_show" },
+  { tool: "rig_queue_show", routes: ["GET /api/queue/:qitemId", "GET /api/queue/:qitemId/transitions"], effect: "read" },
+  { tool: "rig_queue_list", routes: ["GET /api/queue/list"], effect: "read" },
+  { tool: "rig_queue_claim", routes: ["POST /api/queue/:qitemId/claim"], effect: "destructive" },
+  { tool: "rig_queue_update", routes: ["POST /api/queue/:qitemId/update"], effect: "destructive" },
+  { tool: "rig_telemetry_events", routes: ["GET /api/telemetry/v1/events"], effect: "read" },
+  { tool: "rig_whoami", routes: ["GET /api/whoami"], effect: "read" },
+];
+
+// Short guidance a client may show the model (the server's MCP instructions).
+const INSTRUCTIONS = [
+  "This server reaches an OpenRig team as one seat: the one named by OPENRIG_SESSION_NAME where the server was configured (rig_whoami shows it). The daemon attributes this server's writes to that seat.",
+  "To hand work to a seat, use rig_queue_create and keep its qitemId; read the answer later with rig_queue_show. Queue items are durable: they outlive this conversation and this server.",
+  "Tools marked read-only change nothing. A seat whose activity is unknown is not idle, and an accepted request (a restore's attemptId) is not a finished one.",
+  "A question reserved for a person is theirs to answer: don't answer it on their behalf.",
+].join("\n");
+
 /**
  * Maps a DaemonResponse to MCP tool result.
  * Three error levels: HTTP status, in-body errors, and structural failure fields.
@@ -71,27 +140,31 @@ const DESTRUCTIVE: ToolAnnotations = { readOnlyHint: false, destructiveHint: tru
 function mapResult(
   res: DaemonResponse<unknown>,
   structuralCheck?: (data: Record<string, unknown>) => boolean,
+  opts: { structured?: boolean; structuralCode?: string } = {},
 ): TextResult {
   const text = JSON.stringify(res.data);
+  const data = (res.data ?? {}) as Record<string, unknown>;
+  const daemonCode = typeof data.code === "string" ? data.code : undefined;
+  const said = (fallback: string): string => typeof data.error === "string" ? data.error
+    : typeof data.message === "string" ? data.message : fallback;
 
   // Level 1: HTTP error
   if (res.status >= 400) {
-    return { content: [{ type: "text", text }], isError: true };
+    return errorResult(text, daemonCode ?? `http_${res.status}`, said(`the daemon answered ${res.status}`), { status: res.status });
   }
-
-  const data = res.data as Record<string, unknown>;
 
   // Level 2: In-body error/errors fields
   if (data.error || (Array.isArray(data.errors) && data.errors.length > 0)) {
-    return { content: [{ type: "text", text }], isError: true };
+    const first = Array.isArray(data.errors) ? data.errors[0] : undefined;
+    return errorResult(text, daemonCode ?? "request_failed", said(typeof first === "string" ? first : JSON.stringify(first ?? "the request reported an error")));
   }
 
   // Level 3: Tool-specific structural failure
   if (structuralCheck && structuralCheck(data)) {
-    return { content: [{ type: "text", text }], isError: true };
+    return errorResult(text, daemonCode ?? opts.structuralCode ?? "operation_incomplete", said("the operation did not complete"));
   }
 
-  return { content: [{ type: "text", text }] };
+  return opts.structured ? { content: [{ type: "text", text }], structuredContent: structured(res.data) } : { content: [{ type: "text", text }] };
 }
 
 /**
@@ -103,7 +176,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   const server = new McpServer({
     name: "openrig",
     version: CLI_VERSION,
-  });
+  }, { instructions: INSTRUCTIONS });
 
   // 1. rig_up — launch from a spec, bundle or topology, or restore an existing rig by name
   server.tool(
@@ -133,7 +206,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
         );
         return mapResult(res);
       } catch (err) {
-        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+        return caught(err);
       }
     },
   );
@@ -161,7 +234,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
         });
         return mapResult(res);
       } catch (err) {
-        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+        return caught(err);
       }
     },
   );
@@ -177,7 +250,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
         const res = await client.get("/api/ps");
         return mapResult(res);
       } catch (err) {
-        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+        return caught(err);
       }
     },
   );
@@ -193,7 +266,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
         const res = await client.get("/healthz");
         return mapResult(res);
       } catch (err) {
-        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+        return caught(err);
       }
     },
   );
@@ -213,7 +286,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
         const res = await client.post(`/api/rigs/${encodeURIComponent(rig.id)}/snapshots`, {});
         return mapResult(res);
       } catch (err) {
-        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+        return caught(err);
       }
     },
   );
@@ -234,11 +307,11 @@ export function createMcpServer(client: DaemonClient): McpServer {
         // The list answers [] for an id it has nothing under, so a handle no rig matches would read as a rig
         // with no snapshots. Snapshots kept under a removed rig's id still list.
         if (!rig.known && Array.isArray(res.data) && res.data.length === 0) {
-          return { content: [{ type: "text" as const, text: JSON.stringify({ error: `Rig '${rigId}' not found: no rig has that name or id` }) }], isError: true as const };
+          return rigNotFound(rigId);
         }
         return mapResult(res);
       } catch (err) {
-        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+        return caught(err);
       }
     },
   );
@@ -246,7 +319,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   // 7. rig_restore — restore from snapshot
   server.tool(
     "rig_restore",
-    "Restore a rig from a snapshot",
+    "Start restoring a rig from a snapshot. It answers at once with an attemptId while the restore runs in the background; follow the attempt with rig_restore_status.",
     {
       rigId: z.string().describe("Rig name or identifier"),
       snapshotId: z.string().describe("Snapshot identifier"),
@@ -259,7 +332,27 @@ export function createMcpServer(client: DaemonClient): McpServer {
         const res = await client.post(`/api/rigs/${encodeURIComponent(rig.id)}/restore/${encodeURIComponent(snapshotId)}`, {});
         return mapResult(res);
       } catch (err) {
-        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+        return caught(err);
+      }
+    },
+  );
+
+  // 7b. rig_restore_status — follow a restore attempt rig_restore started
+  server.tool(
+    "rig_restore_status",
+    "Read where a restore attempt stands: the receipt for the attemptId rig_restore returned. An attempt still running answers attempt_incomplete.",
+    {
+      rigId: z.string().describe("Rig name or identifier"),
+      attemptId: z.number().int().positive().describe("The attemptId rig_restore returned"),
+    },
+    READ_ONLY,
+    async ({ rigId, attemptId }) => {
+      try {
+        const rig = await rigIdFor(client, rigId);
+        if ("content" in rig) return rig;
+        return mapResult(await client.get(`/api/rigs/${encodeURIComponent(rig.id)}/restore/status/${attemptId}`), undefined, { structured: true });
+      } catch (err) {
+        return caught(err);
       }
     },
   );
@@ -275,7 +368,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
         const res = await client.post("/api/discovery/scan", {});
         return mapResult(res);
       } catch (err) {
-        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+        return caught(err);
       }
     },
   );
@@ -303,7 +396,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
         const res = await client.post(`/api/discovery/${encodeURIComponent(discoveryId)}/bind`, body);
         return mapResult(res);
       } catch (err) {
-        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+        return caught(err);
       }
     },
   );
@@ -325,9 +418,9 @@ export function createMcpServer(client: DaemonClient): McpServer {
           const integrity = data.integrityResult as { passed?: boolean } | undefined;
           if (integrity && integrity.passed === false) return true;
           return false;
-        });
+        }, { structuralCode: "bundle_integrity_failed" });
       } catch (err) {
-        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+        return caught(err);
       }
     },
   );
@@ -345,7 +438,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
         const res = await client.postText("/api/agents/validate", yaml);
         return mapResult(res);
       } catch (err) {
-        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+        return caught(err);
       }
     },
   );
@@ -363,7 +456,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
         const res = await client.postText("/api/rigs/import/validate", yaml);
         return mapResult(res);
       } catch (err) {
-        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+        return caught(err);
       }
     },
   );
@@ -383,7 +476,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
         const res = await client.get(`/api/rigs/${encodeURIComponent(rig.id)}/nodes`);
         return mapResult(res);
       } catch (err) {
-        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+        return caught(err);
       }
     },
   );
@@ -403,10 +496,8 @@ export function createMcpServer(client: DaemonClient): McpServer {
     async ({ session, text, verify, force, waitForIdleSeconds }) => {
       try {
         if (force && waitForIdleSeconds !== undefined) {
-          return {
-            content: [{ type: "text", text: JSON.stringify({ ok: false, error: "waitForIdleSeconds cannot be combined with force" }) }],
-            isError: true,
-          };
+          const message = "waitForIdleSeconds cannot be combined with force";
+          return errorResult(JSON.stringify({ ok: false, error: message }), "invalid_arguments", message);
         }
         const waitForIdleMs = waitForIdleSeconds === undefined ? undefined : Math.ceil(waitForIdleSeconds * 1000);
         const res = await client.post("/api/transport/send", {
@@ -418,7 +509,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
         }, transportRequestOptions(waitForIdleRequestOptions(waitForIdleMs)));
         return mapResult(res);
       } catch (err) {
-        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+        return caught(err);
       }
     },
   );
@@ -445,7 +536,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
         const res = await client.post("/api/transport/capture", body, transportRequestOptions());
         return mapResult(res);
       } catch (err) {
-        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+        return caught(err);
       }
     },
   );
@@ -470,7 +561,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
         });
         return mapResult(res);
       } catch (err) {
-        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+        return caught(err);
       }
     },
   );
@@ -496,7 +587,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
         const res = await client.get(`/api/rigs/${encodeURIComponent(rig.id)}/chat/history?${params.toString()}`);
         return mapResult(res);
       } catch (err) {
-        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+        return caught(err);
       }
     },
   );
@@ -532,9 +623,9 @@ export function createMcpServer(client: DaemonClient): McpServer {
         return mapResult(res, (data) => {
           const result = data["result"] as { node?: { status?: string } } | undefined;
           return result?.node?.status !== undefined && result.node.status !== "launched";
-        });
+        }, { structuralCode: "member_not_launched" });
       } catch (err) {
-        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+        return caught(err);
       }
     },
   );
@@ -563,9 +654,11 @@ export function createMcpServer(client: DaemonClient): McpServer {
         const res = await client.post("/api/queue/create", {
           qitemId: id, destinationSession: destination, body, summary, tags, priority, tier,
         });
-        return mapResult(res);
+        return mapResult(res, undefined, { structured: true });
       } catch (err) {
-        return { content: [{ type: "text" as const, text: `${(err as Error).message} The outcome is unknown: check rig_queue_show with qitemId ${id} before retrying, and retry only with that same qitemId.` }], isError: true as const };
+        const failure = caught(err);
+        const text = `${(err as Error).message} The outcome is unknown: check rig_queue_show with qitemId ${id} before retrying, and retry only with that same qitemId.`;
+        return { ...failure, content: [{ type: "text", text }], structuredContent: { ...failure.structuredContent, qitemId: id, outcome: "unknown" } };
       }
     },
   );
@@ -585,9 +678,9 @@ export function createMcpServer(client: DaemonClient): McpServer {
         if (item.status >= 400) return mapResult(item);
         const transitions = await client.get(`/api/queue/${id}/transitions`);
         if (transitions.status >= 400) return mapResult(transitions);
-        return mapResult({ status: 200, data: { item: item.data, transitions: transitions.data } });
+        return mapResult({ status: 200, data: { item: item.data, transitions: transitions.data } }, undefined, { structured: true });
       } catch (err) {
-        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+        return caught(err);
       }
     },
   );
@@ -611,7 +704,8 @@ export function createMcpServer(client: DaemonClient): McpServer {
         const params = new URLSearchParams();
         const sessionName = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
         if ((owned || mine) && !sessionName) {
-          return { content: [{ type: "text" as const, text: JSON.stringify({ ok: false, error: "owned and mine need this server's seat: set OPENRIG_SESSION_NAME in its env, or filter by destination or source" }) }], isError: true as const };
+          const message = "owned and mine need this server's seat: set OPENRIG_SESSION_NAME in its env, or filter by destination or source";
+          return errorResult(JSON.stringify({ ok: false, error: message }), "seat_required", message);
         }
         if (owned) params.set("destinationSession", sessionName!);
         else if (mine) params.set("as", sessionName!);
@@ -623,9 +717,9 @@ export function createMcpServer(client: DaemonClient): McpServer {
         if (source) params.set("sourceSession", source);
         if (state) params.set("state", state);
         params.set("limit", String(limit ?? 100));
-        return mapResult(await client.get(`/api/queue/list?${params.toString()}`));
+        return mapResult(await client.get(`/api/queue/list?${params.toString()}`), undefined, { structured: true });
       } catch (err) {
-        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+        return caught(err);
       }
     },
   );
@@ -638,9 +732,9 @@ export function createMcpServer(client: DaemonClient): McpServer {
     DESTRUCTIVE,
     async ({ qitemId }) => {
       try {
-        return mapResult(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/claim`, {}));
+        return mapResult(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/claim`, {}), undefined, { structured: true });
       } catch (err) {
-        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+        return caught(err);
       }
     },
   );
@@ -667,9 +761,9 @@ export function createMcpServer(client: DaemonClient): McpServer {
       try {
         return mapResult(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
           state, closureReason, closureTarget, summary, evidenceRef, blockedOn, wakeAfterSeconds, transitionNote: note, resolution, reopen,
-        }));
+        }), undefined, { structured: true });
       } catch (err) {
-        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+        return caught(err);
       }
     },
   );
@@ -694,7 +788,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
           if ("content" in rig) return rig;
           // The daemon filters by exact id and matches nothing for an unknown one, which would read as a quiet rig.
           if (!rig.known) {
-            return { content: [{ type: "text" as const, text: JSON.stringify({ error: `Rig '${rigId}' not found: no rig has that name or id` }) }], isError: true as const };
+            return rigNotFound(rigId);
           }
           params.set("rigId", rig.id);
         }
@@ -704,7 +798,30 @@ export function createMcpServer(client: DaemonClient): McpServer {
         if (limit !== undefined) params.set("limit", String(limit));
         return mapResult(await client.get(`/api/telemetry/v1/events?${params.toString()}`));
       } catch (err) {
-        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
+        return caught(err);
+      }
+    },
+  );
+
+  // 26. rig_whoami — which seat this server acts as
+  server.tool(
+    "rig_whoami",
+    "Show which OpenRig seat this server acts as (OPENRIG_SESSION_NAME where it was configured): its rig, pod, peers and edges. This is the configured seat, not a verified caller.",
+    {},
+    READ_ONLY,
+    async () => {
+      try {
+        const seat = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
+        if (!seat) {
+          const none = { ok: true, seat: null, message: "This server has no seat: OPENRIG_SESSION_NAME isn't set where it was configured, so its writes aren't attributed to a seat." };
+          return { content: [{ type: "text" as const, text: JSON.stringify(none) }], structuredContent: none };
+        }
+        const params = new URLSearchParams({ sessionName: seat, compact: "1" });
+        const targetRepo = readOpenRigEnv("OPENRIG_TARGET_REPO", "RIGGED_TARGET_REPO")?.trim();
+        if (targetRepo) params.set("targetRepo", targetRepo);
+        return mapResult(await client.get(`/api/whoami?${params.toString()}`), undefined, { structured: true });
+      } catch (err) {
+        return caught(err);
       }
     },
   );

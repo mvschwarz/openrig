@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createMcpServer } from "../src/mcp-server.js";
-import { DaemonClient, type DaemonResponse } from "../src/client.js";
+import { DaemonClient, DaemonConnectionError, type DaemonResponse } from "../src/client.js";
 
 function mockClient(overrides?: {
   get?: (path: string) => Promise<DaemonResponse>;
@@ -41,8 +41,8 @@ describe("MCP Server", () => {
     if (cleanup) await cleanup();
   });
 
-  // T1: MCP server lists all 24 tools: the original 18, the five queue tools and the telemetry events read
-  it("lists all 24 tools", async () => {
+  // T1: MCP server lists all 26 tools: the original 18, the five queue tools, the telemetry events read, restore status and whoami
+  it("lists all 26 tools", async () => {
     await setup();
     const result = await mcpClient.listTools();
     const names = result.tools.map((t) => t.name).sort();
@@ -63,6 +63,7 @@ describe("MCP Server", () => {
       "rig_queue_show",
       "rig_queue_update",
       "rig_restore",
+      "rig_restore_status",
       "rig_rig_nodes",
       "rig_rig_validate",
       "rig_send",
@@ -71,6 +72,7 @@ describe("MCP Server", () => {
       "rig_status",
       "rig_telemetry_events",
       "rig_up",
+      "rig_whoami",
     ]);
     await cleanup();
   });
@@ -221,7 +223,7 @@ describe("MCP Server", () => {
     await setup();
     const { tools } = await mcpClient.listTools();
     const reads = ["rig_agent_validate", "rig_bundle_inspect", "rig_capture", "rig_chatroom_watch", "rig_ps", "rig_queue_list", "rig_queue_show",
-      "rig_rig_nodes", "rig_rig_validate", "rig_snapshot_list", "rig_status", "rig_telemetry_events"];
+      "rig_restore_status", "rig_rig_nodes", "rig_rig_validate", "rig_snapshot_list", "rig_status", "rig_telemetry_events", "rig_whoami"];
     const additive = ["rig_add", "rig_chatroom_send", "rig_queue_create", "rig_snapshot_create"];
     // Discover refreshes and retires discovered facts; claim ends a blocked row's wait. Both change existing state.
     const destructive = ["rig_bind", "rig_discover", "rig_down", "rig_queue_claim", "rig_queue_update", "rig_restore", "rig_send", "rig_up"];
@@ -247,6 +249,95 @@ describe("MCP Server", () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it("rig_restore says it only starts the restore, and rig_restore_status follows the attempt", async () => {
+    const getFn = vi.fn(async (path: string) => {
+      if (path.startsWith("/api/rigs/summary")) return { status: 200, data: [{ id: "rig-1", name: "my-rig" }] };
+      if (path === "/api/rigs/rig-1/restore/status/7") return { status: 409, data: { error: "attempt 7 is still running", code: "attempt_incomplete" } };
+      if (path === "/api/rigs/rig-1/restore/status/8") return { status: 200, data: { ok: true, attemptId: 8, rigResult: "fully_restored" } };
+      return { status: 404, data: { error: "unexpected" } };
+    });
+    await setup({ get: getFn });
+    const { tools } = await mcpClient.listTools();
+    expect(tools.find((tool) => tool.name === "rig_restore")?.description).toContain("rig_restore_status");
+
+    const running = await mcpClient.callTool({ name: "rig_restore_status", arguments: { rigId: "my-rig", attemptId: 7 } });
+    expect(running.isError).toBe(true);
+    expect(running.structuredContent).toEqual({ ok: false, code: "attempt_incomplete", message: "attempt 7 is still running", status: 409 });
+
+    const done = await mcpClient.callTool({ name: "rig_restore_status", arguments: { rigId: "my-rig", attemptId: 8 } });
+    expect(done.isError).toBeFalsy();
+    expect(done.structuredContent).toEqual({ ok: true, attemptId: 8, rigResult: "fully_restored" });
+
+    const invalid = await mcpClient.callTool({ name: "rig_restore_status", arguments: { rigId: "my-rig", attemptId: 0 } });
+    expect(invalid.isError).toBe(true);
+    await cleanup();
+  });
+
+  it("rig_whoami reads the seat this server is configured as, and says plainly when there is none", async () => {
+    try {
+      vi.stubEnv("OPENRIG_SESSION_NAME", "dev-impl@my-rig");
+      vi.stubEnv("RIGGED_SESSION_NAME", "");
+      vi.stubEnv("OPENRIG_TARGET_REPO", "");
+      vi.stubEnv("RIGGED_TARGET_REPO", "");
+      const identity = { identity: { sessionName: "dev-impl@my-rig", rigName: "my-rig" }, peers: [] };
+      const getFn = vi.fn(async () => ({ status: 200, data: identity }));
+      await setup({ get: getFn });
+      const seated = await mcpClient.callTool({ name: "rig_whoami", arguments: {} });
+      expect(getFn).toHaveBeenCalledWith("/api/whoami?sessionName=dev-impl%40my-rig&compact=1");
+      expect(seated.structuredContent).toEqual(identity);
+      await cleanup();
+
+      vi.stubEnv("OPENRIG_SESSION_NAME", "");
+      const quietGet = vi.fn(async () => ({ status: 200, data: {} }));
+      await setup({ get: quietGet });
+      const unseated = await mcpClient.callTool({ name: "rig_whoami", arguments: {} });
+      expect(unseated.isError).toBeFalsy();
+      expect(unseated.structuredContent).toMatchObject({ ok: true, seat: null });
+      expect(quietGet).not.toHaveBeenCalled();
+      await cleanup();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("the queue tools return structured content; every error carries one shape and keeps its old text", async () => {
+    const missing = { error: "qitem qitem-x not found", code: "qitem_not_found" };
+    const getFn = vi.fn(async (path: string) => {
+      if (path === "/api/queue/qitem-1") return { status: 200, data: { qitemId: "qitem-1", state: "done" } };
+      if (path === "/api/queue/qitem-1/transitions") return { status: 200, data: [{ state: "done" }] };
+      if (path === "/api/queue/qitem-x") return { status: 404, data: missing };
+      if (path.startsWith("/api/queue/list")) return { status: 200, data: [{ qitemId: "qitem-1" }] };
+      return { status: 404, data: {} };
+    });
+    const postFn = vi.fn(async () => { throw new DaemonConnectionError("Cannot reach the OpenRig daemon at http://127.0.0.1:9999"); });
+    await setup({ get: getFn, post: postFn });
+
+    const shown = await mcpClient.callTool({ name: "rig_queue_show", arguments: { qitemId: "qitem-1" } });
+    expect(shown.structuredContent).toEqual({ item: { qitemId: "qitem-1", state: "done" }, transitions: [{ state: "done" }] });
+    const listed = await mcpClient.callTool({ name: "rig_queue_list", arguments: { destination: "dev-impl@my-rig" } });
+    expect(listed.structuredContent).toEqual({ items: [{ qitemId: "qitem-1" }] });
+
+    const notFound = await mcpClient.callTool({ name: "rig_queue_show", arguments: { qitemId: "qitem-x" } });
+    expect(notFound.isError).toBe(true);
+    expect((notFound.content as Array<{ text: string }>)[0]!.text).toBe(JSON.stringify(missing));
+    expect(notFound.structuredContent).toEqual({ ok: false, code: "qitem_not_found", message: "qitem qitem-x not found", status: 404 });
+
+    const unreachable = await mcpClient.callTool({ name: "rig_queue_claim", arguments: { qitemId: "qitem-1" } });
+    expect((unreachable.content as Array<{ text: string }>)[0]!.text).toBe("Cannot reach the OpenRig daemon at http://127.0.0.1:9999");
+    expect(unreachable.structuredContent).toEqual({ ok: false, code: "daemon_unreachable", message: "Cannot reach the OpenRig daemon at http://127.0.0.1:9999" });
+    await cleanup();
+  });
+
+  it("gives the client short instructions on the seat, durable delegation and reserved questions", async () => {
+    await setup();
+    const instructions = mcpClient.getInstructions() ?? "";
+    expect(instructions).toContain("OPENRIG_SESSION_NAME");
+    expect(instructions).toContain("rig_queue_create");
+    expect(instructions).toContain("not idle");
+    expect(instructions).toContain("reserved for a person");
+    await cleanup();
   });
 
   it("rig_down calls POST /api/down with correct params", async () => {
@@ -356,7 +447,7 @@ describe("MCP Server", () => {
 
     // Verify server is responsive
     const result = await mcpClient.listTools();
-    expect(result.tools.length).toBe(24);
+    expect(result.tools.length).toBe(26);
 
     // Clean disconnect
     await cleanup();
@@ -370,7 +461,7 @@ describe("MCP Server", () => {
     await client2.connect(ct2);
 
     const result2 = await client2.listTools();
-    expect(result2.tools.length).toBe(24);
+    expect(result2.tools.length).toBe(26);
 
     await client2.close();
     await server2.close();
