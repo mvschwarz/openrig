@@ -1,7 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { randomBytes } from "node:crypto";
-import fs from "node:fs";
 import nodePath from "node:path";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { DaemonConnectionError, DaemonTimeoutError, terminalAuthHeaders, type DaemonClient, type DaemonResponse } from "./client.js";
@@ -137,17 +136,13 @@ function sliceSummary(slice: SliceEntry): Record<string, unknown> {
 type SharedRoot = { name: string; path: string };
 type FileRead = { root?: string; path?: string; content?: string; binary?: boolean; size?: number; mtime?: string; truncated?: boolean; truncatedAtBytes?: number | null; totalBytes?: number };
 
-/** The shared root an absolute path falls under, and its path inside that root. The daemon's roots are canonical, so a
- *  path that doesn't match as given is tried again through this machine's realpath (a symlinked temp directory). The
+/** The shared root an absolute path falls under as written, and its path inside that root. The reference names a file
+ *  where the daemon runs, which may be another machine, so it's never resolved through this machine's filesystem; the
  *  daemon still checks containment itself when the file is read. */
 function underSharedRoot(roots: SharedRoot[], absolute: string): { root: string; path: string } | null {
-  const candidates = [absolute];
-  try { candidates.push(fs.realpathSync(absolute)); } catch { /* not on this machine: as given only */ }
-  for (const candidate of candidates) {
-    for (const root of roots) {
-      const inside = nodePath.relative(root.path, candidate);
-      if (inside && inside !== ".." && !inside.startsWith(`..${nodePath.sep}`) && !nodePath.isAbsolute(inside)) return { root: root.name, path: inside };
-    }
+  for (const root of roots) {
+    const inside = nodePath.relative(root.path, absolute);
+    if (inside && inside !== ".." && !inside.startsWith(`..${nodePath.sep}`) && !nodePath.isAbsolute(inside)) return { root: root.name, path: inside };
   }
   return null;
 }
@@ -785,7 +780,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
     ADDITIVE,
     async ({ destination, body, summary, tags, priority, tier, qitemId, revises }) => {
-      // A revision carries its original's lineage, as a workflow revision and a handoff do: the original's chain, then the original.
+      // A revision carries its original's lineage as a handoff does: the original's chain, then the original.
       let lineage: { chainOfRecord: string[]; body: string } | undefined;
       if (revises) {
         try {
@@ -1146,7 +1141,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
           return root ? await read("evidenceRef", root, ref) : unavailable("The evidenceRef is a relative path: name the shared root it's under (root).");
         }
         const shared = underSharedRoot(roots, ref);
-        if (!shared) return unavailable("The evidenceRef is outside every shared root, so it can't be read through this daemon.");
+        if (!shared) return unavailable("The evidenceRef is outside every shared root as the daemon lists them, so it isn't read. If it reaches a root through a link, read the file with root and path.");
         return await read("evidenceRef", shared.root, shared.path);
       } catch (err) {
         return caught(err);

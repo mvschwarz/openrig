@@ -37,14 +37,14 @@ describe("MCP queue tools on the daemon's queue routes", () => {
     migrate(db, ALL_MIGRATIONS);
     home = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-queue-"));
     process.env.OPENRIG_HOME = home;
-    // One shared root, canonical as the daemon resolves it at startup; tests name files by the temp path as given.
-    shared = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-shared-"));
+    // One shared root, canonical as the daemon resolves it at startup (a temp directory can sit behind a symlink).
+    shared = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mcp-shared-")));
     const inert = async () => ({ ok: false, error: "inert fixture" });
     const { app } = createTestApp(db, {
       appDeps: {
         sessionTransport: { resolveSessions: async () => ({ ok: false, code: "not_found", error: "inert fixture" }), send: inert, capture: inert, broadcast: inert } as never,
         queueRepo: new QueueRepository(db, new EventBus(db), { validateRig: () => true }),
-        filesAllowlist: [{ name: "proof", canonicalPath: fs.realpathSync(shared) }],
+        filesAllowlist: [{ name: "proof", canonicalPath: shared }],
       },
     });
     server = await new Promise<ServerType>((resolve) => {
@@ -179,7 +179,6 @@ describe("MCP queue tools on the daemon's queue routes", () => {
       return qitemId;
     };
 
-    // The assignee names the file by its path as written; the daemon's root is canonical.
     const read = await desk("rig_artifact_read", { qitemId: await finished(report) });
     expect(read.isError).toBe(false);
     expect(read.structured).toMatchObject({ available: true, source: "evidenceRef", root: "proof", path: "report.md", binary: false,
@@ -194,7 +193,14 @@ describe("MCP queue tools on the daemon's queue routes", () => {
 
     const outside = path.join(home, "notes.md");
     fs.writeFileSync(outside, "not shared");
-    for (const [evidenceRef, reason] of [[outside, "outside every shared root"], ["https://example.com/report", "a link"], [undefined, "no evidenceRef"]] as const) {
+    // The reference names a file where the daemon runs, which may be another machine: a link on this machine that leads into
+    // the root says nothing about what the same path is there, so it isn't followed.
+    fs.mkdirSync(path.join(shared, "old"));
+    fs.writeFileSync(path.join(shared, "old", "report.md"), "not shared");
+    fs.symlinkSync(path.join(shared, "old"), path.join(home, "alias"));
+    const linked = path.join(home, "alias", "report.md");
+    for (const [evidenceRef, reason] of [[outside, "outside every shared root"], [linked, "outside every shared root"],
+      ["https://example.com/report", "a link"], [undefined, "no evidenceRef"]] as const) {
       const none = await desk("rig_artifact_read", { qitemId: await finished(evidenceRef) });
       expect(none.isError).toBe(false);
       expect(none.structured).toMatchObject({ available: false, evidenceRef: evidenceRef ?? null, roots: ["proof"] });
