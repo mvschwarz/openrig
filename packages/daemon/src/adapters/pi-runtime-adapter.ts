@@ -177,7 +177,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     for (const file of files) {
       try {
         const content = this.fs.readFile(file.absolutePath);
-        const hint = file.deliveryHint === "auto" ? resolveConcreteHint(file.path, content) : file.deliveryHint;
+        const hint = file.deliveryHint === "auto" ? resolveConcreteHint(file.path, content, file.orientation) : file.deliveryHint;
 
         switch (hint) {
           case "guidance_merge": {

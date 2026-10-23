@@ -21,4 +21,20 @@ describe("restore leaves a seat's own role out of shared guidance", () => {
     // A shared block that is also named role, from another file, is still put back.
     expect(items(runtime, [guidance("role", "/specs/rig/guidance/team-role.md")])).toEqual(["role /specs/rig/guidance/team-role.md"]);
   });
+
+  it.each(["claude-code", "codex"])("%s: an auto startup file that is a seat's own role is left out, readable or not; other guidance stays", (runtime) => {
+    const startup = (path: string, absolutePath: string, orientation?: "role") => ({
+      path, absolutePath, ownerRoot: "/specs", deliveryHint: "auto", required: true, appliesOn: ["fresh_start", "restore"], ...(orientation ? { orientation } : {}),
+    });
+    const files = [
+      startup("guidance/role.md", "/specs/agents/impl/guidance/role.md"),
+      startup("roles/lead.md", "/specs/agents/lead/roles/lead.md", "role"),
+      startup("guidance/team.md", "/specs/rig/guidance/team.md"),
+    ];
+    for (const unreadable of [false, true]) {
+      const read = (p: string) => { if (unreadable && p.includes("/agents/")) throw new Error(`ENOENT: ${p}`); return "# text"; };
+      const restored = seatGuidance({ runtime, projectionEntries: [], resolvedStartupFiles: files } as unknown as NodeStartupSnapshot, "/team", null, () => true, read);
+      expect(restored?.items.map((item) => item.blockId)).toEqual(["guidance/team.md"]);
+    }
+  });
 });

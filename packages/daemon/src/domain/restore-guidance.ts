@@ -21,6 +21,7 @@ import {
   stripManagedBlocks,
   type ManagedBlockMergeFsOps,
   isPerSeatRoleGuidance,
+  isPerSeatRoleStartupFile,
 } from "./managed-blocks.js";
 import { resolveConcreteHint } from "./runtime-adapter.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
@@ -94,9 +95,9 @@ export function seatGuidance(
     let hint: string = f.deliveryHint;
     if (hint === "auto") {
       try {
-        hint = resolveConcreteHint(f.path, readFile(f.absolutePath));
+        hint = resolveConcreteHint(f.path, readFile(f.absolutePath), f.orientation);
       } catch {
-        if (f.path.endsWith(".md") && !f.path.endsWith("SKILL.md")) {
+        if (f.path.endsWith(".md") && !f.path.endsWith("SKILL.md") && !isPerSeatRoleStartupFile(f.path, f.orientation)) {
           items.set(f.path, { blockId: f.path, sourcePath: f.absolutePath, unresolved: true });
         }
         continue;

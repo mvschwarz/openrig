@@ -461,7 +461,7 @@ restore behavior, and the distinction between readiness and verified proof.
 
 | Hint | When Delivered | Mechanism |
 |------|---------------|-----------|
-| `auto` | Depends on the file | A path ending in `SKILL.md`, or content beginning with `# SKILL`, is `skill_install`; otherwise a `.md` file is `guidance_merge`, and any other file is `send_text` |
+| `auto` | Depends on the file | A seat's own role (a file marked `orientation: role`, or at a `guidance/role.md` path) is `send_text`, so pod-mates never overwrite each other's role in the shared file. Otherwise a path ending in `SKILL.md`, or content beginning with `# SKILL`, is `skill_install`; a `.md` file is `guidance_merge`; and any other file is `send_text` |
 | `guidance_merge` | Before harness boot | Merged into CLAUDE.md/AGENTS.md as managed block |
 | `skill_install` | Before harness boot | Installed to runtime skill directory |
 | `send_text` | After harness is ready | Sent as text to agent terminal via tmux |
