@@ -8,7 +8,7 @@ import { isClaudeResumeType } from "../adapters/claude-resume.js";
 import type { StartupAction, StartupProofSelection, StartupFailureStage } from "./types.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
-  ProjectionResult, StartupDeliveryResult, ForkSource,
+  ProjectionResult, StartupDeliveryResult, ForkSource, ReadinessResult,
 } from "./runtime-adapter.js";
 import { isAttentionRequiredReadinessCode, resolveConcreteHint } from "./runtime-adapter.js";
 import type { ProjectionPlan } from "./projection-planner.js";
@@ -228,6 +228,10 @@ type StartupDeliveryInput = StartupInput & {
   lastSubmissionConfirmed?: boolean;
   /** Claude only: why the latest interactive send was not confirmed, in words for the operator. */
   lastSubmissionUnconfirmedReason?: string;
+  /** Claude only: the runtime refused an earlier startup turn (an expired login, say), so later inputs are held. */
+  refusedTurn?: ReadinessResult;
+  /** How many startup inputs were held after that refusal, and so are still owed. */
+  heldInputs?: number;
 };
 
 export type StartupResult = { warnings?: string[] } & (
@@ -850,6 +854,15 @@ export class StartupOrchestrator {
       return this.fail(deliveryInput, "failed", afterReadyResult.errors, undefined, false, undefined, false, "after_ready", true);
     }
 
+    // A startup turn the runtime refused held every later input back: the seat never read them, so they're owed, not
+    // delivered. A fresh start keeps its context pending for `rig seat continue`; a restore delivers it again.
+    if (deliveryInput.refusedTurn) {
+      return this.fail(deliveryInput, "attention_required", [
+        deliveryInput.refusedTurn.reason ?? "The runtime refused a startup turn.",
+        `Startup paused after a refused turn: ${deliveryInput.heldInputs} startup input${deliveryInput.heldInputs === 1 ? "" : "s"} weren't sent and are owed to this seat${isFreshLaunch ? "" : "; restoring the seat delivers them again"}.`,
+      ], undefined, isFreshLaunch, undefined, false, "post_delivery_readiness", true);
+    }
+
     // Delivering the first native prompt can reveal a provider refusal or
     // interactive gate. Bundled identity/preload prompts consume their files,
     // so the remaining file list alone does not tell us whether context was sent.
@@ -1160,7 +1173,24 @@ export class StartupOrchestrator {
       : `Startup submission unverified in ${input.binding.tmuxSession}: ${reason}`));
   }
 
+  /** Whether the runtime refused the last startup turn: an attention readiness code now (Claude's "Login expired ·
+   *  Please run /login" as its latest response reads login_required). An unavailable observation holds nothing back. */
+  private async refusedTurn(input: StartupDeliveryInput): Promise<ReadinessResult | undefined> {
+    try {
+      const readiness = await input.adapter.checkReady(input.binding);
+      return !readiness.ready && isAttentionRequiredReadinessCode(readiness.code) ? readiness : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   private async sendInteractiveText(input: StartupDeliveryInput, text: string, source: StartupSubmissionDiagnostic["source"], actionIndex?: number): Promise<StartupSendFailure | null> {
+    // After a refused turn nothing more is typed into the seat. The held input is counted, and startNode reports it as
+    // owed before it would mark the seat ready, so returning here never reads as delivered.
+    if (input.adapter.runtime === "claude-code" && input.sendOrder > 0 && (input.refusedTurn ??= await this.refusedTurn(input))) {
+      input.heldInputs = (input.heldInputs ?? 0) + 1;
+      return null;
+    }
     const sendOrder = ++input.sendOrder;
     const tmuxSession = input.binding.tmuxSession!;
     input.lastSubmissionConfirmed = false;

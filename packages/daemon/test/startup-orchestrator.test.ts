@@ -795,6 +795,64 @@ describe("StartupOrchestrator", () => {
     expect(tmux.killSession).not.toHaveBeenCalled();
   });
 
+  describe("a startup turn the runtime refuses (an expired login)", () => {
+    const files: ResolvedStartupFile[] = ["role.md", "a.md", "b.md"].map((path) => ({
+      path, absolutePath: `/fixture/${path}`, ownerRoot: "/fixture", deliveryHint: "send_text" as const, required: true,
+      appliesOn: ["fresh_start" as const, "restore" as const],
+    }));
+    const read = (path: string) => `Contents of ${nodePath.basename(path)}`;
+    const sent = (typed: string[]) => typed.map((text) => text.match(/Contents of (\S+)/)?.[1]);
+    // The adapter's own send_text loop: each file through the orchestrator's checked send, in order.
+    const deliverStartup: RuntimeAdapter["deliverStartup"] = async (pending, _binding, send) => {
+      for (const file of pending) await send?.(read(file.absolutePath));
+      return { delivered: pending.length, failed: [] };
+    };
+    function harness(refused: () => boolean) {
+      const typed: string[] = [];
+      const t = mockTmux({ sendText: vi.fn(async (_session: string, text: string) => { typed.push(text); return { ok: true as const }; }) });
+      const adapter = mockAdapter({
+        deliverStartup: vi.fn(deliverStartup),
+        checkReady: vi.fn(async () => typed.length > 0 && refused()
+          ? { ready: false, code: "login_required", reason: "Claude refused the request: Login expired · Please run /login" }
+          : { ready: true }),
+      });
+      return { typed, orchestrator: createOrchestrator({ tmux: t, readFile: read }), adapter };
+    }
+
+    it("sends nothing more, holds the rest as owed, and a continuation delivers them in order after sign-in", async () => {
+      const seed = seedSession();
+      let loggedIn = false;
+      const { typed, orchestrator, adapter } = harness(() => !loggedIn);
+      const failed = await orchestrator.startNode(makeInput(seed, { adapter, resolvedStartupFiles: files, startupActions: [makeIdentityAction()] }));
+
+      expect(sent(typed)).toEqual(["role.md"]); // only the refused first turn (identity + role.md)
+      expect(failed).toMatchObject({ ok: false, startupStatus: "attention_required" });
+      expect(failed.ok ? [] : failed.errors).toEqual(expect.arrayContaining([
+        expect.stringContaining("Login expired"),
+        expect.stringContaining("2 startup inputs weren't sent"),
+        expect.stringContaining("rig seat continue"),
+      ]));
+      expect(orchestrator.pendingStartupContext(seed.nodeId, seed.sessionId)).toMatchObject({ mode: "fresh" });
+      expect(db.prepare("SELECT count(*) AS n FROM events WHERE node_id = ? AND type = 'node.startup_ready'").get(seed.nodeId)).toEqual({ n: 0 });
+
+      loggedIn = true;
+      typed.length = 0;
+      const continued = await orchestrator.startNode(makeInput(seed, { adapter, resolvedStartupFiles: files,
+        startupActions: [makeIdentityAction()], skipHarnessLaunch: true, continueFreshStartup: true }));
+      expect(continued).toMatchObject({ ok: true, startupStatus: "ready" });
+      expect(sent(typed)).toEqual(["role.md", "a.md", "b.md"]);
+    });
+
+    it("leaves a startup whose turns aren't refused exactly as before", async () => {
+      const seed = seedSession();
+      const { typed, orchestrator, adapter } = harness(() => false);
+      const result = await orchestrator.startNode(makeInput(seed, { adapter, resolvedStartupFiles: files, startupActions: [makeIdentityAction()] }));
+      expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
+      expect(sent(typed)).toEqual(["role.md", "a.md", "b.md"]);
+      expect(orchestrator.pendingStartupContext(seed.nodeId, seed.sessionId)).toBeNull();
+    });
+  });
+
   it("records the exact adapter-returned launch effect only after successful managed launch", async () => {
     const seed = seedSession();
     const appliedLaunch = observeClaudePermission("--permission-mode acceptEdits");
@@ -1474,11 +1532,8 @@ describe("StartupOrchestrator", () => {
     const seed = seedSession();
 
     // First attempt: fails during action (non-idempotent action executes then something else fails)
-    const failAdapter = mockAdapter({
-      checkReady: vi.fn()
-        .mockResolvedValueOnce({ ready: true }) // first attempt: ready
-        .mockResolvedValueOnce({ ready: true }), // retry: ready
-    });
+    // Ready on both attempts. Readiness is also read between startup sends (a refused turn holds the rest).
+    const failAdapter = mockAdapter({ checkReady: vi.fn(async () => ({ ready: true })) });
     // OPR.0.4.3.06 — text-aware mock (robust to the extra orientation-challenge
     // send on fresh continuity): everything succeeds except the FIRST /configure
     // (attempt 1's second action), which fails as before.
