@@ -105,7 +105,7 @@ function routerLineStep(deps: SetupDeps, choice: "yes" | "no" | undefined, dryRu
     placement,
     files: "Each Claude seat's CLAUDE.md (or CLAUDE.local.md when its rig chooses that file) and each Codex seat's AGENTS.md, in the seat's working folder, at its next start. A file that is a link isn't written through; the start reports it as linked.",
     ifNo,
-    limit: "Switching to no later stops new writes but doesn't remove a line already written; rig down removes OpenRig's blocks from these files, unless a seat of another active rig, or a still-running seat of this one, uses the file. A line someone edited is kept, and rig down names it.",
+    limit: "Switching to no later stops new writes but doesn't remove a line already written; rig down removes OpenRig's blocks from these files, unless a seat of another active rig, or a still-running seat of this one, uses the file. A line someone edited is kept: a start leaves it as it is, and rig down names it.",
     answerWith: "rig setup --router-line yes, or rig setup --router-line no (saved as skills.router_line.enabled; change it any time with either)",
     scope: "This choice covers only this line. OpenRig's other writes, listed under \"OpenRig may modify\", don't depend on it.",
   });

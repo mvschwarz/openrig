@@ -4,7 +4,7 @@ import nodePath from "node:path";
 import { getOpenRigHome } from "../openrig-compat.js";
 import type { ReconcileSkillLoadoutResult, SkillLoadout, SkillLoadoutLocation, SkillRuntime } from "./skill-catalog.js";
 import { parseSkillFrontmatter } from "./skill-discovery.js";
-import { MANAGED_BLOCK_APPEND_SEPARATOR, managedBlockText } from "./managed-blocks.js";
+import { MANAGED_BLOCK_APPEND_SEPARATOR, hasEditedManagedBlock, managedBlockText } from "./managed-blocks.js";
 
 // OPR.0.7.0.13 — where a team seat's skills live: storage OpenRig owns, outside the person's project and their own
 // skill folders, so a person's own agent opened in the project sees none of the team's skills.
@@ -688,7 +688,13 @@ export function writeSeatSkillCatalog(paths: SeatSkillPaths): SeatSkillCatalog {
 export const SEAT_SKILLS_BOOTSTRAP_BLOCK_ID = "openrig-seat-skills.md";
 
 /** OPR.0.7.0.13 (router, R1.1): the one constant bootstrap line, verbatim. The guidance asset carries exactly this text. */
-export const SEAT_SKILLS_BOOTSTRAP_LINE ="OpenRig seat skills: if `OPENRIG_SESSION_NAME` is set, run `rig skill loadout --seat self` and use the router skill it names; if it isn't set, this line doesn't apply to you.";
+export const SEAT_SKILLS_BOOTSTRAP_LINE = "OpenRig seat skills: if `OPENRIG_SESSION_NAME` is set, run `rig skill loadout --seat self` and use the router skill it names; if it isn't set, this line doesn't apply to you.";
+
+/** Whether guidance text holds the seat-skills block with anything but the line: a person edited it. A start leaves such a
+ *  block as it is, and down keeps it (both by `managedBlockBodyMatches`). */
+export function seatSkillsLineEdited(content: string): boolean {
+  return hasEditedManagedBlock(content, SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, SEAT_SKILLS_BOOTSTRAP_LINE);
+}
 
 export interface FootprintSeat { seat: string; runtime: string; cwd: string; claudeManagedBlockFile?: string | null }
 export interface SkillRouterFootprint {

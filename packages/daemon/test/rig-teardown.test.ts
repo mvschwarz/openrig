@@ -16,8 +16,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
-import { MANAGED_BLOCK_START, mergeManagedBlock } from "../src/domain/managed-blocks.js";
-import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, SEAT_SKILLS_BOOTSTRAP_LINE } from "../src/domain/seat-skill-storage.js";
+import { mergeManagedBlock } from "../src/domain/managed-blocks.js";
+import { SEAT_SKILLS_BOOTSTRAP_LINE } from "../src/domain/seat-skill-storage.js";
 
 
 function mockTmux(killResult?: { ok: boolean; code?: string; message?: string }): TmuxAdapter {
@@ -528,28 +528,30 @@ describe("RigTeardownOrchestrator", () => {
     const writer = { exists: (p: string) => fs.existsSync(p), readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c) };
     const asset = fs.readFileSync(path.join(import.meta.dirname, "../assets/guidance/openrig-seat-skills.md"), "utf-8");
     const personal = "# Personal instructions\nPreserve these exact bytes.\n";
-    for (const edited of [false, true]) {
+    // An appended word and an indented line (four spaces make it a Markdown code block) are both a person's edits.
+    const edits = { none: (line: string) => line, appended: (line: string) => `${line} PERSON LINE EDIT`, indented: (line: string) => `    ${line}` };
+    for (const [kind, edit] of Object.entries(edits)) {
       const cwd = fs.mkdtempSync(path.join(tmpDir, `${runtime}-`));
       const guidance = path.join(cwd, fileName);
       fs.writeFileSync(guidance, personal);
       mergeManagedBlock(writer, guidance, "CULTURE.md", "culture text");
-      mergeManagedBlock(writer, guidance, SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, asset);
-      if (edited) fs.writeFileSync(guidance, fs.readFileSync(guidance, "utf-8").replace(SEAT_SKILLS_BOOTSTRAP_LINE, `${SEAT_SKILLS_BOOTSTRAP_LINE} PERSON LINE EDIT`));
-      const rig = rigRepo.createRig(`line-${runtime}-${edited}`);
+      mergeManagedBlock(writer, guidance, "openrig-seat-skills.md", asset);
+      fs.writeFileSync(guidance, fs.readFileSync(guidance, "utf-8").replace(SEAT_SKILLS_BOOTSTRAP_LINE, edit(SEAT_SKILLS_BOOTSTRAP_LINE)));
+      const rig = rigRepo.createRig(`line-${runtime}-${kind}`);
       const node = rigRepo.addNode(rig.id, "dev", { runtime, cwd });
-      sessionRegistry.updateStatus(sessionRegistry.registerSession(node.id, `dev@line-${runtime}-${edited}`).id, "running");
+      sessionRegistry.updateStatus(sessionRegistry.registerSession(node.id, `dev@line-${runtime}-${kind}`).id, "running");
 
       const result = await buildTeardown().teardown(rig.id);
 
       const after = fs.readFileSync(guidance, "utf-8");
-      if (!edited) {
-        expect(after).toBe(personal);
-        expect(result.keptGuidance).toBeUndefined();
+      if (kind === "none") {
+        expect(after, kind).toBe(personal);
+        expect(result.keptGuidance, kind).toBeUndefined();
       } else {
-        expect(after.startsWith(personal)).toBe(true);
-        expect(after).toContain(`${MANAGED_BLOCK_START(SEAT_SKILLS_BOOTSTRAP_BLOCK_ID)}\n${SEAT_SKILLS_BOOTSTRAP_LINE} PERSON LINE EDIT`);
-        expect(after).not.toContain("culture text");
-        expect(result.keptGuidance).toEqual([`${guidance}: ${SEAT_SKILLS_BOOTSTRAP_BLOCK_ID}`]);
+        expect(after.startsWith(personal), kind).toBe(true);
+        expect(after, kind).toContain(`<!-- BEGIN OpenRig MANAGED BLOCK: openrig-seat-skills.md -->\n${edit(SEAT_SKILLS_BOOTSTRAP_LINE)}\n`);
+        expect(after, kind).not.toContain("culture text");
+        expect(result.keptGuidance, kind).toEqual([`${guidance}: openrig-seat-skills.md`]);
       }
     }
   });

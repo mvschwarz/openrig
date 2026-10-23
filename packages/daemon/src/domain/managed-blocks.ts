@@ -100,6 +100,23 @@ export function mergeManagedBlock(
   fs.writeFile(targetPath, `${existing}${MANAGED_BLOCK_APPEND_SEPARATOR}${block}`);
 }
 
+/** Each `blockId` block in `content` (current markers): the whole block and the text between its markers. */
+function managedBlockPattern(blockId: string): RegExp {
+  return new RegExp(`${escapeRegex(MANAGED_BLOCK_START(blockId))}([\\s\\S]*?)${escapeRegex(MANAGED_BLOCK_END(blockId))}`, "g");
+}
+
+/** Whether a block's body still holds `written`: the same bytes, ignoring only the writer's own framing (newlines at either
+ *  end, and CRLF line endings). A person's spaces count, so an indented line is an edit. */
+export function managedBlockBodyMatches(body: string, written: string): boolean {
+  const frame = (text: string) => text.replace(/\r\n/g, "\n").replace(/^\n+|\n+$/g, "");
+  return frame(body) === frame(written);
+}
+
+/** Whether `content` holds a `blockId` block whose body is anything but `written`: someone edited it. */
+export function hasEditedManagedBlock(content: string, blockId: string, written: string): boolean {
+  return [...content.matchAll(managedBlockPattern(blockId))].some((m) => !managedBlockBodyMatches(m[1]!, written));
+}
+
 /** What a removal did: whether the file changed, and the ids of blocks kept because they were edited. */
 export interface ManagedBlockRemoval { changed: boolean; keptEdited: string[] }
 
@@ -122,9 +139,8 @@ export function removeManagedBlocksFromFile(
   const kept: string[] = [];
   let working = original;
   for (const [id, body] of Object.entries(writtenBodies)) {
-    const block = new RegExp(`${escapeRegex(MANAGED_BLOCK_START(id))}\\n?([\\s\\S]*?)\\n?${escapeRegex(MANAGED_BLOCK_END(id))}`, "g");
-    working = working.replace(block, (whole: string, inner: string) => {
-      if (inner.trim() === body.trim()) return whole;
+    working = working.replace(managedBlockPattern(id), (whole: string, inner: string) => {
+      if (managedBlockBodyMatches(inner, body)) return whole;
       if (!keptEdited.includes(id)) keptEdited.push(id);
       kept.push(whole);
       return `\u0000openrig-kept-${kept.length - 1}\u0000`;

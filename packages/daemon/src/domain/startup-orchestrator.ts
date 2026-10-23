@@ -1,6 +1,5 @@
 import { nonInterruptiveNotice } from "../adapters/non-interruptive.js";
 import { randomUUID } from "node:crypto";
-import { lstatSync } from "node:fs";
 import type Database from "better-sqlite3";
 import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
@@ -27,8 +26,8 @@ import { shellQuote } from "../adapters/shell-quote.js";
 import { observeClaudeResumeLaunch, type ClaudeLaunchedProcess, type NativeProcessLister } from "./native-process-lineage.js";
 import { CommunityHarnessRuntimeAdapter } from "../adapters/community-harness-runtime-adapter.js";
 import { join } from "node:path";
-import { readFootprintAnswer, routerLineSkipReason, type FootprintAnswer, type RouterLineWriteResult } from "./footprint-choice.js";
-import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, describeSkillRouterFootprint, refusedSeatSkillsRootForNode, seatCatalogKeptNote, seatRouterKeptNote, seatSkillPathsForNode, seatSkillPluginDirForNode, writeSeatSkillCatalog, writeSeatSkillRouter } from "./seat-skill-storage.js";
+import { guidanceFileIsLink, readFootprintAnswer, readGuidanceFile, routerLineSkipReason, type FootprintAnswer, type RouterLineWriteResult } from "./footprint-choice.js";
+import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, describeSkillRouterFootprint, seatSkillsLineEdited, refusedSeatSkillsRootForNode, seatCatalogKeptNote, seatRouterKeptNote, seatSkillPathsForNode, seatSkillPluginDirForNode, writeSeatSkillCatalog, writeSeatSkillRouter } from "./seat-skill-storage.js";
 import { recordConversationPromptForNode, recordForkConversationPromptForNode, seatLaunchAdditionsForLaunch, systemPromptPendingNoteForNode } from "./seat-launch-additions.js";
 
 // Expanded startup text can put the current input marker above 50 scrollback lines.
@@ -166,11 +165,6 @@ export function isRecoverableStartupFailure(db: Database.Database, nodeId: strin
  *  (never the Codex catalog, which shares the logical name but is sent as text). */
 export function isSeatSkillsBootstrapLine(file: Pick<ResolvedStartupFile, "path" | "deliveryHint">): boolean {
   return file.path === SEAT_SKILLS_BOOTSTRAP_BLOCK_ID && file.deliveryHint === "guidance_merge";
-}
-
-/** Whether the path itself is a symbolic link (a missing or unreadable path isn't). */
-function isLink(path: string): boolean {
-  try { return lstatSync(path).isSymbolicLink(); } catch { return false; }
 }
 
 export interface StartupInput {
@@ -490,10 +484,14 @@ export class StartupOrchestrator {
       if (target) {
         const skip = routerLineSkipReason(answer);
         if (skip) routerLine = { answer, files: [{ path: target, outcome: "skipped", reason: skip }] };
-        else if (isLink(target)) {
+        else if (guidanceFileIsLink(target)) {
           // A linked guidance file is someone's layout, often a file outside the project: the line isn't written through it.
           routerLine = { answer, files: [{ path: target, outcome: "linked" }] };
           warnings.push(`seat_skills_line_linked: ${target} is a link, so the line wasn't written through it; the seat started without it`);
+        } else if (seatSkillsLineEdited(readGuidanceFile(target))) {
+          // Someone edited the line: a start leaves their block as it is, as rig down does.
+          routerLine = { answer, files: [{ path: target, outcome: "edited" }] };
+          warnings.push(`seat_skills_line_edited: ${target} holds an edited seat-skills line, so this start left it as it is`);
         } else {
           try {
             // The saved line is optional, and the adapters swallow an optional file's write error; for this one isolated

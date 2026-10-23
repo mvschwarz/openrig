@@ -3,6 +3,7 @@
 // person's saved yes or no (an explicit false is persisted), `env` is the environment's, never the person's answer.
 // Limits: a malformed hand-edited value resolves to the default, so it reads as unasked; a full config reset returns to
 // unasked. Whoever lands this file first owns it (slice 13 or slice 20); the other imports it.
+import { lstatSync, readFileSync } from "node:fs";
 import type { SettingsStore } from "./user-settings/settings-store.js";
 
 export type FootprintAnswer = { state: "unasked" } | { state: "yes" | "no"; by: "saved" | "environment" };
@@ -20,6 +21,8 @@ export type RouterLineFileOutcome =
   | { path: string; outcome: "skipped"; reason: "answer_no" | "answer_unasked" | "answer_environment_no" | "answer_unreadable" }
   // The guidance file is a symbolic link; the line isn't written through it.
   | { path: string; outcome: "linked" }
+  // The file holds the seat-skills block with someone's edit; the start leaves it as it is.
+  | { path: string; outcome: "edited" }
   | { path: string; outcome: "unwritable"; error: string };
 export interface RouterLineWriteResult { answer: FootprintAnswer | null; files: RouterLineFileOutcome[] }
 
@@ -29,4 +32,15 @@ export function routerLineSkipReason(answer: FootprintAnswer | null): Extract<Ro
   if (answer.state === "unasked") return "answer_unasked";
   if (answer.state === "no") return answer.by === "environment" ? "answer_environment_no" : "answer_no";
   return null;
+}
+
+/** Whether the guidance file itself is a symbolic link; the line is never written through one. A missing or unreadable
+ *  path isn't a link. */
+export function guidanceFileIsLink(path: string): boolean {
+  try { return lstatSync(path).isSymbolicLink(); } catch { return false; }
+}
+
+/** A guidance file's text, read from disk, or "" when it's missing or unreadable. */
+export function readGuidanceFile(path: string): string {
+  try { return readFileSync(path, "utf8"); } catch { return ""; }
 }

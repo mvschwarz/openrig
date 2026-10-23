@@ -28,7 +28,9 @@ import { assessNativeResumeProbe } from "./native-resume-probe.js";
 import { resumeProbeEvidence, type NativeResumeProbeEvidence } from "./native-resume-probe-evidence.js";
 import { observeClaudeDelivery, observeClaudeResumeLaunch, verifyClaudePaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess } from "./native-process-lineage.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
-import { seatGuidance, restoreMissingGuidance, missingGuidanceBlocks } from "./restore-guidance.js";
+import { applySeatSkillsLineRule, seatGuidance, restoreMissingGuidance, missingGuidanceBlocks } from "./restore-guidance.js";
+import { readFootprintAnswer } from "./footprint-choice.js";
+import { SettingsStore } from "./user-settings/settings-store.js";
 import type {
   RestoreOutcome,
   RestoreRigResult,
@@ -200,6 +202,8 @@ interface RestoreOrchestratorDeps {
   transcriptStore?: TranscriptStore;
   serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
   listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
+  /** Where the person's seat-skills line answer is read (default: the OpenRig settings). */
+  routerLineSettings?: Pick<SettingsStore, "resolveOne">;
 }
 
 export class RestoreOrchestrator {
@@ -219,6 +223,7 @@ export class RestoreOrchestrator {
   private transcriptStore: TranscriptStore | null;
   private serviceOrchestrator: import("./service-orchestrator.js").ServiceOrchestrator | null;
   private listProcesses: (() => Promise<Array<{ pid: number; ppid: number; command: string }>>) | undefined;
+  private routerLineSettings: Pick<SettingsStore, "resolveOne"> | undefined;
   private appliedLaunchStore: AppliedLaunchObservationStore;
 
   constructor(deps: RestoreOrchestratorDeps) {
@@ -259,6 +264,7 @@ export class RestoreOrchestrator {
     this.transcriptStore = deps.transcriptStore ?? null;
     this.serviceOrchestrator = deps.serviceOrchestrator ?? null;
     this.listProcesses = deps.listProcesses;
+    this.routerLineSettings = deps.routerLineSettings;
     this.appliedLaunchStore = new AppliedLaunchObservationStore(deps.db);
   }
 
@@ -1222,6 +1228,11 @@ export class RestoreOrchestrator {
    *  guidance file still lacks a managed block it should hold, the seat keeps its true status (a
    *  live resumed session is still running) and the gap is disclosed on the node and in the
    *  warnings, so the rig is reported partially_restored, not fully_restored. */
+  /** Whether the person answered yes to the seat-skills line; an unreadable answer isn't a yes. */
+  private routerLineAnsweredYes(): boolean {
+    try { return readFootprintAnswer(this.routerLineSettings ?? new SettingsStore()).state === "yes"; } catch { return false; }
+  }
+
   private checkRestoredGuidance(
     result: RestoreNodeResult,
     node: SnapshotData["nodes"][number],
@@ -1239,6 +1250,7 @@ export class RestoreOrchestrator {
       warnings?.push(`Restore: ${node.logicalId}: could not check its guidance: ${(err as Error).message}`);
       return { ...result, guidanceGaps: ["(guidance check failed)"] };
     }
+    if (guidance) guidance = applySeatSkillsLineRule(guidance, this.routerLineAnsweredYes()).guidance;
     if (!guidance || guidance.items.length === 0) return result;
     let missing: string[];
     try {
@@ -1381,6 +1393,11 @@ export class RestoreOrchestrator {
       } catch (err) {
         // Guidance never blocks the exact resume; the post-launch check discloses the gap.
         warnings?.push(`Restore guidance: ${node.logicalId}: could not read its saved guidance selection: ${(err as Error).message}`);
+      }
+      if (guidance) {
+        const rule = applySeatSkillsLineRule(guidance, this.routerLineAnsweredYes());
+        guidance = rule.guidance;
+        if (rule.excluded === "linked") warnings?.push(`Restore guidance: ${node.logicalId}: the seat-skills line wasn't put back, because ${guidance.targetPath} is a link.`);
       }
       if (guidance && guidance.items.length > 0) {
         const repair = restoreMissingGuidance(guidance, {
