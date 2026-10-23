@@ -1160,7 +1160,9 @@ describe("ClaudeCompactionEnforcer", () => {
         // Hold the FIRST send (prep) open so the first trigger is suspended mid-sequence (stage=preparing).
         let releasePrep!: () => void;
         send.mockImplementationOnce(() => new Promise((resolve) => { releasePrep = () => resolve({ ok: true }); }));
-        const enforcer = new ClaudeCompactionEnforcer(settings, transport, { openrigHome: HOME });
+        // This control exercises the in-progress guard, not elapsed preparation time: holding the prep open (and a busy CI)
+        // must not consume its 50ms budget.
+        const enforcer = new ClaudeCompactionEnforcer(settings, transport, { openrigHome: HOME, now: () => 1_700_000_000_000 });
 
         // Start (do NOT await) — runs synchronously up to the held prep send: stage=preparing, send #1 fired.
         const first = enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20 });
@@ -1431,7 +1433,8 @@ describe("ClaudeCompactionEnforcer", () => {
     it("state surfacing: preparing → compact-sent → restore-sent → audit-sent across the sequence", async () => {
       const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
       const { transport, send } = makeSessionTransport();
-      const enforcer = new ClaudeCompactionEnforcer(settings, transport, { openrigHome: HOME });
+      // Holding phase 1 open (and a busy CI) must not consume the 50ms preparation budget: this checks the stages, not time.
+      const enforcer = new ClaudeCompactionEnforcer(settings, transport, { openrigHome: HOME, now: () => 1_700_000_000_000 });
 
       // Hold phase 1 open so we can observe "preparing".
       let resolvePrep: (v: { ok: boolean }) => void = () => {};
