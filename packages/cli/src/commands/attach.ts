@@ -59,7 +59,7 @@ export function attachCommand(depsOverride?: StatusDeps): Command {
     .option("--cwd <path>", "Working directory to record", process.cwd())
     .option("--display-name <name>", "Display label inside tmux; external session name outside tmux")
     .option("--print-env", "Print shell exports for OPENRIG_NODE_ID and OPENRIG_SESSION_NAME")
-    .option("--json", "JSON output")
+    .option("--json", "JSON output, including the activity env the attached app needs. Its token is a credential: don't print or paste it, and use rig whoami for identity")
     .action(async (opts: {
       self?: boolean;
       rig: string;

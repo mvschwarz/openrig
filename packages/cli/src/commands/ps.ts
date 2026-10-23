@@ -11,6 +11,7 @@ import { loadHostRegistry, resolveHost, hostDisplayTarget, resolveRemoteBearer, 
 import { runCrossHostCommand, type RunCrossHostCommandOpts } from "../cross-host-executor.js";
 import { emitCrossHostError, emitCrossHostFailure } from "../cross-host-cli-helpers.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
+import { formatSeatActivity as formatActivity } from "../lib/seat-activity.js";
 import type { AggregatedPayload, PerHostStatus } from "../lib/hosts/fanout-contract.js";
 
 interface PsEntry {
@@ -78,7 +79,9 @@ interface NodeEntry {
     needsInput: { count: number; reason: string | null };
     decidedBy: string | null;
   } | null;
-  identityVerdict?: { reason?: string | null } | null;
+  identityVerdict?: { verdict?: string; reason?: string | null; observedAt?: string | null } | null;
+  /** The registry's recorded session status, kept when the served sessionStatus is corrected. */
+  storedSessionStatus?: string | null;
   /** A community harness's seat: its label, maintainer and declared limits. */
   communityHarness?: { harness: string; maintainer: string | null; limits: string[]; identity: string; needsInput: string; presetError?: string };
   /** Slice 15 — `has-work-to-do` primitive. Derived from queue_items;
@@ -228,6 +231,8 @@ const ALLOWED_NODE_FIELDS = new Set([
   "agentActivity",
   "contextUsage",
   "heldReason",
+  "storedSessionStatus",
+  "identityVerdict",
 ]);
 
 interface PsCliOptions {
@@ -636,6 +641,17 @@ function missingSessionGuidance(node: NodeEntry): string | null {
     : null;
 }
 
+/** A recorded-running seat whose applicable identity check could not reach tmux: its liveness is
+ *  unconfirmed, not known dead. Codex's mismatch verdict keeps its own attention path. */
+function livenessUnconfirmed(node: NodeEntry): boolean {
+  return node.sessionStatus === "running" && !node.intentionallyStopped
+    && node.identityVerdict?.verdict === "tmux_unavailable";
+}
+
+function livenessLine(seat: string, node: NodeEntry): string {
+  return `Liveness (${seat}): recorded running, not confirmed: tmux was unavailable at the last observation (${node.identityVerdict?.observedAt ?? "time unknown"}).`;
+}
+
 // OPR.0.4.0.34 — the compact orch field set (PRD FR-4). Carries the
 // source-available identity + state + resume-summary fields an orchestrator
 // needs at a glance, WITHOUT leaking the resume token value or resumeCommand
@@ -740,6 +756,14 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       lastActivity: n.agentActivity?.sampledAt ?? n.startupCompletedAt ?? null,
     };
     if (n.intentionallyStopped !== undefined) compact.intentionallyStopped = n.intentionallyStopped;
+    // The served identity evidence (verdict, reason, observation time) and the registry's recorded
+    // status, without the raw evidence; recorded running is not a check that the process is alive.
+    if (n.storedSessionStatus !== undefined) compact.storedSessionStatus = n.storedSessionStatus;
+    if (n.identityVerdict) {
+      const { verdict, reason, observedAt } = n.identityVerdict;
+      // Only what was served: an absent time stays absent, never filled in.
+      compact.identityVerdict = { ...(verdict ? { verdict } : {}), ...(reason ? { reason } : {}), ...(observedAt ? { observedAt } : {}) };
+    }
     // held/attention reason (short) when present.
     if (n.heldReason) compact.heldReason = n.heldReason;
     if (attention && n.latestError) {
@@ -899,7 +923,7 @@ podNamespace, hostSelfId, canonicalSessionName, nodeKind, runtime, communityHarn
 intentionallyStopped, startupStatus, restoreOutcome, lifecycleState, tmuxAttachCommand,
 resumeCommand, latestError, terminalActive, hasAssignedWork,
 assignedWorkCount, pendingWorkCount, inProgressWorkCount, blockedWorkCount,
-agentActivity, contextUsage, heldReason.
+agentActivity, contextUsage, heldReason, storedSessionStatus, identityVerdict.
 
 --host runs on a remote host declared in ~/.openrig/hosts.yaml (no current-rig
 default applied; the remote host's rigs are shown).
@@ -1333,7 +1357,7 @@ async function handleNodes(
       const attn = needsAttention(n);
       const reason = missingSessionGuidance(n) ?? (attn || hasCurrentUsageLimit(n)
         ? (n.latestError ? truncate(n.latestError, 40) : n.agentActivity?.reason ?? "—")
-        : "—");
+        : livenessUnconfirmed(n) ? "liveness unconfirmed" : "—");
       console.log(padCompactNodeRow(
         n.rigName,
         n.canonicalSessionName ?? "—",
@@ -1367,7 +1391,8 @@ async function handleNodes(
         formatActivity(n),
         formatContextUsage(n.contextUsage),
         n.restoreOutcome,
-        missingSessionGuidance(n) ?? (n.latestError ? truncate(n.latestError, 30) : n.heldReason ? `held: ${truncate(n.heldReason, 25)}` : "—"),
+        missingSessionGuidance(n) ?? (n.latestError ? truncate(n.latestError, 30) : n.heldReason ? `held: ${truncate(n.heldReason, 25)}`
+          : livenessUnconfirmed(n) ? "liveness unconfirmed" : "—"),
       ));
     }
   }
@@ -1381,6 +1406,9 @@ async function handleNodes(
   for (const n of humanList as NodeEntry[]) {
     if (n.communityHarness) console.log(formatCommunityHarnessLine(n.canonicalSessionName ?? n.logicalId, n.communityHarness));
   }
+  for (const n of humanList as NodeEntry[]) {
+    if (livenessUnconfirmed(n)) console.log(livenessLine(n.canonicalSessionName ?? n.logicalId, n));
+  }
   if (humanTruncated) {
     const remaining = filtered.length - HUMAN_NODE_BUDGET;
     console.log(`... and ${remaining} more node${remaining === 1 ? "" : "s"} (truncated at ${HUMAN_NODE_BUDGET}).`);
@@ -1389,27 +1417,6 @@ async function handleNodes(
     const remaining = filtered.length - (limit ?? 0);
     console.log(`... and ${remaining} more node${remaining === 1 ? "" : "s"} (--limit ${limit}).`);
   }
-}
-
-function formatActivity(n: Pick<NodeEntry, "agentActivity" | "activityState" | "communityHarness">): string {
-  // S19 — render from the served taxonomy state when present: needs-input as
-  // count(+reason), otherwise the bridge's display value. No local arbitration.
-  const tax = n.activityState;
-  if (tax) {
-    if (tax.needsInput.count > 0) return `needs-input x${tax.needsInput.count}`;
-    // A community harness has no needs-input source in that state, so its zero isn't a clearance: a prompt the
-    // screen shows is kept.
-    if (n.communityHarness && n.agentActivity?.state === "needs_input") return "needs-input (screen)";
-    return tax.display;
-  }
-  // Legacy fallback (a daemon without the S19 enrichment) — retires with the
-  // pre-taxonomy surfaces per the ladder-as-migration rule.
-  const activity = n.agentActivity;
-  if (!activity) return "unknown";
-  if (activity.state === "running") return "running";
-  if (activity.state === "needs_input") return "needs_input";
-  if (activity.state === "idle") return "idle";
-  return "unknown";
 }
 
 function truncate(s: string, max: number): string {
@@ -1443,6 +1450,9 @@ function padRigRow(cells: string[], widths: number[]): string {
   return cells.map((cell, i) => i < widths.length ? fitRigCell(cell, widths[i]!) : cell).join(RIG_COLUMN_SEPARATOR);
 }
 
+// A cell filled to its width, or cut to it, still ends before the next column begins.
+const NODE_COLUMN_SEPARATOR = " ";
+
 export function padNodeRow(rig: string, pod: string, member: string, session: string, runtime: string, model: string, status: string, startup: string, oriented: string, lifecycle: string, terminal: string, work: string, activity: string, ctx: string, restore: string, error: string): string {
   return [
     fitCell(rig, 30),
@@ -1459,11 +1469,12 @@ export function padNodeRow(rig: string, pod: string, member: string, session: st
     // Slice 15 — distinct TERMINAL + WORK columns.
     fitCell(terminal, 9),
     fitCell(work, 6),
-    fitCell(activity, 12),
+    // Wide enough for a needs-input count, as in the compact table.
+    fitCell(activity, 17),
     fitCell(ctx, 6),
     fitCell(restore, 10),
     error,
-  ].join("");
+  ].join(NODE_COLUMN_SEPARATOR);
 }
 
 export function padCompactNodeRow(rig: string, session: string, lifecycle: string, activity: string, work: string, reason: string): string {
@@ -1471,10 +1482,10 @@ export function padCompactNodeRow(rig: string, session: string, lifecycle: strin
     fitCell(rig, 22),
     fitCell(session, 38),
     fitCell(lifecycle, 11),
-    fitCell(activity, 14),
+    fitCell(activity, 17),
     fitCell(work, 6),
     reason,
-  ].join("");
+  ].join(NODE_COLUMN_SEPARATOR);
 }
 
 // Slice 15 — render the terminal-active primitive honestly.

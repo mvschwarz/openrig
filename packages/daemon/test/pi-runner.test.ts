@@ -7,7 +7,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { PassThrough } from "node:stream";
 import {
-  createRunnerInput, MAX_PI_INPUT_BYTES, RunnerCore, mapPiEvent, parseRunnerArgs,
+  createRunnerInput, inOrder, MAX_PI_INPUT_BYTES, RunnerCore, mapPiEvent, parseRunnerArgs,
   prepareRunnerSidecar,
   type RunnerIo,
 } from "../src/adapters/pi-runner.js";
@@ -42,6 +42,141 @@ function readyCore(f = fakeIo()) {
   }));
   return { core, ...f };
 }
+
+// ── Activity posts arrive in the runner's own order ─────────────────────────
+
+describe("inOrder", () => {
+  it("starts a post only after the one before it settles, even when the first is slow", async () => {
+    const started: string[] = [];
+    const releases: Array<() => void> = [];
+    const send = inOrder((name: string) => new Promise<string>((resolve) => {
+      started.push(name);
+      releases.push(() => resolve(name));
+    }));
+    const first = send("beat");
+    const second = send("agent_start");
+    await Promise.resolve(); await Promise.resolve();
+    expect(started).toEqual(["beat"]);
+    releases[0]();
+    await first;
+    await Promise.resolve(); await Promise.resolve();
+    expect(started).toEqual(["beat", "agent_start"]);
+    releases[1]();
+    await expect(second).resolves.toBe("agent_start");
+  });
+
+  it("goes on to the next post when one fails", async () => {
+    const send = inOrder(async (n: number) => { if (n === 1) throw new Error("down"); return n; });
+    const failed = send(1);
+    await expect(send(2)).resolves.toBe(2);
+    await expect(failed).rejects.toThrow("down");
+  });
+});
+
+// ── Idle heartbeat ──────────────────────────────────────────────────────────
+
+describe("idle heartbeat", () => {
+  function clocked(runtime?: "pi" | "omp") {
+    const f = fakeIo();
+    let t = Date.parse("2026-07-06T10:00:00Z");
+    f.io.now = () => new Date(t).toISOString();
+    const core = new RunnerCore(f.io, { sessionName: SESSION, nodeId: "node-1", launchId: "launch-77" }, runtime ? { runtime } : undefined);
+    core.start();
+    const beats = () => f.activity.filter(a => a.subtype === "idle_heartbeat");
+    return { core, f, beats, advance: (ms: number) => { t += ms; } };
+  }
+  const ready = (core: RunnerCore) => core.handlePiLine(JSON.stringify({
+    type: "response", id: "pi-runner-get-state", data: { sessionFile: SESSION_FILE, sessionId: "0197a2f0" } }));
+
+  it("says nothing before the runner is ready", () => {
+    const c = clocked();
+    c.core.heartbeat();
+    expect(c.beats()).toEqual([]);
+  });
+
+  it("posts idle once ready, then at most once per interval", () => {
+    const c = clocked();
+    ready(c.core);
+    c.core.heartbeat();
+    expect(c.beats()).toEqual([expect.objectContaining({ sessionName: SESSION, hookEvent: "Stop", subtype: "idle_heartbeat", runtime: "pi" })]);
+    c.advance(60_000); c.core.heartbeat();
+    expect(c.beats()).toHaveLength(1);
+    c.advance(120_000); c.core.heartbeat();
+    expect(c.beats()).toHaveLength(2);
+  });
+
+  it("stays quiet mid-turn and resumes after agent_end", () => {
+    const c = clocked();
+    ready(c.core);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    c.advance(10 * 60_000); c.core.heartbeat();
+    expect(c.beats()).toEqual([]);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    c.advance(180_000); c.core.heartbeat();
+    expect(c.beats()).toHaveLength(1);
+  });
+
+  // agent_start is not the only way a turn runs: turn_start, compaction and auto-retry report the agent working
+  // without setting `streaming`, and a beat in those stretches would read idle mid-turn.
+  it.each([
+    ["a turn opened by turn_start alone", { type: "turn_start" }],
+    ["a compaction", { type: "compaction_start" }],
+    ["an automatic retry", { type: "auto_retry_start" }],
+  ])("stays quiet during %s, and resumes after agent_end", (_name, event) => {
+    const c = clocked();
+    ready(c.core);
+    c.core.handlePiLine(JSON.stringify(event));
+    c.advance(10 * 60_000); c.core.heartbeat();
+    expect(c.beats()).toEqual([]);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    c.advance(180_000); c.core.heartbeat();
+    expect(c.beats()).toHaveLength(1);
+  });
+
+  it("counts a Stop the turn posted as a report: the next beat is a full interval after agent_end", () => {
+    const c = clocked();
+    ready(c.core);
+    c.core.heartbeat();
+    c.advance(170_000);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    c.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    c.advance(60_000); c.core.heartbeat();
+    expect(c.beats()).toHaveLength(1);
+    c.advance(120_000); c.core.heartbeat();
+    expect(c.beats()).toHaveLength(2);
+  });
+
+  it("stays quiet after the pi child exits", () => {
+    const c = clocked();
+    ready(c.core);
+    c.core.handlePiExit(1);
+    c.advance(10 * 60_000); c.core.heartbeat();
+    expect(c.beats()).toEqual([]);
+  });
+
+  it("every Stop a Pi runner posts says how often it will beat, except its exit report", () => {
+    const c = clocked();
+    ready(c.core);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    c.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    c.advance(180_000); c.core.heartbeat();
+    const stops = c.f.activity.filter(a => a.hookEvent === "Stop");
+    expect(stops).toHaveLength(2);
+    for (const stop of stops) expect(stop.livenessSeconds).toBe(180);
+    c.core.handlePiExit(1);
+    const exit = c.f.activity.find(a => a.subtype === "pi_exited");
+    expect(exit).toBeDefined();
+    expect(exit).not.toHaveProperty("livenessSeconds");
+    expect(c.f.activity.filter(a => a.hookEvent !== "Stop")).toSatisfy((rest: Record<string, unknown>[]) => rest.every(a => !("livenessSeconds" in a)));
+  });
+
+  it("is a Pi-only behaviour", () => {
+    const c = clocked("omp");
+    ready(c.core);
+    c.core.heartbeat();
+    expect(c.beats()).toEqual([]);
+  });
+});
 
 // ── Actual Node line editor + framed input ──────────────────────────────────
 

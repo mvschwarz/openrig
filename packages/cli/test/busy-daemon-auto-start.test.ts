@@ -66,6 +66,24 @@ describe("auto-start only for a daemon confirmed down", () => {
 
   }
 
+  it("rig up --plan starts nothing: a stopped daemon is daemon_not_running, a blocked probe keeps its own guidance", async () => {
+    const run = async (status: DaemonStatus) => {
+      lifecycle.status = status;
+      const out: string[] = [];
+      vi.mocked(console.log).mockImplementation((...a: unknown[]) => { out.push(a.join(" ")); });
+      vi.mocked(console.error).mockImplementation((...a: unknown[]) => { out.push(a.join(" ")); });
+      const cmd = upCommand({ lifecycleDeps: {} as never, clientFactory: client().factory as never });
+      cmd.exitOverride();
+      await cmd.parseAsync(["node", "up", "some-rig", "--plan", "--json"]).catch(() => {});
+      return out.join("\n");
+    };
+    expect(await run({ state: "stopped" })).toContain("daemon_not_running");
+    const blocked = await run({ state: "unverified", host: "127.0.0.1", port: 7433, probeErrorCode: "EPERM" });
+    expect(blocked).not.toContain("daemon_not_running");
+    expect(blocked).not.toContain("no daemon is running");
+    expect(lifecycle.startDaemon).not.toHaveBeenCalled();
+  });
+
   it("rig up: a stopped daemon is still started", async () => {
     lifecycle.status = { state: "stopped" };
     const c = client();

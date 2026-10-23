@@ -29,6 +29,8 @@ export interface ComposedPane {
   label: string;
   /** Provider-neutral shell command; a provider may wrap it using runtime metadata. */
   paneCommand: string;
+  /** The same local attach as an argv, for a provider that reruns it without a shell (a Herdr restart). Absent for an ssh tile. */
+  attachArgv?: string[];
   /** True when the attach is view-only (`tmux attach -r`) — cross-rig / saved read-only. */
   readOnly: boolean;
 }
@@ -95,6 +97,8 @@ export interface ProviderLiveness {
  */
 export interface OpenViewResult {
   provider: string;
+  /** Explicitly selected provider session, when the request names one. */
+  session?: string;
   ok: boolean;
   opened: string[];
   absent: AbsentSeat[];

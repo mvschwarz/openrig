@@ -66,8 +66,11 @@ export function defaultTmuxFileOps(): TmuxFileOps {
 }
 
 export type TmuxResult =
-  | { ok: true; warnings?: string[] }
-  | { ok: false; code: string; message: string };
+  | { ok: true; warnings?: string[]; stopPhase?: StopPhase }
+  | { ok: false; code: string; message: string; stopPhase?: StopPhase };
+
+/** Furthest external stop boundary reached; an attempted command can have an uncertain effect. */
+export type StopPhase = "none" | "detach_attempted" | "detached" | "kill_attempted";
 
 export interface TmuxSession {
   name: string;
@@ -904,28 +907,35 @@ export class TmuxAdapter {
     }
   }
 
-  async killSession(name: string): Promise<TmuxResult> {
+  /** With a delivery guard, terminate by immutable tmux session ID; checked callers validate before detach and kill. */
+  async killSession(name: string, beforeEffect?: () => void): Promise<TmuxResult> {
+    let stopPhase: StopPhase = "none";
     if (this.deliveryGuard) {
-      return this.guardedInput(name, async pane => {
+      const result = await this.guardedInput(name, async (pane, beforeWrite) => {
         const stdout = await this.run(["tmux", "display-message", "-p", "-t", pane, "#{session_id}"], `tmux display-message -p -t ${shellQuote(pane)} '#{session_id}'`);
         const sessionId = stdout.trim();
         if (!/^\$\d+$/.test(sessionId)) return { ok: false, code: "guard_target_unknown", message: "Cannot establish immutable session identity; no session killed." };
         const kill = async () => {
-          const result = await this.killSessionUnchecked(sessionId);
+          const result = await this.killSessionUnchecked(sessionId, beforeEffect && (() => { beforeWrite(); beforeEffect(); }), phase => { stopPhase = phase; });
           if (result.ok) { this.freshProbes.delete(name); this.freshProbes.delete(pane); this.freshManaged.delete(name); }
           return result;
         };
         if (this.freshProbes.get(name) === pane && !this.deliveryGuard!.maybeTarget(name) && !this.deliveryGuard!.maybeTarget(pane)) return kill();
         return this.deliveryGuard!.input(this.freshManaged.get(name)?.nodeId ?? name, kill);
       }, true);
+      return beforeEffect ? { ...result, stopPhase } : result;
     }
+    if (beforeEffect) return { ok: false, code: "guard_unavailable", message: "Checked stop requires the delivery guard.", stopPhase };
     return this.killSessionUnchecked(name);
   }
 
-  private async killSessionUnchecked(name: string): Promise<TmuxResult> {
+  /** Keep effect checks outside command catches so a selection refusal retains its code and phase. */
+  private async killSessionUnchecked(name: string, beforeEffect?: () => void, phase?: (value: StopPhase) => void): Promise<TmuxResult> {
     // The guarded path passes the immutable `$N` id, which stays as it is; a bare name is made exact.
     const session = exactTarget(name, "session");
     // Detach first so `detach-on-destroy off` cannot switch views onto another session.
+    beforeEffect?.();
+    phase?.("detach_attempted");
     try {
       await this.run(["tmux", "detach-client", "-s", session],
         `tmux detach-client -s ${shellQuote(session)}`);
@@ -934,6 +944,9 @@ export class TmuxAdapter {
       const message = err instanceof Error ? err.message : String(err);
       if (!message.toLowerCase().includes("no current client")) return classifyWriteError(err);
     }
+    phase?.("detached");
+    beforeEffect?.();
+    phase?.("kill_attempted");
     try {
       await this.run(["tmux", "kill-session", "-t", session],
         `tmux kill-session -t ${shellQuote(session)}`);

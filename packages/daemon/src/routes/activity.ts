@@ -43,6 +43,7 @@ export function evidenceFromHookActivity(input: {
     seq: input.seq,
     observedAt: input.activity.eventAt ?? input.activity.sampledAt,
     ...(input.activity.sourceSequence ? { sourceSequence: input.activity.sourceSequence } : {}),
+    ...(input.activity.livenessSeconds ? { livenessSeconds: input.activity.livenessSeconds } : {}),
     ...(input.route ? { route: input.route } : {}),
   };
   if (input.activity.reason === "permission_request_pending") {
@@ -447,6 +448,8 @@ activityRoutes.post("/hooks", async (c) => {
     generation: stringOrNull(body.generation),
     turnId: stringOrNull(body.turnId),
     sourceSequence: typeof body.sequence === "number" && Number.isSafeInteger(body.sequence) && body.sequence > 0 ? body.sequence : null,
+    livenessSeconds: typeof body.livenessSeconds === "number" && Number.isSafeInteger(body.livenessSeconds)
+      && body.livenessSeconds > 0 && body.livenessSeconds <= 3600 ? body.livenessSeconds : null,
   });
 
   if (!result.ok) {

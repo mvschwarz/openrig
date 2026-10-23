@@ -17,6 +17,7 @@ import { LegacyRigSpecSchema as RigSpecSchema } from "./rigspec-schema.js"; // T
 import { LegacyRigSpecCodec as RigSpecCodec } from "./rigspec-codec.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import type { LegacyRigSpec as RigSpec, LegacyRigSpecEdge as RigSpecEdge, InstantiateOutcome, InstantiateResult } from "./types.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import { resolveLaunchCwd } from "./cwd-resolution.js";
+import type { RecordCreated } from "./operation-correlation.js";
 
 // Only these edge kinds constrain launch order
 const LAUNCH_DEPENDENCY_KINDS = new Set(["delegates_to", "spawned_by"]);
@@ -66,7 +67,7 @@ export class RigInstantiator {
     this.tmuxAdapter = deps.tmuxAdapter;
   }
 
-  async instantiate(spec: RigSpec, opts?: { nonInterruptive?: boolean; env?: SeatEnv }): Promise<InstantiateOutcome> {
+  async instantiate(spec: RigSpec, opts?: { nonInterruptive?: boolean; env?: SeatEnv; recordCreated?: RecordCreated }): Promise<InstantiateOutcome> {
     // 1. Validate
     const raw = RigSpecCodec.parse(RigSpecCodec.serialize(spec));
     const validation = RigSpecSchema.validate(raw);
@@ -109,6 +110,7 @@ export class RigInstantiator {
       const txn = this.db.transaction(() => {
         const rig = this.rigRepo.createRig(spec.name);
         rigId = rig.id;
+        opts?.recordCreated?.(rig.id);
         if (opts?.nonInterruptive !== undefined) this.rigRepo.setRigNonInterruptive(rig.id, opts.nonInterruptive);
 
         for (const specNode of spec.nodes) {
@@ -125,6 +127,7 @@ export class RigInstantiator {
             packageRefs: specNode.packageRefs,
           });
           nodeIdMap[specNode.id] = node.id;
+          opts?.recordCreated?.(rig.id, node.id);
         }
 
         for (const specEdge of spec.edges) {
@@ -310,6 +313,7 @@ import { rigPreflight, preflightValidatedSpec } from "./rigspec-preflight.js";
 import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
 import { resolveAdvisorModel, resolveNodeConfig, selectedPluginPaths } from "./profile-resolver.js";
 import { resolveStartup } from "./startup-resolver.js";
+import { isCommunityHarnessRuntime } from "./built-in-runtimes.js";
 import { planProjection, claudeConflictTargetPath, projectionConflictWarnings, filterProtectedProjections, type ProjectionPlan } from "./projection-planner.js";
 import { ProjectionManifestStore } from "./projection-manifest-store.js";
 import { StartupOrchestrator } from "./startup-orchestrator.js";
@@ -418,7 +422,7 @@ export type MaterializeOutcome =
   | { ok: false; code: "validation_failed"; errors: string[] }
   | { ok: false; code: "preflight_failed"; errors: string[]; warnings: string[] }
   | { ok: false; code: "target_rig_not_found"; message: string }
-  | { ok: false; code: "materialize_conflict"; message: string }
+  | { ok: false; code: "materialize_conflict"; message: string; existingNodeId?: string }
   | { ok: false; code: "materialize_error"; message: string }
   // S5b (OPR.0.5.4.11) — running-name guard refusal on the CREATE branch only
   // (expand/add_member pass targetRigId and are never guarded here).
@@ -476,7 +480,7 @@ export type AddMemberOutcome =
   | { ok: true; result: AddMemberResult }
   | { ok: false; code: "rig_not_found"; message: string }
   | { ok: false; code: "pod_not_found"; message: string }
-  | { ok: false; code: "member_conflict"; message: string }
+  | { ok: false; code: "member_conflict"; message: string; existingNodeId?: string }
   | { ok: false; code: "edge_unresolved"; message: string }
   | { ok: false; code: "materialize_error"; message: string }
   | { ok: false; code: "validation_failed"; errors: string[] }
@@ -628,6 +632,14 @@ export class PodRigInstantiator {
     if (!preflight.ready) {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
     }
+    // A pod added to a running rig inherits the rig's layers; stop before it exists if a required one is gone,
+    // when at least one added member reads startup files.
+    if (opts?.targetRigId && targetRig && rigSpec.pods.some((pod) => pod.members.some((m) => this.runtimeTakesStartupFiles(m.runtime)))) {
+      const missingInherited = this.inheritedStartupFileErrors(opts.targetRigId, targetRig.rig.name);
+      if (missingInherited.length > 0) {
+        return { ok: false, code: "preflight_failed", errors: missingInherited, warnings: preflight.warnings };
+      }
+    }
 
     return this.materializeValidatedSpec(rigSpec, rigRoot, preflight.warnings, opts);
   }
@@ -652,6 +664,7 @@ export class PodRigInstantiator {
       cwdOverride?: string;
       /** S9: ordinary member growth targets this already-persisted pod. */
       existingPodNamespace?: string;
+      recordCreated?: RecordCreated;
     },
   ): Promise<MaterializeOutcome> {
     const persistedEvents: Array<ReturnType<EventBus["persistWithinTransaction"]>> = [];
@@ -674,6 +687,7 @@ export class PodRigInstantiator {
         if (!materializedRigId) {
           const rig = this.deps.rigRepo.createRig(rigSpec.name);
           materializedRigId = rig.id;
+          opts?.recordCreated?.(rig.id);
           persistedEvents.push(this.deps.eventBus.persistWithinTransaction({ type: "rig.created", rigId: materializedRigId }));
         }
 
@@ -723,7 +737,8 @@ export class PodRigInstantiator {
           for (const member of pod.members) {
             const qualifiedId = `${pod.id}.${member.id}`;
             if (logicalIdToNodeId.has(qualifiedId)) {
-              throw { code: "materialize_conflict", message: `Logical ID '${qualifiedId}' already exists in rig '${currentRig.rig.name}'` };
+              throw { code: "materialize_conflict", message: `Logical ID '${qualifiedId}' already exists in rig '${currentRig.rig.name}'`,
+                ...(opts?.recordCreated ? { existingNodeId: logicalIdToNodeId.get(qualifiedId) } : {}) };
             }
           }
         }
@@ -766,6 +781,7 @@ export class PodRigInstantiator {
               rigRoot,
               cwdOverride: opts?.cwdOverride,
             });
+            opts?.recordCreated?.(materializedRigId, node.id);
             logicalIdToNodeId.set(qualifiedId, node.id);
             // Seam B R2: restart-stable provenance persists AT MATERIALIZE (a
             // materialized-but-never-launched seat must still restore its posture).
@@ -862,9 +878,9 @@ export class PodRigInstantiator {
       };
     } catch (err) {
       if (err && typeof err === "object" && "code" in err && "message" in err) {
-        const typed = err as { code: string; message: string };
+        const typed = err as { code: string; message: string; existingNodeId?: string };
         if (typed.code === "materialize_conflict") {
-          return { ok: false, code: "materialize_conflict", message: typed.message };
+          return { ok: false, code: "materialize_conflict", message: typed.message, ...(typed.existingNodeId ? { existingNodeId: typed.existingNodeId } : {}) };
         }
       }
       return { ok: false, code: "materialize_error", message: err instanceof Error ? err.message : String(err) };
@@ -1000,7 +1016,7 @@ export class PodRigInstantiator {
     rigRoot: string,
     opts?: { cwdOverride?: string; edges?: Array<{ from: string; to: string; kind: string }>;
       /** A fork's source seat: its launch additions are copied into this new seat once it is validated, and kept. */
-      launchAdditionsFrom?: SeatSkillPaths },
+      launchAdditionsFrom?: SeatSkillPaths; recordCreated?: RecordCreated },
   ): Promise<AddMemberOutcome> {
     // 1. Resolve the rig.
     const rig = this.deps.rigRepo.getRig(rigId);
@@ -1051,10 +1067,12 @@ export class PodRigInstantiator {
     // colliding logical id would be a real seat collision — reject it honestly.
     // (validate's externalQualifiedIds only resolves edge targets; it does NOT
     // reject a member colliding with an existing node, so this guard is load-bearing.)
-    if (rig.nodes.some((node) => node.logicalId === qualifiedId)) {
+    const existingNode = rig.nodes.find((node) => node.logicalId === qualifiedId);
+    if (existingNode) {
       return {
         ok: false,
         code: "member_conflict",
+        ...(opts?.recordCreated ? { existingNodeId: existingNode.id } : {}),
         message: `Member "${qualifiedId}" already exists in rig "${rig.rig.name}". Pick a different member id, or remove the existing seat first.`,
       };
     }
@@ -1075,6 +1093,14 @@ export class PodRigInstantiator {
     });
     if (!preflight.ready) {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
+    }
+
+    // 6b. Stop before a seat exists if a required file the rig or this pod declared is gone, for a runtime that reads startup files.
+    const missingInherited = this.runtimeTakesStartupFiles(member.runtime)
+      ? this.inheritedStartupFileErrors(rigId, rig.rig.name, podNamespace)
+      : [];
+    if (missingInherited.length > 0) {
+      return { ok: false, code: "preflight_failed", errors: missingInherited, warnings: preflight.warnings };
     }
 
     // 7. Validate + resolve any declared pod-local edges BEFORE creating the
@@ -1125,6 +1151,7 @@ export class PodRigInstantiator {
       suppressSummaryEvent: true,
       cwdOverride: opts?.cwdOverride,
       existingPodNamespace: podNamespace,
+      recordCreated: opts?.recordCreated,
     });
     if (!materialized.ok) {
       const message = "message" in materialized
@@ -1133,7 +1160,7 @@ export class PodRigInstantiator {
           ? materialized.errors.join("; ")
           : "member materialization failed";
       if (materialized.code === "materialize_conflict") {
-        return { ok: false, code: "member_conflict", message };
+        return { ok: false, code: "member_conflict", message, ...(opts?.recordCreated && materialized.existingNodeId ? { existingNodeId: materialized.existingNodeId } : {}) };
       }
       return { ok: false, code: "materialize_error", message };
     }
@@ -1277,7 +1304,7 @@ export class PodRigInstantiator {
     return { ok: true, rigId, nodeId, logicalId: node.logicalId, status: "launched", sessionName: result.sessionName, warnings: result.warnings };
   }
 
-  async instantiate(rigSpecYaml: string, rigRoot: string, opts?: { nonInterruptive?: boolean; cwdOverride?: string; env?: SeatEnv; installRoot?: string; force?: boolean; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean }> }): Promise<InstantiateOutcome> {
+  async instantiate(rigSpecYaml: string, rigRoot: string, opts?: { nonInterruptive?: boolean; cwdOverride?: string; env?: SeatEnv; installRoot?: string; force?: boolean; recordCreated?: RecordCreated; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean }> }): Promise<InstantiateOutcome> {
     // #141: while an import may archive a stopped same-name generation, allow one import per rig name at
     // a time on this daemon. Otherwise two imports could each replace it, or one could archive the other's
     // in-progress replacement. Unrelated names are unaffected; an adapter that cannot probe keeps today's
@@ -1303,7 +1330,7 @@ export class PodRigInstantiator {
     }
   }
 
-  private async instantiateOnce(rigSpecYaml: string, rigRoot: string, opts?: { nonInterruptive?: boolean; cwdOverride?: string; env?: SeatEnv; installRoot?: string; force?: boolean; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean }> }): Promise<InstantiateOutcome> {
+  private async instantiateOnce(rigSpecYaml: string, rigRoot: string, opts?: { nonInterruptive?: boolean; cwdOverride?: string; env?: SeatEnv; installRoot?: string; force?: boolean; recordCreated?: RecordCreated; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean }> }): Promise<InstantiateOutcome> {
     // 1. Parse + validate
     let rigSpec: PodRigSpec;
     try {
@@ -1383,7 +1410,9 @@ export class PodRigInstantiator {
             if (makeRunningSessionCounter(this.db)(id) > 0 || !this.deps.rigRepo.archiveRig(id)) throw new GenerationChanged(rigSpec.name);
           }
         }
-        return this.deps.rigRepo.createRig(rigSpec.name, opts?.installRoot);
+        const rig = this.deps.rigRepo.createRig(rigSpec.name, opts?.installRoot);
+        opts?.recordCreated?.(rig.id);
+        return rig;
       });
       const rig = create();
       rigId = rig.id;
@@ -1508,7 +1537,7 @@ export class PodRigInstantiator {
         // Terminal fast-path: skip agent resolution and profile resolution
         if (member.agentRef === "builtin:terminal") {
           const termResult = await this.processTerminalMember(
-            rigId, rigSpec, rigRoot, pod, member, podId, qualifiedId, nodeIdMap, launchedSessionNames, podInstantiateWarnings, opts?.cwdOverride, opts?.env,
+            rigId, rigSpec, rigRoot, pod, member, podId, qualifiedId, nodeIdMap, launchedSessionNames, podInstantiateWarnings, opts?.cwdOverride, opts?.env, opts?.recordCreated,
           );
           nodeResults.push(termResult);
           continue;
@@ -1585,6 +1614,7 @@ export class PodRigInstantiator {
           // null, and resolveRestorePosture fell through to rig full_bypass.)
           const bootstrapAttachment = this.resolveMemberPolicyAttachment(member.permissionPolicy, rigSpec.permissionPolicy, rigRoot);
           if (bootstrapAttachment) this.persistNodePolicyProvenanceStrict(node.id, bootstrapAttachment);
+          opts?.recordCreated?.(rigId, node.id);
           return node.id;
         });
         let nodeId: string;
@@ -1846,25 +1876,29 @@ export class PodRigInstantiator {
     warnings: string[],
     cwdOverride?: string,
     envOverride?: SeatEnv,
+    recordCreated?: RecordCreated,
   ): Promise<{ logicalId: string; status: "launched" | "failed"; code?: string; error?: string }> {
     const effectiveCwd = resolveLaunchCwd(member.cwd, rigRoot, cwdOverride);
     // Create node with sentinel values
     let nodeId: string;
     try {
-      const node = this.deps.rigRepo.addNode(rigId, qualifiedId, {
-        runtime: member.runtime,
-        model: member.model,
-        effort: member.effort,
-        advisor: member.advisor,
-        env: member.env,
-        cwd: effectiveCwd,
-        restorePolicy: "checkpoint_only",
-        podId,
-        agentRef: member.agentRef,
-        profile: member.profile,
-        label: member.label,
-      });
-      nodeId = node.id;
+      nodeId = this.db.transaction(() => {
+        const node = this.deps.rigRepo.addNode(rigId, qualifiedId, {
+          runtime: member.runtime,
+          model: member.model,
+          effort: member.effort,
+          advisor: member.advisor,
+          env: member.env,
+          cwd: effectiveCwd,
+          restorePolicy: "checkpoint_only",
+          podId,
+          agentRef: member.agentRef,
+          profile: member.profile,
+          label: member.label,
+        });
+        recordCreated?.(rigId, node.id);
+        return node.id;
+      })();
       nodeIdMap[qualifiedId] = nodeId;
     } catch (err) {
       return { logicalId: qualifiedId, status: "failed", error: (err as Error).message };
@@ -2011,8 +2045,66 @@ export class PodRigInstantiator {
 
   /** Store the rig culture file and rig startup block the spec declares, with the absolute root they resolve against. */
   private persistRigStartupLayers(rigId: string, rigSpec: PodRigSpec, rigRoot: string): void {
-    if (!rigSpec.cultureFile && !rigSpec.startup) return;
-    this.deps.rigRepo.setRigStartupLayers(rigId, { root: nodePath.resolve(rigRoot), cultureFile: rigSpec.cultureFile, startup: rigSpec.startup });
+    const podStartupFiles: Record<string, StartupFile[]> = {};
+    for (const pod of rigSpec.pods) {
+      if (pod.startup?.files.length) podStartupFiles[pod.id] = pod.startup.files;
+    }
+    const hasPodFiles = Object.keys(podStartupFiles).length > 0;
+    if (!rigSpec.cultureFile && !rigSpec.startup && !hasPodFiles) return;
+    this.deps.rigRepo.setRigStartupLayers(rigId, {
+      root: nodePath.resolve(rigRoot),
+      cultureFile: rigSpec.cultureFile,
+      startup: rigSpec.startup,
+      ...(hasPodFiles ? { podStartupFiles } : {}),
+    });
+  }
+
+  /** Whether a runtime reads startup files at all. A terminal seat's adapter delivers nothing, and a community harness
+   *  takes none (it only warns), so a missing file can't fail either; main adds them today and keeps doing so. */
+  private runtimeTakesStartupFiles(runtime: string): boolean {
+    return runtime !== "terminal" && !isCommunityHarnessRuntime(runtime);
+  }
+
+  /** Why an add must stop: a startup file the rig or the pod declared as required, or the rig's declared `culture_file`,
+   *  that the add would inherit but cannot read. Empty when nothing is recorded (a rig created before the record, or
+   *  one that declared nothing) or every such file reads. Optional files and files that apply only on restore are not checked. */
+  private inheritedStartupFileErrors(rigId: string, rigName: string, podId?: string): string[] {
+    const layers = this.deps.rigRepo.getRigStartupLayers(rigId);
+    if (!layers) return [];
+    const readable = (absolutePath: string): boolean => {
+      try {
+        this.deps.fsOps.readFile(absolutePath);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const errors: string[] = [];
+    const check = (path: string, owner: string, what: string): void => {
+      const absolutePath = nodePath.resolve(layers.root, path);
+      if (!readable(absolutePath)) {
+        errors.push(`${what} "${path}" (${absolutePath}), declared by ${owner}, is missing or unreadable.`);
+      }
+    };
+    const rigOwner = `rig "${rigName}"`;
+    if (layers.cultureFile) check(layers.cultureFile, rigOwner, "The rig's culture_file");
+    for (const f of layers.startup?.files ?? []) {
+      if (f.required && f.appliesOn.includes("fresh_start")) check(f.path, rigOwner, "Required startup file");
+    }
+    for (const f of (podId ? layers.podStartupFiles?.[podId] : undefined) ?? []) {
+      if (f.required && f.appliesOn.includes("fresh_start")) check(f.path, `pod "${podId}" of ${rigOwner}`, "Required startup file");
+    }
+    if (errors.length > 0) errors.push("No seat was added. Restore the file, then run the command again.");
+    return errors;
+  }
+
+  /** The files a seat's pod contributes: the pod's own startup when the launching spec declares it (a declared seat),
+   *  else the pod files recorded when the rig was created (a seat added to that pod), resolved against the rig's stored root. */
+  private podStartupResolvedFiles(pod: RigSpecPod, rigLayers: RigStartupLayers, rigRoot: string): ResolvedStartupFile[] {
+    if (pod.startup) {
+      return pod.startup.files.map((f) => ({ ...f, absolutePath: nodePath.resolve(rigRoot, f.path), ownerRoot: rigRoot }));
+    }
+    return (rigLayers.podStartupFiles?.[pod.id] ?? []).map((f) => ({ ...f, absolutePath: nodePath.resolve(rigLayers.root, f.path), ownerRoot: rigLayers.root }));
   }
 
   /** The rig culture file and rig startup block a seat launches with, and the root they resolve against: the spec's
@@ -2698,11 +2790,7 @@ export class PodRigInstantiator {
       }
     }
     // Layer 5: Pod startup
-    if (pod.startup) {
-      for (const f of pod.startup.files) {
-        files.push({ ...f, absolutePath: nodePath.resolve(rigRoot, f.path), ownerRoot: rigRoot });
-      }
-    }
+    files.push(...this.podStartupResolvedFiles(pod, rigLayers, rigRoot));
     // Layer 6: Member startup
     if (member.startup) {
       for (const f of member.startup.files) {
@@ -2754,11 +2842,7 @@ export class PodRigInstantiator {
       }
     }
     // 5. Pod startup
-    if (pod.startup) {
-      for (const f of pod.startup.files) {
-        files.push({ ...f, absolutePath: nodePath.resolve(rigRoot, f.path), ownerRoot: rigRoot });
-      }
-    }
+    files.push(...this.podStartupResolvedFiles(pod, rigLayers, rigRoot));
     // 6. Member startup
     if (member.startup) {
       for (const f of member.startup.files) {
@@ -2865,7 +2949,7 @@ export class PodRigInstantiator {
       if (f.deliveryHint !== "auto") return f;
       try {
         const content = this.deps.fsOps.readFile(f.absolutePath);
-        return { ...f, deliveryHint: resolveConcreteHint(f.path, content) };
+        return { ...f, deliveryHint: resolveConcreteHint(f.path, content, f.orientation) };
       } catch {
         // If file can't be read, default to send_text (safest — delivered after harness ready)
         return { ...f, deliveryHint: "send_text" as const };

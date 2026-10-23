@@ -100,6 +100,28 @@ describe("rig up --host HTTP", () => {
     expect(body.freshLogicalIds).toEqual(["dev.impl", "dev.qa"]);
   });
 
+  it("--name with a bare name says to pass the spec path or bundle file, and posts nothing", async () => {
+    vi.stubEnv("HOST_B_TOKEN", "remote-tok");
+    const client = mockClient({});
+    const { upCommand } = await import("../src/commands/up.js");
+    const prog = new Command();
+    prog.exitOverride();
+    prog.addCommand(upCommand({
+      lifecycleDeps: {} as any,
+      clientFactory: () => client,
+      hostRegistryLoader: mockRegistry([
+        { id: "host-b", transport: "http", url: "http://remote:7433", bearer_env: "HOST_B_TOKEN" },
+      ]),
+    } as any));
+    const { stderr, exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "up", "starter", "--host", "host-b", "--name", "beta"]);
+    });
+    expect(client._calls.length).toBe(0);
+    expect(exitCode).toBe(1);
+    expect(stderr.join("\n")).toContain("pass the spec path or bundle file");
+    expect(stderr.join("\n")).not.toContain("restored under its own name");
+  });
+
   it("missing bearer exits nonzero under --json", async () => {
     delete process.env.MISSING_TOK;
     const client = mockClient({});

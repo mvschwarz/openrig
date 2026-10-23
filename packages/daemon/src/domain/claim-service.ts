@@ -1,3 +1,5 @@
+import { shellQuote } from "../adapters/shell-quote.js";
+import { resumeTypeForRuntime, validateResumeToken } from "./resume-token-validation.js";
 import { OutboxHandler } from "./outbox-handler.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
@@ -16,10 +18,23 @@ import {
 } from "./pane-binding-observation.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
+import { SessionTransport } from "./session-transport.js";
 
 export type ClaimResult =
   | { ok: true; nodeId: string; sessionId: string }
   | { ok: false; code: string; error: string };
+
+export interface AdoptionCaptureOutcome {
+  outcome: "captured" | "preserved" | "skipped" | "exempt" | "noop" | "error";
+  reason?: string;
+}
+
+export interface ReconcileResumeMetadata {
+  capture: AdoptionCaptureOutcome;
+  /** Recorded metadata is not proof of conversation continuity or resumability. */
+  status: "recorded" | "missing" | "unknown" | "not_applicable";
+  guidance?: string;
+}
 
 /**
  * OPR.0.3.4.3 — outcome of the no-launch reconcile (adopt a hand-resumed
@@ -40,6 +55,8 @@ export interface ReconcileSessionResult {
   projectionDrift: string[];
   /** Provider-session conversation continuity is never verified by reconcile. */
   continuity: "unverified";
+  /** Absent for the binding-only missing-pane repair, which does not capture. */
+  resumeMetadata?: ReconcileResumeMetadata;
 }
 
 export interface MissingPaneRepairResult extends ReconcileSessionResult {
@@ -127,6 +144,8 @@ export class ClaimService {
   private resumeTokenCapturer: ClaimServiceDeps["resumeTokenCapturer"] | null;
   private piRunnerStateStore: ClaimServiceDeps["piRunnerStateStore"] | null;
   private ompRunnerStateStore: ClaimServiceDeps["ompRunnerStateStore"] | null;
+  /** Delivers the claim hint the way the startup retry is delivered (startup-orchestrator.ts builds the same transport). */
+  private sessionTransport: SessionTransport | null;
 
   constructor(deps: ClaimServiceDeps) {
     if (deps.db !== deps.rigRepo.db) throw new Error("ClaimService: rigRepo must share the same db handle");
@@ -147,6 +166,9 @@ export class ClaimService {
     this.resumeTokenCapturer = deps.resumeTokenCapturer ?? null;
     this.piRunnerStateStore = deps.piRunnerStateStore ?? null;
     this.ompRunnerStateStore = deps.ompRunnerStateStore ?? null;
+    this.sessionTransport = this.tmuxAdapter ? new SessionTransport({
+      db: deps.db, rigRepo: deps.rigRepo, sessionRegistry: deps.sessionRegistry, tmuxAdapter: this.tmuxAdapter, eventBus: deps.eventBus,
+    }) : null;
   }
 
   private async observeBindingPane(
@@ -199,22 +221,30 @@ export class ClaimService {
     }
   }
 
-  /** Best-effort: send a short identity hint into the adopted session after claim. */
+  /**
+   * Best-effort: send a short identity hint into the adopted session after claim. It goes through the delivery path as
+   * an OpenRig notice, so the seat's level types or holds it, and at every level the prompt guard refuses it while the
+   * seat is waiting at a native prompt (slice 21 I7).
+   */
   private async deliverClaimHint(tmuxSession: string, meta: {
     rigName: string; logicalId: string;
   }): Promise<void> {
-    if (!this.tmuxAdapter) return;
+    if (!this.sessionTransport) return;
     const hint = `--- OpenRig: You have been adopted into rig "${meta.rigName}" as ${meta.logicalId}. Run: rig whoami --json ---`;
-    const write = async () => {
-      const sent = await this.tmuxAdapter!.sendText(tmuxSession, hint);
-      if (sent.ok) await this.tmuxAdapter!.sendKeys(tmuxSession, ["Enter"]);
-    };
-    const guard = this.tmuxAdapter.deliveryGuard;
-    if (guard) await guard.operation(tmuxSession, write, async target => {
-      new OutboxHandler(this.db).retain({ outboxId: `guard-claim-${target.nodeId}-${target.occupant ?? "unknown"}`,
-        senderSession: "claim@system", destinationSession: tmuxSession, body: hint }, target);
+    const guard = this.tmuxAdapter?.deliveryGuard;
+    const target = guard?.maybeTarget(tmuxSession);
+    // One held copy per occupant, however often the hint is retried.
+    const deliveryId = target ? `guard-claim-${target.nodeId}-${target.occupant ?? "unknown"}` : undefined;
+    // A claim runs under its lifecycle lease, and a send inside that lease isn't re-checked against the level (a terminal
+    // member's default holds OpenRig notices), so the hint checks the level itself.
+    if (guard && target && deliveryId && guard.holdsInput(target.nodeId, { source: "openrig", urgent: false })) {
+      new OutboxHandler(this.db).retain({ outboxId: deliveryId, senderSession: "claim@system", destinationSession: tmuxSession, body: hint }, target);
+      return;
+    }
+    const result = await this.sessionTransport.send(tmuxSession, hint, {
+      actorSession: "claim@system", openrigNotice: true, ...(deliveryId ? { deliveryId } : {}),
     });
-    else await write();
+    if (!result.ok) console.warn(`[claim] identity hint not typed into ${tmuxSession}: ${result.reason ?? "send_failed"}. ${result.error ?? ""}`.trim());
   }
 
   private maybeProvisionContextCollector(runtime: string | null | undefined, cwd: string | null | undefined, tmuxSession: string): void {
@@ -247,7 +277,7 @@ export class ClaimService {
    */
   private async captureResumeTokenOnAdoption(input: {
     rigId: string; nodeId: string; sessionId: string; sessionName: string; runtime: string | null;
-  }): Promise<void> {
+  }): Promise<AdoptionCaptureOutcome> {
     try {
       // Derivation is the shared PURE helper (OPR.0.4.3.04 B2 — reused by the
       // seat-handover discovered-mode capture); persistence + events stay here so
@@ -256,11 +286,12 @@ export class ClaimService {
         { runtime: input.runtime, sessionName: input.sessionName },
         { contextUsageStore: this.contextUsageStore, claudeProcessStartedAt: this.claudeProcessStartedAt, resumeTokenCapturer: this.resumeTokenCapturer, piRunnerStateStore: this.piRunnerStateStore, ompRunnerStateStore: this.ompRunnerStateStore },
       );
-      if (derived.outcome === "exempt" || derived.outcome === "noop") return;
+      if (derived.outcome === "exempt" || derived.outcome === "noop") return { outcome: derived.outcome };
       const runtime = input.runtime as string; // non-null past exempt
       if (derived.outcome === "skipped") {
         this.emitCaptureSkip(input, runtime, derived.reason);
-        return;
+        // The legacy capture reason also covers an absent result before a deadline.
+        return { outcome: "skipped", reason: derived.reason === "probe_timeout" ? "not_obtained" : derived.reason };
       }
       const validation = { resumeType: derived.resumeType, token: derived.token };
 
@@ -283,8 +314,10 @@ export class ClaimService {
               runtime, outcome: "preserved", resumeType: validation.resumeType, reason: "higher_rank_present", redacted: true,
             });
       } catch { /* best-effort */ }
+      return { outcome: wrote ? "captured" : "preserved" };
     } catch {
-      // best-effort — capture never fails or blocks the adoption (PRD Rule 7)
+      // No exception text or native token crosses the result boundary.
+      return { outcome: "error", reason: "capture_failed" };
     }
   }
 
@@ -602,10 +635,25 @@ export class ClaimService {
       // Pure reads only (sidecar file / pid-keyed log) — consistent with the
       // no-launch/no-input contract above; does NOT touch `continuity`
       // (FR-3 captures a token, it does not assert conversation continuity).
-      await this.captureResumeTokenOnAdoption({
+      const capture = await this.captureResumeTokenOnAdoption({
         rigId: nodeRow.rig_id, nodeId: nodeRow.id, sessionId, sessionName,
         runtime: nodeRow.runtime,
       });
+      const expectedType = resumeTypeForRuntime(nodeRow.runtime);
+      let status: ReconcileResumeMetadata["status"] = expectedType ? "unknown" : "not_applicable";
+      if (expectedType) {
+        try {
+          const row = this.db.prepare("SELECT resume_type, resume_token FROM sessions WHERE id=?").get(sessionId) as
+            { resume_type: string | null; resume_token: string | null } | undefined;
+          status = row?.resume_type === expectedType && validateResumeToken(nodeRow.runtime, row.resume_token).ok ? "recorded" : "missing";
+        } catch { /* Reporting cannot turn an already committed binding into failure. */ }
+      }
+      const resumeMetadata: ReconcileResumeMetadata = { capture, status };
+      if (status === "missing" || status === "unknown") {
+        resumeMetadata.guidance = `The seat is bound, but future resume metadata is ${status === "missing" ? "missing" : "unconfirmed"}. ` +
+          `After confirming the live conversation identity, pipe its verified token to rig seat set-resume-token ${shellQuote(sessionName)} --token-stdin --reason "verified live conversation". ` +
+          "The token must come from stdin, never a command argument. No prior token was copied.";
+      }
 
       return {
         ok: true,
@@ -618,6 +666,7 @@ export class ClaimService {
           sessionId,
           projectionDrift,
           continuity: "unverified",
+          resumeMetadata,
         },
       };
     } catch (err) {

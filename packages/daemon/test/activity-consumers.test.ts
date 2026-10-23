@@ -77,7 +77,10 @@ describe("S19 A8 — the enrichment serves the arbitrated taxonomy state", () =>
 
 describe("S19 A8 — consumption trace: the surfaces read the SERVED state (no re-arbitration)", () => {
   it("cli ps renders activityState (taxonomy-first, legacy fallback cited)", () => {
-    const src = readFileSync(join(repoRoot, "packages", "cli", "src", "commands", "ps.ts"), "utf8");
+    // ps renders through the shared seat-activity formatter, which the MCP team read uses too.
+    const ps = readFileSync(join(repoRoot, "packages", "cli", "src", "commands", "ps.ts"), "utf8");
+    const src = readFileSync(join(repoRoot, "packages", "cli", "src", "lib", "seat-activity.ts"), "utf8");
+    expect(ps).toContain('from "../lib/seat-activity.js"');
     expect(src).toContain("activityState");
     expect(src).toMatch(/Legacy fallback/);
   });

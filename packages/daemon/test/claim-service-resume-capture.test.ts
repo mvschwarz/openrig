@@ -339,6 +339,52 @@ describe("ClaimService FR-3 — adoption-boundary resume-token capture", () => {
     return { rig, node, session: s };
   }
 
+  it.each(["codex", "claude-code"].flatMap(runtime => [false, true].map(captured => ({ runtime, captured }))))(
+    "reconcile reports future resume metadata for $runtime (captured=$captured), keeping binding success",
+    async ({ runtime, captured }) => {
+      const { node, session } = seedDetachedManagedSeat(runtime, "dev-driver@test-rig");
+      const type = runtime === "codex" ? "codex_id" : "claude_id";
+      sessionRegistry.updateResumeToken(session.id, type, "synthetic-old-conversation", "operator");
+      if (captured) {
+        captureCodexThreadId.mockResolvedValue("synthetic-current-conversation");
+        readSidecar.mockReturnValue({ ok: true, data: { session_id: "synthetic-current-conversation" } });
+      }
+      const result = await buildService().reconcileSession({ sessionName: "dev-driver@test-rig" });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.resumeMetadata).toMatchObject({
+        capture: { outcome: captured ? "captured" : "skipped" }, status: captured ? "recorded" : "missing",
+      });
+      if (!captured) {
+        expect(result.result.resumeMetadata?.capture.reason).toBe(runtime === "codex" ? "not_obtained" : "missing_sidecar");
+        expect(result.result.resumeMetadata?.guidance).toContain("After confirming the live conversation");
+        expect(result.result.resumeMetadata?.guidance).toContain("rig seat set-resume-token");
+        expect(result.result.resumeMetadata?.guidance).toContain("--token-stdin --reason");
+      } else expect(result.result.resumeMetadata?.guidance).toBeUndefined();
+      expect(tokenRow(node.id).resume_token).toBe(captured ? "synthetic-current-conversation" : null);
+      expect(db.prepare("SELECT resume_token FROM sessions WHERE id=?").get(session.id)).toEqual({ resume_token: "synthetic-old-conversation" });
+      expect(sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe("dev-driver@test-rig");
+      expect(result.result.continuity).toBe("unverified");
+      expect(mockTmux.sendText).not.toHaveBeenCalled();
+      expect(mockTmux.sendKeys).not.toHaveBeenCalled();
+      expect(JSON.stringify(result)).not.toContain("synthetic-");
+    },
+  );
+
+  it.each(["codex", "claude-code", "terminal"])("keeps a %s binding successful when capture throws or is inapplicable", async runtime => {
+    seedDetachedManagedSeat(runtime, "dev-driver@test-rig");
+    captureCodexThreadId.mockRejectedValue(new Error("internal native detail"));
+    readSidecar.mockImplementation(() => { throw new Error("internal native detail"); });
+    const result = await buildService().reconcileSession({ sessionName: "dev-driver@test-rig" });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.resumeMetadata).toMatchObject({
+      capture: { outcome: runtime === "codex" ? "skipped" : runtime === "claude-code" ? "error" : "exempt" }, status: runtime === "terminal" ? "not_applicable" : "missing",
+    });
+    expect(Boolean(result.result.resumeMetadata?.guidance)).toBe(runtime !== "terminal");
+    expect(JSON.stringify(result)).not.toContain("internal native detail");
+  });
+
   it("reconcileSession captures a Codex token at the no-launch adoption boundary", async () => {
     captureCodexThreadId.mockResolvedValue("codex-thread-reconcile");
     const { node } = seedDetachedManagedSeat("codex", "dev-driver@test-rig");

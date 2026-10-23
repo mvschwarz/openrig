@@ -359,7 +359,9 @@ function hasPickupEvidence(db: Database.Database, row: Pick<QueueItem, "qitemId"
   return false;
 }
 
-type WakeMode = "failed" | "unconfirmed";
+/** `held`: the seat's typing guard or interruption level held the wake on purpose (nothing typed). A retry would be held
+ *  again, so it's never re-nudged: past the same window as an unconfirmed wake, one notice escalates it, worded as held. */
+type WakeMode = "failed" | "unconfirmed" | "held";
 
 function classifyWakeResult(lastNudgeResult: string | null): WakeMode | null {
   if (!lastNudgeResult) return null;
@@ -373,6 +375,9 @@ function classifyWakeResult(lastNudgeResult: string | null): WakeMode | null {
   // records a fresh attempt; later retries reuse the same delivery id, whose
   // retained readback returns `retained` again even after the guard has cleared —
   // so the row re-probes once and then escalates rather than looping probes.
+  // A draft-aware hold can clear on its own (the draft is sent or cleared), so it keeps that retry path. A hold or a
+  // level that holds the wake is the person's choice: retrying is held again, so it reads as held.
+  if (lastNudgeResult === "retained:typing_guard") return "held";
   if (lastNudgeResult.startsWith("retained:")) return "failed";
   if (
     lastNudgeResult === "delivered-ack-pending" ||
@@ -496,7 +501,7 @@ export function readWakeLadderBackstop(db: Database.Database, qitemId: string): 
     || (row.state === "in-progress" && row.claimedAt && mode === "failed" && db.prepare(
       "SELECT 1 FROM queue_transitions WHERE qitem_id = ? AND transition_note LIKE 'parked-owner wake delivery failed:%' LIMIT 1",
     ).get(qitemId));
-  if (!eligible || !mode || (mode === "unconfirmed" && hasPickupEvidence(db, row))) return recovery ? recoveryBackstop() : null;
+  if (!eligible || !mode || ((mode === "unconfirmed" || mode === "held") && hasPickupEvidence(db, row))) return recovery ? recoveryBackstop() : null;
   const ladder = readLadder(db, qitemId);
   if (ladder.exhausted) return recovery ? recoveryBackstop() : {
     owner: defaultResolveOrchestrator(db, row.destinationSession) ?? row.destinationSession,
@@ -508,7 +513,7 @@ export function readWakeLadderBackstop(db: Database.Database, qitemId: string): 
   if (!retry && recovery && !JSON.parse(disposition!.tags ?? "[]").includes(WAKE_ESCALATION_TAG)) return recoveryBackstop();
   const last = ladder.lastMarkerTs ?? (row.lastNudgeAttempt ? Date.parse(row.lastNudgeAttempt) : null);
   let due = last === null || Number.isNaN(last) ? now.getTime() : last + interval * 1000;
-  if (mode === "unconfirmed") {
+  if (mode === "unconfirmed" || mode === "held") {
     // The existing gate compares rounded age-minutes; display its actual
     // earliest eligibility, without changing that policy to fit the face.
     due = Math.max(due, Date.parse(row.tsCreated) + Math.max(0, resolveWakeUnconfirmedWindowMinutes() - 0.5) * 60_000);
@@ -529,7 +534,9 @@ export function readWakeLadderBackstop(db: Database.Database, qitemId: string): 
     owner: retry ? row.destinationSession : operator ? resolveOperatorSeat() ?? row.sourceSession : orch!,
     mechanism: retry ? "queue-wake-ladder:retry" : ladder.opEngineDispatched ? "queue-wake-ladder:operator-outcome" : operator ? "queue-wake-ladder:operator" : "queue-wake-ladder:orchestrator",
     dueAt: ladder.opEngineDispatched ? null : new Date(due).toISOString(), intervalSeconds: interval,
-    ...(suspension ? { suspendedUntil: suspension.until, note: suspension.reason } : { note: "Earliest eligibility; the next scheduler pass rechecks provider state, custody and the shared destination budget." }),
+    ...(suspension ? { suspendedUntil: suspension.until, note: suspension.reason }
+      : mode === "held" ? { held: true, note: `Held by ${row.destinationSession}'s typing guard: nothing was typed, and it isn't retried. Read it with rig seat held-messages ${row.destinationSession}; one notice goes out if it's still waiting then.` }
+        : { note: "Earliest eligibility; the next scheduler pass rechecks provider state, custody and the shared destination budget." }),
   };
 }
 
@@ -634,7 +641,8 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
     const attemptWake =
       deps.attemptWake ??
       (async (qitemId: string, target: string): Promise<string> => {
-        await deps.queueRepo.maybeNudge(qitemId, target, true);
+        // A ladder retry is OpenRig's own scheduling on the row, whoever created it.
+        await deps.queueRepo.maybeNudge(qitemId, target, true, undefined, undefined, "openrig");
         return deps.queueRepo.getById(qitemId)?.lastNudgeWireResult ?? "indeterminate:no transport available";
       });
 
@@ -760,7 +768,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
 
       // F1 gates for the unconfirmed class: never re-nudge; enter only past the window
       // with zero pickup evidence.
-      if (mode === "unconfirmed") {
+      if (mode === "unconfirmed" || mode === "held") {
         if (minutesSince(row.tsCreated, now) < windowMin) continue;
         if (hasPickupEvidence(deps.db, row)) continue;
       }
@@ -825,7 +833,9 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       const reason =
         mode === "failed"
           ? `wake failed ${view.attempts} times over ${minutesSince(view.firstMarkerTs ?? row.tsCreated, now)} min`
-          : `unconfirmed delivery with no pickup evidence over ${minutesSince(row.tsCreated, now)} min`;
+          : mode === "held"
+            ? `held by ${row.destinationSession}'s typing guard for ${minutesSince(row.tsCreated, now)} min: nothing was typed, and it isn't retried`
+            : `unconfirmed delivery with no pickup evidence over ${minutesSince(row.tsCreated, now)} min`;
       const dest = row.destinationSession;
       if (!escalating.has(dest)) escalating.set(dest, []);
       escalating.get(dest)!.push({ row, view, mode, reason, due, suspended });

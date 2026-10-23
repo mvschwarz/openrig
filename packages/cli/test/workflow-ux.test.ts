@@ -27,6 +27,7 @@ describe("rig workflow --help carries examples on every command (HG-4)", () => {
     "show",
     "trace",
     "continue",
+    "revise",
   ];
 
   // Commander v13 attaches `addHelpText('after', ...)` as a listener

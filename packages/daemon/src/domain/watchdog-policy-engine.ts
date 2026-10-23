@@ -333,9 +333,7 @@ export class WatchdogPolicyEngine {
 
     const parsed = this.parseSpec(job.specYaml);
     const isContextUsageThreshold = job.policy === "context-usage-threshold";
-    const target = isContextUsageThreshold
-      ? { session: job.targetSession }
-      : (parsed.target ?? { session: job.targetSession });
+    const target = watchdogJobTarget(job, parsed.target);
     const occupantGeneration = isContextUsageThreshold
       ? (this.resolveTargetGeneration?.(job.targetSession) ?? null)
       : null;
@@ -599,7 +597,7 @@ export class WatchdogPolicyEngine {
     if (thresholdFire && occupantGeneration && !continuityAction) {
       this.jobsRepo.recordThresholdFire(job.jobId, occupantGeneration, evaluatedAt);
     }
-    const deliverySchedule = this.jobsRepo.getByIdOrThrow(job.jobId);
+    const deliverySchedule = this.jobsRepo.deliverySchedule(job.jobId);
     const delivery = await this.deliver(
       {
         targetSession: outcome.target.session,
@@ -700,7 +698,7 @@ export class WatchdogPolicyEngine {
   }
 
   private async deliverDigest(seat: string, digest: HeldReminder[]): Promise<void> {
-    const schedules = digest.map((held) => this.jobsRepo.getByIdOrThrow(held.job.jobId));
+    const schedules = digest.map((held) => this.jobsRepo.deliverySchedule(held.job.jobId));
     const members = digest.map((held) => ({ jobId: held.job.jobId, occurrenceId: held.occurrenceId }));
     const digestId = `digest-${createHash("sha256").update(JSON.stringify(members.map((m) => m.occurrenceId).sort())).digest("hex")}`;
     const lines = digest.map(({ entry }) => {
@@ -726,7 +724,7 @@ export class WatchdogPolicyEngine {
   /** A held reminder sent on its own, exactly as `evaluate` would have sent it: an ordinary park reminder with its
    *  continuation's preview, anything else verbatim. */
   private async deliverAlone(seat: string, held: HeldReminder, entry: ParkReminderEntry | null): Promise<void> {
-    const schedule = this.jobsRepo.getByIdOrThrow(held.job.jobId);
+    const schedule = this.jobsRepo.deliverySchedule(held.job.jobId);
     const message = entry ? withContinuationPreview(held.outcome.message, entry.qitemId, entry.continuation) : held.outcome.message;
     const delivery = await this.deliver(
       { targetSession: seat, message },
@@ -799,11 +797,11 @@ export class WatchdogPolicyEngine {
     // The history above audits the actual attempt. A newer park/blocker change
     // must not receive its receipt or be backed off as though we sent for it.
     const current = this.jobsRepo.getByIdOrThrow(job.jobId);
-    if (current.state === "active" && current.specYaml === deliverySchedule.specYaml
-      && current.intervalSeconds === deliverySchedule.intervalSeconds
+    if (current.state === "active" && this.jobsRepo.scheduleUnchanged(current, deliverySchedule)
       && (isContextUsageThreshold || current.lastEvaluationAt === evaluatedAt)) {
       this.onWakeAttempt?.({ jobId: job.jobId, deliveryStatus: delivery.status });
     }
+    this.jobsRepo.deliveryAccounted(job.jobId);
     return {
       job: this.jobsRepo.getByIdOrThrow(job.jobId),
       outcome,
@@ -837,6 +835,17 @@ function parseContinuityAction(
     destination: value["destination"],
     body: value["body"],
   };
+}
+
+/** The seat a job is addressed to, before delivery resolves the name: a context-usage job measures and wakes its
+ *  stored target; every other policy prefers its spec's `target:`. A seat swap compares the same value (#1775). */
+export function watchdogJobTarget(
+  job: { policy: string; targetSession: string },
+  specTarget: { session: string } | null,
+): { session: string } {
+  return job.policy === "context-usage-threshold"
+    ? { session: job.targetSession }
+    : (specTarget ?? { session: job.targetSession });
 }
 
 /** Parse the operator-authored watchdog YAML before it reaches persistence. */

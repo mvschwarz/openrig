@@ -16,9 +16,10 @@ import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-obse
 import { observeClaudePermission } from "../src/domain/permission-drift.js";
 import type { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 import { assessNativeResumeProbe } from "../src/domain/native-resume-probe.js";
+import { createHash } from "node:crypto";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
-import { seatSkillPaths } from "../src/domain/seat-skill-storage.js";
+import { SEAT_SKILLS_BOOTSTRAP_LINE, describeSkillRouterFootprint, seatSkillPaths } from "../src/domain/seat-skill-storage.js";
 import { prepareSeatLaunchAdditions, recordConversationPrompt, systemPromptPendingNote } from "../src/domain/seat-launch-additions.js";
 import * as nodeFs from "node:fs";
 import * as nodeOs from "node:os";
@@ -203,6 +204,117 @@ describe("StartupOrchestrator", () => {
       expect(result.warnings?.some((w) => w.startsWith("seat_skills_line_unwritable:"))).toBe(true);
     } finally {
       nodeFs.chmodSync(cwd, 0o755);
+      nodeFs.rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  // What setup shows is what a start writes: with a yes, the real adapters add exactly the footprint's bytes, the line between
+  // OpenRig's markers, to an existing guidance file, and write exactly that text into a new one.
+  it.each([
+    ["codex", "an existing"], ["codex", "a new"], ["claude-code", "an existing"], ["claude-code", "a new"],
+  ] as const)("through the real %s adapter: a start writes exactly the text setup previews into %s guidance file", async (runtime, kind) => {
+    const existing = kind === "an existing" ? "# Personal instructions\nPreserve these exact bytes.\n" : null;
+    const root = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "line-exact-"));
+    try {
+      const footprint = describeSkillRouterFootprint([]);
+      const asset = nodePath.join(import.meta.dirname, "../assets/guidance/openrig-seat-skills.md");
+      const readinessSettings = {
+        resolveOne: (key: string) => key === "skills.router_line.enabled" ? { value: true, source: "file", defaultValue: false } : { value: 30, source: "default", defaultValue: 30 },
+      } as unknown as Pick<SettingsStore, "resolveOne">;
+      const seed = seedSession();
+      const cwd = nodeFs.mkdtempSync(nodePath.join(root, "project-"));
+      const guidance = nodePath.join(cwd, runtime === "codex" ? "AGENTS.md" : "CLAUDE.md");
+      if (existing !== null) nodeFs.writeFileSync(guidance, existing);
+      const fsOps = {
+        readFile: (f: string) => nodeFs.readFileSync(f, "utf8"), writeFile: (f: string, c: string) => nodeFs.writeFileSync(f, c),
+        exists: (f: string) => nodeFs.existsSync(f), mkdirp: (d: string) => { nodeFs.mkdirSync(d, { recursive: true }); },
+        copyFile: (a: string, b: string) => nodeFs.copyFileSync(a, b), listFiles: (d: string) => nodeFs.readdirSync(d), homedir: root,
+      };
+      const tmuxNever = new Proxy({}, { get() { throw new Error("no tmux calls in delivery"); } }) as never;
+      const real = runtime === "codex"
+        ? new CodexRuntimeAdapter({ fsOps: fsOps as never, tmux: tmuxNever, listProcesses: () => [] })
+        : new ClaudeCodeAdapter({ fsOps: fsOps as never, tmux: tmuxNever } as never);
+      const adapter = mockAdapter({ runtime, deliverStartup: real.deliverStartup.bind(real) as RuntimeAdapter["deliverStartup"] });
+      const result = await createOrchestrator({ readinessSettings, readFile: (f) => nodeFs.readFileSync(f, "utf8") }).startNode(makeInput(seed, {
+        adapter, isRestore: true, binding: { ...makeBinding(), cwd },
+        resolvedStartupFiles: [{ path: "openrig-seat-skills.md", absolutePath: asset, ownerRoot: nodePath.dirname(asset), deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start", "restore"] }],
+      }));
+      expect(result).toMatchObject({ ok: true, routerLine: { files: [{ outcome: "delivered" }] } });
+      expect(nodeFs.readFileSync(guidance, "utf8")).toBe(existing === null ? footprint.written : `${existing}${footprint.appended}`);
+    } finally {
+      nodeFs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // A guidance file that is a link (here to a file outside the project) isn't written through: the start reports it linked.
+  it.each(["codex", "claude-code"] as const)("through the real %s adapter: a linked guidance file is left unwritten and reported linked, and the seat still starts", async (runtime) => {
+    const seed = seedSession();
+    const root = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "line-linked-"));
+    try {
+      const cwd = nodePath.join(root, "project");
+      nodeFs.mkdirSync(cwd);
+      const elsewhere = nodePath.join(root, "elsewhere.md");
+      const personal = "# Personal instructions\nPreserve these exact bytes.\n";
+      nodeFs.writeFileSync(elsewhere, personal);
+      nodeFs.symlinkSync(elsewhere, nodePath.join(cwd, runtime === "codex" ? "AGENTS.md" : "CLAUDE.md"));
+      const fsOps = {
+        readFile: (f: string) => nodeFs.readFileSync(f, "utf8"), writeFile: (f: string, c: string) => nodeFs.writeFileSync(f, c),
+        exists: (f: string) => nodeFs.existsSync(f), mkdirp: (d: string) => { nodeFs.mkdirSync(d, { recursive: true }); },
+        copyFile: (a: string, b: string) => nodeFs.copyFileSync(a, b), listFiles: (d: string) => nodeFs.readdirSync(d), homedir: root,
+      };
+      const tmuxNever = new Proxy({}, { get() { throw new Error("no tmux calls in delivery"); } }) as never;
+      const real = runtime === "codex"
+        ? new CodexRuntimeAdapter({ fsOps: fsOps as never, tmux: tmuxNever, listProcesses: () => [] })
+        : new ClaudeCodeAdapter({ fsOps: fsOps as never, tmux: tmuxNever } as never);
+      const adapter = mockAdapter({ runtime, deliverStartup: real.deliverStartup.bind(real) as RuntimeAdapter["deliverStartup"] });
+      const readinessSettings = {
+        resolveOne: (key: string) => key === "skills.router_line.enabled" ? { value: true, source: "file", defaultValue: false } : { value: 30, source: "default", defaultValue: 30 },
+      } as unknown as Pick<SettingsStore, "resolveOne">;
+      const asset = nodePath.join(import.meta.dirname, "../assets/guidance/openrig-seat-skills.md");
+      const result = await createOrchestrator({ readinessSettings, readFile: (f) => nodeFs.readFileSync(f, "utf8") }).startNode(makeInput(seed, {
+        adapter, isRestore: true, binding: { ...makeBinding(), cwd },
+        resolvedStartupFiles: [{ path: "openrig-seat-skills.md", absolutePath: asset, ownerRoot: nodePath.dirname(asset), deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start", "restore"] }],
+      }));
+      expect(result).toMatchObject({ ok: true, routerLine: { answer: { state: "yes", by: "saved" }, files: [{ outcome: "linked", path: expect.stringMatching(runtime === "codex" ? /AGENTS\.md$/ : /CLAUDE\.md$/) }] } });
+      expect(result.warnings?.some((w) => w.startsWith("seat_skills_line_linked:"))).toBe(true);
+      expect(nodeFs.readFileSync(elsewhere, "utf8")).toBe(personal);
+    } finally {
+      nodeFs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // An edited seat-skills line is left as it is by a start, as rig down leaves it: a fresh start doesn't replace it.
+  it.each(["codex", "claude-code"] as const)("through the real %s adapter: a start leaves an edited seat-skills line as it is and reports it edited", async (runtime) => {
+    const seed = seedSession();
+    const cwd = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "line-edited-"));
+    try {
+      const guidance = nodePath.join(cwd, runtime === "codex" ? "AGENTS.md" : "CLAUDE.md");
+      const edited = "# Personal instructions\n\n<!-- BEGIN OpenRig MANAGED BLOCK: openrig-seat-skills.md -->\n"
+        + `${SEAT_SKILLS_BOOTSTRAP_LINE} PERSON LINE EDIT\n\n<!-- END OpenRig MANAGED BLOCK: openrig-seat-skills.md -->`;
+      nodeFs.writeFileSync(guidance, edited);
+      const fsOps = {
+        readFile: (f: string) => nodeFs.readFileSync(f, "utf8"), writeFile: (f: string, c: string) => nodeFs.writeFileSync(f, c),
+        exists: (f: string) => nodeFs.existsSync(f), mkdirp: (d: string) => { nodeFs.mkdirSync(d, { recursive: true }); },
+        copyFile: (a: string, b: string) => nodeFs.copyFileSync(a, b), listFiles: (d: string) => nodeFs.readdirSync(d), homedir: cwd,
+      };
+      const tmuxNever = new Proxy({}, { get() { throw new Error("no tmux calls in delivery"); } }) as never;
+      const real = runtime === "codex"
+        ? new CodexRuntimeAdapter({ fsOps: fsOps as never, tmux: tmuxNever, listProcesses: () => [] })
+        : new ClaudeCodeAdapter({ fsOps: fsOps as never, tmux: tmuxNever } as never);
+      const adapter = mockAdapter({ runtime, deliverStartup: real.deliverStartup.bind(real) as RuntimeAdapter["deliverStartup"] });
+      const readinessSettings = {
+        resolveOne: (key: string) => key === "skills.router_line.enabled" ? { value: true, source: "file", defaultValue: false } : { value: 30, source: "default", defaultValue: 30 },
+      } as unknown as Pick<SettingsStore, "resolveOne">;
+      const asset = nodePath.join(import.meta.dirname, "../assets/guidance/openrig-seat-skills.md");
+      const result = await createOrchestrator({ readinessSettings }).startNode(makeInput(seed, {
+        adapter, isRestore: false, binding: { ...makeBinding(), cwd },
+        resolvedStartupFiles: [{ path: "openrig-seat-skills.md", absolutePath: asset, ownerRoot: nodePath.dirname(asset), deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start", "restore"] }],
+      }));
+      // The person's bytes first: on a build without the check, the start replaces the edit.
+      expect(nodeFs.readFileSync(guidance, "utf8")).toBe(edited);
+      expect(result).toMatchObject({ ok: true, routerLine: { answer: { state: "yes", by: "saved" }, files: [{ outcome: "edited" }] } });
+      expect(result.warnings?.some((w) => w.startsWith("seat_skills_line_edited:"))).toBe(true);
+    } finally {
       nodeFs.rmSync(cwd, { recursive: true, force: true });
     }
   });
@@ -1473,6 +1585,43 @@ describe("StartupOrchestrator", () => {
     if (!result.ok) {
       expect(result.errors.some((e) => e.includes("harness crash"))).toBe(true);
     }
+  });
+
+  it.each(["available", "error", "timeout"] as const)("persists the real Claude launch probe on startup_failed with geometry=%s (#1480)", async geometry => {
+    const missingGeometry = geometry !== "available";
+    const seed = seedSession();
+    const content = "❯ fixture-private-startup-prompt\n● Login expired · Please run /login\n\n❯";
+    const tmux = mockTmux({
+      getPaneCommand: vi.fn(async () => "claude"),
+      capturePaneContent: vi.fn(async () => content),
+      listPanes: vi.fn(async () => {
+        if (geometry === "timeout") return new Promise<never>(() => {});
+        if (geometry === "error") throw new Error("fixture-private-geometry-error");
+        return [{ id: "%1", index: 0, cwd: "/project", width: 100, height: 30, active: true }];
+      }),
+    });
+    const adapter = new ClaudeCodeAdapter({ tmux, sleep: async () => {}, fsOps: {
+      readFile: () => { throw new Error("fixture file missing"); },
+      writeFile: () => {}, exists: () => false, mkdirp: () => {}, copyFile: () => {}, listFiles: () => [],
+    } });
+    const result = await createOrchestrator(tmux).startNode(makeInput(seed, {
+      adapter, binding: { ...makeBinding(), cwd: "/project" },
+      isRestore: true, resumeToken: "saved-conversation", resumeType: "claude_id", allowFreshFallback: false,
+    }));
+    const probe = {
+      status: "failed", code: "login_required", loginRefusal: { message: "Login expired · Please run /login", row: "response" },
+      capture: { lines: 4, bytes: Buffer.byteLength(content), sha256: createHash("sha256").update(content).digest("hex"), columns: missingGeometry ? null : 100, rows: missingGeometry ? null : 30 },
+    };
+    expect(result).toMatchObject({ ok: false, startupStatus: "failed",
+      errors: ["Harness launch failed: Claude resume failed: timed out waiting for Claude to become active"], probe });
+    expect(sessionRegistry.getSessionsForRig(seed.rigId).find(s => s.id === seed.sessionId)?.startupStatus).toBe("failed");
+    const events = db.prepare("SELECT payload FROM events WHERE type = 'node.startup_failed'").all() as { payload: string }[];
+    expect(events).toHaveLength(1);
+    expect(JSON.parse(events[0]!.payload)).toMatchObject({ rigId: seed.rigId, nodeId: seed.nodeId, sessionId: seed.sessionId,
+      requestedResumeToken: "saved-conversation", stage: "harness_launch", probe });
+    expect(JSON.parse(events[0]!.payload).probe).toEqual(probe);
+    expect(events[0]!.payload).not.toContain("fixture-private");
+    expect(JSON.stringify(result)).not.toContain("fixture-private-startup-prompt");
   });
 
   // NS-T04: launchHarness persists resume token

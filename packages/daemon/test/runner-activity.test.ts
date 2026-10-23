@@ -267,6 +267,86 @@ describe("the daemon's own wiring", () => {
   });
 });
 
+describe("pi idle liveness", () => {
+  const BEAT = 180_000; // the runner's idle heartbeat, which it states as livenessSeconds on every Stop it posts
+  const beat = (f: ReturnType<typeof fixture>) => f.post("Stop", "idle_heartbeat", { livenessSeconds: 180 });
+
+  it("a seat that has just become ready reads idle from its first beat, with no turn yet", async () => {
+    const f = fixture("pi");
+    expect(f.state().activity).toBe("unknown");
+    await beat(f);
+    expect(f.state()).toMatchObject({ activity: "idle-at-prompt", decidedBy: "lifecycle-hooks" });
+    expect(f.parked()).toBe(true);
+  });
+
+  it("an idle report holds for two beats, then lapses to unknown: a runner that died quietly stops reading idle", async () => {
+    const f = fixture("pi");
+    await f.runnerEvent({ type: "agent_start" });
+    await f.post("Stop", "agent_end", { livenessSeconds: 180 });
+    f.later(2 * BEAT - 1_000);
+    expect(f.state()).toMatchObject({ activity: "idle-at-prompt", decidedBy: "lifecycle-hooks" });
+    f.later(2_000);
+    expect(f.state()).toMatchObject({ activity: "unknown", decidedBy: null });
+    expect(f.parked()).toBe("indeterminate"); // no longer counts as a parked, available owner
+  });
+
+  it("keeps reading idle for as long as the beats keep coming", async () => {
+    const f = fixture("pi");
+    for (let i = 0; i < 6; i++) {
+      await beat(f);
+      f.later(BEAT);
+      expect(f.state()).toMatchObject({ activity: "idle-at-prompt", decidedBy: "lifecycle-hooks" });
+    }
+  });
+
+  it("a beat doesn't make a working seat idle and a turn start ends the idle", async () => {
+    const f = fixture("pi");
+    await beat(f);
+    await f.runnerEvent({ type: "agent_start" });
+    expect(f.state()).toMatchObject({ activity: "working" });
+    f.later(HOOK_AUTHORITY_WINDOW_MS + 1_000); // a quiet turn: still the 15 s working window, as before
+    expect(f.state()).toMatchObject({ activity: "unknown", decidedBy: null });
+  });
+
+  it("silence never clears a pending attention prompt", async () => {
+    const f = fixture("pi");
+    await beat(f);
+    f.later(1_000);
+    await f.post("Notification", "permission_prompt");
+    f.later(60 * 60 * 1000);
+    expect(f.state().needsInput).toMatchObject({ count: 1 });
+    expect(f.parked()).toBe(true);
+  });
+
+  it("an idle report with no liveness promise (an older runner) still holds until the next boundary", async () => {
+    const f = fixture("pi");
+    await f.runnerEvent({ type: "agent_start" });
+    await f.runnerEvent({ type: "agent_end" });
+    f.later(60 * 60 * 1000);
+    expect(f.state()).toMatchObject({ activity: "idle-at-prompt", decidedBy: "lifecycle-hooks" });
+  });
+
+  it("ignores a liveness value that isn't a positive whole number of at most an hour", async () => {
+    for (const bad of [0, -5, 1.5, 7200, "180", null]) {
+      const f = fixture("pi");
+      await f.post("Stop", "agent_end", { livenessSeconds: bad });
+      f.later(60 * 60 * 1000);
+      expect(f.state()).toMatchObject({ activity: "idle-at-prompt", decidedBy: "lifecycle-hooks" });
+    }
+  });
+
+  it("after a daemon restart a fresh idle report is restored and a stale one is not", async () => {
+    const f = fixture("pi");
+    await beat(f);
+    f.later(BEAT);
+    await f.restart();
+    expect(f.state()).toMatchObject({ activity: "idle-at-prompt", decidedBy: "lifecycle-hooks" });
+    f.later(60 * 60 * 1000); // the runner died during the downtime and no beat has come since
+    await f.restart();
+    expect(f.state()).toMatchObject({ activity: "unknown", decidedBy: null });
+  });
+});
+
 describe("omp only", () => {
   it("a nonterminal agent_end keeps the turn working", async () => {
     const f = fixture("omp");

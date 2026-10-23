@@ -322,5 +322,48 @@ The pre-0.5.8 complete array remains available with: rig watchdog list --all --f
       });
     });
 
+  cmd
+    .command("update <jobId>")
+    .description(
+      "Change an active watchdog job's interval, spec or message in place, keeping its job id (so a queue " +
+      "attachment still holds), its registration, history and every field you don't name. A new interval takes " +
+      "effect immediately, measured from the job's last evaluation (or its registration if it has never run), " +
+      "and the last-evaluation and fire records are not rewritten. A stopped or finished job is refused, not " +
+      "restarted; so are a change of policy, target or registering agent, and a spec invalid for the job's policy",
+    )
+    .option("--interval-seconds <n>", "New evaluation interval (positive integer)")
+    .option("--message <text>", "New message; the rest of the spec stays as written")
+    .option("--spec <path>", "Path to a YAML spec file that replaces the job's spec")
+    .option("--json", "JSON output for agents")
+    .action(async (jobId: string, opts: { intervalSeconds?: string; message?: string; spec?: string; json?: boolean }) => {
+      if (opts.intervalSeconds === undefined && opts.message === undefined && opts.spec === undefined) {
+        console.error("Give at least one of --interval-seconds, --message or --spec");
+        process.exitCode = 1;
+        return;
+      }
+      let specYaml: string | undefined;
+      if (opts.spec) {
+        try {
+          specYaml = readFileSync(opts.spec, "utf-8");
+        } catch (err) {
+          console.error(`Failed to read spec file ${opts.spec}: ${err instanceof Error ? err.message : err}`);
+          process.exitCode = 1;
+          return;
+        }
+      }
+      const intervalSeconds = opts.intervalSeconds !== undefined
+        ? cadenceSeconds("--interval-seconds", opts.intervalSeconds)
+        : undefined;
+      const deps = getDeps();
+      await withClient(deps, async (client) => {
+        const res = await client.post<unknown>(`/api/watchdog/${encodeURIComponent(jobId)}/update`, {
+          intervalSeconds,
+          message: opts.message,
+          specYaml,
+        });
+        printResult(opts.json ?? false, res.data, res.status);
+      });
+    });
+
   return cmd;
 }

@@ -1,0 +1,11 @@
+# Install as $OPENRIG_HOME/community-harnesses/cursor.yaml, with openrig-cursor-launch on the seat's PATH.
+format: 1
+name: cursor
+command: openrig-cursor-launch
+maintainer: Your name or team
+limits:
+  - resume reads a chat as missing unless its store is in the seat's Cursor config folder, under the seat's working directory
+  - no guidance, skills or startup files are placed
+  - needs-input and approval prompts are read from the screen only
+launch_result: true
+resume: true

@@ -65,6 +65,7 @@ function clearEnv(): () => void {
     "OPENRIG_FEED_SUBSCRIPTIONS_AUDIT_LOG",
     "OPENRIG_RUNTIME_CODEX_HOOKS_ENABLED",
     "OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS",
+    "OPENRIG_POLICIES_CLAUDE_COMPACTION_PREPARATION_ROOT",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_ENABLED",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_PRE_COMPACT_INSTRUCTION",
@@ -154,6 +155,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "runtime.codex.hooks_enabled",
       "runtime.readiness_timeout_seconds",
       // Slice 27 — Claude auto-compaction policy. SC-29 EXCEPTION #10.
+      "policies.claude_compaction.preparation_root",
       "policies.claude_compaction.enabled",
       "policies.claude_compaction.threshold_percent",
       "policies.claude_compaction.pre_compact_instruction",
@@ -1238,5 +1240,41 @@ describe("ConfigStore — GHOST-STAGE (d): write-canonical + verify-readback", (
     store.set("daemon.port", "9191");
     expect(store.get("daemon.port")).toBe(9191);
     expect((JSON.parse(readFileSync(join(home, "config.json"), "utf-8")) as { daemon?: { port?: number } }).daemon?.port).toBe(9191);
+  });
+});
+
+
+describe("compaction preparation root", () => {
+  let tmpDir: string, configPath: string;
+  let restoreEnv: () => void;
+  beforeEach(() => {
+    restoreEnv = clearEnv();
+    tmpDir = mkdtempSync(join(tmpdir(), "preparation-root-settings-"));
+    configPath = join(tmpDir, "config.json");
+  });
+  afterEach(() => { restoreEnv(); rmSync(tmpDir, { recursive: true, force: true }); });
+  const key = "policies.claude_compaction.preparation_root";
+  it("resolves file/env overrides consistently and resets to workspace-first preparation", () => {
+    const store = new ConfigStore(configPath);
+    const root = join(tmpDir, "maps with spaces");
+    expect(store.resolve().policies.claudeCompaction.preparationRoot).toBe("");
+    store.set(key, root);
+    expect(store.resolveWithSource(key)).toMatchObject({ value: root, source: "file" });
+    expect(new ConfigStore(configPath).resolve().policies.claudeCompaction.preparationRoot).toBe(root);
+    process.env.OPENRIG_POLICIES_CLAUDE_COMPACTION_PREPARATION_ROOT = join(root, "override");
+    try {
+      expect(store.resolveWithSource(key)).toMatchObject({ value: join(root, "override"), source: "env" });
+    } finally { delete process.env.OPENRIG_POLICIES_CLAUDE_COMPACTION_PREPARATION_ROOT; }
+    store.reset(key);
+    expect(store.resolve().policies.claudeCompaction.preparationRoot).toBe("");
+    store.set(key, "");
+    expect(store.resolve().policies.claudeCompaction.preparationRoot).toBe("");
+  });
+  it.each(["relative/maps", "~/maps", " /maps", "/maps\0invalid"])("rejects invalid root %j without replacing valid settings", (value) => {
+    const store = new ConfigStore(configPath);
+    const root = join(tmpDir, "maps");
+    store.set(key, root);
+    expect(() => store.set(key, value)).toThrow(/absolute path/);
+    expect(store.resolve().policies.claudeCompaction.preparationRoot).toBe(root);
   });
 });

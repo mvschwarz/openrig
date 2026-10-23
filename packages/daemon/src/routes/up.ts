@@ -198,6 +198,9 @@ upRoutes.post("/", async (c) => {
 
   // `rig up --env KEY=VALUE`: environment for this launch only. It is not saved with the rig.
   const envOverride = readSeatEnvOverride(body["envOverride"]);
+  // `rig up <spec> --name <rig>`: the rig's name instead of the spec's `name:`. The launch lock below stays
+  // per source, so two simultaneous launches of one spec answer 409 even under different names.
+  const rigName = typeof body["rigName"] === "string" && body["rigName"] !== "" ? body["rigName"] : undefined;
 
   // Route source — classify raw sourceRef first, only resolve path for file-based kinds
   let sourceKind: string;
@@ -339,6 +342,7 @@ upRoutes.post("/", async (c) => {
         sourceKind,
         cwdOverride,
         targetRoot,
+        rigName,
       });
 
       if (result.status === "planned") {
@@ -365,6 +369,7 @@ upRoutes.post("/", async (c) => {
         nonInterruptive,
         cwdOverride,
         envOverride,
+        rigName,
         targetRoot,
         runId: run.id,
       });

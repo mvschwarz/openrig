@@ -9,7 +9,7 @@ import { useQuery } from "@tanstack/react-query";
 
 export type RigAggStatus = "up" | "partial" | "down" | "blocked" | "unknown";
 export type SeatTokenState = "present" | "missing" | "stale" | "unverified";
-export type SeatIntendedAction = "resume-original" | "fresh-primed" | "awaiting-decision";
+export type SeatIntendedAction = "resume-original" | "fresh-primed" | "awaiting-decision" | "leave-attached";
 
 export interface RigStatusSeat {
   logicalId: string;

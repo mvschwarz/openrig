@@ -30,7 +30,7 @@ interface BrowserSource { id: string; state: State; path: string | null; detail:
 /** Names are presentation policy, never a second setting registry or resolver. */
 const PATHS = new Set(["db.path", "transcripts.path", "workspace.root", "workspace.slices_root",
   "workspace.steering_path", "workspace.specs_root", "workspace.projects_root", "workspace.catalog_path",
-  "topology.root", "context.root", "skills.root", "policies.claude_compaction.message_file_path"]);
+  "topology.root", "context.root", "skills.root", "policies.claude_compaction.message_file_path", "policies.claude_compaction.preparation_root"]);
 const IDENTITIES = new Set(["daemon.host", "host.name", "host.selected", "context.system_world",
   "ui.timezone", "agents.advisor_session", "agents.operator_session", "workspace.operator_seat_name",
   "workflow.exception_routing", "policies.idle_gate_qitem.auto_register"]);

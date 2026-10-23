@@ -7,7 +7,7 @@ import { shellQuote } from "../adapters/shell-quote.js";
 // Explicit public launch metadata, not a prefix/denylist over credential names.
 // Provider keys and OPENRIG_ACTIVITY_HOOK_TOKEN keep their non-typed channel.
 export const SEAT_PUBLIC_ENV_KEYS = [
-  "OPENRIG_HOME", "OPENRIG_URL", "OPENRIG_HOST", "OPENRIG_PORT",
+  "OPENRIG_HOME", "OPENRIG_DB", "TMUX_TMPDIR", "OPENRIG_URL", "OPENRIG_HOST", "OPENRIG_PORT",
   "OPENRIG_NODE_ID", "OPENRIG_SESSION_NAME", "OPENRIG_RUNTIME",
   "OPENRIG_OCCUPANT_GENERATION", "OPENRIG_TRANSCRIPTS_LINES",
   "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS",

@@ -47,7 +47,7 @@ describe("stub CLI journeys", () => {
     try {
       // Stop the launched seats while their daemon can still coordinate teardown.
       // Removing the scratch tree with live rigs can race their final writes.
-      for (const rig of launchedRigs) await cli(["down", rig, "--json", "--force"]);
+      for (const rig of launchedRigs) await cli(["down", rig, "--json", "--force", "--yes"]);
     } finally {
       await daemon.stop();
     }

@@ -41,19 +41,47 @@ export interface GuardPreference {
   pending: boolean;
   desiredMode: TypingGuardMode;
   effectiveMode: TypingGuardMode;
+  /** The interruption level, where one is set (or a terminal member's default); absent means the mode alone decides. */
+  desiredLevel?: InterruptionLevel;
+  effectiveLevel?: InterruptionLevel;
 }
 
 export const TYPING_GUARD_MODES = ["off", "draft-aware", "hold"] as const;
 export type TypingGuardMode = (typeof TYPING_GUARD_MODES)[number];
-export interface TypingGuardSettings { mode: TypingGuardMode }
+/** The middle interruption levels, and a terminal member's default. `off` is always interrupt and `hold` is full quiet;
+ *  these sit between, deciding by the input's source and urgency. */
+export const INTERRUPTION_LEVELS = ["openrig-urgent", "urgent-only", "sends-only"] as const;
+export type InterruptionLevel = (typeof INTERRUPTION_LEVELS)[number];
+export interface TypingGuardSettings { mode: TypingGuardMode; level?: InterruptionLevel }
 export interface TypingGuardConfig extends TypingGuardSettings { revision: string }
 const DEFAULT_GUARD: TypingGuardConfig = { mode: "off", revision: "legacy-off" };
+/** A terminal member with nothing set holds OpenRig's own notices and takes deliberate sends. */
+const TERMINAL_DEFAULT: TypingGuardConfig = { mode: "off", level: "sends-only", revision: "terminal-default" };
+
+/** What automatic input is, for the level: OpenRig's own (a watchdog, a scheduler wake, a notice) or anyone else's. */
+export interface AdmissionInput { source: "openrig" | "agent"; urgent: boolean }
+
+/** Whether a level lets this input type. Every other input at the seat is held, never refused or lost. */
+export function levelAdmits(level: InterruptionLevel, input: AdmissionInput): boolean {
+  if (input.urgent) return true;
+  if (level === "openrig-urgent") return input.source === "openrig";
+  if (level === "sends-only") return input.source === "agent";
+  return false;
+}
 
 export function parseTypingGuardSettings(value: unknown): TypingGuardSettings {
   const input = typeof value === "boolean" ? { mode: value ? "hold" : "off" } : value;
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new DeliveryGuardError("invalid_typing_guard", "Supply an enabled boolean or a typing-guard mode.");
   const config = input as Record<string, unknown>;
-  if (!(TYPING_GUARD_MODES as readonly unknown[]).includes(config.mode)) throw new DeliveryGuardError("invalid_typing_guard", "mode must be off, draft-aware or hold.");
+  // A level is set as a mode name and stored with the coarse mode older daemons understand: `hold` for the middle
+  // levels (an older daemon holds everything there, never typing what the level would hold), `off` for sends-only.
+  if ((INTERRUPTION_LEVELS as readonly unknown[]).includes(config.mode)) {
+    const level = config.mode as InterruptionLevel;
+    return { mode: level === "sends-only" ? "off" : "hold", level };
+  }
+  if (!(TYPING_GUARD_MODES as readonly unknown[]).includes(config.mode)) {
+    throw new DeliveryGuardError("invalid_typing_guard", "mode must be off, draft-aware, openrig-urgent, urgent-only, sends-only or hold.");
+  }
   if (config.holdSeconds !== undefined || config.maxAttempts !== undefined) throw new DeliveryGuardError("invalid_typing_guard", "Draft-aware sends return their result immediately; retry settings are not supported.");
   return { mode: config.mode as TypingGuardMode };
 }
@@ -63,7 +91,15 @@ function storedGuard(raw: string | null | undefined, enabled: number): TypingGua
   const value = JSON.parse(raw) as Record<string, unknown>;
   const settings = parseTypingGuardSettings({ mode: value.mode });
   if (typeof value.revision !== "string" || !value.revision) throw new DeliveryGuardError("invalid_typing_guard", "Stored guard configuration has no revision.");
-  return { ...settings, revision: value.revision };
+  const level = (INTERRUPTION_LEVELS as readonly unknown[]).includes(value.level) ? value.level as InterruptionLevel : undefined;
+  return { ...settings, ...(level ? { level } : {}), revision: value.revision };
+}
+
+/** Whether this configuration holds the input. With a level, a classified input is decided by the level; an input with
+ *  no classification (lifecycle work, a direct adapter write) is held only where the coarse mode holds. */
+function holds(config: TypingGuardConfig, input?: AdmissionInput): boolean {
+  if (config.level && input) return !levelAdmits(config.level, input);
+  return config.mode === "hold";
 }
 
 /** One serialization domain for preference activation, delivery and writing lifecycle.
@@ -117,7 +153,20 @@ export class SeatDeliveryGuard {
   preference(nodeId: string): GuardPreference {
     const { desired, effective } = this.configuration(nodeId);
     return { nodeId, desired: desired.mode === "hold", effective: effective.mode === "hold", pending: desired.revision !== effective.revision,
-      desiredMode: desired.mode, effectiveMode: effective.mode };
+      desiredMode: desired.mode, effectiveMode: effective.mode,
+      ...(desired.level ? { desiredLevel: desired.level } : {}), ...(effective.level ? { effectiveLevel: effective.level } : {}) };
+  }
+
+  /** Whether the seat's configuration would hold this input now (desired or effective, as the operation decides). */
+  holdsInput(nodeId: string, input: AdmissionInput): boolean {
+    const config = this.configuration(nodeId);
+    return holds(config.desired, input) || holds(config.effective, input);
+  }
+
+  private terminalMember(nodeId: string): boolean {
+    try {
+      return (this.db.prepare("SELECT runtime FROM nodes WHERE id=?").get(nodeId) as { runtime?: string | null } | undefined)?.runtime === "terminal";
+    } catch { return false; }
   }
 
   configuration(nodeId: string): { desired: TypingGuardConfig; effective: TypingGuardConfig } {
@@ -130,6 +179,7 @@ export class SeatDeliveryGuard {
         return { desired: storedGuard(null, row.desired), effective: storedGuard(null, row.effective) };
       }
     }
+    if (!row && this.hasModeConfig && this.terminalMember(nodeId)) return { desired: TERMINAL_DEFAULT, effective: TERMINAL_DEFAULT };
     return { desired: storedGuard(row?.desired_config, row?.desired ?? 0), effective: storedGuard(row?.effective_config, row?.effective ?? 0) };
   }
 
@@ -162,8 +212,8 @@ export class SeatDeliveryGuard {
     const { change, desired } = this.db.transaction(() => {
       const old = this.configuration(nodeId);
       const settings = parseTypingGuardSettings(value);
-      if (!this.hasModeConfig && settings.mode === "draft-aware") throw new DeliveryGuardError("typing_guard_unavailable", "Draft-aware guard configuration requires the mode schema.");
-      const unchanged = settings.mode === old.desired.mode;
+      if (!this.hasModeConfig && (settings.mode === "draft-aware" || settings.level)) throw new DeliveryGuardError("typing_guard_unavailable", "Draft-aware and level configuration require the mode schema.");
+      const unchanged = settings.mode === old.desired.mode && settings.level === old.desired.level;
       const desired = { ...settings, revision: unchanged ? old.desired.revision : randomUUID() };
       // The legacy bits deliberately fail safe to hold when a daemon without modes opens this DB.
       const args = [nodeId, Number(desired.mode !== "off"), Number(old.effective.mode !== "off"), actor, reason, at];
@@ -203,7 +253,7 @@ export class SeatDeliveryGuard {
 
   /** fn must include lifecycle preflight, effects and last write. Retention callbacks
    * execute under this same lease, before any pane capture/paste/submit branch. */
-  async operation<T>(name: string, fn: () => Promise<T>, held?: (target: GuardTarget) => Promise<T>): Promise<T> {
+  async operation<T>(name: string, fn: () => Promise<T>, held?: (target: GuardTarget) => Promise<T>, input?: AdmissionInput): Promise<T> {
     const bound = this.target(name);
     const inherited = this.scope.getStore()?.get(bound.nodeId);
     if (inherited?.active && inherited.target.nodeId === bound.nodeId) {
@@ -214,12 +264,16 @@ export class SeatDeliveryGuard {
       const current = this.target(name);
       if (!this.same(bound, current)) throw new DeliveryGuardError("guard_target_changed", "Input target changed while waiting; no input written.");
       const config = this.configuration(bound.nodeId);
-      if (config.desired.mode === "hold" || config.effective.mode === "hold") {
+      if (holds(config.desired, input) || holds(config.effective, input)) {
         if (held) return held(bound);
         throw new DeliveryGuardError("typing_guard_enabled", "Automatic input is paused for this seat. Select off or draft-aware mode explicitly before this writing operation.");
       }
+      // Input a middle level lets through still never types over a person's draft: it's delivered as draft-aware.
+      const admittedByLevel = !!input && (config.desired.level === "openrig-urgent" || config.desired.level === "urgent-only"
+        || config.effective.level === "openrig-urgent" || config.effective.level === "urgent-only");
       const lease: Lease = { target: bound, active: true, origin: "automatic", humanEpoch: this.humanEpochs.get(bound.nodeId) ?? 0,
-        config: config.desired.mode === "draft-aware" ? config.desired : config.effective };
+        config: admittedByLevel ? { mode: "draft-aware", revision: config.desired.revision }
+          : config.desired.mode === "draft-aware" ? config.desired : config.effective };
       lease.serialOwner = lease;
       try { return await this.scope.run(new Map([...(this.scope.getStore() ?? []), [lease.target.nodeId, lease]]), fn); }
       finally { lease.active = false; }

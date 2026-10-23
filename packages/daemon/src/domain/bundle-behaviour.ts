@@ -267,7 +267,7 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
           for (const f of block?.files ?? []) {
             const fact = fileFact(seat, "startup", f.path, base, refs);
             const content = fact.resolution === "archive" ? files.get(fact.pathOrRef) : undefined;
-            fact.delivery = f.deliveryHint === "auto" && content !== undefined ? resolveConcreteHint(f.path, content) : f.deliveryHint;
+            fact.delivery = f.deliveryHint === "auto" && content !== undefined ? resolveConcreteHint(f.path, content, f.orientation) : f.deliveryHint;
             view.toldFiles.push(fact);
             if (fact.delivery === "skill_install" && (runtime === "claude-code" || runtime === "codex")) {
               const root = runtime === "claude-code" ? ".claude" : ".agents";

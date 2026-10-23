@@ -1,6 +1,6 @@
 import { readFileSync, mkdirSync, unlinkSync, existsSync } from "node:fs";
 import { writeTextAtomically } from "./atomic-text-write.js";
-import { join, dirname, resolve } from "node:path";
+import { join, dirname, resolve, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 import {
   getDefaultOpenRigPath,
@@ -136,6 +136,7 @@ export interface RiggedConfig {
   // extra instruction file path for mission-specific reading lists.
   policies: {
     claudeCompaction: {
+      preparationRoot: string;
       enabled: boolean;
       thresholdPercent: number;
       preCompactInstruction: string;
@@ -317,6 +318,7 @@ const DEFAULTS = {
   // Slice 27 — opt-in default-off. Threshold default 80% per spec.
   policies: {
     claudeCompaction: {
+      preparationRoot: "",
       enabled: false,
       thresholdPercent: 80,
       preCompactInstruction: DEFAULT_CLAUDE_COMPACTION_PRE_COMPACT_INSTRUCTION,
@@ -459,7 +461,8 @@ export const VALID_KEYS = [
   "runtime.codex.hooks_enabled",
   "runtime.readiness_timeout_seconds",
   // Slice 27 — Claude auto-compaction policy. SC-29 EXCEPTION #10:
-  // 7 ConfigStore keys (lockstep with daemon SETTINGS_VALID_KEYS).
+  // 8 ConfigStore keys (lockstep with daemon SETTINGS_VALID_KEYS).
+  "policies.claude_compaction.preparation_root",
   "policies.claude_compaction.enabled",
   "policies.claude_compaction.threshold_percent",
   "policies.claude_compaction.pre_compact_instruction",
@@ -575,6 +578,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "runtime.readiness_timeout_seconds": { primary: "OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS" },
   // Slice 27 — Claude auto-compaction policy. OPENRIG_X primary only
   // (net-new keys, no legacy).
+  "policies.claude_compaction.preparation_root": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_PREPARATION_ROOT" },
   "policies.claude_compaction.enabled": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_ENABLED" },
   "policies.claude_compaction.threshold_percent": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT" },
   "policies.claude_compaction.pre_compact_instruction": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_PRE_COMPACT_INSTRUCTION" },
@@ -666,6 +670,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "feed.subscriptions.audit_log": ["feed", "subscriptions", "auditLog"],
   "runtime.codex.hooks_enabled": ["runtime", "codex", "hooksEnabled"],
   "runtime.readiness_timeout_seconds": ["runtime", "readinessTimeoutSeconds"],
+  "policies.claude_compaction.preparation_root": ["policies", "claudeCompaction", "preparationRoot"],
   "policies.claude_compaction.enabled": ["policies", "claudeCompaction", "enabled"],
   "policies.claude_compaction.threshold_percent": ["policies", "claudeCompaction", "thresholdPercent"],
   "policies.claude_compaction.pre_compact_instruction": ["policies", "claudeCompaction", "preCompactInstruction"],
@@ -963,6 +968,11 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
   // e.g. 50 = compact earlier; range is 1-100 inclusive. A value of 0
   // would fire /compact on every poll tick (catastrophic without
   // default-off as backstop).
+  "policies.claude_compaction.preparation_root": (_raw, value) => {
+    if (typeof value !== "string" || (value !== "" && (!isAbsolute(value) || value.includes("\0")))) {
+      throw new Error("Invalid policies.claude_compaction.preparation_root: use an absolute path or an empty string for the default");
+    }
+  },
   "policies.claude_compaction.threshold_percent": (raw, coerced) => {
     const trimmed = (raw ?? "").trim();
     if (!/^-?\d+$/.test(trimmed)) {
@@ -1224,6 +1234,7 @@ export class ConfigStore {
       },
       policies: {
         claudeCompaction: {
+          preparationRoot: v("policies.claude_compaction.preparation_root") as string,
           enabled: v("policies.claude_compaction.enabled") as boolean,
           thresholdPercent: v("policies.claude_compaction.threshold_percent") as number,
           preCompactInstruction: v("policies.claude_compaction.pre_compact_instruction") as string,

@@ -65,7 +65,7 @@ describe("read-only configuration comparison and unknown native enforcement", ()
     expect(parseClaudePermissionModes("no permission surface")).toBeNull();
   });
 
-  it("reports a narrowed Claude project policy as drift with the exact file and independent axes", () => {
+  it("reports a manual file default separately from the managed launch mode", () => {
     const diagnostic = diagnoseRuntimePosture({
       runtime: "claude-code",
       cwd,
@@ -79,7 +79,7 @@ describe("read-only configuration comparison and unknown native enforcement", ()
     expect(diagnostic.cwdRead.state).toBe("visible");
     expect(diagnostic.commandPath.state).toBe("available");
     expect(diagnostic.configuration).toMatchObject({
-      comparison: "drift",
+      comparison: "aligned",
       expected: "acceptEdits",
       sourcePath: settingsPath,
     });
@@ -90,6 +90,17 @@ describe("read-only configuration comparison and unknown native enforcement", ()
       deny: ["Read(/tmp/**)"],
     });
   });
+
+  it.each([{}, { permissions: {} }, { permissions: { defaultMode: "auto" } }, { permissions: { defaultMode: "denyAll" } }])(
+    "accepts readable settings under the explicit managed launch mode: %j", settings => {
+      const diagnostic = diagnoseRuntimePosture({ runtime: "claude-code", cwd,
+        applied: observeClaudePermission("--permission-mode acceptEdits"),
+        fs: fsFixture({ [settingsPath]: JSON.stringify(settings) }) });
+      expect(diagnostic.configuration).toMatchObject({ comparison: "aligned", expected: "acceptEdits",
+        reason: "emitted_launch_arguments" });
+      expect(diagnostic.configuration?.observed?.defaultMode).toBe(settings.permissions?.defaultMode ?? "acceptEdits");
+      expect(diagnostic.enforcement).toMatchObject({ state: "unknown", reason: "native_permission_effect_unverified" });
+    });
 
   it("reports a matching Claude defaultMode as aligned", () => {
     const diagnostic = diagnoseRuntimePosture({
@@ -119,14 +130,14 @@ describe("read-only configuration comparison and unknown native enforcement", ()
     });
   });
 
-  it("does not let ordinary acceptEdits bypass a narrowed project policy", () => {
+  it("keeps the manual file default separate from launch-mode precedence", () => {
     const diagnostic = diagnoseRuntimePosture({
       runtime: "claude-code",
       cwd,
       applied: observeClaudePermission("--permission-mode acceptEdits"),
       fs: fsFixture({ [settingsPath]: JSON.stringify({ permissions: { defaultMode: "manual" } }) }),
     });
-    expect(diagnostic.configuration).toMatchObject({ comparison: "drift", expected: "acceptEdits" });
+    expect(diagnostic.configuration).toMatchObject({ comparison: "aligned", expected: "acceptEdits" });
     expect(diagnostic.enforcement.state).toBe("unknown");
   });
 
@@ -148,7 +159,6 @@ describe("read-only configuration comparison and unknown native enforcement", ()
     ["malformed", { [settingsPath]: "{" }, "settings_unparseable"],
     ["top-level array", { [settingsPath]: "[]" }, "settings_invalid_shape"],
     ["scalar permissions", { [settingsPath]: JSON.stringify({ permissions: "denyAll" }) }, "permissions_invalid_shape"],
-    ["unsupported mode", { [settingsPath]: JSON.stringify({ permissions: { defaultMode: "futureMode" } }) }, "unsupported_default_mode"],
     ["conflicting rule", { [settingsPath]: JSON.stringify({ permissions: { defaultMode: "acceptEdits", allow: ["Read(/**)"], deny: ["Read(/**)"] } }) }, "conflicting_rules"],
   ])("keeps %s UNKNOWN-EFFECTIVE", (_name, files, reason) => {
     const diagnostic = diagnoseRuntimePosture({

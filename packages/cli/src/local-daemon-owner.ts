@@ -26,7 +26,7 @@ function isLoopbackEndpoint(baseUrl: string): boolean {
   } catch { return false; }
 }
 
-function processIdentity(raw: string): { uid: number; start: string } | undefined {
+export function processIdentity(raw: string): { uid: number; start: string } | undefined {
   // LC_ALL=C: ps lstart is a stable process-start discriminator, not a PID-only check.
   const match = raw.trim().match(/^(\d+)\s+([A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})$/);
   if (!match?.[1] || !match[2] || !Number.isFinite(Date.parse(match[2]))) return;

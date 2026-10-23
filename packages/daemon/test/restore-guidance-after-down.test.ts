@@ -70,7 +70,11 @@ interface SeatOptions {
   freshOnlyFile?: boolean;
   /** An extra older "auto" .md startup file (classified from its content). */
   autoGuidanceFile?: boolean;
+  /** The saved selection carries the seat-skills bootstrap file, as for every seat with skill storage. */
+  seatSkillsLine?: boolean;
 }
+
+const SEAT_SKILLS_ASSET = path.join(import.meta.dirname, "../assets/guidance/openrig-seat-skills.md");
 
 describe("a seat's guidance across rig down then rig up --existing (exact resume)", () => {
   let db: Database.Database;
@@ -149,6 +153,10 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
       files.push({ path: "NOTES.md", absolutePath: path.join(spec, "NOTES.md"), ownerRoot: spec,
         deliveryHint: "auto", required: false, appliesOn: ["fresh_start", "restore"] });
     }
+    if (opts.seatSkillsLine) {
+      files.push({ path: "openrig-seat-skills.md", absolutePath: SEAT_SKILLS_ASSET, ownerRoot: path.dirname(SEAT_SKILLS_ASSET),
+        deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start", "restore"] });
+    }
     if (opts.autoSkillFile) {
       fs.writeFileSync(path.join(spec, "helper.md"), "# SKILL\nA skill, never merged into guidance.");
       files.push({ path: "helper.md", absolutePath: path.join(spec, "helper.md"), ownerRoot: spec,
@@ -168,7 +176,7 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
 
   /** `rig down` (the real teardown), then `rig up --existing` from its auto snapshot. Records
    *  the guidance file's content at the moment the native harness was started. */
-  async function downThenUpExisting(rigId: string, guidanceFile: string, opts: SeatOptions & { betweenDownAndUp?: () => void; noPane?: boolean } = {}) {
+  async function downThenUpExisting(rigId: string, guidanceFile: string, opts: SeatOptions & { betweenDownAndUp?: () => void; noPane?: boolean; routerLine?: "yes" | "no" } = {}) {
     const runtime = opts.runtime ?? "claude-code";
     const tmux = mockTmux({ noPane: opts.noPane });
     const down = await new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, snapshotCapture, eventBus })
@@ -198,6 +206,7 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
       db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture, checkpointStore,
       nodeLauncher: new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux }),
       tmuxAdapter: tmux, claudeResume, codexResume,
+      ...(opts.routerLine ? { routerLineSettings: { resolveOne: () => ({ value: opts.routerLine === "yes", source: "file", defaultValue: false }) } as never } : {}),
       // The pane's process tree shows the same native session resumed (the joined-resume proof).
       listProcesses: async () => [
         { pid: 1234, ppid: 1, command: "zsh" },
@@ -223,6 +232,18 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     const lead = result.nodes.find((n) => n.logicalId === "lead");
     expect(lead?.status).toBe("resumed");
     expect(lead?.guidanceGaps).toBeUndefined();
+    expect(result.rigResult).toBe("fully_restored");
+  });
+
+  // The seat-skills line comes back only with the person's yes, as at a start: after a no, an exact resume leaves the file
+  // without it and reports no gap.
+  it.each(["no", "yes"] as const)("an exact resume after the answer %s puts the seat-skills line back only with a yes", async (routerLine) => {
+    const { rigId, guidanceFile } = launchedSeat({ seatSkillsLine: true });
+    const { result, fileAtHarnessStart } = await downThenUpExisting(rigId, guidanceFile, { routerLine });
+    expect(fileAtHarnessStart).toContain(MANAGED_BLOCK_START("SOP.md"));
+    if (routerLine === "no") expect(fileAtHarnessStart).not.toContain("<!-- BEGIN OpenRig MANAGED BLOCK: openrig-seat-skills.md -->");
+    else expect(fileAtHarnessStart).toContain("<!-- BEGIN OpenRig MANAGED BLOCK: openrig-seat-skills.md -->");
+    expect(result.nodes.find((n) => n.logicalId === "lead")?.guidanceGaps).toBeUndefined();
     expect(result.rigResult).toBe("fully_restored");
   });
 

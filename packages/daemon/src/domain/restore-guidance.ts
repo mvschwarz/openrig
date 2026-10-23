@@ -20,17 +20,18 @@ import {
   mergeManagedBlock,
   stripManagedBlocks,
   type ManagedBlockMergeFsOps,
+  isPerSeatRoleGuidance,
+  isPerSeatRoleStartupFile,
 } from "./managed-blocks.js";
 import { resolveConcreteHint } from "./runtime-adapter.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import type { NodeStartupSnapshot } from "./types.js";
+import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID } from "./seat-skill-storage.js";
+import { guidanceFileIsLink } from "./footprint-choice.js";
 
 const LEGACY_BLOCK_START = (id: string) => `<!-- BEGIN RIGGED MANAGED BLOCK: ${id} -->`;
 const LEGACY_BLOCK_END = (id: string) => `<!-- END RIGGED MANAGED BLOCK: ${id} -->`;
 
-/** The per-seat role block is delivered through send_text, never merged into a shared file
- *  (ADR-0006); the adapters skip it, and so does this. */
-const NEVER_MERGED = new Set(["rig-role"]);
 
 export interface GuidanceItem {
   blockId: string;
@@ -96,9 +97,9 @@ export function seatGuidance(
     let hint: string = f.deliveryHint;
     if (hint === "auto") {
       try {
-        hint = resolveConcreteHint(f.path, readFile(f.absolutePath));
+        hint = resolveConcreteHint(f.path, readFile(f.absolutePath), f.orientation);
       } catch {
-        if (f.path.endsWith(".md") && !f.path.endsWith("SKILL.md")) {
+        if (f.path.endsWith(".md") && !f.path.endsWith("SKILL.md") && !isPerSeatRoleStartupFile(f.path, f.orientation)) {
           items.set(f.path, { blockId: f.path, sourcePath: f.absolutePath, unresolved: true });
         }
         continue;
@@ -107,8 +108,19 @@ export function seatGuidance(
     if (hint !== "guidance_merge") continue;
     items.set(f.path, { blockId: f.path, sourcePath: f.absolutePath });
   }
-  for (const id of NEVER_MERGED) items.delete(id);
+  // A seat's own role goes through send_text, never into a shared file (ADR-0006); the adapters skip it too.
+  for (const [id, item] of items) if (isPerSeatRoleGuidance(item.blockId, item.sourcePath)) items.delete(id);
   return { targetPath, items: [...items.values()] };
+}
+
+/** The seat-skills line's own rule, as at a start: its block belongs in the guidance only with the person's yes, and never
+ *  through a linked file. Without it, the block is left out (so it's neither put back nor reported missing), and
+ *  `excluded` says why. */
+export function applySeatSkillsLineRule(guidance: SeatGuidance, answeredYes: boolean): { guidance: SeatGuidance; excluded?: "not_yes" | "linked" } {
+  if (!guidance.items.some((item) => item.blockId === SEAT_SKILLS_BOOTSTRAP_BLOCK_ID)) return { guidance };
+  const excluded = !answeredYes ? "not_yes" : guidanceFileIsLink(guidance.targetPath) ? "linked" : undefined;
+  if (!excluded) return { guidance };
+  return { guidance: { ...guidance, items: guidance.items.filter((item) => item.blockId !== SEAT_SKILLS_BOOTSTRAP_BLOCK_ID) }, excluded };
 }
 
 type BlockState = "complete" | "absent" | "incomplete";

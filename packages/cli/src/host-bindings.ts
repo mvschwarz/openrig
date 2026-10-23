@@ -89,10 +89,12 @@ export function loadHostBindings(path: string = defaultHostBindingsPath()): Host
 // send/capture/doctor concurrently, and an interleaved write could erase a sibling's binding —
 // benign for a BINDING (TOFU re-learns) but not for a CONFLICT record, whose loss is the exact
 // silence the known_hosts lesson forbids. Guard: an mkdir-based advisory lock (atomic on every
-// platform) held across load→mutate→rename, with bounded busy-wait retries and a stale-lock
-// takeover. If the lock cannot be won inside the budget the write proceeds UNGUARDED (fail-open —
-// availability over the rare loss; the conflict re-records on the next contradicting observation).
-const LOCK_RETRIES = 40;
+// platform) held across load→mutate→rename, with sleeping retries and a stale-lock takeover. A
+// waiter sleeps rather than spins, so it never starves the holder of CPU, and it waits past the
+// stale threshold, so a slow holder is waited out or taken over instead of written over. The write
+// proceeds UNGUARDED (fail-open — availability over the rare loss; the conflict re-records on the
+// next contradicting observation) only when the lock can't be created at all, or isn't won by the
+// wait's end.
 const LOCK_RETRY_MS = 5;
 // NAMED TAIL (r1 F2 review, not built for): after a stale takeover the ORIGINAL holder still
 // believes it holds the lock, so its release rmdirs the NEW holder's lock — in principle that
@@ -101,23 +103,26 @@ const LOCK_RETRY_MS = 5;
 // multi-minute stalls, so the tail is not zero. The token-verified-release fix is more machinery
 // than a fail-open advisory lock over a self-healing cache justifies.
 const LOCK_STALE_MS = 2_000;
+const LOCK_WAIT_MS = LOCK_STALE_MS + 1_000;
+const sleepCell = new Int32Array(new SharedArrayBuffer(4));
 
 function acquireLock(lockDir: string): boolean {
-  for (let i = 0; i < LOCK_RETRIES; i++) {
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
     try {
       mkdirSync(lockDir);
       return true;
-    } catch {
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") return false;
       try {
         if (Date.now() - statSync(lockDir).mtimeMs > LOCK_STALE_MS) rmdirSync(lockDir);
       } catch {
         /* raced away — retry */
       }
-      const until = Date.now() + LOCK_RETRY_MS;
-      while (Date.now() < until) { /* bounded busy-wait: sync API, sub-ms slices */ }
+      if (Date.now() >= deadline) return false;
+      Atomics.wait(sleepCell, 0, 0, LOCK_RETRY_MS); // a real sleep in a sync API
     }
   }
-  return false;
 }
 
 function releaseLock(lockDir: string): void {
