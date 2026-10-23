@@ -138,7 +138,8 @@ LIFECYCLE); see the
 - **Attention codes:** `trust_gate`, `hook_trust_gate`, `update_gate`, `login_required`,
   `mcp_gate`, `bypass_consent_gate`, `codex_auth_refusal`, `codex_client_incompatible`.
 - **Restore outcome:** `resumed`, `fresh-primed`, `awaiting-decision`, `attention_required`,
-  `failed` (plus `rebuilt`, `operator_recovered` and the legacy `fresh`).
+  `failed` (plus `rebuilt`, `operator_recovered` and the legacy `fresh`). A seat joined with
+  `rig attach` as an external CLI reads `left_attached`: restore leaves it as it is.
 
 ## Rejected oracles — dated receipts (2026-08-26), so nobody re-derives them expensively
 

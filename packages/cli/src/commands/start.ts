@@ -551,8 +551,8 @@ status); a restore that returned without a ready kernel exits 1.
           if (!opts.json) {
             console.log(`  ${rigName}: ${rigResult ?? resStatus}`);
             for (const n of nodes) {
-              if (n.status === "awaiting-decision" && n.error) {
-                console.log(`    ${n.logicalId}: awaiting-decision -- ${n.error}`);
+              if ((n.status === "awaiting-decision" || n.status === "left_attached") && n.error) {
+                console.log(`    ${n.logicalId}: ${n.status} -- ${n.error}`);
               } else {
                 console.log(`    ${n.logicalId}: ${n.status}`);
               }
@@ -641,7 +641,9 @@ function keptDownEntry(c: StartCandidate): { rigName: string; restoreCommand: st
 
 function summarizeReadiness(c: StartCandidate): string {
   if (!c.preview) return "";
-  const actions = c.preview.nodes.map((n) => n.intendedAction);
+  // A seat left attached is restore's to leave alone, so it doesn't change the rig's readiness.
+  const actions = c.preview.nodes.map((n) => n.intendedAction).filter((a) => a !== "leave-attached");
+  if (actions.length === 0) return "[left attached]";
   if (actions.every((a) => a === "resume-original")) return "[ready to resume]";
   if (actions.some((a) => a === "awaiting-decision")) return "[will ask before fresh]";
   if (actions.every((a) => a === "fresh-primed")) return "[fresh start]";

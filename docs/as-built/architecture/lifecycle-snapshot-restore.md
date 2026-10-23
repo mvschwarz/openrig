@@ -37,8 +37,9 @@ All in `packages/daemon/src/domain/types.ts`. The spec/projection types live in
   `resumed`, `rebuilt`, `fresh`, `fresh-primed`, `awaiting-decision`,
   `failed`, `attention_required`, `operator_recovered`, `n-a`. The restore
   result itself, `RestoreNodeResult.status` (`types.ts:475`), has the same
-  values without `n-a`: **8**
+  values without `n-a`, plus `left_attached`: **9**
   (`grep -E '^  status: "resumed"' packages/daemon/src/domain/types.ts | grep -o '"[^"]*"' | wc -l`).
+  `left_attached` isn't a `NodeRestoreOutcome`; the inventory projects it as `n-a`.
   Where `restore-orchestrator.ts` sets each one:
   - `resumed` — `baseStatus = "resumed"` after a legacy resume (`:1030`); the
     status is returned only by `finishJoinedResume` (defined `:1320`, called
@@ -61,6 +62,10 @@ All in `packages/daemon/src/domain/types.ts`. The spec/projection types live in
     `:1292`, `:1300`).
   - `operator_recovered` — only from later reconciliation,
     `reconcileNodeRuntimeTruth` (`:1590`, event at `:1727`).
+  - `left_attached` — a seat joined with `rig attach` as an external CLI,
+    returned first in `restoreNodeWithCompensation`: nothing is launched and
+    its binding and claim stay as they were. It doesn't count against the
+    rollup, and its forecast in `restore-plan-preview.ts` is `leave-attached`.
 - **RestoreRigResult** (`types.ts:444`) — the rig-level rollup, **4** values
   (`grep '^export type RestoreRigResult' packages/daemon/src/domain/types.ts | grep -o '"[^"]*"' | wc -l`):
   `fully_restored`, `partially_restored`, `failed`, `not_attempted`.
