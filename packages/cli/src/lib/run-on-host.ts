@@ -1,6 +1,6 @@
 import { runCrossHostCommand, type CrossHostResult, type RunCrossHostCommandOpts } from "../cross-host-executor.js";
 import { emitCrossHostError, emitCrossHostFailure } from "../cross-host-cli-helpers.js";
-import { fetchSelfHostId, getDaemonStatus, getDaemonUrl, type LifecycleDeps } from "../daemon-lifecycle.js";
+import { resolveOriginSelfHostId, type LifecycleDeps } from "../daemon-lifecycle.js";
 import { hostDisplayTarget, loadHostRegistry, resolveHost, type HostEntry } from "../host-registry.js";
 
 // Slice 18 — `--host` on the commands that move a Codex home (`rig auth status|list|switch`, `rig seat restart`):
@@ -11,18 +11,14 @@ import { hostDisplayTarget, loadHostRegistry, resolveHost, type HostEntry } from
 export interface RunOnHostDeps {
   hostRegistryLoader?: typeof loadHostRegistry;
   crossHostRun?: (host: HostEntry, argv: readonly string[], opts?: RunCrossHostCommandOpts) => Promise<CrossHostResult>;
-  /** This host's id, for the origin (default: the local daemon's /healthz; undefined when it can't be read). */
+  /** This host's id, for the origin (default: its persisted identity; undefined when it can't be read). */
   selfHostId?: () => Promise<string | undefined>;
 }
 
-/** This host's id from the local daemon, failing open as `rig send` does: undefined when it can't be read. */
+/** This machine's persisted host id, read as `rig send --host` reads it: never from the daemon endpoint, which
+ *  OPENRIG_URL may point at another machine, and readable during a daemon outage. Undefined when it can't be read. */
 export async function localSelfHostId(deps: LifecycleDeps): Promise<string | undefined> {
-  try {
-    const status = await getDaemonStatus(deps);
-    return status.port ? await fetchSelfHostId(deps, getDaemonUrl(status)) : undefined;
-  } catch {
-    return undefined;
-  }
+  return resolveOriginSelfHostId(deps).catch(() => undefined);
 }
 
 /** The origin as `rig send` carries it: `<member>@<rig>@<selfHostId>`, adding this host's id only to a two-part name,

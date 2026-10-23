@@ -1,7 +1,7 @@
 // Slice 18 — `--codex-home` and `--host` on the commands that move a Codex home: `rig auth status|list|switch` and
 // `rig seat restart`. `--host` runs the same rig command on another registered machine over its SSH entry, as the
 // calling seat; only that argv goes out, and the remote command's own output and status come back.
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,6 +9,9 @@ import { authCommand } from "../src/commands/auth.js";
 import { seatCommand } from "../src/commands/seat.js";
 import type { CrossHostResult } from "../src/cross-host-executor.js";
 import type { HostEntry } from "../src/host-registry.js";
+
+// This machine's persisted identity, as `rig send --host` reads it (the real reader opens the local store).
+vi.mock("../src/local-origin.js", () => ({ readLocalOrigin: () => "host-local" }));
 
 const SEAT = "fleet-agent@fleet";
 const REGISTRY = {
@@ -195,5 +198,18 @@ describe("rig seat restart --host", () => {
     expect(res.code).toBe(1);
     expect(res.err).toContain("A restart requires --reason");
     expect(ran).toEqual([]);
+  });
+});
+
+describe("the origin's host id, as rig send reads it", () => {
+  const before = process.env.OPENRIG_URL;
+  afterEach(() => { if (before === undefined) delete process.env.OPENRIG_URL; else process.env.OPENRIG_URL = before; });
+
+  it("is this machine's persisted id, even when OPENRIG_URL points at another machine's daemon", async () => {
+    process.env.OPENRIG_URL = "http://host-b.example:7433";
+    const { selfHostId: _injected, ...production } = host;
+    await capture(() => authCommand({ env: { HOME: home, OPENRIG_SESSION_NAME: SEAT, OPENRIG_URL: "http://host-b.example:7433" }, host: production })
+      .parseAsync(["status", "--host", "box-ssh"], { from: "user" }));
+    expect(ran.at(-1)?.origin).toBe(`${SEAT}@host-local`);
   });
 });
