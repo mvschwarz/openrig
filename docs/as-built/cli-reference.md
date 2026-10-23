@@ -210,6 +210,8 @@ the sections that were not read are `null`.
 | `rig gateway human mode decisions <entityId> <applicationId>` | — | `--json` |
 | `rig gateway human remove <entityId>` | — | `--force` |
 
+- `human set <entityId> slack-subscription <value>` — sets the person's Slack subscription: `every-ask` (the default) posts every ask to them to Slack; `urgent-only` posts only asks created with `--alert`, and other asks wait on Steering and the TUI; `unset` removes the authored subscription so the default applies. `human show` prints the value with its origin, `authored` or `default` (`slack-subscription: every-ask (default)`); `--json` carries it as `record.slackSubscription` `{ value, source }`.
+
 ### parked
 
 | Invocation | Aliases | Declared options |
@@ -342,6 +344,8 @@ the sections that were not read are `null`.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig ps` | — | `--json`<br>`--no-cleanup`<br>`--resources`<br>`--nodes`<br>`--full`<br>`--verbose`<br>`--limit <n>`<br>`--fields <list>`<br>`--summary`<br>`--filter <key=value>`<br>`--active`<br>`--running`<br>`-A, --all-rigs`<br>`--rig <name>`<br>`--session <name>`<br>`--include-archived`<br>`--host <id>`<br>`--all-hosts`<br>`--hosts <ids>` |
+
+- `--nodes --json` — each seat carries the daemon's served `needsAttention` flag; the CLI doesn't re-derive it, and it is absent when an older daemon doesn't serve it. `arbitratedNeedsInput` and `needsInputEvidence` (`{ rung, observedAt }` or null) come with `--full`, or by name through `--fields`.
 
 ### roster
 
@@ -911,6 +915,8 @@ for input and receipt examples, rollback, and snapshot behavior.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig compact-plan` | — | `--json`<br>`--rig <name>`<br>`--refresh`<br>`--threshold-tokens <n>`<br>`--threshold-percent <0-100>` |
+
+- `--threshold-tokens` and `--threshold-percent` set the plan's own candidate thresholds (the percentage applies when a seat's context window size is missing). They are not the automatic compaction setting: the output labels them as the plan's own and shows `policies.claude_compaction` (`enabled`, `threshold_percent`) separately, for comparison only, or says it couldn't be read.
 
 ### compact
 

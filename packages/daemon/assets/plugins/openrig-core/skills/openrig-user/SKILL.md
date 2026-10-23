@@ -457,6 +457,16 @@ clear updates the current binding and identity verdict without a clear event.
 Acknowledgment or responsiveness alone does not prove that the original
 conversation resumed.
 
+Two startup cases also end in `attention_required`, and the result says what to do:
+- **Assisted startup** (a community harness preset with `startup_assisted: true`): the startup text and Enter were
+  sent but submission isn't confirmed. Check the pane and submit any staged text, don't resend it, then run the
+  reported `rig seat clear-attention <session> --reason "..."` once the seat has responded.
+- **A refused startup turn** (Claude answered a startup turn with a refusal such as an expired login): nothing more is
+  typed into the seat, and the result names how many later startup inputs weren't sent. A fresh start that ran no
+  one-shot action stays continuable: `rig seat continue <seat>` delivers the whole startup again, the refused turn
+  included. A resumed or forked seat keeps its conversation and isn't offered continue; a fresh start that can't
+  continue names `rig seat launch <seat> --fresh --stop --reason "<why>"`.
+
 A 422 response names the uncleared class and its failed check. If the recorded
 native token needs correction and you know the actual token, use
 `rig seat set-resume-token <session> --token-stdin --reason <explanation>`, then
@@ -818,7 +828,7 @@ rig send <session> "message" --host <id>
 rig send <session> "message" --json
 ```
 
-**The send-guard (v0.4.0) — the default is SAFE.** A default `rig send` is guarded: it will NOT submit into an interactive prompt / permission block on the target pane. Flags:
+**The send-guard (v0.4.0) — the default is SAFE.** A default `rig send` is guarded: it will NOT submit into an interactive prompt / permission block on the target pane. That includes Claude's MCP server approval menu (`N new MCP servers found in .mcp.json`, ending `Space to select · Enter to confirm · Esc to reject all`) while it is the current screen: the send is refused with reason `target_needs_input` and `Refused: '<session>' is at an interactive prompt (selection_prompt). A message must not select or approve it. … No text was sent.` Approving or rejecting those servers is the person's call; `--dangerously-interact` drives it only deliberately. Flags:
 - `--verify` — delivery evidence.
 - `--force` — **a back-compat no-op on the send DECISION**: it never bypasses the interactive-prompt/permission guard and never changes whether a message is delivered (a mid-task/busy pane already sends-with-advisory by default). *(It does NOT "bypass activity-risk checks" — that earlier teaching is retired.)* It is **not fully inert**, though — it is still parsed solely to be **rejected in combination with `--wait-for-idle`**: `rig send … --force --wait-for-idle <n>` prints `--wait-for-idle cannot be combined with --force`, exits 1, and sends nothing. So do not read "no-op" as "`--force --wait-for-idle` is harmless"; that pairing errors. *(Verified against current product main `d37a08ad`: the guard-bypass no-op is declared at `send.ts` and confirmed by runtime capture — a plain `--force` send delivers through the ordinary path; the `--wait-for-idle` rejection is enforced at `send.ts`, `routes/transport.ts`, and `session-transport.ts`, and confirmed by runtime capture — exit 1, nothing sent.)*
 - `--wait-for-idle <seconds>` — wait until the target is explicitly idle before sending. **Cannot be combined with `--force`** (that pairing is rejected: exit 1, nothing sent).
@@ -1536,7 +1546,8 @@ rig mcp token revoke <name>
 ```
 
 The 34 shipped tools fall into three groups. Over stdio, and over HTTP with no grants, every tool is offered. An HTTP
-grant offers the work tools, the workspace tools only with `--workspace`, and the owner tools only with `--owner`.
+grant offers the work tools; the workspace tools with `--workspace` or `--owner`; and the owner tools only with
+`--owner`, which offers every tool.
 - **Work (17):** orientation, communication and the durable work loop.
   - `rig_whoami`: the seat the server acts as (rig, pod, peers, edges) and the `caller`: authenticated (an HTTP
     credential, with its principal) or declared (`OPENRIG_SESSION_NAME` where the server was configured, which nothing
@@ -1562,7 +1573,8 @@ grant offers the work tools, the workspace tools only with `--workspace`, and th
   - `rig_restore_status`, that attempt's receipt.
 
 **Results:**
-- The queue tools and `rig_whoami` return a structured result beside the text.
+- A structured result comes beside the text from the queue tools, `rig_whoami`, `rig_team`, the four workspace tools,
+  `rig_artifact_read`, `rig_human_decision_room` and `rig_restore_status`. The other tools answer in text.
 - Every failure carries the same structured shape: `ok: false`, a `code` and a `message`.
 
 **Identity:**
@@ -1581,7 +1593,10 @@ grant offers the work tools, the workspace tools only with `--workspace`, and th
   - **Identity:** each caller acts as its grant's seat.
   - **What it reaches:** only its rigs' seats and work, and its roots' artifacts. Anything else answers `out_of_scope`.
   - **Bad credentials:** a missing, invalid or revoked token gets a 401, never the environment's seat.
-  - **A broken token file:** if the file later goes missing or can't be read, every request is refused until a restart.
+  - **A broken token file:** the server reads the file on every request. While it is missing or can't be read, every
+    request is refused (`auth_config_unreadable`); restore a valid, readable file and requests are served again, with
+    no restart. The other way back is a restart with no token file, which returns the server to the no-grants mode
+    above (loopback only). A restart never skips a token file that is present: its grants still apply.
 - **Beyond loopback** (`--bind`), the server starts only with a grant. TLS comes from the tunnel or proxy, not from
   this server.
 - **`rig mcp token add`** prints the token once and stores only its hash.
