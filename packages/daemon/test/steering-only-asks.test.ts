@@ -31,25 +31,27 @@ import { runWakeLadderTick } from "../src/domain/queue-wake-ladder.js";
 import type { AttentionRead } from "../src/attention-surface.js";
 
 const HUMAN = "human-founder";
-/** The people, with their slack-asks setting (absent = the default). */
-const registryWith = (slackAsks?: "all" | "alerts-only") => ({
+/** The people, with their Slack subscription's preset (absent = the default). */
+const registryWith = (preset?: "every-ask" | "urgent-only") => ({
   ok: true as const,
   entities: [{
     entityId: HUMAN, class: "human" as const, displayName: "Founder", address: `${HUMAN}@external`,
     connectorBindings: [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "env:SLACK_BOT_TOKEN", role: "primary" as const, handle: "UFOUNDER" }],
-    prefs: { deliveryClass: "B" as const, availability: "available" as const, ...(slackAsks ? { slackAsks } : {}) },
+    prefs: { deliveryClass: "B" as const, availability: "available" as const },
+    ...(preset ? { subscriptions: [{ destination: { connector: "slack" as const }, filter: { preset } }] } : {}),
   }, {
     // A registered person addressed as a kernel alias, which no human-* name pattern matches.
     entityId: "operator-admin", class: "human" as const, displayName: "Operator", address: "operator-admin@external",
     connectorBindings: [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "env:SLACK_BOT_TOKEN", role: "primary" as const, handle: "UOPERATOR" }],
-    prefs: { deliveryClass: "B" as const, availability: "available" as const, ...(slackAsks ? { slackAsks } : {}) },
+    prefs: { deliveryClass: "B" as const, availability: "available" as const },
+    ...(preset ? { subscriptions: [{ destination: { connector: "slack" as const }, filter: { preset } }] } : {}),
   }],
 });
-// Most cases here are a person who chose Steering for plain asks (alerts-only); the default cases reset it.
-let registry = registryWith("alerts-only");
+// Most cases here are a person whose Slack subscription is urgent-only (plain asks wait on Steering); the default cases reset it.
+let registry = registryWith("urgent-only");
 const QUESTION = [{ id: "q1", question: "A or B?", options: [{ id: "a", label: "A" }, { id: "b", label: "B" }] }];
 
-describe("an ask to a person is on Steering and the TUI; Slack gets it by their slack-asks setting", () => {
+describe("an ask to a person is on Steering and the TUI; Slack gets it by their Slack subscription", () => {
   let db: Database.Database;
   let repo: QueueRepository;
   let bus: EventBus;
@@ -62,7 +64,7 @@ describe("an ask to a person is on Steering and the TUI; Slack gets it by their 
     db = createDb();
     migrate(db, ALL_MIGRATIONS);
     unreachable = null;
-    registry = registryWith("alerts-only");
+    registry = registryWith("urgent-only");
     repo = newRepo();
     home = mkdtempSync(join(tmpdir(), "steering-only-"));
     const secrets = join(home, "slack.env");
@@ -210,7 +212,7 @@ describe("an ask to a person is on Steering and the TUI; Slack gets it by their 
     const read = await (await app.request(`/api/attention?item=${encodeURIComponent(`queue:${row.qitemId}`)}`)).json() as {
       items: Array<{ id: string; recipient: string }>; detail: { lines: string[] } | null };
     expect(read.items).toContainEqual(expect.objectContaining({ id: `queue:${row.qitemId}`, recipient: "operator-admin@kernel" }));
-    expect(read.detail!.lines).toContain("Slack: not sent: created without --alert, and this person takes only alerted asks in Slack (slack-asks alerts-only)");
+    expect(read.detail!.lines).toContain("Slack: not sent: created without --alert, and this person's Slack subscription is urgent-only");
     await runGateway();
     expect(posts).toHaveLength(0);
   });
@@ -483,7 +485,7 @@ describe("an ask to a person is on Steering and the TUI; Slack gets it by their 
     expect(onSteering()).toContain(quiet.qitemId);
   });
 
-  it("by default (no slack-asks set, as on upgrade) every ask posts to Slack as before, and an alerted one stands out", async () => {
+  it("by default (no Slack subscription authored, as on upgrade) every ask posts to Slack as before, and an alerted one stands out", async () => {
     registry = registryWith(); // a person with Slack configured before the setting existed
     const plain = await ask();
     const urgent = await ask({ alert: true });
@@ -492,8 +494,8 @@ describe("an ask to a person is on Steering and the TUI; Slack gets it by their 
     expect(repo.getById(urgent.qitemId)!.tags).toContain("human-alert");
     // Not a quiet ask: the stuck sweep, the ladder and the waiting view treat it as before.
     expect(repo.humanAskWithoutAlert(plain.qitemId)).toBe(false);
-    // The classification is the create's: choosing alerts-only afterwards doesn't take back an ask already made.
-    registry = registryWith("alerts-only");
+    // The classification is the create's: changing the preset to urgent-only afterwards doesn't take back an ask already made.
+    registry = registryWith("urgent-only");
     await runGateway();
     expect(posts).toHaveLength(2);
     expect(posted(plain)).toBe(true);

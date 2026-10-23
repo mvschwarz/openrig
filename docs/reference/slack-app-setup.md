@@ -137,9 +137,9 @@ part of OpenRig.
 
 ## One channel per rig or seat (optional)
 
-Every ask to a person posts to Slack by default. A person who wants Slack for urgent asks only sets
-`rig gateway human set <id> slack-asks alerts-only`: then only an ask marked `--alert` posts, and the rest wait on Steering
-and the TUI. An ask marked `--alert` stands out either way (an interrupt with a mention). By default every post goes to the one channel from `rig slack setup --channel`.
+Every ask to a person posts to Slack by default: that's their Slack subscription's `every-ask` preset. A person who wants
+Slack for urgent asks only sets `rig gateway human set <id> slack-subscription urgent-only`: then only an ask marked
+`--alert` posts, and the rest wait on Steering and the TUI. An ask marked `--alert` stands out either way (an interrupt with a mention). By default every post goes to the one channel from `rig slack setup --channel`.
 To follow each rig separately, post a rig's items, or a single seat's, to its own channel:
 
 ```bash

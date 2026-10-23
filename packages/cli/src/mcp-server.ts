@@ -879,7 +879,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       tier: z.string().optional().describe("Tier (as rig queue create --tier)"),
       qitemId: z.string().optional().describe("Request id to reuse when retrying the same create (default: a new id)"),
       revises: z.string().optional().describe("The qitemId of the work this asks to revise"),
-      alert: z.boolean().optional().describe("For an ask to a person that's urgent: something only they can do, or an approval whose wait costs now (as rig queue create --alert). It stands out in Slack. Without it the ask still posts to Slack unless the person chose alerts-only, in which case it waits on Steering and the TUI"),
+      alert: z.boolean().optional().describe("For an ask to a person that's urgent: something only they can do, or an approval whose wait costs now (as rig queue create --alert). It stands out in Slack. Without it the ask still posts to Slack unless the person's Slack subscription is urgent-only, in which case it waits on Steering and the TUI"),
     },
     ADDITIVE,
     async ({ destination, body, summary, tags, priority, tier, qitemId, revises, alert }) => {

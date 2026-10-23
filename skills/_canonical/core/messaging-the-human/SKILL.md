@@ -73,16 +73,16 @@ rig queue create --destination <entityId>@external \
 
 An ask is on Steering and the TUI, where the person can answer it, choosing an
 option or typing a reply; it comes back to you exactly as a Slack answer does.
-Whether it also posts to Slack is the person's own setting (`rig gateway human
-show <id>`, `slack-asks`): by default (`all`) every ask posts, and with
-`alerts-only` only an ask marked `--alert` does. So forgetting `--alert` never
-hides an ask from someone who reads Slack.
+Whether it also posts to Slack is the person's Slack subscription (`rig gateway
+human show <id>`, `slack-subscription`): by default (`every-ask`) every ask
+posts, and with `urgent-only` only an ask marked `--alert` does. So forgetting
+`--alert` never hides an ask from someone who reads Slack.
 
 Add `--alert` when the ask is urgent: something only they can do, or an approval
 whose wait costs now. A sign-in, a credential or an approval that expires needs
 it; a question that can wait for their next look doesn't. An alerted ask stands
 out in Slack (an interrupt with a mention, within their quiet hours and
-availability), and it's the only kind that reaches someone on `alerts-only`.
+availability), and it's the only kind that reaches someone on `urgent-only`.
 An update (`--human-intent update`) posts as before and takes no `--alert`.
 
 Before asking a **decision**, check whether the person has a mode on with a
@@ -162,8 +162,8 @@ well would issue another notification for the same decision.
 
 The row persists before bounded delivery verification. Read its qitem ID and
 verification result; `posted` proves connector posting, **not human readership**.
-`not-alerted` means the person takes only alerted asks in Slack (`alerts-only`), so the
-ask is on Steering and the TUI without a Slack post, as they chose; it isn't a failure. `transport-failed`, `never-posted`, or a pending/indeterminate result
+`not-alerted` means the person's Slack subscription is `urgent-only`, so the ask is
+on Steering and the TUI without a Slack post, as they chose; it isn't a failure. `transport-failed`, `never-posted`, or a pending/indeterminate result
 leaves the row intact. Inspect that same row and its next action; never create a second row
 or blindly resend because verification timed out.
 

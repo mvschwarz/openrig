@@ -51,7 +51,7 @@ interface DeliveryResultBase {
 /** The gateway (Slack connector) owns delivery; its ledger is the receipt. */
 export interface GatewayDeliveryResult extends DeliveryResultBase {
   receiptSource: "gateway";
-  /** not-alerted: an ask created without --alert to a person who takes only alerted asks in Slack (slack-asks alerts-only), so it's on Steering and the TUI and never sent to Slack. */
+  /** not-alerted: an ask created without --alert to a person whose Slack subscription is urgent-only, so it's on Steering and the TUI and never sent to Slack. */
   outcome: "posted" | "transport-failed" | "never-posted" | "still-pending" | "indeterminate" | "not-alerted";
   /** null means no receipt can presently settle connector acceptance. */
   connectorAccepted: boolean | null;
@@ -246,7 +246,7 @@ export async function waitForDeliveryOutcome(
       // An ask placed on Steering without an alert owes no post, so there's no receipt to wait for.
       if (outcome == null && stringField(row, "ownerNotificationLevel") === "RECORD") {
         return { ...gateway, outcome: "not-alerted", connectorAccepted: null,
-          detail: "created without --alert, and the person takes only alerted asks in Slack (slack-asks alerts-only), so it's not sent there; it's on Steering and the TUI for them", nextAction: null };
+          detail: "created without --alert, and the person's Slack subscription is urgent-only, so it's not sent there; it's on Steering and the TUI for them", nextAction: null };
       }
       if (outcome === "posted") {
         // #96: a --reply-to update reports whether it joined the earlier item's thread.
@@ -767,7 +767,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--target-repo <name>", "PL-007: typed repo scope (must match a repo in the source rig's RigSpec.workspace.repos[])")
     .option("--summary <text>", "Short human-readable subject of the row, shown on every surface that lists it (RECENT, the story, the needs-you view). Say what the work is and why it needs this seat. For a human destination, --body-file is the complete decision brief or update; keep technical continuation in the owning agent row and evidence.")
     .option("--human-intent <intent>", "decision (default) or update: a quiet informational delivery, never an approval request")
-    .option("--alert", "For an ask to a person that's urgent: something only they can do, or an approval whose wait costs now. It stands out in Slack (an interrupt with a mention). Without it the ask still posts to Slack for a person on the default (slack-asks all), and waits on Steering and the TUI for one who chose alerts-only")
+    .option("--alert", "For an ask to a person that's urgent: something only they can do, or an approval whose wait costs now. It stands out in Slack (an interrupt with a mention). Without it the ask still posts to Slack for a person on the default Slack subscription (every-ask), and waits on Steering and the TUI for one on urgent-only")
     .option("--human-detail-file <path>", "One explicitly authored supplemental thread reply; keep the complete action/options in --body-file")
     .option("--reply-to <qitemId>", "Post this update into an earlier qitem's Slack thread (requires --human-intent update; posts as a new top-level message instead if that thread can't be used, e.g. it is missing or still has an open human decision; --verify reports why)")
     .option("--human-questions-file <path>", "#193: JSON array of 1-4 questions for a decision, each {id, question, options: [{id, label, recommended?}]} with 2-4 options; Slack shows them as buttons")
@@ -1212,7 +1212,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .option("--target-repo <name>", "PL-007: typed repo scope for the new qitem")
     .option("--summary <text>", "OPR.0.4.1.18: short human-readable 1-2 sentence subject of the new qitem — what it is and why this seat — shown on every surface that lists it (RECENT, the story, the needs-you view); --body stays source of truth. Not inherited from the source row. Warned-if-missing.")
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-5: durable-artifact pointer for the new qitem. Required by the daemon when the new qitem is human-routed; optional otherwise.")
-    .option("--alert", "For a handoff to a person that's urgent: something only they can do, or an approval whose wait costs now. It stands out in Slack (an interrupt with a mention). Without it the item still posts to Slack for a person on the default (slack-asks all), and waits on Steering and the TUI for one who chose alerts-only")
+    .option("--alert", "For a handoff to a person that's urgent: something only they can do, or an approval whose wait costs now. It stands out in Slack (an interrupt with a mention). Without it the item still posts to Slack for a person on the default Slack subscription (every-ask), and waits on Steering and the TUI for one on urgent-only")
     .option("--host <id>", QUEUE_HOST_OPTION_HELP)
     .option("--no-nudge", "Suppress the default nudge to the new destination")
     .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
@@ -1316,7 +1316,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .option("--target-repo <name>", "PL-007: typed repo scope for the new qitem")
     .option("--summary <text>", "OPR.0.4.1.18: short human-readable 1-2 sentence subject of the new qitem — what it is and why this seat — shown on every surface that lists it (RECENT, the story, the needs-you view); --body stays source of truth. Not inherited from the source row. Warned-if-missing.")
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-5: durable-artifact pointer for the new qitem. Required by the daemon when the new qitem is human-routed; optional otherwise.")
-    .option("--alert", "For a handoff to a person that's urgent: something only they can do, or an approval whose wait costs now. It stands out in Slack (an interrupt with a mention). Without it the item still posts to Slack for a person on the default (slack-asks all), and waits on Steering and the TUI for one who chose alerts-only")
+    .option("--alert", "For a handoff to a person that's urgent: something only they can do, or an approval whose wait costs now. It stands out in Slack (an interrupt with a mention). Without it the item still posts to Slack for a person on the default Slack subscription (every-ask), and waits on Steering and the TUI for one on urgent-only")
     .option("--host <id>", QUEUE_HOST_OPTION_HELP)
     .option("--no-nudge", "Suppress the default nudge to the new destination")
     .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")

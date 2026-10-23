@@ -36,22 +36,54 @@ export const ENTITY_ID_PATTERN = /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/;
 export const ADDRESS_DOMAIN = "external";
 
 // Closed key sets — a typo'd field must fail LOUD, never silently degrade behavior.
-const ALLOWED_FRAGMENT_KEYS = new Set(["entityId", "class", "displayName", "address", "connectorBindings", "prefs"]);
+const ALLOWED_FRAGMENT_KEYS = new Set(["entityId", "class", "displayName", "address", "connectorBindings", "prefs", "subscriptions"]);
 const ALLOWED_BINDING_KEYS = new Set(["kind", "connectorRef", "secretsRef", "role", "handle"]);
 // A connector handle (M1 A6 v3 schema 9e468b2f): the platform-native id of the human ON that
 // connector (e.g. a Slack user id). Constrained so it can never forge a session ref (no ':' / '@'
 // / whitespace) — it is compared to an inbound sender id and spliced into teaching text.
 export const HANDLE_PATTERN = /^[A-Za-z0-9._-]+$/;
-const ALLOWED_PREFS_KEYS = new Set(["deliveryClass", "away", "availability", "slackAsks"]);
-/** How a person's plain asks reach Slack: `all` (every ask posts there too) or `alerts-only` (only asks marked
- *  alert-worthy post; the rest wait on Steering and the TUI). */
-export const SLACK_ASKS_MODES = ["all", "alerts-only"] as const;
-export type SlackAsks = (typeof SLACK_ASKS_MODES)[number];
-/** Unset means this: every ask posts, as before Steering-only asks existed, so nothing changes on upgrade. */
-export const DEFAULT_SLACK_ASKS: SlackAsks = "all";
+const ALLOWED_PREFS_KEYS = new Set(["deliveryClass", "away", "availability"]);
 
-export function slackAsksFor(prefs: Pick<HumanPrefs, "slackAsks"> | undefined): SlackAsks {
-  return prefs?.slackAsks ?? DEFAULT_SLACK_ASKS;
+/** Attention subscriptions: where a person's items go besides Steering and the TUI, each a saved filter plus a
+ *  destination. The first is Slack's, with two preset filters. Field filters and channel destinations extend these
+ *  objects later without a migration. */
+export const SUBSCRIPTION_PRESETS = ["every-ask", "urgent-only"] as const;
+export type SubscriptionPreset = (typeof SUBSCRIPTION_PRESETS)[number];
+/** With no Slack subscription authored, every ask posts, as before subscriptions existed, so nothing changes on upgrade. */
+export const DEFAULT_SLACK_PRESET: SubscriptionPreset = "every-ask";
+export interface AttentionSubscription {
+  /** Where matching items go: the person's Slack binding. */
+  destination: { connector: "slack" };
+  /** Which items: `every-ask` (every ask to them) or `urgent-only` (asks marked --alert, which carry HUMAN_ALERT_TAG). */
+  filter: { preset: SubscriptionPreset };
+}
+const ALLOWED_SUBSCRIPTION_KEYS = new Set(["destination", "filter"]);
+
+/** The person's Slack subscription preset, and whether they authored it. */
+export function slackSubscriptionFor(human: Pick<HumanFragment, "subscriptions"> | undefined): { preset: SubscriptionPreset; source: "authored" | "default" } {
+  const authored = human?.subscriptions?.find((sub) => sub.destination.connector === "slack");
+  return authored ? { preset: authored.filter.preset, source: "authored" } : { preset: DEFAULT_SLACK_PRESET, source: "default" };
+}
+
+function validateSubscriptions(value: unknown): { ok: true; subscriptions: AttentionSubscription[] } | { ok: false; error: string } {
+  if (!Array.isArray(value)) return { ok: false, error: "subscriptions must be a list of { destination, filter }" };
+  const subscriptions: AttentionSubscription[] = [];
+  for (const [i, sub] of value.entries()) {
+    const where = `subscriptions[${i}]`;
+    if (!isObj(sub)) return { ok: false, error: `${where} must be a mapping { destination, filter }` };
+    const uk = unknownKey(sub, ALLOWED_SUBSCRIPTION_KEYS);
+    if (uk) return { ok: false, error: `${where} has unknown key "${uk}" — allowed: destination, filter` };
+    const { destination, filter } = sub;
+    if (!isObj(destination) || unknownKey(destination, new Set(["connector"])) || destination.connector !== "slack") {
+      return { ok: false, error: `${where}.destination must be { connector: slack } (the person's Slack binding)` };
+    }
+    if (!isObj(filter) || unknownKey(filter, new Set(["preset"])) || !(SUBSCRIPTION_PRESETS as readonly string[]).includes(String(filter.preset))) {
+      return { ok: false, error: `${where}.filter must be { preset: ${SUBSCRIPTION_PRESETS.join("|")} }` };
+    }
+    if (subscriptions.some((s) => s.destination.connector === "slack")) return { ok: false, error: `${where}: one Slack subscription per person` };
+    subscriptions.push({ destination: { connector: "slack" }, filter: { preset: filter.preset as SubscriptionPreset } });
+  }
+  return { ok: true, subscriptions };
 }
 
 /** The tag an ask created or handed off with humanAlert (`--alert`) carries: it stands out in Slack, as an interrupt,
@@ -100,8 +132,6 @@ export interface HumanPrefs {
   away?: boolean;
   /** OPR.0.5.6.1 — availability mode (available | focus | away | off). */
   availability?: "available" | "focus" | "away" | "off";
-  /** Whether plain asks post to Slack (`all`) or only alert-worthy ones (`alerts-only`); unset reads as DEFAULT_SLACK_ASKS. */
-  slackAsks?: SlackAsks;
 }
 
 export interface HumanFragment {
@@ -112,6 +142,8 @@ export interface HumanFragment {
   address: string;
   connectorBindings: HumanConnectorBinding[];
   prefs: HumanPrefs;
+  /** Attention subscriptions (one per connector for now); none means the default Slack subscription. */
+  subscriptions?: AttentionSubscription[];
 }
 
 export type ValidateResult =
@@ -129,7 +161,7 @@ export function validateHumanFragment(raw: unknown): ValidateResult {
   if (!isObj(raw)) return { ok: false, error: "human fragment must be a mapping" };
   const uk = unknownKey(raw, ALLOWED_FRAGMENT_KEYS);
   if (uk) return { ok: false, error: `unknown fragment key "${uk}" — allowed: ${[...ALLOWED_FRAGMENT_KEYS].join(", ")} (a typo must not silently degrade)` };
-  const { entityId, class: cls, displayName, address, connectorBindings, prefs } = raw;
+  const { entityId, class: cls, displayName, address, connectorBindings, prefs, subscriptions: rawSubscriptions } = raw;
 
   if (typeof entityId !== "string" || !ENTITY_ID_PATTERN.test(entityId)) {
     return { ok: false, error: `entityId "${String(entityId)}" must be a lowercase slug (a-z0-9._- , no leading/trailing separator)` };
@@ -212,9 +244,6 @@ export function validateHumanFragment(raw: unknown): ValidateResult {
   if (prefs.availability !== undefined && !HUMAN_AVAILABILITY_MODES.has(String(prefs.availability))) {
     return { ok: false, error: `prefs.availability "${String(prefs.availability)}" must be one of available|focus|away|off` };
   }
-  if (prefs.slackAsks !== undefined && !(SLACK_ASKS_MODES as readonly string[]).includes(String(prefs.slackAsks))) {
-    return { ok: false, error: `prefs.slackAsks "${String(prefs.slackAsks)}" must be one of ${SLACK_ASKS_MODES.join("|")}` };
-  }
   // Two spellings of one truth are refused: a present availability is the
   // authority; legacy away may only AGREE with it (away:true + availability=away).
   if (prefs.availability !== undefined && prefs.away === true && prefs.availability !== "away") {
@@ -223,11 +252,16 @@ export function validateHumanFragment(raw: unknown): ValidateResult {
   const validatedPrefs: HumanPrefs = { deliveryClass: prefs.deliveryClass as HumanPrefs["deliveryClass"] };
   if (prefs.away !== undefined) validatedPrefs.away = prefs.away;
   if (prefs.availability !== undefined) validatedPrefs.availability = prefs.availability as HumanPrefs["availability"];
-  if (prefs.slackAsks !== undefined) validatedPrefs.slackAsks = prefs.slackAsks as SlackAsks;
+  let subscriptions: AttentionSubscription[] | undefined;
+  if (rawSubscriptions !== undefined) {
+    const v = validateSubscriptions(rawSubscriptions);
+    if (!v.ok) return v;
+    subscriptions = v.subscriptions;
+  }
 
   return {
     ok: true,
-    fragment: { entityId, class: "human", displayName, address, connectorBindings: bindings, prefs: validatedPrefs },
+    fragment: { entityId, class: "human", displayName, address, connectorBindings: bindings, prefs: validatedPrefs, ...(subscriptions ? { subscriptions } : {}) },
   };
 }
 
@@ -474,8 +508,9 @@ export interface EffectiveHumanRecord {
   prefs: {
     deliveryClass: ProvenancedValue<HumanPrefs["deliveryClass"]>;
     away: ProvenancedValue<boolean>;
-    slackAsks: ProvenancedValue<SlackAsks>;
   };
+  /** The Slack subscription's preset filter (`every-ask` unless authored). */
+  slackSubscription: ProvenancedValue<SubscriptionPreset>;
   connectorBindings: Array<HumanConnectorBinding & { inboundResolvable: boolean }>;
 }
 
@@ -592,15 +627,15 @@ export function showHuman(entityId: string, home: string = getOpenRigHome()): Sh
           value: f.fragment.prefs.away === true,
           source: rawPrefs.away !== undefined ? "authored" : "default",
         },
-        slackAsks: { value: slackAsksFor(f.fragment.prefs), source: rawPrefs.slackAsks !== undefined ? "authored" : "default" },
       },
+      slackSubscription: (({ preset, source }) => ({ value: preset, source }))(slackSubscriptionFor(f.fragment)),
       connectorBindings: f.fragment.connectorBindings.map((b) => ({ ...b, inboundResolvable: b.handle !== undefined })),
     },
   };
 }
 
 const SETTABLE_FIELDS_TEACHING =
-  "settable fields: display-name, delivery-class, away, availability (available|focus|away|off, or unset), slack-asks (all|alerts-only, or unset for all), binding.<n> (binding.<n> takes a full kind:connectorRef:secretsRef:role[:handle=<id>] spec)";
+  "settable fields: display-name, delivery-class, away, availability (available|focus|away|off, or unset), slack-subscription (every-ask|urgent-only, or unset for every-ask), binding.<n> (binding.<n> takes a full kind:connectorRef:secretsRef:role[:handle=<id>] spec)";
 
 /** Cross-fragment handle-uniqueness: the same pre-write check add runs (one platform id =
  *  one human), extracted so set enforces it identically. */
@@ -689,11 +724,14 @@ export function setHumanField(
     if (value === "unset") delete rawPrefs.availability;
     else rawPrefs.availability = value;
     raw.prefs = rawPrefs;
-  } else if (field === "slack-asks") {
-    // `unset` returns to the default (DEFAULT_SLACK_ASKS); the add-time validator checks any other value.
-    if (value === "unset") delete rawPrefs.slackAsks;
-    else rawPrefs.slackAsks = value;
-    raw.prefs = rawPrefs;
+  } else if (field === "slack-subscription") {
+    // The preset of the person's Slack subscription. `unset` removes it, so the default (DEFAULT_SLACK_PRESET) applies;
+    // the add-time validator checks any other value.
+    const others = (Array.isArray(raw.subscriptions) ? raw.subscriptions : [])
+      .filter((sub) => !(isObj(sub) && isObj(sub.destination) && sub.destination.connector === "slack"));
+    const next = value === "unset" ? others : [...others, { destination: { connector: "slack" }, filter: { preset: value } }];
+    if (next.length) raw.subscriptions = next;
+    else delete raw.subscriptions;
   } else if (field.startsWith("binding.")) {
     const idxRaw = field.slice("binding.".length);
     const idx = /^\d+$/.test(idxRaw) ? Number.parseInt(idxRaw, 10) : NaN;

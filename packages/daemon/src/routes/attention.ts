@@ -42,7 +42,7 @@ export function attentionRoutes(): Hono {
       const slackLine = (qitemId: string): string => {
         const delivery = queue.deliveryOutcomeFor(qitemId);
         if (delivery) return delivery.outcome === "posted" ? "posted (posted isn't read)" : `${delivery.outcome}: ${delivery.detail}`;
-        return quiet.has(qitemId) ? "not sent: created without --alert, and this person takes only alerted asks in Slack (slack-asks alerts-only)" : "no receipt yet";
+        return quiet.has(qitemId) ? "not sent: created without --alert, and this person's Slack subscription is urgent-only" : "no receipt yet";
       };
       // Keep an opened request inspectable after its source is resolved, without
       // retaining it in the current Action required feed or inventing an inbox.

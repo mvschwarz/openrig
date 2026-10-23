@@ -67,7 +67,7 @@ describe("complete human notifications", () => {
     const alerted = await repo.create({ ...request, humanAlert: true });
     const update = await repo.create({ ...request, humanIntent: "update", tags: ["escalation"], humanDetail: "Retained supplemental context." });
     const rows = await makeQueuePorts(repo, { loadHumanRegistry: () => registry }).listHumanAlerts({});
-    // An omitted intent is a decision: by default (slack-asks all) it posts, as an alerted one does.
+    // An omitted intent is a decision: by default (the Slack subscription's every-ask preset) it posts, as an alerted one does.
     expect(rows.find((q) => q.qitemId === legacy.qitemId)).toMatchObject({ ownerNotificationKind: "human-required", ownerNotificationLevel: "ALERT" });
     expect(rows.find((q) => q.qitemId === alerted.qitemId)).toMatchObject({ ownerNotificationKind: "human-required", ownerNotificationLevel: "ALERT" });
     expect(rows.find((q) => q.qitemId === update.qitemId)).toMatchObject({ humanIntent: "update", humanDetail: "Retained supplemental context.", ownerNotificationKind: "human-update", ownerNotificationLevel: "NOTICE" });

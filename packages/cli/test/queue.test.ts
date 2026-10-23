@@ -441,7 +441,7 @@ describe("rig queue CLI", () => {
       { destinationSession: "human-founder@external" },
     );
     expect(result).toMatchObject({ receiptSource: "gateway", outcome: "not-alerted", connectorAccepted: null, nextAction: null });
-    expect(result.detail).toMatch(/^created without --alert, and the person takes only alerted asks in Slack \(slack-asks alerts-only\)/);
+    expect(result.detail).toMatch(/^created without --alert, and the person's Slack subscription is urgent-only/);
     expect(reads).toBe(1);
   });
 

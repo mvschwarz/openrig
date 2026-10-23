@@ -4,7 +4,7 @@ import { quietCustodyBackstop, quietHoldCustody } from "./quiet-hold-custody.js"
 import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import type { EventBus } from "./event-bus.js";
-import { loadHumanRegistry, resolveRegisteredHumanAddress, slackAsksFor, withHumanAlertTag, type LoadResult } from "./gateway/human-registry.js";
+import { loadHumanRegistry, resolveRegisteredHumanAddress, slackSubscriptionFor, withHumanAlertTag, type LoadResult } from "./gateway/human-registry.js";
 import { resolveExternal } from "./gateway/external-admission.js";
 import type { PersistedEvent } from "./types.js";
 import { QueueTransitionLog, type OwnerNotificationLevel, type QueueTransition, type RecentQueueTransitionScope } from "./queue-transition-log.js";
@@ -1107,10 +1107,10 @@ export class QueueRepository {
 
     const destinationHuman = resolveRegisteredHumanAddress(input.destinationSession, registry.entities);
     if (input.action === "create" && destinationHuman !== null) {
-      // An ask posts to Slack (ALERT) unless the person chose alerts-only: then a plain ask lands on Steering and the TUI
-      // (RECORD: below the posting dial, so no post is owed), and only one marked alert-worthy posts.
+      // The person's Slack subscription decides: `every-ask` (the default) posts every ask (ALERT); `urgent-only` posts only
+      // one marked --alert, and a plain ask lands on Steering and the TUI (RECORD: below the posting dial, so no post is owed).
       const person = registry.entities.find((entity) => entity.address === destinationHuman);
-      const posts = input.humanAlert === true || slackAsksFor(person?.prefs) === "all";
+      const posts = input.humanAlert === true || slackSubscriptionFor(person).preset === "every-ask";
       return input.humanIntent === "update"
         ? { kind: "human-update", level: "NOTICE" }
         : { kind: "human-required", level: posts ? "ALERT" : "RECORD" };

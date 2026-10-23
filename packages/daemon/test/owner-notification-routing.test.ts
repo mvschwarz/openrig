@@ -95,7 +95,7 @@ describe("S14 owner notifications — system notices, not remembered tags", () =
       evidenceRef: "/proof/direct.md",
       nudge: false,
     });
-    // A direct ask posts by default (slack-asks all: ALERT), as an alerted one does.
+    // A direct ask posts by default (the Slack subscription's every-ask preset: ALERT), as an alerted one does.
     expect(db.prepare(
       "SELECT owner_notification_kind, owner_notification_level FROM queue_transitions WHERE qitem_id=? ORDER BY transition_id DESC LIMIT 1",
     ).get(direct.qitemId)).toEqual({ owner_notification_kind: "human-required", owner_notification_level: "ALERT" });
