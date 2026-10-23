@@ -5,6 +5,7 @@ import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-life
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { experimentStatus, setExperiment, readBounded, JevRun, streamDecision, classifyCapture } from "./project-jev.js";
+import { decisionsStatus, readDecisionsSettings, type DecisionsSettings } from "../decisions/decisions.js";
 import fs from "node:fs";
 
 /**
@@ -21,6 +22,7 @@ export interface ProjectDeps extends StatusDeps {
   workerRead?: (file: string) => string;
   experimentEnv?: NodeJS.ProcessEnv;
   experimentFetch?: typeof fetch;
+  decisionsSettings?: () => DecisionsSettings;
 }
 
 async function withClient<T>(
@@ -94,6 +96,16 @@ export function projectCommand(depsOverride?: ProjectDeps): Command {
         if (fd !== undefined) fs.closeSync(fd);
         if (run) { process.removeListener("SIGINT", run.stop); process.removeListener("SIGTERM", run.stop); }
       }
+    });
+
+  cmd.command("decisions").description("Typed decisions (OpenRouter + Jev) for enabled consumers; off by default")
+    .command("status").description("What a decision run in this process would do; makes no provider call")
+    .option("--json", "JSON output")
+    .action(() => {
+      try {
+        const deps = getDeps();
+        printResult(true, decisionsStatus((deps.decisionsSettings ?? readDecisionsSettings)(), deps.experimentEnv, deps.workerRead), 200);
+      } catch (error) { printResult(true, {error: "decisions_status", message: error instanceof Error ? error.message : "unavailable"}, 400); }
     });
 
   for (const verb of ["candidates", "wake"] as const) {

@@ -200,6 +200,11 @@ export const SETTINGS_VALID_KEYS = [
   // A verified Claude Code or Codex send reports on input-box evidence; daemon-read, twin of the CLI key.
   "transport.verify_input_box",
   "transport.local_user_guard",
+  // Slice 22 (OPR.0.7.2.22) — typed decisions (OpenRouter + Jev), off by default; read by the invoking
+  // rig process, never by the daemon. Twin of the CLI keys.
+  "decisions.enabled",
+  "decisions.consumers",
+  "decisions.template_dir",
   // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs (arch D3; closed-set,
   // arch-safe defaults BAKED in getDefaultValue, bounded validation in
   // KEY_CONSTRAINTS). CLI-settable twin: lockstep with cli/src/config-store.ts
@@ -315,6 +320,9 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "usage.pi_openrouter_charge": { primary: "OPENRIG_USAGE_PI_OPENROUTER_CHARGE" },
   "transport.local_user_guard": { primary: "OPENRIG_TRANSPORT_LOCAL_USER_GUARD" },
   "transport.verify_input_box": { primary: "OPENRIG_TRANSPORT_VERIFY_INPUT_BOX" },
+  "decisions.enabled": { primary: "OPENRIG_DECISIONS_ENABLED" },
+  "decisions.consumers": { primary: "OPENRIG_DECISIONS_CONSUMERS" },
+  "decisions.template_dir": { primary: "OPENRIG_DECISIONS_TEMPLATE_DIR" },
   // OPR.0.4.6.FS-1 W2 — retention knobs; net-new keys, OPENRIG_* primary only.
   "retention.enabled": { primary: "OPENRIG_RETENTION_ENABLED" },
   "retention.transitions_days": { primary: "OPENRIG_RETENTION_TRANSITIONS_DAYS" },
@@ -405,6 +413,9 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "usage.pi_openrouter_charge": ["usage", "piOpenRouterCharge"],
   "transport.local_user_guard": ["transport", "localUserGuard"],
   "transport.verify_input_box": ["transport", "verifyInputBox"],
+  "decisions.enabled": ["decisions", "enabled"],
+  "decisions.consumers": ["decisions", "consumers"],
+  "decisions.template_dir": ["decisions", "templateDir"],
   "retention.enabled": ["retention", "enabled"],
   "retention.transitions_days": ["retention", "transitionsDays"],
   "retention.watchdog_days": ["retention", "watchdogDays"],
@@ -708,6 +719,10 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     // Input-box evidence for verified Claude Code and Codex sends; off until the switch is on.
     case "transport.local_user_guard": return false;
     case "transport.verify_input_box": return false;
+    // Slice 22 — typed decisions off, no consumers, shipped templates only.
+    case "decisions.enabled": return false;
+    case "decisions.consumers": return "";
+    case "decisions.template_dir": return "";
     // OPR.0.4.6.FS-1 W2 — retention defaults (arch D3 safe values: archive
     // terminal+aged transitions >30d; prune watchdog_history >14d keep-50/job;
     // 500 rows/qitems per bounded batch; enabled by default).
@@ -928,6 +943,11 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: s
   "queue.wake_unconfirmed_window_minutes": positiveIntegerConstraint("queue.wake_unconfirmed_window_minutes"),
   "queue.wake_swap_grace_seconds": positiveIntegerConstraint("queue.wake_swap_grace_seconds"),
   "queue.wake_human_rung": wakeHumanRungConstraint,
+  "decisions.template_dir": (_raw, value) => {
+    if (typeof value !== "string" || (value !== "" && (!path.isAbsolute(value) || value.includes("\0")))) {
+      throw new Error("Invalid decisions.template_dir: use an absolute path, or an empty string for the shipped templates only");
+    }
+  },
 };
 
 function validateKeyConstraints(key: SettingsValidKey, raw: string, coerced: string | number | boolean): void {

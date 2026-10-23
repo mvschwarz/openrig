@@ -118,6 +118,10 @@ Keys:
   usage.pi_openrouter_charge  with usage.pi_cost_facts on, Pi seats look up OpenRouter's actual charge for their requests, shown beside the estimate (default off; changes take effect when a Pi seat next launches or resumes; earlier outcomes stay visible)
   transport.verify_input_box  with --verify, a send to a Claude Code or Codex seat (also queue wakes) reads verified only when the seat was proven idle before the paste and its input box showed the exact text before Enter and was empty after it, on the same pane process; a busy or unknown seat, and anything else, reads unconfirmed, not failed. Reporting only (default off)
   transport.local_user_guard  on a Mac, the CLI refuses a local daemon whose reported user, checked with ps, isn't yours; an explicit OPENRIG_URL skips the check. A mitigation for reaching the wrong daemon, not authentication (default off)
+  decisions.enabled      typed decisions (OpenRouter + Jev) for the consumers in decisions.consumers, with OPENROUTER_API_KEY from the
+                         rig process that runs them; off makes no provider calls (default off). rig project decisions status shows the state
+  decisions.consumers    comma-separated consumers that may call (supported: stream; default none). An unknown name makes no calls
+  decisions.template_dir absolute folder of <name>.yaml templates that replace the shipped ones (default empty: shipped templates only)
 
 Precedence: CLI flag > environment variable > config file > default`)
     .action((opts: { json?: boolean; withSource?: boolean }) => {

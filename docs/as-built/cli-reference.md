@@ -467,6 +467,8 @@ the sections that were not read are `null`.
 | `rig project experimental disable` | — | `--config <file>` **required**<br>`--max-requests <n>`<br>`--timeout-ms <n>`<br>`--json` |
 | `rig project experimental status` | — | `--config <file>` **required**<br>`--max-requests <n>`<br>`--timeout-ms <n>`<br>`--json` |
 | `rig project experimental capture` | — | `--config <file>` **required**<br>`--input <file>` **required**<br>`--output <file>` **required**<br>`--json` |
+| `rig project decisions` | — | — |
+| `rig project decisions status` | — | `--json` |
 | `rig project candidates` | — | `--project <id>` **required**<br>`--taxonomy <file>` **required**<br>`--classifier-version <version>` **required**<br>`--evidence-epoch <epoch>` **required**<br>`--decisions <file>`<br>`--experiment <file>`<br>`--limit <count>`<br>`--json` |
 | `rig project wake` | — | `--project <id>` **required**<br>`--taxonomy <file>` **required**<br>`--classifier-version <version>` **required**<br>`--evidence-epoch <epoch>` **required**<br>`--decisions <file>`<br>`--experiment <file>`<br>`--limit <count>`<br>`--json` |
 | `rig project shadow-status` | — | — |

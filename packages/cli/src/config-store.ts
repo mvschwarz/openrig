@@ -195,6 +195,13 @@ export interface RiggedConfig {
     verifyInputBox: boolean;
     localUserGuard: boolean;
   };
+  // Slice 22 (OPR.0.7.2.22) — typed decisions (OpenRouter + Jev), off until enabled; read by the
+  // invoking rig process. templateDir holds optional <name>.yaml templates. Lockstep with the daemon twin.
+  decisions: {
+    enabled: boolean;
+    consumers: string;
+    templateDir: string;
+  };
   // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs (twin of the daemon
   // settings-store): enabled + the four bounded numeric tunables.
   retention: {
@@ -367,6 +374,12 @@ const DEFAULTS = {
     verifyInputBox: false,
     localUserGuard: false,
   },
+  // Slice 22 — typed decisions OFF, no consumers, shipped templates only.
+  decisions: {
+    enabled: false,
+    consumers: "",
+    templateDir: "",
+  },
   // OPR.0.4.6.FS-1 W2 — retention defaults (twin of daemon getDefaultValue).
   retention: {
     enabled: true,
@@ -497,6 +510,10 @@ export const VALID_KEYS = [
   "usage.pi_openrouter_charge",
   "transport.verify_input_box",
   "transport.local_user_guard",
+  // Slice 22 — typed decisions (OpenRouter + Jev), off by default; lockstep with the daemon twin.
+  "decisions.enabled",
+  "decisions.consumers",
+  "decisions.template_dir",
   // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs; CLI-settable twin,
   // lockstep with the daemon settings-store SETTINGS_VALID_KEYS.
   "retention.enabled",
@@ -605,6 +622,9 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "usage.pi_openrouter_charge": { primary: "OPENRIG_USAGE_PI_OPENROUTER_CHARGE" },
   "transport.local_user_guard": { primary: "OPENRIG_TRANSPORT_LOCAL_USER_GUARD" },
   "transport.verify_input_box": { primary: "OPENRIG_TRANSPORT_VERIFY_INPUT_BOX" },
+  "decisions.enabled": { primary: "OPENRIG_DECISIONS_ENABLED" },
+  "decisions.consumers": { primary: "OPENRIG_DECISIONS_CONSUMERS" },
+  "decisions.template_dir": { primary: "OPENRIG_DECISIONS_TEMPLATE_DIR" },
   // OPR.0.4.6.FS-1 W2 — retention knobs; net-new keys, OPENRIG_* primary only.
   "retention.enabled": { primary: "OPENRIG_RETENTION_ENABLED" },
   "retention.transitions_days": { primary: "OPENRIG_RETENTION_TRANSITIONS_DAYS" },
@@ -696,6 +716,9 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "usage.pi_openrouter_charge": ["usage", "piOpenRouterCharge"],
   "transport.local_user_guard": ["transport", "localUserGuard"],
   "transport.verify_input_box": ["transport", "verifyInputBox"],
+  "decisions.enabled": ["decisions", "enabled"],
+  "decisions.consumers": ["decisions", "consumers"],
+  "decisions.template_dir": ["decisions", "templateDir"],
   "retention.enabled": ["retention", "enabled"],
   "retention.transitions_days": ["retention", "transitionsDays"],
   "retention.watchdog_days": ["retention", "watchdogDays"],
@@ -1053,6 +1076,12 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
   "queue.wake_unconfirmed_window_minutes": positiveIntegerConstraint("queue.wake_unconfirmed_window_minutes"),
   "queue.wake_swap_grace_seconds": positiveIntegerConstraint("queue.wake_swap_grace_seconds"),
   "queue.wake_human_rung": wakeHumanRungConstraint,
+  // Slice 22 — every rig process resolves the same folder, whatever its cwd.
+  "decisions.template_dir": (_raw, value) => {
+    if (typeof value !== "string" || (value !== "" && (!isAbsolute(value) || value.includes("\0")))) {
+      throw new Error("Invalid decisions.template_dir: use an absolute path, or an empty string for the shipped templates only");
+    }
+  },
 };
 
 function validateKeyConstraints(key: ValidKey, raw: string, coerced: string | number | boolean): void {
@@ -1277,6 +1306,11 @@ export class ConfigStore {
       transport: {
         localUserGuard: v("transport.local_user_guard") as boolean,
         verifyInputBox: v("transport.verify_input_box") as boolean,
+      },
+      decisions: {
+        enabled: v("decisions.enabled") as boolean,
+        consumers: v("decisions.consumers") as string,
+        templateDir: v("decisions.template_dir") as string,
       },
       retention: {
         enabled: v("retention.enabled") as boolean,
