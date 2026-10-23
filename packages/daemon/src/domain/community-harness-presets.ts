@@ -15,7 +15,7 @@ import { BUILT_IN_RUNTIMES, isCommunityHarnessRuntime } from "./built-in-runtime
 export { BUILT_IN_RUNTIMES, isCommunityHarnessRuntime };
 
 export const COMMUNITY_HARNESS_PRESET_FORMAT = 1;
-const FIELDS = ["format", "name", "command", "maintainer", "limits", "launch_result", "names_conversation", "resume"] as const;
+const FIELDS = ["format", "name", "command", "maintainer", "limits", "launch_result", "names_conversation", "resume", "startup_assisted"] as const;
 const NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
 export interface CommunityHarnessPreset {
@@ -29,6 +29,8 @@ export interface CommunityHarnessPreset {
   namesConversation: boolean;
   /** The harness can reopen a conversation OpenRig knows (OPENRIG_RESUME_REF): one its launcher reported, or one OpenRig named. */
   resume: boolean;
+  /** Startup text is attempted, but the person must check its submission before the seat is marked ready. */
+  startupAssisted: boolean;
   path: string;
 }
 
@@ -66,6 +68,7 @@ function parsePreset(name: string, path: string, text: string): CommunityHarness
   }
   if (raw.launch_result !== undefined && typeof raw.launch_result !== "boolean") return bad("launch_result must be true or false");
   if (raw.resume !== undefined && typeof raw.resume !== "boolean") return bad("resume must be true or false");
+  if (raw.startup_assisted !== undefined && typeof raw.startup_assisted !== "boolean") return bad("startup_assisted must be true or false");
   if (raw.names_conversation !== undefined && typeof raw.names_conversation !== "boolean") return bad("names_conversation must be true or false");
   if (raw.launch_result === true && raw.names_conversation === true) {
     return bad("launch_result and names_conversation can't both be true: either the launcher reports the conversation, or OpenRig names it");
@@ -74,7 +77,8 @@ function parsePreset(name: string, path: string, text: string): CommunityHarness
     return bad("resume needs launch_result: true or names_conversation: true, so the conversation to reopen is one OpenRig knows");
   }
   return { ok: true, preset: { name, command: raw.command as string, maintainer: raw.maintainer as string, limits: limits as string[],
-    launchResult: raw.launch_result === true, namesConversation: raw.names_conversation === true, resume: raw.resume === true, path } };
+    launchResult: raw.launch_result === true, namesConversation: raw.names_conversation === true, resume: raw.resume === true,
+    startupAssisted: raw.startup_assisted === true, path } };
 }
 
 /** The first shell construct in a preset command, or null when it's one program with its arguments. The command is

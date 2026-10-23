@@ -894,6 +894,16 @@ export class StartupOrchestrator {
       ], undefined, false, undefined, false, "identity_verification", false);
     }
 
+    // Keep the running conversation, but don't call an explicitly assisted startup ready.
+    // The paste and Enter were attempted; continuing startup must not paste that context a second time.
+    if (deliveryInput.sendOrder > 0 && input.adapter instanceof CommunityHarnessRuntimeAdapter && input.adapter.startupAssisted()) {
+      return this.fail(deliveryInput, "attention_required", [
+        `Startup assisted for community harness "${input.adapter.runtime}" in ${input.binding.tmuxSession}: text and Enter were sent, but submission isn't confirmed. `
+          + `Check the pane and submit any staged startup text; don't resend it. Once the seat has responded, acknowledge it with `
+          + `rig seat clear-attention ${shellQuote(input.binding.tmuxSession!)} --reason ${shellQuote("Startup submission checked; seat responded")}.`,
+      ], undefined, false, undefined, false, "post_delivery_readiness", false);
+    }
+
     // 8. Mark ready
     this.sessionRegistry.updateStartupStatus(input.sessionId, "ready", new Date().toISOString());
     const submission = deliveryInput.submissionWarnings.length

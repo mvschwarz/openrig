@@ -19,6 +19,7 @@ import { assessNativeResumeProbe } from "../src/domain/native-resume-probe.js";
 import { createHash } from "node:crypto";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
+import { CommunityHarnessRuntimeAdapter } from "../src/adapters/community-harness-runtime-adapter.js";
 import { SEAT_SKILLS_BOOTSTRAP_LINE, describeSkillRouterFootprint, seatSkillPaths } from "../src/domain/seat-skill-storage.js";
 import { prepareSeatLaunchAdditions, recordConversationPrompt, systemPromptPendingNote } from "../src/domain/seat-launch-additions.js";
 import * as nodeFs from "node:fs";
@@ -1013,6 +1014,38 @@ describe("StartupOrchestrator", () => {
     expect(result.ok).toBe(true);
     expect(tmux.sendText).toHaveBeenCalledWith("r01-impl", "/rename impl");
     expect(tmux.sendKeys).toHaveBeenCalledWith("r01-impl", ["Enter"]);
+  });
+
+  it.each([
+    [true, true, "attention_required"],
+    [false, true, "ready"],
+    [true, false, "ready"],
+  ] as const)("reports declared startup assistance (%s), after sending context (%s)", async (assisted, sendContext, status) => {
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "assisted-startup-"));
+    try {
+      nodeFs.writeFileSync(nodePath.join(dir, "synth.yaml"),
+        `format: 1\nname: synth\ncommand: synth\nmaintainer: Example\nstartup_assisted: ${assisted}\n`);
+      const seed = seedSession();
+      const adapter = new CommunityHarnessRuntimeAdapter("synth", { presetsDir: () => dir,
+        tmux: { hasSession: async () => true, getPaneCommand: async () => "node", sendShellCommand: vi.fn() } });
+      const input = makeInput(seed, { adapter, skipHarnessLaunch: true,
+        startupActions: sendContext ? [makeIdentityAction()] : [] });
+      const orch = createOrchestrator();
+      const result = await orch.startNode(input);
+      expect(result.startupStatus).toBe(status);
+      expect(db.prepare("SELECT status, startup_status FROM sessions WHERE id=?").get(seed.sessionId))
+        .toEqual({ status: "running", startup_status: status });
+      expect(tmux.killSession).not.toHaveBeenCalled();
+      expect(tmux.sendText).toHaveBeenCalledTimes(sendContext ? 1 : 0);
+      expect(tmux.sendKeys).toHaveBeenCalledTimes(sendContext ? 1 : 0);
+      if (sendContext) expect(tmux.sendKeys).toHaveBeenCalledWith("r01-impl", ["Enter"]);
+      if (status === "attention_required") {
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.errors.join(" ")).toContain("Startup assisted");
+        expect(orch.canContinueStartup(seed.nodeId, seed.sessionId)).toBe(false); // Don't paste uncertain context again.
+        expect(db.prepare("SELECT seq FROM events WHERE node_id=? AND type='node.startup_ready'").all(seed.nodeId)).toEqual([]);
+      }
+    } finally { nodeFs.rmSync(dir, { recursive: true, force: true }); }
   });
 
   // T8: operator debug append executes after resolved startup

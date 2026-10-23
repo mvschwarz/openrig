@@ -19,14 +19,24 @@ limits:                         # what the maintainer says doesn't work
 launch_result: true             # optional: the launcher reports the conversation it created (below)
 # names_conversation: true      # optional, instead of launch_result: OpenRig names the conversation (below)
 resume: true                    # optional, needs one of those two; declare it only once your harness's resume is checked
+startup_assisted: true           # optional: startup submission needs a person's check (below)
 ```
 
 - **`command`** is a single program and its arguments. Shell syntax such as `|`, `&&`, `;`, redirections or `$(…)`
   is refused: put it in a script and name the script.
 - **Built-in runtime names are reserved.** A preset can't replace `claude-code`, `codex` or the other built-ins.
 - **Unknown fields are refused,** so a preset written for a newer OpenRig says so instead of half-working.
-- **Fork isn't supported, and resume only as described below.** Neither is placing skills, guidance or startup files. The seat is
-  called ready while something other than a shell runs in its pane, which says nothing about which conversation it is.
+- **Fork isn't supported, and resume only as described below.** Neither is placing skills, guidance or startup files. Except
+  for assisted startup below, the seat is called ready while something other than a shell runs in its pane, which says
+  nothing about which conversation it is.
+
+### Assisted startup
+
+Set `startup_assisted: true` when the harness doesn't reliably submit OpenRig's startup text. OpenRig still pastes the
+text and presses Enter once. If it sends startup text, the running seat then shows **attention required**, rather than
+ready: check its pane and submit any text still in the composer. Don't resend the identity prompt. After the seat responds,
+use the reported `rig seat clear-attention <session> --reason "Startup submission checked; seat responded"` command to
+acknowledge the check. A launch with no startup text needs no such check. Other presets keep their existing behavior.
 
 ## Reporting the conversation a launch created (`launch_result: true`)
 
@@ -133,8 +143,14 @@ CLI.
 - **The preset:** it declares `launch_result` and `resume`. Cursor's `--resume` with an id it doesn't hold starts a new,
   empty chat without saying so, so on a resume the launcher first checks that the chat's store exists. When it doesn't, the
   launcher reports `error: "missing"` and starts nothing.
+- **Startup is assisted:** identity text has remained in Cursor's composer after the initial Enter. The preset declares
+  `startup_assisted: true`; check and submit it in the pane as above. Unattended startup submission is not confirmed.
+- **Sender names come from the sending session.** A command run from an unattached operator shell can arrive as
+  `<unknown sender>`; that doesn't mean the receiving Cursor seat lost its identity. To send as a named teammate, join
+  the operator's session with `rig attach --self` first. Commands run by the Cursor seat inherit that seat's identity.
 
 Copy both and maintain them as your own.
 
 The launcher is the contributor's code, in the contributor's package. OpenRig runs no code from a preset and loads no
-module into its daemon. A preset that sets `launch_result` or `names_conversation` is refused by an older OpenRig, which doesn't know the field.
+module into its daemon. A preset that sets `launch_result`, `names_conversation` or `startup_assisted` is refused by an older
+OpenRig that doesn't know the field.

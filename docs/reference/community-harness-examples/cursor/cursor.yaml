@@ -4,8 +4,10 @@ name: cursor
 command: openrig-cursor-launch
 maintainer: Your name or team
 limits:
+  - startup assisted; check the pane and submit any staged identity text
   - resume reads a chat as missing unless its store is in the seat's Cursor config folder, under the seat's working directory
   - no guidance, skills or startup files are placed
   - needs-input and approval prompts are read from the screen only
 launch_result: true
 resume: true
+startup_assisted: true

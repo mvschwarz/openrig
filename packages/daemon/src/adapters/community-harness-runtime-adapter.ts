@@ -152,6 +152,12 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     }
     return { ready: true };
   }
+
+  /** A process running isn't proof that the startup paste was submitted. */
+  startupAssisted(): boolean {
+    const found = loadCommunityHarnessPreset(this.runtime, this.deps.presetsDir?.() ?? communityHarnessesDir());
+    return found.ok && found.preset.startupAssisted;
+  }
 }
 
 /** A new conversation's name: the seat's session name, made safe, and 8 random hex digits, at most 100 characters. */

@@ -62,7 +62,7 @@ describe("the documented Cursor launcher and preset", () => {
     expect(exit).not.toBe(0);
   });
 
-  it("is a preset this OpenRig loads, declaring launch_result and resume", () => {
-    expect(loadCommunityHarnessPreset("cursor", EXAMPLE)).toMatchObject({ ok: true, preset: { command: "openrig-cursor-launch", launchResult: true, resume: true } });
+  it("declares conversation reporting, resume and assisted startup", () => {
+    expect(loadCommunityHarnessPreset("cursor", EXAMPLE)).toMatchObject({ ok: true, preset: { command: "openrig-cursor-launch", launchResult: true, resume: true, startupAssisted: true } });
   });
 });
