@@ -191,7 +191,7 @@ export class ContextMonitor {
         });
         return;
       }
-      if (!this.compactionEnforcer.hasPendingPostCompactStage?.(session.session_name)) return;
+      if (!this.compactionEnforcer.hasPendingPostCompactStage?.(session.session_name, { cwd: session.cwd, runtime: session.runtime })) return;
       await this.compactionEnforcer.drainPendingPostCompactStage({
         sessionName: session.session_name,
         cwd: session.cwd,
