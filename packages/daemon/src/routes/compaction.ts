@@ -1,3 +1,4 @@
+import { transportSenderSession } from "./require-sender-identity.js";
 import { physicalSessionName } from "../domain/session-registry.js";
 import { Hono } from "hono";
 import { shellQuote } from "../adapters/shell-quote.js";
@@ -74,6 +75,7 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
     const usage = usageStore.getForNode(row.node_id, sessionName);
     const outcome = await enforcer.triggerManualCompact(
       {
+        nodeId: row.node_id,
         sessionName,
         runtime: row.runtime,
         cwd: row.cwd,
@@ -84,7 +86,7 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
       // This is the OPERATOR's manual-trigger verb (bearer-auth'd); the resulting sequence is
       // drain-exempt while auto-compaction is disabled. GHOST-STAGE fix (a) actor-gate: automation
       // paths that do NOT set this are NOT exempt, so they cannot launder a drain past the gate.
-      { operatorInitiated: true, skipMap: body.skipMap === true },
+      { operatorInitiated: true, skipMap: body.skipMap === true, actor: { source: "caller", session: transportSenderSession(c) ?? null } },
     );
 
     if (outcome.triggered) {
@@ -173,6 +175,10 @@ export function compactResultText(compact: "not_sent" | "submitted_unconfirmed" 
 
 function manualReasonMessage(sessionName: string, reason: string): string {
   switch (reason) {
+    case "terminal_policy_refused":
+      return `Managed compaction for '${sessionName}' was refused by its terminal policy. Read rig seat status ${shellQuote(sessionName)}; an authorised policy change uses rig seat set-terminal-policy. The existing rig send --dangerously-interact --reason path is unchanged; prompt and interruption guards still apply.`;
+    case "terminal_policy_unavailable":
+      return `Could not read the selected terminal policy for '${sessionName}'; no new managed compaction is authorised. Inspect rig seat status ${shellQuote(sessionName)}.`;
     case "occupant_generation_unavailable":
       return `The occupant generation could not be resolved for '${sessionName}'; no preparation or compact was sent. For the confirmed live seat, run rig reconcile-session ${shellQuote(sessionName)} --no-launch, then explicitly retry rig compact ${shellQuote(sessionName)}. Reconciliation does not restart this attempt.`;
     case "preparation_incomplete":

@@ -90,7 +90,7 @@ describe("SeatLifecycleService.setEffort", () => {
     expect(db.prepare("SELECT * FROM sessions ORDER BY id").all()).toEqual(sessionsBefore);
     expect(eventsOfType(db, "node.effort_changed")).toEqual([{
       type: "node.effort_changed", rigId: rig.id, nodeId: node.id, logicalId: "dev.impl",
-      from: null, to: "high", reason: "long refactor", operator: "orch-lead@eff-rig",
+      from: null, to: "high", reason: "long refactor", operator: "orch-lead@eff-rig", actorClass: "peer",
     }]);
     expect(rigRepo.getRig(rig.id)!.nodes.find((n) => n.id === node.id)!.effortChoice).toBe("high");
   });
@@ -243,8 +243,8 @@ describe("SeatLifecycleService.setEffort and effortReport on a Pi seat", () => {
     if (!cleared.ok) throw new Error(cleared.message);
     expect(cleared).toMatchObject({ requested: null, changed: true, saved: { choice: null, effective: "medium", source: "authored" } });
     expect(eventsOfType(db, "node.effort_changed")).toEqual([
-      { type: "node.effort_changed", rigId: rig.id, nodeId: node.id, logicalId: "dev.pi", from: null, to: "high", reason: "deep work", operator: "op" },
-      { type: "node.effort_changed", rigId: rig.id, nodeId: node.id, logicalId: "dev.pi", from: "high", to: null, reason: "back to spec", operator: null },
+      { type: "node.effort_changed", rigId: rig.id, nodeId: node.id, logicalId: "dev.pi", from: null, to: "high", reason: "deep work", operator: "op", actorClass: "peer" },
+      { type: "node.effort_changed", rigId: rig.id, nodeId: node.id, logicalId: "dev.pi", from: "high", to: null, reason: "back to spec", operator: null, actorClass: "unknown" },
     ]);
   });
 

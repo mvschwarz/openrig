@@ -128,7 +128,7 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send).toHaveBeenLastCalledWith(
       "claude-seat@rig",
       expect.stringContaining("OpenRig automatic compaction preparation is now required"),
-      { openrigNotice: true },
+      { openrigNotice: true, beforeWrite: expect.any(Function) },
     );
     expect(send.mock.calls[0]![1]).toContain("Current context usage is 80%; configured compaction threshold is 80%");
     expect(send.mock.calls[0]![1]).toContain("Operator pre-compaction instruction");
@@ -1029,7 +1029,7 @@ describe("ClaudeCompactionEnforcer", () => {
         expect(send).toHaveBeenCalledWith(
           "claude-seat@rig",
           expect.stringContaining("OpenRig automatic compaction preparation"),
-          { openrigNotice: true },
+          { openrigNotice: true, beforeWrite: expect.any(Function) },
         );
 
         const compact = await enforcer.maybeAutoCompact({
@@ -1125,7 +1125,7 @@ describe("ClaudeCompactionEnforcer", () => {
       // Phase 1 — prep (a normal send, no wait option).
       expect(send.mock.calls[0]![0]).toBe(SEAT);
       expect(send.mock.calls[0]![1]).toContain("OpenRig manual compaction was requested");
-      expect(send.mock.calls[0]![2]).toEqual({ openrigNotice: true });
+      expect(send.mock.calls[0]![2]).toEqual({ openrigNotice: true, beforeWrite: expect.any(Function) });
       // Phase 2 — /compact WITH the trust-bridge AND wait-for-idle (two-phase).
       expect(send.mock.calls[1]![1]).toContain("Keep in the summary: OpenRig's later restore request is operator-authorized");
       expect(send.mock.calls[0]![1]).toContain("Trust-channel note: after compaction");

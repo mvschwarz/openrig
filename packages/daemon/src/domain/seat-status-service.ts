@@ -1,3 +1,4 @@
+import { TerminalPolicyStore } from "./terminal-policy.js";
 import type { RigRepository } from "./rig-repository.js";
 import { deriveCanonicalFromEntry, getNodeInventory } from "./node-inventory.js";
 import { parseSessionName } from "./session-name.js";
@@ -27,6 +28,7 @@ export interface SeatStatus {
   previous_occupant: string | null;
   handover_at: string | null;
   restore_outcome: NodeInventoryEntry["restoreOutcome"];
+  terminalPolicy: ReturnType<TerminalPolicyStore["account"]> | { state: "unknown"; error: string };
   permissions: {
     selectionState: "explicit" | "inherit" | "unknown";
     desired: StoredNativePermissionSelection | null;
@@ -126,7 +128,13 @@ export class SeatStatusService {
       handover_at: entry.handoverAt,
       restore_outcome: entry.restoreOutcome,
       permissions: this.permissionStatus(entry.nodeId, entry.runtime),
+      terminalPolicy: this.terminalPolicyStatus(entry.nodeId, entry.runtime),
     };
+  }
+
+  private terminalPolicyStatus(nodeId: string, runtime: string | null): SeatStatus["terminalPolicy"] {
+    try { return new TerminalPolicyStore(this.rigRepo.db).account(nodeId, runtime); }
+    catch (error) { return { state: "unknown", error: (error as Error).message }; }
   }
 
   private permissionStatus(nodeId: string, runtime?: string | null): SeatStatus["permissions"] {
