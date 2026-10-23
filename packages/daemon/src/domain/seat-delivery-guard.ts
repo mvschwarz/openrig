@@ -423,8 +423,9 @@ export class SeatDeliveryGuard {
     if (!input || input.state === "unknown") throw new DeliveryGuardError("draft_input_unknown", "The current input cannot be read. Automatic delivery is held.");
     if (submit) {
       // The TUI may render the collapsed label only after notePasted's read.
-      // Recognize it before Enter in this same lease and original composer.
-      const collapsed = lease.staged && !!lease.inputFrame && lease.inputFrame === input.frame && ownCollapsedPaste(input, lease.staged.text);
+      // If no label was recorded, recognize it in this same lease and original composer.
+      const collapsed = lease.staged && !lease.staged.collapsedPaste && !!lease.inputFrame
+        && lease.inputFrame === input.frame && ownCollapsedPaste(input, lease.staged.text);
       const owned = lease.staged && (composerContainsOwnedText(input, lease.staged.text)
         || !!collapsed || !!lease.staged.collapsedPaste && input.cursorAtEnd && input.collapsedPaste === lease.staged.collapsedPaste);
       if (!owned) throw new DeliveryGuardError("draft_input_changed", "The input no longer contains only this delivery's staged text. Enter was not sent.");

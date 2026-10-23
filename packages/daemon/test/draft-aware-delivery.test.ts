@@ -124,6 +124,21 @@ describe("current draft-aware delivery through the real transport", () => {
     expect(f.outbox.getById("wake-intent-" + item.qitemId)!.deliveryState).toBe("delivered");
   });
 
+  it("does not submit a person's replacement paste after recording its own label", async () => {
+    const f = fixture(); await f.enable();
+    const text = "first line\nsecond line\nlast line", draft = "different first\ndifferent second\ndifferent last";
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async name => {
+      const body = f.bodies[f.guard.target(name).nodeId];
+      return body == null ? null : frame(body === text ? "[Pasted text #1 +2 lines]" : body === draft ? "[Pasted text #2 +2 lines]" : body);
+    });
+    // A person attached directly replaces the draft; no broker humanInput call updates the epoch.
+    f.hooks.sleep = ms => { if (ms === 200) f.bodies.a = draft; };
+    expect(await f.send("replacement-label", text, { verify: false })).toMatchObject({ ok: false, sent: true, reason: "draft_input_changed" });
+    expect(f.submissions).toEqual([]);
+    expect(f.writes).toHaveLength(1);
+    expect(f.bodies.a).toBe(draft);
+  });
+
   it.each(["wrong count", "moved cursor", "changed composer", "human input"])("does not submit a delayed label after %s", async condition => {
     const f = fixture(); await f.enable();
     const text = "first line\nsecond line\nlast line";
