@@ -1026,7 +1026,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--wake-watchdog <jobId>", "For state=blocked: attach an existing live watchdog id targeting the row owner")
     .option("--wake-after <duration>", "For state=blocked: atomically arm a timer (for example 90s, 15m, 2h)", wakeDurationSeconds)
     .option("--summary <text>", "Summary persisted onto the item (human-seat parks, or standalone summary update without --state)")
-    .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-6: park-time durable-artifact pointer persisted onto the item (human-seat parks only)")
+    .option("--evidence-ref <path>", "Pointer to the durable artifact, persisted onto the item on a human-seat park or a done close (--state done)")
     .option("--note <text>", "Transition note for the audit log")
     .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")

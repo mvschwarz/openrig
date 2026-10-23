@@ -138,6 +138,13 @@ describe("51-06 D2 — real CLI->loopback HTTP->queueRoutes/QueueRepository acce
     expect(item.evidenceRef).toBe("/proof/park.md");
   });
 
+  it("real CLI: a done close with --evidence-ref stores the artifact on the closed row (exit 0)", async () => {
+    await runCli(["update", id, "--state", "in-progress"]);
+    const { exit } = await runCli(["update", id, "--state", "done", "--closure-reason", "no-follow-on", "--evidence-ref", "/proof/result.md"]);
+    expect(exit).toBeFalsy();
+    expect(repo.getByIdOrThrow(id)).toMatchObject({ state: "done", evidenceRef: "/proof/result.md" });
+  });
+
   function parkArgs(verb: "block" | "update", blockedOn: string): string[] {
     return verb === "block"
       ? ["block", id, "--on", blockedOn]

@@ -426,8 +426,9 @@ export interface QueueUpdateInput {
    * updatable AT THE PARK MOMENT (state=blocked with a human-seat blocker),
    * not create-only: `rig queue block --summary --evidence-ref` persists
    * them onto the EXISTING item so the attention query + Packet 2 read
-   * them. OPR.0.5.1 slice-51-06 D2: supplying them on a NON-park transition
-   * is REJECTED (QueueRepositoryError "summary_evidence_not_persistable")
+   * them. A done close also persists evidence_ref, so a finished row carries
+   * its artifact. OPR.0.5.1 slice-51-06 D2: supplying either where it can't
+   * be stored is REJECTED (QueueRepositoryError "summary_evidence_not_persistable")
    * before any mutation — not silently ignored — so a caller never believes
    * unpersistable metadata was saved.
    */
@@ -2843,6 +2844,8 @@ export class QueueRepository {
       throw new QueueRepositoryError("invalid_human_notification", "An informational delivery cannot become a human approval park; author a separate decision request.");
     }
     const isHumanPark = input.state === "blocked" && isHumanSeatSession(effectiveBlockedOn);
+    // A done close can also store the artifact the work produced, so the finished row carries its link.
+    const isDoneClose = input.state === "done";
 
     // OPR.0.5.1 slice-51-06 D2 — summary/evidence_ref are persist-able ONLY at a human-seat park
     // (see the FR-6 note below). Silently ignoring them on any other transition is a data-loss trap
@@ -2852,12 +2855,15 @@ export class QueueRepository {
     if (!isHumanPark) {
       const invalidFields: Array<"summary" | "evidenceRef"> = [];
       if (input.summary != null) invalidFields.push("summary");
-      if (input.evidenceRef != null) invalidFields.push("evidenceRef");
+      if (input.evidenceRef != null && !isDoneClose) invalidFields.push("evidenceRef");
       if (invalidFields.length > 0) {
         const flags = invalidFields.map((f) => (f === "summary" ? "--summary" : "--evidence-ref")).join(" / ");
+        const where = invalidFields.map((f) => f === "summary"
+          ? "summary persists on a human-seat park, or on its own (rig queue update <id> --summary … with no --state)"
+          : "evidenceRef persists on a human-seat park or a done close").join("; ");
         throw new QueueRepositoryError(
           "summary_evidence_not_persistable",
-          `${invalidFields.join(" + ")} persist only on a human-seat park (state=blocked on a human seat); the '${input.state}' transition cannot store them. Remove ${flags}, or park the item (rig queue block --on <human-seat> --summary … --evidence-ref …).`,
+          `${where}; the '${input.state}' transition cannot store ${invalidFields.length > 1 ? "them" : "it"}. Remove ${flags}, or use one of those.`,
           { invalidFields },
         );
       }
@@ -3073,9 +3079,11 @@ export class QueueRepository {
 
     // FR-6: park-time summary/evidence_ref are PERSISTED onto the existing
     // item (not merely validated-then-dropped) — visible to the attention
-    // query and to Packet 2. Only the park path writes them.
+    // query and to Packet 2. A done close writes evidence_ref the same way.
     if (isHumanPark) {
       this.persistSummary(input.qitemId, input.summary ?? null);
+      this.persistEvidenceRef(input.qitemId, input.evidenceRef ?? null);
+    } else if (isDoneClose) {
       this.persistEvidenceRef(input.qitemId, input.evidenceRef ?? null);
     }
 
