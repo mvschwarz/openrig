@@ -60,6 +60,22 @@ describe("a rig's representative", () => {
     twins.prepare("INSERT INTO rigs (id, name) VALUES ('rig-w2', 'workshop')").run();
     expect(resolveRigRepresentative(twins, "workshop")).toBeNull(); // two rigs share the name
   });
+
+  it("is the relaunched rig's lead when an archived earlier generation shares the name, so its channel reaches that lead", () => {
+    const db = topology();
+    db.prepare("INSERT INTO rigs (id, name, archived_at) VALUES ('rig-w0', 'workshop', '2026-10-17 00:00:00')").run();
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('n-first', 'rig-w0', 'orch.first')").run();
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('n-first-child', 'rig-w0', 'dev.first')").run();
+    db.prepare("INSERT INTO edges (id, rig_id, source_id, target_id, kind) VALUES ('e0', 'rig-w0', 'n-first', 'n-first-child', 'delegates_to')").run();
+    db.prepare("INSERT INTO sessions (id, node_id, session_name, status) VALUES ('s0', 'n-first', 'orch-first@workshop', 'stopped')").run();
+    expect(resolveRigRepresentative(db, "workshop")).toBe("orch-lead@workshop");
+    // The Slack subsystem's own composition, for a person's top-level message in the rig's mapped channel.
+    const cfg = { channel: "C0MACHINE", channelMap: [{ match: "workshop", channel: "C0WS" }] };
+    expect(resolveInboundChannelDestination(cfg, "C0WS", (rig) => resolveRigRepresentative(db, rig))).toBe("orch-lead@workshop");
+    // Archived generations alone don't resolve: their seats are stopped, so the message goes to the inbound destination.
+    db.prepare("UPDATE rigs SET archived_at = '2026-10-23 00:00:00' WHERE id = 'rig-w'").run();
+    expect(resolveRigRepresentative(db, "workshop")).toBeNull();
+  });
 });
 
 describe("where a person's new message in a channel goes", () => {
