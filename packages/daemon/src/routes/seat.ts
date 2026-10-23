@@ -109,6 +109,7 @@ seatRoutes.post("/handover/:seatRef", async (c) => {
   const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
   const rigRepo = c.get("rigRepo" as never) as RigRepository;
   const service = new SeatHandoverService({
+    codexPermissions: (c.get("currentModelReader" as never) as import("../domain/model-divergence/current-model-reader.js").CurrentModelReader | undefined) ?? undefined,
     db: rigRepo.db,
     rigRepo,
     sessionRegistry: c.get("sessionRegistry" as never) as SessionRegistry,
@@ -262,7 +263,7 @@ export function seatLifecycleService(c: { get(key: never): unknown }): SeatLifec
 function seatLifecycleStatus(code: string): 400 | 404 | 409 | 500 | 502 {
   if (code === "seat_ref_required" || code === "missing_model" || code === "missing_reason" || code === "fresh_required"
     || code === "missing_effort" || code === "invalid_effort" || code === "invalid_policy"
-    || code === "missing_cwd" || code === "invalid_cwd") return 400;
+    || code === "missing_cwd" || code === "invalid_cwd" || code === "invalid_stop_precondition") return 400;
   if (code === "seat_not_found") return 404;
   if (code === "tmux_probe_failed") return 502;
   if (code === "launch_unavailable" || code === "runtime_adapter_missing" || code === "launch_failed" || code === "startup_failed"
@@ -271,6 +272,16 @@ function seatLifecycleStatus(code: string): 400 | 404 | 409 | 500 | 502 {
   // nothing_to_clean — state conflicts, not client syntax errors.
   return 409;
 }
+
+seatRoutes.post("/set-terminal-policy/:seatRef", async c => {
+  const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
+  const actor = transportSenderSession(c) ?? (typeof body.operator === "string" ? body.operator : "");
+  if (body.rigDefault !== undefined && typeof body.rigDefault !== "boolean") return c.json({ error: "rigDefault must be boolean" }, 400);
+  const result = seatLifecycleService(c).setTerminalPolicy({ seatRef: c.req.param("seatRef"),
+    preset: body.preset, helpers: body.helpers, exceptions: body.exceptions,
+    reason: typeof body.reason === "string" ? body.reason : "", actor, rigDefault: body.rigDefault === true });
+  return c.json(result, result.ok ? 200 : result.code === "invalid_terminal_policy" || result.code === "actor_required" ? 400 : seatLifecycleStatus(result.code));
+});
 
 seatRoutes.post("/set-permissions/:seatRef", async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
@@ -302,7 +313,7 @@ seatRoutes.post("/set-model/:seatRef", async (c) => {
     seatRef: c.req.param("seatRef")!,
     model: typeof body["model"] === "string" ? body["model"] : "",
     reason: typeof body["reason"] === "string" ? body["reason"] : "",
-    operator: typeof body["operator"] === "string" ? body["operator"] : null,
+    operator: transportSenderSession(c) ?? (typeof body["operator"] === "string" ? body["operator"] : null),
   });
   if (result.ok) return c.json(result);
   return c.json(result, seatLifecycleStatus(result.code));
@@ -330,7 +341,7 @@ seatRoutes.post("/set-effort/:seatRef", async (c) => {
     seatRef: c.req.param("seatRef")!,
     effort: clear ? null : typeof body["effort"] === "string" ? body["effort"] : "",
     reason: typeof body["reason"] === "string" ? body["reason"] : "",
-    operator: typeof body["operator"] === "string" ? body["operator"] : null,
+    operator: transportSenderSession(c) ?? (typeof body["operator"] === "string" ? body["operator"] : null),
   });
   if (result.ok) return c.json(result);
   return c.json(result, seatLifecycleStatus(result.code));
@@ -397,12 +408,18 @@ seatRoutes.post("/continue/:seatRef", async (c) => {
   return c.json(result, result.ok ? 200 : 409);
 });
 
+seatRoutes.get("/stop-precondition/:seatRef", c => {
+  const result = seatLifecycleService(c).stopPrecondition(c.req.param("seatRef")!);
+  return "contract" in result ? c.json(result) : c.json(result, seatLifecycleStatus(result.code));
+});
+
 seatRoutes.post("/stop/:seatRef", async (c) => {
   const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
   const result = await seatLifecycleService(c).stopSeat({
     seatRef: c.req.param("seatRef")!,
     reason: typeof body["reason"] === "string" ? body["reason"] : "",
     operator: typeof body["operator"] === "string" ? body["operator"] : null,
+    ...(Object.prototype.hasOwnProperty.call(body, "expected") ? { expected: body["expected"] } : {}),
   });
   if (result.ok) return c.json(result);
   return c.json(result, seatLifecycleStatus(result.code));

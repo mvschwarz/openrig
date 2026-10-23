@@ -847,7 +847,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     const pickup = derivePickup({
       state: r.state,
       lastMeaningfulAt: lastMeaningfulTransition(deps.db, r.qitem_id)?.at,
-      activity: arbitrated?.activity, needsInput: arbitrated?.needsInput.count,
+      activity: arbitrated?.activity, needsInput: arbitrated?.needsInput.count, needsInputReason: arbitrated?.needsInput.reason,
       claimedAt: r.claimed_at,
       lastHeartbeat: r.last_heartbeat,
       postClaimMotionCount: Number(r.post_claim_motion ?? 0),
@@ -1181,7 +1181,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
       const activity = deps.seatActivity?.getSeatStateBySession(r.destination_session);
       const pickup = derivePickup({
         lastMeaningfulAt: lastMeaningfulTransition(deps.db, r.qitem_id)?.at,
-        activity: activity?.activity, needsInput: activity?.needsInput.count,
+        activity: activity?.activity, needsInput: activity?.needsInput.count, needsInputReason: activity?.needsInput.reason,
         state: r.state,
         claimedAt: r.claimed_at,
         lastHeartbeat: r.last_heartbeat,
@@ -1197,7 +1197,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
       let parkKind: "deliberate-with-wake" | "stalled" | "indeterminate";
       if (pickup.state === "parked" && wake) {
         parkKind = "deliberate-with-wake";
-      } else if (pickup.state === "stalled-after-claim") {
+      } else if (pickup.state === "stalled-after-claim" || pickup.stall) {
         parkKind = "stalled";
       } else {
         parkKind = "indeterminate";
@@ -1207,6 +1207,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
         qitem_id: r.qitem_id,
         pickup_state: pickup.state,
         ...(pickup.evidence ? { pickup_evidence: pickup.evidence } : {}),
+        ...(pickup.stall ? { pickup_stall: pickup.stall } : {}),
         park_kind: parkKind,
         park_kind_basis: wake
           ? `armed wake ${wake.wake_ref} on queue_transition_wakes`

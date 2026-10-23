@@ -88,11 +88,16 @@ export function declaredProject(c: Pick<ReadContext, "get">, id: string): Projec
 export function projectById(c: Pick<ReadContext, "get">, id: string): ProjectRead {
   return usableProject(lookupProject(c, id));
 }
+/** Prepared roots may spell the same directory through a symlink or dot segments. */
+export function sameProjectRoot(expected: string, actual: string): boolean {
+  try { return expected === actual || fs.realpathSync(expected) === fs.realpathSync(actual); }
+  catch { return false; } // Distinct unavailable paths cannot confirm project identity.
+}
 export function selectedProject(c: ReadContext): ProjectRead | null {
   const id = c.req.query("project");
   if (id === undefined) return null;
   const p = lookupProject(c, id);
-  if (c.req.query("projectRoot") && c.req.query("projectRoot") !== p.root) throw new ProjectReadError("project_changed", `Project ${id} root changed; choose it again`);
+  if (c.req.query("projectRoot") && !sameProjectRoot(c.req.query("projectRoot")!, p.root)) throw new ProjectReadError("project_changed", `Project ${id} root changed; choose it again`);
   return usableProject(p);
 }
 export function projectReadResponse(err: unknown): Response {

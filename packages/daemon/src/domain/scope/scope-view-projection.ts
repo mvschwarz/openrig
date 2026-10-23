@@ -202,9 +202,10 @@ function specShaFromLockedArtifacts(fs: ScopeFsDeps, sliceDir: string, fm: strin
   return createHash("sha256").update(bytes).digest("hex").slice(0, 8);
 }
 
-/** `root`: a selected catalog project's root. It bounds the readiness (policy search and scope identity) exactly as
- *  `rig proof` does for that project, so the scopes view and proof agree; without it the nearest project.yaml is used. */
-export function projectSliceScope(fs: ScopeFsDeps, sliceDir: string, readPolicy?: ProofPolicyRead, root?: string): SliceScopeDetail | null {
+export type SliceScopeHeader = Pick<SliceScopeSummary, "dirName" | "id" | "displayName" | "status" | "stage" | "locks">;
+
+/** A slice's own node file, read once: the counts view's row, and where every projection starts. */
+export function projectSliceHeader(fs: ScopeFsDeps, sliceDir: string): (SliceScopeHeader & { content: string; fm: string }) | null {
   const readmePath = NODE_FILE_PRECEDENCE
     .map((n) => path.join(sliceDir, n))
     .find((p) => fs.exists(p));
@@ -212,6 +213,24 @@ export function projectSliceScope(fs: ScopeFsDeps, sliceDir: string, readPolicy?
   const content = fs.readFile(readmePath);
   if (!content) return null;
   const fm = extractFrontmatterRaw(content) ?? "";
+  const heading = /^# (.+)$/m.exec(content);
+  return {
+    content, fm,
+    dirName: path.basename(sliceDir),
+    id: fmValue(fm, "id"),
+    displayName: heading ? heading[1]!.trim() : path.basename(sliceDir),
+    status: fmValue(fm, "status"),
+    stage: fmValue(fm, "stage"),
+    locks: readLocks(fm),
+  };
+}
+
+/** `root`: a selected catalog project's root. It bounds the readiness (policy search and scope identity) exactly as
+ *  `rig proof` does for that project, so the scopes view and proof agree; without it the nearest project.yaml is used. */
+export function projectSliceScope(fs: ScopeFsDeps, sliceDir: string, readPolicy?: ProofPolicyRead, root?: string): SliceScopeDetail | null {
+  const header = projectSliceHeader(fs, sliceDir);
+  if (!header) return null;
+  const { content, fm } = header;
 
   const items = readProofContract(sliceDir, fs);
   const proofDir = path.join(sliceDir, "proof");
@@ -228,16 +247,15 @@ export function projectSliceScope(fs: ScopeFsDeps, sliceDir: string, readPolicy?
   const contract = pairContract(items, drops);
   const paired = contract.filter((c) => c.paired).length;
 
-  const heading = /^# (.+)$/m.exec(content);
   const progressPath = path.join(sliceDir, "PROGRESS.md");
   return {
     readiness: readSliceReadiness(sliceDir, fs, readPolicy, root),
-    dirName: path.basename(sliceDir),
-    id: fmValue(fm, "id"),
-    displayName: heading ? heading[1]!.trim() : path.basename(sliceDir),
-    status: fmValue(fm, "status"),
-    stage: fmValue(fm, "stage"),
-    locks: readLocks(fm),
+    dirName: header.dirName,
+    id: header.id,
+    displayName: header.displayName,
+    status: header.status,
+    stage: header.stage,
+    locks: header.locks,
     proof: { paired, total: items.length },
     intent: sectionBody(content, "Intent"),
     miniRequirements: miniRequirements(content),

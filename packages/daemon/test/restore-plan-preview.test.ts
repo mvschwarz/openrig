@@ -105,6 +105,18 @@ describe("FR-6 restore-plan token state", () => {
     });
   });
 
+  it.each([false, true])("forecasts a seat joined with rig attach as an external CLI as leave-attached, as restore leaves it, with fresh=%s", (fresh) => {
+    const rig = {
+      rig: { id: "rig-1", name: "test-rig" },
+      nodes: [{ id: "n1", logicalId: "desk", runtime: "claude-code", binding: { attachmentType: "external_cli", externalSessionName: "desk-app@test-rig" } }],
+      edges: [],
+    } as unknown as RigWithRelations;
+    const node = buildRestorePlanPreview(rig, null, [row("n1", { resumeType: null, resumeToken: null })], fresh ? ["desk"] : undefined).nodes[0]!;
+    expect(node).toMatchObject({ intendedAction: "leave-attached", freshRequired: false });
+    expect(node.reason).toContain("rig unclaim desk-app@test-rig");
+    expect(node.runtimePrompt).toBeUndefined();
+  });
+
   it("presents a never-occupied current seat as new, without a history warning", () => {
     const rig = rigWith([{ id: "n1", logicalId: "a", runtime: "codex" }]);
     const result = buildRestorePlanPreview(rig, null, []).nodes[0]!;

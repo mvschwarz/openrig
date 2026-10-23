@@ -30,7 +30,7 @@ function fixture() {
   writeExe(path.join(userBin, "rig"), "#!/bin/sh\necho wrong-rig\n");
   writeExe(path.join(userBin, "codex"), "#!/bin/sh\necho wrong-codex\n");
   writeExe(path.join(userBin, "user-tool"), "#!/bin/sh\necho user-tool-preserved\n");
-  writeExe(path.join(bin, "rig"), `#!${process.execPath}\nconst http=require('node:http');const r=http.get(process.env.OPENRIG_URL+'/whoami',{headers:{authorization:'Bearer '+process.env.OPENRIG_ACTIVITY_HOOK_TOKEN}},s=>{let b='';s.on('data',c=>b+=c);s.on('end',()=>{console.log(JSON.stringify({body:JSON.parse(b),home:process.env.OPENRIG_HOME,node:process.env.OPENRIG_NODE_ID,runtime:process.env.OPENRIG_RUNTIME,generation:process.env.OPENRIG_OCCUPANT_GENERATION,PATH:process.env.PATH,HOME:process.env.HOME,CODEX_HOME:process.env.CODEX_HOME,CLAUDE_CONFIG_DIR:process.env.CLAUDE_CONFIG_DIR,USER_VALUE:process.env.USER_VALUE}));});});r.on('error',e=>{console.error(e.message);process.exitCode=1;});\n`);
+  writeExe(path.join(bin, "rig"), `#!${process.execPath}\nconst http=require('node:http');const r=http.get(process.env.OPENRIG_URL+'/whoami',{headers:{authorization:'Bearer '+process.env.OPENRIG_ACTIVITY_HOOK_TOKEN}},s=>{let b='';s.on('data',c=>b+=c);s.on('end',()=>{console.log(JSON.stringify({body:JSON.parse(b),home:process.env.OPENRIG_HOME,node:process.env.OPENRIG_NODE_ID,runtime:process.env.OPENRIG_RUNTIME,generation:process.env.OPENRIG_OCCUPANT_GENERATION,PATH:process.env.PATH,HOME:process.env.HOME,CODEX_HOME:process.env.CODEX_HOME,CLAUDE_CONFIG_DIR:process.env.CLAUDE_CONFIG_DIR,USER_VALUE:process.env.USER_VALUE,OPENRIG_DB:process.env.OPENRIG_DB,TMUX_TMPDIR:process.env.TMUX_TMPDIR}));});});r.on('error',e=>{console.error(e.message);process.exitCode=1;});\n`);
   for (const name of ["claude", "codex"]) writeExe(path.join(bin, name), `#!/bin/sh\nif [ "$1" = --help ]; then printf '%s\\n' '--permission-mode <mode> (choices: "auto", "default")'; else rig whoami; user-tool >/dev/null; fi\n`);
   const identity: Record<string, string> = { OPENRIG_NODE_ID: "node-current", OPENRIG_SESSION_NAME: "seat@rig", OPENRIG_RUNTIME: "claude-code", OPENRIG_OCCUPANT_GENERATION: "successor-generation" };
   const tmux = new TmuxAdapter(async cmd => {
@@ -39,9 +39,9 @@ function fixture() {
     if (!key) throw Error("unexpected environment read");
     return `${key}=${identity[key]}\n`;
   });
-  const env = { PATH: `${bin}:/usr/bin:/bin`, HOME: path.join(root, "home"), OPENRIG_HOME: path.join(root, "instance"), OPENRIG_URL: "http://127.0.0.1:1", OPENRIG_ACTIVITY_HOOK_TOKEN: "synthetic-channel-secret", ANTHROPIC_API_KEY: "synthetic-provider-secret", CODEX_HOME: "/daemon/codex" };
+  const env = { PATH: `${bin}:/usr/bin:/bin`, HOME: path.join(root, "home"), OPENRIG_HOME: path.join(root, "instance"), OPENRIG_DB: path.join(root, "selected db.sqlite"), TMUX_TMPDIR: path.join(root, "tmux directory"), OPENRIG_URL: "http://127.0.0.1:1", OPENRIG_ACTIVITY_HOOK_TOKEN: "synthetic-channel-secret", ANTHROPIC_API_KEY: "synthetic-provider-secret", CODEX_HOME: "/daemon/codex" };
   const rc = path.join(root, "rc");
-  writeFileSync(rc, `export OPENRIG_HOME=/wrong OPENRIG_URL=http://127.0.0.1:1 OPENRIG_NODE_ID=wrong OPENRIG_OCCUPANT_GENERATION=wrong\nexport PATH=${shellQuote(userBin + ":" + bin + ":/usr/bin:/bin")}\nexport HOME=/user/home CODEX_HOME=/user/codex CLAUDE_CONFIG_DIR=/user/claude USER_VALUE=keep\n`);
+  writeFileSync(rc, `export OPENRIG_DB=/wrong.sqlite TMUX_TMPDIR=/wrong-tmux OPENRIG_HOME=/wrong OPENRIG_URL=http://127.0.0.1:1 OPENRIG_NODE_ID=wrong OPENRIG_OCCUPANT_GENERATION=wrong\nexport PATH=${shellQuote(userBin + ":" + bin + ":/usr/bin:/bin")}\nexport HOME=/user/home CODEX_HOME=/user/codex CLAUDE_CONFIG_DIR=/user/claude USER_VALUE=keep\n`);
   const launch = new SeatLaunchEnvironment(tmux, env, root, path.join(bin, "rig"));
   const commands: string[] = [];
   const binding: NodeBinding = { id: "b", nodeId: "node-current", tmuxSession: "seat@rig", tmuxPane: "%1", tmuxWindow: null, cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", cwd: path.join(root, "workspace") };
@@ -63,7 +63,7 @@ function fixture() {
     expect(command).not.toContain(env.ANTHROPIC_API_KEY);
     const { stdout } = await exec("/bin/bash", ["--noprofile", "--rcfile", rc, "-ic", command], { env, cwd: binding.cwd, timeout: 5000 });
     const observed = JSON.parse(stdout);
-    expect(observed).toMatchObject({ body: { node: "node-current" }, home: env.OPENRIG_HOME, node: "node-current" });
+    expect(observed).toMatchObject({ body: { node: "node-current" }, home: env.OPENRIG_HOME, node: "node-current", OPENRIG_DB: env.OPENRIG_DB, TMUX_TMPDIR: env.TMUX_TMPDIR });
     if (!managed) expect(observed).toMatchObject({ generation: "successor-generation", HOME: "/user/home", CODEX_HOME: "/user/codex", CLAUDE_CONFIG_DIR: "/user/claude", USER_VALUE: "keep" });
     if (!managed) {
       const [owned, ...rest] = observed.PATH.split(":");

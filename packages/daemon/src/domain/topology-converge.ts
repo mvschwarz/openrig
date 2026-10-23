@@ -3,6 +3,7 @@ import type { ClaimService, ReconcileSessionOutcome } from "./claim-service.js";
 import type { SeatSkillPaths } from "./seat-skill-storage.js";
 import type { RigRepository } from "./rig-repository.js";
 import { addRigEdge, removeRigEdge, type EdgeOpOutcome } from "./rig-edge-ops.js";
+import type { RecordCreated } from "./operation-correlation.js";
 
 /**
  * Topology-mutation converge spine (OPR.0.3.3.24, AC-6 scaffold).
@@ -138,7 +139,7 @@ export async function convergeOp(
   rigId: string,
   op: TopologyOp,
   rigRoot: string,
-  opts?: { cwdOverride?: string; launchAdditionsFrom?: SeatSkillPaths },
+  opts?: { cwdOverride?: string; launchAdditionsFrom?: SeatSkillPaths; recordCreated?: RecordCreated },
 ): Promise<ConvergeResult> {
   switch (op.kind) {
     case "add_member": {
@@ -146,6 +147,7 @@ export async function convergeOp(
         cwdOverride: opts?.cwdOverride,
         ...(opts?.launchAdditionsFrom ? { launchAdditionsFrom: opts.launchAdditionsFrom } : {}),
         edges: op.edges,
+        recordCreated: opts?.recordCreated,
       });
       return { kind: "add_member", supported: true, outcome };
     }

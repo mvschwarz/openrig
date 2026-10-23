@@ -17,6 +17,50 @@ Direct human input remains available.
 
 ## Configure and inspect
 
+### Who may intervene
+
+`rig seat status <seat>` shows the seat's terminal interaction account alongside
+its native permissions and interruption level. These choices are independent.
+The presets `no-peer-interventions`, `help-within-instructions` and `full-control`
+set the peer row. Self and OpenRig retain their existing authority unless an
+explicit exception changes it. Named helpers and the delegating instruction are
+shown; OpenRig does not interpret free-text instructions as executable rules.
+
+~~~sh
+rig seat set-terminal-policy reviewer@my-rig --preset help-within-instructions \
+  --helper lead@my-rig --peer-model deny \
+  --reason "Help with compaction; keep the review model"
+rig seat status reviewer@my-rig
+~~~
+
+Each `--peer-compaction`, `--self-compaction`, `--openrig-compaction`,
+`--peer-model`, `--self-model` or `--openrig-model` exception takes `allow` or
+`deny`. Model includes reasoning effort. Exceptions apply to the whole actor
+row: `--peer-compaction allow` also allows unnamed peers. A choice with
+exceptions reads as Custom. The setter replaces the complete choice; omit
+exceptions to return to the preset's defaults. Outside a managed seat, use `--operator <address>` for
+audit attribution. This does not establish an authenticated identity.
+
+Enforcement covers managed compaction and saved model/effort changes only.
+The latter take effect at the next managed continuation, not in the current
+process. Other interventions remain guidance-only. Managed compaction applies
+to Claude seats; it is not offered for Codex or Pi. A policy change during
+preparation is checked before further input. It does not undo a submitted
+`/compact` or abandon an already-owed restore/audit.
+
+Existing seats retain current behaviour on upgrade. To choose a default for
+newly added seats in a rig, add `--rig-default` to the setter above: existing
+seats keep their own copied choices. OpenRig's standing managed-compaction
+authority stays active unless its exception is deliberately changed.
+
+Caller attribution is cooperative. An unattributed caller retains current
+behaviour rather than being labelled the person or a peer. The existing
+`rig send --dangerously-interact --reason` path and its audit are unchanged;
+this policy adds no restriction there, and the existing prompt, draft and
+interruption guards still apply. Plain tmux is not prevented.
+
+### Terminal delivery
+
 Run from a seat shell with `OPENRIG_SESSION_NAME` set; the daemon derives the
 audit actor from transport identity.
 

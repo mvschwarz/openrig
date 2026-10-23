@@ -142,6 +142,8 @@ export function makeEnsureStuckExceptionItem(deps: StuckExceptionDeps): EnsureSt
         destinationSession: destination,
         body,
         priority: "urgent",
+        // OpenRig's own escalation: it wakes as OpenRig's, marked urgent by OpenRig.
+        wakeTrigger: "openrig",
         tier,
         tags: [...workflowExceptionTags(exception.identity), recoveryTag(e.packetId), ...scopeTags],
         summary: exception.reason,

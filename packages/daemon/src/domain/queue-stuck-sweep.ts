@@ -370,6 +370,15 @@ export function verificationCommand(target: string): string {
   return `OPENRIG_URL=<registered-host> rig queue list --destination ${target}`;
 }
 
+/** The finding's headline says where custody was not checked, so its owner can act from the list. */
+export function custodyHeadline(rowId: string, targets: string[], ageMinutes: number): string {
+  const hosts = [...new Set(targets.flatMap((target) =>
+    target.startsWith("qitem-") && target.includes("@") ? [target.slice(target.indexOf("@") + 1)] : []))];
+  return hosts.length
+    ? `Custody not checked on host ${hosts.join(", ")} for ${rowId} (${ageMinutes} min)`
+    : `Custody not checked: no successor of ${rowId} in this store (${ageMinutes} min)`;
+}
+
 function evidenceBody(db: Database.Database, c: Candidate): string {
   if (c.verificationTargets?.length) {
     const checks = c.verificationTargets
@@ -553,6 +562,9 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       // hold with no live release job is stuck: nothing will ever release it.
       const quiet = quietHoldCustody(deps.db, row.qitemId, now);
       if (quiet && quiet.state !== "orphaned") continue;
+      // The seat's typing guard or interruption level held its wake on purpose: it's held and readable at the seat, not
+      // stuck. (A handed-off baton's one held notice is the wake ladder's.)
+      if (row.lastNudgeResult === "retained:typing_guard") continue;
       // The ladder check runs LAST here too: a row the ladder alone would have stopped is
       // ladder-suppressed, and its finding stays open (#1419).
       if (hasLiveLadder(deps.db, row.qitemId, now, suppressionMinutes)) {
@@ -723,9 +735,13 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           sourceSession: c.row.sourceSession,
           destinationSession: c.route,
           body: evidenceBody(deps.db, c),
-          summary: `Stuck sweep: ${c.verificationTargets ? "successor-verification-required" : c.kind} on ${c.row.qitemId} (${c.ageMinutes} min)`,
+          summary: c.verificationTargets
+            ? custodyHeadline(c.row.qitemId, c.verificationTargets, c.ageMinutes)
+            : `Stuck sweep: ${c.kind} on ${c.row.qitemId} (${c.ageMinutes} min)`,
           evidenceRef: `rig queue show ${c.row.qitemId}`,
           tags: [STUCK_SWEEP_FINDING_TAG, dedupTag, recoveryTag(c.row.qitemId)],
+          // OpenRig's own finding, whoever created the stuck row.
+          wakeTrigger: "openrig" as const,
         };
         const created = await deps.queueRepo.create(input);
         findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: created.qitemId, action: "created" });

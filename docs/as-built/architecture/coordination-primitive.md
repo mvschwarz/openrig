@@ -146,8 +146,20 @@ that gateway side too. For the pane side, read:
   `indeterminate:…` reads `claimed` (`presentedNudgeResult`). Unclaiming shows
   the stored result again.
 - `claimedAt`: when the destination claimed the row. Closing doesn't clear it.
-- `pickup`: the derived pickup receipt (`unclaimed`, `working`,
+- `pickup`: the derived pickup receipt (`unclaimed`, `working`, `needs-input`,
   `stalled-after-claim`, `parked`, `terminal`), computed at read time.
+
+A claimed item whose owner's activity reports outstanding input reads
+`needs-input`, with the reason in `pickup.evidence`. That covers an item in
+progress and a `pending` item that kept its claim, after an update back to
+`pending` or a reopen. A Codex permission request the daemon couldn't confirm on
+screen reads `owner may need input (not verified: permission_request_unverified)`.
+The input signal can outlast the prompt it reported, so it never pauses
+recovery. When the claim would otherwise read `stalled-after-claim`, the receipt
+keeps that evidence in `pickup.stall`, and the stuck sweep's finding, its
+backstop and manual dispositions behave exactly as for `stalled-after-claim`.
+Queue reads, the pickup view and the execution view share this receipt
+(`queue-pickup.ts`). Unclaimed, blocked and terminal items keep their receipts.
 
 A claim isn't proof that the body was read or that the terminal render was
 verified, and closing a task isn't a new delivery receipt: a claimed task that

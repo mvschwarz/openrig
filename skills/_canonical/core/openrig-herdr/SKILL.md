@@ -111,6 +111,9 @@ system-clipboard copy works immediately (it's server-wide).
 - **Inner tmux status bar** is hidden by default (herdr provides the chrome); one config key
   (`terminal.status_bar`) flips it back on for raw-tmux / no-provider surfaces, and the flip applies
   to **future launches only**.
+- **After a Herdr server restart or update** (without `--handoff`), Herdr restores the layout and
+  labels but not the processes, so OpenRig's tiles come back as empty shells while the seats keep
+  running. Reopen the view: `rig terminal open <view> --provider herdr`.
 
 ## Saved views — the library (`terminal-views.yaml`)
 

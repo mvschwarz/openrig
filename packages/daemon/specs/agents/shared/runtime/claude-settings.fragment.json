@@ -1,7 +1,4 @@
 {
-  "permissions": {
-    "defaultMode": "acceptEdits"
-  },
   "enabledMcpjsonServers": [
     "exa",
     "context7"

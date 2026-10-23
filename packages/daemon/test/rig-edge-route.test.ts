@@ -225,6 +225,14 @@ describe("an edge receipt names the routing it moves", () => {
     expect(removed.routing).toEqual({ representative: { from: null, to: "orch-lead@route-rig" } });
   });
 
+  it("an archived earlier generation with the rig's name doesn't hide that change", async () => {
+    // An archived rig with the same name, such as the earlier generation a relaunch archives.
+    setup.rigRepo.archiveRig(setup.rigRepo.createRig("route-rig").id);
+    expect(resolveRigRepresentative(db, "route-rig")).toBe("orch-lead@route-rig");
+    const added = await (await add("ops.old", "dev.build")).json() as Receipt;
+    expect(added.routing).toEqual({ representative: { from: "orch-lead@route-rig", to: null } });
+  });
+
   it("an ordinary add that moves nothing says nothing extra", async () => {
     setup.rigRepo.addEdge(rigId, ids["orch.lead"]!, ids["ops.old"]!, "delegates_to");
     // dev.build keeps its more recent parent, and the rig keeps its one root.

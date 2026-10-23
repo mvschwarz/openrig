@@ -17,7 +17,7 @@ npx skills add https://github.com/mvschwarz/openrig/tree/<release-tag>/skills/ri
 npx skills add https://github.com/mvschwarz/openrig/tree/<release-tag>/skills/rigs --skill rigs --agent codex
 ```
 
-For a new install, use the latest release's tag, for example `v0.6.12`. If OpenRig is already installed, use the tag
+For a new install, use the latest release's tag, for example `v0.7.0`. If OpenRig is already installed, use the tag
 that matches `rig --version`, or upgrade first. If the command fails with `npx: command not found`, Node.js isn't
 installed or isn't on your PATH yet (see [What you need](#what-you-need)). Then type `/rigs` in Claude Code, or `$rigs` in Codex, and say what
 you want built.

@@ -1,3 +1,5 @@
+import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
+import { NativePermissionStore } from "../src/domain/native-permission-store.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
@@ -53,6 +55,7 @@ describe("SeatHandoverService", () => {
   let getDefaultShell: ReturnType<typeof vi.fn>;
   let getPaneCommand: ReturnType<typeof vi.fn>;
   let service: SeatHandoverService;
+  let currentCodexPermissions: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     db = createFullTestDb();
@@ -90,6 +93,7 @@ describe("SeatHandoverService", () => {
     // KI-14: healthy default — the respawned pane comes up as a blank shell.
     getDefaultShell = vi.fn(async () => "/bin/zsh");
     getPaneCommand = vi.fn(async () => "zsh");
+    currentCodexPermissions = vi.fn(async () => ({ state: "unverified", reason: "fixture has no native policy" }));
     service = newService();
   });
 
@@ -107,6 +111,7 @@ describe("SeatHandoverService", () => {
 
   function newService(adapter: TmuxAdapter = tmux(), occupantInvalidator: OccupantInvalidator = { invalidateRetiringOccupant }): SeatHandoverService {
     return new SeatHandoverService({
+      codexPermissions: { currentCodexPermissions },
       db,
       rigRepo,
       sessionRegistry,
@@ -797,6 +802,62 @@ describe("SeatHandoverService", () => {
   });
 
   // OPR.0.5.5.5 (05-handover-sources-real) INVERTED the former B3 pin: fork and
+  it.each(["floor", "inherit", "policy", null] as const)("rebuild respects a deliberate same-mode selection (%s), not an old choice alone", async mode => {
+    const { node } = seedSeat();
+    const store = new NativePermissionStore(db);
+    const setter = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux() });
+    if (mode === "policy") {
+      await setter.setPolicy({ seatRef: "dev-impl@seat-rig", ref: "builtin:locked", actor: "old operator", reason: "earlier launch" });
+      db.prepare("UPDATE events SET created_at = '2026-04-19 00:00:00' WHERE type = 'node.policy_changed' AND node_id = ?").run(node.id);
+    } else if (mode !== "inherit") {
+      store.write(node.id, { runtime: "codex", mode: "floor" }, "old operator", "earlier launch");
+      db.prepare("UPDATE node_permission_selections SET updated_at = '2026-04-19 00:00:00' WHERE node_id = ?").run(node.id);
+    }
+    const envelope = { approvalPolicy: "never", sandboxPolicy: { type: "danger-full-access" } };
+    currentCodexPermissions.mockResolvedValue({ state: "observed", envelope, profile: null,
+      processStartedAt: "Mon Apr 20 12:00:00 2026", observedAt: "2026-04-20T12:01:00Z" });
+    if (mode !== null) {
+      const selected = mode === "policy"
+        ? await setter.setPolicy({ seatRef: "dev-impl@seat-rig", ref: "builtin:locked", actor: "person", reason: "choose successor permissions" })
+        : await setter.setPermissions({ seatRef: "dev-impl@seat-rig", mode, actor: "person", reason: "choose successor permissions" });
+      expect(selected).toMatchObject({ ok: true, changed: false });
+      expect(signalPaneProcess).not.toHaveBeenCalled();
+      expect(launchHarness).not.toHaveBeenCalled();
+    }
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", source: "rebuild", reason: "context wall" });
+    expect(result).toMatchObject({ ok: true, result: { sourceOutcome: { permissions: { state: mode === null ? "emitted" : "selection_used" } } } });
+    const binding = launchHarness.mock.calls[0]![0];
+    expect(binding.launchPosture).toBe("floor");
+    expect(binding.codexRebuildPermissions).toEqual(mode === null ? envelope : undefined);
+  });
+
+  it.each(["observed", "unverified", "changed selection", "cleared selection", "profile change", "older selection"])(
+    "rebuild permission result: %s", async state => {
+      const { node } = seedSeat(state === "profile change" ? { codexConfigProfile: "next-profile" } : undefined);
+      const envelope = { approvalPolicy: "on-request", sandboxPolicy: { type: "workspace-write",
+        network_access: false, exclude_tmpdir_env_var: false, exclude_slash_tmp: false } };
+      if (state !== "unverified") currentCodexPermissions.mockImplementation(async () => {
+        expect(signalPaneProcess).not.toHaveBeenCalled();
+        if (state === "changed selection" || state === "older selection") {
+          new NativePermissionStore(db).write(node.id, { runtime: "codex", mode: "full_bypass" }, "person", "successor choice");
+          if (state === "older selection") db.prepare("UPDATE node_permission_selections SET updated_at = '2026-04-19 00:00:00' WHERE node_id = ?").run(node.id);
+        }
+        if (state === "cleared selection") eventBus.emit({ type: "node.permissions_changed", nodeId: node.id,
+          rigId: node.rig_id, from: { runtime: "codex", mode: "full_bypass" }, to: null, actor: "person", reason: "inherit",
+          source: "seat_selection", effect: "future_launches_only" });
+        return { state: "observed", envelope, processStartedAt: "Mon Apr 20 12:00:00 2026",
+          observedAt: "2026-04-20T12:01:00Z", profile: null };
+      });
+      const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "rebuild", source: "rebuild" });
+      expect(result).toMatchObject({ ok: true, result: { sourceOutcome: { mode: "rebuild",
+        permissions: { state: (state === "changed selection" || state === "cleared selection" || state === "profile change") ? "selection_used" : state === "unverified" ? "unverified" : "emitted" } } } });
+      const binding = launchHarness.mock.calls[0]![0];
+      if (state === "observed" || state === "older selection") expect(binding.codexRebuildPermissions).toEqual(envelope);
+      else expect(binding.codexRebuildPermissions).toBeUndefined();
+      if (state === "changed selection") expect(binding.launchPosture).toBe("full_bypass");
+      expect(respawnPane).toHaveBeenCalledTimes(1);
+    });
+
   // rebuild now EXECUTE (full coverage in seat-handover-sources.test.ts). What
   // survives of B3 is its safety core: a source that cannot proceed refuses
   // HONESTLY and pre-mutation — never a blank successor reported complete.

@@ -83,6 +83,13 @@ describe("artifactPoolReadyPolicy (POC contract)", () => {
     expect(out).toEqual({ action: "skip", reason: "no_actionable_artifacts" });
   });
 
+  it.each([
+    ["no pools", {}, /context pool list is required/],
+    ["a pool with an empty path", { pools: { paths: [""] } }, /every pool requires a path/],
+  ])("refuses %s", async (_name, context, error) => {
+    await expect(artifactPoolReadyPolicy.evaluate(makeJob({ context }))).rejects.toThrow(error);
+  });
+
   it("send with formatted message when pool has actionable artifacts", async () => {
     writeFileSync(join(tmp, "a.md"), "---\nstatus: ready\n---\nbody-a\n");
     writeFileSync(join(tmp, "b.md"), "---\nstatus: ready\n---\nbody-b\n");

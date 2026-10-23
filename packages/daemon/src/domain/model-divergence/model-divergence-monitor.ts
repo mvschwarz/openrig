@@ -21,6 +21,7 @@
 // proclamation event; an unreachable channel is a named failure/deferral, never a silence.
 
 import { createHash } from "node:crypto";
+import type Database from "better-sqlite3";
 import { CANONICAL_MODEL_PINS } from "../spec-validation-advisory.js";
 
 export interface PinnedSeat {
@@ -51,6 +52,8 @@ export interface ModelDivergenceProclamation {
   effectiveModel: string;
   diagnosis: string | null;
   detectedAt: string;
+  /** Content-derived (node, generation, pin, effective): the same divergence always has the same id. */
+  occurrenceId: string;
   channels: ChannelOutcome[];
 }
 
@@ -86,6 +89,9 @@ export interface ModelDivergenceMonitorDeps {
   resolveOversightSeat: () => string | null;
   /** Durable record of the proclamation + its per-channel outcomes. */
   recordProclamation: (p: ModelDivergenceProclamation) => void;
+  /** Whether this occurrence was already proclaimed to someone (a channel delivered or retained it), by an earlier daemon
+   *  too. The settled set lives in memory, so without this a restart alerts again on an unchanged divergence. */
+  wasProclaimed?: (occurrenceId: string, nodeId: string) => boolean;
   /** Optional cause string when a rejection signal is known (diagnosis, NEVER the trigger). */
   diagnose?: (seat: PinnedSeat) => string | null;
   now?: () => Date;
@@ -97,7 +103,21 @@ export const SLACK_DEFERRAL_LINE = "human-via-Slack: deferred: M1 not landed";
 /** Polls a pinned generation may stay signal-less before it is loudly named as unchecked. */
 export const PENDING_VISIBILITY_POLLS = 10;
 
-export function formatProclamation(p: Omit<ModelDivergenceProclamation, "channels">): string {
+/** `wasProclaimed` from the record a proclamation already writes: its `seat.model_divergence` event. Only a proclamation
+ *  some channel delivered or retained counts, so an alert nobody received is proclaimed again after a restart. */
+export function proclaimedInEventLog(db: Pick<Database.Database, "prepare">): (occurrenceId: string, nodeId: string) => boolean {
+  const stmt = db.prepare(`SELECT 1 FROM events
+    WHERE node_id = ? AND type = 'seat.model_divergence' AND json_extract(payload, '$.occurrenceId') = ?
+      AND EXISTS (SELECT 1 FROM json_each(payload, '$.channels') WHERE json_extract(value, '$.status') IN ('delivered', 'retained'))
+    LIMIT 1`);
+  return (occurrenceId, nodeId) => stmt.get(nodeId, occurrenceId) !== undefined;
+}
+
+function occurrenceIdFor(seat: PinnedSeat, effectiveModel: string): string {
+  return createHash("sha256").update(JSON.stringify([seat.nodeId, seat.generation ?? seat.sessionName, seat.pinnedModel, effectiveModel])).digest("hex");
+}
+
+export function formatProclamation(p: Omit<ModelDivergenceProclamation, "channels" | "occurrenceId">): string {
   return [
     `MODEL DIVERGENCE on ${p.sessionName}: pinned=${p.pinnedModel} effective=${p.effectiveModel}`,
     `The seat is RUNNING (graceful degrade held) but on a model nobody chose.`,
@@ -200,12 +220,18 @@ export class ModelDivergenceMonitor {
       this.settled.add(key);
       return;
     }
-    const proclamation = await this.proclaim(seat, read.model);
+    const occurrenceId = occurrenceIdFor(seat, read.model);
+    let alreadyProclaimed = false;
+    try {
+      alreadyProclaimed = this.deps.wasProclaimed?.(occurrenceId, seat.nodeId) ?? false;
+    } catch (err) {
+      this.warn(`[model-divergence] could not read earlier proclamations for ${seat.sessionName}, proclaiming: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (!alreadyProclaimed) fired.push(await this.proclaim(seat, read.model, occurrenceId));
     this.settled.add(key);
-    fired.push(proclamation);
   }
 
-  private async proclaim(seat: PinnedSeat, effectiveModel: string): Promise<ModelDivergenceProclamation> {
+  private async proclaim(seat: PinnedSeat, effectiveModel: string, occurrenceId: string): Promise<ModelDivergenceProclamation> {
     const detectedAt = (this.deps.now?.() ?? new Date()).toISOString();
     const base = {
       nodeId: seat.nodeId,
@@ -219,7 +245,6 @@ export class ModelDivergenceMonitor {
       detectedAt,
     };
     const message = formatProclamation(base);
-    const occurrenceId = createHash("sha256").update(JSON.stringify([seat.nodeId, seat.generation ?? seat.sessionName, seat.pinnedModel, effectiveModel])).digest("hex");
     const channels: ChannelOutcome[] = [];
 
     const orchSeats = this.deps.resolveOrchSeats(seat.rigName);
@@ -243,7 +268,7 @@ export class ModelDivergenceMonitor {
     // channel refuses loudly with its named deferral — never an improvised shadow path.
     channels.push({ channel: "slack", target: null, status: "deferred", detail: SLACK_DEFERRAL_LINE });
 
-    const proclamation: ModelDivergenceProclamation = { ...base, channels };
+    const proclamation: ModelDivergenceProclamation = { ...base, occurrenceId, channels };
     try {
       this.deps.recordProclamation(proclamation);
     } catch (err) {

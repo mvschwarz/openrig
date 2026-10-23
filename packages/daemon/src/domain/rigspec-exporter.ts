@@ -234,15 +234,21 @@ export class RigSpecExporter {
     const rigEnv = this.rigRepo.getRigEnv(rigId);
     // #25: the selected Claude managed-block file is also a rig-row field.
     const claudeManagedBlockFile = this.rigRepo.getRigClaudeManagedBlockFile(rigId);
+    // #1631: culture_file and rig-level startup block round-trip through export.
+    const startupLayers = this.rigRepo.getRigStartupLayers(rigId);
+    const cultureFile = startupLayers?.cultureFile;
+    const startup = startupLayers?.startup;
 
     return {
       version: "0.2",
       name: rig.rig.name,
+      ...(cultureFile ? { cultureFile } : {}),
       ...(rigPermissionPolicy ? { permissionPolicy: rigPermissionPolicy } : {}),
       ...(this.rigRepo.getRigNonInterruptive(rigId) ? { nonInterruptive: true } : {}),
       ...(rigEnv ? { env: rigEnv } : {}),
       ...(claudeManagedBlockFile ? { managedBlocks: { "claude-code": claudeManagedBlockFile } } : {}),
       ...(workspace ? { workspace } : {}),
+      ...(startup ? { startup } : {}),
       pods: podSpecs,
       edges: crossPodEdges,
     };

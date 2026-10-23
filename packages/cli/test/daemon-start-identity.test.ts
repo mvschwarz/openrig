@@ -86,6 +86,101 @@ describe("child-bound startup", () => {
       errors.mockRestore();
     }
   });
+  describe("slow startup health", () => {
+    const later = <T>(ms: number, value: T) => new Promise<T>((resolve) => setTimeout(() => resolve(value), ms));
+    const settle = async (f: ReturnType<typeof fixture>) => {
+      const started = Date.now();
+      const result = startDaemon(opts, f.deps).catch((e: Error) => e);
+      await vi.runAllTimersAsync();
+      return { outcome: await result, elapsed: Date.now() - started };
+    };
+    it.each([
+      ["headers", 400], ["headers", 1000], ["JSON", 400], ["JSON", 1000],
+    ] as const)("accepts the child when its valid health %s take %ims", async (part, ms) => {
+      vi.useFakeTimers();
+      const f = fixture(); const fetch = f.deps.fetch;
+      f.deps.fetch = async (url) => (await fetch(url), part === "headers")
+        ? later(ms, { ok: true, json: async () => f.body })
+        : { ok: true, json: () => later(ms, f.body) };
+      const { outcome } = await settle(f);
+      expect(outcome instanceof Error ? outcome.message : outcome.pid).toBe(f.child.pid);
+      expect(JSON.parse(f.files.get(STATE_FILE)!)).toMatchObject({ pid: f.child.pid });
+    });
+    it("rejects a slow response naming another PID", async () => {
+      vi.useFakeTimers();
+      const f = fixture(); const fetch = f.deps.fetch;
+      f.deps.fetch = async (url) => (await fetch(url), later(1000, { ok: true, json: async () => ({ ...f.body, pid: 888 }) }));
+      const { outcome } = await settle(f);
+      expect((outcome as Error).message).toMatch(/identity mismatch.*observed 888/);
+      expect(f.files.has(STATE_FILE)).toBe(false);
+    });
+    it("gives up on a never-answering endpoint within one readiness deadline", async () => {
+      vi.useFakeTimers();
+      const f = fixture(); const fetch = f.deps.fetch;
+      f.deps.fetch = async (url) => (await fetch(url), new Promise(() => {}));
+      const { outcome, elapsed } = await settle(f);
+      expect((outcome as Error).message).toMatch(/Last probe: .*timed out|Last probe: .*healthz/);
+      expect(elapsed).toBeLessThanOrEqual(20_000);
+      expect(f.files.has(STATE_FILE)).toBe(false);
+      expect(f.deps.kill).toHaveBeenCalledWith(12345, "SIGTERM");
+    });
+    // Synchronous work crossing the deadline is modelled by a clock jump inside one fetch, before
+    // any timer runs. Post-spawn fetches: 0 primary read, 1 primary listener check, 2 secondary check.
+    const jumpAt = (f: ReturnType<typeof fixture>, at: number, secondary?: "timeout") => {
+      const fetch = f.deps.fetch; const urls: string[] = [];
+      f.deps.fetch = async (url) => {
+        const res = await fetch(url);
+        if (urls.push(url) - 1 === at) vi.setSystemTime(Date.now() + 21_000);
+        if (secondary && url.includes("127.0.0.2")) throw new Error("timeout");
+        return res;
+      };
+      return urls;
+    };
+    it("publishes a verified child whose last listener answer lands after the deadline", async () => {
+      vi.useFakeTimers();
+      const f = fixture(); const urls = jumpAt(f, 1);
+      const { outcome } = await settle(f);
+      expect(outcome instanceof Error ? outcome.message : outcome.pid).toBe(f.child.pid);
+      expect(JSON.parse(f.files.get(STATE_FILE)!)).toMatchObject({ pid: f.child.pid });
+      expect(f.deps.kill).not.toHaveBeenCalled();
+      expect(urls).toHaveLength(2);
+    });
+    it("starts no listener check after the deadline, so a late primary read cannot publish through an uncertain secondary", async () => {
+      vi.useFakeTimers();
+      const f = fixture(); f.body.bind.hosts.push("127.0.0.2");
+      const urls = jumpAt(f, 0, "timeout");
+      const { outcome } = await settle(f);
+      expect((outcome as Error).message).toMatch(/listener verification is incomplete.*reservation retained/);
+      expect(f.files.has(STATE_FILE)).toBe(false);
+      expect(f.deps.kill).not.toHaveBeenCalled();
+      expect(urls).toHaveLength(1);
+    });
+    it("still publishes with a warning when only the secondary check runs past the deadline", async () => {
+      vi.useFakeTimers();
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const f = fixture(); f.body.bind.hosts.push("127.0.0.2");
+        const urls = jumpAt(f, 2, "timeout");
+        const { outcome } = await settle(f);
+        expect(outcome instanceof Error ? outcome.message : outcome.pid).toBe(f.child.pid);
+        expect(errors.mock.calls.flat().join(" ")).toMatch(/127\.0\.0\.2 could not be verified/);
+        expect(urls).toHaveLength(3);
+      } finally {
+        errors.mockRestore();
+      }
+    });
+    it("retains the child when the deadline runs out during the primary listener's check", async () => {
+      vi.useFakeTimers();
+      const f = fixture(); const fetch = f.deps.fetch; let calls = 0;
+      // After spawn, each primary read names the child; each listener check after it never answers.
+      f.deps.fetch = async (url) => (await fetch(url), calls++ % 2 === 0 ? { ok: true, json: async () => f.body } : new Promise(() => {}));
+      const { outcome, elapsed } = await settle(f);
+      expect((outcome as Error).message).toMatch(/listener verification is incomplete.*reservation retained/);
+      expect(elapsed).toBeLessThanOrEqual(20_000);
+      expect(f.files.has(STATE_FILE)).toBe(false);
+      expect(f.deps.kill).not.toHaveBeenCalled();
+    });
+  });
   it("tracks child exit while the health response is pending", async () => {
     const f = fixture(); const fetch = f.deps.fetch;
     f.deps.fetch = async (url) => {

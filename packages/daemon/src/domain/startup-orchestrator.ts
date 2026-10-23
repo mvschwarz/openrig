@@ -240,7 +240,8 @@ export type StartupResult = { warnings?: string[] } & (
   // outcomes so restore-orchestrator's per-node mapping can populate
   // `attentionEvidence` on the RestoreNodeResult. Internal type only;
   // not persisted on the failure event.
-  | { ok: false; startupStatus: "attention_required" | "failed"; errors: string[]; evidence?: string; recovery?: string; missingConversation?: true });
+  | { ok: false; startupStatus: "attention_required" | "failed"; errors: string[]; evidence?: string; recovery?: string; missingConversation?: true;
+    probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence });
 
 interface StartupOrchestratorDeps {
   db: Database.Database;
@@ -640,11 +641,11 @@ export class StartupOrchestrator {
             // unverified fork keeps its unsent context for a verified continuation.
             return this.fail(input, "attention_required", errors, launchResult.evidence,
               launchResult.forkIdentityPending ? forkContext ?? false : continuityOutcome === "fresh",
-              undefined, false, "harness_launch", true);
+              undefined, false, "harness_launch", true, launchResult.probe);
           }
 
           errors.push(`Harness launch failed: ${launchResult.error}`);
-          return this.fail(input, "failed", errors, undefined, false, launchResult.recovery, launchResult.missingConversation === true, "harness_launch", true);
+          return this.fail(input, "failed", errors, undefined, false, launchResult.recovery, launchResult.missingConversation === true, "harness_launch", true, launchResult.probe);
         }
       } catch (err) {
         errors.push(`Harness launch error: ${(err as Error).message}`);
@@ -954,6 +955,7 @@ export class StartupOrchestrator {
     missingConversation = false,
     stage?: StartupFailureStage,
     hasPendingWork?: boolean,
+    probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence,
   ): StartupResult {
     if (status === "attention_required" && typeof pendingContext === "object") {
       // The reasons above stay visible; this only says what the status means for the fork.
@@ -976,8 +978,10 @@ export class StartupOrchestrator {
       ...(hasPendingWork !== undefined ? { hasPendingWork } : {}),
       requestedResumeToken: input.resumeToken ?? null,
       requestedResumeType: input.resumeType ?? null,
+      ...(probe ? { probe } : {}),
     });
     return { ok: false, startupStatus: status, errors, evidence, ...(recovery ? { recovery } : {}),
+      ...(probe ? { probe } : {}),
       ...(missingConversation ? { missingConversation: true as const } : {}) };
   }
 
@@ -1204,6 +1208,7 @@ export class StartupOrchestrator {
         phase = "guarded_retry";
         diagnostic.retry = "threw"; // Replaced when the transport returns normally.
         retry = await this.sessionTransport.send(tmuxSession, "", {
+          openrigNotice: true,
           submitOnly: true,
           expectedStagedText: text,
           submitOnlyCaptureLines: STARTUP_SUBMIT_CAPTURE_LINES,
