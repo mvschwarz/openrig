@@ -20,6 +20,8 @@ import { createHash } from "node:crypto";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { CommunityHarnessRuntimeAdapter } from "../src/adapters/community-harness-runtime-adapter.js";
+import { SeatAttentionReconciler } from "../src/domain/seat-attention-reconciler.js";
+import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { SEAT_SKILLS_BOOTSTRAP_LINE, describeSkillRouterFootprint, seatSkillPaths } from "../src/domain/seat-skill-storage.js";
 import { prepareSeatLaunchAdditions, recordConversationPrompt, systemPromptPendingNote } from "../src/domain/seat-launch-additions.js";
 import * as nodeFs from "node:fs";
@@ -1017,15 +1019,22 @@ describe("StartupOrchestrator", () => {
   });
 
   it.each([
-    [true, true, "attention_required"],
-    [false, true, "ready"],
-    [true, false, "ready"],
-  ] as const)("reports declared startup assistance (%s), after sending context (%s)", async (assisted, sendContext, status) => {
+    [true, true, "attention_required", false],
+    [false, true, "ready", false],
+    [true, false, "ready", false],
+    [true, true, "attention_required", true],
+  ] as const)("reports declared startup assistance (%s), after sending context (%s), status (%s), full restore (%s)", async (assisted, sendContext, status, fullRestore) => {
     const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "assisted-startup-"));
     try {
       nodeFs.writeFileSync(nodePath.join(dir, "synth.yaml"),
         `format: 1\nname: synth\ncommand: synth\nmaintainer: Example\nstartup_assisted: ${assisted}\n`);
       const seed = seedSession();
+      db.prepare("UPDATE nodes SET runtime='synth' WHERE id=?").run(seed.nodeId);
+      const started = fullRestore ? eventBus.emit({ type: "restore.started", rigId: seed.rigId, snapshotId: "snapshot" }) : null;
+      if (fullRestore) vi.mocked(tmux.sendText).mockImplementation(async () => {
+        nodeFs.unlinkSync(nodePath.join(dir, "synth.yaml")); // A mid-start preset edit doesn't change this launch's declaration.
+        return { ok: true };
+      });
       const adapter = new CommunityHarnessRuntimeAdapter("synth", { presetsDir: () => dir,
         tmux: { hasSession: async () => true, getPaneCommand: async () => "node", sendShellCommand: vi.fn() } });
       const input = makeInput(seed, { adapter, skipHarnessLaunch: true,
@@ -1044,6 +1053,27 @@ describe("StartupOrchestrator", () => {
         if (!result.ok) expect(result.errors.join(" ")).toContain("Startup assisted");
         expect(orch.canContinueStartup(seed.nodeId, seed.sessionId)).toBe(false); // Don't paste uncertain context again.
         expect(db.prepare("SELECT seq FROM events WHERE node_id=? AND type='node.startup_ready'").all(seed.nodeId)).toEqual([]);
+      }
+      if (fullRestore) {
+        eventBus.emit({ type: "restore.completed", rigId: seed.rigId, snapshotId: "snapshot", result: {
+          snapshotId: "snapshot", preRestoreSnapshotId: null, rigResult: "partially_restored",
+          nodes: [{ nodeId: seed.nodeId, logicalId: "impl", status: "attention_required" }], warnings: [],
+        } });
+        const completed = db.prepare("SELECT payload FROM events WHERE type='restore.completed'").get();
+        const strict = vi.fn(async () => ({ ok: false as const, code: "runtime_unsupported", detail: "Native lineage proof isn't supported for synth." }));
+        const reconciler = new SeatAttentionReconciler({ db, sessionRegistry, eventBus,
+          agentActivityStore: new AgentActivityStore({ db, eventBus }), reconcileRestoreOutcome: strict });
+        expect(await reconciler.clearAttention("r01-impl")).toMatchObject({ ok: false });
+        expect(strict).toHaveBeenCalledTimes(1);
+        strict.mockClear();
+        expect(await reconciler.clearAttention("r01-impl", { reason: "Checked startup; seat responded" }))
+          .toMatchObject({ ok: true, clearedBy: "operator_attestation", clearedClasses: ["startup_status", "restore_outcome"] });
+        expect(strict).not.toHaveBeenCalled();
+        expect(getNodeInventory(db, seed.rigId)[0]).toMatchObject({ startupStatus: "ready", restoreOutcome: "operator_recovered" });
+        const event = db.prepare("SELECT payload FROM events WHERE type='restore.outcome_reconciled'").get() as { payload: string };
+        expect(JSON.parse(event.payload)).toMatchObject({ attemptId: started!.seq, evidence: { source: "operator_attestation", runtimeCwdVerified: false } });
+        expect(db.prepare("SELECT payload FROM events WHERE type='restore.completed'").get()).toEqual(completed);
+        expect(tmux.sendText).toHaveBeenCalledTimes(1);
       }
     } finally { nodeFs.rmSync(dir, { recursive: true, force: true }); }
   });

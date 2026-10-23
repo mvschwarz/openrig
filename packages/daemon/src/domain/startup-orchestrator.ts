@@ -376,6 +376,7 @@ export class StartupOrchestrator {
       for (const reason of refused) warnings.push(`${input.sessionName ?? input.nodeId}: seat_launch_addition_refused: ${reason}; launched without it`);
     }
     const deliveryInput: StartupDeliveryInput = { ...input, warnings, submissionWarnings: [], startupAttemptId: randomUUID(), sendOrder: 0, submissionDiagnostics: [] };
+    const startupAssisted = input.adapter instanceof CommunityHarnessRuntimeAdapter && input.adapter.startupAssisted();
     const errors: string[] = [];
     let continuityOutcome: "resumed" | "fresh" | "forked" | "rebuilt" = input.resumeToken
       ? "resumed"
@@ -896,12 +897,12 @@ export class StartupOrchestrator {
 
     // Keep the running conversation, but don't call an explicitly assisted startup ready.
     // The paste and Enter were attempted; continuing startup must not paste that context a second time.
-    if (deliveryInput.sendOrder > 0 && input.adapter instanceof CommunityHarnessRuntimeAdapter && input.adapter.startupAssisted()) {
+    if (deliveryInput.sendOrder > 0 && startupAssisted) {
       return this.fail(deliveryInput, "attention_required", [
         `Startup assisted for community harness "${input.adapter.runtime}" in ${input.binding.tmuxSession}: text and Enter were sent, but submission isn't confirmed. `
           + `Check the pane and submit any staged startup text; don't resend it. Once the seat has responded, acknowledge it with `
           + `rig seat clear-attention ${shellQuote(input.binding.tmuxSession!)} --reason ${shellQuote("Startup submission checked; seat responded")}.`,
-      ], undefined, false, undefined, false, "post_delivery_readiness", false);
+      ], undefined, false, undefined, false, "assisted_startup", false);
     }
 
     // 8. Mark ready

@@ -554,6 +554,32 @@ describe("SeatAttentionReconciler", () => {
     expect(payload.nodeId).toBe(nodeId);
   });
 
+  it.each([
+    ["a previous restore attempt", "assisted_startup", true, false],
+    ["another startup failure", "readiness_check", false, false],
+    ["another occupant", "assisted_startup", false, true],
+  ] as const)("doesn't acknowledge full-restore attention from %s as this seat's assisted startup", async (_case, stage, oldAttempt, otherOccupant) => {
+    const { rigId, nodeId, sessionId } = seedAttentionSeat("assisted-control", "worker@assisted-control");
+    sessionRegistry.updateStatus(sessionId, "running");
+    db.prepare("UPDATE nodes SET runtime='synth' WHERE id=?").run(nodeId);
+    sessionRegistry.recordCommunityHarnessSelection(sessionId, "synth");
+    const start = () => eventBus.emit({ type: "restore.started", rigId, snapshotId: "snapshot" });
+    if (!oldAttempt) start();
+    eventBus.emit({ type: "node.startup_failed", rigId, nodeId,
+      sessionId: otherOccupant ? "retired-occupant" : sessionId, stage, error: "Needs attention" });
+    if (oldAttempt) start();
+    eventBus.emit({ type: "restore.completed", rigId, snapshotId: "snapshot", result: {
+      snapshotId: "snapshot", preRestoreSnapshotId: null, rigResult: "partially_restored",
+      nodes: [{ nodeId, logicalId: "worker", status: "attention_required" }], warnings: [],
+    } });
+    const strict = vi.fn(async () => ({ ok: false as const, code: "runtime_unsupported", detail: "Not an assisted startup acknowledgement." }));
+    const checked = new SeatAttentionReconciler({ db, sessionRegistry, eventBus, agentActivityStore: activityStore, reconcileRestoreOutcome: strict });
+    expect(await checked.clearAttention("worker@assisted-control", { reason: "Checked startup" })).toMatchObject({ ok: false });
+    expect(strict).toHaveBeenCalledTimes(1);
+    expect(db.prepare("SELECT startup_status FROM sessions WHERE id=?").get(sessionId)).toEqual({ startup_status: "attention_required" });
+    expect(db.prepare("SELECT seq FROM events WHERE type='restore.outcome_reconciled'").all()).toEqual([]);
+  });
+
   it("OPR.0.5.9.14: refuses derived-class clear without strict evidence even with operator attestation", async () => {
     const { rigId, nodeId, sessionId } = seedDerivedAttentionSeat("r-derived-refuse", "worker@r-derived-refuse");
     const before = db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").all();

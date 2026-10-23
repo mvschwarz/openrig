@@ -388,6 +388,7 @@ const POSITIVE_STATES = new Set(["running", "idle"]);
 type DerivedAttentionOutcome = {
   status: "failed" | "attention_required";
   source: "restore.completed" | "restore.subset_completed";
+  assistedStartupAttemptId?: number;
 };
 
 export class SeatAttentionReconciler {
@@ -418,13 +419,15 @@ export class SeatAttentionReconciler {
     }
 
     const previousError = session.latestError ?? null;
+    const assistedRestore = opts?.reason && session.startupStatus === "attention_required" && !identityClassActive
+      ? derivedOutcome?.assistedStartupAttemptId : undefined;
 
     // Full-restore outcomes belong to one immutable attempt. Generic activity,
     // send verification, and operator attestation cannot prove that lineage;
     // delegate to the restore owner that checks the exact native resume token
     // and appends the attempt-scoped reconciliation event. Subset restores do
     // not have a restore.started receipt and retain their established path.
-    if (derivedOutcome?.source === "restore.completed") {
+    if (derivedOutcome?.source === "restore.completed" && assistedRestore === undefined) {
       const reconcile = this.deps.reconcileRestoreOutcome;
       if (!reconcile) {
         eventBus.emit({
@@ -539,6 +542,7 @@ export class SeatAttentionReconciler {
     // Operator attestation override (--reason).
     if (opts?.reason) {
       const clearedClasses: ("startup_status" | "restore_outcome" | "pane_identity")[] = [];
+      const acknowledgeRestore = derivedOutcome?.source === "restore.subset_completed" || assistedRestore !== undefined;
       if (startupClassActive) {
         sessionRegistry.updateStartupStatus(session.id, "ready", new Date().toISOString());
         eventBus.emit({
@@ -554,12 +558,12 @@ export class SeatAttentionReconciler {
         });
         clearedClasses.push("startup_status");
       }
-      if (derivedOutcome?.source === "restore.subset_completed") {
+      if (derivedOutcome && acknowledgeRestore) {
         eventBus.emit({
           type: "restore.outcome_reconciled",
           rigId: session.rigId,
           nodeId: session.nodeId,
-          attemptId: 0,
+          attemptId: assistedRestore ?? 0,
           from: derivedOutcome.status,
           to: "operator_recovered",
           evidence: { source: "operator_attestation", reason: opts.reason, runtimeCwdVerified: false },
@@ -575,7 +579,7 @@ export class SeatAttentionReconciler {
         reason: opts.reason,
         previousError,
         clearedClasses,
-        derivedEvidence: derivedOutcome?.source === "restore.subset_completed"
+        derivedEvidence: acknowledgeRestore
           ? { source: "operator_attestation", reason: opts.reason, runtimeCwdVerified: false }
           : undefined,
       };
@@ -712,12 +716,14 @@ export class SeatAttentionReconciler {
     startupStatus: string;
     sessionStatus: string;
     runtime: string | null;
+    communityHarness: string | null;
     resumeToken: string | null;
     bindingPane: string | null;
     latestError: string | null;
   } | null {
     const row = this.deps.sessionRegistry.db.prepare(
       `SELECT s.id, s.node_id, n.rig_id, n.runtime, s.resume_token, b.tmux_pane, s.startup_status, s.status,
+              ${sessionCommunityHarnessSelect(this.deps.sessionRegistry.db)} AS community_harness,
               (SELECT e.payload FROM events e WHERE e.node_id = s.node_id AND e.type IN ('node.startup_attention_required','node.startup_failed') ORDER BY e.seq DESC LIMIT 1) as latest_error_payload
        FROM sessions s
        JOIN nodes n ON n.id = s.node_id
@@ -731,6 +737,7 @@ export class SeatAttentionReconciler {
       startup_status: string;
       status: string;
       runtime: string | null;
+      community_harness: string | null;
       resume_token: string | null;
       tmux_pane: string | null;
       latest_error_payload: string | null;
@@ -755,6 +762,7 @@ export class SeatAttentionReconciler {
       startupStatus: row.startup_status ?? "pending",
       sessionStatus: row.status ?? "unknown",
       runtime: row.runtime,
+      communityHarness: row.community_harness,
       resumeToken: row.resume_token,
       bindingPane: row.tmux_pane,
       latestError,
@@ -774,7 +782,7 @@ export class SeatAttentionReconciler {
     return verdict.verdict === "mismatch" || verdict.verdict === "pane_missing" ? verdict : null;
   }
 
-  private getDerivedAttentionOutcome(session: { nodeId: string; rigId: string; sessionStatus: string }): DerivedAttentionOutcome | null {
+  private getDerivedAttentionOutcome(session: { id: string; nodeId: string; rigId: string; sessionStatus: string; runtime: string | null; communityHarness: string | null }): DerivedAttentionOutcome | null {
     if (!this.deps.db) return null;
 
     const rows = this.deps.db.prepare(
@@ -814,11 +822,28 @@ export class SeatAttentionReconciler {
         // Mirror deriveNodeLifecycleState: attention_required regardless of
         // sessionStatus; failed only when sessionStatus=running.
         const source = row.type as DerivedAttentionOutcome["source"];
-        if (n.status === "attention_required") return { status: "attention_required", source };
+        if (n.status === "attention_required") {
+          // Only this occupant's explicit assisted-startup outcome inside this attempt can be acknowledged.
+          // Native identity failures and unrelated/stale community failures still require strict reconciliation.
+          const assisted = source === "restore.completed" && communityHarnessOf(session.communityHarness, session.runtime)
+            && this.assistedStartupInAttempt(session, attemptSeq, row.seq);
+          return { status: "attention_required", source, ...(assisted ? { assistedStartupAttemptId: attemptSeq } : {}) };
+        }
         if (n.status === "failed" && session.sessionStatus === "running") return { status: "failed", source };
         return null;
       } catch { continue; }
     }
     return null;
+  }
+
+  private assistedStartupInAttempt(session: { id: string; nodeId: string }, attemptId: number, completedSeq: number): boolean {
+    const latest = this.deps.db!.prepare(
+      "SELECT seq, payload FROM events WHERE node_id = ? AND type IN ('node.startup_pending','node.startup_ready','node.startup_failed') ORDER BY seq DESC LIMIT 1",
+    ).get(session.nodeId) as { seq: number; payload: string } | undefined;
+    if (!latest || latest.seq <= attemptId || latest.seq >= completedSeq) return false;
+    try {
+      const event = JSON.parse(latest.payload);
+      return event.type === "node.startup_failed" && event.sessionId === session.id && event.stage === "assisted_startup";
+    } catch { return false; }
   }
 }

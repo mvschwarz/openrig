@@ -146,8 +146,7 @@ CLI.
 - **Startup is assisted:** identity text has remained in Cursor's composer after the initial Enter. The preset declares
   `startup_assisted: true`; check and submit it in the pane as above. Unattended startup submission is not confirmed.
 - **Sender names come from the sending session.** A command run from an unattached operator shell can arrive as
-  `<unknown sender>`; that doesn't mean the receiving Cursor seat lost its identity. To send as a named teammate, join
-  the operator's session with `rig attach --self` first. Commands run by the Cursor seat inherit that seat's identity.
+  `<unknown sender>`; that doesn't mean the receiving Cursor seat lost its identity.
 
 Copy both and maintain them as your own.
 

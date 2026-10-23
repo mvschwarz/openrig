@@ -950,6 +950,7 @@ export type StartupFailureStage =
   | "after_files"
   | "after_ready"
   | "post_delivery_readiness"
+  | "assisted_startup"
   | "identity_verification";
 
 export interface LifecycleDefaults {
