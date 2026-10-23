@@ -64,8 +64,8 @@ describe("rig ps — runtime + declared model", () => {
   const filledCells = (widths: number[]) => widths.map((width, i) => String.fromCharCode(97 + i).repeat(width));
 
   it("padCompactNodeRow keeps every column apart when each cell fills its width", () => {
-    const cells = filledCells([22, 38, 11, 17, 6]);
-    const row = (padCompactNodeRow as (...cells: string[]) => string)(...cells, "reason");
+    const cells = filledCells([22, 38, 11, 17, 6, 4]);
+    const row = (padCompactNodeRow as (...cells: string[]) => string)(...cells.slice(0, 5), "reason", cells[5]!);
     expect(row.split(" ")).toEqual([...cells, "reason"]);
   });
 

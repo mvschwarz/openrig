@@ -161,6 +161,7 @@ nodesRoutes.get("/", observeInventoryHandler, async (c) => {
   const withTerminalAndWork = attachTerminalActivityAndWork(withActivity, {
     db: deps.rigRepo.db,
     seatActivity: deps.seatActivityService,
+    agentActivity: deps.agentActivityStore,
   });
   // Slice 13 fix 2 — HOST ATTRIBUTION AT THE SOURCE. A daemon only inventories its own seats, so
   // every row it serves lives on THIS host; stamping the boot-reconciled self-id here means a
@@ -195,8 +196,12 @@ nodesRoutes.get("/:logicalId", async (c) => {
   const [detailWithTerminalAndWork] = attachTerminalActivityAndWork(detailWithActivity ? [detailWithActivity] : [detail], {
     db: deps.rigRepo.db,
     seatActivity: deps.seatActivityService,
+    agentActivity: deps.agentActivityStore,
   });
   Object.assign(detail, {
+    needsAttention: detailWithTerminalAndWork?.needsAttention,
+    arbitratedNeedsInput: detailWithTerminalAndWork?.arbitratedNeedsInput,
+    needsInputEvidence: detailWithTerminalAndWork?.needsInputEvidence,
     agentActivity: detailWithTerminalAndWork?.agentActivity,
     terminalActive: detailWithTerminalAndWork?.terminalActive,
     // ARCH RULING 3a947fb1: serve the raw lastActivityAt fact on node-detail too

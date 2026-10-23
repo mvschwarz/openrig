@@ -43,7 +43,7 @@ export function spikeFixtureGraph(): RigGraph {
         data: {
           // ◐ partial/% — the EXISTING amber-attention state with a served ctx%
           logicalId: "dev.qa", podNamespace: "dev", runtime: "codex", model: "gpt",
-          status: "running", nodeKind: "agent", startupStatus: "attention_required", contextUsedPercentage: 63,
+          status: "running", nodeKind: "agent", needsAttention: true, startupStatus: "attention_required", contextUsedPercentage: 63,
           agentActivity: { state: "needs_input" }, terminalActive: false, canonicalSessionName: "dev-qa@openrig-build",
         },
       },

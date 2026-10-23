@@ -376,6 +376,8 @@ function agentDetailLines(
     ? snap.seatEffort.report
     : null;
   const activityReason = agent.activity?.needsInput?.reason ?? agent.activity?.signalReason ?? null;
+  const attention = agent.needsAttention == null ? "unknown" : agent.needsAttention ? "needed" : "not raised";
+  const inputEvidence = agent.arbitratedNeedsInput == null ? "absent" : `${agent.arbitratedNeedsInput ? "observed input" : "observed clear"}${agent.needsInputEvidence ? ` · ${agent.needsInputEvidence.rung} · ${displayTime(agent.needsInputEvidence.observedAt, timeZone)}` : ""}`;
   const needsRows = needs.length > 0
     ? needs.flatMap((item) => [
       ...wrapDetailValue("qitem", item.qitemId ?? "no actionable qitem id served", contentWidth),
@@ -405,7 +407,7 @@ function agentDetailLines(
       {
         title: "CURRENT ACTIVITY",
         fields: [
-          { label: "activity", value: agent.activity?.activity ?? agent.status },
+          { label: "activity", value: `${agent.activity?.activity ?? agent.status} · attention ${attention} · needs-input evidence ${inputEvidence}` },
           ...(activityReason ? [{ label: "reason", value: activityReason }] : []),
           ...(agent.activity?.decidedBy ? [{ label: "decided by", value: agent.activity.decidedBy }] : []),
           ...(agent.activity?.signalSource || agent.activity?.signalReason ? [{ label: "signal", value: `${agent.activity.signalSource ?? "unknown"} · ${agent.activity.signalReason ?? "no reason"}` }] : []),
@@ -767,6 +769,7 @@ function instanceContentLines(
   let seatCount = 0;
   let workingCount = 0;
   let attentionCount = 0;
+  let attentionUnknown = 0;
   let openCount = 0;
   for (const rig of host.rigs) {
     const agents = rig.pods.flatMap((pod) => pod.agents.map((agent) => ({ pod: pod.name, agent })))
@@ -789,7 +792,8 @@ function instanceContentLines(
       const queue = queueFacts(snap, agent.session);
       seatCount += 1;
       if (["active", "working", "running"].includes(agent.status)) workingCount += 1;
-      if (/attention|needs|blocked|unknown|failed/.test(agent.status)) attentionCount += 1;
+      if (agent.needsAttention === true) attentionCount += 1;
+      else if (agent.needsAttention == null) attentionUnknown += 1;
       openCount += queue.count;
       lines.push({
         text: tableRow(columns, {
@@ -808,7 +812,7 @@ function instanceContentLines(
       });
     }
   }
-  lines.push({ text: "" }, { text: host.rigs.some(r => r.inventoryUnavailable) ? `${host.rigs.length} rigs · inventory incomplete · ${seatCount} seats read` : `${host.rigs.length} rigs · ${seatCount} seats · ${workingCount} working · ${attentionCount} need attention · ${openCount}${queueIncomplete(snap) ? "+ sampled" : ""} open rows` });
+  lines.push({ text: "" }, { text: host.rigs.some(r => r.inventoryUnavailable) ? `${host.rigs.length} rigs · inventory incomplete · ${seatCount} seats read` : `${host.rigs.length} rigs · ${seatCount} seats · ${workingCount} working · ${attentionCount} need attention${attentionUnknown ? ` · ${attentionUnknown} attention unknown` : ""} · ${openCount}${queueIncomplete(snap) ? "+ sampled" : ""} open rows` });
   lines.push(...recentLines(snap, scope, contentWidth, false, state.timeZone));
   return lines;
 }

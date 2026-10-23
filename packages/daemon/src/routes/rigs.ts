@@ -396,6 +396,7 @@ rigsRoutes.get("/:id/graph", async (c) => {
   const inventoryWithActivity = attachTerminalActivityAndWork(inventoryWithActivityOnly, {
     db: getRepo(c).db,
     seatActivity: seatActivityService,
+    agentActivity: agentActivityStore,
   });
 
   // PL-019 item 5: read-side join for active-qitem enrichment. Cheap by
@@ -423,6 +424,7 @@ rigsRoutes.get("/:id/graph", async (c) => {
     contextAvailability: n.contextUsage?.availability ?? "unknown",
     contextTotalInputTokens: n.contextUsage?.totalInputTokens ?? null,
     contextTotalOutputTokens: n.contextUsage?.totalOutputTokens ?? null,
+    needsAttention: n.needsAttention,
     agentActivity: n.agentActivity ?? null,
     currentQitems: n.canonicalSessionName
       ? currentQitemsBySession.get(n.canonicalSessionName) ?? []

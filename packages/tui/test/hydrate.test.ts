@@ -204,6 +204,14 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     });
     expect(snap.hosts[0]?.rigs[0]?.pods[0]?.agents[0]).toMatchObject({ nodeId: "01JNODEIMPL" });
   });
+  it("shows attention as unknown when an older daemon omits the seat flag", async () => {
+    const snap = await hydrateSnapshot(fixtureClient());
+    expect(snap.hosts[0]!.rigs[0]!.pods[0]!.agents[0]!.needsAttention).toBeNull();
+    const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    view.dispatch({ type: "drill", resource: "host", name: snap.hosts[0]!.name });
+    const output = renderScreen(view.get(), snap, { cols: 160, rows: 60 });
+    expect(output.lines.join("\n")).toContain("attention unknown");
+  });
   it("leaves health unassessed when a focused view skips the projection read", async () => {
     const context = { section: "topology" as const, viewTab: "table" as const, drill: [] };
     const snap = await hydrateSnapshot(fixtureClient(), undefined, undefined, undefined, undefined, context);
@@ -506,8 +514,8 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
 
     const nodes = [
       { ...base, logicalId: "dev.failed", startupStatus: "failed", lifecycleState: "attention_required", terminalActive: true },
-      { ...base, logicalId: "dev.attention", startupStatus: "attention_required", lifecycleState: "attention_required", terminalActive: false },
-      { ...base, logicalId: "dev.input", startupStatus: "ready", agentActivity: { state: "needs_input" }, terminalActive: true },
+      { ...base, logicalId: "dev.attention", needsAttention: true, startupStatus: "attention_required", lifecycleState: "attention_required", terminalActive: false },
+      { ...base, logicalId: "dev.input", needsAttention: true, arbitratedNeedsInput: true, startupStatus: "ready", agentActivity: { state: "needs_input" }, terminalActive: true },
       { ...base, logicalId: "dev.active", startupStatus: "ready", agentActivity: { state: "running" }, terminalActive: true },
       { ...base, logicalId: "dev.mismatch", startupStatus: "ready", lifecycleState: "attention_required", agentActivity: { state: "running" }, terminalActive: true, identityVerdict: { verdict: "mismatch" } },
       { ...base, logicalId: "dev.missing", startupStatus: "ready", lifecycleState: "attention_required", agentActivity: { state: "running" }, terminalActive: true, identityVerdict: { verdict: "pane_missing" } },
@@ -538,7 +546,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     const nodes = [
       { ...base, ...quiet, logicalId: "dev.app-quiet", runtime: "synth-harness", communityHarness: { harness: "synth-harness" } },
       { ...base, ...quiet, logicalId: "dev.app-moving", runtime: "synth-harness", communityHarness: { harness: "synth-harness" }, terminalActive: true },
-      { ...base, ...quiet, logicalId: "dev.app-prompt", runtime: "synth-harness", communityHarness: { harness: "synth-harness" }, agentActivity: { state: "needs_input" } },
+      { ...base, ...quiet, logicalId: "dev.app-prompt", needsAttention: true, arbitratedNeedsInput: null, runtime: "synth-harness", communityHarness: { harness: "synth-harness" }, agentActivity: { state: "needs_input" } },
       { ...base, ...quiet, logicalId: "dev.pi-quiet", runtime: "pi" },
       { ...base, ...quiet, logicalId: "dev.claude-quiet", runtime: "claude-code" },
     ];
@@ -547,7 +555,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     expect(statuses).toEqual({
       "dev.app-quiet": "unknown",
       "dev.app-moving": "active",
-      "dev.app-prompt": "needs_input",
+      "dev.app-prompt": "attention_required",
       "dev.pi-quiet": "idle",
       "dev.claude-quiet": "idle",
     });
@@ -568,6 +576,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
       {
         ...base,
         logicalId: "dev.missing-attention",
+        needsAttention: true,
         sessionStatus: "detached",
         startupStatus: "attention_required",
         lifecycleState: "attention_required",

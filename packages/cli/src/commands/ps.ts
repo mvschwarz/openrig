@@ -44,6 +44,10 @@ interface PsEntry {
 }
 
 interface NodeEntry {
+  /** Served daemon attention, never re-derived here. Missing on an older daemon. */
+  needsAttention?: boolean;
+  arbitratedNeedsInput?: boolean | null;
+  needsInputEvidence?: { rung: string; observedAt: string } | null;
   rigId: string;
   rigName: string;
   logicalId: string;
@@ -229,6 +233,9 @@ const ALLOWED_NODE_FIELDS = new Set([
   "inProgressWorkCount",
   "blockedWorkCount",
   "agentActivity",
+  "needsAttention",
+  "arbitratedNeedsInput",
+  "needsInputEvidence",
   "contextUsage",
   "heldReason",
   "storedSessionStatus",
@@ -614,13 +621,6 @@ function selectFanOutFields(entries: Array<Record<string, unknown>>, fields: str
   });
 }
 
-function needsAttention(node: NodeEntry): boolean {
-  return node.lifecycleState === "attention_required"
-    || node.startupStatus === "attention_required"
-    || node.startupStatus === "failed"
-    || node.agentActivity?.state === "needs_input";
-}
-
 function hasCurrentUsageLimit(node: NodeEntry): boolean {
   const activity = node.agentActivity;
   return activity?.state === "unknown" && activity.reason === "usage_limit"
@@ -707,7 +707,7 @@ export function formatDeclaredModel(model: string | null | undefined): string {
 
 export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, unknown>> {
   return nodes.map((n) => {
-    const attention = needsAttention(n);
+    const attention = n.needsAttention === true;
     const observation = n.modelObservation == null ? null : modelObservation(n.modelObservation, n.sessionStatus === "running");
     const compact: Record<string, unknown> = {
       // identity (rigId/rigName + logicalId + session) — disambiguates under -A.
@@ -731,6 +731,8 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       modelObservation: !observation ? null : observation.status === "observed"
         ? [observation.model, observation.source, observation.observedAt]
         : { status: "unknown", reason: observation.reason },
+      // Provenance remains on --full / --fields; the compact read keeps the served flag.
+      ...(n.needsAttention === undefined ? {} : { needsAttention: n.needsAttention }),
       // lifecycle + session/startup state.
       sessionStatus: n.sessionStatus,
       startupStatus: n.startupStatus,
@@ -923,7 +925,8 @@ podNamespace, hostSelfId, canonicalSessionName, nodeKind, runtime, communityHarn
 intentionallyStopped, startupStatus, restoreOutcome, lifecycleState, tmuxAttachCommand,
 resumeCommand, latestError, terminalActive, hasAssignedWork,
 assignedWorkCount, pendingWorkCount, inProgressWorkCount, blockedWorkCount,
-agentActivity, contextUsage, heldReason, storedSessionStatus, identityVerdict.
+agentActivity, needsAttention, arbitratedNeedsInput, needsInputEvidence,
+contextUsage, heldReason, storedSessionStatus, identityVerdict.
 
 --host runs on a remote host declared in ~/.openrig/hosts.yaml (no current-rig
 default applied; the remote host's rigs are shown).
@@ -1352,9 +1355,9 @@ async function handleNodes(
   const humanTruncated = !opts.full && limit === null && filtered.length > HUMAN_NODE_BUDGET;
 
   if (useCompact) {
-    console.log(padCompactNodeRow("RIG", "SESSION", "LIFECYCLE", "ACTIVITY", "WORK", "REASON"));
+    console.log(padCompactNodeRow("RIG", "SESSION", "LIFECYCLE", "ACTIVITY", "WORK", "REASON", "ATTN"));
     for (const n of humanList as NodeEntry[]) {
-      const attn = needsAttention(n);
+      const attn = n.needsAttention === true;
       const reason = missingSessionGuidance(n) ?? (attn || hasCurrentUsageLimit(n)
         ? (n.latestError ? truncate(n.latestError, 40) : n.agentActivity?.reason ?? "—")
         : livenessUnconfirmed(n) ? "liveness unconfirmed" : "—");
@@ -1365,6 +1368,7 @@ async function handleNodes(
         formatActivity(n),
         formatHasWork(n.hasAssignedWork, n.assignedWorkCount ?? n.pendingWorkCount),
         reason,
+        n.needsAttention === undefined ? "?" : n.needsAttention ? "yes" : "no",
       ));
     }
   } else {
@@ -1477,13 +1481,14 @@ export function padNodeRow(rig: string, pod: string, member: string, session: st
   ].join(NODE_COLUMN_SEPARATOR);
 }
 
-export function padCompactNodeRow(rig: string, session: string, lifecycle: string, activity: string, work: string, reason: string): string {
+export function padCompactNodeRow(rig: string, session: string, lifecycle: string, activity: string, work: string, reason: string, attention = "?"): string {
   return [
     fitCell(rig, 22),
     fitCell(session, 38),
     fitCell(lifecycle, 11),
     fitCell(activity, 17),
     fitCell(work, 6),
+    fitCell(attention, 4),
     reason,
   ].join(NODE_COLUMN_SEPARATOR);
 }

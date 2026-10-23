@@ -65,6 +65,7 @@ function runningDeps(port: number): StatusDeps {
 // This is the minimum to prove the compact-default token regression.
 
 function makeFatNode(rigId: string, rigName: string, logicalId: string, opts?: {
+  needsAttention?: boolean;
   lifecycleState?: string;
   sessionStatus?: string;
   startupStatus?: string;
@@ -82,6 +83,9 @@ function makeFatNode(rigId: string, rigName: string, logicalId: string, opts?: {
   return {
     rigId,
     rigName,
+    needsAttention: opts?.needsAttention ?? false,
+    arbitratedNeedsInput: null,
+    needsInputEvidence: null,
     logicalId,
     podId: `pod-${logicalId.split(".")[0]}`,
     podNamespace: logicalId.split(".")[0],
@@ -144,6 +148,7 @@ const RIG_A_NODES = [
   makeFatNode("rig-a", "openrig-build", "rev1.r2"),
   // One attention node — reason must appear in compact
   makeFatNode("rig-a", "openrig-build", "dev1.design", {
+    needsAttention: true,
     lifecycleState: "attention_required",
     startupStatus: "attention_required",
     activityState: "needs_input",
@@ -380,12 +385,12 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
 
   it.each([[false, false], [true, false], [false, true]])("shows current limits without hiding startup failures (stale: %s, failed: %s)", async (stale, failed) => {
     const node = RIG_B_NODES[0]!;
-    const original = { agentActivity: node.agentActivity, startupStatus: node.startupStatus, latestError: node.latestError };
+    const original = { agentActivity: node.agentActivity, startupStatus: node.startupStatus, latestError: node.latestError, needsAttention: node.needsAttention };
     node.agentActivity = {
       ...original.agentActivity, state: "unknown", reason: "usage_limit", evidenceSource: "runtime_hook",
       rawEvent: "at_limit", stale, fallback: false,
     } as typeof original.agentActivity;
-    if (failed) Object.assign(node, { startupStatus: "failed", latestError: "startup failure" });
+    if (failed) Object.assign(node, { startupStatus: "failed", latestError: "startup failure", needsAttention: true });
     try {
       const json = await captureLogs(() => makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--rig", "openrig-comms", "--json"]).then(() => {}));
       const activity = JSON.parse(json.logs.join(""))[0].agentActivity;
@@ -660,7 +665,7 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
       seat("ops.untimed", unavailable),
       seat("ops.verified", { verdict: "verified", reason: null, observedAt: at }),
       { ...seat("ops.stopped", { ...unavailable, observedAt: at }, { sessionStatus: "exited" }), intentionallyStopped: true },
-      seat("ops.codex", { verdict: "mismatch", reason: "tmux_unavailable", observedAt: at }, { lifecycleState: "attention_required", latestError: "codex identity mismatch" }),
+      seat("ops.codex", { verdict: "mismatch", reason: "tmux_unavailable", observedAt: at }, { needsAttention: true, lifecycleState: "attention_required", latestError: "codex identity mismatch" }),
     ];
     RIG_A_NODES.push(...(extra as unknown as typeof RIG_A_NODES));
     try {
@@ -676,7 +681,7 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
       });
       expect(row(compact, "ops.unavail").identityVerdict).not.toHaveProperty("evidence");
       expect(row(compact, "ops.untimed").identityVerdict).toEqual({ verdict: "tmux_unavailable", reason: "tmux_unavailable" });
-      expect(row(compact, "ops.codex")).toMatchObject({ lifecycleState: "attention_required", latestError: "codex identity mismatch" });
+      expect(row(compact, "ops.codex")).toMatchObject({ needsAttention: true, lifecycleState: "attention_required", latestError: "codex identity mismatch" });
       const selected = JSON.parse(await run("--json", "--fields", "logicalId,storedSessionStatus,identityVerdict")).entries;
       expect(row(selected, "ops.unavail")).toMatchObject({ storedSessionStatus: "running", identityVerdict: { reason: "tmux_unavailable", observedAt: at } });
 

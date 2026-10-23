@@ -49,6 +49,10 @@ interface HealthProjectionRead {
   coverage?: HealthCoverage[];
 }
 interface NodeInventoryRead {
+  needsAttention?: boolean;
+  arbitratedNeedsInput?: boolean | null;
+  needsInputEvidence?: { rung: string; observedAt: string } | null;
+
   nodeId?: string;
   logicalId: string;
   podNamespace?: string | null;
@@ -222,6 +226,9 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
   const identityDownranked = node.identityVerdict?.verdict === "mismatch"
     || (node.identityVerdict?.verdict === "pane_missing" && node.identityVerdict?.reason !== "session_missing");
   return {
+    needsAttention: node.needsAttention ?? null,
+    arbitratedNeedsInput: node.arbitratedNeedsInput ?? null,
+    needsInputEvidence: node.needsInputEvidence ?? null,
     nodeId: node.nodeId,
     name: node.logicalId,
     runtime: node.runtime ?? "unknown",
@@ -259,23 +266,17 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
       ? "detached"
       : node.startupStatus === "failed"
         ? "failed"
-      : node.lifecycleState === "attention_required" || identityDownranked || node.startupStatus === "attention_required"
-        ? "attention_required"
-        // S19: the SERVED taxonomy display decides first (the daemon's one bridge);
-        // the inline mixing below survives only as the pre-taxonomy fallback.
-        : node.activityState?.display === "needs-input"
-          ? "needs_input"
-          : node.agentActivity?.state === "needs_input"
-            ? "needs_input"
-            : node.sessionStatus === "running" || node.sessionStatus === "ready"
-              ? (node.activityState?.display === "working"
-                  ? "active"
-                  : node.activityState?.display === "idle"
-                    ? "idle"
-                    : (node.terminalActive === true || (node.terminalActive == null && node.agentActivity?.state === "running") ? "active"
-                      // A community harness gives no idle signal: a quiet screen is unknown, not idle.
-                      : node.communityHarness ? "unknown" : "idle"))
-              : (node.sessionStatus ?? "unknown"),
+      : node.needsAttention === true || identityDownranked
+        ? (node.arbitratedNeedsInput === true ? "needs_input" : "attention_required")
+        : node.sessionStatus === "running" || node.sessionStatus === "ready"
+          ? (node.activityState?.display === "working"
+            ? "active"
+            : node.activityState?.display === "idle"
+              ? "idle"
+              : (node.terminalActive === true || (node.terminalActive == null && node.agentActivity?.state === "running") ? "active"
+                // A community harness gives no idle signal: a quiet screen is unknown, not idle.
+                : node.communityHarness ? "unknown" : "idle"))
+          : (node.sessionStatus ?? "unknown"),
     live: node.lifecycleState === "running",
     canRun: node.lifecycleState !== "running"
       && node.sessionStatus !== "running"

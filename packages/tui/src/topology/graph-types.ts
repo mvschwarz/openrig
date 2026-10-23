@@ -5,6 +5,7 @@
 // packages/daemon/src/domain/graph-projection.ts (RFNode/RFEdge) and the
 // captured sample spike/real-graph-v-openrig-build.json.
 export interface GraphNodeData {
+  needsAttention?: boolean;
   logicalId: string;
   podNamespace?: string | null;
   podLabel?: string | null;

@@ -41,6 +41,23 @@ state. Attention/alarm values likewise stay in their own machinery (`attentionCo
 Both herdr and omnigent converged on this exclusion, with warning comments on the
 collision in both codebases.
 
+### Per-seat attention in the node inventory
+
+`rig ps --nodes` carries the daemon's `needsAttention` result, using the same predicate
+as the rig's `attentionCount`. It also serves `arbitratedNeedsInput`: `true` for observed
+input, `false` for an observed clear, and `null` when no authoritative needs-input source
+answered. `needsInputEvidence` retains that source's rung and observation time, or `null`.
+A zero prompt count alone is not an observed clear. Absent arbitration evidence leaves
+the existing live-hook fallback in effect; lifecycle, startup, held and error signals
+can independently raise attention. A false attention flag means no known trigger, not
+proof that an unobserved input box is clear.
+
+The compact human table's ATTN column renders `yes`, `no`, or `?` when the flag is
+unavailable. Compact JSON retains `needsAttention`; use `--full` or
+`--fields needsAttention,arbitratedNeedsInput,needsInputEvidence` with `--json` for the
+provenance. The TUI uses the served flag for attention glyphs and totals, and shows the
+needs-input evidence in seat detail. A missing flag from an older daemon stays unknown.
+
 ## Derived diagnoses — computed at read time, never stored
 
 - **PARKED** — the disease: `(activity = idle-at-prompt OR needs-input pending) ×

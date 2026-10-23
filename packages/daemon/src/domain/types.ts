@@ -726,6 +726,12 @@ export interface NodeInventoryEntry {
   resumeType: string | null;
   resumeToken: string | null;
   startupCompletedAt: string | null;
+  /** The daemon's attention predicate, also used by the rig attention total. */
+  needsAttention?: boolean;
+  /** true = observed input; false = observed clear; null = no authoritative needs-input answer.
+   * Absent only on inventory that has not been enriched. Never infer false from a zero count. */
+  arbitratedNeedsInput?: boolean | null;
+  needsInputEvidence?: import("./activity-taxonomy.js").ArbitratedSeatState["needsInputEvidence"];
   agentActivity?: AgentActivity;
   contextUsage?: ContextUsage;
   /** Health of the daemon-owned transcript capture for this seat. */
