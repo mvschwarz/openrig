@@ -383,7 +383,7 @@ describe("rig launch --seats", () => {
           ok: false,
           launched: [
             { nodeId: "n1", logicalId: "dev.driver", status: "fresh" },
-            { nodeId: "n2", logicalId: "dev.guard", status: "awaiting-decision", error: "Original session unresumable: resume requested but runtime continuity could not be verified. Re-run with --fresh dev.guard ..." },
+            { nodeId: "n2", logicalId: "dev.guard", status: "awaiting-decision", error: "Original session unresumable: resume requested but runtime continuity could not be verified. No session is running. Retry the restore with runtime adapters, or deliberately start only this seat fresh: rig seat launch 'dev.guard@rig-1' --fresh --reason \"<why>\"." },
           ],
           held: [],
           alreadyRunning: [],
@@ -405,7 +405,7 @@ describe("rig launch --seats", () => {
     const deps = makeDeps({
       "dev.driver/launch": {
         status: 409,
-        data: { ok: false, logicalId: "dev.driver", code: "awaiting-decision", status: "awaiting-decision", error: "Original session unresumable: resume requested but no token available. Re-run with --fresh dev.driver ..." },
+        data: { ok: false, logicalId: "dev.driver", code: "awaiting-decision", status: "awaiting-decision", error: "Original session unresumable: resume requested but no token available. No session is running. Restore the original session manually, or deliberately start only this seat fresh: rig seat launch 'dev.driver@rig-1' --fresh --reason \"<why>\"." },
       },
     });
     const cmd = launchCommand(deps);

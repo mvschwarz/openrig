@@ -555,15 +555,29 @@ describe("SeatAttentionReconciler", () => {
   });
 
   it("OPR.0.5.9.14: refuses derived-class clear without strict evidence even with operator attestation", async () => {
-    seedDerivedAttentionSeat("r-derived-refuse", "worker@r-derived-refuse");
+    const { rigId, nodeId, sessionId } = seedDerivedAttentionSeat("r-derived-refuse", "worker@r-derived-refuse");
+    const before = db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").all();
+    const sendVerify = vi.fn(async () => ({ ok: true }));
+    const capture = vi.fn(async (sessionName: string) => ({ ok: true, sessionName, content: "fixture" }));
     const derivedReconciler = new SeatAttentionReconciler({
-      sessionRegistry, eventBus, agentActivityStore: activityStore, db,
+      sessionRegistry, eventBus, agentActivityStore: activityStore, db, sendVerify, capture,
     });
 
     const result = await derivedReconciler.clearAttention("worker@r-derived-refuse", { reason: "operator verified" });
 
     expect(result.ok).toBe(false);
     expect(result.code).toBe("not_demonstrably_responsive");
+    expect(result.detail).toContain("strict restore reconciler is unavailable");
+    const refusals = db.prepare("SELECT payload FROM events WHERE type = 'seat.attention_clear_refused'").all() as { payload: string }[];
+    expect(refusals).toHaveLength(1);
+    expect(JSON.parse(refusals[0]!.payload)).toEqual({
+      type: "seat.attention_clear_refused", rigId, nodeId, sessionId,
+      sessionName: "worker@r-derived-refuse", attentionClass: "restore_outcome", code: "strict_reconciler_unavailable",
+    });
+    expect(db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").all()).toEqual(before);
+    expect(db.prepare("SELECT payload FROM events WHERE type = 'seat.attention_cleared'").all()).toHaveLength(0);
+    expect(sendVerify).not.toHaveBeenCalled();
+    expect(capture).not.toHaveBeenCalled();
     const events = db.prepare("SELECT payload FROM events WHERE type = 'restore.outcome_reconciled'").all();
     expect(events).toHaveLength(0);
   });

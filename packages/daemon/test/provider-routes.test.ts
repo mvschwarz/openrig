@@ -43,11 +43,12 @@ function appWith(svc: ProviderService | null): Hono {
 }
 
 describe("provider routes", () => {
-  it("the subscription move record is gone: its routes answer 404, not a disabled-feature 409", async () => {
+  it("move reports are queue items now, not the removed event-log record: no setting gates them, and there's no /moves/:id", async () => {
     const app = appWith(stubService);
-    expect((await app.request("/api/provider/moves")).status).toBe(404);
+    // This app wires no queue, so the report routes say so rather than answering a disabled-feature 409.
+    expect((await app.request("/api/provider/moves")).status).toBe(503);
+    expect((await app.request("/api/provider/moves", { method: "POST", body: "{}" })).status).toBe(503);
     expect((await app.request("/api/provider/moves/m-1")).status).toBe(404);
-    expect((await app.request("/api/provider/moves", { method: "POST", body: "{}" })).status).toBe(404);
   });
 
   it("GET /status returns the whole four-block model", async () => {

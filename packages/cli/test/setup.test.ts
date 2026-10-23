@@ -30,6 +30,8 @@ function makeDeps(overrides?: Partial<SetupDeps>): SetupDeps {
     exists: () => false,
     platform: "darwin",
     mkdirp: vi.fn(),
+    // Never the person's real config: a path that doesn't exist reads as unanswered.
+    routerLineStore: new ConfigStore(join(tmpdir(), "setup-router-line-none", "config.json")),
     ...overrides,
   };
 }
@@ -51,8 +53,13 @@ function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCod
 
 function expectRuntimeConfigDisclosure(result: SetupResult): void {
   // Setup leaves cmux configuration alone; only managed runtime disclosures remain.
-  expect(result.runtimeConfig).toHaveLength(4);
+  expect(result.runtimeConfig).toHaveLength(9);
   expect(result.runtimeConfig.find((d) => d.path === "~/.claude/settings.json")).toBeUndefined();
+  // The other writes are disclosed beside the router-line choice: guidance blocks, the collector, plugins, ignore entries.
+  expect(result.runtimeConfig.map((d) => `${d.runtime} ${d.path}`)).toEqual(expect.arrayContaining([
+    "claude-code CLAUDE.md (or CLAUDE.local.md when the rig chooses it)", "codex AGENTS.md", "claude-code .openrig/context-collector.cjs",
+    "codex .codex/plugins/<plugin>", "codex .git/info/exclude",
+  ]));
   expect(result.runtimeConfig).toEqual(expect.arrayContaining([
     {
       scope: "global",
@@ -70,13 +77,13 @@ function expectRuntimeConfigDisclosure(result: SetupResult): void {
       scope: "project",
       runtime: "claude-code",
       path: ".mcp.json",
-      purpose: "Apply selected Claude MCP runtime-resource fragments.",
+      purpose: "Merge MCP fragments a team selects.",
     },
     {
       scope: "global",
       runtime: "codex",
       path: "$CODEX_HOME/config.toml (default: ~/.codex/config.toml)",
-      purpose: "Pre-trust managed workspaces and apply selected Codex config runtime-resource fragments.",
+      purpose: expect.stringContaining("the openrig marketplace and openrig-core plugin"),
     },
   ]));
 }
@@ -1035,6 +1042,68 @@ describe("--providers: a provider the person didn't choose reads not selected, n
     await new Command().addCommand(setupCommand(makeDeps())).parseAsync(["node", "rig", "setup", "--providers", "gemini"]);
     expect(process.exitCode).toBe(1);
     expect(errors.join("\n")).toContain("Unknown provider 'gemini'");
+    process.exitCode = undefined;
+    vi.restoreAllMocks();
+  });
+});
+
+describe("rig setup: the router-line question", () => {
+  let dir: string;
+  let store: ConfigStore;
+  beforeEach(() => {
+    vi.stubEnv("OPENRIG_SKILLS_ROUTER_LINE_ENABLED", "");
+    delete process.env["OPENRIG_SKILLS_ROUTER_LINE_ENABLED"];
+    dir = mkdtempSync(join(tmpdir(), "setup-router-line-"));
+    store = new ConfigStore(join(dir, "config.json"));
+  });
+  afterEach(() => { vi.unstubAllEnvs(); rmSync(dir, { recursive: true, force: true }); });
+
+  const routerStep = (result: SetupResult) => result.steps.find((s) => s.id === "router_line");
+
+  it("shows the exact line and files, and an unanswered question isn't a yes: nothing is saved", async () => {
+    const set = vi.spyOn(store, "set");
+    const result = await runSetup(makeDeps({ routerLineStore: store }), {});
+    expect(routerStep(result)).toMatchObject({ status: "skipped", message: expect.stringContaining("it isn't a yes"), fixHint: "rig setup --router-line yes, or rig setup --router-line no" });
+    expect(result.routerLine).toMatchObject({ answer: "unasked", files: expect.stringContaining("AGENTS.md"), limit: expect.stringContaining("doesn't remove a line already written") });
+    expect(result.routerLine.line).toContain("rig skill loadout --seat self");
+    expect(result.routerLine.ifNo).toContain("Nothing is written into these files");
+    expect(set).not.toHaveBeenCalled();
+    expect(store.resolveWithSource("skills.router_line.enabled").source).toBe("default");
+  });
+
+  it.each([["yes", true], ["no", false]] as const)("saves --router-line %s and reads it back as the person's answer", async (choice, value) => {
+    const result = await runSetup(makeDeps({ routerLineStore: store }), { routerLine: choice });
+    expect(store.resolveWithSource("skills.router_line.enabled")).toMatchObject({ value, source: "file" });
+    expect(routerStep(result)).toMatchObject({ status: "applied", message: expect.stringContaining(`Saved: ${choice}.`) });
+    expect(result.routerLine).toMatchObject({ answer: choice, by: "saved" });
+    // A later bare run reports the saved answer without asking again.
+    const again = await runSetup(makeDeps({ routerLineStore: store }), {});
+    expect(routerStep(again)).toMatchObject({ status: "pass", message: `Saved answer: ${choice}.` });
+  });
+
+  it("a dry run saves nothing, and reports a saved answer as skipped like every dry-run step", async () => {
+    const result = await runSetup(makeDeps({ routerLineStore: store }), { dryRun: true, routerLine: "yes" });
+    expect(routerStep(result)).toMatchObject({ status: "skipped", message: "Dry run: would save your router-line answer: yes." });
+    expect(store.resolveWithSource("skills.router_line.enabled").source).toBe("default");
+    store.set("skills.router_line.enabled", "true");
+    const saved = await runSetup(makeDeps({ routerLineStore: store }), { dryRun: true });
+    expect(routerStep(saved)).toMatchObject({ status: "skipped", message: "Dry run: Saved answer: yes." });
+  });
+
+  it("says when the environment overrides the saved answer", async () => {
+    process.env["OPENRIG_SKILLS_ROUTER_LINE_ENABLED"] = "false";
+    const result = await runSetup(makeDeps({ routerLineStore: store }), { routerLine: "yes" });
+    expect(routerStep(result)).toMatchObject({ status: "warn", message: expect.stringContaining("overrides it (no)") });
+    expect(result.routerLine).toMatchObject({ answer: "no", by: "environment" });
+  });
+
+  it("refuses an answer other than yes or no before running setup", async () => {
+    const errors: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((...args) => { errors.push(args.map(String).join(" ")); });
+    process.exitCode = undefined;
+    await new Command().addCommand(setupCommand(makeDeps({ routerLineStore: store }))).parseAsync(["node", "rig", "setup", "--router-line", "maybe"]);
+    expect(process.exitCode).toBe(1);
+    expect(errors.join("\n")).toContain('--router-line takes yes or no, got "maybe".');
     process.exitCode = undefined;
     vi.restoreAllMocks();
   });

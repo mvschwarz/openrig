@@ -16,10 +16,11 @@ function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-config-on-demand-")); roots.push(root);
   const home = path.join(root, "home"), codexHome = path.join(root, "codex-home"), bin = path.join(root, "bin"), cwd = path.join(root, "project");
   for (const dir of [home, codexHome, bin, cwd]) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(bin, "codex"), `#!${process.execPath}\nif(process.argv.includes('--help'))console.log('Usage: codex [OPTIONS]\\n  --no-daemon');else if(process.argv.includes('--version'))console.log('codex-cli 0.155.1');\n`, { mode: 0o700 });
+  const calls = path.join(root, "codex-calls.jsonl");
+  fs.writeFileSync(path.join(bin, "codex"), `#!${process.execPath}\nrequire('node:fs').appendFileSync(${JSON.stringify(calls)}, JSON.stringify(process.argv.slice(2)) + "\\n");\nif(process.argv.includes('--help'))console.log('Usage: codex [OPTIONS]\\n  --no-daemon');else if(process.argv.includes('--version'))console.log('codex-cli 0.155.1');\n`, { mode: 0o700 });
   const config = path.join(codexHome, "config.toml");
   const env = { PATH: `${bin}:${path.dirname(process.execPath)}:/usr/bin:/bin`, HOME: home, CODEX_HOME: codexHome, OPENRIG_HOME: path.join(root, "instance") };
-  return { root, home, codexHome, cwd, config, env };
+  return { root, home, codexHome, cwd, config, env, calls };
 }
 
 async function startDaemon(f: ReturnType<typeof fixture>, hooksEnabled = true) {
@@ -84,11 +85,13 @@ it("a daemon with no Codex seat and hooks disabled leaves a config without the b
   try { expect(fs.existsSync(g.config)).toBe(false); } finally { other.db.close(); }
 }, 60000);
 
-it("a daemon that boots with a Codex seat still writes the hooks block and trust", async () => {
+it("a daemon with a selected Codex seat installs its plugin while retaining inline activity hooks", async () => {
   const f = fixture(); fs.writeFileSync(f.config, USER_CONFIG);
   const first = await startDaemon(f);
   first.db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-1', 'r')").run();
   first.db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime) VALUES ('node-1', 'rig-1', 'dev.impl', 'codex')").run();
+  first.db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, '[]', '[]', 'codex')")
+    .run("node-1", JSON.stringify([{ category: "plugin", absolutePath: path.join(f.env.OPENRIG_HOME, "plugins", "openrig-core") }]));
   first.db.close();
   expect(fs.readFileSync(f.config, "utf8")).toBe(USER_CONFIG);
   const second = await startDaemon(f);
@@ -97,6 +100,9 @@ it("a daemon that boots with a Codex seat still writes the hooks block and trust
     expect(text).toContain(USER_CONFIG);
     expect(text).toContain(HOOKS_BLOCK);
     expect(text).toContain("trusted_hash");
+    const calls = fs.existsSync(f.calls) ? fs.readFileSync(f.calls, "utf8").trim().split("\n").map((line) => JSON.parse(line) as string[]) : [];
+    expect(calls.filter((args) => args[0] === "plugin").map(args => args.slice(0,2))).toEqual([["plugin", "marketplace"], ["plugin", "add"]]);
+    // The stub records native calls only; it does not emulate Codex's cache/config writes.
   } finally { second.db.close(); }
 }, 60000);
 

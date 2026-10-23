@@ -29,6 +29,7 @@ function realVendorFs(): PluginVendorFs {
       w(dir, "");
       return r;
     },
+    copyFileExclusive: (src: string, dest: string) => fs.copyFileSync(src, dest, fs.constants.COPYFILE_EXCL),
     statMode: (p) => fs.statSync(p).mode,
     chmod: (p, m) => fs.chmodSync(p, m),
   };
@@ -219,5 +220,88 @@ describe("PluginVendorService release-version authority", () => {
       ) as { version: string };
       expect(installed.version).toBe(bundled.version);
     }
+  });
+});
+
+
+describe("managed refresh preserves recoverable edits", () => {
+  function upgrade(kind: "plugin" | "plugin skill" | "packaged skill", failBackup = false) {
+    const base = fs.mkdtempSync(nodePath.join(os.tmpdir(), "vendor-preserve-"));
+    const assets = nodePath.join(base, "assets"); seedAssets(assets);
+    const userPlugins = nodePath.join(base, "home", "plugins");
+    const globalRoot = nodePath.join(base, "global");
+    const plugin = nodePath.join(userPlugins, "openrig-core");
+    const source = kind === "plugin" ? nodePath.join(assets, "openrig-core") : plugin;
+    const target = kind === "plugin" ? plugin : nodePath.join(globalRoot, "compaction-restore");
+    const rel = kind === "plugin" ? "skills/compaction-restore/SKILL.md" : "SKILL.md";
+    const dest = nodePath.join(target, rel);
+    const logs: string[] = [];
+    const ops = realVendorFs();
+    const svc = new PluginVendorService({ vendoredAssetsDir: assets, userPluginsDir: userPlugins, fs: ops, httpClient,
+      logger: (...args) => logs.push(args.map(String).join(" ")) });
+    const manifest = (dir: string, version: string) => {
+      for (const harness of [".claude-plugin", ".codex-plugin"]) {
+        fs.mkdirSync(nodePath.join(dir, harness), { recursive: true });
+        fs.writeFileSync(nodePath.join(dir, harness, "plugin.json"), JSON.stringify({ name: "openrig-core", version }));
+      }
+    };
+    // Global projection reads a staged plugin; no daemon or native runtime involved.
+    if (kind !== "plugin") {
+      fs.mkdirSync(nodePath.join(plugin, "skills/compaction-restore"), { recursive: true });
+      fs.writeFileSync(nodePath.join(plugin, "skills/compaction-restore/SKILL.md"), "# compaction-restore\n");
+      manifest(plugin, "0.1.0");
+    }
+    fs.mkdirSync(nodePath.dirname(dest), { recursive: true });
+    const edited = Buffer.from([0xff, 0, ...Buffer.from("my unique edit\r\n")]);
+    fs.writeFileSync(dest, edited);
+    if (kind === "plugin") manifest(target, "0.0.1");
+    else fs.writeFileSync(nodePath.join(target, ".openrig-vendor-version"), "0.0.1\n");
+    if (failBackup) ops.copyFileExclusive = () => { throw Error("fixture backup denied"); };
+    const refresh = () => kind === "plugin" ? svc.ensureVendored("openrig-core")
+      : kind === "plugin skill" ? svc.ensureSkillGlobally("openrig-core", "compaction-restore", [globalRoot])
+        : svc.ensureSkillDirGlobally(nodePath.join(plugin, "skills/compaction-restore"), "compaction-restore", JSON.parse(fs.readFileSync(nodePath.join(source, ".claude-plugin/plugin.json"), "utf8")).version, [globalRoot]);
+    const backupFiles = () => {
+      const dir = nodePath.join(base, "home", "backups", "managed-refresh");
+      return fs.existsSync(dir) ? ops.listFiles(dir).map(rel => nodePath.join(dir, rel)) : [];
+    };
+    return { base, source, target, dest, edited, logs, manifest, refresh, backupFiles, ops };
+  }
+
+  it.each(["plugin", "plugin skill", "packaged skill"] as const)("%s: recovers exact edited bytes after refresh and keeps earlier recovery copies across retries", async kind => {
+    const f = upgrade(kind);
+    try {
+      // Fail the first target write after preservation, then retry the same version with another edit.
+      const write = f.ops.writeFile;
+      let failWrite = true;
+      f.ops.writeFile = (file, content) => {
+        if (failWrite && file.startsWith(f.target + nodePath.sep)) { failWrite = false; throw Error("fixture interrupted refresh"); }
+        write(file, content);
+      };
+      await expect(Promise.resolve().then(f.refresh)).rejects.toThrow("fixture interrupted refresh");
+      const saved = f.backupFiles().find(file => fs.readFileSync(file).equals(f.edited));
+      expect(saved).toBeDefined();
+      expect(f.logs.join("\n")).toContain(saved);
+      expect(f.logs.join("\n")).toContain("before managed refresh");
+      const nextEdit = Buffer.from("a second unique edit\n"); fs.writeFileSync(f.dest, nextEdit);
+      await f.refresh();
+      expect(fs.readFileSync(f.dest, "utf8")).toBe("# compaction-restore\n");
+      expect(fs.readFileSync(saved!)).toEqual(f.edited);
+      const second = f.backupFiles().find(file => fs.readFileSync(file).equals(nextEdit));
+      expect(second).toBeDefined();
+      await f.refresh(); // equal-version retry leaves both recovery copies intact
+      expect(fs.readFileSync(saved!)).toEqual(f.edited);
+      expect(fs.readFileSync(second!)).toEqual(nextEdit);
+    } finally { fs.rmSync(f.base, { recursive: true, force: true }); }
+  });
+
+  it.each(["plugin", "plugin skill", "packaged skill"] as const)("%s: a failed preservation leaves all target files and version authority unchanged and warns", async kind => {
+    const f = upgrade(kind, true);
+    try {
+      const before = Object.fromEntries(realVendorFs().listFiles(f.target).map(rel => [rel, fs.readFileSync(nodePath.join(f.target, rel))]));
+      await expect(Promise.resolve().then(f.refresh)).resolves.toBeUndefined();
+      for (const [rel, bytes] of Object.entries(before)) expect(fs.readFileSync(nodePath.join(f.target, rel))).toEqual(bytes);
+      expect(f.logs.join("\n")).toContain("fixture backup denied");
+      expect(f.logs.join("\n")).toContain("refresh skipped");
+    } finally { fs.rmSync(f.base, { recursive: true, force: true }); }
   });
 });

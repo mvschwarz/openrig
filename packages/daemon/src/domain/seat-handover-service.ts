@@ -1,3 +1,6 @@
+import type { CodexPermissionEnvelope, CodexPermissionContinuity, CodexRebuildPermissions } from "./codex-rebuild-permissions.js";
+import { parseSqliteUtcMs } from "./sqlite-time.js";
+import { lstartToMinTs } from "./codex-thread-id.js";
 import type Database from "better-sqlite3";
 import { readSeatEffort } from "./seat-effort.js";
 import { NativePermissionStore } from "./native-permission-store.js";
@@ -83,7 +86,7 @@ export interface SeatHandoverMutationResult {
    *  reason — recorded, never silently dropped. Absent for fresh/discovered. */
   sourceOutcome?:
     | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
-    | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string };
+    | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string; permissions?: CodexPermissionContinuity };
   /** OPR.0.7.0.9: a seat launch addition the successor launched without (missing or refused), named. */
   launchAdditionNotes?: string[];
 }
@@ -133,6 +136,7 @@ interface SeatHandoverServiceDeps {
   eventBus: EventBus;
   tmuxAdapter: TmuxAdapter;
   successorLauncher?: SuccessorSessionLauncher;
+  codexPermissions?: { currentCodexPermissions(nodeId: string, sessionName: string, cwd: string): Promise<CodexRebuildPermissions> };
   now?: () => Date;
   /** OpenRig identity/activity env stamped onto a created successor session,
    *  mirroring the launch identity env. Defaults to {} (the three core identity
@@ -212,6 +216,7 @@ interface SeatHandoverServiceDeps {
 }
 
 export class SeatHandoverService {
+  private codexPermissions: SeatHandoverServiceDeps["codexPermissions"];
   private db: Database.Database;
   private statusService: SeatStatusService;
   private planner: SeatHandoverPlanner;
@@ -239,6 +244,7 @@ export class SeatHandoverService {
     if (deps.db !== deps.sessionRegistry.db) throw new Error("SeatHandoverService: sessionRegistry must share the same db handle");
     if (deps.db !== deps.discoveryRepo.db) throw new Error("SeatHandoverService: discoveryRepo must share the same db handle");
     if (deps.db !== deps.eventBus.db) throw new Error("SeatHandoverService: eventBus must share the same db handle");
+    this.codexPermissions = deps.codexPermissions;
     this.db = deps.db;
     this.rigRepo = deps.rigRepo;
     this.sessionRegistry = deps.sessionRegistry;
@@ -464,6 +470,12 @@ export class SeatHandoverService {
     //    not a bare shell, before it can commit.
     // Seam B Guard-F1: an ORGANIC seat has no node provenance — the inherited rig
     // attachment still carries to the successor (continuity of the same seat).
+    let observedCodexPermissions: CodexRebuildPermissions | undefined;
+    if (parsed.source.mode === "rebuild" && node.runtime === "codex") {
+      try { observedCodexPermissions = await this.codexPermissions?.currentCodexPermissions(node.id, latestSession.session_name, node.cwd ?? "")
+        ?? { state: "unverified", reason: "No native predecessor permission reader is available." }; }
+      catch { observedCodexPermissions = { state: "unverified", reason: "The native predecessor permission read failed." }; }
+    }
     const successorPosture = this.rigRepo.getNodePolicyProvenance(node.id)?.launchPosture
       ?? this.rigRepo.getRigPolicyProvenance(statusResult.status.rig_id)?.launchPosture
       ?? "floor"; // R2 terminal: absence = the locked floor on the continuity edge too
@@ -476,6 +488,32 @@ export class SeatHandoverService {
     const effectivePermissionMode = permissionOverride.permissionMode ?? (effectivePosture === "auto" && node.runtime === "claude-code" ? "auto" : undefined);
     // The successor must carry its own generation from its first byte. This reservation writes no
     // ledger row; commit consumes it, while every failed pre-commit branch remains unregistered.
+    let codexRebuildPermissions: CodexPermissionEnvelope | undefined;
+    let permissionContinuity: CodexPermissionContinuity | undefined;
+    if (observedCodexPermissions) {
+      const observed = observedCodexPermissions;
+      if (observed.state === "observed") {
+        const selection = new NativePermissionStore(this.db).read(node.id);
+        const selectedAt = selection ? parseSqliteUtcMs(selection.updatedAt) : NaN;
+        const started = (lstartToMinTs(observed.processStartedAt) ?? Infinity) * 1000;
+        // The existing audit also covers clearing a choice and applying a policy: neither leaves
+        // a timestamp in node_permission_selections after an inherit/reset.
+        const changed = this.db.prepare(`SELECT created_at FROM events WHERE node_id = ?
+          AND type IN ('node.permissions_changed', 'node.policy_changed') ORDER BY seq DESC LIMIT 1`)
+          .get(node.id) as { created_at: string } | undefined;
+        const changedAt = changed ? parseSqliteUtcMs(changed.created_at) : NaN;
+        // A saved choice made since this process started is for the successor, even if the
+        // predecessor took a later turn. The same-second ordering is not distinguishable.
+        if ((selection && (!Number.isFinite(selectedAt) || selectedAt >= started))
+          || (changed && (!Number.isFinite(changedAt) || changedAt >= started))
+          || (!!node.codex_config_profile?.trim() && node.codex_config_profile.trim() !== observed.profile)) {
+          permissionContinuity = { state: "selection_used", detail: "The current saved permission choice or declared successor profile was used instead of carrying the predecessor policy. Native successor permissions are unverified." };
+        } else {
+          codexRebuildPermissions = observed.envelope;
+          permissionContinuity = { state: "emitted", detail: "The observed predecessor approval and sandbox policy was emitted for the successor, without fresh-launch grants. Native successor equivalence is not verified." };
+        }
+      } else permissionContinuity = { state: "unverified", detail: `${observed.reason} Existing launch behaviour was used; permissions were not verified or carried.` };
+    }
     const occupantGeneration = this.sessionRegistry.reserveOccupantGeneration();
     const corePluginDir = seatCorePluginDir(node, this.db, undefined, this.pluginsDir);
     // OPR.0.7.0.13 — the successor is the same seat, so it gets the same skill storage.
@@ -495,7 +533,7 @@ export class SeatHandoverService {
       // spec (else the running topology drifts from the founder-designed one at every handover).
       // A4-profile: likewise carry the codex config profile (adapter emits -p) — the restore path
       // already threads it; handover must too, or a profile-pinned codex seat reverts at handover.
-      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, ...(seatAdditions.additions ? { launchAdditions: seatAdditions.additions } : {}), kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault, nonInterruptive: this.rigRepo.getRigNonInterruptive(statusResult.status.rig_id), launchPosture: effectivePosture, ...(effectivePermissionMode ? { permissionMode: effectivePermissionMode } : {}), model: node.model, effort: readSeatEffort(this.db, node.id)?.effective ?? undefined, advisor: node.advisor ?? undefined, codexConfigProfile: node.codex_config_profile ?? undefined, seatEnv: withPluginDirs(this.rigRepo.getEffectiveSeatEnv(node.id), [corePluginDir, seatSkillDir, ...additionPluginDirs]), ...((corePluginDir || codexCorePluginDir) && node.cwd ? { seatProjectDir: node.cwd } : {}) },
+      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, ...(codexRebuildPermissions ? { codexRebuildPermissions } : {}), ...(seatAdditions.additions ? { launchAdditions: seatAdditions.additions } : {}), kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault, nonInterruptive: this.rigRepo.getRigNonInterruptive(statusResult.status.rig_id), launchPosture: effectivePosture, ...(effectivePermissionMode ? { permissionMode: effectivePermissionMode } : {}), model: node.model, effort: readSeatEffort(this.db, node.id)?.effective ?? undefined, advisor: node.advisor ?? undefined, codexConfigProfile: node.codex_config_profile ?? undefined, seatEnv: withPluginDirs(this.rigRepo.getEffectiveSeatEnv(node.id), [corePluginDir, seatSkillDir, ...additionPluginDirs]), ...((corePluginDir || codexCorePluginDir) && node.cwd ? { seatProjectDir: node.cwd } : {}) },
       departingSessionName: latestSession.session_name,
       occupantGeneration,
       // OPR.0.5.5.5: a fork-sourced successor launches as a NATIVE FORK of the
@@ -613,7 +651,7 @@ export class SeatHandoverService {
       } else {
         emptyChainReason = "artifacts" in chain ? "the durable chain resolved to zero artifacts" : chain.emptyReason;
       }
-      sourceOutcome = { mode: "rebuild", primedArtifacts, gaps, ...(emptyChainReason ? { emptyChainReason } : {}) };
+      sourceOutcome = { mode: "rebuild", primedArtifacts, gaps, ...(permissionContinuity ? { permissions: permissionContinuity } : {}), ...(emptyChainReason ? { emptyChainReason } : {}) };
       const delivered = await this.deliverRebuildPrimingPacket(launch.tmuxSession, {
         seatRef: input.seatRef,
         reason,

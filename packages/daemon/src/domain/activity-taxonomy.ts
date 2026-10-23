@@ -129,6 +129,9 @@ export interface ActivityEvidence {
   observedAt: string;
   /** The emitter's own order (a runner's per-post sequence), which orders posts that share an observedAt. */
   sourceSequence?: number;
+  /** How often the source promises to report while idle. A durable idle boundary holds for two of these, then lapses to
+   *  unknown: a runner that died without saying so stops reading idle. Absent: the boundary holds until the next. */
+  livenessSeconds?: number;
   activity?: ActivityValue;
   needsInput?: NeedsInput;
   permissionRequest?: { id: string };

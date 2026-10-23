@@ -111,6 +111,7 @@ export class DaemonResponseError extends Error {
 export interface DaemonResponse<T = unknown> {
   status: number;
   data: T;
+  headers?: Headers;
 }
 
 /**
@@ -357,7 +358,11 @@ export class DaemonClient {
 
   private async requestText(path: string, init: RequestInit, options?: DaemonRequestOptions): Promise<DaemonResponse<string>> {
     let data = "";
-    const res = await this.fetch(path, init, options, async (response) => { data = await response.text(); });
-    return { status: res.status, data };
+    let headers: Headers | undefined;
+    const res = await this.fetch(path, init, options, async (response) => {
+      headers = response.headers;
+      data = await response.text();
+    });
+    return { status: res.status, data, headers };
   }
 }

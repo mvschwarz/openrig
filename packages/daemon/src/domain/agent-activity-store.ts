@@ -21,6 +21,8 @@ export interface HookActivityInput {
   generation?: string | null;
   /** The emitter's own order for its posts (OpenRig's pi/omp runner), when it sends one. */
   sourceSequence?: number | null;
+  /** How often the emitter promises to report while it stays idle (OpenRig's pi runner). */
+  livenessSeconds?: number | null;
 }
 
 export type RecordHookActivityResult =
@@ -54,6 +56,9 @@ interface SessionLookupRow {
 interface EventPayloadRow {
   payload: string;
 }
+
+/** How many of a node's newest hook records a restart-restore orders by the emitter's own sequence. */
+const SOURCE_ORDER_WINDOW = 200;
 
 export class AgentActivityStore {
   readonly db: Database.Database;
@@ -115,6 +120,7 @@ export class AgentActivityStore {
     });
     activity.turnId = input.turnId ?? null;
     if (input.sourceSequence) activity.sourceSequence = input.sourceSequence;
+    if (input.livenessSeconds) activity.livenessSeconds = input.livenessSeconds;
 
     const event = this.eventBus.emit({
       type: "agent.activity",
@@ -231,12 +237,17 @@ export class AgentActivityStore {
   }
 
   /** The newest of a node's hook records by the emitter's order (time, then its sequence), for one session when named.
-   *  Not by arrival: a runner's posts aren't awaited, so any number of older ones can land after a newer one. Read once
-   *  per seat when a restart restores it. */
+   *  Not by arrival: a runner's posts aren't awaited, so older ones can land after a newer one. Only the node's newest
+   *  SOURCE_ORDER_WINDOW records to arrive are ordered, and the session is chosen from those: a runner's heartbeat grows
+   *  the history without bound, and a late post can't be behind more than the few still in flight. Filtering the session
+   *  before the window would make SQLite walk a new session's whole earlier history. Read once per seat on a restart. */
   private latestBySourceOrder(nodeId: string, sessionName: string | null): ReturnType<typeof parseActivityPayload> {
     const row = this.db.prepare(`
-      SELECT payload FROM events
-      WHERE node_id = ? AND type = 'agent.activity' AND (? IS NULL OR json_extract(payload, '$.sessionName') = ?)
+      SELECT payload FROM (
+        SELECT payload, seq FROM events
+        WHERE node_id = ? AND type = 'agent.activity'
+        ORDER BY seq DESC LIMIT ${SOURCE_ORDER_WINDOW})
+      WHERE (? IS NULL OR json_extract(payload, '$.sessionName') = ?)
       ORDER BY json_extract(payload, '$.activity.eventAt') DESC,
         COALESCE(json_extract(payload, '$.activity.sourceSequence'), 0) DESC, seq DESC
       LIMIT 1`).get(nodeId, sessionName, sessionName) as EventPayloadRow | undefined;

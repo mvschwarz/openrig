@@ -27,7 +27,7 @@ describe("generated file Git hygiene", () => {
   let root: string;
   let repo: string;
   beforeEach(() => {
-    root = fs.mkdtempSync(path.join(os.tmpdir(), "generated-file-hygiene-"));
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "generated-file-hygiene-")));
     repo = path.join(root, "repo"); fs.mkdirSync(repo);
     git(repo, "init", "-q");
     git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-qm", "initial");
@@ -117,6 +117,19 @@ describe("generated file Git hygiene", () => {
     expect(git(repo, "status", "--porcelain", "-uall")).toContain("sub/.codex/plugins/openrig-core/a lOTHERx!#.md");
     excludeNewGeneratedFiles(path.join(repo, "sub"), [generated]);
     expect(fs.readFileSync(excludePath(repo))).toEqual(after);
+  });
+
+  it("excludes generated core plugin files through an aliased seat directory", () => {
+    const alias = path.join(root, "repo-alias"); fs.symlinkSync(repo, alias, "dir");
+    const file = write(".codex/plugins/openrig-core/payload.txt");
+    const aliasFile = path.join(alias, path.relative(repo, file));
+    expect(excludeNewGeneratedFiles(alias, [aliasFile])).toEqual([]);
+    const excluded = fs.readFileSync(excludePath(repo));
+    expect(excluded.toString()).toContain("/.codex/plugins/openrig-core/payload.txt");
+    // The existing-ignore reader must recognize the alias too, so another pass adds nothing.
+    expect(excludeNewGeneratedFiles(alias, [aliasFile])).toEqual([]);
+    expect(fs.readFileSync(excludePath(repo))).toEqual(excluded);
+    expect(execFileSync("git", ["-C", repo, "check-ignore", "--stdin", "-z"], { input: aliasFile + "\0", encoding: "utf8" })).toBe(aliasFile + "\0");
   });
 
   it("keeps later sibling user guidance visible (review F1)", () => {

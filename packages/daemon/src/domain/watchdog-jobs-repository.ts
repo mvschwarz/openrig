@@ -158,7 +158,7 @@ export class WatchdogJobsError extends Error {
 }
 
 /** Preserve optional cadence conversion while rejecting an uncomputable scan. */
-function validateCadences(input: RegisterWatchdogJobInput): void {
+export function validateCadences(input: Pick<RegisterWatchdogJobInput, "intervalSeconds" | "scanIntervalSeconds">): void {
   if (!Number.isInteger(input.intervalSeconds) || input.intervalSeconds <= 0) {
     throw new WatchdogJobsError("interval_invalid", `interval_seconds must be a positive integer (got ${String(input.intervalSeconds)})`,
       { field: "interval_seconds", intervalSeconds: input.intervalSeconds });
@@ -194,6 +194,10 @@ export class WatchdogJobsRepository {
   private readonly hasContextUsageColumns: boolean;
   private readonly hasWatchedFileGenerationColumn: boolean;
   private readonly hasThresholdUnitsColumns: boolean;
+  /** Per job, the spec and interval a caller's update replaced, for a delivery still in flight (see updateInPlace). */
+  private readonly updatedFrom = new Map<string, Array<{ specYaml: string; intervalSeconds: number }>>();
+  /** Per job, the schedule its delivery in flight started under (see deliverySchedule). */
+  private readonly inFlight = new Map<string, { specYaml: string; intervalSeconds: number }>();
   constructor(
     private readonly db: Database.Database,
     private readonly now: () => Date = () => new Date(),
@@ -663,11 +667,12 @@ export class WatchdogJobsRepository {
       if (schedule) {
         // A delivery may yield while its owner reschedules the next wake. The
         // fire still happened, but must not replace that newer due boundary.
-        this.db.prepare(`UPDATE watchdog_jobs SET last_fire_at = ?,
-          last_evaluation_at = CASE WHEN state = 'active' AND spec_yaml = ? AND interval_seconds = ? AND last_evaluation_at IS ?
-            THEN ? ELSE last_evaluation_at END
-          WHERE job_id = ?`)
-          .run(evaluatedAt, schedule.specYaml, schedule.intervalSeconds, schedule.lastEvaluationAt, evaluatedAt, jobId);
+        // A caller's update of the job in place is not such a reschedule.
+        const current = this.getById(jobId);
+        const unchanged = current?.state === "active" && current.lastEvaluationAt === schedule.lastEvaluationAt
+          && this.scheduleUnchanged(current, schedule);
+        this.db.prepare(`UPDATE watchdog_jobs SET last_fire_at = ?${unchanged ? ", last_evaluation_at = ?" : ""} WHERE job_id = ?`)
+          .run(...(unchanged ? [evaluatedAt, evaluatedAt, jobId] : [evaluatedAt, jobId]));
         return;
       }
       this.db
@@ -676,6 +681,7 @@ export class WatchdogJobsRepository {
         )
         .run(evaluatedAt, evaluatedAt, jobId);
     } else {
+      this.updatedFrom.delete(jobId);
       this.db
         .prepare(`UPDATE watchdog_jobs SET last_evaluation_at = ? WHERE job_id = ?`)
         .run(evaluatedAt, jobId);
@@ -684,6 +690,56 @@ export class WatchdogJobsRepository {
 
   /** Preserve job identity while its owner adjusts a durable reminder schedule. */
   updateSchedule(jobId: string, specYaml: string, intervalSeconds: number, lastEvaluationAt: string | null): void {
+    // A rewrite that stores what is already there reschedules nothing, so it keeps what an update replaced.
+    const current = this.getById(jobId);
+    if (!current || current.specYaml !== specYaml || current.intervalSeconds !== intervalSeconds
+      || current.lastEvaluationAt !== lastEvaluationAt) this.updatedFrom.delete(jobId);
+    this.writeSchedule(jobId, specYaml, intervalSeconds, lastEvaluationAt);
+  }
+
+  /**
+   * A caller's update of an active job in place (`rig watchdog update`). It writes through the same schedule
+   * writer, and remembers the spec and interval it replaced: a delivery that began under them and finishes after
+   * the update is the same wake, not a rescheduled one, so its receipt still counts (see `scheduleUnchanged`).
+   * Any other reschedule of the job that changes something forgets them.
+   */
+  updateInPlace(jobId: string, specYaml: string, intervalSeconds: number, lastEvaluationAt: string | null): void {
+    const before = this.getByIdOrThrow(jobId);
+    this.writeSchedule(jobId, specYaml, intervalSeconds, lastEvaluationAt);
+    // Bounded: only deliveries in flight at the time of an update can match, and a job's next evaluation clears it.
+    const replaced = [...(this.updatedFrom.get(jobId) ?? []), { specYaml: before.specYaml, intervalSeconds: before.intervalSeconds }];
+    const kept = replaced.slice(-8);
+    // However many updates land, the schedule the delivery in flight started under stays until that delivery is
+    // accounted for. A real reschedule still forgets it, because it clears this record.
+    const started = this.inFlight.get(jobId);
+    const isStarted = (s: { specYaml: string; intervalSeconds: number }) =>
+      s.specYaml === started?.specYaml && s.intervalSeconds === started.intervalSeconds;
+    if (started && replaced.some(isStarted) && !kept.some(isStarted)) kept.unshift(started);
+    this.updatedFrom.set(jobId, kept);
+  }
+
+  /** A job's schedule read as its delivery starts; scheduleUnchanged keeps matching it until deliveryAccounted. */
+  deliverySchedule(jobId: string): WatchdogJob {
+    const job = this.getByIdOrThrow(jobId);
+    this.inFlight.set(jobId, { specYaml: job.specYaml, intervalSeconds: job.intervalSeconds });
+    return job;
+  }
+
+  deliveryAccounted(jobId: string): void {
+    this.inFlight.delete(jobId);
+  }
+
+  /** True when `snapshot`, read before a delivery, is still the job's schedule or one only an update replaced. */
+  scheduleUnchanged(
+    current: Pick<WatchdogJob, "jobId" | "specYaml" | "intervalSeconds">,
+    snapshot: Pick<WatchdogJob, "specYaml" | "intervalSeconds">,
+  ): boolean {
+    if (current.specYaml === snapshot.specYaml && current.intervalSeconds === snapshot.intervalSeconds) return true;
+    return (this.updatedFrom.get(current.jobId) ?? []).some((replaced) =>
+      replaced.specYaml === snapshot.specYaml && replaced.intervalSeconds === snapshot.intervalSeconds);
+  }
+
+  private writeSchedule(jobId: string, specYaml: string, intervalSeconds: number, lastEvaluationAt: string | null): void {
     this.db.prepare(`UPDATE watchdog_jobs SET spec_yaml = ?, interval_seconds = ?, last_evaluation_at = ?
       WHERE job_id = ? AND state = 'active'`).run(specYaml, intervalSeconds, lastEvaluationAt, jobId);
   }
@@ -760,22 +816,36 @@ export class WatchdogJobsRepository {
 
   /**
    * GHOST-STAGE (e/Class-B): at a seat swap, stop every ARMED (state='active') job registered by the
-   * RETIRING generation — a stale wake firing into the successor's context is the specimen; the
-   * successor re-arms its own. Gen-scoped, NEVER name-scoped (the successor shares the seat name, so a
-   * name-scoped stop would kill the successor's own jobs). A NULL/empty generation never matches
-   * (UNKNOWN ≠ retired — note-2). Returns the count stopped. Auditable (terminal_reason), not a hard
-   * delete — the row stays for forensics. Pre-063 dbs no-op. `keepJobIds` are left running: the queue's
-   * current park timers wake the seat that owns a still-blocked row, which the successor inherits.
+   * RETIRING generation that wakes the retiring seat itself (`wakesRetiringSeat`, which the caller
+   * decides from the job's delivery target) — a stale wake firing into the successor's context is the
+   * specimen; the successor re-arms its own. A job it registered for another seat wakes that seat, never
+   * the successor, so it keeps running (#1775). Gen-scoped, NEVER name-scoped alone (the successor shares
+   * the seat name, so a name-scoped stop would kill the successor's own jobs). A NULL/empty generation
+   * never matches (UNKNOWN ≠ retired — note-2). Returns the count stopped. Auditable (terminal_reason),
+   * not a hard delete — the row stays for forensics. Pre-063 dbs no-op. `keepJobIds` are left running:
+   * the queue's current park timers wake the seat that owns a still-blocked row, which the successor
+   * inherits.
    */
-  dropArmedByRegisteringGeneration(generationUuid: string, keepJobIds: readonly string[] = []): number {
+  dropArmedByRegisteringGeneration(
+    generationUuid: string,
+    wakesRetiringSeat: (job: WatchdogJob) => boolean,
+    keepJobIds: readonly string[] = [],
+  ): number {
     if (!this.hasGenColumn || !generationUuid) return 0;
-    const keep = keepJobIds.length > 0 ? ` AND job_id NOT IN (${keepJobIds.map(() => "?").join(", ")})` : "";
+    const keep = new Set(keepJobIds);
+    const ids = (this.db
+      .prepare(`SELECT * FROM watchdog_jobs WHERE state = 'active' AND registered_by_generation_uuid = ?`)
+      .all(generationUuid) as JobRow[])
+      .map(rowToJob)
+      .filter((job) => !keep.has(job.jobId) && wakesRetiringSeat(job))
+      .map((job) => job.jobId);
+    if (ids.length === 0) return 0;
     const res = this.db
       .prepare(
         `UPDATE watchdog_jobs SET state = 'stopped', terminal_reason = 'registering generation retired (seat handover)'
-         WHERE state = 'active' AND registered_by_generation_uuid = ?${keep}`,
+         WHERE state = 'active' AND job_id IN (${ids.map(() => "?").join(", ")})`,
       )
-      .run(generationUuid, ...keepJobIds);
+      .run(...ids);
     return res.changes;
   }
 }

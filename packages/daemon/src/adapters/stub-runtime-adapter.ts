@@ -24,7 +24,7 @@ import type {
 } from "../domain/runtime-adapter.js";
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
-import { mergeManagedBlock } from "../domain/managed-blocks.js";
+import { isPerSeatRoleGuidance, mergeManagedBlock, perSeatRoleSkipWarning } from "../domain/managed-blocks.js";
 import {
   stubSeatSidecarPath, buildStubRunnerCommand, parseStubRunnerState,
   type StubRunnerState,
@@ -290,7 +290,7 @@ export class StubRuntimeAdapter implements RuntimeAdapter {
     if (!this.fsOps) return false;
     if (entry.category === "guidance" && entry.mergeStrategy === "managed_block") {
       const targetPath = nodePath.join(binding.cwd, "AGENTS.md");
-      return this.mergeGuidance(targetPath, entry.effectiveId, this.fsOps.readFile(entry.absolutePath), warnings);
+      return this.mergeGuidance(targetPath, entry.effectiveId, this.fsOps.readFile(entry.absolutePath), warnings, entry.absolutePath);
     }
     if (entry.category === "skill") {
       const targetDir = nodePath.join(binding.cwd, ".openrig", "stub", "skills", entry.effectiveId);
@@ -320,11 +320,15 @@ export class StubRuntimeAdapter implements RuntimeAdapter {
     return false;
   }
 
-  private mergeGuidance(targetPath: string, blockId: string, content: string, warnings: string[]): boolean {
+  private mergeGuidance(targetPath: string, blockId: string, content: string, warnings: string[], sourcePath?: string): boolean {
     if (!this.fsOps) return false;
     // Per-seat rig-role content collides across pod-mates when merged into a shared
     // cwd file; it is delivered via send_text instead (mirrors the other adapters).
-    if (blockId === "rig-role") return false;
+    if (isPerSeatRoleGuidance(blockId, sourcePath)) {
+      const warning = perSeatRoleSkipWarning(blockId, targetPath);
+      if (warning) warnings.push(warning);
+      return false;
+    }
     mergeManagedBlock(this.fsOps, targetPath, blockId, content, {
       warnings,
       replaceBlockIds: blockId === "openrig-start.md" ? ["using-openrig.md"] : [],

@@ -28,7 +28,7 @@ export function makeWatchdogDeliver(deps: {
         if (deps.hasPendingPostCompactStage!(targetSession)) throw new DeliveryGuardError("managed_compaction_pending", PARKED_OWNER_COMPACTION_PENDING);
       } : undefined;
       const result = await deps.sessionTransport.send(targetSession, payload,
-        { actorSession: "watchdog@system", auditPointer: source.jobId, ...(beforeWrite ? { beforeWrite } : {}) });
+        { actorSession: "watchdog@system", openrigNotice: true, auditPointer: source.jobId, ...(beforeWrite ? { beforeWrite } : {}) });
       if (result.outcome === "retained") return { status: "retained", outboxIds: result.outboxIds, continuityActionCompleted };
       return result.ok
         ? { status: "ok", continuityActionCompleted }

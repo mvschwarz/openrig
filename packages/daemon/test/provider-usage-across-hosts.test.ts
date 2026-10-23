@@ -356,8 +356,10 @@ describe("GET /api/provider/usage/hosts", () => {
 
 describe("POST /api/provider/usage/hosts/refresh", () => {
   it("a refresh slower than the 5 s read class still succeeds, and its reading reaches the view", async () => {
-    const a = await host("a", { codex: { delayMs: 6_000, secondaryUsed: 85 } });
-    const hub = await host("hub", { registry: [a.entry()] });
+    // Keep the scripted weekly window before its reset while the delay uses real timers.
+    const now = () => "2026-10-14T00:00:00.000Z";
+    const a = await host("a", { now, codex: { delayMs: 6_000, secondaryUsed: 85 } });
+    const hub = await host("hub", { now, registry: [a.entry()] });
     const started = Date.now();
     const { status, body } = await refreshVia(hub, { provider: "codex" });
     expect(Date.now() - started).toBeGreaterThan(5_000);

@@ -225,11 +225,17 @@ host in front of you.
    process are gone. If the command returns while either remains, stop: inspect
    identity and use the host's authorized recovery procedure. Do not blindly
    signal a PID.
-7. Start the target with `rig daemon start` or the host's known wrapper. Verify
-   daemon status, process path, listener, version, and database integrity.
-8. Run the plugin refresh helper in plan mode. Apply safe writes only after the
-   three roots and classifications make sense; resolve preserved paths one at a
-   time when required.
+7. Before starting the target, account for its startup refresh of managed plugins
+   and marked global skills. This runtime preserves differing replaced files under
+   `$OPENRIG_HOME/backups/managed-refresh/` and reports each recovery path; if the
+   target lacks that preservation, copy those trees first. Start it with
+   `rig daemon start` or the host's known wrapper. Verify daemon status, process
+   path, listener, version, and database integrity. Recovery copies retain bytes;
+   they do not promise custom behaviour remains active after refresh.
+8. Run the plugin refresh helper in plan mode. Its plan governs only the helper's
+   later writes, not startup writes that already happened. Apply safe writes only
+   after the three roots and classifications make sense; resolve preserved paths
+   one at a time when required.
 9. Verify protected seats with `rig ps --nodes -A --json`, representative
    `rig capture`, and `rig restore-check` where applicable. `-A` is required:
    without it the node read is your CURRENT rig only, and a daemon upgrade

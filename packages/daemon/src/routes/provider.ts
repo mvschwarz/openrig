@@ -3,6 +3,9 @@ import { getSelfHostId, LOCAL_HOST_ID } from "../domain/hosts/fanout-contract.js
 import { loadHostRegistry } from "../domain/hosts/hosts-registry-reader.js";
 import type { ProviderService } from "../domain/provider/provider-service.js";
 import type { ProviderKind } from "../domain/provider/provider-types.js";
+import { checkMoveReport, credentialRefusal, findCredential, MOVE_REPORT_TAG, readMoveReport, renderMoveReport, type MoveReport } from "../domain/provider/subscription-move-report.js";
+import { QueueRepositoryError, type QueueRepository } from "../domain/queue-repository.js";
+import { requireSenderIdentity, resolveRecordedProvenance } from "./require-sender-identity.js";
 import {
   readUsageAcrossHosts,
   selectUsageHosts,
@@ -263,6 +266,82 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
     }
     // Business outcome (incl. failed_safely / rebind_in_progress) is an explicit 200 payload.
     return c.json(await svc.switchAccount({ seat, toAccount, forceUnsafe }), 200);
+  });
+
+  // Slice 18 — subscription move reports: queue items tagged subscription-move, filed by the agent that moved a Codex
+  // home and read back by it (and by the Fleet app, once its page is connected). Filing one checks and keeps the report;
+  // it never switches or restarts.
+  const NOTHING_RECORDED = "Nothing was recorded, and the move itself is unchanged. Correct the report and file it again; don't repeat the switch or restart.";
+  const queueOf = (c: Context): QueueRepository | null => (c.get("queueRepo" as never) as QueueRepository | undefined) ?? null;
+
+  router.get("/moves", (c) => {
+    const queue = queueOf(c);
+    if (!queue) return c.json({ error: "queue_unavailable" }, unavailable);
+    const limitRaw = c.req.query("limit");
+    const limit = limitRaw === undefined ? 50 : Number(limitRaw);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) return c.json({ error: "limit_invalid", message: "limit must be an integer from 1 to 200" }, 400);
+    const seat = c.req.query("seat") || undefined;
+    const items = queue.list({ tag: MOVE_REPORT_TAG, limit });
+    const moves: Array<{ qitemId: string; reportedAt: string; reportedBy: string; reportedTo: string; state: string; report: MoveReport; followedBy: string[] }> = [];
+    const unreadable: Array<{ qitemId: string; reason: string }> = [];
+    for (const item of items) {
+      const read = readMoveReport(item.body);
+      if (!read.ok) { unreadable.push({ qitemId: item.qitemId, reason: read.errors.join("; ") }); continue; }
+      moves.push({ qitemId: item.qitemId, reportedAt: item.tsCreated, reportedBy: item.sourceSession, reportedTo: item.destinationSession, state: item.state, report: read.report, followedBy: [] });
+    }
+    for (const move of moves) move.followedBy = moves.filter((later) => later.report.follows === move.qitemId).map((later) => later.qitemId);
+    const shown = seat ? moves.filter((move) => [...move.report.seats, ...(move.report.peers ?? [])].some((entry) => entry.seat === seat)) : moves;
+    // A bounded recent window: the newest `limit` tagged items, before the seat filter. `truncated` says the window was
+    // full, so older reports may exist; it isn't a seat's complete history.
+    return c.json({ moves: shown, unreadable, truncated: items.length === limit }, 200);
+  });
+
+  router.post("/moves", async (c) => {
+    const queue = queueOf(c);
+    if (!queue) return c.json({ error: "queue_unavailable" }, unavailable);
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
+    }
+    const body = (raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {}) as { to?: unknown; report?: unknown; evidenceRef?: unknown };
+    // Before anything else, and over everything the queue would keep or echo: nothing in a recognized credential format
+    // is persisted or repeated back, in a value or a key.
+    const credential = findCredential(body.to, "to") ?? findCredential(body.evidenceRef, "evidenceRef") ?? findCredential(body.report);
+    if (credential) {
+      return c.json({ error: "move_report_invalid", errors: [credentialRefusal(credential)], message: NOTHING_RECORDED }, 400);
+    }
+    if (typeof body.to !== "string" || body.to.trim() === "") {
+      return c.json({ error: "to_required", message: "to must name the seat the report goes to: whoever asked for the move, or the person" }, 400);
+    }
+    const check = checkMoveReport(body.report);
+    if (!check.ok) {
+      return c.json({
+        error: "move_report_invalid",
+        errors: check.errors,
+        message: NOTHING_RECORDED,
+      }, 400);
+    }
+    const identity = requireSenderIdentity(c, { verb: "a subscription move report" });
+    if (!identity.ok) return identity.response;
+    const { summary, body: text } = renderMoveReport(check.report);
+    try {
+      const item = await queue.create({
+        sourceSession: identity.session,
+        destinationSession: body.to.trim(),
+        body: text,
+        summary,
+        tags: [MOVE_REPORT_TAG],
+        // A report to a person's seat follows the queue's rule for human-routed items: it names its evidence.
+        ...(typeof body.evidenceRef === "string" && body.evidenceRef.trim() ? { evidenceRef: body.evidenceRef.trim() } : {}),
+        identityProvenance: resolveRecordedProvenance(c, identity),
+      });
+      return c.json({ qitemId: item.qitemId, report: check.report }, 201);
+    } catch (error) {
+      if (!(error instanceof QueueRepositoryError)) throw error;
+      return c.json({ error: error.code, message: `${error.message} ${NOTHING_RECORDED}` }, 400);
+    }
   });
 
   return router;

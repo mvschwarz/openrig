@@ -16,6 +16,7 @@ import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-obse
 import { observeClaudePermission } from "../src/domain/permission-drift.js";
 import type { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 import { assessNativeResumeProbe } from "../src/domain/native-resume-probe.js";
+import { createHash } from "node:crypto";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { seatSkillPaths } from "../src/domain/seat-skill-storage.js";
@@ -1473,6 +1474,43 @@ describe("StartupOrchestrator", () => {
     if (!result.ok) {
       expect(result.errors.some((e) => e.includes("harness crash"))).toBe(true);
     }
+  });
+
+  it.each(["available", "error", "timeout"] as const)("persists the real Claude launch probe on startup_failed with geometry=%s (#1480)", async geometry => {
+    const missingGeometry = geometry !== "available";
+    const seed = seedSession();
+    const content = "❯ fixture-private-startup-prompt\n● Login expired · Please run /login\n\n❯";
+    const tmux = mockTmux({
+      getPaneCommand: vi.fn(async () => "claude"),
+      capturePaneContent: vi.fn(async () => content),
+      listPanes: vi.fn(async () => {
+        if (geometry === "timeout") return new Promise<never>(() => {});
+        if (geometry === "error") throw new Error("fixture-private-geometry-error");
+        return [{ id: "%1", index: 0, cwd: "/project", width: 100, height: 30, active: true }];
+      }),
+    });
+    const adapter = new ClaudeCodeAdapter({ tmux, sleep: async () => {}, fsOps: {
+      readFile: () => { throw new Error("fixture file missing"); },
+      writeFile: () => {}, exists: () => false, mkdirp: () => {}, copyFile: () => {}, listFiles: () => [],
+    } });
+    const result = await createOrchestrator(tmux).startNode(makeInput(seed, {
+      adapter, binding: { ...makeBinding(), cwd: "/project" },
+      isRestore: true, resumeToken: "saved-conversation", resumeType: "claude_id", allowFreshFallback: false,
+    }));
+    const probe = {
+      status: "failed", code: "login_required", loginRefusal: { message: "Login expired · Please run /login", row: "response" },
+      capture: { lines: 4, bytes: Buffer.byteLength(content), sha256: createHash("sha256").update(content).digest("hex"), columns: missingGeometry ? null : 100, rows: missingGeometry ? null : 30 },
+    };
+    expect(result).toMatchObject({ ok: false, startupStatus: "failed",
+      errors: ["Harness launch failed: Claude resume failed: timed out waiting for Claude to become active"], probe });
+    expect(sessionRegistry.getSessionsForRig(seed.rigId).find(s => s.id === seed.sessionId)?.startupStatus).toBe("failed");
+    const events = db.prepare("SELECT payload FROM events WHERE type = 'node.startup_failed'").all() as { payload: string }[];
+    expect(events).toHaveLength(1);
+    expect(JSON.parse(events[0]!.payload)).toMatchObject({ rigId: seed.rigId, nodeId: seed.nodeId, sessionId: seed.sessionId,
+      requestedResumeToken: "saved-conversation", stage: "harness_launch", probe });
+    expect(JSON.parse(events[0]!.payload).probe).toEqual(probe);
+    expect(events[0]!.payload).not.toContain("fixture-private");
+    expect(JSON.stringify(result)).not.toContain("fixture-private-startup-prompt");
   });
 
   // NS-T04: launchHarness persists resume token

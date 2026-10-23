@@ -214,7 +214,27 @@ Examples:
     .option("--actor-session <session>", "Agent recording this decision")
     .option("--reason <text>", "Why the plan changed")
     .option("--json", "Complete comparison or receipt")
-    .addHelpText("after", "\nStart with: rig workflow revise <instance>\nInspection returns the exact apply command and recovery key. Compatible revisions preserve completed/live steps, required obligations and child custody. Restore a changed completed/live step and revise its unstarted successors; no blind abort/replay is required. Exception-routing changes apply to future occurrences only; existing exception obligations keep their owners. Ordinary roles and routing remain protected. After a timeout use rig workflow operation <key> or repeat the identical apply command.\n")
+    .addHelpText("after", `
+Start with: rig workflow revise <instance>
+Inspection returns the exact apply command and recovery key. Compatible revisions preserve completed/live steps, required obligations and child custody. Restore a changed completed/live step and revise its unstarted successors; no blind abort/replay is required. Exception-routing changes apply to future occurrences only; existing exception obligations keep their owners. Ordinary roles and routing remain protected. After a timeout use rig workflow operation <key> or repeat the identical apply command.
+
+Examples:
+  $ rig workflow revise WF01ABC
+  $ rig workflow revise WF01ABC --json | jq '{status, changes, reasons, applyCommand}'
+
+A mixed change is refused whole: one reason makes the proposal incompatible, and
+nothing is adopted, not even its compatible parts. Say the mission source edits
+completed step review and adds an unstarted step docs that waits on the
+outstanding step ship:
+  graph:    incompatible · authored input has not been adopted
+  ...
+    step-changed: review (objective)
+    step-added: docs
+    Step review already has completed, live or failed work. ...
+Put review back as it was bound (likewise any removed required step or required
+order), keep docs, and inspect again. When it reads compatible, run the apply
+line it prints, then rig workflow show WF01ABC to confirm the adoption.
+`)
     .action(async (instanceId: string, opts: { apply?: boolean; expectedVersion?: string; expectedDigest?: string; operationKey?: string; actorSession?: string; reason?: string; json?: boolean }) => {
       if (opts.apply && (!opts.operationKey || !opts.expectedDigest || opts.expectedVersion === undefined || !opts.actorSession || !opts.reason)) {
         emit3PartError(opts.json ?? false, "The inspected revision identity and decision are required.", "No revision was sent.", "Run rig workflow revise " + instanceId + " and use its apply command.");

@@ -74,6 +74,36 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("terminal interaction policy", () => {
+  it("records the explicit preset and actor exceptions without changing native permissions", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const { logs, exitCode } = await captureLogs(() => makeCommand(makeDeps({ status: 200,
+      data: { ok: true, effect: "Saved for managed checks; no native permission change." } }, calls)).parseAsync([
+      "node", "rig", "seat", "set-terminal-policy", "reviewer@team", "--preset", "help-within-instructions",
+      "--helper", "helper@team", "--peer-model", "deny", "--openrig-compaction", "allow", "--reason", "Keep the review model",
+    ]));
+    expect(calls).toEqual([{ path: "/api/seat/set-terminal-policy/reviewer%40team", body: {
+      preset: "help-within-instructions", helpers: ["helper@team"],
+      exceptions: { peer: { model: "deny" }, openrig: { compaction: "allow" } },
+      rigDefault: false, reason: "Keep the review model", operator: undefined,
+    } }]);
+    expect(exitCode).toBeUndefined();
+    expect(logs.join("\n")).toContain("rig seat status 'reviewer@team'");
+  });
+
+  it("shows actor scope and enforcement limits in the ordinary seat account", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const { logs } = await captureLogs(() => makeCommand(makeDeps({ status: 200, data: {
+      seat_ref: "reviewer@team", terminalPolicy: { state: "planned", label: "Custom", source: "explicit",
+        instruction: "Keep the review model", rules: { peer: { compaction: "allow", model: "deny" } },
+        supported: { compaction: "managed", model: "saved setting; native effect unverified" } },
+    } }, calls)).parseAsync(["node", "rig", "seat", "status", "reviewer@team"]));
+    expect(logs.join("\n")).toContain("Terminal interaction (planned; managed checks): Custom [explicit]");
+    expect(logs.join("\n")).toContain("peer: compaction=allow; model/effort=deny");
+    expect(logs.join("\n")).toContain("Other interventions: guidance-only");
+  });
+});
+
 describe("#729 startup warnings", () => {
   it.each([[200, false], [200, true], [409, false], [409, true]] as const)("seat launch retains warnings and HTTP %s (json=%s)", async (status, json) => {
     const warning = "Startup submission unverified: capture unavailable";

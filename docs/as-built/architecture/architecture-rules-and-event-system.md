@@ -68,9 +68,10 @@ system-level invariants.
 14. Restore outcome states are a fixed set (`RestoreNodeResult.status`,
     `types.ts:475`): `resumed`, `rebuilt`, `fresh-primed`,
     `awaiting-decision`, `attention_required`, `failed`, plus
-    `operator_recovered` (set only by later reconciliation) and `fresh`
-    (retained only for the legacy continuity-restoring skip path). `rebuilt` =
-    new process assembled from artifacts.
+    `operator_recovered` (set only by later reconciliation), `fresh`
+    (retained only for the legacy continuity-restoring skip path) and
+    `left_attached` (a seat joined with `rig attach` as an external CLI, which
+    restore leaves as it is). `rebuilt` = new process assembled from artifacts.
 15. Restore honesty: a failed resume stops loudly as `awaiting-decision`, with
     the blank session rolled back and no session running
     (`restore-orchestrator.ts:1055`). No automatic fresh fallback. Fresh launch

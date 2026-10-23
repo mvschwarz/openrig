@@ -140,6 +140,7 @@ function noticeFor(ended: ModeApplication, scheduledEnd: string, qitemId: string
       summary: `Your ${ended.modeName} ended at its scheduled time`,
       body: `Your ${ended.modeName} ended at its scheduled time. Its account: \`${account}\`; ask your operator to go through it.`,
       tags: ["mode-scheduled-end"],
+      wakeTrigger: "openrig",
     };
   }
   const where = ended.settings.delivery.account ?? "their registered channel";
@@ -155,6 +156,7 @@ function noticeFor(ended: ModeApplication, scheduledEnd: string, qitemId: string
       `Applied by ${ended.startedBy}.${recipient.why ? ` Sent to ${recipient.to} because ${recipient.why}.` : ""}`,
     ].join("\n"),
     tags: ["mode-scheduled-end"],
+    wakeTrigger: "openrig",
   };
 }
 

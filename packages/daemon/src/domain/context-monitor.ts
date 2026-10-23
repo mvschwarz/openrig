@@ -180,6 +180,7 @@ export class ContextMonitor {
     try {
       if (usage && usage.availability === "known" && usage.fresh && usage.usedPercentage != null) {
         await this.compactionEnforcer.maybeAutoCompact({
+          nodeId: session.node_id,
           sessionName: session.session_name,
           cwd: session.cwd,
           runtime: session.runtime,

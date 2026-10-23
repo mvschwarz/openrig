@@ -32,6 +32,7 @@ interface FrontDoorPermissionDiagnostic {
     sourcePath: string | null;
     reason?: string;
   };
+  configuration?: { comparison: "aligned" | "drift" | "unknown"; reason?: string };
   observedAt: string;
 }
 
@@ -238,16 +239,22 @@ export async function openMissionControl(io: FrontDoorIo = {}): Promise<void> {
   // Codex sandbox observation gap: named profiles deliberately remain unresolved and an adopted
   // generation can briefly have no launch observation. Neither is evidence of drift, and blocking the
   // read-only control plane on that missing evidence makes the TUI unreachable from healthy managed
-  // seats. Keep every proven or settings-derived enforcement problem non-launching.
+  // seats. Claude also keeps native enforcement unknown: a valid emitted mode and readable, valid
+  // settings permit the view without claiming native enforcement. Invalid rules/settings still block.
   const launchObservationGap = probeResult.state === "diagnostic"
     && probeResult.diagnostic.transport.state === "healthy"
     && probeResult.diagnostic.cwdRead.state === "visible"
     && probeResult.diagnostic.commandPath.state === "available"
-    && probeResult.diagnostic.enforcement.axis === "sandbox"
     && probeResult.diagnostic.enforcement.state === "unknown"
     && (
-      probeResult.diagnostic.enforcement.reason === "named_profile_unresolved"
-      || probeResult.diagnostic.enforcement.reason === "applied_launch_unknown"
+      (probeResult.diagnostic.enforcement.axis === "sandbox" && (
+        probeResult.diagnostic.enforcement.reason === "named_profile_unresolved"
+        || probeResult.diagnostic.enforcement.reason === "applied_launch_unknown"
+      ))
+      || (probeResult.diagnostic.enforcement.axis === "permission"
+        && probeResult.diagnostic.enforcement.reason === "native_permission_effect_unverified"
+        && probeResult.diagnostic.configuration?.comparison === "aligned"
+        && probeResult.diagnostic.configuration.reason === "emitted_launch_arguments")
     );
   const shouldLaunchTui =
     probeResult.state === "ready"

@@ -284,7 +284,9 @@ with. Claude Code before 2.1.290 ignores the key, Claude's managed settings take
 2. The agent writes `RESTORE-MAP.md.tmp` with its file-edit tool, completion marker last.
    Later ticks return `preparation_pending` until that exact map is complete. The map path is under the seat's working directory
    (`.openrig/compaction/preparation/<session>/<attempt>/`, with a `.gitignore` of `*`) when
-   that is writable, otherwise under `compaction/preparation/` in the OpenRig home.
+   that is writable, otherwise under `compaction/preparation/` in the OpenRig home. An explicit
+   `policies.claude_compaction.preparation_root` instead places maps at `<root>/<session>/<attempt>/`
+   for both manual and automatic attempts; failure to prepare that root stops the attempt without fallback.
 3. The daemon atomically renames the completed temp file to `RESTORE-MAP.md` in its existing
    final send checks, after rechecking the attempt and occupant. An already-complete final map
    remains compatible. Only then is `/compact` sent, with the final map path appended to the
