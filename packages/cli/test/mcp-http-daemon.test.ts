@@ -2,7 +2,8 @@
 // a real token file. With no grants it serves loopback as the env's seat, declared; with grants, every request needs a
 // credential (loopback included), each caller acts as its own seat, reaches only its scope, and a revoked grant stops at
 // the next request while its records stay.
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -18,7 +19,7 @@ import { ALL_MIGRATIONS } from "../../daemon/src/db/all-migrations.js";
 import { EventBus } from "../../daemon/src/domain/event-bus.js";
 import { QueueRepository } from "../../daemon/src/domain/queue-repository.js";
 import { mcpCommand } from "../src/commands/mcp.js";
-import { addGrant, McpHttpConfigError, revokeGrant, startMcpHttpServer } from "../src/mcp-http.js";
+import { addGrant, McpHttpConfigError, revokeGrant, startMcpHttpServer, withGrantsLock } from "../src/mcp-http.js";
 
 const INITIALIZE = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "probe", version: "1" } } };
 
@@ -31,6 +32,8 @@ describe("rig mcp serve --http on the daemon's routes", () => {
   let daemonUrl: string;
   let tokenFile: string;
   let setup: ReturnType<typeof createTestApp>;
+  /** The targets the capture route resolved, in order. */
+  let resolved: unknown[];
   const closers: Array<() => Promise<void>> = [];
   const saved = { home: process.env.OPENRIG_HOME, session: process.env.OPENRIG_SESSION_NAME };
 
@@ -45,9 +48,10 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     tokenFile = path.join(home, "mcp-http-tokens.json");
     repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
     const inert = async () => ({ ok: false, error: "inert fixture" });
+    resolved = [];
     setup = createTestApp(db, {
       appDeps: {
-        sessionTransport: { resolveSessions: async () => ({ ok: false, code: "not_found", error: "inert fixture" }), send: inert, capture: inert, broadcast: inert } as never,
+        sessionTransport: { resolveSessions: async (target: unknown) => { resolved.push(target); return { ok: false, code: "not_found", error: "inert fixture" }; }, send: inert, capture: inert, broadcast: inert } as never,
         queueRepo: repo,
         filesAllowlist: [{ name: "proof", canonicalPath: shared }],
       },
@@ -114,7 +118,7 @@ describe("rig mcp serve --http on the daemon's routes", () => {
   });
 
   it("with grants, refuses a missing or invalid credential on loopback, never as the env's seat", async () => {
-    grant("alice");
+    await grant("alice");
     const served = await listen();
     expect(served.authenticated).toBe(true);
     for (const headers of [{}, { Authorization: "Bearer orm_not-a-token" }, { Authorization: "Basic abc" }]) {
@@ -127,8 +131,8 @@ describe("rig mcp serve --http on the daemon's routes", () => {
   });
 
   it("keeps two concurrent callers apart: each acts as its own grant's seat, never the env's", async () => {
-    const alice = grant("alice");
-    const bob = grant("bob");
+    const alice = await grant("alice");
+    const bob = await grant("bob");
     seat("team", "bob");
     const served = await listen();
     const [asAlice, asBob] = await Promise.all([connect(served.url, alice), connect(served.url, bob)]);
@@ -144,7 +148,7 @@ describe("rig mcp serve --http on the daemon's routes", () => {
   });
 
   it("reaches only its scope: an out-of-scope write creates nothing, and items, successors, artifacts and owner tools stay out of reach", async () => {
-    const carol = grant("carol");
+    const carol = await grant("carol");
     const served = await listen();
     const asCarol = await connect(served.url, carol);
 
@@ -192,16 +196,101 @@ describe("rig mcp serve --http on the daemon's routes", () => {
   });
 
   it("stops a revoked grant at its next request and keeps its records", async () => {
-    const alice = grant("alice");
+    const alice = await grant("alice");
     const served = await listen();
     const asAlice = await connect(served.url, alice);
     expect((await asAlice("rig_queue_create", { destination: "impl@team", body: "before revoke" })).isError).toBe(false);
-    expect(revokeGrant(tokenFile, "alice")).toBe(true);
+    expect(await revokeGrant(tokenFile, "alice")).toBe(true);
     const res = await post(served.url, { Authorization: `Bearer ${alice}` });
     expect(res.status).toBe(401);
     expect(rows()).toBe(1);
     // With every grant gone, auth stays configured: nothing falls back to the env seat.
     expect((await post(served.url)).status).toBe(401);
+  });
+
+  it("changes only rows its scope owns: a row its team handed elsewhere, or a person's ask, reads but doesn't update", async () => {
+    const carol = await grant("carol");
+    const served = await listen();
+    const asCarol = await connect(served.url, carol);
+    const handed = await repo.create({ sourceSession: "lead@team", destinationSession: "impl@other", body: "for the other team", nudge: false } as never);
+    const ask = await repo.create({ sourceSession: "lead@team", destinationSession: "alex@external", body: "a person's pending ask", nudge: false } as never);
+    for (const row of [handed, ask]) {
+      expect((await asCarol("rig_queue_show", { qitemId: row.qitemId })).isError).toBe(false);
+      const update = await asCarol("rig_queue_update", { qitemId: row.qitemId, state: "done", closureReason: "no-follow-on" });
+      expect(update.structured).toMatchObject({ ok: false, code: "out_of_scope" });
+      expect(repo.getById(row.qitemId)?.state).toBe("pending");
+    }
+    const owned = await repo.create({ sourceSession: "lead@other", destinationSession: "impl@team", body: "ours", nudge: false } as never);
+    expect((await asCarol("rig_queue_update", { qitemId: owned.qitemId, note: "on it" })).isError).toBe(false);
+  });
+
+  it("captures the rig its scope check authorized: a handle that is one rig's id and another rig's name reaches the first", async () => {
+    const carol = await grant("carol");
+    const team = setup.rigRepo.createRig("team");
+    setup.rigRepo.createRig(team.id);
+    const served = await listen();
+    const asCarol = await connect(served.url, carol);
+    await asCarol("rig_capture", { rig: team.id });
+    expect(resolved).toEqual([{ rig: "team" }]);
+  });
+
+  it("refuses every request once its token file is gone after an authenticated start, until a restart with no file", async () => {
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const alice = await grant("alice");
+      const served = await listen();
+      expect((await post(served.url, { Authorization: `Bearer ${alice}` })).status).toBe(200);
+      fs.rmSync(tokenFile);
+      for (const headers of [{}, { Authorization: `Bearer ${alice}` }]) {
+        const res = await post(served.url, headers);
+        expect(res.status).toBe(500);
+        expect(((await res.json()) as { error: string }).error).toBe("auth_config_unreadable");
+      }
+      expect(rows()).toBe(0);
+      expect((await listen()).authenticated).toBe(false);
+    } finally {
+      quiet.mockRestore();
+    }
+  });
+
+  it("treats a malformed grant as an unreadable file, never acting as the env's seat, and keeps the file's text out of the reply", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(addGrant(tokenFile, { name: "erin", seat: "  ", rigs: ["team"], roots: [], workspace: false, owner: false })).rejects.toThrow(/seat/);
+      expect(fs.existsSync(tokenFile)).toBe(false);
+      await grant("alice");
+      const served = await listen();
+      const token = "orm_hand-written";
+      const entry = { name: "erin", tokenSha256: createHash("sha256").update(token).digest("hex"), seat: "erin@team", rigs: ["team"], roots: [], workspace: false, owner: false, createdAt: "2026-10-23T00:00:00.000Z" };
+      const { seat: _seat, ...seatless } = entry;
+      for (const bad of [{ ...entry, seat: "" }, { ...entry, seat: "  " }, seatless, { ...entry, rigs: "team" }]) {
+        fs.writeFileSync(tokenFile, JSON.stringify({ principals: [bad] }));
+        const attempt = await connect(served.url, token).then((call) => call("rig_queue_create", { destination: "impl@team", body: "as whom?" }), (err: unknown) => err);
+        expect(attempt).toBeInstanceOf(Error);
+      }
+      expect(rows()).toBe(0);
+      fs.writeFileSync(tokenFile, "orm_leaked-secret");
+      const res = await post(served.url, { Authorization: `Bearer ${token}` });
+      expect(res.status).toBe(500);
+      expect(await res.text()).not.toContain("orm_leaked");
+      expect(logged.mock.calls.flat().join("\n")).toContain("orm_leaked");
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
+  it("serializes token add and revoke: a revoke that reported success isn't undone by an add publishing its older copy", async () => {
+    await grant("alice");
+    let revoked!: Promise<boolean>;
+    // Another token command is mid-update under the lock: it has read the file and is publishing it with a new grant.
+    await withGrantsLock(tokenFile, () => {
+      const read = JSON.parse(fs.readFileSync(tokenFile, "utf8"));
+      revoked = revokeGrant(tokenFile, "alice");
+      read.principals.push({ ...read.principals[0], name: "bob" });
+      fs.writeFileSync(tokenFile, JSON.stringify(read));
+    });
+    expect(await revoked).toBe(true);
+    expect(JSON.parse(fs.readFileSync(tokenFile, "utf8")).principals.map((grant: { name: string }) => grant.name)).toEqual(["bob"]);
   });
 
   it("rig mcp token add, list and revoke: the token is shown once and only its hash is kept, in a file only its owner reads", async () => {

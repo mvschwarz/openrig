@@ -4,7 +4,8 @@
 // local owner as the env's seat, declared and not authenticated (what stdio does). With one, every request needs a bearer
 // credential that matches a grant, even on loopback: a tunnel or proxy delivers remote traffic to loopback, so loopback
 // proves nothing about the caller. A missing, invalid or revoked credential is refused and never falls back to the env
-// seat. Each request gets its own DaemonClient, carrying its grant's seat, so concurrent callers never share an identity.
+// seat, and so is every request once the file is gone or malformed, until a restart. Each request gets its own
+// DaemonClient, carrying its grant's seat, so concurrent callers never share an identity.
 import http from "node:http";
 import fs from "node:fs";
 import nodePath from "node:path";
@@ -32,8 +33,19 @@ export function mcpTokenFilePath(home: string = getOpenRigHome()): string {
   return nodePath.join(home, "mcp-http-tokens.json");
 }
 
-/** The configured grants, or null when there is no token file (auth not configured). A file that can't be read or parsed
- *  throws: a broken configuration must never read as "no auth". */
+/** An entry as token add writes it. A blank seat would act as the env's seat, and a string would become a set of its
+ *  characters, so any other shape makes the file unreadable. */
+function isGrant(entry: unknown): entry is McpGrant {
+  const grant = (entry ?? {}) as Record<string, unknown>;
+  const text = (value: unknown) => typeof value === "string" && value.trim() !== "";
+  const list = (value: unknown) => Array.isArray(value) && value.every((item) => typeof item === "string");
+  const flag = (value: unknown) => typeof value === "boolean";
+  return text(grant.name) && typeof grant.tokenSha256 === "string" && text(grant.seat)
+    && list(grant.rigs) && list(grant.roots) && flag(grant.workspace) && flag(grant.owner);
+}
+
+/** The configured grants, or null when there is no token file (auth not configured). A file that can't be read or parsed,
+ *  or holds a malformed entry, throws: a broken configuration must never read as "no auth". */
 export function readGrants(file: string): McpGrant[] | null {
   let text: string;
   try {
@@ -42,9 +54,34 @@ export function readGrants(file: string): McpGrant[] | null {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw err;
   }
-  const parsed = JSON.parse(text) as { principals?: unknown };
-  if (!Array.isArray(parsed.principals)) throw new Error(`${file} must hold { "principals": [...] }`);
+  const parsed = JSON.parse(text) as { principals?: unknown } | null;
+  if (!Array.isArray(parsed?.principals)) throw new Error(`${file} must hold { "principals": [...] }`);
+  const bad = parsed.principals.findIndex((entry) => !isGrant(entry));
+  if (bad >= 0) throw new Error(`${file}: grant ${bad + 1} is malformed; each needs a name, a tokenSha256, a non-blank seat, and lists of rigs and roots`);
   return parsed.principals as McpGrant[];
+}
+
+/** Holds the token file's lock for one read, modify and publish, so a concurrent add and revoke can't each publish a copy
+ *  that drops the other's change. A lock left by a crashed command names itself after the wait. */
+export async function withGrantsLock<T>(file: string, update: () => T, waitMs = 5_000): Promise<T> {
+  const lock = `${file}.lock`;
+  fs.mkdirSync(nodePath.dirname(file), { recursive: true });
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    try {
+      fs.closeSync(fs.openSync(lock, "wx", 0o600));
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      if (Date.now() >= deadline) throw new Error(`Another rig mcp token command holds ${lock}. If none is running, remove that file and try again.`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+  try {
+    return update();
+  } finally {
+    fs.rmSync(lock, { force: true });
+  }
 }
 
 function writeGrants(file: string, grants: McpGrant[]): void {
@@ -58,23 +95,30 @@ function writeGrants(file: string, grants: McpGrant[]): void {
 const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
 
 /** Adds a grant and returns its token, which is shown once and never stored. */
-export function addGrant(file: string, grant: Omit<McpGrant, "tokenSha256" | "createdAt">): string {
-  const grants = readGrants(file) ?? [];
-  if (grants.some((existing) => existing.name === grant.name)) {
-    throw new Error(`'${grant.name}' already has a grant; revoke it first to issue a new token`);
+export function addGrant(file: string, grant: Omit<McpGrant, "tokenSha256" | "createdAt">): Promise<string> {
+  if (!grant.name.trim() || !grant.seat.trim()) {
+    return Promise.reject(new Error("A grant needs a name and a seat: --seat <session>, the seat this caller acts as."));
   }
-  const token = `orm_${randomBytes(32).toString("base64url")}`;
-  grants.push({ ...grant, tokenSha256: sha256(token), createdAt: new Date().toISOString() });
-  writeGrants(file, grants);
-  return token;
+  return withGrantsLock(file, () => {
+    const grants = readGrants(file) ?? [];
+    if (grants.some((existing) => existing.name === grant.name)) {
+      throw new Error(`'${grant.name}' already has a grant; revoke it first to issue a new token`);
+    }
+    const token = `orm_${randomBytes(32).toString("base64url")}`;
+    grants.push({ ...grant, seat: grant.seat.trim(), tokenSha256: sha256(token), createdAt: new Date().toISOString() });
+    writeGrants(file, grants);
+    return token;
+  });
 }
 
 /** Removes a grant; its next request is refused. The file stays, so auth stays configured. */
-export function revokeGrant(file: string, name: string): boolean {
-  const grants = readGrants(file);
-  if (!grants?.some((grant) => grant.name === name)) return false;
-  writeGrants(file, grants.filter((grant) => grant.name !== name));
-  return true;
+export function revokeGrant(file: string, name: string): Promise<boolean> {
+  return withGrantsLock(file, () => {
+    const grants = readGrants(file);
+    if (!grants?.some((grant) => grant.name === name)) return false;
+    writeGrants(file, grants.filter((grant) => grant.name !== name));
+    return true;
+  });
 }
 
 /** The grant a bearer token matches, compared in constant time. */
@@ -127,8 +171,11 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
   if (!loopback && !configured) {
     throw new McpHttpConfigError(`Serving on ${opts.host} needs authentication: add a grant with rig mcp token add, then start again. With no grants, the server stays on loopback.`);
   }
-  const makeClient = opts.clientFactory ?? ((url: string, sessionName?: string) => new DaemonClient(url, sessionName ? { sessionName } : undefined));
+  const makeClient = opts.clientFactory ?? ((url: string, sessionName?: string) => new DaemonClient(url, sessionName === undefined ? undefined : { sessionName }));
   let boundPort = opts.port;
+  // Once auth has been configured here, a missing token file is a broken configuration, not a return to local-owner
+  // mode: that takes a restart with no file. A beyond-loopback listener always starts with auth.
+  let authSeen = configured;
 
   const handle = async (req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
     if (new URL(req.url ?? "/", "http://localhost").pathname !== "/mcp") {
@@ -138,10 +185,14 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
     let grants: McpGrant[] | null;
     try {
       grants = readGrants(opts.tokenFile);
+      if (grants === null && authSeen) throw new Error(`${opts.tokenFile} is gone after auth was configured; restore it, or restart with no token file to serve loopback unauthenticated`);
     } catch (err) {
-      reply(res, 500, { error: "auth_config_unreadable", message: `The token file can't be read: ${(err as Error).message}` });
+      // The detail stays in this server's log: the reply goes to a caller not yet authenticated.
+      console.error(`rig mcp serve --http: the token file can't be read: ${(err as Error).message}`);
+      reply(res, 500, { error: "auth_config_unreadable", message: "The token file can't be read." });
       return;
     }
+    if (grants !== null) authSeen = true;
     let access: McpAccess | undefined;
     let seat: string | undefined;
     if (grants !== null) {
@@ -156,10 +207,6 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
       }
       access = { principal: grant.name, owner: grant.owner === true, rigs: grant.rigs ?? [], roots: grant.roots ?? [], workspace: grant.workspace === true };
       seat = grant.seat;
-    } else if (!loopback) {
-      // The token file was removed after start: never serve a non-loopback caller without auth.
-      reply(res, 401, { error: "unauthenticated", message: "Authentication isn't configured, so this server serves loopback only." }, { "WWW-Authenticate": 'Bearer realm="openrig"' });
-      return;
     }
     let body: unknown;
     if (req.method === "POST") {

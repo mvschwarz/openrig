@@ -133,10 +133,10 @@ function sliceSummary(slice: SliceEntry): Record<string, unknown> {
   };
 }
 
-type Scope = { session(value: unknown): boolean; item(row: unknown): boolean; rig(name: unknown): boolean; root(name: unknown): boolean };
+type Scope = { session(value: unknown): boolean; item(row: unknown): boolean; owner(row: unknown): boolean; rig(name: unknown): boolean; root(name: unknown): boolean };
 
-/** What an authenticated non-owner caller may reach: its own seat, its rigs' seats, the items they send or own, and its
- *  shared roots. A person (<entityId>@external) is never in a non-owner's scope. */
+/** What an authenticated non-owner caller may reach: its own seat, its rigs' seats, the items they send or own (to read),
+ *  the items they own (to change), and its shared roots. A person (<entityId>@external) is never in a non-owner's scope. */
 function scopeFor(access: McpAccess, seatOf: () => string | undefined): Scope {
   const rigs = new Set(access.rigs);
   const session = (value: unknown): boolean => {
@@ -152,6 +152,9 @@ function scopeFor(access: McpAccess, seatOf: () => string | undefined): Scope {
       const item = (row ?? {}) as { sourceSession?: unknown; destinationSession?: unknown };
       return session(item.sourceSession) || session(item.destinationSession);
     },
+    // The daemon's update has no owner check, so changing a row needs its owner in scope: a row a team seat handed to
+    // another team, or a person's pending ask, stays readable and isn't the sender's to close or settle.
+    owner: (row) => session(((row ?? {}) as { destinationSession?: unknown }).destinationSession),
     rig: (name) => typeof name === "string" && rigs.has(name),
     root: (name) => typeof name === "string" && access.roots.includes(name),
   };
@@ -361,22 +364,30 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   };
   const scope = access && !access.owner ? scopeFor(access, seatOf) : null;
   const caller = access ? { authenticated: true, principal: access.principal } : { authenticated: false, identity: "declared" };
-  /** For an authenticated non-owner: the error for an item it can't reach (or can't read), else null. */
-  const itemOutOfScope = async (qitemId: string): Promise<TextResult | null> => {
+  /** For an authenticated non-owner: the error for an item it can't reach (or can't read), else null. `owner` asks
+   *  whether it may change the item, which needs the item's owner in scope. */
+  const itemOutOfScope = async (qitemId: string, need: "item" | "owner" = "item"): Promise<TextResult | null> => {
     if (!scope) return null;
     const item = await client.get(`/api/queue/${encodeURIComponent(qitemId)}`);
     if (item.status >= 400) return mapResult(item);
-    return scope.item(item.data) ? null : outOfScope(`Item ${qitemId}`);
+    if (scope[need](item.data)) return null;
+    return outOfScope(need === "owner" && scope.item(item.data) ? `Item ${qitemId}'s owner` : `Item ${qitemId}`);
   };
-  /** For an authenticated non-owner: the error for a rig handle outside its rigs (or one the rig list can't resolve), else null. */
-  const rigOutOfScope = async (handle: string): Promise<TextResult | null> => {
-    if (!scope) return null;
+  /** For an authenticated non-owner: the name of the rig a handle resolves to when it's one of its rigs, else the error
+   *  (outside its rigs, or a handle the rig list can't resolve). */
+  const scopedRigName = async (handle: string): Promise<TextResult | string> => {
     const rig = await rigIdFor(client, handle);
     if ("content" in rig) return rig;
     if (!rig.resolved) return outOfScope(`Rig ${handle}`);
     const detail = await client.get(`/api/rigs/${encodeURIComponent(rig.id)}`);
     if (detail.status >= 400) return mapResult(detail);
-    return scope.rig(((detail.data ?? {}) as RigDetail).rig?.name) ? null : outOfScope(`Rig ${handle}`);
+    const name = ((detail.data ?? {}) as RigDetail).rig?.name;
+    return scope?.rig(name) ? name as string : outOfScope(`Rig ${handle}`);
+  };
+  const rigOutOfScope = async (handle: string): Promise<TextResult | null> => {
+    if (!scope) return null;
+    const name = await scopedRigName(handle);
+    return typeof name === "string" ? null : name;
   };
 
   // 1. rig_up — launch from a spec, bundle or topology, or restore an existing rig by name
@@ -732,15 +743,21 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     READ_ONLY,
     async ({ session, rig, pod, lines }) => {
       try {
+        let rigName = rig;
         if (scope) {
           if (session && !scope.session(session)) return outOfScope(`Session ${session}`);
           if (pod && !rig) return outOfScope(`Pod ${pod} without its rig`);
-          const denied = rig ? await rigOutOfScope(rig) : null;
-          if (denied) return denied;
+          // The route finds the rig by name, so send the name this check authorized: a handle that is one rig's id and
+          // another rig's name must not reach the second rig's terminals.
+          if (rig) {
+            const name = await scopedRigName(rig);
+            if (typeof name !== "string") return name;
+            rigName = name;
+          }
         }
         const body: Record<string, unknown> = {};
         if (session) body.session = session;
-        if (rig) body.rig = rig;
+        if (rigName) body.rig = rigName;
         if (pod) body.pod = pod;
         if (lines) body.lines = lines;
         body.inputBox = true; // what the live input box holds, in the result's inputBox
@@ -1017,7 +1034,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     DESTRUCTIVE,
     async ({ qitemId, state, closureReason, closureTarget, note, resolution, reopen, summary, evidenceRef, blockedOn, wakeAfterSeconds }) => {
       try {
-        const denied = await itemOutOfScope(qitemId);
+        const denied = await itemOutOfScope(qitemId, "owner");
         if (denied) return denied;
         return mapResult(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
           state, closureReason, closureTarget, summary, evidenceRef, blockedOn, wakeAfterSeconds, transitionNote: note, resolution, reopen,

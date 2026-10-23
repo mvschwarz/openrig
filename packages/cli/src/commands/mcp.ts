@@ -27,7 +27,9 @@ export function mcpCommand(depsOverride?: StatusDeps): Command {
 With --http and no token file, the server stays on loopback and acts as OPENRIG_SESSION_NAME, declared and not
 authenticated, like stdio. Once a grant exists (rig mcp token add), every request needs its bearer credential, loopback
 included, and each caller acts as its grant's seat within its rigs and roots. Add a grant before reaching the port
-through a tunnel or proxy: they arrive on loopback too. TLS comes from the tunnel or proxy, not from this server.`)
+through a tunnel or proxy: they arrive on loopback too. If the token file then goes missing or can't be read, every
+request is refused; serving unauthenticated again takes a restart with no token file. TLS comes from the tunnel or
+proxy, not from this server.`)
     .action(async (opts: { port?: string; http?: boolean; bind?: string }) => {
       const deps = getDepsF();
 
@@ -81,10 +83,10 @@ through a tunnel or proxy: they arrive on loopback too. TLS comes from the tunne
     .option("--root <name...>", "Shared file roots (OPENRIG_FILES_ALLOWLIST names) whose artifacts it may read")
     .option("--workspace", "Also read the work tree and context (rig_slices, rig_mission, rig_context_*)")
     .option("--owner", "An owner grant: every tool and object, like the local owner")
-    .action((name: string, opts: { seat: string; rig?: string[]; root?: string[]; workspace?: boolean; owner?: boolean }) => {
+    .action(async (name: string, opts: { seat: string; rig?: string[]; root?: string[]; workspace?: boolean; owner?: boolean }) => {
       const file = mcpTokenFilePath();
       try {
-        const issued = addGrant(file, { name, seat: opts.seat, rigs: opts.rig ?? [], roots: opts.root ?? [], workspace: opts.workspace === true, owner: opts.owner === true });
+        const issued = await addGrant(file, { name, seat: opts.seat, rigs: opts.rig ?? [], roots: opts.root ?? [], workspace: opts.workspace === true, owner: opts.owner === true });
         console.log(`Token for ${name}, shown once (only its hash is kept in ${file}):`);
         console.log(issued);
         console.log(`The client sends it as: Authorization: Bearer <token>. Revoke it with: rig mcp token revoke ${name}`);
@@ -112,9 +114,9 @@ through a tunnel or proxy: they arrive on loopback too. TLS comes from the tunne
   token
     .command("revoke <name>")
     .description("Remove a grant: its next request is refused. Work it already handed over stays with its owners")
-    .action((name: string) => {
+    .action(async (name: string) => {
       try {
-        if (!revokeGrant(mcpTokenFilePath(), name)) { console.error(`No grant named ${name}.`); process.exitCode = 1; return; }
+        if (!(await revokeGrant(mcpTokenFilePath(), name))) { console.error(`No grant named ${name}.`); process.exitCode = 1; return; }
         console.log(`Revoked ${name}: its next request is refused. Its rows and records stay.`);
       } catch (err) {
         console.error((err as Error).message);
