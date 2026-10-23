@@ -209,6 +209,9 @@ configurations, as below; do not take the pin from a cached page summary.
    don't already cover, the asks come often, especially early, and each one
    needs their answer, in the seat's pane or through you. Their yes starts
    the team; it isn't a yes to those later asks.
+   For a team that already exists, `rig seat status <seat>` shows each seat's
+   planned permissions: the native mode, where it comes from, what OpenRig
+   adds and what isn't known. Read it to them as planned, not observed.
    Use `applying-a-permission-policy`; for an unset policy, recommend the team
    default rather than `none`. Starting the team, `rig up` without `--plan`,
    waits on their yes to this plan; a yes they already gave for this same
