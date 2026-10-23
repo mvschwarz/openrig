@@ -6,10 +6,13 @@ import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { DaemonConnectionError, DaemonTimeoutError, terminalAuthHeaders, type DaemonClient, type DaemonResponse } from "./client.js";
 import { readOpenRigEnv } from "./openrig-compat.js";
 import { resolveRigHandle } from "./rig-handle.js";
+import { formatSeatActivity, type SeatActivityFields } from "./lib/seat-activity.js";
 import { CLI_VERSION } from "./version.js";
 
 const LONG_RUNNING_UP_TIMEOUT_MS = 120_000;
 const WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS = 5_000;
+/** The most text rig_context_get returns; a longer file or section is cut, and says so. */
+const CONTEXT_TEXT_LIMIT = 48_000;
 
 type TextResult = {
   content: Array<{ type: "text"; text: string }>;
@@ -44,6 +47,90 @@ function rigNotFound(handle: string): TextResult {
 function structured(data: unknown): Record<string, unknown> {
   if (data && typeof data === "object" && !Array.isArray(data)) return data as Record<string, unknown>;
   return Array.isArray(data) ? { items: data } : { value: data };
+}
+
+/** Where a handed-on item went. A cross-host handoff records the remote item as qitem-…@<host> in closureTarget (named, not
+ *  fetched); a local successor is the item whose handedOffFrom is this one, the newest when there are several. null when
+ *  none is found; { unknown: true, code } when the lookup failed or the daemon can't filter by handedOffFrom. */
+async function successorOf(client: DaemonClient, qitemId: string, closureTarget: unknown): Promise<Record<string, unknown> | null> {
+  const remote = typeof closureTarget === "string" ? /^(qitem-[^@]+)@([^@]+)$/.exec(closureTarget) : null;
+  if (remote) return { qitemId: remote[1], host: remote[2] };
+  try {
+    const res = await client.get(`/api/queue/list?${new URLSearchParams({ handedOffFrom: qitemId, compact: "1", limit: "5" }).toString()}`);
+    if (res.status >= 400) return { unknown: true, code: (mapResult(res).structuredContent as { code: string }).code };
+    if (!Array.isArray(res.data)) return { unknown: true, code: "unexpected_response" };
+    if (ignoredFilter(res.data, { handedOffFrom: qitemId })) return { unknown: true, code: "filter_unsupported" };
+    const [next, ...others] = res.data as Array<{ qitemId?: string; destinationSession?: string; state?: string }>;
+    if (!next) return null;
+    return { qitemId: next.qitemId, destinationSession: next.destinationSession, state: next.state, ...(others.length > 0 ? { otherSuccessors: others.map((o) => o.qitemId) } : {}) };
+  } catch (err) {
+    return { unknown: true, code: (caught(err).structuredContent as { code: string }).code };
+  }
+}
+
+/** The list filter a daemon ignored, if its rows show one: a daemon older than the filter answers the unfiltered list. */
+function ignoredFilter(data: unknown, filters: { since?: string; handedOffFrom?: string }): string | null {
+  if (!Array.isArray(data)) return null;
+  const rows = data as Array<{ handedOffFrom?: unknown; tsUpdated?: unknown }>;
+  if (filters.handedOffFrom && rows.some((row) => row.handedOffFrom !== filters.handedOffFrom)) return "handedOffFrom";
+  const sinceMs = filters.since ? Date.parse(filters.since) : Number.NaN;
+  if (!Number.isNaN(sinceMs) && rows.some((row) => typeof row.tsUpdated === "string" && Date.parse(row.tsUpdated) < sinceMs)) return "since";
+  return null;
+}
+
+type RigDetail = {
+  rig?: { id?: string; name?: string };
+  nodes?: Array<{ id: string; logicalId: string }>;
+  edges?: Array<{ sourceId: string; targetId: string; kind: string }>;
+  representative?: string | null;
+};
+type InventorySeat = SeatActivityFields & {
+  logicalId: string;
+  canonicalSessionName?: string | null;
+  podNamespace?: string | null;
+  role?: string | null;
+  runtime?: string | null;
+  nodeKind?: string;
+  sessionStatus?: string | null;
+};
+
+/** A rig's team from its detail (authored delegates_to edges and the daemon's representative) and its node inventory
+ *  (sessions and activity, passed on as the daemon reports them). */
+function teamView(detail: RigDetail, inventory: unknown): Record<string, unknown> {
+  const logicalIds = new Map((detail.nodes ?? []).map((node) => [node.id, node.logicalId]));
+  const delegation = (detail.edges ?? []).filter((edge) => edge.kind === "delegates_to")
+    .map((edge) => ({ from: logicalIds.get(edge.sourceId), to: logicalIds.get(edge.targetId) }));
+  const seats = (Array.isArray(inventory) ? inventory as InventorySeat[] : []).map((seat) => ({
+    logicalId: seat.logicalId,
+    session: seat.canonicalSessionName ?? null,
+    pod: seat.podNamespace ?? null,
+    role: seat.role ?? null,
+    runtime: seat.runtime ?? null,
+    kind: seat.nodeKind ?? null,
+    sessionStatus: seat.sessionStatus ?? "unknown",
+    activity: formatSeatActivity(seat),
+    reportsTo: delegation.filter((edge) => edge.to === seat.logicalId).map((edge) => edge.from),
+    delegatesTo: delegation.filter((edge) => edge.from === seat.logicalId).map((edge) => edge.to),
+  }));
+  const rig = { id: detail.rig?.id ?? null, name: detail.rig?.name ?? null };
+  if (!("representative" in detail)) {
+    return { rig, lead: null, leadNote: "This daemon doesn't report a rig's lead; it needs a newer daemon.", seats };
+  }
+  const session = detail.representative ?? null;
+  if (!session) {
+    return { rig, lead: null, leadNote: "No single lead: the rig has no one seat that delegates to others and that nothing delegates to, or that seat has no session.", seats };
+  }
+  return { rig, lead: { session, logicalId: seats.find((seat) => seat.session === session)?.logicalId ?? null }, seats };
+}
+
+type SliceEntry = { name?: string; missionId?: string | null; displayName?: string; status?: string; description?: string | null; qitemCount?: number; lastActivityAt?: string | null };
+
+/** A slice's summary fields, without its paths and readiness detail. */
+function sliceSummary(slice: SliceEntry): Record<string, unknown> {
+  return {
+    name: slice.name, missionId: slice.missionId ?? null, displayName: slice.displayName, status: slice.status,
+    description: slice.description ?? null, qitemCount: slice.qitemCount, lastActivityAt: slice.lastActivityAt ?? null,
+  };
 }
 
 /**
@@ -115,18 +202,23 @@ export const MCP_OPERATIONS: ReadonlyArray<{ tool: string; routes: readonly stri
   { tool: "rig_chatroom_watch", routes: ["GET /api/rigs/:rigId/chat/history"], effect: "read" },
   { tool: "rig_add", routes: ["POST /api/rigs/:rigId/pods/:podNamespace/members"], effect: "additive" },
   { tool: "rig_queue_create", routes: ["POST /api/queue/create"], effect: "additive" },
-  { tool: "rig_queue_show", routes: ["GET /api/queue/:qitemId", "GET /api/queue/:qitemId/transitions"], effect: "read" },
+  { tool: "rig_queue_show", routes: ["GET /api/queue/:qitemId", "GET /api/queue/:qitemId/transitions", "GET /api/queue/list"], effect: "read" },
   { tool: "rig_queue_list", routes: ["GET /api/queue/list"], effect: "read" },
   { tool: "rig_queue_claim", routes: ["POST /api/queue/:qitemId/claim"], effect: "destructive" },
   { tool: "rig_queue_update", routes: ["POST /api/queue/:qitemId/update"], effect: "destructive" },
   { tool: "rig_telemetry_events", routes: ["GET /api/telemetry/v1/events"], effect: "read" },
   { tool: "rig_whoami", routes: ["GET /api/whoami"], effect: "read" },
+  { tool: "rig_team", routes: ["GET /api/rigs/:rigId", "GET /api/rigs/:rigId/nodes"], effect: "read" },
+  { tool: "rig_slices", routes: ["GET /api/slices"], effect: "read" },
+  { tool: "rig_mission", routes: ["GET /api/missions/:missionId"], effect: "read" },
+  { tool: "rig_context_pack", routes: ["GET /api/context-packs/library/by-ref"], effect: "read" },
+  { tool: "rig_context_get", routes: ["GET /api/context-packs/library/resolve-address"], effect: "read" },
 ];
 
 // Short guidance a client may show the model (the server's MCP instructions).
 const INSTRUCTIONS = [
-  "This server reaches an OpenRig team as one seat: the one named by OPENRIG_SESSION_NAME where the server was configured (rig_whoami shows it). The daemon attributes this server's writes to that seat.",
-  "To hand work to a seat, use rig_queue_create and keep its qitemId; read the answer later with rig_queue_show. Queue items are durable: they outlive this conversation and this server.",
+  "This server reaches an OpenRig team as one seat: the one named by OPENRIG_SESSION_NAME where the server was configured (rig_whoami shows it; rig_team shows a rig's seats and its lead). The daemon attributes this server's writes to that seat.",
+  "To hand work to a seat, use rig_queue_create and keep its qitemId; read the answer later with rig_queue_show, which names the next item when the work was handed on. Queue items are durable: they outlive this conversation and this server.",
   "Tools marked read-only change nothing. A seat whose activity is unknown is not idle, and an accepted request (a restore's attemptId) is not a finished one.",
   "A question reserved for a person is theirs to answer: don't answer it on their behalf.",
 ].join("\n");
@@ -147,9 +239,9 @@ function mapResult(
   const data = (res.data ?? {}) as Record<string, unknown>;
   // The daemon answers errors two ways: { error: <prose>, code } (restore, up), and the queue's { error: <code>,
   // message: <prose> }, whose missing-item reads send the code alone. So an error beside a message is the code, and so
-  // is a snake_case error on its own.
+  // is a snake_case error on its own. The slice and mission routes send a hint where others send a message.
   const error = typeof data.error === "string" ? data.error : undefined;
-  const prose = typeof data.message === "string" ? data.message : undefined;
+  const prose = typeof data.message === "string" ? data.message : typeof data.hint === "string" ? data.hint : undefined;
   const errorIsCode = error !== undefined && (prose !== undefined || /^[a-z][a-z0-9]*(_[a-z0-9]+)+$/.test(error));
   const daemonCode = typeof data.code === "string" ? data.code : errorIsCode ? error : undefined;
   const said = (fallback: string): string => (errorIsCode ? prose ?? error : error ?? prose) ?? fallback;
@@ -672,7 +764,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   // 20. rig_queue_show — one item with its transitions: a delegated task's answer is its own record
   server.tool(
     "rig_queue_show",
-    "Read one queue item and its transitions. For a task you handed off, this is where its answer is: the state, the closure reason and target, and the notes the assignee recorded.",
+    "Read one queue item and its transitions. For a task you handed off, this is where its answer is: the state, the closure reason and target, and the notes the assignee recorded. When the item was handed on, successor names the next item (on another host: its id and host); follow it with rig_queue_show. null means none was found.",
     {
       qitemId: z.string().describe("The qitemId returned by rig_queue_create (or any queue item)"),
     },
@@ -684,7 +776,10 @@ export function createMcpServer(client: DaemonClient): McpServer {
         if (item.status >= 400) return mapResult(item);
         const transitions = await client.get(`/api/queue/${id}/transitions`);
         if (transitions.status >= 400) return mapResult(transitions);
-        return mapResult({ status: 200, data: { item: item.data, transitions: transitions.data } }, undefined, { structured: true });
+        const row = (item.data ?? {}) as { state?: unknown; closureReason?: unknown; closureTarget?: unknown };
+        const handedOn = row.state === "handed-off" || row.closureReason === "handed_off_to";
+        const successor = handedOn ? await successorOf(client, qitemId, row.closureTarget) : undefined;
+        return mapResult({ status: 200, data: { item: item.data, transitions: transitions.data, ...(handedOn ? { successor } : {}) } }, undefined, { structured: true });
       } catch (err) {
         return caught(err);
       }
@@ -694,7 +789,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
   // 21. rig_queue_list — list queue items
   server.tool(
     "rig_queue_list",
-    "List queue items. owned: assigned to this seat. mine: this seat is the source or the destination. Without a scope, this seat's rig. Without state, open items only (all adds closed ones); a state filter returns exactly those states, closed ones included.",
+    "List queue items. owned: assigned to this seat. mine: this seat is the source or the destination. Without a scope, this seat's rig. Without state, open items only (all adds closed ones); a state filter returns exactly those states, closed ones included. since finds work updated after a time; handedOffFrom finds where a handed-off item went.",
     {
       owned: z.boolean().optional().describe("Only items assigned to this seat (overrides destination)"),
       mine: z.boolean().optional().describe("Items this seat sent or owns"),
@@ -702,10 +797,12 @@ export function createMcpServer(client: DaemonClient): McpServer {
       source: z.string().optional().describe("Filter by source seat"),
       state: z.string().optional().describe("Only these states, comma-separated; closed states included when named"),
       all: z.boolean().optional().describe("Without state: include closed items"),
+      since: z.string().optional().describe("Only items updated at or after this ISO-8601 time, e.g. done work since Monday: state done, since 2026-10-19"),
+      handedOffFrom: z.string().optional().describe("The items handed on from this qitemId, in any state and any rig"),
       limit: z.number().int().positive().optional().describe("Result limit (default 100)"),
     },
     READ_ONLY,
-    async ({ owned, mine, destination, source, state, all, limit }) => {
+    async ({ owned, mine, destination, source, state, all, since, handedOffFrom, limit }) => {
       try {
         const params = new URLSearchParams();
         const sessionName = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
@@ -715,15 +812,23 @@ export function createMcpServer(client: DaemonClient): McpServer {
         }
         if (owned) params.set("destinationSession", sessionName!);
         else if (mine) params.set("as", sessionName!);
-        else if (!destination && !source && sessionName?.includes("@")) params.set("rig", sessionName.split("@")[1]!);
-        if (!all) params.set("activeOnly", "1");
+        else if (!destination && !source && !handedOffFrom && sessionName?.includes("@")) params.set("rig", sessionName.split("@")[1]!);
+        if (!all && !handedOffFrom) params.set("activeOnly", "1");
         params.set("compact", "1");
         // owned means assigned to this seat; another destination can't widen it to someone else's items.
         if (destination && !owned) params.set("destinationSession", destination);
         if (source) params.set("sourceSession", source);
         if (state) params.set("state", state);
+        if (since) params.set("updatedSince", since);
+        if (handedOffFrom) params.set("handedOffFrom", handedOffFrom);
         params.set("limit", String(limit ?? 100));
-        return mapResult(await client.get(`/api/queue/list?${params.toString()}`), undefined, { structured: true });
+        const res = await client.get(`/api/queue/list?${params.toString()}`);
+        const ignored = res.status < 400 ? ignoredFilter(res.data, { since, handedOffFrom }) : null;
+        if (ignored) {
+          const message = `The daemon didn't apply ${ignored}, so this list isn't filtered by it; it needs a newer daemon.`;
+          return errorResult(JSON.stringify({ ok: false, error: message }), "filter_unsupported", message);
+        }
+        return mapResult(res, undefined, { structured: true });
       } catch (err) {
         return caught(err);
       }
@@ -826,6 +931,123 @@ export function createMcpServer(client: DaemonClient): McpServer {
         const targetRepo = readOpenRigEnv("OPENRIG_TARGET_REPO", "RIGGED_TARGET_REPO")?.trim();
         if (targetRepo) params.set("targetRepo", targetRepo);
         return mapResult(await client.get(`/api/whoami?${params.toString()}`), undefined, { structured: true });
+      } catch (err) {
+        return caught(err);
+      }
+    },
+  );
+
+  // 27. rig_team — a rig's seats and its lead
+  server.tool(
+    "rig_team",
+    "Show a rig's team: its lead, the rig's one delegates_to root (the seat that delegates to others and that nothing delegates to: the seat to delegate to), and each seat's pod, role, runtime, delegation (reportsTo, delegatesTo) and activity as the daemon reports it. Activity the daemon doesn't know reads unknown, never idle.",
+    {
+      rigId: z.string().describe("Rig name or identifier"),
+    },
+    READ_ONLY,
+    async ({ rigId }) => {
+      try {
+        const rig = await rigIdFor(client, rigId);
+        if ("content" in rig) return rig;
+        const id = encodeURIComponent(rig.id);
+        const detail = await client.get(`/api/rigs/${id}`);
+        if (detail.status >= 400) return mapResult(detail);
+        const nodes = await client.get(`/api/rigs/${id}/nodes`);
+        if (nodes.status >= 400) return mapResult(nodes);
+        return mapResult({ status: 200, data: teamView((detail.data ?? {}) as RigDetail, nodes.data) }, undefined, { structured: true });
+      } catch (err) {
+        return caught(err);
+      }
+    },
+  );
+
+  // 28. rig_slices — the work tree's slices, as summaries
+  server.tool(
+    "rig_slices",
+    "List the work tree's slices, most recently active first: name, mission, status, description and how many queue items name it. Paths and readiness detail are left out.",
+    {
+      missionId: z.string().optional().describe("Only this mission's slices"),
+      filter: z.enum(["all", "active", "done", "blocked"]).optional().describe("Only slices with this status (default all)"),
+      limit: z.number().int().positive().max(200).optional().describe("Most slices to return (default 50)"),
+    },
+    READ_ONLY,
+    async ({ missionId, filter, limit }) => {
+      try {
+        const res = await client.get(`/api/slices${filter ? `?${new URLSearchParams({ filter }).toString()}` : ""}`);
+        if (res.status >= 400) return mapResult(res);
+        const all = (((res.data ?? {}) as { slices?: SliceEntry[] }).slices ?? []).filter((slice) => !missionId || slice.missionId === missionId);
+        const shown = all.slice(0, limit ?? 50);
+        return mapResult({ status: 200, data: { slices: shown.map(sliceSummary), totalCount: all.length, truncated: shown.length < all.length } }, undefined, { structured: true });
+      } catch (err) {
+        return caught(err);
+      }
+    },
+  );
+
+  // 29. rig_mission — one mission's status and slices
+  server.tool(
+    "rig_mission",
+    "Read one mission: its status and its slices as summaries.",
+    {
+      missionId: z.string().describe("The mission's id (its folder name)"),
+    },
+    READ_ONLY,
+    async ({ missionId }) => {
+      try {
+        const res = await client.get(`/api/missions/${encodeURIComponent(missionId)}`);
+        if (res.status >= 400) return mapResult(res);
+        const mission = (res.data ?? {}) as { missionId?: string; status?: unknown; slices?: SliceEntry[] };
+        return mapResult({ status: 200, data: { missionId: mission.missionId ?? missionId, status: mission.status ?? null, slices: (mission.slices ?? []).map(sliceSummary) } }, undefined, { structured: true });
+      } catch (err) {
+        return caught(err);
+      }
+    },
+  );
+
+  // 30. rig_context_pack — one context pack's files
+  server.tool(
+    "rig_context_pack",
+    "Show one context pack: its purpose and the files it declares (path, role, summary, estimated tokens), so a file can be read with rig_context_get as <pack>/<file>.",
+    {
+      ref: z.string().describe("The pack's ref, as rig context list shows it (e.g. project-world)"),
+    },
+    READ_ONLY,
+    async ({ ref }) => {
+      try {
+        const res = await client.get(`/api/context-packs/library/by-ref?${new URLSearchParams({ ref }).toString()}`);
+        if (res.status >= 400) return mapResult(res);
+        const pack = (res.data ?? {}) as { relativePath?: string; name?: string; version?: string; purpose?: string | null; files?: Array<{ path: string; role?: string; summary?: string | null; estimatedTokens?: number | null }> };
+        return mapResult({ status: 200, data: {
+          ref: pack.relativePath ?? ref, name: pack.name, version: pack.version, purpose: pack.purpose ?? null,
+          files: (pack.files ?? []).map((file) => ({ path: file.path, role: file.role, summary: file.summary ?? null, estimatedTokens: file.estimatedTokens ?? null })),
+        } }, undefined, { structured: true });
+      } catch (err) {
+        return caught(err);
+      }
+    },
+  );
+
+  // 31. rig_context_get — one context file or section, as rig context get reads it
+  server.tool(
+    "rig_context_get",
+    `Read one context file or one section of it, as rig context get does: <pack>/<file>, or <pack>/<file>#<h2-slug>[/<h3-slug>]. Text over ${CONTEXT_TEXT_LIMIT} characters is cut (truncated: true); address a section to read the rest.`,
+    {
+      address: z.string().describe("<pack>/<file>[#<h2-slug>[/<h3-slug>]]"),
+    },
+    READ_ONLY,
+    async ({ address }) => {
+      try {
+        const res = await client.get(`/api/context-packs/library/resolve-address?${new URLSearchParams({ address }).toString()}`);
+        if (res.status >= 400) return mapResult(res);
+        const found = (res.data ?? {}) as { address?: string; packRef?: string; filePath?: string; headerPath?: unknown; text?: string };
+        const text = found.text ?? "";
+        const cut = text.length > CONTEXT_TEXT_LIMIT;
+        return mapResult({ status: 200, data: {
+          address: found.address ?? address, packRef: found.packRef, filePath: found.filePath,
+          ...(found.headerPath !== undefined ? { headerPath: found.headerPath } : {}),
+          text: cut ? text.slice(0, CONTEXT_TEXT_LIMIT) : text,
+          ...(cut ? { truncated: true, totalChars: text.length } : {}),
+        } }, undefined, { structured: true });
       } catch (err) {
         return caught(err);
       }

@@ -122,6 +122,37 @@ describe("MCP queue tools on the daemon's queue routes", () => {
     expect((await desk("rig_queue_show", { qitemId })).data.item).toMatchObject({ state: "pending" });
   });
 
+  it("follows a handed-on task to the item that carries it, and finds finished work by time", async () => {
+    const desk = await connectAs(DESK);
+    const impl = await connectAs(IMPL);
+    const qitemId = (await desk("rig_queue_create", { destination: IMPL, body: "Fix the stale fixture." })).data.qitemId as string;
+    expect((await impl("rig_queue_claim", { qitemId })).isError).toBe(false);
+    // An open item has no successor key: its result reads as before.
+    expect("successor" in (await desk("rig_queue_show", { qitemId })).data).toBe(false);
+
+    // The assignee hands it on with the CLI's route; the MCP tools don't hand off.
+    const handoff = await fetch(`${url}/api/queue/${qitemId}/handoff`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": IMPL },
+      body: JSON.stringify({ toSession: "qa@team", nudge: false }),
+    });
+    expect(handoff.status).toBe(201);
+    const next = ((await handoff.json()) as { created: { qitemId: string } }).created.qitemId;
+
+    const shown = await desk("rig_queue_show", { qitemId });
+    expect(shown.data.item).toMatchObject({ state: "handed-off" });
+    expect(shown.structured).toMatchObject({ successor: { qitemId: next, destinationSession: "qa@team", state: "pending" } });
+    expect(shown.data.successor).toEqual((shown.structured as { successor: unknown }).successor);
+    const onward = await desk("rig_queue_list", { handedOffFrom: qitemId });
+    expect((onward.structured as { items: Array<{ qitemId: string }> }).items.map((item) => item.qitemId)).toEqual([next]);
+
+    const since = async (time: string) => ((await desk("rig_queue_list", { destination: "qa@team", since: time })).structured as { items: unknown[] }).items.length;
+    expect(await since("2000-01-01T00:00:00Z")).toBe(1);
+    expect(await since("2999-01-01T00:00:00Z")).toBe(0);
+    const invalid = await desk("rig_queue_list", { destination: "qa@team", since: "yesterday" });
+    expect(invalid.isError).toBe(true);
+    expect(invalid.structured).toMatchObject({ ok: false, code: "updated_since_invalid", status: 400 });
+  });
+
   it("records the configured seat as the source even when nothing else names it", async () => {
     const desk = await connectAs(DESK);
     const created = await desk("rig_queue_create", { destination: IMPL, body: "fixture" });

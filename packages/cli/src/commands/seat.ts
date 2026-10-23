@@ -44,6 +44,14 @@ interface SeatStatusResponse {
       source: string;
       fallbackReason?: string;
     };
+    /** The daemon's planned account (permission-account.ts); older daemons don't send it. */
+    account?: {
+      summary: string;
+      overrides: string[];
+      openRigAdds: { claudeAllow: string[]; claudeAsk: string[]; notes: string[] };
+      unknown: string[];
+      controls: string[];
+    };
   };
   session_status: string | null;
   launch_cwd?: string | null;
@@ -188,7 +196,21 @@ function printHuman(status: SeatStatusResponse): void {
   console.log(`Session: ${display(status.session_status, "unknown")}`);
   const reason = sessionReason(status.session_reason);
   if (reason) console.log(`Reason: ${reason}`);
-  if (status.permissions) {
+  if (status.permissions?.account) {
+    const p = status.permissions;
+    const a = p.account!;
+    console.log("Permissions, planned for the next fresh managed launch (not observed):");
+    console.log(`  ${a.summary}`);
+    if (a.overrides.length) console.log(`  This seat's choice is used instead of the ${a.overrides.join(" and the ")}.`);
+    for (const note of a.openRigAdds.notes) console.log(`  ${note}`);
+    if (a.openRigAdds.claudeAllow.length) console.log("  The exact allowance and ask lists are in --json, under permissions.account.openRigAdds.");
+    console.log(`  Last launch arguments (observed): ${p.lastLaunchArguments?.value ?? "unknown"}${p.lastLaunchArguments?.approvalPolicy ? `; approval=${p.lastLaunchArguments.approvalPolicy}` : ""}`);
+    for (const item of a.unknown) console.log(`  Unknown: ${item}`);
+    if (a.controls.length) {
+      console.log("  To change it, for future launches only:");
+      for (const control of a.controls) console.log(`    ${control}`);
+    }
+  } else if (status.permissions) {
     const p = status.permissions;
     const formatSource = (source: string): string => {
       if (source === "member_spec") return "from the member's permission_policy";

@@ -205,7 +205,7 @@ rig up <rig> --existing brings it back, resuming each seat's conversation where 
       }
 
       if (result.leftRunning && result.leftRunning.length > 0) {
-        console.log(`Left running: ${result.leftRunning.join(", ")}. Joined with rig attach as an external CLI, so OpenRig doesn't stop it.`);
+        console.log(`Not stopped: ${result.leftRunning.join(", ")}. Joined with rig attach as an external CLI, which OpenRig doesn't stop or check.`);
       }
 
       // Exit code: errors first, then deleted, then alreadyStopped

@@ -31,6 +31,7 @@ describe("MCP operation table against the daemon", () => {
   let server: ServerType;
   let url: string;
   let routes: Array<{ method: string; path: string }>;
+  let setup: ReturnType<typeof createTestApp>;
   const closers: Array<() => Promise<void>> = [];
   const saved = { home: process.env.OPENRIG_HOME, session: process.env.OPENRIG_SESSION_NAME };
 
@@ -39,7 +40,8 @@ describe("MCP operation table against the daemon", () => {
     migrate(db, ALL_MIGRATIONS);
     home = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-ops-"));
     process.env.OPENRIG_HOME = home;
-    const { app } = createTestApp(db);
+    setup = createTestApp(db);
+    const { app } = setup;
     routes = app.routes;
     server = await new Promise<ServerType>((resolve) => {
       const s = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, () => resolve(s));
@@ -97,5 +99,25 @@ describe("MCP operation table against the daemon", () => {
     const attempt = await client.callTool({ name: "rig_restore_status", arguments: { rigId: "01RIGNOTHERE", attemptId: 1 } });
     expect(attempt.isError).toBe(true);
     expect(attempt.structuredContent).toMatchObject({ ok: false, code: "attempt_not_found", status: 404 });
+  });
+
+  it("reads a rig's team through its real routes: the lead from the authored delegation, activity as the daemon reports it", async () => {
+    const rig = setup.rigRepo.createRig("led-team");
+    const lead = setup.rigRepo.addNode(rig.id, "orch.lead", { role: "orchestrator" });
+    const impl = setup.rigRepo.addNode(rig.id, "dev.impl", { role: "worker" });
+    setup.rigRepo.addEdge(rig.id, lead.id, impl.id, "delegates_to");
+    setup.sessionRegistry.registerSession(lead.id, "orch-lead@led-team");
+    const client = await connect();
+
+    const team = await client.callTool({ name: "rig_team", arguments: { rigId: "led-team" } });
+    expect(team.isError).toBeFalsy();
+    const view = team.structuredContent as { lead: unknown; seats: Array<Record<string, unknown>> };
+    expect(view.lead).toEqual({ session: "orch-lead@led-team", logicalId: "orch.lead" });
+    const seats = Object.fromEntries(view.seats.map((seat) => [seat.logicalId as string, seat]));
+    expect(seats["orch.lead"]).toMatchObject({ role: "orchestrator", session: "orch-lead@led-team", delegatesTo: ["dev.impl"], reportsTo: [] });
+    expect(seats["dev.impl"]).toMatchObject({ role: "worker", reportsTo: ["orch.lead"], delegatesTo: [] });
+    // Nothing has observed these seats, so their activity is unknown, never idle.
+    expect(seats["dev.impl"]!.activity).toBe("unknown");
+    expect(seats["orch.lead"]!.activity).toBe("unknown");
   });
 });

@@ -316,6 +316,29 @@ describe("rig seat status", () => {
     expect(output).toContain("Previous occupant: none");
   });
 
+  it("prints the planned permission account as planned, with its unknowns and the controls, in place of the old mode line", async () => {
+    const account = {
+      summary: "Next launch: --permission-mode acceptEdits, from OpenRig's team default (no policy or seat choice is recorded); OpenRig adds 2 allowances and asks before 1 lifecycle commands.",
+      overrides: [], unknown: ["Whether the harness applies this is unverified until a launch."],
+      openRigAdds: { claudeAllow: ["Read(./**)", "Bash(rig:*)"], claudeAsk: ["Bash(rig up:*)"], notes: ["A hook asks before the listed lifecycle commands."] },
+      controls: ['rig seat set-permissions dev-impl@seat-rig --mode <mode> --reason "<why>"'],
+    };
+    const deps = makeDeps({ status: 200, data: { ...STATUS, permissions: { selectionState: "inherit", desired: null, lastLaunchArguments: { value: "--permission-mode acceptEdits" }, nativeEffect: "unverified", account } } }, []);
+
+    const { logs } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
+    });
+
+    const output = logs.join("\n");
+    expect(output).toContain("Permissions, planned for the next fresh managed launch (not observed):");
+    expect(output).toContain(`  ${account.summary}`);
+    expect(output).toContain("  The exact allowance and ask lists are in --json, under permissions.account.openRigAdds.");
+    expect(output).toContain("  Last launch arguments (observed): --permission-mode acceptEdits");
+    expect(output).toContain("  Unknown: Whether the harness applies this is unverified until a launch.");
+    expect(output).toContain('    rig seat set-permissions dev-impl@seat-rig --mode <mode> --reason "<why>"');
+    expect(output).not.toContain("Permission mode for future launches");
+  });
+
   it("explains a confirmed missing tmux session", async () => {
     const deps = makeDeps({
       status: 200,

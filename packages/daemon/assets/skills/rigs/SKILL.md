@@ -110,7 +110,8 @@ person needs in their project or home folder and name that path.
   `rig attach --self --rig <rigId> --pod operator --member person-agent --runtime <claude-code|codex> --print-env`.
   `--node <logicalId>` binds to an existing seat instead. Attach once, and keep the variables it prints
   (`OPENRIG_NODE_ID` and `OPENRIG_SESSION_NAME`). Each command may run in a fresh shell, so put them in front of every
-  later `rig` command. Check with `rig whoami --json`.
+  later `rig` command. Check with `rig whoami --json`, and use it or `rig seat status` later for identity and state,
+  not `rig attach --json` output. Don't print `OPENRIG_ACTIVITY_*` values: they're credentials.
   If they decline, a message that must still say who it's from can go as a queue item with a declared source,
   `rig queue create --source <their id>@external --destination <seat> --summary "<one line>" --body-file <file>`: the
   seat sees that name, recorded as declared, and can reply to them if they're registered (`rig gateway human list`).

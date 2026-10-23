@@ -1019,6 +1019,31 @@ describe("Up CLI", () => {
     expect(exitCode).toBe(1);
   });
 
+  it("up --plan with no daemon running starts nothing and says how to start one", async () => {
+    const spawn = vi.fn(() => ({ pid: 1, unref: vi.fn() }) as never);
+    const clientFactory = vi.fn();
+    const deps: StatusDeps = {
+      // No state file and nothing answering: the daemon is down, as on a fresh instance.
+      lifecycleDeps: { ...mockLifecycleDeps(), exists: vi.fn(() => false), readFile: vi.fn(() => null), spawn, fetch: vi.fn(async (url: string) => { throw new Error(`refused:${url}`); }) },
+      clientFactory: clientFactory as unknown as StatusDeps["clientFactory"],
+    };
+    const run = async (args: string[]) => {
+      const prog = new Command();
+      prog.exitOverride();
+      prog.addCommand(upCommand({ ...deps, preflightExec: healthyPreflightExec }));
+      return captureLogs(async () => { await prog.parseAsync(["node", "rig", "up", "/tmp/test.yaml", "--plan", ...args]); });
+    };
+
+    const text = await run([]);
+    expect(text.exitCode).toBe(1);
+    expect(text.logs.join("\n")).toContain("A preview doesn't start one");
+    expect(text.logs.join("\n")).toContain("rig daemon start --no-kernel");
+    const json = await run(["--json"]);
+    expect(JSON.parse(json.logs.at(-1)!)).toMatchObject({ ok: false, code: "daemon_not_running", plan: true, changed: false });
+    expect(spawn).not.toHaveBeenCalled(); // no daemon, so no kernel and no agent turns
+    expect(clientFactory).not.toHaveBeenCalled();
+  });
+
   it("auto-start uses resolved daemon port instead of default 7433", async () => {
     const savedPort = process.env["OPENRIG_PORT"];
     process.env["OPENRIG_PORT"] = "7461";

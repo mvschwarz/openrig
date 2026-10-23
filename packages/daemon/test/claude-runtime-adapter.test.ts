@@ -1257,6 +1257,30 @@ describe("Claude Code runtime adapter", () => {
     logSpy.mockRestore();
   });
 
+  it("projectEntry skips a legacy `role` projection of the seat's own role file, and still merges shared guidance named `role`", async () => {
+    const fs = mockFs({ "/agents/analyst/guidance/role.md": "# You are the analyst", "/rig/guidance/team-role.md": "# Our team's role" });
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const project = (absolutePath: string, cwd: string) => new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: fs }).project({
+      runtime: "claude-code", cwd,
+      entries: [makeEntry({ category: "guidance", effectiveId: "role", mergeStrategy: "managed_block", absolutePath, resourcePath: "guidance/role.md" })],
+      startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [],
+    }, makeBinding(cwd));
+    const store = (fs as unknown as { _store: Record<string, string> })._store;
+
+    // Saved before the id became rig-role: the analyst's own role must not land in the file every pod-mate reads.
+    const own = await project("/agents/analyst/guidance/role.md", "/project");
+    expect(store["/project/CLAUDE.md"]).toBeUndefined();
+    expect(own.skipped).toContain("role");
+    // A spec saved that way may have had no other route for the role, so the result says what happened.
+    expect(own.warnings).toEqual([expect.stringContaining("role: not merged into /project/CLAUDE.md")]);
+    // Guidance that is genuinely shared and happens to be named role still merges.
+    const shared = await project("/rig/guidance/team-role.md", "/shared");
+    expect(store["/shared/CLAUDE.md"]).toContain("Our team's role");
+    expect(shared.projected).toContain("role");
+    expect(shared.warnings).toBeUndefined();
+    logSpy.mockRestore();
+  });
+
   it("projectEntry reports non-rig-role guidance in `projected`, not `skipped` (regression on contract)", async () => {
     const fs = mockFs({ "/agents/base/guidance/using-openrig.md": "# Using OpenRig\nhub guidance" });
     const adapter = new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: fs });

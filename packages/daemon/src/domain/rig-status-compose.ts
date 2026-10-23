@@ -39,7 +39,7 @@ export interface RigStatusSeat {
   lifecycleState: NodeLifecycleState;
   /** Read-only restore-plan forecast (restore-plan-preview). */
   tokenState: ResumeTokenState;
-  intendedAction: "resume-original" | "fresh-primed" | "awaiting-decision";
+  intendedAction: "resume-original" | "fresh-primed" | "awaiting-decision" | "leave-attached";
   freshRequired: boolean;
   /** True when THIS seat blocks a restore-original (awaiting-decision) — the
    *  per-seat blocker that folds up to the aggregate `blocked`. */
@@ -205,11 +205,12 @@ function lifecycleToAggregate(lifecycle: ReturnType<typeof deriveRigLifecycleSta
 }
 
 function countActions(perSeat: RigStatusSeat[]): string {
-  const counts = { "resume-original": 0, "fresh-primed": 0, "awaiting-decision": 0 };
+  const counts = { "resume-original": 0, "fresh-primed": 0, "awaiting-decision": 0, "leave-attached": 0 };
   for (const s of perSeat) counts[s.intendedAction] += 1;
   const parts: string[] = [];
   if (counts["resume-original"]) parts.push(`${counts["resume-original"]} resume-original`);
   if (counts["fresh-primed"]) parts.push(`${counts["fresh-primed"]} fresh-primed`);
   if (counts["awaiting-decision"]) parts.push(`${counts["awaiting-decision"]} awaiting-decision`);
+  if (counts["leave-attached"]) parts.push(`${counts["leave-attached"]} leave-attached`);
   return parts.length > 0 ? parts.join(", ") : "no seats";
 }

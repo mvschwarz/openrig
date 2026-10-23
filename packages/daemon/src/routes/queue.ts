@@ -1026,6 +1026,15 @@ export function queueRoutes(): Hono {
     const rig = c.req.query("rig") || undefined;
     const activeOnly = c.req.query("activeOnly") === "1";
     const attention = c.req.query("attention") === "1";
+    // Follow-through reads: a handoff's successor, and items updated since a time. Rows store ts_updated as
+    // toISOString(), so the time is normalized to that form before it's compared.
+    const handedOffFrom = c.req.query("handedOffFrom") || undefined;
+    const updatedSinceRaw = c.req.query("updatedSince") || undefined;
+    const updatedSinceMs = updatedSinceRaw === undefined ? undefined : Date.parse(updatedSinceRaw);
+    if (updatedSinceMs !== undefined && Number.isNaN(updatedSinceMs)) {
+      return c.json({ error: "updated_since_invalid", message: `updatedSince must be an ISO-8601 time (got "${updatedSinceRaw}")` }, 400);
+    }
+    const updatedSince = updatedSinceMs === undefined ? undefined : new Date(updatedSinceMs).toISOString();
 
     // Trim each name so "pending, in-progress" matches like "pending,in-progress". A blank name
     // stays in the filter (it matches no row), so a filter of only commas or spaces stays explicit.
@@ -1046,6 +1055,8 @@ export function queueRoutes(): Hono {
         compact,
         rig,
         activeOnly,
+        handedOffFrom,
+        updatedSince,
       });
       return c.json(items);
     }
@@ -1072,6 +1083,8 @@ export function queueRoutes(): Hono {
       destinationSession,
       sourceSession,
       targetRepo,
+      handedOffFrom,
+      updatedSince,
     });
     // Defense-in-depth: refine with the JS predicate so the SQL
     // LIKE superset cannot leak a malformed destination through.

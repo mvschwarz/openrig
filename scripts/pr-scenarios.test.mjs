@@ -2,6 +2,19 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readReport, verifyPassingRun, verifyRun, PASSING_CASES, RESULT_PREFIX, SCENARIO } from '../packages/test-system/ci/result.mjs';
 
+const mcpResult = data => ({ content: [{ type: 'text', text: JSON.stringify(data) }], structuredContent: data });
+const mcp = {
+  identity: mcpResult({ identity: { sessionName: 'dev-impl@dev-pair-stub', rigName: 'dev-pair-stub' } }),
+  unseated: mcpResult({ ok: true, seat: null, message: 'This server has no seat' }),
+  created: mcpResult({ qitemId: 'qitem-installed-mcp' }),
+  shown: mcpResult({ item: { qitemId: 'qitem-installed-mcp', sourceSession: 'dev-impl@dev-pair-stub',
+    destinationSession: 'dev-qa@dev-pair-stub', body: 'Read the installed MCP result.' } }),
+  missing: { isError: true, content: [{ type: 'text', text: '{"error":"qitem_not_found"}' }],
+    structuredContent: { ok: false, code: 'qitem_not_found', message: 'qitem_not_found', status: 404 } },
+  daemonError: { status: 404, body: { error: 'qitem_not_found' } },
+  instructions: 'OPENRIG_SESSION_NAME\nrig_queue_create\nnot idle\nreserved for a person',
+};
+
 // Pure admission controls, not E2E evidence. No process, socket, native addon or DB.
 function report(mode, result, fault = null) {
   return { mode, result, records: [result], fault };
@@ -82,8 +95,17 @@ test('a passing-only case admits only a clean PASS of its own scenario', () => {
     const hook = { rawOutput: JSON.stringify({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: text } }), additionalContext: text };
     const pass = { ...(PASSING_CASES[caseName].kind === 'hook' ? { hook } : {}), mode: 'healthy', caseName, scenarioSha256: 'a'.repeat(64), result, records: [result], fault: null };
     if (caseName === 'daemon-restart') {
+      pass.mcp = mcp;
       pass.preservation = { failedBackupUnchanged: true, editedSha256: 'b'.repeat(64), backedUpSha256: 'b'.repeat(64),
         targetFilesChecked: 2, version: '0.1.17', shippedVersion: '0.1.17' };
+      verifyPassingRun(0, pass, caseName);
+      for (const changed of [undefined, { ...mcp, identity: mcpResult({ identity: { sessionName: 'other', rigName: 'dev-pair-stub' } }) },
+        { ...mcp, unseated: mcpResult({ ok: true, seat: 'unexpected', message: 'no seat' }) },
+        { ...mcp, created: { content: mcp.created.content } },
+        { ...mcp, missing: { ...mcp.missing, structuredContent: { ...mcp.missing.structuredContent, code: 'http_error' } } },
+        { ...mcp, instructions: 'no guidance' }]) {
+        assert.throws(() => verifyPassingRun(0, { ...pass, mcp: changed }, caseName));
+      }
       for (const changed of [undefined, { ...pass.preservation, failedBackupUnchanged: false },
         { ...pass.preservation, backedUpSha256: 'c'.repeat(64) }, { ...pass.preservation, version: '0.0.1' }]) {
         assert.throws(() => verifyPassingRun(0, { ...pass, preservation: changed }, caseName));

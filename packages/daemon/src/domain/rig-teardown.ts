@@ -25,8 +25,8 @@ export interface TeardownResult {
   /** OPR.0.7.0.13: team skill files left in seats' own storage because they were edited, or were never recorded as
    *  OpenRig's. Present only when something was kept. */
   keptSkills?: string[];
-  /** Seats joined with `rig attach` as an external CLI. OpenRig doesn't stop them, so they keep their claim. Present only
-   *  when one was left running. */
+  /** Sessions of seats joined with `rig attach` as an external CLI, which down doesn't stop or check. Without --delete
+   *  each keeps its claim as it was, whether or not the app still runs. Present only when there was one. */
   leftRunning?: string[];
 }
 

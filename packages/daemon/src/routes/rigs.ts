@@ -4,6 +4,7 @@ import { Hono } from "hono";
 import { observeInventoryHandler, observeInventoryQuery } from "../domain/request-phase-observer.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "../domain/rig-repository.js";
+import { resolveRigRepresentativeById } from "../domain/queue-owner.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
 import type { EventBus } from "../domain/event-bus.js";
 import { summarizeSnapshot, type SnapshotRepository } from "../domain/snapshot-repository.js";
@@ -347,11 +348,13 @@ rigsRoutes.get("/", observeInventoryHandler, (c) => {
 });
 
 rigsRoutes.get("/:id", (c) => {
-  const rig = getRepo(c).getRig(c.req.param("id"));
+  const repo = getRepo(c);
+  const rig = repo.getRig(c.req.param("id"));
   if (!rig) {
     return c.json({ error: "rig not found" }, 404);
   }
-  return c.json(rig);
+  // The rig's one delegates_to root at its session: null when there's none or several, or the root has no session.
+  return c.json({ ...rig, representative: resolveRigRepresentativeById(repo.db, rig.rig.id) });
 });
 
 rigsRoutes.get("/:id/graph", async (c) => {
