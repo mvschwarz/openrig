@@ -193,6 +193,61 @@ describe("MCP Server", () => {
   });
 
   // T3: rig_down calls POST /api/down
+  it("rig_up passes cwd, env, a rig name and fresh seats, and refuses an env the daemon would drop", async () => {
+    const postFn = vi.fn(async () => ({ status: 201, data: { status: "completed" } }));
+    await setup({ post: postFn });
+
+    const ok = await mcpClient.callTool({
+      name: "rig_up",
+      arguments: { sourceRef: "/work/rig.yaml", cwd: "/work/app", env: { API_MODE: "test" }, rigName: "app-team", fresh: ["dev.impl"] },
+    });
+    expect(ok.isError).toBeFalsy();
+    expect(postFn).toHaveBeenCalledWith("/api/up", expect.objectContaining({
+      sourceRef: "/work/rig.yaml", cwdOverride: "/work/app", envOverride: { API_MODE: "test" }, rigName: "app-team", freshLogicalIds: ["dev.impl"],
+    }), { timeoutMs: 120_000 });
+
+    // The daemon ignores an env block with any invalid entry, so the launch would run without it; refuse it before sending.
+    for (const env of [{ "lower-case": "x" }, { OPENRIG_HOME: "/tmp" }, { EMPTY: "" }]) {
+      const refused = await mcpClient.callTool({ name: "rig_up", arguments: { sourceRef: "/work/rig.yaml", env } });
+      expect(refused.isError).toBe(true);
+    }
+    const relative = await mcpClient.callTool({ name: "rig_up", arguments: { sourceRef: "/work/rig.yaml", cwd: "app" } });
+    expect(relative.isError).toBe(true);
+    expect(postFn).toHaveBeenCalledTimes(1);
+    await cleanup();
+  });
+
+  it("declares read and change hints on every tool, so a client can let the reads through once", async () => {
+    await setup();
+    const { tools } = await mcpClient.listTools();
+    const reads = ["rig_agent_validate", "rig_bundle_inspect", "rig_capture", "rig_chatroom_watch", "rig_ps", "rig_queue_list", "rig_queue_show",
+      "rig_rig_nodes", "rig_rig_validate", "rig_snapshot_list", "rig_status", "rig_telemetry_events"];
+    const additive = ["rig_add", "rig_chatroom_send", "rig_discover", "rig_queue_claim", "rig_queue_create", "rig_snapshot_create"];
+    const destructive = ["rig_bind", "rig_down", "rig_queue_update", "rig_restore", "rig_send", "rig_up"];
+    const hints = Object.fromEntries(tools.map((tool) => [tool.name, tool.annotations]));
+    expect(Object.keys(hints).sort()).toEqual([...reads, ...additive, ...destructive].sort());
+    for (const name of reads) expect(hints[name], name).toEqual({ readOnlyHint: true });
+    for (const name of additive) expect(hints[name], name).toEqual({ readOnlyHint: false, destructiveHint: false });
+    for (const name of destructive) expect(hints[name], name).toEqual({ readOnlyHint: false, destructiveHint: true });
+    await cleanup();
+  });
+
+  it("rig_send and rig_capture send the daemon's terminal token when one is configured, as the CLI does", async () => {
+    vi.stubEnv("OPENRIG_TERMINAL_BEARER_TOKEN", "terminal-secret");
+    try {
+      const postFn = vi.fn(async () => ({ status: 200, data: { ok: true } }));
+      await setup({ post: postFn });
+      await mcpClient.callTool({ name: "rig_send", arguments: { session: "dev-impl@my-rig", text: "hello" } });
+      await mcpClient.callTool({ name: "rig_send", arguments: { session: "dev-impl@my-rig", text: "hello", waitForIdleSeconds: 30 } });
+      await mcpClient.callTool({ name: "rig_capture", arguments: { session: "dev-impl@my-rig" } });
+      const auth = { headers: { Authorization: "Bearer terminal-secret" } };
+      expect(postFn.mock.calls.map((call) => (call as unknown[])[2])).toEqual([auth, { timeoutMs: 35000, ...auth }, auth]);
+      await cleanup();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("rig_down calls POST /api/down with correct params", async () => {
     const postFn = vi.fn(async () => ({
       status: 200,
@@ -521,7 +576,7 @@ describe("MCP Server", () => {
   // T-chatroom-watch: rig_chatroom_watch returns recent history
   it("rig_chatroom_watch returns recent history", async () => {
     const getFn = vi.fn(async (path: string) => {
-      if (path === "/api/rigs/summary") {
+      if (path.startsWith("/api/rigs/summary")) {
         return {
           status: 200,
           data: [{ id: "rig-1", name: "my-rig", nodeCount: 2 }],
@@ -545,6 +600,7 @@ describe("MCP Server", () => {
     });
 
     expect(result.isError).toBeFalsy();
+    expect(getFn).toHaveBeenCalledWith("/api/rigs/rig-1/chat/history?limit=20");
     const parsed = JSON.parse((result.content as Array<{ text: string }>)[0]!.text);
     expect(Array.isArray(parsed)).toBe(true);
     expect(parsed[0].sender).toBe("alice");
@@ -560,7 +616,8 @@ describe("MCP Server", () => {
         { id: "rig-2", name: "my-rig", nodeCount: 1 },
       ],
     }));
-    await setup({ get: getFn });
+    const postFn = vi.fn(async () => ({ status: 201, data: {} }));
+    await setup({ get: getFn, post: postFn });
 
     const result = await mcpClient.callTool({
       name: "rig_chatroom_send",
@@ -569,7 +626,31 @@ describe("MCP Server", () => {
 
     expect(result.isError).toBe(true);
     const parsed = JSON.parse((result.content as Array<{ text: string }>)[0]!.text);
-    expect(parsed.error).toContain("ambiguous");
+    expect(parsed).toMatchObject({ code: "rig_ambiguous", candidates: ["rig-1", "rig-2"] });
+    expect(postFn).not.toHaveBeenCalled();
+    await cleanup();
+  });
+
+  it("the chatroom tools take a rig id as well as a name; watch reads one topic, sender and page size; send ignores an old sender argument", async () => {
+    const getFn = vi.fn(async (path: string) => {
+      if (path.startsWith("/api/rigs/summary")) return { status: 200, data: [{ id: "01RIG", name: "my-rig", nodeCount: 2 }] };
+      return { status: 200, data: [] };
+    });
+    const postFn = vi.fn(async () => ({ status: 201, data: { id: "msg-1", body: "hello" } }));
+    await setup({ get: getFn, post: postFn });
+
+    const sent = await mcpClient.callTool({ name: "rig_chatroom_send", arguments: { rigName: "01RIG", body: "hello", sender: "someone-else" } });
+    expect(sent.isError).toBeFalsy();
+    expect(postFn).toHaveBeenCalledWith("/api/rigs/01RIG/chat/send", { body: "hello" });
+
+    const read = await mcpClient.callTool({ name: "rig_chatroom_watch", arguments: { rigName: "my-rig", topic: "release", sender: "dev-impl@my-rig", limit: 5 } });
+    expect(read.isError).toBeFalsy();
+    expect(getFn).toHaveBeenCalledWith("/api/rigs/01RIG/chat/history?limit=5&topic=release&sender=dev-impl%40my-rig");
+
+    // A handle no rig has is an error, not an empty room.
+    const missing = await mcpClient.callTool({ name: "rig_chatroom_watch", arguments: { rigName: "no-such-rig" } });
+    expect(missing.isError).toBe(true);
+    expect((missing.content as Array<{ text: string }>)[0]!.text).toContain("not found");
     await cleanup();
   });
 
@@ -692,6 +773,15 @@ describe("MCP Server", () => {
       expect(postFn.mock.calls[0]?.[0]).toBe("/api/queue/qitem-1/claim");
       expect(postFn.mock.calls[1]?.[0]).toBe("/api/queue/qitem-1/update");
       expect(postFn.mock.calls[1]?.[1]).toMatchObject({ state: "done", closureReason: "no-follow-on", transitionNote: "the answer" });
+      await cleanup();
+    });
+    it("rig_queue_update passes the outcome as resolution and a deliberate reopen", async () => {
+      const postFn = vi.fn(async () => ({ status: 200, data: { ok: true } }));
+      await setup({ post: postFn });
+      await mcpClient.callTool({ name: "rig_queue_update", arguments: { qitemId: "qitem-1", state: "done", closureReason: "no-follow-on", resolution: "the answer" } });
+      await mcpClient.callTool({ name: "rig_queue_update", arguments: { qitemId: "qitem-1", state: "pending", reopen: true, note: "one more detail" } });
+      expect(postFn.mock.calls[0]?.[1]).toMatchObject({ state: "done", resolution: "the answer" });
+      expect(postFn.mock.calls[1]?.[1]).toMatchObject({ state: "pending", reopen: true, transitionNote: "one more detail" });
       await cleanup();
     });
   });

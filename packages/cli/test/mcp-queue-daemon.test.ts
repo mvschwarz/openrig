@@ -100,6 +100,24 @@ describe("MCP queue tools on the daemon's queue routes", () => {
     expect(JSON.stringify(mine.data)).toContain(qitemId);
   });
 
+  it("keeps the assignee's answer as the item's resolution, and reopens the item only deliberately", async () => {
+    const desk = await connectAs(DESK);
+    const impl = await connectAs(IMPL);
+    const qitemId = (await desk("rig_queue_create", { destination: IMPL, body: "Name the stale fixture." })).data.qitemId as string;
+    expect((await impl("rig_queue_claim", { qitemId })).isError).toBe(false);
+    expect((await impl("rig_queue_update", { qitemId, state: "done", closureReason: "no-follow-on", resolution: "ANSWER: fixtures/old.json" })).isError).toBe(false);
+
+    const closed = await desk("rig_queue_show", { qitemId });
+    expect(closed.data.item).toMatchObject({ state: "done", resolution: "ANSWER: fixtures/old.json" });
+
+    // Moving a closed item back takes reopen and a note; without reopen the daemon refuses it.
+    const refused = await impl("rig_queue_update", { qitemId, state: "pending", note: "one more detail" });
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused.data)).toContain("terminal_reopen_requires_ack");
+    expect((await impl("rig_queue_update", { qitemId, state: "pending", reopen: true, note: "one more detail" })).isError).toBe(false);
+    expect((await desk("rig_queue_show", { qitemId })).data.item).toMatchObject({ state: "pending" });
+  });
+
   it("records the configured seat as the source even when nothing else names it", async () => {
     const desk = await connectAs(DESK);
     const created = await desk("rig_queue_create", { destination: IMPL, body: "fixture" });

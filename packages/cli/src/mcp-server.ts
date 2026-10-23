@@ -1,7 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { randomBytes } from "node:crypto";
-import type { DaemonClient, DaemonResponse } from "./client.js";
+import nodePath from "node:path";
+import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
+import { terminalAuthHeaders, type DaemonClient, type DaemonResponse } from "./client.js";
 import { readOpenRigEnv } from "./openrig-compat.js";
 import { resolveRigHandle } from "./rig-handle.js";
 import { CLI_VERSION } from "./version.js";
@@ -29,6 +31,33 @@ async function rigIdFor(client: DaemonClient, handle: string): Promise<{ id: str
   if (resolution.kind === "resolved") return { id: resolution.id, known: true };
   return { id: handle, known: resolution.kind === "passthrough" };
 }
+
+/** The rig id for a chatroom tool: rigIdFor's, and an error for a handle no rig has. History answers [] for an
+ *  unknown id, which would read as an empty room. */
+async function chatRigId(client: DaemonClient, handle: string): Promise<{ id: string } | TextResult> {
+  const rig = await rigIdFor(client, handle);
+  if ("content" in rig) return rig;
+  if (!rig.known) {
+    return { content: [{ type: "text", text: JSON.stringify({ error: `Rig '${handle}' not found: no rig has that name or id` }) }], isError: true };
+  }
+  return rig;
+}
+
+/** Options for the transport routes: the wait-for-idle timeout, plus the daemon's terminal bearer token when one is
+ *  configured (the daemon checks it on /api/transport/* only), sent the way the CLI's send and capture send it. */
+function transportRequestOptions(timeout?: { timeoutMs: number }): { timeoutMs?: number; headers?: Record<string, string> } | undefined {
+  const headers = terminalAuthHeaders();
+  const hasHeaders = Object.keys(headers).length > 0;
+  if (!timeout && !hasHeaders) return undefined;
+  return { ...(timeout ?? {}), ...(hasHeaders ? { headers } : {}) };
+}
+
+// Hints for a client deciding what to ask the person (MCP tool annotations), not enforcement. A read-only tool changes
+// nothing through OpenRig. An additive one adds a record or a seat. A destructive one can stop, replace or discard
+// something, or, for rig_send, types into an agent that may act on it.
+const READ_ONLY: ToolAnnotations = { readOnlyHint: true };
+const ADDITIVE: ToolAnnotations = { readOnlyHint: false, destructiveHint: false };
+const DESTRUCTIVE: ToolAnnotations = { readOnlyHint: false, destructiveHint: true };
 
 /**
  * Maps a DaemonResponse to MCP tool result.
@@ -74,21 +103,30 @@ export function createMcpServer(client: DaemonClient): McpServer {
     version: CLI_VERSION,
   });
 
-  // 1. rig_up — bootstrap/bundle install
+  // 1. rig_up — launch from a spec, bundle or topology, or restore an existing rig by name
   server.tool(
     "rig_up",
-    "Bootstrap a rig from a spec or bundle",
+    "Launch a rig from a rig spec (.yaml), a .rigbundle or a .rigtopology, or restore an existing rig by its name from its latest snapshot",
     {
-      sourceRef: z.string().describe("Path to .yaml rig spec or .rigbundle"),
+      sourceRef: z.string().describe("An absolute path to a rig spec (.yaml), .rigbundle or .rigtopology, or the name of an existing rig to restore. The daemon reads the path, so a relative one resolves against the daemon's directory."),
       plan: z.boolean().optional().describe("Plan mode — preview without executing"),
       autoApprove: z.boolean().optional().describe("Auto-approve trusted actions"),
       targetRoot: z.string().optional().describe("Target root directory for package installation"),
+      cwd: z.string().refine((dir) => nodePath.isAbsolute(dir), "cwd must be an absolute path").optional().describe("Absolute working directory for a new launch's agents (as rig up --cwd)"),
+      // The daemon drops the whole env block when any entry is invalid, so check it here the way rig up --env does.
+      env: z.record(
+        z.string().regex(/^[A-Z_][A-Z0-9_]*$/, "env names match ^[A-Z_][A-Z0-9_]*$").refine((name) => !name.startsWith("OPENRIG_"), "OPENRIG_* env names belong to OpenRig"),
+        z.string().min(1, "env values must not be empty").refine((value) => !value.includes("\0"), "env values must not contain a NUL byte"),
+      ).optional().describe("Environment variables for this launch only, not saved with the rig (as rig up --env NAME=value)"),
+      rigName: z.string().min(1).optional().describe("A new launch's rig name instead of the spec's (as rig up --name)"),
+      fresh: z.array(z.string()).optional().describe("When restoring an existing rig: the seats (logical ids, e.g. dev.impl) to start fresh instead of resuming (as rig up --fresh)"),
     },
-    async ({ sourceRef, plan, autoApprove, targetRoot }) => {
+    DESTRUCTIVE,
+    async ({ sourceRef, plan, autoApprove, targetRoot, cwd, env, rigName, fresh }) => {
       try {
         const res = await client.post(
           "/api/up",
-          { sourceRef, plan: plan ?? false, autoApprove: autoApprove ?? false, targetRoot },
+          { sourceRef, plan: plan ?? false, autoApprove: autoApprove ?? false, targetRoot, cwdOverride: cwd, envOverride: env, rigName, freshLogicalIds: fresh },
           plan ? undefined : { timeoutMs: LONG_RUNNING_UP_TIMEOUT_MS },
         );
         return mapResult(res);
@@ -108,6 +146,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
       force: z.boolean().optional().describe("Kill sessions immediately"),
       snapshot: z.boolean().optional().describe("Take snapshot before teardown"),
     },
+    DESTRUCTIVE,
     async (params) => {
       try {
         const rig = await rigIdFor(client, params.rigId);
@@ -130,6 +169,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
     "rig_ps",
     "List rigs and their status",
     {},
+    READ_ONLY,
     async () => {
       try {
         const res = await client.get("/api/ps");
@@ -145,6 +185,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
     "rig_status",
     "Check daemon health",
     {},
+    READ_ONLY,
     async () => {
       try {
         const res = await client.get("/healthz");
@@ -162,6 +203,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
     {
       rigId: z.string().describe("Rig name or identifier"),
     },
+    ADDITIVE,
     async ({ rigId }) => {
       try {
         const rig = await rigIdFor(client, rigId);
@@ -181,6 +223,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
     {
       rigId: z.string().describe("Rig name or identifier"),
     },
+    READ_ONLY,
     async ({ rigId }) => {
       try {
         const rig = await rigIdFor(client, rigId);
@@ -206,6 +249,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
       rigId: z.string().describe("Rig name or identifier"),
       snapshotId: z.string().describe("Snapshot identifier"),
     },
+    DESTRUCTIVE,
     async ({ rigId, snapshotId }) => {
       try {
         const rig = await rigIdFor(client, rigId);
@@ -223,6 +267,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
     "rig_discover",
     "Scan for tmux sessions to discover",
     {},
+    ADDITIVE,
     async () => {
       try {
         const res = await client.post("/api/discovery/scan", {});
@@ -244,6 +289,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
       podNamespace: z.string().optional().describe("Pod namespace to create node in (mode: create in pod)"),
       memberName: z.string().optional().describe("Member name for new node (required with podNamespace)"),
     },
+    DESTRUCTIVE,
     async ({ discoveryId, rigId, logicalId, podNamespace, memberName }) => {
       try {
         const rig = await rigIdFor(client, rigId);
@@ -267,6 +313,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
     {
       bundlePath: z.string().describe("Path to .rigbundle file"),
     },
+    READ_ONLY,
     async ({ bundlePath }) => {
       try {
         const res = await client.post("/api/bundles/inspect", { bundlePath });
@@ -290,6 +337,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
     {
       yaml: z.string().describe("YAML text of the agent spec"),
     },
+    READ_ONLY,
     async ({ yaml }) => {
       try {
         const res = await client.postText("/api/agents/validate", yaml);
@@ -307,6 +355,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
     {
       yaml: z.string().describe("YAML text of the rig spec"),
     },
+    READ_ONLY,
     async ({ yaml }) => {
       try {
         const res = await client.postText("/api/rigs/import/validate", yaml);
@@ -324,6 +373,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
     {
       rigId: z.string().describe("Rig name or identifier"),
     },
+    READ_ONLY,
     async ({ rigId }) => {
       try {
         const rig = await rigIdFor(client, rigId);
@@ -347,6 +397,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
       force: z.boolean().optional().describe("Send even if target appears mid-task"),
       waitForIdleSeconds: z.number().positive().optional().describe("Wait until explicit idle evidence before sending"),
     },
+    DESTRUCTIVE,
     async ({ session, text, verify, force, waitForIdleSeconds }) => {
       try {
         if (force && waitForIdleSeconds !== undefined) {
@@ -362,7 +413,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
           verify,
           force,
           waitForIdleMs,
-        }, waitForIdleRequestOptions(waitForIdleMs));
+        }, transportRequestOptions(waitForIdleRequestOptions(waitForIdleMs)));
         return mapResult(res);
       } catch (err) {
         return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
@@ -380,6 +431,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
       pod: z.string().optional().describe("Capture all sessions in a pod"),
       lines: z.number().optional().describe("Number of lines to capture (default: 20)"),
     },
+    READ_ONLY,
     async ({ session, rig, pod, lines }) => {
       try {
         const body: Record<string, unknown> = {};
@@ -388,7 +440,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
         if (pod) body.pod = pod;
         if (lines) body.lines = lines;
         body.inputBox = true; // what the live input box holds, in the result's inputBox
-        const res = await client.post("/api/transport/capture", body);
+        const res = await client.post("/api/transport/capture", body, transportRequestOptions());
         return mapResult(res);
       } catch (err) {
         return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
@@ -399,30 +451,19 @@ export function createMcpServer(client: DaemonClient): McpServer {
   // 16. rig_chatroom_send — send message to rig chatroom
   server.tool(
     "rig_chatroom_send",
-    "Send a message to a rig's chatroom",
+    "Send a message to a rig's chatroom as this server's seat",
     {
-      rigName: z.string().describe("Rig name to send message to"),
+      rigName: z.string().describe("Rig name or identifier"),
       body: z.string().describe("Message body"),
-      sender: z.string().optional().describe("(deprecated, ignored) the sender is derived from the seat env (X-OpenRig-Session, stamped by the MCP server's DaemonClient); the chat route derives it from the transport header"),
     },
+    ADDITIVE,
     async ({ rigName, body }) => {
       try {
-        // Resolve rig name → ID
-        const summaryRes = await client.get<Array<{ id: string; name: string }>>("/api/rigs/summary");
-        const matches = (summaryRes.data ?? []).filter((r) => r.name === rigName);
-
-        if (matches.length === 0) {
-          return { content: [{ type: "text" as const, text: JSON.stringify({ error: `Rig '${rigName}' not found` }) }], isError: true as const };
-        }
-        if (matches.length > 1) {
-          return { content: [{ type: "text" as const, text: JSON.stringify({ error: `Rig '${rigName}' is ambiguous — ${matches.length} rigs share that name` }) }], isError: true as const };
-        }
-
-        const rigId = matches[0]!.id;
+        const rig = await chatRigId(client, rigName);
+        if ("content" in rig) return rig;
         // P21: no body sender — the daemon derives it from the transport header (X-OpenRig-Session,
-        // stamped by the MCP server's DaemonClient from its seat env). A hardcoded 'mcp' differing from the
-        // header would be SUPERSEDED by it (transport:v1), not persisted (P18: the 409 mismatch is retired).
-        const res = await client.post(`/api/rigs/${encodeURIComponent(rigId)}/chat/send`, {
+        // stamped by the MCP server's DaemonClient from its seat env).
+        const res = await client.post(`/api/rigs/${encodeURIComponent(rig.id)}/chat/send`, {
           body,
         });
         return mapResult(res);
@@ -432,28 +473,25 @@ export function createMcpServer(client: DaemonClient): McpServer {
     },
   );
 
-  // 17. rig_chatroom_watch — get recent chatroom history for a rig
+  // 17. rig_chatroom_watch — a rig's recent chatroom history (the name is kept; it reads history, it doesn't stream)
   server.tool(
     "rig_chatroom_watch",
-    "Get recent chatroom messages for a rig (MCP returns history, not streaming)",
+    "Read a rig's recent chatroom messages: the most recent ones (default 20), oldest first, optionally one topic's or one sender's. It returns what is there now and doesn't wait for new messages.",
     {
-      rigName: z.string().describe("Rig name"),
+      rigName: z.string().describe("Rig name or identifier"),
+      topic: z.string().optional().describe("Only messages in this topic"),
+      sender: z.string().optional().describe("Only messages from this seat"),
+      limit: z.number().int().positive().optional().describe("How many recent messages (default 20)"),
     },
-    async ({ rigName }) => {
+    READ_ONLY,
+    async ({ rigName, topic, sender, limit }) => {
       try {
-        // Resolve rig name → ID
-        const summaryRes = await client.get<Array<{ id: string; name: string }>>("/api/rigs/summary");
-        const matches = (summaryRes.data ?? []).filter((r) => r.name === rigName);
-
-        if (matches.length === 0) {
-          return { content: [{ type: "text" as const, text: JSON.stringify({ error: `Rig '${rigName}' not found` }) }], isError: true as const };
-        }
-        if (matches.length > 1) {
-          return { content: [{ type: "text" as const, text: JSON.stringify({ error: `Rig '${rigName}' is ambiguous — ${matches.length} rigs share that name` }) }], isError: true as const };
-        }
-
-        const rigId = matches[0]!.id;
-        const res = await client.get(`/api/rigs/${encodeURIComponent(rigId)}/chat/history?limit=20`);
+        const rig = await chatRigId(client, rigName);
+        if ("content" in rig) return rig;
+        const params = new URLSearchParams({ limit: String(limit ?? 20) });
+        if (topic) params.set("topic", topic);
+        if (sender) params.set("sender", sender);
+        const res = await client.get(`/api/rigs/${encodeURIComponent(rig.id)}/chat/history?${params.toString()}`);
         return mapResult(res);
       } catch (err) {
         return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
@@ -474,6 +512,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
       edges: z.array(z.object({ from: z.string(), to: z.string(), kind: z.string() })).optional().describe("Optional pod-local edges (from/to are member ids within the pod; resolved against the new member + existing pod-mates)"),
       rigRoot: z.string().optional().describe("Root directory for agent resolution"),
     },
+    ADDITIVE,
     async ({ rigId, podNamespace, member, edges, rigRoot }) => {
       try {
         const body: Record<string, unknown> = { member };
@@ -515,6 +554,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
       tier: z.string().optional().describe("Tier (as rig queue create --tier)"),
       qitemId: z.string().optional().describe("Request id to reuse when retrying the same create (default: a new id)"),
     },
+    ADDITIVE,
     async ({ destination, body, summary, tags, priority, tier, qitemId }) => {
       const id = qitemId ?? `qitem-${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}-${randomBytes(8).toString("hex")}`;
       try {
@@ -535,6 +575,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
     {
       qitemId: z.string().describe("The qitemId returned by rig_queue_create (or any queue item)"),
     },
+    READ_ONLY,
     async ({ qitemId }) => {
       try {
         const id = encodeURIComponent(qitemId);
@@ -562,6 +603,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
       all: z.boolean().optional().describe("Without state: include closed items"),
       limit: z.number().int().positive().optional().describe("Result limit (default 100)"),
     },
+    READ_ONLY,
     async ({ owned, mine, destination, source, state, all, limit }) => {
       try {
         const params = new URLSearchParams();
@@ -591,6 +633,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
     "rig_queue_claim",
     "Claim a queue item assigned to this seat before working on it.",
     { qitemId: z.string().describe("The queue item to claim") },
+    ADDITIVE,
     async ({ qitemId }) => {
       try {
         return mapResult(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/claim`, {}));
@@ -603,22 +646,25 @@ export function createMcpServer(client: DaemonClient): McpServer {
   // 23. rig_queue_update — record progress, block, or close with the answer
   server.tool(
     "rig_queue_update",
-    "Update a queue item: add a note, block it, or close it. To answer a task, close it with state done, a closure reason, and the answer in note.",
+    "Update a queue item: add a note, block it, close it, or reopen a closed one. To answer a task, close it with state done, a closure reason and the answer in resolution, which the item keeps; note records why this transition happened.",
     {
       qitemId: z.string().describe("The queue item to update"),
       state: z.string().optional().describe("New state (e.g. in-progress, blocked, done)"),
       closureReason: z.string().optional().describe("Why it closed (as rig queue update --closure-reason)"),
       closureTarget: z.string().optional().describe("Closure target, when the reason needs one"),
-      note: z.string().optional().describe("Transition note: progress, or the answer when closing"),
+      note: z.string().optional().describe("Transition note: progress, or why this transition happened (required to reopen)"),
+      resolution: z.string().optional().describe("The outcome the item keeps, stored only by the update that closes an open item (as rig queue update --resolution)"),
+      reopen: z.boolean().optional().describe("Reopen a closed item: give an active state (pending, in-progress or blocked) and a note (as rig queue update --reopen)"),
       summary: z.string().optional().describe("Replace the one-line summary"),
       evidenceRef: z.string().optional().describe("Where the evidence is"),
       blockedOn: z.string().optional().describe("What it waits on, when blocking"),
       wakeAfterSeconds: z.number().int().positive().optional().describe("Wake this seat after this many seconds, when blocking. Delivered only to a seat with a terminal: an attached app can't receive it today, so the item just waits until it is checked."),
     },
-    async ({ qitemId, state, closureReason, closureTarget, note, summary, evidenceRef, blockedOn, wakeAfterSeconds }) => {
+    DESTRUCTIVE,
+    async ({ qitemId, state, closureReason, closureTarget, note, resolution, reopen, summary, evidenceRef, blockedOn, wakeAfterSeconds }) => {
       try {
         return mapResult(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
-          state, closureReason, closureTarget, summary, evidenceRef, blockedOn, wakeAfterSeconds, transitionNote: note,
+          state, closureReason, closureTarget, summary, evidenceRef, blockedOn, wakeAfterSeconds, transitionNote: note, resolution, reopen,
         }));
       } catch (err) {
         return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true as const };
@@ -637,6 +683,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
       nodeId: z.string().optional().describe("Node identifier"),
       limit: z.number().int().min(1).max(128).optional().describe("Source rows to scan (default and maximum 128); a filter can return fewer"),
     },
+    READ_ONLY,
     async ({ cursor, start, rigId, nodeId, limit }) => {
       try {
         const params = new URLSearchParams();
