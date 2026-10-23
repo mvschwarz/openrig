@@ -193,7 +193,7 @@ function printHuman(status: SeatStatusResponse): void {
   if (status.permissions?.account) {
     const p = status.permissions;
     const a = p.account!;
-    console.log("Permissions, planned for the next managed launch (not observed):");
+    console.log("Permissions, planned for the next fresh managed launch (not observed):");
     console.log(`  ${a.summary}`);
     if (a.overrides.length) console.log(`  This seat's choice is used instead of the ${a.overrides.join(" and the ")}.`);
     for (const note of a.openRigAdds.notes) console.log(`  ${note}`);

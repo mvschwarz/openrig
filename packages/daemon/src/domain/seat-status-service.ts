@@ -35,7 +35,7 @@ export interface SeatStatus {
     nativeEffect: "unverified";
     error?: string;
     effective?: ResolvedSeatPermission;
-    /** The planned account for the next managed launch (permission-account.ts); absent when it can't be read. */
+    /** The planned account for the next fresh managed launch (permission-account.ts); absent when it can't be read. */
     account?: PermissionAccount;
   };
 }

@@ -1,19 +1,21 @@
-// Slice 20, partial crawl: one seat's PLANNED permission account, from the same decisions its next managed launch makes
+// Slice 20, partial crawl: one seat's PLANNED permission account, from the same decisions its next fresh managed launch makes
 // (NativePermissionStore, the posture flags, the team and kernel lists). Planned, not observed: nothing here runs a
 // harness, probes Codex or reads native settings files, so what only a launch or the harness knows is listed as unknown.
 import type Database from "better-sqlite3";
 import { NativePermissionStore, type StoredNativePermissionSelection } from "./native-permission-store.js";
 import { claudePostureFlag, codexPostureArg } from "../adapters/yolo-mode.js";
 import { KERNEL_CLAUDE_ALLOW, TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK } from "../adapters/kernel-authority.js";
+import { RigRepository } from "./rig-repository.js";
+import type { NodeBinding } from "./runtime-adapter.js";
 
-export type PermissionAccountSource = "explicit" | "member_policy" | "rig_policy" | "kernel_default" | "team_default" | "environment" | "floor";
+export type PermissionAccountSource = "explicit" | "member_policy" | "rig_policy" | "kernel_default" | "team_default" | "floor";
 
 export interface PermissionAccount {
   basis: "planned";
   runtime: string | null;
   /** Null for a runtime OpenRig sets no native permission argument for (Pi, a terminal). */
   source: PermissionAccountSource | null;
-  /** The native permission argument the next managed launch emits, verbatim. */
+  /** The native permission argument a fresh managed launch emits, verbatim (restore and rebuild: see `unknown`). */
   nativeArgument: string | null;
   /** The account in plain words. */
   summary: string;
@@ -64,37 +66,45 @@ export function planPermissionAccount(db: Database.Database, nodeId: string, sea
   const resolved = store.resolve(nodeId, runtime);
   const refs = policyRefs(db, nodeId);
 
-  let source: PermissionAccountSource;
-  let posture: "floor" | "full_bypass" | "auto" | undefined;
-  let mode: string | undefined;
-  if (override.kernelAuthority) { source = "kernel_default"; posture = override.launchPosture; }
-  else if (explicit) { source = "explicit"; posture = override.launchPosture; mode = override.permissionMode; }
-  else if (resolved.source === "member_spec" || resolved.source === "rig_spec") {
-    source = resolved.source === "member_spec" ? "member_policy" : "rig_policy"; posture = resolved.launchPosture; mode = resolved.permissionMode;
-  } else {
-    // No policy and no seat choice: the launch leaves the posture unset, so the daemon's OPENRIG_YOLO decides.
-    const yolo = env.OPENRIG_YOLO === "1" || env.OPENRIG_YOLO === "true";
-    source = yolo ? "environment" : override.teamPermissionDefault ? "team_default" : "floor";
-  }
+  const source: PermissionAccountSource = override.kernelAuthority ? "kernel_default" : explicit ? "explicit"
+    : resolved.source === "member_spec" ? "member_policy" : resolved.source === "rig_spec" ? "rig_policy"
+    : override.teamPermissionDefault ? "team_default" : "floor";
+
+  // The binding a fresh managed launch of this seat starts from, built as the launch builds it: the persisted policy
+  // posture, else the explicit floor (an ambient OPENRIG_YOLO never widens a seat with no policy), then the seat's own
+  // choice and the team or kernel default through NativePermissionStore.apply.
+  const repo = new RigRepository(db);
+  const rigId = (db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(nodeId) as { rig_id: string } | undefined)?.rig_id;
+  const bindingPosture = repo.getNodePolicyProvenance(nodeId)?.launchPosture
+    ?? (rigId ? repo.getRigPolicyProvenance(rigId)?.launchPosture : undefined) ?? "floor";
+  const planned = store.apply({ nodeId, launchPosture: bindingPosture } as NodeBinding, runtime);
+  const posture = planned.launchPosture;
+  const mode = planned.permissionMode;
 
   const profile = runtime === "codex" ? refs.profile : null;
   const nativeArgument = runtime === "claude-code" ? claudePostureFlag(env, posture, mode)
     : codexPostureArg(profile ? ` -p ${profile}` : "", env, posture).trim();
   const openRigAdds: PermissionAccount["openRigAdds"] = { claudeAllow: [], claudeAsk: [], notes: [] };
-  const unknown = [NOT_READ, UNVERIFIED];
-  if (runtime === "claude-code" && override.kernelAuthority) openRigAdds.claudeAllow = [...KERNEL_CLAUDE_ALLOW];
-  else if (runtime === "claude-code" && override.teamPermissionDefault && !mode && (!posture || posture === "floor")) {
+  const unknown = [NOT_READ, UNVERIFIED,
+    runtime === "codex"
+      ? "This is the saved plan for a fresh launch. A restore re-reads a custom policy file, and a rebuild handover can carry the previous occupant's observed Codex sandbox and approvals instead, without the extra roots or network setting."
+      : "This is the saved plan for a fresh launch. A restore re-reads a custom policy file, which can differ from what's saved."];
+  if (runtime === "claude-code" && planned.kernelAuthority) openRigAdds.claudeAllow = [...KERNEL_CLAUDE_ALLOW];
+  else if (runtime === "claude-code" && planned.teamPermissionDefault && !mode && (!posture || posture === "floor")) {
     openRigAdds.claudeAllow = [...TEAM_CLAUDE_ALLOW];
     openRigAdds.claudeAsk = [...TEAM_CLAUDE_ASK];
     openRigAdds.notes.push("A hook asks before the listed lifecycle commands.");
   }
   if (runtime === "codex") {
-    openRigAdds.notes.push(override.teamPermissionDefault && !profile && nativeArgument === "-s workspace-write"
+    openRigAdds.notes.push(planned.teamPermissionDefault && !profile && nativeArgument === "-s workspace-write"
       ? "Extra writable roots: the shared workspace and the pod's state folder; git metadata folders on a fresh launch."
       : "Extra writable roots for OpenRig's queue state, unless a read-only profile rules them out; git metadata folders on a fresh launch.");
     if (nativeArgument === "-s workspace-write") unknown.push("Codex network access: added at launch only if Codex's own configuration allows it; not read here.");
   }
-  if (refs.nonInterruptive && posture === "full_bypass") openRigAdds.notes.push("Non-interruptive: supported harness warnings are accepted or hidden with launch flags.");
+  // The kernel's Codex seats always get them (operationalLaunchArgs); other seats when the rig records non-interruptive.
+  if ((runtime === "codex" && planned.kernelAuthority) || (refs.nonInterruptive && posture === "full_bypass")) {
+    openRigAdds.notes.push("Non-interruptive: supported harness warnings are accepted or hidden with launch flags.");
+  }
 
   const overrides = explicit ? [refs.member ? `member policy ${refs.member}` : null, refs.rig ? `rig policy ${refs.rig}` : null].filter((v): v is string => !!v) : [];
   // The resolver's own fallback (Codex has no auto mode), and a named Codex profile that supplies the argument under a
@@ -109,7 +119,6 @@ export function planPermissionAccount(db: Database.Database, nodeId: string, sea
     rig_policy: `the rig's policy ${refs.rig ?? ""}`.trim(),
     kernel_default: "the kernel's operational default",
     team_default: "OpenRig's team default (no policy or seat choice is recorded)",
-    environment: "the daemon's OPENRIG_YOLO setting (no policy or seat choice is recorded)",
     floor: profile ? `no policy or seat choice; the named Codex profile ${profile} governs its sandbox and approvals` : "no policy or seat choice; OpenRig's floor",
   };
   const adds = openRigAdds.claudeAllow.length

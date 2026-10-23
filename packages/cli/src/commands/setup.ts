@@ -99,7 +99,7 @@ function routerLineStep(deps: SetupDeps, choice: "yes" | "no" | undefined, dryRu
     line,
     files: "Each Claude seat's CLAUDE.md (or CLAUDE.local.md when its rig chooses that file) and each Codex seat's AGENTS.md, in the seat's working folder, at its next start.",
     ifNo,
-    limit: "Switching to no later stops new writes but doesn't remove a line already written; rig down removes OpenRig's blocks from these files, unless another running seat still uses the file.",
+    limit: "Switching to no later stops new writes but doesn't remove a line already written; rig down removes OpenRig's blocks from these files, unless a seat of another active rig, or a still-running seat of this one, uses the file.",
     answerWith: "rig setup --router-line yes, or rig setup --router-line no (saved as skills.router_line.enabled; change it any time with either)",
     scope: "This choice covers only this line. OpenRig's other writes, listed under \"OpenRig may modify\", don't depend on it.",
   });
@@ -185,7 +185,7 @@ const BASE_RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure[] = [
     scope: "project",
     runtime: "claude-code",
     path: "CLAUDE.md (or CLAUDE.local.md when the rig chooses it)",
-    purpose: "OpenRig managed blocks at each start: the rig's culture, the OpenRig Start identity pointer, the onboarding pages at a fresh start (onboarding.default_pack.enabled), and guidance files a team merges. The router line is added only on a yes. rig down removes the blocks unless another running seat uses the file.",
+    purpose: "OpenRig managed blocks at each start: the rig's culture, the OpenRig Start identity pointer, the onboarding pages at a fresh start (onboarding.default_pack.enabled), and guidance files a team merges. The router line is added only on a yes. rig down removes the blocks unless a seat of another active rig, or a still-running seat of this one, uses the file.",
   },
   {
     scope: "project",
@@ -201,15 +201,9 @@ const BASE_RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure[] = [
   },
   {
     scope: "project",
-    runtime: "claude-code",
-    path: ".git/info/exclude",
-    purpose: "Ignore entries for guidance files OpenRig newly creates in a git checkout, so they don't show as changes.",
-  },
-  {
-    scope: "project",
     runtime: "codex",
     path: ".git/info/exclude",
-    purpose: "Ignore entries for guidance files and plugin folders OpenRig newly creates in a git checkout.",
+    purpose: "Ignore entries for the openrig-core plugin files OpenRig newly creates in a git checkout. For another new file, such as a new guidance file, it prints how to ignore it instead.",
   },
   {
     scope: "global",
@@ -810,7 +804,7 @@ export function routerLineLines(preview: RouterLinePreview): string[] {
     `The one line OpenRig can add to shared guidance files (answer: ${answer}):`,
     `  Line: ${preview.line}`,
     `  Files: ${preview.files}`,
-    `  If no: ${preview.ifNo}`,
+    `  If no (this line only): ${preview.ifNo}`,
     `  ${preview.limit}`,
     `  ${preview.scope}`,
     `  Answer: ${preview.answerWith}`,

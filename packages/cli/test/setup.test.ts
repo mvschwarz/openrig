@@ -53,12 +53,12 @@ function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCod
 
 function expectRuntimeConfigDisclosure(result: SetupResult): void {
   // Setup leaves cmux configuration alone; only managed runtime disclosures remain.
-  expect(result.runtimeConfig).toHaveLength(10);
+  expect(result.runtimeConfig).toHaveLength(9);
   expect(result.runtimeConfig.find((d) => d.path === "~/.claude/settings.json")).toBeUndefined();
   // The other writes are disclosed beside the router-line choice: guidance blocks, the collector, plugins, ignore entries.
   expect(result.runtimeConfig.map((d) => `${d.runtime} ${d.path}`)).toEqual(expect.arrayContaining([
     "claude-code CLAUDE.md (or CLAUDE.local.md when the rig chooses it)", "codex AGENTS.md", "claude-code .openrig/context-collector.cjs",
-    "codex .codex/plugins/<plugin>", "claude-code .git/info/exclude", "codex .git/info/exclude",
+    "codex .codex/plugins/<plugin>", "codex .git/info/exclude",
   ]));
   expect(result.runtimeConfig).toEqual(expect.arrayContaining([
     {

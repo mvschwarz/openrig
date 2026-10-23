@@ -330,7 +330,7 @@ describe("rig seat status", () => {
     });
 
     const output = logs.join("\n");
-    expect(output).toContain("Permissions, planned for the next managed launch (not observed):");
+    expect(output).toContain("Permissions, planned for the next fresh managed launch (not observed):");
     expect(output).toContain(`  ${account.summary}`);
     expect(output).toContain("  The exact allowance and ask lists are in --json, under permissions.account.openRigAdds.");
     expect(output).toContain("  Last launch arguments (observed): --permission-mode acceptEdits");
