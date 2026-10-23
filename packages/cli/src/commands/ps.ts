@@ -78,7 +78,9 @@ interface NodeEntry {
     needsInput: { count: number; reason: string | null };
     decidedBy: string | null;
   } | null;
-  identityVerdict?: { reason?: string | null } | null;
+  identityVerdict?: { verdict?: string; reason?: string | null; observedAt?: string | null } | null;
+  /** The registry's recorded session status, kept when the served sessionStatus is corrected. */
+  storedSessionStatus?: string | null;
   /** A community harness's seat: its label, maintainer and declared limits. */
   communityHarness?: { harness: string; maintainer: string | null; limits: string[]; identity: string; needsInput: string; presetError?: string };
   /** Slice 15 — `has-work-to-do` primitive. Derived from queue_items;
@@ -228,6 +230,8 @@ const ALLOWED_NODE_FIELDS = new Set([
   "agentActivity",
   "contextUsage",
   "heldReason",
+  "storedSessionStatus",
+  "identityVerdict",
 ]);
 
 interface PsCliOptions {
@@ -636,6 +640,17 @@ function missingSessionGuidance(node: NodeEntry): string | null {
     : null;
 }
 
+/** A recorded-running seat whose applicable identity check could not reach tmux: its liveness is
+ *  unconfirmed, not known dead. Codex's mismatch verdict keeps its own attention path. */
+function livenessUnconfirmed(node: NodeEntry): boolean {
+  return node.sessionStatus === "running" && !node.intentionallyStopped
+    && node.identityVerdict?.verdict === "tmux_unavailable";
+}
+
+function livenessLine(seat: string, node: NodeEntry): string {
+  return `Liveness (${seat}): recorded running, not confirmed: tmux was unavailable at the last observation (${node.identityVerdict?.observedAt ?? "time unknown"}).`;
+}
+
 // OPR.0.4.0.34 — the compact orch field set (PRD FR-4). Carries the
 // source-available identity + state + resume-summary fields an orchestrator
 // needs at a glance, WITHOUT leaking the resume token value or resumeCommand
@@ -740,6 +755,14 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       lastActivity: n.agentActivity?.sampledAt ?? n.startupCompletedAt ?? null,
     };
     if (n.intentionallyStopped !== undefined) compact.intentionallyStopped = n.intentionallyStopped;
+    // The served identity evidence (verdict, reason, observation time) and the registry's recorded
+    // status, without the raw evidence; recorded running is not a check that the process is alive.
+    if (n.storedSessionStatus !== undefined) compact.storedSessionStatus = n.storedSessionStatus;
+    if (n.identityVerdict) {
+      const { verdict, reason, observedAt } = n.identityVerdict;
+      // Only what was served: an absent time stays absent, never filled in.
+      compact.identityVerdict = { ...(verdict ? { verdict } : {}), ...(reason ? { reason } : {}), ...(observedAt ? { observedAt } : {}) };
+    }
     // held/attention reason (short) when present.
     if (n.heldReason) compact.heldReason = n.heldReason;
     if (attention && n.latestError) {
@@ -1333,7 +1356,7 @@ async function handleNodes(
       const attn = needsAttention(n);
       const reason = missingSessionGuidance(n) ?? (attn || hasCurrentUsageLimit(n)
         ? (n.latestError ? truncate(n.latestError, 40) : n.agentActivity?.reason ?? "—")
-        : "—");
+        : livenessUnconfirmed(n) ? "liveness unconfirmed" : "—");
       console.log(padCompactNodeRow(
         n.rigName,
         n.canonicalSessionName ?? "—",
@@ -1367,7 +1390,8 @@ async function handleNodes(
         formatActivity(n),
         formatContextUsage(n.contextUsage),
         n.restoreOutcome,
-        missingSessionGuidance(n) ?? (n.latestError ? truncate(n.latestError, 30) : n.heldReason ? `held: ${truncate(n.heldReason, 25)}` : "—"),
+        missingSessionGuidance(n) ?? (n.latestError ? truncate(n.latestError, 30) : n.heldReason ? `held: ${truncate(n.heldReason, 25)}`
+          : livenessUnconfirmed(n) ? "liveness unconfirmed" : "—"),
       ));
     }
   }
@@ -1380,6 +1404,9 @@ async function handleNodes(
   }
   for (const n of humanList as NodeEntry[]) {
     if (n.communityHarness) console.log(formatCommunityHarnessLine(n.canonicalSessionName ?? n.logicalId, n.communityHarness));
+  }
+  for (const n of humanList as NodeEntry[]) {
+    if (livenessUnconfirmed(n)) console.log(livenessLine(n.canonicalSessionName ?? n.logicalId, n));
   }
   if (humanTruncated) {
     const remaining = filtered.length - HUMAN_NODE_BUDGET;

@@ -649,6 +649,50 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     }
   });
 
+  it("discloses recorded running with tmux unavailable as liveness unconfirmed, and leaves other states alone", async () => {
+    const at = "2026-06-19T11:58:00.000Z";
+    const seat = (logicalId: string, verdict: Record<string, unknown>, opts?: Parameters<typeof makeFatNode>[3]) => ({
+      ...makeFatNode("rig-a", "openrig-build", logicalId, opts), storedSessionStatus: opts?.sessionStatus ?? "running", identityVerdict: verdict,
+    });
+    const unavailable = { verdict: "tmux_unavailable", reason: "tmux_unavailable", evidenceSource: "tmux_session", evidence: { command: "tmux list-sessions", pid: 4242 } };
+    const extra = [
+      seat("ops.unavail", { ...unavailable, observedAt: at }),
+      seat("ops.untimed", unavailable),
+      seat("ops.verified", { verdict: "verified", reason: null, observedAt: at }),
+      { ...seat("ops.stopped", { ...unavailable, observedAt: at }, { sessionStatus: "exited" }), intentionallyStopped: true },
+      seat("ops.codex", { verdict: "mismatch", reason: "tmux_unavailable", observedAt: at }, { lifecycleState: "attention_required", latestError: "codex identity mismatch" }),
+    ];
+    RIG_A_NODES.push(...(extra as unknown as typeof RIG_A_NODES));
+    try {
+      const run = async (...args: string[]) => (await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--rig", "openrig-build", ...args]);
+      })).logs.join("\n");
+      const row = (rows: Array<Record<string, any>>, id: string) => rows.find((r) => r.logicalId === id)!;
+
+      const compact = JSON.parse(await run("--json"));
+      expect(row(compact, "ops.unavail")).toMatchObject({
+        sessionStatus: "running", storedSessionStatus: "running",
+        identityVerdict: { verdict: "tmux_unavailable", reason: "tmux_unavailable", observedAt: at },
+      });
+      expect(row(compact, "ops.unavail").identityVerdict).not.toHaveProperty("evidence");
+      expect(row(compact, "ops.untimed").identityVerdict).toEqual({ verdict: "tmux_unavailable", reason: "tmux_unavailable" });
+      expect(row(compact, "ops.codex")).toMatchObject({ lifecycleState: "attention_required", latestError: "codex identity mismatch" });
+      const selected = JSON.parse(await run("--json", "--fields", "logicalId,storedSessionStatus,identityVerdict")).entries;
+      expect(row(selected, "ops.unavail")).toMatchObject({ storedSessionStatus: "running", identityVerdict: { reason: "tmux_unavailable", observedAt: at } });
+
+      for (const view of [[], ["--full"]]) {
+        const out = await run(...view);
+        expect(out).toContain(`Liveness (ops-unavail@openrig-build): recorded running, not confirmed: tmux was unavailable at the last observation (${at}).`);
+        expect(out).toContain("Liveness (ops-untimed@openrig-build): recorded running, not confirmed: tmux was unavailable at the last observation (time unknown).");
+        for (const other of ["ops-verified", "ops-stopped", "ops-codex", "orch1-lead"]) expect(out).not.toContain(`Liveness (${other}@`);
+        expect(out.split("\n").filter((line) => line.includes("ops-unavail@")).join("\n")).not.toMatch(/detached|restore|relaunch/);
+        expect(out).toContain("tmux session missing; restore or relaunch the seat");
+      }
+    } finally {
+      RIG_A_NODES.splice(RIG_A_NODES.length - extra.length);
+    }
+  });
+
   it("--full human table uses full-detail columns", async () => {
     const { logs } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--full"]);
