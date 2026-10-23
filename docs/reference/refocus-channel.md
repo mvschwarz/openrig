@@ -36,9 +36,11 @@ own project folder is the same project and still acts as the seat, as before thi
 launched before this change, a manual run) the hooks do what they always did. The plugin's activity relay stays quiet next to
 the seat's own `settings.local.json` copy only when that entry is exactly OpenRig's and the script it names is the same
 script; an entry from an older install doesn't match, so both report until the seat's next launch refreshes it.
-OpenRig does not automatically install the Codex plugin. A fresh Codex home has no automatic plugin refocus hooks;
-an already installed plugin and the person's choices are left alone. Codex loads an installed, enabled plugin through
-its native configuration, and each hook remains subject to Codex's exact-hook review. The Codex
+OpenRig automatically installs its Codex plugin for seats that select it. On its first installation, the six exact shipped
+hook definitions are trusted before launch, after checking the installed hook files against this daemon's shipped copy.
+Existing plugin disables and hook choices are retained. An existing untrusted installation stays under native review:
+Codex's "continue without trusting" leaves no record, so OpenRig does not assume an absent trust record is permission.
+The Codex
 column above then applies only to a Codex seat whose plugin selection includes openrig-core: every Codex hook command
 exits 0 before running anything unless OpenRig gave that seat `OPENRIG_SEAT_PROJECT_DIR` and an explicit
 `OPENRIG_NODE`.

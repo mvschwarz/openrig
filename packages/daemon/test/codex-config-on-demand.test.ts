@@ -85,7 +85,7 @@ it("a daemon with no Codex seat and hooks disabled leaves a config without the b
   try { expect(fs.existsSync(g.config)).toBe(false); } finally { other.db.close(); }
 }, 60000);
 
-it("a daemon with a selected Codex seat keeps inline hook trust without installing additional review hooks", async () => {
+it("a daemon with a selected Codex seat installs its plugin while retaining inline activity hooks", async () => {
   const f = fixture(); fs.writeFileSync(f.config, USER_CONFIG);
   const first = await startDaemon(f);
   first.db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-1', 'r')").run();
@@ -101,8 +101,8 @@ it("a daemon with a selected Codex seat keeps inline hook trust without installi
     expect(text).toContain(HOOKS_BLOCK);
     expect(text).toContain("trusted_hash");
     const calls = fs.existsSync(f.calls) ? fs.readFileSync(f.calls, "utf8").trim().split("\n").map((line) => JSON.parse(line) as string[]) : [];
-    expect(calls.filter((args) => args[0] === "plugin")).toEqual([]);
-    expect(text).not.toContain('[plugins."openrig-core@openrig"]');
+    expect(calls.filter((args) => args[0] === "plugin").map(args => args.slice(0,2))).toEqual([["plugin", "marketplace"], ["plugin", "add"]]);
+    // The stub records native calls only; it does not emulate Codex's cache/config writes.
   } finally { second.db.close(); }
 }, 60000);
 

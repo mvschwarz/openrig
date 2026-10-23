@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
-import fs, { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -10,7 +10,7 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV } from "../src/domain/claude-core-plugin-env.js";
-import { CodexRuntimeAdapter, computeCodexHookTrust } from "../src/adapters/codex-runtime-adapter.js";
+import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { parse as parseToml } from "smol-toml";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
@@ -20,9 +20,6 @@ const require = createRequire(import.meta.url);
 const PLUGIN = resolve(import.meta.dirname, "../assets/plugins/openrig-core");
 const RELAY = join(PLUGIN, "hooks", "scripts", "activity-relay.cjs");
 const relay = require(RELAY) as { pluginRunIsRedundant(p: Record<string, unknown>, argv: string[], env: NodeJS.ProcessEnv): boolean };
-const managed = require(join(PLUGIN, "hooks", "scripts", "codex-hook-trust.cjs")) as {
-  computeCodexHookTrust(event: string, input: { keySource: string; command: string; timeoutSec: number }): { key: string; hash: string };
-};
 const NODE_DIR = dirname(process.execPath);
 
 let root: string;
@@ -136,62 +133,8 @@ describe("the launch signal: selected, unselected and personal", () => {
   });
 });
 
-describe("the plugin relay on Codex always reports: whether the managed relay runs can't be established", () => {
-  /** A CODEX_HOME whose config the daemon itself provisioned: the managed relay block and its trust. */
-  function provisioned(): string {
-    const codexHome = join(root, "codex-home"); mkdirSync(codexHome, { recursive: true });
-    new CodexRuntimeAdapter({ tmux: {} as TmuxAdapter, fsOps: realFs, codexHome, activityRelayPath: RELAY }).ensureCodexActivityHooks();
-    return codexHome;
-  }
-  const env = (codexHome: string, path = NODE_DIR): NodeJS.ProcessEnv => ({ OPENRIG_RUNTIME: "codex", CODEX_HOME: codexHome, PATH: path });
-  const quiet = (event: string, e: NodeJS.ProcessEnv) => relay.pluginRunIsRedundant({ hook_event_name: event }, ["node", RELAY, "--from-plugin"], e);
-  const config = (codexHome: string) => join(codexHome, "config.toml");
-  const trustKey = (codexHome: string, event: string) => managed.computeCodexHookTrust(event, {
-    keySource: fs.realpathSync.native(config(codexHome)), command: `node "${RELAY}"`, timeoutSec: 5 }).key;
-  const edit = (codexHome: string, fn: (s: string) => string) => writeFileSync(config(codexHome), fn(readFileSync(config(codexHome), "utf8")));
-
-  it("reports each managed event even with the managed relay trusted in the user file (the stated duplicate)", () => {
-    // Codex merges hook state from every user layer (a selected profile included) and session flags, which the relay can't
-    // see, so it never assumes the managed handler ran. With both routes active each event is reported twice, never zero.
-    const home = provisioned();
-    for (const event of ["SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest"]) expect(quiet(event, env(home))).toBe(false);
-    // The daemon's trust writer and the plugin share one hash recipe.
-    expect(computeCodexHookTrust("Stop", { keySource: "/k/config.toml", command: `node "${RELAY}"`, timeoutSec: 5 }))
-      .toEqual(managed.computeCodexHookTrust("Stop", { keySource: "/k/config.toml", command: `node "${RELAY}"`, timeoutSec: 5 }));
-  });
-
-  it("an edited managed stanza or a disable in another user layer leaves the plugin reporting (never zero)", () => {
-    // The stanza edited after it was trusted, the original hash kept: Codex sees Modified and skips it.
-    for (const extra of ['statusMessage = "activity"\n', "async = true\n"]) {
-      rmSync(root, { recursive: true, force: true }); mkdirSync(root);
-      const home = provisioned();
-      edit(home, (s) => s.replace(/(\[\[hooks\.Stop\.hooks\]\]\ntype = "command"\ncommand = '[^']+'\ntimeout = 5\n)/, `$1${extra}`));
-      expect(quiet("Stop", env(home))).toBe(false);
-    }
-    // A selected profile layer disables the managed key while the user file still trusts it.
-    rmSync(root, { recursive: true, force: true }); mkdirSync(root);
-    const home = provisioned();
-    edit(home, (s) => `profile = "work"\n\n${s}`);
-    writeFileSync(join(home, "work.config.toml"), `[hooks.state.${JSON.stringify(trustKey(home, "Stop"))}]\nenabled = false\n`);
-    expect(quiet("Stop", env(home))).toBe(false);
-  });
-
-  it("a home with no managed block (the plugin alone) reports", () => {
-    const home = provisioned();
-    writeFileSync(config(home), "[features]\nhooks = true\n");
-    expect(quiet("Stop", env(home))).toBe(false);
-  });
-
-  it("the Claude path is unchanged: without OPENRIG_RUNTIME=codex the Codex config is never consulted", () => {
-    const home = provisioned();
-    expect(relay.pluginRunIsRedundant({ hook_event_name: "Stop", cwd: root }, ["node", RELAY, "--from-plugin"], { CODEX_HOME: home, PATH: NODE_DIR })).toBe(false);
-    // Root reads a mode-000 file anyway, so the unreadable case can't be made there.
-    if (process.getuid?.() !== 0) {
-      chmodSync(config(home), 0o000);
-      try { expect(quiet("Stop", env(home))).toBe(false); } // unreadable: reports
-      finally { chmodSync(config(home), 0o600); }
-    }
-  });
+it("Claude's plugin activity fallback stays available without Codex config or a trust helper", () => {
+  expect(relay.pluginRunIsRedundant({ hook_event_name: "Stop", cwd: root }, ["node", RELAY, "--from-plugin"], {})).toBe(false);
 });
 
 describe("Codex starts with the person's existing plugin choices", () => {
@@ -239,12 +182,12 @@ describe("Codex starts with the person's existing plugin choices", () => {
 });
 
 describe("the relay copied alone, as a Claude seat's settings relay", () => {
-  it("still loads and runs without its Codex sibling, and a Codex session without the sibling reports", () => {
+  it("still loads without its Codex sibling and leaves Codex activity to the inline route", () => {
     const dir = join(root, "state", "claude-activity-hooks"); mkdirSync(dir, { recursive: true });
     const copy = join(dir, "activity-relay.cjs");
     writeFileSync(copy, readFileSync(RELAY));
     const r = spawnSync(process.execPath, ["-e", `const m = require(${JSON.stringify(copy)}); process.stdout.write(String(m.pluginRunIsRedundant({ hook_event_name: "Stop" }, ["node", "x", "--from-plugin"], { OPENRIG_RUNTIME: "codex", CODEX_HOME: ${JSON.stringify(root)} })))`], { encoding: "utf8" });
     expect(r.status, r.stderr).toBe(0);
-    expect(r.stdout).toBe("false");
+    expect(r.stdout).toBe("true");
   });
 });
