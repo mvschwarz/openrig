@@ -154,7 +154,11 @@ describe("openrig-core refocus hook — context library refs", () => {
     const bundle = "# Minimal-PATH context\n";
     const result = runHook({ nodeRig: true, ref: REF, capturePython: true, rigStdout: bundle,
       whoamiStdout: JSON.stringify({ currentWorkBasis: "fixture has no current work" }),
-      extraEnv: { OPENRIG_REFOCUS_WORK_NODE: undefined, OPENRIG_WORKSPACE_ROOT: undefined, OPENRIG_REFOCUS_WORK_PACKET: "1" } });
+      extraEnv: {
+        // Test budget pin: this case tests the fallback, not the hook's time budget.
+        OPENRIG_REFOCUS_BUDGET_MS: "52000",
+        OPENRIG_REFOCUS_WORK_NODE: undefined, OPENRIG_WORKSPACE_ROOT: undefined, OPENRIG_REFOCUS_WORK_PACKET: "1",
+      } });
     expect(result.status).toBe(0);
     expect(result.payload?.hookSpecificOutput.additionalContext.endsWith(bundle)).toBe(true);
     expect(result.rigVerbs().trim().split("\n")).toEqual([
