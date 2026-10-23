@@ -567,6 +567,8 @@ export type Action =
   | { type: "act"; act: "launch-spec" }
   | { type: "act"; act: "open-terminal"; view: string; expectedPlan?: string }
   | { type: "act"; act: "run"; rigId: string; agent: string }
+  /** Answer a request on its own row, as Steering does: the mission-control verb and actor the Feed served. */
+  | { type: "act"; act: "answer"; qitemId: string; verb: "approve"; actorSession: string }
   | { type: "notice"; message: string };
 
 /** FR-12: the section set is ONE in-code registry — adding a section is a

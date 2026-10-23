@@ -40,6 +40,9 @@ export function filterHumanAlerts(items: QueueItem[], opts: AlertFilterOpts): Qu
   const active = new Set(["pending", "in-progress", "blocked"]);
   return items.filter((q) => {
     if (q.state && !active.has(q.state)) return false;
+    // An ask posts only when its asker marked it alert-worthy: a human-required ask at RECORD is on Steering whatever
+    // the posting dial says (the dial governs updates and notices).
+    if (q.ownerNotificationKind === "human-required" && q.ownerNotificationLevel === "RECORD") return false;
     return q.ownerNotificationLevel
       ? ownerNotificationLevelAtLeast(q.ownerNotificationLevel, opts.minimumLevel ?? "NOTICE")
       : false;

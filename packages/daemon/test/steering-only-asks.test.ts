@@ -23,6 +23,10 @@ import { QUIET_RELEASE_POLICY, runQuietRelease } from "../src/domain/policies/qu
 import { createStuckSweepStatus, runStuckSweep, STUCK_SWEEP_FINDING_TAG } from "../src/domain/queue-stuck-sweep.js";
 import { Hono } from "hono";
 import { attentionRoutes } from "../src/routes/attention.js";
+import { queueRoutes } from "../src/routes/queue.js";
+import { missionControlRoutes } from "../src/routes/mission-control.js";
+import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
+import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 
 const HUMAN = "human-founder";
 const registry = {
@@ -43,6 +47,7 @@ const QUESTION = [{ id: "q1", question: "A or B?", options: [{ id: "a", label: "
 describe("an ask lands on Steering; Slack alerts only when it's marked alert-worthy", () => {
   let db: Database.Database;
   let repo: QueueRepository;
+  let bus: EventBus;
   let home: string;
   const posts: Array<Record<string, unknown>> = [];
 
@@ -59,7 +64,8 @@ describe("an ask lands on Steering; Slack alerts only when it's marked alert-wor
   afterEach(() => { db.close(); rmSync(home, { recursive: true, force: true }); });
 
   function newRepo(): QueueRepository {
-    return new QueueRepository(db, new EventBus(db), { validateRig: () => true, loadHumanRegistry: () => registry });
+    bus = new EventBus(db);
+    return new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: () => registry });
   }
   let n = 0;
   async function ask(opts: { alert?: boolean; questions?: boolean } = {}): Promise<QueueItem> {
@@ -92,6 +98,25 @@ describe("an ask lands on Steering; Slack alerts only when it's marked alert-wor
   const posted = (row: QueueItem) => JSON.stringify(posts).includes(String(row.body));
   const onSteering = () => repo.listAttention({}).map((item) => item.qitemId);
   const owner = (row: QueueItem) => repo.transitionLog.latestOwnerNotificationForQitem(row.qitemId);
+  /** The daemon's own readers as the TUI and Steering call them: the queue list, the Feed, and the mission-control write. */
+  function readers() {
+    const app = new Hono();
+    const eventBus = bus;
+    const writeContract = new MissionControlWriteContract({ db, eventBus, queueRepo: repo, actionLog: new MissionControlActionLog(db) });
+    app.use("*", async (c, next) => {
+      c.set("queueRepo" as never, repo as never);
+      c.set("eventBus" as never, eventBus as never);
+      c.set("missionControlWriteContract" as never, writeContract as never);
+      await next();
+    });
+    app.route("/api/queue", queueRoutes());
+    app.route("/api/attention", attentionRoutes());
+    app.route("/api/mission-control", missionControlRoutes());
+    return app;
+  }
+  type Feed = { items: Array<{ id: string; recipient?: string; answer?: { verb: "approve"; actorSession: string } }>; detail: { lines: string[] } | null };
+  const feed = async (app: Hono, row?: QueueItem) =>
+    (await app.request(`/api/attention${row ? `?item=${encodeURIComponent(`queue:${row.qitemId}`)}` : ""}`)).json() as Promise<Feed>;
 
   it("an ordinary ask is on Steering and answerable there, with no Slack alert", async () => {
     const row = await ask();
@@ -175,7 +200,7 @@ describe("an ask lands on Steering; Slack alerts only when it's marked alert-wor
     const read = await (await app.request(`/api/attention?item=${encodeURIComponent(`queue:${row.qitemId}`)}`)).json() as {
       items: Array<{ id: string; recipient: string }>; detail: { lines: string[] } | null };
     expect(read.items).toContainEqual(expect.objectContaining({ id: `queue:${row.qitemId}`, recipient: "operator-admin@kernel" }));
-    expect(read.detail!.lines).toContain("Slack: not sent: on Steering only (an alert-worthy ask is created with --alert)");
+    expect(read.detail!.lines).toContain("Slack: not sent: created without --alert, so it's on Steering only");
     await runGateway();
     expect(posts).toHaveLength(0);
   });
@@ -196,14 +221,68 @@ describe("an ask lands on Steering; Slack alerts only when it's marked alert-wor
     expect(findings.length).toBeGreaterThan(0);
   });
 
-  it("with Slack's posting dial set to RECORD the ask posts, and its receipt is reported as posted", async () => {
+  it("an ask posts to Slack only with --alert, whatever Slack's posting dial says", async () => {
     saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-OWNER", secretsEnvFile: join(home, "slack.env"), minimumLevelThatPosts: "RECORD" }, home);
-    const row = await ask();
+    const quiet = await ask();
+    const urgent = await ask({ alert: true });
     await runGateway();
     expect(posts).toHaveLength(1);
-    expect(repo.deliveryOutcomeFor(row.qitemId)).toMatchObject({ outcome: "posted" });
-    expect(repo.humanAskWithoutAlert(row.qitemId)).toBe(false);
-    expect(repo.waitingView(row.qitemId)!.nextBackstop).toMatchObject({ mechanism: expect.stringMatching(/^none \(posted to the human/) });
+    expect(posted(urgent)).toBe(true);
+    expect(posted(quiet)).toBe(false);
+    expect(repo.deliveryOutcomeFor(quiet.qitemId)).toBeNull();
+    expect(repo.waitingView(quiet.qitemId)!.nextBackstop).toMatchObject({ mechanism: expect.stringMatching(/^none \(on Steering/) });
+  });
+
+  it("every attention reader shares one membership: alias asks are in ?attention=1, and an alerted one stays in the Feed after its post", async () => {
+    const aliasAsk = (alert: boolean) => repo.create({ sourceSession: "orch-lead@r", destinationSession: "operator-admin@kernel",
+      body: `alias ask ${alert ? "urgent" : "quiet"}`, summary: "Alias ask", evidenceRef: "/proof/alias.md", nudge: false, ...(alert ? { humanAlert: true } : {}) });
+    const quiet = await aliasAsk(false);
+    const urgent = await aliasAsk(true);
+    await runGateway();
+    expect(posted(urgent)).toBe(true);
+    expect(posted(quiet)).toBe(false);
+    const app = readers();
+    const listed = await (await app.request("/api/queue/list?attention=1")).json() as Array<{ qitemId: string }>;
+    expect(listed.map((row) => row.qitemId)).toEqual(expect.arrayContaining([quiet.qitemId, urgent.qitemId]));
+    expect((await feed(app)).items.map((item) => item.id)).toEqual(expect.arrayContaining([`queue:${quiet.qitemId}`, `queue:${urgent.qitemId}`]));
+  });
+
+  it("the Feed shows an alerted ask's real receipt: none yet, then its transport failure", async () => {
+    const row = await ask({ alert: true });
+    const app = readers();
+    expect((await feed(app, row)).detail!.lines).toContain("Slack: no receipt yet");
+    const key = `${row.qitemId}:${owner(row)!.transitionId}`;
+    repo.update({ qitemId: row.qitemId, actorSession: "daemon@kernel", transitionNote: `slack-owner-notification-transport-failed notification_key=${key} level=ALERT detail=http-500` });
+    expect((await feed(app, row)).detail!.lines.find((line) => line.startsWith("Slack: "))).toMatch(/^Slack: transport-failed: .*http-500/);
+  });
+
+  it("an ask is answered in the TUI as on Steering: the Feed serves Approve as the person, and it closes that same row", async () => {
+    const row = await ask();
+    const twin = await ask();
+    const parked = await repo.create({ sourceSession: "orch-lead@r", destinationSession: "dev@r", body: "work", nudge: false });
+    repo.update({ qitemId: parked.qitemId, actorSession: "dev@r", state: "blocked", blockedOn: `${HUMAN}@kernel`, summary: "Parked",
+      evidenceRef: "/proof/parked.md", transitionNote: "parked on the person" });
+    const app = readers();
+    const read = await feed(app, row);
+    const item = read.items.find((entry) => entry.id === `queue:${row.qitemId}`)!;
+    expect(item.answer).toEqual({ verb: "approve", actorSession: `${HUMAN}@kernel` });
+    expect(read.items.find((entry) => entry.id === `queue:${parked.qitemId}`)?.answer).toBeUndefined();
+    const act = (body: Record<string, unknown>) => app.request("/api/mission-control/action", { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    // The TUI posts the served answer; Steering's Approve posts its own card's body for the twin.
+    expect((await act({ verb: item.answer!.verb, qitemId: row.qitemId, actorSession: item.answer!.actorSession })).ok).toBe(true);
+    expect((await act({ verb: "approve", qitemId: twin.qitemId, actorSession: `${HUMAN}@kernel` })).ok).toBe(true);
+    const closing = (id: string) => {
+      const last = repo.listTransitions(id).at(-1)!;
+      return { state: last.state, closureReason: last.closureReason, actorSession: last.actorSession, identityProvenance: last.identityProvenance };
+    };
+    expect(closing(row.qitemId)).toEqual(closing(twin.qitemId));
+    expect(closing(row.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on", actorSession: `${HUMAN}@kernel` });
+    expect(repo.getById(row.qitemId)).toMatchObject({ state: "done" });
+    expect(onSteering()).not.toContain(row.qitemId);
+    // Neither answered ask ever went to Slack (the row parked on the person alerts, as parks do).
+    await runGateway();
+    expect(posted(row) || posted(twin)).toBe(false);
   });
 
   it("stays unalerted across quiet hours, a restart, the gateway's retries and the stuck sweep", async () => {

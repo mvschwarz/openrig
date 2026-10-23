@@ -909,6 +909,17 @@ describe("MCP Server", () => {
       await cleanup();
     });
 
+    it("rig_queue_create sends humanAlert only when alert is set, so an MCP-only agent can still raise a sign-in", async () => {
+      const postFn = vi.fn(async () => ({ status: 201, data: { qitemId: "qitem-1" } }));
+      await setup({ post: postFn });
+      await mcpClient.callTool({ name: "rig_queue_create", arguments: { destination: "human-founder@external", body: "Sign in again?", alert: true } });
+      await mcpClient.callTool({ name: "rig_queue_create", arguments: { destination: "human-founder@external", body: "Which name?" } });
+      const bodies = postFn.mock.calls.map((call) => (call as unknown as [string, Record<string, unknown>])[1]);
+      expect(bodies[0]).toMatchObject({ humanAlert: true });
+      expect(bodies[1]).not.toHaveProperty("humanAlert");
+      await cleanup();
+    });
+
     it("rig_queue_create reuses a given request id and names it when the outcome is unknown", async () => {
       const postFn = vi.fn(async () => { throw new Error("timed out after 5000ms"); });
       await setup({ post: postFn });

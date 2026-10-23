@@ -193,7 +193,10 @@ describe("WF-5 FR-2 class (a): born-in-txn exception item", () => {
 
   it("NEVER-LOST FALLBACK: no exception_routing + no host default → the item routes human@host with the human-gate tier", async () => {
     build();
+    const create = vi.spyOn(queueRepo, "createWithinTransaction");
     await failEntryStep(seed(SPEC_NO_ROUTING));
+    // A failed step routed to the person is an approval whose wait costs now: it alerts.
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ destinationSession: "human@host", humanAlert: true }));
     const rows = exceptionRows(db);
     expect(rows).toHaveLength(1);
     expect(rows[0]!.destination_session).toBe("human@host");

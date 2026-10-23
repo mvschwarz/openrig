@@ -135,7 +135,8 @@ export function makeEnsureStuckExceptionItem(deps: StuckExceptionDeps): EnsureSt
       `evidence: ${evidenceRef}\n` +
       `resolve: inspect the current owner and deadline; packet age alone does not establish idle. This item clears when the instance leaves the exception state.`;
     const scopeTags = packetScopeTags(readInstanceScope(deps.db, e.instanceId), e.stepId);
-    const createItem = (destination: string, tier: string) =>
+    // Routed to the person, a stuck workflow is an approval whose wait costs now: alert them.
+    const createItem = (destination: string, tier: string, toPerson: boolean) =>
       deps.queueRepo.create({
         qitemId: recoveryId(deps.db, e.packetId),
         sourceSession: input.createdBySession,
@@ -148,15 +149,16 @@ export function makeEnsureStuckExceptionItem(deps: StuckExceptionDeps): EnsureSt
         tags: [...workflowExceptionTags(exception.identity), recoveryTag(e.packetId), ...scopeTags],
         summary: exception.reason,
         evidenceRef,
+        ...(toPerson ? { humanAlert: true } : {}),
       });
     let created;
     try {
-      created = await createItem(route.destinationSession, route.tier);
+      created = await createItem(route.destinationSession, route.tier, route.humanRouted === true);
     } catch (error) {
       if (!(error instanceof QueueRepositoryError) || error.code !== "unknown_destination_rig" || route.humanRouted) throw error;
       // An unavailable agent rig may use the registered human fallback.
       // Other admission/storage failures retain their original diagnosis.
-      created = await createItem(workflowHumanDestination(deps.humanFallbackSeat), "human-gate");
+      created = await createItem(workflowHumanDestination(deps.humanFallbackSeat), "human-gate", true);
     }
     log(
       `workflow exception: stuck_overdue item ${created.qitemId} created for instance ${e.instanceId} (step ${e.stepId ?? "?"}, ${route.position})`,

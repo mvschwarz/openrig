@@ -440,8 +440,8 @@ describe("rig queue CLI", () => {
       { timeoutMs: 60_000, sleep: async () => { throw new Error("waited for a post that isn't owed"); } },
       { destinationSession: "human-founder@external" },
     );
-    expect(result).toMatchObject({ receiptSource: "gateway", outcome: "not-alerted", connectorAccepted: null, nextAction: "rig queue show qitem-steering --json" });
-    expect(result.detail).toMatch(/Steering/);
+    expect(result).toMatchObject({ receiptSource: "gateway", outcome: "not-alerted", connectorAccepted: null, nextAction: null });
+    expect(result.detail).toMatch(/^created without --alert, so not sent to Slack/);
     expect(reads).toBe(1);
   });
 

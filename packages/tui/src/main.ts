@@ -439,6 +439,9 @@ async function run(): Promise<void> {
       } else if (action.act === "run") {
         const result = await client.launchNode(action.rigId, action.agent);
         view.dispatch({ type: "notice", message: launchNodeNotice(action.agent, result) });
+      } else if (action.act === "answer") {
+        await client.missionControlAction({ verb: action.verb, qitemId: action.qitemId, actorSession: action.actorSession });
+        view.dispatch({ type: "notice", message: `Approved ${action.qitemId} as ${action.actorSession}: the request is closed on its own row.` });
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

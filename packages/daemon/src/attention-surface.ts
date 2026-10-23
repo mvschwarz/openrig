@@ -10,6 +10,8 @@ export interface AttentionItem {
   project: { id: string; root: string } | null;
   source: string;
   recipient?: string | null;
+  /** How the person answers this request where they read it: the same mission-control verb and actor Steering uses. */
+  answer?: { verb: "approve"; actorSession: string };
 }
 export interface AttentionDetail {
   item: AttentionItem;

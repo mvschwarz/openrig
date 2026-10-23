@@ -3917,12 +3917,12 @@ export class QueueRepository {
     // clause: a qitem parked as state=blocked on a HUMAN-seat blocker is a
     // decision the human owes. Blocking on another qitem (today's shipped
     // usage) does NOT match — is_human_seat_session rejects qitem ids.
-    // An ask placed on Steering without an alert lands here by its classification, as Slack would have found it, so one
-    // to a registered person addressed as a seat or an alias is on Steering too; a reroute ends that.
+    // An ask to a person lands here by its classification (isCurrentHumanAsk), alerted or not, so one to a registered
+    // person addressed as a seat or an alias is on Steering too; a reroute ends that.
     const quietAsk = this.hasOwnerNotificationColumns ? `
         OR EXISTS (SELECT 1 FROM queue_transitions ask
           WHERE ask.qitem_id = queue_items.qitem_id AND ask.state = 'pending'
-            AND ask.owner_notification_kind = 'human-required' AND ask.owner_notification_level = 'RECORD'
+            AND ask.owner_notification_kind = 'human-required'
             AND ask.transition_id = (SELECT MAX(latest.transition_id) FROM queue_transitions latest
               WHERE latest.qitem_id = queue_items.qitem_id AND latest.owner_notification_level IS NOT NULL
                 AND latest.owner_notification_kind <> 'human-decision-resolved')
@@ -4270,6 +4270,15 @@ export class QueueRepository {
       "SELECT 1 FROM queue_transitions WHERE qitem_id = ? AND transition_id > ? AND transition_note LIKE 'fallback-routed:%' LIMIT 1",
     ).get(qitemId, owner.transitionId);
     return rerouted ? null : owner;
+  }
+
+  /** True when this row is an ask to a person that's still theirs: its own create-time human-required notification, at
+   *  any level, not rerouted since. Every attention reader (listAttention, the list route, the Feed) uses this one
+   *  membership, whatever happened to its Slack post. */
+  isCurrentHumanAsk(qitemId: string, listed?: ListedLedger): boolean {
+    if (!this.hasQueueTransitionsTable) return false;
+    const owners = listed?.owners ?? this.transitionLog.ownerNotificationsForQitems([qitemId]).get(qitemId) ?? [];
+    return this.currentAskNotification(qitemId, owners)?.ownerNotificationKind === "human-required";
   }
 
   /** True when this row's current ask was placed on Steering without a Slack alert (human-required at RECORD) and is still

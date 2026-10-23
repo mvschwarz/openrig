@@ -954,7 +954,8 @@ export class WorkflowProjector {
       `reason: ${exception.reason}\n` +
       `evidence: ${evidenceRef}\n` +
       `resolve: diagnose via the trace above, then \`rig workflow resume ${instance.instanceId}${occurrenceId ? ` --occurrence ${occurrenceId}` : ""} [--decision <text>]\` re-drives from this step (completed steps never re-run).`;
-    const createExceptionItem = (destination: string, tier: string) =>
+    // Routed to the person, a failed workflow step is an approval whose wait costs now: alert them.
+    const createExceptionItem = (destination: string, tier: string, toPerson: boolean) =>
       this.queueRepo.createWithinTransaction({
         sourceSession: input.actorSession,
         identityProvenance: input.identityProvenance ?? null,
@@ -966,10 +967,11 @@ export class WorkflowProjector {
         summary: exception.reason,
         evidenceRef,
         chainOfRecord: [input.currentPacketId],
+        ...(toPerson ? { humanAlert: true } : {}),
       });
     let createdException;
     try {
-      createdException = createExceptionItem(route.destinationSession, route.tier);
+      createdException = createExceptionItem(route.destinationSession, route.tier, route.humanRouted === true);
     } catch (error) {
       if (!(error instanceof QueueRepositoryError) || error.code !== "unknown_destination_rig" || route.humanRouted) throw error;
       // Only an unavailable agent rig invokes human selection. Other
@@ -978,6 +980,7 @@ export class WorkflowProjector {
       createdException = createExceptionItem(
         workflowHumanDestination(this.exceptionDial?.humanFallbackSeat),
         "human-gate",
+        true,
       );
     }
     registerEvent(createdException.persistedEvent);

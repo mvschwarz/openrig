@@ -51,7 +51,7 @@ interface DeliveryResultBase {
 /** The gateway (Slack connector) owns delivery; its ledger is the receipt. */
 export interface GatewayDeliveryResult extends DeliveryResultBase {
   receiptSource: "gateway";
-  /** not-alerted: an ask placed on Steering without a Slack alert, below Slack's posting dial, so no post is owed yet. */
+  /** not-alerted: an ask created without --alert, so it's on Steering and never sent to Slack. */
   outcome: "posted" | "transport-failed" | "never-posted" | "still-pending" | "indeterminate" | "not-alerted";
   /** null means no receipt can presently settle connector acceptance. */
   connectorAccepted: boolean | null;
@@ -246,7 +246,7 @@ export async function waitForDeliveryOutcome(
       // An ask placed on Steering without an alert owes no post, so there's no receipt to wait for.
       if (outcome == null && stringField(row, "ownerNotificationLevel") === "RECORD") {
         return { ...gateway, outcome: "not-alerted", connectorAccepted: null,
-          detail: "on Steering for the person, below Slack's posting dial, so not posted; --alert sends an alert. If the dial is set to post it, rig queue show reports its receipt.", nextAction: `rig queue show ${qitemId} --json` };
+          detail: "created without --alert, so not sent to Slack; it's on Steering for the person", nextAction: null };
       }
       if (outcome === "posted") {
         // #96: a --reply-to update reports whether it joined the earlier item's thread.

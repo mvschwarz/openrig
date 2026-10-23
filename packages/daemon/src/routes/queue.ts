@@ -1097,8 +1097,10 @@ export function queueRoutes(): Hono {
       updatedSince,
     });
     // Defense-in-depth: refine with the JS predicate so the SQL
-    // LIKE superset cannot leak a malformed destination through.
-    const filtered = items.filter(isAttentionItem);
+    // LIKE superset cannot leak a malformed destination through. An ask to a registered person addressed as a seat or
+    // an alias is a member by its classification, as listAttention selected it.
+    const repo = getRepo(c);
+    const filtered = items.filter((item) => isAttentionItem(item) || repo.isCurrentHumanAsk(item.qitemId));
     return c.json(filtered);
   });
 

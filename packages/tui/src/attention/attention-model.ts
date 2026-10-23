@@ -58,6 +58,12 @@ export function attentionLines(state: ViewState, snap: FleetSnapshot, width: num
       lines.push({ text: `Scope: ${d.item.scope}` }, { text: `Observed: ${d.item.at ?? "unknown"}` });
       lines.push(...d.lines.map(text => ({ text })));
       for (const f of d.files) lines.push(listItem(f.label, { type: "attention-source", path: f.path }));
+      // Answer it here as on Steering: the served verb, on this row, as the person.
+      const qitemId = d.item.id.startsWith("queue:") ? d.item.id.slice("queue:".length) : null;
+      if (d.item.answer && qitemId) {
+        lines.push(listItem(`Approve as ${d.item.answer.actorSession} (closes this request, as Steering's Approve does)`,
+          { type: "act", act: "answer", qitemId, verb: d.item.answer.verb, actorSession: d.item.answer.actorSession }));
+      }
       lines.push({ text: `Source: ${d.item.source}` });
     }
   } else {

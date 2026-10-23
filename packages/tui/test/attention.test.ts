@@ -56,3 +56,38 @@ it.each([140, 80])("keeps readable summaries, passive exact source navigation an
   expect(requests.every(r => r.startsWith("GET "))).toBe(true);
   expect(requests.filter(r => r.includes("/api/files/read")).every(r => r === "GET /api/files/read?root=alpha&path=proof.md")).toBe(true);
 });
+
+it("answers an ask from its request view as Steering does: the served Approve, as the person, through the mission-control write", async () => {
+  const requests: Array<{ method: string; path: string; body: unknown }> = [];
+  const asked = { id: "queue:quiet-ask", kind: "action" as const, summary: "Which name for the release?", unblocks: null, urgency: "routine", at: "2026-10-23T18:00:00Z",
+    scope: "instance · project unknown", project: null, source: "/api/queue/quiet-ask", recipient: "human-founder@kernel",
+    answer: { verb: "approve" as const, actorSession: "human-founder@kernel" } };
+  const parked = { ...asked, id: "queue:parked", summary: "A row parked on the person", source: "/api/queue/parked", answer: undefined };
+  let wanted = asked;
+  const client = new DaemonClient({ baseUrl: "http://fixture", fetchImpl: (async (url, init) => {
+    const u = new URL(String(url));
+    requests.push({ method: init?.method ?? "GET", path: u.pathname, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+    if (u.pathname === "/api/attention") return Response.json({ scope: "instance", readAt: asked.at, items: [asked, parked], sources: [{ source: "queue", state: "available", detail: "fixture" }],
+      detail: u.searchParams.get("item") ? { item: wanted, lines: ["Slack: not sent: created without --alert, so it's on Steering only"], files: [] } : null, detailError: null });
+    if (u.pathname === "/api/queue/human-updates") return Response.json({ items: [], limit: 20, truncated: false });
+    if (u.pathname === "/api/mission-control/action") return Response.json({ verb: "approve", qitemId: "quiet-ask", closedQitem: {} });
+    throw new Error(`Unexpected request: ${u}`);
+  }) as typeof fetch });
+  let snap: FleetSnapshot = emptySnapshot();
+  const view = createViewState({ instanceId: "attention-answer", getSnapshot: () => snap });
+  const refresh = async () => { snap = await hydrateSnapshot(client, undefined, null, null, null, view.get()); };
+  view.dispatch(parseCommand("attention")); await refresh();
+  view.dispatch({ type: "attention-open", id: asked.id }); await refresh();
+  const lines = attentionLines(view.get(), snap, 140);
+  const approve = lines.find(l => l.action?.type === "act");
+  expect(approve?.action).toEqual({ type: "act", act: "answer", qitemId: "quiet-ask", verb: "approve", actorSession: "human-founder@kernel" });
+  expect(lines.map(l => l.text).join("\n")).toContain("Slack: not sent");
+  wanted = parked;
+  view.dispatch({ type: "back" }); view.dispatch({ type: "attention-open", id: parked.id }); await refresh();
+  expect(attentionLines(view.get(), snap, 140).some(l => l.action?.type === "act")).toBe(false);
+  // What the driver loop sends for that act: Steering's own write, nothing else.
+  await client.missionControlAction({ verb: "approve", qitemId: "quiet-ask", actorSession: "human-founder@kernel" });
+  expect(requests.filter(r => r.method === "POST")).toEqual([
+    { method: "POST", path: "/api/mission-control/action", body: { verb: "approve", qitemId: "quiet-ask", actorSession: "human-founder@kernel" } },
+  ]);
+});
