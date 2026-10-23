@@ -8,6 +8,7 @@ import { networkInterfaces } from 'node:os';
 import { join } from 'node:path';
 import { defaultHostDaemon, runScenarioFile } from '../../daemon/test/helpers/scenario-pipeline.ts';
 import { CASES, PASSING_CASES, RESULT_PREFIX } from './result.mjs';
+import { preserveRefresh } from './preserve-refresh.mjs';
 
 assert.equal(process.platform, 'linux', 'container execution only');
 assert.notEqual(process.getuid(), 0, 'run as the unprivileged testbed user');
@@ -77,6 +78,10 @@ sys.exit(r.returncode)
     },
     daemon: async (scaffold, options) => {
       const daemon = await defaultHostDaemon(scaffold, options);
+      if (caseName === 'daemon-restart') return {
+        ...daemon,
+        restart: async () => { report.preservation = await preserveRefresh(daemon, scaffold.openrigHome, rigBin); },
+      };
       if (mode === 'healthy' || selected.kind === 'hook') return daemon;
       return {
         ...daemon,

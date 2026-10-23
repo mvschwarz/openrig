@@ -81,6 +81,14 @@ test('a passing-only case admits only a clean PASS of its own scenario', () => {
     const text = (PASSING_CASES[caseName].includes ?? []).join('\n');
     const hook = { rawOutput: JSON.stringify({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: text } }), additionalContext: text };
     const pass = { ...(PASSING_CASES[caseName].kind === 'hook' ? { hook } : {}), mode: 'healthy', caseName, scenarioSha256: 'a'.repeat(64), result, records: [result], fault: null };
+    if (caseName === 'daemon-restart') {
+      pass.preservation = { failedBackupUnchanged: true, editedSha256: 'b'.repeat(64), backedUpSha256: 'b'.repeat(64),
+        targetFilesChecked: 2, version: '0.1.17', shippedVersion: '0.1.17' };
+      for (const changed of [undefined, { ...pass.preservation, failedBackupUnchanged: false },
+        { ...pass.preservation, backedUpSha256: 'c'.repeat(64) }, { ...pass.preservation, version: '0.0.1' }]) {
+        assert.throws(() => verifyPassingRun(0, { ...pass, preservation: changed }, caseName));
+      }
+    }
     verifyPassingRun(0, pass, caseName);
     const fail = { ...result, verdict: 'FAIL', failedStep: 2 };
     for (const [exitCode, bad] of [

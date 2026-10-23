@@ -36,6 +36,15 @@ export function verifyPassingRun(exitCode, report, caseName) {
   assert.deepEqual(report.records[0], report.result);
   assert.equal(exitCode, 0);
   assert.equal(report.result.verdict, 'PASS');
+  if (caseName === 'daemon-restart') {
+    const proof = report.preservation;
+    assert.equal(proof?.failedBackupUnchanged, true);
+    assert.match(proof.editedSha256, /^[0-9a-f]{64}$/);
+    assert.equal(proof.backedUpSha256, proof.editedSha256);
+    assert.ok(proof.targetFilesChecked > 0);
+    assert.equal(proof.version, proof.shippedVersion);
+    assert.notEqual(proof.version, '0.0.1');
+  }
   if (selected.kind === 'hook') {
     verifyHookOutput(report.hook);
     for (const text of selected.includes) assert.ok(report.hook.additionalContext.includes(text), text);
