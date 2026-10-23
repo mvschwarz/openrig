@@ -5,9 +5,11 @@ import {mkdirSync, writeFileSync, readFileSync, renameSync, rmSync, mkdtempSync}
 import {tmpdir} from 'node:os';
 import {join, dirname} from 'node:path';
 import {randomUUID} from 'node:crypto';
+import {Hono} from 'hono';
 import {ClaudeCompactionEnforcer, RESTART_RECOVERY_WINDOW_MS_DEFAULT, buildPostCompactTurnBoundaryPrompt} from '../src/domain/claude-compaction-enforcer.js';
 import {SessionTransport} from '../src/domain/session-transport.js';
 import {SeatDeliveryGuard} from '../src/domain/seat-delivery-guard.js';
+import {compactionRoutes} from '../src/routes/compaction.js';
 
 const seat='writer@demo', high={sessionName:seat,runtime:'claude-code',usedPercentage:90};
 const homes:string[]=[];
@@ -18,19 +20,24 @@ function fixture(){
  let clock=10000,generation='generation-one';
  const db={prepare:()=>({get:()=>undefined,all:()=>[]})} as any;
  const writes:string[]=[];
+ // onWrite sees each text as it is written; busy holds the seat non-idle; failCompact loses a /compact's result.
+ const hooks:{onWrite?:(text:string)=>void;busy?:boolean;failCompact?:boolean}={};
  const policy={preparationRoot:'',enabled:true,thresholdPercent:80,preCompactInstruction:'Write a restore map.',compactInstruction:'',messageInline:'',messageFilePath:'',postRestoreAuditInstruction:''};
- const tmux={probeSession:vi.fn(async()=>({state:'present'})),sendText:vi.fn(async(_:string,text:string)=>{writes.push(text);return{ok:true};}),sendKeys:vi.fn(async()=>({ok:true}))};
+ const tmux={probeSession:vi.fn(async()=>({state:'present'})),sendKeys:vi.fn(async()=>({ok:true})),sendText:vi.fn(async(_:string,text:string)=>{
+  writes.push(text);hooks.onWrite?.(text);
+  return hooks.failCompact&&text.startsWith('/compact')?{ok:false,code:'tmux_error',message:'the result was lost'}:{ok:true};
+ })};
  const guard=new SeatDeliveryGuard(db,()=>({nodeId:'node-one',session:seat,pane:'%1',occupant:generation}));
  Object.assign(tmux,{deliveryGuard:guard});
  const transport=new SessionTransport({db,rigRepo:{} as any,sessionRegistry:{} as any,tmuxAdapter:tmux as any,sleep:async(ms)=>{clock+=ms;},now:()=>new Date(clock),waitForIdlePollMs:5});
  (transport as any).getSessionMeta=()=>({runtime:'claude-code',attachmentType:'tmux',nodeId:'node-one',pane:'%1',occupant:generation,resumeToken:'native-one'});
  (transport as any).claudeDeliveryObservation=async()=>({state:'unknown',detail:'injected process observation'});
- (transport as any).classifySendReadiness=async()=>({state:'idle',reason:'fixture',evidenceSource:'fixture'});
+ (transport as any).classifySendReadiness=async()=>({state:hooks.busy?'running':'idle',reason:'fixture',evidenceSource:'fixture'});
  (transport as any).diagnoseProducerLink=async()=>'fixture';
  const settings={resolveClaudeCompactionPolicy:()=>policy};
  // A daemon process: a new one shares the instance home, the seat and the clock, and nothing held in memory.
  const daemon=(instance=randomUUID())=>new ClaudeCompactionEnforcer(settings as any,transport,{openrigHome:home,daemonInstance:instance,now:()=>clock,sleep:async(ms)=>{clock+=ms;},resolveOccupantGeneration:()=>generation});
- return{daemon,writes,policy,advance:(ms:number)=>{clock+=ms;},generation:(g:string)=>{generation=g;}};
+ return{daemon,writes,policy,hooks,transport,home,advance:(ms:number)=>{clock+=ms;},generation:(g:string)=>{generation=g;}};
 }
 type F=ReturnType<typeof fixture>;
 const compacts=(f:F)=>f.writes.filter(t=>t.startsWith('/compact'));
@@ -38,6 +45,7 @@ const prepPrompts=(f:F)=>f.writes.filter(t=>t.includes('Write a restore map.'));
 const boundaries=(f:F)=>f.writes.filter(t=>t===buildPostCompactTurnBoundaryPrompt());
 const restores=(f:F)=>f.writes.filter(t=>t.includes('restoring this Claude session after compaction'));
 const audits=(f:F)=>f.writes.filter(t=>t.startsWith('Now audit your compaction restore'));
+const recordFile=(e:ClaudeCompactionEnforcer)=>join(dirname(e.getPreparationState(seat)!.mapPath),'COMPACTION-STATE.json');
 function completeMap(e:ClaudeCompactionEnforcer){
  const a=e.getPreparationState(seat)!;mkdirSync(dirname(a.mapPath),{recursive:true});
  writeFileSync(a.mapPath+'.tmp',`# Restore map\nCurrent work and next step.\n${a.marker}\n`);
@@ -83,6 +91,24 @@ it('a restart during an open preparation waits on it: no second preparation prom
  expect(compacts(f)).toHaveLength(1);
 });
 
+it('a restart while a preparation retry is being written never sends that prompt again',async()=>{
+ const f=fixture();const first=f.daemon();
+ const send=f.transport.send.bind(f.transport);let refuse=true;
+ // The first send is refused before any input, so the next poll retries it.
+ vi.spyOn(f.transport,'send').mockImplementation(async(...args)=>{
+  if(refuse){refuse=false;return{ok:false,sessionName:seat,sent:false,reason:'session_missing'} as any;}
+  return send(...args);
+ });
+ await first.maybeAutoCompact(high);expect(prepPrompts(f)).toHaveLength(0);
+ const record=recordFile(first);let atWrite='';
+ f.hooks.onWrite=()=>{atWrite=readFileSync(record,'utf8');};
+ await first.maybeAutoCompact(high);expect(prepPrompts(f)).toHaveLength(1);
+ // The first daemon stopped as the retry's text was written: its record is as it stood then.
+ writeFileSync(record,atWrite);
+ const restarted=f.daemon();await restarted.maybeAutoCompact(high);await restarted.maybeAutoCompact(high);
+ expect(prepPrompts(f)).toHaveLength(1);
+});
+
 it('a restart while /compact was being sent never sends it again, and still owes the restore steps',async()=>{
  const f=fixture();const first=f.daemon();await first.maybeAutoCompact(high);
  const attempt=completeMap(first);
@@ -94,11 +120,81 @@ it('a restart while /compact was being sent never sends it again, and still owes
  expect(compacts(f)).toHaveLength(0);expect(boundaries(f)).toHaveLength(1);
 });
 
-it('an open record older than the recovery window is not resumed, and reads as stranded rather than idle',async()=>{
- const f=fixture();await compactedBy(f);f.advance(RESTART_RECOVERY_WINDOW_MS_DEFAULT+1);
+it('a restart after a /compact whose result was lost owes its restore steps, and neither prepares nor compacts again',async()=>{
+ const f=fixture();const first=f.daemon();await first.maybeAutoCompact(high);completeMap(first);
+ f.hooks.failCompact=true;await first.maybeAutoCompact(high);f.hooks.failCompact=false;
+ expect(compacts(f)).toHaveLength(1);expect(first.getPreparationState(seat)).toMatchObject({status:'stopped',compact:'uncertain'});
+ const restarted=f.daemon();await restarted.maybeAutoCompact(high);
+ // What the seat receives first: the restore steps, not a second request to write a map.
+ expect(prepPrompts(f)).toHaveLength(1);
+ for(let i=0;i<3;i++)await staleTick(restarted);
+ expect(boundaries(f)).toHaveLength(1);expect(restores(f)).toHaveLength(1);expect(compacts(f)).toHaveLength(1);
+});
+
+it('a restart after an automatic /compact waited for a busy seat and sent nothing owes no restore, and the map compacts once',async()=>{
+ const f=fixture();const first=f.daemon();await first.maybeAutoCompact(high);completeMap(first);
+ f.hooks.busy=true;expect(await first.maybeAutoCompact(high)).toMatchObject({reason:'waiting_for_idle'});f.hooks.busy=false;
+ expect(compacts(f)).toHaveLength(0);
  const restarted=f.daemon();await staleTick(restarted);
+ // What the seat receives first: no restore steps for a compaction that never happened.
  expect(boundaries(f)).toHaveLength(0);
+ await restarted.maybeAutoCompact(high);expect(compacts(f)).toHaveLength(1);
+});
+
+it("a restart as a manual /compact is written keeps its restore request's map and the operator's authority",async()=>{
+ const f=fixture();f.policy.enabled=false;f.policy.preparationRoot=join(f.home,'maps');
+ const first=f.daemon();let atWrite='';
+ f.hooks.onWrite=(text)=>{
+  if(text.includes('Write a restore map.'))completeMap(first);
+  if(text.startsWith('/compact'))atWrite=readFileSync(recordFile(first),'utf8');
+ };
+ expect(await first.triggerManualCompact({...high,cwd:null},{operatorInitiated:true})).toMatchObject({triggered:true});
+ const mapPath=first.getPreparationState(seat)!.mapPath;
+ // The first daemon stopped as /compact was written; automatic compaction is off, so only the operator's request authorizes the restore.
+ writeFileSync(recordFile(first),atWrite);
+ const restarted=f.daemon();for(let i=0;i<3;i++)await staleTick(restarted);
+ expect(boundaries(f)).toHaveLength(1);expect(restores(f)).toHaveLength(1);
+ expect(restores(f)[0]).toContain(mapPath);
+});
+
+it('a manual compaction asked for before the first poll after a restart neither prepares again nor replaces the owed restore',async()=>{
+ const f=fixture();await compactedBy(f);
+ const restarted=f.daemon();
+ const outcome=await restarted.triggerManualCompact({...high,cwd:null},{operatorInitiated:true});
+ expect(prepPrompts(f)).toHaveLength(1);
+ expect(outcome).toMatchObject({triggered:false,reason:'already_in_progress'});
+ await staleTick(restarted);expect(boundaries(f)).toHaveLength(1);
+});
+
+it('an open record older than the recovery window is not resumed: rig compact --state shows it, and a later compaction says it replaced it',async()=>{
+ const f=fixture();await compactedBy(f);f.advance(RESTART_RECOVERY_WINDOW_MS_DEFAULT+1);
+ const restarted=f.daemon();
+ // A first look at the seat after the restart, before any poll.
+ const app=new Hono();
+ app.use('*',async(c,next)=>{
+  c.set('compactionEnforcer' as never,restarted);
+  c.set('db' as never,{prepare:()=>({get:()=>({node_id:'node-one',runtime:'claude-code',cwd:null})})});
+  await next();
+ });
+ app.route('/api/compaction',compactionRoutes());
+ const state=await(await app.request(`/api/compaction/state?session=${encodeURIComponent(seat)}`)).json();
+ await staleTick(restarted);
+ expect(boundaries(f)).toHaveLength(0);
+ expect(state.stranded).toMatchObject({phase:'turn_boundary',detail:expect.stringContaining('restore request naming mapPath')});
  expect(restarted.observedCompaction(seat)).toMatchObject({stage:'compacted',detail:expect.stringContaining('OpenRig restart')});
+ await restarted.maybeAutoCompact(high);expect(prepPrompts(f)).toHaveLength(2);
+ expect(restarted.getPreparationState(seat)?.supersedes).toMatchObject({mapPath:state.stranded.mapPath});
+ expect(restarted.observedCompaction(seat)?.detail).toContain('replaces a compaction from before an OpenRig restart');
+});
+
+it("a record in a shape this daemon doesn't write is ignored, so it can't hold up the seat's compaction",async()=>{
+ const f=fixture();const first=f.daemon();await first.maybeAutoCompact(high);
+ const record=recordFile(first);
+ // As a newer daemon might leave it, before a rollback.
+ writeFileSync(record,JSON.stringify({...JSON.parse(readFileSync(record,'utf8')),phase:'a_later_stage'}));
+ const restarted=f.daemon();await restarted.maybeAutoCompact(high);
+ expect(prepPrompts(f)).toHaveLength(2);
+ expect(restarted.hasPendingPostCompactStage(seat,{cwd:null,runtime:'claude-code'})).toBe(false);
 });
 
 it("another occupant's record is left alone",async()=>{

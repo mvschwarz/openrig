@@ -34,7 +34,9 @@ import * as path from "node:path";
  * - Restart: each attempt's record (COMPACTION-STATE.json, beside its map)
  *   says what the daemon last did for it, so a restarted daemon resumes an
  *   owed restore and waits on an open preparation instead of starting a
- *   second one (`recoverAfterRestart`).
+ *   second one (`recoverAfterRestart`). A prompt or /compact is marked in
+ *   flight at its write, so a restart never sends it again. A restart between
+ *   a post-compact stage's send and its record can send that one stage again.
  * - Definite pre-write prep failures retry at most three times. Uncertain
  *   delivery never replays. Unfinished preparation stops visibly until an
  *   explicit retry; it cannot arm a delayed compact after its deadline.
@@ -428,7 +430,11 @@ export interface PreparationState {
   compact: "not_sent" | "submitted_unconfirmed" | "uncertain";
   deadlineAt: number | null;
   reason?: string;
+  /** A record too old to resume that this attempt replaced (see `getStrandedCompaction`): its restore may have been owed. */
+  supersedes?: StrandedCompaction;
 }
+/** An open record from before a restart, too old to resume: the seat's restore steps may still be owed. */
+export interface StrandedCompaction { attemptId: string; mapPath: string; phase: string; recordedAt: string }
 interface PreparationAttempt extends PreparationState {
   sends: number;
   policyWasEnabled: boolean;
@@ -464,8 +470,9 @@ interface CompactionRecord {
   occupantGeneration: string | null;
   mode: "automatic" | "manual";
   /** `preparing`: waiting for the map. A post-compact stage: /compact was submitted and that stage is owed next.
+   *  `compact_uncertain`: the attempt stopped after a /compact whose outcome is unknown, so its restore is owed if it ran.
    *  `done`: the post-restore audit was sent. `ended`: the attempt stopped or was cancelled. */
-  phase: "preparing" | PendingPostCompactStage | "done" | "ended";
+  phase: "preparing" | PendingPostCompactStage | "compact_uncertain" | "done" | "ended";
   delivery: PreparationState["delivery"];
   deadlineAt: number | null;
   sends: number;
@@ -480,12 +487,30 @@ interface CompactionRecord {
   updatedAt: number;
 }
 
+const RECORD_PHASES = new Set(["preparing", "turn_boundary", "restore_prompt", "compliance_prompt", "compact_uncertain", "done", "ended"]);
+const RECORD_DELIVERIES = new Set(["pending", "not_sent", "delivered", "uncertain"]);
+
+/** A record only in the shape this daemon writes. Any other (a newer daemon's after a rollback, a damaged file) is ignored,
+ *  so it can't hold up a seat's compaction. */
 function readCompactionRecord(file: string): CompactionRecord | null {
   try {
-    const record = JSON.parse(fs.readFileSync(file, "utf8")) as CompactionRecord;
-    return typeof record.attemptId === "string" && typeof record.session === "string" && typeof record.phase === "string"
-      && typeof record.updatedAt === "number" && typeof record.mapPath === "string" ? record : null;
+    const r = JSON.parse(fs.readFileSync(file, "utf8")) as CompactionRecord;
+    const text = (v: unknown) => typeof v === "string";
+    const textOrNull = (v: unknown) => v === null || typeof v === "string";
+    const carry = r.restoreCarry as Partial<RestoreCarry> | undefined;
+    const valid = text(r.daemon) && text(r.attemptId) && text(r.session) && textOrNull(r.occupantGeneration)
+      && (r.mode === "automatic" || r.mode === "manual") && RECORD_PHASES.has(r.phase) && RECORD_DELIVERIES.has(r.delivery)
+      && (r.deadlineAt === null || Number.isFinite(r.deadlineAt)) && Number.isInteger(r.sends) && r.sends >= 0 && r.sends <= PREP_SEND_ATTEMPTS_MAX
+      && text(r.mapPath) && text(r.marker) && text(r.compactInstruction) && textOrNull(r.preparationRoot) && Number.isFinite(r.updatedAt)
+      && (r.operatorInitiated === undefined || typeof r.operatorInitiated === "boolean") && (r.compactSending === undefined || r.compactSending === true)
+      && (carry === undefined || (typeof carry === "object" && carry !== null && textOrNull(carry.mapPath) && textOrNull(carry.compactInstruction)
+        && (carry.skipMap === undefined || (text(carry.skipMap?.mapPath) && text(carry.skipMap?.marker)))));
+    return valid ? r : null;
   } catch { return null; }
+}
+
+function strandedSummary(record: CompactionRecord): StrandedCompaction {
+  return { attemptId: record.attemptId, mapPath: record.mapPath, phase: record.phase, recordedAt: new Date(record.updatedAt).toISOString() };
 }
 
 export class ClaudeCompactionEnforcer {
@@ -599,7 +624,10 @@ export class ClaudeCompactionEnforcer {
     if (owed === "restore_prompt") return { stage: "compacted", detail: "compacted, with its restore not yet requested" };
     if (owed === "turn_boundary") return { stage: "compacting", detail: "being compacted: /compact was submitted and the post-compaction steps haven't started" };
     const attempt = this.pendingPreCompactPrep.get(sessionName);
-    if (attempt?.status === "sending" || attempt?.status === "waiting") return { stage: "preparing", detail: "preparing for a managed compaction: /compact hasn't been sent yet" };
+    if (attempt?.status === "sending" || attempt?.status === "waiting") {
+      return { stage: "preparing", detail: `preparing for a managed compaction: /compact hasn't been sent yet${attempt.supersedes
+        ? `; it replaces a compaction from before an OpenRig restart whose restore steps may still have been owed (map ${attempt.supersedes.mapPath})` : ""}` };
+    }
     if (attempt?.status === "compact-sent") return { stage: "compacting", detail: "being compacted: /compact was submitted and the post-compaction steps haven't started" };
     if (this.stranded.has(sessionName)) {
       return { stage: "compacted", detail: "compacted before an OpenRig restart, with its restore steps possibly still owed: the record is too old for OpenRig to resume them" };
@@ -610,12 +638,23 @@ export class ClaudeCompactionEnforcer {
   /** True while a post-compact stage (turn boundary, restore or audit) is still owed to this seat. Given the seat, a
    *  restarted daemon first picks up a stage its predecessor recorded (`recoverAfterRestart`). */
   hasPendingPostCompactStage(sessionName: string, seat?: { cwd?: string | null; runtime: string | null }): boolean {
-    if (seat && seat.runtime === "claude-code" && !this.recovered.has(sessionName)) {
-      let preparationRoot: string | null = null;
-      try { preparationRoot = this.settingsStore.resolveClaudeCompactionPolicy().preparationRoot || null; } catch { /* default roots */ }
-      this.recoverAfterRestart({ sessionName, ...seat }, preparationRoot);
-    }
+    if (seat) this.recoverSeat({ sessionName, ...seat });
     return this.pendingPostCompactRestore.has(sessionName);
+  }
+
+  /** The first time this daemon reaches a seat (a poll, a manual request, a state read): pick up its record from before a
+   *  restart, with the policy's preparation root (`recoverAfterRestart`). */
+  recoverSeat(seat: { sessionName: string; cwd?: string | null; runtime: string | null }): void {
+    if (seat.runtime !== "claude-code" || this.recovered.has(seat.sessionName)) return;
+    let preparationRoot: string | null = null;
+    try { preparationRoot = this.settingsStore.resolveClaudeCompactionPolicy().preparationRoot || null; } catch { /* default roots */ }
+    this.recoverAfterRestart(seat, preparationRoot);
+  }
+
+  /** An open record from before a restart that was too old to resume, while no later attempt has replaced it. */
+  getStrandedCompaction(sessionName: string): StrandedCompaction | null {
+    const record = this.stranded.get(sessionName);
+    return record ? strandedSummary(record) : null;
   }
 
   /**
@@ -941,6 +980,10 @@ export class ClaudeCompactionEnforcer {
   }
 
   private async triggerManualCompactUnchecked(input: EnforcerInput, opts: { operatorInitiated?: boolean; skipMap?: boolean; actor?: TerminalActor }): Promise<ManualCompactionOutcome> {
+    // The manual budget starts with the request. A request reaching a seat before the monitor's first poll after a restart
+    // finds its owed restore or open preparation first, so it neither prepares twice nor replaces the owed restore.
+    const requestedAt = this.now();
+    this.recoverSeat(input);
     this.reconcilePreparations();
     const active = this.pendingPreCompactPrep.get(input.sessionName);
     const stage = this.manualCompactionState.get(input.sessionName)?.stage;
@@ -956,7 +999,7 @@ export class ClaudeCompactionEnforcer {
     const actor = opts.actor ?? { source: "caller" as const, session: null };
     const policyRefusal = this.terminalPolicyReason(input, actor);
     if (policyRefusal) return this.recordManualFailure(input.sessionName, policyRefusal);
-    const attempt = this.beginPreparation(input, "manual", opts.skipMap === true, actor);
+    const attempt = this.beginPreparation(input, "manual", opts.skipMap === true, actor, requestedAt);
     if (attempt.status === "stopped") return this.recordManualFailure(input.sessionName, attempt.reason ?? "occupant_generation_unavailable");
     const failed = (reason: string): ManualCompactionOutcome => {
       // A cancelled request may settle after an explicit retry. Its receipt must
@@ -1001,9 +1044,9 @@ export class ClaudeCompactionEnforcer {
     return { triggered: true, stage: "compact-sent" };
   }
 
-  private beginPreparation(input: EnforcerInput, mode: "automatic" | "manual", skipMap = false, policyActor: TerminalActor = { source: "openrig" }): PreparationAttempt {
+  private beginPreparation(input: EnforcerInput, mode: "automatic" | "manual", skipMap = false, policyActor: TerminalActor = { source: "openrig" },
+    startedAt = this.now()): PreparationAttempt {
     const attemptId = randomUUID();
-    const startedAt = this.now();
     const policy = this.settingsStore.resolveClaudeCompactionPolicy();
     const preparationRoot = policy.preparationRoot || null;
     const fallbackMapPath = path.join(this.openrigHome, "compaction", "preparation", sanitizeSessionKey(input.sessionName), attemptId, "RESTORE-MAP.md");
@@ -1019,6 +1062,9 @@ export class ClaudeCompactionEnforcer {
       controller: new AbortController(),
       compactInstruction: policy.compactInstruction ?? "",
     };
+    // A stranded record this attempt replaces stays visible on the attempt, not dropped quietly.
+    const stranded = this.stranded.get(input.sessionName);
+    if (stranded) attempt.supersedes = strandedSummary(stranded);
     this.pendingPreCompactPrep.set(input.sessionName, attempt);
     this.stranded.delete(input.sessionName);
     // A map cannot satisfy an unknown occupant. Keep the failed attempt visible and
@@ -1093,6 +1139,7 @@ export class ClaudeCompactionEnforcer {
     attempt.status = "waiting";
     const policy = this.settingsStore.resolveClaudeCompactionPolicy();
     let prep;
+    let marked = false;
     try {
       const composed = composeManagedCompactCommand({ compactInstruction: attempt.compactInstruction, mapPath: attempt.mapPath });
       prep = await this.sessionTransport.send(input.sessionName, buildPreCompactPrepPrompt({
@@ -1104,6 +1151,8 @@ export class ClaudeCompactionEnforcer {
         if (this.pendingPreCompactPrep.get(input.sessionName) !== attempt || attempt.controller.signal.aborted || attempt.status === "stopped")
           throw new DeliveryGuardError("preparation_stopped", "This compaction attempt ended before preparation input.");
         this.checkAttemptPolicy(input, attempt);
+        // At the write, a retry included: from here a restart reads this prompt as possibly delivered and never resends it.
+        if (!marked) { marked = true; this.persist(input.sessionName, attempt.attemptId, { delivery: "pending", sends: attempt.sends }); }
       } });
     } catch (error) {
       if (error instanceof DeliveryGuardError) {
@@ -1141,14 +1190,28 @@ export class ClaudeCompactionEnforcer {
       if (!skipMap && !this.mapReady(attempt, true)) throw new DeliveryGuardError("preparation_incomplete", "This attempt's restore map is incomplete; /compact was not submitted.");
     };
     const composed = composeManagedCompactCommand({ compactInstruction: attempt.compactInstruction, mapPath: skipMap ? null : attempt.mapPath });
+    // Whatever the command could not carry, the restore request carries instead. An explicitly
+    // selected preparation root also keeps its exact map in that request, even when the command fit it.
+    const carry: RestoreCarry | undefined = skipMap || attempt.preparationRoot !== null || !composed.mapPathInCommand || !composed.instructionInCommand ? {
+      mapPath: !skipMap && (attempt.preparationRoot !== null || !composed.mapPathInCommand) ? attempt.mapPath : null,
+      compactInstruction: composed.instructionInCommand ? null : attempt.compactInstruction,
+      ...(skipMap ? { skipMap: { mapPath: attempt.mapPath, marker: attempt.marker } } : {}),
+    } : undefined;
+    const operatorInitiated = this.manualCompactionState.get(input.sessionName)?.operatorInitiated;
+    let marked = false;
+    // At the write, after the final checks: from here a restart treats /compact as possibly sent, and keeps what its
+    // restore request needs (the carried map and instruction, and a manual request's authority).
+    const beforeWrite = () => {
+      check();
+      if (!marked) { marked = true; this.persist(input.sessionName, attempt.attemptId, { compactSending: true, restoreCarry: carry, operatorInitiated }); }
+    };
     const send = async () => {
       check();
-      this.persist(input.sessionName, attempt.attemptId, { compactSending: true });
       // Both paths send only to an idle seat, with the same idle wait, bounded by the attempt's existing
       // deadline. (The automatic path used to send into a seat still finishing its preparation turn.)
       // Idle comes from a live pane read: the newest hook can predate the rest of the preparation turn.
       return this.sessionTransport.send(input.sessionName, composed.command,
-        { openrigNotice: true, beforeWrite: check, ...(attempt.deadlineAt !== null ? { waitForIdleMs: Math.max(1, Math.min(this.compactSendIdleWaitMs, attempt.deadlineAt - this.now())), readinessFromPaneOnly: true } : {}) });
+        { openrigNotice: true, beforeWrite, ...(attempt.deadlineAt !== null ? { waitForIdleMs: Math.max(1, Math.min(this.compactSendIdleWaitMs, attempt.deadlineAt - this.now())), readinessFromPaneOnly: true } : {}) });
     };
     let result: Pick<SendResult, "ok" | "reason" | "outcome" | "sent" | "inputPhase">;
     let guardRefused = false;
@@ -1170,6 +1233,7 @@ export class ClaudeCompactionEnforcer {
       // Nothing sent: a guard refusal before input, a retained send, or the transport's explicit sent:false
       // for a send that never reached its write.
       const notSent = !writeAttempted && (guardRefused || result.outcome === "retained" || result.sent === false);
+      if (notSent && marked) this.persist(input.sessionName, attempt.attemptId, { compactSending: undefined });
       // Only a known pre-input idle deferral keeps the automatic attempt armed for a later poll; the transport
       // marks those `not_reached`. reconcilePreparations still ends it at the deadline or on an occupant change.
       if (attempt.mode === "automatic" && notSent && phase === "not_reached") {
@@ -1183,22 +1247,14 @@ export class ClaudeCompactionEnforcer {
     }
     attempt.compact = "submitted_unconfirmed";
     if (attempt.controller.signal.aborted) return { ok: false, reason: attempt.reason };
-    // Whatever the command could not carry, the restore request carries instead. An explicitly
-    // selected preparation root also keeps its exact map in that request, even when the command fit it.
-    if (skipMap || attempt.preparationRoot !== null || !composed.mapPathInCommand || !composed.instructionInCommand) {
-      this.restoreCarry.set(input.sessionName, {
-        mapPath: !skipMap && (attempt.preparationRoot !== null || !composed.mapPathInCommand) ? attempt.mapPath : null,
-        compactInstruction: composed.instructionInCommand ? null : attempt.compactInstruction,
-        ...(skipMap ? { skipMap: { mapPath: attempt.mapPath, marker: attempt.marker } } : {}),
-      });
-    } else this.restoreCarry.delete(input.sessionName);
+    if (carry) this.restoreCarry.set(input.sessionName, carry);
+    else this.restoreCarry.delete(input.sessionName);
     attempt.status = "compact-sent";
     this.lastAutoCompactAt.set(input.sessionName, this.now());
     this.triggeredAboveThreshold.add(input.sessionName);
     this.pendingPostCompactRestore.set(input.sessionName, "turn_boundary");
     this.pendingStageGeneration.set(input.sessionName, attempt.occupantGeneration);
-    this.persist(input.sessionName, attempt.attemptId, { phase: "turn_boundary", restoreCarry: this.restoreCarry.get(input.sessionName),
-      operatorInitiated: this.manualCompactionState.get(input.sessionName)?.operatorInitiated });
+    this.persist(input.sessionName, attempt.attemptId, { phase: "turn_boundary", restoreCarry: carry, operatorInitiated });
     return { ok: true };
   }
 
@@ -1262,12 +1318,13 @@ export class ClaudeCompactionEnforcer {
   /**
    * After a daemon restart, pick up the seat's managed compaction from the record beside its newest attempt, when an
    * earlier daemon process wrote it. This runs once per seat, and only when this daemon holds nothing for that seat.
-   * - An owed post-compact stage (turn boundary, restore, audit) is resumed.
+   * - An owed post-compact stage (turn boundary, restore, audit) is resumed, and so is the restore after a /compact that
+   *   was being sent or whose outcome was lost.
    * - An automatic preparation is waited on rather than begun again. A prompt whose delivery wasn't recorded may have
    *   reached the seat, so it is never sent again.
    * - A manual preparation stops, because its caller is gone.
-   * A record of another occupant is left alone. An open post-compact record older than the recovery window isn't
-   * resumed; it reads as stranded.
+   * A record of another occupant, or in any other shape (see `readCompactionRecord`), is left alone. An open post-compact
+   * record older than the recovery window isn't resumed; it reads as stranded, at the stage it owes.
    */
   recoverAfterRestart(input: { sessionName: string; cwd?: string | null; runtime: string | null }, preparationRoot: string | null): void {
     const session = input.sessionName;
@@ -1300,9 +1357,9 @@ export class ClaudeCompactionEnforcer {
     const live = this.resolveOccupantGeneration?.(session) ?? this.sessionTransport.deliveryGuard?.maybeTarget(session)?.occupant ?? null;
     if (record.occupantGeneration !== null && live !== null && live !== record.occupantGeneration) return;
     const stale = this.now() - record.updatedAt > this.restartRecoveryWindowMs;
-    // A /compact whose send had begun is never sent again; its restore steps are owed in case it ran. The restore request
-    // tells a seat that didn't compact to say so and skip.
-    const phase = record.phase === "preparing" && record.compactSending ? "turn_boundary" : record.phase;
+    // A /compact whose send had begun, or whose outcome was lost, is never sent again; its restore steps are owed in case it
+    // ran. The restore request tells a seat that didn't compact to say so and skip.
+    const phase = (record.phase === "preparing" && record.compactSending) || record.phase === "compact_uncertain" ? "turn_boundary" : record.phase;
     if (phase === "preparing") {
       if (stale) return; // Its preparation deadline passed long ago; a fresh attempt may begin.
       this.records.set(session, newest);
@@ -1319,7 +1376,7 @@ export class ClaudeCompactionEnforcer {
       if (record.mode === "manual") this.stopPreparation(session, "daemon_restarted");
       return;
     }
-    if (stale) { this.stranded.set(session, record); return; }
+    if (stale) { this.stranded.set(session, { ...record, phase }); return; }
     this.records.set(session, newest);
     this.pendingPostCompactRestore.set(session, phase);
     this.pendingStageGeneration.set(session, record.occupantGeneration);
@@ -1336,7 +1393,7 @@ export class ClaudeCompactionEnforcer {
     const attempt = this.pendingPreCompactPrep.get(session);
     if ((expected && expected !== attempt) || !attempt || attempt.status === "stopped" || attempt.status === "compact-sent") return;
     attempt.status = "stopped"; attempt.reason = reason; attempt.stoppedAt = this.now(); attempt.controller.abort();
-    this.persist(session, attempt.attemptId, { phase: "ended" });
+    this.persist(session, attempt.attemptId, { phase: attempt.compact === "uncertain" ? "compact_uncertain" : "ended" });
     if (attempt.mode === "manual") this.setManualStage(session, "skipped-or-failed", reason);
   }
 
@@ -1357,7 +1414,11 @@ export class ClaudeCompactionEnforcer {
       this.pendingStageGeneration.delete(session);
       this.restoreCarry.delete(session);
       this.setManualStage(session, "cancelled", "compaction_cancelled");
-    } else this.stopPreparation(session, "preparation_cancelled");
+    } else {
+      this.stopPreparation(session, "preparation_cancelled");
+      // A cancel also ends an uncertain /compact's owed restore, so a restart doesn't resume it.
+      if (attempt?.compact === "uncertain") this.persistStage(session, "ended");
+    }
     return this.getPreparationState(session);
   }
 

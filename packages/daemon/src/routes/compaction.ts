@@ -53,14 +53,7 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
     }
 
     // Resolve the DB node id + runtime for the latest session row.
-    const row = db.prepare(`
-      SELECT n.id AS node_id, n.runtime AS runtime, n.cwd AS cwd
-      FROM sessions s
-      JOIN nodes n ON s.node_id = n.id
-      WHERE s.session_name = ?
-      ORDER BY s.id DESC
-      LIMIT 1
-    `).get(sessionName) as { node_id: string; runtime: string | null; cwd: string | null } | undefined;
+    const row = latestSeatNode(db, sessionName);
     if (!row) {
       return c.json({
         ok: false,
@@ -142,15 +135,33 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
     if (!session) {
       return c.json({ ok: false, error: "Missing required query param: session" }, 400);
     }
+    // After a restart, the first look at a seat picks up its record, as the context monitor's first poll would.
+    const db = c.get("db" as never) as Database.Database | undefined;
+    const seat = db ? latestSeatNode(db, session) : undefined;
+    if (seat) enforcer.recoverSeat({ sessionName: session, cwd: seat.cwd, runtime: seat.runtime });
     const preparation = enforcer.getPreparationState(session);
+    const stranded = enforcer.getStrandedCompaction(session);
     return c.json({ ok: true, session, state: enforcer.getManualCompactionState(session), preparation,
       ...(preparation ? { compact: compactResultText(preparation.compact) } : {}),
       ...(preparation?.reason === "occupant_generation_unavailable"
         ? { guidance: manualReasonMessage(session, preparation.reason) } : {}),
+      ...(stranded ? { stranded: { ...stranded, detail: "This seat's managed compaction is from before an OpenRig restart and too old for OpenRig to resume, so its restore steps may still be owed. If it compacted or you can't tell, send it a normal restore request naming mapPath, asking it to skip reading if it did not compact." } } : {}),
     });
   });
 
   return router;
+}
+
+/** The node behind a session's latest row: its id, runtime and launch workspace. */
+function latestSeatNode(db: Database.Database, sessionName: string): { node_id: string; runtime: string | null; cwd: string | null } | undefined {
+  return db.prepare(`
+    SELECT n.id AS node_id, n.runtime AS runtime, n.cwd AS cwd
+    FROM sessions s
+    JOIN nodes n ON s.node_id = n.id
+    WHERE s.session_name = ?
+    ORDER BY s.id DESC
+    LIMIT 1
+  `).get(sessionName) as { node_id: string; runtime: string | null; cwd: string | null } | undefined;
 }
 
 function manualOutcomeMessage(sessionName: string, outcome: Extract<ManualCompactionOutcome, { triggered: false }>): string {

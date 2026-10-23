@@ -101,7 +101,7 @@ already submitted. Raw provider /compact and normal messages are unchanged.`);
     const stage = res.data["stage"] as string | undefined;
     const compact = res.data["compact"] as string | undefined;
     console.log(`Manual compaction for ${session}: ${compact ?? "submitted, unconfirmed"}${stage ? ` (stage: ${stage})` : ""}`);
-    console.log("The restore + read-depth audit prompts follow automatically as the seat drains below threshold, unless the daemon restarts first.");
+    console.log("The restore + read-depth audit prompts follow automatically as the seat drains below threshold, and a daemon restart picks them up where they stopped (rig compact --state shows one too old to resume).");
   });
 
   return cmd;
