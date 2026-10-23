@@ -184,20 +184,32 @@ describe("OMP executable resolution before the seat HOME applies", () => {
 
   it("resolves a mise shim to the real binary using the operator HOME", () => {
     const fake = ops({ [shim]: "/home/op/.local/bin/mise", [real]: real });
-    expect(resolveRuntimeExecutable("omp", { PATH: "/usr/bin:/home/op/.local/share/mise/shims", HOME: "/home/op" }, fake)).toEqual({ ok: true, path: real });
+    expect(resolveRuntimeExecutable("omp", { PATH: "/usr/bin:/home/op/.local/share/mise/shims", HOME: "/home/op" }, fake, "linux")).toEqual({ ok: true, path: real });
     expect(fake.runs).toEqual([["/home/op/.local/bin/mise", "which", "omp", "HOME=/home/op"]]);
   });
 
   it("returns a plain binary's real path without running it", () => {
     const fake = ops({ "/opt/bin/omp": "/opt/omp/omp" });
-    expect(resolveRuntimeExecutable("omp", { PATH: "relative:/opt/bin" }, fake)).toEqual({ ok: true, path: "/opt/omp/omp" });
+    expect(resolveRuntimeExecutable("omp", { PATH: "relative:/opt/bin" }, fake, "linux")).toEqual({ ok: true, path: "/opt/omp/omp" });
     expect(fake.runs).toEqual([]);
+  });
+  it("selects the Windows native executable while ignoring relative entries and batch shims", () => {
+    const binary = "C:\\native\\omp.exe";
+    const fake = ops({ "C:\\shims\\omp.cmd": "C:\\shims\\omp.cmd", [binary]: binary });
+    expect(resolveRuntimeExecutable("omp", { PATH: "relative;C:\\shims;C:\\native" }, fake, "win32")).toEqual({ ok: true, path: binary });
+    expect(fake.runs).toEqual([]);
+  });
+  it("resolves a Windows mise shim using the operator environment", () => {
+    const shim = "C:\\shims\\omp.exe", mise = "C:\\tools\\mise.exe", binary = "C:\\installs\\omp.exe";
+    const fake = ops({ [shim]: mise, [binary]: binary }, binary);
+    expect(resolveRuntimeExecutable("omp", { PATH: "C:\\shims", HOME: "C:\\operator" }, fake, "win32")).toEqual({ ok: true, path: binary });
+    expect(fake.runs).toEqual([[mise, "which", "omp", "HOME=C:\\operator"]]);
   });
 
   it("fails as a launch error when omp is missing or the shim maps nowhere", () => {
-    expect(resolveRuntimeExecutable("omp", { PATH: "/usr/bin" }, ops({}))).toMatchObject({ ok: false, error: expect.stringMatching(/not found on PATH/) });
+    expect(resolveRuntimeExecutable("omp", { PATH: "/usr/bin" }, ops({}), "linux")).toMatchObject({ ok: false, error: expect.stringMatching(/not found on PATH/) });
     const broken = ops({ [shim]: "/home/op/.local/bin/mise" }, "");
-    expect(resolveRuntimeExecutable("omp", { PATH: "/home/op/.local/share/mise/shims" }, broken)).toMatchObject({ ok: false, error: expect.stringMatching(/mise which omp/) });
+    expect(resolveRuntimeExecutable("omp", { PATH: "/home/op/.local/share/mise/shims" }, broken, "linux")).toMatchObject({ ok: false, error: expect.stringMatching(/mise which omp/) });
   });
 
   it("returns a launch failure if the mise target disappears during resolution", () => {
@@ -206,7 +218,7 @@ describe("OMP executable resolution before the seat HOME applies", () => {
       if (p === real) throw new Error("ENOENT: target removed");
       return "/home/op/.local/bin/mise";
     };
-    expect(resolveRuntimeExecutable("omp", { PATH: "/home/op/.local/share/mise/shims" }, fake)).toMatchObject({ ok: false, error: expect.stringContaining("ENOENT") });
+    expect(resolveRuntimeExecutable("omp", { PATH: "/home/op/.local/share/mise/shims" }, fake, "linux")).toMatchObject({ ok: false, error: expect.stringContaining("ENOENT") });
   });
 });
 

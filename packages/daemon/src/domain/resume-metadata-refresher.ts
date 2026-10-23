@@ -17,7 +17,7 @@ import {
 } from "./native-resume-probe.js";
 import { runAsyncSite } from "./sync-site-wrap.js";
 import { isClaudeSidecarFromEarlierProcess, type ResumeTokenCaptureDeps } from "./resume-token-capture.js";
-import { observeClaudePaneRuntime, type NativeProcessLister } from "./native-process-lineage.js";
+import { observeClaudePaneRuntime, readWindowsProcessesStrict, type NativeProcessLister } from "./native-process-lineage.js";
 import { validateResumeToken } from "./resume-token-validation.js";
 import { readProcessTable } from "./process-table.js";
 
@@ -449,8 +449,8 @@ export async function defaultListProcessesStrict(): Promise<Array<{ pid: number;
   // startedAt = the process START TIME — the identity half of pid+start-time
   // (r1's pid-reuse remedy): a reused pid changes it, so a consumer
   // holding last cycle's identity can invalidate without any extra spawn.
-  const rows = await runAsyncSite("resume_metadata.list_processes", readProcessTable);
-  return rows.map(({ pid, ppid, startedAt, command }) => ({ pid, ppid, startedAt, command }));
+  const rows = await runAsyncSite("resume_metadata.list_processes", process.platform === "win32" ? readWindowsProcessesStrict : readProcessTable);
+  return rows.map(({ pid, ppid, startedAt, command }) => ({ pid, ppid, startedAt: startedAt!, command }));
 }
 
 function findCodexDescendantPids(

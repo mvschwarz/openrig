@@ -40,7 +40,7 @@ echo "[6/6] Assembling package..."
 # build-info module into EACH package's dist (per-package generated modules;
 # the committed src/build-info.ts files stay the honest dev stubs). No
 # runtime cross-package import.
-STAMP_SEMVER="$(node -p "require('$CLI_DIR/package.json').version")"
+STAMP_SEMVER="$(cd "$CLI_DIR" && node -p "require('./package.json').version")"
 STAMP_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 # DIRTY = the BUILD INPUTS differ from the commit, not "the working dir has scratch in it".
 # Bare `git status --porcelain` counts UNTRACKED files repo-wide, so ordinary scratch

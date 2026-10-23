@@ -23,6 +23,13 @@ import type { ViewState, ViewStateStore } from "./types.js";
 /** macOS sun_path caps unix-socket paths at ~104 bytes; guard with margin. */
 export const MAX_SOCKET_PATH_BYTES = 100;
 
+/** Windows IPC has a flat pipe namespace, not filesystem Unix sockets. */
+export function controlEndpoint(socketPath: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform !== "win32" || /^\\\\[.?]\\pipe\\/i.test(socketPath)) return socketPath;
+  const identity = createHash("sha256").update(path.resolve(socketPath).toLowerCase()).digest("hex");
+  return `\\\\.\\pipe\\openrig-tui-${identity}`;
+}
+
 export function describeState(state: ViewState) {
   const named = new Map(state.drill.map((item) => [item.kind, item.name]));
   const mission = state.scopesSelected?.mission ?? state.scopesMission ?? undefined;
@@ -94,10 +101,15 @@ interface ControlSocketOptions {
 }
 
 export async function createControlSocket(options: ControlSocketOptions): Promise<ControlSocket> {
+  const endpoint = controlEndpoint(options.socketPath);
+  options = { ...options, socketPath: endpoint };
   try {
     return await createReservedControlSocket(options);
   } catch (error) {
     if (!options.fallbackOnCollision || (error as NodeJS.ErrnoException).code !== "EADDRINUSE") throw error;
+    if (process.platform === "win32") {
+      return createReservedControlSocket({ ...options, socketPath: `${endpoint}-${process.pid}-${randomUUID()}` });
+    }
     const directory = path.dirname(options.socketPath);
     const suffix = `-${process.pid}-${randomUUID().slice(0, 8)}.sock`;
     const budget = MAX_SOCKET_PATH_BYTES - Buffer.byteLength(directory + path.sep + suffix);
@@ -187,12 +199,12 @@ async function createReservedControlSocket(options: ControlSocketOptions): Promi
   const { socketPath, view, onMutation } = options;
   const currentContext = options.currentContext ?? (() => "standard");
   const bytes = Buffer.byteLength(socketPath);
-  if (bytes > MAX_SOCKET_PATH_BYTES) {
+  if (process.platform !== "win32" && bytes > MAX_SOCKET_PATH_BYTES) {
     throw new Error(
       `socket path too long (${bytes} bytes; unix sun_path caps ~104): ${socketPath} — use a short runtime dir (default: $OPENRIG_HOME/run)`,
     );
   }
-  fs.mkdirSync(path.dirname(socketPath), { recursive: true });
+  if (process.platform !== "win32") fs.mkdirSync(path.dirname(socketPath), { recursive: true });
 
   const server = net.createServer((conn) => {
     let buf = "";
@@ -238,6 +250,9 @@ async function createReservedControlSocket(options: ControlSocketOptions): Promi
     await listen();
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE") throw error;
+    // A live Windows pipe is owned by its server and disappears on exit.
+    // Never apply filesystem stale-socket unlink/recovery to this namespace.
+    if (process.platform === "win32") throw error;
     // All supported recoverers reserve this path before probing/unlinking.
     const reservation = `${socketPath}.recovery.lock`;
     const releaseReservation = acquireRecoveryReservation(reservation);

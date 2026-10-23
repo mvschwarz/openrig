@@ -61,7 +61,7 @@ console.log(JSON.stringify({env:{HOME:process.env.HOME,CLAUDE_CONFIG_DIR:dir}, s
     CREATE TABLE occupant_tenures(node_id TEXT, generation_uuid TEXT, generation_ordinal INTEGER);`);
   db.prepare("INSERT INTO nodes VALUES ('node','claude-code',?)").run(cwd);
   db.exec("INSERT INTO bindings VALUES ('binding','node','seat','%1'); INSERT INTO occupant_tenures VALUES ('node','generation',1)");
-  const managed = new ClaudeManagedLaunch(db, env, {});
+  const managed = new ClaudeManagedLaunch(db, env, {}, undefined, undefined, "linux");
   const reads: string[] = [], writes: string[] = [], launches: any[] = [];
   const fsOps: ClaudeAdapterFsOps = {
     homedir: daemonHome, exists: fs.existsSync, mkdirp: p => { fs.mkdirSync(p, { recursive: true }); },

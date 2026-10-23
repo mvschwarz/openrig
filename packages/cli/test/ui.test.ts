@@ -46,6 +46,7 @@ function runningState(port: number): DaemonState {
 
 function runningDeps(port: number, execFn?: UiDeps["exec"]): UiDeps {
   return {
+    platform: "darwin",
     lifecycleDeps: mockLifecycleDeps({
       exists: vi.fn((p: string) => p === STATE_FILE),
       readFile: vi.fn((p: string) => {
@@ -117,6 +118,7 @@ describe("rig ui open", () => {
     try {
       const execFn = vi.fn(async () => {});
       const deps: UiDeps = {
+        platform: "darwin",
         lifecycleDeps: mockLifecycleDeps({
           exists: vi.fn(() => false),
           fetch: vi.fn(async (url: string) => {
@@ -158,6 +160,7 @@ describe("rig ui open", () => {
   it("busy daemon -> opens the UI URL", async () => {
     const execFn = vi.fn(async () => {});
     const deps: UiDeps = {
+      platform: "darwin",
       lifecycleDeps: mockLifecycleDeps({
         exists: vi.fn((p: string) => p === STATE_FILE),
         readFile: vi.fn((p: string) => {
@@ -236,6 +239,7 @@ describe("rig ui open", () => {
       const execFn = vi.fn(async () => {});
       // Daemon is down (no state file)
       const deps: UiDeps = {
+        platform: "darwin",
         lifecycleDeps: mockLifecycleDeps({ exists: vi.fn(() => false) }),
         exec: execFn,
       };

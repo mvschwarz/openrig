@@ -18,7 +18,7 @@
     "test:ui": "npm run test -w packages/ui",
     "typecheck:prep": "npm run build -w packages/daemon",
     "lint": "npm run typecheck:prep && tsc --noEmit --project packages/daemon/tsconfig.json && tsc --noEmit --project packages/ui/tsconfig.json && tsc --noEmit --project packages/cli/tsconfig.json && tsc --noEmit --project packages/tui/tsconfig.json",
-    "build:package": "bash scripts/build-package.sh",
+    "build:package": "node scripts/run-package-build.mjs",
     "test:tui-package": "node scripts/test-tui-package.mjs",
     "mirror-skills": "node scripts/mirror-skills.mjs",
     "mirror-skills:check": "node scripts/mirror-skills.mjs --check",

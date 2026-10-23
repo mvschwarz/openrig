@@ -15,6 +15,7 @@ export async function createDaemon({ dbPath }) {
   const { EventBus } = await load('domain/event-bus');
   const { WatchdogScheduler } = await load('domain/watchdog-scheduler');
   const { SlowOpRecorder } = await load('domain/slow-op-recorder');
+  const { TmuxAdapter } = await load('adapters/tmux');
   const db = createDb(dbPath); migrate(db, ALL_MIGRATIONS);
   const store = new DaemonLifecycleStore(db);
   const epoch = `fixture-${process.pid}`; store.recordBoot(epoch, new Date().toISOString());
@@ -44,6 +45,7 @@ export async function createDaemon({ dbPath }) {
       });
     },
     deps: {
+      tmuxAdapter: new TmuxAdapter(async () => ''),
       rigRepo: { db }, settingsStore: { resolveOne: () => ({ value: false }) },
       psProjectionService: { setPeriodicSnapshotState() {} },
       watchdogScheduler: scheduler, slowOpRecorder: recorder,

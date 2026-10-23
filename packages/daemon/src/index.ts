@@ -2,7 +2,7 @@ import { serve, type ServerType } from "@hono/node-server";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { endProbeGroupsOnStartupSignal, stopRuntimeProbes } from "./adapters/bounded-probe-exec.js";
-import { closeHttpServer, createDaemonShutdown, DAEMON_SHUTDOWN_RECEIPT, trackHttpServerResponses } from "./daemon-shutdown.js";
+import { closeHttpServer, createDaemonShutdown, DAEMON_SHUTDOWN_RECEIPT, trackHttpServerResponses, startWindowsDaemonControl } from "./daemon-shutdown.js";
 import { readOpenRigEnv, OPENRIG_HOME } from "./openrig-compat.js";
 import { makeOperatorDeliveryEngine } from "./domain/gateway/operator-delivery-engine.js";
 import { resolveDaemonDbPath } from "./daemon-db-path.js";
@@ -383,9 +383,11 @@ export async function startServer(port?: number) {
   // exit so any in-flight policy evaluation completes (or is awaited).
   // Multi-bind: close every serve() instance in parallel.
   deps.healthDiagnosis?.start();
+  let closeWindowsControl: (() => Promise<void>) | undefined;
   const shutdown = createDaemonShutdown({
     receiptPath: path.join(OPENRIG_HOME, DAEMON_SHUTDOWN_RECEIPT),
     phases: [
+      ["windows-control", () => closeWindowsControl?.()],
       ["timers", () => {
         deps.resumeMetadataRefresher?.stop();
         if (heartbeatTimer) clearInterval(heartbeatTimer);
@@ -421,6 +423,7 @@ export async function startServer(port?: number) {
   disarmStartupSignals();
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
+  if (process.platform === "win32") closeWindowsControl = await startWindowsDaemonControl(OPENRIG_HOME, () => shutdown("Windows control"));
 
   // Backward-compatible single-server return (callers that just need a
   // handle reference; multi-bind shutdown is wired via signal handlers).

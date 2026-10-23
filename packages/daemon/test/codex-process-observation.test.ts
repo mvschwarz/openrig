@@ -14,7 +14,7 @@ afterEach(() => {
   if (scratch) fs.rmSync(scratch, { recursive: true, force: true });
 });
 
-it("reads foreground identity through the real async executable and parser path", async () => {
+it.skipIf(process.platform === "win32")("reads foreground identity through the real async executable and parser path", async () => {
   // ps is the process table's source off Linux.
   Object.defineProperty(process, "platform", { value: "darwin" });
   scratch = fs.mkdtempSync(path.join(os.tmpdir(), "codex-process-read-"));
@@ -82,9 +82,15 @@ it("reads this test process with the installed ps columns, without starting a pr
   const self = rows.find((r) => r.pid === process.pid);
   expect(self).toBeDefined();
   expect(self!.ppid).toBe(process.ppid);
-  expect(self!.pgid).toBeGreaterThan(0);
-  expect(Number.isInteger(self!.tpgid)).toBe(true);
+  if (process.platform === "win32") {
+    expect(self!.platform).toBe("win32");
+    expect(self!.pgid).toBeUndefined();
+    expect(Number.isFinite(Date.parse(self!.startedAt!))).toBe(true);
+  } else {
+    expect(self!.pgid).toBeGreaterThan(0);
+    expect(Number.isInteger(self!.tpgid)).toBe(true);
+    expect(self!.startedAt).toMatch(/\d{2}:\d{2}:\d{2}.*\d{4}/);
+  }
   expect(self!.executableName).toBeTruthy();
   expect(self!.command).toBeTruthy();
-  expect(self!.startedAt).toMatch(/\d{2}:\d{2}:\d{2}.*\d{4}/);
 });

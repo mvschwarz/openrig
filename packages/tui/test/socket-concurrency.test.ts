@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { controlEndpoint } from "../src/socket-server.js";
 
 async function line(child: ChildProcessWithoutNullStreams): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -40,7 +41,7 @@ async function query(socketPath: string): Promise<string> {
   } finally { client.destroy(); }
 }
 
-it("two processes recovering one stale socket cannot unlink a live replacement", async () => {
+it.skipIf(process.platform === "win32")("two processes recovering one stale Unix socket cannot unlink a live replacement", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "opr-race-"));
   const socketPath = path.join(root, "control.sock");
   const source = fileURLToPath(new URL("../dist/socket-server.js", import.meta.url));
@@ -127,27 +128,38 @@ it("two standalone TUIs stay usable and expose the second control path without r
   };
   try {
     const socketPath = path.join(root, "run", "tui-tui-1.sock");
+    const endpoint = controlEndpoint(socketPath);
     const first = launch();
-    await waitFor(first, () => fs.existsSync(socketPath));
-    const original = fs.lstatSync(socketPath);
+    await waitFor(first, () => process.platform === "win32" ? outputs.get(first)!.includes(`socket: [copy] ${endpoint}`) : fs.existsSync(socketPath));
+    const original = process.platform === "win32" ? undefined : fs.lstatSync(socketPath);
     const second = launch();
-    let alternate: string | undefined;
-    await waitFor(second, () => {
-      alternate = fs.readdirSync(path.dirname(socketPath)).find(name => name.endsWith(".sock") && name !== path.basename(socketPath));
-      return !!alternate;
-    });
-    const secondPath = path.join(root, "run", alternate!);
-    await waitFor(second, () => outputs.get(second)!.includes(`socket: [copy] ${secondPath}`));
+    let secondPath: string;
+    if (process.platform === "win32") {
+      await waitFor(second, () => outputs.get(second)!.includes("socket: [copy] \\\\.\\pipe\\"));
+      second.stdin.write("\x1b[<0;10;32M");
+      await waitFor(second, () => /Control socket\r\n\r\n([^\r\n]+)\r\n/.test(outputs.get(second)!));
+      secondPath = /Control socket\r\n\r\n([^\r\n]+)\r\n/.exec(outputs.get(second)!)![1]!;
+      expect(secondPath).not.toBe(endpoint);
+      second.stdin.write("\n");
+    } else {
+      let alternate: string | undefined;
+      await waitFor(second, () => {
+        alternate = fs.readdirSync(path.dirname(socketPath)).find(name => name.endsWith(".sock") && name !== path.basename(socketPath));
+        return !!alternate;
+      });
+      secondPath = path.join(root, "run", alternate!);
+      await waitFor(second, () => outputs.get(second)!.includes(`socket: [copy] ${secondPath}`));
+    }
     expect(second.exitCode).toBeNull();
-    expect(fs.lstatSync(socketPath).ino).toBe(original.ino);
-    expect(await query(socketPath)).toBe("tui-1");
+    if (original) expect(fs.lstatSync(socketPath).ino).toBe(original.ino);
+    expect(await query(endpoint)).toBe("tui-1");
     expect(await query(secondPath)).toBe("tui-1");
     // Send a genuine SGR mouse click on the status copy label through stdin.
     second.stdin.write("\x1b[<0;10;32M");
     await waitFor(second, () => outputs.get(second)!.includes(`\r\nControl socket\r\n\r\n${secondPath}\r\n`));
     second.stdin.write("\n");
     await stop(second);
-    expect(await query(socketPath)).toBe("tui-1");
+    expect(await query(endpoint)).toBe("tui-1");
   } finally {
     await Promise.all(launched.map(stop));
     fs.rmSync(root, { recursive: true, force: true });
@@ -155,7 +167,7 @@ it("two standalone TUIs stay usable and expose the second control path without r
 }, 15000);
 
 
-it.each([false, true])("recovers after a killed reservation owner without removing a concurrent replacement (delayed=$delayed)", async (delayed) => {
+it.skipIf(process.platform === "win32").each([false, true])("recovers after a killed Unix reservation owner without removing a concurrent replacement (delayed=$delayed)", async (delayed) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "opr-killed-"));
   const socketPath = path.join(root, "control.sock");
   const source = fileURLToPath(new URL("../dist/socket-server.js", import.meta.url));
@@ -230,7 +242,7 @@ it.each([false, true])("recovers after a killed reservation owner without removi
 }, 10_000);
 
 
-it("recovers after a process is killed while reclaiming an abandoned reservation", async () => {
+it.skipIf(process.platform === "win32")("recovers after a process is killed while reclaiming an abandoned Unix reservation", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "opr-reclaimer-"));
   const socketPath = path.join(root, "control.sock");
   const source = fileURLToPath(new URL("../dist/socket-server.js", import.meta.url));

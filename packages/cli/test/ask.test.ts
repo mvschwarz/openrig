@@ -5,6 +5,7 @@ import { askCommand } from "../src/commands/ask.js";
 import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
+import { allowFetchTarget } from "./fetch-guard.js";
 
 function mockLifecycleDeps(): LifecycleDeps {
   return {
@@ -131,6 +132,7 @@ describe("Ask CLI", () => {
     });
     await new Promise<void>((resolve) => { server.listen(0, resolve); });
     port = (server.address() as { port: number }).port;
+    allowFetchTarget(`http://127.0.0.1:${port}`);
   });
 
   afterAll(() => { server.close(); });
