@@ -226,7 +226,7 @@ describe("an edge receipt names the routing it moves", () => {
   });
 
   it("an archived earlier generation with the rig's name doesn't hide that change", async () => {
-    // A relaunch archives the stopped earlier generation and creates the new rig under the same name.
+    // An archived rig with the same name, such as the earlier generation a relaunch archives.
     setup.rigRepo.archiveRig(setup.rigRepo.createRig("route-rig").id);
     expect(resolveRigRepresentative(db, "route-rig")).toBe("orch-lead@route-rig");
     const added = await (await add("ops.old", "dev.build")).json() as Receipt;

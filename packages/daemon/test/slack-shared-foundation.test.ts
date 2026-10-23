@@ -72,7 +72,8 @@ describe("a rig's representative", () => {
     // The Slack subsystem's own composition, for a person's top-level message in the rig's mapped channel.
     const cfg = { channel: "C0MACHINE", channelMap: [{ match: "workshop", channel: "C0WS" }] };
     expect(resolveInboundChannelDestination(cfg, "C0WS", (rig) => resolveRigRepresentative(db, rig))).toBe("orch-lead@workshop");
-    // Archived generations alone don't resolve: their seats are stopped, so the message goes to the inbound destination.
+    // A name resolves among unarchived rigs only, as the CLI's rig handles do, so archived rigs alone send the message to the
+    // inbound destination. An archived rig stays reachable by id and by its threads.
     db.prepare("UPDATE rigs SET archived_at = '2026-10-23 00:00:00' WHERE id = 'rig-w'").run();
     expect(resolveRigRepresentative(db, "workshop")).toBeNull();
   });
