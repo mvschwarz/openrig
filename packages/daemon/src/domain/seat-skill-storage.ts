@@ -683,8 +683,11 @@ export function writeSeatSkillCatalog(paths: SeatSkillPaths): SeatSkillCatalog {
   return { path: paths.catalogPath, digest, count };
 }
 
+/** The startup file, and the managed block id, that carry the bootstrap line into a seat's guidance file. */
+export const SEAT_SKILLS_BOOTSTRAP_BLOCK_ID = "openrig-seat-skills.md";
+
 /** OPR.0.7.0.13 (router, R1.1): the one constant bootstrap line, verbatim. The guidance asset carries exactly this text. */
-export const SEAT_SKILLS_BOOTSTRAP_LINE = "OpenRig seat skills: if `OPENRIG_SESSION_NAME` is set, run `rig skill loadout --seat self` and use the router skill it names; if it isn't set, this line doesn't apply to you.";
+export const SEAT_SKILLS_BOOTSTRAP_LINE ="OpenRig seat skills: if `OPENRIG_SESSION_NAME` is set, run `rig skill loadout --seat self` and use the router skill it names; if it isn't set, this line doesn't apply to you.";
 
 export interface FootprintSeat { seat: string; runtime: string; cwd: string; claudeManagedBlockFile?: string | null }
 export interface SkillRouterFootprint {

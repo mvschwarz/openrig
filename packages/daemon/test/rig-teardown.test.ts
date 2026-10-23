@@ -16,6 +16,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { MANAGED_BLOCK_START, mergeManagedBlock } from "../src/domain/managed-blocks.js";
+import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, SEAT_SKILLS_BOOTSTRAP_LINE } from "../src/domain/seat-skill-storage.js";
 
 
 function mockTmux(killResult?: { ok: boolean; code?: string; message?: string }): TmuxAdapter {
@@ -517,6 +519,39 @@ describe("RigTeardownOrchestrator", () => {
     tmux.killSession = vi.fn(async () => ({ ok: true }));
     await buildTeardown(tmux).teardown(rigId);
     expect(fs.readFileSync(guidance, "utf-8")).toBe("Operator notes\n");
+  });
+
+  // The seat-skills line's block goes at down only while it still holds the line; a person's edit is kept and named.
+  it.each([
+    ["claude-code", "CLAUDE.md"], ["codex", "AGENTS.md"],
+  ] as const)("keeps a person's edit to the seat-skills line in a %s seat's %s and reports it; an unedited line goes", async (runtime, fileName) => {
+    const writer = { exists: (p: string) => fs.existsSync(p), readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c) };
+    const asset = fs.readFileSync(path.join(import.meta.dirname, "../assets/guidance/openrig-seat-skills.md"), "utf-8");
+    const personal = "# Personal instructions\nPreserve these exact bytes.\n";
+    for (const edited of [false, true]) {
+      const cwd = fs.mkdtempSync(path.join(tmpDir, `${runtime}-`));
+      const guidance = path.join(cwd, fileName);
+      fs.writeFileSync(guidance, personal);
+      mergeManagedBlock(writer, guidance, "CULTURE.md", "culture text");
+      mergeManagedBlock(writer, guidance, SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, asset);
+      if (edited) fs.writeFileSync(guidance, fs.readFileSync(guidance, "utf-8").replace(SEAT_SKILLS_BOOTSTRAP_LINE, `${SEAT_SKILLS_BOOTSTRAP_LINE} PERSON LINE EDIT`));
+      const rig = rigRepo.createRig(`line-${runtime}-${edited}`);
+      const node = rigRepo.addNode(rig.id, "dev", { runtime, cwd });
+      sessionRegistry.updateStatus(sessionRegistry.registerSession(node.id, `dev@line-${runtime}-${edited}`).id, "running");
+
+      const result = await buildTeardown().teardown(rig.id);
+
+      const after = fs.readFileSync(guidance, "utf-8");
+      if (!edited) {
+        expect(after).toBe(personal);
+        expect(result.keptGuidance).toBeUndefined();
+      } else {
+        expect(after.startsWith(personal)).toBe(true);
+        expect(after).toContain(`${MANAGED_BLOCK_START(SEAT_SKILLS_BOOTSTRAP_BLOCK_ID)}\n${SEAT_SKILLS_BOOTSTRAP_LINE} PERSON LINE EDIT`);
+        expect(after).not.toContain("culture text");
+        expect(result.keptGuidance).toEqual([`${guidance}: ${SEAT_SKILLS_BOOTSTRAP_BLOCK_ID}`]);
+      }
+    }
   });
 
   it.each(["kill_failed", "transport_unavailable"] as const)("keeps guidance when termination is unconfirmed: %s", async failure => {

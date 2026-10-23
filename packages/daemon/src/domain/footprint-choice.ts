@@ -18,6 +18,8 @@ export type RouterLineFileOutcome =
   // The delivery succeeded; it can't tell a changed file from one already holding the line, so it isn't "written".
   | { path: string; outcome: "delivered" }
   | { path: string; outcome: "skipped"; reason: "answer_no" | "answer_unasked" | "answer_environment_no" | "answer_unreadable" }
+  // The guidance file is a symbolic link; the line isn't written through it.
+  | { path: string; outcome: "linked" }
   | { path: string; outcome: "unwritable"; error: string };
 export interface RouterLineWriteResult { answer: FootprintAnswer | null; files: RouterLineFileOutcome[] }
 

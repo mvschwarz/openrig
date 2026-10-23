@@ -322,6 +322,21 @@ describe("Down CLI", () => {
     expect(exitCode).toBeUndefined();
   });
 
+  it("names each edited OpenRig guidance block it kept", async () => {
+    responseOverride = {
+      status: 200,
+      body: {
+        rigId: "rig-1", sessionsKilled: 1, snapshotId: null, deleted: false, deleteBlocked: false, alreadyStopped: false, errors: [],
+        keptGuidance: ["/work/project/CLAUDE.md: openrig-seat-skills.md"],
+      },
+    };
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "down", "rig-1"]);
+    });
+    expect(logs).toContain("Kept 1 edited OpenRig block(s) in guidance files; remove them by hand if you don't want them:");
+    expect(logs).toContain("  /work/project/CLAUDE.md: openrig-seat-skills.md");
+  });
+
   it.each([
     { rigName: "workshop", isUniqueName: false },
     {},

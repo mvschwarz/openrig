@@ -86,6 +86,8 @@ interface TeardownResult {
   errors: string[];
   /** Team skill files kept in seats' own storage: edited, or never recorded as OpenRig's. */
   keptSkills?: string[];
+  /** Managed guidance blocks a person edited, kept in their file as `<file>: <block id>`. */
+  keptGuidance?: string[];
   /** Seats joined with `rig attach` as an external CLI, which OpenRig doesn't stop. */
   leftRunning?: string[];
 }
@@ -284,6 +286,10 @@ the command warns and exits without stopping; re-run with --yes to confirm expli
       if (result.keptSkills && result.keptSkills.length > 0) {
         console.log(`Kept ${result.keptSkills.length} team skill file(s) in the seats' own storage: edited, or not recorded as OpenRig's:`);
         for (const file of result.keptSkills) console.log(`  ${file}`);
+      }
+      if (result.keptGuidance && result.keptGuidance.length > 0) {
+        console.log(`Kept ${result.keptGuidance.length} edited OpenRig block(s) in guidance files; remove them by hand if you don't want them:`);
+        for (const block of result.keptGuidance) console.log(`  ${block}`);
       }
 
       if (result.leftRunning && result.leftRunning.length > 0) {

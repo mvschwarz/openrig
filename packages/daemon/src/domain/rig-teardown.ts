@@ -11,7 +11,7 @@ import nodePath from "node:path";
 import { removeManagedBlocksFromFile, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE } from "./managed-blocks.js";
 import { stopTranscriptRotation } from "./transcript-rotation.js";
 import { findOtherSessionOwner } from "./session-owner.js";
-import { cleanSeatSkills, seatSkillPaths } from "./seat-skill-storage.js";
+import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, SEAT_SKILLS_BOOTSTRAP_LINE, cleanSeatSkills, seatSkillPaths } from "./seat-skill-storage.js";
 import { settleAutomaticRestore } from "./existing-rig-restore.js";
 
 export interface TeardownResult {
@@ -25,6 +25,9 @@ export interface TeardownResult {
   /** OPR.0.7.0.13: team skill files left in seats' own storage because they were edited, or were never recorded as
    *  OpenRig's. Present only when something was kept. */
   keptSkills?: string[];
+  /** Managed guidance blocks left in a guidance file because a person edited them, as `<file>: <block id>`. Present
+   *  only when something was kept. */
+  keptGuidance?: string[];
   /** Sessions of seats joined with `rig attach` as an external CLI, which down doesn't stop or check. Without --delete
    *  each keeps its claim as it was, whether or not the app still runs. Present only when there was one. */
   leftRunning?: string[];
@@ -117,7 +120,7 @@ export class RigTeardownOrchestrator {
     if (liveSessions.length === 0) {
       // Additional intent is best-effort; keep down's existing result if it cannot be recorded.
       await this.recordAlreadyStoppedIntent(rigId).catch(() => {});
-      this.cleanupManagedGuidanceFiles(rigId, currentLiveGuidanceTargets());
+      this.cleanupManagedGuidanceFiles(rigId, currentLiveGuidanceTargets(), result);
       result.alreadyStopped = true;
       // Still tear down services even if no agent sessions are running
       if (this.deps.serviceOrchestrator) {
@@ -209,7 +212,7 @@ export class RigTeardownOrchestrator {
         if (!ownedByAnotherRig) stopTranscriptRotation(session.sessionName);
         // Success or already gone — update DB atomically
         this.atomicNodeCleanup(session);
-        this.cleanupManagedGuidanceFileForNode(rigId, session.runtime, session.cwd, currentLiveGuidanceTargets());
+        this.cleanupManagedGuidanceFileForNode(rigId, session.runtime, session.cwd, currentLiveGuidanceTargets(), result);
         if (killResult.ok) result.sessionsKilled++;
       } else {
         // Real kill failure — don't update this node
@@ -219,7 +222,7 @@ export class RigTeardownOrchestrator {
     }
     // Stop live sessions before probing historical rows; bookkeeping must not fail down.
     await this.recordAlreadyStoppedIntent(rigId).catch(() => {});
-    this.cleanupManagedGuidanceFiles(rigId, currentLiveGuidanceTargets());
+    this.cleanupManagedGuidanceFiles(rigId, currentLiveGuidanceTargets(), result);
 
     // 5b. Tear down services if they exist
     if (this.deps.serviceOrchestrator) {
@@ -394,14 +397,14 @@ export class RigTeardownOrchestrator {
     return targets;
   }
 
-  private cleanupManagedGuidanceFiles(rigId: string, liveGuidanceTargets: ReadonlySet<string>): void {
+  private cleanupManagedGuidanceFiles(rigId: string, liveGuidanceTargets: ReadonlySet<string>, result: TeardownResult): void {
     const rows = this.db.prepare(`
       SELECT DISTINCT runtime, cwd
       FROM nodes
       WHERE rig_id = ?
     `).all(rigId) as Array<{ runtime: string | null; cwd: string | null }>;
     for (const row of rows) {
-      this.cleanupManagedGuidanceFileForNode(rigId, row.runtime, row.cwd, liveGuidanceTargets);
+      this.cleanupManagedGuidanceFileForNode(rigId, row.runtime, row.cwd, liveGuidanceTargets, result);
     }
   }
 
@@ -432,17 +435,22 @@ export class RigTeardownOrchestrator {
     }
   }
 
-  private cleanupManagedGuidanceFileForNode(rigId: string, runtime: string | null, cwd: string | null, liveGuidanceTargets: ReadonlySet<string>): void {
+  private cleanupManagedGuidanceFileForNode(rigId: string, runtime: string | null, cwd: string | null, liveGuidanceTargets: ReadonlySet<string>, result: TeardownResult): void {
     const targetPath = this.guidanceTargetPath(rigId, runtime, cwd);
     if (!targetPath) {
       return;
     }
     if (liveGuidanceTargets.has(this.guidancePathKey(targetPath))) return;
-    removeManagedBlocksFromFile({
+    // The seat-skills line's block is removed only while it still holds the line; a person's edit is kept and reported.
+    const { keptEdited } = removeManagedBlocksFromFile({
       exists: (path) => fs.existsSync(path),
       readFile: (path) => fs.readFileSync(path, "utf-8"),
       writeFile: (path, content) => fs.writeFileSync(path, content, "utf-8"),
       deleteFile: (path) => fs.unlinkSync(path),
-    }, targetPath);
+    }, targetPath, { [SEAT_SKILLS_BOOTSTRAP_BLOCK_ID]: SEAT_SKILLS_BOOTSTRAP_LINE });
+    for (const id of keptEdited) {
+      const entry = `${targetPath}: ${id}`;
+      if (!result.keptGuidance?.includes(entry)) (result.keptGuidance ??= []).push(entry);
+    }
   }
 }

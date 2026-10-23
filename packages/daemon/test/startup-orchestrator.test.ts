@@ -208,6 +208,43 @@ describe("StartupOrchestrator", () => {
     }
   });
 
+  // A guidance file that is a link (here to a file outside the project) isn't written through: the start reports it linked.
+  it.each(["codex", "claude-code"] as const)("through the real %s adapter: a linked guidance file is left unwritten and reported linked, and the seat still starts", async (runtime) => {
+    const seed = seedSession();
+    const root = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "line-linked-"));
+    try {
+      const cwd = nodePath.join(root, "project");
+      nodeFs.mkdirSync(cwd);
+      const elsewhere = nodePath.join(root, "elsewhere.md");
+      const personal = "# Personal instructions\nPreserve these exact bytes.\n";
+      nodeFs.writeFileSync(elsewhere, personal);
+      nodeFs.symlinkSync(elsewhere, nodePath.join(cwd, runtime === "codex" ? "AGENTS.md" : "CLAUDE.md"));
+      const fsOps = {
+        readFile: (f: string) => nodeFs.readFileSync(f, "utf8"), writeFile: (f: string, c: string) => nodeFs.writeFileSync(f, c),
+        exists: (f: string) => nodeFs.existsSync(f), mkdirp: (d: string) => { nodeFs.mkdirSync(d, { recursive: true }); },
+        copyFile: (a: string, b: string) => nodeFs.copyFileSync(a, b), listFiles: (d: string) => nodeFs.readdirSync(d), homedir: root,
+      };
+      const tmuxNever = new Proxy({}, { get() { throw new Error("no tmux calls in delivery"); } }) as never;
+      const real = runtime === "codex"
+        ? new CodexRuntimeAdapter({ fsOps: fsOps as never, tmux: tmuxNever, listProcesses: () => [] })
+        : new ClaudeCodeAdapter({ fsOps: fsOps as never, tmux: tmuxNever } as never);
+      const adapter = mockAdapter({ runtime, deliverStartup: real.deliverStartup.bind(real) as RuntimeAdapter["deliverStartup"] });
+      const readinessSettings = {
+        resolveOne: (key: string) => key === "skills.router_line.enabled" ? { value: true, source: "file", defaultValue: false } : { value: 30, source: "default", defaultValue: 30 },
+      } as unknown as Pick<SettingsStore, "resolveOne">;
+      const asset = nodePath.join(import.meta.dirname, "../assets/guidance/openrig-seat-skills.md");
+      const result = await createOrchestrator({ readinessSettings, readFile: (f) => nodeFs.readFileSync(f, "utf8") }).startNode(makeInput(seed, {
+        adapter, isRestore: true, binding: { ...makeBinding(), cwd },
+        resolvedStartupFiles: [{ path: "openrig-seat-skills.md", absolutePath: asset, ownerRoot: nodePath.dirname(asset), deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start", "restore"] }],
+      }));
+      expect(result).toMatchObject({ ok: true, routerLine: { answer: { state: "yes", by: "saved" }, files: [{ outcome: "linked", path: expect.stringMatching(runtime === "codex" ? /AGENTS\.md$/ : /CLAUDE\.md$/) }] } });
+      expect(result.warnings?.some((w) => w.startsWith("seat_skills_line_linked:"))).toBe(true);
+      expect(nodeFs.readFileSync(elsewhere, "utf8")).toBe(personal);
+    } finally {
+      nodeFs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   // A link refusing a seat's first plugin manifest or catalog: its skills are refused there and named, never written into
   // the project; a seat that never had storage (no link) keeps the project, as before.
   describe.each(["codex", "claude-code"] as const)("through the real %s adapter, a seat whose storage a link refused", (runtime) => {

@@ -92,24 +92,48 @@ export function mergeManagedBlock(
   fs.writeFile(targetPath, `${existing}\n\n${block}`);
 }
 
-export function removeManagedBlocksFromFile(fs: ManagedBlockCleanupFsOps, targetPath: string): boolean {
+/** What a removal did: whether the file changed, and the ids of blocks kept because they were edited. */
+export interface ManagedBlockRemoval { changed: boolean; keptEdited: string[] }
+
+/**
+ * Remove OpenRig's managed blocks from a guidance file. A block named in `writtenBodies` is removed only while its body is
+ * still what OpenRig writes there; an edited one is kept, in place, and named in `keptEdited`. Blocks with no known body
+ * are removed as before.
+ */
+export function removeManagedBlocksFromFile(
+  fs: ManagedBlockCleanupFsOps,
+  targetPath: string,
+  writtenBodies: Readonly<Record<string, string>> = {},
+): ManagedBlockRemoval {
   if (!fs.exists(targetPath)) {
-    return false;
+    return { changed: false, keptEdited: [] };
   }
 
   const original = fs.readFile(targetPath);
-  const cleaned = stripManagedBlocks(original);
+  const keptEdited: string[] = [];
+  const kept: string[] = [];
+  let working = original;
+  for (const [id, body] of Object.entries(writtenBodies)) {
+    const block = new RegExp(`${escapeRegex(MANAGED_BLOCK_START(id))}\\n?([\\s\\S]*?)\\n?${escapeRegex(MANAGED_BLOCK_END(id))}`, "g");
+    working = working.replace(block, (whole: string, inner: string) => {
+      if (inner.trim() === body.trim()) return whole;
+      if (!keptEdited.includes(id)) keptEdited.push(id);
+      kept.push(whole);
+      return `\u0000openrig-kept-${kept.length - 1}\u0000`;
+    });
+  }
+  const cleaned = stripManagedBlocks(working).replace(/\u0000openrig-kept-(\d+)\u0000/g, (_m, i: string) => kept[Number(i)]!);
   if (cleaned.length === 0) {
     fs.deleteFile(targetPath);
-    return true;
+    return { changed: true, keptEdited };
   }
 
   if (cleaned !== original.trim()) {
     fs.writeFile(targetPath, `${cleaned}\n`);
-    return true;
+    return { changed: true, keptEdited };
   }
 
-  return false;
+  return { changed: false, keptEdited };
 }
 
 export function stripManagedBlocks(content: string): string {
