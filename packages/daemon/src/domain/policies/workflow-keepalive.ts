@@ -80,24 +80,28 @@ export interface WorkflowKeepaliveDeps {
   reconcileStuckExceptions?: (instanceId: string) => number;
 }
 
+/** What the spec lacks to be evaluated, or null. A job update checks a new spec with this too. */
+export function workflowKeepaliveSpecProblem(spec: Pick<PolicyJob, "context">): { field: string; message: string } | null {
+  return (spec.context as WorkflowKeepaliveContext).workflow_instance_id
+    ? null : { field: "context.workflow_instance_id", message: "workflow-keepalive: context.workflow_instance_id is required" };
+}
+
 export function makeWorkflowKeepalivePolicy(deps: WorkflowKeepaliveDeps): Policy {
   const { db } = deps;
 
   return {
     name: "workflow-keepalive",
     async evaluate(job: PolicyJob): Promise<PolicyEvaluation> {
-      const context = job.context as WorkflowKeepaliveContext;
-      const instanceId = context.workflow_instance_id;
-      if (!instanceId) {
-        throw Object.assign(
-          new Error("workflow-keepalive: context.workflow_instance_id is required"),
-          {
-            code: "policy_spec_invalid",
-            policy: "workflow-keepalive",
-            field: "context.workflow_instance_id",
-          },
-        );
+      const problem = workflowKeepaliveSpecProblem(job);
+      if (problem) {
+        throw Object.assign(new Error(problem.message), {
+          code: "policy_spec_invalid",
+          policy: "workflow-keepalive",
+          field: problem.field,
+        });
       }
+      const context = job.context as WorkflowKeepaliveContext;
+      const instanceId = context.workflow_instance_id!;
 
       // Audit-row-18 critical assertion: read from SQLite only.
       const instance = db

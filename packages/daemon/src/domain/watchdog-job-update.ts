@@ -1,5 +1,8 @@
 import { parse as parseYaml, parseDocument } from "yaml";
-import { expandPools, type ArtifactPoolSpec } from "./policies/artifact-pool-helpers.js";
+import { artifactPoolListProblem, type ArtifactPoolSpec } from "./policies/artifact-pool-helpers.js";
+import { edgeArtifactRequiredSpecProblem } from "./policies/edge-artifact-required.js";
+import { periodicReminderSpecProblem } from "./policies/periodic-reminder.js";
+import { workflowKeepaliveSpecProblem } from "./policies/workflow-keepalive.js";
 import { isQueueWait, retuneQueueWait } from "./queue-wait-backoff.js";
 import { nextDueAt } from "./watchdog-due.js";
 import {
@@ -38,29 +41,15 @@ export interface WatchdogJobUpdateResult {
   intervalEffect: string | null;
 }
 
-/** What each policy itself requires of a spec when it evaluates, checked before a spec is stored. */
+/** What each policy's own evaluation requires of a spec (its own check), applied before a spec is stored. */
+const SPEC_PROBLEMS: Record<string, (spec: ReturnType<typeof parseWatchdogSpec>) => string | null | undefined> = {
+  "periodic-reminder": (spec) => periodicReminderSpecProblem(spec)?.message,
+  "edge-artifact-required": (spec) => edgeArtifactRequiredSpecProblem(spec)?.message,
+  "artifact-pool-ready": (spec) => artifactPoolListProblem(spec.context["pools"] as ArtifactPoolSpec | ArtifactPoolSpec[] | undefined),
+  "workflow-keepalive": (spec) => workflowKeepaliveSpecProblem(spec)?.message,
+};
 function specProblem(policy: string, parsed: ReturnType<typeof parseWatchdogSpec>): string | null {
-  const context = parsed.context;
-  const hasPath = (side: unknown): boolean => {
-    const spec = side as { path?: unknown; paths?: unknown } | undefined;
-    return Boolean(spec?.path) || Array.isArray(spec?.paths);
-  };
-  if (policy === "periodic-reminder") {
-    const message = parsed.message ?? (context["message"] as string | undefined);
-    return message?.trim() ? null : "periodic-reminder needs a message (top-level message or context.message)";
-  }
-  if (policy === "edge-artifact-required") {
-    return hasPath(context["source"]) && hasPath(context["target"])
-      ? null : "edge-artifact-required needs context.source.path and context.target.path";
-  }
-  if (policy === "artifact-pool-ready") {
-    return expandPools(context["pools"] as ArtifactPoolSpec | ArtifactPoolSpec[] | undefined).length > 0
-      ? null : "artifact-pool-ready needs a context.pools list with a path";
-  }
-  if (policy === "workflow-keepalive") {
-    return context["workflow_instance_id"] ? null : "workflow-keepalive needs context.workflow_instance_id";
-  }
-  return null;
+  return SPEC_PROBLEMS[policy]?.(parsed) ?? null;
 }
 
 function storedTarget(job: WatchdogJob): string {

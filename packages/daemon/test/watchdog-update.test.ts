@@ -109,6 +109,12 @@ describe("watchdog update", () => {
       expect(after.intervalSeconds).toBe(3600);
     });
 
+    it("accepts a whitespace-only message in a full spec, as evaluation sends it; a message-only edit still needs text", async () => {
+      const job = register();
+      const res = await update(job.jobId, { specYaml: `policy: periodic-reminder\ntarget: ${OWNER}\nmessage: "   "\n` });
+      expect(res.status).toBe(200);
+      expect((await update(job.jobId, { message: "   " })).status).toBe(400);
+    });
     it("replaces the spec with another valid one for the same policy", async () => {
       const job = register();
       const spec = ["policy: periodic-reminder", "target:", `  session: ${OWNER}`, "message: new words", ""].join("\n");
@@ -483,6 +489,15 @@ describe("watchdog update", () => {
       await refused(job.jobId, { specYaml: `policy: periodic-reminder\ntarget: ${OWNER}\n` }, 400, "spec_invalid");
       await refused(job.jobId, { specYaml: "- not\n- a mapping\n" }, 400, "spec_invalid");
       await refused(job.jobId, { message: "   " }, 400, "spec_invalid");
+      // The parser types context.message before any policy check runs.
+      await refused(job.jobId, { specYaml: `policy: periodic-reminder\ntarget: ${OWNER}\ncontext:\n  message: 42\n` }, 400, "spec_invalid");
+    });
+
+    it("a pool spec the pool scanner would refuse before scanning", async () => {
+      const job = register({ policy: "artifact-pool-ready", specYaml: `policy: artifact-pool-ready\ntarget: ${OWNER}\ncontext:\n  pools:\n    - path: /tmp/pool\n` });
+      await refused(job.jobId, { specYaml: `policy: artifact-pool-ready\ntarget: ${OWNER}\ncontext:\n  pools: []\n` }, 400, "spec_invalid");
+      const res = await update(job.jobId, { specYaml: `policy: artifact-pool-ready\ntarget: ${OWNER}\ncontext: {}\n` });
+      expect(res.body.message).toMatch(/context pool list is required/);
     });
 
     it("a spec for a different policy", async () => {
