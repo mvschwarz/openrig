@@ -58,10 +58,12 @@ export function slackAsksFor(prefs: Pick<HumanPrefs, "slackAsks"> | undefined): 
  *  under every setting. */
 export const HUMAN_ALERT_TAG = "human-alert";
 
-/** The ask's tags, with HUMAN_ALERT_TAG added when it's marked alert-worthy. */
+/** The ask's tags, with HUMAN_ALERT_TAG exactly when this create or handoff is marked alert-worthy: an inherited one is
+ *  dropped, so `--alert` decides per item. */
 export function withHumanAlertTag(tags: string[] | null | undefined, humanAlert: boolean | undefined): string[] | null {
-  if (humanAlert !== true) return tags ?? null;
-  return (tags ?? []).includes(HUMAN_ALERT_TAG) ? [...(tags ?? [])] : [...(tags ?? []), HUMAN_ALERT_TAG];
+  const rest = (tags ?? []).filter((tag) => tag !== HUMAN_ALERT_TAG);
+  if (humanAlert === true) return [...rest, HUMAN_ALERT_TAG];
+  return tags ? rest : null;
 }
 // OPR.0.5.6.1 — the availability enum the delivery rules engine consumes.
 // Legacy `away: true` reads as availability=away ONLY when availability is

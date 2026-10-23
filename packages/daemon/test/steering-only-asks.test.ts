@@ -508,4 +508,16 @@ describe("an ask to a person is on Steering and the TUI; Slack gets it by their 
     const read = await feed(readers(), plain);
     expect(read.detail!.lines).toContain("Slack: posted (posted isn't read)");
   });
+
+  it("--alert decides per item: an alerted ask handed to another person without --alert posts to them with no mention", async () => {
+    registry = registryWith();
+    const urgent = await ask({ alert: true });
+    const handed = (await repo.handoff({ qitemId: urgent.qitemId, fromSession: `${HUMAN}@kernel`, toSession: "operator-admin@kernel",
+      body: "handed on, not urgent", summary: "Handed on", evidenceRef: "/proof/handed.md", nudge: false })).created;
+    expect(repo.getById(handed.qitemId)!.tags ?? []).not.toContain("human-alert");
+    await runGateway();
+    const post = posts.find((p) => JSON.stringify(p).includes("handed on, not urgent"));
+    expect(post).toBeDefined();
+    expect(JSON.stringify(post)).not.toContain("<@UOPERATOR>");
+  });
 });
