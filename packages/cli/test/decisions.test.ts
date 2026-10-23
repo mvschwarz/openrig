@@ -81,6 +81,17 @@ describe("answers", () => {
       template: { name: "stream", digest: expect.stringMatching(/^sha256:/) } });
     expect(JSON.stringify(result)).not.toContain(KEY);
   });
+  it("every sent result carries the exact request body, and the run exposes the template bytes it sent", async () => {
+    const send = answering(), r = run({ send });
+    const answered = await r.decide({ observation: "o" }, OPTIONS);
+    expect("request" in answered && answered.request).toBe(String(send.mock.calls[0]![1]!.body));
+    expect(r.template).toMatchObject({ name: "stream", source: "shipped", text: SHIPPED_TEMPLATES.stream });
+    const failedRun = run({ send: vi.fn(async () => new Response("down", { status: 503 })) });
+    const failedResult = await failedRun.decide({ observation: "o" }, OPTIONS);
+    expect(failedResult).toMatchObject({ status: "failed", request: expect.stringContaining('"observation":"o"') });
+    expect(JSON.stringify(failedResult)).not.toContain(KEY);
+    expect(run({ settings: () => ({ ...ON, enabled: false }), env: noEnv() }).template).toBeNull();
+  });
   it("leaves optional questions with no options unasked, and doesn't fill fields the provider didn't return", async () => {
     const send = vi.fn(async (_u: unknown, init?: RequestInit) => {
       const e = envelope(String(init!.body)) as Record<string, unknown>; delete e.usage; delete e.id; delete e.provider; return Response.json(e);
@@ -150,6 +161,14 @@ describe("refusals, malformed answers and failures stay distinct", () => {
     expect(await r.decide({}, OPTIONS)).toEqual(expect.objectContaining({ status: "failed", cause, httpStatus, upstream: "unknown" }));
     expect(send).toHaveBeenCalledTimes(1);
   });
+  it("a provider error in a 200 body keeps the provenance the provider returned", async () => {
+    const send = vi.fn(async () => Response.json({ id: "gen-dec-9", model: JEV_MODEL + "-20260917", provider: "TypeSafe",
+      usage: { input_tokens: 10, output_tokens: 0, cost: 0.00001 }, error: { code: 502, message: "model down" } }));
+    expect(await run({ send }).decide({}, OPTIONS)).toMatchObject({ status: "failed", cause: "provider", httpStatus: 502,
+      provenance: { requestedModel: JEV_MODEL, returnedModel: JEV_MODEL + "-20260917", generationId: "gen-dec-9", usage: { costUsd: 0.00001 } } });
+    expect(await run({ send: vi.fn(async () => { throw new TypeError("fetch failed"); }) }).decide({}, OPTIONS))
+      .toMatchObject({ status: "failed", provenance: { requestedModel: JEV_MODEL, returnedModel: null, generationId: null, usage: null } });
+  });
   it("an error code that throws when stringified is still read as a provider error", async () => {
     const send = vi.fn(async () => Response.json({ error: { code: { toString: 1 }, message: "odd" } }));
     expect(await run({ send }).decide({}, OPTIONS)).toMatchObject({ status: "failed", cause: "provider", detail: "provider error without a code: odd" });
@@ -184,6 +203,26 @@ describe("one budget owner", () => {
     const first = slow.decide({}, OPTIONS);
     expect(await slow.decide({}, OPTIONS)).toMatchObject({ status: "not_called", reason: "busy" });
     release(); expect(await first).toMatchObject({ status: "answered" });
+  });
+  it("after a timeout the run makes no more calls, since that transport may still be running", async () => {
+    vi.useFakeTimers();
+    const send = vi.fn(() => new Promise<Response>(() => {})), r = run({ send, budget: { callTimeoutMs: 1000 } });
+    const first = r.decide({}, OPTIONS);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await first).toMatchObject({ status: "failed", cause: "timeout" });
+    expect(await r.decide({}, OPTIONS)).toMatchObject({ status: "not_called", reason: "unsettled" });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+  it("turning decisions off or removing the consumer stops the next send, and the run stays stopped", async () => {
+    for (const change of [(x: DecisionsSettings) => ({ ...x, enabled: false }), (x: DecisionsSettings) => ({ ...x, consumers: "other" })]) {
+      let s = ON; const send = answering(), r = run({ settings: () => s, send });
+      expect((await r.decide({}, OPTIONS)).status).toBe("answered");
+      s = change(ON);
+      expect(await r.decide({}, OPTIONS)).toMatchObject({ status: "not_called", reason: "settings_changed" });
+      s = ON;
+      expect(await r.decide({}, OPTIONS)).toMatchObject({ status: "not_called", reason: "settings_changed" });
+      expect(send).toHaveBeenCalledTimes(1);
+    }
   });
   it("the run's total deadline spans every call", async () => {
     let t = 0; const send = answering(), r = run({ send, now: () => t, budget: { deadlineMs: 5000 } });

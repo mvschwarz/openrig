@@ -30,7 +30,8 @@ export interface Budget { maxCalls: number; deadlineMs: number; callTimeoutMs: n
 export const DEFAULT_BUDGET: Budget = { maxCalls: 20, deadlineMs: 60_000, callTimeoutMs: 10_000 };
 
 export interface TemplateQuestion { instructions: string; criteria?: Record<string, string>; criteriaFrom?: string; required: boolean }
-export interface DecisionTemplate { name: string; instructions: string; questions: Record<string, TemplateQuestion>; source: string; digest: string }
+/** `text` is the template's exact bytes, so an attempt record can keep the actual template, not only its digest. */
+export interface DecisionTemplate { name: string; instructions: string; questions: Record<string, TemplateQuestion>; source: string; digest: string; text: string }
 type Question = { type: "choice"; instructions: string; criteria: Record<string, string> };
 
 export type Answer = { choice: string | null; confidence: number | null; probabilities: Record<string, number> | null };
@@ -41,25 +42,27 @@ export type Provenance = {
 };
 type TemplateRef = { name: string; digest: string };
 export type NotCalledReason = "disabled" | "unknown_consumer" | "consumer_not_enabled" | "template_unavailable" |
-  "no_key" | "budget_spent" | "busy" | "canceled" | "invalid_request";
-export type DecisionResult =
+  "no_key" | "budget_spent" | "busy" | "canceled" | "invalid_request" | "settings_changed" | "unsettled";
+type Sent =
   | { status: "answered"; answers: Record<string, Answer>; provenance: Provenance; template: TemplateRef }
   /** A required question came back __unknown__: semantic uncertainty, kept with every answer. */
   | { status: "abstained"; unknown: string[]; answers: Record<string, Answer>; provenance: Provenance; template: TemplateRef }
   | { status: "refused"; httpStatus: number; message: string; provenance: Provenance }
   | { status: "malformed"; detail: string; provenance: Provenance }
   | { status: "stale"; reason: string; provenance: Provenance }
-  /** A request was sent. Its upstream outcome and charge are unknown: a timeout or cancel proves neither. */
-  | { status: "failed"; cause: "timeout" | "canceled" | "provider" | "invocation"; detail: string; httpStatus: number | null; upstream: "unknown" }
-  | { status: "not_called"; reason: NotCalledReason; detail: string };
+  /** A request was sent. Its upstream outcome and charge are unknown: a timeout or cancel proves neither.
+   *  Provenance keeps whatever the provider returned; its returned fields are null when no response arrived. */
+  | { status: "failed"; cause: "timeout" | "canceled" | "provider" | "invocation"; detail: string; httpStatus: number | null; upstream: "unknown"; provenance: Provenance };
+/** Every result after a send carries the exact request body sent (state, composed questions, options; never the key). */
+export type DecisionResult = (Sent & { request: string }) | { status: "not_called"; reason: NotCalledReason; detail: string };
 
 const object = (x: unknown): x is Record<string, any> => !!x && typeof x === "object" && !Array.isArray(x);
 const sameKeys = (a: object, b: object) => JSON.stringify(Object.keys(a).sort()) === JSON.stringify(Object.keys(b).sort());
 const unit = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1;
 const text = (v: unknown, max: number): v is string => typeof v === "string" && v.trim().length > 0 && v.length <= max;
 const notCalled = (reason: NotCalledReason, detail: string) => ({ status: "not_called", reason, detail }) as const;
-const failed = (cause: "timeout" | "canceled" | "provider" | "invocation", detail: string, httpStatus: number | null = null) =>
-  ({ status: "failed", cause, detail, httpStatus, upstream: "unknown" }) as const;
+const failed = (cause: "timeout" | "canceled" | "provider" | "invocation", detail: string, httpStatus: number | null, provenance: Provenance) =>
+  ({ status: "failed", cause, detail, httpStatus, upstream: "unknown", provenance }) as const;
 
 export function parseConsumers(raw: string): string[] { return [...new Set(raw.split(",").map(s => s.trim()).filter(Boolean))]; }
 
@@ -98,7 +101,7 @@ export function parseTemplate(raw: string, name: string, source: string): Decisi
     questions[id] = { instructions: q.instructions, required: q.required ?? true,
       ...(q.criteria !== undefined ? { criteria: criteria(q.criteria, `question ${id}`) } : { criteriaFrom: q.criteria_from }) };
   }
-  return { name, instructions: x.instructions, questions, source, digest: "sha256:" + createHash("sha256").update(raw).digest("hex") };
+  return { name, instructions: x.instructions, questions, source, digest: "sha256:" + createHash("sha256").update(raw).digest("hex"), text: raw };
 }
 
 /** `<templateDir>/<name>.yaml` when it exists, else the shipped template of that name. */
@@ -139,16 +142,16 @@ function provenanceOf(x: unknown): Provenance {
     usage: u ? { inputTokens: n("input_tokens"), outputTokens: n("output_tokens"), costUsd: n("cost") } : null };
 }
 
-function judge(status: number, body: string, questions: Record<string, Question>, t: DecisionTemplate): DecisionResult {
+function judge(status: number, body: string, questions: Record<string, Question>, t: DecisionTemplate): Sent {
   let x: unknown; try { x = JSON.parse(body); } catch { x = undefined; }
   const provenance = provenanceOf(x), err = object(x) && object(x.error) ? x.error : null;
   const message = typeof err?.message === "string" ? err.message.slice(0, 200) : "";
   // 403 is OpenRouter's guardrail block or moderation flag; an error can also arrive in a 200 body.
   if (status === 403 || (status === 200 && err?.code === 403)) return { status: "refused", httpStatus: 403, message, provenance };
-  if (status !== 200) return failed(status === 400 ? "invocation" : "provider", `HTTP ${status}${message ? ": " + message : ""}`, status);
+  if (status !== 200) return failed(status === 400 ? "invocation" : "provider", `HTTP ${status}${message ? ": " + message : ""}`, status, provenance);
   // Only primitives are stringified: a remote object such as {"toString":1} throws in String().
   const code = typeof err?.code === "number" || typeof err?.code === "string" ? String(err.code) : "without a code";
-  if (err) return failed("provider", `provider error ${code}${message ? ": " + message : ""}`, typeof err.code === "number" ? err.code : null);
+  if (err) return failed("provider", `provider error ${code}${message ? ": " + message : ""}`, typeof err.code === "number" ? err.code : null, provenance);
   const malformed = (detail: string) => ({ status: "malformed", detail, provenance }) as const;
   if (!object(x)) return malformed("the response isn't a JSON object");
   if (typeof x.model !== "string" || !RETURNED_MODEL.test(x.model)) return malformed(`the returned model isn't ${JEV_MODEL} or a dated build of it`);
@@ -196,6 +199,8 @@ export class DecisionRun {
   readonly startedAt: number;
   calls = 0;
   private pending = false;
+  /** Set when the run can make no more calls: its settings or template changed, or a call may still be unsettled. */
+  private halted: Extract<DecisionResult, { status: "not_called" }> | null = null;
   private readonly controller = new AbortController();
   private readonly resolved: Resolved;
   private readonly settings: () => DecisionsSettings;
@@ -216,16 +221,22 @@ export class DecisionRun {
   }
   /** The no-call reason every decide() returns, or null when calls can be made. */
   get unavailable() { return "status" in this.resolved ? this.resolved : null; }
+  /** The template every call in this run sends, fixed when the run starts; null when no call is possible. */
+  get template(): DecisionTemplate | null { return "status" in this.resolved ? null : this.resolved.template; }
   stop = () => { this.controller.abort(); };
 
   async decide(state: unknown, options: Record<string, Record<string, string>> = {}, signal?: AbortSignal): Promise<DecisionResult> {
     if ("status" in this.resolved) return this.resolved;
     if (this.pending) return notCalled("busy", "one decision at a time per run");
     if (signal?.aborted || this.controller.signal.aborted) return notCalled("canceled", "canceled before a request was sent");
+    if (this.halted) return this.halted;
     const remaining = this.startedAt + this.budget.deadlineMs - this.now();
     if (this.calls >= this.budget.maxCalls || remaining <= 0)
       return notCalled("budget_spent", `${this.calls} of ${this.budget.maxCalls} calls used; the run's deadline is ${this.budget.deadlineMs} ms`);
     const { template, key } = this.resolved;
+    // Off means no new calls: the settings and template are checked again before every send.
+    const change = this.changed(template);
+    if (change) return this.halted = notCalled("settings_changed", `${change}; this run makes no more calls`);
     const questions = this.questions(template, options);
     if (typeof questions === "string") return notCalled("invalid_request", questions);
     const body = JSON.stringify({ model: JEV_MODEL, provider: PROVIDER, state, questions });
@@ -251,14 +262,22 @@ export class DecisionRun {
         }),
       ]);
       const result = judge(response.status, response.body, questions, template);
-      if (result.status !== "answered" && result.status !== "abstained") return result;
-      const stale = this.staleReason(template);
-      return stale ? { status: "stale", reason: stale, provenance: result.provenance } : result;
+      if (result.status !== "answered" && result.status !== "abstained") return { ...result, request: body };
+      const late = this.now() > this.startedAt + this.budget.deadlineMs ? "the answer arrived after the run's deadline" : null;
+      const change = late ? null : this.changed(template);
+      if (change) this.halted = notCalled("settings_changed", `${change}; this run makes no more calls`);
+      const stale = late ?? change;
+      return stale ? { status: "stale", reason: stale, provenance: result.provenance, request: body } : { ...result, request: body };
     } catch (e) {
-      if (why === "timeout") return failed("timeout", `no complete answer within ${timeoutMs} ms`);
-      if (why === "canceled") return failed("canceled", "canceled locally after the request was sent");
-      if (e instanceof RangeError) return { status: "malformed", detail: e.message, provenance: provenanceOf(undefined) };
-      return failed("provider", "the request failed before a complete response (network, TLS or a refused redirect)");
+      const none = provenanceOf(undefined);
+      if (why) {
+        // The transport may still be running upstream, so this run stays one call at a time by making no more.
+        this.halted = notCalled("unsettled", "an earlier call timed out or was canceled and may still be running upstream; this run makes no more calls");
+        return why === "timeout" ? { ...failed("timeout", `no complete answer within ${timeoutMs} ms`, null, none), request: body }
+          : { ...failed("canceled", "canceled locally after the request was sent", null, none), request: body };
+      }
+      if (e instanceof RangeError) return { status: "malformed", detail: e.message, provenance: none, request: body };
+      return { ...failed("provider", "the request failed before a complete response (network, TLS or a refused redirect)", null, none), request: body };
     } finally {
       clearTimeout(timer); ctl.abort(); this.pending = false;
       signal?.removeEventListener("abort", cancel); this.controller.signal.removeEventListener("abort", cancel);
@@ -287,13 +306,14 @@ export class DecisionRun {
     return out;
   }
 
-  private staleReason(t: DecisionTemplate): string | null {
-    if (this.now() > this.startedAt + this.budget.deadlineMs) return "the answer arrived after the run's deadline";
+  /** Why this run's settings or template no longer hold, or null. */
+  private changed(t: DecisionTemplate): string | null {
     try {
       const s = this.settings();
-      if (!s.enabled || !parseConsumers(s.consumers).includes(this.o.consumer)) return "decisions were turned off for this consumer during the call";
-      if (loadTemplate(this.o.consumer, s.templateDir, this.read).digest !== t.digest) return "the template changed during the call";
-    } catch { return "the settings or template became unreadable during the call"; }
+      if (!s.enabled) return "decisions.enabled was turned off during the run";
+      if (!parseConsumers(s.consumers).includes(this.o.consumer)) return `${this.o.consumer} was removed from decisions.consumers during the run`;
+      if (loadTemplate(this.o.consumer, s.templateDir, this.read).digest !== t.digest) return "the template changed during the run";
+    } catch { return "the settings or template became unreadable during the run"; }
     return null;
   }
 }
