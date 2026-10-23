@@ -750,14 +750,15 @@ describe("RestoreOrchestrator", () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
+    // The claim isn't marked detached, nothing is launched in the app's place, and its binding is as it was.
+    expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(claimed.id)).toEqual({ status: "running" });
+    expect(hasSession).not.toHaveBeenCalledWith("desk-app@r99");
+    expect((tmux.createSession as ReturnType<typeof vi.fn>).mock.calls.flat().join(" ")).not.toContain("desk");
+    expect(sessionRegistry.getBindingForNode(desk.id)).toMatchObject({ attachmentType: "external_cli", externalSessionName: "desk-app@r99" });
+    expect(result.result.nodes.find((n) => n.logicalId === "worker")?.status).toBe("fresh-primed");
     expect(result.result.nodes.find((n) => n.logicalId === "desk")).toMatchObject({
       status: "left_attached", error: expect.stringContaining("rig unclaim desk-app@r99"),
     });
-    expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(claimed.id)).toEqual({ status: "running" });
-    expect(sessionRegistry.getBindingForNode(desk.id)).toMatchObject({ attachmentType: "external_cli", externalSessionName: "desk-app@r99" });
-    expect(hasSession).not.toHaveBeenCalledWith("desk-app@r99");
-    expect(result.result.nodes.find((n) => n.logicalId === "worker")?.status).toBe("fresh-primed");
-    expect((tmux.createSession as ReturnType<typeof vi.fn>).mock.calls.flat().join(" ")).not.toContain("desk");
     // A seat left attached doesn't count against the rig.
     expect(rollupRestoreRigResult([
       { nodeId: "a", logicalId: "a", status: "resumed" },
