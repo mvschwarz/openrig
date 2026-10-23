@@ -22,7 +22,17 @@ python3 -m venv .venv
 ```
 
 The examples pin the SDK version used in the pipe trials; they are not a recommendation to downgrade another
-application. Recheck its API and cancellation behavior when changing versions. Save this helper as `queue_io.py`:
+application. The official SDK 1.1.0 paths were exercised in both directions. Other 1.x versions were not tested.
+Recheck the API and cancellation behavior when changing versions.
+
+Pydantic AI 2.60.0 with FastA2A 2.1.1 did not interoperate with these SDK 1.1.0 recipes in the tested setup:
+FastA2A's inbound typed client returned `result={}` even though the SDK front, with 0.3 compatibility enabled,
+sent task, artifact and completed records in its raw SSE stream. Outbound, the official SDK raised a protobuf
+parse error at the FastA2A task's `status.timestamp`; the full wire timestamp was not retained. When mixing
+frameworks, compare the raw stream's task IDs, artifact and final status with the typed client's output.
+An HTTP 200 or an empty typed result is not proof that the task succeeded. Retain the evidence before retrying.
+
+Save this helper as `queue_io.py`:
 
 ```python
 import asyncio
@@ -50,6 +60,7 @@ controls described later. Use a peer that supports those operations when testing
 
 Save as `a2a_client.py`. This client also works without an OpenRig row, for the inbound recipe below.
 Streaming reads have no deadline so quiet worker waits keep their stream; connection, write and pool waits are bounded to 10 seconds.
+Stop the local wait with Ctrl-C or a caller-owned overall deadline; this does not confirm cancellation, so keep the task/context IDs and cancel through the peer when it is reachable.
 
 ```python
 import asyncio
@@ -303,7 +314,7 @@ Keep these facts separate:
 | Working | This front observed the receiving seat's claim. |
 | Input-required | A question needs answering; this example leaves the row in-progress. |
 | Completed + artifact | The worker's stored result was returned; your assessment still belongs to you. |
-| Canceled | Queue cancellation was committed. Verify separately that the worker noticed and stopped. |
+| Canceled | This inbound front committed queue cancellation; an outside peer's cancellation says nothing about your outbound row. Verify separately that the worker noticed and stopped. |
 | Failed / JSON-RPC error | Retain the actual error and any row effect; do not report success. |
 | Disconnect / timeout | The last known state remains all you know. Inspect before retrying. |
 
@@ -320,8 +331,13 @@ and concurrency. Inbound used a private daemon and a separate no-model queue wor
 stored resolutions, two tasks overlapped without crossing IDs, and completed-task reuse left the old result
 unchanged. The successful cancellation check also observed the worker stop, beyond receiving the protocol reply.
 
-These are pipe results, not model-quality or provider-spend claims. Vendor/model-backed peers, public deployment
-and authentication, stream reconnect, durable bridge restart, and cancellation before row binding were not
-exercised. The inbound example holds A2A tasks and their row mapping in memory: keep it running for the conversation;
+A later inbound check used an official SDK 1.1.0 client and front, an OpenRig queue row, and Pi 1.4.0 running
+`openai/gpt-4o-mini`. One marker answer reached the row's resolution and the client's completed artifact. A
+custodian performed the queue writes; model tools were disabled. That run used a 120-second streaming read
+timeout and prompt RPC event draining, changed together. It did not separately test the unbounded read used above.
+
+These results do not establish model quality or provider billing. Other framework versions, model tool use,
+public deployment and authentication, stream reconnect, durable bridge restart, and cancellation before row
+binding were not exercised. The inbound example holds A2A tasks and their row mapping in memory: keep it running for the conversation;
 after a crash, inspect retained OpenRig rows before any replacement run. It binds loopback and supplies no public
 authentication layer. Use it on your own machine or a trusted private path, not as an unauthenticated public gateway.
