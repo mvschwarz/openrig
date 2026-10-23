@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
-import { execArgvCommand, execCommand, resolveOnPath } from "../src/adapters/tmux-exec.js";
+import { execArgvCommand, execCommand, execTmuxShellCommand, resolveOnPath } from "../src/adapters/tmux-exec.js";
 
 // Fake `tmux` binaries in private directories: each prints its own directory, so a call shows which one ran.
 // PATH holds only these directories: a real tmux later on PATH would answer for a fake that has gone.
@@ -21,9 +21,9 @@ function dir(name: string, tmux?: "exec" | "plain" | "directory"): string {
 }
 
 /** The same tmux call on the shell transport, as main runs it, and on the argv transport: output or failure. */
-async function bothTransports(argv: string[], legacy: string): Promise<{ shell: string | { failed: true }; argv: string | { failed: true } }> {
+async function bothTransports(argv: string[], legacy: string, shellExec: ExecFn = execCommand): Promise<{ shell: string | { failed: true }; argv: string | { failed: true } }> {
   const settle = (p: Promise<string>) => p.then((out) => out, () => ({ failed: true as const }));
-  return { shell: await settle(execCommand(legacy)), argv: await settle(execArgvCommand(argv)) };
+  return { shell: await settle(shellExec(legacy)), argv: await settle(execArgvCommand(argv)) };
 }
 
 // dash goes on to the next PATH entry when a file's interpreter is missing; bash, sh on macOS, stops there.
@@ -59,6 +59,24 @@ describe.skipIf(process.platform === "win32")("tmux binary resolution", { timeou
     expect(await execArgvCommand(["tmux", "list-sessions", "-F", "#{session_name} x"])).toBe("run-a list-sessions -F #{session_name} x\n");
     vi.stubEnv("PATH", `${b}:${a}`);
     expect(await execArgvCommand(["tmux", "-V"])).toBe("run-b -V\n");
+  });
+
+  it("does not pass activity hook tokens to tmux subprocesses", async () => {
+    const d = path.join(root, "scrub-hook-env");
+    fs.mkdirSync(d, { recursive: true });
+    fs.writeFileSync(path.join(d, "tmux"), `#!${process.execPath}\nconsole.log(JSON.stringify({ openrig: Boolean(process.env.OPENRIG_ACTIVITY_HOOK_TOKEN), legacy: Boolean(process.env.RIGGED_ACTIVITY_HOOK_TOKEN), ordinary: process.env.USER_VALUE }));\n`, { mode: 0o755 });
+    vi.stubEnv("PATH", d);
+    vi.stubEnv("OPENRIG_ACTIVITY_HOOK_TOKEN", "synthetic-openrig-hook-token");
+    vi.stubEnv("RIGGED_ACTIVITY_HOOK_TOKEN", "synthetic-legacy-hook-token");
+    vi.stubEnv("USER_VALUE", "preserved");
+
+    const result = await bothTransports(["tmux", "-V"], "tmux -V", execTmuxShellCommand);
+    expect(result).toEqual({
+      shell: '{"openrig":false,"legacy":false,"ordinary":"preserved"}\n',
+      argv: '{"openrig":false,"legacy":false,"ordinary":"preserved"}\n',
+    });
+    expect(process.env.OPENRIG_ACTIVITY_HOOK_TOKEN).toBeTruthy();
+    expect(process.env.RIGGED_ACTIVITY_HOOK_TOKEN).toBeTruthy();
   });
 
   it("falls back to the shell when the cached binary has gone, and the shell finds the next one", async () => {

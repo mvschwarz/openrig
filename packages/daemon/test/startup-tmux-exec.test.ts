@@ -4,7 +4,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDaemon } from "../src/startup.js";
-import { execArgvCommand } from "../src/adapters/tmux-exec.js";
+import { execArgvCommand, execTmuxShellCommand } from "../src/adapters/tmux-exec.js";
 import type { ArgvExecFn, ExecFn, TmuxAdapter } from "../src/adapters/tmux.js";
 import type { CmuxTransportFactory } from "../src/adapters/cmux.js";
 
@@ -12,6 +12,10 @@ const cmuxFactory: CmuxTransportFactory = async () => { throw Object.assign(new 
 
 function argvExecOf(adapter: TmuxAdapter): ArgvExecFn | undefined {
   return (adapter as unknown as { argvExec?: ArgvExecFn }).argvExec;
+}
+
+function shellExecOf(adapter: TmuxAdapter): ExecFn {
+  return (adapter as unknown as { exec: ExecFn }).exec;
 }
 
 // A full daemon composition took 3-28 s per file on a loaded host.
@@ -34,10 +38,11 @@ describe("createDaemon tmux exec wiring", { timeout: 120000 }, () => {
   });
 
   for (const host of ["linux", "darwin"] as const) {
-    it(`runs tmux without a shell on ${host}`, async () => {
+    it(`wires the credential-scrubbing shell fallback and argv transport on ${host}`, async () => {
       Object.defineProperty(process, "platform", { ...platform, value: host });
       const daemon = await createDaemon({ dbPath: ":memory:", cmuxFactory });
       try {
+        expect(shellExecOf(daemon.deps.tmuxAdapter)).toBe(execTmuxShellCommand);
         expect(argvExecOf(daemon.deps.tmuxAdapter)).toBe(execArgvCommand);
       } finally {
         daemon.eventLoopMonitor.stop();

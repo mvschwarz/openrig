@@ -2,6 +2,7 @@ import { exec, execFile } from "node:child_process";
 import { accessSync, constants, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
+import { ACTIVITY_HOOK_TOKEN_ENV_KEYS } from "./tmux.js";
 import type { ArgvExecFn, ExecFn } from "./tmux.js";
 
 const execAsync = promisify(exec);
@@ -60,6 +61,12 @@ function withExecOutput(err: unknown): unknown {
   return typeof stderr === "string" ? Object.assign(thrown, { execStderr: stderr }) : thrown;
 }
 
+function tmuxChildEnvironment(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const key of ACTIVITY_HOOK_TOKEN_ENV_KEYS) delete env[key];
+  return env;
+}
+
 /**
  * Production ExecFn for TmuxAdapter.
  * Wraps child_process.exec (shell command string) and returns stdout.
@@ -67,6 +74,17 @@ function withExecOutput(err: unknown): unknown {
 export const execCommand: ExecFn = async (cmd: string): Promise<string> => {
   try {
     const { stdout } = await execAsync(cmd);
+    return stdout;
+  } catch (err) {
+    throw withExecOutput(err);
+  }
+};
+
+/** Shell transport for TmuxAdapter. Hook credentials stay in the daemon for endpoint setup,
+ *  but must not be inherited by a newly started tmux server or its client processes. */
+export const execTmuxShellCommand: ExecFn = async (cmd: string): Promise<string> => {
+  try {
+    const { stdout } = await execAsync(cmd, { env: tmuxChildEnvironment() });
     return stdout;
   } catch (err) {
     throw withExecOutput(err);
@@ -85,7 +103,7 @@ export const execArgvCommand: ArgvExecFn = async (argv: string[]): Promise<strin
   if (!bin) throw new Error("execArgvCommand: empty argv");
   // Nothing ran when no file was found: a shell also finds tmux through an entry the lookup skips, such as a literal
   // `~/bin`, and reports a missing one as the shell transport does.
-  const opts = { windowsHide: true, maxBuffer: TMUX_MAX_BUFFER };
+  const opts = { windowsHide: true, maxBuffer: TMUX_MAX_BUFFER, env: tmuxChildEnvironment() };
   const run = (file: string | null) => file ? execFileAsync(file, args, opts) : execFileAsync("/bin/sh", ["-c", 'exec "$0" "$@"', bin, ...args], opts);
   try {
     if (process.platform === "win32") return (await execFileAsync(bin, args, opts)).stdout;

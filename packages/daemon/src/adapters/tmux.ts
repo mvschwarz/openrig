@@ -28,7 +28,7 @@ export type ArgvExecFn = (argv: string[]) => Promise<string>;
 // Activity relays resolve their auth from the mode-0600 endpoint file. Keep
 // these names empty in tmux environments so daemon auth never reaches tmux on
 // argv, and a token from the parent shell cannot override that file.
-const ACTIVITY_HOOK_TOKEN_ENV_KEYS = [
+export const ACTIVITY_HOOK_TOKEN_ENV_KEYS = [
   "OPENRIG_ACTIVITY_HOOK_TOKEN",
   "RIGGED_ACTIVITY_HOOK_TOKEN",
 ] as const;
