@@ -902,6 +902,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     const realFs = {
       readFile: (p: string) => fs.readFileSync(p, "utf-8"),
       writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"),
+      copyFileExclusive: (src: string, dest: string) => fs.copyFileSync(src, dest, fs.constants.COPYFILE_EXCL),
       exists: (p: string) => fs.existsSync(p),
       mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }),
       listFiles: (dir: string) => {

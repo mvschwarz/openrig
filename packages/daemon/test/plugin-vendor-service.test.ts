@@ -25,6 +25,10 @@ function mockFs(initialFiles?: Record<string, string>) {
   return {
     readFile: (p: string) => { if (p in store) return store[p]!; throw new Error(`Not found: ${p}`); },
     writeFile: (p: string, c: string) => { store[p] = c; },
+    copyFileExclusive: (src: string, dest: string) => {
+      if (dest in store) throw Error(`Recovery path exists: ${dest}`);
+      store[dest] = store[src]!;
+    },
     exists: (p: string) => p in store || Object.keys(store).some((k) => k.startsWith(p + "/")),
     mkdirp: () => {},
     listFiles: (dir: string) => Object.keys(store).filter((k) => k.startsWith(dir + "/")).map((k) => k.slice(dir.length + 1)),
