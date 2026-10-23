@@ -611,7 +611,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
       closureTarget: z.string().optional().describe("Closure target, when the reason needs one"),
       note: z.string().optional().describe("Transition note: progress, or the answer when closing"),
       summary: z.string().optional().describe("Replace the one-line summary"),
-      evidenceRef: z.string().optional().describe("Where the evidence is"),
+      evidenceRef: z.string().optional().describe("Pointer to the durable artifact, stored on the item when closing with state done or parking on a human seat; other updates refuse it"),
       blockedOn: z.string().optional().describe("What it waits on, when blocking"),
       wakeAfterSeconds: z.number().int().positive().optional().describe("Wake this seat after this many seconds, when blocking. Delivered only to a seat with a terminal: an attached app can't receive it today, so the item just waits until it is checked."),
     },
