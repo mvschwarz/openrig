@@ -1528,33 +1528,65 @@ rig specs rename <name-or-id> <new-name> [--json]
 ## MCP
 
 ```bash
-rig mcp serve [--port <port>]
+rig mcp serve [--port <daemon-port>]        # stdio: a local app starts the server itself
+rig mcp serve --http [--bind <host:port>]   # Streamable HTTP at /mcp (default 127.0.0.1:7437)
+rig mcp token add <name> --seat <session> [--rig <name>...] [--root <name>...] [--workspace] [--owner]
+rig mcp token list [--json]
+rig mcp token revoke <name>
 ```
 
-Current shipped MCP tools:
-- `rig_up`
-- `rig_down`
-- `rig_ps`
-- `rig_status`
-- `rig_snapshot_create`
-- `rig_snapshot_list`
-- `rig_restore`
-- `rig_discover`
-- `rig_bind`
-- `rig_bundle_inspect`
-- `rig_agent_validate`
-- `rig_rig_validate`
-- `rig_rig_nodes`
-- `rig_send`
-- `rig_capture`
-- `rig_chatroom_send`
-- `rig_chatroom_watch`
-- `rig_add`
-- `rig_queue_create`, `rig_queue_show`, `rig_queue_list`, `rig_queue_claim`, `rig_queue_update`
-- `rig_telemetry_events`: one bounded page of event metadata, as `rig telemetry events` reads it
+The 34 shipped tools fall into three groups. Over stdio, and over HTTP with no grants, every tool is offered. An HTTP
+grant offers the work tools, the workspace tools only with `--workspace`, and the owner tools only with `--owner`.
+- **Work (17):** orientation, communication and the durable work loop.
+  - `rig_whoami`: the seat the server acts as (rig, pod, peers, edges) and the `caller`: authenticated (an HTTP
+    credential, with its principal) or declared (`OPENRIG_SESSION_NAME` where the server was configured, which nothing
+    verifies).
+  - `rig_status`, `rig_ps`, `rig_rig_nodes`, and `rig_team`: a rig's lead (its one `delegates_to` root, the seat to
+    delegate to) and each seat's role, delegation and activity.
+  - `rig_send`, `rig_capture`, `rig_chatroom_send`, `rig_chatroom_watch`.
+  - `rig_queue_create`, `rig_queue_show`, `rig_queue_list`, `rig_queue_claim`, `rig_queue_update`:
+    - `revises` on create asks for a linked revision of an earlier item;
+    - show names a handed-off item's successor;
+    - `handedOffFrom` on list follows a handoff.
+  - `rig_artifact_read`: a finished item's artifact (its `evidenceRef`) or a named file, through the daemon's shared
+    roots (`OPENRIG_FILES_ALLOWLIST`), in windows (`offset`, `nextOffset`). Outside those roots it answers unavailable
+    rather than reading a local path.
+  - `rig_human_decision_room`, then `rig_queue_decide`: on your own pending ask to a person, read the decision room of
+    the mode they have on, and record a decision you made for them inside it. No tool writes a person's own answer.
+- **Workspace (4):** `rig_slices`, `rig_mission`, `rig_context_pack`, and `rig_context_get` (one context file or
+  section, as `rig context get` reads it).
+- **Owner (13):** `rig_up`, `rig_down`, `rig_snapshot_create`, `rig_snapshot_list`, `rig_discover`, `rig_bind`,
+  `rig_add`, `rig_bundle_inspect`, `rig_agent_validate`, `rig_rig_validate`, `rig_telemetry_events` (one bounded page
+  of event metadata), and:
+  - `rig_restore`, which starts a restore and returns its attempt;
+  - `rig_restore_status`, that attempt's receipt.
 
-The server acts as one seat: the `OPENRIG_SESSION_NAME` in its environment. Every request carries that identity, so
-no tool call names a sender. Without it, writes that need an actor are refused with `actor_required`.
+**Results:**
+- The queue tools and `rig_whoami` return a structured result beside the text.
+- Every failure carries the same structured shape: `ok: false`, a `code` and a `message`.
+
+**Identity:**
+- **Over stdio, and over HTTP with no grants:** the server acts as one seat, the `OPENRIG_SESSION_NAME` in its
+  environment. Every request carries that identity, so no tool call names a sender. Without it, writes that need an
+  actor are refused with `actor_required`.
+- **Over HTTP with grants:** each caller acts as its own grant's seat.
+
+### Over HTTP: an assistant that can't start a local process
+
+- **No grants (no token file):**
+  - the listener stays on loopback and acts as `OPENRIG_SESSION_NAME`, declared, like stdio;
+  - a request whose `Host` isn't loopback is refused.
+- **With grants:** every request needs `Authorization: Bearer <token>`, loopback included, because a tunnel or proxy
+  delivers remote traffic to loopback.
+  - **Identity:** each caller acts as its grant's seat.
+  - **What it reaches:** only its rigs' seats and work, and its roots' artifacts. Anything else answers `out_of_scope`.
+  - **Bad credentials:** a missing, invalid or revoked token gets a 401, never the environment's seat.
+  - **A broken token file:** if the file later goes missing or can't be read, every request is refused until a restart.
+- **Beyond loopback** (`--bind`), the server starts only with a grant. TLS comes from the tunnel or proxy, not from
+  this server.
+- **`rig mcp token add`** prints the token once and stores only its hash.
+- **`revoke`:** the caller's next request is refused, and work it already handed over stays with its owners.
+- **Grants, binds and tunnels are the person's decisions.** Give them the commands, and don't run them on their behalf.
 
 ### Join a team from an agent with no terminal of its own (desktop apps)
 
@@ -1566,11 +1598,12 @@ use the `rig` CLI instead, the same way.
    Note the `OPENRIG_SESSION_NAME` it prints.
 2. **Give the person the MCP entry to add.** Don't edit their app's settings yourself. The entry runs
    `rig mcp serve`, with `OPENRIG_SESSION_NAME=<that seat>` in its environment. Most MCP clients take it as a
-   command, arguments and an `env` map.
+   command, arguments and an `env` map. An app that can't start a local process connects to `rig mcp serve --http`
+   instead, with a grant for that seat (see "Over HTTP" above).
 3. **Hand off work** with `rig_queue_create`, and keep the `qitemId` it returns.
 4. **Read the answer** with `rig_queue_show <qitemId>`. The item's state, closure and transition notes are where the
-   assignee records it. A call that times out has an unknown outcome: check `rig_queue_show` with the same id
-   before you retry, and retry only with that id.
+   assignee records it, and `rig_artifact_read` reads an artifact it names. A call that times out has an unknown
+   outcome: check `rig_queue_show` with the same id before you retry, and retry only with that id.
 5. **Take work** with `rig_queue_list` (`owned: true`), `rig_queue_claim` and `rig_queue_update`. Close with the
    answer in `note`.
 
