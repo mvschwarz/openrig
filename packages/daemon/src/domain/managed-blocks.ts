@@ -135,3 +135,11 @@ export function isPerSeatRoleGuidance(blockId: string, sourcePath?: string): boo
   if (blockId === "rig-role") return true;
   return blockId === "role" && sourcePath !== undefined && /(^|[\\/])guidance[\\/]role\.md$/.test(sourcePath);
 }
+
+/** The warning a skipped legacy `role` leaves in the projection result: a spec saved before `rig-role` may have had no
+ *  other route for it. A `rig-role` skip is the designed path, so it adds none. */
+export function perSeatRoleSkipWarning(blockId: string, targetPath: string): string | undefined {
+  if (blockId === "rig-role") return undefined;
+  return `${blockId}: not merged into ${targetPath}, the guidance file pod-mates share, because guidance/role.md is a seat's own role. `
+    + "A seat's role reaches it only as a send_text startup file; a seat whose spec has none starts without its role.";
+}

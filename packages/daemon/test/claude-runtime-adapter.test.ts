@@ -1271,10 +1271,13 @@ describe("Claude Code runtime adapter", () => {
     const own = await project("/agents/analyst/guidance/role.md", "/project");
     expect(store["/project/CLAUDE.md"]).toBeUndefined();
     expect(own.skipped).toContain("role");
+    // A spec saved that way may have had no other route for the role, so the result says what happened.
+    expect(own.warnings).toEqual([expect.stringContaining("role: not merged into /project/CLAUDE.md")]);
     // Guidance that is genuinely shared and happens to be named role still merges.
     const shared = await project("/rig/guidance/team-role.md", "/shared");
     expect(store["/shared/CLAUDE.md"]).toContain("Our team's role");
     expect(shared.projected).toContain("role");
+    expect(shared.warnings).toBeUndefined();
     logSpy.mockRestore();
   });
 

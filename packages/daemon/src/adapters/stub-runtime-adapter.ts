@@ -24,7 +24,7 @@ import type {
 } from "../domain/runtime-adapter.js";
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
-import { isPerSeatRoleGuidance, mergeManagedBlock } from "../domain/managed-blocks.js";
+import { isPerSeatRoleGuidance, mergeManagedBlock, perSeatRoleSkipWarning } from "../domain/managed-blocks.js";
 import {
   stubSeatSidecarPath, buildStubRunnerCommand, parseStubRunnerState,
   type StubRunnerState,
@@ -324,7 +324,11 @@ export class StubRuntimeAdapter implements RuntimeAdapter {
     if (!this.fsOps) return false;
     // Per-seat rig-role content collides across pod-mates when merged into a shared
     // cwd file; it is delivered via send_text instead (mirrors the other adapters).
-    if (isPerSeatRoleGuidance(blockId, sourcePath)) return false;
+    if (isPerSeatRoleGuidance(blockId, sourcePath)) {
+      const warning = perSeatRoleSkipWarning(blockId, targetPath);
+      if (warning) warnings.push(warning);
+      return false;
+    }
     mergeManagedBlock(this.fsOps, targetPath, blockId, content, {
       warnings,
       replaceBlockIds: blockId === "openrig-start.md" ? ["using-openrig.md"] : [],
