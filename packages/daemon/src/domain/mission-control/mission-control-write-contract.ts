@@ -50,7 +50,7 @@ import {
 } from "./mission-control-action-log.js";
 import { isHumanSeatSession } from "../human-route-enforcer.js";
 import { createHash } from "node:crypto";
-import { formatHumanAnswers, unansweredQuestions } from "../human-questions.js";
+import { formatHumanAnswers, unansweredQuestions, type HumanAnswers } from "../human-questions.js";
 
 export class MissionControlWriteContractError extends Error {
   constructor(
@@ -494,7 +494,9 @@ export class MissionControlWriteContract {
    * (`decision`) through resolveDirectHumanReply, placed under the first unanswered question. Once it's answered, the
    * asking seat gets one reply row and then the ask closes once, the order of Slack's own continuation, so a retry never
    * leaves an ask closed with its answer not returned; the reply row's id comes from the ask, so a retry finds the same
-   * row. An ask that's already answered records, sends and closes nothing more.
+   * row. With neither a choice nor words, a complete question set whose return didn't finish is sent again, with exactly
+   * its recorded answers. A retry in other words than the reply already returned is refused, never closed on. An ask
+   * that's already answered records, sends and closes nothing more.
    */
   private async answerAsk(input: MissionControlActionInput): Promise<MissionControlActionResult> {
     const ask = this.queueRepo.getById(input.qitemId);
@@ -514,6 +516,10 @@ export class MissionControlWriteContract {
     const questions = ask.humanQuestions ?? [];
     const chose = input.questionId !== undefined || input.optionId !== undefined;
     const words = input.decision?.trim() ?? "";
+    // A complete set whose return didn't finish (it failed, or the process stopped): sending again returns exactly those
+    // recorded answers, never a bare close.
+    const resume = !chose && !words && questions.length > 0 && unansweredQuestions(questions, ask.humanAnswers ?? {}).length === 0;
+    const answersReply = (answers: HumanAnswers) => `${formatHumanAnswers(questions, answers).join("\n")}\n\n---\nAnswers (question id → option id): ${JSON.stringify(answers)}\nIn reply to: ${input.qitemId} (its humanAnswers field holds the same)`;
     let reply: string;
     if (chose) {
       const recorded = this.queueRepo.recordHumanAnswer({ qitemId: input.qitemId, actorSession: input.actorSession,
@@ -527,7 +533,9 @@ export class MissionControlWriteContract {
         return this.recordAnswer(input, before, just ?? `answered ${input.questionId}`, {
           outcome: "recorded", unanswered: unansweredQuestions(recorded.questions, recorded.answers).map((q) => q.question) });
       }
-      reply = `${formatHumanAnswers(recorded.questions, recorded.answers).join("\n")}\n\n---\nAnswers (question id → option id): ${JSON.stringify(recorded.answers)}\nIn reply to: ${input.qitemId} (its humanAnswers field holds the same)`;
+      reply = answersReply(recorded.answers);
+    } else if (resume) {
+      reply = answersReply(ask.humanAnswers ?? {});
     } else {
       if (!words) {
         throw new MissionControlWriteContractError("decision_required",
@@ -537,14 +545,30 @@ export class MissionControlWriteContract {
       reply = `${words}\n\n---\n${earlier.length ? `Earlier answers: ${earlier.join("; ")}\n` : ""}In reply to: ${input.qitemId}${questions.length ? " (its humanAnswers field holds these words under its first unanswered question)" : ""}`;
     }
     const replyId = `qitem-human-answer-${createHash("sha256").update(input.qitemId).digest("hex").slice(0, 20)}`;
-    await this.queueRepo.create({
-      qitemId: replyId, sourceSession: input.actorSession, destinationSession: ask.sourceSession,
-      body: `${reply}\nAnswered by ${input.actorSession} in OpenRig.`,
-      summary: `${input.actorSession} answered: ${ask.summary ?? input.qitemId}`,
-      tags: ["human-answer", ...(ask.tags ?? []).filter((t) => /^(project|mission|slice):/.test(t))],
-      inboundReplyTo: input.qitemId, ...(input.notify === false ? { nudge: false } : {}),
-    });
-    const decision = chose ? formatHumanAnswers(questions, this.queueRepo.getById(input.qitemId)?.humanAnswers ?? {}).join("; ") : words;
+    let returned: Awaited<ReturnType<QueueRepository["create"]>>;
+    try {
+      returned = await this.queueRepo.create({
+        qitemId: replyId, sourceSession: input.actorSession, destinationSession: ask.sourceSession,
+        body: `${reply}\nAnswered by ${input.actorSession} in OpenRig.`,
+        summary: `${input.actorSession} answered: ${ask.summary ?? input.qitemId}`,
+        tags: ["human-answer", ...(ask.tags ?? []).filter((t) => /^(project|mission|slice):/.test(t))],
+        inboundReplyTo: input.qitemId, ...(input.notify === false ? { nudge: false } : {}),
+      });
+    } catch (error) {
+      throw new MissionControlWriteContractError("answer_not_closed",
+        `Returning the answer to ${ask.sourceSession} failed (${(error as Error).message}), so ${input.qitemId} wasn't closed. `
+        + (chose || resume ? "Its recorded answers stay on the row; open it again to send them." : "Nothing was recorded; answer again once that's fixed."),
+        { qitemId: input.qitemId });
+    }
+    // The reply row is keyed by the ask, so this is an earlier attempt's row in other words: the asker holds those. Close
+    // only on words that went back; this answer wasn't sent.
+    if (returned.createWarning?.code === "qitem_body_not_saved") {
+      throw new MissionControlWriteContractError("answer_not_closed",
+        `An earlier answer already went back to ${ask.sourceSession} as ${replyId}, in other words, so this one wasn't sent and ${input.qitemId} wasn't closed with it. `
+        + `Answer again with the same words as ${replyId} to close it, or Chat with the asker.`,
+        { qitemId: input.qitemId, replyQitemId: replyId });
+    }
+    const decision = chose || resume ? formatHumanAnswers(questions, this.queueRepo.getById(input.qitemId)?.humanAnswers ?? {}).join("; ") : words;
     if (!this.queueRepo.resolveDirectHumanReply({ qitemId: input.qitemId, actorSession: input.actorSession, decision })) {
       throw new MissionControlWriteContractError("answer_not_closed",
         `The answer went back to ${ask.sourceSession} as ${replyId}, but qitem ${input.qitemId} didn't close: it changed meanwhile.`,

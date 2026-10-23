@@ -57,15 +57,17 @@ export function attentionRoutes(): Hono {
         const questions = q.humanQuestions?.length ? q.humanQuestions : null;
         const unanswered = questions ? unansweredQuestions(questions, q.humanAnswers ?? {}).length : 0;
         const item: AttentionItem = { id: `queue:${q.qitemId}`, kind: "action", recipient: toPerson ? q.destinationSession : q.blockedOn,
-          // An ask addressed to the person is answered on this row, as them: Steering's Approve, or, while it has unanswered
-          // questions (which Approve would close unanswered), mission control's answer, a choice or their own words. They
-          // can also open the asker's terminal (Chat). A row parked on them is resolved another way, so it carries neither.
-          ...(toPerson && q.state === "pending" ? { answer: { verb: unanswered ? "answer" as const : "approve" as const, actorSession: q.destinationSession } } : {}),
+          // An ask addressed to the person is answered on this row, as them: Steering's Approve, or, for an ask with questions,
+          // mission control's answer (a choice, their own words, or sending a complete set's recorded answers back), which
+          // Approve would close without returning. They can also open the asker's terminal (Chat). A row parked on them is
+          // resolved another way, so it carries neither.
+          ...(toPerson && q.state === "pending" ? { answer: { verb: questions ? "answer" as const : "approve" as const, actorSession: q.destinationSession } } : {}),
           ...(toPerson ? { asker: q.sourceSession } : {}),
           ...(questions ? { humanQuestions: questions, humanAnswers: q.humanAnswers ?? {} } : {}),
           summary: q.summary || q.body.trim().split(/\r?\n/).find(Boolean) || "Request summary unavailable", urgency: q.priority, unblocks, at: q.tsUpdated, scope: p ? `project ${p.id}` : "instance · project unknown", project: p ? { id: p.id, root: p.root } : null, source: `/api/queue/${encodeURIComponent(q.qitemId)}` };
         const route = unanswered
           ? `Decision route: answer its questions here, choosing an option or typing a reply${quiet.has(q.qitemId) ? "; it wasn't sent to Slack" : ", or in the correlated Slack message"}.`
+          : questions && q.state === "pending" ? "Decision route: its questions are all answered, but the answers haven't gone back to the asker yet: send them from here."
           : quiet.has(q.qitemId) ? "Decision route: answer on Steering; it wasn't sent to Slack." : "Decision route: follow the correlated human request in Slack.";
         add(item, () => {
           const mode = posture?.resolve({ qitemId: q.qitemId });

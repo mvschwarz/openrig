@@ -59,19 +59,25 @@ export function attentionLines(state: ViewState, snap: FleetSnapshot, width: num
       lines.push(...questionLines(d.item).map(text => ({ text })));
       lines.push(...d.lines.map(text => ({ text })));
       for (const f of d.files) lines.push(listItem(f.label, { type: "attention-source", path: f.path }));
-      // Answer it here, on this row, as the person: Steering's Approve, or, while questions are open (Approve would close
-      // them unanswered), one act per option. Either way they can answer in their own words with `reply`.
+      // Answer it here, on this row, as the person: Steering's Approve, or, for an ask with questions (Approve would close it
+      // without returning them), one act per open option, or, once every question is answered and the answers haven't gone
+      // back yet, the act that sends them. While a question is open, or with none, `reply` takes their own words.
       const qitemId = d.item.id.startsWith("queue:") ? d.item.id.slice("queue:".length) : null;
       if (d.item.answer && qitemId) {
         const { verb, actorSession } = d.item.answer;
+        const open = (d.item.humanQuestions ?? []).filter(q => answerOf(d.item, q.id) == null);
         if (verb === "approve") {
           lines.push(listItem(`Approve as ${actorSession} (closes this request, as Steering's Approve does)`, { type: "act", act: "answer", qitemId, verb, actorSession }));
+        } else if (!open.length) {
+          lines.push(listItem(`Send the recorded answers back to ${d.item.asker ?? "the asker"} and close this request`, { type: "act", act: "answer", qitemId, verb, actorSession }));
         } else {
-          for (const q of (d.item.humanQuestions ?? []).filter(q => answerOf(d.item, q.id) == null))
+          for (const q of open)
             for (const o of q.options) lines.push(listItem(`Answer "${q.question}": ${o.label}${o.recommended ? " (recommended)" : ""}`,
               { type: "act", act: "answer", qitemId, verb, actorSession, questionId: q.id, optionId: o.id }));
         }
-        lines.push({ text: `Or answer in your own words: reply <text>, as ${actorSession}${verb === "answer" ? " (it fills the first unanswered question and closes the request)" : ""}.` });
+        if (verb === "approve" || open.length) {
+          lines.push({ text: `Or answer in your own words: reply <text>, as ${actorSession}${verb === "answer" ? " (it fills the first unanswered question and closes the request)" : ""}.` });
+        }
       }
       // Chat, as on the Feed card: open the asker's terminal (its pod's view) to answer in your own words.
       if (d.item.asker) {

@@ -13,8 +13,9 @@ export interface AttentionItem {
   source: string;
   recipient?: string | null;
   /** How the person answers this request where they read it, through mission control as themselves: `approve` (Steering's
-   *  one-tap Approve), or `answer` while it has unanswered questions, which Approve would close unanswered. `answer` takes a
-   *  choice or their own words, and either goes back to the asker as Slack's answers do. */
+   *  one-tap Approve), or `answer` for an ask with questions, which Approve would close without returning their answers.
+   *  `answer` takes a choice or their own words, or sends a complete set's recorded answers back, and the answer goes back
+   *  to the asker as Slack's answers do. */
   answer?: { verb: "approve" | "answer"; actorSession: string };
   /** The seat that asked, which the person can open to answer in their own words (the Feed card's Chat). */
   asker?: string;

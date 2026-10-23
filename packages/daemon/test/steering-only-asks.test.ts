@@ -4,7 +4,7 @@
 // selection, posting dial, quiet hours and stuck sweep act on it. Real SQLite (all migrations), the real queue, the real
 // gateway wire and its own outbound driver over a recording fetch, the real quiet-hours store and release job. No Slack.
 // Native: NOT RUN.
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -52,10 +52,13 @@ describe("an ask lands on Steering; Slack alerts only when it's marked alert-wor
   let bus: EventBus;
   let home: string;
   const posts: Array<Record<string, unknown>> = [];
+  /** A destination whose rig has left the topology, so the queue refuses rows to it. */
+  let unreachable: string | null = null;
 
   beforeEach(() => {
     db = createDb();
     migrate(db, ALL_MIGRATIONS);
+    unreachable = null;
     repo = newRepo();
     home = mkdtempSync(join(tmpdir(), "steering-only-"));
     const secrets = join(home, "slack.env");
@@ -67,7 +70,7 @@ describe("an ask lands on Steering; Slack alerts only when it's marked alert-wor
 
   function newRepo(): QueueRepository {
     bus = new EventBus(db);
-    return new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: () => registry });
+    return new QueueRepository(db, bus, { validateRig: (session) => session !== unreachable, loadHumanRegistry: () => registry });
   }
   let n = 0;
   async function ask(opts: { alert?: boolean; questions?: boolean } = {}): Promise<QueueItem> {
@@ -371,6 +374,46 @@ describe("an ask lands on Steering; Slack alerts only when it's marked alert-wor
     expect(replies(typed)).toHaveLength(1);
     expect(resolved(typed)).toBe(1);
     expect((repo.getById(typed.qitemId)!.humanAnswers!.q1 as { text: string }).text).toBe(words);
+  });
+
+  it("an answer set whose return failed is sent again from the Feed with its recorded choice, never closed by a bare Approve", async () => {
+    const row = await ask({ questions: true });
+    const t = await tui(readers());
+    unreachable = "orch-lead@r"; // the asking seat's rig left the topology, so the return is refused
+    await expect(t.run((await t.open(row)).act('Answer "A or B?": B'))).rejects.toThrow();
+    expect(repo.getById(row.qitemId)).toMatchObject({ state: "pending", humanAnswers: { q1: "b" } });
+    expect(replies(row)).toEqual([]);
+    // Reopened: every question is answered, so the Feed offers to send the answers back, not Approve.
+    const reopened = await t.open(row);
+    expect(reopened.read.items.find((i) => i.id === `queue:${row.qitemId}`)?.answer).toEqual({ verb: "answer", actorSession: `${HUMAN}@kernel` });
+    expect(reopened.act("Approve as")).toBeUndefined();
+    unreachable = null;
+    expect(await t.run(reopened.act("Send the recorded answers back"))).toMatchObject({ answer: { outcome: "answered" } });
+    expect(replies(row)).toHaveLength(1);
+    expect(replies(row)[0]!.body).toContain("A or B?: B");
+    expect(repo.getById(row.qitemId)).toMatchObject({ state: "done", humanAnswers: { q1: "b" } });
+    expect(resolved(row)).toBe(1);
+  });
+
+  it("a typed retry in other words than the answer already returned is refused, not closed on; the same words close it", async () => {
+    const row = await ask();
+    const t = await tui(readers());
+    // The first answer went back to the asker, and then its close didn't commit.
+    vi.spyOn(repo, "resolveDirectHumanReply").mockReturnValueOnce(false);
+    await expect(t.reply(row, "Yes, ship it")).rejects.toThrow();
+    expect(replies(row)).toHaveLength(1);
+    expect(repo.getById(row.qitemId)).toMatchObject({ state: "pending" });
+    // Other words: nothing is sent, nothing closes, and the asker still holds the first answer.
+    await expect(t.reply(row, "No, hold it")).rejects.toThrow();
+    expect(replies(row)).toHaveLength(1);
+    expect(replies(row)[0]!.body).toContain("Yes, ship it");
+    expect(repo.getById(row.qitemId)).toMatchObject({ state: "pending" });
+    expect(resolved(row)).toBe(0);
+    // The same words: the same reply row, and the ask closes once.
+    expect(await t.reply(row, "Yes, ship it")).toMatchObject({ answer: { outcome: "answered" } });
+    expect(replies(row)).toHaveLength(1);
+    expect(repo.getById(row.qitemId)).toMatchObject({ state: "done" });
+    expect(resolved(row)).toBe(1);
   });
 
   it("the wake ladder leaves a quiet handoff to a person on Steering: past its window nothing posts, while an alerted one still escalates", async () => {
