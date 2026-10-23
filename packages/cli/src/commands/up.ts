@@ -283,6 +283,16 @@ team back with its conversations, run rig up <rig-name> --existing, not the spec
 
       // Run preflight before auto-start
       let status = await getDaemonStatus(deps.lifecycleDeps);
+      // A plan is a preview. The daemon computes it, but starting a daemon here would also boot its kernel's agents and
+      // spend their model turns, so --plan asks for a running daemon instead of starting one.
+      if (opts.plan && shouldAutoStartDaemon(status)) {
+        const fact = "rig up --plan asks the daemon for the plan, and no daemon is running for this OpenRig home. A preview doesn't start one, because starting a daemon also starts its kernel's agents.";
+        const how = "Start it with rig daemon start (its kernel's agents start too) or rig daemon start --no-kernel (no agents), then run the plan again. Or run rig up without --plan to start everything and launch.";
+        if (opts.json) console.log(JSON.stringify({ ok: false, code: "daemon_not_running", error: fact, plan: true, changed: false, message: how }));
+        else { console.error(fact); console.error(how); }
+        process.exitCode = 1;
+        return;
+      }
       // A busy daemon of this home gets the request instead of a start attempt (shouldAutoStartDaemon).
       if (shouldAutoStartDaemon(status)) {
         let startOptions: StartOptions;
