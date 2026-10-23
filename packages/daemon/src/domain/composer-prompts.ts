@@ -174,8 +174,8 @@ export function composerContainsOwnedText(input: ComposerInput, expected: string
   return false;
 }
 
-/** An opaque label may be remembered only immediately after this lease pasted
- * the text. Subsequent submission requires that same complete label and cursor.
+/** Recognize this lease's paste immediately after pasting or before its Enter
+ * in the original composer. A later lease cannot acquire ownership from a label.
  */
 export function ownCollapsedPaste(input: ComposerInput, expected: string): string | null {
   if (input.collapsedPaste && input.cursorAtEnd && input.pasteMatchesExpected) return input.collapsedPaste;

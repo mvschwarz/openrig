@@ -3027,7 +3027,9 @@ export class SessionTransport {
           reason: policyRefusal ? submitResult.code : "submit_failed",
           outcome: "failed",
           inputPhase: "written",
-          error: `Text is in '${sessionName}', but the Enter reported a failure, so the submission outcome is unconfirmed. The agent may need manual attention.${submitResult.code === "managed_compaction_pending" ? ` ${submitResult.message}` : ""}`,
+          error: policyRefusal
+            ? `Text was pasted into '${sessionName}', but Enter was not sent: ${submitResult.message} Inspect the current input before submitting it.`
+            : `Text is in '${sessionName}', but the Enter reported a failure, so the submission outcome is unconfirmed. The agent may need manual attention.`,
           ...(waitMode || policyRefusal ? { sent: true, ...waitEvidence } : {}),
         });
       }

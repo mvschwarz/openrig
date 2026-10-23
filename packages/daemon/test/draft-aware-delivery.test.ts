@@ -104,6 +104,64 @@ describe("current draft-aware delivery through the real transport", () => {
     expect(f.submissions).toEqual([text, text]);
   });
 
+  it("submits its delayed collapsed paste once, leaving the next queue wake deliverable", async () => {
+    const f = fixture(); await f.enable();
+    const text = "first line\nsecond line\nlast line";
+    let readsAfterPaste = 0;
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async name => {
+      const body = f.bodies[f.guard.target(name).nodeId];
+      if (body === text) return frame(readsAfterPaste++ === 0 ? "" : "[Pasted text #1 +2 lines]");
+      return body == null ? null : frame(body);
+    });
+    expect(await f.send("delayed-label", text, { verify: false })).toMatchObject({ ok: true, sent: true });
+    const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "next work", nudge: false });
+    f.repo.stageWakeIntent(item.qitemId, "sender@test", "worker@test", null, true);
+    await f.repo.drainPendingWakeIntents();
+    expect(f.submissions).toEqual([text, expect.stringContaining(item.qitemId)]);
+    expect(f.writes.filter(write => write.startsWith("paste:"))).toHaveLength(2);
+    expect(f.writes.filter(write => write.startsWith("keys:"))).toHaveLength(2);
+    expect(f.bodies.a).toBe("");
+    expect(f.outbox.getById("wake-intent-" + item.qitemId)!.deliveryState).toBe("delivered");
+  });
+
+  it.each(["wrong count", "moved cursor", "changed composer", "human input"])("does not submit a delayed label after %s", async condition => {
+    const f = fixture(); await f.enable();
+    const text = "first line\nsecond line\nlast line";
+    let readsAfterPaste = 0;
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async name => {
+      const body = f.bodies[f.guard.target(name).nodeId];
+      if (body !== text) return body == null ? null : frame(body);
+      if (readsAfterPaste++ === 0) return frame("");
+      const snapshot = frame(condition === "wrong count" ? "[Pasted text #1 +9 lines]" : "[Pasted text #1 +2 lines]");
+      if (condition === "moved cursor") snapshot.cursor.x--;
+      if (condition === "changed composer") snapshot.cursor.width--;
+      return snapshot;
+    });
+    if (condition === "human input") f.hooks.sleep = async ms => {
+      if (ms === 200) await f.guard.humanInput("worker@test", async () => {});
+    };
+    const result = await f.send("unowned-label", text, { verify: false });
+    expect(result).toMatchObject({ ok: false, sent: true, reason: "draft_input_changed" });
+    expect(result.error).toContain("Enter was not sent");
+    expect(f.submissions).toEqual([]);
+    expect(f.bodies.a).toBe(text);
+    expect(f.writes).toHaveLength(1);
+  });
+
+  it("retains the next wake behind an uncertain native Enter without submitting or replaying the leftover", async () => {
+    const f = fixture(); await f.enable();
+    const enter = vi.spyOn(f.tmux, "sendKeys").mockResolvedValueOnce({ ok: false, code: "tmux_error", message: "lost Enter result" });
+    const first = await f.send("uncertain-enter");
+    expect(first).toMatchObject({ ok: false, reason: "submit_failed" });
+    expect(first.error).toContain("submission outcome is unconfirmed");
+    expect(f.outbox.getById(first.outboxIds![0]!)!.deliveryState).toBe("indeterminate");
+    expect(await f.send("next-wake")).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
+    expect(enter).toHaveBeenCalledTimes(1);
+    expect(f.writes).toHaveLength(1);
+    expect(f.submissions).toEqual([]);
+    expect(f.bodies.a).toBe("incoming message");
+  });
+
   it("tries a current request after the person's draft clears, without replaying a saved prerequisite", async () => {
     const f = fixture(); await f.enable(); f.bodies.a = "a person's draft";
     const oldPrerequisite = vi.fn();
