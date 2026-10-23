@@ -532,6 +532,28 @@ describe("rig start (OPR.0.3.4.1)", () => {
     expect(applyBodies.length).toBeGreaterThanOrEqual(1);
   });
 
+  it("#1332 each seat left awaiting a decision gets a one-seat command for exactly that seat, dotted legacy ids included", async () => {
+    setupCandidateRig("legacy-rig");
+    const plan = routes["/api/rigs/:id/up"]!;
+    // A partial restore: a sibling runs, so `rig up --existing ... --fresh` would be refused for these seats.
+    routes["/api/rigs/:id/up"] = (req, body) => body.plan === true ? plan(req, body) : {
+      status: "restored", rigId: "rig-1", rigName: "legacy-rig", rigResult: "partially_restored",
+      nodes: [
+        { logicalId: "orch.lead", status: "resumed" },
+        { logicalId: "dev.ops.impl", status: "awaiting-decision" },
+        { logicalId: "dev.ops-impl", status: "awaiting-decision" },
+      ],
+      warnings: [],
+    };
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "start", "--last"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain(`dev.ops.impl: awaiting-decision -- to fresh-prime: rig seat launch dev.ops.impl@legacy-rig --fresh --reason "fresh-prime after restore"`);
+    expect(output).toContain(`dev.ops-impl: awaiting-decision -- to fresh-prime: rig seat launch dev.ops-impl@legacy-rig --fresh --reason "fresh-prime after restore"`);
+    expect(output).not.toContain("rig up --existing");
+  });
+
   // ---- KERNEL INVARIANT ----
 
   it("kernel failure -> honest hard-fail, restore NOT attempted", async () => {

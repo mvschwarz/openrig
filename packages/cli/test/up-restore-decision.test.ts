@@ -116,9 +116,30 @@ describe("rig up --existing — resume-original default (OPR.0.3.4.2)", () => {
     });
     const output = logs.join("\n");
     expect(output).toContain("dev.impl: awaiting-decision");
-    expect(output).toContain("--fresh dev.impl");
+    expect(output).toContain(`To deliberately fresh-prime: rig seat launch dev.impl@myrig --fresh --reason "fresh-prime after restore"`);
+    expect(output).not.toContain("rig up --existing");
     expect(exitCode).toBe(1);
     // CRITICAL: exactly one POST — nothing auto-substituted a fresh session.
+    expect(upBodies).toHaveLength(1);
+  });
+
+  it("#1332 a partial restore names each awaiting seat by the rig's name and its exact logical id", async () => {
+    respond = () => ({
+      status: "restored", rigId: "rig-1", rigName: "legacy-rig", rigResult: "partially_restored",
+      nodes: [
+        { logicalId: "orch.lead", status: "resumed" },
+        { logicalId: "dev.ops.impl", status: "awaiting-decision", error: "no token available" },
+        { logicalId: "dev.ops-impl", status: "awaiting-decision", error: "no token available" },
+      ],
+      warnings: [],
+    });
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "up", "legacy-rig", "--existing"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain(`dev.ops.impl: awaiting-decision — no session started. To deliberately fresh-prime: rig seat launch dev.ops.impl@legacy-rig --fresh --reason "fresh-prime after restore"`);
+    expect(output).toContain(`dev.ops-impl: awaiting-decision — no session started. To deliberately fresh-prime: rig seat launch dev.ops-impl@legacy-rig --fresh --reason "fresh-prime after restore"`);
+    expect(output).not.toContain("rig up --existing");
     expect(upBodies).toHaveLength(1);
   });
 
@@ -178,6 +199,8 @@ describe("rig up --existing — resume-original default (OPR.0.3.4.2)", () => {
 
     expect(upBodies).toHaveLength(1);
     expect(logs.join("\n")).toContain("No fresh sessions started");
+    expect(logs.join("\n")).toContain(`rig seat launch dev.impl@myrig --fresh --reason "fresh-prime after restore"`);
+    expect(logs.join("\n")).not.toContain("Re-run with --fresh <seat...>");
     expect(exitCode).toBe(1);
   });
 

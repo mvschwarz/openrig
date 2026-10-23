@@ -12,6 +12,7 @@ import {
   waitForKernelReady,
   type LifecycleDeps, daemonStatusGuard } from "../daemon-lifecycle.js";
 import { shouldAutoStartDaemon } from "../daemon-reachability.js";
+import { freshSeatCommand } from "../fresh-seat-command.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
@@ -599,7 +600,7 @@ status); a restore that returned without a ready kernel exits 1.
             } else {
               // Headless: report honestly, no auto-substitute.
               for (const n of awaiting) {
-                if (!opts.json) console.error(`    ${n.logicalId}: awaiting-decision -- to fresh-prime: rig up --existing ${rigName} --fresh ${n.logicalId}`);
+                if (!opts.json) console.error(`    ${n.logicalId}: awaiting-decision -- to fresh-prime: ${freshSeatCommand(n.logicalId, rigName)}`);
               }
             }
           }

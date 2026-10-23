@@ -10,6 +10,7 @@ import { DaemonClient, DaemonConnectionError, DaemonTimeoutError } from "../clie
 import { getDaemonStatus, getDaemonUrl, startDaemon, type LifecycleDeps, daemonStatusGuard } from "../daemon-lifecycle.js";
 import { shouldAutoStartDaemon } from "../daemon-reachability.js";
 import { prepareDaemonAutoStart } from "../daemon-auto-start.js";
+import { freshSeatCommand } from "../fresh-seat-command.js";
 import type { StartOptions } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -749,11 +750,12 @@ team back with its conversations, run rig up <rig-name> --existing, not the spec
                 console.log(`  ${n.logicalId}: ${n.status}`);
               }
             } else {
-              console.log(`  No fresh sessions started. Re-run with --fresh <seat...> when you decide.`);
+              console.log(`  No fresh sessions started. When you decide, start a seat fresh with:`);
+              for (const n of awaiting) console.log(`    ${freshSeatCommand(n.logicalId, rigName ?? source)}`);
             }
           } else {
             for (const n of awaiting) {
-              console.error(`  ${n.logicalId}: awaiting-decision — no session started. To deliberately fresh-prime: rig up --existing ${source} --fresh ${n.logicalId}`);
+              console.error(`  ${n.logicalId}: awaiting-decision — no session started. To deliberately fresh-prime: ${freshSeatCommand(n.logicalId, rigName ?? source)}`);
             }
           }
         }
