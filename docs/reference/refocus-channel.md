@@ -40,6 +40,7 @@ OpenRig automatically installs its Codex plugin for seats that select it. On its
 hook definitions are trusted before launch, after checking the installed hook files against this daemon's shipped copy.
 Existing plugin disables and hook choices are retained. An existing untrusted installation stays under native review:
 Codex's "continue without trusting" leaves no record, so OpenRig does not assume an absent trust record is permission.
+The file check happens only when trust is granted: a later edit to the cached hook scripts keeps that trust, as with any hook trusted in Codex.
 The Codex
 column above then applies only to a Codex seat whose plugin selection includes openrig-core: every Codex hook command
 exits 0 before running anything unless OpenRig gave that seat `OPENRIG_SEAT_PROJECT_DIR` and an explicit
