@@ -447,7 +447,7 @@ export class StartupOrchestrator {
     let postLaunchFiles: ResolvedStartupFile[] = [];
     for (const f of applicableFiles) {
       const hint = f.deliveryHint === "auto"
-        ? resolveConcreteHint(f.path, this.safeReadFile(f.absolutePath))
+        ? resolveConcreteHint(f.path, this.safeReadFile(f.absolutePath), f.orientation)
         : f.deliveryHint;
       if (hint === "send_text") {
         postLaunchFiles.push(f);
@@ -565,6 +565,7 @@ export class StartupOrchestrator {
           const launchResult = await input.adapter.launchHarness(input.binding, {
             name: input.sessionName ?? input.binding.tmuxSession ?? "",
             resumeToken: launchResumeToken,
+            ...(launchResumeToken && input.resumeType ? { resumeType: input.resumeType } : {}),
             ...(input.forkSource && !launchResumeToken ? { forkSource: input.forkSource } : {}),
           });
           if (launchResult.ok) {
@@ -575,10 +576,15 @@ export class StartupOrchestrator {
             }
             const notice = nonInterruptiveNotice(input.adapter.runtime, input.binding);
             if (notice) warnings.push(`${input.sessionName ?? input.nodeId}: ${notice}`);
+            for (const note of launchResult.warnings ?? []) warnings.push(`${input.sessionName ?? input.nodeId}: ${note}`);
             const normalizedResumeToken = launchResult.resumeToken?.trim();
             if (normalizedResumeToken) {
               try {
-                this.sessionRegistry.updateResumeToken(input.sessionId, launchResult.resumeType ?? "", normalizedResumeToken, "scrape");
+                if (launchResult.resumeProvenance === "launcher") {
+                  this.sessionRegistry.recordLauncherReportedToken(input.sessionId, launchResult.resumeType ?? "", normalizedResumeToken);
+                } else {
+                  this.sessionRegistry.updateResumeToken(input.sessionId, launchResult.resumeType ?? "", normalizedResumeToken, "scrape");
+                }
               } catch { /* best-effort */ }
             }
             // OPR.0.7.0.9: the prompt a new conversation starts with; on a resume, a changed prompt is pending.

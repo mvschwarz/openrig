@@ -281,7 +281,7 @@ describe("managed refresh preserves recoverable edits", () => {
       const saved = f.backupFiles().find(file => fs.readFileSync(file).equals(f.edited));
       expect(saved).toBeDefined();
       expect(f.logs.join("\n")).toContain(saved);
-      expect(f.logs.join("\n")).toContain("may no longer be active");
+      expect(f.logs.join("\n")).toContain("before managed refresh");
       const nextEdit = Buffer.from("a second unique edit\n"); fs.writeFileSync(f.dest, nextEdit);
       await f.refresh();
       expect(fs.readFileSync(f.dest, "utf8")).toBe("# compaction-restore\n");

@@ -1,3 +1,4 @@
+import { isPerSeatRoleStartupFile } from "./managed-blocks.js";
 import type { Binding, StartupFile } from "./types.js";
 import type { ProjectionPlan } from "./projection-planner.js";
 import type { ClaudeResumeRotation } from "./native-process-lineage.js";
@@ -117,6 +118,10 @@ export type HarnessLaunchRecovery = "retry_fresh" | "attention_required";
 // pinned as the one it started, kept even when a later sample saw it replaced (#1077).
 export type HarnessLaunchResult =
   | { ok: true; resumeToken?: string; resumeType?: string; appliedLaunch?: import("./permission-drift.js").AppliedLaunchObservation;
+    /** Where resumeToken came from, when not a pane scrape: a community harness's launcher reported it. */
+    resumeProvenance?: "launcher";
+    /** Launch notes for the person, such as a community harness whose launch identity is unavailable. */
+    warnings?: string[];
     launchedProcess?: import("./native-process-lineage.js").ClaudeLaunchedProcess;
     /** Codex (#1524): the native process a managed resume was proven on from Codex's own records. Restore's join
      *  compares the process it verifies later against this one before it reports the seat resumed. */
@@ -160,7 +165,10 @@ export type HarnessLaunchResult =
 export function resolveConcreteHint(
   path: string,
   content: string,
+  orientation?: string,
 ): "guidance_merge" | "skill_install" | "send_text" {
+  // A seat's own role never merges into the file its pod-mates share.
+  if (isPerSeatRoleStartupFile(path, orientation)) return "send_text";
   if (path.endsWith("SKILL.md") || content.startsWith("# SKILL")) return "skill_install";
   if (path.endsWith(".md")) return "guidance_merge";
   return "send_text";
@@ -223,6 +231,8 @@ export interface RuntimeAdapter {
   launchHarness(
     binding: NodeBinding,
     opts: { name: string; resumeToken?: string; forkSource?: ForkSource;
+      /** The saved token's type, when known (a community harness resumes only its own `community:<name>` ids). */
+      resumeType?: string;
       /** Fresh successor in the retired occupant's pane; not an adopt, resume or fork. */
       freshInPlace?: boolean },
   ): Promise<HarnessLaunchResult>;

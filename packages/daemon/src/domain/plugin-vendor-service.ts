@@ -199,7 +199,7 @@ export class PluginVendorService {
         const backup = nodePath.join(backupDir, rel);
         this.fs.mkdirp(nodePath.dirname(backup));
         this.fs.copyFileExclusive(dest, backup);
-        this.logger(`[plugin-vendor] preserved ${dest} at ${backup}; custom behaviour may no longer be active after refresh`);
+        this.logger(`[plugin-vendor] preserved previous contents of ${dest} at ${backup} before managed refresh`);
       }
       return true;
     } catch (error) {

@@ -2949,7 +2949,7 @@ export class PodRigInstantiator {
       if (f.deliveryHint !== "auto") return f;
       try {
         const content = this.deps.fsOps.readFile(f.absolutePath);
-        return { ...f, deliveryHint: resolveConcreteHint(f.path, content) };
+        return { ...f, deliveryHint: resolveConcreteHint(f.path, content, f.orientation) };
       } catch {
         // If file can't be read, default to send_text (safest — delivered after harness ready)
         return { ...f, deliveryHint: "send_text" as const };

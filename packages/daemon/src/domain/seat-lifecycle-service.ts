@@ -460,7 +460,7 @@ export class SeatLifecycleService {
       if (!file.appliesOn.includes("fresh_start") || file.deliveryHint === "send_text") continue;
       try {
         const hint = file.deliveryHint === "auto"
-          ? resolveConcreteHint(file.path, fs.readFileSync(file.absolutePath, "utf8")) : file.deliveryHint;
+          ? resolveConcreteHint(file.path, fs.readFileSync(file.absolutePath, "utf8"), file.orientation) : file.deliveryHint;
         if (hint !== "send_text") files.push({ ...file, deliveryHint: hint });
       } catch (error) {
         const detail = `Startup file ${file.path}: ${(error as Error).message}`;

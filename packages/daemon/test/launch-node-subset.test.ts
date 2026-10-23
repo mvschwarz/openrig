@@ -1,6 +1,9 @@
 // OPR.0.3.4.11 — launchNodeSubset tests: managed partial restore for held seats.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type Database from "better-sqlite3";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
@@ -428,6 +431,26 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     Object.assign(data.sessions[0], fields);
     db.prepare("UPDATE snapshots SET data = ? WHERE id = ?").run(JSON.stringify(data), snapshotId);
   }
+
+  it.each([[true, "To resume its conversation"], [false, "start nothing and ask for a decision"]] as const)(
+    "offers a community harness's idle seat the resume command only when its preset declares resume (resume=%s)", async (resumes, advice) => {
+      const saved = process.env["OPENRIG_HOME"];
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), "subset-community-"));
+      try {
+        process.env["OPENRIG_HOME"] = home;
+        fs.mkdirSync(path.join(home, "community-harnesses"));
+        fs.writeFileSync(path.join(home, "community-harnesses", "synth-harness.yaml"),
+          `format: 1\nname: synth-harness\ncommand: synth-launch\nmaintainer: Example\nlimits: []\nlaunch_result: true\n${resumes ? "resume: true\n" : ""}`);
+        const { rigId, session, snapshotId } = seedPreservedShell("synth-harness");
+        sessionRegistry.recordCommunityHarnessSelection(session.id, "synth-harness");
+        setSavedSession(snapshotId, { communityHarness: "synth-harness", resumeType: "community:synth-harness", resumeToken: "chat-123", restorePolicy: "resume_if_possible" });
+        const result = await orchestrator.launchNodeSubset(rigId, ["dev.driver"]);
+        expect(result.launched![0]).toMatchObject({ status: "attention_required", error: expect.stringContaining(advice) });
+      } finally {
+        if (saved === undefined) delete process.env["OPENRIG_HOME"]; else process.env["OPENRIG_HOME"] = saved;
+        fs.rmSync(home, { recursive: true, force: true });
+      }
+    });
 
   it.each(["claude-code", "codex", "pi", "omp"])("reports an exited %s agent without replacing its preserved shell", async (runtime) => {
     const { rigId, nodeIds, session } = seedPreservedShell(runtime);

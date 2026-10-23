@@ -1680,6 +1680,7 @@ describe("StartupOrchestrator", () => {
     expect(launchHarness.mock.calls[0]![1]).toEqual({
       name: "r01-impl",
       resumeToken: "stale-token",
+      resumeType: "codex_id",
     });
     expect(launchHarness.mock.calls[1]![1]).toEqual({
       name: "r01-impl",

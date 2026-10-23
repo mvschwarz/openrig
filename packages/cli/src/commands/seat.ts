@@ -4,6 +4,8 @@ import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-life
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { shellQuote } from "../cross-host-executor.js";
+import { localSelfHostId, originFor, runOnSshHost, type RunOnHostDeps } from "../lib/run-on-host.js";
+import { readOpenRigEnv } from "../openrig-compat.js";
 import { seatLaunchAdditionLines, type SeatLaunchAdditionsView } from "../seat-launch-additions-lines.js";
 
 export type SeatDeps = StatusDeps;
@@ -336,7 +338,7 @@ function printSeatError(error: SeatStatusError, fallback: string): void {
   }
 }
 
-export function seatCommand(depsOverride?: SeatDeps & { readStdin?: () => Promise<string> }): Command {
+export function seatCommand(depsOverride?: SeatDeps & { readStdin?: () => Promise<string>; host?: RunOnHostDeps }): Command {
   const cmd = new Command("seat")
     .description("Inspect OpenRig seat observability state");
   const getDeps = (): SeatDeps => depsOverride ?? {
@@ -923,6 +925,7 @@ Examples:
     .option("--verify", "After a real tool-using turn, check whether the restarted seat can be reported as moved")
     .option("--expect-account <text>", "With --verify: the account Codex's /status Account line must name")
     .option("--operator <address>", "Operator recorded on the audit event")
+    .option("--host <id>", "Restart a seat on this registered machine, over its SSH entry, as this seat")
     .option("--json", "JSON output for agents")
     .description("Restart one Codex seat in place so it reads its Codex home's current account")
     .addHelpText("after", `
@@ -951,11 +954,13 @@ Results: restarted_account_unverified, not_started (the original is still runnin
 incomplete (it exited; the resume was not proven; the pane may be held for recovery),
 native_unknown (what happened could not be observed). Only --verify reports moved,
 and only with a completed tool turn since the restart AND --expect-account matched.
+With --host, the same restart runs on that machine against its daemon, over its SSH entry; the audit names this
+seat as the operator unless --operator does, and the result is that machine's, as it reports it.
 Examples:
   rig seat restart dev.impl --keep-conversation --plan --json
   rig seat restart dev-impl@my-rig --keep-conversation --reason "take the home's new account"
   rig seat restart dev.impl --keep-conversation --verify --expect-account me@example.com`)
-    .action(async (seat: string, opts: { keepConversation: boolean; reason?: string; plan?: boolean; verify?: boolean; expectAccount?: string; operator?: string; json?: boolean }) => {
+    .action(async (seat: string, opts: { keepConversation: boolean; reason?: string; plan?: boolean; verify?: boolean; expectAccount?: string; operator?: string; host?: string; json?: boolean }) => {
       if (opts.plan && opts.verify) {
         const error = { ok: false, code: "invalid_options", message: "--plan and --verify are separate steps; pass one." };
         if (opts.json) console.log(JSON.stringify(error, null, 2));
@@ -968,6 +973,26 @@ Examples:
         if (opts.json) console.log(JSON.stringify(error, null, 2));
         else console.error(error.message);
         process.exitCode = 1;
+        return;
+      }
+      if (opts.host) {
+        const seatName = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim() || undefined;
+        const origin = await originFor(seatName, depsOverride?.host?.selfHostId ?? (() => localSelfHostId(getDeps().lifecycleDeps)));
+        const changes = !opts.plan && !opts.verify;
+        const operator = opts.operator ?? (changes ? origin : undefined);
+        await runOnSshHost(opts.host, "seat restart", [
+          "seat", "restart", seat, "--keep-conversation",
+          ...(opts.plan ? ["--plan"] : []),
+          ...(opts.verify ? ["--verify"] : []),
+          ...(opts.expectAccount !== undefined ? ["--expect-account", opts.expectAccount] : []),
+          ...(opts.reason !== undefined ? ["--reason", opts.reason] : []),
+          ...(operator ? ["--operator", operator] : []),
+          ...(opts.json ? ["--json"] : []),
+        ], {
+          origin,
+          json: opts.json,
+          ...(changes ? { changes: { check: `rig seat restart ${seat} --keep-conversation --plan --host ${opts.host} (its lastRestart says whether this restart ran); don't restart it again on this result alone` } } : {}),
+        }, depsOverride?.host);
         return;
       }
       if (opts.verify) {

@@ -714,10 +714,10 @@ Only Claude and Codex tenures can be woken.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig auth` | — | — |
-| `rig auth status` | — | `--runtime <runtime>` |
-| `rig auth list` | — | `--runtime <runtime>` |
+| `rig auth status` | — | `--runtime <runtime>`<br>`--codex-home <dir>`<br>`--host <id>` |
+| `rig auth list` | — | `--runtime <runtime>`<br>`--codex-home <dir>`<br>`--host <id>` |
 | `rig auth save <profile>` | — | `--runtime <runtime>` |
-| `rig auth switch <profile>` | — | `--runtime <runtime>` |
+| `rig auth switch <profile>` | — | `--runtime <runtime>`<br>`--codex-home <dir>`<br>`--host <id>` |
 | `rig auth validate <profile>` | — | `--runtime <runtime>` |
 | `rig auth seats` | — | — |
 | `rig auth seats list` | — | `--runtime <runtime>` |
@@ -736,6 +736,8 @@ Only Claude and Codex tenures can be woken.
 | `rig provider signals` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
 | `rig provider precheck` | — | `--seat <s>` **required**<br>`--to-account <a>` **required**<br>`--json` |
 | `rig provider switch` | — | `--seat <s>` **required**<br>`--to-account <a>` **required**<br>`--force-unsafe`<br>`--json` |
+| `rig provider moves` | — | `--seat <seat>`<br>`--limit <n>`<br>`--json` |
+| `rig provider moves report` | — | `--file <path>` **required**<br>`--to <seat>` **required**<br>`--follows <qitemId>`<br>`--evidence-ref <ref>`<br>`--json` |
 
 ### usage
 

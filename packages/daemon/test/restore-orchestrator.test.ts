@@ -1,3 +1,4 @@
+import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
@@ -2379,7 +2380,7 @@ describe("RestoreOrchestrator", () => {
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.result.nodes.map((node) => node.status)).toEqual(["attention_required", "attention_required", "attention_required"]);
     expect(seen).toHaveLength(3);
-    for (const opts of seen) expect(Object.keys(opts).sort()).toEqual(["name", "resumeToken"]);
+    for (const opts of seen) expect(Object.keys(opts).sort()).toEqual(["name", "resumeToken", "resumeType"]);
   });
 
   it("pod-aware chooser attention preserves the attempted native token for no-input reconciliation", async () => {
@@ -2784,15 +2785,21 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
-  it.each(["current", "legacy"])("a community harness's %s snapshot stops at resume-unsupported even with a saved token, launching nothing", async (format) => {
+  it.each([["current", "former"], ["legacy", "former"], ["current", "launcher"]] as const)("a community harness's %s snapshot stops at resume-unsupported, in the preview and in restore, even with a %s token, launching nothing", async (format, token) => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-community-harness", rig.id, "Dev");
     const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "synth-harness", podId: "pod-community-harness" });
     const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
     sessionRegistry.updateStatus(session.id, "running");
-    // A token left by a former runtime: nothing resumes a community harness with it.
-    sessionRegistry.updateResumeToken(session.id, "codex_id", "former-runtime-token");
+    // A token left by a former runtime, or one its launcher reported: nothing resumes a community harness with it.
+    if (token === "former") sessionRegistry.updateResumeToken(session.id, "codex_id", "former-runtime-token");
+    else sessionRegistry.recordLauncherReportedToken(session.id, "community:synth-harness", "chat-123");
     sessionRegistry.recordCommunityHarnessSelection(session.id, "synth-harness");
+    if (token === "launcher") {
+      // A report isn't a verification: the session doesn't read as resumable.
+      expect(db.prepare("SELECT resume_provenance AS p, resume_last_verified AS v, resume_last_probe_status AS s FROM sessions WHERE id = ?").get(session.id))
+        .toEqual({ p: "launcher", v: null, s: null });
+    }
     db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "synth-harness");
     const snap = snapshotCapture.captureSnapshot(rig.id, "test");
     if (format === "legacy") {
@@ -2814,6 +2821,9 @@ describe("RestoreOrchestrator", () => {
       launchHarness,
     };
 
+    const reason = `Resume is unsupported for community harness "synth-harness": its preset is launch-only. No session was started, and the earlier conversation is left as it is. Only if you want a new conversation, run: rig seat launch 'dev.impl@test-rig' --fresh --reason "<why>".`;
+    const savedSnap = snapshotRepo.getSnapshot(snap.id)!;
+    expect(buildRestorePlanPreview(rigRepo.getRig(rig.id)!, savedSnap, savedSnap.data.sessions).nodes[0]).toMatchObject({ intendedAction: "awaiting-decision", reason });
     const orch = createOrchestrator();
     const result = await orch.restore(snap.id, { adapters: { "synth-harness": mockAdapter } });
 
@@ -2823,6 +2833,62 @@ describe("RestoreOrchestrator", () => {
       expect(nodeResult!.status).toBe("awaiting-decision");
       expect(nodeResult!.error).toBe(`Resume is unsupported for community harness "synth-harness": its preset is launch-only. No session was started, and the earlier conversation is left as it is. Only if you want a new conversation, run: rig seat launch 'dev.impl@test-rig' --fresh --reason "<why>".`);
       expect(launchHarness).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each([
+    ["its own conversation reopens", "community:synth-harness", { ok: true, resumeToken: "chat-123", resumeType: "community:synth-harness", resumeProvenance: "launcher" },
+      "resume-original", "resumed", 1, { t: "chat-123", p: "launcher" }],
+    ["the launcher reports another conversation", "community:synth-harness", { ok: false, recovery: "attention_required", resumeMismatch: { opened: "chat-999" },
+      error: "asked to resume conversation chat-123, its launcher reports conversation chat-999 instead. The seat keeps conversation chat-123" }, "resume-original", "attention_required", 1,
+      { t: "chat-123", p: null }],
+    ["the conversation is gone", "community:synth-harness", { ok: false, missingConversation: true, error: "conversation chat-123: its launcher says the conversation doesn't exist, and started nothing" },
+      "resume-original", "awaiting-decision", 1, { t: null, p: null }],
+    ["the saved token is a former runtime's", "codex_id", { ok: true }, "awaiting-decision", "awaiting-decision", 0, { t: "codex-thread-1", p: null }],
+    ["its launcher never reported a conversation", "none", { ok: true }, "awaiting-decision", "awaiting-decision", 0, { t: null, p: null }],
+  ] as const)("a community harness whose preset declares resume, when %s: the preview and restore agree on the seat's outcome", async (_case, tokenType, launch, forecast, status, calls, current) => {
+    const saved = process.env["OPENRIG_HOME"];
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "restore-community-resume-"));
+    try {
+      process.env["OPENRIG_HOME"] = home;
+      fs.mkdirSync(path.join(home, "community-harnesses"));
+      fs.writeFileSync(path.join(home, "community-harnesses", "synth-harness.yaml"),
+        "format: 1\nname: synth-harness\ncommand: synth-launch\nmaintainer: Example\nlimits: []\nlaunch_result: true\nresume: true\n");
+      const rig = rigRepo.createRig("test-rig");
+      db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-community-resume", rig.id, "Dev");
+      const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "synth-harness", podId: "pod-community-resume" });
+      const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+      sessionRegistry.updateStatus(session.id, "running");
+      if (tokenType === "codex_id") sessionRegistry.updateResumeToken(session.id, "codex_id", "codex-thread-1");
+      else if (tokenType !== "none") sessionRegistry.recordLauncherReportedToken(session.id, tokenType, "chat-123");
+      sessionRegistry.recordCommunityHarnessSelection(session.id, "synth-harness");
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "synth-harness");
+      const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+      sessionRegistry.updateStatus(session.id, "exited");
+      db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+      const savedSnap = snapshotRepo.getSnapshot(snap.id)!;
+      expect(buildRestorePlanPreview(rigRepo.getRig(rig.id)!, savedSnap, savedSnap.data.sessions).nodes[0]).toMatchObject({ intendedAction: forecast });
+      const launchHarness = vi.fn(async () => launch);
+      const mockAdapter = { runtime: "synth-harness", listInstalled: vi.fn(async () => []), project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+        deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })), checkReady: vi.fn(async () => ({ ready: true })), launchHarness };
+      const result = await createOrchestrator().restore(snap.id, { adapters: { "synth-harness": mockAdapter as never } });
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      if (!result.ok) return;
+      const restored = result.result.nodes.find((n) => n.nodeId === node.id);
+      expect(restored).toMatchObject({ status });
+      // A seat with no conversation is told so, not that it holds a former runtime's id.
+      if (tokenType === "none") expect(restored?.error).toMatch(/no resume token was captured/);
+      expect(launchHarness).toHaveBeenCalledTimes(calls);
+      if (calls) expect((launchHarness.mock.calls[0] as unknown[])[1]).toMatchObject({ resumeToken: "chat-123", resumeType: "community:synth-harness" });
+      // The current session never takes a different conversation, and the seat says "reported by its launcher" only when
+      // this launch's launcher reported it: a resume that needed attention keeps chat-123 as attempted, not reported.
+      expect(db.prepare("SELECT resume_token AS t, resume_provenance AS p FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(node.id)).toEqual(current);
+      const label = getNodeInventory(db, rig.id)[0]!.communityHarness;
+      expect(label?.identity).toBe(current.p === "launcher" ? "reported by its launcher, not observed" : "not confirmed");
+      expect(label?.reportedConversation).toBe(current.p === "launcher" ? "chat-123" : undefined);
+    } finally {
+      if (saved === undefined) delete process.env["OPENRIG_HOME"]; else process.env["OPENRIG_HOME"] = saved;
+      fs.rmSync(home, { recursive: true, force: true });
     }
   });
 

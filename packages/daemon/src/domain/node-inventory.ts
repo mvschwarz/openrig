@@ -67,6 +67,7 @@ interface InventoryRow {
   startup_status: string | null;
   resume_type: string | null;
   resume_token: string | null;
+  resume_provenance?: string | null;
   startup_completed_at: string | null;
   binding_attachment_type: string | null;
   binding_id: string | null;
@@ -636,6 +637,7 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       s.startup_status,
       s.resume_type,
       s.resume_token,
+      s.resume_provenance,
       s.startup_completed_at,
       b.attachment_type as binding_attachment_type,
       b.id as binding_id,
@@ -745,7 +747,7 @@ function buildInventoryEntry(
     attachmentType: (row.binding_attachment_type as NodeInventoryEntry["attachmentType"]) ?? null,
     nodeKind: deriveNodeKind(row.runtime),
     runtime: row.runtime,
-    ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!) } : {}),
+    ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!, undefined, { resumeType: row.resume_type, resumeToken: row.resume_token, resumeProvenance: row.resume_provenance ?? null }) } : {}),
     sessionStatus,
     storedSessionStatus: row.session_status,
     intentionallyStopped: row.intentionally_stopped === 1

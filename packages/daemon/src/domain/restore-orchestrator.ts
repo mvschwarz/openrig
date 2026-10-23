@@ -88,8 +88,9 @@ const LAUNCH_DEPENDENCY_KINDS = new Set(["delegates_to", "spawned_by"]);
 // usability, and lifecycle projection. Imported and re-exported here so the
 // existing export surface and the execution call sites below are unchanged.
 import { resolveActiveSnapshotSession, activeOccupantAmbiguityError, absentSeatResumeHistory, absentSeatResumeHistoryError, freshSeatLaunchCommand } from "./active-occupant.js";
-import { effectiveRestorePolicy, type RestoreSeatFacts } from "./restore-policy.js";
+import { effectiveRestorePolicy, type RestoreSeatFacts, communityLaunchOnlyRestoreReason } from "./restore-policy.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
+import { communityHarnessStopsRestore } from "./community-harness-presets.js";
 import { seatAdapter } from "../adapters/community-harness-runtime-adapter.js";
 import { pluginPathsOf } from "./claude-core-plugin-env.js";
 import { seatLaunchAdditionsForLaunch, systemPromptPendingNoteForNode, type SeatLaunchAdditions } from "./seat-launch-additions.js";
@@ -156,7 +157,9 @@ function snapshotLaunchOutcome(data: SnapshotData, nodeId: string, runtime: stri
   }
   const policy = effectiveRestorePolicy(seatFacts(data, nodeId, savedRuntime, runtime), session.restorePolicy);
   if (policy !== "resume_if_possible") return { kind: "fresh", why: `saves this seat with restore policy '${policy}'` };
-  if (communityHarnessOf(session.communityHarness, runtime)) return { kind: "decision", why: "is a community harness whose preset is launch-only (resume unsupported)" };
+  if (communityHarnessOf(session.communityHarness, runtime) && communityHarnessStopsRestore(runtime, session.resumeType, session.resumeToken)) {
+    return { kind: "decision", why: "is a community harness whose preset can't resume this seat's saved conversation (launch-only, or the id isn't this harness's own)" };
+  }
   if (!session.resumeToken) return { kind: "decision", why: "has no resume token for this seat" };
   if (!session.resumeType || session.resumeType === "none") return { kind: "fresh", why: "records no resume source for this seat" };
   return { kind: "resume" };
@@ -1051,13 +1054,15 @@ export class RestoreOrchestrator {
       const snapSession = occupantResolution.kind === "resolved" ? occupantResolution.session : null;
       const policy = effectiveRestorePolicy(seatFacts(data, nodeId, node.runtime, liveNode ? liveNode.runtime : node.runtime), snapSession?.restorePolicy);
       const resumeSourceRecorded = !!snapSession?.resumeType && snapSession.resumeType !== "none";
-      // A community harness is launch-only: nothing resumes it, so even a saved token (say, from a former runtime) stops here.
-      if (policy === "resume_if_possible" && snapSession && !freshRequested && communityHarnessOf(snapSession.communityHarness, node.runtime)) {
+      // A community harness that can't resume this seat's token (launch-only, or a former runtime's id) stops here; a seat
+      // with no token goes on to the "no resume token" stop below.
+      if (policy === "resume_if_possible" && snapSession && !freshRequested && communityHarnessOf(snapSession.communityHarness, node.runtime)
+        && communityHarnessStopsRestore(node.runtime, snapSession.resumeType, snapSession.resumeToken)) {
         return {
           nodeId,
           logicalId: node.logicalId,
           status: "awaiting-decision",
-          error: `Resume is unsupported for community harness "${node.runtime}": its preset is launch-only. No session was started, and the earlier conversation is left as it is. Only if you want a new conversation, run: ${this.freshSeatCommand(rigId, data, node.logicalId)}.`,
+          error: communityLaunchOnlyRestoreReason(node.runtime, node.logicalId, this.rigRepo.getRig(rigId)?.rig.name ?? data.rig.name),
         };
       }
       if (policy === "resume_if_possible" && snapSession && !snapSession.resumeToken && !freshRequested) {
@@ -1702,7 +1707,7 @@ export class RestoreOrchestrator {
               // Only the runtime's own report that the conversation doesn't exist rolls the seat back
               // as unresumable. A pane that went back to its shell for another reason stays failed,
               // with its pane and binding kept, so its output can still be read.
-              if (startupResult.recovery === "retry_fresh" && startupResult.missingConversation) {
+              if (startupResult.missingConversation) {
                 await this.rollbackToZeroSession(node.id, sessionName, launchResult?.session.id, priorState);
                 return {
                   nodeId: node.id,

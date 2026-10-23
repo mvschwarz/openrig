@@ -602,7 +602,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     for (const file of files) {
       try {
         const content = this.fs.readFile(file.absolutePath);
-        const hint = file.deliveryHint === "auto" ? this.detectDeliveryHint(file.path, content) : file.deliveryHint;
+        const hint = file.deliveryHint === "auto" ? this.detectDeliveryHint(file.path, content, file.orientation) : file.deliveryHint;
 
         switch (hint) {
           case "guidance_merge": {
@@ -1239,8 +1239,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return true;
   }
 
-  private detectDeliveryHint(path: string, content: string): "guidance_merge" | "skill_install" | "send_text" {
-    return resolveConcreteHint(path, content);
+  private detectDeliveryHint(path: string, content: string, orientation?: string): "guidance_merge" | "skill_install" | "send_text" {
+    return resolveConcreteHint(path, content, orientation);
   }
 
   private provisionWorkspaceTrust(cwd: string | null): void {
