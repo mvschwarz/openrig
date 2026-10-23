@@ -301,6 +301,19 @@ describe("workflow route (WF3 FR-4 — close+recreate+rebind)", () => {
     expect(inst.currentStepId).toBe("produce");
   });
 
+  it("an alert-worthy step routed to a person stays alert-worthy; routed to an agent it doesn't carry the tag", async () => {
+    const tagsOf = (id: string) => JSON.parse((db.prepare("SELECT tags FROM queue_items WHERE qitem_id = ?").get(id) as { tags: string }).tags) as string[];
+    // A failed step's approval, as the projector makes it: alert-worthy, with the summary and evidence a person reads.
+    const markAlertWorthy = (id: string) => db.prepare("UPDATE queue_items SET tags = ?, summary = ?, evidence_ref = ? WHERE qitem_id = ?")
+      .run(JSON.stringify([...tagsOf(id), "human-alert"]), "Approve the failed step's retry", "/proof/failed-step.md", id);
+    const { instanceId, entryPacket } = await instantiate();
+    markAlertWorthy(entryPacket);
+    const toPerson = await runtime.route({ instanceId, toSession: "human-founder@kernel", actorSession: "orch@rig" });
+    expect(tagsOf(toPerson.newPacketId)).toContain("human-alert");
+    const toAgent = await runtime.route({ instanceId, toSession: "producer2@rig", actorSession: "orch@rig" });
+    expect(tagsOf(toAgent.newPacketId)).not.toContain("human-alert");
+  });
+
   it("concurrency: the version guard serializes — a stale-versioned frontier write after route conflicts", async () => {
     const { instanceId } = await instantiate();
     const stale = runtime.instanceStore.getByIdOrThrow(instanceId);
