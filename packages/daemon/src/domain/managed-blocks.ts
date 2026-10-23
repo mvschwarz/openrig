@@ -146,18 +146,48 @@ export function removeManagedBlocksFromFile(
       return `\u0000openrig-kept-${kept.length - 1}\u0000`;
     });
   }
-  const cleaned = stripManagedBlocks(working).replace(/\u0000openrig-kept-(\d+)\u0000/g, (_m, i: string) => kept[Number(i)]!);
-  if (cleaned.length === 0) {
+  // Blocks the writer added come out with exactly its separators, so the person's bytes are as they were; a file in any
+  // other shape is cleaned and its blank lines normalized, as before.
+  const exact = removeBlocksAsWritten(working);
+  const cleaned = (exact ?? stripManagedBlocks(working)).replace(/\u0000openrig-kept-(\d+)\u0000/g, (_m, i: string) => kept[Number(i)]!);
+  // A file the writer created goes when nothing else is left; a file that was there before keeps its bytes, even empty.
+  if (cleaned.length === 0 && (exact === null || working.startsWith("<!-- BEGIN OpenRig MANAGED BLOCK: "))) {
     fs.deleteFile(targetPath);
     return { changed: true, keptEdited };
   }
 
-  if (cleaned !== original.trim()) {
-    fs.writeFile(targetPath, `${cleaned}\n`);
+  if (exact === null ? cleaned !== original.trim() : cleaned !== original) {
+    fs.writeFile(targetPath, exact === null ? `${cleaned}\n` : cleaned);
     return { changed: true, keptEdited };
   }
 
   return { changed: false, keptEdited };
+}
+
+/** The current writer's blocks where `stripManagedBlocks` finds them: the same matches, with each block's own span. */
+const CURRENT_BLOCK = /(?:\n|^)\s*(<!-- BEGIN OpenRig MANAGED BLOCK: [\s\S]*?<!-- END OpenRig MANAGED BLOCK: [^>]+ -->)(\s*)(?=\n|$)/g;
+
+/**
+ * `content` with OpenRig's blocks taken out as `mergeManagedBlock` put them in: each block, the separator it wrote before
+ * the first (none when that block started a new file), and the newlines between and after blocks, which only the writer
+ * puts there (a later merge ends the file with one more). Text a person added around a block stays as it is. Null when
+ * the file isn't in that shape, such as a legacy block, or text against a block without the writer's separator.
+ */
+function removeBlocksAsWritten(content: string): string | null {
+  if (content.includes("<!-- BEGIN RIGGED MANAGED BLOCK:")) return null;
+  const spans = [...content.matchAll(CURRENT_BLOCK)].map((m) => {
+    const end = m.index! + m[0].length - m[2]!.length;
+    return { start: end - m[1]!.length, end };
+  });
+  let kept = "";
+  for (let i = 0; i <= spans.length; i++) {
+    const text = content.slice(i === 0 ? 0 : spans[i - 1]!.end, i < spans.length ? spans[i]!.start : content.length);
+    if (i > 0 && /^\n*$/.test(text)) continue;
+    if (i === spans.length || (i === 0 && text === "")) { kept += text; continue; }
+    if (!text.endsWith(MANAGED_BLOCK_APPEND_SEPARATOR)) return null;
+    kept += text.slice(0, -MANAGED_BLOCK_APPEND_SEPARATOR.length);
+  }
+  return kept;
 }
 
 export function stripManagedBlocks(content: string): string {

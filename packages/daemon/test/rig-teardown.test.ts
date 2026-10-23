@@ -16,7 +16,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
-import { mergeManagedBlock } from "../src/domain/managed-blocks.js";
+import { managedBlockText, mergeManagedBlock } from "../src/domain/managed-blocks.js";
 import { SEAT_SKILLS_BOOTSTRAP_LINE } from "../src/domain/seat-skill-storage.js";
 
 
@@ -537,6 +537,7 @@ describe("RigTeardownOrchestrator", () => {
       mergeManagedBlock(writer, guidance, "CULTURE.md", "culture text");
       mergeManagedBlock(writer, guidance, "openrig-seat-skills.md", asset);
       fs.writeFileSync(guidance, fs.readFileSync(guidance, "utf-8").replace(SEAT_SKILLS_BOOTSTRAP_LINE, edit(SEAT_SKILLS_BOOTSTRAP_LINE)));
+      const before = fs.readFileSync(guidance, "utf-8");
       const rig = rigRepo.createRig(`line-${runtime}-${kind}`);
       const node = rigRepo.addNode(rig.id, "dev", { runtime, cwd });
       sessionRegistry.updateStatus(sessionRegistry.registerSession(node.id, `dev@line-${runtime}-${kind}`).id, "running");
@@ -548,10 +549,42 @@ describe("RigTeardownOrchestrator", () => {
         expect(after, kind).toBe(personal);
         expect(result.keptGuidance, kind).toBeUndefined();
       } else {
-        expect(after.startsWith(personal), kind).toBe(true);
+        // Only the culture block and its separator go: every byte around the kept edit stays.
+        expect(after, kind).toBe(before.replace(`\n\n${managedBlockText("CULTURE.md", "culture text")}`, ""));
         expect(after, kind).toContain(`<!-- BEGIN OpenRig MANAGED BLOCK: openrig-seat-skills.md -->\n${edit(SEAT_SKILLS_BOOTSTRAP_LINE)}\n`);
-        expect(after, kind).not.toContain("culture text");
         expect(result.keptGuidance, kind).toEqual([`${guidance}: openrig-seat-skills.md`]);
+      }
+    }
+  });
+
+  // Down takes out exactly what the writer added: a person's file is byte for byte what it was before the line went in,
+  // whatever it ended with, after one start or several, beside the rig's other blocks; a file the line created is gone.
+  it.each([
+    ["claude-code", "CLAUDE.md"], ["codex", "AGENTS.md"],
+  ] as const)("returns a %s seat's %s to its original bytes after the seat-skills line was on", async (runtime, fileName) => {
+    const writer = { exists: (p: string) => fs.existsSync(p), readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c) };
+    const asset = fs.readFileSync(path.join(import.meta.dirname, "../assets/guidance/openrig-seat-skills.md"), "utf-8");
+    const shapes = { "no trailing newline": "# Notes\nkeep these", "one trailing newline": "# Notes\nkeep these\n", "two trailing newlines": "# Notes\nkeep these\n\n", "a new file": null };
+    for (const [shape, original] of Object.entries(shapes)) {
+      for (const starts of [1, 2]) {
+        const label = `${shape}, ${starts} start(s)`;
+        const cwd = fs.mkdtempSync(path.join(tmpDir, `${runtime}-`));
+        const guidance = path.join(cwd, fileName);
+        if (original !== null) fs.writeFileSync(guidance, original);
+        // Each start merges the rig's culture and then the seat-skills line, as a start with the line on writes them.
+        for (let i = 0; i < starts; i++) {
+          mergeManagedBlock(writer, guidance, "CULTURE.md", "culture text");
+          mergeManagedBlock(writer, guidance, "openrig-seat-skills.md", asset);
+        }
+        expect(fs.readFileSync(guidance, "utf-8"), label).toContain(SEAT_SKILLS_BOOTSTRAP_LINE);
+        const rig = rigRepo.createRig(`bytes-${runtime}-${Object.keys(shapes).indexOf(shape)}-${starts}`);
+        const node = rigRepo.addNode(rig.id, "dev", { runtime, cwd });
+        sessionRegistry.updateStatus(sessionRegistry.registerSession(node.id, `dev@${rig.name}`).id, "running");
+
+        await buildTeardown().teardown(rig.id);
+
+        if (original === null) expect(fs.existsSync(guidance), label).toBe(false);
+        else expect(fs.readFileSync(guidance, "utf-8"), label).toBe(original);
       }
     }
   });
