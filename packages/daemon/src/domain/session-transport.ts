@@ -1652,6 +1652,18 @@ export interface SendOpts {
 
 const CALLER_CANCELLED = "caller_cancelled";
 
+/** The readiness reason's tail when only the retained hook says the seat waits on a person: the pane shows no prompt it
+ *  recognizes. */
+const LATEST_HOOK_ONLY = "latest hook, pane unrecognized";
+
+/** What to do when the refusal rests only on that hook: a prompt declined or answered with no hook after it reads that
+ *  way until someone who saw it end says so. */
+function clearAttentionHint(sessionName: string, reason: string): string {
+  return reason.endsWith(LATEST_HOOK_ONLY)
+    ? ` If that prompt is gone (declined or answered), clear it: rig seat clear-attention ${sessionName} --reason "<what you saw>".`
+    : "";
+}
+
 /** The caller's cancellation signal, or none for sends no caller owns (queue wakes, committed outbox deliveries). */
 function callerSignal(opts?: SendOpts): AbortSignal | undefined {
   return opts?.queueWake || opts?.committedOutboxIds ? undefined : opts?.signal;
@@ -2836,7 +2848,7 @@ export class SessionTransport {
             recheck.state === "needs_input"
               ? {
                   reason: "target_needs_input",
-                  error: `Refused: '${sessionName}' is at an interactive prompt (${recheck.reason}). A message must not select or approve it. To deliberately drive the prompt: rig send ${sessionName} "<text>" --dangerously-interact --reason "<why>". No text was sent.`,
+                  error: `Refused: '${sessionName}' is at an interactive prompt (${recheck.reason}). A message must not select or approve it. To deliberately drive the prompt: rig send ${sessionName} "<text>" --dangerously-interact --reason "<why>".${clearAttentionHint(sessionName, recheck.reason)} No text was sent.`,
                 }
               : recheck.state === "unknown"
                 ? {
@@ -2945,7 +2957,7 @@ export class SessionTransport {
             sessionName,
             reason: "target_needs_input",
             activity: readiness,
-            error: `Refused: '${sessionName}' is at an interactive prompt (${readiness.reason}). A message must not select or approve it. To deliberately drive the prompt: rig send ${sessionName} "<text>" --dangerously-interact --reason "<why>". No text was sent.`,
+            error: `Refused: '${sessionName}' is at an interactive prompt (${readiness.reason}). A message must not select or approve it. To deliberately drive the prompt: rig send ${sessionName} "<text>" --dangerously-interact --reason "<why>".${clearAttentionHint(sessionName, readiness.reason)} No text was sent.`,
           };
         }
       } else if (readiness.state === "unknown") {
@@ -3300,7 +3312,7 @@ export class SessionTransport {
         return {
           ok: false,
           reason: "target_needs_input",
-          error: `Target requires attention (${activity.reason}). No text was sent.`,
+          error: `Target requires attention (${activity.reason}).${clearAttentionHint(input.sessionName, activity.reason)} No text was sent.`,
           activity,
           waitedMs,
           attempts,
@@ -3510,7 +3522,7 @@ export class SessionTransport {
       return {
         ...hookActivity,
         state: "needs_input",
-        reason: `${hookActivity.rawSubtype ?? hookActivity.rawEvent ?? "needs_input"}; latest hook, pane unrecognized`,
+        reason: `${hookActivity.rawSubtype ?? hookActivity.rawEvent ?? "needs_input"}; ${LATEST_HOOK_ONLY}`,
       };
     }
     return probe;

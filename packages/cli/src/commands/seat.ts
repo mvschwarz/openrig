@@ -542,7 +542,7 @@ rig seat handover, THEN retarget the view. Examples:
   cmd
     .command("clear-attention")
     .argument("<session>", "Canonical session name (e.g. dev-impl@my-rig)")
-    .option("--reason <text>", "Attest startup or subset-restore attention; cannot bypass full-restore or pane-identity checks")
+    .option("--reason <text>", "Attest startup or subset-restore attention, or that a prompt the latest hook names is gone; cannot bypass full-restore or pane-identity checks")
     .option("--json", "JSON output for agents")
     .description("Reconcile seat attention using the checks for its attention class")
     .addHelpText("after", `
@@ -551,7 +551,11 @@ Examples:
   rig seat clear-attention dev-impl@my-rig --reason "founder re-authed, confirmed live"
   rig seat clear-attention dev-impl@my-rig --json
 
---reason can acknowledge startup-status and subset-restore attention. It does
+--reason can acknowledge startup-status and subset-restore attention. It can
+also say a prompt is gone: when the seat's latest hook still says it waits on a
+person (a permission prompt declined or answered with no hook after) and sends
+are refused, --reason "<what you saw>" records the prompt cleared. Each send
+still checks the pane for a prompt it recognizes. It does
 not bypass full-restore continuity or pane-identity checks. Acknowledgment alone
 does not prove that the original conversation resumed.
 If the recorded native token needs correction and you know the actual token:

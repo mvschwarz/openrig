@@ -6,7 +6,7 @@ import { decodeTime } from "ulid";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
-import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
+import { AgentActivityStore, latestHookWaitsOnPerson } from "../src/domain/agent-activity-store.js";
 import { SeatAttentionReconciler } from "../src/domain/seat-attention-reconciler.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
@@ -151,6 +151,42 @@ describe("SeatAttentionReconciler", () => {
 
     expect(result.ok).toBe(false);
     expect(result.code).toBe("not_in_attention");
+  });
+
+  describe("a latest hook that still says the seat waits on a person (a prompt declined or answered with no hook after)", () => {
+    function readySeat(name: string, hookEvent: string, ageMs = 600_000): string {
+      const rig = rigRepo.createRig(name);
+      const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+      const session = sessionRegistry.registerSession(node.id, `worker@${name}`);
+      sessionRegistry.updateStartupStatus(session.id, "ready");
+      activityStore.recordHookEvent({ sessionName: `worker@${name}`, runtime: "claude-code", hookEvent,
+        occurredAt: new Date(Date.now() - ageMs).toISOString() });
+      return `worker@${name}`;
+    }
+
+    it("is an attention class: without --reason it says what to do, not 'not in attention'", async () => {
+      const seat = readySeat("r-hook-1", "PermissionPromptConfirmed");
+      const result = await reconciler.clearAttention(seat);
+      expect(result).toMatchObject({ ok: false, code: "not_demonstrably_responsive" });
+      expect(result.detail).toContain("PermissionPromptConfirmed");
+      expect(result.detail).toContain('rerun with --reason "<what you saw>"');
+    });
+
+    it("with --reason it records the prompt cleared, so the hook no longer reads as a waiting person", async () => {
+      const seat = readySeat("r-hook-2", "PermissionPromptConfirmed");
+      const result = await reconciler.clearAttention(seat, { reason: "declined; composer empty" });
+      expect(result).toMatchObject({ ok: true, code: "cleared", clearedBy: "operator_attestation", clearedClasses: ["needs_input_hook"] });
+      const latest = activityStore.getLatestForNode({ sessionName: seat });
+      expect(latest?.rawEvent).toBe("PermissionPromptCleared");
+      expect(latestHookWaitsOnPerson(latest, "claude-code")).toBe(false);
+      const cleared = db.prepare("SELECT payload FROM events WHERE type = 'seat.attention_cleared' ORDER BY seq DESC LIMIT 1").get() as { payload: string };
+      expect(JSON.parse(cleared.payload)).toMatchObject({ from: "needs_input_hook", clearedBy: "operator_attestation", reason: "declined; composer empty" });
+    });
+
+    it("a ready seat whose latest hook shows work is still not in attention", async () => {
+      const seat = readySeat("r-hook-3", "UserPromptSubmit", 5_000);
+      expect(await reconciler.clearAttention(seat, { reason: "nothing to clear" })).toMatchObject({ ok: false, code: "not_in_attention" });
+    });
   });
 
   it("rebinds a healthy replacement pane and clears the pane-identity attention class", async () => {

@@ -606,6 +606,26 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(sendKeys).not.toHaveBeenCalled();
   });
 
+  it("a prompt declined with no hook after it: the refusal says how to clear it, and once cleared the send goes", async () => {
+    const fixedNow = new Date("2026-10-08T06:47:16.000Z");
+    // The activity poller's own record of the prompt it saw, ten minutes ago; nothing newer was recorded.
+    agentActivityStore.recordHookEvent({ runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "PermissionPromptConfirmed",
+      occurredAt: new Date(fixedNow.getTime() - 600_000).toISOString() });
+    const { sendText } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => UNRECOGNIZED_PANE, sendText }), { now: () => fixedNow });
+    const refused = await t.send("dev-impl@my-rig", "hi");
+    expect(refused).toMatchObject({ ok: false, reason: "target_needs_input" });
+    expect(refused.error).toContain("(PermissionPromptConfirmed; latest hook, pane unrecognized)");
+    expect(refused.error).toContain(`If that prompt is gone (declined or answered), clear it: rig seat clear-attention dev-impl@my-rig --reason "<what you saw>".`);
+    expect(sendText).not.toHaveBeenCalled();
+    // What clear-attention --reason records: the prompt cleared, after the hook that named it.
+    agentActivityStore.recordHookEvent({ runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "PermissionPromptCleared",
+      occurredAt: new Date(fixedNow.getTime() - 5_000).toISOString() });
+    const sent = await t.send("dev-impl@my-rig", "hi");
+    expect(sent.ok).toBe(true);
+    expect(sendText).toHaveBeenCalled();
+  });
+
   it("a stale permission_prompt hook + a recognized empty composer sends (no new refusal at an idle prompt)", async () => {
     const fixedNow = new Date("2026-10-08T06:47:16.000Z");
     seedPersonWaitingHook(fixedNow, 36_000);
