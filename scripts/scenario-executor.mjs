@@ -1,6 +1,6 @@
 // Client-side helpers for the existing scenario scripts; never runs a daemon.
 import { spawn, spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { constants } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -97,6 +97,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     } else if (operation === 'settle') {
       const [cidFile, name, image] = args;
       settleContainer({ id: readFileSync(cidFile, 'utf8').trim(), name, image });
+      unlinkSync(cidFile);
     } else if (operation === 'timeout') {
       process.exitCode = await runWithDeadline(args.slice(1), { timeoutMs: Number(args[0]) * 1000 });
     } else {

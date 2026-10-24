@@ -152,21 +152,30 @@ else if(args[0]==='kill'){
   const state=JSON.parse(fs.readFileSync(marker));state.State={Running:false,Status:'exited'};fs.writeFileSync(marker,JSON.stringify(state));
 }else if(args[0]==='wait'){if(JSON.parse(fs.readFileSync(marker)).State.Running)process.exit(8);console.log('0');}
 else if(args[0]==='rm'){
+  if(process.env.LOAD_CASE==='retain')process.exit(8);
   if(args.length!==2||args[1]!==id||JSON.parse(fs.readFileSync(marker)).State.Running)process.exit(8);
   fs.unlinkSync(marker);
 }else process.exit(8);
 `, { mode: 0o755 });
-    for (const [mode, status] of [["success", 0], ["failure", 7], ["timeout", 124]]) {
+    for (const [mode, status] of [["success", 0], ["success", 0], ["failure", 7], ["timeout", 124], ["retain", 2]]) {
       const out = join(root, mode), marker = join(root, "container");
       const run = spawnSync("/bin/bash", [join(root, "scripts/build-testbed-image.sh"), out], {
         env: { PATH: `${join(root, "bin")}:/usr/bin:/bin`, HOME: root, TMPDIR: root, LOAD_CASE: mode, FAKE_CONTAINER: marker },
         encoding: "utf8", timeout: 8000,
       });
       assert.equal(run.status, status, `${mode}: ${run.stderr}`);
-      assert.equal(Number(readFileSync(join(out, "image-load.exit-code.txt"), "utf8")), status);
+      assert.equal(Number(readFileSync(join(out, "image-load.exit-code.txt"), "utf8")), mode === "retain" ? 0 : status);
       assert.match(readFileSync(join(out, "image-load.container-name.txt"), "utf8"), /^openrig-testbed-load-/);
-      assert.equal(existsSync(marker), false, `${mode}: container must be removed even after timeout`);
+      assert.equal(existsSync(marker), mode === "retain", `${mode}: only confirmed removal clears the container`);
+      assert.equal(existsSync(join(out, "image-load.cid")), mode === "retain", `${mode}: cidfile follows confirmed removal`);
       assert.equal(existsSync(join(out, "manifest.json")), status === 0);
+      if (mode === "retain") {
+        const retry = spawnSync("/bin/bash", [join(root, "scripts/build-testbed-image.sh"), out], {
+          env: { PATH: `${join(root, "bin")}:/usr/bin:/bin`, HOME: root, TMPDIR: root, LOAD_CASE: mode, FAKE_CONTAINER: marker },
+          encoding: "utf8", timeout: 3000,
+        });
+        assert.equal(retry.status, 2); assert.match(retry.stderr, /Retained cidfile/);
+      }
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

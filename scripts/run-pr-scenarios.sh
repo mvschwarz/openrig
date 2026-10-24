@@ -101,7 +101,7 @@ run_case() {  # run_case <case> <mode>
   printf '%s\n' "$status" > "$OUT/$attempt-$scenario-$mode.exit-code.txt"
   cat "$LOG"
   node scripts/scenario-executor.mjs timeout 30 docker inspect "$CONTAINER" > "$OUT/$attempt-$scenario-$mode.container.json"
-  node scripts/scenario-executor.mjs settle "$CONTAINER_CID" "$CONTAINER" "$IMAGE_ID" >/dev/null || { CONTAINER=""; exit 2; }
+  node scripts/scenario-executor.mjs settle "$CONTAINER_CID" "$CONTAINER" "$IMAGE_ID" >/dev/null || { echo "Cleanup incomplete; retained container name: $CONTAINER" >&2; CONTAINER=""; exit 2; }
   CONTAINER=""
   node --input-type=module - "$mode" "$status" "$LOG" "$scenario" <<'JS'
 import { readFileSync } from 'node:fs';

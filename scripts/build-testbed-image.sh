@@ -115,7 +115,7 @@ node "${REPO_ROOT}/scripts/scenario-executor.mjs" timeout 30 docker inspect "${L
   > "${OUT_DIR}/image-load.container.json" || inspect_status=$?
 [ "${load_status}" -eq 0 ] || exit "${load_status}"
 [ "${inspect_status}" -eq 0 ] || exit "${inspect_status}"
-node "${REPO_ROOT}/scripts/scenario-executor.mjs" settle "${LOAD_CID}" "${LOAD_CONTAINER}" "${IMAGE_ID}" >/dev/null || { LOAD_CONTAINER=""; exit 2; }
+node "${REPO_ROOT}/scripts/scenario-executor.mjs" settle "${LOAD_CID}" "${LOAD_CONTAINER}" "${IMAGE_ID}" >/dev/null || { echo "Cleanup incomplete; retained container name: ${LOAD_CONTAINER}" >&2; LOAD_CONTAINER=""; exit 2; }
 LOAD_CONTAINER=""
 
 # --- emit the reproducible manifest + census receipt via the tested node orchestrator ---
