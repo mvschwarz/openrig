@@ -210,6 +210,8 @@ interface DaemonOptions {
   cmuxExec?: ExecFn;
   cmuxFactory?: CmuxTransportFactory;
   cmuxTimeoutMs?: number;
+  /** Test seam for the Rex terminal provider's `rex` CLI runs. */
+  rexRun?: import("./domain/terminal/rex-transport.js").RexRun;
   tmuxOptionPlatform?: NodeJS.Platform;
   slowOpRecorder?: SlowOperationInstrumentation;
   /**
@@ -1948,6 +1950,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     const { TerminalService } = await import("./domain/terminal/terminal-service.js");
     const { createHerdrProviders } = await import("./domain/terminal/herdr-sessions.js");
     const { CmuxProviderAdapter } = await import("./domain/terminal/cmux-provider-adapter.js");
+    const { RexAdapter } = await import("./domain/terminal/rex-adapter.js");
+    const { createRexCliTransport } = await import("./domain/terminal/rex-transport.js");
     const { CmuxLayoutService } = await import("./domain/cmux-layout-service.js");
     const { TerminalViewsStore } = await import("./domain/terminal/terminal-views-store.js");
     const { getNodeInventory, getNodeInventoryForRigs } = await import("./domain/node-inventory.js");
@@ -1979,9 +1983,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // the rig-scope /cmux/launch endpoint, never one window per seat.
       layoutService: new CmuxLayoutService(cmuxAdapter),
     });
-    const providerMap: Record<string, typeof herdrProvider | typeof cmuxProvider> = {
+    const providerMap: Record<string, import("./domain/terminal/terminal-provider.js").TerminalProvider> = {
       herdr: herdrProvider,
       cmux: cmuxProvider,
+      rex: new RexAdapter({ transport: createRexCliTransport(opts?.rexRun ? { run: opts.rexRun, binary: () => "rex" } : {}) }),
     };
 
     deps.terminalService = new TerminalService({

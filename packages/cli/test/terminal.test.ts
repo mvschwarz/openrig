@@ -99,6 +99,19 @@ describe("rig terminal CLI", () => {
     expect(call!.body).toEqual({ view: "acme-build", provider: "cmux" });
   });
 
+  it("open --provider rex POSTs the rex provider and names the Rex session it opened", async () => {
+    const { deps, calls } = makeDeps({
+      routes: { "POST /api/terminal/open": { status: 200, data: opened(["a-seat"], { provider: "rex", space: { id: "session:1", label: "acme-build" } }) } },
+    });
+    const program = createProgram({ terminalDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "terminal", "open", "acme-build", "--provider", "rex"]);
+    expect(calls.find((c) => c.path === "/api/terminal/open")!.body).toEqual({ view: "acme-build", provider: "rex" });
+    expect(logs[0]).toContain("Prepared 1 tile(s) in rex.");
+    expect(logs[0]).toContain('rex session: "acme-build" (session:1).');
+    expect(process.exitCode).toBeUndefined();
+  });
+
   it("open with a partial (some opened, some named) is a SUCCESS — exit 0", async () => {
     const { deps } = makeDeps({
       routes: {
