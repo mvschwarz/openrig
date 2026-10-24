@@ -364,6 +364,8 @@ interface ClearAttentionDeps {
   sessionRegistry: SessionRegistry;
   eventBus: EventBus;
   agentActivityStore: AgentActivityStore;
+  /** Settles the activity service's pending prompt for a session, so it agrees with a cleared hook. */
+  settlePermissionPrompt?: (sessionName: string) => void;
   sendVerify?: SendVerifyFn;
   capture?: CaptureFn;
   db?: Database.Database;
@@ -670,11 +672,13 @@ export class SeatAttentionReconciler {
   }
 
   /** Records the operator's word that the prompt the latest hook named is gone, as the "prompt cleared" hook the activity
-   *  poller writes when it sees one go, so the send gate and the wake ladder stop reading the old hook as a waiting person. */
+   *  poller writes when it sees one go, and settles the poller's pending prompt, so the send gate, the wake ladder and the
+   *  inventory stop reading the seat as waiting on a person. */
   private clearWaitingHook(session: { rigId: string; nodeId: string; runtime: string | null; latestError: string | null },
     sessionName: string, hook: AgentActivity, reason: string): void {
     this.deps.agentActivityStore.recordHookEvent({ sessionName, runtime: session.runtime, generation: hook.generation ?? null,
       hookEvent: "PermissionPromptCleared" });
+    this.deps.settlePermissionPrompt?.(sessionName);
     this.deps.eventBus.emit({ type: "seat.attention_cleared", rigId: session.rigId, nodeId: session.nodeId, sessionName,
       from: "needs_input_hook", to: "ready", clearedBy: "operator_attestation",
       evidence: { kind: "needs_input_hook", state: hook.rawEvent ?? hook.state, reason: hook.reason }, reason, previousError: session.latestError });

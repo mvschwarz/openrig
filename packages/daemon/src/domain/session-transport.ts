@@ -1656,11 +1656,11 @@ const CALLER_CANCELLED = "caller_cancelled";
  *  recognizes. */
 const LATEST_HOOK_ONLY = "latest hook, pane unrecognized";
 
-/** What to do when the refusal rests only on that hook: a prompt declined or answered with no hook after it reads that
- *  way until someone who saw it end says so. */
+/** What to do when the refusal rests only on a retained hook (a Claude waiting hook, or a Codex permission request the pane
+ *  can't confirm): a prompt declined or answered with no hook after it reads that way until someone who saw it end says so. */
 function clearAttentionHint(sessionName: string, reason: string): string {
-  return reason.endsWith(LATEST_HOOK_ONLY)
-    ? ` If that prompt is gone (declined or answered), clear it: rig seat clear-attention ${sessionName} --reason "<what you saw>".`
+  return reason.endsWith(LATEST_HOOK_ONLY) || reason === "permission_request_unverified"
+    ? ` Look first: rig capture ${sessionName}. If that prompt is gone (declined or answered), clear it: rig seat clear-attention ${sessionName} --reason "<what you saw>".`
     : "";
 }
 

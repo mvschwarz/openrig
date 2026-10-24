@@ -417,9 +417,12 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
       return captureKind === "empty" ? "" : "unrecognized provider content";
     };
     const transport = makeTransport(mockTmux({ capturePaneContent: capture, sendText, sendKeys }), { now: () => fixedNow });
-    expect(await transport.send(seat, "follow up", { force: true })).toMatchObject({
+    const refused = await transport.send(seat, "follow up", { force: true });
+    expect(refused).toMatchObject({
       ok: false, reason: "target_needs_input", activity: { reason: "permission_request_unverified" },
     });
+    // Only the retained request says so: the refusal names the way out for a prompt that's gone.
+    expect(refused.error).toContain(`rig seat clear-attention ${seat} --reason "<what you saw>"`);
     expect(sendText).not.toHaveBeenCalled();
     expect(sendKeys).not.toHaveBeenCalled();
   });
@@ -616,7 +619,7 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     const refused = await t.send("dev-impl@my-rig", "hi");
     expect(refused).toMatchObject({ ok: false, reason: "target_needs_input" });
     expect(refused.error).toContain("(PermissionPromptConfirmed; latest hook, pane unrecognized)");
-    expect(refused.error).toContain(`If that prompt is gone (declined or answered), clear it: rig seat clear-attention dev-impl@my-rig --reason "<what you saw>".`);
+    expect(refused.error).toContain(`Look first: rig capture dev-impl@my-rig. If that prompt is gone (declined or answered), clear it: rig seat clear-attention dev-impl@my-rig --reason "<what you saw>".`);
     expect(sendText).not.toHaveBeenCalled();
     // What clear-attention --reason records: the prompt cleared, after the hook that named it.
     agentActivityStore.recordHookEvent({ runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "PermissionPromptCleared",
