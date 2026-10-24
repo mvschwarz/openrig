@@ -9,24 +9,23 @@ applies-when: |
   the source that implements a command. Use command help for invocation details.
 siblings: [README.md, codemap.md]
 prerequisite-reads: [../reference/help.md]
-last-verified-against-source: 92a2b8f7157661716a9c79de742cd82a96d1e6f7
-last-updated: 2026-10-09
+last-verified-against-source: 7923e13e353f5f6f9872cfe4d3f615d1f1ebc478
+last-updated: 2026-10-24
 ---
 
 # CLI Reference — Registered Commands and Options
 
-Verified against source commit `92a2b8f7157661716a9c79de742cd82a96d1e6f7`.
+Verified against source commit `7923e13e353f5f6f9872cfe4d3f615d1f1ebc478`.
 The inventory below comes from the actual Commander tree returned by
 [`createProgram()`](../../packages/cli/src/index.ts), not a grep of command
 strings or an installed CLI from a different commit.
 
-There are **87 top-level registrations**, **356 registered command objects**
+There are **90 top-level registrations**, **399 registered command objects**
 below `rig` (including groups and the hidden `restore apply` command), and
-**1,084 explicitly registered option objects**, including the root version
+**1,255 explicitly registered option objects**, including the root version
 option. Aliases do not add command objects; short/long spellings of one
 option do not add option objects. Commander-generated help is additional.
 These are counts for that source snapshot, not a claim about a deployed release.
-The terminal rows below also include the later named-session options.
 
 ## Reading this reference
 
@@ -144,7 +143,7 @@ Root: `rig`; declared option: `-V, --version`.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig daemon` | — | — |
-| `rig daemon start` | — | `--port <port>`<br>`--host <host>`<br>`--db <path>`<br>`--no-kernel`<br>`--wait-for-kernel`<br>`--wait-for-kernel-ms <ms>` |
+| `rig daemon start` | — | `--port <port>`<br>`--host <host>`<br>`--db <path>`<br>`--allow-db-conflict`<br>`--no-kernel`<br>`--wait-for-kernel`<br>`--wait-for-kernel-ms <ms>` |
 | `rig daemon stop` | — | — |
 | `rig daemon status` | — | — |
 | `rig daemon logs` | — | `--follow` |
@@ -191,8 +190,6 @@ the sections that were not read are `null`.
 | `rig gateway human` | — | — |
 | `rig gateway human add <entityId>` | — | `--display-name <name>` **required**<br>`--binding <kind:connectorRef:secretsRef:role[:handle=<id>]>` **required** (repeatable)<br>`--delivery-class <A\|B\|C\|D>` **required**<br>`--away`<br>`--replace`<br>`--reason <reason>`<br>`--actor <actor>` |
 | `rig gateway human list` | — | `--json` |
-| `rig gateway human show <entityId>` | — | `--json` |
-| `rig gateway human set <entityId> <field> <value>` | — | `--reason <reason>`<br>`--actor <actor>` |
 | `rig gateway human quiet` | — | — |
 | `rig gateway human quiet set <entityId>` | — | `--daily <window>`<br>`--until <time>`<br>`--tz <zone>`<br>`--actor <actor>`<br>`--json` |
 | `rig gateway human quiet end <entityId>` | — | `--actor <actor>`<br>`--json` |
@@ -208,6 +205,8 @@ the sections that were not read are `null`.
 | `rig gateway human mode room <entityId>` | — | `--json` |
 | `rig gateway human mode decide <qitemId>` | — | `--application <id>` **required**<br>`--choose <question=option...>`<br>`--reason <why>` **required**<br>`--reversible`<br>`--irreversible`<br>`--actor <actor>`<br>`--json` |
 | `rig gateway human mode decisions <entityId> <applicationId>` | — | `--json` |
+| `rig gateway human show <entityId>` | — | `--json` |
+| `rig gateway human set <entityId> <field> <value>` | — | `--reason <reason>`<br>`--actor <actor>` |
 | `rig gateway human remove <entityId>` | — | `--force` |
 
 - `human set <entityId> slack-subscription <value>` — sets the person's Slack subscription: `every-ask` (the default) posts every ask to them to Slack; `urgent-only` posts only asks created with `--alert`, and other asks wait on Steering and the TUI; `unset` removes the authored subscription so the default applies. `human show` prints the value with its origin, `authored` or `default` (`slack-subscription: every-ask (default)`); `--json` carries it as `record.slackSubscription` `{ value, source }`.
@@ -403,7 +402,7 @@ the sections that were not read are `null`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig send [session] [text]` | — | `--to <sessions>` (repeatable)<br>`--pod <name>`<br>`--rig <name>`<br>`--verify`<br>`--force`<br>`--wait-for-idle <seconds>`<br>`--raw`<br>`--dangerously-interact`<br>`--reason <text>`<br>`--urgent`<br>`--host <id>`<br>`--from <session>`<br>`--context <ref>`<br>`--json` |
+| `rig send [session] [text]` | — | `--to <sessions>` (repeatable)<br>`--pod <name>`<br>`--rig <name>`<br>`--verify`<br>`--force`<br>`--wait-for-idle <seconds>`<br>`--raw`<br>`--dangerously-interact`<br>`--type-without-checking`<br>`--reason <text>`<br>`--urgent`<br>`--host <id>`<br>`--from <session>`<br>`--context <ref>`<br>`--json` |
 
 ### stream
 
@@ -436,7 +435,7 @@ the sections that were not read are `null`.
 | `rig queue whoami` | — | `--session <session>`<br>`--recent-limit <n>`<br>`--work-candidates`<br>`--json` |
 | `rig queue fallback <qitemId>` | — | `--destination <session>` **required**<br>`--reason <text>`<br>`--json` |
 | `rig queue show <qitemId>` | — | `--full`<br>`--json` |
-| `rig queue transitions <qitemId>` | — | `--json` |
+| `rig queue transitions <qitemId>` | — | `--json`<br>`--full` |
 | `rig queue list` | — | `-a, --all`<br>`-A, --all-rigs`<br>`--full`<br>`--owned`<br>`--mine`<br>`-o <format>`<br>`--destination <session>`<br>`--source <session>`<br>`--state <state>`<br>`--target-repo <name>`<br>`--limit <n>`<br>`--json` |
 | `rig queue overdue` | — | `--rig <name>`<br>`-A, --all-rigs`<br>`--full`<br>`--limit <n>`<br>`--json` |
 | `rig queue undelivered` | — | `--rig <name>`<br>`-A, --all-rigs`<br>`--full`<br>`--limit <n>`<br>`--json` |
@@ -946,10 +945,14 @@ for input and receipt examples, rollback, and snapshot behavior.
 | `rig seat handover <seat>` | — | `--source <source>`<br>`--reason <reason>`<br>`--operator <address>`<br>`--dry-run`<br>`--json` |
 | `rig seat switch-client <seat>` | — | `--to-window <n>`<br>`--client <id>`<br>`--json` |
 | `rig seat clear-attention <session>` | — | `--reason <text>`<br>`--json` |
+| `rig seat set-terminal-policy <seat>` | — | `--preset <preset>` **required**<br>`--helper <addresses...>`<br>`--rig-default`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json`<br>`--peer-compaction <decision>`<br>`--peer-model <decision>`<br>`--self-compaction <decision>`<br>`--self-model <decision>`<br>`--openrig-compaction <decision>`<br>`--openrig-model <decision>` |
 | `rig seat set-permissions <seat>` | — | `--mode <mode>` **required**<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
+| `rig seat set-effort <seat>` | — | `--effort <level>`<br>`--clear`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
+| `rig seat effort <seat>` | — | `--json` |
 | `rig seat set-model <seat>` | — | `--model <id>` **required**<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-cwd <seat>` | — | `--cwd <directory>` **required**<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
-| `rig seat launch <seat>` | — | `--fresh` **required**<br>`--reason <text>` **required**<br>`--stop`<br>`--operator <address>`<br>`--json` |
+| `rig seat launch <seat>` | — | `--fresh` **required**<br>`--reason <text>`<br>`--plan`<br>`--stop`<br>`--operator <address>`<br>`--json` |
+| `rig seat restart <seat>` | — | `--keep-conversation` **required**<br>`--reason <text>`<br>`--plan`<br>`--verify`<br>`--expect-account <text>`<br>`--operator <address>`<br>`--host <id>`<br>`--json` |
 | `rig seat continue <seat>` | — | `--json` |
 | `rig seat stop <seat>` | — | `--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat clean <seat>` | — | `--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
