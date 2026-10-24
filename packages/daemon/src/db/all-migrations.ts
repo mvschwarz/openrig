@@ -1,4 +1,4 @@
-import { claudeTokenReadingsSchema } from "./migrations/132_claude_token_readings.js";
+import { claudeTokenReadingsSchema } from "./migrations/134_claude_token_readings.js";
 // The canonical ordered migration list. SINGLE SOURCE: the daemon boot path
 // (startup.ts) and any test/tool that needs a schema-faithful DB both migrate from THIS array,
 // so a reader DB is never seeded from a stale hand-copied subset (the perf-fixture-migration-parity

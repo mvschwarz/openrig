@@ -1,4 +1,4 @@
-import { claudeTokenReadingsSchema } from "../../src/db/migrations/132_claude_token_readings.js";
+import { claudeTokenReadingsSchema } from "../../src/db/migrations/134_claude_token_readings.js";
 import { terminalPolicySchema } from "../../src/db/migrations/128_terminal_policy.js";
 import { seatIdentityPanePidSchema } from "../../src/db/migrations/119_seat_identity_pane_pid.js";
 import { rigStartupLayersSchema } from "../../src/db/migrations/121_rig_startup_layers.js";

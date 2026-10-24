@@ -1,7 +1,7 @@
 import type { Migration } from "../migrate.js";
 // Extend the existing reading history, not a credential registry. Metadata holds labels/references only.
 export const claudeTokenReadingsSchema: Migration = {
-  name: "132_claude_token_readings.sql",
+  name: "134_claude_token_readings.sql",
   sql: `
     CREATE TABLE provider_account_readings_next (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
