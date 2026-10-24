@@ -165,6 +165,8 @@ export interface RiggedConfig {
   // `rig config get/set terminal.status_bar` surface + twin parity.
   terminal: {
     statusBar: boolean;
+    /** Applied at daemon startup; a live previous server is retained until drained. */
+    tmuxServer: "inherit" | "isolated";
     /** Rows of tmux scrollback per pane; `rig setup` writes it into the managed `~/.tmux.conf` block. */
     historyLimit: number;
     inheritTmuxEnvironment: boolean;
@@ -355,6 +357,7 @@ const DEFAULTS = {
   // OPR.0.4.6.02 S1 — inner-tmux status bar OFF at launch by default.
   terminal: {
     statusBar: false,
+    tmuxServer: "inherit",
     historyLimit: 10000,
     inheritTmuxEnvironment: false,
   },
@@ -504,6 +507,7 @@ export const VALID_KEYS = [
   // boolean (default off), lockstep with the daemon settings-store twin
   // (the parity test pins both). Flip is future-launches-only (BR-1).
   "terminal.status_bar",
+  "terminal.tmux_server",
   // The managed ~/.tmux.conf block's history-limit, written by `rig setup`; lockstep with the daemon twin.
   "terminal.history_limit",
   "terminal.inherit_tmux_environment",
@@ -626,6 +630,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "snapshots.periodic.retention_keep": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_RETENTION_KEEP" },
   // OPR.0.4.6.02 S1 — net-new key; OPENRIG_* primary only (no RIGGED_* legacy).
   "terminal.status_bar": { primary: "OPENRIG_TERMINAL_STATUS_BAR" },
+  "terminal.tmux_server": { primary: "OPENRIG_TMUX_SERVER" },
   "terminal.history_limit": { primary: "OPENRIG_TERMINAL_HISTORY_LIMIT" },
   "terminal.inherit_tmux_environment": { primary: "OPENRIG_TERMINAL_INHERIT_TMUX_ENVIRONMENT" },
   "output.compact": { primary: "OPENRIG_OUTPUT_COMPACT" },
@@ -724,6 +729,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "snapshots.periodic.interval_seconds": ["snapshots", "periodic", "intervalSeconds"],
   "snapshots.periodic.retention_keep": ["snapshots", "periodic", "retentionKeep"],
   "terminal.status_bar": ["terminal", "statusBar"],
+  "terminal.tmux_server": ["terminal", "tmuxServer"],
   "terminal.history_limit": ["terminal", "historyLimit"],
   "terminal.inherit_tmux_environment": ["terminal", "inheritTmuxEnvironment"],
   "output.compact": ["output", "compact"],
@@ -949,6 +955,11 @@ function percentageConstraint(key: string) {
 }
 
 const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | number | boolean) => void>> = {
+  "terminal.tmux_server": (raw) => {
+    if (raw !== "inherit" && raw !== "isolated") {
+      throw new Error(`Invalid value for terminal.tmux_server: must be "inherit" or "isolated", got "${raw}"`);
+    }
+  },
   "daemon.db_conflict": (raw) => {
     if (raw !== "warn" && raw !== "stop") throw new Error("daemon.db_conflict must be warn or stop");
   },
@@ -1328,6 +1339,7 @@ export class ConfigStore {
       },
       terminal: {
         statusBar: v("terminal.status_bar") as boolean,
+        tmuxServer: v("terminal.tmux_server") as "inherit" | "isolated",
         historyLimit: v("terminal.history_limit") as number,
         inheritTmuxEnvironment: v("terminal.inherit_tmux_environment") as boolean,
       },

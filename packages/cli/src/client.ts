@@ -170,6 +170,29 @@ export class DaemonClient {
   private originUnknown = false;
   private readonly sessionName?: string;
 
+  /** Isolated terminal tools require this home's durable identity, even on loopback. */
+  async isLocalInstance(): Promise<boolean> {
+    if (this.remoteTarget) return false;
+    const origin = (await import("./local-origin.js")).readLocalOrigin();
+    return !!origin && await this.matchesInstanceIdentity(origin);
+  }
+
+  private async matchesInstanceIdentity(origin: string): Promise<boolean> {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const target = await Promise.race([
+        (async () => {
+          const res = await this.fetchImpl(`${this.baseUrl.replace(/\/+$/, "")}/healthz`, { signal: controller.signal });
+          return res.ok ? (await res.json() as { selfHostId?: unknown }).selfHostId : undefined;
+        })(),
+        new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), Math.min(this.timeoutMs, 1000)); }),
+      ]);
+      return target === origin;
+    } catch { return false; }
+    finally { clearTimeout(timer); controller.abort(); }
+  }
+
   private async identityHeaders(): Promise<Record<string, string>> {
     const localHeaders = senderIdentityHeaders(undefined, this.sessionName);
     const session = localHeaders[SENDER_IDENTITY_HEADER];
@@ -182,22 +205,8 @@ export class DaemonClient {
       this.originUnknown = true;
       return { ...localHeaders, "X-OpenRig-Origin-Unknown": "true" };
     }
-    if (!this.remoteTarget) {
-      // Loopback may be a forwarded endpoint. Only matching instance identity proves locality.
-      const controller = new AbortController();
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        const target = await Promise.race([
-          (async () => {
-            const res = await this.fetchImpl(`${this.baseUrl.replace(/\/+$/, "")}/healthz`, { signal: controller.signal });
-            return res.ok ? (await res.json() as { selfHostId?: unknown }).selfHostId : undefined;
-          })(),
-          new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), Math.min(this.timeoutMs, 1000)); }),
-        ]);
-        if (target === origin) return localHeaders;
-      } catch { /* Unproved locality: carry the known origin, never the endpoint's identity. */ }
-      finally { clearTimeout(timer); controller.abort(); }
-    }
+    // Loopback may be forwarded. Unproved locality carries the known origin.
+    if (!this.remoteTarget && await this.matchesInstanceIdentity(origin)) return localHeaders;
     return senderIdentityHeaders(origin, this.sessionName);
   }
 

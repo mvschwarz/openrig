@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { existsSync } from "node:fs";
 import { openMissionControl, USAGE_LINES, type FrontDoorIo } from "../front-door.js";
 import { sharedTuiTarget, attachSharedTui } from "../shared-tui.js";
+import type { TmuxAttachment } from "../tmux-attachment.js";
 
 /** The registry-entry shape `rig tui commands` serializes (REGISTRY I2, ruling 64f1dbdf).
  *  Structural mirror of the TUI's CommandEntry data fields (functions are not serialized). */
@@ -38,8 +39,8 @@ async function loadRegistryFromDist(baseDir: string): Promise<TuiCommandEntry[]>
 
 export function tuiCommand(io: FrontDoorIo & {
   loadRegistry?: () => Promise<TuiCommandEntry[]>;
-  sharedTarget?: () => Promise<string>;
-  attachShared?: (target: string) => Promise<number>;
+  sharedTarget?: () => Promise<TmuxAttachment>;
+  attachShared?: (target: TmuxAttachment) => Promise<number>;
 } = {}): Command {
   const cmd = new Command("tui")
     .description("open the status dashboard, not agent chat (--shared is the OpenRig view fallback)")

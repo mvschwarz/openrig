@@ -34,7 +34,8 @@ import { composeView, type ViewMemberInput } from "./view-composer.js";
 import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { buildGridRoot } from "./herdr-adapter.js";
-import { daemonTmuxServerArgs } from "../../adapters/tmux-server.js";
+import { daemonTmuxServerArgs, daemonTmuxServerInfo } from "../../adapters/tmux-server.js";
+import type { TmuxServerSelection } from "../tmux-server-selection.js";
 // deriveViewMembers is a VALUE exported by the views store (not the composer).
 import { deriveViewMembers } from "./terminal-views-store.js";
 import type {
@@ -74,6 +75,7 @@ export interface OpenViewRequest {
 export interface TerminalPreview {
   provider: string;
   session?: string;
+  tmux?: TmuxServerSelection;
   view: string;
   planId: string;
   composed: ComposedView;
@@ -99,6 +101,7 @@ export interface ProviderStatusReport {
 
 export interface TerminalStatusResult {
   providers: ProviderStatusReport[];
+  tmux?: TmuxServerSelection;
   session?: string;
   error?: string;
   code?: string;
@@ -251,7 +254,7 @@ export class TerminalService {
     if (!view) return { code: "view_required", error: "a view argument is required" };
     const resolved = await this.resolveView(view);
     if ("code" in resolved) return resolved;
-    const composed = composeView(resolved.id, await this.refineLiveness(resolved.members), { resolveHost: (id) => this.deps.resolveHost(id), panesPerPage: resolved.panesPerPage ?? panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: daemonTmuxServerArgs() });
+    const composed = composeView(resolved.id, await this.refineLiveness(resolved.members), { resolveHost: (id) => this.deps.resolveHost(id), panesPerPage: resolved.panesPerPage ?? panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: daemonTmuxServerArgs(), localTmuxServerMode: daemonTmuxServerInfo()?.mode });
     if (resolved.kernelLayout && Number.isSafeInteger(viewportColumns) && viewportColumns! >= 120) {
       // The default's members are operator, dashboard, advisor. Keep the advisor separate
       // even when one of the other roles is unavailable; chunking two at a time would not.
@@ -274,7 +277,8 @@ export class TerminalService {
     const { provider, session } = selected;
     const composed = await this.resolveComposed(req.view, provider.panesPerPage, req.viewportColumns);
     if ("code" in composed) return errorResult(providerName, composed.code, composed.error);
-    return { provider: providerName, ...(session !== undefined ? { session } : {}), view: req.view, composed,
+    const tmux = daemonTmuxServerInfo();
+    return { provider: providerName, ...(session !== undefined ? { session } : {}), ...(tmux ? { tmux } : {}), view: req.view, composed,
       grids: composed.pages.map(page => buildGridRoot(page, composed.columns)), planId: this.planId(providerName, composed, session), status: await provider.status() };
   }
 
@@ -300,7 +304,7 @@ export class TerminalService {
       const inventory = await this.deps.listRigSeatsBatch?.(result.rigs);
       for (const entry of entries) {
         const rows = entry.kind === "derived" ? inventory?.get(entry.name) : undefined;
-        const plan = rows ? composeView(entry.view, await this.refineLiveness(deriveViewMembers(rows, { readOnly: false })), { resolveHost: id => this.deps.resolveHost(id), panesPerPage: this.deps.resolveProvider(DEFAULT_PROVIDER)?.panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: daemonTmuxServerArgs() })
+        const plan = rows ? composeView(entry.view, await this.refineLiveness(deriveViewMembers(rows, { readOnly: false })), { resolveHost: id => this.deps.resolveHost(id), panesPerPage: this.deps.resolveProvider(DEFAULT_PROVIDER)?.panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: daemonTmuxServerArgs(), localTmuxServerMode: daemonTmuxServerInfo()?.mode })
           : await this.resolveComposed(entry.view, this.deps.resolveProvider(DEFAULT_PROVIDER)?.panesPerPage);
         if ("code" in plan) continue;
         result.catalog.push({ ...entry, members: [...plan.opened, ...plan.absent, ...plan.degraded].map((m) => m.seat), ready: plan.opened.length, absent: plan.absent.length, degraded: plan.degraded.length, pages: plan.pages.length });
@@ -311,10 +315,11 @@ export class TerminalService {
 
   /** Provider availability + liveness (doctor). Unknown named provider → empty report for it. */
   async status(providerName?: string, session?: string): Promise<TerminalStatusResult> {
+    const tmux = daemonTmuxServerInfo();
     if (session !== undefined) {
       const selected = this.selectProvider({ provider: providerName, session });
       if ("ok" in selected) return { providers: [], error: selected.error, code: selected.code };
-      return { session: selected.session, providers: [{ name: selected.name,
+      return { session: selected.session, ...(tmux ? { tmux } : {}), providers: [{ name: selected.name,
         status: await selected.provider.status(), liveness: await selected.provider.liveness() }] };
     }
     const names: string[] = providerName ? [providerName] : ["herdr", "cmux"];
@@ -331,7 +336,7 @@ export class TerminalService {
       }
       providers.push({ name, status: await p.status(), liveness: await p.liveness() });
     }
-    return { providers };
+    return { providers, ...(tmux ? { tmux } : {}) };
   }
 
   /** Resolve a view argument into composer-ready members (precedence in the file header). */

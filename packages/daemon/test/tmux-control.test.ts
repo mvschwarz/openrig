@@ -129,11 +129,12 @@ function tagOf(line: string, before: string, after: string): string {
 
 /** The spawned tmux the control exec falls back to: its own call (the server's version, read before a client starts)
  *  is answered here; every other argv is recorded and given to `answer`. */
-function fakeSpawned(answer: (argv: string[]) => string | Promise<string> = () => "") {
+function fakeSpawned(answer: (argv: string[]) => string | Promise<string> = () => "", serverArgs: readonly string[] = []) {
   const spawned: string[][] = [];
   const own: string[][] = [];
   const fallback = async (argv: string[]): Promise<string> => {
-    if (argv[1] === "list-sessions" && argv[3]?.startsWith("#{version}")) {
+    const args = argv.slice(1 + serverArgs.length);
+    if (serverArgs.every((arg, i) => arg === argv[i + 1]) && args[0] === "list-sessions" && args[2]?.startsWith("#{version}")) {
       own.push(argv);
       return "3.6|\n3.6|\n";
     }
@@ -144,6 +145,88 @@ function fakeSpawned(answer: (argv: string[]) => string | Promise<string> = () =
 }
 
 describe("tmuxControlExec", () => {
+  it.each([["-S", "/tmp/rig isolated.sock"], ["-L", "rig-isolated"]])("routes commands on its selected %s server and keeps command-local flags", async (flag, server) => {
+    const serverArgs = [flag, server];
+    const client = fakeClient();
+    const { spawned, own, fallback } = fakeSpawned(() => "spawned\n", serverArgs);
+    const start = vi.fn((_args: string[]) => client.child);
+    const exec = tmuxControlExec(fallback, { spawnClient: start, serverArgs, replyTimeoutMs: 1000 });
+    try {
+      const read = exec(["tmux", ...serverArgs, "capture-pane", "-p", "-t", "=seat@rig:", "-S", "-20", ";", "has-session", "-t", "=seat@rig"]);
+      await vi.waitFor(() => expect(client.written).toEqual(["'capture-pane' '-p' '-t' '=seat@rig:' '-S' '-20'"]));
+      client.answer("selected server");
+      await vi.waitFor(() => expect(client.written).toEqual([
+        "'capture-pane' '-p' '-t' '=seat@rig:' '-S' '-20'", "'has-session' '-t' '=seat@rig'",
+      ]));
+      client.answer();
+      expect(await read).toBe("selected server\n");
+      expect(own).toEqual([["tmux", ...serverArgs, "list-sessions", "-F", "#{version}|#{@openrig-control}"]]);
+      expect(start.mock.calls[0]?.[0]?.slice(0, 3)).toEqual([...serverArgs, "-C"]);
+      expect(spawned).toEqual([]);
+    } finally {
+      await exec.close();
+    }
+  });
+
+  it("leaves commands for another server or with other global flags unchanged for the spawned client", async () => {
+    const serverArgs = ["-S", "/tmp/rig-isolated.sock"];
+    const { spawned, own, fallback } = fakeSpawned(() => "spawned\n", serverArgs);
+    const start = vi.fn(() => { throw new Error("No control client expected"); });
+    const exec = tmuxControlExec(fallback, { spawnClient: start, serverArgs });
+    const listing = ["list-sessions", "-F", "#{session_name}"];
+    const commands = [
+      ["tmux", "-S", "/tmp/other.sock", ...listing],
+      ["tmux", "-L", "rig-isolated", ...listing],
+      ["tmux", ...listing],
+      ["tmux", ...serverArgs, "-u", ...listing],
+      ["tmux", ...serverArgs, "-S", "/tmp/other.sock", "has-session", "-t", "=s", ";", ...listing],
+      ["tmux", "-S"],
+    ];
+    for (const argv of commands) expect(await exec(argv)).toBe("spawned\n");
+    expect(spawned).toEqual(commands);
+    expect(own).toEqual([]);
+    expect(start).not.toHaveBeenCalled();
+    await exec.close();
+  });
+
+  it("filters its own listing rows with server flags, including listings that need a spawned client", async () => {
+    const serverArgs = ["-S", "/tmp/rig-isolated.sock"];
+    const client = fakeClient();
+    const { spawned, fallback } = fakeSpawned(() => "", serverArgs);
+    const exec = tmuxControlExec(fallback, { spawnClient: () => client.child, serverArgs, owner: "d4e5", replyTimeoutMs: 1000 });
+    try {
+      const listing = exec(["tmux", ...serverArgs, "list-sessions", "-F", "#{session_name}"]);
+      await vi.waitFor(() => expect(client.written).toHaveLength(1));
+      const tag = tagOf(client.written[0]!, "'list-sessions' '-F' '", "#{session_name}'");
+      client.answer(`${tag}openrig-control-d4e5`, "seat@rig");
+      expect(await listing).toBe("seat@rig\n");
+      expect(await exec(["tmux", ...serverArgs, "list-windows", "-F", "#{window_index}"])).toBe("");
+      expect(spawned).toHaveLength(1);
+      expect(spawned[0]!.slice(0, 5)).toEqual(["tmux", ...serverArgs, "list-windows", "-F"]);
+      tagOf(spawned[0]!.join(" "), `tmux ${serverArgs.join(" ")} list-windows -F `, "#{window_index}");
+      expect(client.written).toHaveLength(1);
+    } finally {
+      await exec.close();
+    }
+  });
+
+  it("keeps read fallback and a lost write's probe on the selected server without replaying the write", async () => {
+    const serverArgs = ["-S", "/tmp/rig-isolated.sock"];
+    const client = fakeClient();
+    const { spawned, fallback } = fakeSpawned(() => "spawned read\n", serverArgs);
+    const exec = tmuxControlExec(fallback, { spawnClient: () => client.child, serverArgs, replyTimeoutMs: 1000 });
+    const readArgv = ["tmux", ...serverArgs, "capture-pane", "-p", "-t", "=seat@rig:"];
+    const read = exec(readArgv);
+    await vi.waitFor(() => expect(client.written).toHaveLength(1));
+    const write = exec(["tmux", ...serverArgs, "send-keys", "-t", "=seat@rig:", "Enter"]).then(() => null, (err: Error) => err.message);
+    await vi.waitFor(() => expect(client.written).toHaveLength(2));
+    client.exit();
+    expect(await read).toBe("spawned read\n");
+    expect(await write).toBe("tmux control client ended: exited (SIGTERM)");
+    expect(spawned).toEqual([readArgv, ["tmux", ...serverArgs, "display-message", "-p", "-t", "=seat@rig:", ""]]);
+    await exec.close();
+  });
+
   it("drops a client once the reply at the head of its line is overdue, and starts a new one for the next command", async () => {
     const clients = [fakeClient(), fakeClient()];
     let started = 0;

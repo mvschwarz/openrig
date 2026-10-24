@@ -9,6 +9,7 @@ import type { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import type { RestoreOrchestrator } from "../src/domain/restore-orchestrator.js";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { buildAttentionResponse } from "../src/routes/up.js";
+import { setDaemonTmuxServer } from "../src/adapters/tmux-server.js";
 
 const VALID_SPEC = `
 schema_version: 1
@@ -37,6 +38,8 @@ describe("Up API route", () => {
   let tmuxAdapter: ReturnType<typeof createTestApp>["tmuxAdapter"];
 
   beforeEach(() => {
+    // This file mixes a real daemon composition with unit-only route fixtures.
+    setDaemonTmuxServer([]);
     db = createFullTestDb();
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "up-route-"));
     // Create test app with real UpCommandRouter fsOps pointing to tmpDir
@@ -50,6 +53,7 @@ describe("Up API route", () => {
   });
 
   afterEach(() => {
+    setDaemonTmuxServer([]);
     db.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -942,7 +946,11 @@ edges: []
       expect(buildAttentionResponse(result)).toBeNull();
     });
 
-    it("HG-4: blocked + attention_required stage → fact/consequence/action with attentionNodes", () => {
+    it.each([
+      { server: [], attach: "tmux attach -t dev-impl@conveyor" },
+      { server: ["-S", "/private/selected socket"], attach: "tmux -S '/private/selected socket' attach -t dev-impl@conveyor" },
+    ])("HG-4: blocked + attention_required includes the effective attachment: $attach", ({ server, attach }) => {
+      setDaemonTmuxServer(server);
       const result = {
         rigId: "rig-conveyor-1",
         stages: [
@@ -965,7 +973,7 @@ edges: []
       expect(r!.error.consequence).toMatch(/rig-conveyor-1/);
       expect(r!.error.consequence).toMatch(/rig ps/);
       expect(r!.error.consequence).toMatch(/attention_required/);
-      expect(r!.error.action).toMatch(/tmux attach -t dev-impl@conveyor/);
+      expect(r!.error.action).toContain(attach);
       expect(r!.error.action).not.toMatch(/rig setup --cwd/);
       // Singular phrasing for a 1-node case
       expect(r!.error.action).toMatch(/^Inspect the affected session/);

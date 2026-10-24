@@ -34,6 +34,7 @@ import { NodeLauncher } from "./domain/node-launcher.js";
 import { TmuxOptionDefaultsApplier } from "./domain/tmux-option-defaults.js";
 import { TmuxAdapter } from "./adapters/tmux.js";
 import { setDaemonTmuxServer, tmuxServerArgs } from "./adapters/tmux-server.js";
+import { selectTmuxServer, type TmuxServerMode } from "./domain/tmux-server-selection.js";
 import { CmuxAdapter } from "./adapters/cmux.js";
 import { execArgvCommand, execCommand } from "./adapters/tmux-exec.js";
 import { tmuxControlExec } from "./adapters/tmux-control.js";
@@ -506,17 +507,33 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   watchdogAutoRegistration.assertLiveSeatCoverage();
   const watchdogHistoryLogInstance = new WatchdogHistoryLog(db);
 
+  // Select before reconciliation: a surviving old server must stay reachable
+  // while a requested move to another server waits for those seats to stop.
+  const tmuxSelection = opts?.tmuxExec || opts?.argvExec ? undefined : await selectTmuxServer({
+    home: OPENRIG_HOME,
+    mode: new ContextPackSettingsStore().resolveOne("terminal.tmux_server").value as TmuxServerMode,
+    persist: dbPath !== ":memory:",
+    registeredSessions: (db.prepare(`
+      SELECT DISTINCT tmux_session AS name FROM bindings
+      WHERE COALESCE(attachment_type, 'tmux') = 'tmux' AND tmux_session IS NOT NULL
+      UNION SELECT s.session_name AS name FROM sessions s
+      WHERE s.id = (SELECT latest.id FROM sessions latest WHERE latest.node_id = s.node_id
+        ORDER BY datetime(latest.created_at) DESC, latest.rowid DESC LIMIT 1)
+        AND s.status <> 'exited'
+    `).all() as Array<{ name: string }>).map(row => row.name).filter(Boolean),
+  });
+  if (tmuxSelection?.note) console.warn(`[tmux] ${tmuxSelection.note}`);
   // An injected string exec keeps the shell path, so its fake sees every command. OPENRIG_TMUX_SHELL=1 keeps it too.
   const spawnedArgvExec = opts?.argvExec
     ?? (opts?.tmuxExec || (process.env.OPENRIG_TMUX_SHELL === "1" && process.platform !== "win32") ? undefined : execArgvCommand);
   // OPENRIG_TMUX_CONTROL=1 drives the real tmux through one control-mode client (tmux-control.ts); by default a client
   // is spawned per command. An injected exec is the test's own, and psmux has no control mode.
   const argvExec = spawnedArgvExec === execArgvCommand && process.platform !== "win32" && process.env.OPENRIG_TMUX_CONTROL === "1"
-    ? tmuxControlExec(execArgvCommand) : spawnedArgvExec;
-  const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? execCommand, undefined, argvExec);
-  // The real tmux runs with this process's environment, so its server is the one $TMUX names.
-  // An injected exec has no server of its own: printed attach commands stay in the default form.
-  setDaemonTmuxServer(opts?.tmuxExec ? [] : tmuxServerArgs(process.env));
+    ? tmuxControlExec(execArgvCommand, { serverArgs: tmuxSelection?.executionArgs }) : spawnedArgvExec;
+  const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? execCommand, undefined, argvExec, tmuxSelection?.executionArgs);
+  // Inherit keeps the native execution environment; attachment metadata still names
+  // its server for a new terminal. Isolated execution and attachment share a fixed socket.
+  setDaemonTmuxServer(tmuxSelection?.serverArgs ?? (opts?.tmuxExec ? [] : tmuxServerArgs(process.env)), tmuxSelection);
   const deliveryGuard = new SeatDeliveryGuard(db, target => resolveGuardTarget(db, target));
   deliveryGuard.recoverActivation();
   tmuxAdapter.deliveryGuard = deliveryGuard;
@@ -1256,6 +1273,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   });
   const selfAttachService = new SelfAttachService({
     db, rigRepo, podRepo, sessionRegistry, eventBus, tmuxAdapter, transcriptStore,
+    tmuxServer: tmuxSelection,
     claudeContextProvisioner: claudeAdapter,
     // OPR.0.4.3.28 B3 — echo the resolved activity url+token into the self-attach
     // response env so the caller's shell can produce activity signal.

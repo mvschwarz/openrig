@@ -356,6 +356,31 @@ and stays on Herdr when neither is (`providerNameFor`,
 `terminal-service.ts:175`); a named provider is used as named. These place existing tmux
 sessions in views; they do not launch harnesses.
 
+### Tmux server selection
+
+Before reconciliation, `startup.ts` calls `selectTmuxServer` in
+`domain/tmux-server-selection.ts`. `terminal.tmux_server` defaults to `inherit`;
+`isolated` selects a socket derived from the canonical OpenRig home. The effective
+choice is persisted in `tmux-server.json`. A registered live seat, or an
+uninspectable old server, defers a requested change until a later restart.
+The persisted `pinned` flag and active marker make isolation and migration records
+mandatory, while ordinary inherited records remain advisory. Returning to inheritance
+commits an unpinned record before clearing the marker, so offline cleanup cannot reuse
+a stale inherited socket or keep enforcing a completed isolation choice.
+
+`TmuxAdapter` receives the selection's `executionArgs` for both shell and argv
+transports, including its direct probe/cleanup calls. They are empty for ordinary
+`inherit` mode, preserving tmux's environment-based selection; `serverArgs` still
+names the server for attachments. The opt-in control client uses the same execution
+arguments for its connection, probes and fallback commands. The same startup choice feeds node
+inventory, `TerminalService.status()` and previews, composed panes, shared TUI attachment and
+CLI viewer management. SSH panes resolve the remote instance through its own
+`rig terminal attach`. For isolation, self-attachment checks the caller's socket before binding;
+offline destruction reads the persisted socket before removing state.
+
+See [tmux server selection](../../reference/tmux-servers.md) for configuration
+loading, first-upgrade migration, discovery scope and platform behavior.
+
 ## 3. Resume honesty
 
 The daemon does not assume a harness resumed just because the launch command

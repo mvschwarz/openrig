@@ -14,6 +14,8 @@ import { createHerdrSocketRpc, createHerdrSocketTransport } from "../../daemon/s
 import { composeView } from "../../daemon/src/domain/terminal/view-composer.js";
 import { terminalRoutes } from "../../daemon/src/routes/terminal.js";
 
+vi.mock("../src/local-origin.js", () => ({ readLocalOrigin: () => "window-fixture" }));
+
 describe("terminal open request budget", () => {
   it.skipIf(process.platform === "win32")("waits for two healthy page applications instead of abandoning a delivered open", async () => {
     const owned = mkdtempSync(join(tmpdir(), "or-terminal-"));
@@ -56,6 +58,7 @@ describe("terminal open request budget", () => {
       host: null, alive: true, readOnly: false,
     })), { resolveHost: () => null, panesPerPage: HERDR_PANES_PER_PAGE });
     const app = new Hono();
+    app.get("/healthz", c => c.json({ selfHostId: "window-fixture" }));
     app.use("*", async (c, next) => {
       c.set("terminalService" as never, {
         openView: () => adapter.openView(view),

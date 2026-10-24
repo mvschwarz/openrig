@@ -488,7 +488,12 @@ rig terminal open saved:kernel --provider herdr --json
 rig terminal open saved:kernel --provider cmux --json
 ```
 
-Use `rig terminal status --json` to inspect provider availability and liveness.
+Use `rig terminal status --json` to inspect provider availability, liveness and the
+daemon's effective tmux server. To keep managed seats out of your personal tmux
+session list, opt into [an isolated server](tmux-servers.md) with
+`rig config set terminal.tmux_server isolated`; existing live seats defer the
+switch until they are stopped and the daemon restarts.
+
 To keep rigs in separate Herdr sessions, select one explicitly:
 `rig terminal open future-prod-rig --provider herdr --session future-prod`.
 `--session default` selects Herdr's default session; omitting the option keeps

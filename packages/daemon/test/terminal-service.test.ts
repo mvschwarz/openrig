@@ -11,6 +11,7 @@ import { describe, it, expect } from "vitest";
 import { createHash } from "node:crypto";
 import { planHerdrLayout } from "../src/domain/terminal/herdr-adapter.js";
 import { TerminalService, type TerminalServiceDeps } from "../src/domain/terminal/terminal-service.js";
+import { daemonTmuxServerArgs, daemonTmuxServerInfo, setDaemonTmuxServer } from "../src/adapters/tmux-server.js";
 import type {
   ComposedView,
   OpenViewResult,
@@ -59,6 +60,45 @@ const savedView: SavedView = {
     { seat: "builder@acme-ops", tmuxSession: "builder@acme-ops" },
   ],
 };
+
+describe("SSH tiles follow the viewing instance's effective server mode", () => {
+  it.each([
+    { requestedMode: "inherit", mode: "inherit" },
+    { requestedMode: "isolated", mode: "isolated" },
+    { requestedMode: "isolated", mode: "inherit" },
+    { requestedMode: "inherit", mode: "isolated" },
+  ] as const)("requested $requestedMode, effective $mode", async ({ requestedMode, mode }) => {
+    const previousArgs = [...daemonTmuxServerArgs()];
+    const previousSelection = daemonTmuxServerInfo();
+    try {
+      // Inheritance can still name a non-default LOCAL socket; its presence does
+      // not opt remote tiles into a new command or disclose that local path.
+      setDaemonTmuxServer(["-S", "/local/only/socket"], {
+        requestedMode, mode, serverArgs: ["-S", "/local/only/socket"], executionArgs: [],
+        migrationPending: requestedMode !== mode, blockingSessions: [],
+      });
+      const remote: SavedView = { id: "remote", name: "remote", members: [{
+        seat: "worker@edge", tmuxSession: "worker@edge", host: "edge", readOnly: true,
+      }] };
+      const { deps, herdr } = makeDeps({
+        viewsStore: { get: id => id === remote.id ? remote : null, list: () => [remote] },
+        resolveHost: id => id === "edge" ? { id, transport: "ssh", target: "fixture" } : null,
+      });
+      const svc = new TerminalService(deps);
+      const preview = await svc.previewView({ view: "remote" }) as { planId: string };
+      const result = await svc.openView({ view: "remote", expectedPlan: preview.planId });
+      expect(result.ok).toBe(true);
+      expect(result.code).toBeUndefined();
+      const command = herdr.lastView!.opened[0]!.paneCommand;
+      expect(command).toBe(mode === "isolated"
+        ? "ssh -t 'fixture' 'env OPENRIG_HOST_SELECTED=local rig terminal attach --read-only -- '\"'\"'worker@edge'\"'\"''"
+        : "ssh -t 'fixture' 'tmux attach -r -t '\"'\"'worker@edge'\"'\"''");
+      expect(command).not.toContain("/local/only/socket");
+    } finally {
+      setDaemonTmuxServer(previousArgs, previousSelection);
+    }
+  });
+});
 
 function makeDeps(overrides: Partial<TerminalServiceDeps> = {}): {
   deps: TerminalServiceDeps;

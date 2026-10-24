@@ -186,4 +186,16 @@ describe("Attach CLI", () => {
       tmuxPane: "%42",
     });
   });
+
+  it("includes the actual socket without trimming literal path whitespace", () => {
+    const savedPane = process.env.TMUX_PANE;
+    process.env.TMUX_PANE = "%42";
+    try {
+      expect(resolveAttachContext(() => "seat\n@1\n%42\n/private/socket name \n"))
+        .toMatchObject({ attachmentType: "tmux", tmuxSocketPath: "/private/socket name " });
+    } finally {
+      if (savedPane === undefined) delete process.env.TMUX_PANE;
+      else process.env.TMUX_PANE = savedPane;
+    }
+  });
 });
