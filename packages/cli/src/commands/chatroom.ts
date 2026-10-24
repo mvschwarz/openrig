@@ -4,7 +4,15 @@ import { readOpenRigEnv } from "../openrig-compat.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { shellQuote } from "../cross-host-executor.js";
+
+/** argv for the dedicated tmux session that runs `rig chatroom watch`. tmux hands its last argument to
+ *  `sh -c`, so the rig name is single-quoted: a name with spaces, quotes, `$` or backticks reaches the
+ *  watcher as one literal argument and is never expanded by the shell. */
+export function chatroomWatchTmuxArgs(rig: string): string[] {
+  return ["new-session", "-d", "-s", `chatroom@${rig}`, `rig chatroom watch ${shellQuote(rig)}`];
+}
 
 interface RigSummary {
   id: string;
@@ -172,7 +180,7 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
       if (opts.tmux) {
         const sessionName = `chatroom@${rig}`;
         try {
-          execSync(`tmux new-session -d -s ${JSON.stringify(sessionName)} "rig chatroom watch ${JSON.stringify(rig)}"`, { stdio: "ignore" });
+          execFileSync("tmux", chatroomWatchTmuxArgs(rig), { stdio: "ignore" });
           console.log(`Started watch in tmux session: ${sessionName}`);
           console.log(`Attach with: tmux attach -t ${sessionName}`);
         } catch {
