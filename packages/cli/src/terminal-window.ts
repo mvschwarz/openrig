@@ -96,8 +96,8 @@ function inHerdrPane(env: NodeJS.ProcessEnv): boolean {
 
 /** Rex's markers, read the same way; inside a Herdr pane, Herdr keeps the view. */
 export function inRex(env: NodeJS.ProcessEnv): boolean {
-  return env["TERM_PROGRAM"] === "rex" || (env["TERM_PROGRAM"] !== "herdr" && !inHerdrPane(env)
-    && !!env["REX_SESSION"] && !!env["REX_BLOCK"] && !!env["REX_SERVER"]);
+  return !inHerdrPane(env) && (env["TERM_PROGRAM"] === "rex"
+    || (env["TERM_PROGRAM"] !== "herdr" && !!env["REX_SESSION"] && !!env["REX_BLOCK"] && !!env["REX_SERVER"]));
 }
 
 async function herdrBinary(deps: WindowDeps): Promise<string | null> {

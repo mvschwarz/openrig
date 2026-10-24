@@ -212,6 +212,7 @@ describe("Rex detection keeps the other paths unchanged", () => {
     [{ TERM_PROGRAM: "tmux", REX_SESSION: "s", REX_BLOCK: "b" }, false],
     [{ ...IN_REX, TERM_PROGRAM: "herdr" }, false],
     [{ ...IN_REX, TERM_PROGRAM: "tmux", HERDR_ENV: "1", HERDR_PANE_ID: "p", HERDR_SOCKET_PATH: "/h.sock" }, false],
+    [{ ...IN_REX, HERDR_ENV: "1", HERDR_PANE_ID: "p", HERDR_SOCKET_PATH: "/h.sock" }, false],
     [{ TERM_PROGRAM: "ghostty" }, false],
   ])("inRex(%j) is %s", (env, expected) => {
     expect(inRex(env)).toBe(expected);

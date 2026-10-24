@@ -226,6 +226,7 @@ console.log(${JSON.stringify(JSON.stringify(opened))});`);
   it("reads Rex's markers as the CLI does", () => {
     expect(inRex({ TERM_PROGRAM: "tmux", REX_SESSION: "s", REX_BLOCK: "b" })).toBe(false);
     expect(inRex({ TERM_PROGRAM: "tmux", REX_SESSION: "s", REX_BLOCK: "b", REX_SERVER: "x", HERDR_ENV: "1", HERDR_PANE_ID: "p", HERDR_SOCKET_PATH: "/h" })).toBe(false);
+    expect(inRex({ TERM_PROGRAM: "rex", HERDR_ENV: "1", HERDR_PANE_ID: "p", HERDR_SOCKET_PATH: "/h" })).toBe(false);
   });
 
   it("keeps its own Herdr markers and never looks for a viewer", async () => {
