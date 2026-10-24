@@ -6,6 +6,8 @@ import type { ProviderSignal } from "./provider-types.js";
 interface ReactiveSeat {
   seatSession: string;
   runtime: string;
+  /** The seat's own runtime home, when it declares one (seat-runtime-home.ts). */
+  runtimeHome?: { home?: string };
 }
 
 interface ReactiveActivityReader {
