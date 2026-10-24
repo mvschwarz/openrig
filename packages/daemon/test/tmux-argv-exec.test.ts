@@ -27,7 +27,7 @@ function argvAdapter(seen: string[][], impl?: (argv: string[]) => string) {
 describe("tmux argv exec path", () => {
   it("createSession passes cwd/env as verbatim argv units", async () => {
     const seen: string[][] = [];
-    const { adapter, exec } = argvAdapter(seen);
+    const { adapter, exec } = argvAdapter(seen, (argv) => argv[1] === "new-session" ? "%1\n" : ""); // new-session -P prints its pane
     await adapter.createSession("r01-dev1-impl", "/home/user/my project/code", { PATH: "/a b:/c", EMPTY: "" });
     expect(exec).not.toHaveBeenCalled();
     expect(seen).toEqual([[

@@ -687,6 +687,13 @@ export class TmuxAdapter {
     } catch (err) {
       return classifyWriteError(err);
     }
+    // tmux can exit 0 having made nothing: a server that can't create its socket prints its error and quits, and the
+    // client still exits 0. new-session prints the pane it made; with none, the session must be read back before it
+    // counts as created.
+    if (!/^%\d+$/.test(created)) {
+      const missing = await this.sessionMissingAfterCreate(name);
+      if (missing) return { ok: false, code: "session_not_created", message: missing };
+    }
     // A tmux server started from a Claude Code session or Herdr pane hands
     // their identity to every new pane. Mark it removed for this session only
     // and restart the fresh pane so its shell starts without it. The session
@@ -702,6 +709,22 @@ export class TmuxAdapter {
     } catch (err) {
       return { ok: true, warnings: [...warnings, parentSessionEnvWarning(name, err)] };
     }
+  }
+
+  /** Why a session new-session printed no pane for isn't there, or null when it is. Anything short of a found session
+   *  counts as missing: tmux reported no pane, so only a positive read-back keeps the launch. */
+  private async sessionMissingAfterCreate(name: string): Promise<string | null> {
+    let cause: string;
+    try {
+      const probe = await this.probeSession(name);
+      if (probe.state === "present") return null;
+      cause = probe.state === "absent" ? `can't find session: ${name}` : probe.cause ?? "no tmux server";
+    } catch (err) {
+      const reported = tmuxReportedError(err);
+      cause = reported instanceof Error ? reported.message : String(reported);
+    }
+    return `tmux exited without an error but made no session "${name}" (${cause.trim()}). Check that tmux can create its `
+      + "server socket: the TMUX_TMPDIR directory, or the directory of an explicit -S socket path, must be writable by this user.";
   }
 
   /** Mark the server's inherited parent-session identity as removed in one
