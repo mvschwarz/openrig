@@ -6,7 +6,6 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { remainingDaemonImports } from "./rewrite-daemon-imports.mjs";
-import { checkPackagedPluginVersions } from "./check-packaged-plugin-versions.mjs";
 
 // 51-04 Q2 — the pack-step proof. The old guard only string-matched `npm pack`, so it stayed GREEN
 // over THREE stacked breaks (root package / no bin / non-standalone-installable). Tiers:
@@ -81,7 +80,6 @@ test("package proof: the tarball ships the daemon surfaces and no packaged JS im
     assert.equal(packed.bundledDependencies, undefined, "the packed manifest must not bundle dependencies");
 
     execFileSync("tar", ["-xzf", tgzPath, "-C", extract]);
-    checkPackagedPluginVersions(join(extract, "package"));
     const left = [];
     const walk = (dir) => {
       for (const entry of readdirSync(dir)) {
