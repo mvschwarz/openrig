@@ -2972,7 +2972,9 @@ export class SessionTransport {
         sessionName,
         reason: policyRefusal ? textResult.code : "send_failed",
         outcome: "failed",
-        ...(policyRefusal ? (textResult.code === "managed_compaction_pending" ? { inputPhase: "not_reached" as const } : {}) : { inputPhase: "attempted" as const }),
+        // The adapter's draft checks run before the paste (only file/buffer preparation precedes them), and its
+        // after-paste observation cannot fail the write, so a draft_* receipt proves the target input was never reached.
+        inputPhase: policyRefusal ? "not_reached" as const : "attempted" as const,
         error: `Failed to send text to '${sessionName}': ${textResult.message}`,
         ...(waitMode || policyRefusal ? { sent: false, ...waitEvidence } : {}),
       });

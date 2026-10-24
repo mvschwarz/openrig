@@ -1117,6 +1117,39 @@ describe("SessionTransport", () => {
     expect(submitFailed.outcome).toBe("failed");
   });
 
+  it.each(["draft_input_busy", "draft_input_unknown", "draft_input_changed"])(
+    "a %s refusal at the text step is labeled not_reached and sends no Enter (fake receipt, not a real-guard proof)", async (code) => {
+    seedCanonicalRig();
+    const keys: string[][] = [];
+    const tmux = mockTmux({
+      sendText: async () => ({ ok: false, code, message: "held by the guard" }),
+      sendKeys: async (_target, k) => { keys.push(k); return { ok: true as const }; },
+    });
+    const result = await createTransport(tmux).send("dev-impl@my-rig", "hello");
+    expect(result).toMatchObject({ ok: false, reason: code, outcome: "failed", sent: false, inputPhase: "not_reached" });
+    expect(keys).toEqual([]);
+  });
+
+  it("a draft refusal of Enter after a successful paste stays written with sent:true", async () => {
+    seedCanonicalRig();
+    const texts: string[] = [];
+    const tmux = mockTmux({
+      sendText: async (_target, text) => { texts.push(text); return { ok: true as const }; },
+      sendKeys: async () => ({ ok: false, code: "draft_input_changed", message: "Enter was not sent." }),
+    });
+    const result = await createTransport(tmux).send("dev-impl@my-rig", "hello");
+    expect(texts).toEqual(["hello"]);
+    expect(result).toMatchObject({ ok: false, reason: "draft_input_changed", outcome: "failed", sent: true, inputPhase: "written" });
+  });
+
+  it("a generic failed text write stays attempted, never not_reached", async () => {
+    seedCanonicalRig();
+    const tmux = mockTmux({ sendText: async () => ({ ok: false, code: "session_not_found", message: "gone" }) });
+    const result = await createTransport(tmux).send("dev-impl@my-rig", "hello");
+    expect(result).toMatchObject({ ok: false, reason: "send_failed", inputPhase: "attempted" });
+    expect(result.sent).toBeUndefined();
+  });
+
   it("send without verify carries no outcome field (additive, verify-scoped)", async () => {
     seedCanonicalRig();
     const transport = createTransport(mockTmux());
