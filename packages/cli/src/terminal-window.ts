@@ -273,7 +273,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
   let windowAttempted = false;
   let manualCommand: string | undefined;
   let currentHerdr = false;
-  const recovery = `rig terminal open ${shellQuote(view)} --window${selectedProvider && ["herdr", "rex", "tmux"].includes(selectedProvider) ? ` --provider ${shellQuote(selectedProvider)}` : ""}${sessionFlag}`;
+  const recovery = `rig terminal open ${shellQuote(view)} --window${selectedProvider && ["herdr", "tmux"].includes(selectedProvider) ? ` --provider ${shellQuote(selectedProvider)}` : ""}${sessionFlag}`;
   const failed = (reason: string): OpenViewResult => ({ ...failure(provider,
     currentHerdr ? `The current Herdr view outcome could not be confirmed. ${reason} Inspect the selected space before retrying: ${recovery}`
       : window ? `A terminal window was requested, but the view outcome could not be confirmed. ${reason} Inspect the terminal before retrying: ${recovery}`
@@ -283,7 +283,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
   try {
     if (!localDaemon(client.baseUrl)) throw new Error("The window launcher must run on the daemon's own desktop; the configured daemon is remote.");
     if (session !== undefined && selectedProvider !== "herdr") throw new Error("--session selects a Herdr session; use --provider herdr.");
-    if (selectedProvider && !["herdr", "rex", "tmux"].includes(selectedProvider)) throw new Error("--window supports herdr, rex or tmux. Use cmux without --window.");
+    if (selectedProvider && !["herdr", "tmux"].includes(selectedProvider)) throw new Error("--window supports herdr, rex or tmux. Use cmux without --window.");
     const launchWindow = await windowLauncher(deps, windowNotes);
     const measured = typeof launchWindow !== "string" ? await deps.columns?.().catch(() => undefined) : undefined;
     let viewportColumns = Number.isSafeInteger(measured) && measured! > 0 ? measured : undefined;

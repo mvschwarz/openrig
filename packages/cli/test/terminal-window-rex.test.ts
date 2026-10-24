@@ -224,10 +224,12 @@ describe("Rex detection keeps the other paths unchanged", () => {
     expect(f.rexCalls()).toEqual([]);
   });
 
-  it("--session stays a Herdr choice", async () => {
+  it("--session stays a Herdr choice, and the recovery doesn't repeat the refused provider", async () => {
     const f = fixture();
     const result = await openTerminalWindow(f.client, "acme", "rex", f.deps, undefined, "work");
     expect(result.error).toContain("--session selects a Herdr session; use --provider herdr.");
+    expect(result.error).toContain("run: rig terminal open 'acme' --window --session 'work'");
+    expect(result.error).not.toContain("--provider 'rex'");
     expect(f.rexCalls()).toEqual([]);
   });
 });
