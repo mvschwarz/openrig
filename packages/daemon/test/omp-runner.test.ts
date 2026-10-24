@@ -310,6 +310,19 @@ describe("OMP RPC lifecycle", () => {
     expect(pending).toHaveLength(3);
   });
 
+  it("a second startup block before agent_start steers instead of raising runtime_error (#1932)", () => {
+    const { core, rpc, activity } = runner();
+    core.handleUserBlock("first startup block");
+    core.handlePiLine(JSON.stringify({ id: "p1", type: "response", command: "prompt", success: true }));
+    core.handleUserBlock("second startup block");
+    expect(rpc.filter((x) => ["prompt", "steer"].includes(String(x.type)))).toEqual([
+      { type: "prompt", message: "first startup block" }, { type: "steer", message: "second startup block" },
+    ]);
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end", isTerminal: true }));
+    expect(activity.filter((event) => event.subtype === "runtime_error")).toHaveLength(0);
+  });
+
   it("keeps prompt rejections visible as attention after the turn ends", () => {
     const { core, activity } = runner();
     core.handlePiLine(JSON.stringify({ type: "response", id: "prompt-1", command: "prompt", success: false, error: "No API key" }));

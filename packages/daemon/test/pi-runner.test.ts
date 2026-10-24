@@ -355,6 +355,42 @@ describe("RunnerCore.handleUserBlock", () => {
     expect(rpc.at(-1)).toEqual({ type: "prompt", message: "next task" });
   });
 
+  it("a block that arrives after a prompt but before agent_start steers that turn (#1932)", () => {
+    const { core, rpc } = readyCore();
+    core.handleUserBlock("first startup block");
+    core.handlePiLine(JSON.stringify({ type: "response", command: "prompt", success: true }));
+    core.handleUserBlock("second startup block");
+    expect(rpc.filter(x => ["prompt", "steer"].includes(String(x.type)))).toEqual([
+      { type: "prompt", message: "first startup block" }, { type: "steer", message: "second startup block" },
+    ]);
+    // The turn starts and ends; the next block is a prompt again.
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    core.handleUserBlock("next task");
+    expect(rpc.at(-1)).toEqual({ type: "prompt", message: "next task" });
+  });
+
+  it("a refused prompt or steer, or the child exiting, never leaves the runner steering an idle agent", () => {
+    const refusedPrompt = readyCore();
+    refusedPrompt.core.handleUserBlock("first");
+    refusedPrompt.core.handlePiLine(JSON.stringify({ type: "response", command: "prompt", success: false, error: "No API key" }));
+    refusedPrompt.core.handleUserBlock("again");
+    expect(refusedPrompt.rpc.at(-1)).toEqual({ type: "prompt", message: "again" });
+
+    const refusedSteer = readyCore();
+    refusedSteer.core.handleUserBlock("first");
+    refusedSteer.core.handleUserBlock("second");
+    refusedSteer.core.handlePiLine(JSON.stringify({ type: "response", command: "steer", success: false, error: "not streaming" }));
+    refusedSteer.core.handleUserBlock("third");
+    expect(refusedSteer.rpc.at(-1)).toEqual({ type: "prompt", message: "third" });
+
+    const exited = readyCore();
+    exited.core.handleUserBlock("first");
+    exited.core.handlePiExit(1);
+    exited.core.handleUserBlock("after restart");
+    expect(exited.rpc.at(-1)).toEqual({ type: "prompt", message: "after restart" });
+  });
+
   it("/abort → RPC abort; /followup → RPC follow_up", () => {
     const { core, rpc } = readyCore();
     core.handleUserBlock("/abort");
