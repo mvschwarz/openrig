@@ -779,6 +779,7 @@ export class PodRigInstantiator {
               member,
               podId: podRecord.id,
               rigRoot,
+              rigSpec,
               cwdOverride: opts?.cwdOverride,
             });
             opts?.recordCreated?.(materializedRigId, node.id);
@@ -957,7 +958,7 @@ export class PodRigInstantiator {
         continue;
       }
 
-      const launched = await this.launchBinding({
+      const launched = await this.launchValidatedMember({
         rigId: targetRigId,
         rigSpec,
         rigRoot,
@@ -1605,6 +1606,7 @@ export class PodRigInstantiator {
             resolvedSpecName: configResult.config.resolvedSpecName,
             resolvedSpecVersion: configResult.config.resolvedSpecVersion,
             resolvedSpecHash: configResult.config.resolvedSpecHash,
+            launchRecipe: { version: 1, rigRoot, rigSpec },
           });
           // Guard multi-seat correction (16e853a7): node creation + required provenance
           // are ONE ATOMIC UNIT (SQLite savepoint). A setter fault rolls the INSERT back
@@ -1955,6 +1957,7 @@ export class PodRigInstantiator {
     member: RigSpecPodMember;
     podId: string;
     rigRoot: string;
+    rigSpec: PodRigSpec;
     cwdOverride?: string;
   }) {
     const effectiveCwd = resolveLaunchCwd(input.member.cwd, input.rigRoot, input.cwdOverride);
@@ -1989,6 +1992,7 @@ export class PodRigInstantiator {
       agentRef: input.member.agentRef,
       profile: input.member.profile,
       label: input.member.label,
+      launchRecipe: { version: 1, rigRoot: input.rigRoot, rigSpec: input.rigSpec },
     });
     const event = this.deps.eventBus.persistWithinTransaction({
       type: "node.added",
@@ -1997,6 +2001,20 @@ export class PodRigInstantiator {
       logicalId: input.qualifiedId,
     });
     return { node, event };
+  }
+
+  private launchValidatedMember(input: {
+    rigId: string;
+    rigSpec: PodRigSpec;
+    rigRoot: string;
+    pod: RigSpecPod;
+    member: RigSpecPodMember;
+    qualifiedId: string;
+    nodeId: string;
+    cwdOverride?: string;
+    envOverride?: SeatEnv;
+  }) {
+    return this.launchBinding(input);
   }
 
   /**
@@ -2023,6 +2041,80 @@ export class PodRigInstantiator {
     return input.member.agentRef === "builtin:terminal"
       ? this.launchExistingTerminalMember(input)
       : this.launchExistingAgentMember(input);
+  }
+
+  /**
+   * Rebuild a fresh pod-aware launch from the source captured at materialization.
+   * A missing startup context means the daemon has no restorable startup
+   * context for this seat; it does not by itself prove that no conversation
+   * exists. It must not prevent a new harness from being started for a seat
+   * whose validated launch recipe is available.
+   */
+  async launchPersistedFresh(
+    rigId: string,
+    nodeId: string,
+  ): Promise<{ status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string; warnings?: string[] }> {
+    const rig = this.deps.rigRepo.getRig(rigId);
+    const node = rig?.nodes.find((candidate) => candidate.id === nodeId);
+    if (!rig || !node) {
+      return { status: "failed", error: `Node "${nodeId}" not found in rig "${rigId}".` };
+    }
+
+    const recipe = this.deps.rigRepo.getNodeLaunchRecipe(nodeId);
+    if (!recipe) {
+      return {
+        status: "attention_required",
+        error: `Fresh launch recipe unavailable for ${node.logicalId}; rematerialize the pod-aware rig before launching this seat.`,
+      };
+    }
+
+    const context = this.findMemberContext(recipe.rigSpec, node.logicalId);
+    if (!context) {
+      return {
+        status: "attention_required",
+        error: `Fresh launch recipe for ${node.logicalId} does not contain its member definition.`,
+      };
+    }
+
+    // The recipe supplies the authored source, while the retained node row is the
+    // latest operator choice. Keep those choices authoritative across a restart.
+    const member = {
+      ...context.member,
+      ...(node.model !== null ? { model: node.model } : {}),
+      ...(node.effort !== null && node.effort !== undefined ? { effort: node.effort } : {}),
+      ...(node.codexConfigProfile !== null && node.codexConfigProfile !== undefined
+        ? { codexConfigProfile: node.codexConfigProfile }
+        : {}),
+      ...(node.permissionPolicy !== null && node.permissionPolicy !== undefined
+        ? { permissionPolicy: node.permissionPolicy }
+        : {}),
+      ...(node.env !== null && node.env !== undefined ? { env: node.env } : {}),
+      ...(node.cwd !== null ? { cwd: node.cwd } : {}),
+      ...(node.restorePolicy !== null ? { restorePolicy: node.restorePolicy } : {}),
+      ...(node.sessionSource !== null && node.sessionSource !== undefined ? { sessionSource: node.sessionSource } : {}),
+    };
+
+    return this.launchValidatedMember({
+      rigId,
+      rigSpec: recipe.rigSpec,
+      rigRoot: recipe.rigRoot,
+      pod: context.pod,
+      member,
+      qualifiedId: node.logicalId,
+      nodeId,
+      // Preserve the resolved cwd from materialization, including a prior
+      // --cwd-override, rather than silently falling back to process cwd.
+      cwdOverride: node.cwd ?? undefined,
+    });
+  }
+
+  /** Whether a persisted recipe contains enough validated source to attempt a fresh launch. */
+  canLaunchPersistedFresh(rigId: string, nodeId: string): boolean {
+    const rig = this.deps.rigRepo.getRig(rigId);
+    const node = rig?.nodes.find((candidate) => candidate.id === nodeId);
+    if (!rig || !node) return false;
+    const recipe = this.deps.rigRepo.getNodeLaunchRecipe(nodeId);
+    return recipe ? this.findMemberContext(recipe.rigSpec, node.logicalId) !== null : false;
   }
 
   /**
