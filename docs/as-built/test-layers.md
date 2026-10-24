@@ -144,7 +144,7 @@ Exit codes: 0 pass, 1 a leg failed, 2 lane busy, 3 the runner itself errored.
 |---|---|
 | `runtime: stub` adapter | `packages/daemon/src/adapters/stub-runtime-adapter.ts`, with `stub-runner.ts` (the process that runs in the pane), `stub-script.ts` (the launch-script format) and `stub-compaction.ts` / `stub-restore.ts` |
 | Scenario format and runner | `packages/daemon/test/helpers/scenario-*.ts`. Step verbs: `up`, `down`, `send`, `restart`, `daemon`, `seed_regression` are bound. `restore`, `emit`, `mutate`, `policy` parse but are unbound. Assertion surfaces: `ps`, `queue`, `stream`, `scope`, `pane`, `transcript`, `tui_socket`, `policy_provenance`. |
-| Scenario library | `packages/test-system/scenarios/`: 17 scenarios, 7 stub topologies, `agents/`, `culture.md`, per-seat stub scripts in `scripts/` |
+| Scenario library | `packages/test-system/scenarios/`: 20 scenarios, 7 stub topologies, `agents/`, `culture.md`, per-seat stub scripts in `scripts/` |
 | Runner fixtures | `packages/daemon/test/fixtures/scenarios/` (`scenario-01-per-seat-scripts`, `scenario-02-baton`, `scenario-10-one-view-state`) |
 | Host runner | `packages/daemon/scripts/run-scenarios.mjs` |
 | In-container entry and result check | `packages/test-system/ci/run.mjs`, `packages/test-system/ci/result.mjs` |
@@ -279,15 +279,17 @@ The most useful next pieces of harness work, roughly in dependency order:
 
 ### Library status
 
-Four scenarios run in CI: `queue-baton-survives-restart` (since #243) with its seeded pair,
-and `transcript-reads-addressed-seat`, `capture-returns-addressed-seat` and
-`daemon-restart-preserves-team-identity` in passing form only. Three more,
-`down-stops-every-seat`, `send-renders-in-addressed-pane` and
+Seven library scenarios run in CI: `queue-baton-survives-restart` (since #243) and
+`refocus-parked-baton` with their seeded pairs, and `transcript-reads-addressed-seat`,
+`capture-returns-addressed-seat`, `daemon-restart-preserves-team-identity`,
+`refocus-active-baton` and `refocus-parked-baton-packet-off` in passing form only. The
+`fixture` case runs the `scenario-02-baton` test fixture through the same seeded pair.
+Three more, `down-stops-every-seat`, `send-renders-in-addressed-pane` and
 `up-relaunch-restores-a-two-seat-team`, run with the local runner but not in CI, and
 `compaction-restore-resumes-role` runs the compaction round-trip's success path the same
-way. Those seven later scenarios are not in this table; see "Status
-today" under [Help wanted](#help-wanted-command-families-without-a-behavioural-scenario). The
-other nine scenarios are authored but not yet runnable as meaningful checks:
+way. Those ten later scenarios are not in this table; "Status today" under
+[Help wanted](#help-wanted-command-families-without-a-behavioural-scenario) covers seven
+of them. The other nine scenarios are authored but not yet runnable as meaningful checks:
 
 | Scenario | Why it doesn't run as a check yet | Smallest useful next step |
 |---|---|---|
@@ -570,9 +572,6 @@ How to make a case useful:
 
 Read these with care. This page notes them and proposes no changes.
 
-- `packages/test-system/ci/README.md` describes the CI scenario job, except its
-  "Run one case" section, which still says both cases and six runs; the script runs four cases
-  and eight containers by default.
 - The headers of `transcript-reads-addressed-seat.yaml` and `capture-returns-addressed-seat.yaml`
   say "host mode only". Both run in the CI container job, which executes the host-mode pipeline
   inside the image.
