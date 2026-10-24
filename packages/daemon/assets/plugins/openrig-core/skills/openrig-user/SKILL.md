@@ -96,9 +96,10 @@ A queue write (`create`, `claim`, `update`, `handoff`, `handoff-and-complete`) a
 handoff answers with the closed row and its successor. When that answer shows what you need to establish, use it.
 
 `create` also prints `Queue create request ID: <id> (not proof of persistence)` on stderr *before* it sends the write,
-so an interrupted create can be reconciled. That ID names a request, not a row: the row is the `qitemId` in the
-answer on stdout, and a non-zero exit means no row was confirmed. Don't merge stderr into stdout and keep the first
-`qitem-…` you find there; a refused create prints its request ID first, too.
+so an interrupted create can be reconciled. That ID names a request, not a row. The row is the `qitemId` on stdout
+when the command exits 0. A non-zero exit means no row was confirmed, even when stdout carries a `qitemId`: an
+indeterminate answer repeats the request ID so you can reconcile by it. Don't merge stderr into stdout and keep the
+first `qitem-…` you find there; a refused create prints its request ID first, too.
 
 Read back (`rig queue show <id> --full --json`, or `rig queue transitions <id>`) when the answer doesn't show what you
 need, for example:
@@ -107,7 +108,9 @@ need, for example:
   other host), or the write warned `qitem_body_not_saved` (an existing row came back). Reconcile by the original ID
   before any retry. A 502 whose `failureClass` is `unknown-host`, `unsupported-transport` or `registry` isn't
   indeterminate: the daemon refused before contacting any host and wrote nothing (`create` says "No row was
-  created"). `unsupported-transport` means that host entry is SSH-declared; `rig host list` shows its http entry;
+  created"). `unsupported-transport` means that host entry is SSH-declared. Use the http entry for the same machine
+  from `rig host list`; if there isn't one, add it with that machine's daemon URL (`rig host add --id <id>
+  --transport http --url <daemon-url>`), asking whoever runs that host for the URL;
 - the output was compact or truncated and the field you need isn't in it (the compact receipt shows `bodyBytes`, not
   the body, and its footer names what it left out);
 - you need a transition note, a closure or blocker detail, or a successor that the output you saw omits;
