@@ -46,26 +46,41 @@ function settings(command: string) {
 it.each([
   { kind: "fresh", managed: false }, { kind: "fork", managed: false }, { kind: "resume", managed: false },
   { kind: "fresh", managed: true }, { kind: "fork", managed: true }, { kind: "resume", managed: true },
-])("$kind, explicit mode=$managed: a limited seat can read its managed restore files, not a peer's marker", async ({ kind, managed }) => {
+])("$kind, explicit mode=$managed: command grants only the canonical seat files and launched conversation packet", async ({ kind, managed }) => {
   const f = fixture(managed);
   expect((await f.adapter.launchHarness(f.binding, { name: "owner@rig",
     ...(kind === "fork" ? { forkSource: { kind: "native_id" as const, value: PARENT } } : {}),
     ...(kind === "resume" ? { resumeToken: CHILD } : {}) })).ok).toBe(true);
   const allow = settings(f.commands[0]!).permissions.allow as string[];
-  expect(allow).toContain(`Read(/${f.marker})`); // retained native failure: marker is outside cwd
-  expect(allow).toContain(`Read(/${f.home}/plugins/openrig-core/skills/refocusing/SKILL.md)`);
-  expect(allow).toContain(`Read(/${f.home}/plugins/openrig-core/skills/claude-compaction-restore/SKILL.md)`);
-  expect(allow).toContain(`Read(//tmp/claude-compaction-restore/${CHILD}-*/restore-instructions.md)`);
-  expect(allow.some(x => x.includes("peer@rig") || x.includes(PARENT))).toBe(false);
-  expect(allow).not.toContain(`Read(/${f.home}/**)`);
+  expect(allow.filter(rule => rule.startsWith("Read(") && rule !== "Read(./**)")).toEqual([
+    `Read(/${f.marker})`,
+    `Read(/${f.home}/plugins/openrig-core/skills/refocusing/SKILL.md)`,
+    `Read(/${f.home}/plugins/openrig-core/skills/claude-compaction-restore/SKILL.md)`,
+    `Read(/${f.home}/compaction/post-compact-extra/owner@rig.md)`,
+    `Read(/${f.home}/compaction/preparation/owner@rig/*/RESTORE-MAP.md)`,
+    `Read(/${f.cwd}/.openrig/compaction/preparation/owner@rig/*/RESTORE-MAP.md)`,
+    ...["restore-instructions.md", "restore-summary.json", "transcript.txt", "transcript-narrative.txt", "touched-files.md"]
+      .map(file => `Read(//tmp/claude-compaction-restore/${CHILD}-*/${file})`),
+  ]);
 });
 
-it.each([false, true])("legacy resume, explicit mode=%s: keeps the exact marker allowance and user's permission mode", async managed => {
+it("runtime-switch command keys restore files to the canonical seat, not its staging session", async () => {
+  const f = fixture(true);
+  f.binding.tmuxSession = "openrig-switch-x";
+  expect((await f.adapter.launchHarness(f.binding, { name: "owner@rig" })).ok).toBe(true);
+  const allow = settings(f.commands[0]!).permissions.allow as string[];
+  expect(allow).toContain(`Read(/${f.marker})`);
+  expect(allow.some(rule => rule.includes("openrig-switch-x"))).toBe(false);
+});
+
+it.each([false, true])("legacy resume, explicit mode=%s: command keeps the exact marker allowance, launched conversation packet and permission mode", async managed => {
   const f = fixture(managed);
   const adapter = new ClaudeResumeAdapter(f.tmux, { openrigHome: f.home, ...(managed ? { claudeManagedLaunch: f.claudeManagedLaunch } : {}) });
   vi.spyOn(adapter as any, "verifyResume").mockResolvedValue({ ok: true });
   await adapter.resume("owner@rig", "claude_id", CHILD, f.cwd, "floor", undefined, managed ? "acceptEdits" : undefined, "node", undefined, undefined, false, true);
-  expect(settings(f.commands[0]!).permissions.allow).toContain(`Read(/${f.marker})`);
+  const allow = settings(f.commands[0]!).permissions.allow as string[];
+  expect(allow).toContain(`Read(/${f.marker})`);
+  expect(allow).toContain(`Read(//tmp/claude-compaction-restore/${CHILD}-*/restore-instructions.md)`);
   expect(f.commands[0]).toMatch(/--permission-mode'? '?acceptEdits/);
 });
 

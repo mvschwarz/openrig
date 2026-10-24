@@ -285,7 +285,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const posture = claudePostureFlag(process.env, binding.launchPosture, binding.permissionMode);
     const appliedLaunch = observeClaudePermission(posture);
     const permissionArgs = (nativeSessionId: string) => withManagedRestoreReads(operationalLaunchArgs(this.runtime, binding), {
-      openrigHome: this.stateDir, session: binding.tmuxSession!, cwd: binding.cwd, nativeSessionId,
+      openrigHome: this.stateDir, session: opts.name, cwd: binding.cwd, nativeSessionId,
     });
     const permissionArg = (args: string[]) => posture + args.map(arg => ` ${shellQuote(arg)}`).join("");
     // OPR.0.5.3.1: classic-renderer env prefix (default on) → native scrollback for every
