@@ -61,6 +61,7 @@ const LABELS: Record<string, string> = {
   "snapshots.periodic.enabled": "Periodic snapshots", "snapshots.periodic.interval_seconds": "Snapshot interval",
   "snapshots.periodic.retention_keep": "Snapshots to retain", "ui.terminal.max_live_terminals": "Legacy web terminal limit",
   "retention.usage_samples_days": "Usage sample retention",
+  "retention.stream_days": "Stream retention (days)", "retention.stream_max_items": "Stream items kept",
   "transcripts.poll_interval_seconds": "Transcript refresh", "transcripts.lines": "Transcript lines",
   "ui.preview.refresh_interval_seconds": "Preview refresh", "ui.preview.max_pins": "Preview pins",
   "ui.preview.default_lines": "Preview lines", "context.system_world": "System world",

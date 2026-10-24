@@ -1,7 +1,8 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { EventBus } from "../domain/event-bus.js";
-import type { StreamStore } from "../domain/stream-store.js";
+import { StreamCursorExpiredError, type StreamStore } from "../domain/stream-store.js";
+import { listSubscriptions, readPage, subscribe, unsubscribe } from "../domain/stream-subscriptions.js";
 import { requireSenderIdentity, resolveRecordedProvenance } from "./require-sender-identity.js";
 import { queryLimit } from "./query-limit.js";
 
@@ -129,18 +130,29 @@ export function streamRoutes(): Hono {
     const includeArchived = c.req.query("includeArchived") === "true";
 
     const store = getStore(c);
-    const items = store.list({
-      limit,
-      afterSortKey,
-      sourceSession,
-      hintDestination,
-      hintTag,
-      since,
-      until,
-      includeArchived,
-      ...(parsedDirection ? { direction: parsedDirection } : {}),
-    });
-    return c.json(items);
+    try {
+      const items = store.list({
+        limit,
+        afterSortKey,
+        sourceSession,
+        hintDestination,
+        hintTag,
+        since,
+        until,
+        includeArchived,
+        ...(parsedDirection ? { direction: parsedDirection } : {}),
+      });
+      return c.json(items);
+    } catch (err) {
+      if (!(err instanceof StreamCursorExpiredError)) throw err;
+      let prunedThrough: string | null = null;
+      try {
+        prunedThrough = (store.db.prepare("SELECT pruned_through_ts AS ts FROM stream_retention_marks WHERE id = 1").get() as { ts?: string } | undefined)?.ts ?? null;
+      } catch { /* a daemon database without stream retention */ }
+      return c.json({ error: "stream_cursor_expired", afterSortKey: err.afterSortKey, prunedThrough,
+        message: `No stream item has sort key ${err.afterSortKey}: stream retention pruned it, or it never existed. Items after it may have been pruned too. ` +
+          (prunedThrough ? `Resume with --since ${prunedThrough}.` : "Resume with --since <time>.") }, 410);
+    }
   });
 
   // GET /watch — SSE for new stream.emitted events.
@@ -198,6 +210,36 @@ export function streamRoutes(): Hono {
 
   app.get("/watch", sseHandler);
   app.get("/sse", sseHandler);
+
+  // Slice 22 outcome 9: hub-reader subscriptions and the reader's bounded read. MUST precede /:streamItemId.
+  app.post("/subscriptions", async (c) => {
+    const body = await c.req.json<{ readerSession?: string; hintTags?: unknown; hintType?: unknown; actor?: string }>().catch(() => ({} as never));
+    const identity = requireSenderIdentity(c, { verb: "stream subscribe", bodyClaim: body.actor });
+    if (!identity.ok) return identity.response;
+    const reader = typeof body.readerSession === "string" ? body.readerSession.trim() : "";
+    if (!/^[^@\s]+@[^@\s]+$/.test(reader)) return c.json({ error: "reader_session_invalid", message: "readerSession must be a seat@rig session name" }, 400);
+    const tags = Array.isArray(body.hintTags) ? body.hintTags.filter((x): x is string => typeof x === "string" && x.trim() !== "").map((x) => x.trim()) : [];
+    const type = typeof body.hintType === "string" && body.hintType.trim() ? body.hintType.trim() : null;
+    return c.json(subscribe(getStore(c).db, { readerSession: reader, hintTags: tags, hintType: type, actor: identity.session }));
+  });
+
+  app.get("/subscriptions", (c) => c.json(listSubscriptions(getStore(c).db)));
+
+  app.delete("/subscriptions/:readerSession", (c) => {
+    const reader = c.req.param("readerSession");
+    if (!unsubscribe(getStore(c).db, reader)) return c.json({ error: "subscription_not_found", message: `No stream subscription for ${reader}` }, 404);
+    return c.json({ ok: true, readerSession: reader });
+  });
+
+  // The reader is the transport identity (a body `reader` only when there is none), so a seat advances only its own cursor.
+  app.post("/read", async (c) => {
+    const body = await c.req.json<{ reader?: string; limit?: unknown }>().catch(() => ({} as never));
+    const identity = requireSenderIdentity(c, { verb: "stream read", bodyClaim: body.reader });
+    if (!identity.ok) return identity.response;
+    const page = readPage(getStore(c).db, identity.session, { limit: typeof body.limit === "number" ? body.limit : undefined });
+    if (!page) return c.json({ error: "subscription_not_found", message: `No stream subscription for ${identity.session}; create one with rig stream subscribe ${identity.session}` }, 404);
+    return c.json(page);
+  });
 
   // GET /:streamItemId — fetch one
   app.get("/:streamItemId", (c) => {
