@@ -91,6 +91,25 @@ describe("completed human answer interrupted before ask close", () => {
     expect(afterSecond).toMatchObject({ committedReplyCount: 1, askState: "done", replyCount: 1, resolutionCount: 1, nudgeCount: 1 });
   });
 
+  it.each(["slack", "steering"] as const)("%s typed answer interrupted at close, then retried on the same surface: one return", async surface => {
+    const f = await fixture();
+    const answer = surface === "slack" ? () => f.typedSlack("Original words") : () => f.steering({ decision: "Original words" });
+    let interruptedAt: ReturnType<typeof f.snapshot> | null = null;
+    const original = f.repo.resolveDirectHumanReply.bind(f.repo);
+    vi.spyOn(f.repo, "resolveDirectHumanReply").mockImplementationOnce(() => {
+      interruptedAt = f.snapshot(); throw new Error("fixture interruption after durable reply, before ask close");
+    }).mockImplementation(original);
+    await answer();
+    const beforeRetry = f.snapshot();
+    expect(interruptedAt).toMatchObject({ committedReplyCount: 1, askState: "pending", replyCount: 1, resolutionCount: 0, nudgeCount: 1 });
+    expect(beforeRetry).toMatchObject({ askState: "pending", replyCount: 1, resolutionCount: 0, nudgeCount: 1 });
+    const retry = await answer();
+    if (surface === "steering") expect(retry).toMatchObject({ status: 200, body: { answer: { message: expect.stringContaining("Already answered") } } });
+    else expect(retry).toMatchObject({ disposition: "accepted" });
+    expect(f.snapshot()).toMatchObject({ committedReplyCount: 1, askState: "done", replyCount: 1, resolutionCount: 1, nudgeCount: 1,
+      replies: beforeRetry.replies, answers: { choice: { kind: "typed-reply", text: "Original words" } } });
+  });
+
   it("without interruption, an answer closes once and the other surface creates no second reply", async () => {
     const f = await fixture(); await f.slack(); await f.steering(); const result = f.snapshot();
     expect(result).toMatchObject({ askState: "done", replyCount: 1, resolutionCount: 1, nudgeCount: 1 });
