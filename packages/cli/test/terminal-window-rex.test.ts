@@ -4,8 +4,8 @@ import { inRex, openTerminalWindow, type WindowDeps } from "../src/terminal-wind
 
 const REX = "/opt/rex bin/rex";
 const IN_REX = { HOME: "/home/p", TERM_PROGRAM: "rex", REX_SESSION: "session:here", REX_BLOCK: "block:mine", REX_SERVER: "unix:///rex.sock" };
-const APP = { client_id: "client:app", connection_state: "connected", info: { kind: "app", label: "MacBookPro" } };
-const REMOTE_APP = { client_id: "client:remote", connection_state: "connected", info: { kind: "app", label: "mac01" } };
+const APP = { client_id: "client:app", connection_state: "connected", info: { kind: "app", label: "laptop" } };
+const REMOTE_APP = { client_id: "client:remote", connection_state: "connected", info: { kind: "app", label: "desktop" } };
 const CLI = { client_id: "client:cli", info: { kind: "cli", name: "rex" } };
 const SELECTABLE = { actions: [{ name: "session.new" }, { name: "session.select", args: { required: ["session_id"] } }] };
 
@@ -57,7 +57,7 @@ describe("rig terminal open --window from Rex", () => {
     const f = fixture();
     const result = await openTerminalWindow(f.client, "acme", undefined, f.deps, "rex-plan");
     expect(result).toMatchObject({ provider: "rex", ok: true, opened: ["op@acme"], space: { id: "session:new", label: "acme" } });
-    expect(result.notes).toEqual(['The Rex app "MacBookPro" switched to session "acme".']);
+    expect(result.notes).toEqual(['The Rex app "laptop" switched to session "acme".']);
     expect(f.get.mock.calls.map(([url]) => url)).toEqual(["/api/terminal/status?provider=rex", "/api/terminal/preview?view=acme&provider=rex&viewportColumns=132"]);
     expect(f.post).toHaveBeenCalledExactlyOnceWith("/api/terminal/open", { view: "acme", provider: "rex", expectedPlan: "rex-plan", viewportColumns: 132 }, { timeoutMs: 45_000 });
     expect(f.rexCalls()).toEqual([
@@ -79,7 +79,7 @@ describe("rig terminal open --window from Rex", () => {
   it("picks the app that owns the caller's block when several apps view the session", async () => {
     const f = fixture({ clients: [REMOTE_APP, APP], owner: "client:app" });
     const result = await openTerminalWindow(f.client, "acme", undefined, f.deps);
-    expect(result.notes).toEqual(['The Rex app "MacBookPro" switched to session "acme".']);
+    expect(result.notes).toEqual(['The Rex app "laptop" switched to session "acme".']);
     expect(f.rexCalls().at(-1)).toContain('"client_id":"client:app"');
   });
 
@@ -87,7 +87,7 @@ describe("rig terminal open --window from Rex", () => {
     const f = fixture({ clients: [REMOTE_APP, APP], owner: "client:other" });
     const result = await openTerminalWindow(f.client, "acme", undefined, f.deps);
     expect(result).toMatchObject({ ok: true, opened: ["op@acme"] });
-    expect(result.notes).toEqual(['Several Rex apps are connected ("mac01", "MacBookPro"), so none was switched; select session "acme" in the one you\'re using.']);
+    expect(result.notes).toEqual(['Several Rex apps are connected ("desktop", "laptop"), so none was switched; select session "acme" in the one you\'re using.']);
     expect(f.rexCalls().some((call) => call.startsWith("client.perform"))).toBe(false);
   });
 
@@ -95,7 +95,7 @@ describe("rig terminal open --window from Rex", () => {
     const f = fixture({ perform: () => { throw Object.assign(new Error("Command failed"), { stderr: "Error: remote control is off (status=403 code=refused)\n" }); } });
     const result = await openTerminalWindow(f.client, "acme", undefined, f.deps);
     expect(result).toMatchObject({ ok: true, opened: ["op@acme"] });
-    expect(result.notes).toEqual(['The Rex app "MacBookPro" did not switch to session "acme" (refused); select it in Rex. To let OpenRig switch it, turn on Remote Control in the app\'s Settings, under Rex Server.']);
+    expect(result.notes).toEqual(['The Rex app "laptop" did not switch to session "acme" (refused); select it in Rex. To let OpenRig switch it, turn on Remote Control in the app\'s Settings, under Rex Server.']);
   });
 
   it("says when no app can switch sessions", async () => {
@@ -162,7 +162,7 @@ describe("rig terminal open --window from Rex", () => {
   it("with --provider rex outside Rex, uses the server's one app", async () => {
     const f = fixture({ env: { HOME: "/home/p", TERM_PROGRAM: "ghostty" } });
     const result = await openTerminalWindow(f.client, "acme", "rex", f.deps);
-    expect(result.notes).toEqual(['The Rex app "MacBookPro" switched to session "acme".']);
+    expect(result.notes).toEqual(['The Rex app "laptop" switched to session "acme".']);
     expect(f.rexCalls()[1]).toBe("client.list {}");
   });
 
