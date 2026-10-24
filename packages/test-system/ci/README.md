@@ -156,8 +156,9 @@ sends a unique marker, captured in the addressed seat's pane (rendered delivery,
 not agent consumption).
 
 Immediately before the existing `down` action, a gone-process control rechecks
-one private pane's identity, terminates only that fixture seat's process, proves
-that PID gone, and blindly restarts again. The dead seat must detach or restore
+one private pane's identity, closes only that fixture pane, independently proves
+its shell, children and recorded seat PIDs gone, and blindly restarts again.
+The dead seat must detach or restore
 with a different live process, while the untouched peer remains unchanged. A
 correct-environment restart then permits the ordinary cleanup. Each partial DB,
 pane and poll observation, and any failed stage, remains in the report; an

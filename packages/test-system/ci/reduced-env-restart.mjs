@@ -61,6 +61,12 @@ export function verifyGoneProcess(proof) {
   assert.match(proof.absenceProbe.stderr, /No such process/i);
   assert.equal(proof.recovery, 'complete');
   const { target, before, after } = proof;
+  assert.ok(target.pids.includes(target.pid) && target.pids.length >= 2, 'missing shell/child PID census');
+  assert.deepEqual(proof.absenceProbes.map(row => row.pid), target.pids);
+  for (const probe of proof.absenceProbes) {
+    assert.equal(probe.code, 1);
+    assert.match(probe.stderr, /No such process/i);
+  }
   const prior = before.sessions.find(row => row.id === target.sessionId);
   assert.ok(prior?.status === 'running' && prior.node_id === target.nodeId);
   assert.ok(panesOf(before.privatePanes).some(row => row.name === prior.session_name && row.pid === target.pid && !row.dead));
@@ -189,20 +195,33 @@ export async function reducedEnvRestart(daemon, scaffold, rigBin, proof = {},
         const target = gone.before.sessions[1];
         const pane = panesOf(gone.before.privatePanes).find(row => row.name === target.session_name && !row.dead);
         assert.ok(pane?.pid > 1, 'owned seat process unavailable');
-        gone.target = { nodeId: target.node_id, sessionId: target.id, pid: pane.pid, pane: pane.pane };
+        gone.stage = 'owned-process-census';
+        const children = (await command('/bin/ps', ['-axo', 'pid=,ppid='])).stdout.trim().split('\n')
+          .map(line => line.trim().split(/\s+/).map(Number)).filter(([, parent]) => parent === pane.pid).map(([pid]) => pid);
+        assert.ok(children.length && children.every(pid => Number.isSafeInteger(pid) && pid > 1), 'fixture child process unavailable');
+        const recordedPids = gone.before.verdicts.filter(row => row.node_id === target.node_id && row.session_name === target.session_name)
+          .flatMap(row => [row.observed_pid, row.observed_pane_pid]).filter(pid => Number.isSafeInteger(pid) && pid > 1);
+        gone.target = { nodeId: target.node_id, sessionId: target.id, pid: pane.pid, pane: pane.pane,
+          pids: [...new Set([pane.pid, ...children, ...recordedPids])].sort((a, b) => a - b) };
         gone.stage = 'confirm-owned-pane';
         const observed = await command('/usr/bin/tmux', ['-S', scaffold.tmuxSocketPath, 'display-message', '-p', '-t', pane.pane,
           '#{session_name}:#{pane_id}:#{pane_pid}:#{pane_dead}']);
         assert.deepEqual(panesOf([observed.stdout.trim()]), [pane], 'owned pane identity changed; no kill');
         gone.stage = 'kill-owned-seat';
-        gone.kill = await command('/bin/kill', ['-TERM', String(pane.pid)], daemon.readEnv);
+        // Closing the owned PTY ends its interactive shell and foreground job; TERM to the shell does not.
+        gone.kill = await command('/usr/bin/tmux', ['-S', scaffold.tmuxSocketPath, 'kill-pane', '-t', pane.pane]);
         for (let i = 0; i < 40; i++) {
-          try { await command('/bin/kill', ['-0', String(pane.pid)], daemon.readEnv); }
-          catch (error) {
-            if (error.code === 1 && /No such process/i.test(error.stderr)) {
-              gone.absenceProbe = { code: error.code, stderr: error.stderr }; gone.processAbsent = true; break;
+          gone.absenceProbes = [];
+          for (const pid of gone.target.pids) {
+            try { await command('/bin/kill', ['-0', String(pid)], daemon.readEnv); }
+            catch (error) {
+              if (error.code !== 1 || !/No such process/i.test(error.stderr)) throw error;
+              gone.absenceProbes.push({ pid, code: error.code, stderr: error.stderr });
             }
-            throw error;
+          }
+          if (gone.absenceProbes.length === gone.target.pids.length) {
+            gone.absenceProbe = gone.absenceProbes.find(row => row.pid === pane.pid);
+            gone.processAbsent = true; break;
           }
           await pause(250);
         }
