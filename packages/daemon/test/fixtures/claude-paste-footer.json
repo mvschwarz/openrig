@@ -1,0 +1,24 @@
+{
+  "provenance": "Claude 2.1.309 retained native composer: transcript and seat title omitted; cursor y adjusted for crop. Seven identical post-paste frames deduplicated.",
+  "before": {
+    "screen": "────────────────────────────────────────────────────────────────────────────────\n\u001b[39m❯ \n\u001b[38;5;244m────────────────────────────────────────────────────────────────────────────────\n\u001b[39m  \u001b[38;5;147m⏵⏵\u001b[39m \u001b[38;5;147maccept\u001b[39m \u001b[38;5;147medits\u001b[39m \u001b[38;5;147mon\u001b[38;5;246m (shift+tab\u001b[39m \u001b[38;5;246mto\u001b[39m \u001b[38;5;246mcycle)\u001b[39m\n\n\n",
+    "cursor": {
+      "x": 2,
+      "y": 1,
+      "width": 80,
+      "height": 24
+    },
+    "inMode": false
+  },
+  "after": {
+    "screen": "────────────────────────────────────────────────────────────────────────────────\n\u001b[39m❯ [Pasted text #1 +70 lines]\n\u001b[38;5;244m────────────────────────────────────────────────────────────────────────────────\n\u001b[39m  \u001b[38;5;246mpaste again to expand\u001b[39m\n\n\n",
+    "cursor": {
+      "x": 28,
+      "y": 1,
+      "width": 80,
+      "height": 24
+    },
+    "inMode": false
+  },
+  "afterSamples": 7
+}
