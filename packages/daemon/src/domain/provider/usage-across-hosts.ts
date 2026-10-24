@@ -339,7 +339,12 @@ export function isUsageRow(v: unknown): v is ProviderUsageAllowance {
 
 const seatConfiguration: Check = (v) =>
   record({ source: oneOf("registry"), profileRef: str, recordedAt: str, profileSaved: nullable(bool) })(v)
-  || record({ source: oneOf("default_login"), home: nullable(str), homeNote: str })(v)
+  || record({
+    source: oneOf("default_login"),
+    home: nullable(str),
+    homeNote: str,
+    homeFrom: optional(oneOf("member", "rig")),
+  })(v)
   || record({ source: oneOf("unknown"), reason: str })(v);
 
 /** A served seat account with every field the views read, typed as provider-types.ts says. */
@@ -349,6 +354,7 @@ export const isSeat = record({
   runtime: str,
   configured: seatConfiguration,
   registryNotes: optional(listOf(str)),
+  ignoredHome: optional(record({ from: oneOf("member", "rig"), variable: str, value: str })),
   allowance: record({ linked: oneOf(false), reason: str }),
   observed: optional(record({
     windowsSampled: optional(bool),

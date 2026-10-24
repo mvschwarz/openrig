@@ -139,12 +139,16 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       const c = (r["configured"] ?? {}) as Record<string, unknown>;
       const configured = c["source"] === "registry"
         ? `configured: profile ${c["profileRef"]} (registry, recorded ${c["recordedAt"]}${c["profileSaved"] === false ? "; profile not saved on this host" : c["profileSaved"] === null ? "; whether the profile is saved: unknown" : ""})`
+        : c["source"] === "default_login" && c["homeFrom"]
+          ? `configured: the seat's own home (${c["home"]}, from its ${c["homeFrom"]} env)`
         : c["source"] === "default_login"
           ? `configured: default login${c["home"] ? ` (${c["home"]})` : ""}`
           : `configured: unknown (${c["reason"]})`;
       const allowance = (r["allowance"] ?? {}) as Record<string, unknown>;
       console.log(`  ${r["seatSession"]}  ${r["runtime"]}  ${configured} · allowance not linked`);
       if (c["source"] === "default_login" && c["homeNote"]) console.log(`    ${c["homeNote"]}`);
+      const ignored = r["ignoredHome"] as Record<string, unknown> | undefined;
+      if (ignored) console.log(`    ignored: its ${ignored["from"]} env sets ${ignored["variable"]}=${ignored["value"]}, which isn't an absolute path, so it isn't used as this seat's home`);
       for (const note of (r["registryNotes"] as string[] | undefined) ?? []) console.log(`    ${note}`);
       const observed = r["observed"] as Record<string, unknown> | undefined;
       const differs = (observed?.["differsFrom"] as string[] | undefined) ?? [];
