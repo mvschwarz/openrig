@@ -1651,6 +1651,30 @@ export class QueueRepository {
     }
   }
 
+  /** First committed return of a direct ask, including pre-shared-ID Slack replies. */
+  getHumanAnswer(qitemId: string, actorSession: string): QueueItem | null {
+    const ask = this.getById(qitemId);
+    if (!this.hasReplyToColumn || !ask || ask.destinationSession !== actorSession
+      || ask.humanIntent === "update" || !this.isPersonAddress(actorSession)) return null;
+    const row = this.db.prepare(`SELECT qitem_id FROM queue_items
+      WHERE reply_to = ? AND source_session = ? AND destination_session = ?
+        AND (EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = 'human-answer')
+          OR (qitem_id LIKE 'qitem-slack-inbound-%' AND COALESCE(summary, '') NOT LIKE '[Recovered after gap] %'))
+      ORDER BY ts_created, rowid LIMIT 1`).get(qitemId, actorSession, ask.sourceSession) as { qitem_id: string } | undefined;
+    return row ? this.getById(row.qitem_id) : null;
+  }
+
+  /** The lookup and create's insert run synchronously before its first delivery await.
+   * Every new surface uses the same ID; old IDs and their original bodies remain intact. */
+  async createHumanAnswer(input: QueueCreateInput & { inboundReplyTo: string }): Promise<QueueItem> {
+    const existing = this.getHumanAnswer(input.inboundReplyTo, input.sourceSession);
+    if (existing) return existing;
+    return this.create({ ...input,
+      qitemId: `qitem-human-answer-${createHash("sha256").update(input.inboundReplyTo).digest("hex").slice(0, 20)}`,
+      tags: [...new Set([...(input.tags ?? []), "human-answer"])],
+    });
+  }
+
   async create(input: QueueCreateInput): Promise<QueueItem & {
     /** Response-only: the retry's changed body was not written. Never stored on the row. */
     createWarning?: { code: "qitem_body_not_saved"; message: string };

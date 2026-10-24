@@ -59,11 +59,14 @@ export interface CreateQitemInput {
   tags?: string[];
   /** #822 — the ask whose OpenRig thread this message, answer, or reaction came from. */
   inReplyTo?: string;
+  /** A current typed/button answer, never a reaction or a recovered late message. */
+  humanAnswer?: boolean;
 }
 
 /** What the inbound router needs: land a durable qitem, get its id (or throw). */
 export interface InboundQueuePort {
   createQitem(input: CreateQitemInput): Promise<string>;
+  getHumanAnswer?(qitemId: string, actorSession: string): { qitemId: string; body: string } | null;
 }
 
 /** What the outbound driver needs: the current human-alert set, full items included. */
@@ -138,8 +141,13 @@ export function makeQueuePorts(
   opts: { loadHumanRegistry?: () => LoadResult } = {},
 ): InboundQueuePort & OutboundQueuePort {
   return {
+    getHumanAnswer: (qitemId, actorSession) => queueRepo.getHumanAnswer(qitemId, actorSession),
     async createQitem(input: CreateQitemInput): Promise<string> {
-      const created = await queueRepo.create({
+      const ask = input.inReplyTo ? queueRepo.getById(input.inReplyTo) : null;
+      const directAnswer = input.humanAnswer && ask && ask.destinationSession === input.source && ask.humanIntent !== "update"
+        && queueRepo.isPersonAddress(input.source);
+      const create = directAnswer ? queueRepo.createHumanAnswer.bind(queueRepo) : queueRepo.create.bind(queueRepo);
+      const created = await create({
         qitemId: input.qitemId,
         sourceSession: input.source,
         destinationSession: input.destination,
@@ -147,7 +155,7 @@ export function makeQueuePorts(
         summary: input.summary,
         priority: (input.priority ?? "routine") as never,
         tags: input.tags ?? ["founder-slack", "inbound"],
-        inboundReplyTo: input.inReplyTo ?? null,
+        inboundReplyTo: input.inReplyTo!,
       });
       return (created as unknown as { qitemId: string }).qitemId;
     },

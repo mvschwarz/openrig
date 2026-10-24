@@ -384,8 +384,8 @@ describe("structured human questions (#193)", () => {
       await click("ship", "yes", { actionTs: "2001.1" }); // a real late click
       await click("ship", "yes", { actionTs: "2001.1" }); // and its redelivery
       await vi.waitFor(() => expect(threadAcks()).toHaveLength(3));
-      expect(threadAcks()[2]).toBe(CLICK_REPLIES.closed);
-      expect(threadAcks().filter((t) => t === CLICK_REPLIES.closed)).toHaveLength(1);
+      expect(threadAcks()[2]).toContain("Already answered; the original answer went to author@rig as ");
+      expect(threadAcks().filter((t) => t.startsWith("Already answered"))).toHaveLength(1);
       expect(repliesToSeat()).toHaveLength(1);
     });
 
@@ -442,7 +442,7 @@ describe("structured human questions (#193)", () => {
       expect(threadAcks()).toHaveLength(1);
       await click("ship", "yes", { actionTs: "2200.1" }); // Socket Mode redelivery of that click
       await vi.waitFor(() => expect(threadAcks()).toHaveLength(2));
-      expect(threadAcks()[1]).toBe(CLICK_REPLIES.onRecord);
+      expect(threadAcks()[1]).toContain("Already answered; the original answer went to author@rig as ");
       await click("ship", "yes", { actionTs: "2200.1" }); // and once posted, never again
       expect(threadAcks()).toHaveLength(2);
       expect(repliesToSeat()).toHaveLength(1);

@@ -445,8 +445,8 @@ async function run(): Promise<void> {
         const result = await client.missionControlAction(input);
         view.dispatch({ type: "notice", message: action.verb === "approve"
           ? `Approved ${action.qitemId} as ${action.actorSession}: the request is closed on its own row.`
-          : result.answer?.outcome === "recorded" ? `Recorded on ${action.qitemId}. Still to answer: ${result.answer.unanswered.join("; ")}`
-          : `Answered ${action.qitemId} as ${action.actorSession}: the answer went back to the asker, and the request is closed.` });
+          : result.answer?.message ?? (result.answer?.outcome === "recorded" ? `Recorded on ${action.qitemId}. Still to answer: ${result.answer.unanswered.join("; ")}`
+          : `Answered ${action.qitemId} as ${action.actorSession}: the answer went back to the asker, and the request is closed.`) });
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
