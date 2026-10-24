@@ -1319,6 +1319,7 @@ export class SeatLifecycleService {
     ).all(node.id) as Array<{ id: string }>).map((row) => row.id);
     const retiringGeneration = this.sessionRegistry.currentOccupantTenure(node.id)?.generationUuid ?? null;
 
+    const viewWarnings: string[] = [];
     let canonicalProbe = await this.probeLiveness(
       canonicalSessionName,
       "fresh launch refuses rather than overwrite a possibly-live canonical session",
@@ -1366,6 +1367,10 @@ export class SeatLifecycleService {
         false,
       );
       if (!stopped.ok) return stopped;
+      // All tile providers attach once; the safe detach must not silently look
+      // like a seat disappearing. Report recovery without inventorying or reopening views.
+      const view = shellQuote(`rig:${seat.rigName}`);
+      viewWarnings.push(`Replacing the tmux session for "${canonicalSessionName}" detaches its open terminal tiles. Reopen the view: rig terminal open ${view} --window (Herdr or tmux), or rig terminal open ${view} --provider cmux.`);
       // Stopping the server's last session ends tmux's server, and every probe
       // below would then be transport_unavailable, never absence. Restore an
       // empty server (no session is invented; a no-op while the server is up)
@@ -1382,7 +1387,7 @@ export class SeatLifecycleService {
         reason: input.reason,
         operator: input.operator,
       });
-      if (!cleaned.ok) return cleaned;
+      if (!cleaned.ok) return { ...cleaned, warnings: viewWarnings };
     }
 
     // The stop/clean composition may have taken time; buy absence again at the
@@ -1391,11 +1396,12 @@ export class SeatLifecycleService {
       canonicalSessionName,
       "fresh launch refuses rather than race a canonical-session collision",
     );
-    if ("code" in finalProbe) return finalProbe;
+    if ("code" in finalProbe) return { ...finalProbe, warnings: viewWarnings };
     if (finalProbe.state === "present") {
       return {
         ok: false,
         code: "unmanaged_session_collision",
+        warnings: viewWarnings,
         message: `Canonical tmux session "${canonicalSessionName}" appeared before launch; refusing to overwrite it.`,
       };
     }
@@ -1414,7 +1420,7 @@ export class SeatLifecycleService {
       occupantKind: "fresh",
     });
     if (!launch.ok) {
-      return { ok: false, code: "launch_failed", message: launch.message };
+      return { ok: false, code: "launch_failed", message: launch.message, warnings: viewWarnings };
     }
     const observedGeneration = this.sessionRegistry.currentOccupantTenure(node.id)?.generationUuid ?? null;
     const generation = observedGeneration && observedGeneration !== retiringGeneration
@@ -1436,8 +1442,8 @@ export class SeatLifecycleService {
         errors: ["new occupant generation was not persisted"],
       });
       return compensation === "zero"
-        ? { ok: false, code: "startup_failed", status: "failed", message: "Fresh launch could not persist a new occupant generation; the new session was rolled back." }
-        : { ok: false, code: "attention_required", status: "attention_required", message: "Fresh launch could not persist a new occupant generation and the new process could not be confirmed stopped; the seat requires attention.", sessionName: canonicalSessionName, sessionId: launch.session.id };
+        ? { ok: false, code: "startup_failed", status: "failed", warnings: viewWarnings, message: "Fresh launch could not persist a new occupant generation; the new session was rolled back." }
+        : { ok: false, code: "attention_required", status: "attention_required", warnings: viewWarnings, message: "Fresh launch could not persist a new occupant generation and the new process could not be confirmed stopped; the seat requires attention.", sessionName: canonicalSessionName, sessionId: launch.session.id };
     }
     this.activityOracle?.declareOccupantSwap(node.id, generation);
 
@@ -1467,6 +1473,8 @@ export class SeatLifecycleService {
       allowFreshFallback: false,
     });
 
+    const warnings = viewWarnings.length ? [...(startupResult.warnings ?? []), ...viewWarnings] : startupResult.warnings;
+
     if (!startupResult.ok && startupResult.startupStatus === "failed") {
       const compensation = await this.compensateFailedFreshLaunch({
         seat,
@@ -1488,14 +1496,14 @@ export class SeatLifecycleService {
             code: "startup_failed",
             status: "failed",
             message: `Fresh startup failed and was rolled back to zero live session/binding: ${startupResult.errors.join("; ")}`,
-            warnings: startupResult.warnings,
+            warnings,
           }
         : {
             ok: false,
             code: "attention_required",
             status: "attention_required",
             message: `Fresh startup failed and the new process could not be confirmed stopped; the seat requires attention: ${startupResult.errors.join("; ")}`,
-            warnings: startupResult.warnings,
+            warnings,
             sessionName: canonicalSessionName,
             sessionId: launch.session.id,
             generation,
@@ -1562,7 +1570,7 @@ export class SeatLifecycleService {
         sessionName: canonicalSessionName,
         sessionId: launch.session.id,
         generation,
-        warnings: startupResult.warnings,
+        warnings,
       };
     }
 
@@ -1578,7 +1586,7 @@ export class SeatLifecycleService {
       advisor: node.advisor ?? undefined,
       startupPolicyHash: startup.hash,
       supersededSessionIds,
-      warnings: startupResult.warnings,
+      warnings,
     };
   }
 
