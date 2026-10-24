@@ -727,6 +727,14 @@ export class WatchdogJobsRepository {
 
   deliveryAccounted(jobId: string): void {
     this.inFlight.delete(jobId);
+    // Its schedule matches are done, and the next delivery starts under the job's current schedule.
+    this.updatedFrom.delete(jobId);
+  }
+
+  /** A job that stopped running keeps no replaced schedules, unless a delivery in flight still needs them
+   *  (its deliveryAccounted releases them). */
+  private releaseStoppedSchedules(jobIds: readonly string[]): void {
+    for (const jobId of jobIds) if (!this.inFlight.has(jobId)) this.updatedFrom.delete(jobId);
   }
 
   /** True when `snapshot`, read before a delivery, is still the job's schedule or one only an update replaced. */
@@ -796,6 +804,7 @@ export class WatchdogJobsRepository {
         `UPDATE watchdog_jobs SET state = 'terminal', terminal_reason = ? WHERE job_id = ?`,
       )
       .run(reason, jobId);
+    this.releaseStoppedSchedules([jobId]);
   }
 
   stop(jobId: string, reason = "operator_stopped"): WatchdogJob {
@@ -811,7 +820,9 @@ export class WatchdogJobsRepository {
     this.db
       .prepare(`UPDATE watchdog_jobs SET state = 'stopped', terminal_reason = ? WHERE job_id = ?`)
       .run(reason, jobId);
-    return this.getByIdOrThrow(jobId);
+    const stopped = this.getByIdOrThrow(jobId);
+    this.releaseStoppedSchedules([jobId]);
+    return stopped;
   }
 
   /**
@@ -846,6 +857,7 @@ export class WatchdogJobsRepository {
          WHERE state = 'active' AND job_id IN (${ids.map(() => "?").join(", ")})`,
       )
       .run(...ids);
+    if (res.changes > 0) this.releaseStoppedSchedules(ids);
     return res.changes;
   }
 }
