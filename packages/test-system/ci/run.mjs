@@ -10,6 +10,7 @@ import { defaultHostDaemon, runScenarioFile } from '../../daemon/test/helpers/sc
 import { CASES, PASSING_CASES, RESULT_PREFIX } from './result.mjs';
 import { preserveRefresh } from './preserve-refresh.mjs';
 import { checkMcpStdio } from './mcp-stdio.mjs';
+import { reducedEnvRestart, verifyReducedEnvRestart } from './reduced-env-restart.mjs';
 
 assert.equal(process.platform, 'linux', 'container execution only');
 assert.notEqual(process.getuid(), 0, 'run as the unprivileged testbed user');
@@ -84,6 +85,8 @@ sys.exit(r.returncode)
         restart: async () => {
           report.preservation = await preserveRefresh(daemon, scaffold.openrigHome, rigBin);
           report.mcp = await checkMcpStdio(rigBin, daemon.readEnv);
+          report.reducedEnv = await reducedEnvRestart(daemon, scaffold, rigBin);
+          verifyReducedEnvRestart(report.reducedEnv);
         },
       };
       if (mode === 'healthy' || selected.kind === 'hook') return daemon;

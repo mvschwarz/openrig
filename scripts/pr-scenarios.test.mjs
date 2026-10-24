@@ -96,9 +96,26 @@ test('a passing-only case admits only a clean PASS of its own scenario', () => {
     const pass = { ...(PASSING_CASES[caseName].kind === 'hook' ? { hook } : {}), mode: 'healthy', caseName, scenarioSha256: 'a'.repeat(64), result, records: [result], fault: null };
     if (caseName === 'daemon-restart') {
       pass.mcp = mcp;
+      const snapshot = { nodes: [{ id: 'worker' }, { id: 'peer' }], bindings: [{ id: 'b1', node_id: 'worker', tmux_pane: '%1' }, { id: 'b2', node_id: 'peer', tmux_pane: '%2' }],
+        sessions: [{ id: 's1', node_id: 'worker', session_name: 'worker', status: 'running' },
+          { id: 's2', node_id: 'peer', session_name: 'peer', status: 'running' }],
+        privatePanes: ['worker\t%1\t111\t0', 'peer\t%2\t222\t0'], defaultPanes: [] };
+      pass.reducedEnv = { scope: 'team seats only; kernel duplication not exercised',
+        environment: { TMUX: false, TMUX_TMPDIR: false, wrapperOnPath: false },
+        removed: ['TMUX', 'TMUX_TMPDIR', 'scaffold tmux wrapper'], before: snapshot, after: structuredClone(snapshot) };
+
       pass.preservation = { failedBackupUnchanged: true, editedSha256: 'b'.repeat(64), backedUpSha256: 'b'.repeat(64),
         targetFilesChecked: 2, version: '0.1.17', shippedVersion: '0.1.17' };
       verifyPassingRun(0, pass, caseName);
+      for (const after of [
+        { ...snapshot, nodes: [] }, { ...snapshot, bindings: [] }, { ...snapshot, sessions: [] },
+        { ...snapshot, sessions: snapshot.sessions.map((row, i) => i ? row : { ...row, status: 'superseded' }) },
+        { ...snapshot, privatePanes: ['replacement'] }, { ...snapshot, defaultPanes: ['duplicate'] },
+      ]) assert.throws(() => verifyPassingRun(0, { ...pass, reducedEnv: { ...pass.reducedEnv, after } }, caseName));
+      assert.throws(() => verifyPassingRun(0, { ...pass, reducedEnv: undefined }, caseName));
+      assert.throws(() => verifyPassingRun(0, { ...pass, reducedEnv: { ...pass.reducedEnv,
+        environment: { ...pass.reducedEnv.environment, wrapperOnPath: true } } }, caseName));
+
       for (const changed of [undefined, { ...mcp, identity: mcpResult({ identity: { sessionName: 'other', rigName: 'dev-pair-stub' } }) },
         { ...mcp, unseated: mcpResult({ ok: true, seat: 'unexpected', message: 'no seat' }) },
         { ...mcp, created: { content: mcp.created.content } },

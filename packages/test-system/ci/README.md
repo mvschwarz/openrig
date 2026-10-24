@@ -144,3 +144,10 @@ images or other agents' containers.
 These are controlled hook invocations against the actual scenario daemon, not native Claude/Codex hook scheduling or agent consumption. Fixtures and fault launchers stay under the scenario scaffold; installed hooks are unchanged. The pre-existing queue-durability and passing-only cases are retained.
 
 Managed-compaction coverage uses `managed-compaction-effect.test.ts` in ordinary daemon CI instead: the shipped compact route deliberately refuses `runtime:stub`, and the precompact seam exposes a keyed marker rather than a daemon stream event. The bounded helper fallback drives the real enforcer's command through a stub input model (recorded Claude2.1.282 success792/paste850-851) into the real precompact hook. Healthy and851-character seeded controls assert marker presence/absence, rather than a submit receipt or pane token. This is not native compaction or an installed `rig compact` journey. No runtime filter or ordinary-send behavior changes.
+
+The `daemon-restart` case also starts the installed daemon without inherited
+`TMUX`/`TMUX_TMPDIR` or the scaffold's forced-socket wrapper, keeping its private
+HOME/DB, stub runtimes and `--no-kernel`. It compares both original team panes and
+processes, node/session identities and bindings, and rejects new default-socket
+panes or superseded sessions. This covers **team seats only; kernel duplication
+is not exercised**. A cut comparison runs the same helper on both exact archives.
