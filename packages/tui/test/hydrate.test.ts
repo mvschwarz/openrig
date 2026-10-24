@@ -246,6 +246,42 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     const snap = await hydrateSnapshot(fixtureClient(), undefined, undefined, undefined, undefined, context);
     expect(snap.health).toBeUndefined();
   });
+  // The focused views that render the HEALTH summary line must hydrate the projection they read.
+  it.each([
+    ["instance Table", { resource: "host", name: "mm2-openrig1" }, "table"],
+    ["rig Table", { resource: "rig", name: "myrig", target: { host: "mm2-openrig1" } }, "table"],
+    ["rig Overview", { resource: "rig", name: "myrig", target: { host: "mm2-openrig1" } }, "overview"],
+  ] as const)("loads health for the focused %s so its summary reports the served findings", async (_label, drill, tab) => {
+    const calls: string[] = [];
+    const full = await hydrateSnapshot(fixtureClient());
+    const view = createViewState({ instanceId: "t", getSnapshot: () => full });
+    view.dispatch({ type: "drill", ...drill } as never);
+    view.dispatch({ type: "tab", tab });
+    const { section, viewTab, drill: segments } = view.get();
+    const snap = await hydrateSnapshot(fixtureClient({}, {}, calls), undefined, undefined, undefined, segments.find((part) => part.kind === "rig")?.name, { section, viewTab, drill: segments });
+    expect(calls).toContain("/api/health?limit=200");
+    expect(snap.health).toMatchObject({ availability: "loaded", total: 1 });
+    const text = renderScreen(view.get(), snap, { cols: 160, rows: 60 }).lines.join("\n");
+    expect(text).toContain("HEALTH");
+    expect(text).not.toContain("Not assessed");
+  });
+  // Views that do not render the summary stay lazy: no health request, nothing to assess.
+  it.each([
+    ["instance Overview", { resource: "host", name: "mm2-openrig1" }, "overview"],
+    ["instance Graph", { resource: "host", name: "mm2-openrig1" }, "graph"],
+    ["rig Graph", { resource: "rig", name: "myrig", target: { host: "mm2-openrig1" } }, "graph"],
+    ["rig Recent", { resource: "rig", name: "myrig", target: { host: "mm2-openrig1" } }, "recent"],
+  ] as const)("does not read health for the focused %s", async (_label, drill, tab) => {
+    const calls: string[] = [];
+    const full = await hydrateSnapshot(fixtureClient());
+    const view = createViewState({ instanceId: "t", getSnapshot: () => full });
+    view.dispatch({ type: "drill", ...drill } as never);
+    view.dispatch({ type: "tab", tab });
+    const { section, viewTab, drill: segments } = view.get();
+    const snap = await hydrateSnapshot(fixtureClient({}, {}, calls), undefined, undefined, undefined, segments.find((part) => part.kind === "rig")?.name, { section, viewTab, drill: segments });
+    expect(calls).not.toContain("/api/health?limit=200");
+    expect(snap.health).toBeUndefined();
+  });
   it("hydrates the seat queue on the focused topology table so Q / WORK / NOW can fill", async () => {
     const row = (qitemId: string, state: string, destinationSession: string) => ({ qitemId, state, destinationSession, blockedOn: null, handedOffTo: null, tier: null, tags: ["slice:OPR.1.0.2.7"], summary: `work ${qitemId}`, body: "", claimedAt: null, tsUpdated: "2026-09-12T10:00:00.000Z" });
     const context = { section: "topology" as const, viewTab: "table" as const, drill: [{ kind: "rig" as const, name: "myrig" }] };

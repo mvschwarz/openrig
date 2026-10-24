@@ -46,6 +46,7 @@ it("a 24-rig landing fetches names only; a selected rig never reads unrelated in
     if (u.pathname === "/healthz") return Response.json({ selfHostId: "fixture" });
     if (u.pathname === "/api/rigs/summary") return Response.json(rigs);
     if (u.pathname === "/api/rigs/r17/nodes" || u.pathname === "/api/queue/recent-transitions" || u.pathname === "/api/queue/list") return Response.json([]);
+    if (u.pathname === "/api/health") return Response.json({ schema: "openrig.health-list/v0alpha1", evaluatedAt: "2026-09-05T12:00:00.000Z", total: 0, limit: 200, truncated: false, records: [] });
     throw Error(`Unrelated request ${u.pathname}`);
   }) as typeof fetch });
   let snap = emptySnapshot();
@@ -61,7 +62,9 @@ it("a 24-rig landing fetches names only; a selected rig never reads unrelated in
   expect(calls.filter(c => c.startsWith("/api/queue/list")).sort()).toEqual([
     "/api/queue/list?attention=1", "/api/queue/list?state=blocked", "/api/queue/list?state=in-progress", "/api/queue/list?state=pending&limit=50",
   ]);
-  expect(calls).toHaveLength(8);
+  // The rig Table renders the HEALTH summary, so it reads the health projection once; no other rig's data.
+  expect(calls.filter(c => c.startsWith("/api/health"))).toEqual(["/api/health?limit=200"]);
+  expect(calls).toHaveLength(9);
 });
 
 it.each(["overview", "graph", "health"] as const)("a drilled rig on the %s tab reads no seat queue lists", async (viewTab) => {
