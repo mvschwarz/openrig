@@ -713,11 +713,11 @@ export class TmuxAdapter {
       return classifyWriteError(err);
     }
     // tmux can exit 0 having made nothing: a server that can't create its socket prints its error and quits, and the
-    // client still exits 0. new-session prints the pane it made; with none, the session must be read back before it
-    // counts as created.
+    // client still exits 0. new-session prints the pane it made; with none, the session must be read back before the
+    // launch counts as created.
     if (!/^%\d+$/.test(created)) {
-      const missing = await this.sessionMissingAfterCreate(name);
-      if (missing) return { ok: false, code: "session_not_created", message: missing };
+      const unconfirmed = await this.sessionUnconfirmedAfterCreate(name);
+      if (unconfirmed) return { ok: false, ...unconfirmed };
     }
     // A tmux server started from a Claude Code session or Herdr pane hands
     // their identity to every new pane. Mark it removed for this session only
@@ -736,20 +736,25 @@ export class TmuxAdapter {
     }
   }
 
-  /** Why a session new-session printed no pane for isn't there, or null when it is. Anything short of a found session
-   *  counts as missing: tmux reported no pane, so only a positive read-back keeps the launch. */
-  private async sessionMissingAfterCreate(name: string): Promise<string | null> {
+  /** When new-session printed no pane: why the launch can't count as created, or null when the session is there. Only a
+   *  found session keeps the launch. A positive "can't find session" says it wasn't created; a probe that couldn't reach or
+   *  read tmux says creation couldn't be confirmed, which isn't absence. */
+  private async sessionUnconfirmedAfterCreate(name: string): Promise<{ code: "session_not_created" | "session_unconfirmed"; message: string } | null> {
+    const lead = "tmux returned exit status 0 without a usable pane id";
     let cause: string;
     try {
       const probe = await this.probeSession(name);
       if (probe.state === "present") return null;
-      cause = probe.state === "absent" ? `can't find session: ${name}` : probe.cause ?? "no tmux server";
+      if (probe.state === "absent") return { code: "session_not_created", message: `${lead}, and no session "${name}" exists (can't find session: ${name}).` };
+      cause = probe.cause ?? "no tmux server";
     } catch (err) {
       const reported = tmuxReportedError(err);
       cause = reported instanceof Error ? reported.message : String(reported);
     }
-    return `tmux exited without an error but made no session "${name}" (${cause.trim()}). Check that tmux can create its `
-      + "server socket: the TMUX_TMPDIR directory, or the directory of an explicit -S socket path, must be writable by this user.";
+    // tmux's own words, without an exec wrapper's "Command failed: <command>" line.
+    const said = cause.split("\n").map(line => line.trim()).filter(line => line && !line.startsWith("Command failed:")).join(" ") || cause.trim();
+    return { code: "session_unconfirmed", message: `${lead}; creation of session "${name}" could not be confirmed (${said}). Check that tmux `
+      + "can create its server socket: the TMUX_TMPDIR directory, or the directory of an explicit -S socket path, must be writable by this user." };
   }
 
   /** Mark the server's inherited parent-session identity as removed in one

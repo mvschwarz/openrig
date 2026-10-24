@@ -20,15 +20,26 @@ function adapter(respond: (args: string[]) => Promise<string>) {
 }
 
 describe("createSession reads the session back when new-session reports no pane", () => {
-  it("no pane and no server: the launch fails with tmux's own error, and nothing more is sent", async () => {
+  it("no pane and no server: the launch fails as unconfirmed with tmux's own error, and nothing more is sent", async () => {
     const { a, calls } = adapter(async args => {
       if (args[1] === "has-session") throw Object.assign(new Error(`Command failed: tmux has-session -t =seat\n${socketGone}`), { execStderr: socketGone });
       return "";
     });
     const result = await a.createSession("seat");
-    expect(result).toMatchObject({ ok: false, code: "session_not_created" });
-    expect(result.ok === false && result.message).toContain(`made no session "seat" (${socketGone.trim()})`);
+    // A read-back that can't reach tmux doesn't establish absence.
+    expect(result).toMatchObject({ ok: false, code: "session_unconfirmed" });
+    expect(result.ok === false && result.message).toContain(`creation of session "seat" could not be confirmed (${socketGone.trim()})`);
     expect(calls.map(c => creates(c) ? "create" : c[1])).toEqual(["create", "has-session"]);
+  });
+
+  it("no pane and tmux says the session isn't there: the launch fails as not created", async () => {
+    const { a } = adapter(async args => {
+      if (args[1] === "has-session") throw Object.assign(new Error("Command failed: tmux has-session -t =seat\ncan't find session: seat\n"), { execStderr: "can't find session: seat\n" });
+      return "";
+    });
+    const result = await a.createSession("seat");
+    expect(result).toMatchObject({ ok: false, code: "session_not_created" });
+    expect(result.ok === false && result.message).toContain(`no session "seat" exists`);
   });
 
   it("no pane but the session is there: the launch stands, as before", async () => {
@@ -47,7 +58,7 @@ const hasTmux = (() => { try { execFileSync("tmux", ["-V"], { stdio: "ignore" })
 
 // Root reads any directory, so the unwritable socket parent only stops a non-root user.
 describe.skipIf(process.platform === "win32" || !hasTmux || process.getuid?.() === 0)("real tmux whose server can't create its socket", () => {
-  it("createSession reports the launch failed, naming the socket, instead of created", async () => {
+  it("createSession reports the launch unconfirmed, naming the socket, instead of created", async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "rb-"));
     const parent = path.join(home, "ro");
     fs.mkdirSync(parent, { mode: 0o500 });
@@ -57,8 +68,8 @@ describe.skipIf(process.platform === "win32" || !hasTmux || process.getuid?.() =
       args => execArgvCommand(["tmux", "-S", socket, "-f", "/dev/null", ...args.slice(1)]));
     try {
       const result = await a.createSession("seat");
-      expect(result).toMatchObject({ ok: false, code: "session_not_created" });
-      expect(result.ok === false && result.message).toMatch(/made no session "seat" \(error connecting to \S*ro\/sock/);
+      expect(result).toMatchObject({ ok: false, code: "session_unconfirmed" });
+      expect(result.ok === false && result.message).toMatch(/creation of session "seat" could not be confirmed \(error connecting to \S*ro\/sock/);
     } finally {
       fs.chmodSync(parent, 0o700);
       fs.rmSync(home, { recursive: true, force: true });
