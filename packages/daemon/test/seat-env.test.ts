@@ -123,4 +123,23 @@ describe("persisted env", () => {
     expect(members.find((m) => m.id === "impl")!.env).toEqual({ SHARED: "member", ONLY_MEMBER: "m" });
     expect(members.find((m) => m.id === "plain")!.env).toBeUndefined();
   });
+
+  it("leaves a runtime home that isn't an absolute path out of what the seat's process gets, and still exports it", () => {
+    db = createFullTestDb();
+    const rigRepo = new RigRepository(db);
+    const podRepo = new PodRepository(db);
+    const rig = rigRepo.createRig("home-rig");
+    const pod = podRepo.createPod(rig.id, "dev", "Dev");
+    const impl = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: pod.id, agentRef: "local:a", profile: "p", cwd: ".",
+      env: { CLAUDE_CONFIG_DIR: "relative/claude", OTHER: "kept" } });
+    const plain = rigRepo.addNode(rig.id, "dev.plain", { runtime: "codex", podId: pod.id, agentRef: "local:b", profile: "p", cwd: "." });
+    rigRepo.setRigEnv(rig.id, { CLAUDE_CONFIG_DIR: "/homes/rig-claude", CODEX_HOME: "/homes/rig-codex" });
+
+    // The member's relative value is reported as ignored and shadows the rig's, so the seat gets neither.
+    expect(rigRepo.getEffectiveSeatEnv(impl.id)).toEqual({ OTHER: "kept", CODEX_HOME: "/homes/rig-codex" });
+    expect(rigRepo.getEffectiveSeatEnv(plain.id)).toEqual({ CLAUDE_CONFIG_DIR: "/homes/rig-claude", CODEX_HOME: "/homes/rig-codex" });
+
+    const exported = new RigSpecExporter({ rigRepo, sessionRegistry: new SessionRegistry(db), podRepo }).exportRig(rig.id) as RigSpec;
+    expect(exported.pods[0]!.members.find((m) => m.id === "impl")!.env).toEqual({ CLAUDE_CONFIG_DIR: "relative/claude", OTHER: "kept" });
+  });
 });
