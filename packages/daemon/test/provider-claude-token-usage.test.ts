@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync, spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { Hono } from "hono";
 import { migrate } from "../src/db/migrate.js";
@@ -126,8 +128,6 @@ describe("selected Claude credential usage", () => {
     const f = fake("console.log('SYNTHETIC-TEST-ONLY invalid credential'); process.exit(1)");
     const result = await claudeTokenUsageReader({ launchPath: f.root })({ label: "fixture", tokenFile: f.tokenFile });
     expect(result).toMatchObject({ ok: false, reason: "probe_failed" }); expect(JSON.stringify(result)).not.toContain("SYNTHETIC");
-    fs.chmodSync(f.tokenFile, 0o644);
-    expect(await claudeTokenUsageReader({ launchPath: f.root })({ label: "fixture", tokenFile: f.tokenFile })).toMatchObject({ ok: false, reason: "credential_file_unavailable" });
   });
 
   it("uses only the selected token in an isolated real child, with tools/hooks/MCP disabled and no secret in argv/results", async () => {
@@ -140,6 +140,32 @@ describe("selected Claude credential usage", () => {
     const r = await claudeTokenUsageReader({ launchPath: f.root, now: () => NOW })({ label: "fixture", tokenFile: f.tokenFile });
     expect(r).toMatchObject({ ok: true, probe: { exitCode: 0, requestOutcome: "completed", cliVersion: "2.1.310" } });
     expect(JSON.stringify(r)).not.toContain("SYNTHETIC");
+  });
+
+  it.skipIf(process.platform === "win32")("a FIFO credential path returns without blocking the serving event loop", () => {
+    const f = fake("process.exit(6)"); fs.unlinkSync(f.tokenFile); execFileSync("/usr/bin/mkfifo", [f.tokenFile]);
+    const module = fileURLToPath(new URL("../src/domain/provider/claude-token-usage.ts", import.meta.url));
+    const script = `import { claudeTokenUsageReader } from ${JSON.stringify(module)};
+      const outcome = await claudeTokenUsageReader({launchPath:${JSON.stringify(f.root)},timeoutMs:80})({label:'fixture',tokenFile:${JSON.stringify(f.tokenFile)}});
+      console.log(JSON.stringify(outcome));`;
+    // The parent deadline kills this disposable process if a synchronous open blocks its own timers.
+    const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], { encoding: "utf8", timeout: 8000 });
+    expect(child.error, "reader must return before the parent deadline").toBeUndefined();
+    expect(child.status).toBe(0);
+    expect(JSON.parse(child.stdout)).toMatchObject({ ok: false, reason: "credential_file_unavailable" });
+  });
+
+  it.each(["mode", "owner", "symlink"] as const)("a readable token with a %s concern is used with a warning", async concern => {
+    const f = fake(`console.log(JSON.stringify(${JSON.stringify(EVENT)}))`);
+    let tokenFile = f.tokenFile;
+    let uid: ReturnType<typeof vi.spyOn> | undefined;
+    if (concern === "mode") fs.chmodSync(tokenFile, 0o644);
+    if (concern === "owner" && process.getuid) { const current = process.getuid(); uid = vi.spyOn(process, "getuid").mockReturnValue(current + 1); }
+    if (concern === "symlink") { tokenFile = path.join(f.root, "alias.token"); fs.symlinkSync(f.tokenFile, tokenFile); }
+    try {
+      const result = await claudeTokenUsageReader({ launchPath: f.root })({ label: "fixture", tokenFile });
+      expect(result).toMatchObject({ ok: true, probe: { warnings: expect.arrayContaining([expect.stringContaining(concern === "mode" ? "group/others" : concern === "owner" ? "owned by uid" : "symlink")]) } });
+    } finally { uid?.mockRestore(); }
   });
 
   it("bounds an unfinished child and reports possible provider spend", async () => {
