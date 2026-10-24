@@ -80,8 +80,11 @@ export async function openRexView(client: DaemonClient, view: string, deps: Wind
   try {
     const rex = await rexBinary(deps);
     if (!rex) return fail(`No Rex session was opened: the rex command was not found here. ${elsewhere}`);
+    // This rex reads the server only from -S, never from REX_SERVER.
+    const server = deps.env["REX_SERVER"]?.trim();
+    const rexArgs = ["--autostart=false", ...(server ? ["-S", server] : [])];
     const call: RexCall = async (method, params, timeoutMs) =>
-      JSON.parse(await deps.exec(rex, ["--autostart=false", "api", "call", method, JSON.stringify(params)], timeoutMs)) as Record<string, unknown>;
+      JSON.parse(await deps.exec(rex, [...rexArgs, "api", "call", method, JSON.stringify(params)], timeoutMs)) as Record<string, unknown>;
     const status = await client.get<RexStatus>("/api/terminal/status?provider=rex");
     const daemonRex = status.data?.providers?.[0];
     if (status.status >= 400 || !daemonRex?.status?.available) {
@@ -89,7 +92,7 @@ export async function openRexView(client: DaemonClient, view: string, deps: Wind
       return fail(`No Rex session was opened: the daemon can't reach a Rex server${detail}. ${elsewhere}`);
     }
     let callerInstance: unknown;
-    try { callerInstance = (JSON.parse(await deps.exec(rex, ["--autostart=false", "whoami", "--json"])) as Record<string, unknown>)["instance_id"]; }
+    try { callerInstance = (JSON.parse(await deps.exec(rex, [...rexArgs, "whoami", "--json"])) as Record<string, unknown>)["instance_id"]; }
     catch { /* unconfirmed below */ }
     const daemonInstance = daemonRex.status.server?.instanceId;
     if (typeof callerInstance !== "string" || !callerInstance || !daemonInstance) {

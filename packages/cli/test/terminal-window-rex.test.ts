@@ -20,6 +20,9 @@ interface Options {
   binary?: boolean;
 }
 
+/** A rex argv without its global flags: `--autostart=false`, then `-S <server>` when one is set. */
+const commandArgs = (args: string[]) => args.slice(args[1] === "-S" ? 3 : 1);
+
 function fixture(o: Options = {}) {
   const pane = { seat: "op@acme", label: "operator", paneCommand: "tmux attach -t 'op@acme'" };
   const get = vi.fn(async (url: string): Promise<{ status: number; data: unknown }> => {
@@ -39,8 +42,9 @@ function fixture(o: Options = {}) {
       return `${REX}\n`;
     }
     if (file !== REX) throw new Error(`unexpected ${file}`);
-    if (args[1] === "whoami") return JSON.stringify({ instance_id: o.callerInstance ?? "inst-1" });
-    const [method, params] = [args[3], JSON.parse(args[4] ?? "{}")];
+    const rest = commandArgs(args);
+    if (rest[0] === "whoami") return JSON.stringify({ instance_id: o.callerInstance ?? "inst-1" });
+    const [method, params] = [rest[2], JSON.parse(rest[3] ?? "{}")];
     if (method === "session.list_clients" || method === "client.list") return JSON.stringify({ clients: o.clients ?? [APP, CLI] });
     if (method === "client.inspect") return JSON.stringify(params.client_id === CLI.client_id ? { client: CLI } : { client: {}, ...SELECTABLE });
     if (method === "session.list_blocks") return JSON.stringify({ blocks: [{ block_id: "block:mine", owner: o.owner }] });
@@ -48,7 +52,7 @@ function fixture(o: Options = {}) {
     throw new Error(`unexpected ${method}`);
   });
   const deps: WindowDeps = { platform: "darwin", env: o.env ?? IN_REX, exists: () => false, exec, launch: vi.fn(), sleep: vi.fn(), id: () => "unused", herdrConfig: vi.fn(() => "/unused"), columns: async () => 132 };
-  const rexCalls = () => exec.mock.calls.filter(([file]) => file === REX).map(([, args]) => args[1] === "whoami" ? "whoami" : `${args[3]} ${args[4]}`);
+  const rexCalls = () => exec.mock.calls.filter(([file]) => file === REX).map(([, args]) => commandArgs(args)).map((rest) => rest[0] === "whoami" ? "whoami" : `${rest[2]} ${rest[3]}`);
   return { client, deps, get, post, exec, rexCalls };
 }
 
@@ -67,8 +71,23 @@ describe("rig terminal open --window from Rex", () => {
       'client.inspect {"client_id":"client:cli"}',
       'client.perform {"client_id":"client:app","action":"session.select","args":{"session_id":"session:new"},"origin":"cli","timeout_ms":10000}',
     ]);
-    expect(f.exec.mock.calls.every(([file, args]) => file !== REX || args[0] === "--autostart=false")).toBe(true);
+    expect(f.exec.mock.calls.filter(([file]) => file === REX).every(([, args]) => args[0] === "--autostart=false" && args[1] === "-S" && args[2] === "unix:///rex.sock")).toBe(true);
     expect(f.deps.launch).not.toHaveBeenCalled();
+  });
+
+  it("asks the caller's own Rex server with -S, since rex ignores REX_SERVER from the environment", async () => {
+    const f = fixture({ env: { ...IN_REX, REX_SERVER: " unix:///tmp/rex%20home/server.sock " } });
+    await openTerminalWindow(f.client, "acme", undefined, f.deps);
+    const whoami = f.exec.mock.calls.find(([file, args]) => file === REX && args.includes("whoami"))![1];
+    expect(whoami).toEqual(["--autostart=false", "-S", "unix:///tmp/rex%20home/server.sock", "whoami", "--json"]);
+  });
+
+  it("passes no -S without REX_SERVER, leaving rex's own default server", async () => {
+    const f = fixture({ env: { HOME: "/home/p", TERM_PROGRAM: "ghostty" } });
+    await openTerminalWindow(f.client, "acme", "rex", f.deps);
+    const calls = f.exec.mock.calls.filter(([file]) => file === REX).map(([, args]) => args);
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls.every((args) => args[0] === "--autostart=false" && !args.includes("-S"))).toBe(true);
   });
 
   it("takes the Rex path from a tmux inside a Rex block", async () => {
@@ -151,7 +170,7 @@ describe("rig terminal open --window from Rex", () => {
     const f = fixture();
     const exec = f.exec.getMockImplementation()!;
     f.exec.mockImplementation(async (file, args) => {
-      if (args[3] === "session.list_clients") throw Object.assign(new Error("Command failed"), { stderr: "Error: boom (status=500 code=internal)\n" });
+      if (commandArgs(args)[2] === "session.list_clients") throw Object.assign(new Error("Command failed"), { stderr: "Error: boom (status=500 code=internal)\n" });
       return exec(file, args);
     });
     const result = await openTerminalWindow(f.client, "acme", undefined, f.deps);
