@@ -11,6 +11,8 @@ import { describe, it, expect } from "vitest";
 import { createHash } from "node:crypto";
 import { planHerdrLayout } from "../src/domain/terminal/herdr-adapter.js";
 import { TerminalService, type TerminalServiceDeps } from "../src/domain/terminal/terminal-service.js";
+import { RexAdapter } from "../src/domain/terminal/rex-adapter.js";
+import { createRexCliTransport, type RexRun } from "../src/domain/terminal/rex-transport.js";
 import type {
   ComposedView,
   OpenViewResult,
@@ -251,9 +253,49 @@ describe("TerminalService — view resolution + one-shape result", () => {
     const { deps } = makeDeps();
     const svc = new TerminalService(deps);
     const all = await svc.status();
-    expect(all.providers.map((p) => p.name).sort()).toEqual(["cmux", "herdr"]);
+    expect(all.providers.map((p) => p.name).sort()).toEqual(["cmux", "herdr", "rex"]);
     const one = await svc.status("tmate");
     expect(one.providers[0]?.status.available).toBe(false);
+  });
+
+  it("checks providers side by side, so a slow one never delays the others", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const asked: string[] = [];
+    const provider = (name: string, wait?: Promise<void>): TerminalProvider => Object.assign(new RecordingProvider(name), {
+      async status(): Promise<ProviderStatus> {
+        asked.push(name);
+        await wait;
+        return { provider: name, available: true, capabilities: {} };
+      },
+    });
+    const map: Record<string, TerminalProvider> = { herdr: provider("herdr", gate), cmux: provider("cmux"), rex: provider("rex") };
+    const { deps } = makeDeps({ resolveProvider: (name) => map[name] ?? null });
+    const report = new TerminalService(deps).status();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(asked).toEqual(["herdr", "cmux", "rex"]);
+    release();
+    expect((await report).providers.map((p) => p.name)).toEqual(["herdr", "cmux", "rex"]);
+  });
+
+  it("a stalled Rex leaves a usable status beside a healthy provider, well inside the CLI's 5 s request", async () => {
+    const budgets: number[] = [];
+    // A rex that never answers and can't even be stopped: its run never settles.
+    const stalled: RexRun = (_argv, _stdin, timeoutMs) => {
+      budgets.push(timeoutMs);
+      return new Promise(() => {});
+    };
+    const rex = new RexAdapter({ transport: createRexCliTransport({ run: stalled, binary: () => "/opt/rex/bin/rex", env: {} }) });
+    const map: Record<string, TerminalProvider> = { herdr: new RecordingProvider("herdr"), rex };
+    const { deps } = makeDeps({ resolveProvider: (name) => map[name] ?? null });
+    const started = Date.now();
+    const report = await new TerminalService(deps).status();
+    expect(Date.now() - started).toBeLessThan(5_000);
+    const byName = Object.fromEntries(report.providers.map((p) => [p.name, p]));
+    expect(byName["herdr"]).toMatchObject({ status: { available: true }, liveness: { alive: true } });
+    expect(byName["rex"]).toMatchObject({ status: { available: false }, liveness: { alive: false } });
+    expect(byName["rex"]!.liveness.detail).toContain("did not answer within 1000 ms");
+    expect(budgets).toEqual([1_000, 1_000]);
   });
 });
 
@@ -649,6 +691,21 @@ describe("TerminalService — an omitted provider falls back from herdr to cmux 
     expect(herdr.lastView).not.toBeNull();
     expect(cmux.lastView).toBeNull();
     expect(r.notes?.join("\n") ?? "").not.toContain("Herdr isn't available here");
+  });
+
+  it("never picks rex for an omitted provider, even when it is the only live one", async () => {
+    const { deps, herdr, cmux } = makeDeps();
+    down(herdr, "unavailable");
+    down(cmux, "unavailable");
+    const rex = new RecordingProvider("rex");
+    const resolve = deps.resolveProvider;
+    deps.resolveProvider = (name) => (name === "rex" ? rex : resolve(name));
+    const service = new TerminalService(deps);
+    expect(await service.previewView({ view: "acme-build" })).toMatchObject({ provider: "herdr" });
+    expect((await service.openView({ view: "acme-build" })).provider).toBe("herdr");
+    expect(rex.lastView).toBeNull();
+    expect((await service.openView({ view: "acme-build", provider: "rex" })).provider).toBe("rex");
+    expect(rex.lastView).not.toBeNull();
   });
 
   it("prefers a live herdr when both are there", async () => {

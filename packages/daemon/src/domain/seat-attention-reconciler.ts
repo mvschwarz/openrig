@@ -4,7 +4,7 @@
 import type Database from "better-sqlite3";
 import { CLAUDE_RESUME_ROTATION_COLUMNS, claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
-import type { AgentActivityStore } from "./agent-activity-store.js";
+import { latestHookPermissionPending, latestHookWaitsOnPerson, type AgentActivityStore } from "./agent-activity-store.js";
 import type { AgentActivity, SeatIdentityVerdict } from "./types.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { classifyPaneRuntimeMatch } from "./seat-identity-reconciler.js";
@@ -323,7 +323,7 @@ export interface ClearAttentionResult {
   reason?: string;
   detail?: string;
   previousError?: string | null;
-  clearedClasses?: ("startup_status" | "restore_outcome" | "pane_identity")[];
+  clearedClasses?: ("startup_status" | "restore_outcome" | "pane_identity" | "needs_input_hook")[];
   derivedEvidence?: {
     source: string;
     kind?: string;
@@ -364,6 +364,8 @@ interface ClearAttentionDeps {
   sessionRegistry: SessionRegistry;
   eventBus: EventBus;
   agentActivityStore: AgentActivityStore;
+  /** Settles the activity service's pending prompt for a session, so it agrees with a cleared hook. */
+  settlePermissionPrompt?: (sessionName: string) => void;
   sendVerify?: SendVerifyFn;
   capture?: CaptureFn;
   db?: Database.Database;
@@ -414,8 +416,22 @@ export class SeatAttentionReconciler {
     const derivedOutcome = this.getDerivedAttentionOutcome(session);
     const identityClassActive = this.getActiveIdentityVerdict(session, sessionName);
 
-    if (!startupClassActive && !derivedOutcome && !identityClassActive) {
-      return { ok: false, code: "not_in_attention", detail: `Session startup_status is '${session.startupStatus}', restoreOutcome is not attention/failed, and pane identity is not mismatched/missing — not in attention` };
+    // The latest runtime hook still says the seat waits on a person (an approval, a picker, an elicitation) and nothing
+    // newer was recorded. A prompt declined or answered with no hook after it reads that way for good, and sends stay
+    // refused while the pane can't show the prompt ended. Only someone who saw it end can say so.
+    const hook = agentActivityStore.getLatestForNode({ nodeId: session.nodeId, sessionName });
+    const hookClassActive = latestHookWaitsOnPerson(hook, session.runtime) || latestHookPermissionPending(hook, session.runtime);
+
+    if (!startupClassActive && !derivedOutcome && !identityClassActive && !hookClassActive) {
+      return { ok: false, code: "not_in_attention", detail: `Session startup_status is '${session.startupStatus}', restoreOutcome is not attention/failed, pane identity is not mismatched/missing, and its latest hook doesn't say it waits on a person — not in attention` };
+    }
+    if (hookClassActive && !startupClassActive && !derivedOutcome && !identityClassActive) {
+      if (!opts?.reason) {
+        return { ok: false, code: "not_demonstrably_responsive", detail: `Its latest hook (${hook!.rawEvent ?? hook!.reason}, ${hook!.eventAt ?? "time unknown"}) says it waits on a person, and nothing newer was recorded. OpenRig can't see that prompt end. If it's gone (declined or answered), rerun with --reason "<what you saw>"; a send still checks the pane for a prompt it recognizes.` };
+      }
+      this.clearWaitingHook(session, sessionName, hook!, opts.reason);
+      return { ok: true, code: "cleared", from: session.startupStatus, to: "ready", clearedBy: "operator_attestation",
+        reason: opts.reason, previousError: session.latestError ?? null, clearedClasses: ["needs_input_hook"] };
     }
 
     const previousError = session.latestError ?? null;
@@ -541,7 +557,11 @@ export class SeatAttentionReconciler {
 
     // Operator attestation override (--reason).
     if (opts?.reason) {
-      const clearedClasses: ("startup_status" | "restore_outcome" | "pane_identity")[] = [];
+      const clearedClasses: ("startup_status" | "restore_outcome" | "pane_identity" | "needs_input_hook")[] = [];
+      if (hookClassActive) {
+        this.clearWaitingHook(session, sessionName, hook!, opts.reason);
+        clearedClasses.push("needs_input_hook");
+      }
       const acknowledgeRestore = derivedOutcome?.source === "restore.subset_completed" || assistedRestore !== undefined;
       if (startupClassActive) {
         sessionRegistry.updateStartupStatus(session.id, "ready", new Date().toISOString());
@@ -649,6 +669,19 @@ export class SeatAttentionReconciler {
         ? `Latest activity: state='${activity.state}', stale=${activity.stale ?? false}, reason='${activity.reason}' -- not positive evidence; send-verify also not confirmed`
         : "No recent agent activity found; send-verify also not confirmed"}. --reason can acknowledge this attention; acknowledgment does not prove resumed continuity.`,
     };
+  }
+
+  /** Records the operator's word that the prompt the latest hook named is gone, as the "prompt cleared" hook the activity
+   *  poller writes when it sees one go, and settles the poller's pending prompt, so the send gate, the wake ladder and the
+   *  inventory stop reading the seat as waiting on a person. */
+  private clearWaitingHook(session: { rigId: string; nodeId: string; runtime: string | null; latestError: string | null },
+    sessionName: string, hook: AgentActivity, reason: string): void {
+    this.deps.agentActivityStore.recordHookEvent({ sessionName, runtime: session.runtime, generation: hook.generation ?? null,
+      hookEvent: "PermissionPromptCleared" });
+    this.deps.settlePermissionPrompt?.(sessionName);
+    this.deps.eventBus.emit({ type: "seat.attention_cleared", rigId: session.rigId, nodeId: session.nodeId, sessionName,
+      from: "needs_input_hook", to: "ready", clearedBy: "operator_attestation",
+      evidence: { kind: "needs_input_hook", state: hook.rawEvent ?? hook.state, reason: hook.reason }, reason, previousError: session.latestError });
   }
 
   private performEvidenceClear(

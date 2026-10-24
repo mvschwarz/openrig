@@ -4,6 +4,7 @@ import { join } from "node:path";
 import os from "node:os";
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync, unlinkSync } from "node:fs";
 import { resolveCodexDbPaths } from "./codex-thread-id.js";
+import { declaredRuntimeHomes } from "./seat-runtime-home.js";
 import type { ContextUsage, ContextUnknownReason } from "./types.js";
 import { parseSqliteUtcMs } from "./sqlite-time.js";
 import {
@@ -463,7 +464,11 @@ export class ContextUsageStore {
   }
 
   private resolveCodexStateDbPaths(): string[] {
-    return this.codexHome || this.codexHomeDir ? resolveCodexDbPaths(this.codexHomeDir ?? "", "state", undefined, this.codexHome) : [];
+    const daemon = this.codexHome || this.codexHomeDir ? resolveCodexDbPaths(this.codexHomeDir ?? "", "state", undefined, this.codexHome) : [];
+    // A seat with its own CODEX_HOME keeps its threads there. A thread id is unique across homes, so each declared home is
+    // searched after the daemon's.
+    const seats = declaredRuntimeHomes(this.db, "codex").flatMap(home => resolveCodexDbPaths("", "state", undefined, home));
+    return [...new Set([...daemon, ...seats])];
   }
 
   private readLatestCodexTokenCount(rolloutPath: string): CodexTokenCountEvent | null {

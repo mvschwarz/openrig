@@ -53,6 +53,7 @@ describe("SeatLifecycleService.launchFresh", () => {
   let harnessResult: Awaited<ReturnType<RuntimeAdapter["launchHarness"]>>;
   let paneCommand: string;
   let adapter: RuntimeAdapter;
+  let runtimeAdapters: Record<string, RuntimeAdapter>;
   let invalidations: Array<Record<string, unknown>>;
   let activitySwaps: Array<{ nodeId: string; generation: string }>;
   let service: SeatLifecycleService;
@@ -128,6 +129,7 @@ describe("SeatLifecycleService.launchFresh", () => {
     activitySwaps = [];
     listProcesses = async () => [{ pid: 4242, ppid: 1, pgid: 4242, tpgid: 4242,
       executableName: "codex", command: "/opt/native/codex -m model", startedAt: "Sat Jan  1 12:00:00 2000" }];
+    runtimeAdapters = { "claude-code": adapter, codex: { ...adapter, runtime: "codex" } };
     service = new SeatLifecycleService({
       db,
       rigRepo,
@@ -137,13 +139,36 @@ describe("SeatLifecycleService.launchFresh", () => {
       listProcesses: () => listProcesses(),
       nodeLauncher,
       startupOrchestrator,
-      runtimeAdapters: { "claude-code": adapter, codex: { ...adapter, runtime: "codex" } },
+      runtimeAdapters,
       occupantInvalidator: { invalidateRetiringOccupant: (input) => invalidations.push(input) },
       activityOracle: { declareOccupantSwap: (nodeId, generation) => activitySwaps.push({ nodeId, generation }) },
     });
   });
 
   afterEach(() => db.close());
+
+  it.each([
+    { runtime: "terminal" as const, fail: false },
+    { runtime: "claude-code" as const, fail: false },
+    { runtime: "claude-code" as const, fail: true },
+  ])("#1939: reports view recovery after replacement: $runtime, startup failure=$fail", async ({ runtime, fail }) => {
+    if (runtime === "terminal") runtimeAdapters.terminal = { ...adapter, runtime };
+    const seat = seedSeat({ runtime });
+    if (fail) adapter.launchHarness = async () => ({ ok: false, error: "fixture startup failure" });
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "replace occupant" });
+    expect(result.ok).toBe(!fail);
+    expect(result.warnings).toEqual(expect.arrayContaining([
+      expect.stringContaining(`Replacing the tmux session for "${seat.sessionName}" detaches its open terminal tiles.`),
+    ]));
+    expect(result.warnings?.join("\n")).toContain("rig terminal open 'rig:fresh-rig' --window");
+    expect(result.warnings?.join("\n")).toContain("--provider cmux");
+  });
+
+  it("#1939: a clean seat launch does not claim that it replaced an open tile", async () => {
+    const seat = seedSeat({ clean: true });
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "first occupant" });
+    expect(result.warnings?.some(warning => warning.includes("open terminal tiles"))).not.toBe(true);
+  });
 
   it.each([true, false])("#729: retains warnings independently of fresh identity (verified=%s)", async verified => {
     const seat = seedSeat();
@@ -154,7 +179,7 @@ describe("SeatLifecycleService.launchFresh", () => {
     ]), seat.node.id);
     const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "explicit fresh" });
     expect(result.ok).toBe(verified);
-    expect(result.warnings).toEqual(["Existing projection warning", expect.stringContaining("Startup submission unverified")]);
+    expect(result.warnings).toEqual(["Existing projection warning", expect.stringContaining("Startup submission unverified"), expect.stringContaining("open terminal tiles")]);
     if (verified) expect(new SeatIdentityStore(db).getForNode(seat.node.id)?.verdict).toBe("verified");
     else expect(result).toMatchObject({ code: "runtime_identity_unverified", status: "attention_required" });
   });
@@ -302,7 +327,7 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(deriveRehydrateSessionIdByNode(history, [seat.node.id], readFreshOccupantRelations(db, seat.rig.id))[seat.node.id]).toBeNull();
   });
 
-  function seedSeat(opts?: { clean?: boolean; adopted?: boolean; model?: string; withContext?: boolean; runtime?: "claude-code" | "codex" }) {
+  function seedSeat(opts?: { clean?: boolean; adopted?: boolean; model?: string; withContext?: boolean; runtime?: "claude-code" | "codex" | "terminal" }) {
     const runtime = opts?.runtime ?? "claude-code";
     const rig = rigRepo.createRig("fresh-rig");
     const node = rigRepo.addNode(rig.id, "dev.impl", {

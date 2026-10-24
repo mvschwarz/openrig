@@ -12,7 +12,7 @@ import { WAKE_INTENT_PREFIX, type OutboxHandler, type OutboxEntry } from "./outb
 import type { QueueWakeFacts } from "./draft-aware-delivery.js";
 import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
 import { lastMeaningfulTransition, readWaitingView, type WaitingView, type WaitingActivityReader } from "./queue-waiting.js";
-import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
+import { isOpenRigSender, OPENRIG_SENDER, wrapPaneEnvelope } from "../lib/pane-envelope.js";
 import { isBoundTerminalSeat } from "./terminal-seat.js";
 import { renderQueueHandoffNudge } from "./queue-nudge-text.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
@@ -1700,13 +1700,16 @@ export class QueueRepository {
     }
 
     let wakeStaged = false;
+    // A row OpenRig creates itself (a sweep finding, an escalation, a health or mode notice) keeps its source for the
+    // record, but its wake comes from OpenRig: the seat named as source didn't send it.
+    const wakeFrom = input.wakeTrigger === "openrig" && !isOpenRigSender(input.sourceSession) ? OPENRIG_SENDER : input.sourceSession;
     const txn = this.db.transaction(() => {
       const created = this.createInTransactionalContext(input);
       if (this.outbox && input.nudge !== false) {
         try {
           // A savepoint removes any partial intent when staging fails, while
           // preserving ordinary create's existing acceptance of the task.
-          this.db.transaction(() => this.stageWakeIntent(created.qitemId, input.sourceSession, input.destinationSession, input.identityProvenance ?? null, input.nudge, input.wakeTrigger))();
+          this.db.transaction(() => this.stageWakeIntent(created.qitemId, wakeFrom, input.destinationSession, input.identityProvenance ?? null, input.nudge, input.wakeTrigger))();
           wakeStaged = true;
         } catch (err) {
           this.recordNudgeAttempt(created.qitemId, `failed:wake not retained: ${err instanceof Error ? err.message : String(err)}`);
@@ -1769,7 +1772,7 @@ export class QueueRepository {
     if (this.outbox) {
       if (wakeStaged) this.deliverWakeIntentAfterCommit(`${WAKE_INTENT_PREFIX}${id}`);
     } else {
-      await this.maybeNudge(id, input.destinationSession, input.nudge, input.sourceSession, undefined, input.wakeTrigger);
+      await this.maybeNudge(id, input.destinationSession, input.nudge, wakeFrom, undefined, input.wakeTrigger);
     }
     return this.getByIdOrThrow(id);
   }
@@ -1958,6 +1961,16 @@ export class QueueRepository {
     if (isHumanSeatSessionRef(destination)) return true;
     const registry = this.loadHumanRegistryFn();
     return registry.ok && resolveRegisteredHumanAddress(destination, registry.entities) !== null;
+  }
+
+  /** The asked person, when a different registered person is acting on what was asked of them; else null. An agent, the
+   *  asked person under another spelling, and an ask to no registered person aren't someone else. */
+  askedSomeoneElse(actorSession: string, askedSession: string | null | undefined): string | null {
+    const registry = this.loadHumanRegistryFn();
+    if (!registry.ok) return null;
+    const asked = resolveRegisteredHumanAddress(askedSession, registry.entities);
+    const actor = resolveRegisteredHumanAddress(actorSession, registry.entities);
+    return asked && actor && actor !== asked ? asked : null;
   }
 
   private validateReplyTo(replyTo: string, humanIntent: QueueCreateInput["humanIntent"]): void {
@@ -4615,6 +4628,29 @@ export class QueueRepository {
           actorSession: "system",
           transitionNote: "released: claimant generation retired (seat handover)",
         });
+      }
+    });
+    txn();
+    return rows.length;
+  }
+
+  /**
+   * Slice 16: a runtime switch moves the seat's in-progress claims from its predecessor's generation to its successor's,
+   * inside the switch's commit, so none is released or held twice. Only in-progress rows the predecessor claimed move;
+   * pending, blocked and unstamped rows are untouched. Appends an audit transition per item. Returns the count moved.
+   */
+  transferClaimsByGeneration(fromGeneration: string, toGeneration: string, note: string): number {
+    if (!this.hasClaimedGenColumn || !fromGeneration || !toGeneration) return 0;
+    const rows = this.db
+      .prepare(`SELECT qitem_id FROM queue_items WHERE state = 'in-progress' AND claimed_by_generation_uuid = ?`)
+      .all(fromGeneration) as Array<{ qitem_id: string }>;
+    if (rows.length === 0) return 0;
+    const ts = new Date().toISOString();
+    const txn = this.db.transaction(() => {
+      for (const { qitem_id } of rows) {
+        this.db.prepare(`UPDATE queue_items SET claimed_by_generation_uuid = ?, ts_updated = ? WHERE qitem_id = ?`)
+          .run(toGeneration, ts, qitem_id);
+        this.transitionLog.append({ qitemId: qitem_id, state: "in-progress", actorSession: "system", transitionNote: note });
       }
     });
     txn();

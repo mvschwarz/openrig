@@ -132,7 +132,8 @@ describe("ClaimService FR-3 — adoption-boundary resume-token capture", () => {
     expect(row.resume_token).toBe("codex-thread-abcd");
     expect(row.resume_type).toBe("codex_id");
     expect(row.resume_provenance).toBe("adoption");
-    expect(captureCodexThreadId).toHaveBeenCalledWith("dev-qa@test-rig");
+    // The bound node goes with it, so a seat with its own CODEX_HOME is searched there.
+    expect(captureCodexThreadId).toHaveBeenCalledWith("dev-qa@test-rig", { nodeId: node.id });
   });
 
   it("bind captures only an OMP seat's own runner session file", async () => {

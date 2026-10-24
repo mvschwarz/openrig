@@ -53,6 +53,7 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
   // chatroom send <rig> "message" [--sender <name>]
   cmd
     .command("send")
+    .description("Post a message to a rig's chat room; the sender is this seat")
     .argument("<rig>", "Rig name")
     .argument("<message>", "Message to send")
     .option("--sender <name>", "(deprecated, ignored) the sender is derived from the seat env (X-OpenRig-Session); P21 made the chat route derive it from the transport header")
@@ -91,6 +92,7 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
   // chatroom history <rig> [--topic <name>] [--limit N] [--json]
   cmd
     .command("history")
+    .description("Print a rig's chat messages and topic markers, with filters")
     .argument("<rig>", "Rig name")
     .option("--topic <name>", "Filter by topic")
     .option("--after <id>", "Messages after this message ID")
@@ -154,6 +156,7 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
   // chatroom watch <rig> [--tmux]
   cmd
     .command("watch")
+    .description("Print a rig's chat messages as they arrive; --tmux runs it in its own tmux session")
     .argument("<rig>", "Rig name")
     .option("--tmux", "Run watch in a dedicated tmux session")
     .action(async (rig: string, opts: { tmux?: boolean }) => {
@@ -235,6 +238,7 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
   // chatroom topic <rig> <topic-name> [--body "text"]
   cmd
     .command("topic")
+    .description("Start a new topic in a rig's chat room")
     .argument("<rig>", "Rig name")
     .argument("<topic-name>", "Topic name")
     .option("--body <text>", "Optional body text")
@@ -270,6 +274,7 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
   // chatroom wait <rig>
   cmd
     .command("wait")
+    .description("Wait for the next matching message in a rig's chat room; exits 1 when --timeout passes")
     .argument("<rig>", "Rig name")
     .option("--after <id>", "Only messages after this ID")
     .option("--topic <name>", "Filter by topic")
@@ -382,6 +387,7 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
   // chatroom clear <rig>
   cmd
     .command("clear")
+    .description("Delete every message in a rig's chat room")
     .argument("<rig>", "Rig name")
     .action(async (rig: string) => {
       const client = await getClient();

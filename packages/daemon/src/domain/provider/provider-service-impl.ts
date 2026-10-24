@@ -12,6 +12,7 @@ import {
   type AgentActivityStore,
 } from "../agent-activity-store.js";
 import { getNodeInventory } from "../node-inventory.js";
+import { RUNTIME_HOME_VAR, seatRuntimeHome, type HomeRuntime } from "../seat-runtime-home.js";
 import { readCodexAuthMetadata, type CodexAuthMetadata } from "./codex-auth-reader.js";
 import { collectFourBlockReadModel, type ProviderSeat } from "./provider-collect.js";
 import { configuredSeatAccounts } from "./provider-seat-accounts.js";
@@ -41,7 +42,7 @@ export interface ProviderServiceImplDeps {
   env?: NodeJS.ProcessEnv;
   now?: () => string;
   /** Slice 01: Codex usage windows, served only while `enabled()` (provider.usage_windows) is true. */
-  usageWindows?: { enabled: () => boolean; windows: CodexUsageWindows; claude?: ClaudeUsageWindows };
+  usageWindows?: { enabled: () => boolean; windows: CodexUsageWindows; claude?: ClaudeUsageWindows; claudeTokens?: import("./claude-token-usage.js").ClaudeTokenUsage };
 }
 
 export class ProviderServiceImpl implements ProviderService {
@@ -88,7 +89,7 @@ export class ProviderServiceImpl implements ProviderService {
       ? { names: profiles, note: "saved rig auth profiles: not read (usage unknown); this reading is only the login active in the daemon's CODEX_HOME" }
       : null;
     const codexRows = savedProfiles ? usage.map((row) => ({ ...row, savedProfiles })) : usage;
-    const allUsage = [...codexRows, ...(this.deps.usageWindows!.claude?.project(asOf) ?? [])];
+    const allUsage = [...codexRows, ...(this.deps.usageWindows!.claude?.project(asOf) ?? []), ...(this.deps.usageWindows!.claudeTokens?.project(asOf) ?? [])];
     // Each seat's configured account, from the same seat universe and registry metadata (names only), never
     // linked to a usage row.
     const seatAccounts = configuredSeatAccounts({
@@ -103,8 +104,9 @@ export class ProviderServiceImpl implements ProviderService {
     return { ...model, usage: allUsage, seatAccounts };
   }
 
-  async refreshUsage(provider: "codex" | "claude"): Promise<UsageRefreshResult | { disabled: true } | { unavailable: true }> {
+  async refreshUsage(provider: "codex" | "claude", token?: import("./claude-token-usage.js").ClaudeTokenSelection): Promise<UsageRefreshResult | { disabled: true } | { unavailable: true }> {
     if (!this.usageWindowsEnabled()) return { disabled: true };
+    if (provider === "claude" && token) return this.deps.usageWindows!.claudeTokens?.refresh(token) ?? { unavailable: true };
     if (provider === "claude") return this.deps.usageWindows!.claude?.refresh() ?? { unavailable: true };
     return this.deps.usageWindows!.windows.refresh();
   }
@@ -123,11 +125,16 @@ export class ProviderServiceImpl implements ProviderService {
     for (const rig of this.deps.listRigs()) {
       for (const entry of getNodeInventory(this.deps.db, rig.id)) {
         if (!entry.canonicalSessionName) continue;
+        const runtime = entry.runtime ?? "unknown";
+        const runtimeHome = Object.hasOwn(RUNTIME_HOME_VAR, runtime)
+          ? seatRuntimeHome(this.deps.db, entry.nodeId, runtime as HomeRuntime)
+          : {};
         seats.push({
           seatSession: entry.canonicalSessionName,
           rigName: entry.rigName ?? "",
-          runtime: entry.runtime ?? "unknown",
+          runtime,
           lifecycleState: entry.lifecycleState,
+          ...(runtimeHome.home || runtimeHome.ignored ? { runtimeHome } : {}),
         });
       }
     }

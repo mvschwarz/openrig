@@ -200,7 +200,7 @@ describe("stream hub readers (slice 22 outcome 9)", () => {
       pruneStreamItems(db, { nowIso: new Date().toISOString(), streamMaxItems: 1 }); // deletes only the anchor
       const res = await call(`/list?afterSortKey=${a.streamSortKey}`, "GET");
       expect(res.status).toBe(410);
-      expect(await res.json()).toMatchObject({ error: "stream_cursor_expired", prunedThrough: a.tsEmitted, message: expect.stringContaining("--since") });
+      expect(await res.json()).toMatchObject({ error: "stream_cursor_expired", prunedThrough: a.tsEmitted, message: expect.stringContaining(`--since ${a.tsEmitted} resumes after the pruned region`) });
       expect(await (await call(`/list?since=${a.tsEmitted}`, "GET")).json()).toMatchObject([{ streamItemId: "L2" }]);
     });
 

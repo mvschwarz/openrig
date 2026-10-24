@@ -1,4 +1,5 @@
 import os from "node:os";
+import { shellQuote } from "../adapters/shell-quote.js";
 import fs from "node:fs";
 import nodePath from "node:path";
 import type { SessionRegistry } from "./session-registry.js";
@@ -20,8 +21,11 @@ import { isClaudeSidecarFromEarlierProcess, type ResumeTokenCaptureDeps } from "
 import { observeClaudePaneRuntime, type NativeProcessLister } from "./native-process-lineage.js";
 import { validateResumeToken } from "./resume-token-validation.js";
 import { readProcessTable } from "./process-table.js";
+import type { HomeRuntime } from "./seat-runtime-home.js";
 
 export interface ResumeRefreshSession {
+  /** The seat, when known, so its own runtime home is read. */
+  nodeId?: string;
   sessionId: string;
   sessionName: string;
   runtime: string | null;
@@ -32,10 +36,13 @@ export interface ResumeRefreshSession {
 
 interface ResumeMetadataRefresherDeps {
   sessionRegistry: SessionRegistry;
+  /** A seat's own runtime home from its member or rig `env:`, when it declares one. */
+  seatHome?: (nodeId: string, runtime: HomeRuntime) => string | undefined;
   tmuxAdapter: TmuxAdapter;
   listProcesses?: () => Array<{ pid: number; ppid: number; command: string }> | Promise<Array<{ pid: number; ppid: number; command: string }>>;
-  readCodexThreadIdByPid?: (pid: number, identity?: string, report?: CodexCaptureReporter) => Promise<string | undefined> | string | undefined;
-  probeClaudeResume?: (sessionName: string, resumeToken: string, cwd?: string | null) => Promise<"resumable" | "not_resumable" | "inconclusive">;
+  readCodexThreadIdByPid?: (pid: number, identity?: string, report?: CodexCaptureReporter, home?: string) => Promise<string | undefined> | string | undefined;
+  /** `configDir` is the seat's own Claude config dir, passed only when it declares one. */
+  probeClaudeResume?: (sessionName: string, resumeToken: string, cwd?: string | null, configDir?: string) => Promise<"resumable" | "not_resumable" | "inconclusive">;
   resolveHomeDirByPid?: ResolveHomeDirByPid;
   sleep?: (ms: number) => Promise<void>;
   homeDir?: string;
@@ -62,14 +69,15 @@ export class ResumeMetadataRefresher {
   private sessionRegistry: SessionRegistry;
   private tmuxAdapter: TmuxAdapter;
   private listProcesses: () => Array<{ pid: number; ppid: number; command: string }> | Promise<Array<{ pid: number; ppid: number; command: string }>>;
-  private readCodexThreadIdByPid: (pid: number, identity?: string, report?: CodexCaptureReporter) => Promise<string | undefined> | string | undefined;
-  private probeClaudeResume: (sessionName: string, resumeToken: string, cwd?: string | null) => Promise<"resumable" | "not_resumable" | "inconclusive">;
+  private readCodexThreadIdByPid: (pid: number, identity?: string, report?: CodexCaptureReporter, home?: string) => Promise<string | undefined> | string | undefined;
+  private probeClaudeResume: (sessionName: string, resumeToken: string, cwd?: string | null, configDir?: string) => Promise<"resumable" | "not_resumable" | "inconclusive">;
   private resolveHomeDirByPid: ResolveHomeDirByPid;
   private sleep: (ms: number) => Promise<void>;
   private homeDir: string;
   private contextUsageStore: ResumeMetadataRefresherDeps["contextUsageStore"] | null;
   private claudeProcessStartedAt: ResumeMetadataRefresherDeps["claudeProcessStartedAt"] | null;
   private claudeConfigDir: string;
+  private seatHome?: (nodeId: string, runtime: HomeRuntime) => string | undefined;
   private listClaudeProcesses: NativeProcessLister | undefined;
 
   constructor(deps: ResumeMetadataRefresherDeps) {
@@ -82,21 +90,29 @@ export class ResumeMetadataRefresher {
     // with bounded PID-home caching — zero `ps eww` for the common case (298
     // resolve_home spans, mean 8.24s, in one live slow-span sample). An injected
     // readCodexThreadIdByPid (tests, adoption paths) is untouched.
-    const threadIdResolver = new CodexThreadIdResolver({
-      defaultHome: deps.homeDir ?? os.homedir(),
-      codexHome: deps.codexHome,
-      resolveHomeDirByPid: this.resolveHomeDirByPid,
-    });
+    // One resolver per Codex home: a seat with its own CODEX_HOME logs its threads there.
+    const resolvers = new Map<string, CodexThreadIdResolver>();
+    const resolverFor = (home: string | undefined) => {
+      const selected = home ?? deps.codexHome;
+      let resolver = resolvers.get(selected ?? "");
+      if (!resolver) {
+        resolver = new CodexThreadIdResolver({ defaultHome: deps.homeDir ?? os.homedir(), codexHome: selected,
+          resolveHomeDirByPid: this.resolveHomeDirByPid });
+        resolvers.set(selected ?? "", resolver);
+      }
+      return resolver;
+    };
     // S10 follow-on: identity is REQUIRED on resolve(); an identity-less read routes EXPLICITLY
     // through the named ungated escape hatch — never a silent fallback (r1 owed item 3).
     this.readCodexThreadIdByPid = deps.readCodexThreadIdByPid
-      ?? ((pid, identity, report) => identity === undefined ? threadIdResolver.resolveUngatedLegacy(pid, report) : threadIdResolver.resolve(pid, identity, report));
-    this.probeClaudeResume = deps.probeClaudeResume ?? ((sessionName, resumeToken, cwd) => this.defaultProbeClaudeResume(sessionName, resumeToken, cwd));
+      ?? ((pid, identity, report, home) => identity === undefined ? resolverFor(home).resolveUngatedLegacy(pid, report) : resolverFor(home).resolve(pid, identity, report));
+    this.probeClaudeResume = deps.probeClaudeResume ?? ((sessionName, resumeToken, cwd, configDir) => this.defaultProbeClaudeResume(sessionName, resumeToken, cwd, configDir));
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.homeDir = deps.homeDir ?? os.homedir();
     this.contextUsageStore = deps.contextUsageStore ?? null;
     this.claudeProcessStartedAt = deps.claudeProcessStartedAt ?? null;
     this.claudeConfigDir = deps.claudeConfigDir ?? process.env.CLAUDE_CONFIG_DIR ?? nodePath.join(this.homeDir, ".claude");
+    this.seatHome = deps.seatHome;
     this.listClaudeProcesses = deps.listClaudeProcesses;
   }
 
@@ -141,7 +157,7 @@ export class ResumeMetadataRefresher {
     for (const session of sessions) {
       if (this.stopped.signal.aborted) return;
       if (session.runtime === "codex") {
-        const sessionCaptureOpts = { ...captureOpts, sessionId: session.sessionId };
+        const sessionCaptureOpts = { ...captureOpts, sessionId: session.sessionId, nodeId: session.nodeId };
         if (session.resumeToken) {
           // OPR.0.4.3.20 FR-6.1 — lightweight equal-value freshness RE-STAMP on the
           // periodic (fill-null) path so a present-and-still-valid token does not age
@@ -220,7 +236,11 @@ export class ResumeMetadataRefresher {
           }
           continue;
         }
-        const probe = await this.probeClaudeResume(session.sessionName, session.resumeToken, session.cwd ?? null);
+        // A seat with its own Claude config dir keeps its conversations there, so the probe looks there.
+        const seatHome = session.nodeId ? this.seatHome?.(session.nodeId, "claude-code") : undefined;
+        const probe = await (seatHome
+          ? this.probeClaudeResume(session.sessionName, session.resumeToken, session.cwd ?? null, seatHome)
+          : this.probeClaudeResume(session.sessionName, session.resumeToken, session.cwd ?? null));
         // OPR.0.4.3.20 FR-6 §2.1b — record the probe result WITHOUT clearing:
         // `not_resumable`/`inconclusive` marks the present token stale (the plan
         // surfaces it as `stale — re-verify`), `resumable` stamps freshness. The
@@ -241,7 +261,8 @@ export class ResumeMetadataRefresher {
       if (!first) return undefined;
       const started = Date.parse(first.process.startedAt ?? "");
       if (!Number.isFinite(started)) return undefined;
-      const configDir = nodePath.resolve(session.cwd ?? process.cwd(), this.claudeConfigDir);
+      const seatHome = session.nodeId ? this.seatHome?.(session.nodeId, "claude-code") : undefined;
+      const configDir = nodePath.resolve(session.cwd ?? process.cwd(), seatHome ?? this.claudeConfigDir);
       const file = nodePath.join(configDir, "sessions", `${first.process.pid}.json`);
       const fd = fs.openSync(file, "r");
       let record: { name?: unknown; sessionId?: unknown };
@@ -281,9 +302,12 @@ export class ResumeMetadataRefresher {
     opts?: {
       attempts?: number;
       sessionId?: string;
+      /** The seat, so its own CODEX_HOME is searched when it declares one. */
+      nodeId?: string;
       listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
     },
   ): Promise<string | undefined> {
+    const seatHome = opts?.nodeId ? this.seatHome?.(opts.nodeId, "codex") : undefined;
     if (this.stopped.signal.aborted) return undefined;
     const state = this.captureState(sessionTarget, opts?.sessionId);
     const report = (reason: string, count?: number) => {
@@ -315,7 +339,7 @@ export class ResumeMetadataRefresher {
             reason = "no_log_row"; count = undefined;
             const threadId = await this.readCodexThreadIdByPid(codexPid, identity, diagnostic => {
               reason = diagnostic.reason; count = diagnostic.count;
-            });
+            }, seatHome);
             if (ctrl.signal.aborted) return undefined;
             if (threadId) return threadId;
           }
@@ -353,11 +377,14 @@ export class ResumeMetadataRefresher {
     sessionName: string,
     resumeToken: string,
     cwd?: string | null,
+    configDir?: string,
   ): Promise<"resumable" | "not_resumable" | "inconclusive"> {
-    const command = buildNativeResumeCommand("claude-code", resumeToken, sessionName);
-    if (!command) {
+    const resume = buildNativeResumeCommand("claude-code", resumeToken, sessionName);
+    if (!resume) {
       return "not_resumable";
     }
+    // A leading assignment, as the classic launch uses, so an rc alias or function for `claude` still resolves.
+    const command = configDir ? `CLAUDE_CONFIG_DIR=${shellQuote(configDir)} ${resume}` : resume;
 
     const probeSession = `rigged-refresh-${sanitizeTmuxName(sessionName)}-${Date.now().toString(36)}`;
     const create = this.tmuxAdapter.deliveryGuard

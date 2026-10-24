@@ -21,7 +21,8 @@ export const CODEX_NETWORK_DEFAULT_OVERRIDE = "sandbox_workspace_write.network_a
 export type CodexNetworkDecision = { apply: true } | { apply: false; reason: string };
 export type CodexNetworkDefault = CodexNetworkDecision & { elapsedMs: number };
 /** Reads the network default for a seat that would run in `cwd`. */
-export type CodexNetworkDefaultReader = (cwd: string) => Promise<CodexNetworkDefault>;
+/** `codexHome` is the seat's own home when it has one; it wins over the reader's own. */
+export type CodexNetworkDefaultReader = (cwd: string, codexHome?: string) => Promise<CodexNetworkDefault>;
 
 /** ConfigRequirements fields (app-server v2, 0.160.0) that cannot restrict network inside workspace-write. */
 const UNRELATED_REQUIREMENTS = new Set([
@@ -124,13 +125,14 @@ export function codexNetworkDefaultReader(options: CodexNetworkReaderOptions = {
   const deadlineMs = options.deadlineMs ?? CODEX_NETWORK_READER_DEADLINE_MS;
   const graceMs = options.graceMs ?? 500;
   const maxOutputBytes = options.maxOutputBytes ?? 4 * 1024 * 1024;
-  return async (cwd) => {
+  return async (cwd, seatHome) => {
+    const codexHome = seatHome ?? options.codexHome;
     const started = performance.now();
     const env = {
       ...process.env,
       ...(options.launchPath ? { PATH: options.launchPath } : {}),
       ...(options.home ? { HOME: options.home } : {}),
-      ...(options.codexHome ? { CODEX_HOME: options.codexHome } : {}),
+      ...(codexHome ? { CODEX_HOME: codexHome } : {}),
     };
     // The launch flag `-s workspace-write` is `sandbox_mode` for the server; plugins and apps are
     // switched off for the reader only. app-server serves stdio by default.

@@ -152,10 +152,12 @@ export interface FourBlockReadModel {
 }
 
 /** Slice 01 — where a seat's account configuration comes from. A registry row is metadata: it doesn't prove
- *  which login a running session uses. A default login is whatever the daemon's home held at the seat's launch. */
+ *  which login a running session uses. A default login is whatever the seat's home held at its launch: the seat's
+ *  own home when its `env:` declares one (`homeFrom` names where; optional, so older readers keep accepting the
+ *  record), else the daemon's. */
 export type SeatAccountConfiguration =
   | { source: "registry"; profileRef: string; recordedAt: string; profileSaved: boolean | null }
-  | { source: "default_login"; home: string | null; homeNote: string }
+  | { source: "default_login"; home: string | null; homeNote: string; homeFrom?: "member" | "rig" }
   | { source: "unknown"; reason: string };
 
 export interface SeatConfiguredAccount {
@@ -166,6 +168,9 @@ export interface SeatConfiguredAccount {
   /** A registry row that exists but isn't applied or doesn't match (stale after a runtime change, another
    *  runtime in its column, or a profile not saved on this host). */
   registryNotes?: string[];
+  /** A home the seat's `env:` declares that isn't an absolute path, so it isn't used: the seat resolves as if
+   *  it declared none. Reported, never refused. */
+  ignoredHome?: { from: "member" | "rig"; variable: string; value: string };
   /** Always unlinked: nothing supported links a configured account to an observed allowance. */
   allowance: { linked: false; reason: string };
   /** What this seat itself was observed reporting. Claude: its own status-line samples, and the seats whose
@@ -198,7 +203,25 @@ export interface ClaudeUsageIdentity {
   source: "claude auth status orgId and email" | "unresolved";
 }
 
+export interface ClaudeTokenIdentity {
+  source: "configured credential label";
+  credentialLabel: string;
+  credentialRef: string;
+  limitId: string;
+}
+export interface ClaudeTokenProbe {
+  warnings?: string[];
+  exitCode: number | null;
+  requestOutcome: "completed" | "failed" | "unknown";
+  cliVersion: string | null;
+  status: string | null;
+  overageStatus: string | null;
+  overageDisabledReason: string | null;
+  isUsingOverage: boolean | null;
+}
+
 export interface UsageWindowRow {
+  status?: string;
   /** The provider-native window name (Codex: primary / secondary). */
   window: string;
   durationMins: number | null;
@@ -240,10 +263,11 @@ export interface UsageRefreshOutcome {
 }
 
 export interface ProviderUsageAllowance {
+  probe?: ClaudeTokenProbe;
   provider: ProviderKind;
   /** Null only for the explicit row of a source never read since the daemon started. */
-  identity: UsageAllowanceIdentity | ClaudeUsageIdentity | null;
-  source: { kind: "codex_app_server" | "claude_statusline_samples"; host: "local" };
+  identity: UsageAllowanceIdentity | ClaudeUsageIdentity | ClaudeTokenIdentity | null;
+  source: { kind: "codex_app_server" | "claude_statusline_samples" | "claude_token_probe"; host: "local" };
   observedAt: string | null;
   /** Seat links are not observed by this read. */
   seats: "unknown";

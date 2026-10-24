@@ -11,6 +11,7 @@ import { claudeClassicRendererEnvPrefix } from "../adapters/yolo-mode.js";
 import { parseClaudePermissionModes } from "./permission-drift.js";
 import { validateNativePermissionSelection } from "./native-permission-selection.js";
 import { seatLaunchAdditionsForLaunch } from "./seat-launch-additions.js";
+import { effectiveRuntimeHome } from "./seat-runtime-home.js";
 
 export interface ClaudeLaunchTarget {
   nodeId: string;
@@ -19,6 +20,9 @@ export interface ClaudeLaunchTarget {
   pane?: string | null;
   /** A successor may have a reserved generation before its tenure is committed. */
   generation?: string;
+  /** Slice 16: a Claude successor staged beside the seat's current occupant on another runtime (from #1214 by
+   *  Aschenbath). The seat still records that occupant until the switch commits; it must still be bound exactly. */
+  runtimeSwitch?: { fromRuntime: string; session: string; pane: string; generation: string };
 }
 
 interface TargetSnapshot {
@@ -105,13 +109,13 @@ export class ClaudeManagedLaunch {
     return [...keys].filter(key => validateSeatEnvName(key) === null && !MANAGED_LAUNCH_KEYS.includes(key));
   }
 
-  private target(nodeId: string): TargetSnapshot {
+  private target(nodeId: string, runtime = "claude-code"): TargetSnapshot {
     const row = this.db.prepare(`SELECT n.id AS nodeId, n.runtime, n.cwd,
       b.id AS bindingId, b.tmux_session AS session, b.tmux_pane AS pane,
       (SELECT generation_uuid FROM occupant_tenures WHERE node_id=n.id
        ORDER BY generation_ordinal DESC LIMIT 1) AS generation
       FROM nodes n LEFT JOIN bindings b ON b.node_id=n.id WHERE n.id=?`).get(nodeId) as TargetSnapshot | undefined;
-    if (!row || row.runtime !== "claude-code" || !row.cwd || !path.isAbsolute(row.cwd)) {
+    if (!row || row.runtime !== runtime || !row.cwd || !path.isAbsolute(row.cwd)) {
       throw new Error("Claude managed launch context is unresolved: an absolute seat cwd and Claude node are required.");
     }
     return row;
@@ -122,30 +126,37 @@ export class ClaudeManagedLaunch {
     return this.target(nodeId).cwd!;
   }
 
+  /** The config dir a seat's Claude selects: its own home from its member or rig `env:`, else the daemon's. */
+  private selectedConfigDir(nodeId: string | undefined): string | undefined {
+    return effectiveRuntimeHome(this.db, nodeId, "claude-code", this.sessionEnv.CLAUDE_CONFIG_DIR);
+  }
+
   /** Bootstrap and the launched child must use the same native selection.
    * Unset config uses HOME/.claude.json; even an explicit default-looking
    * directory selects <configDir>/.claude.json instead (#154/#225).
    */
-  configPaths(cwd: string): { configDir: string; statePath: string } {
-    const { HOME, CLAUDE_CONFIG_DIR } = this.sessionEnv;
+  configPaths(cwd: string, nodeId?: string): { configDir: string; statePath: string } {
+    const { HOME } = this.sessionEnv;
+    const CLAUDE_CONFIG_DIR = this.selectedConfigDir(nodeId);
     if (!HOME || !path.isAbsolute(HOME)) throw new Error("Claude managed launch context is unresolved: absolute HOME is required.");
     const configDir = path.resolve(cwd, CLAUDE_CONFIG_DIR ?? path.join(HOME, ".claude"));
     return { configDir, statePath: path.join(CLAUDE_CONFIG_DIR === undefined ? HOME : configDir, ".claude.json") };
   }
 
-  /** The state file under the daemon's own non-empty CLAUDE_CONFIG_DIR, or undefined when the daemon
-   * selects none. Classic bootstrap provisions it in addition to HOME/.claude.json. */
-  selectedStatePath(cwd: string): string | undefined {
-    return this.sessionEnv.CLAUDE_CONFIG_DIR ? this.configPaths(cwd).statePath : undefined;
+  /** The state file under the seat's own or the daemon's non-empty CLAUDE_CONFIG_DIR, or undefined when neither
+   * selects one. Classic bootstrap provisions it in addition to HOME/.claude.json. */
+  selectedStatePath(cwd: string, nodeId?: string): string | undefined {
+    return this.selectedConfigDir(nodeId) ? this.configPaths(cwd, nodeId).statePath : undefined;
   }
 
-  private context(cwd: string) {
-    const { PATH, HOME, CLAUDE_CONFIG_DIR } = this.sessionEnv;
+  private context(cwd: string, nodeId: string) {
+    const { PATH, HOME } = this.sessionEnv;
+    const CLAUDE_CONFIG_DIR = this.selectedConfigDir(nodeId);
     if (!PATH || !HOME || !path.isAbsolute(HOME)) throw new Error("Claude managed launch context is unresolved: managed PATH and absolute HOME are required.");
     // Relative/empty PATH entries are interpreted at the intended seat cwd,
     // including for /usr/bin/env shebangs inside the selected executable.
     const search = PATH.split(path.delimiter).map(p => path.resolve(cwd, p));
-    const { configDir } = this.configPaths(cwd);
+    const { configDir } = this.configPaths(cwd, nodeId);
     const env: Record<string, string> = { PATH: search.join(path.delimiter), HOME };
     // Session storage needs a directory, but exporting the default changes
     // Claude's global config selection. Preserve an unset native selection.
@@ -170,26 +181,32 @@ export class ClaudeManagedLaunch {
   async prepare(request: ClaudeLaunchTarget, mode: string): Promise<{
     assertCurrent: () => void; command: (args: readonly string[], launchEnv?: Readonly<Record<string, string>>) => string; configDir: string; executable: string; executableIsScript: boolean;
   }> {
-    const target = Object.freeze({ ...request });
-    const before = this.target(target.nodeId);
+    const target = Object.freeze({ ...request, ...(request.runtimeSwitch ? { runtimeSwitch: Object.freeze({ ...request.runtimeSwitch }) } : {}) });
+    const switching = target.runtimeSwitch;
+    const before = this.target(target.nodeId, switching?.fromRuntime);
     const cwd = before.cwd!;
     if (target.session !== undefined && (!before.pane || !before.generation)) {
       throw new Error("Claude managed launch context is unresolved: a bound pane and current occupant are required.");
     }
-    if ((target.cwd !== undefined && target.cwd !== cwd)
-      || (target.session !== undefined && target.session !== before.session)
-      || (target.pane != null && target.pane !== before.pane)) {
+    // A staged switch successor: the seat's current occupant is still bound exactly, and the successor is elsewhere.
+    const staged = !!switching && switching.fromRuntime !== "claude-code" && switching.session === before.session
+      && switching.pane === before.pane && switching.generation === before.generation
+      && !!target.session && target.session !== before.session && !!target.pane && target.pane !== before.pane
+      && !!target.generation && target.generation !== before.generation;
+    if ((target.cwd !== undefined && target.cwd !== cwd) || (switching && !staged)
+      || (!staged && target.session !== undefined && target.session !== before.session)
+      || (!staged && target.pane != null && target.pane !== before.pane)) {
       throw new Error("Claude managed launch target disagrees with the current binding; no input or selection changed.");
     }
-    const context = this.context(cwd);
+    const context = this.context(cwd, target.nodeId);
     // This is the existing managed session channel, not arbitrary shell variables.
     // Filter out the explicit capability environment and overwrite launch identity.
     const inherited = Object.keys(this.sessionEnv).filter(key => this.sessionEnv[key] !== undefined
       && !MANAGED_LAUNCH_KEYS.includes(key));
     if (inherited.some(key => !/^[A-Z_][A-Z0-9_]*$/.test(key))) throw new Error("Invalid managed environment key.");
     const assertCurrent = () => {
-      if (JSON.stringify(this.target(target.nodeId)) !== JSON.stringify(before)
-        || JSON.stringify(this.context(cwd)) !== JSON.stringify(context)
+      if (JSON.stringify(this.target(target.nodeId, switching?.fromRuntime)) !== JSON.stringify(before)
+        || JSON.stringify(this.context(cwd, target.nodeId)) !== JSON.stringify(context)
         || JSON.stringify(Object.keys(this.sessionEnv).filter(key => this.sessionEnv[key] !== undefined
           && !["PATH", "HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"].includes(key))) !== JSON.stringify(inherited)) {
         throw new Error("Claude managed launch context changed during capability discovery/input; retry explicitly.");

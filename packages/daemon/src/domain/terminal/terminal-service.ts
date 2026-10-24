@@ -52,10 +52,10 @@ import type {
   TerminalProvider,
 } from "./terminal-provider.js";
 
-/** The v1 provider name set (herdr = proof-gated primary; cmux = best-effort). */
-export type TerminalProviderName = "herdr" | "cmux";
+/** The provider name set (herdr = proof-gated primary; cmux = best-effort; rex = by name or from a Rex caller). */
+export type TerminalProviderName = "herdr" | "cmux" | "rex";
 export const DEFAULT_PROVIDER: TerminalProviderName = "herdr";
-/** The order an omitted provider is chosen in: herdr if it's there, otherwise cmux. */
+/** The order an omitted provider is chosen in: herdr if it's there, otherwise cmux. Rex is never chosen here. */
 const DEFAULT_PROVIDER_ORDER: readonly TerminalProviderName[] = ["herdr", "cmux"];
 
 export interface OpenViewRequest {
@@ -170,7 +170,7 @@ export class TerminalService {
   } | OpenViewResult {
     const name = (req.provider ?? DEFAULT_PROVIDER).trim() || DEFAULT_PROVIDER;
     const defaultProvider = this.deps.resolveProvider(name);
-    if (!defaultProvider) return errorResult(name, "unknown_provider", `unknown provider '${name}' — expected herdr or cmux`);
+    if (!defaultProvider) return errorResult(name, "unknown_provider", `unknown provider '${name}' — expected herdr, cmux or rex`);
     if (req.session === undefined) return { name, provider: defaultProvider };
     const session = typeof req.session === "string" ? req.session.trim() : "";
     if (!session || session === "." || session === ".." || /[\\/\x00-\x1f\x7f]/.test(session)) {
@@ -317,20 +317,19 @@ export class TerminalService {
       return { session: selected.session, providers: [{ name: selected.name,
         status: await selected.provider.status(), liveness: await selected.provider.liveness() }] };
     }
-    const names: string[] = providerName ? [providerName] : ["herdr", "cmux"];
-    const providers: ProviderStatusReport[] = [];
-    for (const name of names) {
+    const names: string[] = providerName ? [providerName] : ["herdr", "cmux", "rex"];
+    // Checked side by side, so a slow provider never delays the others.
+    const providers = await Promise.all(names.map(async (name): Promise<ProviderStatusReport> => {
       const p = this.deps.resolveProvider(name);
       if (!p) {
-        providers.push({
+        return {
           name,
           status: { provider: name, available: false, capabilities: {} },
           liveness: { alive: false, detail: `unknown provider '${name}'` },
-        });
-        continue;
+        };
       }
-      providers.push({ name, status: await p.status(), liveness: await p.liveness() });
-    }
+      return { name, status: await p.status(), liveness: await p.liveness() };
+    }));
     return { providers };
   }
 

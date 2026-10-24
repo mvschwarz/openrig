@@ -15,6 +15,7 @@ import YAML from "yaml";
 import { scopeCommand } from "../src/commands/scope.js";
 import { readFrontmatter } from "../src/lib/scope/scope-fs.js";
 import { readMissionReadiness, readProjectReadiness, readSliceReadiness, recordJudgment } from "../../daemon/src/domain/proof/judgments.js";
+import { compileProjectLifecycle } from "../../daemon/src/domain/project-lifecycle-compiler.js";
 
 function mktemp(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "rig-scope-cmd-"));
@@ -713,6 +714,20 @@ describe("rig scope mission create (HG-14 + HG-15)", () => {
     expect(parsed.mission.name).toBe("release-0.4.0");
     expect(parsed.mission.path).toBeTruthy();
     expect(parsed.mission.template).toBe("release");
+  });
+
+  // The lab's self-scout: a new mission refused to compile (lifecycle_field_missing) until metadata.name was added by hand.
+  it("scaffolds a mission whose project lifecycle compiles, with its name recorded exactly", async () => {
+    fs.copyFileSync(new URL("../../../docs/reference/project-release-profile.yaml", import.meta.url),
+      path.join(path.dirname(env.missionsRoot), "project.yaml"));
+    // Unquoted, YAML would read "#2" as a comment and "1.10" as the number 1.1.
+    for (const name of ["lab-mission", "#2", "1.10"]) {
+      const r = await run(["mission", "create", name, "--json"], env.missionsRoot);
+      expect(r.exitCode).toBe(0);
+      const missionPath = JSON.parse(r.stdout).mission.path as string;
+      expect(YAML.parse(fs.readFileSync(path.join(missionPath, "mission.yaml"), "utf8")).metadata).toEqual({ name, status: "planned" });
+      expect(compileProjectLifecycle({ missionPath, operationKey: "first-compile" }).identity.mission).toBe(name);
+    }
   });
 
   it("creates the first mission under an explicit workspace before its missions folder exists", async () => {

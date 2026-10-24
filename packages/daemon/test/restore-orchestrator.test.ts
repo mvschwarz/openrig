@@ -1222,6 +1222,23 @@ describe("RestoreOrchestrator", () => {
     expect(codex.resume).toHaveBeenCalled();
   });
 
+  it("a Codex seat with its own CODEX_HOME resumes with that home appended; a seat without one gets the call as before", async () => {
+    const snap = seedRigAndSnapshot({
+      nodes: [{ logicalId: "worker", role: "worker", runtime: "codex" }, { logicalId: "plain", role: "worker", runtime: "codex" }],
+      edges: [], resumeType: "codex_id", resumeToken: "uuid-123", restorePolicy: "resume_if_possible",
+    });
+    db.prepare("UPDATE nodes SET env_json = ? WHERE logical_id = 'worker'").run(JSON.stringify({ CODEX_HOME: "/homes/worker" }));
+    const codex = mockCodexResume();
+    await createOrchestrator({ codex }).restore(snap.id);
+    const calls = vi.mocked(codex.resume).mock.calls as unknown[][];
+    expect(calls).toHaveLength(2);
+    const withHome = calls.filter((c) => c.includes("/homes/worker"));
+    expect(withHome).toHaveLength(1);
+    expect(withHome[0]).toHaveLength(12);
+    expect(withHome[0]![11]).toBe("/homes/worker");
+    expect(calls.find((c) => !c.includes("/homes/worker"))!.length).toBeLessThan(12);
+  });
+
   it("resume succeeds -> status 'resumed'", async () => {
     const snap = seedRigAndSnapshot({
       nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
@@ -4028,6 +4045,26 @@ describe("RestoreOrchestrator", () => {
       expect(tmux.sendText).not.toHaveBeenCalled();
       expect(db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").get()).toEqual(oldEvent);
       expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(usable ? 1 : 0);
+    });
+
+    it("reconciles a verified Codex resume with the issue 1764 non-gpt status footer", async () => {
+      const tmux = mockTmuxForReconciler();
+      vi.mocked(tmux.hasSession).mockResolvedValue(true);
+      vi.mocked(tmux.getPaneCommand).mockResolvedValue("zsh");
+      vi.mocked(tmux.capturePaneContent).mockResolvedValue([
+        "› ",
+        "  Ready · Context 13% used · anthropic/claude-3.5-sonnet         ⚠ 2 warnings · f2 to view",
+      ].join("\n"));
+      const seeded = seedFailedAttempt({ runtime: "codex", restoreOutcome: "attention_required", withResumeToken: true });
+      const listProcesses = async () => [
+        { pid: 1234, ppid: 1, pgid: 1234, tpgid: 1235, command: "zsh", executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000" },
+        { pid: 1235, ppid: 1234, pgid: 1235, tpgid: 1235, command: "codex resume tok-abc-123", executableName: "codex", startedAt: "Sat Jan  1 12:00:01 2000" },
+      ];
+
+      const result = await createOrchestrator({ tmux, listProcesses }).reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+
+      expect(result).toMatchObject({ ok: true, to: "operator_recovered" });
+      expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(1);
     });
 
     it.each([

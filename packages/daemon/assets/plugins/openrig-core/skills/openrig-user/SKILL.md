@@ -94,10 +94,23 @@ rig queue handoff <qitem-id> \
 
 A queue write (`create`, `claim`, `update`, `handoff`, `handoff-and-complete`) answers with the row it wrote; a
 handoff answers with the closed row and its successor. When that answer shows what you need to establish, use it.
-Read back (`rig queue show <id> --full --json`, or `rig queue transitions <id>`) when it doesn't, for example:
 
-- the outcome was INDETERMINATE (a transport failure, or a 502 `remote_queue_write_failed`), or the write warned
-  `qitem_body_not_saved` (an existing row came back). Reconcile by the original ID before any retry;
+`create` also prints `Queue create request ID: <id> (not proof of persistence)` on stderr *before* it sends the write,
+so an interrupted create can be reconciled. That ID names a request, not a row. The row is the `qitemId` on stdout
+when the command exits 0. A non-zero exit means no row was confirmed, even when stdout carries a `qitemId`: an
+indeterminate answer repeats the request ID so you can reconcile by it. Don't merge stderr into stdout and keep the
+first `qitem-…` you find there; a refused create prints its request ID first, too.
+
+Read back (`rig queue show <id> --full --json`, or `rig queue transitions <id>`) when the answer doesn't show what you
+need, for example:
+
+- the outcome was INDETERMINATE (a transport failure, or a 502 `remote_queue_write_failed` that may have reached the
+  other host), or the write warned `qitem_body_not_saved` (an existing row came back). Reconcile by the original ID
+  before any retry. A 502 whose `failureClass` is `unknown-host`, `unsupported-transport` or `registry` isn't
+  indeterminate: the daemon refused before contacting any host and wrote nothing (`create` says "No row was
+  created"). `unsupported-transport` means that host entry is SSH-declared. Use the http entry for the same machine
+  from `rig host list`; if there isn't one, add it with that machine's daemon URL (`rig host add --id <id>
+  --transport http --url <daemon-url>`), asking whoever runs that host for the URL;
 - the output was compact or truncated and the field you need isn't in it (the compact receipt shows `bodyBytes`, not
   the body, and its footer names what it left out);
 - you need a transition note, a closure or blocker detail, or a successor that the output you saw omits;
@@ -983,6 +996,24 @@ rig auth seats … --runtime codex         # seat -> profile registry (metadata 
 ```
 
 **Hard secret boundary:** no token value is ever printed, logged, queued, streamed, or committed; status/validate report presence/mode/login-state only; seat labels are metadata, not live-account proof. MVP is `--runtime codex`; other runtimes use the same surface with a different `--runtime`, never a parallel command.
+
+### Give a seat its own Claude or Codex account
+
+A runtime's login lives in its home: Claude Code's in its config dir (`CLAUDE_CONFIG_DIR`, default `~/.claude`), Codex's
+in `CODEX_HOME` (default `~/.codex`). A seat that names its own home in `env:` runs on that home's login.
+
+1. **Prepare the home once, natively,** in a terminal: `CLAUDE_CONFIG_DIR=/abs/path claude`, then `/login`; or
+   `CODEX_HOME=/abs/path codex login`. The person signs in; never copy credential files between homes.
+2. **Name it in the member's `env:`** in `rig.yaml` (`CLAUDE_CONFIG_DIR: /abs/path` or `CODEX_HOME: /abs/path`), or in
+   the rig's `env:` for every seat of that runtime. The member's value wins. It must be an absolute path: any other
+   value is reported and ignored, and the seat keeps the daemon's home.
+3. **It takes effect at the seat's next launch** (a fresh launch, restore or handover); a running seat keeps the home
+   it started with. A conversation saved under the old home doesn't resume from the new one.
+4. **Check it:** `rig seat status <seat>` shows the home and where it came from, and `rig provider status` lists it as
+   the seat's configured account. Both say what's configured, not which login a running session holds.
+
+Seats may share a home. OpenRig writes its own settings (Codex hooks, managed `config.toml` and plugin; Claude's
+first-run trust settings) into the seat's home.
 
 ### Manage subscriptions across a fleet (when the person asks you to)
 

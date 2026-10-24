@@ -174,7 +174,9 @@ outside the rollup, even after its slices are accepted, until someone changes
 its status to `active` (or `release-candidate` for a release that is ready to
 judge). Nothing changes the status automatically. Missions created before this
 default carry no status and are not counted either; add the line by hand to
-include them.
+include them. It also writes `metadata.name`, the mission's folder name, which
+the project lifecycle compiler requires; a mission created without it refuses to
+compile with `lifecycle_field_missing` until you add that line.
 
 The three sections project into the UI's one review structure: a vertical
 stack of **INTENT → PLAN → DELIVERED**. A slice missing a section still

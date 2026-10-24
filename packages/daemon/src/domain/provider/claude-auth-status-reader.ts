@@ -103,14 +103,14 @@ async function stopProcessGroup(pgid: number, graceMs: number): Promise<void> {
   }
 }
 
-/** `claude auth status --json` in its own process group; the group is stopped however the command ends,
+/** A Claude command (auth status by default) in its own process group; the group is stopped however the command ends,
  *  so nothing it started outlives it. Its output is taken once the command exits, not when its pipes close
  *  (a leftover child could hold them open). */
-function runAuthStatus(file: string, env: NodeJS.ProcessEnv, cwd: string | undefined, timeoutMs: number, graceMs: number): Promise<Run> {
+export function runClaudeCommand(file: string, env: NodeJS.ProcessEnv, cwd: string | undefined, timeoutMs: number, graceMs: number, args: string[] = ["auth", "status", "--json"]): Promise<Run> {
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(file, ["auth", "status", "--json"], { env, cwd, stdio: ["ignore", "pipe", "ignore"], detached: true });
+      child = spawn(file, args, { env, cwd, stdio: ["ignore", "pipe", "ignore"], detached: true });
     } catch (error) {
       resolve({ code: null, stdout: "", error: error as NodeJS.ErrnoException, timedOut: false });
       return;
@@ -165,7 +165,7 @@ export function claudeAuthStatusReader(options: ClaudeAuthReaderOptions = {}): C
     const fail = (reason: ClaudeAuthFailureReason, detail: string) => ({ ok: false as const, at: now(), reason, detail });
     const claude = resolveClaudeExecutable(env);
     if (claude === null) return fail("binary_not_found", "no claude executable on the daemon's PATH");
-    const r = await runAuthStatus(claude, env, options.home, timeoutMs, graceMs);
+    const r = await runClaudeCommand(claude, env, options.home, timeoutMs, graceMs);
     if (r.error?.code === "ENOENT") return fail("binary_not_found", "no claude executable on the daemon's PATH");
     if (r.timedOut) return fail("auth_status_failed", `claude auth status did not answer within ${Math.round(timeoutMs / 1000)} s`);
     if (r.error) return fail("auth_status_failed", `claude auth status could not run (${r.error.code ?? r.error.message})`);

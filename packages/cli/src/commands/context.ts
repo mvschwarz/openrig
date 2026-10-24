@@ -681,6 +681,7 @@ Examples:
   // library verb — nothing here sends to a seat. Naming rig/seat (or mission)
   // is the caller's explicit grant of read access to that directory subtree.
   cmd.command("profile")
+    .description("Compose a context pack's atoms into the profile for one --situation and print it")
     .argument("<name-or-ref>", "Context pack name or path-like ref (its manifest must declare atoms)")
     .requiredOption("--situation <situation>", "fresh | handover | post-compaction")
     // r1 4d obs 2: default from the seat's own environment — a codex seat that

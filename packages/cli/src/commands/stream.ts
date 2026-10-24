@@ -296,5 +296,28 @@ export function streamCommand(depsOverride?: StreamDeps): Command {
       });
     });
 
+  cmd
+    .command("act <streamItemId>")
+    .description("Record what you did about a stream item: link the work you opened or joined, decline with a reason, or mark it a duplicate")
+    .option("--work <qitemId>", "The queue row you opened or joined for it")
+    .option("--decline <reason>", "Decline it, with your reason (yours only; others may still act)")
+    .option("--duplicate <id>", "The queue row or stream item it repeats")
+    .option("--reader <session>", "The reader, when not run from a managed seat")
+    .option("--json", "JSON output for agents")
+    .action(async (streamItemId: string, opts: { work?: string; decline?: string; duplicate?: string; reader?: string; json?: boolean }) => {
+      const chosen = [opts.work && "work", opts.decline && "decline", opts.duplicate && "duplicate"].filter(Boolean);
+      if (chosen.length !== 1) {
+        console.error("Give exactly one of --work, --decline or --duplicate");
+        process.exitCode = 1;
+        return;
+      }
+      const body = opts.work ? { action: "act", workQitemId: opts.work } : opts.decline ? { action: "decline", reason: opts.decline }
+        : { action: "duplicate", duplicateOf: opts.duplicate };
+      await withClient(getDeps(), async (client) => {
+        const res = await client.post<unknown>(`/api/stream/${encodeURIComponent(streamItemId)}/act`, { ...body, ...(opts.reader ? { reader: opts.reader } : {}) });
+        printResult(opts.json ?? false, res.data, res.status);
+      });
+    });
+
   return cmd;
 }

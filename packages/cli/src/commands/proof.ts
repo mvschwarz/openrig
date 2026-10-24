@@ -3,9 +3,39 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { Command } from "commander";
 import YAML from "yaml";
+import { inferCatalogProject, ProjectReadError } from "@openrig/daemon/project-catalog";
 import { DaemonClient } from "../client.js";
-import { findSlice, resolveMissionsRoot } from "../lib/scope/scope-fs.js";
-import { ScopeCliError } from "../lib/scope/types.js";
+import { ConfigStore } from "../config-store.js";
+import { findSlice, readProjectMissionsRoot, resolveMissionsRoot } from "../lib/scope/scope-fs.js";
+import { ScopeCliError, type SliceInfo } from "../lib/scope/types.js";
+
+/** findSlice, then, for an absolute slice path the configured tree doesn't own, the catalogued project whose root holds it
+ *  (chosen as work-install chooses one for a working folder), read under that project's missions root. A tree named with
+ *  --workspace or OPENRIG_WORK_ROOT stands, and a retry that fails reports the original refusal. */
+function findSliceInCatalog(
+  missionsRoot: string, slicePath: string, hintMission: string | null, workspace: string | undefined, warnings: string[],
+): SliceInfo {
+  try {
+    return findSlice(missionsRoot, slicePath, hintMission);
+  } catch (error) {
+    if (!(error instanceof ScopeCliError) || !path.isAbsolute(slicePath) || workspace || process.env.OPENRIG_WORK_ROOT) throw error;
+    let projectMissionsRoot: string | null = null;
+    try {
+      const catalogPath = String(new ConfigStore().resolveWithSource("workspace.catalog_path").value);
+      const project = inferCatalogProject(catalogPath, new ProjectReadError("project_required", "no catalogued project holds the slice"),
+        { cwd: slicePath }, warnings);
+      projectMissionsRoot = readProjectMissionsRoot(project.root, warnings);
+    } catch {
+      throw error;
+    }
+    if (!projectMissionsRoot || path.resolve(projectMissionsRoot) === path.resolve(missionsRoot)) throw error;
+    try {
+      return findSlice(projectMissionsRoot, slicePath, hintMission);
+    } catch {
+      throw error;
+    }
+  }
+}
 import { selectProofContractBody, isScaffoldPlaceholderText } from "../lib/scope/scaffold-placeholder.js";
 import { parseLogicalCheckboxes } from "../lib/scope/logical-checkbox.js";
 
@@ -230,7 +260,7 @@ checkboxes do not accept an item under the selected proof policy.
         }
         const parentOpts = (command.parent?.opts() ?? {}) as { workspace?: string };
         const missionsRoot = resolveMissionsRoot({ override: parentOpts.workspace });
-        const slice = findSlice(missionsRoot, slicePath, opts.mission ?? null);
+        const slice = findSliceInCatalog(missionsRoot, slicePath, opts.mission ?? null, parentOpts.workspace, warns);
 
         // Resolve the artifact body.
         let body = "";

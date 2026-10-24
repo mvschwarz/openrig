@@ -85,6 +85,26 @@ describe("current member Claude rules (offline, no native enforcement claim)", (
     expect(stored()).toBe(before);
   });
 
+  it("plans a target runtime with its own mode/profile while preserving dormant Claude rules", async () => {
+    const f = fixture();
+    expect(await f.service.setPermissions(update)).toMatchObject({ ok: true });
+    const store = new NativePermissionStore(f.db);
+    store.write(f.a.id, { runtime: "claude-code", mode: "auto" }, "operator", "prior mode");
+    const codex = store.launchOverride(f.a.id, "codex", {
+      selection: { runtime: "codex", mode: "floor" }, codexProfile: "target-profile",
+    });
+    expect(codex).toMatchObject({ launchPosture: "floor", teamPermissionDefault: false });
+    expect(codex.claudePermissions).toBeUndefined();
+    // A target profile also wins when the switch inherits rather than selects a mode.
+    expect(store.launchOverride(f.a.id, "codex", { selection: null, codexProfile: "target-profile" }).teamPermissionDefault).toBe(false);
+    f.db.prepare("UPDATE nodes SET runtime='codex' WHERE id=?").run(f.a.id);
+    store.write(f.a.id, { runtime: "codex", mode: "floor" }, "operator", "prior Codex mode");
+    expect(store.launchOverride(f.a.id, "claude-code", {
+      selection: { runtime: "claude-code", mode: "acceptEdits" }, codexProfile: null,
+    })).toMatchObject({ permissionMode: "acceptEdits", claudePermissions: rules });
+    expect(readClaudePermissionRules(f.db, f.a.id)).toEqual(rules);
+  });
+
   it("rolls back an update when its audit cannot be persisted", async () => {
     const f = fixture(); vi.spyOn(f.eventBus, "persistWithinTransaction").mockImplementation(() => { throw Error("audit unavailable"); });
     expect(await f.service.setPermissions(update)).toMatchObject({ ok: false });

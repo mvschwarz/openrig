@@ -1,3 +1,4 @@
+import { claudeTokenReadingsSchema } from "./migrations/134_claude_token_readings.js";
 // The canonical ordered migration list. SINGLE SOURCE: the daemon boot path
 // (startup.ts) and any test/tool that needs a schema-faithful DB both migrate from THIS array,
 // so a reader DB is never seeded from a stale hand-copied subset (the perf-fixture-migration-parity
@@ -9,6 +10,8 @@ import { terminalPolicySchema } from "./migrations/128_terminal_policy.js";
 import { streamDispositionsSchema } from "./migrations/129_stream_dispositions.js";
 import { streamSubscriptionsSchema } from "./migrations/130_stream_subscriptions.js";
 import { streamRetentionFloorSchema } from "./migrations/131_stream_retention_floor.js";
+import { seatRuntimeSwitchesSchema } from "./migrations/132_seat_runtime_switches.js";
+import { streamReaderActionsSchema } from "./migrations/133_stream_reader_actions.js";
 import { seatIdentityProcessEvidenceSchema } from "./migrations/135_seat_identity_process_evidence.js";
 import { bindingsSessionsSchema } from "./migrations/002_bindings_sessions.js";
 import { eventsSchema } from "./migrations/003_events.js";
@@ -263,6 +266,9 @@ export const ALL_MIGRATIONS: Migration[] = [
   streamDispositionsSchema,
   streamSubscriptionsSchema,
   streamRetentionFloorSchema,
+  seatRuntimeSwitchesSchema,
+  streamReaderActionsSchema,
+  claudeTokenReadingsSchema,
   seatIdentityProcessEvidenceSchema,
   nodeClaudePermissionsSchema,
 ];

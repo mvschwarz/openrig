@@ -31,8 +31,9 @@ fleet can pick them up.
   the manual path above is the whole path, and `--decide` still applies any
   effect that was already accepted.
 - `rig stream show <id>` tells a poster what became of an item. Hub readers
-  use `rig stream subscribe` and `rig stream read`; their read progress is
-  theirs, not a classification.
+  use `rig stream subscribe` and `rig stream read`, and record what they did
+  with `rig stream act`; a reader's read progress and action are theirs, not a
+  classification.
 - When ambiguity is real, escalate to `advisor.lead` — don't
   guess destinations.
 

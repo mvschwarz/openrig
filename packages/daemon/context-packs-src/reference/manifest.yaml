@@ -1,10 +1,13 @@
-# Reference guides the help pack links to, loaded one file or section at a time by address
+# Reference guides the help pack and command help link to, loaded one file or section at a time by address
 # (rig context get reference/<file>#<section>). Each file is a symlink to docs/reference/.
 name: reference
 version: "0"
 taxonomy: world
-purpose: "Version-matched reference guides the help guide links to. Load a single file or section by address; don't load the whole pack."
+purpose: "Version-matched reference guides the help guide and command help link to. Load a single file or section by address; don't load the whole pack."
 files:
+  - path: acp-agents.md
+    role: reference
+    summary: "Handing a queue row's task to an ACP agent with rig acp run (linked from rig acp run --help)."
   - path: getting-started.md
     role: reference
     summary: "Getting started: setup, first team, recovery after a reboot, and permissions."

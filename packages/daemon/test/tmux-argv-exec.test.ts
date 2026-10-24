@@ -29,7 +29,8 @@ describe("tmux argv exec path", () => {
     const seen: string[][] = [];
     const files = memFs();
     const exec = vi.fn(async () => { throw new Error("argv only"); });
-    const adapter = new TmuxAdapter(exec, files, async args => { seen.push(args); return ""; });
+    // The sourced new-session -P prints its pane.
+    const adapter = new TmuxAdapter(exec, files, async args => { seen.push(args); return args.includes("source-file") ? "%1\n" : ""; });
     await adapter.createSession("r01-dev1-impl", "/home/user/my project/code", { PATH: "/a b:/c", EMPTY: "" });
     expect(exec).not.toHaveBeenCalled();
     expect(seen).toEqual([["tmux", "start-server", ";", "source-file", "/tmp/text.txt"], ["tmux", "show-environment", "-g"]]);

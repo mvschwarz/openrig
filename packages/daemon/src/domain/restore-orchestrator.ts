@@ -21,6 +21,7 @@ import type { NodeLauncher } from "./node-launcher.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { ClaudeResumeAdapter } from "../adapters/claude-resume.js";
 import type { CodexResumeAdapter } from "../adapters/codex-resume.js";
+import { seatRuntimeHome } from "./seat-runtime-home.js";
 import type { PiResumeAdapter } from "../adapters/pi-resume.js";
 import type { OmpResumeAdapter } from "../adapters/omp-resume.js";
 import type { TranscriptStore } from "./transcript-store.js";
@@ -2001,7 +2002,11 @@ export class RestoreOrchestrator {
     }
 
     if (this.codexResume.canResume(resumeType, resumeToken)) {
-      const result = await this.codexResume.resume(sessionName, resumeType, resumeToken, cwd, codexConfigProfile, resolvedPosture, model, ...launchTail);
+      // A seat with its own CODEX_HOME resumes the conversation that home holds; without one the call is unchanged.
+      const seatHome = seatRuntimeHome(this.db, nodeId, "codex").home;
+      const codexTail = seatHome ? [...launchTail, ...Array(4 - launchTail.length).fill(undefined), seatHome] : launchTail;
+      const result = await this.codexResume.resume(sessionName, resumeType, resumeToken, cwd, codexConfigProfile, resolvedPosture, model,
+        ...(codexTail as [...typeof launchTail, seatCodexHome?: string]));
       if (result.ok) {
         const notice = nonInterruptiveNotice("codex", { nonInterruptive, launchPosture: resolvedPosture, permissionMode });
         if (notice) warnings?.push(`${sessionName}: ${notice}`);
@@ -2203,6 +2208,7 @@ export class RestoreOrchestrator {
       // Headerless readiness requires the same stable foreground/argv proof
       // as the resume adapter; a token-bearing descendant alone is insufficient.
       ...(runtime === "claude-code" ? { claudeResumeIdentityVerified } : {}),
+      ...(runtime === "codex" ? { codexProcessVerified: true } : {}),
     });
     const fgProcess = runtime === "claude-code" ? "claude" as const : runtime === "codex" ? "codex" as const : null;
     if (!fgProcess) {

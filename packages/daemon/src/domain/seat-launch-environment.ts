@@ -100,10 +100,13 @@ export class SeatLaunchEnvironment {
     return bin;
   }
 
-  async command(session: string, command: string, target: { codexCwd?: string; nodeId?: string; generation?: string; runtime?: string } = {}): Promise<string> {
+  async command(session: string, command: string, target: { codexCwd?: string; nodeId?: string; generation?: string; runtime?: string;
+    /** The seat's own CODEX_HOME when it declares one; it wins over the daemon's. */
+    codexHome?: string } = {}): Promise<string> {
+    const codexHome = target.codexHome ?? this.codexHome;
     const searchPath = this.sessionEnv.PATH;
     const codexEnv = target.codexCwd !== undefined
-      ? [searchPath ? `PATH=${shellQuote(searchPath)}` : "", this.codexHome ? `CODEX_HOME=${shellQuote(this.codexHome)}` : ""].filter(Boolean)
+      ? [searchPath ? `PATH=${shellQuote(searchPath)}` : "", codexHome ? `CODEX_HOME=${shellQuote(codexHome)}` : ""].filter(Boolean)
       : [];
     const fallback = codexEnv.length ? `env ${codexEnv.join(" ")} ${command}` : command;
     try {
@@ -136,7 +139,7 @@ export class SeatLaunchEnvironment {
       }
       const binDir = this.rigBin();
       const env = publicSeatEnvironment({ OPENRIG_TRANSCRIPTS_LINES: "", OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS: "", ...this.sessionEnv, ...identity });
-      if (target.codexCwd !== undefined && this.codexHome) env.CODEX_HOME = this.codexHome;
+      if (target.codexCwd !== undefined && codexHome) env.CODEX_HOME = codexHome;
       // Classic Claude may be an rc alias or function, not a PATH executable.
       // Its caller sources the staged command in a pane-shell subshell. Leading
       // assignments preserve shell lookup; /usr/bin/env would bypass it.

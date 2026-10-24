@@ -192,6 +192,17 @@ describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)"
 
 
 describe("terminal preview width", () => {
+  it("previews with the provider the window opener will use", async () => {
+    const requests: string[] = [];
+    const client = new DaemonClient({ baseUrl: "http://fixture", fetchImpl: (async url => {
+      requests.push(String(url));
+      return { ok: true, json: async () => ({}) } as Response;
+    }) as typeof fetch });
+    await client.previewTerminal("saved:kernel");
+    await client.previewTerminal("saved:kernel", "rex");
+    expect(requests.map(url => new URL(url).searchParams.get("provider"))).toEqual(["herdr", "rex"]);
+  });
+
   it.each([undefined, 0, -1, 119.5, Infinity, NaN, 119, 120, 159, 160])("only sends a measured positive integer width: %s", async columns => {
     const descriptor = Object.getOwnPropertyDescriptor(process.stdout, "columns");
     const ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");

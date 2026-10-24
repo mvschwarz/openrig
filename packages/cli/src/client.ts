@@ -14,6 +14,9 @@ export function terminalAuthHeaders(): Record<string, string> {
 /** The header carrying the caller's seat identity, derived ONCE at the transport chokepoint. */
 export const SENDER_IDENTITY_HEADER = "X-OpenRig-Session";
 
+/** The caller's occupant generation (its seat env), read only by a runtime switch's own checks. */
+export const OCCUPANT_GENERATION_HEADER = "X-OpenRig-Occupant-Generation";
+
 /**
  * P18 sender-provenance — derive the caller's identity from the seat ENV (never a request-body
  * claim). Routes that record authorship into the channel of record read ONLY this header, so a
@@ -31,7 +34,13 @@ export function senderIdentityHeaders(originSelfHostId?: string, sessionName?: s
     originSelfHostId && originSelfHostId.length > 0 && session.split("@").length < 3
       ? `${session}@${originSelfHostId}`
       : session;
-  return { [SENDER_IDENTITY_HEADER]: value };
+  // Slice 16: the caller's own occupant generation from its seat env, so the two processes of one seat during a
+  // runtime switch can be told apart. Only a client acting for its own process carries it.
+  const generation = sessionName === undefined ? process.env.OPENRIG_OCCUPANT_GENERATION?.trim() : undefined;
+  return {
+    [SENDER_IDENTITY_HEADER]: value,
+    ...(generation && /^[0-9A-Za-z-]{1,64}$/.test(generation) ? { [OCCUPANT_GENERATION_HEADER]: generation } : {}),
+  };
 }
 
 /** Construct registered remote clients with the origin derived from this instance's durable store. */
