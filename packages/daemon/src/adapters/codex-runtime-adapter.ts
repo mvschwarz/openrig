@@ -810,20 +810,21 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   /** Type a command buildResumeCommand built into the pane's shell, then verify the resume as launchHarness
    *  does. Nothing is prepared again, so the command runs exactly as it was built and checked. */
-  async sendResumeCommand(tmuxSession: string, command: string, resumeToken: string, nodeId?: string): Promise<HarnessLaunchResult> {
+  async sendResumeCommand(tmuxSession: string, command: string, resumeToken: string, nodeId?: string, home?: string): Promise<HarnessLaunchResult> {
     const textResult = await this.tmux.sendShellCommand(tmuxSession, command);
     if (!textResult.ok) return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
-    return this.verifyResumeInPane(tmuxSession, resumeToken, nodeId);
+    return this.verifyResumeInPane(tmuxSession, resumeToken, nodeId, home);
   }
 
   /** launchHarness's resume verification for a resume the caller started itself: dismiss a skippable update
-   *  prompt, then require a proven resumed conversation (never process-alive alone). The proof reads the seat's
-   *  own CODEX_HOME when `nodeId` names a seat that declares one, where its resumed Codex logs. */
-  async verifyResumeInPane(tmuxSession: string, resumeToken: string, nodeId?: string): Promise<HarnessLaunchResult> {
+   *  prompt, then require a proven resumed conversation (never process-alive alone). The proof reads `home` when the
+   *  caller read it from the running Codex, else the seat's own CODEX_HOME when `nodeId` names a seat that declares one,
+   *  where its resumed Codex logs. */
+  async verifyResumeInPane(tmuxSession: string, resumeToken: string, nodeId?: string, home?: string): Promise<HarnessLaunchResult> {
     const updatePrompt: UpdatePromptAttempt = { handled: false };
     await this.dismissSkippableCodexUpdatePrompt(tmuxSession, updatePrompt);
     if (updatePrompt.failure) return updatePrompt.failure;
-    return this.verifyResumeLaunch(tmuxSession, updatePrompt, { resumeToken, ...this.ownHomeOpt({ nodeId }) });
+    return this.verifyResumeLaunch(tmuxSession, updatePrompt, { resumeToken, ...(home ? { home } : this.ownHomeOpt({ nodeId })) });
   }
 
   /** Launch flags shared by fresh, fork and resume, decided once per launch. With `running`, the probed and
