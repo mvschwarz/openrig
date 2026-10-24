@@ -50,7 +50,7 @@ import { ClaudeManagedLaunch } from "./domain/claude-managed-launch.js";
 import { ClaudeResumeAdapter } from "./adapters/claude-resume.js";
 import { CodexResumeAdapter } from "./adapters/codex-resume.js";
 import { codexDaemonSupportProbe } from "./domain/codex-daemon-support.js";
-import { declaredRuntimeHomes, seatRuntimeHome } from "./domain/seat-runtime-home.js";
+import { claudeConfigRootFor, declaredRuntimeHomes, seatRuntimeHome } from "./domain/seat-runtime-home.js";
 import { codexNetworkDefaultReader } from "./domain/codex-network-default.js";
 import { codexUsageReader } from "./domain/provider/codex-usage-reader.js";
 import { CodexUsageWindows } from "./domain/provider/codex-usage-windows.js";
@@ -557,7 +557,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // S19 — the Claude self-report rung (pid.json), consulted per sweep for seats whose
     // declared inventory staffs it; unreadable = null = the ladder falls, never errors.
     selfReportReader: (sessionName, seatNodeId) => {
-      const sessionsDir = nodePath.join(process.env.CLAUDE_CONFIG_DIR ?? nodePath.join(os.homedir(), ".claude"), "sessions");
+      // The seat's own Claude config dir when it declares one, where its Claude writes pid.json.
+      const sessionsDir = nodePath.join(claudeConfigRootFor(db, seatNodeId), "sessions");
       return readClaudeSelfReportEvidence({ sessionsDir, sessionName, seatNodeId });
     },
     // pi and omp: after a restart, a runner seat takes its last recorded hook (current session and generation only).
@@ -1070,12 +1071,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const continuityPolicyMaterializer = new ContinuityPolicyMaterializer(
     watchdogJobsRepoInstance,
     ({ sessionId }) => {
-      const row = db.prepare("SELECT resume_token FROM sessions WHERE id = ?").get(sessionId) as
-        | { resume_token: string | null }
+      const row = db.prepare("SELECT resume_token, node_id FROM sessions WHERE id = ?").get(sessionId) as
+        | { resume_token: string | null; node_id: string }
         | undefined;
       const token = row?.resume_token;
       if (!token) return null;
-      const claudeRoot = process.env.CLAUDE_CONFIG_DIR ?? nodePath.join(os.homedir(), ".claude");
+      // The seat's own Claude config dir when it declares one, where its transcripts are.
+      const claudeRoot = claudeConfigRootFor(db, row?.node_id);
       return findClaudeTranscriptByToken(nodePath.join(claudeRoot, "projects"), token);
     },
   );
