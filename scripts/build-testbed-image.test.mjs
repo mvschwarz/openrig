@@ -137,16 +137,22 @@ const p=spawnSync(${JSON.stringify(process.execPath)},args,{stdio:'inherit'});pr
 `, { mode: 0o755 });
     writeFileSync(join(root, "bin/docker"), `#!${process.execPath}
 import fs from 'node:fs';const args=process.argv.slice(2);const marker=process.env.FAKE_CONTAINER;
+const id='a'.repeat(64),image='sha256:'+'b'.repeat(64);
 if(args[0]==='version')console.log(JSON.stringify({Os:'linux',Arch:'amd64'}));
+else if(args[0]==='image')console.log(image);
 else if(args[0]==='build'){}
 else if(args[0]==='run'){
-  const at=args.indexOf('--name');if(at<0)process.exit(9);
-  fs.writeFileSync(marker,args[at+1]);
+  const at=args.indexOf('--name'),cid=args.indexOf('--cidfile');if(at<0||cid<0)process.exit(9);
+  fs.writeFileSync(args[cid+1],id);fs.writeFileSync(marker,JSON.stringify({Id:id,Name:'/'+args[at+1],Image:image,State:{Running:process.env.LOAD_CASE==='timeout',Status:process.env.LOAD_CASE==='timeout'?'running':'exited'}}));
   if(process.env.LOAD_CASE==='timeout')setInterval(()=>{},1000);
   else process.exit(process.env.LOAD_CASE==='failure'?7:0);
-}else if(args[0]==='inspect')console.log('[]');
+}else if(args[0]==='inspect')console.log(JSON.stringify([JSON.parse(fs.readFileSync(marker))]));
+else if(args[0]==='kill'){
+  if(args.join(' ')!=='kill --signal TERM '+id)process.exit(8);
+  const state=JSON.parse(fs.readFileSync(marker));state.State={Running:false,Status:'exited'};fs.writeFileSync(marker,JSON.stringify(state));
+}else if(args[0]==='wait'){if(JSON.parse(fs.readFileSync(marker)).State.Running)process.exit(8);console.log('0');}
 else if(args[0]==='rm'){
-  if(fs.readFileSync(marker,'utf8')!==args.at(-1))process.exit(8);
+  if(args.length!==2||args[1]!==id||JSON.parse(fs.readFileSync(marker)).State.Running)process.exit(8);
   fs.unlinkSync(marker);
 }else process.exit(8);
 `, { mode: 0o755 });
