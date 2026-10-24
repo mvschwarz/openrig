@@ -127,6 +127,12 @@ describe("rex CLI transport", () => {
     expect(performance.now() - started).toBeLessThan(1_000);
   });
 
+  it("keeps a version answer when only server.status is stuck", async () => {
+    const run: RexRun = async (argv) => (argv.includes("server.version") ? '{"rex_version":"1.2.3"}' : new Promise<string>(() => {}));
+    const transport = createRexCliTransport({ run, binary: () => BIN, env: {}, probeTimeoutMs: 50 });
+    expect(await transport.probe()).toEqual({ alive: true, version: "1.2.3", instanceId: null });
+  });
+
   it("a probe never throws: an unreachable server is alive:false with the reason", async () => {
     const transport = createRexCliTransport({ run: async () => { throw new RexRunError("exit 4", 4, "Error: rex server is not running\n"); }, binary: () => BIN, env: {} });
     const probe = await transport.probe();

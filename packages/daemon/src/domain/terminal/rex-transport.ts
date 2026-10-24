@@ -142,19 +142,21 @@ export function createRexCliTransport(opts: { run?: RexRun; env?: NodeJS.Process
   return {
     request,
     async probe() {
-      const answered = Promise.allSettled([request("server.version", {}, probeTimeoutMs), request("server.status", {}, probeTimeoutMs)]);
-      // The runs end at the budget, but stopping a stuck rex can take longer; discovery answers by the budget regardless.
+      const calls = [request("server.version", {}, probeTimeoutMs), request("server.status", {}, probeTimeoutMs)];
+      const settled: Array<PromiseSettledResult<Record<string, unknown>> | undefined> = [];
+      calls.forEach((call, i) => call.then((value) => { settled[i] = { status: "fulfilled", value }; }, (reason) => { settled[i] = { status: "rejected", reason }; }));
+      // The runs end at the budget, but stopping a stuck rex can take longer; discovery answers by the budget with what came back.
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const late = new Promise<"late">((resolve) => { timer = setTimeout(() => resolve("late"), probeTimeoutMs + PROBE_SLACK_MS); });
-      const outcome = await Promise.race([answered, late]);
+      const late = new Promise<void>((resolve) => { timer = setTimeout(resolve, probeTimeoutMs + PROBE_SLACK_MS); });
+      await Promise.race([Promise.allSettled(calls), late]);
       clearTimeout(timer);
-      if (outcome === "late") return { alive: false, version: null, instanceId: null, detail: `the Rex server did not answer within ${probeTimeoutMs} ms` };
-      const [version, status] = outcome;
+      const [version, status] = settled;
+      if (!version) return { alive: false, version: null, instanceId: null, detail: `the Rex server did not answer within ${probeTimeoutMs} ms` };
       if (version.status === "rejected") {
         return { alive: false, version: null, instanceId: null, detail: (version.reason as Error).message };
       }
       const rexVersion = version.value["rex_version"];
-      const instanceId = status.status === "fulfilled" ? status.value["instance_id"] : null;
+      const instanceId = status?.status === "fulfilled" ? status.value["instance_id"] : null;
       return {
         alive: true,
         version: typeof rexVersion === "string" && rexVersion ? rexVersion : null,
