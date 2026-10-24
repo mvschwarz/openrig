@@ -613,9 +613,9 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
       specYaml: `policy: periodic-reminder\ntarget:\n  session: ${seat}\ninterval_seconds: 7200\nmessage: sweep\n`, registeredBySession: seat });
     // Attempts are stamped in real time, in order, so a ladder tick's own records fall between them as they would.
     const log = new WatchdogHistoryLog(db); let last = 0;
-    const record = (outcome: "refused" | "sent") => log.record({ jobId, evaluatedAt: new Date(last = Math.max(Date.now(), last + 1)).toISOString(), outcome,
+    const record = (outcome: "refused" | "sent", kind = "selection_prompt") => log.record({ jobId, evaluatedAt: new Date(last = Math.max(Date.now(), last + 1)).toISOString(), outcome,
       deliveryTargetSession: seat, deliveryStatus: outcome === "sent" ? "ok" : "failed",
-      evaluationNotes: outcome === "refused" ? { deliveryReason: `Refused: '${seat}' is at an interactive prompt (selection_prompt). No text was sent.` } : null });
+      evaluationNotes: outcome === "refused" ? { deliveryReason: `Refused: '${seat}' is at an interactive prompt (${kind}). No text was sent.` } : null });
     outcomes.forEach(record);
     return { jobId, record };
   }
@@ -846,6 +846,39 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
       expect(notes(alert!.qitemId).join("\n")).toContain("human rung explicit-only; not posted to a person");
       expect(new DispatchBuffer(home).pending()).toEqual([]);
       expect(posts).toEqual([]);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("#81: a permission prompt that joins a choice alert the explicit-only floor kept from a person still posts, once", async () => {
+    vi.stubEnv("OPENRIG_WORKSPACE_OPERATOR_SEAT_NAME", "ops@fixture");
+    try {
+      await refusedEpisode("mixed@fixture", "selection_prompt", undefined, 1);
+      const posts: unknown[] = []; const port = engine(posts);
+      const opts = { ...toOps, readPromptState: () => "blocked" as const };
+      await tick(port, opts);
+      const [alert] = alerts();
+      expect(posts).toEqual([]);
+      await refusedEpisode("mixed@fixture", "permission_prompt", undefined, 2);
+      await tick(port, { ...opts, now: new Date(Date.now() + 240_000) });
+      await vi.waitFor(() => expect(posts).toHaveLength(1));
+      await tick(port, { ...opts, now: new Date(Date.now() + 360_000) }); expect(posts).toHaveLength(1);
+      expect(alerts().map(a => a.qitemId)).toEqual([alert!.qitemId]);
+      expect(alerts()[0]!.tags).not.toContain("prompt-kind:choice");
+      expect(notes(alert!.qitemId).join("\n")).toContain("explicit-only floor");
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("#81: a reminder whose latest refusal turns from a choice to a permission prompt still posts after the explicit-only floor", async () => {
+    vi.stubEnv("OPENRIG_WORKSPACE_OPERATOR_SEAT_NAME", "ops@fixture");
+    try {
+      const posts: unknown[] = []; const port = engine(posts);
+      const { record } = reminder(["refused", "refused"]);
+      await tick(port, toOps);
+      expect(posts).toEqual([]);
+      record("refused", "permission_prompt");
+      await tick(port, { ...toOps, now: new Date(Date.now() + 240_000) });
+      await vi.waitFor(() => expect(posts).toHaveLength(1));
+      expect(alerts()[0]!.tags).not.toContain("prompt-kind:choice");
     } finally { vi.unstubAllEnvs(); }
   });
 
