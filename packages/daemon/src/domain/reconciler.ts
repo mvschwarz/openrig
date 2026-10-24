@@ -9,10 +9,11 @@ import { lstartToMinTs } from "./codex-thread-id.js";
 export interface ReconcileResult {
   checked: number;
   detached: number;
-  /** Not on this daemon's tmux server, yet the seat's recorded process is still running: most likely on a tmux server
-   *  this daemon can't see (it didn't inherit the seats' TMUX). Left as they were, never detached, so nothing relaunches
-   *  them. `server` is that process's parent, its tmux server, when the process table shows it. */
-  unseen: { sessionId: string; sessionName: string; pid: number; server: { pid: number; command: string } | null }[];
+  /** Not on this daemon's tmux server, yet the seat's last observed process is still running: most likely on a tmux
+   *  server this daemon can't see (it didn't inherit the seats' TMUX). Left as they were, never detached, so nothing
+   *  relaunches them. `parent` is that process's immediate parent when the process table shows it; it may be the tmux
+   *  server, or a shell or wrapper in between. */
+  unseen: { sessionId: string; sessionName: string; pid: number; parent: { pid: number; command: string } | null }[];
   errors: { sessionId: string; error: string }[];
 }
 
@@ -118,18 +119,19 @@ export class Reconciler {
     return { checked, detached, unseen, errors };
   }
 
-  /** The seat's recorded process, as a conservative hint that it still runs, not proof of identity: the identity
-   *  reconciler's last observation of this very session, and a process with that pid whose start isn't observably later
-   *  than the observation. Start times are whole seconds, so a pid reused within the observation's second still passes.
-   *  An unreadable table or record is no evidence. */
+  /** The seat's last observed process, as a conservative hint that it still runs, not proof of identity: the last pid
+   *  evidence recorded for this very session (kept with its own time, so a later poll that couldn't see the seat doesn't
+   *  erase it), and a process with that pid whose start isn't observably later than that observation. Start times are
+   *  whole seconds, so a pid reused within the observation's second still passes. An unreadable table or record is no
+   *  evidence. */
   private async recordedProcessStillRunning(
     session: { nodeId: string; sessionName: string },
     processes: () => Promise<ProcessTableRow[] | null>,
-  ): Promise<{ pid: number; server: { pid: number; command: string } | null } | null> {
-    const verdict = new SeatIdentityStore(this.db).getForNode(session.nodeId);
-    if (!verdict || verdict.sessionName !== session.sessionName) return null;
-    const observedAt = Date.parse(verdict.observedAt) / 1000;
-    const pids = [verdict.evidence.observedPanePid, verdict.evidence.observedPid]
+  ): Promise<{ pid: number; parent: { pid: number; command: string } | null } | null> {
+    const evidence = new SeatIdentityStore(this.db).getProcessEvidence(session.nodeId);
+    if (!evidence || evidence.sessionName !== session.sessionName) return null;
+    const observedAt = Date.parse(evidence.observedAt) / 1000;
+    const pids = [evidence.panePid, evidence.pid]
       .filter((pid): pid is number => typeof pid === "number" && pid > 0);
     if (!pids.length || Number.isNaN(observedAt)) return null;
     const rows = await processes();
@@ -139,7 +141,7 @@ export class Reconciler {
       const started = row ? lstartToMinTs(row.startedAt) : undefined;
       if (!row || started === undefined || started > observedAt) continue;
       const parent = rows.find((r) => r.pid === row.ppid);
-      return { pid, server: parent ? { pid: parent.pid, command: parent.command } : null };
+      return { pid, parent: parent ? { pid: parent.pid, command: parent.command } : null };
     }
     return null;
   }

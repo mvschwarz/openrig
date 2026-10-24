@@ -5,6 +5,7 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { Reconciler } from "../src/domain/reconciler.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
+import { SeatIdentityReconciler } from "../src/domain/seat-identity-reconciler.js";
 import type { ProcessTableRow } from "../src/domain/process-table.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -22,11 +23,14 @@ const lstart = (d: Date) => `${DAYS[d.getDay()]} ${MONTHS[d.getMonth()]} ${Strin
 const OBSERVED = new Date("2026-10-24T04:40:00.000Z");
 const BEFORE = new Date(OBSERVED.getTime() - 10 * 60_000);
 const AFTER = new Date(OBSERVED.getTime() + 60_000);
+const LATER = new Date(OBSERVED.getTime() + 5 * 60_000);
 const SERVER = "tmux -S /tmp/seats.sock new-session -d -s anchor";
 const row = (pid: number, ppid: number, startedAt: Date, command: string): ProcessTableRow =>
   ({ pid, ppid, pgid: pid, tpgid: -1, executableName: command.split(" ")[0]!, startedAt: lstart(startedAt), command });
 
 const noServer = { probeSession: async () => ({ state: "transport_unavailable" as const }) } as unknown as TmuxAdapter;
+/** The restarted daemon's identity poll, on a server where none of the seats' sessions exist. */
+const blindPoll = { listSessions: async () => [] } as unknown as ConstructorParameters<typeof SeatIdentityReconciler>[0]["tmux"];
 
 describe("startup reconcile: a seat on a tmux server this daemon can't see", () => {
   let db: Database.Database;
@@ -34,6 +38,7 @@ describe("startup reconcile: a seat on a tmux server this daemon can't see", () 
   let eventBus: EventBus;
   let rigId: string;
   let sessionId: string;
+  let nodeId: string;
   beforeEach(() => {
     db = createFullTestDb();
     sessionRegistry = new SessionRegistry(db);
@@ -45,6 +50,7 @@ describe("startup reconcile: a seat on a tmux server this daemon can't see", () 
     sessionRegistry.updateStatus(session.id, "running");
     rigId = rig.id;
     sessionId = session.id;
+    nodeId = node.id;
     new SeatIdentityStore(db).upsert({
       nodeId: node.id, verdict: "verified", evidenceSource: null, reason: null,
       evidence: { registeredPane: "%1", observedPid: 4242, observedPanePid: 4241, observedCommand: "claude", matchedLayer: 1 },
@@ -58,10 +64,10 @@ describe("startup reconcile: a seat on a tmux server this daemon can't see", () 
   const status = () => sessionRegistry.getSessionsForRig(rigId)[0]!.status;
   const detachedEvents = () => (db.prepare("SELECT count(*) AS n FROM events WHERE type = 'session.detached'").get() as { n: number }).n;
 
-  it("leaves it as it was while its recorded process still runs, and names that process's tmux server", async () => {
+  it("leaves it as it was while its recorded process still runs, and names that process's parent", async () => {
     const result = await reconcile(async () => [row(4241, 900, BEFORE, "claude"), row(900, 1, BEFORE, SERVER)]);
     expect(result).toMatchObject({ checked: 1, detached: 0,
-      unseen: [{ sessionId, sessionName: "advisor-lead@demo", pid: 4241, server: { pid: 900, command: SERVER } }] });
+      unseen: [{ sessionId, sessionName: "advisor-lead@demo", pid: 4241, parent: { pid: 900, command: SERVER } }] });
     expect(status()).toBe("running");
     expect(detachedEvents()).toBe(0);
   });
@@ -69,7 +75,7 @@ describe("startup reconcile: a seat on a tmux server this daemon can't see", () 
   it("does the same when the server it looked at runs but doesn't have the session", async () => {
     const absent = { probeSession: async () => ({ state: "absent" as const }) } as unknown as TmuxAdapter;
     const result = await reconcile(async () => [row(4241, 900, BEFORE, "claude")], absent);
-    expect(result).toMatchObject({ detached: 0, unseen: [{ pid: 4241, server: null }] });
+    expect(result).toMatchObject({ detached: 0, unseen: [{ pid: 4241, parent: null }] });
     expect(status()).toBe("running");
   });
 
@@ -88,5 +94,36 @@ describe("startup reconcile: a seat on a tmux server this daemon can't see", () 
     db.prepare("UPDATE seat_identity_verdicts SET session_name = 'advisor-lead-old@demo'").run();
     const result = await reconcile(async () => [row(4241, 900, BEFORE, "claude")]);
     expect(result).toMatchObject({ detached: 1, unseen: [] });
+  });
+
+  describe("on a second restart, after the restarted daemon's own identity poll couldn't see the seat", () => {
+    const running = async () => [row(4241, 900, BEFORE, "claude"), row(900, 1, BEFORE, SERVER)];
+    const firstRestartThenPoll = async () => {
+      expect(await reconcile(running)).toMatchObject({ detached: 0, unseen: [{ pid: 4241 }] });
+      await new SeatIdentityReconciler({ db, tmux: blindPoll, now: () => LATER }).reconcileAll();
+      // The current verdict stays honest: the poll saw nothing and records no pid.
+      expect(new SeatIdentityStore(db).getForNode(nodeId)).toMatchObject({
+        verdict: "tmux_unavailable", observedAt: LATER.toISOString(), evidence: { observedPid: null } });
+    };
+
+    it("still leaves it as it was while its last observed process runs", async () => {
+      await firstRestartThenPoll();
+      expect(await reconcile(running)).toMatchObject({ detached: 0, unseen: [{ pid: 4241, parent: { pid: 900 } }] });
+      expect(status()).toBe("running");
+      expect(detachedEvents()).toBe(0);
+    });
+
+    it("detaches once that process is gone", async () => {
+      await firstRestartThenPoll();
+      expect(await reconcile(async () => [row(900, 1, BEFORE, SERVER)])).toMatchObject({ detached: 1, unseen: [] });
+      expect(status()).toBe("detached");
+    });
+
+    it("finds the seat again once the daemon looks at the seats' own server", async () => {
+      await firstRestartThenPoll();
+      const present = { probeSession: async () => ({ state: "present" as const }) } as unknown as TmuxAdapter;
+      expect(await reconcile(running, present)).toMatchObject({ checked: 1, detached: 0, unseen: [] });
+      expect(status()).toBe("running");
+    });
   });
 });

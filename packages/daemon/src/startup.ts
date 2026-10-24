@@ -748,8 +748,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       for (const u of result.unseen) {
         try {
           // eslint-disable-next-line no-console
-          console.warn(`startup reconcile: ${u.sessionName} isn't on this daemon's tmux server, but its process ${u.pid} is still running`
-            + `${u.server ? ` under tmux server process ${u.server.pid} (${u.server.command.slice(0, 160)})` : ""}, so it was left as it was: not marked`
+          console.warn(`startup reconcile: ${u.sessionName} isn't on this daemon's tmux server, but its last observed process ${u.pid} is still running`
+            + `${u.parent ? ` (parent process ${u.parent.pid}: ${u.parent.command.slice(0, 160)})` : ""}, so it was left as it was: not marked`
             + ` detached and not relaunched. The daemon is probably using a different tmux server from its seats (it didn't inherit their`
             + ` TMUX). Restart the daemon from inside the seats' tmux server, or with TMUX set to it.`);
         } catch { /* logging must never throw */ }
