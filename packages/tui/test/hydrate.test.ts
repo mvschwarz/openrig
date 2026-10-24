@@ -251,6 +251,8 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     ["instance Table", { resource: "host", name: "mm2-openrig1" }, "table"],
     ["rig Table", { resource: "rig", name: "myrig", target: { host: "mm2-openrig1" } }, "table"],
     ["rig Overview", { resource: "rig", name: "myrig", target: { host: "mm2-openrig1" } }, "overview"],
+    ["pod Table", { resource: "pod", name: "dev", target: { host: "mm2-openrig1", rig: "myrig" } }, "table"],
+    ["pod Overview", { resource: "pod", name: "dev", target: { host: "mm2-openrig1", rig: "myrig" } }, "overview"],
   ] as const)("loads health for the focused %s so its summary reports the served findings", async (_label, drill, tab) => {
     const calls: string[] = [];
     const full = await hydrateSnapshot(fixtureClient());
