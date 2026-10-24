@@ -251,6 +251,8 @@ interface LadderView {
   opOutcomeResolved: boolean;
   opUnresolved: string | null;
   exhausted: boolean;
+  /** The latest exhaustion marker's note: why the ladder stopped. */
+  exhaustedNote: string | null;
   suspendEpisodeOpen: boolean;
   firstMarkerTs: number | null;
 }
@@ -270,6 +272,7 @@ function readLadder(db: Database.Database, qitemId: string, after = lastMeaningf
     opOutcomeResolved: false,
     opUnresolved: null,
     exhausted: false,
+    exhaustedNote: null,
     suspendEpisodeOpen: false,
     firstMarkerTs: null,
   };
@@ -308,7 +311,7 @@ function readLadder(db: Database.Database, qitemId: string, after = lastMeaningf
         view.opOutcomeResolved = true;
       }
     }
-    if (note.startsWith(LADDER_EXHAUSTED_PREFIX)) view.exhausted = true;
+    if (note.startsWith(LADDER_EXHAUSTED_PREFIX)) { view.exhausted = true; view.exhaustedNote = note; }
     if (note.startsWith(LADDER_SUSPEND_PREFIX)) suspends += 1;
     if (note.startsWith(LADDER_RESUME_PREFIX)) resumes += 1;
     if (isAttempt || isRung) {
@@ -1029,6 +1032,8 @@ function refusedWatchdogJobs(db: Database.Database, clearedAlert: (dest: string)
 
 /** Marks a prompt alert whose every refusal was at a choice prompt, such as a usage-limit dialog. */
 const PROMPT_CHOICE_TAG = "prompt-kind:choice";
+/** Why a choice-prompt alert stopped when queue.wake_human_rung kept it a visible row for an agent operator seat. */
+const PROMPT_FLOOR_EXHAUSTED = "explicit-only floor: a visible row, not posted to a person";
 
 /** Another open choice-prompt alert on this machine whose operator rung already went to the delivery engine. */
 function postedPromptAlert(db: Database.Database, except: string): string | null {
@@ -1219,7 +1224,9 @@ async function advancePromptRefusals(
     const row = deps.queueRepo.getById(aggregate.qitemId);
     if (!row) continue;
     const addedKeys = group.keys.filter(key => !row.tags?.includes(key));
-    if (addedKeys.length) {
+    // A reminder's run keeps its key while its latest refusal changes kind, so the kind is recomputed on its own too.
+    const kindChanged = choiceOnly !== Boolean(row.tags?.includes(PROMPT_CHOICE_TAG));
+    if (addedKeys.length || kindChanged) {
       deps.db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?")
         .run(JSON.stringify([...(row.tags ?? []).filter(t => t !== PROMPT_CHOICE_TAG), ...kindTags, ...addedKeys]), row.qitemId);
       // An alert that already exists names a reminder that joins it; nothing is sent again for it.
@@ -1231,7 +1238,11 @@ async function advancePromptRefusals(
     // The aggregate ID is the episode. Claiming it does not start a second
     // delivery episode or erase its accepted dispatch/receipt history.
     const view = readLadder(deps.db, row.qitemId, 0);
-    if (view.exhausted) continue;
+    // The explicit-only floor stopped this alert without a person. If the seat's prompt now needs one (a permission prompt
+    // joined it), the permission leg still runs; accepted or deferred delivery stays exactly-once.
+    const floorOnly = view.exhausted && !view.opEngineDispatched
+      && view.exhaustedNote === `${LADDER_EXHAUSTED_PREFIX} ${PROMPT_FLOOR_EXHAUSTED}`;
+    if (view.exhausted && !(floorOnly && !choiceOnly)) continue;
     if (view.opEngineDispatched) {
       if (view.opOutcomeResolved) appendExhausted(deps.queueRepo, row, "engine outcome resolved");
       continue; // accepted/deferred delivery retains gateway custody
@@ -1263,7 +1274,10 @@ async function advancePromptRefusals(
       }
       continue;
     }
-    if (await operatorRung(deps, row, reason, actions, view, choiceOnly)) appendExhausted(deps.queueRepo, row, "operator rung resolved");
+    if (await operatorRung(deps, row, reason, actions, view, choiceOnly)) {
+      const floor = deps.queueRepo.listTransitions(row.qitemId).at(-1)?.transitionNote?.includes("human rung explicit-only");
+      appendExhausted(deps.queueRepo, row, floor ? PROMPT_FLOOR_EXHAUSTED : "operator rung resolved");
+    }
   }
 }
 
