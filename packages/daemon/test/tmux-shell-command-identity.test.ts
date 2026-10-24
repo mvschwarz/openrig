@@ -32,6 +32,9 @@ async function fixture() {
   let serial = 0;
   const hooks: { write?: (path: string) => void; exec?: (command: string) => void } = {};
   const tmux = new TmuxAdapter(async command => {
+    // Model private config consumption; this fixture records logical terminal operations.
+    const file = [...files.keys()].find(p => command.endsWith(p));
+    if (command.includes("source-file ") && file) command = "tmux " + files.get(file)!.trimEnd();
     commands.push(command); hooks.exec?.(command);
     if (command.includes("#{pane_current_command}")) return "bash";
     if (command.startsWith("tmux new-session")) { panes.set("worker@fixture", "%0"); return ""; }

@@ -130,7 +130,7 @@ describe.skipIf(process.platform === "win32")("seat launch environment after she
     const prepared = await new ClaudeManagedLaunch(db, f.env, {}).prepare({ nodeId: "node-current", session: "seat@rig", pane: "%1" }, "auto");
     const command = prepared.command(["--permission-mode", "auto"]);
     expect(command).not.toContain(f.env.OPENRIG_URL);
-    expect(command).toContain('"OPENRIG_URL=${OPENRIG_URL-}"');
+    expect(command).toContain('export OPENRIG_URL="${OPENRIG_URL-}"');
     expect(command).toContain(shellQuote(`HOME=${f.env.HOME}`));
     expect(command).toContain(shellQuote(`PATH=${f.env.PATH}`));
     expect(warn).toHaveBeenCalledTimes(1);

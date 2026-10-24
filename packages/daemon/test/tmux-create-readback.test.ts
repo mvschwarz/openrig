@@ -10,6 +10,9 @@ import { execArgvCommand } from "../src/adapters/tmux-exec.js";
 // still exits 0. A launch then read as created, and `rig up` reported the seat launched with no terminal.
 const socketGone = "error connecting to /fixture/cli/tmux.sock (No such file or directory)\n";
 
+/** The create call: new-session, or the private config that carries it (start-server ; source-file <file>). */
+const creates = (args: string[]) => args[1] === "new-session" || args.includes("source-file");
+
 function adapter(respond: (args: string[]) => Promise<string>) {
   const calls: string[][] = [];
   const a = new TmuxAdapter(async () => { throw new Error("argv only"); }, undefined, async args => { calls.push(args); return respond(args); });
@@ -25,7 +28,7 @@ describe("createSession reads the session back when new-session reports no pane"
     const result = await a.createSession("seat");
     expect(result).toMatchObject({ ok: false, code: "session_not_created" });
     expect(result.ok === false && result.message).toContain(`made no session "seat" (${socketGone.trim()})`);
-    expect(calls.map(c => c[1])).toEqual(["new-session", "has-session"]);
+    expect(calls.map(c => creates(c) ? "create" : c[1])).toEqual(["create", "has-session"]);
   });
 
   it("no pane but the session is there: the launch stands, as before", async () => {
@@ -34,7 +37,7 @@ describe("createSession reads the session back when new-session reports no pane"
   });
 
   it("a pane: no read-back", async () => {
-    const { a, calls } = adapter(async args => args[1] === "new-session" ? "%4\n" : "");
+    const { a, calls } = adapter(async args => creates(args) ? "%4\n" : "");
     expect((await a.createSession("seat")).ok).toBe(true);
     expect(calls.some(c => c[1] === "has-session")).toBe(false);
   });

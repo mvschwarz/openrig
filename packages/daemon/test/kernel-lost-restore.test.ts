@@ -25,6 +25,8 @@ import { restoreExistingRigUnattended } from "../src/domain/existing-rig-restore
 import type { RestoreOrchestrator } from "../src/domain/restore-orchestrator.js";
 import type { BootstrapOrchestrator } from "../src/domain/bootstrap-orchestrator.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
+import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
+import type { ProcessTableRow } from "../src/domain/process-table.js";
 
 const SEATS = ["kernel.operator", "kernel.advisor"];
 const dbs: Database.Database[] = [];
@@ -78,12 +80,12 @@ function host(claimed = false) {
   /** What `rig down kernel` does. */
   const down = () => new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, eventBus, snapshotCapture, tmuxAdapter: tmux }).teardown(rig.id);
   /** What daemon start does: reconcile every rig, then boot the kernel. */
-  const reconcile = async () => {
-    const reconciler = new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter: tmux });
+  const reconcile = async (readProcesses?: () => Promise<ProcessTableRow[]>) => {
+    const reconciler = new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, ...(readProcesses ? { readProcesses } : {}) });
     for (const r of rigRepo.listRigs()) await reconciler.reconcile(r.id);
   };
-  const daemonStart = async (restoreLostKernel?: (rigId: string) => Promise<{ errors: string[] }>) => {
-    await reconcile();
+  const daemonStart = async (restoreLostKernel?: (rigId: string) => Promise<{ errors: string[] }>, readProcesses?: () => Promise<ProcessTableRow[]>) => {
+    await reconcile(readProcesses);
     return bootKernelIfNeeded({
       rigRepo, sessionRegistry, eventBus,
       bootstrapOrchestrator: bootstrap as unknown as BootstrapOrchestrator,
@@ -112,6 +114,30 @@ describe("daemon start with an existing kernel rig", () => {
     expect(restore).toHaveBeenCalledTimes(1);
     expect(restore).toHaveBeenCalledWith(h.rig.id);
     expect(tracker.getStatus().kernelState).toBe("booting");
+    expect(h.bootstrap.bootstrap).not.toHaveBeenCalled();
+  });
+
+  it("doesn't restore a kernel whose seats still run on a tmux server this daemon can't see", async () => {
+    const h = host();
+    // The seats' processes, as the identity reconciler last recorded them, are still running; this daemon's tmux server
+    // (it didn't inherit the seats' TMUX) shows none of their sessions.
+    const observedAt = new Date();
+    const started = new Date(observedAt.getTime() - 60_000);
+    const lstart = (d: Date) => `${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getDay()]} `
+      + `${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getMonth()]} `
+      + `${String(d.getDate()).padStart(2, " ")} ${[d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":")} ${d.getFullYear()}`;
+    h.nodes.forEach(({ node, name }, i) => new SeatIdentityStore(h.db).upsert({
+      nodeId: node.id, verdict: "verified", evidenceSource: null, reason: null,
+      evidence: { registeredPane: `%${i}`, observedPid: 5000 + i, observedPanePid: 5000 + i, observedCommand: "claude", matchedLayer: 1 },
+      sessionName: name, observedAt: observedAt.toISOString(),
+    }));
+    const processes = async () => h.nodes.map((_, i): ProcessTableRow =>
+      ({ pid: 5000 + i, ppid: 900, pgid: 5000 + i, tpgid: -1, executableName: "claude", startedAt: lstart(started), command: "claude" }));
+    h.reboot();
+    const restore = vi.fn(async () => ({ errors: [] }));
+    await h.daemonStart(restore, processes);
+    expect(h.statuses()).toEqual(["running", "running"]);
+    expect(restore).not.toHaveBeenCalled();
     expect(h.bootstrap.bootstrap).not.toHaveBeenCalled();
   });
 
