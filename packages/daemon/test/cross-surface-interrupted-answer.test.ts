@@ -39,11 +39,12 @@ async function fixture() {
   const contract = new MissionControlWriteContract({ db, eventBus: bus, queueRepo: repo, actionLog: new MissionControlActionLog(db) });
   const ask = await repo.create({ sourceSession: ASKER, destinationSession: PERSON, body: "Synthetic one-question ask", summary: "Proceed?",
     humanIntent: "decision", humanAlert: true, humanQuestions: questions, evidenceRef: "/fixture/decision", nudge: false });
+  const resolveHumanReply = vi.fn(makeHumanReplyResolver(repo, contract));
   const router = new InboundRouter({ queue: makeQueuePorts(repo), destination: ASKER, seen: new SeenStore(join(home, "seen.jsonl")),
     deadLetter: new DeadLetterStore(join(home, "dead.jsonl")), resolveSender: () => ({ admitted: true, source: PERSON }),
     resolveRoute: () => ({ destination: ASKER, correlationQitemId: ask.qitemId }),
     acknowledgeAnswer: async ({ text }) => { acknowledgements.push(text); },
-    recordHumanAnswer: input => repo.recordHumanAnswer(input), resolveHumanReply: makeHumanReplyResolver(repo, contract) });
+    recordHumanAnswer: input => repo.recordHumanAnswer(input), resolveHumanReply });
   const app = new Hono(); app.use("*", async (c, next) => { c.set("queueRepo" as never, repo as never); c.set("eventBus" as never, bus as never); c.set("missionControlWriteContract" as never, contract as never); await next(); });
   app.route("/api/mission-control", missionControlRoutes());
   const slack = () => router.routeAction({ type: "block_actions", user: { id: "UTEST" }, channel: { id: "CTEST" },
@@ -66,8 +67,8 @@ async function fixture() {
       replyCount: replies.length, resolutionCount: resolved.length, nudgeCount: nudges.filter(n => n.session === ASKER).length };
   };
   closes.push(() => { db.close(); rmSync(home, { recursive: true, force: true }); });
-  return { repo, ask, slack, steering, snapshot, acknowledgements,
-    typedSlack: (text: string, recoveredThreadReply = false) => router.route({ type: "message", user: "UTEST", channel: "CTEST", thread_ts: "1.1", ts: "3.3", text, recoveredThreadReply }) };
+  return { repo, ask, slack, steering, snapshot, acknowledgements, resolveHumanReply,
+    typedSlack: (text: string, recoveredThreadReply = false, ts = "3.3") => router.route({ type: "message", user: "UTEST", channel: "CTEST", thread_ts: "1.1", ts, text, recoveredThreadReply }) };
 }
 
 describe("completed human answer interrupted before ask close", () => {
@@ -140,6 +141,22 @@ describe("completed human answer interrupted before ask close", () => {
     else await f.slack(); // A later button must not replace the earlier typed answer.
     expect(f.snapshot()).toMatchObject({ committedReplyCount: 1, replyCount: 1, resolutionCount: 1, nudgeCount: 1,
       answers: { choice: { kind: "typed-reply", text: "Original words" } } });
+  });
+
+  it.each(["slack", "steering"] as const)("a closed ask answered in %s delivers a later typed Slack follow-up as conversation", async first => {
+    const f = await fixture();
+    if (first === "slack") await f.typedSlack("Yes, ship it.");
+    else await f.steering({ decision: "Yes, ship it." });
+    expect(f.snapshot()).toMatchObject({ askState: "done", replyCount: 1, resolutionCount: 1, nudgeCount: 1 });
+    const resolveCalls = f.resolveHumanReply.mock.calls.length;
+    expect(await f.typedSlack("Also: use the release branch", false, "4.4")).toMatchObject({ disposition: "accepted" });
+    const after = f.snapshot();
+    expect(after).toMatchObject({ askState: "done", committedReplyCount: 2, replyCount: 2, resolutionCount: 1, nudgeCount: 2 });
+    const followup = after.replies.find(row => row.body.startsWith("Also: use the release branch"))!;
+    expect(followup).toBeDefined();
+    expect(f.repo.getById(followup.id)?.tags).not.toContain("human-answer");
+    expect(f.resolveHumanReply).toHaveBeenCalledTimes(resolveCalls);
+    expect(f.acknowledgements.some(text => text.startsWith("Already answered"))).toBe(false);
   });
 
   it("a wrong person cannot reuse the answer, and a recovered late message remains separate", async () => {
