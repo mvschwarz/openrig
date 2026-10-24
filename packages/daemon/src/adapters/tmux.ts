@@ -29,7 +29,7 @@ interface TmuxShellCommandOptions {
 export type ArgvExecFn = (argv: string[]) => Promise<string>;
 
 /**
- * Injectable file/buffer operations for `sendText`.
+ * Injectable file/buffer operations for terminal payloads and launch environments.
  * Split out so tests can observe temp-file writes and unique-name generation
  * without touching the real filesystem; production wires node fs + os.tmpdir.
  */
@@ -252,6 +252,13 @@ function shellQuote(s: string): string {
   return "'" + s.replace(/'/g, "'\"'\"'") + "'";
 }
 
+/** tmux config joins physical newlines even inside single quotes. Encode multiline words
+ * with its double-quoted escapes instead of passing shell syntax to source-file. */
+function tmuxConfigQuote(s: string): string {
+  if (!s.includes("\n")) return shellQuote(s);
+  return '"' + s.replace(/[\\"$\n\r\t]/g, c => ({ "\\": "\\\\", '"': '\\"', "$": "\\$", "\n": "\\n", "\r": "\\r", "\t": "\\t" })[c]!) + '"';
+}
+
 /**
  * An exact tmux target for a session name. tmux resolves a bare name by prefix when no session has that exact name,
  * so a read or pipe for a session that just ended would act on another (`dev-impl@my-rig` on `dev-impl@my-rig2`).
@@ -370,10 +377,16 @@ export class TmuxAdapter {
       const baseline = { ...Object.fromEntries(updated.map(key => [key, process.env[key]])), ...policy.env };
       removeParentSessionEnv(baseline);
       const values = Object.entries({ ...baseline, ...seatEnv })
-        .filter((entry): entry is [string,string] => entry[1] !== undefined)
-        .map(([key,value]) => shellQuote(`${key}=${value}`));
-      const reset = `exec /usr/bin/env -i -- ${values.join(" ")} TMUX="$TMUX" TMUX_PANE="$TMUX_PANE" TERM="$TERM" SHELL="$SHELL" "$@"`;
-      return ["/bin/sh", "-c", reset, "sh", shell, ...(command ? ["-c", command] : ["-l"])];
+        .filter((entry): entry is [string,string] => entry[1] !== undefined && !["TMUX", "TMUX_PANE", "TERM", "SHELL"].includes(entry[0]))
+        .map(([key,value]) => {
+          if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error("Invalid environment name");
+          return `export ${key}=${shellQuote(value)}`;
+        });
+      const file = this.fileOps.tmpName();
+      // Builtin exports keep values off env/sh argv; the pane owns removal once started.
+      await this.fileOps.writeFile(file, `/bin/rm -f -- ${shellQuote(file)}\n${values.join("\n")}\nexec "$@"\n`, { mode: 0o600, flag: "wx" });
+      const reset = 'exec /usr/bin/env -i -- TMUX="$TMUX" TMUX_PANE="$TMUX_PANE" TERM="$TERM" SHELL="$SHELL" /bin/sh "$@"';
+      return ["/bin/sh", "-c", reset, "sh", file, shell, ...(command ? ["-c", command] : ["-l"])];
     } catch {
       // Keep the working launch, with a diagnostic; this option is not a new admission gate.
       const warning = "Scoped tmux environment unavailable; retaining the previous environment for this launch.";
@@ -532,6 +545,18 @@ export class TmuxAdapter {
     return this.exec(legacy ?? posixJoinArgv(argv));
   }
 
+  /** Environment-bearing commands travel in a private config, never a client's argv.
+   * Values stay in tmux's session environment, including for later panes. No global mutation.
+   * A failed/uncertain call retains its private file: it may not have been consumed yet.
+   */
+  private async runEnvironmentCommand(argv: string[], legacy?: string, startServer = false): Promise<string> {
+    const file = this.fileOps.tmpName();
+    await this.fileOps.writeFile(file, (legacy ?? posixJoinArgv(argv)).slice("tmux ".length) + "\n", { mode: 0o600, flag: "wx" });
+    const output = await this.run(["tmux", ...(startServer ? ["start-server", ";"] : []), "source-file", file]);
+    await this.fileOps.unlink(file).catch(() => {});
+    return output;
+  }
+
   /** Ends the daemon's tmux control client, and with it its session (tmux-control.ts), when tmux is driven through one. */
   async closeControlClient(): Promise<void> {
     await (this.argvExec as Partial<TmuxControlExec> | undefined)?.close?.();
@@ -659,6 +684,81 @@ export class TmuxAdapter {
   /** The committed binding now owns identity; this is not filesystem cleanup. */
   finishLaunchBinding(session: string): void { this.freshManaged.delete(session); }
 
+  /** Runtime switch (slice 16, from #1214 by Aschenbath): exchange the staged successor's pane with the seat's bound
+   *  pane, so the seat's session keeps its name and the staging session holds the predecessor. Both memberships are
+   *  checked by tmux at the write, and the same exchange undoes an uncommitted one. Requires the seat's lifecycle lease
+   *  and the staging session this lease created. */
+  async swapRuntimeSwitchPanes(input: { nodeId: string; stagingSession: string; canonicalSession: string; canonicalPane: string; stagedPane: string }): Promise<TmuxResult> {
+    try {
+      const created = this.freshManaged.get(input.stagingSession);
+      if (this.deliveryGuard?.maybeTarget(input.stagingSession)) throw new Error("The staging session is now another seat's; nothing was exchanged.");
+      if (this.deliveryGuard && (!this.deliveryGuard.ownsLifecycle(input.nodeId) || created?.nodeId !== input.nodeId || created.pane !== input.stagedPane)) {
+        throw new Error("A runtime switch exchange requires the seat's lifecycle lease and its own staging pane.");
+      }
+      if (!/^%\d+$/.test(input.canonicalPane) || !/^%\d+$/.test(input.stagedPane)) throw new Error("Exact pane ids are required.");
+      const canonical = await this.listPanes(input.canonicalSession);
+      const staged = await this.listPanes(input.stagingSession);
+      if (canonical.length !== 1 || canonical[0]!.id !== input.canonicalPane || staged.length !== 1 || staged[0]!.id !== input.stagedPane) {
+        throw new Error("The seat's or the staging session's pane changed; nothing was exchanged.");
+      }
+      const sessionId = async (pane: string) => {
+        const argv = ["tmux", "display-message", "-p", "-t", exactTarget(pane, "pane"), "#{session_id}"];
+        const id = (await this.run(argv, posixJoinArgv(argv))).trim();
+        if (!/^\$\d+$/.test(id)) throw new Error("A session's identity couldn't be established; nothing was exchanged.");
+        return id;
+      };
+      const canonicalId = await sessionId(input.canonicalPane);
+      const stagingId = await sessionId(input.stagedPane);
+      this.deliveryGuard?.checkInput(input.nodeId);
+      const mismatch = "display-message -p runtime-switch-target-changed";
+      const swap = `swap-pane -d -s ${input.stagedPane} -t ${input.canonicalPane}`;
+      const checkStaged = `if-shell -F -t ${input.stagedPane} ${shellQuote(`#{==:#{session_id},${stagingId}}`)} ${shellQuote(swap)} ${shellQuote(mismatch)}`;
+      const argv = ["tmux", "if-shell", "-F", "-t", input.canonicalPane, `#{==:#{session_id},${canonicalId}}`, checkStaged, mismatch];
+      const output = await this.run(argv, posixJoinArgv(argv));
+      if (output.includes("runtime-switch-target-changed")) throw new Error("A pane moved at the exchange; nothing was exchanged.");
+      // The staging session now holds the other pane; its retirement (or a rollback) addresses that one.
+      this.freshManaged.set(input.stagingSession, { nodeId: input.nodeId, pane: input.canonicalPane });
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, code: "runtime_switch_target_changed", message: (error as Error).message };
+    }
+  }
+
+  /** Recovery only: take back custody of a staging session a durable runtime-switch record names, after a restart.
+   *  Its single pane, the seat it was made for and its generation must still match before it can be touched. */
+  async adoptRuntimeSwitchStaging(input: { nodeId: string; stagingSession: string; pane: string; generations: string[] }): Promise<TmuxResult> {
+    try {
+      if (this.deliveryGuard && !this.deliveryGuard.ownsLifecycle(input.nodeId)) throw new Error("Runtime switch recovery requires the seat's lifecycle lease.");
+      if (this.deliveryGuard?.maybeTarget(input.stagingSession)) throw new Error("The staging session is now another seat's; nothing was touched.");
+      const panes = await this.listPanes(input.stagingSession);
+      const generation = await this.getSessionEnv(input.stagingSession, "OPENRIG_OCCUPANT_GENERATION");
+      if ((await this.listWindows(input.stagingSession)).length !== 1 || panes.length !== 1 || panes[0]!.id !== input.pane
+        || await this.getSessionEnv(input.stagingSession, "OPENRIG_NODE_ID") !== input.nodeId
+        || !generation || !input.generations.includes(generation)) {
+        throw new Error("The staging session's identity changed; nothing was touched.");
+      }
+      this.freshManaged.set(input.stagingSession, { nodeId: input.nodeId, pane: input.pane });
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, code: "runtime_switch_target_changed", message: (error as Error).message };
+    }
+  }
+
+  /** After a committed runtime switch: the seat's session carries the successor's runtime and generation, so a later
+   *  pane or respawn in it starts as the successor's. The running successor already has them in its own process. */
+  async setRuntimeSwitchEnvironment(session: string, runtime: string, generation: string): Promise<TmuxResult> {
+    return this.guardedInput(session, async (_pane, beforeWrite) => {
+      try {
+        for (const [key, value] of [["OPENRIG_RUNTIME", runtime], ["OPENRIG_OCCUPANT_GENERATION", generation]] as const) {
+          beforeWrite();
+          const argv = ["tmux", "set-environment", "-t", exactTarget(session, "session"), key, value];
+          await this.run(argv, posixJoinArgv(argv));
+        }
+        return { ok: true };
+      } catch (error) { return classifyWriteError(error); }
+    });
+  }
+
   private async createSessionUnchecked(name: string, cwd?: string, env?: Record<string, string>): Promise<TmuxResult> {
     // These are the daemon's resolved capture settings, not seat overrides.
     // An empty per-session value prevents the tmux server's inherited values
@@ -674,18 +774,25 @@ export class TmuxAdapter {
     for (const [k, v] of Object.entries(seatEnv)) argv.push("-e", `${k}=${v}`);
     // The pane new-session itself made: an after-new-session hook may select another window.
     argv.push("-P", "-F", "#{pane_id}");
-    const legacyParts = ["tmux", "new-session", "-d", "-s", shellQuote(name)];
-    if (cwd != null) legacyParts.push("-c", shellQuote(cwd));
-    for (const [k, v] of Object.entries(seatEnv)) legacyParts.push("-e", shellQuote(`${k}=${v}`));
-    legacyParts.push("-P", "-F", shellQuote("#{pane_id}"));
+    const legacyParts = ["tmux", "new-session", "-d", "-s", tmuxConfigQuote(name)];
+    if (cwd != null) legacyParts.push("-c", tmuxConfigQuote(cwd));
+    for (const [k, v] of Object.entries(seatEnv)) legacyParts.push("-e", tmuxConfigQuote(`${k}=${v}`));
+    legacyParts.push("-P", "-F", tmuxConfigQuote("#{pane_id}"));
     const warnings: string[] = [];
     const scopedCommand = await this.scopedLaunchCommand(seatEnv, undefined, warnings);
-    if (scopedCommand) { argv.push(...scopedCommand); legacyParts.push(...scopedCommand.map(shellQuote)); }
+    if (scopedCommand) { argv.push(...scopedCommand); legacyParts.push(...scopedCommand.map(tmuxConfigQuote)); }
     let created: string;
     try {
-      created = (await this.run(argv, legacyParts.join(" "))).trim();
+      created = (await this.runEnvironmentCommand(argv, legacyParts.join(" "), true)).trim();
     } catch (err) {
       return classifyWriteError(err);
+    }
+    // tmux can exit 0 having made nothing: a server that can't create its socket prints its error and quits, and the
+    // client still exits 0. new-session prints the pane it made; with none, the session must be read back before the
+    // launch counts as created.
+    if (!/^%\d+$/.test(created)) {
+      const unconfirmed = await this.sessionUnconfirmedAfterCreate(name);
+      if (unconfirmed) return { ok: false, ...unconfirmed };
     }
     // A tmux server started from a Claude Code session or Herdr pane hands
     // their identity to every new pane. Mark it removed for this session only
@@ -702,6 +809,27 @@ export class TmuxAdapter {
     } catch (err) {
       return { ok: true, warnings: [...warnings, parentSessionEnvWarning(name, err)] };
     }
+  }
+
+  /** When new-session printed no pane: why the launch can't count as created, or null when the session is there. Only a
+   *  found session keeps the launch. A positive "can't find session" says it wasn't created; a probe that couldn't reach or
+   *  read tmux says creation couldn't be confirmed, which isn't absence. */
+  private async sessionUnconfirmedAfterCreate(name: string): Promise<{ code: "session_not_created" | "session_unconfirmed"; message: string } | null> {
+    const lead = "tmux returned exit status 0 without a usable pane id";
+    let cause: string;
+    try {
+      const probe = await this.probeSession(name);
+      if (probe.state === "present") return null;
+      if (probe.state === "absent") return { code: "session_not_created", message: `${lead}, and no session "${name}" exists (can't find session: ${name}).` };
+      cause = probe.cause ?? "no tmux server";
+    } catch (err) {
+      const reported = tmuxReportedError(err);
+      cause = reported instanceof Error ? reported.message : String(reported);
+    }
+    // tmux's own words, without an exec wrapper's "Command failed: <command>" line.
+    const said = cause.split("\n").map(line => line.trim()).filter(line => line && !line.startsWith("Command failed:")).join(" ") || cause.trim();
+    return { code: "session_unconfirmed", message: `${lead}; creation of session "${name}" could not be confirmed (${said}). Check that tmux `
+      + "can create its server socket: the TMUX_TMPDIR directory, or the directory of an explicit -S socket path, must be writable by this user." };
   }
 
   /** Mark the server's inherited parent-session identity as removed in one
@@ -1003,11 +1131,12 @@ export class TmuxAdapter {
     // Legacy commands remain one argument; the scoped wrapper executes directly before the user shell.
     if (scopedCommand) argv.push(...scopedCommand);
     else if (command != null && command.length > 0) argv.push(command);
-    const legacyRespawn = ["tmux", "respawn-pane", "-t", shellQuote(exact)];
-    if (opts?.cwd != null) legacyRespawn.push("-c", shellQuote(opts.cwd));
-    if (opts?.env) for (const [k, v] of Object.entries(opts.env)) legacyRespawn.push("-e", shellQuote(`${k}=${v}`));
-    if (scopedCommand) legacyRespawn.push(...scopedCommand.map(shellQuote));
-    else if (command != null && command.length > 0) legacyRespawn.push(shellQuote(command));
+    const quote = opts?.env && Object.keys(opts.env).length ? tmuxConfigQuote : shellQuote;
+    const legacyRespawn = ["tmux", "respawn-pane", "-t", quote(exact)];
+    if (opts?.cwd != null) legacyRespawn.push("-c", quote(opts.cwd));
+    if (opts?.env) for (const [k, v] of Object.entries(opts.env)) legacyRespawn.push("-e", quote(`${k}=${v}`));
+    if (scopedCommand) legacyRespawn.push(...scopedCommand.map(quote));
+    else if (command != null && command.length > 0) legacyRespawn.push(quote(command));
     // The successor starts from the session environment: exclude inherited
     // parent-session identity there first (sessions made before this existed).
     // A failure here is a warning; the respawn goes ahead as it did before.
@@ -1017,7 +1146,8 @@ export class TmuxAdapter {
       warnings.push(parentSessionEnvWarning(exact, err));
     }
     try {
-      await this.run(argv, legacyRespawn.join(" "));
+      if (opts?.env && Object.keys(opts.env).length) await this.runEnvironmentCommand(argv, legacyRespawn.join(" "));
+      else await this.run(argv, legacyRespawn.join(" "));
       return warnings.length ? { ok: true, warnings } : { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -1237,13 +1367,12 @@ export class TmuxAdapter {
     }
   }
 
-  /** Set one variable in a session's environment: what its next spawned process inherits, not a
-   *  running one. Callers that pass a value are putting it on a tmux command line. */
+  /** Set one variable for later panes, through the same private-file channel as launch. */
   async setSessionEnv(session: string, key: string, value: string): Promise<void> {
     if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) throw new Error("Invalid session environment key.");
     const target = exactTarget(session, "session");
-    await this.run(["tmux", "set-environment", "-t", target, key, value],
-      `tmux set-environment -t ${shellQuote(target)} ${shellQuote(key)} ${shellQuote(value)}`);
+    await this.runEnvironmentCommand(["tmux", "set-environment", "-t", target, key, value],
+      `tmux set-environment -t ${tmuxConfigQuote(target)} ${tmuxConfigQuote(key)} ${tmuxConfigQuote(value)}`);
   }
 
   /** Remove one variable from a session's environment, so a process spawned there afterwards

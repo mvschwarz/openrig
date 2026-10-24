@@ -702,6 +702,9 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // new one is created durable + waking (the create path's default nudge).
     const findings: StuckSweepFindingAction[] = [];
     const liveDedupTags = new Set<string>();
+    // A finding that could not be created (a row whose destination no longer resolves, say) must not
+    // stop the others: it is reported, its row stays detected, and the pass is still a failure.
+    const failedCreates: string[] = [];
     for (const c of [...new Map(candidates.map(c => [c.row.qitemId, c])).values()]) {
       const dedupTag = findingDedupTag(c.kind, c.row.qitemId);
       const shared = findQueueRecovery(deps.db, c.row.qitemId);
@@ -745,8 +748,14 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           // OpenRig's own finding, whoever created the stuck row.
           wakeTrigger: "openrig" as const,
         };
-        const created = await deps.queueRepo.create(input);
-        findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: created.qitemId, action: "created" });
+        try {
+          const created = await deps.queueRepo.create(input);
+          findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: created.qitemId, action: "created" });
+        } catch (err) {
+          const message = `${c.kind} finding for ${c.row.qitemId} to ${c.route} not created: ${err instanceof Error ? err.message : String(err)}`;
+          log(`[stuck-sweep] ${message}`);
+          failedCreates.push(message);
+        }
       }
     }
 
@@ -792,6 +801,12 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       }
     }
 
+    if (failedCreates.length > 0) {
+      // Not a clean or complete pass: say so, while keeping the findings that were made.
+      const error = failedCreates.join("; ");
+      status?.record("failed", { error, findings: findings.filter((f) => f.action !== "closed").length });
+      return { outcome: "failed", findings, error };
+    }
     const outcome = findings.length > 0 ? "findings" : "clean";
     status?.record(outcome, { findings: findings.filter((f) => f.action !== "closed").length });
     return { outcome, findings };

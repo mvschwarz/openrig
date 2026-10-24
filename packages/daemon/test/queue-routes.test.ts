@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Hono } from "hono";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -32,6 +35,7 @@ function buildApp(opts: {
   queueRepo: QueueRepository;
   inboxHandler: InboxHandler;
   outboxHandler: OutboxHandler;
+  settingsStore?: { resolveOne: (key: string) => { value: unknown } };
   /** The configured missions root, for routes that resolve work nodes. */
   slicesRoot?: string;
 }): Hono {
@@ -42,6 +46,7 @@ function buildApp(opts: {
     c.set("queueRepo" as never, opts.queueRepo);
     c.set("inboxHandler" as never, opts.inboxHandler);
     c.set("outboxHandler" as never, opts.outboxHandler);
+    if (opts.settingsStore) c.set("settingsStore" as never, opts.settingsStore);
     await next();
   });
   app.route("/api/queue", queueRoutes());
@@ -55,6 +60,7 @@ describe("queue routes", () => {
   let inbox: InboxHandler;
   let outbox: OutboxHandler;
   let app: Hono;
+  let temporaryWorkspace: string | undefined;
 
   beforeEach(() => {
     db = createDb();
@@ -81,7 +87,11 @@ describe("queue routes", () => {
     app = buildApp({ eventBus: bus, queueRepo, inboxHandler: inbox, outboxHandler: outbox });
   });
 
-  afterEach(() => db.close());
+  afterEach(() => {
+    db.close();
+    if (temporaryWorkspace) fs.rmSync(temporaryWorkspace, { recursive: true, force: true });
+    temporaryWorkspace = undefined;
+  });
 
   it.each(["create", "handoff", "handoff-and-complete"])("keeps committed %s successful when the destination advisory throws", async (verb) => {
     queueRepo = new QueueRepository(db, bus, {
@@ -895,6 +905,9 @@ describe("queue routes", () => {
       const err = await res.json() as { error: string; message: string };
       expect(err.error).toBe("actor_required");
       expect(err.message).toMatch(/X-OpenRig-Session/);
+      // The header is set by the CLI from the seat's environment; it isn't called authenticated.
+      expect(err.message).toContain("no transport identity (no X-OpenRig-Session header, which the CLI sets from the seat's OPENRIG_SESSION_NAME)");
+      expect(err.message).not.toMatch(/authenticated/i);
     });
   });
 
@@ -2359,6 +2372,256 @@ describe("queue routes", () => {
       expect(body.asDestination.inProgress).toBe(1);
       expect(body.asDestination.recent).toHaveLength(2);
       expect(body.asSource.total).toBe(0);
+    });
+
+    it("resolves project-tagged current work against that catalog project's missions root", async () => {
+      temporaryWorkspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "openrig-whoami-project-")));
+      fs.writeFileSync(path.join(temporaryWorkspace, "workspace.yaml"), "projects:\n  - id: alpha\n    root: alpha\n  - id: beta\n    root: beta\n");
+      for (const project of ["alpha", "beta"]) {
+        const root = path.join(temporaryWorkspace, project);
+        const slice = path.join(root, "work-items", "release", "slices", "01-work");
+        fs.mkdirSync(slice, { recursive: true });
+        fs.writeFileSync(path.join(root, "project.yaml"), `id: ${project}\nmissions:\n  root: work-items\n`);
+        fs.writeFileSync(path.join(root, "SPEC.md"), `---\nid: ${project}\n---\n# ${project}\n`);
+        fs.writeFileSync(path.join(root, "work-items", "release", "SPEC.md"), "---\nid: release\n---\n# Release\n");
+        fs.writeFileSync(path.join(slice, "SPEC.md"), "---\nid: 01-work\n---\n# Work\n");
+      }
+      app = buildApp({
+        eventBus: bus,
+        queueRepo,
+        inboxHandler: inbox,
+        outboxHandler: outbox,
+        settingsStore: { resolveOne: (key) => ({ value: key === "workspace.root"
+          ? temporaryWorkspace
+          : key === "workspace.catalog_path"
+            ? path.join(temporaryWorkspace!, "workspace.yaml")
+            // The legacy implementation used this root for every project, so
+            // point it at beta to prove alpha is not silently misread as beta.
+            : path.join(temporaryWorkspace!, "beta", "work-items") }) },
+      });
+      const created = await app.request("/api/queue/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@r" },
+        body: JSON.stringify({ sourceSession: "alice@r", destinationSession: "bob@r", body: "alpha work",
+          tags: ["project:alpha", "mission:release", "slice:01-work"], nudge: false }),
+      });
+      expect(created.status).toBe(201);
+      const { qitemId } = await created.json() as { qitemId: string };
+      const claimed = await app.request(`/api/queue/${qitemId}/claim`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "bob@r" },
+        body: JSON.stringify({ destinationSession: "bob@r" }),
+      });
+      expect(claimed.status).toBe(200);
+
+      const response = await app.request("/api/queue/whoami?session=bob@r");
+      expect(response.status).toBe(200);
+      const body = await response.json() as { currentWork: { workNodePath: string } | null; currentWorkBasis: string };
+      expect(body.currentWork?.workNodePath).toBe(path.join(temporaryWorkspace, "alpha", "work-items", "release", "slices", "01-work"));
+      expect(body.currentWorkBasis).toContain("one typed in-progress work node");
+
+      const withCandidates = await app.request("/api/queue/whoami?session=bob@r&candidates=1");
+      const candidateBody = await withCandidates.json() as { workCandidates: { candidates: Array<{ workNodePath: string | null }> } };
+      expect(candidateBody.workCandidates.candidates).toEqual([
+        expect.objectContaining({ workNodePath: path.join(temporaryWorkspace, "alpha", "work-items", "release", "slices", "01-work") }),
+      ]);
+      expect((candidateBody.workCandidates as { missionsRoot: string }).missionsRoot)
+        .toBe(path.join(temporaryWorkspace, "beta", "work-items"));
+      expect((candidateBody.workCandidates as { missionsOnHost: string[] }).missionsOnHost).toEqual(["release"]);
+    });
+
+    it.each([
+      {
+        name: "an unknown project tag",
+        catalog: "projects:\n  - id: alpha\n    root: alpha\n",
+        tags: ["project:missing", "mission:release", "slice:01-work"],
+        reason: "project:missing is not in the project catalogue; used configured root",
+      },
+      {
+        name: "several distinct project tags",
+        catalog: "projects:\n  - id: alpha\n    root: alpha\n  - id: beta\n    root: beta\n",
+        tags: ["project:alpha", "project:beta", "mission:release", "slice:01-work"],
+        reason: "multiple project tags (alpha, beta); used configured root",
+      },
+      {
+        name: "a missing catalog",
+        catalog: null,
+        tags: ["project:alpha", "mission:release", "slice:01-work"],
+        reason: "project:alpha could not be used because the workspace catalog is not configured; used configured root",
+      },
+      {
+        name: "an invalid catalog",
+        catalog: "projects: invalid\n",
+        tags: ["project:alpha", "mission:release", "slice:01-work"],
+        reason: "project:alpha could not be used because the workspace catalog is unavailable; used configured root",
+      },
+      {
+        name: "duplicate catalog IDs",
+        catalog: "projects:\n  - id: alpha\n    root: alpha\n  - id: alpha\n    root: other\n",
+        tags: ["project:alpha", "mission:release", "slice:01-work"],
+        reason: "project:alpha could not be used because the workspace catalog is unavailable; used configured root",
+      },
+      {
+        name: "a catalog entry with a project error",
+        catalog: "projects:\n  - id: alpha\n    root: alpha\n",
+        tags: ["project:alpha", "mission:release", "slice:01-work"],
+        projectError: true,
+        reason: "project:alpha is unavailable in the project catalogue; used configured root",
+      },
+    ])("falls back to the configured root for $name and explains why", async ({ catalog, tags, projectError, reason }) => {
+      temporaryWorkspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "openrig-whoami-project-fallback-")));
+      if (catalog !== null) fs.writeFileSync(path.join(temporaryWorkspace, "workspace.yaml"), catalog);
+      const configuredRoot = path.join(temporaryWorkspace, "configured", "work-items");
+      const mission = path.join(configuredRoot, "release");
+      const slice = path.join(mission, "slices", "01-work");
+      fs.mkdirSync(slice, { recursive: true });
+      fs.writeFileSync(path.join(mission, "SPEC.md"), "---\nid: release\n---\n# Release\n");
+      fs.writeFileSync(path.join(slice, "SPEC.md"), "---\nid: 01-work\n---\n# Work\n");
+      if (catalog !== null && catalog.includes("id: alpha")) {
+        const projectRoot = path.join(temporaryWorkspace, "alpha");
+        fs.mkdirSync(projectRoot, { recursive: true });
+        fs.writeFileSync(path.join(projectRoot, "project.yaml"), projectError ? "id: not-alpha\n" : "id: alpha\n");
+        fs.writeFileSync(path.join(projectRoot, "SPEC.md"), "---\nid: alpha\n---\n# Alpha\n");
+      }
+      app = buildApp({
+        eventBus: bus,
+        queueRepo,
+        inboxHandler: inbox,
+        outboxHandler: outbox,
+        settingsStore: { resolveOne: (key) => ({ value: key === "workspace.root"
+          ? temporaryWorkspace
+          : key === "workspace.catalog_path"
+            ? path.join(temporaryWorkspace!, "workspace.yaml")
+            : configuredRoot }) },
+      });
+      const created = await app.request("/api/queue/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@r" },
+        body: JSON.stringify({ sourceSession: "alice@r", destinationSession: "bob@r", body: "fallback work", tags, nudge: false }),
+      });
+      expect(created.status).toBe(201);
+      const { qitemId } = await created.json() as { qitemId: string };
+      const claimed = await app.request(`/api/queue/${qitemId}/claim`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "bob@r" },
+        body: JSON.stringify({ destinationSession: "bob@r" }),
+      });
+      expect(claimed.status).toBe(200);
+
+      const response = await app.request("/api/queue/whoami?session=bob@r&candidates=1");
+      expect(response.status).toBe(200);
+      const body = await response.json() as {
+        currentWork: { workNodePath: string } | null;
+        currentWorkBasis: string;
+        workCandidates: {
+          missionsRoot: string | null;
+          missionsOnHost: string[];
+          candidates: Array<{ workNodePath: string | null; unresolved: string | null }>;
+        };
+      };
+      expect(body.currentWork?.workNodePath).toBe(slice);
+      expect(body.currentWorkBasis).toContain(reason);
+      expect(body.workCandidates.missionsRoot).toBe(configuredRoot);
+      expect(body.workCandidates.missionsOnHost).toEqual(["release"]);
+      expect(body.workCandidates.candidates).toEqual([
+        expect.objectContaining({ workNodePath: slice, unresolved: null, source: expect.stringContaining(reason) }),
+      ]);
+    });
+
+    it("does not fall back to the configured root when a selected project's node is missing", async () => {
+      temporaryWorkspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "openrig-whoami-project-no-fallback-")));
+      fs.writeFileSync(path.join(temporaryWorkspace, "workspace.yaml"), "projects:\n  - id: alpha\n    root: alpha\n");
+      const configuredRoot = path.join(temporaryWorkspace, "configured", "work-items");
+      const configuredSlice = path.join(configuredRoot, "release", "slices", "01-work");
+      fs.mkdirSync(configuredSlice, { recursive: true });
+      fs.writeFileSync(path.join(configuredRoot, "release", "SPEC.md"), "---\nid: release\n---\n# Release\n");
+      fs.writeFileSync(path.join(configuredSlice, "SPEC.md"), "---\nid: 01-work\n---\n# Work\n");
+      const projectRoot = path.join(temporaryWorkspace, "alpha");
+      fs.mkdirSync(projectRoot, { recursive: true });
+      fs.writeFileSync(path.join(projectRoot, "project.yaml"), "id: alpha\nmissions:\n  root: work-items\n");
+      fs.writeFileSync(path.join(projectRoot, "SPEC.md"), "---\nid: alpha\n---\n# Alpha\n");
+      app = buildApp({
+        eventBus: bus,
+        queueRepo,
+        inboxHandler: inbox,
+        outboxHandler: outbox,
+        settingsStore: { resolveOne: (key) => ({ value: key === "workspace.root"
+          ? temporaryWorkspace
+          : key === "workspace.catalog_path"
+            ? path.join(temporaryWorkspace!, "workspace.yaml")
+            : configuredRoot }) },
+      });
+      const item = await queueRepo.create({ sourceSession: "alice@r", destinationSession: "bob@r", body: "project work",
+        tags: ["project:alpha", "mission:release", "slice:01-work"], nudge: false });
+      const claimed = await app.request(`/api/queue/${item.qitemId}/claim`, {
+        method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "bob@r" },
+        body: JSON.stringify({ destinationSession: "bob@r" }),
+      });
+      expect(claimed.status).toBe(200);
+
+      const response = await app.request("/api/queue/whoami?session=bob@r&candidates=1");
+      const body = await response.json() as {
+        currentWork: { workNodePath: string } | null;
+        currentWorkBasis: string;
+        workCandidates: { candidates: Array<{ workNodePath: string | null; unresolved: string | null }> };
+      };
+      expect(body.currentWork).toBeNull();
+      expect(body.currentWorkBasis).toContain("mission release resolves to 0 directories");
+      expect(body.workCandidates.candidates).toEqual([
+        expect.objectContaining({ workNodePath: null, unresolved: expect.stringContaining("resolves to 0 directories") }),
+      ]);
+    });
+
+    it("keeps same-named work distinct when in-progress rows select different projects", async () => {
+      temporaryWorkspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "openrig-whoami-project-same-name-")));
+      fs.writeFileSync(path.join(temporaryWorkspace, "workspace.yaml"), "projects:\n  - id: alpha\n    root: alpha\n  - id: beta\n    root: beta\n");
+      const projectPaths = new Map<string, string>();
+      for (const project of ["alpha", "beta"]) {
+        const root = path.join(temporaryWorkspace, project);
+        const slice = path.join(root, "work-items", "release", "slices", "01-work");
+        projectPaths.set(project, slice);
+        fs.mkdirSync(slice, { recursive: true });
+        fs.writeFileSync(path.join(root, "project.yaml"), `id: ${project}\nmissions:\n  root: work-items\n`);
+        fs.writeFileSync(path.join(root, "SPEC.md"), `---\nid: ${project}\n---\n# ${project}\n`);
+        fs.writeFileSync(path.join(root, "work-items", "release", "SPEC.md"), "---\nid: release\n---\n# Release\n");
+        fs.writeFileSync(path.join(slice, "SPEC.md"), "---\nid: 01-work\n---\n# Work\n");
+      }
+      app = buildApp({
+        eventBus: bus,
+        queueRepo,
+        inboxHandler: inbox,
+        outboxHandler: outbox,
+        settingsStore: { resolveOne: (key) => ({ value: key === "workspace.root"
+          ? temporaryWorkspace
+          : key === "workspace.catalog_path"
+            ? path.join(temporaryWorkspace!, "workspace.yaml")
+            : path.join(temporaryWorkspace!, "configured", "work-items") }) },
+      });
+      const claim = async (project: string) => {
+        const item = await queueRepo.create({ sourceSession: "alice@r", destinationSession: "bob@r", body: `${project} work`,
+          tags: [`project:${project}`, "mission:release", "slice:01-work"], nudge: false });
+        const response = await app.request(`/api/queue/${item.qitemId}/claim`, {
+          method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "bob@r" },
+          body: JSON.stringify({ destinationSession: "bob@r" }),
+        });
+        expect(response.status).toBe(200);
+        return item.qitemId;
+      };
+      const alphaId = await claim("alpha");
+      const betaId = await claim("beta");
+
+      const response = await app.request("/api/queue/whoami?session=bob@r");
+      const body = await response.json() as {
+        currentWork: { workNodePath: string } | null;
+        currentWorkBasis: string;
+        currentWorkChoice?: { candidates: Array<{ qitemId: string; projects: string[]; workNodePath: string | null }> };
+      };
+      expect(body.currentWork).toBeNull();
+      expect(body.currentWorkBasis).toBe("2 distinct typed work nodes — refusing to guess");
+      expect(body.currentWorkChoice?.candidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({ qitemId: alphaId, projects: ["alpha"], workNodePath: projectPaths.get("alpha") }),
+        expect.objectContaining({ qitemId: betaId, projects: ["beta"], workNodePath: projectPaths.get("beta") }),
+      ]));
     });
 
     // OPR.0.7.0.12 — work candidates ride only an explicit request, and the read writes nothing.

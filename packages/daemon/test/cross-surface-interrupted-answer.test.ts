@@ -178,6 +178,42 @@ describe("completed human answer interrupted before ask close", () => {
     expect(f.snapshot()).toMatchObject({ replyCount: 1, resolutionCount: 1, nudgeCount: 1 });
   });
 
+  it.each(["slack", "steering"] as const)("an absorbed typed retry after %s survives close then seen interruption without sending its words", async first => {
+    const f = await fixture();
+    const close = vi.spyOn(f.repo, "resolveDirectHumanReply").mockImplementationOnce(() => { throw new Error("before close"); });
+    await (first === "slack" ? f.slack() : f.steering());
+    close.mockRestore();
+    const original = f.snapshot().replies;
+    const mark = f.seen.mark.bind(f.seen);
+    vi.spyOn(f.seen, "mark").mockImplementation((id, status) => {
+      if (id === "CTEST:3.3") throw new Error("before final seen append");
+      mark(id, status);
+    });
+    await expect(f.typedSlack("Words the person was told were not sent")).rejects.toThrow("before final seen append");
+    vi.mocked(f.seen.mark).mockRestore();
+    expect(f.acknowledgements.at(-1)).toContain("No new reply was sent");
+    expect(f.snapshot()).toMatchObject({ askState: "done", replyCount: 1, resolutionCount: 1, nudgeCount: 1 });
+    expect(f.seen.load().has("CTEST:3.3")).toBe(false);
+    await f.typedSlack("Words the person was told were not sent");
+    expect(f.snapshot()).toMatchObject({ committedReplyCount: 1, replies: original, replyCount: 1, resolutionCount: 1, nudgeCount: 1 });
+    await f.typedSlack("A genuinely new follow-up", false, "4.4");
+    expect(f.snapshot()).toMatchObject({ replyCount: 2, resolutionCount: 1, nudgeCount: 2 });
+    expect(f.snapshot().replies.some(row => row.body.startsWith("A genuinely new follow-up"))).toBe(true);
+  });
+
+  it("an absorbed event recorded before an interrupted close can still finish that close", async () => {
+    const f = await fixture();
+    const close = vi.spyOn(f.repo, "resolveDirectHumanReply").mockImplementation(() => { throw new Error("before close"); });
+    await f.steering();
+    const original = f.snapshot().replies;
+    expect(await f.typedSlack("Absorbed retry")).toMatchObject({ disposition: "dead-lettered", reason: "resolve_failed" });
+    expect(f.snapshot()).toMatchObject({ askState: "pending", replyCount: 1, resolutionCount: 0, nudgeCount: 1 });
+    expect(f.seen.load().has("CTEST:3.3")).toBe(false);
+    close.mockRestore();
+    await f.typedSlack("Absorbed retry");
+    expect(f.snapshot()).toMatchObject({ askState: "done", replies: original, replyCount: 1, resolutionCount: 1, nudgeCount: 1 });
+  });
+
   it("the same timestamp in another channel is a different follow-up event", async () => {
     const f = await fixture(); await f.typedSlack("Original words");
     expect(await f.typedSlack("Context from another channel", false, "3.3", "COTHER")).toMatchObject({ disposition: "accepted" });

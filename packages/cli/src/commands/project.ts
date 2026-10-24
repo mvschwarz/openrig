@@ -55,8 +55,13 @@ export function projectCommand(depsOverride?: ProjectDeps): Command {
   };
 
   const experimental = cmd.command("experimental").description("Optional Jev experiment; advisory, finite foreground runs, disabled by default");
+  const experimentVerbDescriptions = {
+    enable: "Turn the experiment on in its --config file, with any new limits, and print its status",
+    disable: "Turn the experiment off in its --config file and print its status; later runs make no request",
+    status: "Print the experiment's settings from its --config file; changes nothing",
+  } as const;
   for (const verb of ["enable", "disable", "status"] as const) {
-    experimental.command(verb).requiredOption("--config <file>", "Explicit local experiment JSON; contains no credential")
+    experimental.command(verb).description(experimentVerbDescriptions[verb]).requiredOption("--config <file>", "Explicit local experiment JSON; contains no credential")
       .option("--max-requests <n>", "Maximum requests per foreground run, 1..20")
       .option("--timeout-ms <n>", "Per-request deadline, 1000..30000")
       .option("--json", "JSON output")

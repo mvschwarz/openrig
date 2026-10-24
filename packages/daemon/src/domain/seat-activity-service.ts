@@ -415,6 +415,22 @@ export class SeatActivityService {
     if (claude && evidence.permissionRequest) void this.pollPermissionPrompt(seat.sessionName).catch(() => {});
   }
 
+  /** A person attested that the prompt this seat waited on is gone (`clear-attention --reason`): settle it here as a
+   *  resolving hook does, so the oracle, the wake ladder and the inventory agree with the cleared hook. A new permission
+   *  hook starts a new request, and each send still reads the pane. */
+  settlePermissionPrompt(sessionName: string): void {
+    const seatNodeId = this.sessionToSeat.get(sessionName);
+    const seat = seatNodeId ? this.ladder.get(seatNodeId) : undefined;
+    if (!seat || seat.retired) return;
+    seat.permissions.clear();
+    seat.permissionObservedAt = null;
+    seat.sources.delete(`${seat.inventory?.runtime ?? "codex"}:permission-prompt`);
+    for (const source of seat.sources.values()) {
+      if (source.latest.needsInput?.count) source.latest = { ...source.latest, needsInput: undefined };
+    }
+    this.arbitrate(seat);
+  }
+
   /** A handover/generation swap: its OWN visible event, never an activity transition.
    *  Evidence, debounce, contradiction and promotion state are cleared; every known
    *  rung's trust drops to `absent` until the successor's adapter RE-DECLARES its

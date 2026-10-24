@@ -251,6 +251,8 @@ interface LadderView {
   opOutcomeResolved: boolean;
   opUnresolved: string | null;
   exhausted: boolean;
+  /** The latest exhaustion marker's note: why the ladder stopped. */
+  exhaustedNote: string | null;
   suspendEpisodeOpen: boolean;
   firstMarkerTs: number | null;
 }
@@ -270,6 +272,7 @@ function readLadder(db: Database.Database, qitemId: string, after = lastMeaningf
     opOutcomeResolved: false,
     opUnresolved: null,
     exhausted: false,
+    exhaustedNote: null,
     suspendEpisodeOpen: false,
     firstMarkerTs: null,
   };
@@ -308,7 +311,7 @@ function readLadder(db: Database.Database, qitemId: string, after = lastMeaningf
         view.opOutcomeResolved = true;
       }
     }
-    if (note.startsWith(LADDER_EXHAUSTED_PREFIX)) view.exhausted = true;
+    if (note.startsWith(LADDER_EXHAUSTED_PREFIX)) { view.exhausted = true; view.exhaustedNote = note; }
     if (note.startsWith(LADDER_SUSPEND_PREFIX)) suspends += 1;
     if (note.startsWith(LADDER_RESUME_PREFIX)) resumes += 1;
     if (isAttempt || isRung) {
@@ -1002,15 +1005,15 @@ const PROMPT_ALERT_ROWS = `(tags LIKE '%"${PROMPT_ALERT_TAG}"%' OR tags LIKE '%\
  * the same until a reminder lands or the prompt clears. Jobs are found through the refused outcome's index. The
  * parked-owner job's refusals already arrive as notes on the rows it wakes. */
 function refusedWatchdogJobs(db: Database.Database, clearedAlert: (dest: string) => { qitemId: string; at: string } | null):
-  Array<{ jobId: string; dest: string; registeredBy: string; key: string; refusedAt: string }> {
+  Array<{ jobId: string; dest: string; registeredBy: string; key: string; refusedAt: string; choice: boolean }> {
   if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'watchdog_history'").get()) return [];
   const jobs = db.prepare(`SELECT job_id, registered_by_session FROM watchdog_jobs WHERE state = 'active' AND policy != ?
     AND job_id IN (SELECT job_id FROM watchdog_history WHERE outcome = 'refused')`).all(PARKED_OWNER_POLICY_NAME) as Array<{ job_id: string; registered_by_session: string }>;
-  const recent = db.prepare(`SELECT history_id, outcome, delivery_target_session AS dest, evaluated_at FROM watchdog_history
+  const recent = db.prepare(`SELECT history_id, outcome, delivery_target_session AS dest, evaluated_at, evaluation_notes FROM watchdog_history
     WHERE job_id = ? ORDER BY evaluated_at DESC, history_id DESC LIMIT 50`);
   const before = db.prepare(`SELECT history_id, evaluated_at FROM watchdog_history WHERE job_id = ?
     AND NOT (outcome = 'refused' AND delivery_target_session IS ?) ORDER BY evaluated_at DESC, history_id DESC LIMIT 1`);
-  type Entry = { history_id: string; outcome: string; dest: string | null; evaluated_at: string };
+  type Entry = { history_id: string; outcome: string; dest: string | null; evaluated_at: string; evaluation_notes?: string | null };
   return jobs.flatMap(({ job_id, registered_by_session }) => {
     const entries = recent.all(job_id) as Entry[];
     const dest = entries[0]?.dest;
@@ -1022,8 +1025,24 @@ function refusedWatchdogJobs(db: Database.Database, clearedAlert: (dest: string)
     const cleared = retired && (!anchor || retired.at > anchor.evaluated_at) ? retired : null;
     if (run.filter(e => !cleared || e.evaluated_at > cleared.at).length < 2) return [];
     const after = cleared ? `alert:${cleared.qitemId}` : anchor?.history_id ?? "start";
-    return [{ jobId: job_id, dest, registeredBy: registered_by_session, key: `${dest}|watchdog:${job_id}|after:${after}`, refusedAt: entries[0]!.evaluated_at }];
+    return [{ jobId: job_id, dest, registeredBy: registered_by_session, key: `${dest}|watchdog:${job_id}|after:${after}`, refusedAt: entries[0]!.evaluated_at,
+      choice: (entries[0]!.evaluation_notes ?? "").includes("(selection_prompt)") }];
   });
+}
+
+/** Marks a prompt alert whose every refusal was at a choice prompt, such as a usage-limit dialog. */
+const PROMPT_CHOICE_TAG = "prompt-kind:choice";
+/** Why a choice-prompt alert stopped when queue.wake_human_rung kept it a visible row for an agent operator seat. */
+const PROMPT_FLOOR_EXHAUSTED = "explicit-only floor: a visible row, not posted to a person";
+
+/** Another open choice-prompt alert on this machine whose operator rung already went to the delivery engine. */
+function postedPromptAlert(db: Database.Database, except: string): string | null {
+  const row = db.prepare(`SELECT qitem_id FROM queue_items WHERE qitem_id != ? AND state IN ('pending','in-progress','blocked')
+      AND ${PROMPT_ALERT_ROWS} AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)
+      AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)
+      AND EXISTS (SELECT 1 FROM queue_transitions t WHERE t.qitem_id = queue_items.qitem_id AND t.transition_note LIKE ?)
+    ORDER BY ts_created LIMIT 1`).get(except, PROMPT_ALERT_TAG, PROMPT_CHOICE_TAG, `${LADDER_RUNG_PREFIX} operator dispatched-to-engine%`) as { qitem_id: string } | undefined;
+  return row?.qitem_id ?? null;
 }
 
 /** Positive refusals enter the existing rungs without ever retrying the blocked
@@ -1038,7 +1057,10 @@ async function advancePromptRefusals(
   attemptWake: (qitemId: string, target: string) => Promise<string>,
   actions: WakeLadderAction[],
 ): Promise<void> {
-  const groups = new Map<string, { keys: string[]; rows: Map<string, QueueItem>; jobs: Map<string, string>; refusedAt: string }>();
+  const groups = new Map<string, { keys: string[]; rows: Map<string, QueueItem>; jobs: Map<string, string>; refusedAt: string; choiceSince?: string; choice?: boolean; other?: boolean; latestChoice?: boolean }>();
+  const readAt = (dest: string, refusedAt: string): "blocked" | "clear" | "unknown" => {
+    try { return deps.readPromptState?.(dest, refusedAt) ?? "unknown"; } catch { return "unknown"; }
+  };
   const unreadableDestinations = new Set<string>();
   const loggedRows = new Set<string>();
   const readCandidate = (id: string, destination: string): QueueItem | null => {
@@ -1087,6 +1109,16 @@ async function advancePromptRefusals(
       let group = groups.get(primary.destinationSession);
       if (!group) { group = { keys: [], rows: new Map(), jobs: new Map(), refusedAt: episode.refusedAt }; groups.set(primary.destinationSession, group); }
       if (Date.parse(episode.refusedAt) > Date.parse(group.refusedAt)) group.refusedAt = episode.refusedAt;
+      // The transport refused at a choice prompt, such as a usage-limit dialog, that no permission hook announces.
+      const choice = episode.note.includes("(selection_prompt)");
+      if (episode.refusedAt === group.refusedAt) group.latestChoice = choice;
+      if (!choice) group.other = true;
+      else {
+        group.choice = true;
+        // Only a choice prompt that nothing newer has cleared keeps its age; a cleared one lends none to a later refusal.
+        if (readAt(primary.destinationSession, episode.refusedAt) !== "clear"
+          && (!group.choiceSince || Date.parse(episode.refusedAt) < Date.parse(group.choiceSince))) group.choiceSince = episode.refusedAt;
+      }
       group.keys.push(`${PROMPT_EPISODE_TAG}${episode.key}`);
       for (const row of rows) group.rows.set(row.qitemId, row);
     }
@@ -1110,12 +1142,21 @@ async function advancePromptRefusals(
     let group = groups.get(job.dest);
     if (!group) { group = { keys: [], rows: new Map(), jobs: new Map(), refusedAt: job.refusedAt }; groups.set(job.dest, group); }
     if (Date.parse(job.refusedAt) > Date.parse(group.refusedAt)) group.refusedAt = job.refusedAt;
+    if (job.refusedAt === group.refusedAt) group.latestChoice = job.choice;
     group.keys.push(tag);
     group.jobs.set(job.jobId, job.registeredBy);
+    if (job.choice) group.choice = true; else group.other = true;
   }
 
-  const promptState = (dest: string) => {
-    try { return deps.readPromptState?.(dest, groups.get(dest)?.refusedAt ?? now.toISOString()) ?? "unknown"; } catch { return "unknown"; }
+  const promptState = (dest: string): "blocked" | "clear" | "unknown" => {
+    const group = groups.get(dest);
+    const state = readAt(dest, group?.refusedAt ?? now.toISOString());
+    // A choice prompt no hook announces leaves the seat's own evidence unknown, and the transport's refusal is a read of
+    // that prompt. While the latest refusal is at a choice prompt, one held one retry interval with nothing newer clearing
+    // it reads blocked; one answered within seconds never escalates, and a current non-choice refusal keeps its own rule.
+    if (state === "unknown" && group?.latestChoice && group.choiceSince
+      && now.getTime() - Date.parse(group.choiceSince) >= intervalS * 1000) return "blocked";
+    return state;
   };
   const aggregates = deps.db.prepare(`SELECT qitem_id FROM queue_items WHERE state IN ('pending','in-progress','blocked')
     AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)`)
@@ -1173,15 +1214,21 @@ async function advancePromptRefusals(
     const orch = resolveOrch(dest);
     const toOperator = orch === null || orch === dest;
     const reason = "interactive prompt blocks outstanding work; no input was sent";
+    // Every refusal at a choice prompt: the alert follows queue.wake_human_rung and holds for other choice alerts. Any other
+    // prompt keeps the permission-prompt route.
+    const choiceOnly = Boolean(group.choice && !group.other);
+    const kindTags = choiceOnly ? [PROMPT_CHOICE_TAG] : [];
     const aggregate = await ensureEscalationRow(deps, dest,
       toOperator ? resolveOperatorSeat() ?? members[0]?.row.sourceSession ?? [...group.jobs.values()][0]! : orch!, members, reason,
-      `prompt-destination:${dest}`, [PROMPT_ALERT_TAG, ...group.keys], group.jobs);
+      `prompt-destination:${dest}`, [PROMPT_ALERT_TAG, ...kindTags, ...group.keys], group.jobs);
     const row = deps.queueRepo.getById(aggregate.qitemId);
     if (!row) continue;
     const addedKeys = group.keys.filter(key => !row.tags?.includes(key));
-    if (addedKeys.length) {
+    // A reminder's run keeps its key while its latest refusal changes kind, so the kind is recomputed on its own too.
+    const kindChanged = choiceOnly !== Boolean(row.tags?.includes(PROMPT_CHOICE_TAG));
+    if (addedKeys.length || kindChanged) {
       deps.db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?")
-        .run(JSON.stringify([...(row.tags ?? []), ...addedKeys]), row.qitemId);
+        .run(JSON.stringify([...(row.tags ?? []).filter(t => t !== PROMPT_CHOICE_TAG), ...kindTags, ...addedKeys]), row.qitemId);
       // An alert that already exists names a reminder that joins it; nothing is sent again for it.
       const addedJobs = [...group.jobs.keys()].filter(id => addedKeys.some(key => key.includes(`|watchdog:${id}|`)));
       if (addedJobs.length) deps.queueRepo.transitionLog.append({ qitemId: row.qitemId, state: row.state, actorSession: LADDER_ACTOR,
@@ -1191,7 +1238,11 @@ async function advancePromptRefusals(
     // The aggregate ID is the episode. Claiming it does not start a second
     // delivery episode or erase its accepted dispatch/receipt history.
     const view = readLadder(deps.db, row.qitemId, 0);
-    if (view.exhausted) continue;
+    // The explicit-only floor stopped this alert without a person. If the seat's prompt now needs one (a permission prompt
+    // joined it), the permission leg still runs; accepted or deferred delivery stays exactly-once.
+    const floorOnly = view.exhausted && !view.opEngineDispatched
+      && view.exhaustedNote === `${LADDER_EXHAUSTED_PREFIX} ${PROMPT_FLOOR_EXHAUSTED}`;
+    if (view.exhausted && !(floorOnly && !choiceOnly)) continue;
     if (view.opEngineDispatched) {
       if (view.opOutcomeResolved) appendExhausted(deps.queueRepo, row, "engine outcome resolved");
       continue; // accepted/deferred delivery retains gateway custody
@@ -1212,7 +1263,21 @@ async function advancePromptRefusals(
       }
       appendMarker(deps.queueRepo, row, `${LADDER_RUNG_PREFIX} orchestrator self-skip reason=${reason}`);
     }
-    if (await operatorRung(deps, row, reason, actions, view, false)) appendExhausted(deps.queueRepo, row, "operator rung resolved");
+    // One choice-prompt alert to a person at a time on this machine: a prompt many seats hit together, such as a shared usage
+    // limit, posts once. Each other choice alert stays open, names the alert it waits on, and posts after that one retires.
+    // A permission prompt, which only a person can approve, never waits behind it.
+    const posted = choiceOnly && deps.deliveryEngine ? postedPromptAlert(deps.db, row.qitemId) : null;
+    if (posted) {
+      const waiting = `${LADDER_RUNG_PREFIX} operator waiting on ${posted}`;
+      if (!deps.queueRepo.listTransitions(row.qitemId).some(t => t.transitionNote?.startsWith(waiting))) {
+        appendMarker(deps.queueRepo, row, `${waiting} reason=one person alert at a time for seats blocked at a prompt`);
+      }
+      continue;
+    }
+    if (await operatorRung(deps, row, reason, actions, view, choiceOnly)) {
+      const floor = deps.queueRepo.listTransitions(row.qitemId).at(-1)?.transitionNote?.includes("human rung explicit-only");
+      appendExhausted(deps.queueRepo, row, floor ? PROMPT_FLOOR_EXHAUSTED : "operator rung resolved");
+    }
   }
 }
 
@@ -1241,7 +1306,7 @@ async function operatorRung(
   reason: string,
   actions: WakeLadderAction[],
   view: LadderView,
-  /** False for a prompt-blocked seat, which only a person can clear. */
+  /** False for a seat at a permission prompt, which only a person can approve. A choice-prompt alert follows the setting. */
   humanRungSettingApplies = true,
 ): Promise<boolean> {
   const repo = deps.queueRepo;

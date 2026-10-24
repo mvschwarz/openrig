@@ -350,7 +350,7 @@ export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
     // never refused, never laundered. Runs BEFORE the local write AND the cross-host forward.
     const identity = resolveActorWithDeferral(c, { verb: `mission-control ${body.verb}`, bodyClaim: body.actorSession });
     if (!identity.ok) return identity.response;
-    // The SOLE provenance decider (rail 2): transport:v1 ONLY when transport proved it at THIS hop; relay:v1
+    // The SOLE provenance decider (rail 2): transport:v1 ONLY when the header named the actor at THIS hop; relay:v1
     // one hop away; claimed:v1 for the UI deferral OR an unpropagatable/legacy marker (degrade-down default).
     const recordedProvenance = resolveRecordedProvenance(c, identity);
     if (typeof body.hostId === "string" && body.hostId !== "" && body.hostId !== LOCAL_HOST_ID) {
@@ -385,7 +385,7 @@ export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
           "X-OpenRig-Session": identity.session,
           "X-OpenRig-Relay": getSelfHostId() ?? "unknown",
           // Carry the provenance THIS hop resolved so the origin NEVER launders a claimed-era actor into a
-          // verified one: identity.provenance is transport:v1 (CLI) or claimed:v1 (UI deferral). The origin's
+          // transport-derived one: identity.provenance is transport:v1 (CLI) or claimed:v1 (UI deferral). The origin's
           // resolveRecordedProvenance degrades — a transport:v1 marker ⇒ relay:v1, everything else ⇒ claimed:v1.
           // (Literal capitalized key, matching the sibling X-OpenRig-Session/Relay send convention; the
           // receive side reads it case-insensitively via IDENTITY_PROVENANCE_HEADER.)

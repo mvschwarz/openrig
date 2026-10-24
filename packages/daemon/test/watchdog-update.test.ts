@@ -289,6 +289,8 @@ describe("watchdog update", () => {
       return { engine, release: () => release() };
     }
     const settle = () => new Promise((r) => setTimeout(r, 20));
+    /** The repository's private per-job schedule records, read to show when they are released. */
+    const scheduleRecords = () => jobs as unknown as { updatedFrom: Map<string, unknown>; inFlight: Map<string, unknown> };
 
     it("a wait is not told the same thing twice", async () => {
       const row = await queue.create({ sourceSession: "orch@rig", destinationSession: OWNER, body: "work", nudge: false });
@@ -330,13 +332,44 @@ describe("watchdog update", () => {
       for (const seconds of [30, 31, 32, 33, 34, 35, 36, 37, 38]) {
         expect((await update(jobId, { intervalSeconds: seconds })).status).toBe(200);
       }
+      // The held send still needs what those updates replaced.
+      expect(scheduleRecords().updatedFrom.has(jobId)).toBe(true);
       release();
       await first;
+      // Once the send is accounted for, nothing keeps them.
+      expect(scheduleRecords().updatedFrom.has(jobId)).toBe(false);
+      expect(scheduleRecords().inFlight.has(jobId)).toBe(false);
 
       const after = jobs.getByIdOrThrow(jobId);
       expect(JSON.parse(after.specYaml).context.queue_wait.notice).toMatchObject({ deliveryStatus: "ok" });
       expect(after.lastFireAt).not.toBeNull();
       expect((await engine.evaluate(after)).outcome).toMatchObject({ action: "skip", reason: "queue_wait_already_presented" });
+      expect(deliveries).toHaveLength(1);
+    });
+
+    it("a stopped job keeps replaced schedules only while its own delivery is in flight", async () => {
+      const idle = register();
+      expect((await update(idle.jobId, { intervalSeconds: 30 })).status).toBe(200);
+      expect(scheduleRecords().updatedFrom.has(idle.jobId)).toBe(true);
+      jobs.stop(idle.jobId);
+      expect(scheduleRecords().updatedFrom.has(idle.jobId)).toBe(false);
+
+      const row = await queue.create({ sourceSession: "orch@rig", destinationSession: OWNER, body: "work", nudge: false });
+      queue.update({
+        qitemId: row.qitemId, actorSession: OWNER, state: "blocked", blockedOn: "external:vendor-window",
+        transitionNote: "continuation: resume when the window opens", wakeAfterSeconds: 60, wakeMaxSeconds: 240,
+      } as never);
+      const jobId = queue.getParkWakeStatus(row.qitemId)!.ref;
+      const deliveries: Array<{ targetSession: string; message: string }> = [];
+      const { engine, release } = heldEngine(deliveries, true);
+      const first = engine.evaluate(jobs.getByIdOrThrow(jobId));
+      await settle();
+      expect((await update(jobId, { intervalSeconds: 30 })).status).toBe(200);
+      jobs.stop(jobId);
+      expect(scheduleRecords().updatedFrom.has(jobId)).toBe(true);
+      release();
+      await first;
+      expect(scheduleRecords().updatedFrom.has(jobId)).toBe(false);
       expect(deliveries).toHaveLength(1);
     });
 

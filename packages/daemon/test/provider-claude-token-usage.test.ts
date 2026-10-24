@@ -104,7 +104,7 @@ describe("selected Claude credential usage", () => {
 
   it("migration preserves every existing Codex history field", () => {
     const d = new Database(":memory:"); cleanup.push(() => d.close());
-    migrate(d, ALL_MIGRATIONS.slice(0, -1));
+    migrate(d, ALL_MIGRATIONS.slice(0, ALL_MIGRATIONS.findIndex((m) => m.name === "134_claude_token_readings.sql")));
     d.prepare(`INSERT INTO provider_account_readings (provider,identity_key,account_id,limit_id,identity_source,observed_at,windows_json)
       VALUES ('codex','old','native-id','bucket','account/rateLimits/read accountId',?,'[]')`).run(NOW);
     const before = d.prepare("SELECT * FROM provider_account_readings").all();

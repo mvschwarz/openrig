@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const COMPACTION_TEMPLATE = "   `<launch cwd>/.openrig/compaction/preparation/<session>/<attempt>/RESTORE-MAP.md`; its parent";
+const STARTUP_GUIDE_LINE = "OpenRig uses `<cwd>/.openrig/compaction/preparation/`, falling back to its instance home when";
 
 test("scanner blocks internal paths before reading content", async () => {
   const scanner = await loadScanner();
@@ -131,6 +132,27 @@ test("generated rules allow the shipped compaction template and still detect con
       `${COMPACTION_TEMPLATE} .openrig/compaction/preparation/session-1/attempt-1/RESTORE-MAP.md`));
     assert.ok(scanInternalLeaks({ path, bytes: changed, rules }).some(({ token }) =>
       token === ".openrig/compaction/"));
+  }
+});
+
+test("generated rules allow the startup guide's preparation-root sentence and nothing derived from it", async () => {
+  const { scanInternalLeaks } = await loadScanner();
+  const rules = JSON.parse(readFileSync(new URL("./internal-tokens.generated.json", import.meta.url), "utf8"));
+  const bytes = readFileSync(new URL("../docs/reference/agent-startup-guide.md", import.meta.url));
+  const text = bytes.toString("utf8");
+  assert.ok(text.split("\n").includes(STARTUP_GUIDE_LINE));
+  assert.ok(rules.allowed_context_lines.includes(STARTUP_GUIDE_LINE));
+  assert.ok(rules.path_prefixes.includes(".openrig/compaction/"));
+  for (const path of ["docs/reference/agent-startup-guide.md", "daemon/docs/reference/agent-startup-guide.md"]) {
+    assert.deepEqual(scanInternalLeaks({ path, bytes, rules }), []);
+    for (const modified of [
+      `${STARTUP_GUIDE_LINE} appended detail`,
+      STARTUP_GUIDE_LINE.replace("<cwd>", "/home/example/project"),
+    ]) {
+      const changed = Buffer.from(text.replace(STARTUP_GUIDE_LINE, modified));
+      assert.ok(scanInternalLeaks({ path, bytes: changed, rules }).some(({ token }) =>
+        token === ".openrig/compaction/"));
+    }
   }
 });
 

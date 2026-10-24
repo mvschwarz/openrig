@@ -6,7 +6,11 @@ import { decodeTime } from "ulid";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
-import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
+import { AgentActivityStore, hookEventState, latestHookWaitsOnPerson } from "../src/domain/agent-activity-store.js";
+import { CLAUDE_ACTIVITY_RUNG_INVENTORY } from "../src/domain/activity-taxonomy.js";
+import { SeatActivityService } from "../src/domain/seat-activity-service.js";
+import { makePromptStateReader } from "../src/domain/queue-wake-ladder.js";
+import { evidenceFromHookActivity } from "../src/routes/activity.js";
 import { SeatAttentionReconciler } from "../src/domain/seat-attention-reconciler.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
@@ -151,6 +155,84 @@ describe("SeatAttentionReconciler", () => {
 
     expect(result.ok).toBe(false);
     expect(result.code).toBe("not_in_attention");
+  });
+
+  describe("a latest hook that still says the seat waits on a person (a prompt declined or answered with no hook after)", () => {
+    function readySeat(name: string, hookEvent: string, ageMs = 600_000): string {
+      const rig = rigRepo.createRig(name);
+      const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+      const session = sessionRegistry.registerSession(node.id, `worker@${name}`);
+      sessionRegistry.updateStartupStatus(session.id, "ready");
+      activityStore.recordHookEvent({ sessionName: `worker@${name}`, runtime: "claude-code", hookEvent,
+        occurredAt: new Date(Date.now() - ageMs).toISOString() });
+      return `worker@${name}`;
+    }
+
+    it("is an attention class: without --reason it says what to do, not 'not in attention'", async () => {
+      const seat = readySeat("r-hook-1", "PermissionPromptConfirmed");
+      const result = await reconciler.clearAttention(seat);
+      expect(result).toMatchObject({ ok: false, code: "not_demonstrably_responsive" });
+      expect(result.detail).toContain("PermissionPromptConfirmed");
+      expect(result.detail).toContain('rerun with --reason "<what you saw>"');
+    });
+
+    it("with --reason it records the prompt cleared, so the hook no longer reads as a waiting person", async () => {
+      const seat = readySeat("r-hook-2", "PermissionPromptConfirmed");
+      const result = await reconciler.clearAttention(seat, { reason: "declined; composer empty" });
+      expect(result).toMatchObject({ ok: true, code: "cleared", clearedBy: "operator_attestation", clearedClasses: ["needs_input_hook"] });
+      const latest = activityStore.getLatestForNode({ sessionName: seat });
+      expect(latest?.rawEvent).toBe("PermissionPromptCleared");
+      expect(latestHookWaitsOnPerson(latest, "claude-code")).toBe(false);
+      const cleared = db.prepare("SELECT payload FROM events WHERE type = 'seat.attention_cleared' ORDER BY seq DESC LIMIT 1").get() as { payload: string };
+      expect(JSON.parse(cleared.payload)).toMatchObject({ from: "needs_input_hook", clearedBy: "operator_attestation", reason: "declined; composer empty" });
+    });
+
+    it("a ready seat whose latest hook shows work is still not in attention", async () => {
+      const seat = readySeat("r-hook-3", "UserPromptSubmit", 5_000);
+      expect(await reconciler.clearAttention(seat, { reason: "nothing to clear" })).toMatchObject({ ok: false, code: "not_in_attention" });
+    });
+
+    it("also settles the activity service's pending prompt, so the wake ladder and the inventory agree with the clear", async () => {
+      const rig = rigRepo.createRig("r-hook-4");
+      const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+      const seat = "worker@r-hook-4";
+      sessionRegistry.updateStartupStatus(sessionRegistry.registerSession(node.id, seat).id, "ready");
+      let nowMs = Date.now() - 60_000;
+      let visible: boolean | null = true;
+      const service = new SeatActivityService({
+        tmux: { readPaneLastActivity: async () => null }, defaultWindowSeconds: 3, now: () => new Date(nowMs),
+        permissionPromptReader: async () => visible,
+        // As startup wires it: the poller records what it sees as hooks.
+        permissionPromptChanged: (sessionName, confirmed, runtime) => activityStore.recordHookEvent({ sessionName, runtime,
+          hookEvent: confirmed ? "PermissionPromptConfirmed" : "PermissionPromptCleared", occurredAt: new Date(nowMs).toISOString() }),
+      });
+      service.declareRungInventory({ seatNodeId: node.id, sessionName: seat }, CLAUDE_ACTIVITY_RUNG_INVENTORY);
+      // Claude's permission-prompt hook, and the poller sees the prompt.
+      service.reportEvidence(evidenceFromHookActivity({ seatNodeId: node.id, sessionName: seat, runtime: "claude-code", seq: 1,
+        activity: { state: hookEventState("Notification", "permission_prompt", "claude-code"), reason: "permission_prompt",
+          rawEvent: "Notification", rawSubtype: "permission_prompt", evidenceSource: "runtime_hook",
+          sampledAt: new Date(nowMs).toISOString(), evidence: null } })!);
+      await service.pollSeat(seat);
+      // Declined: the screen after it isn't one the poller recognizes, so the request stays confirmed.
+      visible = null;
+      nowMs += 5_000;
+      await service.pollSeat(seat);
+      expect(service.getSeatState(node.id)!.needsInput.count).toBe(1);
+      const refusedAt = new Date(nowMs).toISOString();
+      const promptState = makePromptStateReader({ db, getSeatState: id => service.getSeatState(id),
+        getLatestHook: sessionName => activityStore.getLatestForNode({ sessionName }) });
+      expect(promptState(seat, refusedAt)).toBe("blocked");
+
+      const withService = new SeatAttentionReconciler({ sessionRegistry, eventBus, agentActivityStore: activityStore,
+        settlePermissionPrompt: sessionName => service.settlePermissionPrompt(sessionName) });
+      expect(await withService.clearAttention(seat, { reason: "declined; composer empty" })).toMatchObject({ ok: true, clearedClasses: ["needs_input_hook"] });
+      expect(service.getSeatState(node.id)!.needsInput.count).toBe(0);
+      expect(promptState(seat, refusedAt)).toBe("clear");
+      // The next poll has no request to re-confirm.
+      nowMs += 5_000;
+      await service.pollSeat(seat);
+      expect(service.getSeatState(node.id)!.needsInput.count).toBe(0);
+    });
   });
 
   it("rebinds a healthy replacement pane and clears the pane-identity attention class", async () => {

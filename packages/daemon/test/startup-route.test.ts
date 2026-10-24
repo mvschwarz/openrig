@@ -4,10 +4,10 @@ import { startupRevision } from "../src/routes/startup.js";
 import { defaultProbeRuntimes } from "../src/domain/kernel-boot.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 import { existsSync, readFileSync } from "node:fs";
-import { verifyPaneIdleShell } from "../src/domain/native-process-lineage.js";
+import { verifyCodexPaneProcess, verifyPaneIdleShell } from "../src/domain/native-process-lineage.js";
 vi.mock("../src/domain/native-process-lineage.js", async (original) => {
   const actual = await original<typeof import("../src/domain/native-process-lineage.js")>();
-  return { ...actual, verifyPaneIdleShell: vi.fn(actual.verifyPaneIdleShell) };
+  return { ...actual, verifyCodexPaneProcess: vi.fn(actual.verifyCodexPaneProcess), verifyPaneIdleShell: vi.fn(actual.verifyPaneIdleShell) };
 });
 vi.mock("../src/domain/kernel-boot.js", async (original) => ({ ...await original<typeof import("../src/domain/kernel-boot.js")>(), defaultProbeRuntimes: vi.fn(async () => ({ codex: "ok", claudeCode: "ok" })) }));
 
@@ -95,6 +95,34 @@ describe("startup consent and effect boundary", () => {
       const seen = await observed(shellPane("claude-code", true).id);
       expect(seen).toMatchObject({ state: "attention_required", detail: "The probe pane returned to a shell instead of staying inside the runtime." });
     });
+  });
+  it("re-probes a Codex status footer after the foreground process is verified", async () => {
+    setup = createTestApp(db, {
+      appDeps: {
+        listProcesses: async () => [
+          { pid: 900, ppid: 1, command: "/bin/zsh", pgid: 900, tpgid: 901, executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000" },
+          { pid: 901, ppid: 900, command: "codex --model anthropic/claude-3.5-sonnet", pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:01 2000" },
+        ],
+      },
+    });
+    const { rig, node } = seat();
+    setup.tmuxAdapter.probeSession = vi.fn(async () => ({ state: "present" } as never));
+    setup.tmuxAdapter.listPanes = vi.fn(async () => [{ id: "%1", index: 0, cwd: "/p", width: 80, height: 24, active: true }]) as never;
+    setup.tmuxAdapter.getPaneCommand = vi.fn(async () => "zsh");
+    setup.tmuxAdapter.getPanePid = vi.fn(async () => 900);
+    let captures = 0;
+    setup.tmuxAdapter.capturePaneContent = vi.fn(async () => {
+      captures++;
+      if (captures === 1) return "  project2 · main\n› codex resume 019a136b-0000-7000-8000-000000000001";
+      return [
+        "› ",
+        "  Ready · Context 13% used · anthropic/claude-3.5-sonnet         ⚠ 2 warnings · f2 to view",
+      ].join("\n");
+    });
+
+    const response = await setup.app.request(`/api/startup/${rig.id}`);
+    expect((await response.json()).seats[0].observed).toMatchObject({ state: "running" });
+    expect(captures).toBe(2);
   });
   it("reports unavailable transport without authorizing fresh replacement", async () => {
     const { rig, node } = seat();

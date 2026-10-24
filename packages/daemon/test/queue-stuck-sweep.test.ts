@@ -104,6 +104,39 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     );
   }
 
+  it("a row whose destination no longer resolves does not stop the other findings, and the pass still reports the failure", async () => {
+    // A historic row addressed to a rig that has since gone: admitted when it was created, refused now.
+    let rigGone = false;
+    repo = new QueueRepository(db, bus, {
+      validateRig: (destination) => !(rigGone && destination.endsWith("@product-team")),
+      loadHumanRegistry: () => ({ ok: true, entities: [] }),
+    });
+    const orphan = await mkRow("dev1-impl@product-team");
+    const valid = await mkRow("worker@r");
+    ageCreated(orphan.qitemId, 130);
+    ageCreated(valid.qitemId, 120);
+    rigGone = true;
+
+    const { status, result } = await runSweep();
+    // The later, unrelated row is still recovered.
+    const created = await findingsFor(valid.qitemId);
+    expect(created).toEqual([expect.objectContaining({ destinationSession: "worker@r", state: "pending" })]);
+    expect(result.findings).toEqual([expect.objectContaining({ qitemId: valid.qitemId, action: "created" })]);
+    // The pass still fails visibly, naming the row it could not route, and counts what it did route.
+    expect(result.outcome).toBe("failed");
+    expect(result.error).toContain(orphan.qitemId);
+    expect(status.snapshot()).toMatchObject({ lastOutcome: "failed", consecutiveFailures: 1, findingsRouted: 1 });
+    expect(await findingsFor(orphan.qitemId)).toEqual([]);
+    // The orphan row itself is left as it was.
+    expect(repo.getById(orphan.qitemId)).toMatchObject({ state: "pending", destinationSession: "dev1-impl@product-team" });
+
+    // The next pass refreshes the made finding rather than duplicating it, and still reports the failure.
+    const again = (await runSweep()).result;
+    expect(again.outcome).toBe("failed");
+    expect(await findingsFor(valid.qitemId)).toEqual([expect.objectContaining({ qitemId: created[0]!.qitemId })]);
+    expect(again.findings).toEqual([expect.objectContaining({ qitemId: valid.qitemId, action: "refreshed" })]);
+  });
+
   it("OVERDUE HALF: a claimed-never-closed row past closure_required_at yields exactly one finding row to the claimant, evidence inline", async () => {
     const row = await mkRow();
     repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
