@@ -9,20 +9,20 @@ applies-when: |
   the source that implements a command. Use command help for invocation details.
 siblings: [README.md, codemap.md]
 prerequisite-reads: [../reference/help.md]
-last-verified-against-source: 46df9bd464ef84dd062a005958e6d777c93f56e1
+last-verified-against-source: 71b9c2c072ac5d27a23fb9fb404faa7033cb7e42
 last-updated: 2026-10-24
 ---
 
 # CLI Reference — Registered Commands and Options
 
-Verified against source commit `46df9bd464ef84dd062a005958e6d777c93f56e1`.
+Verified against source commit `71b9c2c072ac5d27a23fb9fb404faa7033cb7e42`.
 The inventory below comes from the actual Commander tree returned by
 [`createProgram()`](../../packages/cli/src/index.ts), not a grep of command
 strings or an installed CLI from a different commit.
 
 There are **90 top-level registrations**, **401 registered command objects**
 below `rig` (including groups and the hidden `restore apply` command), and
-**1,272 explicitly registered option objects**, including the root version
+**1,274 explicitly registered option objects**, including the root version
 option. Aliases do not add command objects; short/long spellings of one
 option do not add option objects. Commander-generated help is additional.
 These are counts for that source snapshot, not a claim about a deployed release.
@@ -756,7 +756,7 @@ Only Claude and Codex tenures can be woken.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig provider` | — | — |
-| `rig provider status` | — | `--json`<br>`--refresh`<br>`--provider <p>`<br>`--all-hosts`<br>`--hosts <ids>` |
+| `rig provider status` | — | `--json`<br>`--refresh`<br>`--provider <p>`<br>`--claude-token-file <path>`<br>`--credential-label <label>`<br>`--all-hosts`<br>`--hosts <ids>` |
 | `rig provider accounts` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
 | `rig provider bindings` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
 | `rig provider signals` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
