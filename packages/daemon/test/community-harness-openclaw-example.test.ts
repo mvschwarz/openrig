@@ -54,7 +54,7 @@ describe("the documented OpenClaw launcher and preset", () => {
     expect(failure).toMatch(/couldn't be listed/);
   });
 
-  it("is a preset this OpenRig loads, declaring names_conversation and not resume", () => {
-    expect(loadCommunityHarnessPreset("openclaw", EXAMPLE)).toMatchObject({ ok: true, preset: { namesConversation: true, launchResult: false, resume: false } });
+  it("is a preset this OpenRig loads, declaring named conversations and local resume", () => {
+    expect(loadCommunityHarnessPreset("openclaw", EXAMPLE)).toMatchObject({ ok: true, preset: { namesConversation: true, launchResult: false, resume: true } });
   });
 });

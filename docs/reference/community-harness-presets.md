@@ -150,7 +150,7 @@ OpenClaw's CLI.
 - **Resets must stay off:** OpenClaw can start a new conversation under the same key on a reset rule
   (`session.reset`). That's off by default; with it on, a key no longer names one conversation. Likewise, typing `/new`
   in the pane moves the chat to a fresh session key, while the seat still holds the name OpenRig gave it.
-- **The preset:** it declares `names_conversation` but not `resume`, until both have been checked with a real OpenClaw.
+- **The preset:** it declares `names_conversation` and `resume`. Local CLI reopen preserved the key, native session id and stored reply on OpenClaw 2026.10.6; a missing key started nothing. The saved name remains labelled as passed by OpenRig, not observed by the adapter. Gateway use is not covered by this preset.
 
 Copy both and maintain them as your own.
 

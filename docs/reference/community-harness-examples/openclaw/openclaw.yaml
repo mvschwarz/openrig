@@ -4,10 +4,10 @@ name: openclaw
 command: openrig-openclaw-launch
 maintainer: Your name or team
 limits:
-  - resume not declared until reopening a named session, and a missing one, have been checked with a real OpenClaw
   - runs locally in the pane (openclaw tui --local), using only agent main, with no Gateway; Gateway-attached use isn't covered
   - automatic session resets (session.reset) must stay off, or a key can start a new conversation
   - typing /new in the pane moves the chat to a fresh session key; the seat still holds the name OpenRig gave it
   - no guidance, skills or startup files are placed
   - needs-input and approval prompts are read from the screen only
 names_conversation: true
+resume: true
