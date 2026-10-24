@@ -4,7 +4,8 @@ const { watch, createProofPolicyRead, readProjectReadiness, resolveProjectRoot, 
   watch: vi.fn(), createProofPolicyRead: vi.fn(() => vi.fn()), readProjectReadiness: vi.fn(), resolveProjectRoot: vi.fn(),
   proofFs: { exists: vi.fn(() => true), readFile: vi.fn(() => null), readBytes: vi.fn(() => null), listDir: vi.fn(() => []), isDirectory: vi.fn(() => true) },
 }));
-vi.mock("node:fs", () => ({ watch }));
+// Real-location checks see every fixture path as itself (no links in these mocked trees).
+vi.mock("node:fs", () => ({ watch, existsSync: () => true, realpathSync: (p: string) => p }));
 vi.mock("../src/domain/proof/judgments.js", () => ({ createProofPolicyRead, readProjectReadiness, resolveProjectRoot, proofFs }));
 import { watchProofSources } from "../src/domain/proof/source-watch.js";
 import type { EventBus } from "../src/domain/event-bus.js";
@@ -125,6 +126,35 @@ it("does not report watching when the inputs keep changing past the reconciliati
   const finalDir = path.dirname(sets[2]!);
   expect(instance.observation().state === "unavailable" || attached.has(finalDir)).toBe(true);
   if (instance.observation().state === "watching") expect(readProjectReadiness.mock.calls.length).toBeGreaterThan(3);
+  instance.close();
+});
+
+it("tells clients when coverage is lost or regained even though the proof result is unchanged", () => {
+  vi.useFakeTimers();
+  const project = path.resolve("fixture/project");
+  const missions = path.join(project, "missions");
+  resolveProjectRoot.mockReturnValue(project);
+  // Setup reads a stable set; the next event's three reads each find a new directory (same result); then it settles.
+  const stable = path.join(project, "project.yaml");
+  const moving = ["a", "b", "c"].map((d) => path.join(project, d, "report.md"));
+  let call = 0;
+  readProjectReadiness.mockImplementation((_m: string, _r: unknown, _root: unknown, io?: Io) => {
+    const n = call++;
+    io?.exists(stable);
+    if (n >= 2) io?.readBytes(moving[Math.min(n - 2, 2)]!);
+    return { missions: [] };
+  });
+  handle();
+  const emit = vi.fn();
+  const instance = watchProofSources(missions, vi.fn(), { emit } as unknown as EventBus);
+  expect(instance.observation().state).toBe("watching");
+  const notifyProject = watch.mock.calls[1]![2];
+  notifyProject("change", "project.yaml"); vi.advanceTimersByTime(50);
+  expect(instance.observation().state).toBe("unavailable");
+  expect(emit.mock.calls.map(([e]) => e.revision)).toEqual(["unavailable"]);
+  notifyProject("change", "project.yaml"); vi.advanceTimersByTime(50);
+  expect(instance.observation().state).toBe("watching");
+  expect(emit.mock.calls.map(([e]) => e.revision)).toEqual(["unavailable", instance.observation().revision]);
   instance.close();
 });
 

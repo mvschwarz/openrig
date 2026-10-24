@@ -26,22 +26,44 @@ function add(out: Shallow, dir: string, name: string) {
   out.set(dir, names);
 }
 
+/** The real location of `p`, resolving its nearest existing ancestor (as containment does), or null if unreadable. */
+function canonical(p: string): string | null {
+  try {
+    let existing = path.resolve(p);
+    while (!fs.existsSync(existing)) existing = path.dirname(existing);
+    return path.resolve(fs.realpathSync(existing), path.relative(existing, path.resolve(p)));
+  } catch { return null; }
+}
+
 /** Where each path the evaluation read outside the missions root is observed: its parent, shallow, filtered to its
- *  name (for a missing parent, the nearest existing ancestor, filtered to the next segment toward it). Every watched
- *  directory, the missions root included, is also anchored at each ancestor up to `top`, filtered to the next segment,
- *  so a replaced or re-pointed directory on the way is seen and its watch rebound. */
-function shallowWatches(missionsRoot: string, top: string, read: Iterable<string>): Shallow {
+ *  name (for a missing parent, the nearest existing ancestor, filtered to the next segment toward it). A directory
+ *  whose real location leaves the project is never watched: the nearest ancestor that stays inside is, filtered to
+ *  the next segment. Every watched directory, the missions root included, is also anchored at each ancestor up to
+ *  `top`, filtered to the next segment, so a replaced or re-pointed directory on the way is seen and its watch rebound. */
+function shallowWatches(missionsRoot: string, top: string, project: string, read: Iterable<string>): Shallow {
   const out: Shallow = new Map();
+  const inside = (dir: string) => { const real = canonical(dir); return real !== null && within(real, project); };
+  // The project may be reached by an alias: real-location paths are bounded by the real project's parent.
+  const realTop = path.dirname(project);
+  const topOf = (p: string) => (within(p, top) ? top : within(p, realTop) ? realTop : null);
   for (const file of read) {
     const target = path.resolve(file);
     if (within(target, missionsRoot)) continue;
     let child = target, dir = path.dirname(target);
     while (dir !== child && !proofFs.exists(dir)) { child = dir; dir = path.dirname(dir); }
-    if (dir === child) continue;
+    const bound = topOf(dir);
+    if (bound === null) continue;
+    while (dir !== child && dir !== bound && !inside(dir)) { child = dir; dir = path.dirname(dir); }
+    if (dir === child || dir === bound) continue;
     add(out, dir, path.basename(child));
   }
   for (const watched of [...out.keys(), missionsRoot]) {
-    for (let p = watched; within(p, top) && p !== top; p = path.dirname(p)) add(out, path.dirname(p), path.basename(p));
+    const bound = topOf(watched);
+    if (bound === null) continue;
+    for (let p = watched; p !== bound && within(p, bound); p = path.dirname(p)) {
+      const parent = path.dirname(p);
+      if (parent === bound || inside(parent)) add(out, parent, path.basename(p));
+    }
   }
   return out;
 }
@@ -57,6 +79,8 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
   let projectRoot = path.dirname(missionsRoot);
   try { projectRoot = resolveProjectRoot(missionsRoot) ?? projectRoot; } catch { /* Legacy roots keep the missions root's parent. */ }
   const top = path.dirname(path.resolve(projectRoot));
+  // The authority boundary in real terms: what the readers' containment check accepts.
+  const project = canonical(projectRoot) ?? path.resolve(projectRoot);
   // ponytail: bounded local workspaces use a full semantic read after a file burst.
   // Keep this workload measured; subtree indexing is warranted only when that bound is exceeded.
   const basis = () => {
@@ -69,8 +93,13 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
       listDir: (p) => proofFs.listDir(note(p)),
       isDirectory: (p) => proofFs.isDirectory(note(p)),
     };
-    const hash = createHash("sha256").update(JSON.stringify(readProjectReadiness(missionsRoot, createProofPolicyRead(), undefined, io).missions.map(m => [m.name, m.revision]))).digest("hex");
-    return { hash, watches: shallowWatches(missionsRoot, top, read) };
+    const hash = createHash("sha256").update(JSON.stringify(readProjectReadiness(missionsRoot, createProofPolicyRead(), undefined, io, note).missions.map(m => [m.name, m.revision]))).digest("hex");
+    // A file read through a link inside the project depends on its real location too: observe both.
+    for (const file of [...read]) {
+      const real = canonical(file);
+      if (real !== null && real !== path.resolve(file) && within(real, project)) read.add(real);
+    }
+    return { hash, watches: shallowWatches(missionsRoot, top, project, read) };
   };
   // failed latches for this instance: a watcher that errored is not trusted to be replaced by a later read.
   let closed = false, failed = false, covered = false, readable = false;
@@ -139,12 +168,15 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
       timer = undefined;
       if (closed) return;
       try {
+        const before = observed();
         const next = evaluate();
         readable = true;
-        if (next === revision) return;
+        // Deduplicate on what clients see: the revision and whether the sources are observed. Losing or regaining
+        // coverage is news even when the proof result itself did not change.
+        if (next === revision && observed() === before) return;
         revision = next;
         invalidate();
-        notify(revision);
+        notify(observed() ? revision : "unavailable");
       } catch (e) {
         // Never report the sources as watched after a failed read or a watch that could not be attached.
         readable = false;

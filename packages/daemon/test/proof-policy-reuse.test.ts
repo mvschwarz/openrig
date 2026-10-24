@@ -316,6 +316,21 @@ describe("QA bounded adverse coverage at 8b236e06", () => {
       expect(opened() === 2 || t.watch.observation().state === "unavailable").toBe(true);
     } finally { t.watch.close(); }
   });
+  it("watches the real location of evidence reached through a link inside the project", () => {
+    const t = adverseFixture();
+    try {
+      // The evidence directory becomes a link to another directory inside the project, with the same accepted bytes.
+      const real = path.join(t.f.root, "real"), live = path.join(real, "live");
+      t.f.write(path.join(live, "report.md"), "accepted observation");
+      fs.renameSync(t.outside, `${t.outside}.old`); fs.symlinkSync(live, t.outside);
+      t.handles.get(path.dirname(t.outside))!.event("rename", path.basename(t.outside)); vi.advanceTimersByTime(50);
+      expect(readSliceReadiness(t.dir).state).toBe("ready");
+      // Replacing the real directory is seen at its own parent, or the sources are reported unobserved.
+      const watched = vi.mocked(fs.watch).mock.calls.map(([root]) => root);
+      expect(watched.includes(real) || t.watch.observation().state === "unavailable").toBe(true);
+      expect(watched.some((root) => !String(root).startsWith(t.f.root) && root !== path.dirname(t.f.root))).toBe(false);
+    } finally { t.watch.close(); }
+  });
   it("QA observes replacement of an external evidence parent or honestly reports unavailable", () => {
     const t = adverseFixture();
     try {
