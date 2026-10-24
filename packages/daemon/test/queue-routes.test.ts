@@ -895,6 +895,9 @@ describe("queue routes", () => {
       const err = await res.json() as { error: string; message: string };
       expect(err.error).toBe("actor_required");
       expect(err.message).toMatch(/X-OpenRig-Session/);
+      // The header is set by the CLI from the seat's environment; it isn't called authenticated.
+      expect(err.message).toContain("no transport identity (no X-OpenRig-Session header, which the CLI sets from the seat's OPENRIG_SESSION_NAME)");
+      expect(err.message).not.toMatch(/authenticated/i);
     });
   });
 

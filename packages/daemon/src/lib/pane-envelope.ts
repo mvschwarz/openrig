@@ -21,10 +21,11 @@
 
 const SENDER_FALLBACK = "<unknown sender>";
 
-/** OpenRig's own sender: the daemon (`daemon@kernel`, the scheduler's existing name) or a subsystem (`…@system`).
- *  No seat answers at these addresses, so their envelope doesn't offer a reply. */
+/** OpenRig's own sender: the daemon (`daemon@kernel`, the scheduler's existing name) or a subsystem actor (`system:health`).
+ *  No seat answers at these addresses, so their envelope doesn't offer a reply. (`…@system` isn't matched: a rig may be named
+ *  `system`, and its seats are real senders.) */
 export const OPENRIG_SENDER = "daemon@kernel";
-export const isOpenRigSender = (sender: string): boolean => sender === OPENRIG_SENDER || sender.endsWith("@system");
+export const isOpenRigSender = (sender: string): boolean => sender === OPENRIG_SENDER || sender.startsWith("system:");
 
 /** Send/broadcast header envelope metadata (ruling 03c35295). The ENVELOPE carries the machine truth;
  *  the rendered header is a PROJECTION of it. Both twins (this + cli wrapSendBody) share this shape. */
@@ -122,7 +123,7 @@ export function wrapPaneEnvelope(
   const reply = senderLabel.endsWith("@external")
     ? `↩ Reply if needed: rig queue create --destination ${senderLabel} --summary "<one line>" --body "..." --verify`
     : isOpenRigSender(senderLabel)
-      ? "↩ Sent by OpenRig itself; there's no seat to reply to. Act on the row it names."
+      ? "↩ Sent by OpenRig itself, not by a seat. Act on the row it names."
       : `↩ Reply: rig send ${senderLabel} "..."`;
   return [...header, "---", body, "---", reply].join("\n");
 }
