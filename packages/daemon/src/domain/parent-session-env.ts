@@ -1,4 +1,4 @@
-// Identity of the Claude Code session or Herdr pane that started the daemon.
+// Identity of the Claude Code session, Herdr pane or Rex block that started the daemon.
 // The daemon starts the tmux server, so anything left here reaches every seat.
 // Named variables, never prefixes: CLAUDE_CODE_* also carries user configuration
 // (for example CLAUDE_CODE_USE_BEDROCK) that seats must keep.
@@ -17,6 +17,8 @@ export const PARENT_SESSION_ENV_KEYS = [
   "HERDR_TAB_ID",
   "HERDR_WORKSPACE_ID",
   "HERDR_STARTUP_CWD",
+  "REX_SESSION",
+  "REX_BLOCK",
 ] as const;
 
 /** The parent-session names present in `env`. CLAUDE_EFFORT is user

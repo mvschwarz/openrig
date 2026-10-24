@@ -251,7 +251,7 @@ describe("TerminalService — view resolution + one-shape result", () => {
     const { deps } = makeDeps();
     const svc = new TerminalService(deps);
     const all = await svc.status();
-    expect(all.providers.map((p) => p.name).sort()).toEqual(["cmux", "herdr"]);
+    expect(all.providers.map((p) => p.name).sort()).toEqual(["cmux", "herdr", "rex"]);
     const one = await svc.status("tmate");
     expect(one.providers[0]?.status.available).toBe(false);
   });
@@ -649,6 +649,21 @@ describe("TerminalService — an omitted provider falls back from herdr to cmux 
     expect(herdr.lastView).not.toBeNull();
     expect(cmux.lastView).toBeNull();
     expect(r.notes?.join("\n") ?? "").not.toContain("Herdr isn't available here");
+  });
+
+  it("never picks rex for an omitted provider, even when it is the only live one", async () => {
+    const { deps, herdr, cmux } = makeDeps();
+    down(herdr, "unavailable");
+    down(cmux, "unavailable");
+    const rex = new RecordingProvider("rex");
+    const resolve = deps.resolveProvider;
+    deps.resolveProvider = (name) => (name === "rex" ? rex : resolve(name));
+    const service = new TerminalService(deps);
+    expect(await service.previewView({ view: "acme-build" })).toMatchObject({ provider: "herdr" });
+    expect((await service.openView({ view: "acme-build" })).provider).toBe("herdr");
+    expect(rex.lastView).toBeNull();
+    expect((await service.openView({ view: "acme-build", provider: "rex" })).provider).toBe("rex");
+    expect(rex.lastView).not.toBeNull();
   });
 
   it("prefers a live herdr when both are there", async () => {
