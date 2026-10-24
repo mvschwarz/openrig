@@ -616,7 +616,7 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     const record = (outcome: "refused" | "sent", kind = "selection_prompt") => log.record({ jobId, evaluatedAt: new Date(last = Math.max(Date.now(), last + 1)).toISOString(), outcome,
       deliveryTargetSession: seat, deliveryStatus: outcome === "sent" ? "ok" : "failed",
       evaluationNotes: outcome === "refused" ? { deliveryReason: `Refused: '${seat}' is at an interactive prompt (${kind}). No text was sent.` } : null });
-    outcomes.forEach(record);
+    outcomes.forEach(outcome => record(outcome));
     return { jobId, record };
   }
 
