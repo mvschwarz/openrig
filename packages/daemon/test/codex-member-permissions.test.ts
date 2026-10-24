@@ -11,11 +11,16 @@ import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 import { SeatStatusService } from "../src/domain/seat-status-service.js";
 import { NativePermissionStore } from "../src/domain/native-permission-store.js";
 import { RigSpecExporter } from "../src/domain/rigspec-exporter.js";
-import { RigSpecCodec } from "../src/domain/rigspec-codec.js";
-import { RigSpecSchema } from "../src/domain/rigspec-schema.js";
+import { RigSpecCodec, LegacyRigSpecCodec } from "../src/domain/rigspec-codec.js";
+import { RigSpecSchema, LegacyRigSpecSchema } from "../src/domain/rigspec-schema.js";
+import fs from "node:fs";
+import os from "node:os";
+import nodePath from "node:path";
+import { execFileSync } from "node:child_process";
 import { codexEnvelopeArgs } from "../src/domain/codex-rebuild-permissions.js";
-import { codexMemberEnvelope, readCodexMemberPermissions, validateCodexMemberPermissions,
+import { codexMemberEnvelope, readCodexMemberPermissions, readProfileFingerprint, validateCodexMemberPermissions,
   type CodexMemberPermissions, type CodexProfileObservation } from "../src/domain/codex-member-permissions.js";
+import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { seatRoutes } from "../src/routes/seat.js";
 import { createTestApp } from "./helpers/test-app.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
@@ -269,6 +274,71 @@ describe("both writers: the spec at creation, the setter afterwards, every launc
     const f = fixture();
     expect(() => f.rigRepo.addNode(f.rig.id, "dev.new", { runtime: "claude-code", codexPermissions: lease })).toThrow(/codex seat/);
     expect(f.db.prepare("SELECT id FROM nodes WHERE logical_id = 'dev.new'").get()).toBeUndefined();
+  });
+});
+
+describe("legacy flat specs carry the envelope too", () => {
+  it("validates, normalizes and round-trips a no-pod Codex seat's envelope", () => {
+    const f = fixture();
+    const raw = { name: "flat", version: "1", nodes: [{ id: "impl", runtime: "codex", cwd: "/same/project", codex_permissions: reader }] };
+    expect(LegacyRigSpecSchema.validate(raw).errors).toEqual([]);
+    expect(LegacyRigSpecSchema.normalize(raw).nodes[0]!.codexPermissions).toEqual(reader);
+    const wrong = { ...raw, nodes: [{ ...raw.nodes[0], runtime: "claude-code" }] };
+    expect(LegacyRigSpecSchema.validate(wrong).errors.join(" ")).toContain("codex_permissions");
+    f.db.prepare("UPDATE nodes SET codex_permissions_json = ? WHERE id = ?").run(JSON.stringify(lease), f.a.id);
+    const exported = new RigSpecExporter({ rigRepo: f.rigRepo, sessionRegistry: new SessionRegistry(f.db) }).exportRig(f.a.rigId);
+    const parsed = LegacyRigSpecCodec.parse(LegacyRigSpecCodec.serialize(exported as import("../src/domain/types.js").LegacyRigSpec));
+    expect(LegacyRigSpecSchema.normalize(parsed).nodes.find(n => n.codexPermissions)!.codexPermissions).toEqual(lease);
+  });
+});
+
+describe("the setter's profile hash is bounded evidence, never a blocker", () => {
+  const dir = () => { const d = fs.mkdtempSync(nodePath.join(os.tmpdir(), "codex-profile-")); return d; };
+
+  it("hashes a regular file and reports a missing one", async () => {
+    const d = dir(); const file = nodePath.join(d, "lease.config.toml"); fs.writeFileSync(file, 'sandbox_mode = "read-only"\n');
+    expect(await readProfileFingerprint(file)).toMatchObject({ state: "present", sha256: expect.stringMatching(/^[0-9a-f]{64}$/) });
+    expect(await readProfileFingerprint(nodePath.join(d, "missing.config.toml"))).toEqual({ state: "absent" });
+    expect(await readProfileFingerprint(file, 4)).toMatchObject({ state: "unreadable", reason: expect.stringContaining("larger") });
+  });
+
+  it.skipIf(process.platform === "win32")("doesn't wait on a FIFO or read a directory", async () => {
+    const d = dir(); const fifo = nodePath.join(d, "fifo.config.toml"); execFileSync("mkfifo", [fifo]);
+    const started = Date.now();
+    expect(await readProfileFingerprint(fifo)).toEqual({ state: "unreadable", reason: "not a regular file" });
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(await readProfileFingerprint(d)).toEqual({ state: "unreadable", reason: "not a regular file" });
+  }, 10_000);
+
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)("reports a read error as a reason", async () => {
+    const d = dir(); const file = nodePath.join(d, "locked.config.toml"); fs.writeFileSync(file, "x = 1\n"); fs.chmodSync(file, 0o000);
+    try { expect(await readProfileFingerprint(file)).toMatchObject({ state: "unreadable", reason: "EACCES" }); }
+    finally { fs.chmodSync(file, 0o600); }
+  });
+
+  it("keeps a loading profile accepted when its bytes can't be read, and reports a check that couldn't run", async () => {
+    const tmux = {} as TmuxAdapter;
+    const unread = new CodexRuntimeAdapter({ tmux, codexHome: "/codex-home", profileFingerprint: async () => ({ state: "unreadable", reason: "not a regular file" }),
+      verifyProfilePreflight: async profile => ({ ok: true, profile }) });
+    expect(await unread.observeProfile("lease", "/same")).toMatchObject({ file: "unreadable", load: "ok", detail: expect.stringContaining("not a regular file") });
+    const broken = new CodexRuntimeAdapter({ tmux, codexHome: "/codex-home", profileFingerprint: async () => { throw new Error("EIO"); },
+      verifyProfilePreflight: async () => { throw new Error("spawn failed"); } });
+    expect(await broken.observeProfile("lease", "/same")).toMatchObject({ file: "unreadable", load: "not_run" });
+  });
+
+  it("answers the route instead of failing when the check itself throws", async () => {
+    const f = fixture(async () => { throw new Error("EISDIR"); }), app = new Hono();
+    app.use("*", async (c, next) => {
+      for (const [key, value] of Object.entries({ rigRepo: f.rigRepo, eventBus: f.eventBus, sessionRegistry: new SessionRegistry(f.db), tmuxAdapter: {},
+        runtimeAdapters: { codex: { runtime: "codex", observeProfile: async () => { throw new Error("EISDIR"); } } } })) c.set(key as never, value as never);
+      await next();
+    });
+    app.route("/api/seat", seatRoutes);
+    expect(await f.service.setPermissions({ seatRef: "dev-a@codex-team", codexProfile: "lease", actor: "operator@codex-team", reason: "Check" }))
+      .toMatchObject({ ok: true, observation: { load: "not_run", detail: expect.stringContaining("EISDIR") } });
+    const response = await app.request("/api/seat/set-permissions/dev-a%40codex-team", { method: "POST",
+      headers: { "content-type": "application/json", "x-openrig-session": "actual@codex-team" }, body: JSON.stringify({ codexProfile: "lease", reason: "Check" }) });
+    expect(response.status).toBe(200);
   });
 });
 

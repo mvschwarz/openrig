@@ -1,4 +1,7 @@
 import type Database from "better-sqlite3";
+import { createHash } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
+import { open } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import type { CodexPermissionEnvelope } from "./codex-rebuild-permissions.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
@@ -84,7 +87,7 @@ export interface CodexProfileObservation {
    *  daemon sets none, so a pane keeps its own and this check can't speak for it. */
   vantage: "configured_codex_home" | "unestablished";
   home: string | null;
-  file: "present" | "absent" | "unverified";
+  file: "present" | "absent" | "unreadable" | "unverified";
   /** The file's bytes when read: observation for a later "changed" report, never a launch pin. */
   sha256?: string;
   load: "ok" | "failed" | "not_run";
@@ -94,4 +97,39 @@ export interface CodexProfileObservation {
 
 export interface CodexProfileObserver {
   observeProfile(profile: string, cwd: string): Promise<CodexProfileObservation>;
+}
+
+export type ProfileFingerprint = { state: "present"; sha256: string } | { state: "absent" } | { state: "unreadable"; reason: string };
+
+/** The largest profile the setter hashes; a profile is a small TOML file. */
+export const PROFILE_FINGERPRINT_MAX_BYTES = 1024 * 1024;
+
+/** The profile file's bytes, for the "changed since recorded" observation only. Asynchronous and bounded: it opens
+ *  without blocking (a FIFO can't hold the open), hashes only a regular file of bounded size, and turns every other
+ *  outcome into a reason instead of an error. The native loader check, not this, decides whether the profile loads. */
+export async function readProfileFingerprint(path: string, maxBytes = PROFILE_FINGERPRINT_MAX_BYTES): Promise<ProfileFingerprint> {
+  let handle: Awaited<ReturnType<typeof open>>;
+  try { handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK); }
+  catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" ? { state: "absent" } : { state: "unreadable", reason: code ?? (error as Error).message };
+  }
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) return { state: "unreadable", reason: "not a regular file" };
+    if (stat.size > maxBytes) return { state: "unreadable", reason: `larger than ${maxBytes} bytes` };
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let length = 0;
+    for (;;) {
+      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+      if (length > maxBytes) return { state: "unreadable", reason: `larger than ${maxBytes} bytes` };
+    }
+    return { state: "present", sha256: createHash("sha256").update(buffer.subarray(0, length)).digest("hex") };
+  } catch (error) {
+    return { state: "unreadable", reason: (error as NodeJS.ErrnoException).code ?? (error as Error).message };
+  } finally {
+    await handle.close().catch(() => {});
+  }
 }

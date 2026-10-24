@@ -1,5 +1,5 @@
 import { codexEnvelopeArgs } from "../domain/codex-rebuild-permissions.js";
-import { codexMemberEnvelope, observeCodexEnvelope, type CodexProfileObservation } from "../domain/codex-member-permissions.js";
+import { codexMemberEnvelope, observeCodexEnvelope, readProfileFingerprint, type CodexProfileObservation, type ProfileFingerprint } from "../domain/codex-member-permissions.js";
 import { operationalLaunchArg } from "./kernel-authority.js";
 import nodePath from "node:path";
 import fs from "node:fs";
@@ -165,6 +165,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   // so no real codex subprocess runs. Contract not weakened — production uses
   // the real probe by default.
   private verifyProfilePreflight: (profile: string, cwd: string, home?: string) => Promise<CodexProfileProbeResult>;
+  private profileFingerprint: (path: string) => Promise<ProfileFingerprint>;
   // #69: whether the installed Codex supports --no-daemon. Startup wires the real probe;
   // absent (unit tests, other embedders) keeps the existing invocation unchanged.
   private detectDaemonSupport?: CodexDaemonSupportDetector;
@@ -217,6 +218,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     /** Match the daemon's prerequisite probe even if the pane's login shell rewrites PATH. */
     launchPath?: string;
     verifyProfilePreflight?: (profile: string, cwd?: string, home?: string) => Promise<CodexProfileProbeResult>;
+    /** The setter's optional profile hash; defaults to a bounded, non-blocking read. */
+    profileFingerprint?: (path: string) => Promise<ProfileFingerprint>;
     detectDaemonSupport?: CodexDaemonSupportDetector;
     readNetworkDefault?: CodexNetworkDefaultReader;
     resolveGitAddDirs?: CodexGitAddDirResolver;
@@ -248,6 +251,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.fs = deps.fsOps;
     this.codexHome = deps.codexHome;
     this.seatHome = deps.seatHome;
+    this.profileFingerprint = deps.profileFingerprint ?? readProfileFingerprint;
     this.launchPath = deps.launchPath;
     this.detectDaemonSupport = deps.detectDaemonSupport;
     this.readNetworkDefault = deps.readNetworkDefault;
@@ -982,12 +986,17 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         detail: "The daemon sets no CODEX_HOME, so this seat's pane keeps its own; OpenRig didn't check the profile there. Each launch still runs the native profile check." };
     }
     const path = nodePath.join(this.codexHome, `${profile}.config.toml`);
-    const present = this.fs.exists(path);
-    const base = { vantage: "configured_codex_home" as const, home: this.codexHome, file: present ? "present" as const : "absent" as const,
-      ...(present ? { sha256: createHash("sha256").update(this.fs.readFile(path)).digest("hex") } : {}), observedAt };
-    const probe = await this.verifyProfilePreflight(profile, cwd);
+    // The hash is optional evidence, read without blocking; the native loader check below decides.
+    const print = await this.profileFingerprint(path).catch((error: unknown): ProfileFingerprint => ({ state: "unreadable", reason: (error as Error).message }));
+    const base = { vantage: "configured_codex_home" as const, home: this.codexHome, file: print.state,
+      ...(print.state === "present" ? { sha256: print.sha256 } : {}), observedAt };
+    let probe: CodexProfileProbeResult;
+    // Only a confirmed native load failure is refused; a check that couldn't run is reported, not refused.
+    try { probe = await this.verifyProfilePreflight(profile, cwd); }
+    catch (error) { return { ...base, load: "not_run", detail: `The native profile check couldn't run (${(error as Error).message}); each launch runs it again.` }; }
     if (!probe.ok) return { ...base, load: "failed", detail: `${probe.error}${probe.migrationHint ? `\n  Fix: ${probe.migrationHint}` : ""}` };
-    return { ...base, load: "ok", detail: present ? `${path} loads.` : `${path} is absent; Codex loads it as an empty layer, so base config applies.` };
+    const unread = print.state === "unreadable" ? ` Its bytes weren't read for a hash (${print.reason}).` : "";
+    return { ...base, load: "ok", detail: print.state === "absent" ? `${path} is absent; Codex loads it as an empty layer, so base config applies.` : `${path} loads.${unread}` };
   }
 
   /** Launch flags shared by fresh, fork and resume, decided once per launch. With `running`, the probed and
