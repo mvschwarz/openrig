@@ -72,7 +72,7 @@ it("a recorded hook decline and outside hook state survive restart and upgrade b
   expect(f.read().hooks.state[key]).toEqual({enabled:false});
   expect(f.read().hooks.state["outside:stop:0:0"]).toEqual({trusted_hash:"person-choice"});
 });
-it.each(["hooks/codex.json","hooks/scripts/refocus.cjs"])("modified vendored %s is not automatically installed or trusted", async relative => {
+it.each(["hooks/codex.json","hooks/scripts/refocus.cjs",".codex-plugin/plugin.json"])("modified vendored %s is not automatically installed or trusted", async relative => {
   const f=fixture(); fs.appendFileSync(path.join(f.plugin,relative),"\n ");
   await f.adapter().ensureCodexCorePlugin(); expect(f.read().hooks?.state ?? {}).toEqual({}); expect(f.calls).toEqual([]);
 });
@@ -258,4 +258,14 @@ it("an unshipped vendored file permits the upgrade but leaves content approval u
   expect(fs.readFileSync(path.join(f.cache, "unshipped-file"), "utf8")).toBe("fixture extra");
   expect(fs.readFileSync(f.file, "utf8")).toBe(before);
   expect(fs.existsSync(path.join(f.home, ".openrig-core-hook-trust.json"))).toBe(false);
+});
+
+it("R2 oa fresh nonmatching bundle gains no declaration-only legacy approval", async () => {
+  const f = fixture();
+  fs.writeFileSync(path.join(f.plugin, "unshipped-file"), "fixture extra");
+  expect(await f.adapter().ensureCodexCorePlugin()).toMatchObject({outcome: "installed"});
+  expect(fs.readFileSync(path.join(f.cache, "unshipped-file"), "utf8")).toBe("fixture extra");
+  expect(fs.existsSync(codexLegacyPluginTrustPath(f.file))).toBe(false);
+  expect(fs.existsSync(path.join(f.home, ".openrig-core-hook-trust.json"))).toBe(false);
+  expect(Object.keys(f.read().hooks?.state ?? {})).toHaveLength(0);
 });

@@ -67,7 +67,7 @@ const codexHookTrust = createRequire(import.meta.url)("../../assets/plugins/open
 
 import { listNativeProcesses, observeCodexPaneProcess, observeCodexForkProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type NativeProcessRow } from "../domain/native-process-lineage.js";
 import { recordSeatSkillWrite, seatPluginSkillsLossNote, seatProjectionComplete, seatSkillWriteRefusal } from "../domain/seat-skill-storage.js";
-import { planOwnedCodexContentApproval, recordOwnedCodexApproval } from "../domain/codex-owned-plugin-trust.js";
+import { codexPluginContentHash, planOwnedCodexContentApproval, recordOwnedCodexApproval } from "../domain/codex-owned-plugin-trust.js";
 
 // Shared by all probes of ONE launch, never reset by a delayed screen or an
 // ambiguous transport result. A separately requested launch gets a new attempt.
@@ -392,6 +392,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       catch { return false; }
     });
     if (!matchesShipped(pluginDir)) return report("skipped", "vendored hook files differ from this daemon's shipped plugin; existing choices are left alone");
+    // Installation retains the hook-file predicate; any approval requires the complete shipped tree.
+    const matchesShippedTree = (dir: string) => {
+      try { return codexPluginContentHash(dir, true) === codexPluginContentHash(shipped, true); }
+      catch { return false; }
+    };
 
     const codexHome = nodePath.dirname(this.resolveCodexConfigPath(home));
     const readLayers = (): CodexConfigLayerRead[] => codexReadableConfigLayers(codexHome, this.codexSystemConfigDir).map((layer) => {
@@ -466,7 +471,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // choices are never rewritten. No cache files or native baseline files are rewritten here.
     let freshGrants = 0;
     const grantLayers = readLayers();
-    if (firstInstall && codexCorePluginEnablement(grantLayers).decision === "allow" && matchesShipped(cachedDir)) {
+    if (firstInstall && codexCorePluginEnablement(grantLayers).decision === "allow" && matchesShippedTree(cachedDir)) {
       let content = this.fs.readFile(this.resolveCodexConfigPath(home));
       const hookManifest = JSON.parse(fs.readFileSync(nodePath.join(shipped, "hooks/codex.json"), "utf8"));
       for (const [event, groups] of Object.entries(hookManifest.hooks) as Array<[string, Array<{ matcher?: string; hooks: Array<{ command: string; timeout: number }> }>]> ) {
