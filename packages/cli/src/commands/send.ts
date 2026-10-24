@@ -502,13 +502,25 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       // Send/broadcast header (ruling 03c35295): a directed `rig send` is a DM — stamp it at send-time
       // (Sent: MM-DD HH:MMZ) so transcripts are timestamped; the To line stays the single recipient.
       const outboundText = raw ? payload : wrapSendBody(senderSession, session, payload, { stampISO: new Date().toISOString() });
+      // Slice 16: a seat that is switching runtime takes no input until the switch ends. Say why and for how long before
+      // waiting, and let this request wait that long. (A daemon without the route gives no notice.)
+      let switching: { id: string; from: string; to: string; committed: boolean; deadlineAt: string } | undefined;
+      try {
+        const probe = await client.get<{ runtimeSwitch?: typeof switching | null }>(`/api/seat/runtime-switch/${encodeURIComponent(session)}`, { timeoutMs: 2_000 });
+        if (probe.status === 200 && probe.data.runtimeSwitch && !probe.data.runtimeSwitch.committed) switching = probe.data.runtimeSwitch;
+      } catch { /* no notice */ }
+      if (switching) {
+        console.error(`Note: ${session} is switching runtime (${switching.from} -> ${switching.to}, switch ${switching.id}). This send waits for it, until about ${switching.deadlineAt}. If the seat moves to ${switching.to}, nothing is typed and you'll need to send again to reach its new occupant.`);
+      }
+      const requestOptions = transportRequestOptions(waitForIdleMs);
+      const switchWaitMs = switching ? Math.max(0, Date.parse(switching.deadlineAt) - Date.now()) + 30_000 : 0;
       let res: { status: number; data: Record<string, unknown> };
       try {
         res = await client.post<Record<string, unknown>>("/api/transport/send", {
           session, text: outboundText, verify: opts.verify, force: opts.force, waitForIdleMs,
           dangerouslyInteract: opts.dangerouslyInteract, reason: opts.reason, actorSession: senderSession ?? null,
           ...(opts.urgent ? { urgent: true } : {}),
-        }, transportRequestOptions(waitForIdleMs));
+        }, switching ? { ...(requestOptions ?? {}), timeoutMs: Math.max(requestOptions?.timeoutMs ?? 5_000, switchWaitMs) } : requestOptions);
       } catch (err) {
         if (err instanceof DaemonConnectionError) {
           // The REAL transport outcome, honestly surfaced (names the
@@ -557,6 +569,9 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       if (res.status >= 400) {
         const error = res.data["error"] as string | undefined;
         console.error(error ?? `Send failed (HTTP ${res.status})`);
+        if (switching && res.data["reason"] === "guard_target_changed" && res.data["sent"] === false) {
+          console.error(`The seat moved to ${switching.to} while this send waited, so nothing was typed. Send it again to reach its new occupant.`);
+        }
         printCompactionNotice(console.error);
         // MH-4 §4 loud-failure hint: the target was 3-part-shaped but its
         // suffix matched no registered host — name the near-miss.

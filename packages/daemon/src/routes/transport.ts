@@ -2,6 +2,8 @@ import { Hono } from "hono";
 import { CAPTURE_INPUT_BOX_DEADLINE_MS, type SessionTransport, type TargetSpec } from "../domain/session-transport.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import { requireSenderIdentity, transportSenderSession } from "./require-sender-identity.js";
+import { OCCUPANT_GENERATION_HEADER, runtimeSwitchCustodyRefusal } from "./runtime-switch-custody.js";
+import type Database from "better-sqlite3";
 import type { OutboxHandler } from "../domain/outbox-handler.js";
 import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
 
@@ -90,6 +92,9 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     // already-nullable audit actor records null (projected "unknown"), and the response carries
     // the sign-it notice below.
     const derivedActor = transportSenderSession(c) ?? null;
+    // Slice 16: a runtime switch's own predecessor or not-yet-committed successor doesn't send as the seat.
+    const switchHeld = runtimeSwitchCustodyRefusal(c.get("db" as never) as Database.Database, derivedActor, c.req.header(OCCUPANT_GENERATION_HEADER));
+    if (switchHeld) return c.json(switchHeld.body, switchHeld.status);
 
     // Check for ambiguity first
     const resolved = await transport.resolveSessions({ session: body.session });
@@ -283,6 +288,9 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     // audit's already-nullable actor records null (projected "unknown"); the response carries the
     // sign-it notice below.
     const derivedActor = transportSenderSession(c) ?? null;
+    // Slice 16: a runtime switch's own predecessor or not-yet-committed successor doesn't send as the seat.
+    const switchHeld = runtimeSwitchCustodyRefusal(c.get("db" as never) as Database.Database, derivedActor, c.req.header(OCCUPANT_GENERATION_HEADER));
+    if (switchHeld) return c.json(switchHeld.body, switchHeld.status);
 
     // P21 I4 (orch ruling from specimen 5 — the false "From: pm-lead" the incident acted upon): the
     // From: line rendered into every recipient's terminal MUST DERIVE from the transport identity, never

@@ -19,6 +19,9 @@ export interface ClaudeLaunchTarget {
   pane?: string | null;
   /** A successor may have a reserved generation before its tenure is committed. */
   generation?: string;
+  /** Slice 16: a Claude successor staged beside the seat's current occupant on another runtime (from #1214 by
+   *  Aschenbath). The seat still records that occupant until the switch commits; it must still be bound exactly. */
+  runtimeSwitch?: { fromRuntime: string; session: string; pane: string; generation: string };
 }
 
 interface TargetSnapshot {
@@ -106,13 +109,13 @@ export class ClaudeManagedLaunch {
     return [...keys].filter(key => validateSeatEnvName(key) === null && !MANAGED_LAUNCH_KEYS.includes(key));
   }
 
-  private target(nodeId: string): TargetSnapshot {
+  private target(nodeId: string, runtime = "claude-code"): TargetSnapshot {
     const row = this.db.prepare(`SELECT n.id AS nodeId, n.runtime, n.cwd,
       b.id AS bindingId, b.tmux_session AS session, b.tmux_pane AS pane,
       (SELECT generation_uuid FROM occupant_tenures WHERE node_id=n.id
        ORDER BY generation_ordinal DESC LIMIT 1) AS generation
       FROM nodes n LEFT JOIN bindings b ON b.node_id=n.id WHERE n.id=?`).get(nodeId) as TargetSnapshot | undefined;
-    if (!row || row.runtime !== "claude-code" || !row.cwd || !path.isAbsolute(row.cwd)) {
+    if (!row || row.runtime !== runtime || !row.cwd || !path.isAbsolute(row.cwd)) {
       throw new Error("Claude managed launch context is unresolved: an absolute seat cwd and Claude node are required.");
     }
     return row;
@@ -171,15 +174,21 @@ export class ClaudeManagedLaunch {
   async prepare(request: ClaudeLaunchTarget, mode: string): Promise<{
     assertCurrent: () => void; command: (args: readonly string[], launchEnv?: Readonly<Record<string, string>>) => string; configDir: string; executable: string; executableIsScript: boolean;
   }> {
-    const target = Object.freeze({ ...request });
-    const before = this.target(target.nodeId);
+    const target = Object.freeze({ ...request, ...(request.runtimeSwitch ? { runtimeSwitch: Object.freeze({ ...request.runtimeSwitch }) } : {}) });
+    const switching = target.runtimeSwitch;
+    const before = this.target(target.nodeId, switching?.fromRuntime);
     const cwd = before.cwd!;
     if (target.session !== undefined && (!before.pane || !before.generation)) {
       throw new Error("Claude managed launch context is unresolved: a bound pane and current occupant are required.");
     }
-    if ((target.cwd !== undefined && target.cwd !== cwd)
-      || (target.session !== undefined && target.session !== before.session)
-      || (target.pane != null && target.pane !== before.pane)) {
+    // A staged switch successor: the seat's current occupant is still bound exactly, and the successor is elsewhere.
+    const staged = !!switching && switching.fromRuntime !== "claude-code" && switching.session === before.session
+      && switching.pane === before.pane && switching.generation === before.generation
+      && !!target.session && target.session !== before.session && !!target.pane && target.pane !== before.pane
+      && !!target.generation && target.generation !== before.generation;
+    if ((target.cwd !== undefined && target.cwd !== cwd) || (switching && !staged)
+      || (!staged && target.session !== undefined && target.session !== before.session)
+      || (!staged && target.pane != null && target.pane !== before.pane)) {
       throw new Error("Claude managed launch target disagrees with the current binding; no input or selection changed.");
     }
     const context = this.context(cwd);
@@ -189,7 +198,7 @@ export class ClaudeManagedLaunch {
       && !MANAGED_LAUNCH_KEYS.includes(key));
     if (inherited.some(key => !/^[A-Z_][A-Z0-9_]*$/.test(key))) throw new Error("Invalid managed environment key.");
     const assertCurrent = () => {
-      if (JSON.stringify(this.target(target.nodeId)) !== JSON.stringify(before)
+      if (JSON.stringify(this.target(target.nodeId, switching?.fromRuntime)) !== JSON.stringify(before)
         || JSON.stringify(this.context(cwd)) !== JSON.stringify(context)
         || JSON.stringify(Object.keys(this.sessionEnv).filter(key => this.sessionEnv[key] !== undefined
           && !["PATH", "HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"].includes(key))) !== JSON.stringify(inherited)) {

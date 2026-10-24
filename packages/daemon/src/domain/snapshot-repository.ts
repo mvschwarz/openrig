@@ -53,12 +53,13 @@ export class SnapshotRepository {
    * structural metadata `RestoreOrchestrator.restore`'s pre-validation requires.
    *
    * OPR.0.3.4.9 Option Y: prefers the most-recent of the crash-insurance tier
-   * {auto-pre-down, auto-periodic} -- the freshest of the two wins. A newer
+   * {auto-pre-down, auto-periodic, runtime-switch} -- the freshest wins. A newer
    * auto-periodic beats a stale auto-pre-down (the crash fix); a genuinely-
    * fresher auto-pre-down still wins (graceful-cycle preserved). Manual,
-   * pre_restore, and auto-rehydrate remain below the tier (unchanged).
+   * pre_restore, and auto-rehydrate remain below the tier (unchanged). Slice 16: a committed runtime switch
+   * captures `runtime-switch` in the tier, so an older automatic snapshot can't restore the seat's previous runtime.
    *
-   * The SQL query orders by `(kind IN ('auto-pre-down','auto-periodic')) DESC,
+   * The SQL query orders by `(kind IN ('auto-pre-down','auto-periodic','runtime-switch')) DESC,
    * created_at DESC, rowid DESC`. The in-memory loop validates each candidate and
    * skips snapshots with corrupted JSON or missing topology metadata, returning
    * the first usable row. Returns null when no usable snapshot exists.
@@ -74,7 +75,7 @@ export class SnapshotRepository {
     // between the ranking and its read is skipped like an unusable one.
     const ids = this.db
       .prepare(
-        "SELECT id FROM snapshots WHERE rig_id = ? ORDER BY (kind IN ('auto-pre-down', 'auto-periodic')) DESC, created_at DESC, rowid DESC"
+        "SELECT id FROM snapshots WHERE rig_id = ? ORDER BY (kind IN ('auto-pre-down', 'auto-periodic', 'runtime-switch')) DESC, created_at DESC, rowid DESC"
       )
       .all(rigId) as Array<{ id: string }>;
 
@@ -138,7 +139,7 @@ export class SnapshotRepository {
         mode,
         rationale: mode === "explicit"
           ? "operator selected this exact restore-usable snapshot"
-          : "automatic crash-insurance ranking prefers auto-pre-down/auto-periodic, then newest usable",
+          : "automatic crash-insurance ranking prefers auto-pre-down/auto-periodic/runtime-switch, then newest usable",
         newerUsableAlternative: newer ? summarizeSnapshot(newer, nowMs) : null,
       },
     };
