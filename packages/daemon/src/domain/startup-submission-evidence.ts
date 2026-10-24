@@ -70,6 +70,13 @@ export function inspectStartupStagedText(pane: string | null, expected: string, 
 // newlines in the pasted text (8 of 8 pastes in retained native runs). Matched on the normalized body.
 export const COLLAPSED_PASTE = /^\[Pastedtext#\d+\+(\d+)lines\]$/;
 
+export const STARTUP_UNCONFIRMED_REASON = {
+  staged: "the prompt still looked staged in the input box",
+  unobservable: "the input box could not be observed",
+  unclear: "the input box did not clearly show the prompt as submitted",
+  retryRefused: "the guarded Enter retry did not go through",
+} as const;
+
 /** Whether the composer holds only Claude's collapsed label for a paste with the expected text's newline count. */
 export function startupOwnCollapsedPaste(pane: string | null, expected: string, runtime: string | null = null): boolean {
   const { body } = composerRegion(pane, runtime);

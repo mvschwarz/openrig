@@ -18,7 +18,7 @@ import { AppliedLaunchObservationStore } from "./applied-launch-observation-stor
 import { NativePermissionStore } from "./native-permission-store.js";
 import { RigRepository } from "./rig-repository.js";
 import { SessionTransport, inspectStartupStagedText } from "./session-transport.js";
-import { claudeInputBoxDrawn, startupNoInputLine, startupOwnCollapsedPaste, startupSubmissionEvidence, type StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
+import { claudeInputBoxDrawn, startupNoInputLine, startupOwnCollapsedPaste, startupSubmissionEvidence, STARTUP_UNCONFIRMED_REASON, type StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 import { resolveReadinessTimeoutMs } from "./readiness-timeout.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
@@ -42,10 +42,10 @@ const STARTUP_SUBMIT_RETRIES = 2;
 
 // Why a startup prompt's submission could not be confirmed, as told to the operator when the
 // proof line is held back.
-const UNCONFIRMED_STAGED = "the prompt still looked staged in the input box";
-const UNCONFIRMED_UNOBSERVABLE = "the input box could not be observed";
-const UNCONFIRMED_UNCLEAR = "the input box did not clearly show the prompt as submitted";
-const UNCONFIRMED_RETRY_REFUSED = "the guarded Enter retry did not go through";
+const UNCONFIRMED_STAGED = STARTUP_UNCONFIRMED_REASON.staged;
+const UNCONFIRMED_UNOBSERVABLE = STARTUP_UNCONFIRMED_REASON.unobservable;
+const UNCONFIRMED_UNCLEAR = STARTUP_UNCONFIRMED_REASON.unclear;
+const UNCONFIRMED_RETRY_REFUSED = STARTUP_UNCONFIRMED_REASON.retryRefused;
 
 /**
  * The proof line is held back on purpose when the startup prompt isn't confirmed submitted. Say that

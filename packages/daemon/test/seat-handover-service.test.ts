@@ -1348,6 +1348,7 @@ describe("SeatHandoverService", () => {
 
   it("carries the persisted primary model and Advisor through handover to the successor", async () => {
     seedSeat({ runtime: "claude-code", model: "claude-sonnet-5-5", advisor: "opus" });
+    capturePaneScreen.mockResolvedValue("Claude Code v2.1.303\n❯ \n────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)");
     launchHarness.mockResolvedValue({ ok: true, resumeToken: "claude-successor", resumeType: "claude_id" });
     const claudeService = new SeatHandoverService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus,
       tmuxAdapter: tmux(), runtimeAdapters: { "claude-code": { runtime: "claude-code", launchHarness, checkReady } as unknown as RuntimeAdapter },
@@ -1376,6 +1377,7 @@ describe("SeatHandoverService", () => {
 
   it("OPR.0.7.0.9 (K2): a Claude seat's launch additions reach its fresh handover successor's launch, and the new conversation's start is recorded", async () => {
     const { rig } = seedSeat({ runtime: "claude-code" });
+    capturePaneScreen.mockResolvedValue("Claude Code v2.1.303\n❯ \n────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)");
     const src = fs.mkdtempSync(path.join(os.tmpdir(), "handover-additions-"));
     try {
       fs.writeFileSync(path.join(src, "prompt.md"), "Short answers.\n");
