@@ -304,8 +304,16 @@ export class ModelDivergenceMonitor {
 export function modelsMatch(pinned: string, effective: string, runtime?: string | null): boolean {
   // Claude's [1m] selects the context window, not a different model. Other runtimes keep it literal.
   const modelId = (model: string) => runtime === "claude-code" ? model.trim().replace(/\[1m\]$/i, "") : model;
-  return canonicalModelPin(modelId(pinned)) === modelId(effective).trim().toLowerCase();
+  const pin = canonicalModelPin(modelId(pinned)), seen = modelId(effective).trim().toLowerCase();
+  if (pin === seen) return true;
+  // A Claude id answers as its dated snapshot (claude-haiku-4-5 as claude-haiku-4-5-20251001), and a pinned snapshot
+  // can be read back undated. When only one side carries the date, it's the same model; two different dates are not.
+  return runtime === "claude-code" && CLAUDE_SNAPSHOT.test(pin) !== CLAUDE_SNAPSHOT.test(seen)
+    && pin.replace(CLAUDE_SNAPSHOT, "") === seen.replace(CLAUDE_SNAPSHOT, "");
 }
+
+/** The -YYYYMMDD date a Claude snapshot id ends with. */
+const CLAUDE_SNAPSHOT = /-\d{8}$/;
 
 /** The pin as modelsMatch compares it: trimmed, lower-cased, through CANONICAL_MODEL_PINS. */
 export function canonicalModelPin(pinned: string): string {
