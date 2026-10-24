@@ -671,3 +671,70 @@ describe("rig proof add --replace swaps the entry and never writes through links
     expect(errs.join("\n")).toContain("could not remove staging file");
   });
 });
+
+// The lab's self-scout: `rig proof add <absolute slice path>` refused "no parent mission" for a slice in a catalogued project other
+// than the configured one, until OPENRIG_WORK_ROOT named that project. The read side already selects the project from the catalog.
+describe("rig proof add: an absolute slice path in another catalogued project", () => {
+  const keys = ["OPENRIG_HOME", "OPENRIG_WORK_ROOT", "OPENRIG_WORKSPACE_SLICES_ROOT", "OPENRIG_WORKSPACE_CATALOG_PATH"] as const;
+  const saved: Partial<Record<(typeof keys)[number], string>> = {};
+  let root: string;
+  let errs: string[];
+  const slice = (project: string) => path.join(root, project, "missions", "release-x", "slices", "19-signal-layer");
+
+  beforeEach(() => {
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "proof-catalog-")));
+    for (const project of ["alpha", "beta", "gamma"]) {
+      fs.mkdirSync(slice(project), { recursive: true });
+      fs.writeFileSync(path.join(root, project, "missions", "release-x", "README.md"), "---\nid: OPR.X\n---\n# m\n");
+      fs.writeFileSync(path.join(slice(project), "README.md"), "---\nid: OPR.X.19\nstatus: building\n---\n# slice\n");
+    }
+    // gamma is on disk but not catalogued.
+    fs.writeFileSync(path.join(root, "workspace.yaml"), "projects:\n  - id: alpha\n    root: alpha\n  - id: beta\n    root: beta\n");
+    for (const key of keys) saved[key] = process.env[key];
+    process.env.OPENRIG_HOME = path.join(root, "home");
+    delete process.env.OPENRIG_WORK_ROOT;
+    process.env.OPENRIG_WORKSPACE_SLICES_ROOT = path.join(root, "alpha", "missions");
+    process.env.OPENRIG_WORKSPACE_CATALOG_PATH = path.join(root, "workspace.yaml");
+    errs = [];
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => { errs.push(a.join(" ")); });
+    process.exitCode = undefined;
+  });
+
+  afterEach(() => {
+    for (const key of keys) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+    vi.restoreAllMocks();
+    fs.rmSync(root, { recursive: true, force: true });
+    process.exitCode = undefined;
+  });
+
+  async function add(slicePath: string, parentArgs: string[] = []): Promise<void> {
+    const cmd = proofCommand();
+    cmd.exitOverride();
+    await cmd.parseAsync(["node", "proof", ...parentArgs, "add", slicePath, "--artifact-type", "qa", "--verdict", "CLEAR",
+      "--candidate-sha", "abc1234", "--money-evidence", "one line of money", "--body", "evidence body", "--name", "qa-clear.md"]);
+  }
+
+  it("drops into that project's slice without OPENRIG_WORK_ROOT", async () => {
+    await add(slice("beta"));
+    expect(errs.join("\n")).not.toContain("no parent mission");
+    expect(fs.existsSync(path.join(slice("beta"), "proof", "qa-clear.md"))).toBe(true);
+    expect(fs.existsSync(path.join(slice("alpha"), "proof"))).toBe(false);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("keeps an explicit --workspace: a slice outside it is still refused", async () => {
+    await add(slice("beta"), ["--workspace", path.join(root, "alpha")]);
+    expect(errs.join("\n")).toContain("no parent mission");
+    expect(fs.existsSync(path.join(slice("beta"), "proof"))).toBe(false);
+  });
+
+  it("still refuses a slice in no catalogued project", async () => {
+    await add(slice("gamma"));
+    expect(errs.join("\n")).toContain("no parent mission");
+    expect(fs.existsSync(path.join(slice("gamma"), "proof"))).toBe(false);
+  });
+});
