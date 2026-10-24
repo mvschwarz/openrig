@@ -519,6 +519,8 @@ All three must be present together. Any partial combination is a validation erro
 
 A terminal seat no longer waits for a `--fresh` decision just because it has no resume token: on restore it relaunches fresh and re-runs its startup actions. The runtime, identity and replay prerequisites still apply. A runtime mismatch still waits for a decision, an ambiguous occupant still fails, and a missing required replay file still blocks.
 
+`rig send` to a terminal node types the exact text, without the From/To envelope that agent seats get, because the shell would run the envelope lines. The sender's output says so.
+
 ### agent_ref Rules
 
 - Must start with `local:` or `path:`

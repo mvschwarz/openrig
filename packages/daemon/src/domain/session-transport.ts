@@ -36,6 +36,7 @@ import type { AgentActivity } from "./types.js";
 import { DeliveryGuardError, type AdmissionInput, type GuardTarget, type SeatDeliveryGuard } from "./seat-delivery-guard.js";
 import { withUrgentLine } from "./urgent-line.js";
 import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "../lib/pane-envelope.js";
+import { isBoundTerminalSeat } from "./terminal-seat.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { isShellForeground } from "./shell-classifier.js";
@@ -1566,7 +1567,7 @@ export function readInputBox(pane: string | null, runtime: "claude-code" | "code
 }
 
 export interface SendOpts {
-  /** Internal provenance derived by the authenticated transport route. */
+  /** Internal provenance derived by the transport route. */
   identityProvenance?: string;
   /** Internal wake provenance, never accepted from the public transport route. */
   queueWake?: boolean;
@@ -1640,6 +1641,13 @@ export interface SendOpts {
    *  renders as "[Pasted text #N +X lines]"; X must match this count for the placeholder to count
    *  as evidence of THIS piece. */
   expectedStagedLineCount?: number;
+  /** The text without the From/To envelope. When set and the recipient is a terminal seat
+   *  (`runtime: terminal`), send() types this instead of `text`, so the shell never runs the
+   *  envelope lines. Agent recipients keep `text`. */
+  exactText?: string;
+  /** Internal: send() is typing `exactText` to a terminal seat, so its bytes stay exactly as given: no urgent line, which
+   *  the shell would run. An urgent mark still admits the input and stays in the result. Never accepted from HTTP. */
+  typedExactly?: true;
 }
 
 const CALLER_CANCELLED = "caller_cancelled";
@@ -1717,6 +1725,8 @@ export interface SendResult {
   waitedMs?: number;
   attempts?: number;
   sent?: boolean;
+  /** The recipient is a terminal seat, so `exactText` was typed without the From/To envelope. */
+  envelopeOmitted?: true;
   /** Context, not a status: the seat was in a managed compaction or restore OpenRig had recorded when this send ran. The
    *  send's own result (ok, outcome, error) is unchanged by it, and it never says the restore finished. */
   managedCompaction?: { stage: string; observed: "before_send" | "after_send"; notice: string };
@@ -2205,6 +2215,15 @@ export class SessionTransport {
    * send, add a notice saying so. The notice is context beside the send's own result, which it never changes.
    */
   async send(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
+    // A terminal seat's shell would run the envelope lines as commands. Swap before the guard,
+    // whose outbox body, hash and delivery-ID identity all key on the text actually typed.
+    // Without the envelope there's no Sent: line, so stampISO is dropped too: the delivered-latency
+    // segment must never edit a line of the exact text.
+    if (opts?.exactText !== undefined && !opts.dangerouslyInteract) {
+      const { exactText, ...rest } = opts;
+      if (!isBoundTerminalSeat(this.db, sessionName)) return this.send(sessionName, text, rest);
+      return { ...(await this.send(sessionName, exactText, { ...rest, stampISO: undefined, typedExactly: true })), envelopeOmitted: true };
+    }
     const observe = () => { try { return this.compactionObserver?.(sessionName) ?? null; } catch { return null; } };
     const before = observe();
     const result = await this.sendWithoutCompactionNotice(sessionName, text, opts);
@@ -2220,8 +2239,9 @@ export class SessionTransport {
     // Shown on delivery, and kept with a held message: who marked it urgent.
     console.info(`[transport] urgent send to ${sessionName}, marked by ${opts.urgent.by}`);
     // An explicit prompt answer is typed as keys, and a submit-only retry types no text at all: the label's letters would
-    // act as keystrokes (a menu shortcut, say). Their bytes stay exactly as given; the mark stays in the result and the log.
-    const rawKeys = opts.dangerouslyInteract === true || opts.submitOnly === true;
+    // act as keystrokes (a menu shortcut, say). A terminal seat's exact text would run the label as a command. Their bytes
+    // stay exactly as given; the mark stays in the result and the log.
+    const rawKeys = opts.dangerouslyInteract === true || opts.submitOnly === true || opts.typedExactly === true;
     const result = await this.sendClassified(sessionName, rawKeys ? text : withUrgentLine(text, opts.urgent.by), opts);
     return { ...result, urgent: opts.urgent };
   }
@@ -3781,6 +3801,7 @@ export class SessionTransport {
       // (h) thread the resolved stampISO so send()'s delivered-latency calc measures from the SAME
       // compose stamp the envelope carries (opts may not have carried one; the local stampISO is truth).
       const result = await this.send(session.sessionName, perRecipientText, { ...opts, stampISO,
+        exactText: opts?.envelopeSender ? text : undefined,
         deliveryId: opts?.deliveryId ? `${opts.deliveryId}:${session.sessionName}` : undefined });
       results.push(result);
     }

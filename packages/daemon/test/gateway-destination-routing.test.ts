@@ -28,6 +28,8 @@ import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js"
 import { queueTransitionsArchiveSchema } from "../src/db/migrations/054_queue_transitions_archive.js";
 import { ownerNotificationLevelsSchema } from "../src/db/migrations/076_owner_notification_levels.js";
 import { externalCliAttachmentSchema } from "../src/db/migrations/019_external_cli_attachment.js";
+import { rigArchiveSchema } from "../src/db/migrations/042_rig_archive.js";
+import { occupantTenuresSchema } from "../src/db/migrations/060_occupant_tenures.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
@@ -58,7 +60,7 @@ function makeHarness(opts?: { registryReadable?: () => boolean; entities?: () =>
   migrate(db, [
     coreSchema, bindingsSessionsSchema, externalCliAttachmentSchema, eventsSchema, queueItemsSchema,
     queueTransitionsSchema, outboxEntriesSchema, queueTransitionsArchiveSchema,
-    ownerNotificationLevelsSchema,
+    ownerNotificationLevelsSchema, rigArchiveSchema, occupantTenuresSchema,
   ]);
   const bus = new EventBus(db);
   const sends: Array<{ session: string; text: string }> = [];
@@ -184,8 +186,9 @@ describe("OPR.0.5.6.14 — one destination resolver, no fall-through", () => {
       body: "pane-backed founder seat",
     });
     await vi.waitFor(() => expect(h.repo.getById(item.qitemId)!.lastNudgeResult).not.toBeNull());
-    expect(h.sends.map((send) => send.session)).toEqual(["human-founder@rig1"]);
-    expect(h.repo.getById(item.qitemId)!.lastNudgeResult).toMatch(/^failed:/);
+    // Pane-bound, not gateway-owned. The pane is a terminal seat, so the wake is not typed into it.
+    expect(h.sends).toHaveLength(0);
+    expect(h.repo.getById(item.qitemId)!.lastNudgeResult).toMatch(/^failed:terminal-seat: /);
   });
 
   it("PANELLESS TOPOLOGY IS NOT A TERMINAL: an external_cli-bound registered human stays gateway-routable", async () => {
@@ -616,5 +619,79 @@ describe("GET /api/queue/:qitemId carries the owner notification level", () => {
     const row = await (await app.request(`/api/queue/${item.qitemId}`)).json() as Record<string, unknown>;
     expect(row).toMatchObject({ destinationClass: "pane-bound", ownerNotificationLevel: "ALERT", deliveryOutcome: "posted" });
     h.db.close();
+  });
+});
+
+// A terminal seat runs a shell or a TUI, not an agent: a typed wake would run as a command line.
+describe("a terminal seat never gets a typed queue wake", () => {
+  let h: ReturnType<typeof makeHarness>;
+  beforeEach(() => { h = makeHarness(); });
+
+  function seedTerminalSeat(rig: string, logicalId: string, session: string) {
+    h.db.prepare("INSERT OR IGNORE INTO rigs (id, name) VALUES (?, ?)").run(`rig-${rig}`, rig);
+    const { id: rigId } = h.db.prepare("SELECT id FROM rigs WHERE name = ?").get(rig) as { id: string };
+    h.db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime) VALUES (?, ?, ?, 'terminal')").run(`node-${logicalId}`, rigId, logicalId);
+    h.db.prepare("INSERT INTO sessions (id, node_id, session_name) VALUES (?, ?, ?)").run(`sess-${logicalId}`, `node-${logicalId}`, session);
+    h.db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session) VALUES (?, ?, 'tmux', ?)").run(`binding-${logicalId}`, `node-${logicalId}`, session);
+  }
+
+  it.each([
+    ["a shell seat", "rig1", "infra.shell", "infra-shell@rig1"],
+    ["the kernel's operator.human (rig tui)", "kernel", "operator.human", "operator-human@kernel"],
+  ])("%s: nothing is typed, the result is an honest failed:, the row stays queued, and a retry types nothing", async (_label, rig, logicalId, session) => {
+    seedTerminalSeat(rig, logicalId, session);
+    const item = await h.repo.create({
+      sourceSession: "dev-a@rig1", destinationSession: session,
+      summary: "x; touch /tmp/should-not-run", evidenceRef: EVIDENCE, body: "preserve these bytes",
+    });
+    await vi.waitFor(() => expect(h.repo.getById(item.qitemId)!.lastNudgeResult).not.toBeNull());
+    expect(h.sends).toHaveLength(0);
+    expect(h.repo.getById(item.qitemId)).toMatchObject({
+      state: "pending", body: "preserve these bytes", lastNudgeResult: expect.stringMatching(/^failed:terminal-seat: /),
+    });
+    // The wake ladder retries through maybeNudge.
+    await h.repo.maybeNudge(item.qitemId, session, true, "dev-a@rig1");
+    expect(h.sends).toHaveLength(0);
+    expect(h.repo.getById(item.qitemId)!.lastNudgeResult).toMatch(/^failed:terminal-seat: /);
+  });
+
+  it("a terminal seat known only by its composed name (binding, no session row) gets no typed wake", async () => {
+    h.db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime) VALUES ('node-logs', 'rig-1', 'infra.logs', 'terminal')").run();
+    h.db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session) VALUES ('binding-logs', 'node-logs', 'tmux', 'infra-logs@rig1')").run();
+    const item = await h.repo.create({
+      sourceSession: "dev-a@rig1", destinationSession: "infra-logs@rig1",
+      summary: "x; touch /tmp/should-not-run", evidenceRef: EVIDENCE, body: "composed seat",
+    });
+    await vi.waitFor(() => expect(h.repo.getById(item.qitemId)!.lastNudgeResult).not.toBeNull());
+    expect(h.sends).toHaveLength(0);
+    expect(h.repo.getById(item.qitemId)!.lastNudgeResult).toMatch(/^failed:terminal-seat: /);
+  });
+
+  it("an agent seat still gets its typed wake", async () => {
+    seedTerminalSeat("rig1", "infra.shell", "infra-shell@rig1");
+    const item = await h.repo.create({
+      sourceSession: "infra-shell@rig1", destinationSession: "dev-a@rig1",
+      summary: "agent work", evidenceRef: EVIDENCE, body: "for the agent",
+    });
+    await vi.waitFor(() => expect(h.repo.getById(item.qitemId)!.lastNudgeResult).toBe("verified"));
+    expect(h.sends).toHaveLength(1);
+    expect(h.sends[0]!.session).toBe("dev-a@rig1");
+    expect(h.sends[0]!.text).toContain("From: infra-shell@rig1");
+    expect(h.sends[0]!.text).toContain(item.qitemId);
+  });
+
+  it("a currently bound agent with older terminal history gets its wake and retry", async () => {
+    seedTerminalSeat("rig1", "old.shell", "dev-a@rig1");
+    // Retain the old terminal session row, but its binding has moved elsewhere.
+    h.db.prepare("UPDATE bindings SET tmux_session='old-shell@rig1' WHERE node_id='node-old.shell'").run();
+    const item = await h.repo.create({ sourceSession: "dev-b@rig1", destinationSession: "dev-a@rig1",
+      summary: "current agent work", evidenceRef: EVIDENCE, body: "for the current occupant" });
+    await vi.waitFor(() => expect(h.repo.getById(item.qitemId)!.lastNudgeResult).not.toBeNull());
+    expect(h.repo.getById(item.qitemId)!.lastNudgeResult).toBe("verified");
+    expect(h.sends).toHaveLength(1);
+    await h.repo.maybeNudge(item.qitemId, "dev-a@rig1", true, "dev-b@rig1");
+    expect(h.repo.getById(item.qitemId)!.lastNudgeResult).toBe("verified");
+    expect(h.sends).toHaveLength(2);
+    expect(h.sends.every(send => send.session === "dev-a@rig1")).toBe(true);
   });
 });

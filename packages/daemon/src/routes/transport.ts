@@ -44,6 +44,8 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       submitOnly?: boolean;
       expectedStagedText?: string;
       expectedStagedLineCount?: number;
+      /** The unwrapped text; typed instead of `text` when the recipient is a terminal seat. */
+      exactText?: string;
       urgent?: boolean;
     }>();
 
@@ -108,6 +110,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       return c.json({ ok: false, error: resolved.error }, status);
     }
 
+    const exactText = typeof body.exactText === "string" ? body.exactText : undefined;
     // Slice 16: a seat that is switching runtime takes no input until its switch ends. Rather than wait behind the
     // switch's lease (its whole confirmation window), the send is held at once, like any held send, and says why.
     const target = resolved.sessions.length === 1 ? resolved.sessions[0]!.sessionName : null;
@@ -136,6 +139,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       submitOnly: body.submitOnly,
       expectedStagedText: body.expectedStagedText,
       expectedStagedLineCount: body.expectedStagedLineCount,
+      exactText,
       // The caller's request: if it goes away while the send still waits, nothing is typed later.
       signal: c.req.raw.signal,
     });
@@ -207,7 +211,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
           const entry = outbox.record({
             senderSession: derivedActor,
             destinationSession: body.session,
-            body: body.text,
+            body: result.envelopeOmitted && exactText !== undefined ? exactText : body.text,
             identityProvenance: "transport:v1",
           });
           // The input was dispatched successfully; mark its audit row as broadcast does.

@@ -334,9 +334,13 @@ export class InboundRouter {
       const closed = correlated?.state === "done" || correlated?.state === "handed-off";
       const committedAnswer = (askPending || closed) && !ev.recoveredThreadReply && route.correlationQitemId
         ? this.deps.queue.getHumanAnswer?.(route.correlationQitemId, who.source) : null;
-      // The generated trailing footer records this event's channel and ts, separately from the person's text.
-      // A crash after close but before seen-mark must still reuse that event's committed answer.
-      const replayedAnswer = closed && committedAnswer?.body.endsWith(body.slice(body.lastIndexOf("\n\n---\n"))) ? committedAnswer : null;
+      // An absorbed event has its own identity even when the first answer came from a button or Steering.
+      const absorbedEventKey = committedAnswer ? `answer-event:${JSON.stringify([eventId, route.correlationQitemId, who.source, committedAnswer.qitemId])}` : null;
+      // The footer covers the original typed answer; the marker covers a later event absorbed before close.
+      const replayedAnswer = closed && committedAnswer && (
+        committedAnswer.body.endsWith(body.slice(body.lastIndexOf("\n\n---\n"))) ||
+        (absorbedEventKey && this.deps.seen.load().has(absorbedEventKey))
+      ) ? committedAnswer : null;
       // A different event after close remains conversation; only the pending ask coalesces other retries.
       const earlierAnswer = askPending ? committedAnswer : replayedAnswer;
       let qitemId: string;
@@ -359,6 +363,11 @@ export class InboundRouter {
       let replyResolution: "resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable" | undefined;
       if (!closed && route.correlationQitemId && this.deps.resolveHumanReply && !ev.recoveredThreadReply) {
         try {
+          // Reusing the durable answer consumed this event's words. Record that before close, but
+          // keep the raw event unmarked until completion so an interrupted close can still retry.
+          if (earlierAnswer && absorbedEventKey && !this.deps.seen.load().has(absorbedEventKey)) {
+            this.deps.seen.mark(absorbedEventKey, "answer-consumed");
+          }
           replyResolution = await this.deps.resolveHumanReply({
             qitemId: route.correlationQitemId,
             actorSession: who.source,

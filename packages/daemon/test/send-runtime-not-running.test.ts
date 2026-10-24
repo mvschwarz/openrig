@@ -54,7 +54,7 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
   // The watchdog's deliver() makes exactly this call (startup.ts parked-owner delivery).
   const watchdogSend = (transport: SessionTransport, name: string) =>
     transport.send(name, "[OpenRig watchdog scheduler · policy: parked-owner-consumer] You are parked", {
-      deliveryId: "guard-watchdog-job-1", actorSession: "watchdog@system", auditPointer: "job-1",
+      deliveryId: "guard-watchdog-job-1", actorSession: "watchdog@system", auditPointer: "job-1", openrigNotice: true,
     });
 
   it.each([["claude-code", "zsh"], ["codex", "-bash"]])("%s seat showing %s: refused, nothing typed", async (runtime, shell) => {
@@ -315,13 +315,18 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
     }
   });
 
-  it("negative: a terminal node's shell is its runtime, so it still receives text", async () => {
+  it("negative: a terminal node's shell is its runtime, so a person's send and OpenRig's own notice both still type", async () => {
     seat("terminal", "ops-human@my-rig");
     const { tmux, sendText } = tmuxWithPane(async () => "zsh");
-    const result = await watchdogSend(new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux }), "ops-human@my-rig");
+    const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux });
 
-    expect(result.ok).toBe(true);
+    const personal = await transport.send("ops-human@my-rig", "printf 'hello\\n'", { actorSession: "dev-impl@my-rig" });
+    expect(personal.ok).toBe(true);
     expect(sendText).toHaveBeenCalledOnce();
+
+    const watchdog = await watchdogSend(transport, "ops-human@my-rig");
+    expect(watchdog.ok).toBe(true);
+    expect(sendText).toHaveBeenCalledTimes(2);
   });
 
   it.each([["unknown", async () => null], ["unreadable", async () => { throw new Error("tmux failed"); }]])(

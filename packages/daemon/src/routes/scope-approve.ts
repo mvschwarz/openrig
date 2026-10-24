@@ -29,7 +29,7 @@ export function scopeApproveRoutes(): Hono {
       return c.json({ error: "scope_tier_invalid", message: "scopeTier must be 'slice' or 'mission'" }, 400);
     }
     if (!body.scopePath) return c.json({ error: "scope_path_required", message: "scopePath is required" }, 400);
-    // P21 I1 (the signing surface): the approver identity is DERIVED from the authenticated transport
+    // P21 I1 (the signing surface): the approver identity is DERIVED from the transport
     // header, never the request body. body.actorSession is the transitional adopt-and-drop claim —
     // recorded beside the wire identity; P18 deliver-and-label: a different claim is SUPERSEDED by the
     // header (transport:v1), not refused; absent header + no body actor → 400 actor_required (parameter
@@ -61,7 +61,7 @@ export function scopeApproveRoutes(): Hono {
         missionsRoot: typeof body.missionsRoot === "string" ? body.missionsRoot : null,
         approvalScope,
         actorSession: identity.session, // transport-derived, authoritative
-        identityProvenance: resolveRecordedProvenance(c, identity), // P21 era-stamp: transport:v1 if the header proved it here, else claimed:v1 (resolveRecordedProvenance degrades)
+        identityProvenance: resolveRecordedProvenance(c, identity), // P21 era-stamp: transport:v1 if the header named the actor here, else claimed:v1 (resolveRecordedProvenance degrades)
         onBehalfOf: body.onBehalfOf ?? null,
         reApprove: body.reApprove === true,
         reason: typeof body.reason === "string" ? body.reason : null,

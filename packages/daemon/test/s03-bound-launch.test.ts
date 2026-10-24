@@ -167,7 +167,7 @@ if (process.argv.includes('--help')) {
     const command = prepared.command([]);
     for (const key of ["TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES",
       "LC_COLLATE", "LC_NUMERIC", "LC_TIME", "LC_MONETARY"]) {
-      expect(command).toContain(`\${${key}:+"${key}=$${key}"}`);
+      expect(command).toContain(`if [ -n "\${${key}-}" ]; then export ${key}; else unset ${key}; fi`);
     }
     expect(command).not.toContain("UNAPPROVED_RENDERER_VALUE");
     expect(command).not.toMatch(/TMUX/);
@@ -269,7 +269,7 @@ else console.log(JSON.stringify(Object.fromEntries(${JSON.stringify(paneNames)}
     expect(cmd).toContain("(/*) printf %s");
     expect(cmd).toContain("(?*) if [");
     expect(cmd).not.toMatch(/(^|\s)\$\(/);
-    expect(cmd).toContain('${__openrig_wayland_display:+"WAYLAND_DISPLAY=$__openrig_wayland_display"}');
+    expect(cmd).toContain('export WAYLAND_DISPLAY="$__openrig_wayland_display"');
   });
   it.each(["fresh", "resume", "fork", "legacy"])("names the editor and display session variables on a %s launch", async kind => {
     const f = fixture();
@@ -282,8 +282,8 @@ else console.log(JSON.stringify(Object.fromEntries(${JSON.stringify(paneNames)}
         ...(kind === "fork" ? { forkSource: { kind: "native_id" as const, value: token } } : {}) });
     expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
     const cmd = f.calls[0]!;
-    for (const key of sessionNames) expect(cmd).toContain(`\${${key}:+"${key}=$${key}"}`);
-    expect(cmd).toContain('"WAYLAND_DISPLAY=$__openrig_wayland_display"');
+    for (const key of sessionNames) expect(cmd).toContain(`if [ -n "\${${key}-}" ]; then export ${key}; else unset ${key}; fi`);
+    expect(cmd).toContain('export WAYLAND_DISPLAY="$__openrig_wayland_display"');
     // XDG_RUNTIME_DIR is read to resolve WAYLAND_DISPLAY, never forwarded as a variable.
     expect(cmd).not.toMatch(/XDG_RUNTIME_DIR=\$|"XDG_RUNTIME_DIR=/);
     for (const key of withheldNames.filter(key => key !== "XDG_RUNTIME_DIR")) expect(cmd).not.toContain(key);
@@ -383,7 +383,7 @@ describe("S03 bound launch across existing paths", () => {
     expect(f.calls).toHaveLength(1); const cmd = f.calls[0]!;
     expect(cmd).toContain("/usr/bin/env -i"); expect(cmd).toContain("'--permission-mode' 'auto'");
     expect(cmd).toContain("'OPENRIG_OCCUPANT_GENERATION=generation-1'"); expect(cmd).toContain("'model'\"'\"'s choice'");
-    expect(cmd).toContain('"ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY-}"'); expect(cmd).not.toContain(f.env.ANTHROPIC_API_KEY);
+    expect(cmd).toContain('export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY-}"'); expect(cmd).not.toContain(f.env.ANTHROPIC_API_KEY);
     expect(cmd).toContain("'" + f.executable.replaceAll("'", "'\"'\"'") + "'");
     if (kind !== "fresh") expect(cmd).toContain("'history'\"'\"'s id; literal'");
     expect(f.tmux.sendText).not.toHaveBeenCalled(); expect(f.tmux.sendKeys).not.toHaveBeenCalled(); expect(execFile).toHaveBeenCalledOnce();
