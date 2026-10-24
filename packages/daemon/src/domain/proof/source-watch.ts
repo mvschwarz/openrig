@@ -38,9 +38,10 @@ function canonical(p: string): string | null {
 /** Where each path the evaluation read outside the missions root is observed: its parent, shallow, filtered to its
  *  name (for a missing parent, the nearest existing ancestor, filtered to the next segment toward it). A directory
  *  whose real location leaves the project is never watched: the nearest ancestor that stays inside is, filtered to
- *  the next segment. Every watched directory, the missions root included, is also anchored at each ancestor up to
+ *  the next segment. Every watched directory, the missions root included (under its configured and its real name),
+ *  is also anchored at each ancestor up to
  *  `top`, filtered to the next segment, so a replaced or re-pointed directory on the way is seen and its watch rebound. */
-function shallowWatches(missionsRoot: string, top: string, project: string, read: Iterable<string>): Shallow {
+function shallowWatches(missionsRoot: string, realRoot: string, top: string, project: string, read: Iterable<string>): Shallow {
   const out: Shallow = new Map();
   const inside = (dir: string) => { const real = canonical(dir); return real !== null && within(real, project); };
   // The project may be reached by an alias: real-location paths are bounded by the real project's parent.
@@ -48,7 +49,7 @@ function shallowWatches(missionsRoot: string, top: string, project: string, read
   const topOf = (p: string) => (within(p, top) ? top : within(p, realTop) ? realTop : null);
   for (const file of read) {
     const target = path.resolve(file);
-    if (within(target, missionsRoot)) continue;
+    if (within(target, missionsRoot) || within(target, realRoot)) continue;
     let child = target, dir = path.dirname(target);
     while (dir !== child && !proofFs.exists(dir)) { child = dir; dir = path.dirname(dir); }
     const bound = topOf(dir);
@@ -57,7 +58,8 @@ function shallowWatches(missionsRoot: string, top: string, project: string, read
     if (dir === child || dir === bound) continue;
     add(out, dir, path.basename(child));
   }
-  for (const watched of [...out.keys(), missionsRoot]) {
+  // The missions root is anchored under both its names: a replaced real root must rebind the recursive watch too.
+  for (const watched of [...out.keys(), missionsRoot, realRoot]) {
     const bound = topOf(watched);
     if (bound === null) continue;
     for (let p = watched; p !== bound && within(p, bound); p = path.dirname(p)) {
@@ -99,7 +101,7 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
       const real = canonical(file);
       if (real !== null && real !== path.resolve(file) && within(real, project)) read.add(real);
     }
-    return { hash, watches: shallowWatches(missionsRoot, top, project, read) };
+    return { hash, watches: shallowWatches(missionsRoot, canonical(missionsRoot) ?? missionsRoot, top, project, read) };
   };
   // failed latches for this instance: a watcher that errored is not trusted to be replaced by a later read.
   let closed = false, failed = false, covered = false, readable = false;
@@ -107,11 +109,13 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
   let wanted: Shallow = new Map();
   const shallow = new Map<string, fs.FSWatcher>();
   let recursive: fs.FSWatcher | undefined;
+  // The real location the recursive watch was attached at (it follows a linked root to that directory).
+  let recursiveReal = missionsRoot;
   const notify = (next: string) => { try { bus.emit({ type: "proof.sources_changed", scope: missionsRoot, revision: next }); } catch { /* Quiet refresh remains the repair path. */ } };
   /** A directory at or below `changed` may have been replaced: its watches are dropped, to be reattached by path. */
   const stale = (changed: string) => {
     for (const [dir, watcher] of shallow) if (within(dir, changed)) { watcher.close(); shallow.delete(dir); }
-    if (recursive && within(missionsRoot, changed)) { recursive.close(); recursive = undefined; }
+    if (recursive && (within(missionsRoot, changed) || within(recursiveReal, changed))) { recursive.close(); recursive = undefined; }
   };
   const onEvent = (dir: string | null) => (_event: string, filename: string | Buffer | null) => {
     if (closed) return;
@@ -140,7 +144,9 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
    *  longer needed (new coverage first). Returns whether anything was attached. */
   const resubscribe = (next: Shallow): boolean => {
     let added = false;
-    if (!recursive) { recursive = watchDir(missionsRoot, true); added = true; }
+    const real = canonical(missionsRoot) ?? missionsRoot;
+    if (recursive && real !== recursiveReal) { recursive.close(); recursive = undefined; }
+    if (!recursive) { recursive = watchDir(missionsRoot, true); recursiveReal = real; added = true; }
     for (const dir of next.keys()) {
       if (shallow.has(dir)) continue;
       shallow.set(dir, watchDir(dir, false));
@@ -189,6 +195,7 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
     timer.unref();
   };
   try {
+    recursiveReal = canonical(missionsRoot) ?? missionsRoot;
     recursive = watchDir(missionsRoot, true);
     try { revision = evaluate(); readable = true; } catch (e) {
       if (e instanceof WatchFailure) throw e;

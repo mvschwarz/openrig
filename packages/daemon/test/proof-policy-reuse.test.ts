@@ -331,6 +331,32 @@ describe("QA bounded adverse coverage at 8b236e06", () => {
       expect(watched.some((root) => !String(root).startsWith(t.f.root) && root !== path.dirname(t.f.root))).toBe(false);
     } finally { t.watch.close(); }
   });
+  for (const name of ["missions", null]) it(`rebinds a linked missions root when its real directory is replaced (${name ?? "no filename"})`, () => {
+    const f = fixture(), real = path.join(f.root, "real"), linked = path.join(f.root, "linked-missions");
+    fs.mkdirSync(real); fs.renameSync(f.missions, path.join(real, "missions")); fs.symlinkSync(path.join(real, "missions"), linked);
+    vi.useFakeTimers();
+    // Each handle with its listener; a handle opened before the replacement watches the old directory and stays silent.
+    const opened: Array<{ root: string; recursive: boolean; event: (event: string, name: string | null) => void }> = [];
+    vi.spyOn(fs, "watch").mockImplementation(((root: string, options: { recursive: boolean }, listener: (event: string, name: string | null) => void) => {
+      opened.push({ root, recursive: options.recursive, event: listener });
+      return { on: vi.fn(), close: vi.fn() };
+    }) as unknown as typeof fs.watch);
+    const oracle = () => createHash("sha256").update(JSON.stringify(readProjectReadiness(linked).missions.map(m => [m.name, m.revision]))).digest("hex");
+    const watch = watchProofSources(linked, vi.fn(), { emit: vi.fn() } as unknown as EventBus);
+    try {
+      expect(watch.observation()).toEqual({ state: "watching", revision: oracle() });
+      fs.renameSync(path.join(real, "missions"), path.join(real, "missions.old"));
+      fs.cpSync(path.join(real, "missions.old"), path.join(real, "missions"), { recursive: true });
+      const before = opened.length;
+      opened.filter((h) => h.root === real).at(-1)!.event("rename", name); vi.advanceTimersByTime(50);
+      // A new mission in the replacement tree reaches clients through the live watches only.
+      fs.cpSync(path.join(real, "missions", "trial"), path.join(real, "missions", "new-mission"), { recursive: true });
+      for (const h of opened.slice(before)) h.event("rename", h.recursive ? "new-mission/mission.yaml" : "new-mission");
+      vi.advanceTimersByTime(50);
+      expect(watch.observation().state === "unavailable" || watch.observation().revision === oracle()).toBe(true);
+      expect(opened.some((h) => !h.root.startsWith(f.root) && h.root !== path.dirname(f.root))).toBe(false);
+    } finally { watch.close(); }
+  });
   it("QA observes replacement of an external evidence parent or honestly reports unavailable", () => {
     const t = adverseFixture();
     try {
