@@ -1,3 +1,4 @@
+import { validateClaudePermissionRules } from "../domain/claude-permission-rules.js";
 import type { NodeBinding } from "../domain/runtime-adapter.js";
 import { nonInterruptiveArgs } from "./non-interruptive.js";
 import { isValidThresholdPercent } from "../domain/claude-compaction-enforcer.js";
@@ -44,7 +45,7 @@ export const TEAM_CLAUDE_ASK = [
   "import", "seat set-permissions", "policy apply", "policy permissions apply", "setup", "compact",
 ].map(command => `Bash(rig ${command}:*)`);
 
-type LaunchChoice = Pick<NodeBinding, "kernelAuthority" | "teamPermissionDefault" | "nonInterruptive" | "launchPosture" | "permissionMode"> & {
+type LaunchChoice = Pick<NodeBinding, "kernelAuthority" | "teamPermissionDefault" | "nonInterruptive" | "launchPosture" | "permissionMode" | "claudePermissions"> & {
   /** Whether OpenRig's managed compaction acts on this Claude launch; read from the policy when absent. */
   managedCompaction?: boolean;
 };
@@ -91,7 +92,17 @@ export function operationalLaunchArgs(runtime: string, choice: LaunchChoice): st
     return ["-c", "check_for_update_on_startup=false", ...nonInterruptiveArgs(runtime,
       choice.kernelAuthority ? { launchPosture: "full_bypass", nonInterruptive: true } : choice)];
   }
-  if (runtime === "claude-code") return withIdleCompactionOff(claudeOperationalArgs(choice), choice.managedCompaction ?? managedCompactionActive());
+  if (runtime === "claude-code") {
+    const args = withIdleCompactionOff(claudeOperationalArgs(choice), choice.managedCompaction ?? managedCompactionActive());
+    if (choice.claudePermissions === undefined) return args;
+    const rules = validateClaudePermissionRules(choice.claudePermissions);
+    const at = args.indexOf("--settings");
+    const settings = at < 0 ? {} : JSON.parse(args[at + 1]!) as Record<string, unknown>;
+    const permissions = (settings.permissions ?? {}) as { allow?: string[]; deny?: string[] };
+    const value = JSON.stringify({ ...settings, permissions: { ...permissions,
+      allow: [...(permissions.allow ?? []), ...rules.allow], deny: [...(permissions.deny ?? []), ...rules.deny] } });
+    return at < 0 ? [...args, "--settings", value] : [...args.slice(0, at + 1), value, ...args.slice(at + 2)];
+  }
   return choice.kernelAuthority ? [] : nonInterruptiveArgs(runtime, choice);
 }
 

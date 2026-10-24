@@ -17,6 +17,10 @@ vi.mock("node:fs", async importOriginal => {
 });
 
 describe("Claude kernel inspection permissions", () => {
+  it("asks before an audited member-rule update even with the broad team rig allowance", () => {
+    expect(decide('rig seat set-permissions dev-reader@team --rules rules.json --reason "Change lane"', policy)).toBe("ask");
+  });
+
   // Exercise the actual session hook emitted by the launcher. These are inert
   // hook inputs: no command, network request, provider or rig is executed.
   it.each([

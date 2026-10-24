@@ -3,6 +3,7 @@
 // so a reader DB is never seeded from a stale hand-copied subset (the perf-fixture-migration-parity
 // trap). Append new migrations to the END, in order.
 
+import { nodeClaudePermissionsSchema } from "./migrations/136_node_claude_permissions.js";
 import { coreSchema } from "./migrations/001_core_schema.js";
 import { terminalPolicySchema } from "./migrations/128_terminal_policy.js";
 import { streamDispositionsSchema } from "./migrations/129_stream_dispositions.js";
@@ -261,4 +262,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   streamDispositionsSchema,
   streamSubscriptionsSchema,
   streamRetentionFloorSchema,
+  nodeClaudePermissionsSchema,
 ];

@@ -14,6 +14,7 @@ export interface NodeBinding extends Binding {
   /** Claude-only, session-scoped Advisor model. */
   advisor?: string;
   codexConfigProfile?: string;
+  claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
   /** Rebuild only: a process/conversation-bound native predecessor policy. */
   codexRebuildPermissions?: import("./codex-rebuild-permissions.js").CodexPermissionEnvelope;
   /** OPR.0.4.8.3 Seam B: the seat's RESOLVED launch posture from its permission_policy

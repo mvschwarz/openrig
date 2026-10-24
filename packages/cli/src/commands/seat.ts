@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { Command } from "commander";
 import { DaemonClient, DaemonTimeoutError, terminalAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
@@ -50,7 +51,7 @@ interface SeatStatusResponse {
     account?: {
       summary: string;
       overrides: string[];
-      openRigAdds: { claudeAllow: string[]; claudeAsk: string[]; notes: string[] };
+      openRigAdds: { claudeAllow: string[]; claudeAsk: string[]; claudeDeny?: string[]; notes: string[] };
       unknown: string[];
       controls: string[];
     };
@@ -205,6 +206,7 @@ function printHuman(status: SeatStatusResponse): void {
     console.log(`  ${a.summary}`);
     if (a.overrides.length) console.log(`  This seat's choice is used instead of the ${a.overrides.join(" and the ")}.`);
     for (const note of a.openRigAdds.notes) console.log(`  ${note}`);
+    if (a.openRigAdds.claudeDeny) console.log(`  Claude member rules (planned): ${a.openRigAdds.claudeDeny.length} denies; exact lists are in --json.`);
     if (a.openRigAdds.claudeAllow.length) console.log("  The exact allowance and ask lists are in --json, under permissions.account.openRigAdds.");
     console.log(`  Last launch arguments (observed): ${p.lastLaunchArguments?.value ?? "unknown"}${p.lastLaunchArguments?.approvalPolicy ? `; approval=${p.lastLaunchArguments.approvalPolicy}` : ""}`);
     for (const item of a.unknown) console.log(`  Unknown: ${item}`);
@@ -692,14 +694,27 @@ identity remains unverified; a version number alone cannot clear it.
   cmd
     .command("set-permissions")
     .argument("<seat>", "Canonical session name or logical seat ref")
-    .requiredOption("--mode <mode>", "floor, full_bypass, inherit, or a Claude mode supported by the bound managed launch context")
+    .option("--mode <mode>", "floor, full_bypass, inherit, or a Claude mode supported by the bound managed launch context")
+    .option("--rules <file>", "JSON allow/deny lists for this Claude seat; replaces its recorded rules without changing its mode")
     .requiredOption("--reason <text>", "Reason for the audited future-launch selection")
     .option("--operator <address>", "Operator recorded on the audit event when no session identity is present")
     .option("--json", "JSON output for agents")
     .description("Select native permissions for future managed launches; no relaunch or work-posture change")
-    .addHelpText("after", "\nUse inherit to clear this seat's explicit selection. Current native processes, history, rules and hooks remain unchanged. A later lifecycle action needs its own authorization.")
-    .action(async (seat: string, opts: { mode: string; reason: string; operator?: string; json?: boolean }) => {
-      await runLifecycleVerb("set-permissions", seat, { mode: opts.mode, reason: opts.reason, operator: opts.operator }, opts, data => {
+    .addHelpText("after", "\nUse inherit to clear this seat's explicit selection. Current native processes, history, rules and hooks remain unchanged. A later lifecycle action needs its own authorization.\n--rules takes a JSON object with allow and deny lists only. Use empty lists to clear the seat rules. It does not remove inherited grants or change the running process.")
+    .action(async (seat: string, opts: { mode?: string; rules?: string; reason: string; operator?: string; json?: boolean }) => {
+      if ((opts.mode === undefined) === (opts.rules === undefined)) {
+        console.error("Choose exactly one of --mode or --rules <file>."); process.exitCode = 1; return;
+      }
+      let rules: unknown;
+      if (opts.rules !== undefined) {
+        try { rules = JSON.parse(readFileSync(opts.rules, "utf8")); }
+        catch { console.error(`Cannot read JSON rules from ${opts.rules}; provide an allow/deny mapping.`); process.exitCode = 1; return; }
+      }
+      await runLifecycleVerb("set-permissions", seat, { ...(opts.rules === undefined ? { mode: opts.mode } : { rules }), reason: opts.reason, operator: opts.operator }, opts, data => {
+        if (opts.rules !== undefined) {
+          console.log(`Claude tool rules ${data["changed"] === false ? "unchanged" : "recorded and audited"}.`);
+          console.log(String(data["effect"])); return;
+        }
         const selection = data["to"] as { mode: string } | null;
         console.log(`Permission mode: ${selection?.mode ?? "inherit"}${data["changed"] === false ? " (unchanged)" : " (audited)"}`);
         console.log(String(data["effect"]));
