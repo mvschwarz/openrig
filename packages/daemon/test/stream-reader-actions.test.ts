@@ -64,8 +64,8 @@ describe("stream reader actions (slice 22 outcome 9)", () => {
       action: "create", classificationDestination: "dev-lead@rig", disposition: { disposition: "create", ownerSession: "dev-lead@rig", workQitemId: null,
         effect: { operation: "create", qitemId: "qitem-stream-S1", destination: "dev-lead@rig" }, templateDigest: "sha256:" + "a".repeat(64),
         templateText: "name: stream\n", request: "{}", provenance: {} } });
-    expect(act("d@rig", "act", { workQitemId: "q-1" }).otherWork).toEqual([{ qitemId: "q-2", by: "c@rig", source: "reader" },
-      { qitemId: "qitem-stream-S1", by: "intake@rig", source: "automatic" }]);
+    expect(act("d@rig", "act", { workQitemId: "q-1" }).otherWork).toEqual([{ qitemId: "q-2", current: "q-2", by: "c@rig", source: "reader" },
+      { qitemId: "qitem-stream-S1", current: null, by: "intake@rig", source: "automatic" }]); // its row isn't created yet: lineage unknown
   });
 
   it("a decline is that reader's alone, and a correction keeps the earlier action inspectable", () => {
@@ -83,6 +83,24 @@ describe("stream reader actions (slice 22 outcome 9)", () => {
     expect(pruneStreamItems(db, { nowIso: new Date(Date.now() + 40 * 86_400_000).toISOString() })).toEqual({ deletedRows: 1 });
     expect(stream.getById("S1")).not.toBeNull();
     expect(stream.getById("S2")).toBeNull();
+  });
+
+  it("retention keeps a stream item a duplicate action names, even after the action is corrected", () => {
+    stream.emit({ streamItemId: "S2", sourceSession: "poster@rig", body: "the original report" });
+    act("a@rig", "duplicate", { duplicateOf: "S2" });
+    act("a@rig", "decline", { reason: "not a duplicate after all" });
+    expect(pruneStreamItems(db, { nowIso: new Date(Date.now() + 40 * 86_400_000).toISOString() })).toEqual({ deletedRows: 0 });
+    expect(stream.getById("S2")).not.toBeNull();
+  });
+
+  it("one handed-on work chain isn't other work; unrelated work is still named, with its current row", () => {
+    db.prepare("UPDATE queue_items SET state = 'handed-off', closure_reason = 'handed_off_to', closure_target = 'b@rig' WHERE qitem_id = 'q-1'").run();
+    db.prepare(`INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, body, handed_off_from)
+      VALUES ('q-3', 't', 't', 'a@rig', 'b@rig', 'pending', 'work', 'q-1')`).run();
+    act("a@rig", "act", { workQitemId: "q-1" });
+    expect(act("b@rig", "act", { workQitemId: "q-3" })).not.toHaveProperty("otherWork");
+    expect(act("c@rig", "act", { workQitemId: "q-2" }).otherWork).toEqual([
+      { qitemId: "q-1", current: "q-3", by: "a@rig", source: "reader" }, { qitemId: "q-3", current: "q-3", by: "b@rig", source: "reader" }]);
   });
 
   it("routes: act as the transport identity, and the item's actions", async () => {

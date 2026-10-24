@@ -119,6 +119,18 @@ describe("what became of a stream observation", () => {
       [ACTIONS]: actions(a("intake@rig", "act", { workQitemId: "q-7" })) }), "S1");
     expect(withIntake).toMatchObject({ stage: "work_open", work: [{ qitemId: "q-7" }], application: { outcome: "target_closed" } });
     expect(withIntake).not.toHaveProperty("parallelWork");
+    // One handed-on chain is one piece of work, not parallel work: A linked q-1, which was handed on to q-8, and B linked q-8.
+    const chain = await streamOutcome(client({ [ACTIONS]: actions(a("a@rig", "act", { workQitemId: "q-1", actedAt: "t5" }), a("b@rig", "act", { workQitemId: "q-8", actedAt: "t6" })),
+      "/api/queue/q-1": row("handed-off", { qitemId: "q-1", closureReason: "handed_off_to", closureTarget: "b@rig" }),
+      "/api/queue/list?handedOffFrom=q-1": { status: 200, data: [{ qitemId: "q-8", handedOffFrom: "q-1" }] },
+      "/api/queue/q-8": row("in-progress", { qitemId: "q-8", destinationSession: "b@rig" }) }), "S1");
+    expect(chain).toMatchObject({ stage: "work_open", work: [{ qitemId: "q-8" }] });
+    expect(chain).not.toHaveProperty("parallelWork");
+    // Two actions in the same millisecond: record order (the action id) decides which is newest.
+    const tied = await streamOutcome(client({ [ACTIONS]: actions(a("a@rig", "act", { workQitemId: "q-1", actedAt: "t5", actionId: "01A" }),
+      a("b@rig", "act", { workQitemId: "q-2", actedAt: "t5", actionId: "01B" })),
+      "/api/queue/q-1": row("done", { qitemId: "q-1", closureReason: "no-follow-on" }), "/api/queue/q-2": row("pending", { qitemId: "q-2" }) }), "S1");
+    expect(tied).toMatchObject({ stage: "work_open", work: [{ qitemId: "q-2" }] });
     // A daemon without reader actions says so instead of implying there are none.
     expect(await streamOutcome(client({}), "S1")).toMatchObject({ stage: "awaiting_intake", readers: "unavailable" });
   });

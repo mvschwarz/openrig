@@ -18,7 +18,7 @@ type Classification = { streamItemId: string; classifierSession: string; classif
 type QueueRow = { qitemId: string; destinationSession: string; state: string; closureReason: string | null; closureTarget: string | null;
   resolution: string | null; evidenceRef: string | null; tsUpdated: string };
 type Work = { qitemId: string; owner?: string; state: string; closedToward?: string | null; handedOnFrom?: string[]; unknown?: string };
-type ReaderAction = { readerSession: string; action: string; workQitemId: string | null; duplicateOf: string | null; reason: string | null; actedAt: string };
+type ReaderAction = { actionId?: string; readerSession: string; action: string; workQitemId: string | null; duplicateOf: string | null; reason: string | null; actedAt: string };
 
 const OPEN = ["pending", "in-progress", "blocked"];
 const HOPS = 8;
@@ -107,14 +107,21 @@ export async function streamOutcome(client: Get, streamItemId: string) {
   if (!current.length) return base;
   const readers = current.map(a => ({ reader: a.readerSession, action: a.action, at: a.actedAt, ...(a.workQitemId ? { work: a.workQitemId } : {}),
     ...(a.duplicateOf ? { duplicateOf: a.duplicateOf } : {}), ...(a.reason ? { reason: a.reason } : {}) }));
-  const acted = current.filter(a => a.action === "act" && a.workQitemId).sort((a, b) => b.actedAt.localeCompare(a.actedAt));
+  // Newest first; within the same millisecond, record order (the monotonic action id) decides.
+  const acted = current.filter(a => a.action === "act" && a.workQitemId)
+    .sort((a, b) => b.actedAt.localeCompare(a.actedAt) || (b.actionId ?? "").localeCompare(a.actionId ?? ""));
   const auto = READER_DECIDES.includes(base.stage) ? undefined : (base as { work?: Work[] }).work?.[0];
-  const linked = new Set([...acted.map(a => a.workQitemId!), ...(auto ? [auto.handedOnFrom?.[0] ?? auto.qitemId] : [])]);
-  const parallel = linked.size > 1 ? { parallelWork: [...linked] } : {};
+  // Work is compared by its current row, handoffs followed, so one handed-on chain isn't parallel work. A link whose
+  // current row is unknown keeps its own id.
+  const followed = new Map<string, Work>();
+  for (const id of new Set(acted.map(a => a.workQitemId!))) followed.set(id, await work(client, id));
+  const key = (w: Work, linkedId: string) => w.unknown ? linkedId : w.qitemId;
+  const lineages = new Set([...[...followed].map(([id, w]) => key(w, id)), ...(auto ? [key(auto, auto.handedOnFrom?.[0] ?? auto.qitemId)] : [])]);
+  const parallel = lineages.size > 1 ? { parallelWork: [...lineages] } : {};
   if (!acted.length || !READER_DECIDES.includes(base.stage)) return { ...base, readers, ...parallel };
   // Nothing automatic linked work: the newest reader-linked work is what the poster follows.
   const by = acted[0]!;
-  const row = await work(client, by.workQitemId!);
+  const row = followed.get(by.workQitemId!)!;
   const moved = row.handedOnFrom ? `, handed on to ${row.qitemId}` : "";
   const why = `${(row.unknown ?? "").replace(/_/g, " ")}${row.closedToward ? `; closed toward ${row.closedToward}` : ""}`;
   return { ...base, readers, ...parallel, work: [row],

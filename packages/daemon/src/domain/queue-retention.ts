@@ -320,7 +320,11 @@ export function pruneStreamItems(
   }
   if (tables.has("classification_attempts")) lists.push("SELECT stream_item_id FROM classification_attempts WHERE stream_item_id IS NOT NULL");
   if (tables.has("stream_dispositions")) lists.push("SELECT stream_item_id FROM stream_dispositions WHERE stream_item_id IS NOT NULL");
-  if (tables.has("stream_reader_actions")) lists.push("SELECT stream_item_id FROM stream_reader_actions WHERE stream_item_id IS NOT NULL");
+  if (tables.has("stream_reader_actions")) {
+    lists.push("SELECT stream_item_id FROM stream_reader_actions WHERE stream_item_id IS NOT NULL");
+    // A duplicate action names the item it repeats; keep that item too, for corrected (historical) actions as well.
+    lists.push("SELECT duplicate_of FROM stream_reader_actions WHERE duplicate_of IS NOT NULL");
+  }
   const refs = (alias: string): string => lists.length ? `${alias}.stream_item_id NOT IN (${lists.join(" UNION ")})` : "1";
   const floor = tables.has("stream_retention_floor")
     ? db.prepare("SELECT floor_ts AS ts, floor_key AS key FROM stream_retention_floor WHERE id = 1").get() as { ts: string; key: string } | undefined
