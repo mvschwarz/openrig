@@ -332,12 +332,16 @@ export class InboundRouter {
       const correlated = route.correlationQitemId ? this.deps.queue.getQitem?.(route.correlationQitemId) : null;
       const askPending = correlated?.state === "pending";
       const closed = correlated?.state === "done" || correlated?.state === "handed-off";
-      // Only the open ask's interrupted return is a retry. A closed thread remains a conversation.
-      const earlierAnswer = askPending && !ev.recoveredThreadReply && route.correlationQitemId
+      const committedAnswer = (askPending || closed) && !ev.recoveredThreadReply && route.correlationQitemId
         ? this.deps.queue.getHumanAnswer?.(route.correlationQitemId, who.source) : null;
+      // The generated trailing footer records this event's channel and ts, separately from the person's text.
+      // A crash after close but before seen-mark must still reuse that event's committed answer.
+      const replayedAnswer = closed && committedAnswer?.body.endsWith(body.slice(body.lastIndexOf("\n\n---\n"))) ? committedAnswer : null;
+      // A different event after close remains conversation; only the pending ask coalesces other retries.
+      const earlierAnswer = askPending ? committedAnswer : replayedAnswer;
       let qitemId: string;
       try {
-        qitemId = await this.deps.queue.createQitem({
+        qitemId = replayedAnswer ? replayedAnswer.qitemId : await this.deps.queue.createQitem({
           qitemId: this.inboundQitemId(ev),
           source: who.source, // the REGISTERED human's canonical ref (human-class), never a raw platform id
           destination: route.destination,
