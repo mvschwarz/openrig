@@ -100,7 +100,7 @@ test('a passing-only case admits only a clean PASS of its own scenario', () => {
       const snapshot = { nodes: [{ id: 'worker' }, { id: 'peer' }], bindings: [{ id: 'b1', node_id: 'worker', tmux_pane: '%1' }, { id: 'b2', node_id: 'peer', tmux_pane: '%2' }],
         sessions: [{ id: 's1', node_id: 'worker', session_name: 'worker', status: 'running' },
           { id: 's2', node_id: 'peer', session_name: 'peer', status: 'running' }],
-        privatePanes: ['worker\t%1\t111\t0', 'peer\t%2\t222\t0'], defaultPanes: [] };
+        privatePanes: ['worker:%1:111:0', 'peer:%2:222:0'], defaultPanes: [] };
       snapshot.verdicts = snapshot.sessions.map(row => ({ node_id: row.node_id, session_name: row.session_name, verdict: 'match',
         observed_pid: 111, observed_pane_pid: 111, observed_at: '2026-01-01T00:00:00Z' }));
       pass.reducedEnv = { stage: 'complete', scope: 'team seats only; kernel duplication not exercised',
@@ -148,9 +148,9 @@ test('a passing-only case admits only a clean PASS of its own scenario', () => {
       const restored = structuredClone(pass.reducedEnv.gone);
       restored.outcome = 'restored';
       restored.after.sessions[1].status = 'running';
-      restored.after.privatePanes.push('peer\t%3\t333\t0');
+      restored.after.privatePanes.push('peer:%3:333:0');
       verifyPassingRun(0, { ...pass, reducedEnv: { ...pass.reducedEnv, gone: restored } }, caseName);
-      restored.after.privatePanes[1] = 'peer\t%3\t222\t0';
+      restored.after.privatePanes[1] = 'peer:%3:222:0';
       assert.throws(() => verifyPassingRun(0, { ...pass, reducedEnv: { ...pass.reducedEnv, gone: restored } }, caseName));
       for (const changed of [undefined, { ...mcp, identity: mcpResult({ identity: { sessionName: 'other', rigName: 'dev-pair-stub' } }) },
         { ...mcp, unseated: mcpResult({ ok: true, seat: 'unexpected', message: 'no seat' }) },
@@ -273,10 +273,14 @@ for (const failure of [null, 'after-restart', 'before-private-panes', 'after-pri
         if (failure === (killed ? 'gone-restart' : blind === 1 ? 'after-restart' : 'second-restart')) throw new Error('synthetic restart failure');
         return { stdout: '' };
       }
-      if (args.includes('display-message')) return { stdout: 'peer\t%2\t' + (failure === 'wrong-owned-pane' ? '999' : '112') + '\t0\n' };
+      // tmux renders literal tabs in format output as underscores (as in CI).
+      const row = (name, pane, pid) => args.at(-1).replaceAll('#{session_name}', name)
+        .replaceAll('#{pane_id}', pane).replaceAll('#{pane_pid}', pid).replaceAll('#{pane_dead}', '0')
+        .replaceAll('\t', '_') + '\n';
+      if (args.includes('display-message')) return { stdout: row('peer', '%2', failure === 'wrong-owned-pane' ? '999' : '112') };
       if (failure === proof.stage) throw Object.assign(new Error('synthetic unreadable socket'),
         { code: 13, stdout: '', stderr: 'permission denied' });
-      return { stdout: args[0] !== '-S' ? '' : 'worker\t%1\t111\t0\n' + (killed ? '' : 'peer\t%2\t112\t0\n') };
+      return { stdout: args[0] !== '-S' ? '' : row('worker', '%1', '111') + (killed ? '' : row('peer', '%2', '112')) };
     };
     const daemon = { port: 12345, readEnv: { PATH: '/fixture/bin:/usr/bin:/bin', TMUX: 'synthetic', TMUX_TMPDIR: '/fixture' },
       sigterm: async () => {}, restart: async () => {
@@ -305,6 +309,7 @@ for (const failure of [null, 'after-restart', 'before-private-panes', 'after-pri
       assert.equal(proof.stage, 'complete');
       await controls.goneProcess();
       assert.equal(proof.gone.stage, 'complete');
+      assert.deepEqual(proof.gone.before.privatePanes, ['peer:%2:112:0', 'worker:%1:111:0']);
       assert.deepEqual(events, ['blind1', 'poll-read', 'blind2', 'recovery-restart', 'send', 'kill', 'gone-blind', 'gone-recovery']);
     }
   });

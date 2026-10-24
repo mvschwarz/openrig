@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 const exec = promisify(execFile);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const panesOf = rows => rows.map(line => {
-  const [name, pane, pid, dead] = line.split('\t');
+  const [name, pane, pid, dead] = line.split(':');
   return { name, pane, pid: Number(pid), dead: Number(dead) };
 });
 
@@ -96,7 +96,7 @@ export async function reducedEnvRestart(daemon, scaffold, rigBin, proof = {},
   const panes = async socket => {
     try {
       const { stdout } = await command('/usr/bin/tmux', [...(socket ? ['-S', socket] : []),
-        'list-panes', '-a', '-F', '#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}']);
+        'list-panes', '-a', '-F', '#{session_name}:#{pane_id}:#{pane_pid}:#{pane_dead}']);
       return stdout.trim().split('\n').filter(Boolean).sort();
     } catch (error) {
       if (!socket && error.code === 1 && !error.stdout &&
@@ -192,7 +192,7 @@ export async function reducedEnvRestart(daemon, scaffold, rigBin, proof = {},
         gone.target = { nodeId: target.node_id, sessionId: target.id, pid: pane.pid, pane: pane.pane };
         gone.stage = 'confirm-owned-pane';
         const observed = await command('/usr/bin/tmux', ['-S', scaffold.tmuxSocketPath, 'display-message', '-p', '-t', pane.pane,
-          '#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}']);
+          '#{session_name}:#{pane_id}:#{pane_pid}:#{pane_dead}']);
         assert.deepEqual(panesOf([observed.stdout.trim()]), [pane], 'owned pane identity changed; no kill');
         gone.stage = 'kill-owned-seat';
         gone.kill = await command('/bin/kill', ['-TERM', String(pane.pid)], daemon.readEnv);
