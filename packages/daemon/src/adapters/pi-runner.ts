@@ -3,7 +3,7 @@
 // The runner is what makes a Pi seat behave like a normal OpenRig tmux seat
 // while everything underneath stays structured RPC:
 //
-//   pane stdin (rig send / human typing)  ──▶ RPC prompt / steer / follow_up
+//   pane stdin (rig send / human typing)  ──▶ RPC prompt (queued as a steer while busy) / follow_up
 //   pi RPC events (typed JSONL)           ──▶ (a) human-readable pane mirror
 //                                             (b) activity + session_identity
 //                                                 POSTs to the daemon
@@ -382,10 +382,6 @@ export async function readPiSessionEntryIds(
 
 export class RunnerCore {
   private streaming = false;
-  /** A prompt went out and its turn hasn't been reported yet. `streaming` follows only agent_start/agent_end, so without
-   *  this a block arriving before agent_start went out as a second prompt, which a busy agent refuses (#1932). It ends
-   *  with the turn, when an input is refused (the agent isn't busy after all) or when the child exits. */
-  private promptPending = false;
   private sessionFile: string | undefined;
   private sessionId: string | undefined;
   private lastEntryId: string | undefined;
@@ -537,22 +533,17 @@ export class RunnerCore {
       this.io.mirrorLine(`you (follow-up) ▸ ${message}`);
       return;
     }
-    if (this.streaming || this.promptPending) {
-      // Mid-stream, or a prompt's turn not yet started: steer delivers after the current turn's tool calls,
-      // before the next model call (Pi's documented semantics).
-      this.io.sendRpc({ type: "steer", message: block });
-      this.io.mirrorLine(`you (steer) ▸ ${block}`);
-      return;
-    }
-    this.io.sendRpc({ type: "prompt", message: block });
-    this.io.mirrorLine(`you ▸ ${block}`);
-    this.promptPending = true;
+    // The runtime decides, not the runner: with streamingBehavior "steer", Pi and OMP run the prompt when idle and,
+    // while busy, queue it as a steer, delivered after the current turn's tool calls and before the next model call.
+    // The runner's `streaming` starts only at agent_start, so it can't tell when a turn is about to start (#1932) or
+    // when a prompt was consumed locally and started none. It labels the mirror line only.
+    this.io.sendRpc({ type: "prompt", message: block, streamingBehavior: "steer" });
+    this.io.mirrorLine(this.streaming ? `you (steer) ▸ ${block}` : `you ▸ ${block}`);
   }
 
   /** Child process exit — honest, loud, durable. */
   handlePiExit(code: number | null): void {
     this.ready = false;
-    this.promptPending = false;
     this.reportDroppedFrame(this.frameDecoder?.incomplete());
     this.io.mirrorLine(`[${this.runtime}-runner] EXITED ${this.runtime} exited (code ${code ?? "unknown"})`);
     this.writeSidecar({ exited: { code, at: this.io.now() } });
@@ -583,8 +574,6 @@ export class RunnerCore {
         return;
       }
       this.io.mirrorLine(`[${this.runtime}-runner] ERROR rpc: ${message}`);
-      // A refused input means no turn is coming for it, so the next block is a prompt again.
-      if (typeof record.command === "string" && Object.hasOwn(INPUT_COMMANDS, record.command)) this.promptPending = false;
       // Only a rejected input means the seat cannot do the requested work.
       // A mistimed /abort (or any control command) leaves the seat idle.
       if (this.runtime === "omp" && typeof record.command === "string" && Object.hasOwn(INPUT_COMMANDS, record.command)) {
@@ -778,7 +767,6 @@ export class RunnerCore {
     }
     const mapped = mapPiEvent(event, this.runtime);
     if (mapped.streaming !== undefined) this.streaming = mapped.streaming;
-    if (mapped.streaming === false) this.promptPending = false;
     // OMP writes its JSONL lazily; re-announce identity after each turn until
     // the daemon confirms the token. Pi's get_state identity is final.
     if (event.type === "agent_end" && this.runtime === "omp") this.postSessionIdentity();
