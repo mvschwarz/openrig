@@ -74,7 +74,7 @@ async function fixture(opts: { pane: string | null } = { pane: "%1" }) {
   const effects = () => ({ compactPastes: writes.filter((w) => w.startsWith("paste:/compact")).length, prepPastes: writes.filter((w) => w.startsWith("paste:") && !w.startsWith("paste:/compact")).length, enters: writes.filter((w) => w === "enter").length });
   const compactRows = (state?: string) => (db.prepare("SELECT outbox_id AS id, delivery_state AS state FROM outbox_entries WHERE body LIKE '/compact%'").all() as Array<{ id: string; state: string }>)
     .filter((r) => !state || r.state === state);
-  return { db, e, transport, writes, compactRows, rows, effects, stageMap, activity: (s: string) => { activity = s; } };
+  return { db, e, transport, writes, compactRows, rows, effects, stageMap, activity: (s: string) => { activity = s; }, draft: (text: string) => { body = text; } };
 }
 
 it("automatic, recorded pane (existing-behaviour control, green before this PR's fixes): busy then idle, the lifecycle lease refuses before any send, so no /compact and no held row", async () => {
@@ -106,6 +106,15 @@ it("manual, recorded pane (existing-behaviour control): the preparation prompt i
   expect(f.rows()).toEqual([{ kind: "prep", state: "delivered" }]);
   // ...and the /compact send then meets the draft-aware lifecycle refusal before any input.
   expect(outcome).toMatchObject({ triggered: false, reason: "draft_aware_lifecycle", preparation: { delivery: "delivered", compact: "not_sent" } });
+});
+
+it("manual, someone is drafting in the input box (existing-behaviour control, green before N1): draft-aware delivery holds the preparation prompt as retained, so the request ends at once as not sent", async () => {
+  const f = await fixture();
+  f.draft("half a sentence");
+  const outcome = await f.e.triggerManualCompact({ ...input, usedPercentage: 40 }, { operatorInitiated: true });
+  expect(outcome).toMatchObject({ triggered: false, reason: "draft_input_busy", preparation: { delivery: "not_sent", compact: "not_sent" } });
+  expect(f.rows()).toEqual([{ kind: "prep", state: "retained" }]);
+  expect(f.effects()).toEqual({ compactPastes: 0, prepPastes: 0, enters: 0 });
 });
 
 // ---------------------------------------------------------------------------------------------------------

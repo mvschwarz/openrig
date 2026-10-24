@@ -420,6 +420,18 @@ for (const code of ['draft_input_busy', 'draft_input_unknown', 'draft_input_chan
   });
 }
 
+it('automatic: a draft hold of the preparation prompt (a not_reached receipt) is not sent, so the next poll sends it again instead of waiting out the deadline', async () => {
+  const f = fixture();
+  f.onText((text) => (text.startsWith('/compact') ? undefined : {ok: false, code: 'draft_input_busy', message: 'The seat has an unsubmitted input.'}));
+  expect(await f.e.maybeAutoCompact(input)).toEqual({triggered: false, reason: 'send_failed'});
+  expect(f.e.getPreparationState(seat)).toMatchObject({status: 'sending', delivery: 'not_sent'});
+  f.onText(() => undefined);
+  expect(await f.e.maybeAutoCompact(input)).toEqual({triggered: true});
+  expect(f.e.getPreparationState(seat)).toMatchObject({status: 'waiting', delivery: 'delivered'});
+  // The fake records the held call too: two preparation prompts, one held and one delivered.
+  expect(f.texts().filter((t) => !t.startsWith('/compact'))).toHaveLength(2);
+});
+
 it('automatic: once a draft hold clears, the next poll before the cooldown does not reuse the stopped attempt; after it, a fresh one begins', async () => {
   const f = fixture();
   await armed(f);
