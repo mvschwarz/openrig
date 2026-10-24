@@ -839,7 +839,8 @@ Costs: a new conversation (history isn't converted, only the handover carries
 over); the seat's pane and scrollback change; the team file isn't rewritten (a
 later converge reports a deferred change_runtime); the source runtime's model,
 effort, Codex profile and native permission choice are cleared, not mapped; two
-processes run until cutover; messages to the seat wait during the switch.
+processes run until cutover; messages sent to the seat during the switch are
+held, not typed, and need sending again afterwards.
 Codex and Claude Code, single-pane seats only. --dry-run lists the details.
 
 A seat can switch itself (its CLI may end when it retires; the daemon finishes).

@@ -742,8 +742,8 @@ runtime, move that one seat instead of rebuilding the team. Ask your operator
 agent, or run it yourself:
 
 ```bash
-rig seat set-runtime dev-impl@my-rig --runtime claude-code --reason "Codex limit" --dry-run
-rig seat set-runtime dev-impl@my-rig --runtime claude-code --reason "Codex limit"
+rig seat set-runtime dev-review@starter --runtime claude-code --reason "Codex limit" --dry-run
+rig seat set-runtime dev-review@starter --runtime claude-code --reason "Codex limit"
 ```
 
 The dry run shows the target's settings and where each comes from (an explicit
@@ -777,8 +777,9 @@ What it costs:
   permission policy are kept.
 - **Two processes until cutover.** The successor runs on the target's account
   while the switch is open.
-- **Messages wait.** A `rig send` to the seat during the switch waits, and says
-  so. If the seat moves first, the message isn't typed and needs sending again.
+- **Messages are held during the switch.** A `rig send` to the seat while it
+  switches isn't typed; it says the seat is switching and until when. Send it
+  again afterwards to reach whoever holds the seat.
 - **Leftover files after a failed switch.** The target runtime's prepared seat
   storage and projections can remain.
 - **Codex and Claude Code, single-pane seats.** Startup slash commands aren't

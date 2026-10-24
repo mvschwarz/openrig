@@ -83,9 +83,9 @@ describe("the runtime switch routes", () => {
     });
   });
 
-  it("the summary a sender reads says whether the seat is switching, and until when", async () => {
-    const read = async () => (await (await setup.app.request(`/api/seat/runtime-switch/${encodeURIComponent(SEAT)}`)).json()) as { runtimeSwitch: unknown };
-    expect(await read()).toEqual({ runtimeSwitch: null });
+  it("the seat's status says whether it is switching, and until when", async () => {
+    const read = async () => (await (await setup.app.request(`/api/seat/status/${encodeURIComponent(SEAT)}`)).json()) as { runtimeSwitch?: unknown };
+    expect((await read()).runtimeSwitch).toBeUndefined();
     openSwitch();
     expect((await read()).runtimeSwitch).toMatchObject({ id: "sw1", phase: "preparing", from: "codex", to: "claude-code", committed: false,
       deadlineAt: "2026-10-24T03:00:00.000Z" });

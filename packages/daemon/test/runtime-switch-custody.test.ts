@@ -64,7 +64,7 @@ describe("a runtime switch's own processes don't act as the seat; nothing else c
       c.set("queueRepo" as never, queueRepo as never);
       c.set("inboxHandler" as never, inbox as never);
       c.set("outboxHandler" as never, outbox as never);
-      c.set("sessionTransport" as never, { resolveSessions: vi.fn(async () => ({ ok: true, sessions: [SEAT] })), send } as never);
+      c.set("sessionTransport" as never, { resolveSessions: vi.fn(async () => ({ ok: true, sessions: [{ sessionName: SEAT }] })), send } as never);
       c.set("agentActivityStore" as never, new AgentActivityStore({ db, eventBus }) as never);
       c.set("activityHookToken" as never, "fixture" as never);
       c.set("sessionRegistry" as never, sessionRegistry as never);
@@ -155,6 +155,50 @@ describe("a runtime switch's own processes don't act as the seat; nothing else c
     it("a store without switch records refuses nothing", () => {
       db.exec("DROP TABLE seat_runtime_switches");
       expect(runtimeSwitchCustodyRefusal(db, SEAT, predecessor)).toBeNull();
+    });
+  });
+
+  // A send to a seat that is switching is held at once and says why, on the send's own answer (no extra request, and
+  // no wait behind the switch's lease).
+  describe("a send to a seat that is switching runtime", () => {
+    const sendTo = () => app.request("/api/transport/send", { method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": OTHER }, body: JSON.stringify({ session: SEAT, text: "please review" }) });
+
+    it("is held, not typed, and the sender is told the seat is switching and until when", async () => {
+      record(false);
+      const response = await sendTo();
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body).toMatchObject({ outcome: "retained", sent: false, reason: "runtime_switch_in_progress", runtimeSwitch: { id: "sw1", to: "claude-code" } });
+      expect(body.warning).toBe("dev-impl@seat-rig is switching runtime (codex -> claude-code, switch sw1) until about 2026-10-24T03:00:00Z. Send it again after the switch; it then reaches whoever holds the seat.");
+      expect(send).not.toHaveBeenCalled();
+    });
+
+    it("once the switch has committed, a send goes to the seat as usual", async () => {
+      record(true);
+      expect((await sendTo()).status).toBe(200);
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+
+    it("a send that waited while the seat moved says so, and that nothing was typed", async () => {
+      send.mockImplementationOnce(async () => {
+        // The switch commits while this send waits behind its lease.
+        db.prepare(`INSERT INTO seat_runtime_switches (id, node_id, canonical_session, staging_session, predecessor_pane, successor_pane,
+          predecessor_generation, successor_generation, from_runtime, to_runtime, phase, reason, plan_json, deadline_at, committed_at)
+          VALUES ('sw2', ?, ?, 'openrig-switch-sw2', '%0', '%5', ?, 'g2', 'codex', 'claude-code', 'finished', 'limit', '{}', ?, ?)`)
+          .run(nodeId, SEAT, predecessor, new Date().toISOString(), new Date().toISOString());
+        return { ok: false, sessionName: SEAT, sent: false, reason: "guard_target_changed", error: "Input target changed while waiting; no input written." };
+      });
+      const response = await sendTo();
+      expect(response.status).toBe(409);
+      expect((await response.json()).error).toBe("Input target changed while waiting; no input written. dev-impl@seat-rig moved to claude-code (runtime switch sw2) while this send waited, so nothing was typed. Send it again to reach its new occupant.");
+    });
+
+    it("a seat with no switch, or a switch long finished, sends exactly as before", async () => {
+      expect((await sendTo()).status).toBe(200);
+      send.mockImplementationOnce(async () => ({ ok: false, sessionName: SEAT, sent: false, reason: "guard_target_changed", error: "Input target changed while waiting; no input written." }));
+      record(true); // committed 2026-10-24T02:01Z, before this send began
+      expect((await (await sendTo()).json()).error).toBe("Input target changed while waiting; no input written.");
     });
   });
 });

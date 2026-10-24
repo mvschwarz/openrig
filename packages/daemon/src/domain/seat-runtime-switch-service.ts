@@ -125,7 +125,7 @@ const COSTS = [
   "The team file isn't rewritten: the database and rig export show the new runtime, the imported YAML keeps the old one, so a later converge reports a deferred change_runtime.",
   "Source settings are cleared, not mapped: model, effort, Codex profile and an explicit native permission choice. A model or effort the seat's agent spec declares for the source runtime doesn't apply either.",
   "A second process runs on the target's account until cutover.",
-  "Messages sent to the seat during the switch wait for it; if the seat moves, they aren't typed to it and need sending again (rig send says so).",
+  "Messages sent to the seat while it switches are held, not typed; rig send says the seat is switching and until when, and they need sending again afterwards.",
   "A failed switch can leave the target runtime's prepared files (its seat storage and projections).",
   "Codex and Claude Code only, single-pane seats only.",
 ];
@@ -187,7 +187,8 @@ export class SeatRuntimeSwitchService {
     const open = this.openSwitch(node.id);
     if (open) {
       return { ...refuse("runtime_switch_pending",
-        `${seatRef} already has a runtime switch ${open.committed_at ? "that committed and still needs finishing" : "in progress"} (${open.from_runtime} → ${open.to_runtime}, switch ${open.id}).`,
+        `${seatRef} already has a runtime switch ${open.committed_at ? "that committed and still needs finishing"
+          : open.phase === "abandoned" ? "whose staged successor hasn't been retired" : "in progress"} (${open.from_runtime} → ${open.to_runtime}, switch ${open.id}).`,
         `Inspect it with rig seat status ${seatRef}; finish an interrupted one with rig seat set-runtime ${seatRef} --recover.`), switchId: open.id };
     }
     if (node.runtime !== "codex" && node.runtime !== "claude-code") {
@@ -580,7 +581,9 @@ export class SeatRuntimeSwitchService {
       const retired = await this.retireStaging(row.staging_session, nodeId, "Uncommitted successor");
       if (!retired.ok) return stuck(`The staged successor couldn't be retired: ${retired.message}`);
       tmux.finishLaunchBinding(row.staging_session);
-      const outcome = `interrupted before commit: the ${row.from_runtime} occupant holds the seat; the staged ${row.to_runtime} successor was retired`;
+      // An abandoned switch keeps why it stopped; recovery only settles the successor it couldn't retire then.
+      const outcome = row.phase === "abandoned" ? `${row.outcome ?? "abandoned before commit"} The staged ${row.to_runtime} successor was retired at recovery.`
+        : `interrupted before commit: the ${row.from_runtime} occupant holds the seat; the staged ${row.to_runtime} successor was retired`;
       db.prepare("UPDATE seat_runtime_switches SET phase = 'abandoned', outcome = ?, attention = NULL, updated_at = ? WHERE id = ?").run(outcome, at(), row.id);
       return { ok: true, outcome, switchId: row.id };
     }
@@ -593,11 +596,13 @@ export class SeatRuntimeSwitchService {
     return { ok: true, outcome: `committed: finished; the seat runs ${row.to_runtime}`, switchId: row.id };
   }
 
-  /** Daemon start: finish every interrupted switch. Returns warnings for the ones that still need attention. */
+  /** Daemon start: finish every interrupted switch, including an abandoned one whose successor wasn't retired. Returns
+   *  warnings for the ones that still need attention. */
   async recoverAll(): Promise<string[]> {
     let rows: Array<{ node_id: string; canonical_session: string }> = [];
     try {
-      rows = this.deps.db.prepare("SELECT node_id, canonical_session FROM seat_runtime_switches WHERE phase IN ('preparing', 'confirmed', 'committed')").all() as typeof rows;
+      rows = this.deps.db.prepare(`SELECT DISTINCT node_id, canonical_session FROM seat_runtime_switches
+        WHERE phase IN ('preparing', 'confirmed', 'committed') OR attention IS NOT NULL`).all() as typeof rows;
     } catch { return []; }
     const warnings: string[] = [];
     for (const row of rows) {
@@ -610,7 +615,17 @@ export class SeatRuntimeSwitchService {
   }
 }
 
-/** What `rig seat status` and a waiting send show about a seat's open (or attention-holding) runtime switch. */
+/** A switch of this seat that committed at or after `since` (a send that waited behind it says the seat moved). */
+export function runtimeSwitchCommittedSince(db: Database.Database, session: string, since: string): { id: string; from: string; to: string; committedAt: string } | null {
+  try {
+    const row = db.prepare(`SELECT id, from_runtime, to_runtime, committed_at FROM seat_runtime_switches
+      WHERE canonical_session = ? AND committed_at >= ? ORDER BY committed_at DESC LIMIT 1`).get(session, since) as
+      { id: string; from_runtime: string; to_runtime: string; committed_at: string } | undefined;
+    return row ? { id: row.id, from: row.from_runtime, to: row.to_runtime, committedAt: row.committed_at } : null;
+  } catch { return null; }
+}
+
+/** What `rig seat status` and a send to a switching seat show about a seat's open (or attention-holding) runtime switch. */
 export interface RuntimeSwitchSummary {
   id: string; phase: string; from: string; to: string; committed: boolean; startedAt: string; deadlineAt: string;
   attention: string | null; outcome: string | null;

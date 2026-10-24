@@ -6,7 +6,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type Database from "better-sqlite3";
+import { Hono } from "hono";
 import { createFullTestDb } from "./helpers/test-app.js";
+import { queueRoutes } from "../src/routes/queue.js";
+import { seatRoutes } from "../src/routes/seat.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
@@ -315,6 +318,81 @@ describe("live seat runtime switch", () => {
       expect(await service().recover(nodeId)).toMatchObject({ ok: false, code: "runtime_switch_pending" });
       expect(fakeTmux.killSession).not.toHaveBeenCalled();
       expect(runtimeSwitchSummary(db, { nodeId })).toMatchObject({ id: "sw1", committed: false, attention: expect.stringMatching(/neither the predecessor's nor the successor's/) });
+    });
+  });
+
+  // review-r2's controls on #1895: a process a switch names stays fenced until it's known gone, on every route that acts
+  // as the seat, not only the queue.
+  describe("the two processes of one switch stay apart until each is known gone", () => {
+    const app = () => {
+      const a = new Hono();
+      a.use("*", async (c, next) => {
+        for (const [key, value] of Object.entries({ db, rigRepo, sessionRegistry, eventBus, queueRepo, tmuxAdapter: fakeTmux })) c.set(key as never, value as never);
+        await next();
+      });
+      a.route("/api/queue", queueRoutes());
+      a.route("/api/seat", seatRoutes);
+      return a;
+    };
+    const as = (generation: string, session = SEAT) => ({ "Content-Type": "application/json", "X-OpenRig-Session": session, "X-OpenRig-Occupant-Generation": generation });
+    const committedSwitch = async () => {
+      const svc = service();
+      successorConfirms(svc);
+      expect(await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "limit" })).toMatchObject({ ok: true });
+      return openSwitch();
+    };
+
+    it("a staged successor that couldn't be retired stays fenced, and recovery at the next start retires it", async () => {
+      const a = app();
+      const work = await queueRepo.create({ sourceSession: "orch-lead@seat-rig", destinationSession: SEAT, body: "owned work", nudge: false });
+      fakeTmux.signalPaneProcess.mockImplementation(async () => ({ ok: false, code: "tmux_error", message: "controlled retirement failure" }) as never);
+      fakeTmux.isPaneDead.mockImplementation(async () => false);
+      const svc = service();
+      expect(await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "limit", confirmTimeoutMs: 10_000 })).toMatchObject({ ok: false, committed: false });
+      const row = openSwitch();
+      expect(row).toMatchObject({ phase: "abandoned", attention: expect.stringMatching(/couldn't be retired/) });
+      const claim = await a.request(`/api/queue/${work.qitemId}/claim`, { method: "POST", headers: as(row.successor_generation), body: "{}" });
+      expect(claim.status).toBe(409);
+      expect(await claim.json()).toMatchObject({ code: "switch_not_committed", message: expect.stringMatching(/didn't commit/) });
+      expect(queueRepo.getById(work.qitemId)?.state).toBe("pending");
+      // The next start tries again. Once the process is gone, the switch is settled and nothing is fenced any more.
+      fakeTmux.signalPaneProcess.mockImplementation(async () => ({ ok: true }) as never);
+      fakeTmux.isPaneDead.mockImplementation(async () => true);
+      expect(await svc.recoverAll()).toEqual([]);
+      expect(openSwitch()).toMatchObject({ phase: "abandoned", attention: null, outcome: expect.stringMatching(/retired at recovery/) });
+      expect(panes.has(row.staging_session)).toBe(false);
+    });
+
+    it("the retired predecessor can't change the seat's model; the successor can", async () => {
+      const row = await committedSwitch();
+      const a = app();
+      const stale = await a.request(`/api/seat/set-model/${encodeURIComponent(SEAT)}`, { method: "POST", headers: as(predecessorGeneration),
+        body: JSON.stringify({ model: "stale-predecessor-choice", reason: "earlier work" }) });
+      expect(stale.status).toBe(409);
+      expect(await stale.json()).toMatchObject({ code: "occupant_retired_by_switch" });
+      expect(nodeRow().model).toBeNull();
+      const own = await a.request(`/api/seat/set-model/${encodeURIComponent(SEAT)}`, { method: "POST", headers: as(row.successor_generation),
+        body: JSON.stringify({ model: "successor-choice", reason: "current work" }) });
+      expect(own.status).toBe(200);
+      expect(nodeRow().model).toBe("successor-choice");
+    });
+
+    it.each(["set-effort", "set-permissions", "set-typing-guard", "set-cwd", "set-policy", "set-terminal-policy", "handover", "launch", "stop", "clean", "set-runtime"])(
+      "the retired predecessor can't %s as the seat either", async (route) => {
+        await committedSwitch();
+        const response = await app().request(`/api/seat/${route}/${encodeURIComponent(SEAT)}`, { method: "POST", headers: as(predecessorGeneration), body: "{}" });
+        expect(response.status).toBe(409);
+        expect(await response.json()).toMatchObject({ code: "occupant_retired_by_switch" });
+      });
+
+    it("reading the seat, and anyone else's request, go on as before", async () => {
+      await committedSwitch();
+      const a = app();
+      expect((await a.request(`/api/seat/status/${encodeURIComponent(SEAT)}`, { headers: as(predecessorGeneration) })).status).toBe(200);
+      const operator = await a.request(`/api/seat/set-model/${encodeURIComponent(SEAT)}`, { method: "POST", headers: as("operator-generation", "orch-lead@seat-rig"),
+        body: JSON.stringify({ model: "operator-choice", reason: "operator" }) });
+      expect(operator.status).toBe(200);
+      expect(nodeRow().model).toBe("operator-choice");
     });
   });
 });

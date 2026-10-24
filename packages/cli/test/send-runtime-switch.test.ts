@@ -1,5 +1,5 @@
-// Slice 16: a `rig send` to a seat that is switching runtime waits for the switch, so the sender is told why and for
-// how long before it waits, and told plainly if the seat moved and nothing was typed. The daemon is a fake.
+// Slice 16: a `rig send` to a seat that is switching runtime. The daemon answers on the send itself (held at once, or
+// "the seat moved" if it waited), so the CLI makes one request and shows that answer. The daemon is a fake.
 import { describe, it, expect, vi } from "vitest";
 import { Command } from "commander";
 import { sendCommand } from "../src/commands/send.js";
@@ -18,16 +18,15 @@ function lifecycleDeps(): LifecycleDeps {
   };
 }
 
-type Answer = { status: number; data: unknown };
-async function send(probe: Answer, sent: Answer) {
-  const posts: Array<{ path: string; options?: { timeoutMs?: number } }> = [];
+async function send(answer: { status: number; data: unknown }) {
+  const requests: string[] = [];
   const stderr: string[] = [];
   const stdout: string[] = [];
   const deps: StatusDeps = {
     lifecycleDeps: lifecycleDeps(),
     clientFactory: () => ({
-      get: vi.fn(async (path: string) => path.startsWith("/api/seat/runtime-switch/") ? probe : { status: 404, data: {} }),
-      post: vi.fn(async (path: string, _body: unknown, options?: { timeoutMs?: number }) => { posts.push({ path, options }); return sent; }),
+      get: vi.fn(async (path: string) => { requests.push(`GET ${path}`); return { status: 404, data: {} }; }),
+      post: vi.fn(async (path: string) => { requests.push(`POST ${path}`); return answer; }),
     }) as unknown as ReturnType<StatusDeps["clientFactory"]>,
   };
   const program = new Command();
@@ -37,46 +36,26 @@ async function send(probe: Answer, sent: Answer) {
   process.exitCode = undefined;
   vi.spyOn(console, "log").mockImplementation((...a) => { stdout.push(a.join(" ")); });
   vi.spyOn(console, "error").mockImplementation((...a) => { stderr.push(a.join(" ")); });
-  vi.spyOn(console, "warn").mockImplementation((...a) => { stderr.push(a.join(" ")); });
   try { await program.parseAsync(["node", "rig", "send", "dev-impl@my-rig", "please pick up the review"]); }
   finally { vi.restoreAllMocks(); }
   const exitCode = process.exitCode;
   process.exitCode = before;
-  return { posts, stderr: stderr.join("\n"), stdout: stdout.join("\n"), exitCode };
+  return { requests, stderr: stderr.join("\n"), stdout: stdout.join("\n"), exitCode };
 }
 
-const delivered: Answer = { status: 200, data: { ok: true, sessionName: "dev-impl@my-rig" } };
-const switching = (deadlineAt: string, committed = false): Answer =>
-  ({ status: 200, data: { runtimeSwitch: { id: "01SW", from: "codex", to: "claude-code", committed, deadlineAt } } });
-
 describe("rig send to a seat that is switching runtime", () => {
-  it("says why the send waits and until when, and waits that long instead of timing out first", async () => {
-    const deadline = new Date(Date.now() + 120_000).toISOString();
-    const { posts, stderr, stdout } = await send(switching(deadline), delivered);
-    expect(stderr).toContain(`Note: dev-impl@my-rig is switching runtime (codex -> claude-code, switch 01SW). This send waits for it, until about ${deadline}.`);
-    expect(stderr).toMatch(/If the seat moves to claude-code, nothing is typed and you'll need to send again/);
-    expect(posts[0]!.path).toBe("/api/transport/send");
-    expect(posts[0]!.options?.timeoutMs).toBeGreaterThan(140_000);
-    expect(stdout).toMatch(/Sent to dev-impl@my-rig/);
+  it("is held at once, and the sender is told why and until when, in one request", async () => {
+    const { requests, stdout, exitCode } = await send({ status: 200, data: { ok: true, sessionName: "dev-impl@my-rig", outcome: "retained", sent: false,
+      reason: "runtime_switch_in_progress", warning: "dev-impl@my-rig is switching runtime (codex -> claude-code, switch 01SW) until about 2026-10-24T03:00:00Z. Send it again after the switch; it then reaches whoever holds the seat." } });
+    expect(requests).toEqual(["POST /api/transport/send"]);
+    expect(stdout).toBe("Retained, not delivered to dev-impl@my-rig. dev-impl@my-rig is switching runtime (codex -> claude-code, switch 01SW) until about 2026-10-24T03:00:00Z. Send it again after the switch; it then reaches whoever holds the seat.");
+    expect(exitCode).toBeFalsy();
   });
 
-  it("if the seat moved while the send waited, says nothing was typed and to send again", async () => {
-    const refused: Answer = { status: 500, data: { ok: false, sessionName: "dev-impl@my-rig", sent: false, reason: "guard_target_changed",
-      error: "Input target changed while waiting; no input written." } };
-    const { stderr, exitCode } = await send(switching(new Date(Date.now() + 60_000).toISOString()), refused);
-    expect(stderr).toMatch(/The seat moved to claude-code while this send waited, so nothing was typed\. Send it again to reach its new occupant\./);
-    // The send failed (as before, a daemon 5xx exits 2).
-    expect(exitCode).toBeGreaterThan(0);
-  });
-
-  it.each([
-    ["a seat that isn't switching", { status: 200, data: { runtimeSwitch: null } }],
-    ["a committed switch (the seat has already moved)", switching(new Date(Date.now() + 60_000).toISOString(), true)],
-    ["a daemon without the route", { status: 404, data: {} }],
-  ])("%s: the send goes as before, with no notice", async (_case, probe) => {
-    const { posts, stderr, stdout } = await send(probe as Answer, delivered);
-    expect(stderr).not.toMatch(/switching runtime/);
-    expect(posts[0]!.options?.timeoutMs ?? 0).toBeLessThan(60_000);
-    expect(stdout).toMatch(/Sent to dev-impl@my-rig/);
+  it("a send that waited while the seat moved says nothing was typed and to send again", async () => {
+    const { stderr, exitCode } = await send({ status: 409, data: { ok: false, sessionName: "dev-impl@my-rig", sent: false, reason: "guard_target_changed",
+      error: "Input target changed while waiting; no input written. dev-impl@my-rig moved to claude-code (runtime switch 01SW) while this send waited, so nothing was typed. Send it again to reach its new occupant." } });
+    expect(stderr).toMatch(/moved to claude-code \(runtime switch 01SW\) while this send waited, so nothing was typed\. Send it again to reach its new occupant\./);
+    expect(exitCode).toBe(1);
   });
 });

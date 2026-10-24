@@ -10,7 +10,7 @@ import { SeatStatusService } from "../domain/seat-status-service.js";
 import { SeatHandoverService } from "../domain/seat-handover-service.js";
 import { SeatRuntimeSwitchService, runtimeSwitchSummary } from "../domain/seat-runtime-switch-service.js";
 import type { QueueRepository } from "../domain/queue-repository.js";
-import { OCCUPANT_GENERATION_HEADER } from "./runtime-switch-custody.js";
+import { OCCUPANT_GENERATION_HEADER, runtimeSwitchCustodyRefusal } from "./runtime-switch-custody.js";
 import { SeatSwitchClientService } from "../domain/seat-switch-client-service.js";
 import { SeatLifecycleService } from "../domain/seat-lifecycle-service.js";
 import { makePredecessorRecapResolver } from "../domain/predecessor-recap-resolver.js";
@@ -26,6 +26,17 @@ import type { SessionTransport } from "../domain/session-transport.js";
 import { DeliveryGuardError } from "../domain/seat-delivery-guard.js";
 
 export const seatRoutes = new Hono();
+
+// Slice 16: a runtime switch's retired predecessor, or its staged successor before commit, doesn't act as the seat here
+// either (the queue and send's narrow check). Reads, other callers and requests without a generation go on as before;
+// the staged successor's own confirmation and a recovery are exempt.
+seatRoutes.use("*", async (c, next) => {
+  if (c.req.method === "GET" || /\/set-runtime\/[^/]+\/(confirm|recover)$/.test(c.req.path)) return next();
+  const rigRepo = c.get("rigRepo" as never) as RigRepository | undefined;
+  const refusal = rigRepo ? runtimeSwitchCustodyRefusal(rigRepo.db, transportSenderSession(c), c.req.header(OCCUPANT_GENERATION_HEADER)) : null;
+  if (refusal) return c.json(refusal.body, refusal.status);
+  return next();
+});
 
 // S09 is an independent delivery preference, never a lifecycle or permission change.
 seatRoutes.post("/set-typing-guard/:seatRef", async c => {
@@ -265,11 +276,6 @@ seatRoutes.post("/set-runtime/:seatRef/recover", async (c) => {
   return result.ok ? c.json(result) : c.json(result, 409);
 });
 
-// A send to a seat that is switching waits for the switch; the CLI asks first so it can say why and for how long.
-seatRoutes.get("/runtime-switch/:session", (c) => {
-  const rigRepo = c.get("rigRepo" as never) as RigRepository;
-  return c.json({ runtimeSwitch: runtimeSwitchSummary(rigRepo.db, { session: c.req.param("session")! }) });
-});
 
 seatRoutes.post("/handover/:seatRef", async (c) => {
   const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
