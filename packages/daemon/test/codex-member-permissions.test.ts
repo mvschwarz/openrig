@@ -20,7 +20,7 @@ import { execFileSync } from "node:child_process";
 import { codexEnvelopeArgs } from "../src/domain/codex-rebuild-permissions.js";
 import { codexMemberEnvelope, readCodexMemberPermissions, readProfileFingerprint, validateCodexMemberPermissions,
   type CodexMemberPermissions, type CodexProfileObservation } from "../src/domain/codex-member-permissions.js";
-import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
+import { CodexRuntimeAdapter, type CodexAdapterFsOps } from "../src/adapters/codex-runtime-adapter.js";
 import { seatRoutes } from "../src/routes/seat.js";
 import { createTestApp } from "./helpers/test-app.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
@@ -317,11 +317,12 @@ describe("the setter's profile hash is bounded evidence, never a blocker", () =>
   });
 
   it("keeps a loading profile accepted when its bytes can't be read, and reports a check that couldn't run", async () => {
-    const tmux = {} as TmuxAdapter;
-    const unread = new CodexRuntimeAdapter({ tmux, codexHome: "/codex-home", profileFingerprint: async () => ({ state: "unreadable", reason: "not a regular file" }),
+    // observeProfile reads no adapter filesystem: the profile check runs through its two injected seams.
+    const tmux = {} as TmuxAdapter, fsOps = {} as CodexAdapterFsOps;
+    const unread = new CodexRuntimeAdapter({ tmux, fsOps, codexHome: "/codex-home", profileFingerprint: async () => ({ state: "unreadable", reason: "not a regular file" }),
       verifyProfilePreflight: async profile => ({ ok: true, profile }) });
     expect(await unread.observeProfile("lease", "/same")).toMatchObject({ file: "unreadable", load: "ok", detail: expect.stringContaining("not a regular file") });
-    const broken = new CodexRuntimeAdapter({ tmux, codexHome: "/codex-home", profileFingerprint: async () => { throw new Error("EIO"); },
+    const broken = new CodexRuntimeAdapter({ tmux, fsOps, codexHome: "/codex-home", profileFingerprint: async () => { throw new Error("EIO"); },
       verifyProfilePreflight: async () => { throw new Error("spawn failed"); } });
     expect(await broken.observeProfile("lease", "/same")).toMatchObject({ file: "unreadable", load: "not_run" });
   });
