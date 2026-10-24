@@ -536,6 +536,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
     const configPath = this.resolveCodexConfigPath(home);
     const existing = this.fs.exists(configPath) ? this.fs.readFile(configPath) : "";
+    // A Codex home that keeps its hooks in hooks.json gets OpenRig's there too: Codex warns when one layer mixes both
+    // formats. Without a hooks.json, the inline config.toml block below is unchanged.
+    const hooksPath = nodePath.join(nodePath.dirname(configPath), "hooks.json");
+    if (this.fs.exists(hooksPath)) {
+      this.ensureCodexJsonActivityHooks(existing, configPath, hooksPath, relay);
+      return;
+    }
     const withHooks = upsertCodexActivityHooks(existing, relay);
     if (withHooks !== existing) {
       this.fs.mkdirp(nodePath.dirname(configPath));
@@ -552,6 +559,41 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     if (trusted !== withHooks) {
       this.fs.mkdirp(nodePath.dirname(configPath));
       this.fs.writeFile(configPath, trusted);
+    }
+  }
+
+  /**
+   * OpenRig's activity hooks in an existing hooks.json: one marked group per event (statusMessage "OpenRig activity"),
+   * replaced where it already is or appended after the user's groups, so their positions (and the trust Codex keys by
+   * position) don't move. OpenRig's own inline block from an earlier launch moves out of config.toml; the user's hooks,
+   * in either file, stay where they are. Trust is written for exactly our groups, keyed by the hooks.json path. A file
+   * OpenRig can't read as hooks is left untouched, with a warning.
+   */
+  private ensureCodexJsonActivityHooks(existing: string, configPath: string, hooksPath: string, relay: string): void {
+    const original = this.fs.readFile(hooksPath);
+    let document: { hooks: Record<string, unknown[]> };
+    try { document = parseCodexHooksJson(original); }
+    catch (err) {
+      console.error(`[openrig] codex activity hooks skipped: ${hooksPath} can't be read as hooks (${(err as Error).message}); left untouched`);
+      return;
+    }
+    const command = `node "${relay}"`;
+    const keySource = canonicalCodexHookSource(hooksPath);
+    let config = upsertCodexFeaturesHooksEnabled(stripCodexActivityHooks(existing));
+    for (const event of OPENRIG_ACTIVITY_HOOK_EVENTS) {
+      const groups = document.hooks[event] ?? [];
+      const found = groups.findIndex(isOpenRigActivityGroup);
+      const groupIndex = found < 0 ? groups.length : found;
+      groups[groupIndex] = openRigActivityGroup(command);
+      document.hooks[event] = groups;
+      const { key, hash } = computeCodexHookTrust(event, { keySource, command, timeoutSec: 5, groupIndex, statusMessage: OPENRIG_ACTIVITY_STATUS });
+      config = upsertCodexHookTrust(config, key, hash);
+    }
+    const json = `${JSON.stringify(document, null, 2)}\n`;
+    if (json !== original) this.fs.writeFile(hooksPath, json);
+    if (config !== existing) {
+      this.fs.mkdirp(nodePath.dirname(configPath));
+      this.fs.writeFile(configPath, config);
     }
   }
 
@@ -591,6 +633,25 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    */
   removeCodexActivityHooks(home?: string): void {
     const configPath = this.resolveCodexConfigPath(home);
+    const hooksPath = nodePath.join(nodePath.dirname(configPath), "hooks.json");
+    if (this.fs.exists(hooksPath)) {
+      // Only OpenRig's marked groups leave; the user's stay in place.
+      try {
+        const original = this.fs.readFile(hooksPath);
+        const document = parseCodexHooksJson(original);
+        for (const event of OPENRIG_ACTIVITY_HOOK_EVENTS) {
+          const groups = document.hooks[event];
+          if (!groups) continue;
+          const kept = groups.filter((group) => !isOpenRigActivityGroup(group));
+          if (kept.length > 0) document.hooks[event] = kept;
+          else delete document.hooks[event];
+        }
+        const json = `${JSON.stringify(document, null, 2)}\n`;
+        if (json !== original) this.fs.writeFile(hooksPath, json);
+      } catch (err) {
+        console.error(`[openrig] codex activity hook removal skipped for ${hooksPath}: ${(err as Error).message}`);
+      }
+    }
     if (!this.fs.exists(configPath)) return;
     const existing = this.fs.readFile(configPath);
     const updated = stripCodexActivityHooks(existing);
@@ -1925,6 +1986,8 @@ function upsertCodexHooksFeature(content: string): string {
 
 // OPR.0.4.1.10 FR-A — config-layer activity-hook projection.
 const OPENRIG_ACTIVITY_HOOKS_BEGIN = "# BEGIN OPENRIG MANAGED ACTIVITY HOOKS";
+/** The status Codex shows while OpenRig's hooks.json activity hook runs; it also marks the group as OpenRig's. */
+const OPENRIG_ACTIVITY_STATUS = "OpenRig activity";
 const OPENRIG_ACTIVITY_HOOKS_END = "# END OPENRIG MANAGED ACTIVITY HOOKS";
 const OPENRIG_ACTIVITY_HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest"] as const;
 
@@ -1956,6 +2019,40 @@ function upsertCodexActivityHooks(content: string, relayPath: string): string {
   }
   const prefix = next.replace(/\n*$/, "");
   return prefix.length > 0 ? `${prefix}\n\n${block}` : block;
+}
+
+function canonicalCodexHookSource(path: string): string {
+  // Codex keys hook trust by the canonical source path; a file not on the real filesystem keeps its plain path.
+  try { return fs.realpathSync.native(path); } catch { return path; }
+}
+
+/** A hooks.json document as Codex reads it: `hooks` maps each event to matcher groups, each with a `hooks` list. */
+function parseCodexHooksJson(content: string): { hooks: Record<string, unknown[]> } {
+  const value: unknown = JSON.parse(content);
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("not a JSON object");
+  const record = value as Record<string, unknown>;
+  if (record.hooks === undefined) record.hooks = {};
+  const hooks = record.hooks;
+  if (hooks === null || typeof hooks !== "object" || Array.isArray(hooks)
+    || Object.values(hooks).some((groups) => !Array.isArray(groups)
+      || groups.some((group) => group === null || typeof group !== "object" || !Array.isArray((group as { hooks?: unknown }).hooks)))) {
+    throw new Error("expected hooks to map each event to matcher groups with a hooks list");
+  }
+  return record as { hooks: Record<string, unknown[]> };
+}
+
+function openRigActivityGroup(command: string): { hooks: Array<Record<string, unknown>> } {
+  return { hooks: [{ type: "command", command, timeout: 5, statusMessage: OPENRIG_ACTIVITY_STATUS }] };
+}
+
+/** OpenRig's own group, for any relay path: no matcher, one command handler running the activity relay, with our status. */
+function isOpenRigActivityGroup(group: unknown): boolean {
+  if (group === null || typeof group !== "object") return false;
+  const { hooks, ...rest } = group as { hooks?: unknown };
+  if (Object.keys(rest).length > 0 || !Array.isArray(hooks) || hooks.length !== 1) return false;
+  const handler = hooks[0] as Record<string, unknown> | null;
+  return !!handler && handler.type === "command" && handler.statusMessage === OPENRIG_ACTIVITY_STATUS
+    && typeof handler.command === "string" && /^node ".*activity-relay\.cjs"$/.test(handler.command);
 }
 
 /**
