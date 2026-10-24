@@ -147,7 +147,8 @@ Managed-compaction coverage uses `managed-compaction-effect.test.ts` in ordinary
 
 The `daemon-restart` case also starts the installed daemon without inherited
 `TMUX`/`TMUX_TMPDIR` or the scaffold's forced-socket wrapper, keeping its private
-HOME/DB, stub runtimes and `--no-kernel`. It compares both original team panes and
-processes, node/session identities and bindings, and rejects new default-socket
-panes or superseded sessions. This covers **team seats only; kernel duplication
+HOME/DB, stub runtimes and `--no-kernel`. It first waits until the daemon has
+recorded each running team seat's process, then compares both original team panes
+and processes, node/session identities, session status and bindings, and rejects new
+default-socket panes, superseded sessions or a running session marked detached. This covers **team seats only; kernel duplication
 is not exercised**. A cut comparison runs the same helper on both exact archives.

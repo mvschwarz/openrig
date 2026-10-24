@@ -102,7 +102,8 @@ test('a passing-only case admits only a clean PASS of its own scenario', () => {
         privatePanes: ['worker\t%1\t111\t0', 'peer\t%2\t222\t0'], defaultPanes: [] };
       pass.reducedEnv = { scope: 'team seats only; kernel duplication not exercised',
         environment: { TMUX: false, TMUX_TMPDIR: false, wrapperOnPath: false },
-        removed: ['TMUX', 'TMUX_TMPDIR', 'scaffold tmux wrapper'], before: snapshot, after: structuredClone(snapshot) };
+        removed: ['TMUX', 'TMUX_TMPDIR', 'scaffold tmux wrapper'], before: snapshot, after: structuredClone(snapshot),
+        evidence: [{ node_id: 'peer', session_name: 'peer', pid: 222 }, { node_id: 'worker', session_name: 'worker', pid: 111 }] };
 
       pass.preservation = { failedBackupUnchanged: true, editedSha256: 'b'.repeat(64), backedUpSha256: 'b'.repeat(64),
         targetFilesChecked: 2, version: '0.1.17', shippedVersion: '0.1.17' };
@@ -110,9 +111,11 @@ test('a passing-only case admits only a clean PASS of its own scenario', () => {
       for (const after of [
         { ...snapshot, nodes: [] }, { ...snapshot, bindings: [] }, { ...snapshot, sessions: [] },
         { ...snapshot, sessions: snapshot.sessions.map((row, i) => i ? row : { ...row, status: 'superseded' }) },
+        { ...snapshot, sessions: snapshot.sessions.map((row, i) => i ? row : { ...row, status: 'detached' }) },
         { ...snapshot, privatePanes: ['replacement'] }, { ...snapshot, defaultPanes: ['duplicate'] },
       ]) assert.throws(() => verifyPassingRun(0, { ...pass, reducedEnv: { ...pass.reducedEnv, after } }, caseName));
       assert.throws(() => verifyPassingRun(0, { ...pass, reducedEnv: undefined }, caseName));
+      assert.throws(() => verifyPassingRun(0, { ...pass, reducedEnv: { ...pass.reducedEnv, evidence: pass.reducedEnv.evidence.slice(1) } }, caseName));
       assert.throws(() => verifyPassingRun(0, { ...pass, reducedEnv: { ...pass.reducedEnv,
         environment: { ...pass.reducedEnv.environment, wrapperOnPath: true } } }, caseName));
 

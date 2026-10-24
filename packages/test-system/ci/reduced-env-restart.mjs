@@ -19,6 +19,9 @@ export function verifyReducedEnvRestart(proof) {
   const identity = rows => rows.map(({ id, node_id, session_name }) => ({ id, node_id, session_name }));
   assert.deepEqual(identity(proof.after.sessions), identity(proof.before.sessions), 'sessions replaced or duplicated');
   assert.ok(proof.after.sessions.every(row => row.status !== 'superseded'), 'original session superseded');
+  assert.equal(proof.evidence?.length, 2, 'expected a recorded process for each running team seat before the restart');
+  assert.deepEqual(proof.after.sessions.map(row => row.status), proof.before.sessions.map(row => row.status),
+    'a team session still running elsewhere was marked detached');
   assert.equal(proof.before.privatePanes.length, 2, 'expected both original team panes');
   assert.deepEqual(proof.after.privatePanes, proof.before.privatePanes, 'original panes/processes changed');
   assert.deepEqual(proof.before.defaultPanes, [], 'fixture default socket already occupied');
@@ -59,6 +62,22 @@ export async function reducedEnvRestart(daemon, scaffold, rigBin) {
       };
     } finally { db.close(); }
   };
+  // A restarted daemon keeps a seat it can't see only on recorded evidence, so first wait until the running daemon has
+  // observed each team seat's process under its current session.
+  const recorded = () => {
+    const Database = createRequire(rigBin)('better-sqlite3');
+    const db = new Database(join(scaffold.stateDir, 'scenario.db'), { readonly: true, fileMustExist: true });
+    try {
+      return db.prepare(`SELECT v.node_id, v.session_name, coalesce(v.observed_pane_pid, v.observed_pid) AS pid
+        FROM sessions s JOIN seat_identity_verdicts v ON v.node_id = s.node_id AND v.session_name = s.session_name
+        WHERE s.status = 'running' AND coalesce(v.observed_pane_pid, v.observed_pid) > 0 ORDER BY v.node_id`).all();
+    } finally { db.close(); }
+  };
+  let evidence = recorded();
+  for (let i = 0; evidence.length < 2 && i < 60; i++) {
+    await new Promise(resolve => setTimeout(resolve, 500));
+    evidence = recorded();
+  }
   const before = await snapshot();
   await daemon.sigterm();
   await command(process.execPath, [rigBin, 'daemon', 'start', '--port', String(daemon.port),
@@ -67,5 +86,5 @@ export async function reducedEnvRestart(daemon, scaffold, rigBin) {
     removed: ['TMUX', 'TMUX_TMPDIR', 'scaffold tmux wrapper'],
     environment: { TMUX: Object.hasOwn(reduced, 'TMUX'), TMUX_TMPDIR: Object.hasOwn(reduced, 'TMUX_TMPDIR'),
       wrapperOnPath: reduced.PATH.split(':').includes(join(scaffold.root, 'bin')) },
-    before, after: await snapshot() };
+    evidence, before, after: await snapshot() };
 }
