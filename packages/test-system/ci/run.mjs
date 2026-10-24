@@ -88,9 +88,10 @@ sys.exit(r.returncode)
           report.reducedEnv = {};
           await reducedEnvRestart(daemon, scaffold, rigBin, report.reducedEnv);
           verifyReducedEnvRestart(report.reducedEnv);
-          // What the startup warning tells a person to do: restart the daemon where it sees the seats' tmux server.
-          // The rest of the scenario then runs against a daemon that can reach its seats.
+          // Restore visibility after checking preservation; reduced-env lifecycle control is not exercised.
+          report.reducedEnv.recovery = 'restarting-with-original-environment';
           await daemon.restart();
+          report.reducedEnv.recovery = 'complete';
         },
       };
       if (mode === 'healthy' || selected.kind === 'hook') return daemon;
