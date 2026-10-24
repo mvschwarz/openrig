@@ -1,4 +1,5 @@
 import { codexEnvelopeArgs } from "../domain/codex-rebuild-permissions.js";
+import { codexMemberEnvelope, observeCodexEnvelope, type CodexProfileObservation } from "../domain/codex-member-permissions.js";
 import { operationalLaunchArg } from "./kernel-authority.js";
 import nodePath from "node:path";
 import fs from "node:fs";
@@ -778,6 +779,23 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return this.verifyResumeLaunch(tmuxSession, updatePrompt, { resumeToken });
   }
 
+  /** The setter's check of a profile, in the config home this seat's launches use. An absent file is reported, not
+   *  refused: Codex loads a missing profile as an empty layer. A real load failure fails here as it does at launch. */
+  async observeProfile(profile: string, cwd: string): Promise<CodexProfileObservation> {
+    const observedAt = new Date().toISOString();
+    if (!this.codexHome) {
+      return { vantage: "unestablished", home: null, file: "unverified", load: "not_run", observedAt,
+        detail: "The daemon sets no CODEX_HOME, so this seat's pane keeps its own; OpenRig didn't check the profile there. Each launch still runs the native profile check." };
+    }
+    const path = nodePath.join(this.codexHome, `${profile}.config.toml`);
+    const present = this.fs.exists(path);
+    const base = { vantage: "configured_codex_home" as const, home: this.codexHome, file: present ? "present" as const : "absent" as const,
+      ...(present ? { sha256: createHash("sha256").update(this.fs.readFile(path)).digest("hex") } : {}), observedAt };
+    const probe = await this.verifyProfilePreflight(profile, cwd);
+    if (!probe.ok) return { ...base, load: "failed", detail: `${probe.error}${probe.migrationHint ? `\n  Fix: ${probe.migrationHint}` : ""}` };
+    return { ...base, load: "ok", detail: present ? `${path} loads.` : `${path} is absent; Codex loads it as an empty layer, so base config applies.` };
+  }
+
   /** Launch flags shared by fresh, fork and resume, decided once per launch. With `running`, the probed and
    *  prepared parts come from the running Codex instead, and no Codex process is started to decide them. */
   private async prepareLaunch(binding: NodeBinding, name: string, running: RunningCodexLaunch | undefined,
@@ -797,14 +815,15 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const effortArg = effort ? ` -c ${shellQuote(`model_reasoning_effort="${effort}"`)}` : "";
     const profile = binding.codexConfigProfile?.trim();
     const profileArg = profile ? ` -p ${shellQuote(profile)}` : "";
-    const posture = binding.codexRebuildPermissions
-      ? profileArg + codexEnvelopeArgs(binding.codexRebuildPermissions)
+    // A handover rebuild's observed predecessor envelope, else the seat's own envelope, replaces the posture decision.
+    const memberEnvelope = binding.codexRebuildPermissions || !binding.codexPermissions ? undefined : codexMemberEnvelope(binding.codexPermissions);
+    const envelope = binding.codexRebuildPermissions ?? memberEnvelope;
+    const posture = envelope
+      ? profileArg + codexEnvelopeArgs(envelope)
       : codexPostureArg(profileArg, process.env, binding.launchPosture);
-    const appliedLaunch: AppliedLaunchObservation = binding.codexRebuildPermissions
-      ? { runtime: "codex", axis: "sandbox", state: "observed", value: binding.codexRebuildPermissions.sandboxPolicy.type,
-          reason: "emitted_launch_arguments", ...(binding.codexRebuildPermissions.approvalPolicy === "never" ? { approvalPolicy: "never" } : {}) }
-      : observeCodexSandbox(posture);
-    const postureArg = posture + operationalLaunchArg(this.runtime, binding);
+    const appliedLaunch: AppliedLaunchObservation = envelope ? observeCodexEnvelope(envelope) : observeCodexSandbox(posture);
+    // The seat's envelope is not full access, so a policy's full_bypass extras don't follow it.
+    const postureArg = posture + operationalLaunchArg(this.runtime, memberEnvelope ? { ...binding, kernelAuthority: false, launchPosture: undefined } : binding);
 
     if (running) {
       // The running Codex already loaded its profile; drift in -p is the caller's to compare.
@@ -830,9 +849,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
     // Codex rejects writable --add-dir roots under a read-only sandbox. Only
     // suppress OpenRig's generated roots when later project layers cannot make it writable.
-    const suppressAutoAddDirs = Boolean(!binding.codexRebuildPermissions && profile
-      && posture === profileArg && this.profileRemainsReadOnly(profile, binding.cwd));
-    const teamWorkspaceArg = !binding.codexRebuildPermissions && binding.teamPermissionDefault && !profile
+    // A seat envelope states its sandbox: read-only gets no generated roots; workspace-write keeps them.
+    const suppressAutoAddDirs = memberEnvelope ? memberEnvelope.sandboxPolicy.type === "read-only"
+      : Boolean(!binding.codexRebuildPermissions && profile && posture === profileArg && this.profileRemainsReadOnly(profile, binding.cwd));
+    const teamWorkspaceArg = !envelope && binding.teamPermissionDefault && !profile
       && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write"
       ? codexTeamWorkspaceArg(this.prepareTeamWorkspace, name) : "";
     const queueStateDirArg = binding.codexRebuildPermissions || suppressAutoAddDirs
@@ -845,8 +865,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
     const daemonOptOut = daemonSupport?.kind === "supported";
     const daemonArg = daemonOptOut ? " --no-daemon" : "";
-    // #275: on the plain floor, network access unless Codex reports an opt-out or policy.
-    const networkArg = binding.codexRebuildPermissions ? ""
+    // #275: on the plain floor, network access unless Codex reports an opt-out or policy. An envelope states its own.
+    const networkArg = envelope ? ""
       : await codexNetworkDefaultArg(this.readNetworkDefault, appliedLaunch, binding.cwd, name);
 
     // The launch facts keep the probed daemon choice, so a printed recovery command can repeat it; no probe, no fact.

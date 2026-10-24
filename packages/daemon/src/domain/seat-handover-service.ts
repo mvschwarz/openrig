@@ -504,7 +504,10 @@ export class SeatHandoverService {
         const changedAt = changed ? parseSqliteUtcMs(changed.created_at) : NaN;
         // A saved choice made since this process started is for the successor, even if the
         // predecessor took a later turn. The same-second ordering is not distinguishable.
-        if ((selection && (!Number.isFinite(selectedAt) || selectedAt >= started))
+        // The seat's own envelope is its declared choice for every successor.
+        if (permissionOverride.codexPermissions) {
+          permissionContinuity = { state: "selection_used", detail: "The seat's own permission envelope was used instead of carrying the predecessor policy. Native successor permissions are unverified." };
+        } else if ((selection && (!Number.isFinite(selectedAt) || selectedAt >= started))
           || (changed && (!Number.isFinite(changedAt) || changedAt >= started))
           || (!!node.codex_config_profile?.trim() && node.codex_config_profile.trim() !== observed.profile)) {
           permissionContinuity = { state: "selection_used", detail: "The current saved permission choice or declared successor profile was used instead of carrying the predecessor policy. Native successor permissions are unverified." };
@@ -533,7 +536,7 @@ export class SeatHandoverService {
       // spec (else the running topology drifts from the founder-designed one at every handover).
       // A4-profile: likewise carry the codex config profile (adapter emits -p) — the restore path
       // already threads it; handover must too, or a profile-pinned codex seat reverts at handover.
-      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, ...(codexRebuildPermissions ? { codexRebuildPermissions } : {}), ...(seatAdditions.additions ? { launchAdditions: seatAdditions.additions } : {}), claudePermissions: permissionOverride.claudePermissions, kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault, nonInterruptive: this.rigRepo.getRigNonInterruptive(statusResult.status.rig_id), launchPosture: effectivePosture, ...(effectivePermissionMode ? { permissionMode: effectivePermissionMode } : {}), model: node.model, effort: readSeatEffort(this.db, node.id)?.effective ?? undefined, advisor: node.advisor ?? undefined, codexConfigProfile: node.codex_config_profile ?? undefined, seatEnv: withPluginDirs(this.rigRepo.getEffectiveSeatEnv(node.id), [corePluginDir, seatSkillDir, ...additionPluginDirs]), ...((corePluginDir || codexCorePluginDir) && node.cwd ? { seatProjectDir: node.cwd } : {}) },
+      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, ...(codexRebuildPermissions ? { codexRebuildPermissions } : {}), ...(seatAdditions.additions ? { launchAdditions: seatAdditions.additions } : {}), claudePermissions: permissionOverride.claudePermissions, codexPermissions: permissionOverride.codexPermissions, kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault, nonInterruptive: this.rigRepo.getRigNonInterruptive(statusResult.status.rig_id), launchPosture: effectivePosture, ...(effectivePermissionMode ? { permissionMode: effectivePermissionMode } : {}), model: node.model, effort: readSeatEffort(this.db, node.id)?.effective ?? undefined, advisor: node.advisor ?? undefined, codexConfigProfile: node.codex_config_profile ?? undefined, seatEnv: withPluginDirs(this.rigRepo.getEffectiveSeatEnv(node.id), [corePluginDir, seatSkillDir, ...additionPluginDirs]), ...((corePluginDir || codexCorePluginDir) && node.cwd ? { seatProjectDir: node.cwd } : {}) },
       departingSessionName: latestSession.session_name,
       occupantGeneration,
       // OPR.0.5.5.5: a fork-sourced successor launches as a NATIVE FORK of the

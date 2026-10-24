@@ -166,6 +166,7 @@ export class RigSpecCodec {
         // OPR.0.4.8.3 Seam B: per-seat permission_policy ref round-trips through spec serialization.
         if (m.permissionPolicy) member["permission_policy"] = m.permissionPolicy;
         if (m.claudePermissions !== undefined) member["claude_permissions"] = m.claudePermissions;
+        if (m.codexPermissions !== undefined) member["codex_permissions"] = m.codexPermissions;
         if (m.agentFile) member["agent_file"] = m.agentFile;
         if (m.appendSystemPromptFile) member["append_system_prompt_file"] = m.appendSystemPromptFile;
         if (m.pluginDirs?.length) member["plugin_dirs"] = m.pluginDirs;

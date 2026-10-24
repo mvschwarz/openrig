@@ -1,4 +1,5 @@
 import { readClaudePermissionRules, validateClaudePermissionRules } from "./claude-permission-rules.js";
+import { readCodexMemberPermissions, validateCodexMemberPermissions, type CodexProfileObserver } from "./codex-member-permissions.js";
 import { parseTerminalPolicy, TerminalPolicyRefusal, TerminalPolicyStore, type TerminalAction } from "./terminal-policy.js";
 import type { NativeProcessLister } from "./native-process-lineage.js";
 import type { CurrentModelReader } from "./model-divergence/current-model-reader.js";
@@ -746,8 +747,8 @@ export class SeatLifecycleService {
     return probe.state === "present" ? { state: "yes" } : { state: "no", detail: "tmux session absent" };
   }
 
-  async setPermissions(input: { seatRef: string; mode?: string; rules?: unknown; reason: string; actor: string }): Promise<
-    | { ok: true; seat: SeatDescriptor; from: unknown; to: unknown; changed: boolean; effect: string }
+  async setPermissions(input: { seatRef: string; mode?: string; rules?: unknown; codexPermissions?: unknown; codexProfile?: string; reason: string; actor: string }): Promise<
+    | { ok: true; seat: SeatDescriptor; from: unknown; to: unknown; changed: boolean; effect: string; replaced?: unknown; observation?: unknown }
     | SeatRefusal
   > {
     input = { ...input };
@@ -758,7 +759,10 @@ export class SeatLifecycleService {
     if ("code" in resolved) return resolved;
     const seat = this.describe(resolved);
     const runtime = resolved.entry.runtime ?? "unknown";
-    if ((input.mode === undefined) === (input.rules === undefined)) return { ok: false, code: "permission_selection_refused", message: "Choose exactly one of mode or rules." };
+    const choices = [input.mode, input.rules, input.codexPermissions, input.codexProfile].filter(value => value !== undefined).length;
+    if (choices !== 1) return { ok: false, code: "permission_selection_refused", message: "Choose exactly one of mode, rules, codex permissions or codex profile." };
+    if (input.codexPermissions !== undefined) return this.setCodexPermissions(seat, runtime, input.codexPermissions, input.actor.trim(), input.reason.trim());
+    if (input.codexProfile !== undefined) return this.setCodexProfile(seat, runtime, input.codexProfile, resolved.entry.cwd ?? undefined, input.actor.trim(), input.reason.trim());
     if (input.rules !== undefined) {
       if (runtime !== "claude-code") return { ok: false, code: "permission_selection_refused", message: "claude_permissions is only supported for claude-code seats." };
       try {
@@ -799,22 +803,113 @@ export class SeatLifecycleService {
         const currentRuntime = this.db.prepare("SELECT runtime FROM nodes WHERE id = ?").get(seat.nodeId) as { runtime: string } | undefined;
         if (currentRuntime?.runtime !== runtime) throw new Error("Seat runtime changed while checking native options; selection was not changed.");
         const from = store.read(seat.nodeId);
-        const changed = from?.runtime !== to?.runtime || from?.mode !== to?.mode;
+        // One explicit Codex choice: a mode replaces the seat's envelope, in this same write, and says so.
+        const replaced = runtime === "codex" ? this.clearCodexEnvelope(seat.nodeId) : undefined;
+        const changed = from?.runtime !== to?.runtime || from?.mode !== to?.mode || replaced !== undefined;
         // A Codex re-selection is intent for its next rebuild, even when the saved value is
         // unchanged. Audit inherit too: a cleared selection has no row to carry its timestamp.
         if (changed || runtime === "codex") {
           store.write(seat.nodeId, to, input.actor.trim(), input.reason.trim());
           persisted = this.eventBus.persistWithinTransaction({ type: "node.permissions_changed", rigId: seat.rigId,
-            nodeId: seat.nodeId, from, to, actor: input.actor.trim(), reason: input.reason.trim(), source: "seat_selection", effect: "future_launches_only" });
+            nodeId: seat.nodeId, from, to, actor: input.actor.trim(), reason: input.reason.trim(), source: "seat_selection", effect: "future_launches_only",
+            ...(replaced !== undefined ? { replaced: { codexPermissions: replaced } } : {}) });
         }
-        return { ok: true as const, seat, from, to, changed,
-          effect: "Future managed launches only. The current native process, history, permission rules and work posture are unchanged; no relaunch was requested." };
+        return { ok: true as const, seat, from, to, changed, ...(replaced !== undefined ? { replaced: { codexPermissions: replaced } } : {}),
+          effect: `Future managed launches only.${replaced !== undefined ? " This mode replaces the seat's Codex permission envelope." : ""} The current native process, history, permission rules and work posture are unchanged; no relaunch was requested.` };
       })();
       if (persisted) this.eventBus.notifySubscribers(persisted);
       return result;
     } catch (error) {
       return { ok: false, code: "permission_selection_refused", message: (error as Error).message };
     }
+  }
+
+  /** Clear a Codex seat's envelope inside the caller's transaction; returns what it held, or undefined when it held none. */
+  private clearCodexEnvelope(nodeId: string): unknown {
+    let row: { codex_permissions_json: string | null } | undefined;
+    try { row = this.db.prepare("SELECT codex_permissions_json FROM nodes WHERE id = ?").get(nodeId) as typeof row; }
+    catch { return undefined; } // A minimal fixture without the column has no envelope.
+    if (row?.codex_permissions_json == null) return undefined;
+    let held: unknown;
+    try { held = readCodexMemberPermissions(this.db, nodeId); }
+    catch { held = { state: "invalid", stored: row.codex_permissions_json }; }
+    this.db.prepare("UPDATE nodes SET codex_permissions_json = NULL WHERE id = ?").run(nodeId);
+    return held;
+  }
+
+  /** A Codex seat's envelope: its explicit permission choice, which replaces a recorded mode in the same write. */
+  private setCodexPermissions(seat: SeatDescriptor, runtime: string, value: unknown, actor: string, reason: string):
+    { ok: true; seat: SeatDescriptor; from: unknown; to: unknown; changed: boolean; effect: string; replaced?: unknown } | SeatRefusal {
+    if (runtime !== "codex") return { ok: false, code: "permission_selection_refused", message: "codex_permissions is only supported for codex seats." };
+    try {
+      const to = validateCodexMemberPermissions(value);
+      const store = new NativePermissionStore(this.db);
+      let persisted: PersistedEvent | null = null;
+      const result = this.db.transaction(() => {
+        // Read the current record for the audit; malformed old bytes stay visible as such and are replaced.
+        const row = this.db.prepare("SELECT codex_permissions_json FROM nodes WHERE id = ? AND runtime = 'codex'").get(seat.nodeId) as { codex_permissions_json: string | null } | undefined;
+        if (!row) throw new Error("Seat runtime changed; the envelope was not changed.");
+        let from: unknown = null;
+        try { from = readCodexMemberPermissions(this.db, seat.nodeId) ?? null; }
+        catch { from = { state: "invalid", stored: row.codex_permissions_json }; }
+        let mode: unknown = null;
+        try { mode = store.read(seat.nodeId); }
+        catch { mode = { state: "invalid" }; }
+        const replaced = mode ? { mode } : undefined;
+        const changed = JSON.stringify(from) !== JSON.stringify(to) || replaced !== undefined;
+        if (changed) {
+          this.db.prepare("UPDATE nodes SET codex_permissions_json = ? WHERE id = ?").run(JSON.stringify(to), seat.nodeId);
+          if (replaced) store.write(seat.nodeId, null, actor, reason);
+          persisted = this.eventBus.persistWithinTransaction({ type: "node.codex_permissions_changed", rigId: seat.rigId,
+            nodeId: seat.nodeId, from, to, ...(replaced ? { replaced } : {}), actor, reason, effect: "future_launches_only" });
+        }
+        return { ok: true as const, seat, from, to, changed, ...(replaced ? { replaced } : {}),
+          effect: `The envelope applies at the next separately authorized managed launch or resume, as explicit sandbox and approval flags that a profile or policy posture doesn't override.${replaced ? " It replaces the seat's recorded permission mode." : ""} The current process and history are unchanged. Older readers may ignore it; check rollback compatibility and preserve restrictions before downgrading.` };
+      })();
+      if (persisted) this.eventBus.notifySubscribers(persisted);
+      return result;
+    } catch (error) { return { ok: false, code: "permission_selection_refused", message: (error as Error).message }; }
+  }
+
+  /** A Codex seat's named profile. It doesn't replace a retained conversation's approval; an envelope does. The check
+   *  speaks only for the config home this seat's launches use, and a real load failure keeps the previous profile. */
+  private async setCodexProfile(seat: SeatDescriptor, runtime: string, value: string, cwd: string | undefined, actor: string, reason: string):
+    Promise<{ ok: true; seat: SeatDescriptor; from: unknown; to: unknown; changed: boolean; effect: string; observation?: unknown } | SeatRefusal> {
+    if (runtime !== "codex") return { ok: false, code: "permission_selection_refused", message: "A Codex profile is only supported for codex seats." };
+    const name = value.trim();
+    const to = name === "inherit" ? null : name;
+    if (to !== null && !/^[A-Za-z0-9_.-]+$/.test(to)) {
+      return { ok: false, code: "permission_selection_refused", message: "A Codex profile name uses letters, digits, '.', '_' and '-'; use inherit to clear it." };
+    }
+    const observer = this.runtimeAdapters["codex"] as unknown as Partial<CodexProfileObserver> | undefined;
+    const observed = to !== null && cwd && observer?.observeProfile ? await observer.observeProfile(to, cwd) : undefined;
+    if (observed?.load === "failed") {
+      return { ok: false, code: "permission_selection_refused", message: `Codex profile not changed: ${observed.detail}` };
+    }
+    try {
+      let persisted: PersistedEvent | null = null;
+      const result = this.db.transaction(() => {
+        const row = this.db.prepare("SELECT codex_config_profile FROM nodes WHERE id = ? AND runtime = 'codex'").get(seat.nodeId) as { codex_config_profile: string | null } | undefined;
+        if (!row) throw new Error("Seat runtime changed; the profile was not changed.");
+        const from = row.codex_config_profile;
+        // Re-recording the same profile compares its bytes with the last recorded observation, in the same home.
+        const last = this.db.prepare("SELECT payload FROM events WHERE node_id = ? AND type = 'node.codex_profile_changed' ORDER BY seq DESC LIMIT 1").get(seat.nodeId) as { payload: string } | undefined;
+        const lastObserved = last ? (JSON.parse(last.payload) as { to?: string | null; observation?: { home?: string | null; sha256?: string; file?: string } }) : undefined;
+        const fileChanged = observed?.vantage === "configured_codex_home" && lastObserved?.to === to && lastObserved.observation?.home === observed.home
+          && lastObserved.observation.file !== undefined && (lastObserved.observation.file !== observed.file || lastObserved.observation.sha256 !== observed.sha256);
+        const observation = observed ? { ...observed, ...(fileChanged ? { changedSinceRecorded: true } : {}) } : undefined;
+        const changed = from !== to;
+        if (changed || observation) {
+          this.db.prepare("UPDATE nodes SET codex_config_profile = ? WHERE id = ?").run(to, seat.nodeId);
+          persisted = this.eventBus.persistWithinTransaction({ type: "node.codex_profile_changed", rigId: seat.rigId,
+            nodeId: seat.nodeId, from, to, ...(observation ? { observation } : {}), actor, reason, effect: "future_launches_only" });
+        }
+        return { ok: true as const, seat, from, to, changed, ...(observation ? { observation } : {}),
+          effect: "The profile applies at the next separately authorized managed launch or resume. A retained conversation keeps its saved approval unless an envelope sets one. The current process and history are unchanged." };
+      })();
+      if (persisted) this.eventBus.notifySubscribers(persisted);
+      return result;
+    } catch (error) { return { ok: false, code: "permission_selection_refused", message: (error as Error).message }; }
   }
 
   /** `rig policy apply <name> --seat`: re-point an existing seat's own permission_policy. This writes
@@ -1713,6 +1808,7 @@ export class SeatLifecycleService {
         ...(node.model ? { model: node.model } : {}),
         ...(savedEffort.effective ? { effort: savedEffort.effective } : {}),
         ...(node.codexConfigProfile ? { codexConfigProfile: node.codexConfigProfile } : {}),
+        ...(permissionOverride.codexPermissions ? { codexPermissions: permissionOverride.codexPermissions } : {}),
         launchPosture, kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault,
         nonInterruptive: this.rigRepo.getRigNonInterruptive(seat.rigId),
       },

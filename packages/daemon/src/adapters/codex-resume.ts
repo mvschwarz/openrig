@@ -10,6 +10,8 @@ import { execRuntimeProbe } from "./runtime-probe-exec.js";
 import { shellQuote } from "./shell-quote.js";
 import { codexPostureArg } from "./yolo-mode.js";
 import { observeCodexSandbox } from "../domain/permission-drift.js";
+import { codexEnvelopeArgs } from "../domain/codex-rebuild-permissions.js";
+import { codexMemberEnvelope, observeCodexEnvelope, type CodexMemberPermissions } from "../domain/codex-member-permissions.js";
 import { unknownDaemonSupportMessage, type CodexDaemonSupportDetector } from "../domain/codex-daemon-support.js";
 import { codexNetworkDefaultArg, type CodexNetworkDefaultReader } from "../domain/codex-network-default.js";
 
@@ -69,6 +71,8 @@ export class CodexResumeAdapter {
     nonInterruptive?: boolean,
     kernelAuthority?: boolean,
     teamPermissionDefault?: boolean,
+    // The seat's own permission envelope, read live; it replaces the posture decision, as on the pod-aware path.
+    codexPermissions?: CodexMemberPermissions,
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: "Codex resume not available" };
@@ -97,11 +101,13 @@ export class CodexResumeAdapter {
     }
 
     const profileArg = codexConfigProfile ? ` -p ${shellQuote(codexConfigProfile)}` : "";
-    const posture = codexPostureArg(profileArg, process.env, resolvedPosture);
-    const appliedLaunch = observeCodexSandbox(posture);
-    const postureArg = posture + operationalLaunchArg("codex", { kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture });
-    const networkArg = await codexNetworkDefaultArg(this.options.readNetworkDefault, appliedLaunch, cwd, tmuxSessionName);
-    const workspaceArg = teamPermissionDefault && !codexConfigProfile?.trim()
+    const envelope = codexPermissions ? codexMemberEnvelope(codexPermissions) : undefined;
+    const posture = envelope ? profileArg + codexEnvelopeArgs(envelope) : codexPostureArg(profileArg, process.env, resolvedPosture);
+    const appliedLaunch = envelope ? observeCodexEnvelope(envelope) : observeCodexSandbox(posture);
+    const postureArg = posture + operationalLaunchArg("codex", envelope ? { nonInterruptive }
+      : { kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture });
+    const networkArg = envelope ? "" : await codexNetworkDefaultArg(this.options.readNetworkDefault, appliedLaunch, cwd, tmuxSessionName);
+    const workspaceArg = !envelope && teamPermissionDefault && !codexConfigProfile?.trim()
       && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write"
       ? codexTeamWorkspaceArg(this.options.prepareTeamWorkspace, tmuxSessionName) : "";
     const cmd = buildCodexResumeCore(

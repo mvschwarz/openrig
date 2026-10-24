@@ -167,6 +167,8 @@ function normalizeExpansionPodFragment(raw: Record<string, unknown>): ExpansionP
               : undefined,
         ...("claudePermissions" in m ? { claudePermissions: m["claudePermissions"] }
           : "claude_permissions" in m ? { claudePermissions: m["claude_permissions"] } : {}),
+        ...("codexPermissions" in m ? { codexPermissions: m["codexPermissions"] }
+          : "codex_permissions" in m ? { codexPermissions: m["codex_permissions"] } : {}),
         cwd: typeof m["cwd"] === "string" ? m["cwd"] : undefined,
         model: typeof m["model"] === "string" ? m["model"] : undefined,
         // R2 (4ac243c3): PRESERVE raw presence — a present-invalid value (null, number,

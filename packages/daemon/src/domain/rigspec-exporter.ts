@@ -1,4 +1,5 @@
 import { readClaudePermissionRules } from "./claude-permission-rules.js";
+import { readCodexMemberPermissions } from "./codex-member-permissions.js";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { PodRepository } from "./pod-repository.js";
@@ -185,6 +186,8 @@ export class RigSpecExporter {
         if (node.permissionPolicy) member.permissionPolicy = node.permissionPolicy;
         const rules = node.runtime === "claude-code" ? readClaudePermissionRules(this.rigRepo.db, node.id) : undefined;
         if (rules !== undefined) member.claudePermissions = rules;
+        const envelope = node.runtime === "codex" ? readCodexMemberPermissions(this.rigRepo.db, node.id) : undefined;
+        if (envelope !== undefined) member.codexPermissions = envelope;
         if (node.env) member.env = node.env;
         if (node.sessionSource) member.sessionSource = node.sessionSource;
         const rp = getRestorePolicy(node.id);
