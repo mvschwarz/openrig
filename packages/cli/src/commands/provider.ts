@@ -22,7 +22,7 @@ export const USAGE_ACROSS_HOSTS_REFRESH_TIMEOUT_MS = 75_000;
 
 export function providerCommand(depsOverride?: StatusDeps): Command {
   const cmd = new Command("provider").description(
-    "Provider accounts, usage signals, and interruption-safe account switching",
+    "Provider accounts and usage signals, plus a switch precheck (switching itself isn't carried out yet)",
   );
   const getDeps = (): StatusDeps =>
     depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
@@ -491,10 +491,10 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
 
   cmd
     .command("switch")
-    .description("Switch a seat to an account (precheck-gated; the daemon orchestrates the switch)")
+    .description("Request a seat's switch to an account. Not carried out yet: the daemon runs the precheck and answers failed_safely (reasons in --json), so no account changes")
     .requiredOption("--seat <s>", "The seat session")
     .requiredOption("--to-account <a>", "The target account ref")
-    .option("--force-unsafe", "Override a non-stranding precheck failure (still refuses to strand a live conversation)")
+    .option("--force-unsafe", "Skip the precheck's refusal; the switch still isn't carried out (switch_execution_not_yet_wired)")
     .option("--json", "Output as parseable JSON")
     .action(async (opts: { seat: string; toAccount: string; forceUnsafe?: boolean; json?: boolean }) => {
       const client = await getClient(getDeps());
