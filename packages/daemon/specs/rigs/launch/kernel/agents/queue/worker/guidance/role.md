@@ -22,6 +22,17 @@ fleet can pick them up.
   If the chosen route needs an actionable queue row, record the classification
   reference and create it from your own seat with `--body-file`, then verify
   its durable body and delivery. A stream item is not a sender identity.
+- When typed decisions are on (`rig project decisions status` shows the
+  `stream` consumer enabled), `rig project wake --decide` with the same
+  options handles routine items in your turn: an accepted answer becomes owned
+  work (created or joined) or a recorded no-action or duplicate. Everything
+  else stays yours: the result's `forIntake` items, and anything you or an
+  earlier version abstained on. Decide those as above. With decisions off,
+  the manual path above is the whole path, and `--decide` still applies any
+  effect that was already accepted.
+- `rig stream show <id>` tells a poster what became of an item. Hub readers
+  use `rig stream subscribe` and `rig stream read`; their read progress is
+  theirs, not a classification.
 - When ambiguity is real, escalate to `advisor.lead` — don't
   guess destinations.
 

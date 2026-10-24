@@ -102,6 +102,34 @@ transport or inventory. Failed runs preserve already written output; inspect
 `unavailable`, `remaining`, call count and stop reason rather than treating a file
 as proof of success.
 
+From 0.7.2, `rig project wake --experiment` records its attempts under
+`<classifier-version>+experiment`. `rig stream show` labels its classifications
+`experiment`, not intake's, and its abstentions don't keep an item from the typed
+decisions path below. It still creates no work.
+
+## Typed decisions in the intake turn (`--decide`)
+
+With `decisions.enabled` and the `stream` consumer configured (`rig project decisions
+status`), `rig project wake --decide` takes the same options as a wake and asks a typed
+decision for each eligible item, within the run's call budget. An accepted answer is
+written with the item's classification and becomes owned work (a created or joined queue
+row) or a recorded no-action or duplicate; `rig stream show <id>` shows what became of it.
+Everything else stays with the intake seat: abstentions, errors, a deferral's reason, and
+any item that intake or an earlier version already abstained on (an experiment's
+abstentions excepted). The manual path (`rig project classify`, or a wake with
+`--decisions`) is unchanged and remains the fallback.
+
+**Turning decisions off, or changing them mid-run:**
+- Off means no new provider calls. A run rechecks the settings before every send and halts
+  with `settings_changed`; an answer that arrives after a change is `stale` and isn't applied.
+- Nothing already committed is discarded. Classifications, dispositions and work are kept,
+  and a disposition accepted before the change but not yet applied is still applied:
+  `rig project wake --decide` with decisions off asks nothing, takes the classifier lease
+  and applies those effects (`recovered` in its output).
+- One classifier lease serves every path; an effect is applied only by the lease holder.
+- Old unclassified items are bounded by stream retention (`retention.stream_days`,
+  `retention.stream_max_items`), which keeps items any of these records name.
+
 ## One bounded wake
 
 From the selected occupant, read candidates using the configured project ID:

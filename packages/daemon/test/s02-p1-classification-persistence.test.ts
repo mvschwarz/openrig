@@ -466,6 +466,20 @@ describe("S02 P1 classification persistence and lease correctness", () => {
       expect(seen).toEqual(ids.filter((id) => id !== ids[3] && id !== ids[10]));
     });
 
+    it("the automatic path can leave out items abstained under another version, except an experiment's", () => {
+      const ids = seed(3);
+      const { leaseId } = leases.acquire("occ@rig");
+      const abstain = (id: string, classifierVersion: string) => {
+        const a = ledger.begin({ streamItemId: id, ...V, classifierVersion, leaseId, classifierSession: "occ@rig" });
+        ledger.abstain({ attemptId: a.attemptId, executionId: a.executionId, leaseId, classifierSession: "occ@rig", reason: "left for intake" });
+      };
+      abstain(ids[0]!, "intake-v1");
+      abstain(ids[1]!, "intake-v1+experiment");
+      const auto = { ...V, classifierVersion: "intake-v1+decide:0123456789ab" };
+      expect(ledger.eligible(auto).items.map((i) => i.streamItemId)).toEqual(ids);
+      expect(ledger.eligible({ ...auto, excludeAbstainedElsewhere: true }).items.map((i) => i.streamItemId)).toEqual([ids[1], ids[2]]);
+    });
+
     it("caps the page size and refuses an unknown cursor", () => {
       seed(120);
       expect(ledger.eligible({ ...V, limit: 1000 }).items).toHaveLength(100);
