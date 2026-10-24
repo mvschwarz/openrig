@@ -1,10 +1,13 @@
 #!/bin/sh
 # Reference launcher for OpenClaw 2026.10.6 (fe06181), not installed by OpenRig.
-# Each seat owns its state directory and uses the main agent. OpenRig's opaque name maps to its full native key.
-# Resume checks that exact key before opening the local TUI; an unavailable list is not a missing conversation.
+# Each seat owns its client state and uses the main agent. OpenRig's opaque name maps to its full native key.
+# --gateway selects an existing Gateway configured for this client; the default is an embedded local agent.
+# Resume checks that exact key at its owner; an unavailable lookup is not a missing conversation.
 set -eu
 
 openclaw="${OPENRIG_OPENCLAW:-openclaw}"
+mode=local
+if [ "${1:-}" = --gateway ]; then mode=gateway; shift; fi
 OPENCLAW_STATE_DIR="${OPENRIG_HOME:-$HOME/.openrig}/state/openclaw/${OPENRIG_NODE_ID:-${OPENRIG_SESSION_NAME:-default}}"
 export OPENCLAW_STATE_DIR
 mkdir -p "$OPENCLAW_STATE_DIR"
@@ -21,15 +24,26 @@ case "$name" in
 esac
 
 if [ -n "${OPENRIG_RESUME_REF:-}" ]; then
-  if ! listing=$("$openclaw" sessions --agent main --json --limit all); then
+  if [ "$mode" = gateway ]; then
+    params=$(KEY="$key" node -e 'process.stdout.write(JSON.stringify({ key: process.env.KEY, agentId: "main" }))')
+    if listing=$("$openclaw" gateway call sessions.describe --params "$params" --json); then listed=true; else listed=false; fi
+  else
+    if listing=$("$openclaw" sessions --agent main --json --limit all); then listed=true; else listed=false; fi
+  fi
+  if [ "$listed" = false ]; then
     echo "openrig-openclaw-launch: this seat's OpenClaw sessions couldn't be listed; not starting" >&2
     exit 4
   fi
-  if printf '%s' "$listing" | KEY="$key" node -e '
+  if printf '%s' "$listing" | KEY="$key" MODE="$mode" node -e '
     let raw = ""; process.stdin.on("data", (chunk) => { raw += chunk; });
     process.stdin.on("end", () => {
       try {
-        const { sessions } = JSON.parse(raw);
+        const data = JSON.parse(raw);
+        if (process.env.MODE === "gateway") {
+          if (data.session === null) process.exit(3);
+          process.exit(data.session?.key === process.env.KEY ? 0 : 4);
+        }
+        const { sessions } = data;
         if (!Array.isArray(sessions)) process.exit(4);
         process.exit(sessions.some((s) => s?.agentId === "main" && s.key === process.env.KEY) ? 0 : 3);
       } catch { process.exit(4); }
@@ -45,4 +59,5 @@ if [ -n "${OPENRIG_RESUME_REF:-}" ]; then
     exit "$result"
   fi
 fi
+if [ "$mode" = gateway ]; then exec "$openclaw" tui --session "$key" "$@"; fi
 exec "$openclaw" tui --local --session "$key" "$@"
