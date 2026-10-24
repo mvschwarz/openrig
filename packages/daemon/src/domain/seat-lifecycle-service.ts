@@ -1,3 +1,4 @@
+import { readClaudePermissionRules, validateClaudePermissionRules } from "./claude-permission-rules.js";
 import { parseTerminalPolicy, TerminalPolicyRefusal, TerminalPolicyStore, type TerminalAction } from "./terminal-policy.js";
 import type { NativeProcessLister } from "./native-process-lineage.js";
 import type { CurrentModelReader } from "./model-divergence/current-model-reader.js";
@@ -745,7 +746,7 @@ export class SeatLifecycleService {
     return probe.state === "present" ? { state: "yes" } : { state: "no", detail: "tmux session absent" };
   }
 
-  async setPermissions(input: { seatRef: string; mode: string; reason: string; actor: string }): Promise<
+  async setPermissions(input: { seatRef: string; mode?: string; rules?: unknown; reason: string; actor: string }): Promise<
     | { ok: true; seat: SeatDescriptor; from: unknown; to: unknown; changed: boolean; effect: string }
     | SeatRefusal
   > {
@@ -757,13 +758,40 @@ export class SeatLifecycleService {
     if ("code" in resolved) return resolved;
     const seat = this.describe(resolved);
     const runtime = resolved.entry.runtime ?? "unknown";
+    if ((input.mode === undefined) === (input.rules === undefined)) return { ok: false, code: "permission_selection_refused", message: "Choose exactly one of mode or rules." };
+    if (input.rules !== undefined) {
+      if (runtime !== "claude-code") return { ok: false, code: "permission_selection_refused", message: "claude_permissions is only supported for claude-code seats." };
+      try {
+        const to = validateClaudePermissionRules(input.rules);
+        let persisted: PersistedEvent | null = null;
+        const result = this.db.transaction(() => {
+          // Read the current record for the audit; malformed old bytes stay visible as such and can be repaired.
+          const row = this.db.prepare("SELECT claude_permissions_json FROM nodes WHERE id = ? AND runtime = 'claude-code'").get(seat.nodeId) as { claude_permissions_json: string | null } | undefined;
+          if (!row) throw new Error("Seat runtime changed; rules were not changed.");
+          let from: unknown = null;
+          try { from = readClaudePermissionRules(this.db, seat.nodeId) ?? null; }
+          catch { from = { state: "invalid", stored: row.claude_permissions_json }; }
+          const changed = JSON.stringify(from) !== JSON.stringify(to);
+          if (changed) {
+            this.db.prepare("UPDATE nodes SET claude_permissions_json = ? WHERE id = ?").run(JSON.stringify(to), seat.nodeId);
+            persisted = this.eventBus.persistWithinTransaction({ type: "node.permission_rules_changed", rigId: seat.rigId,
+              nodeId: seat.nodeId, from, to, actor: input.actor.trim(), reason: input.reason.trim(), effect: "future_launches_only" });
+          }
+          return { ok: true as const, seat, from, to, changed,
+            effect: "Rules apply at the next separately authorized managed launch or resume. The current process, permission mode and history are unchanged. Older readers may ignore these rules; check rollback compatibility and preserve restrictions before downgrading." };
+        })();
+        if (persisted) this.eventBus.notifySubscribers(persisted);
+        return result;
+      } catch (error) { return { ok: false, code: "permission_selection_refused", message: (error as Error).message }; }
+    }
+    const mode = input.mode!;
     try {
-      const dynamic = runtime === "claude-code" && !["floor", "full_bypass", "inherit"].includes(input.mode);
+      const dynamic = runtime === "claude-code" && !["floor", "full_bypass", "inherit"].includes(mode);
       const managed = this.runtimeAdapters["claude-code"]?.claudeManagedLaunch;
       if (dynamic && !managed) await unresolvedClaudePermissionModes();
-      const launch = dynamic ? await managed!.prepare({ nodeId: seat.nodeId, cwd: resolved.entry.cwd ?? undefined }, input.mode) : null;
-      const to = input.mode === "inherit" ? null : dynamic ? { runtime: "claude-code" as const, mode: input.mode }
-        : validateNativePermissionSelection(runtime, input.mode);
+      const launch = dynamic ? await managed!.prepare({ nodeId: seat.nodeId, cwd: resolved.entry.cwd ?? undefined }, mode) : null;
+      const to = mode === "inherit" ? null : dynamic ? { runtime: "claude-code" as const, mode: mode }
+        : validateNativePermissionSelection(runtime, mode);
       const store = new NativePermissionStore(this.db);
       let persisted: PersistedEvent | null = null;
       const result = this.db.transaction(() => {

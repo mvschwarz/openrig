@@ -219,6 +219,60 @@ future managed launches of that stable seat; it does not rewrite this spec or
 its inherited policy provenance. `inherit` removes that override. See
 [per-seat permission mode](getting-started.md#per-seat-permission-mode).
 
+### Per-member Claude tool rules
+
+Claude members can record tool rules independently, even when they share a project folder:
+
+```yaml
+claude_permissions:
+  allow: ["Bash(node lane-reader.mjs *)"]
+  deny: ["Read(./private/**)"]
+```
+
+This field accepts only `allow` and `deny` lists of native Claude rule strings. It is
+also supported on legacy flat Claude nodes. Other runtimes, `ask`, mode settings,
+arbitrary settings and parenthesized MCP rules are rejected. Shape validation does
+not establish support by every Claude version.
+
+The initial spec records the rules on the stable seat. For an existing seat, put the
+complete replacement in a JSON file and use the existing audited permission command:
+
+```sh
+rig seat set-permissions dev-reader@team --rules member-rules.json --reason "Select the reader lane"
+rig seat status dev-reader@team --json
+```
+
+Choose either `--rules` or `--mode`, never both. Empty allow and deny lists clear the
+seat's rules. Updating rules leaves the permission mode, running process and history
+unchanged; they apply at the next separately authorized managed launch or resume.
+Restore and same-seat handover read that same record. A fork copies the source's
+currently recorded rules independently, including retained-seat updates. Export
+contains the current record. An invalid or unreadable record refuses that seat's
+launch, fork or export with a repair message rather than silently omitting its denies.
+
+OpenRig composes these rules into its one operational `--settings` value, preserving
+team/kernel defaults, hooks and managed-compaction settings. It never writes them
+into the shared project's Claude settings. Without the field or a recorded update,
+launch arguments are unchanged. Status reports the next-launch plan and lists the
+added rules; it does not verify native enforcement.
+
+Rules add to inherited native permissions; an allow list cannot withdraw broader
+user or project grants. In bypass mode, allows do not constrain access. Managed
+policy and installed mods can change rule behavior; see [Claude's permission
+precedence](https://code.claude.com/docs/en/permissions#precedence-among-rules-hooks-and-mods).
+These are native tool rules, not OS-user or credential isolation. Native acceptance
+and effects must be checked on the Claude version and configuration being used.
+
+**Downgrade:** a file-backed SQLite and launch-composition check against the
+pre-feature reader at `75c1f045` found that it can open the upgraded database but
+omits the recorded rules from launch arguments. This pair is not
+restriction-preserving. The stored bytes survive and the supporting reader recovers
+them; a process already launched by older code is unchanged. Keep a copy of the
+intended rules and establish equivalent native restrictions before using an older
+managed-launch path. Other version pairs and native enforcement need their own checks.
+The launch still uses inline JSON, subject to the operating system's argument-size
+limits.
+
 ### Team launch defaults
 
 A non-kernel Claude or Codex seat with no authored permission policy, explicit

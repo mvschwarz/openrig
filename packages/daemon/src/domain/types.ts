@@ -144,6 +144,7 @@ export type RigEvent =
   | { type: "node.model_changed"; actorClass?: string; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; reason: string; operator: string | null }
   | { type: "node.cwd_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; reason: string; operator: string | null }
   | { type: "node.effort_changed"; actorClass?: string; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
+  | { type: "node.permission_rules_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; effect: "future_launches_only" }
   | { type: "node.permissions_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; source: "seat_selection"; effect: "future_launches_only" }
   | { type: "node.policy_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; launchPosture: "floor" | "full_bypass" | "auto"; reason: string; operator: string }
   | { type: "session.stopped"; rigId: string; nodeId: string; sessionName: string; reason: string; operator: string | null }
@@ -1053,6 +1054,7 @@ export interface LegacyRigSpecNode {
   model?: string;
   effort?: string;
   advisor?: string;
+  claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
   cwd?: string;
   surfaceHint?: string;
   workspace?: string;
@@ -1172,6 +1174,7 @@ export interface RigSpecPodMember {
   /** OPR.0.4.8.3 Seam B: optional per-seat permission_policy REF (builtin:<name> or a spec-relative
    *  custom path). Absent = the floor. Overrides the rig-level ref. */
   permissionPolicy?: string;
+  claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
   /** OPR.0.7.0.9 — Claude members only: their own agent file, appended system prompt file and plugin folders,
    *  as paths beside the spec. Copied into the seat's own storage at launch. */
   agentFile?: string;
@@ -1450,6 +1453,7 @@ export interface ExpansionPodFragment {
     cwd?: string;
     model?: string;
     codexConfigProfile?: string;
+    claudePermissions?: unknown;
     /** OPR.0.4.8.3 Seam B: per-seat permission_policy REF — threaded through the
      *  expansion ingress exactly like role (never silently dropped). Typed UNKNOWN
      *  (R2 at 4ac243c3): the ingress preserves RAW presence — including null and other
