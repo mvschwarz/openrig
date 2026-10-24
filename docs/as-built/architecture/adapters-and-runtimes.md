@@ -363,6 +363,10 @@ it creates an empty session (`session.create`), adds one window per grid page
 the CLI and TUI name it when they run inside Rex (`openRexView`,
 `packages/cli/src/terminal-window-rex.ts`), and an omitted provider never picks
 it. It refuses with `rex_unavailable` when the Rex server does not answer.
+Discovery (`server.version` and `server.status`) has a 1 s budget, and
+`status()` and `liveness()` share one probe. A request whose reply is lost (a
+timeout, a killed client, an unreadable reply) is `unknown`, not failed: the
+adapter never closes a session on it and reports `rex_outcome_unknown`.
 Herdr and Rex build their layout trees from one grid helper
 (`buildTileGrid`, `tile-layout.ts`).
 

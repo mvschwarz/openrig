@@ -11,6 +11,8 @@ import { describe, it, expect } from "vitest";
 import { createHash } from "node:crypto";
 import { planHerdrLayout } from "../src/domain/terminal/herdr-adapter.js";
 import { TerminalService, type TerminalServiceDeps } from "../src/domain/terminal/terminal-service.js";
+import { RexAdapter } from "../src/domain/terminal/rex-adapter.js";
+import { createRexCliTransport, RexRunError, type RexRun } from "../src/domain/terminal/rex-transport.js";
 import type {
   ComposedView,
   OpenViewResult,
@@ -274,6 +276,26 @@ describe("TerminalService — view resolution + one-shape result", () => {
     expect(asked).toEqual(["herdr", "cmux", "rex"]);
     release();
     expect((await report).providers.map((p) => p.name)).toEqual(["herdr", "cmux", "rex"]);
+  });
+
+  it("a stalled Rex leaves a usable status beside a healthy provider, well inside the CLI's 5 s request", async () => {
+    const budgets: number[] = [];
+    // Stands in for spawnRex: a rex that never answers, ended at the run's timeout.
+    const stalled: RexRun = (_argv, _stdin, timeoutMs) => {
+      budgets.push(timeoutMs);
+      return new Promise((_resolve, reject) => setTimeout(() => reject(new RexRunError(`did not answer within ${timeoutMs} ms`, null)), timeoutMs));
+    };
+    const rex = new RexAdapter({ transport: createRexCliTransport({ run: stalled, binary: () => "/opt/rex/bin/rex", env: {} }) });
+    const map: Record<string, TerminalProvider> = { herdr: new RecordingProvider("herdr"), rex };
+    const { deps } = makeDeps({ resolveProvider: (name) => map[name] ?? null });
+    const started = Date.now();
+    const report = await new TerminalService(deps).status();
+    expect(Date.now() - started).toBeLessThan(5_000);
+    const byName = Object.fromEntries(report.providers.map((p) => [p.name, p]));
+    expect(byName["herdr"]).toMatchObject({ status: { available: true }, liveness: { alive: true } });
+    expect(byName["rex"]).toMatchObject({ status: { available: false }, liveness: { alive: false } });
+    expect(byName["rex"]!.liveness.detail).toContain("did not answer within 1000 ms");
+    expect(budgets).toEqual([1_000, 1_000]);
   });
 });
 

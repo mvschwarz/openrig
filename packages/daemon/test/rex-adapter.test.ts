@@ -169,10 +169,25 @@ describe("rex adapter: openView", () => {
     expect(methods(requests)).toEqual(["session.list", "session.create"]);
   });
 
-  it("a reply without a session id is a failed create, not a guess", async () => {
+  it("a reply without a session id leaves the create unconfirmed, not failed", async () => {
     const { transport } = fakeRex({ respond: (method) => (method === "session.create" ? { initial_windows: [] } : { sessions: [] }) });
     const res = await new RexAdapter({ transport, sleep: noWait }).openView(viewOf([pane("a@r")]));
-    expect(res).toMatchObject({ ok: false, code: "rex_session_failed", error: "rex session.create failed: the reply named no session" });
+    expect(res).toMatchObject({
+      ok: false, code: "rex_outcome_unknown",
+      error: `Rex didn't confirm creating session "acme" (the reply named no session); it may exist. Check Rex before retrying.`,
+    });
+  });
+
+  it("a lost session.create reply degrades every seat as unconfirmed and closes nothing", async () => {
+    const { transport, requests } = fakeRex({ respond: (method) => {
+      if (method === "session.create") throw new RexError("rex session.create: did not answer within 30000 ms", "unknown");
+      return { sessions: [] };
+    } });
+    const res = await new RexAdapter({ transport, sleep: noWait }).openView(viewOf([pane("a@r"), pane("b@r")]));
+    expect(res).toMatchObject({ ok: false, code: "rex_outcome_unknown", opened: [], pages: 0 });
+    expect(res.error).toContain(`Rex didn't confirm creating session "acme"`);
+    expect(res.degraded.map((d) => d.reason)).toEqual([res.error, res.error]);
+    expect(methods(requests)).toEqual(["session.list", "session.create"]);
   });
 
   it("opens 17 seats as a 4×4 first window and a second window that keeps focus where it was", async () => {
@@ -231,7 +246,36 @@ describe("rex adapter: openView", () => {
       throw new RexError(`rex ${method}: boom`, "failed");
     } });
     const res = await new RexAdapter({ transport, sleep: noWait }).openView(viewOf([pane("a@r")]));
-    expect(res.notes).toEqual(['Rex kept the empty session "acme" (rex session.destroy: boom); close it in Rex.']);
+    expect(res.notes).toEqual([`Rex may have kept the empty session "acme" (rex session.destroy: boom); close it in Rex if it's still open.`]);
+  });
+
+  it("a lost window reply keeps the session, which may hold tiles, and names it", async () => {
+    const f = fakeRex();
+    const { transport, requests } = fakeRex({ respond: (method, params) => {
+      if (method === "session.new_window") throw new RexError("rex session.new_window: ended by SIGKILL", "unknown");
+      return f.defaults(method, params);
+    } });
+    const res = await new RexAdapter({ transport, sleep: noWait }).openView(viewOf([pane("a@r")]));
+    expect(res).toMatchObject({ ok: false, code: "rex_outcome_unknown", pages: 0, opened: [], space: { id: "session:new", label: "acme" } });
+    expect(res.error).toBe(`Rex didn't confirm page 1 of session "acme", so those seats are listed as degraded but may be open. Check the session in Rex before retrying.`);
+    expect(res.degraded).toEqual([{ seat: "a@r", host: "rex", reason: `Rex didn't confirm page 1 of session "acme" (rex session.new_window: ended by SIGKILL); its tiles may be open` }]);
+    expect(methods(requests)).not.toContain("session.destroy");
+  });
+
+  it("a lost later-page reply keeps the opened page and names the unconfirmed one", async () => {
+    const seats = Array.from({ length: 17 }, (_, i) => pane(`s${i}@r`));
+    const f = fakeRex();
+    let windows = 0;
+    const { transport, requests } = fakeRex({ respond: (method, params) => {
+      if (method === "session.new_window" && ++windows === 2) throw new RexError("rex session.new_window: did not answer within 30000 ms", "unknown");
+      return f.defaults(method, params);
+    } });
+    const res = await new RexAdapter({ transport, sleep: noWait }).openView(viewOf(seats));
+    expect(res).toMatchObject({ ok: true, pages: 1, space: { id: "session:new", label: "acme" } });
+    expect(res.opened).toEqual(seats.slice(0, 16).map((s) => s.seat));
+    expect(res.degraded.map((d) => d.seat)).toEqual(["s16@r"]);
+    expect(res.notes).toContain(`Rex didn't confirm page 2 of session "acme", so those seats are listed as degraded but may be open. Check the session in Rex before retrying.`);
+    expect(methods(requests)).not.toContain("session.destroy");
   });
 
   it("degrades a tile that closed or whose command already exited; the others stay opened", async () => {

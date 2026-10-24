@@ -92,7 +92,16 @@ describe("rex CLI transport", () => {
   it.each(["not json", "[1,2]", "null", ""])("rejects a reply that is not a JSON object: %j", async (out) => {
     const transport = createRexCliTransport({ run: async () => out, binary: () => BIN, env: {} });
     const err = await rejected(transport.request("session.view", {}));
-    expect(err).toMatchObject({ kind: "failed", message: "rex session.view returned no JSON object" });
+    expect(err).toMatchObject({ kind: "unknown", message: "rex session.view returned no JSON object" });
+  });
+
+  it.each([
+    ["a timeout", new RexRunError("did not answer within 30000 ms", null)],
+    ["a killed client", new RexRunError("ended by SIGKILL", null)],
+  ])("%s leaves the outcome unknown, not failed", async (_case, runError) => {
+    const transport = createRexCliTransport({ run: async () => { throw runError; }, binary: () => BIN, env: {} });
+    const err = await rejected(transport.request("session.new_window", {}));
+    expect(err).toMatchObject({ kind: "unknown", message: `rex session.new_window: ${runError.message}` });
   });
 
   it("probes server.version and server.status for version and instance id", async () => {
@@ -108,7 +117,7 @@ describe("rex CLI transport", () => {
     const transport = createRexCliTransport({ run, binary: () => BIN, env: {} });
     await transport.probe();
     await transport.request("session.list", {});
-    expect(calls.map((c) => [c.argv.at(-2), c.timeoutMs])).toEqual([["server.version", 2_000], ["server.status", 2_000], ["session.list", 30_000]]);
+    expect(calls.map((c) => [c.argv.at(-2), c.timeoutMs])).toEqual([["server.version", 1_000], ["server.status", 1_000], ["session.list", 30_000]]);
   });
 
   it("a probe never throws: an unreachable server is alive:false with the reason", async () => {

@@ -7,7 +7,7 @@ import type {
   ProviderStatus,
   TerminalProvider,
 } from "./terminal-provider.js";
-import type { RexProbeResult, RexTransport } from "./rex-transport.js";
+import { RexError, type RexProbeResult, type RexTransport } from "./rex-transport.js";
 import { buildRexGrid, REX_LABEL_LIMIT, rexLabel } from "./rex-layout.js";
 import { planTileLabels } from "./tile-layout.js";
 
@@ -24,6 +24,7 @@ export const REX_TILE_CLOSED_REASON = "the tile had already closed when OpenRig 
 export const REX_TILES_UNCONFIRMED_NOTE = "Rex couldn't confirm the tiles after opening, so those seats are listed as opened without that check.";
 
 const describe = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+const outcomeUnknown = (err: unknown): boolean => err instanceof RexError && err.kind === "unknown";
 
 /** A seat's tile and the block id Rex gave it, if any. */
 export interface RexTile { pane: ComposedPane; blockId: unknown }
@@ -161,17 +162,21 @@ export class RexAdapter implements TerminalProvider {
     try {
       // Empty first: blocks in a create's own windows stay owned by this short-lived client, holding back the app's resize.
       const created = await this.transport.request("session.create", { label });
-      if (typeof created["session_id"] !== "string" || !created["session_id"]) throw new Error("the reply named no session");
+      if (typeof created["session_id"] !== "string" || !created["session_id"]) throw new RexError("the reply named no session", "unknown");
       sessionId = created["session_id"];
     } catch (err) {
-      const reason = `rex session.create failed: ${describe(err)}`;
+      const unknown = outcomeUnknown(err);
+      const reason = unknown
+        ? `Rex didn't confirm creating session "${label}" (${describe(err)}); it may exist. Check Rex before retrying.`
+        : `rex session.create failed: ${describe(err)}`;
       for (const page of view.pages) degrade(page, reason);
-      return { ...base, ok: view.opened.length === 0, pages: 0, error: reason, code: "rex_session_failed" };
+      return { ...base, ok: view.opened.length === 0, pages: 0, error: reason, code: unknown ? "rex_outcome_unknown" : "rex_session_failed" };
     }
 
     const tiles: RexTile[] = [];
     let painted = 0;
     let firstFailure: string | undefined;
+    const uncertainPages: number[] = [];
     for (const [index, pagePanes] of view.pages.entries()) {
       try {
         const window = await this.transport.request("session.new_window", {
@@ -181,19 +186,32 @@ export class RexAdapter implements TerminalProvider {
         painted++;
         pagePanes.forEach((pane, i) => tiles.push({ pane, blockId: Array.isArray(ids) ? ids[i] : undefined }));
       } catch (err) {
+        if (outcomeUnknown(err)) {
+          uncertainPages.push(index + 1);
+          degrade(pagePanes, `Rex didn't confirm page ${index + 1} of session "${label}" (${describe(err)}); its tiles may be open`);
+          continue;
+        }
         const reason = `rex session.new_window failed: ${describe(err)}`;
         firstFailure ??= reason;
         degrade(pagePanes, reason);
       }
     }
+    const space = { id: sessionId, label };
+    const unconfirmed = uncertainPages.length === 0 ? undefined
+      : `Rex didn't confirm page${uncertainPages.length > 1 ? "s" : ""} ${uncertainPages.join(", ")} of session "${label}", so those seats are listed as degraded but may be open. Check the session in Rex before retrying.`;
+    if (painted === 0 && unconfirmed) {
+      // The session may hold tiles, so it stays.
+      return { ...base, ok: view.opened.length === 0, pages: 0, error: unconfirmed, code: "rex_outcome_unknown", space };
+    }
     if (painted === 0) {
       try {
         await this.transport.request("session.destroy", { session_id: sessionId });
       } catch (err) {
-        notes.push(`Rex kept the empty session "${label}" (${describe(err)}); close it in Rex.`);
+        notes.push(`Rex may have kept the empty session "${label}" (${describe(err)}); close it in Rex if it's still open.`);
       }
       return { ...base, ok: view.opened.length === 0, pages: 0, error: firstFailure, code: "rex_session_failed", ...(notes.length ? { notes } : {}) };
     }
+    if (unconfirmed) notes.push(unconfirmed);
 
     if (label !== plain) notes.push(`A view named "${plain}" is already open, so this one is "${label}".`);
     await this.sleep(REX_TILE_SETTLE_MS);
@@ -207,7 +225,7 @@ export class RexAdapter implements TerminalProvider {
       ...base,
       ok: opened.length > 0 || view.opened.length === 0,
       pages: painted,
-      space: { id: sessionId, label },
+      space,
       ...(notes.length ? { notes } : {}),
     };
   }

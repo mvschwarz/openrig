@@ -16,7 +16,8 @@ export class RexRunError extends Error {
 /** One `rex` CLI run: argv (binary first) with JSON on stdin; resolves stdout, rejects with RexRunError. */
 export type RexRun = (argv: string[], stdin: string, timeoutMs: number) => Promise<string>;
 
-export type RexErrorKind = "unavailable" | "method_not_found" | "failed";
+/** `unknown`: the request may have been applied; its reply was lost (a timeout, a killed client or an unreadable reply). */
+export type RexErrorKind = "unavailable" | "method_not_found" | "failed" | "unknown";
 
 export class RexError extends Error {
   constructor(message: string, readonly kind: RexErrorKind, readonly code?: string) {
@@ -38,8 +39,8 @@ export interface RexTransport {
 }
 
 const REQUEST_TIMEOUT_MS = 30_000;
-// A healthy server answers a probe in tens of milliseconds; a hung one must not hold up `rig terminal status`.
-const PROBE_TIMEOUT_MS = 2_000;
+// A healthy server answers a probe in tens of milliseconds; discovery has to fit well inside the CLI's 5 s status request.
+const PROBE_TIMEOUT_MS = 1_000;
 const STOP_GRACE_MS = 1_000;
 const MAX_OUTPUT_CHARS = 4 * 1024 * 1024;
 
@@ -105,6 +106,7 @@ function classify(method: string, err: unknown): RexError {
   const said = run.stderr.trim().split("\n")[0]?.replace(/^Error:\s*/, "").replace(/^stream response "[^"]*" failed:\s*/, "") ?? "";
   const code = /\bcode=([a-z_]+)/.exec(run.stderr)?.[1];
   if (run.errno === "ENOENT" || run.exitCode === 4) return new RexError(`the Rex server is not reachable (${said || run.message})`, "unavailable", code);
+  if (run.exitCode === null && !run.errno) return new RexError(`rex ${method}: ${said || run.message}`, "unknown", code);
   if (code === "method_not_found") return new RexError(`this Rex server has no ${method}; update Rex`, "method_not_found", code);
   return new RexError(`rex ${method}: ${said || run.message}`, "failed", code);
 }
@@ -131,7 +133,7 @@ export function createRexCliTransport(opts: { run?: RexRun; env?: NodeJS.Process
     }
     let parsed: unknown;
     try { parsed = JSON.parse(out); } catch { /* reported below */ }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new RexError(`rex ${method} returned no JSON object`, "failed");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new RexError(`rex ${method} returned no JSON object`, "unknown");
     return parsed as Record<string, unknown>;
   };
   return {

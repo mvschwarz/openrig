@@ -105,7 +105,11 @@ app on macOS, and uses its own `REX_SERVER` when set. It never starts a Rex
 server. An open view is not reused: opening it again adds a numbered session,
 such as `future-rig (2)`. `--session` applies to Herdr only. An unreachable Rex
 server returns `rex_unavailable` and a failed session create returns
-`rex_session_failed`, both as HTTP 200 results with `ok: false`.
+`rex_session_failed`, both as HTTP 200 results with `ok: false`. When Rex
+doesn't confirm a session create or a page, for example because its reply
+timed out, OpenRig closes nothing: the result says `rex_outcome_unknown`, or
+adds a note when other pages opened, and names the session to check in Rex
+before retrying. `rig terminal status` gives Rex about a second to answer.
 
 ## HTTP API
 
