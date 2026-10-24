@@ -1,10 +1,40 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const panesOf = rows => rows.map(line => {
+  const [name, pane, pid, dead] = line.split('\t');
+  return { name, pane, pid: Number(pid), dead: Number(dead) };
+});
+
+function preserved(before, after) {
+  assert.equal(before.nodes.length, 2, 'expected the existing two-seat team');
+  assert.equal(before.bindings.length, 2, 'expected both team bindings');
+  assert.equal(before.sessions.length, 2, 'expected both original team sessions');
+  assert.ok(before.sessions.every(row => row.status === 'running'), 'team was not running before restart');
+  assert.deepEqual(after.nodes, before.nodes, 'team identities/lifecycle changed');
+  assert.deepEqual(after.bindings, before.bindings, 'team bindings changed');
+  assert.deepEqual(after.sessions, before.sessions, 'team sessions replaced, detached or superseded');
+  assert.equal(before.privatePanes.length, 2, 'expected both original team panes');
+  assert.deepEqual(after.privatePanes, before.privatePanes, 'original panes/processes changed');
+  assert.deepEqual(before.defaultPanes, [], 'fixture default socket already occupied');
+  assert.deepEqual(after.defaultPanes, [], 'duplicate sessions on the default socket');
+}
+
+function polled(proof) {
+  return proof.before.sessions.every(session => {
+    const prior = proof.after.verdicts.find(row => row.node_id === session.node_id);
+    const current = proof.poll.verdicts.find(row => row.node_id === session.node_id);
+    return prior && current && current.session_name === session.session_name &&
+      current.verdict === 'tmux_unavailable' && current.observed_pid === null && current.observed_pane_pid === null &&
+      Number.isFinite(Date.parse(current.observed_at)) && Date.parse(current.observed_at) > Date.parse(prior.observed_at);
+  });
+}
 
 export function verifyReducedEnvRestart(proof) {
   assert.ok(proof, 'missing reduced-environment restart proof');
@@ -12,35 +42,57 @@ export function verifyReducedEnvRestart(proof) {
   assert.deepEqual(proof.removed, ['TMUX', 'TMUX_TMPDIR', 'scaffold tmux wrapper']);
   assert.deepEqual(proof.environment, { TMUX: false, TMUX_TMPDIR: false, wrapperOnPath: false });
   assert.equal(proof.scope, 'team seats only; kernel duplication not exercised');
-  assert.equal(proof.before.nodes.length, 2, 'expected the existing two-seat team');
-  assert.deepEqual(proof.after.nodes, proof.before.nodes, 'team identities/lifecycle changed');
-  assert.equal(proof.before.bindings.length, 2, 'expected both team bindings');
-  assert.equal(proof.before.sessions.length, 2, 'expected both original team sessions');
-  assert.ok(proof.before.sessions.every(row => row.status === 'running'), 'team was not running before restart');
-  assert.deepEqual(proof.after.bindings, proof.before.bindings, 'team bindings changed');
-  const identity = rows => rows.map(({ id, node_id, session_name }) => ({ id, node_id, session_name }));
-  assert.deepEqual(identity(proof.after.sessions), identity(proof.before.sessions), 'sessions replaced or duplicated');
-  assert.ok(proof.after.sessions.every(row => row.status !== 'superseded'), 'original session superseded');
-  assert.equal(proof.evidence?.length, 2, 'expected a recorded process for each running team seat before the restart');
+  assert.equal(proof.evidence?.length, 2, 'expected recorded processes before restart');
   for (const session of proof.before.sessions) assert.ok(proof.evidence.some(row =>
     row.node_id === session.node_id && row.session_name === session.session_name && row.pid > 0),
   'missing recorded process for original team session');
-  assert.deepEqual(proof.after.sessions.map(row => row.status), proof.before.sessions.map(row => row.status),
-    'a team session still running elsewhere was marked detached');
-  assert.equal(proof.before.privatePanes.length, 2, 'expected both original team panes');
-  assert.deepEqual(proof.after.privatePanes, proof.before.privatePanes, 'original panes/processes changed');
-  assert.deepEqual(proof.before.defaultPanes, [], 'fixture default socket already occupied');
-  assert.deepEqual(proof.after.defaultPanes, [], 'duplicate sessions on the default socket');
+  for (const phase of ['after', 'poll', 'second', 'recovered']) preserved(proof.before, proof[phase]);
+  assert.ok(polled(proof), 'actual intervening null-PID poll not observed');
+  assert.equal(proof.recovery, 'complete');
+  assert.ok(proof.delivery.marker && !proof.delivery.before.includes(proof.delivery.marker));
+  assert.ok(proof.delivery.after.includes(proof.delivery.marker), 'recovered send did not reach the addressed pane');
+  assert.ok(proof.before.sessions.some(row => row.session_name === proof.delivery.session));
 }
 
-// Runs only in the existing disposable, network-none installed-scenario container.
-export async function reducedEnvRestart(daemon, scaffold, rigBin, proof = {}, { execute = exec, withDatabase } = {}) {
+export function verifyGoneProcess(proof) {
+  assert.equal(proof?.stage, 'complete', 'gone-process control incomplete');
+  assert.equal(proof.processAbsent, true, 'process disappearance not proved');
+  assert.equal(proof.absenceProbe?.code, 1);
+  assert.match(proof.absenceProbe.stderr, /No such process/i);
+  assert.equal(proof.recovery, 'complete');
+  const { target, before, after } = proof;
+  const prior = before.sessions.find(row => row.id === target.sessionId);
+  assert.ok(prior?.status === 'running' && prior.node_id === target.nodeId);
+  assert.ok(panesOf(before.privatePanes).some(row => row.name === prior.session_name && row.pid === target.pid && !row.dead));
+  assert.deepEqual(after.nodes, before.nodes);
+  assert.deepEqual(after.defaultPanes, []);
+  const live = after.sessions.filter(row => row.node_id === target.nodeId && row.status === 'running');
+  assert.ok(live.length <= 1, 'gone seat duplicated');
+  assert.equal(proof.outcome, live.length ? 'restored' : 'detached');
+  if (!live.length) {
+    assert.equal(after.sessions.find(row => row.id === target.sessionId)?.status, 'detached', 'gone seat not detached');
+    assert.ok(!panesOf(after.privatePanes).some(row => row.name === prior.session_name && !row.dead));
+  } else {
+    const panes = panesOf(after.privatePanes).filter(row => row.name === live[0].session_name && !row.dead);
+    assert.equal(panes.length, 1);
+    assert.ok(panes[0].pid > 0 && panes[0].pid !== target.pid, 'dead process kept as running');
+  }
+  for (const peer of before.sessions.filter(row => row.node_id !== target.nodeId)) {
+    assert.deepEqual(after.sessions.find(row => row.id === peer.id), peer, 'live peer altered by gone control');
+    assert.deepEqual(after.bindings.filter(row => row.node_id === peer.node_id), before.bindings.filter(row => row.node_id === peer.node_id));
+    assert.deepEqual(panesOf(after.privatePanes).filter(row => row.name === peer.session_name), panesOf(before.privatePanes).filter(row => row.name === peer.session_name));
+  }
+}
+
+// Only the existing disposable, network-none installed-scenario container.
+export async function reducedEnvRestart(daemon, scaffold, rigBin, proof = {},
+  { execute = exec, withDatabase, pause = sleep, controls = {} } = {}) {
   const reduced = { ...daemon.readEnv };
   delete reduced.TMUX;
   delete reduced.TMUX_TMPDIR;
-  // Merely deleting the variables is vacuous while the scaffold wrapper forces -S.
   reduced.PATH = reduced.PATH.split(':').filter(path => path !== join(scaffold.root, 'bin')).join(':');
   const command = (file, args, env = reduced) => execute(file, args, { env, timeout: 15000, maxBuffer: 262144 });
+  const cli = (args, env = reduced) => command(process.execPath, [rigBin, ...args], env);
   const panes = async socket => {
     try {
       const { stdout } = await command('/usr/bin/tmux', [...(socket ? ['-S', socket] : []),
@@ -49,7 +101,7 @@ export async function reducedEnvRestart(daemon, scaffold, rigBin, proof = {}, { 
     } catch (error) {
       if (!socket && error.code === 1 && !error.stdout &&
           /no server running|error connecting.*No such file or directory/i.test(error.stderr)) return [];
-      throw error; // An unreadable socket is not absence.
+      throw error;
     }
   };
   Object.assign(proof, { scope: 'team seats only; kernel duplication not exercised',
@@ -61,45 +113,110 @@ export async function reducedEnvRestart(daemon, scaffold, rigBin, proof = {}, { 
     const db = new Database(join(scaffold.stateDir, 'scenario.db'), { readonly: true, fileMustExist: true });
     try { return read(db); } finally { db.close(); }
   });
-  const snapshot = async label => {
-    proof.stage = label + '-database';
-    const rows = proof[label] = {};
+  const snapshot = async (label, record = proof) => {
+    record.stage = label + '-database';
+    const rows = record[label] = {};
     database(db => {
       const keys = ['id', 'rig_id', 'logical_id', 'status', 'lifecycle_state', 'is_archived', 'superseded_at', 'superseded_by'];
       rows.nodes = db.prepare('SELECT * FROM nodes ORDER BY id').all()
         .map(row => Object.fromEntries(keys.filter(key => Object.hasOwn(row, key)).map(key => [key, row[key]])));
       rows.bindings = db.prepare('SELECT * FROM bindings ORDER BY id').all().map(({ updated_at, ...binding }) => binding);
       rows.sessions = db.prepare('SELECT id, node_id, session_name, status FROM sessions ORDER BY id').all();
+      rows.verdicts = db.prepare('SELECT node_id, session_name, verdict, observed_pid, observed_pane_pid, observed_at FROM seat_identity_verdicts ORDER BY node_id').all();
     });
-    proof.stage = label + '-private-panes';
+    record.stage = label + '-private-panes';
     rows.privatePanes = await panes(scaffold.tmuxSocketPath);
-    proof.stage = label + '-default-panes';
+    record.stage = label + '-default-panes';
     rows.defaultPanes = await panes();
   };
   const recorded = () => database(db => db.prepare(`SELECT v.node_id, v.session_name,
-    coalesce(v.observed_pane_pid, v.observed_pid) AS pid
-    FROM sessions s JOIN seat_identity_verdicts v ON v.node_id = s.node_id AND v.session_name = s.session_name
+    coalesce(v.observed_pane_pid, v.observed_pid) AS pid FROM sessions s
+    JOIN seat_identity_verdicts v ON v.node_id = s.node_id AND v.session_name = s.session_name
     WHERE s.status = 'running' AND coalesce(v.observed_pane_pid, v.observed_pid) > 0 ORDER BY v.node_id`).all());
+  const blind = async label => {
+    proof.stage = label + '-stop';
+    await daemon.sigterm();
+    proof.stage = label + '-restart';
+    await cli(['daemon', 'start', '--port', String(daemon.port), '--db', join(scaffold.stateDir, 'scenario.db'), '--no-kernel']);
+    await snapshot(label);
+    preserved(proof.before, proof[label]);
+  };
   try {
     proof.stage = 'process-evidence';
     proof.evidence = recorded();
     for (let i = 0; proof.evidence.length < 2 && i < 60; i++) {
-      await new Promise(resolve => setTimeout(resolve, 500));
-      proof.evidence = recorded();
+      await pause(500); proof.evidence = recorded();
     }
     assert.equal(proof.evidence.length, 2, 'both team process records required before restart');
     await snapshot('before');
     assert.ok(proof.before.sessions.every(row => row.status === 'running'), 'team must be running before restart');
-    proof.stage = 'stop';
-    await daemon.sigterm();
-    proof.stage = 'restart';
-    await command(process.execPath, [rigBin, 'daemon', 'start', '--port', String(daemon.port),
-      '--db', join(scaffold.stateDir, 'scenario.db'), '--no-kernel']);
-    await snapshot('after');
+    await blind('after');
+    // Read the ordinary scheduler's persisted result; never call it or write its DB.
+    for (let i = 0; i < 60; i++) {
+      await pause(500); await snapshot('poll');
+      if (polled(proof)) break;
+    }
+    assert.ok(polled(proof), 'normal null-PID poll not observed within30s');
+    preserved(proof.before, proof.poll);
+    await blind('second');
+    proof.stage = 'recovery-restart';
+    proof.recovery = 'restarting-with-original-environment';
+    await daemon.restart();
+    await snapshot('recovered');
+    preserved(proof.before, proof.recovered);
+    proof.recovery = 'complete';
+    proof.stage = 'recovered-delivery';
+    const session = proof.before.sessions[0].session_name;
+    const capture = async () => (await cli(['capture', session, '--lines', '40'], daemon.readEnv)).stdout;
+    const marker = 'reduced-env-' + randomUUID();
+    proof.delivery = { session, marker, before: await capture() };
+    await cli(['send', session, marker, '--json'], daemon.readEnv);
+    for (let i = 0; i < 20; i++) {
+      proof.delivery.after = await capture();
+      if (proof.delivery.after.includes(marker)) break;
+      await pause(250);
+    }
     proof.stage = 'complete';
+    verifyReducedEnvRestart(proof);
+    // Run just before the existing down step: the preceding two-seat expectation stays meaningful.
+    controls.goneProcess = async () => {
+      const gone = proof.gone = {};
+      try {
+        await snapshot('before', gone);
+        preserved(proof.before, gone.before);
+        const target = gone.before.sessions[1];
+        const pane = panesOf(gone.before.privatePanes).find(row => row.name === target.session_name && !row.dead);
+        assert.ok(pane?.pid > 1, 'owned seat process unavailable');
+        gone.target = { nodeId: target.node_id, sessionId: target.id, pid: pane.pid, pane: pane.pane };
+        gone.stage = 'confirm-owned-pane';
+        const observed = await command('/usr/bin/tmux', ['-S', scaffold.tmuxSocketPath, 'display-message', '-p', '-t', pane.pane,
+          '#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}']);
+        assert.deepEqual(panesOf([observed.stdout.trim()]), [pane], 'owned pane identity changed; no kill');
+        gone.stage = 'kill-owned-seat';
+        gone.kill = await command('/bin/kill', ['-TERM', String(pane.pid)], daemon.readEnv);
+        for (let i = 0; i < 40; i++) {
+          try { await command('/bin/kill', ['-0', String(pane.pid)], daemon.readEnv); }
+          catch (error) {
+            if (error.code === 1 && /No such process/i.test(error.stderr)) {
+              gone.absenceProbe = { code: error.code, stderr: error.stderr }; gone.processAbsent = true; break;
+            }
+            throw error;
+          }
+          await pause(250);
+        }
+        assert.equal(gone.processAbsent, true, 'owned process did not disappear');
+        gone.stage = 'restart';
+        await daemon.sigterm();
+        await cli(['daemon', 'start', '--port', String(daemon.port), '--db', join(scaffold.stateDir, 'scenario.db'), '--no-kernel']);
+        await snapshot('after', gone);
+        gone.outcome = gone.after.sessions.some(row => row.node_id === target.node_id && row.status === 'running') ? 'restored' : 'detached';
+        gone.stage = 'recovery-restart';
+        await daemon.restart();
+        gone.recovery = 'complete';
+        gone.stage = 'complete';
+        verifyGoneProcess(gone);
+      } catch (error) { gone.failedStage = gone.stage; throw error; }
+    };
     return proof;
-  } catch (error) {
-    proof.failedStage = proof.stage;
-    throw error;
-  }
+  } catch (error) { proof.failedStage = proof.stage; throw error; }
 }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { verifyMcpStdio } from './mcp-stdio.mjs';
-import { verifyReducedEnvRestart } from './reduced-env-restart.mjs';
+import { verifyReducedEnvRestart, verifyGoneProcess } from './reduced-env-restart.mjs';
 
 export const RESULT_PREFIX = 'OPENRIG_SCENARIO_RESULT=';
 export const SCENARIO = 'queue-baton-survives-restart';
@@ -41,6 +41,7 @@ export function verifyPassingRun(exitCode, report, caseName) {
   if (caseName === 'daemon-restart') {
     verifyMcpStdio(report.mcp);
     verifyReducedEnvRestart(report.reducedEnv);
+    verifyGoneProcess(report.reducedEnv.gone);
     const proof = report.preservation;
     assert.equal(proof?.failedBackupUnchanged, true);
     assert.match(proof.editedSha256, /^[0-9a-f]{64}$/);
