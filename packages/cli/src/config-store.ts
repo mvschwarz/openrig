@@ -14,7 +14,7 @@ import {
 
 export interface RiggedConfig {
   launch: { nonInterruptive: boolean };
-  daemon: { port: number; host: string };
+  daemon: { port: number; host: string; dbConflict?: "warn" | "stop" };
   // OPR.0.4.6.MH1 FR-1 — the persisted host-selection pointer.
   // OPR.0.4.6.MH1 FR-4 — the own-host display name (default "localhost").
   host: { selected: string; name: string };
@@ -261,7 +261,7 @@ const DEFAULT_CLAUDE_COMPACTION_EXTRA_INSTRUCTION_FILE_PATH = getDefaultOpenRigP
 
 const DEFAULTS = {
   launch: { nonInterruptive: false },
-  daemon: { port: 7433, host: "127.0.0.1" },
+  daemon: { port: 7433, host: "127.0.0.1", dbConflict: "warn" },
   // OPR.0.4.6.MH1 FR-1 — "local" ≡ no remote selection (LOCAL_HOST_ID).
   // FR-4 — own-host display name; default "localhost" (PRD-named).
   host: { selected: "local", name: "localhost" },
@@ -411,6 +411,7 @@ const DEFAULTS = {
 export const VALID_KEYS = [
   "daemon.port",
   "daemon.host",
+  "daemon.db_conflict",
   // OPR.0.4.6.MH1 FR-1 — the persisted host-selection pointer (the
   // kubectl current-context shape). ONE static key, lockstep with the
   // daemon settings-store twin (parity test pins both). Registry-
@@ -561,6 +562,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   // OPR.0.4.6.WF5 FR-2 — new key, OPENRIG_* only.
   "workflow.exception_routing": { primary: "OPENRIG_WORKFLOW_EXCEPTION_ROUTING" },
   "daemon.host": { primary: "OPENRIG_HOST", legacy: "RIGGED_HOST" },
+  "daemon.db_conflict": { primary: "OPENRIG_DAEMON_DB_CONFLICT" },
   "db.path": { primary: "OPENRIG_DB", legacy: "RIGGED_DB" },
   "transcripts.enabled": { primary: "OPENRIG_TRANSCRIPTS_ENABLED", legacy: "RIGGED_TRANSCRIPTS_ENABLED" },
   "transcripts.path": { primary: "OPENRIG_TRANSCRIPTS_PATH", legacy: "RIGGED_TRANSCRIPTS_PATH" },
@@ -666,6 +668,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "host.name": ["host", "name"],
   "workflow.exception_routing": ["workflow", "exceptionRouting"],
   "daemon.host": ["daemon", "host"],
+  "daemon.db_conflict": ["daemon", "dbConflict"],
   "db.path": ["db", "path"],
   "transcripts.enabled": ["transcripts", "enabled"],
   "transcripts.path": ["transcripts", "path"],
@@ -946,6 +949,9 @@ function percentageConstraint(key: string) {
 }
 
 const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | number | boolean) => void>> = {
+  "daemon.db_conflict": (raw) => {
+    if (raw !== "warn" && raw !== "stop") throw new Error("daemon.db_conflict must be warn or stop");
+  },
   "transcripts.lines": (raw, value) => {
     if (!/^\d+$/.test(raw.trim()) || typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 1_000_000) {
       throw new Error("Invalid transcripts.lines: must be an integer in [1, 1000000]");
@@ -1210,6 +1216,7 @@ export class ConfigStore {
       daemon: {
         port: v("daemon.port") as number,
         host: v("daemon.host") as string,
+        dbConflict: v("daemon.db_conflict") as "warn" | "stop",
       },
       host: {
         selected: v("host.selected") as string,

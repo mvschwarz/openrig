@@ -17,7 +17,7 @@ import type { InboundQueuePort } from "./queue-access.js";
 import { createHash } from "node:crypto";
 import { ADMITTED_EVENT_TYPES } from "./capabilities.js";
 import { escapeSlackText, parseQuestionAction, redactSecrets } from "./message.js";
-import { formatHumanAnswers, unansweredQuestions, type RecordHumanAnswerResult } from "../../human-questions.js";
+import { humanAnswerText, formatHumanAnswers, unansweredQuestions, type RecordHumanAnswerResult } from "../../human-questions.js";
 import { BotLimiter, DEFAULT_MAX_PER_HOUR, DEFAULT_COOLDOWN_MINUTES, type BotLookup, type NamedBot } from "./bot-inbox.js";
 import { envelopeChannel, type EnvelopeForwarder } from "./forwarding.js";
 
@@ -329,9 +329,19 @@ export class InboundRouter {
       const { summary, body } = this.summaryOf(ev, transfer, route.correlationQitemId);
       // A person's top-level message (not a reply in a thread) becomes the root its answer lands under.
       const mintsRoot = Boolean(this.deps.mintThread && ev.channel && (!ev.thread_ts || ev.thread_ts === ev.ts));
+      const correlated = route.correlationQitemId ? this.deps.queue.getQitem?.(route.correlationQitemId) : null;
+      const askPending = correlated?.state === "pending";
+      const closed = correlated?.state === "done" || correlated?.state === "handed-off";
+      const committedAnswer = (askPending || closed) && !ev.recoveredThreadReply && route.correlationQitemId
+        ? this.deps.queue.getHumanAnswer?.(route.correlationQitemId, who.source) : null;
+      // The generated trailing footer records this event's channel and ts, separately from the person's text.
+      // A crash after close but before seen-mark must still reuse that event's committed answer.
+      const replayedAnswer = closed && committedAnswer?.body.endsWith(body.slice(body.lastIndexOf("\n\n---\n"))) ? committedAnswer : null;
+      // A different event after close remains conversation; only the pending ask coalesces other retries.
+      const earlierAnswer = askPending ? committedAnswer : replayedAnswer;
       let qitemId: string;
       try {
-        qitemId = await this.deps.queue.createQitem({
+        qitemId = replayedAnswer ? replayedAnswer.qitemId : await this.deps.queue.createQitem({
           qitemId: this.inboundQitemId(ev),
           source: who.source, // the REGISTERED human's canonical ref (human-class), never a raw platform id
           destination: route.destination,
@@ -340,18 +350,19 @@ export class InboundRouter {
           summary,
           body,
           ...(route.correlationQitemId ? { inReplyTo: route.correlationQitemId } : {}),
+          ...(askPending && !ev.recoveredThreadReply ? { humanAnswer: true } : {}),
         });
       } catch (e) {
         this.deps.log?.(`qitem create failed ts=${ts}: ${(e as Error).message}`);
         return { landed: false, reason: "create_failed" };
       }
       let replyResolution: "resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable" | undefined;
-      if (route.correlationQitemId && this.deps.resolveHumanReply && !ev.recoveredThreadReply) {
+      if (!closed && route.correlationQitemId && this.deps.resolveHumanReply && !ev.recoveredThreadReply) {
         try {
           replyResolution = await this.deps.resolveHumanReply({
             qitemId: route.correlationQitemId,
             actorSession: who.source,
-            decision: String(ev.text ?? "").trim() || "[file reply]",
+            decision: earlierAnswer ? humanAnswerText(earlierAnswer.body) : String(ev.text ?? "").trim() || "[file reply]",
             messageTs: ev.ts,
           });
         } catch (e) {
@@ -370,6 +381,12 @@ export class InboundRouter {
           this.deps.log?.(`human reply notice failed qitem=${route.correlationQitemId} ts=${ts}: ${(e as Error).message}`);
           return { landed: false, qitemId, reason: "resolve_failed", correlationQitemId: route.correlationQitemId };
         }
+      }
+      if (earlierAnswer && ev.channel && ev.thread_ts) {
+        try {
+          await this.deps.acknowledgeAnswer?.({ channel: ev.channel, threadTs: ev.thread_ts,
+            text: escapeSlackText(`Already answered; the original answer went to ${route.destination} as ${earlierAnswer.qitemId}. No new reply was sent.`) });
+        } catch (e) { this.deps.log?.(`answer acknowledgement failed: ${(e as Error).message}`); }
       }
       if (mintsRoot) {
         try {
@@ -469,6 +486,22 @@ export class InboundRouter {
       if (live) await acknowledge(CLICK_REPLIES.unmapped);
       return { status: "ignored", reason: "unmapped-message" };
     }
+    const existing = this.deps.queue.getHumanAnswer?.(qitemId, who.source);
+    if (existing) {
+      try {
+        const resolution = await this.deps.resolveHumanReply?.({ qitemId, actorSession: who.source, decision: humanAnswerText(existing.body) });
+        if (resolution === "not-applicable") {
+          if (live) await acknowledge(CLICK_REPLIES.notClosed);
+          return { status: "refused", reason: "resolve-not-applicable" };
+        }
+        if (live) await acknowledge(escapeSlackText(`Already answered; the original answer went to ${route.destination} as ${existing.qitemId}. No new reply was sent.`));
+        return { status: "accepted", reason: "answers-complete" };
+      } catch (e) {
+        this.deps.log?.(`answer continuation failed qitem=${qitemId}: ${(e as Error).message}`);
+        if (live) await acknowledge("Your answer is recorded, but closing its request failed. OpenRig will retry.");
+        return { status: "handler-failed", reason: "answer-continuation-failed" };
+      }
+    }
     const recorded = this.deps.recordHumanAnswer?.({ qitemId, actorSession: who.source, ...picked });
     if (!recorded || recorded.status !== "recorded") {
       const reason = recorded?.reason ?? "answers-unavailable";
@@ -497,6 +530,7 @@ export class InboundRouter {
         priority: "routine",
         tags: [...route.tags ?? ["founder-slack", "inbound"], "human-answer"],
         inReplyTo: qitemId,
+        humanAnswer: true,
         summary: `Founder via Slack: answered ${lines.length === 1 ? "1 question" : `${lines.length} questions`}`,
         body: `${lines.join("\n")}\n\n---\nAnswers (question id → option id): ${JSON.stringify(recorded.answers)}\nIn reply to: ${qitemId} (its humanAnswers field holds the same)\nRouted by openrig slack-inbound (button click).`,
       });

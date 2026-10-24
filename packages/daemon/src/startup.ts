@@ -320,8 +320,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // reader. The resolved default remains the writer/network-reader/session root.
   const dbPath = opts?.dbPath ?? ":memory:";
   const seatDbPath = dbPath === ":memory:" ? dbPath : nodePath.resolve(dbPath);
+  const allowDbConflict = process.env.OPENRIG_ALLOW_DB_CONFLICT === "1";
+  delete process.env.OPENRIG_ALLOW_DB_CONFLICT; // this boot only; never pass the go-ahead to seats
   const databaseWarnings = await daemonDatabaseWarnings(dbPath, OPENRIG_HOME,
-    process.env.OPENRIG_DB === dbPath ? "OPENRIG_DB" : process.env.RIGGED_DB === dbPath ? "RIGGED_DB" : undefined);
+    process.env.OPENRIG_DB === dbPath ? "OPENRIG_DB" : process.env.RIGGED_DB === dbPath ? "RIGGED_DB" : undefined,
+    { conflictPolicy: new ContextPackSettingsStore().resolveOne("daemon.db_conflict").value as string,
+      allowConflict: allowDbConflict });
   for (const warning of databaseWarnings) console.warn(`Warning: ${warning}`);
   const db = createDb(dbPath);
   migrate(db, ALL_MIGRATIONS);

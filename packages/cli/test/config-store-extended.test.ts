@@ -44,7 +44,7 @@ function clearEnv(): () => void {
     // its custom home into default-path resolution; UNSETTING it would fall through
     // to the REAL ~/.openrig (foreign on-box state) — so tests set a fresh tmp home.
     "OPENRIG_HOME", "RIGGED_HOME",
-    "OPENRIG_PORT", "OPENRIG_HOST", "OPENRIG_DB",
+    "OPENRIG_PORT", "OPENRIG_HOST", "OPENRIG_DB", "OPENRIG_DAEMON_DB_CONFLICT",
     "OPENRIG_TRANSCRIPTS_ENABLED", "OPENRIG_TRANSCRIPTS_PATH",
     "OPENRIG_TRANSCRIPTS_LINES", "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS",
     "OPENRIG_WORKSPACE_ROOT", "OPENRIG_WORKSPACE_SLICES_ROOT",
@@ -111,7 +111,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
 
   it("VALID_KEYS includes legacy, user-settings, ui.preview, recovery, agents, feed, and transcript-rotation keys", () => {
     const expected = [
-      "daemon.port", "daemon.host",
+      "daemon.port", "daemon.host", "daemon.db_conflict",
       // OPR.0.4.6.MH1 FR-1/FR-4 — host-selection pointer + own-host name.
       "host.selected",
       "host.name",
@@ -213,6 +213,14 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "queue.wake_human_rung",
     ];
     expect([...VALID_KEYS]).toEqual(expected);
+  });
+
+  it("defaults database conflict handling to warn and persists the optional stop", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.get("daemon.db_conflict")).toBe("warn");
+    store.set("daemon.db_conflict", "stop");
+    expect(store.get("daemon.db_conflict")).toBe("stop");
+    expect(() => store.set("daemon.db_conflict", "always")).toThrow(/warn or stop/);
   });
 
   it("resolves context.root from the canonical default and OPENRIG_CONTEXT_ROOT", () => {

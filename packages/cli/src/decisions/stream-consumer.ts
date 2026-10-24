@@ -194,6 +194,22 @@ export async function applyPending(client: Client, binding: Binding, limit = 50)
   return out;
 }
 
+/**
+ * Decisions off or unconfigured: nothing is asked, but effects already accepted are still applied, under this seat's
+ * classifier lease, so committed work is never stranded by a disable.
+ */
+export async function recoverEffects(client: Client, project: string) {
+  const sources = await read<{ occupant?: { session?: string; generation?: string } }>(client, `/api/projects/worker-sources?project=${encodeURIComponent(project)}`);
+  const occupant = sources.status === 200 ? sources.data.occupant : undefined;
+  if (!occupant?.session || !occupant.generation) return [{ outcome: "skipped", reason: "the intake occupant is unavailable; effects wait for a wake" }];
+  const lease = await client.post<{ leaseId?: string; error?: string }>(`/api/projects/lease/acquire?expectedOccupant=${encodeURIComponent(occupant.generation)}`,
+    { classifierSession: occupant.session, evaluateDeadnessFirst: true });
+  if (lease.status >= 400 || typeof lease.data?.leaseId !== "string") {
+    return [{ outcome: "skipped", reason: `classifier lease not acquired (${lease.data?.error ?? `HTTP ${lease.status}`}); effects wait for the holder's wake` }];
+  }
+  return applyPending(client, { intake: occupant.session, generation: occupant.generation, leaseId: lease.data.leaseId });
+}
+
 /** One bounded intake wake with typed decisions. The caller has checked `run.unavailable` first. */
 export async function runDecideWake(client: Client, opts: WakeOptions, run: DecisionRun, readFile?: (file: string) => string) {
   const accepted = new Map<string, Disposition>(), deferrals = new Map<string, Disposition>(), reasons = new Map<string, string>();
@@ -203,6 +219,8 @@ export async function runDecideWake(client: Client, opts: WakeOptions, run: Deci
   const wake = await runProjectWake(client, { ...opts, classifierVersion: automatic }, readFile, {
     // The worker abstains an item when it's told to stop after a decision, so stopping only ever follows a thrown no-call.
     signal: new AbortController().signal, shouldStop: () => stop, timeoutMs: run.budget.callTimeoutMs + 5_000,
+    // Items intake (or an earlier manual version) abstained on stay with intake; experiment abstentions don't count.
+    eligibleQuery: { excludeAbstainedElsewhere: "1" },
     candidates: prepared => {
       routing = prepared.snapshot.routing ?? null;
       if (prepared.snapshot.routingUnavailable) routingGap = prepared.snapshot.routingUnavailable;

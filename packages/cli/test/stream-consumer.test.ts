@@ -246,7 +246,32 @@ describe("stream consumer in the intake turn", () => {
     await new Command().addCommand(projectCommand({ lifecycleDeps: {}, clientFactory: () => { throw Error("daemon forbidden"); },
       decisionsSettings: () => ({ ...ON, enabled: false }), experimentEnv: {}, experimentFetch: send } as ProjectDeps))
       .parseAsync(["project", "wake", "--project", "FIX", "--taxonomy", "t", "--classifier-version", "v", "--evidence-epoch", "e", "--decide"], { from: "user" });
-    expect(JSON.parse(out.at(-1)!)).toMatchObject({ decisions: { status: "not_called", reason: "disabled" }, status: { state: "no_call" } });
+    expect(JSON.parse(out.at(-1)!)).toMatchObject({ decisions: { status: "not_called", reason: "disabled" }, status: { state: "no_call" },
+      recovered: [{ outcome: "skipped", reason: expect.stringContaining("daemon forbidden") }] });
     expect(send).not.toHaveBeenCalled();
+  });
+
+  it("decisions turned off after an answer was accepted: the next --decide asks nothing and still applies the effect", async () => {
+    const d = daemon(["S1"], { createStatus: [500] });
+    expect((await wake(d, provider({ disposition: "create", owner: "dev-lead@rig" }))).decisions.applied).toMatchObject([{ streamItemId: "S1", outcome: "unknown" }]);
+    expect(d.creates).toEqual([]);
+    const out: string[] = []; vi.spyOn(console, "log").mockImplementation(x => { out.push(String(x)); });
+    const send = vi.fn();
+    await new Command().addCommand(projectCommand({ lifecycleDeps: {}, clientFactory: () => d.client,
+      decisionsSettings: () => ({ ...ON, enabled: false }), experimentEnv: {}, experimentFetch: send } as ProjectDeps))
+      .parseAsync(["project", "wake", "--project", "FIX", "--taxonomy", "t", "--classifier-version", "v", "--evidence-epoch", "e", "--decide"], { from: "user" });
+    expect(JSON.parse(out.at(-1)!)).toMatchObject({ decisions: { reason: "disabled" }, recovered: [{ streamItemId: "S1", outcome: "created" }] });
+    expect(d.creates.map(c => c.qitemId)).toEqual(["qitem-stream-S1"]);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("asks the daemon to leave out items abstained under another version", async () => {
+    const d = daemon(["S1"]);
+    const urls: string[] = [];
+    const get = (d.client as { get: (u: string) => Promise<unknown> }).get;
+    (d.client as { get: (u: string) => Promise<unknown> }).get = async (u: string) => { urls.push(u); return get(u); };
+    await wake(d, provider({ disposition: "no_action" }));
+    expect(urls.filter(u => u.startsWith("/api/projects/eligible")).every(u => u.includes("excludeAbstainedElsewhere=1"))).toBe(true);
+    expect(urls.some(u => u.startsWith("/api/projects/eligible"))).toBe(true);
   });
 });

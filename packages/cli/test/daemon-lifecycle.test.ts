@@ -377,6 +377,25 @@ describe("Daemon Lifecycle", () => {
     expect(deps.kill).not.toHaveBeenCalled();
   });
 
+  it("start reports the current child's database-conflict stop and one-start remedy", async () => {
+    await import("@openrig/daemon/instance-initialization");
+    vi.useFakeTimers();
+    const child = Object.assign(new EventEmitter(), { pid: 12345, exitCode: null as number | null, signalCode: null, unref: vi.fn() });
+    const reason = "OPENRIG_DB_CONFLICT: Another live daemon holds /fixture/shared.sqlite. To proceed once, run rig daemon start --allow-db-conflict.";
+    const deps = mockDeps({
+      fetch: vi.fn().mockRejectedValue(new Error("refused")),
+      readFileFrom: vi.fn(() => `Error: ${reason}\n`),
+      spawn: vi.fn(() => {
+        setTimeout(() => { child.exitCode = 1; child.emit("exit", 1, null); }, 1);
+        return child as unknown as ChildProcess;
+      }),
+    });
+    const pending = startDaemon({}, deps).catch(error => error as Error);
+    await vi.runAllTimersAsync();
+    expect((await pending).message).toContain(reason);
+    expect(deps.writeFile).not.toHaveBeenCalledWith(STATE_FILE, expect.anything());
+  });
+
   it("start: an old bind error is not attributed to a new child's unrelated exit", async () => {
     vi.useFakeTimers();
     const child = Object.assign(new EventEmitter(), { pid: 12345, exitCode: null as number | null, signalCode: null, unref: vi.fn() });

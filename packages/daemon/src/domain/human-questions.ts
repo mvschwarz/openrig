@@ -108,3 +108,9 @@ export function formatHumanAnswers(questions: readonly HumanQuestion[], answers:
 export function unansweredQuestions(questions: readonly HumanQuestion[], answers: HumanAnswers): HumanQuestion[] {
   return questions.filter((q) => ownAnswer(answers, q.id) == null);
 }
+
+/** Return the person's original answer, without the attribution footer used by both surfaces. */
+export function humanAnswerText(body: string): string {
+  const footer = body.lastIndexOf("\n\n---\n");
+  return (footer < 0 ? body : body.slice(0, footer)).trim();
+}

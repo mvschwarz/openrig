@@ -187,6 +187,7 @@ export interface StartOptions {
   // Exposed at the CLI as `rig daemon start --no-kernel`; projected
   // into the daemon process env as OPENRIG_NO_KERNEL.
   skipKernelBoot?: boolean;
+  allowDbConflict?: boolean;
 }
 
 export interface LifecycleDeps {
@@ -491,6 +492,7 @@ export function buildDaemonEnv(
     // V0.3.1 slice 05 — projected via OPENRIG_NO_KERNEL env var so
     // the daemon's startup.ts kernel-boot path honors the flag.
     skipKernelBoot?: boolean;
+    allowDbConflict?: boolean;
   },
 ): Record<string, string> {
   const env: Record<string, string> = {};
@@ -513,6 +515,7 @@ export function buildDaemonEnv(
     env["OPENRIG_HOST"] = opts.host;
   }
   env["OPENRIG_DB"] = opts.db;
+  if (opts.allowDbConflict) env["OPENRIG_ALLOW_DB_CONFLICT"] = "1";
   if (opts.transcriptsEnabled !== undefined) {
     env["OPENRIG_TRANSCRIPTS_ENABLED"] = String(opts.transcriptsEnabled);
   }
@@ -705,6 +708,7 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
       transcriptsLines: opts.transcriptsLines,
       transcriptsPollIntervalSeconds: opts.transcriptsPollIntervalSeconds,
       skipKernelBoot: opts.skipKernelBoot,
+      allowDbConflict: opts.allowDbConflict,
     }),
     stdio: ["ignore", logFd, logFd],
     detached: true,
@@ -726,7 +730,8 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     const startupLog = deps.readFileFrom
       ? deps.readFileFrom(LOG_FILE, logOffset) ?? ""
       : Buffer.from(deps.readFile(LOG_FILE) ?? "").subarray(logOffset).toString();
-    const guidance = /\bEADDRINUSE\b/.test(startupLog)
+    const dbConflict = startupLog.match(/^(?:Error: )?(OPENRIG_DB_CONFLICT:[^\r\n]*)/m)?.[1];
+    const guidance = dbConflict ? ` ${dbConflict}` : /\bEADDRINUSE\b/.test(startupLog)
       ? ` ${occupiedPortGuidance(port)}`
       : ` See ${LOG_FILE} for details.`;
     childFailure = new Error(`Daemon child ${child.pid ?? "unknown"} exited before startup completed (code ${code}, signal ${signal ?? "none"}).${guidance}`);

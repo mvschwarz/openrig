@@ -45,6 +45,7 @@ function fixture(saved?: Buffer, opts: { runtime?: string; idleHook?: boolean } 
   const bodies: Record<string, string | null> = { a: "", b: "" };
   const history: Record<string, string> = { a: "", b: "" };
   const writes: string[] = [], submissions: string[] = [];
+  const observations: unknown[] = [];
   const hooks: { load?: () => void | Promise<void>; paste?: () => void | Promise<void>; sleep?: (ms: number) => void | Promise<void> } = {};
   let staged = "";
   const tmux = new TmuxAdapter(async command => {
@@ -75,7 +76,8 @@ function fixture(saved?: Buffer, opts: { runtime?: string; idleHook?: boolean } 
   let at = Date.now();
   const rigRepo = new RigRepository(db), sessionRegistry = new SessionRegistry(db), outbox = new OutboxHandler(db);
   const transport = new SessionTransport({ db, tmuxAdapter: tmux, rigRepo, sessionRegistry, now: () => new Date(at), sleep: async ms => { await hooks.sleep?.(ms); },
-    agentActivityStore: { getLatestForNode: () => opts.idleHook === false ? null
+    eventBus: new EventBus(db), captureObserver: { record: input => { observations.push(input); } },
+    agentActivityStore: { resolveSession: () => ({ rigId: "rig", nodeId: "a", sessionName: "worker@test" }), getLatestForNode: () => opts.idleHook === false ? null
       : ({ state: "idle", reason: "fixture idle hook", evidenceSource: "runtime_hook", sampledAt: new Date(at).toISOString(), evidence: null }) } as never });
   const guarded = transport.guardedDelivery!;
   const repo = new QueueRepository(db, new EventBus(db), { transport, loadHumanRegistry: () => ({ ok: true, entities: [], warnings: [] }) });
@@ -87,7 +89,7 @@ function fixture(saved?: Buffer, opts: { runtime?: string; idleHook?: boolean } 
   });
   app.route("/api/seat", seatRoutes); app.route("/api/transport", transportRoutes());
   cleanup.push(async () => { await guarded.stop(); db.close(); });
-  return { db, guard, tmux, transport, guarded, outbox, repo, app, bodies, history, writes, submissions, hooks,
+  return { db, guard, tmux, transport, observations, guarded, outbox, repo, app, bodies, history, writes, submissions, hooks,
     advance: (ms = 4000) => { at += ms; },
     enable: (settings = {}) => guard.set("a", { mode: "draft-aware", ...settings }, "human@test", "keep draft"),
     send: (id: string, text = "incoming message", opts: SendOpts = {}) => transport.send("worker@test", text, { deliveryId: id, actorSession: "human@test", verify: true, ...opts }),
@@ -583,5 +585,93 @@ describe("supported seat and queue integration", () => {
     expect(f.submissions).toHaveLength(held ? 0 : 1);
     ids.forEach((id, i) => expect(f.outbox.getById(id)).toMatchObject({ body: original[i], deliveryState: held ? "retained" : "delivered" }));
     expect(f.db.prepare("SELECT count(*) n FROM outbox_entries").get()).toEqual({ n: 2 });
+  });
+});
+
+
+describe("deliberate override preserves existing input", () => {
+  const override = { dangerouslyInteract: true, reason: "fixture interaction", verify: false };
+  it.each(["off", "draft-aware", "hold", "openrig-urgent", "urgent-only", "sends-only"])("stops and shows typed input under %s without retaining it", async mode => {
+    const f = fixture();
+    await f.guard.set("a", { mode }, "human@test", "fixture policy");
+    const draft = "私の下書き😀\n  second line U3-private";
+    // Arrives during buffer preparation, so a check before calling the adapter would be too early.
+    f.hooks.load = () => { f.bodies.a = draft; };
+    const res = await f.post("/api/transport/send", { session: "worker@test", text: "incoming override", ...override });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ ok: false, sent: false, reason: "override_input_present", existingInput: {
+      classification: "typed_or_pasted", rows: draft.split("\n"), suggestionRows: [], fullContentsVisible: true,
+      target: { nodeId: "a", occupant: "g1", pane: "%1" }, cursor: expect.objectContaining({ y: 3 }),
+    } });
+    expect(f.writes).toEqual([]);
+    expect(f.bodies.a).toBe(draft);
+    expect(f.db.prepare("SELECT count(*) n FROM outbox_entries").get()).toEqual({ n: 0 });
+    expect(f.db.serialize().includes(Buffer.from("U3-private"))).toBe(false);
+    expect(f.observations).toEqual([]);
+  });
+
+  it.each([null, "[Pasted text #4 +18 lines]"])("shows unreadable or collapsed input honestly: %s", async body => {
+    const f = fixture(); f.bodies.a = body;
+    const result = await f.send("override", "incoming", override);
+    expect(result).toMatchObject({ ok: false, sent: false, existingInput: { classification: body === null ? "unreadable" : "typed_or_pasted", fullContentsVisible: false } });
+    expect(f.writes).toEqual([]);
+  });
+
+  it.each(["", "typed"])("separates the suggestion from %j and never stores either", async typed => {
+    const f = fixture(); const suggestion = " U3 suggestion private";
+    vi.mocked(f.tmux.captureComposerSnapshot).mockResolvedValue({ ...frame(`${typed}\x1b[2m${suggestion}\x1b[22m`),
+      cursor: { x: 2 + typed.length, y: 2, width: 240, height: 60 } });
+    const result = await f.send("override", "incoming", override);
+    expect(result).toMatchObject({ sent: typed === "" ? true : false, existingInput: {
+      classification: typed ? "typed_or_pasted" : "suggestion_only", rows: [typed], suggestionRows: [suggestion],
+    } });
+    expect(f.writes).toEqual(typed ? [] : ["paste:a:incoming"]); // Static suggestion frame never proves this answer staged for Enter.
+    expect(f.db.serialize().includes(Buffer.from(suggestion))).toBe(false);
+  });
+
+  it("the explicit unchecked option can drive unreadable input without clearing or retaining", async () => {
+    const f = fixture(); await f.guard.set("a", { mode: "hold" }, "human@test", "fixture quiet");
+    vi.mocked(f.tmux.captureComposerSnapshot).mockResolvedValue(null);
+    const result = await f.send("unchecked", "incoming", { ...override, typeWithoutChecking: true } as SendOpts);
+    expect(result).toMatchObject({ ok: true, sent: true, existingInput: { classification: "not_checked", cleared: false } });
+    expect(f.tmux.captureComposerSnapshot).not.toHaveBeenCalled();
+    expect(f.writes).toEqual(["paste:a:incoming"]);
+    expect(f.submissions).toEqual([]); // Unreadable input cannot prove the answer staged for Enter.
+  });
+
+  it.each(["R1-existing-draft", ""])("broadcast wait plus override checks current input before typing: %j", async draft => {
+    const f = fixture(); await f.guard.set("a", { mode: "hold" }, "human@test", "fixture quiet");
+    f.bodies.a = draft;
+    const response = await f.post("/api/transport/broadcast", { sessions: ["worker@test"], text: "outgoing", ...override, verify: true, waitForIdleMs: 100 });
+    expect(response.status).toBe(200);
+    const { results } = await response.json();
+    expect(results[0]).toMatchObject(draft
+      ? { ok: false, sent: false, reason: "override_input_present", existingInput: { rows: [draft], classification: "typed_or_pasted" } }
+      : { ok: true, sent: true, existingInput: { classification: "empty" } });
+    expect(f.writes).toEqual(draft ? [] : ["paste:a:outgoing"]);
+    expect(f.submissions).toEqual([]); // Terminal fixture cannot prove a native answer staged for Enter.
+    expect(f.observations).toEqual([]);
+    expect(f.db.serialize().includes(Buffer.from("R1-existing-draft"))).toBe(false);
+  });
+
+  it("unchecked API requests require explicit interaction and a reason", async () => {
+    const f = fixture();
+    for (const [route, dangerouslyInteract] of [["send", false], ["broadcast", true]] as const) {
+      const response = await f.post(`/api/transport/${route}`, { dangerouslyInteract, session: "worker@test", sessions: ["worker@test"], text: "ordinary", typeWithoutChecking: true });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ reason: "invalid_dangerously_interact" });
+    }
+    expect(f.writes).toEqual([]);
+  });
+
+  it("a recognised native prompt keeps its existing audited interaction", async () => {
+    const f = fixture(undefined, { idleHook: false, runtime: "codex" });
+    await f.guard.set("a", { mode: "hold" }, "human@test", "fixture quiet");
+    vi.mocked(f.tmux.capturePaneContent).mockResolvedValue("Codex update available.\n\n› 1. Update now\n  2. Skip this version\n  3. Remind me later\n\n  gpt-5.5 high · Context [████ ] · ~/example");
+    expect(await f.send("native-prompt", "y", override)).toMatchObject({ ok: true, sent: true });
+    expect(f.writes).toEqual(["paste:a:y"]);
+    const audit = f.db.prepare("SELECT payload FROM events WHERE type='transport.prompt_override'").get() as { payload: string };
+    expect(JSON.parse(audit.payload)).not.toHaveProperty("input");
+    expect(f.observations).toEqual([]);
   });
 });

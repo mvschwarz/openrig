@@ -12,8 +12,9 @@ daemon-owned retry scheduler. Sibling seats keep their own mode.
 | `hold` | No automatic terminal input, even at an empty prompt | Retain for inspection outside the pane |
 
 Runtime permissions are separate. Recipient and interactive-prompt checks still
-apply. `--raw`, `--force` and `--dangerously-interact` do not bypass the typing guard.
-Direct human input remains available.
+apply. `--raw` and `--force` do not bypass the typing guard. A deliberate
+`--dangerously-interact --reason` remains available at every interruption level
+and uses the existing-input check below. Direct human input remains available.
 
 ## Configure and inspect
 
@@ -55,9 +56,35 @@ authority stays active unless its exception is deliberately changed.
 
 Caller attribution is cooperative. An unattributed caller retains current
 behaviour rather than being labelled the person or a peer. The existing
-`rig send --dangerously-interact --reason` path and its audit are unchanged;
-this policy adds no restriction there, and the existing prompt, draft and
-interruption guards still apply. Plain tmux is not prevented.
+`rig send --dangerously-interact --reason` path remains available; this policy
+adds no restriction there. Its existing-input check applies independently of the
+typing mode. Plain tmux is not prevented.
+
+### Deliberate interaction and existing input
+
+A managed `rig send <seat> "<answer>" --dangerously-interact --reason "<why>" can
+drive a recognized native menu as before. Otherwise, with the delivery guard
+attached, it reads the visible composer under the seat's lease immediately before
+pasting, after buffer preparation. Empty input proceeds. A recognized dim
+suggestion is displayed separately and counts as empty; typed or pasted text
+(author unknown) stops the send with `override_input_present`. An unreadable input
+stops with `override_input_unknown`, never an empty-input claim. Both return single-send HTTP
+409, `sent: false`, and caller-only `existingInput` evidence (visible rows, suggestion
+rows, cursor/dimensions and target binding). A collapsed paste shows its label,
+not the hidden contents. OpenRig neither holds nor retries this stopped override.
+
+Inspect the shown input in the native terminal, deliberately clear the prompt with
+native/tmux controls, then issue the send again. Manual clearing runs outside
+OpenRig's lease and observation checks and is not recorded. For a deliberate
+unchecked write, add `--type-without-checking` to that same command. It skips the
+read and does **not** clear input: the text may join or submit what is already there.
+The result names that choice. It requires `--dangerously-interact` and `--reason`.
+
+Observed input is returned only to the caller, never saved in an outbox, held
+message, capture-observer record or override audit. The audit keeps classifications,
+counts and the choice, without input contents. The lease serializes OpenRig writes;
+human typing can still race the capture and paste. Ordinary sends and wakes keep
+their existing behaviour.
 
 ### Terminal delivery
 

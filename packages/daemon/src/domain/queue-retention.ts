@@ -299,7 +299,9 @@ export function pruneUsageSamples(
  * references (no classification, duplicate link, classification attempt or disposition names them) and that are
  * older than the window or beyond the newest `streamMaxItems` unreferenced items. Referenced items are kept at any
  * age, so custody and outcome links survive. The newest pruned position is recorded in `stream_retention_marks`,
- * where a reader whose cursor is behind it is told about the gap. Skips when the stream tables aren't present.
+ * where a reader whose cursor is behind it is told about the gap. Items at or below the pre-upgrade floor
+ * (`stream_retention_floor`, migration 131) are never pruned and don't count toward the cap: history that existed
+ * before retention arrived is kept. Skips when the stream tables aren't present.
  */
 export function pruneStreamItems(
   db: Database.Database,
@@ -319,18 +321,23 @@ export function pruneStreamItems(
   if (tables.has("classification_attempts")) lists.push("SELECT stream_item_id FROM classification_attempts WHERE stream_item_id IS NOT NULL");
   if (tables.has("stream_dispositions")) lists.push("SELECT stream_item_id FROM stream_dispositions WHERE stream_item_id IS NOT NULL");
   const refs = (alias: string): string => lists.length ? `${alias}.stream_item_id NOT IN (${lists.join(" UNION ")})` : "1";
+  const floor = tables.has("stream_retention_floor")
+    ? db.prepare("SELECT floor_ts AS ts, floor_key AS key FROM stream_retention_floor WHERE id = 1").get() as { ts: string; key: string } | undefined
+    : undefined;
+  const above = (alias: string) => floor ? ` AND (${alias}.ts_emitted, ${alias}.stream_sort_key) > (?, ?)` : "";
+  const floorParams = floor ? [floor.ts, floor.key] : [];
   const batchSize = opts.batchSize ?? RETENTION_DEFAULTS.batchSize;
   const maxItems = opts.streamMaxItems ?? RETENTION_DEFAULTS.streamMaxItems;
   const cutoff = cutoffIso(opts.nowIso, opts.streamRetentionDays ?? RETENTION_DEFAULTS.streamRetentionDays);
   // The oldest kept item under the count cap is the maxItems-th newest unreferenced one; anything older goes.
   const doomed = db.prepare(
     `SELECT s.stream_item_id AS id, s.ts_emitted AS ts, s.stream_sort_key AS key FROM stream_items s
-      WHERE ${refs("s")}
+      WHERE ${refs("s")}${above("s")}
         AND (s.ts_emitted < ? OR (s.ts_emitted, s.stream_sort_key) < (
-          SELECT k.ts_emitted, k.stream_sort_key FROM stream_items k WHERE ${refs("k")}
+          SELECT k.ts_emitted, k.stream_sort_key FROM stream_items k WHERE ${refs("k")}${above("k")}
            ORDER BY k.ts_emitted DESC, k.stream_sort_key DESC LIMIT 1 OFFSET ?))
       ORDER BY s.ts_emitted, s.stream_sort_key LIMIT ?`,
-  ).all(cutoff, Math.max(0, maxItems - 1), batchSize) as Array<{ id: string; ts: string; key: string }>;
+  ).all(...floorParams, cutoff, ...floorParams, Math.max(0, maxItems - 1), batchSize) as Array<{ id: string; ts: string; key: string }>;
   if (doomed.length === 0) return { deletedRows: 0 };
   const last = doomed[doomed.length - 1]!;
   const remove = db.prepare("DELETE FROM stream_items WHERE stream_item_id = ?");

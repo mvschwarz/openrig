@@ -76,9 +76,10 @@ async function lsof(args: string[]): Promise<string> {
   } catch { return ""; }
 }
 
-/** Boot-time diagnostics only, never exclusion or permission to share a DB.
+/** Boot-time diagnostics, with an optional stop on confirmed live-daemon conflicts.
  * Missing tools, inaccessible records and races leave ownership unknown. */
-export async function daemonDatabaseWarnings(dbPath: string, home: string, selectedBy?: string): Promise<string[]> {
+export async function daemonDatabaseWarnings(dbPath: string, home: string, selectedBy?: string,
+  opts?: { conflictPolicy: string; allowConflict: boolean }): Promise<string[]> {
   if (dbPath === ":memory:") return [];
   const warnings: string[] = [];
   let db: string;
@@ -110,10 +111,14 @@ export async function daemonDatabaseWarnings(dbPath: string, home: string, selec
           || !Number.isInteger(record.port) || record.port < 1 || record.port > 65535) continue;
         const response = await fetch(`http://127.0.0.1:${record.port}/healthz`, { signal: AbortSignal.timeout(500) });
         if (!response.ok || (await response.json() as { pid?: unknown }).pid !== pid) continue;
-        return `At startup: Another live daemon (pid ${pid}) had database ${db} open. Matching record ${recordPath}, modified ${modifiedAt}: recorded home ${resolveForContainment(candidate)} (current home unconfirmed). This daemon's OPENRIG_HOME is ${resolvedHome}. Startup and database writes continue; use separate database paths for independent instances.`;
+        return `At startup: Another live daemon (pid ${pid}) had database ${db} open. Matching record ${recordPath}, modified ${modifiedAt}: recorded home ${resolveForContainment(candidate)} (current home unconfirmed). This daemon's OPENRIG_HOME is ${resolvedHome}.`;
       } catch { /* A stale/unreadable record or failed probe is not a live-daemon claim. */ }
     }
     return undefined;
   }));
-  return [...warnings, ...conflicts.filter((message): message is string => message !== undefined)];
+  const confirmed = conflicts.filter((message): message is string => message !== undefined);
+  if (confirmed.length && opts?.conflictPolicy === "stop" && !opts.allowConflict) {
+    throw new Error(`OPENRIG_DB_CONFLICT: ${confirmed.join(" ")} Daemon startup stopped before opening the database (daemon.db_conflict=stop). Use separate database paths for independent instances. To proceed once deliberately, run rig daemon start --allow-db-conflict with the same options.`);
+  }
+  return [...warnings, ...confirmed.map(message => `${message} Startup and database writes continue; use separate database paths for independent instances.`)];
 }

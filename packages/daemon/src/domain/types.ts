@@ -170,7 +170,7 @@ export type RigEvent =
   // OPR.0.4.1.10 — audit record for a --dangerously-interact send that drove a target's interactive
   // prompt / permission block. overrideReason = caller's --reason; detectedReason/evidenceSource =
   // what the classifier saw (kept distinct so permission_prompt vs selection_prompt vs unknown stays visible).
-  | { type: "transport.prompt_override"; rigId: string; nodeId: string; sessionName: string; actorSession: string | null; detectedState: string; detectedReason: string; evidenceSource: string; overrideReason: string | null }
+  | { type: "transport.prompt_override"; rigId: string; nodeId: string; sessionName: string; actorSession: string | null; detectedState: string; detectedReason: string; evidenceSource: string; overrideReason: string | null; input?: { classification: string; visibleRows: number; suggestionRows: number; choice: "inspect" | "type_without_checking"; outcome: "stopped" | "proceed"; clearAttempted: false } }
   // OPR.0.4.6.PI1 FR-5 — "rpc" provenance is ADDITIVE: Pi session identity comes
   // from the pi-runner's RPC get_state / typed events, never pane scraping.
   | { type: "agent.session_identity"; rigId: string; nodeId: string; sessionName: string; runtime: string; sessionId: string; provenance: "hook" | "scrape" | "rpc" }

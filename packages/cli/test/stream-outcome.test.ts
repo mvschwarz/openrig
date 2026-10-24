@@ -39,6 +39,11 @@ describe("what became of a stream observation", () => {
       .toMatchObject({ stage: "decided_by_intake", classification: { by: "intake-agent@rig", path: "intake" }, deferred: { at: "t1" } });
   });
 
+  it("a classification written by the advisory experiment is labelled so, not as intake's", async () => {
+    expect(await streamOutcome(client({ [LIST]: classified({ classifierVersion: "v1+experiment", classifierSession: "intake-agent@rig" }) }), "S1"))
+      .toMatchObject({ stage: "decided_by_intake", classification: { path: "experiment" }, summary: expect.stringMatching(/^An advisory experiment run by intake-agent@rig recorded/) });
+  });
+
   it("create: the opened row's owner and state, and a closed row's reported outcome with the caveat", async () => {
     expect(await streamOutcome(client({ [DISP]: disposition({}), [LIST]: classified(), "/api/queue/qitem-stream-S1": row("in-progress") }), "S1"))
       .toMatchObject({ stage: "work_open", accepted: { by: "intake@rig" }, classification: { path: "automatic" },

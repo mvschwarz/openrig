@@ -350,7 +350,7 @@ describe("an ask to a person is on Steering and the TUI; Slack gets it by their 
     expect(resolved(row)).toBe(1);
     expect(onSteering()).not.toContain(row.qitemId);
     // A repeated tap on the same view records, sends and closes nothing more.
-    await expect(t.run(second.act('Answer "Ship today?": No'))).rejects.toThrow();
+    expect(await t.run(second.act('Answer "Ship today?": No'))).toMatchObject({ answer: { message: expect.stringContaining("Already answered") } });
     expect(replies(row)).toHaveLength(1);
     expect(resolved(row)).toBe(1);
     expect(repo.getById(row.qitemId)!.humanAnswers).toEqual({ q1: "b", q2: "y" });
@@ -402,7 +402,7 @@ describe("an ask to a person is on Steering and the TUI; Slack gets it by their 
     expect(resolved(row)).toBe(1);
   });
 
-  it("a typed retry in other words than the answer already returned is refused, not closed on; the same words close it", async () => {
+  it("a typed retry closes on the original committed answer, without returning later words", async () => {
     const row = await ask();
     const t = await tui(readers());
     // The first answer went back to the asker, and then its close didn't commit.
@@ -410,14 +410,14 @@ describe("an ask to a person is on Steering and the TUI; Slack gets it by their 
     await expect(t.reply(row, "Yes, ship it")).rejects.toThrow();
     expect(replies(row)).toHaveLength(1);
     expect(repo.getById(row.qitemId)).toMatchObject({ state: "pending" });
-    // Other words: nothing is sent, nothing closes, and the asker still holds the first answer.
-    await expect(t.reply(row, "No, hold it")).rejects.toThrow();
+    // Later words are not sent: the committed answer wins, and its interrupted close finishes.
+    expect(await t.reply(row, "No, hold it")).toMatchObject({ answer: { message: expect.stringContaining("Already answered") } });
     expect(replies(row)).toHaveLength(1);
     expect(replies(row)[0]!.body).toContain("Yes, ship it");
-    expect(repo.getById(row.qitemId)).toMatchObject({ state: "pending" });
-    expect(resolved(row)).toBe(0);
-    // The same words: the same reply row, and the ask closes once.
-    expect(await t.reply(row, "Yes, ship it")).toMatchObject({ answer: { outcome: "answered" } });
+    expect(repo.getById(row.qitemId)).toMatchObject({ state: "done" });
+    expect(resolved(row)).toBe(1);
+    // The closed row no longer offers a Reply action in the TUI.
+    await expect(t.reply(row, "Yes, ship it")).rejects.toThrow();
     expect(replies(row)).toHaveLength(1);
     expect(repo.getById(row.qitemId)).toMatchObject({ state: "done" });
     expect(resolved(row)).toBe(1);
