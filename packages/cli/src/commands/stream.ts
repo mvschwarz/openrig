@@ -237,5 +237,64 @@ export function streamCommand(depsOverride?: StreamDeps): Command {
       });
     });
 
+  // Slice 22 outcome 9: hub readers. Naming the reader is enough; its filter defaults to items addressed to it or tagged
+  // with its session, seat name or logical id.
+  cmd
+    .command("subscribe <readerSession>")
+    .description("Subscribe a reader seat to stream items addressed to it or matching its topics (hint tags)")
+    .option("--tags <tags>", "Comma-separated hint tags to match (any of); default: the reader's own ids")
+    .option("--type <hintType>", "Match only this hint type")
+    .option("--actor <session>", "Who sets this up, when not run from a managed seat")
+    .option("--json", "JSON output for agents")
+    .action(async (readerSession: string, opts: { tags?: string; type?: string; actor?: string; json?: boolean }) => {
+      const hintTags = opts.tags ? opts.tags.split(",").map((s) => s.trim()).filter(Boolean) : [];
+      await withClient(getDeps(), async (client) => {
+        const res = await client.post<unknown>("/api/stream/subscriptions", { readerSession, hintTags, hintType: opts.type ?? null,
+          ...(opts.actor ? { actor: opts.actor } : {}) });
+        printResult(opts.json ?? false, res.data, res.status);
+      });
+    });
+
+  cmd
+    .command("unsubscribe <readerSession>")
+    .description("Remove a reader seat's stream subscription")
+    .option("--json", "JSON output for agents")
+    .action(async (readerSession: string, opts: { json?: boolean }) => {
+      await withClient(getDeps(), async (client) => {
+        const res = await client.delete<unknown>(`/api/stream/subscriptions/${encodeURIComponent(readerSession)}`);
+        printResult(opts.json ?? false, res.data, res.status);
+      });
+    });
+
+  cmd
+    .command("subscriptions")
+    .description("List stream subscriptions, each with its unread count and size")
+    .option("--json", "JSON output for agents")
+    .action(async (opts: { json?: boolean }) => {
+      await withClient(getDeps(), async (client) => {
+        const res = await client.get<unknown>("/api/stream/subscriptions");
+        printResult(opts.json ?? false, res.data, res.status);
+      });
+    });
+
+  cmd
+    .command("read")
+    .description("Read the next page of your subscription (at most 20 items, 2,000-character excerpts) and advance your cursor")
+    .option("--limit <n>", "Items in this page (at most 20)")
+    .option("--reader <session>", "The reader, when not run from a managed seat")
+    .option("--json", "JSON output for agents")
+    .action(async (opts: { limit?: string; reader?: string; json?: boolean }) => {
+      const limit = opts.limit === undefined ? undefined : Number(opts.limit);
+      if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) {
+        console.error("--limit must be a positive integer");
+        process.exitCode = 1;
+        return;
+      }
+      await withClient(getDeps(), async (client) => {
+        const res = await client.post<unknown>("/api/stream/read", { ...(limit ? { limit } : {}), ...(opts.reader ? { reader: opts.reader } : {}) });
+        printResult(opts.json ?? false, res.data, res.status);
+      });
+    });
+
   return cmd;
 }

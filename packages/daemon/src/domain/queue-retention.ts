@@ -79,6 +79,10 @@ export const RETENTION_DEFAULTS = {
   watchdogKeepPerJob: 50,
   /** delete usage_samples telemetry older than this (51-08 A2, PM decision 2) */
   usageSamplesRetentionDays: 14,
+  /** slice 22 outcome 9: delete unreferenced stream items older than this ... */
+  streamRetentionDays: 30,
+  /** ... or beyond this many newest unreferenced items, whichever comes first */
+  streamMaxItems: 20_000,
   /** rows/qitems touched per bounded batch (the anti-wedge bound) */
   batchSize: 500,
   /** safety cap on batches per table per sweep (defense-in-depth vs a runaway loop) */
@@ -93,6 +97,8 @@ export interface RetentionOptions {
   watchdogRetentionDays?: number;
   watchdogKeepPerJob?: number;
   usageSamplesRetentionDays?: number;
+  streamRetentionDays?: number;
+  streamMaxItems?: number;
   batchSize?: number;
   maxBatchesPerTable?: number;
 }
@@ -288,14 +294,72 @@ export function pruneUsageSamples(
   return { deletedRows: result.changes };
 }
 
+/**
+ * Slice 22 outcome 9 — ONE bounded batch of stream retention: delete up to `batchSize` stream items that nothing
+ * references (no classification, duplicate link, classification attempt or disposition names them) and that are
+ * older than the window or beyond the newest `streamMaxItems` unreferenced items. Referenced items are kept at any
+ * age, so custody and outcome links survive. The newest pruned position is recorded in `stream_retention_marks`,
+ * where a reader whose cursor is behind it is told about the gap. Skips when the stream tables aren't present.
+ */
+export function pruneStreamItems(
+  db: Database.Database,
+  opts: RetentionOptions,
+): PruneBatchResult {
+  const tables = new Set((db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((r) => r.name));
+  if (!tables.has("stream_items") || !tables.has("stream_retention_marks")) return { deletedRows: 0 };
+  const columns = (table: string) => new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((r) => r.name));
+  // One uncorrelated list of referenced ids, built once per statement (NULLs excluded so NOT IN can't turn NULL).
+  const lists: string[] = [];
+  if (tables.has("project_classifications")) {
+    lists.push("SELECT stream_item_id FROM project_classifications WHERE stream_item_id IS NOT NULL");
+    if (columns("project_classifications").has("duplicate_of_stream_item_id")) {
+      lists.push("SELECT duplicate_of_stream_item_id FROM project_classifications WHERE duplicate_of_stream_item_id IS NOT NULL");
+    }
+  }
+  if (tables.has("classification_attempts")) lists.push("SELECT stream_item_id FROM classification_attempts WHERE stream_item_id IS NOT NULL");
+  if (tables.has("stream_dispositions")) lists.push("SELECT stream_item_id FROM stream_dispositions WHERE stream_item_id IS NOT NULL");
+  const refs = (alias: string): string => lists.length ? `${alias}.stream_item_id NOT IN (${lists.join(" UNION ")})` : "1";
+  const batchSize = opts.batchSize ?? RETENTION_DEFAULTS.batchSize;
+  const maxItems = opts.streamMaxItems ?? RETENTION_DEFAULTS.streamMaxItems;
+  const cutoff = cutoffIso(opts.nowIso, opts.streamRetentionDays ?? RETENTION_DEFAULTS.streamRetentionDays);
+  // The oldest kept item under the count cap is the maxItems-th newest unreferenced one; anything older goes.
+  const doomed = db.prepare(
+    `SELECT s.stream_item_id AS id, s.ts_emitted AS ts, s.stream_sort_key AS key FROM stream_items s
+      WHERE ${refs("s")}
+        AND (s.ts_emitted < ? OR (s.ts_emitted, s.stream_sort_key) < (
+          SELECT k.ts_emitted, k.stream_sort_key FROM stream_items k WHERE ${refs("k")}
+           ORDER BY k.ts_emitted DESC, k.stream_sort_key DESC LIMIT 1 OFFSET ?))
+      ORDER BY s.ts_emitted, s.stream_sort_key LIMIT ?`,
+  ).all(cutoff, Math.max(0, maxItems - 1), batchSize) as Array<{ id: string; ts: string; key: string }>;
+  if (doomed.length === 0) return { deletedRows: 0 };
+  const last = doomed[doomed.length - 1]!;
+  const remove = db.prepare("DELETE FROM stream_items WHERE stream_item_id = ?");
+  const prior = db.prepare("SELECT pruned_through_ts AS ts, pruned_through_key AS key FROM stream_retention_marks WHERE id = 1");
+  const mark = db.prepare(
+    `INSERT INTO stream_retention_marks (id, pruned_through_ts, pruned_through_key, pruned_items, pruned_at) VALUES (1, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET pruned_through_ts = excluded.pruned_through_ts, pruned_through_key = excluded.pruned_through_key,
+       pruned_items = pruned_items + excluded.pruned_items, pruned_at = excluded.pruned_at`,
+  );
+  let deleted = 0;
+  db.transaction(() => {
+    for (const d of doomed) deleted += remove.run(d.id).changes;
+    const p = prior.get() as { ts: string; key: string } | undefined;
+    const ahead = !p || p.ts < last.ts || (p.ts === last.ts && p.key < last.key);
+    mark.run(ahead ? last.ts : p!.ts, ahead ? last.key : p!.key, deleted, opts.nowIso);
+  })();
+  return { deletedRows: deleted };
+}
+
 export interface RetentionSweepSummary {
   archivedQitems: number;
   archivedRows: number;
   watchdogDeleted: number;
   usageSamplesDeleted: number;
+  streamDeleted: number;
   transitionBatches: number;
   watchdogBatches: number;
   usageSamplesBatches: number;
+  streamBatches: number;
 }
 
 /**
@@ -314,9 +378,11 @@ export async function runQueueRetentionSweep(
     archivedRows: 0,
     watchdogDeleted: 0,
     usageSamplesDeleted: 0,
+    streamDeleted: 0,
     transitionBatches: 0,
     watchdogBatches: 0,
     usageSamplesBatches: 0,
+    streamBatches: 0,
   };
 
   for (let i = 0; i < maxBatches; i++) {
@@ -341,6 +407,14 @@ export async function runQueueRetentionSweep(
     if (batch.deletedRows === 0) break;
     summary.usageSamplesDeleted += batch.deletedRows;
     summary.usageSamplesBatches++;
+    await yieldToLoop();
+  }
+
+  for (let i = 0; i < maxBatches; i++) {
+    const batch = pruneStreamItems(db, opts);
+    if (batch.deletedRows === 0) break;
+    summary.streamDeleted += batch.deletedRows;
+    summary.streamBatches++;
     await yieldToLoop();
   }
 

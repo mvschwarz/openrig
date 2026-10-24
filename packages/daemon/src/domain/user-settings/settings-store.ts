@@ -218,6 +218,9 @@ export const SETTINGS_VALID_KEYS = [
   "retention.watchdog_days",
   "retention.usage_samples_days",
   "retention.watchdog_keep_per_job",
+  // Slice 22 outcome 9 — stream retention: unreferenced items older than N days or beyond the newest N.
+  "retention.stream_days",
+  "retention.stream_max_items",
   "retention.batch_size",
   // S04 (OPR.0.5.5.4) — pickup-receipt stall threshold; net-new key, OPENRIG_* only,
   // CLI-settable twin lockstep with cli/src/config-store.ts VALID_KEYS. Fresh-read per
@@ -332,6 +335,8 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "retention.watchdog_days": { primary: "OPENRIG_RETENTION_WATCHDOG_DAYS" },
   "retention.usage_samples_days": { primary: "OPENRIG_RETENTION_USAGE_SAMPLES_DAYS" },
   "retention.watchdog_keep_per_job": { primary: "OPENRIG_RETENTION_WATCHDOG_KEEP_PER_JOB" },
+  "retention.stream_days": { primary: "OPENRIG_RETENTION_STREAM_DAYS" },
+  "retention.stream_max_items": { primary: "OPENRIG_RETENTION_STREAM_MAX_ITEMS" },
   "retention.batch_size": { primary: "OPENRIG_RETENTION_BATCH_SIZE" },
   // S04 — net-new key; OPENRIG_* primary only.
   "queue.pickup_stall_threshold_minutes": { primary: "OPENRIG_QUEUE_PICKUP_STALL_THRESHOLD_MINUTES" },
@@ -425,6 +430,8 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "retention.watchdog_days": ["retention", "watchdogDays"],
   "retention.usage_samples_days": ["retention", "usageSamplesDays"],
   "retention.watchdog_keep_per_job": ["retention", "watchdogKeepPerJob"],
+  "retention.stream_days": ["retention", "streamDays"],
+  "retention.stream_max_items": ["retention", "streamMaxItems"],
   "retention.batch_size": ["retention", "batchSize"],
   "queue.pickup_stall_threshold_minutes": ["queue", "pickupStallThresholdMinutes"],
   "queue.stuck_sweep_interval_seconds": ["queue", "stuckSweepIntervalSeconds"],
@@ -736,6 +743,8 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "retention.watchdog_days": return 14;
     case "retention.usage_samples_days": return 14;
     case "retention.watchdog_keep_per_job": return 50;
+    case "retention.stream_days": return 30;
+    case "retention.stream_max_items": return 20000;
     case "retention.batch_size": return 500;
     case "queue.pickup_stall_threshold_minutes": return 3;
     case "queue.stuck_sweep_interval_seconds": return 300;
@@ -937,6 +946,16 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: s
   "retention.watchdog_keep_per_job": (raw, coerced) => {
     if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 0) {
       throw new Error(`Invalid value for retention.watchdog_keep_per_job: must be an integer >= 0, got "${raw}"`);
+    }
+  },
+  "retention.stream_days": (raw, coerced) => {
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
+      throw new Error(`Invalid value for retention.stream_days: must be an integer >= 1, got "${raw}"`);
+    }
+  },
+  "retention.stream_max_items": (raw, coerced) => {
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
+      throw new Error(`Invalid value for retention.stream_max_items: must be an integer >= 1, got "${raw}"`);
     }
   },
   "retention.batch_size": (raw, coerced) => {

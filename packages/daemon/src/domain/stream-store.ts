@@ -4,6 +4,25 @@ import type { EventBus } from "./event-bus.js";
 
 const ulid = monotonicFactory();
 
+/** Slice 22 outcome 9: a stored body is at most 16 KiB. A longer body is kept truncated, with the marker inside the stored
+ *  body so every reader sees it; emit never refuses an observation for its size. */
+export const STREAM_BODY_CAP_BYTES = 16 * 1024;
+
+export function capStreamBody(body: string): { body: string; truncated?: { keptBytes: number; originalBytes: number } } {
+  const originalBytes = Buffer.byteLength(body);
+  if (originalBytes <= STREAM_BODY_CAP_BYTES) return { body };
+  const marker = (kept: number) => `\n[truncated by OpenRig: kept ${kept} of ${originalBytes} bytes]`;
+  const room = STREAM_BODY_CAP_BYTES - Buffer.byteLength(marker(STREAM_BODY_CAP_BYTES));
+  let kept = "";
+  let used = 0;
+  for (const ch of body) {
+    const n = Buffer.byteLength(ch);
+    if (used + n > room) break;
+    kept += ch; used += n;
+  }
+  return { body: kept + marker(used), truncated: { keptBytes: used, originalBytes } };
+}
+
 export interface StreamItem {
   streamItemId: string;
   tsEmitted: string;
@@ -17,6 +36,8 @@ export interface StreamItem {
   hintTags: string[] | null;
   interrupt: boolean;
   archivedAt: string | null;
+  /** Set on emit's result only, when the body was over the cap and stored truncated. */
+  bodyTruncated?: { keptBytes: number; originalBytes: number };
 }
 
 export interface StreamEmitInput {
@@ -91,6 +112,7 @@ export class StreamStore {
     if (existing) return this.rowToItem(existing);
 
     const sortKey = ulid();
+    const capped = capStreamBody(input.body);
     const interrupt = input.interrupt ? 1 : 0;
     const tagsJson = input.hintTags ? JSON.stringify(input.hintTags) : null;
 
@@ -108,7 +130,7 @@ export class StreamStore {
             tsEmitted,
             sortKey,
             input.sourceSession,
-            input.body,
+            capped.body,
             input.format ?? "text",
             input.hintType ?? null,
             input.hintUrgency ?? null,
@@ -130,7 +152,7 @@ export class StreamStore {
             tsEmitted,
             sortKey,
             input.sourceSession,
-            input.body,
+            capped.body,
             input.format ?? "text",
             input.hintType ?? null,
             input.hintUrgency ?? null,
@@ -154,7 +176,8 @@ export class StreamStore {
     const persistedEvent = persistTxn();
     this.eventBus.notifySubscribers(persistedEvent);
 
-    return this.rowToItem(this.getByIdRaw(id)!);
+    const item = this.rowToItem(this.getByIdRaw(id)!);
+    return capped.truncated ? { ...item, bodyTruncated: capped.truncated } : item;
   }
 
   getById(streamItemId: string): StreamItem | null {

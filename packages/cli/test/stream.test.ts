@@ -317,4 +317,27 @@ describe("rig stream CLI", () => {
       "Watch error: socket closed",
     ]);
   });
+  it("hub readers: subscribe, subscriptions, unsubscribe and read send the reader, filter and page size", async () => {
+    const { deps, calls } = makeDeps();
+    const run = async (...args: string[]) => {
+      const program = createProgram({ streamDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "stream", ...args, "--json"]);
+    };
+    await run("subscribe", "dev-lead@rig", "--tags", "ci, pr", "--type", "incident");
+    await run("subscriptions");
+    await run("unsubscribe", "dev-lead@rig");
+    await run("read", "--limit", "5");
+    expect(calls).toEqual([
+      { method: "POST", path: "/api/stream/subscriptions", body: { readerSession: "dev-lead@rig", hintTags: ["ci", "pr"], hintType: "incident" } },
+      { method: "GET", path: "/api/stream/subscriptions" },
+      { method: "DELETE", path: "/api/stream/subscriptions/dev-lead%40rig" },
+      { method: "POST", path: "/api/stream/read", body: { limit: 5 } },
+    ]);
+    await run("read", "--limit", "0");
+    expect(calls).toHaveLength(4);
+    expect(errors).toContain("--limit must be a positive integer");
+    expect(process.exitCode).toBe(1);
+    process.exitCode = undefined;
+  });
 });
