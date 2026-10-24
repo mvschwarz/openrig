@@ -736,13 +736,14 @@ export class TmuxAdapter {
    * buffer leaks. Unique temp + buffer names per call keep parallel `rig up`
    * seats from colliding.
    */
-  async sendText(target: string, text: string, beforeInput?: () => void, options?: { bracketed?: boolean }): Promise<TmuxResult> {
+  async sendText(target: string, text: string, beforeInput?: () => void, options?: { bracketed?: boolean; beforePaste?: () => Promise<void> }): Promise<TmuxResult> {
     return this.guardedInput(target, (pane, beforeWrite) => {
       const guard = this.deliveryGuard;
       const identity = this.freshManaged.get(target)?.nodeId ?? target;
-      const policy = guard?.needsInputCheck(identity) ? {
-        beforePaste: () => guard.beforeInput(identity),
-        afterPaste: () => guard.notePasted(identity, text),
+      const checkDraft = guard?.needsInputCheck(identity);
+      const policy = checkDraft || options?.beforePaste ? {
+        beforePaste: async () => { if (checkDraft) await guard!.beforeInput(identity); await options?.beforePaste?.(); },
+        afterPaste: async () => { if (checkDraft) await guard!.notePasted(identity, text); },
       } : undefined;
       return this.sendTextUnchecked(pane, text, () => { beforeWrite(); beforeInput?.(); }, options?.bracketed, policy);
     }, false, "text");

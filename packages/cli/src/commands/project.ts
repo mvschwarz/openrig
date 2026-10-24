@@ -6,7 +6,7 @@ import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { experimentStatus, setExperiment, readBounded, JevRun, streamDecision, classifyCapture } from "./project-jev.js";
 import { DecisionRun, decisionsStatus, readDecisionsSettings, type DecisionsSettings } from "../decisions/decisions.js";
-import { runDecideWake } from "../decisions/stream-consumer.js";
+import { recoverEffects, runDecideWake } from "../decisions/stream-consumer.js";
 import fs from "node:fs";
 
 /**
@@ -131,7 +131,11 @@ export function projectCommand(depsOverride?: ProjectDeps): Command {
           const decisions = new DecisionRun({ consumer: "stream", settings: deps.decisionsSettings, env: deps.experimentEnv, send: deps.experimentFetch,
             budget: { maxCalls: limit, deadlineMs: Math.min(600_000, limit * 10_000) } });
           if (decisions.unavailable) {
-            printResult(true, {decisions: decisions.unavailable, status: decisionsStatus((deps.decisionsSettings ?? readDecisionsSettings)(), deps.experimentEnv, deps.workerRead)}, 200); return;
+            // Nothing is asked, but already-accepted effects are still applied: a disable never strands committed work.
+            let recovered: unknown = [{ outcome: "skipped", reason: "daemon unavailable; effects wait for a wake" }];
+            try { await withClient(deps, async client => { recovered = await recoverEffects(client, opts.project); }); }
+            catch (error) { recovered = [{ outcome: "skipped", reason: `effects not checked: ${error instanceof Error ? error.message : "daemon unavailable"}; they wait for a wake` }]; }
+            printResult(true, {decisions: decisions.unavailable, status: decisionsStatus((deps.decisionsSettings ?? readDecisionsSettings)(), deps.experimentEnv, deps.workerRead), recovered}, 200); return;
           }
           process.once("SIGINT", decisions.stop); process.once("SIGTERM", decisions.stop);
           try {
@@ -157,7 +161,10 @@ export function projectCommand(depsOverride?: ProjectDeps): Command {
           }
         await withClient(getDeps(), async client => {
           try {
-            const result = verb === "wake" ? await runProjectWake(client, opts, getDeps().workerRead, run ? {
+            // The experiment records its own attempt identity: rig stream show labels its classifications, and the automatic
+            // path doesn't treat its abstentions as intake's.
+            const wakeOpts = run ? { ...opts, classifierVersion: `${opts.classifierVersion}+experiment` } : opts;
+            const result = verb === "wake" ? await runProjectWake(client, wakeOpts, getDeps().workerRead, run ? {
               decide: prepared => streamDecision(run!, prepared), signal: run.controller.signal,
               shouldStop: run.stopped, timeoutMs: run.config.timeoutMs,
             } : undefined) : await prepareWorker(client, opts, getDeps().workerRead);

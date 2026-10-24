@@ -36,7 +36,7 @@ function response<T>(r: {status: number; data: T}): T {
   throw Error(`${code}: ${message}`);
 }
 
-export async function prepareWorker(client: Client, opts: WakeOptions, read = localText) {
+export async function prepareWorker(client: Client, opts: WakeOptions, read = localText, eligibleQuery: Record<string, string> = {}) {
   const limit = Number(opts.limit ?? 20);
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw Error("limit must be an integer in 1..100");
   const text = read(opts.taxonomy), taxonomy = parse(text);
@@ -56,7 +56,7 @@ export async function prepareWorker(client: Client, opts: WakeOptions, read = lo
     version: hash(JSON.stringify({sourceVersion: snapshot.version, taxonomyHash: hash(text), values})), values,
     duplicateCandidates: snapshot.sources.recent.map(x => ({streamItemId: x.streamItemId, evidenceRef: x.evidenceRef})), relatedRefs: [],
   };
-  const query = new URLSearchParams({classifierVersion: opts.classifierVersion, taxonomyVersion: taxonomy.version, evidenceEpoch: opts.evidenceEpoch, limit: opts.limit ?? "20", expectedOccupant: occupant.generation});
+  const query = new URLSearchParams({classifierVersion: opts.classifierVersion, taxonomyVersion: taxonomy.version, evidenceEpoch: opts.evidenceEpoch, limit: opts.limit ?? "20", expectedOccupant: occupant.generation, ...eligibleQuery});
   const eligible = response(await client.get<{items: {streamItemId: string}[]; nextAfterSortKey: string | null}>(`/api/projects/eligible?${query}`));
   return {snapshot, candidates, taxonomy: {version: taxonomy.version, source: opts.taxonomy, hash: hash(text), questions: taxonomy.fields}, eligible};
 }
@@ -69,8 +69,10 @@ export async function runProjectWake(client: Client, opts: WakeOptions, read = l
   candidates?: (prepared: Awaited<ReturnType<typeof prepareWorker>>) => ClassificationCandidates;
   classifyBody?: (input: Record<string, unknown>) => Record<string, unknown>;
   abstainBody?: (input: Record<string, unknown>) => Record<string, unknown>;
+  /** Extra eligibility filters the consumer asks the daemon for (an older daemon ignores them). */
+  eligibleQuery?: Record<string, string>;
 }) {
-  const prepared = await prepareWorker(client, opts, read);
+  const prepared = await prepareWorker(client, opts, read, experiment?.eligibleQuery);
   const {snapshot, taxonomy} = prepared;
   const candidates = experiment?.candidates ? experiment.candidates(prepared) : prepared.candidates;
   const {session, generation} = snapshot.occupant;
@@ -94,7 +96,8 @@ export async function runProjectWake(client: Client, opts: WakeOptions, read = l
       heartbeat: (id, actor) => post("/api/projects/lease/heartbeat", {leaseId: id, classifierSession: actor}),
     },
     attempts: {
-      eligible: input => get(`/api/projects/eligible?${new URLSearchParams(Object.entries(input).filter(([,v]) => v !== undefined).map(([k,v]): [string, string] => [k,String(v)]))}`),
+      eligible: input => get(`/api/projects/eligible?${new URLSearchParams([...Object.entries(input).filter(([,v]) => v !== undefined).map(([k,v]): [string, string] => [k,String(v)]),
+        ...Object.entries(experiment?.eligibleQuery ?? {})])}`),
       begin: input => post("/api/projects/attempts/begin", input),
       abstain: input => post(`/api/projects/attempts/${encodeURIComponent(input.attemptId)}/abstain`, experiment?.abstainBody ? experiment.abstainBody({...input}) : input),
       fail: input => post(`/api/projects/attempts/${encodeURIComponent(input.attemptId)}/fail`, input),

@@ -211,6 +211,8 @@ export interface RiggedConfig {
     transitionsDays: number;
     watchdogDays: number;
     watchdogKeepPerJob: number;
+    streamDays: number;
+    streamMaxItems: number;
     batchSize: number;
   };
   // S04 (OPR.0.5.5.4) — pickup-receipt stall threshold (twin of the daemon settings-store).
@@ -389,6 +391,8 @@ const DEFAULTS = {
     transitionsDays: 30,
     watchdogDays: 14,
     watchdogKeepPerJob: 50,
+    streamDays: 30,
+    streamMaxItems: 20000,
     batchSize: 500,
   },
   // S04 — pickup-receipt stall threshold default (twin of daemon getDefaultValue).
@@ -525,6 +529,9 @@ export const VALID_KEYS = [
   "retention.transitions_days",
   "retention.watchdog_days",
   "retention.watchdog_keep_per_job",
+  // Slice 22 outcome 9 — stream retention: unreferenced items older than N days or beyond the newest N.
+  "retention.stream_days",
+  "retention.stream_max_items",
   "retention.batch_size",
   // S04 — pickup-receipt stall threshold; lockstep with the daemon settings-store twin.
   "queue.pickup_stall_threshold_minutes",
@@ -636,6 +643,8 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "retention.transitions_days": { primary: "OPENRIG_RETENTION_TRANSITIONS_DAYS" },
   "retention.watchdog_days": { primary: "OPENRIG_RETENTION_WATCHDOG_DAYS" },
   "retention.watchdog_keep_per_job": { primary: "OPENRIG_RETENTION_WATCHDOG_KEEP_PER_JOB" },
+  "retention.stream_days": { primary: "OPENRIG_RETENTION_STREAM_DAYS" },
+  "retention.stream_max_items": { primary: "OPENRIG_RETENTION_STREAM_MAX_ITEMS" },
   "retention.batch_size": { primary: "OPENRIG_RETENTION_BATCH_SIZE" },
   "queue.pickup_stall_threshold_minutes": { primary: "OPENRIG_QUEUE_PICKUP_STALL_THRESHOLD_MINUTES" },
   "queue.stuck_sweep_interval_seconds": { primary: "OPENRIG_QUEUE_STUCK_SWEEP_INTERVAL_SECONDS" },
@@ -730,6 +739,8 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "retention.transitions_days": ["retention", "transitionsDays"],
   "retention.watchdog_days": ["retention", "watchdogDays"],
   "retention.watchdog_keep_per_job": ["retention", "watchdogKeepPerJob"],
+  "retention.stream_days": ["retention", "streamDays"],
+  "retention.stream_max_items": ["retention", "streamMaxItems"],
   "retention.batch_size": ["retention", "batchSize"],
   "queue.pickup_stall_threshold_minutes": ["queue", "pickupStallThresholdMinutes"],
   "queue.stuck_sweep_interval_seconds": ["queue", "stuckSweepIntervalSeconds"],
@@ -1074,6 +1085,16 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
       throw new Error(`Invalid value for retention.watchdog_keep_per_job: must be an integer >= 0, got "${raw}"`);
     }
   },
+  "retention.stream_days": (raw, coerced) => {
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
+      throw new Error(`Invalid value for retention.stream_days: must be an integer >= 1, got "${raw}"`);
+    }
+  },
+  "retention.stream_max_items": (raw, coerced) => {
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
+      throw new Error(`Invalid value for retention.stream_max_items: must be an integer >= 1, got "${raw}"`);
+    }
+  },
   "retention.batch_size": (raw, coerced) => {
     if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
       throw new Error(`Invalid value for retention.batch_size: must be an integer >= 1, got "${raw}"`);
@@ -1330,6 +1351,8 @@ export class ConfigStore {
         transitionsDays: v("retention.transitions_days") as number,
         watchdogDays: v("retention.watchdog_days") as number,
         watchdogKeepPerJob: v("retention.watchdog_keep_per_job") as number,
+        streamDays: v("retention.stream_days") as number,
+        streamMaxItems: v("retention.stream_max_items") as number,
         batchSize: v("retention.batch_size") as number,
       },
       queue: {

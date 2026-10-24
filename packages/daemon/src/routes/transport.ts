@@ -35,6 +35,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       force?: boolean;
       waitForIdleMs?: number;
       dangerouslyInteract?: boolean;
+      typeWithoutChecking?: boolean;
       reason?: string;
       actorSession?: string | null;
       submitOnly?: boolean;
@@ -89,6 +90,8 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     // the 401 only ever stopped honest uncounted callers. Instead the send DELIVERS, the
     // already-nullable audit actor records null (projected "unknown"), and the response carries
     // the sign-it notice below.
+    if (body.typeWithoutChecking && (!body.dangerouslyInteract || !body.reason?.trim())) return c.json({ ok: false, reason: "invalid_dangerously_interact",
+      error: "--type-without-checking requires --dangerously-interact and --reason. No text was sent." }, 400);
     const derivedActor = transportSenderSession(c) ?? null;
 
     // Check for ambiguity first
@@ -104,6 +107,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       force: body.force,
       waitForIdleMs: body.waitForIdleMs,
       dangerouslyInteract: body.dangerouslyInteract,
+      typeWithoutChecking: body.typeWithoutChecking,
       reason: body.reason,
       actorSession: derivedActor, // transport-derived, never the body claim
       ...(derivedActor ? { identityProvenance: "transport:v1" } : {}),
@@ -135,6 +139,8 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
         delivery_already_attempted: 409,
         delivery_in_progress: 409,
         delivery_indeterminate: 409,
+        override_input_present: 409,
+        override_input_unknown: 409,
         draft_input_busy: 409,
         draft_input_unknown: 409,
         draft_input_changed: 409,
@@ -266,6 +272,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       // (the danger audit fires once per seat, not once per batch).
       waitForIdleMs?: number;
       dangerouslyInteract?: boolean;
+      typeWithoutChecking?: boolean;
       reason?: string;
       actorSession?: string | null;
       urgent?: boolean;
@@ -282,6 +289,8 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     // transport header (see /send). An absent header no longer refuses — the send proceeds and the
     // audit's already-nullable actor records null (projected "unknown"); the response carries the
     // sign-it notice below.
+    if (body.typeWithoutChecking && (!body.dangerouslyInteract || !body.reason?.trim())) return c.json({ ok: false, reason: "invalid_dangerously_interact",
+      error: "--type-without-checking requires --dangerously-interact and --reason. No text was sent." }, 400);
     const derivedActor = transportSenderSession(c) ?? null;
 
     // P21 I4 (orch ruling from specimen 5 — the false "From: pm-lead" the incident acted upon): the
@@ -311,6 +320,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       force: body.force,
       waitForIdleMs: body.waitForIdleMs,
       dangerouslyInteract: body.dangerouslyInteract,
+      typeWithoutChecking: body.typeWithoutChecking,
       reason: body.reason,
       actorSession: derivedActor, // transport-derived, never the body claim
       ...(body.urgent === true ? { urgent: { by: derivedActor ?? "unknown" } } : {}),

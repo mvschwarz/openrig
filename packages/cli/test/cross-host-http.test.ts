@@ -194,11 +194,11 @@ describe("send --host (http branch)", () => {
   it.each(["\r", "\x1b", "\t", " "])("preserves explicit byte payload and interaction options over HTTP (%#)", async text => {
     const h = mockClient(() => ({ status: 200, data: { ok: true, promptInteraction: "unverified" } }));
     await sendCommand(httpDeps(h)).parseAsync(["--host", "vps-b", "dev-impl@my-rig", text,
-      "--dangerously-interact", "--reason", "explicit key", "--verify"], { from: "user" });
+      "--dangerously-interact", "--type-without-checking", "--reason", "explicit key", "--verify"], { from: "user" });
     expect(process.exitCode).toBeUndefined();
     expect(h.calls).toHaveLength(1);
     expect(h.calls[0]).toMatchObject({ method: "POST", path: "/api/transport/send", body: {
-      session: "dev-impl@my-rig", text, dangerouslyInteract: true, reason: "explicit key", verify: true,
+      session: "dev-impl@my-rig", text, dangerouslyInteract: true, typeWithoutChecking: true, reason: "explicit key", verify: true,
     } });
     expect(sshRunnerNeverCalled).not.toHaveBeenCalled();
   });

@@ -58,7 +58,7 @@ export async function streamOutcome(client: Get, streamItemId: string) {
   const c = classificationRes.status === 200 && Array.isArray(classificationRes.data)
     ? classificationRes.data.find(x => x?.streamItemId === streamItemId) ?? null : null;
   const classification = c && { by: c.classifierSession, at: c.tsProjected, action: c.action, destination: c.classificationDestination,
-    path: c.classifierVersion?.includes("+decide:") ? "automatic" : "intake" };
+    path: c.classifierVersion?.includes("+decide:") ? "automatic" : c.classifierVersion?.endsWith("+experiment") ? "experiment" : "intake" };
   if (!d && !notFound && !c) return { stage: "unavailable", summary: "This daemon doesn't serve stream routing records." };
 
   const note = "A closed work row reports its owner's outcome; it isn't proof that a fix shipped.";
@@ -67,7 +67,7 @@ export async function streamOutcome(client: Get, streamItemId: string) {
     if (!c) return deferred
       ? { stage: "deferred_to_intake", summary: `The automatic path deferred it to intake (${d!.reason}). Intake hasn't recorded a decision yet.`, deferred }
       : { stage: "awaiting_intake", summary: "No routing decision is recorded yet." };
-    return { stage: "decided_by_intake", summary: `Intake (${c.classifierSession}) recorded ${c.action ?? "a classification"}${c.classificationDestination ? ` for ${c.classificationDestination}` : ""}. Work it opened by hand isn't linked here.`,
+    return { stage: "decided_by_intake", summary: `${classification?.path === "experiment" ? `An advisory experiment run by ${c.classifierSession}` : `Intake (${c.classifierSession})`} recorded ${c.action ?? "a classification"}${c.classificationDestination ? ` for ${c.classificationDestination}` : ""}. Work it opened by hand isn't linked here.`,
       classification, ...(deferred ? { deferred } : {}) };
   }
 

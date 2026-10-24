@@ -137,6 +137,9 @@ export interface ComposerInput {
   state: "empty" | "text" | "unknown";
   rows: string[];
   columns: number;
+  cursor?: ComposerSnapshot["cursor"];
+  unknownReason?: string;
+  suggestionRows?: string[];
   frame?: string;
   pasteMatchesExpected?: boolean;
   cursorAtEnd: boolean;

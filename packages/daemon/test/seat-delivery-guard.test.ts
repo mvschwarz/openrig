@@ -130,16 +130,34 @@ function transportFixture() {
 }
 
 describe("real adapter/transport guard boundaries with no external effects", () => {
-  it("retains raw/force/verify/danger sends without even capturing or writing; submit-only refuses", async () => {
+  it("retains ordinary/force/verify/wait sends without capturing or writing; submit-only refuses", async () => {
     const f = transportFixture(); await f.guard.set("a", true, "person", "draft");
-    for (const options of [{}, {force:true}, {verify:true}, {dangerouslyInteract:true,reason:"explicit"}, {waitForIdleMs:10}]) {
+    for (const options of [{}, {force:true}, {verify:true}, {waitForIdleMs:10}]) {
       const result = await f.transport.send("a", "message", options);
       expect(result).toMatchObject({ok:true,outcome:"retained",sent:false,verified:false});
       expect(result.outboxIds).toHaveLength(1);
     }
     expect(await f.transport.send("a", "", {submitOnly:true,expectedStagedText:"message"})).toMatchObject({ok:false,reason:"typing_guard_enabled",sent:false});
     expect(f.commands).toEqual([]);expect(f.files).toEqual([]);expect(f.tmux.listPanes).not.toHaveBeenCalled();
-    expect(f.outbox.heldForNode("a").total).toBe(5);f.db.close();
+    expect(f.outbox.heldForNode("a").total).toBe(4);f.db.close();
+  });
+  it("an explicit override under hold reads the composer and stops on unreadable input without typing or retaining", async () => {
+    // This send reaches session metadata; use the existing migrated fixture, not the hold-only schema.
+    const f = queueFixture(); await f.guard.set("a", true, "person", "draft");
+    f.db.prepare("UPDATE nodes SET runtime = 'terminal' WHERE id = 'a'").run();
+    const observer = { record: vi.fn() };
+    const transport = new SessionTransport({ db: f.db, tmuxAdapter: f.tmux, rigRepo: f.rigRepo, sessionRegistry: f.sessionRegistry,
+      sleep: async () => {}, captureObserver: observer });
+    const capture = vi.spyOn(f.tmux, "captureComposerSnapshot").mockResolvedValue(null);
+    const result = await transport.send("worker@test", "message", { dangerouslyInteract: true, reason: "explicit" });
+    expect(result).toMatchObject({ ok: false, reason: "override_input_unknown", sent: false,
+      existingInput: { classification: "unreadable", reason: expect.any(String) } });
+    expect(capture).toHaveBeenCalledTimes(1);
+    // Preparing the inert buffer precedes inspection; no pane input occurs.
+    expect(f.writes.some(command => /paste-buffer|send-keys/.test(command))).toBe(false);
+    expect(f.outbox.heldForNode("a").total).toBe(0);
+    expect(f.db.prepare("SELECT count(*) AS n FROM outbox_entries").get()).toEqual({ n: 0 });
+    expect(observer.record).not.toHaveBeenCalled(); f.db.close();
   });
   it("manual hold preserves coalesced bodies; changing preference or retiring history does not type", async () => {
     const f = transportFixture();await f.guard.set("a",true,"person","draft");

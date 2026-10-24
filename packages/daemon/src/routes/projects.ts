@@ -315,6 +315,7 @@ export function projectsRoutes(): Hono {
         evidenceEpoch: c.req.query("evidenceEpoch") ?? "",
         limit: Number.isFinite(limit) ? limit : undefined,
         afterSortKey: c.req.query("afterSortKey") || undefined,
+        excludeAbstainedElsewhere: c.req.query("excludeAbstainedElsewhere") === "1",
       }));
     } catch (err) {
       return errorResponse(c, err);

@@ -111,7 +111,7 @@ describe("supported occupant wake entry",()=>{
     } else if(choice==="__unknown__") {
       expect(f.writes).toHaveLength(0);expect(out.result.outcomes[0].status).toBe("abstained");
     } else {
-      expect(f.writes).toHaveLength(1);expect(f.writes[0]).toMatchObject({needsHuman:choice==="true",attemptId:"attempt-item-1",executionId:"exec-item-1"});
+      expect(f.writes).toHaveLength(1);expect(f.writes[0]).toMatchObject({needsHuman:choice==="true",attemptId:"attempt-item-1",executionId:"exec-item-1",classifierVersion:expect.stringMatching(/\+experiment$/)});
     }
   });
   it.each(["valid","unknown","invalid","occupant","lease","execution","disabled"])("experimental %s traverses actual command/client/routes/worker/provider with fenced advisory writes",async kind=>{

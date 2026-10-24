@@ -59,7 +59,7 @@ const DEFAULT_GUARD: TypingGuardConfig = { mode: "off", revision: "legacy-off" }
 const TERMINAL_DEFAULT: TypingGuardConfig = { mode: "off", level: "sends-only", revision: "terminal-default" };
 
 /** What automatic input is, for the level: OpenRig's own (a watchdog, a scheduler wake, a notice) or anyone else's. */
-export interface AdmissionInput { source: "openrig" | "agent"; urgent: boolean }
+export interface AdmissionInput { source: "openrig" | "agent"; urgent: boolean; override?: boolean }
 
 /** Whether a level lets this input type. Every other input at the seat is held, never refused or lost. */
 export function levelAdmits(level: InterruptionLevel, input: AdmissionInput): boolean {
@@ -264,7 +264,7 @@ export class SeatDeliveryGuard {
       const current = this.target(name);
       if (!this.same(bound, current)) throw new DeliveryGuardError("guard_target_changed", "Input target changed while waiting; no input written.");
       const config = this.configuration(bound.nodeId);
-      if (holds(config.desired, input) || holds(config.effective, input)) {
+      if (!input?.override && (holds(config.desired, input) || holds(config.effective, input))) {
         if (held) return held(bound);
         throw new DeliveryGuardError("typing_guard_enabled", "Automatic input is paused for this seat. Select off or draft-aware mode explicitly before this writing operation.");
       }
@@ -272,7 +272,8 @@ export class SeatDeliveryGuard {
       const admittedByLevel = !!input && (config.desired.level === "openrig-urgent" || config.desired.level === "urgent-only"
         || config.effective.level === "openrig-urgent" || config.effective.level === "urgent-only");
       const lease: Lease = { target: bound, active: true, origin: "automatic", humanEpoch: this.humanEpochs.get(bound.nodeId) ?? 0,
-        config: admittedByLevel ? { mode: "draft-aware", revision: config.desired.revision }
+        // Explicit interaction keeps serialization/binding checks; its own last-paste reader replaces automatic draft retention.
+        config: input?.override ? DEFAULT_GUARD : admittedByLevel ? { mode: "draft-aware", revision: config.desired.revision }
           : config.desired.mode === "draft-aware" ? config.desired : config.effective };
       lease.serialOwner = lease;
       try { return await this.scope.run(new Map([...(this.scope.getStore() ?? []), [lease.target.nodeId, lease]]), fn); }
