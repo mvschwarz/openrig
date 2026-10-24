@@ -7,6 +7,7 @@ import { coreSchema } from "./migrations/001_core_schema.js";
 import { terminalPolicySchema } from "./migrations/128_terminal_policy.js";
 import { streamDispositionsSchema } from "./migrations/129_stream_dispositions.js";
 import { streamSubscriptionsSchema } from "./migrations/130_stream_subscriptions.js";
+import { streamRetentionFloorSchema } from "./migrations/131_stream_retention_floor.js";
 import { bindingsSessionsSchema } from "./migrations/002_bindings_sessions.js";
 import { eventsSchema } from "./migrations/003_events.js";
 import { snapshotsSchema } from "./migrations/004_snapshots.js";
@@ -259,4 +260,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   terminalPolicySchema,
   streamDispositionsSchema,
   streamSubscriptionsSchema,
+  streamRetentionFloorSchema,
 ];

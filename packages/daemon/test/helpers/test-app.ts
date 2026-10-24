@@ -170,6 +170,7 @@ export const migrationsForFullTestDbExclusions: Record<string, string> = {
   "089_classification_identity_provenance.sql": "extends project_classifications (028 is excluded); classifier fixtures migrate it inline.",
   "129_stream_dispositions.sql": "companion of project_classifications (028 is excluded); stream-disposition suites migrate it inline.",
   "130_stream_subscriptions.sql": "stream reader subscriptions and retention marks; stream suites migrate it inline.",
+  "131_stream_retention_floor.sql": "stream retention's pre-upgrade floor; stream suites migrate it inline.",
   "030_views_custom.sql": "custom-views subsystem table — views suites migrate it inline.",
   "032_watchdog_history.sql": "watchdog history table — watchdog suites migrate it inline (watchdog_jobs is the only watchdog base the core edge carries).",
   "033_workflow_specs.sql": "workflow subsystem table — workflow-* suites migrate the workflow schema inline.",
