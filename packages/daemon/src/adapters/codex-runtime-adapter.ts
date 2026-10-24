@@ -140,13 +140,17 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private seatLaunchEnvironment?: SeatLaunchEnvironment;
   private fs: CodexAdapterFsOps;
   private listProcesses: () => CodexProcess[] | Promise<CodexProcess[]>;
-  private readThreadIdByPid: (pid: number, identity?: string) => Promise<string | undefined> | string | undefined;
-  private readResumeEvidence: (pid: number, identity: string) => Promise<CodexResumeEvidence> | CodexResumeEvidence;
+  private readThreadIdByPid: (pid: number, identity?: string, home?: string) => Promise<string | undefined> | string | undefined;
+  private readResumeEvidence: (pid: number, identity: string, home?: string) => Promise<CodexResumeEvidence> | CodexResumeEvidence;
   private resumeProofWindowMs: number;
   private readinessSettings?: Pick<SettingsStore, "resolveOne">;
   private sleep: (ms: number) => Promise<void>;
   private resolveHomeDirByPid: ResolveHomeDirByPid;
   private codexHome?: string;
+  /** A seat's own CODEX_HOME from its member or rig `env:`, when it declares one. */
+  private seatHome?: (nodeId: string) => string | undefined;
+  /** One thread-id resolver per Codex home its seats use, the daemon's included. */
+  private threadResolvers = new Map<string, CodexThreadIdResolver>();
   private launchPath?: string;
   // Housekeeping B1 fixback (guard-blocking, arch HK-AR-1 = whole-probe DI):
   // the Codex profile-LOAD probe is an injectable dep in the adapter's
@@ -154,7 +158,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   // (defaultProfilePreflight, module-private); tests inject a controlled probe
   // so no real codex subprocess runs. Contract not weakened — production uses
   // the real probe by default.
-  private verifyProfilePreflight: (profile: string, cwd: string) => Promise<CodexProfileProbeResult>;
+  private verifyProfilePreflight: (profile: string, cwd: string, home?: string) => Promise<CodexProfileProbeResult>;
   // #69: whether the installed Codex supports --no-daemon. Startup wires the real probe;
   // absent (unit tests, other embedders) keeps the existing invocation unchanged.
   private detectDaemonSupport?: CodexDaemonSupportDetector;
@@ -188,10 +192,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     seatLaunchEnvironment?: SeatLaunchEnvironment;
     fsOps: CodexAdapterFsOps;
     listProcesses?: () => CodexProcess[] | Promise<CodexProcess[]>;
-    readThreadIdByPid?: (pid: number, identity?: string) => Promise<string | undefined> | string | undefined;
+    readThreadIdByPid?: (pid: number, identity?: string, home?: string) => Promise<string | undefined> | string | undefined;
     /** #1524 (b): the conversation Codex's own records name for one process (pid and start time), or why none
      *  could be read. Default: the identity-gated thread reader for the launched process. */
-    readResumeEvidence?: (pid: number, identity: string) => Promise<CodexResumeEvidence> | CodexResumeEvidence;
+    readResumeEvidence?: (pid: number, identity: string, home?: string) => Promise<CodexResumeEvidence> | CodexResumeEvidence;
     /** The managed resume check's whole window in ms. Default: the existing poll window (tests shorten it). */
     resumeProofWindowMs?: number;
     readinessSettings?: Pick<SettingsStore, "resolveOne">;
@@ -200,9 +204,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     activityRelayPath?: string;
     /** Explicit CODEX_HOME; absent preserves the legacy OS/PID home behavior. */
     codexHome?: string;
+    /** A seat's own CODEX_HOME (an absolute path its member or rig `env:` declares). It wins over `codexHome` for that seat. */
+    seatHome?: (nodeId: string) => string | undefined;
     /** Match the daemon's prerequisite probe even if the pane's login shell rewrites PATH. */
     launchPath?: string;
-    verifyProfilePreflight?: (profile: string) => Promise<CodexProfileProbeResult>;
+    verifyProfilePreflight?: (profile: string, cwd?: string, home?: string) => Promise<CodexProfileProbeResult>;
     detectDaemonSupport?: CodexDaemonSupportDetector;
     readNetworkDefault?: CodexNetworkDefaultReader;
     resolveGitAddDirs?: CodexGitAddDirResolver;
@@ -230,6 +236,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.seatLaunchEnvironment = deps.seatLaunchEnvironment;
     this.fs = deps.fsOps;
     this.codexHome = deps.codexHome;
+    this.seatHome = deps.seatHome;
     this.launchPath = deps.launchPath;
     this.detectDaemonSupport = deps.detectDaemonSupport;
     this.readNetworkDefault = deps.readNetworkDefault;
@@ -237,28 +244,68 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.activityRelayPath = deps.activityRelayPath;
     this.listProcesses = deps.listProcesses ?? defaultListProcesses;
     this.resolveHomeDirByPid = deps.resolveHomeDirByPid ?? defaultResolveHomeDirByPid;
-    const threadIdResolver = new CodexThreadIdResolver({
-      defaultHome: this.fs.homedir ?? os.homedir(), codexHome: this.codexHome,
-      resolveHomeDirByPid: this.resolveHomeDirByPid,
-    });
-    this.readThreadIdByPid = deps.readThreadIdByPid ?? ((pid, identity) => identity === undefined
-      ? this.readThreadIdFromLogs(pid) : threadIdResolver.resolveForkChild(pid, identity));
+    // A seat with its own CODEX_HOME logs its threads there, so each read names the home it searches.
+    this.readThreadIdByPid = deps.readThreadIdByPid ?? ((pid, identity, home) => identity === undefined
+      ? this.readThreadIdFromLogs(pid, home) : this.threadResolverFor(home).resolveForkChild(pid, identity));
     // A just-launched resume may log only inside its start second, so this reads like a fork child's ("by-process").
     this.readResumeEvidence = deps.readResumeEvidence ?? (deps.readThreadIdByPid
-      ? async (pid, identity) => {
-        const threadId = (await deps.readThreadIdByPid!(pid, identity))?.trim();
+      ? async (pid, identity, home) => {
+        const threadId = (await deps.readThreadIdByPid!(pid, identity, home))?.trim();
         return threadId ? { threadId } : { reason: "no_log_row" };
       }
-      : async (pid, identity) => {
+      : async (pid, identity, home) => {
         let reason: string | undefined;
-        const threadId = (await threadIdResolver.resolveForkChild(pid, identity, (d) => { reason = d.reason; }))?.trim();
+        const threadId = (await this.threadResolverFor(home).resolveForkChild(pid, identity, (d) => { reason = d.reason; }))?.trim();
         return threadId ? { threadId } : { reason: reason ?? "no_log_row" };
       });
     this.resumeProofWindowMs = deps.resumeProofWindowMs ?? RESUME_QUICK_ATTEMPTS * RESUME_QUICK_SLEEP_MS + RESUME_EXTENDED_ATTEMPTS * RESUME_EXTENDED_SLEEP_MS;
     this.readinessSettings = deps.readinessSettings;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-    this.verifyProfilePreflight = deps.verifyProfilePreflight
-      ?? ((profile, cwd) => defaultProfilePreflight(profile, this.codexHome ? { cwd, codexHome: this.codexHome, launchPath: this.launchPath } : undefined));
+    this.verifyProfilePreflight = deps.verifyProfilePreflight ?? ((profile, cwd, home) => {
+      const selected = home ?? this.codexHome;
+      return defaultProfilePreflight(profile, selected ? { cwd, codexHome: selected, launchPath: this.launchPath } : undefined);
+    });
+  }
+
+  /** The home a seat's Codex uses: its own from its member or rig `env:`, else the daemon's explicit CODEX_HOME. Undefined
+   *  keeps the legacy OS/PID home behavior. */
+  private homeFor(binding: { nodeId?: string } | undefined): string | undefined {
+    return this.ownHome(binding) ?? this.codexHome;
+  }
+
+  /** Only the seat's own CODEX_HOME, undefined when it declares none. Probes and readers get it as an extra argument
+   *  only when it's set, so a seat without one calls them exactly as before. */
+  private ownHome(binding: { nodeId?: string } | undefined): string | undefined {
+    return binding?.nodeId ? this.seatHome?.(binding.nodeId) : undefined;
+  }
+
+  private ownHomeCommandOpt(binding: { nodeId?: string }): { codexHome?: string } {
+    const own = this.ownHome(binding);
+    return own ? { codexHome: own } : {};
+  }
+
+  private ownHomeOpt(binding: { nodeId?: string }): { home?: string } {
+    const own = this.ownHome(binding);
+    return own ? { home: own } : {};
+  }
+
+  /** A thread id read for this seat's process, in the seat's own home when it declares one. */
+  private readThreadIdForSeat(binding: { nodeId?: string }, pid: number, identity?: string): Promise<string | undefined> | string | undefined {
+    const own = this.ownHome(binding);
+    if (own) return this.readThreadIdByPid(pid, identity, own);
+    return identity === undefined ? this.readThreadIdByPid(pid) : this.readThreadIdByPid(pid, identity);
+  }
+
+  /** The thread-id resolver for one Codex home (undefined: the daemon's), kept so its process-home cache is reused. */
+  private threadResolverFor(home: string | undefined): CodexThreadIdResolver {
+    const selected = home ?? this.codexHome;
+    let resolver = this.threadResolvers.get(selected ?? "");
+    if (!resolver) {
+      resolver = new CodexThreadIdResolver({ defaultHome: this.fs.homedir ?? os.homedir(), codexHome: selected,
+        resolveHomeDirByPid: this.resolveHomeDirByPid });
+      this.threadResolvers.set(selected ?? "", resolver);
+    }
+    return resolver;
   }
 
   /**
@@ -268,8 +315,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    * them: a rig with no Codex seat leaves the user's config alone. A failure warns and does
    * not block the launch.
    */
-  async ensureManagedConfig(): Promise<{ hooksEnabled: boolean } | undefined> {
-    return this.withConfigLock(() => this.applyManagedConfig());
+  async ensureManagedConfig(home?: string): Promise<{ hooksEnabled: boolean } | undefined> {
+    return this.withConfigLock(() => this.applyManagedConfig(home));
   }
 
   /** Run `task` after every earlier config setup on this adapter has finished, whatever its outcome. */
@@ -279,13 +326,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return run;
   }
 
-  private async applyManagedConfig(): Promise<{ hooksEnabled: boolean } | undefined> {
+  private async applyManagedConfig(home?: string): Promise<{ hooksEnabled: boolean } | undefined> {
     if (!this.resolveManagedConfigSettings) return undefined;
     try {
       const { enabled, codexVersion } = await this.resolveManagedConfigSettings();
-      this.ensureCodexFeatureFlag(enabled, { codexVersion });
-      if (enabled) this.ensureCodexActivityHooks();
-      else this.removeCodexActivityHooks();
+      this.ensureCodexFeatureFlag(enabled, { codexVersion }, home);
+      if (enabled) this.ensureCodexActivityHooks(home);
+      else this.removeCodexActivityHooks(home);
       return { hooksEnabled: enabled };
     } catch (err) {
       console.error(`[openrig] runtime setup warning: ${(err as Error).message}`);
@@ -315,7 +362,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    * doesn't disable the plugin (codexCorePluginEnablement), and only when the installed version differs from the vendored
    * one. Codex owns its plugin cache; OpenRig writes the marketplace manifest and first-install exact-hook trust.
    */
-  async ensureCodexCorePlugin(): Promise<{ outcome: "installed" | "current" | "skipped"; reason: string }> {
+  async ensureCodexCorePlugin(home?: string): Promise<{ outcome: "installed" | "current" | "skipped"; reason: string }> {
     const report = (outcome: "installed" | "current" | "skipped", reason: string) => {
       if (outcome !== "current") console.error(`[openrig] codex core plugin ${outcome}: ${reason}`);
       return { outcome, reason };
@@ -344,7 +391,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     });
     if (!matchesShipped(pluginDir)) return report("skipped", "vendored hook files differ from this daemon's shipped plugin; existing choices are left alone");
 
-    const codexHome = nodePath.dirname(this.resolveCodexConfigPath());
+    const codexHome = nodePath.dirname(this.resolveCodexConfigPath(home));
     const layers: CodexConfigLayerRead[] = codexReadableConfigLayers(codexHome, this.codexSystemConfigDir).map((layer) => {
       if (!this.fs.exists(layer.path)) return { ...layer, state: "absent" as const };
       try { return { ...layer, state: "read" as const, content: this.fs.readFile(layer.path) }; }
@@ -393,7 +440,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // Trust is over normalized definitions, not script contents. Byte equality is an additional pre-grant check;
     // Codex remains responsible for later native review if definitions change. No cache files are rewritten here.
     if (firstInstall && matchesShipped(cachedDir)) {
-      let content = this.fs.readFile(this.resolveCodexConfigPath());
+      let content = this.fs.readFile(this.resolveCodexConfigPath(home));
       const hookManifest = JSON.parse(fs.readFileSync(nodePath.join(shipped, "hooks/codex.json"), "utf8"));
       for (const [event, groups] of Object.entries(hookManifest.hooks) as Array<[string, Array<{ matcher?: string; hooks: Array<{ command: string; timeout: number }> }>]> ) {
         groups.forEach((group, groupIndex) => group.hooks.forEach((handler, handlerIndex) => {
@@ -412,7 +459,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           }
         }));
       }
-      this.fs.writeFile(this.resolveCodexConfigPath(), content);
+      this.fs.writeFile(this.resolveCodexConfigPath(home), content);
     }
     return report("installed", `${CODEX_CORE_PLUGIN_KEY} ${version} through Codex's own install (${enablement.reason})`);
   }
@@ -445,11 +492,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    * that lived inside the auto-injected activity-hook provisioning path
    * pre-rip (plugin-primitive Phase 3a slice 3.1).
    */
-  ensureCodexFeatureFlag(enabled: boolean, opts?: { codexVersion?: string }): void {
+  ensureCodexFeatureFlag(enabled: boolean, opts?: { codexVersion?: string }, home?: string): void {
     if (!enabled) return;
     if (!opts?.codexVersion) return;
     if (isCodex013xOrLater(opts.codexVersion)) return;
-    const configPath = this.resolveCodexConfigPath();
+    const configPath = this.resolveCodexConfigPath(home);
     const existing = this.fs.exists(configPath) ? this.fs.readFile(configPath) : "";
     const updated = upsertCodexHooksFeature(existing);
     if (updated !== existing) {
@@ -479,7 +526,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    * codex TUI launch lacks that context and may not deliver SessionStart — not how OpenRig
    * launches seats.)
    */
-  ensureCodexActivityHooks(): void {
+  ensureCodexActivityHooks(home?: string): void {
     const relay = this.activityRelayPath;
     if (!relay || !this.fs.exists(relay)) {
       if (relay) {
@@ -487,7 +534,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       }
       return;
     }
-    const configPath = this.resolveCodexConfigPath();
+    const configPath = this.resolveCodexConfigPath(home);
     const existing = this.fs.exists(configPath) ? this.fs.readFile(configPath) : "";
     const withHooks = upsertCodexActivityHooks(existing, relay);
     if (withHooks !== existing) {
@@ -542,8 +589,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    * Removes ONLY the managed block — preserves any user-owned hooks and leaves [features].hooks
    * (the Codex 0.139 default) intact. Idempotent; no-op when the config or the block is absent.
    */
-  removeCodexActivityHooks(): void {
-    const configPath = this.resolveCodexConfigPath();
+  removeCodexActivityHooks(home?: string): void {
+    const configPath = this.resolveCodexConfigPath(home);
     if (!this.fs.exists(configPath)) return;
     const existing = this.fs.readFile(configPath);
     const updated = stripCodexActivityHooks(existing);
@@ -576,7 +623,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       }
 
       try {
-        const didProject = this.projectEntry(entry, binding.cwd, warnings, binding.seatSkillsRoot, binding.seatSkillsRefused);
+        const didProject = this.projectEntry(entry, binding.cwd, warnings, binding.seatSkillsRoot, binding.seatSkillsRefused, this.homeFor(binding));
         if (didProject) {
           projected.push(entry.effectiveId);
         } else {
@@ -732,7 +779,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     if (updatePrompt.failure) return updatePrompt.failure;
 
     if (opts.resumeToken) {
-      const verification = await this.verifyResumeLaunch(binding.tmuxSession, updatePrompt, { resumeToken: opts.resumeToken });
+      const verification = await this.verifyResumeLaunch(binding.tmuxSession, updatePrompt, { resumeToken: opts.resumeToken, ...this.ownHomeOpt(binding) });
       if (!verification.ok) return verification;
       return { ok: true, resumeToken: opts.resumeToken, resumeType: "codex_id", appliedLaunch,
         ...(verification.resumedProcess ? { resumedProcess: verification.resumedProcess } : {}) };
@@ -763,19 +810,20 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   /** Type a command buildResumeCommand built into the pane's shell, then verify the resume as launchHarness
    *  does. Nothing is prepared again, so the command runs exactly as it was built and checked. */
-  async sendResumeCommand(tmuxSession: string, command: string, resumeToken: string): Promise<HarnessLaunchResult> {
+  async sendResumeCommand(tmuxSession: string, command: string, resumeToken: string, nodeId?: string): Promise<HarnessLaunchResult> {
     const textResult = await this.tmux.sendShellCommand(tmuxSession, command);
     if (!textResult.ok) return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
-    return this.verifyResumeInPane(tmuxSession, resumeToken);
+    return this.verifyResumeInPane(tmuxSession, resumeToken, nodeId);
   }
 
   /** launchHarness's resume verification for a resume the caller started itself: dismiss a skippable update
-   *  prompt, then require a proven resumed conversation (never process-alive alone). */
-  async verifyResumeInPane(tmuxSession: string, resumeToken: string): Promise<HarnessLaunchResult> {
+   *  prompt, then require a proven resumed conversation (never process-alive alone). The proof reads the seat's
+   *  own CODEX_HOME when `nodeId` names a seat that declares one, where its resumed Codex logs. */
+  async verifyResumeInPane(tmuxSession: string, resumeToken: string, nodeId?: string): Promise<HarnessLaunchResult> {
     const updatePrompt: UpdatePromptAttempt = { handled: false };
     await this.dismissSkippableCodexUpdatePrompt(tmuxSession, updatePrompt);
     if (updatePrompt.failure) return updatePrompt.failure;
-    return this.verifyResumeLaunch(tmuxSession, updatePrompt, { resumeToken });
+    return this.verifyResumeLaunch(tmuxSession, updatePrompt, { resumeToken, ...this.ownHomeOpt({ nodeId }) });
   }
 
   /** Launch flags shared by fresh, fork and resume, decided once per launch. With `running`, the probed and
@@ -784,10 +832,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     opts: { installCorePlugin: boolean }): Promise<PreparedCodexLaunch | { ok: false; error: string }> {
     // The config write and, for a seat that selected openrig-core, its install run as one step under the config lock, so
     // concurrent launches never interleave them. An unselected seat's launch never installs.
+    // A seat with its own CODEX_HOME gets OpenRig's managed config (hooks, feature flag) and plugin in that home.
+    const home = this.homeFor(binding);
+    const own = this.ownHome(binding);
     await this.withConfigLock(async () => {
-      const managed = await this.applyManagedConfig();
+      const managed = await this.applyManagedConfig(home);
       if (opts.installCorePlugin && managed?.hooksEnabled && this.resolveCorePluginSelected?.(binding.nodeId)) {
-        try { await this.ensureCodexCorePlugin(); }
+        try { await this.ensureCodexCorePlugin(home); }
         catch (err) { console.error(`[openrig] runtime setup warning: ${(err as Error).message}`); }
       }
     });
@@ -820,7 +871,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // `codex -p <profile> resume` failure. An absent .config.toml passes
     // (Codex default-layers it; advisor Option B).
     if (profile) {
-      const probeResult = await this.verifyProfilePreflight(profile, binding.cwd);
+      const probeResult = await (own ? this.verifyProfilePreflight(profile, binding.cwd, own) : this.verifyProfilePreflight(profile, binding.cwd));
       if (!probeResult.ok) {
         return {
           ok: false,
@@ -831,7 +882,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // Codex rejects writable --add-dir roots under a read-only sandbox. Only
     // suppress OpenRig's generated roots when later project layers cannot make it writable.
     const suppressAutoAddDirs = Boolean(!binding.codexRebuildPermissions && profile
-      && posture === profileArg && this.profileRemainsReadOnly(profile, binding.cwd));
+      && posture === profileArg && this.profileRemainsReadOnly(profile, binding.cwd, home));
     const teamWorkspaceArg = !binding.codexRebuildPermissions && binding.teamPermissionDefault && !profile
       && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write"
       ? codexTeamWorkspaceArg(this.prepareTeamWorkspace, name) : "";
@@ -839,7 +890,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       ? "" : teamWorkspaceArg || this.buildQueueStateAddDirArg(name);
     // #69: one daemon-support decision for this launch, for the Codex the seat pane runs
     // (its cwd, the launch PATH), applied to fresh, fork and resume.
-    const daemonSupport = this.detectDaemonSupport ? await this.detectDaemonSupport(binding.cwd) : undefined;
+    const daemonSupport = this.detectDaemonSupport ? await (own ? this.detectDaemonSupport(binding.cwd, own) : this.detectDaemonSupport(binding.cwd)) : undefined;
     if (daemonSupport?.kind === "unknown") {
       return { ok: false, error: unknownDaemonSupportMessage(daemonSupport.detail) };
     }
@@ -847,7 +898,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const daemonArg = daemonOptOut ? " --no-daemon" : "";
     // #275: on the plain floor, network access unless Codex reports an opt-out or policy.
     const networkArg = binding.codexRebuildPermissions ? ""
-      : await codexNetworkDefaultArg(this.readNetworkDefault, appliedLaunch, binding.cwd, name);
+      : await codexNetworkDefaultArg(own && this.readNetworkDefault ? ((cwd: string) => this.readNetworkDefault!(cwd, own)) : this.readNetworkDefault, appliedLaunch, binding.cwd, name);
 
     // The launch facts keep the probed daemon choice, so a printed recovery command can repeat it; no probe, no fact.
     const launchFacts = daemonSupport ? { ...appliedLaunch, daemonOptOut } : appliedLaunch;
@@ -861,8 +912,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   private async seatCommand(binding: NodeBinding, cmd: string): Promise<string> {
     return this.seatLaunchEnvironment
-      ? await this.seatLaunchEnvironment.command(binding.tmuxSession!, cmd, { codexCwd: binding.cwd, nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime })
-      : this.launchCommand(cmd);
+      ? await this.seatLaunchEnvironment.command(binding.tmuxSession!, cmd, { codexCwd: binding.cwd, nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime, ...this.ownHomeCommandOpt(binding) })
+      : this.launchCommand(cmd, this.homeFor(binding));
   }
 
   private buildQueueStateAddDirArg(sessionName: string): string {
@@ -876,8 +927,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    * Return true only when visible config proves a read-only profile within Codex's default project root.
    * Unknown markers or unreadable layers retain the generated roots for native launch handling.
    */
-  private profileRemainsReadOnly(profile: string, cwd: string): boolean {
-    const root = this.codexHome ?? nodePath.join(this.fs.homedir ?? os.homedir(), ".codex");
+  private profileRemainsReadOnly(profile: string, cwd: string, home: string | undefined = this.codexHome): boolean {
+    const root = home ?? nodePath.join(this.fs.homedir ?? os.homedir(), ".codex");
     const path = nodePath.join(root, `${profile}.config.toml`);
     const userPath = nodePath.join(root, "config.toml");
     if (!this.fs.exists(path)) return false;
@@ -995,7 +1046,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     if (!before || lstartToMinTs(before.process.startedAt) === undefined) return null;
     // Gate PID logs by process start time, then re-observe the whole foreground
     // chain. Neither a reused PID nor a replacement pane proves this child.
-    const child = (await this.readThreadIdByPid(before.process.pid, before.process.startedAt))?.trim();
+    const child = (await this.readThreadIdForSeat(binding, before.process.pid, before.process.startedAt))?.trim();
     if (!child || child === parentToken) return null;
     const after = await observeCodexForkProcess(input);
     return after?.fingerprint === before.fingerprint ? { resumeToken: child, resumeType: "codex_id" } : null;
@@ -1069,12 +1120,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return observation ? JSON.stringify([paneCommand, observation.fingerprint]) : null;
   }
 
-  ensureManagedBootstrap(binding: { cwd?: string | null }): void {
-    this.provisionWorkspaceTrust(binding.cwd ?? null);
+  ensureManagedBootstrap(binding: { cwd?: string | null; nodeId?: string }): void {
+    this.provisionWorkspaceTrust(binding.cwd ?? null, this.homeFor(binding));
   }
 
-  private projectEntry(entry: ProjectionEntry, cwd: string, warnings: string[], seatSkillsRoot?: string, seatSkillsRefused?: string): boolean {
-    if (entry.category === "runtime_resource" && this.applyRuntimeResource(entry)) {
+  private projectEntry(entry: ProjectionEntry, cwd: string, warnings: string[], seatSkillsRoot?: string, seatSkillsRefused?: string,
+    home?: string): boolean {
+    if (entry.category === "runtime_resource" && this.applyRuntimeResource(entry, home)) {
       return true;
     }
 
@@ -1201,12 +1253,12 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
   }
 
-  private applyRuntimeResource(entry: ProjectionEntry): boolean {
+  private applyRuntimeResource(entry: ProjectionEntry, home?: string): boolean {
     if (entry.resourceType !== "codex_config_fragment") {
       return false;
     }
 
-    const configPath = this.resolveCodexConfigPath();
+    const configPath = this.resolveCodexConfigPath(home);
     this.fs.mkdirp(nodePath.dirname(configPath));
 
     const existing = this.fs.exists(configPath) ? this.fs.readFile(configPath) : "";
@@ -1254,9 +1306,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return resolveConcreteHint(path, content, orientation);
   }
 
-  private provisionWorkspaceTrust(cwd: string | null): void {
+  private provisionWorkspaceTrust(cwd: string | null, home?: string): void {
     if (!cwd) return;
-    const configPath = this.resolveCodexConfigPath();
+    const configPath = this.resolveCodexConfigPath(home);
     this.fs.mkdirp(nodePath.dirname(configPath));
 
     let content = "";
@@ -1273,8 +1325,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.fs.writeFile(configPath, content);
   }
 
-  private resolveCodexConfigPath(): string {
-    const root = this.codexHome
+  private resolveCodexConfigPath(home: string | undefined = this.codexHome): string {
+    const root = home
       ?? nodePath.join(this.fs.homedir ?? os.homedir(), ".codex");
     return nodePath.join(root, "config.toml");
   }
@@ -1317,7 +1369,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       if (shellPid) {
         const codexPids = await this.findCodexDescendantPids(shellPid);
         for (const codexPid of codexPids) {
-          const threadId = await this.readThreadIdByPid(codexPid);
+          const threadId = await this.readThreadIdForSeat(binding, codexPid);
           if (threadId) return threadId;
         }
       }
@@ -1380,7 +1432,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return Date.now() >= deadline ? null : value;
   }
 
-  private async proveResumedProcess(tmuxSession: string, resumeToken: string, deadline: number):
+  private async proveResumedProcess(tmuxSession: string, resumeToken: string, deadline: number, home?: string):
     Promise<{ kind: "match"; process: { pid: number; startedAt: string } } | { kind: "mismatch"; threadId: string } | { kind: "unknown"; reason: string; windowEnded?: true }> {
     if (!this.tmux.getPanePid) return { kind: "unknown", reason: "the pane's process can't be read" };
     if (Date.now() >= deadline) return { kind: "unknown", reason: "the resume window ended", windowEnded: true };
@@ -1394,7 +1446,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
     let evidence: CodexResumeEvidence | null;
     try {
-      evidence = await this.beforeResumeDeadline(() => this.readResumeEvidence(before.process.pid, before.process.startedAt!), deadline);
+      evidence = await this.beforeResumeDeadline(() => home ? this.readResumeEvidence(before.process.pid, before.process.startedAt!, home) : this.readResumeEvidence(before.process.pid, before.process.startedAt!), deadline);
     } catch (err) {
       return { kind: "unknown", reason: `Codex's records couldn't be read (${(err as Error).message})` };
     }
@@ -1412,7 +1464,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       : { kind: "mismatch", threadId: evidence.threadId };
   }
 
-  private async verifyResumeLaunch(tmuxSession: string, updatePrompt: UpdatePromptAttempt, opts?: { resumeToken?: string }): Promise<HarnessLaunchResult> {
+  private async verifyResumeLaunch(tmuxSession: string, updatePrompt: UpdatePromptAttempt, opts?: { resumeToken?: string; home?: string }): Promise<HarnessLaunchResult> {
     const quickAttempts = RESUME_QUICK_ATTEMPTS;
     const extendedAttempts = RESUME_EXTENDED_ATTEMPTS;
     const quickSleepMs = RESUME_QUICK_SLEEP_MS;
@@ -1548,7 +1600,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         return { ok: true, resumeToken: undefined, resumeType: undefined };
       }
       if (probe.status === "resumed" && resumeToken) {
-        const proof = await this.proveResumedProcess(tmuxSession, resumeToken, deadline);
+        const proof = await this.proveResumedProcess(tmuxSession, resumeToken, deadline, opts?.home);
         if (proof.kind === "match") return { ok: true, resumeToken, resumeType: "codex_id", resumedProcess: proof.process };
         if (proof.kind === "mismatch") {
           return {
@@ -1630,17 +1682,17 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return findCodexDescendantPids(processes, parentPid);
   }
 
-  private async readThreadIdFromLogs(pid: number): Promise<string | undefined> {
+  private async readThreadIdFromLogs(pid: number, home: string | undefined = this.codexHome): Promise<string | undefined> {
     return readCodexThreadIdFromCandidateHomes(
       pid,
-      this.codexHome ? [] : [await this.resolveHomeDirByPid(pid), this.fs.homedir, os.homedir()],
+      home ? [] : [await this.resolveHomeDirByPid(pid), this.fs.homedir, os.homedir()],
       (path) => this.fs.exists(path),
-      this.codexHome,
+      home,
     );
   }
 
-  private launchCommand(command: string): string {
-    const env = [this.launchPath ? `PATH=${shellQuote(this.launchPath)}` : "", this.codexHome ? `CODEX_HOME=${shellQuote(this.codexHome)}` : ""].filter(Boolean);
+  private launchCommand(command: string, home: string | undefined = this.codexHome): string {
+    const env = [this.launchPath ? `PATH=${shellQuote(this.launchPath)}` : "", home ? `CODEX_HOME=${shellQuote(home)}` : ""].filter(Boolean);
     return env.length ? `env ${env.join(" ")} ${command}` : command;
   }
 }

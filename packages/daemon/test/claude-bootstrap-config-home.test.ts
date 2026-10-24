@@ -163,6 +163,26 @@ describe.skipIf(process.platform === "win32")("Claude managed bootstrap selects 
     expect(f.writes).toEqual([]);
     for (const [file, before] of f.untouched) expect(fs.readFileSync(file, "utf8")).toBe(before);
   });
+  it.each(["managed", "classic"])("%s: a seat's own CLAUDE_CONFIG_DIR gets the bootstrap and the launch, not the daemon's selection", async route => {
+    const f = fixture("alternate", true, false);
+    const seatDir = path.join(f.root, "seat's config");
+    // The seat's stored env (migration 111's columns), declaring its own home over the daemon's selection.
+    f.db.exec("CREATE TABLE rigs(id TEXT, env_json TEXT); ALTER TABLE nodes ADD COLUMN rig_id TEXT; ALTER TABLE nodes ADD COLUMN env_json TEXT;");
+    f.db.prepare("INSERT INTO rigs VALUES ('rig', NULL)").run();
+    f.db.prepare("UPDATE nodes SET rig_id = 'rig', env_json = ? WHERE id = 'node'").run(JSON.stringify({ CLAUDE_CONFIG_DIR: seatDir }));
+    const seatState = path.join(seatDir, ".claude.json");
+    const binding = route === "managed" ? f.binding : { ...f.binding, permissionMode: undefined };
+    expect(await f.adapter.deliverStartup([], binding)).toEqual({ delivered: 0, failed: [] });
+    expect(f.writes).toContain(seatState);
+    expect(f.writes).not.toContain(f.statePath);
+    expect(JSON.parse(fs.readFileSync(seatState, "utf8"))).toMatchObject({ hasCompletedOnboarding: true, projects: { [f.cwd]: { hasTrustDialogAccepted: true } } });
+    if (route === "managed") {
+      expect(await f.adapter.launchHarness(binding, { name: "seat" })).toMatchObject({ ok: true });
+      expect(f.launches[0].env.CLAUDE_CONFIG_DIR).toBe(seatDir);
+      expect(f.launches[0].statePath).toBe(seatState);
+    }
+    expect(fs.existsSync(f.statePath)).toBe(false);
+  });
   it("preserves unreadable selected state without writing another home", async () => {
     const f = fixture("alternate", true, true);
     f.fsOps.readFile = () => { throw Error("synthetic read refusal"); };

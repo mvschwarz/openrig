@@ -1,3 +1,4 @@
+import path from "node:path";
 import { TerminalPolicyStore } from "./terminal-policy.js";
 import type { RigRepository } from "./rig-repository.js";
 import { deriveCanonicalFromEntry, getNodeInventory } from "./node-inventory.js";
@@ -6,6 +7,7 @@ import type { NodeInventoryEntry, SeatIdentityVerdict } from "./types.js";
 import { NativePermissionStore, type StoredNativePermissionSelection, type ResolvedSeatPermission } from "./native-permission-store.js";
 import { AppliedLaunchObservationStore, type StoredAppliedLaunchObservation } from "./applied-launch-observation-store.js";
 import { planPermissionAccount, type PermissionAccount } from "./permission-account.js";
+import { RUNTIME_HOME_VAR, seatRuntimeHome, type HomeRuntime } from "./seat-runtime-home.js";
 
 const SEAT_LOOKUP_GUIDANCE = "List seats with: rig ps --nodes";
 
@@ -29,6 +31,14 @@ export interface SeatStatus {
   previous_occupant: string | null;
   handover_at: string | null;
   restore_outcome: NodeInventoryEntry["restoreOutcome"];
+  /** Claude and Codex seats: the home (and with it the login) the seat's launches use. Configured, not proof of
+   *  which login a running process holds. `ignored` is a declared value that isn't an absolute path. */
+  runtime_home?: {
+    variable: "CLAUDE_CONFIG_DIR" | "CODEX_HOME";
+    home: string | null;
+    source: "member" | "rig" | "daemon" | "native_default";
+    ignored?: { source: "member" | "rig"; value: string };
+  };
   terminalPolicy: ReturnType<TerminalPolicyStore["account"]> | { state: "unknown"; error: string };
   permissions: {
     selectionState: "explicit" | "inherit" | "unknown";
@@ -53,9 +63,11 @@ interface SeatMatch {
 
 export class SeatStatusService {
   private rigRepo: RigRepository;
+  private env: NodeJS.ProcessEnv;
 
-  constructor(deps: { rigRepo: RigRepository }) {
+  constructor(deps: { rigRepo: RigRepository; env?: NodeJS.ProcessEnv }) {
     this.rigRepo = deps.rigRepo;
+    this.env = deps.env ?? process.env;
   }
 
   getStatus(seatRef: string): SeatStatusResult {
@@ -130,9 +142,24 @@ export class SeatStatusService {
       previous_occupant: entry.previousOccupant,
       handover_at: entry.handoverAt,
       restore_outcome: entry.restoreOutcome,
+      ...this.runtimeHomeStatus(entry.nodeId, entry.runtime),
       permissions: this.permissionStatus(entry.nodeId, entry.runtime, entry.canonicalSessionName ?? deriveCanonicalFromEntry(entry) ?? seatRef),
       terminalPolicy: this.terminalPolicyStatus(entry.nodeId, entry.runtime),
     };
+  }
+
+  private runtimeHomeStatus(nodeId: string, runtime: string | null): Pick<SeatStatus, "runtime_home"> {
+    if (!runtime || !Object.hasOwn(RUNTIME_HOME_VAR, runtime)) return {};
+    const variable = RUNTIME_HOME_VAR[runtime as HomeRuntime];
+    const own = seatRuntimeHome(this.rigRepo.db, nodeId, runtime as HomeRuntime);
+    const ignored = own.ignored ? { ignored: own.ignored } : {};
+    if (own.home && own.source) return { runtime_home: { variable, home: own.home, source: own.source } };
+    // The daemon's explicit value, as its launches pass it on; else the runtime's native default under HOME.
+    const daemon = this.env[variable];
+    if (daemon) return { runtime_home: { variable, home: daemon, source: "daemon", ...ignored } };
+    const home = this.env.HOME;
+    const native = home ? path.join(home, runtime === "codex" ? ".codex" : ".claude") : null;
+    return { runtime_home: { variable, home: native, source: "native_default", ...ignored } };
   }
 
   private terminalPolicyStatus(nodeId: string, runtime: string | null): SeatStatus["terminalPolicy"] {

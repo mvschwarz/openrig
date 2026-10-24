@@ -59,6 +59,12 @@ interface SeatStatusResponse {
   };
   session_status: string | null;
   launch_cwd?: string | null;
+  runtime_home?: {
+    variable: string;
+    home: string | null;
+    source: "member" | "rig" | "daemon" | "native_default";
+    ignored?: { source: string; value: string };
+  };
   session_reason?: string | null;
   startup_status: string | null;
   occupant_lifecycle: string;
@@ -187,6 +193,13 @@ function printHuman(status: SeatStatusResponse): void {
   console.log(`Logical ID: ${status.logical_id}`);
   console.log(`Current occupant: ${display(status.current_occupant)}`);
   if (status.launch_cwd !== undefined) console.log(`Working directory for future launches: ${display(status.launch_cwd)}`);
+  if (status.runtime_home) {
+    const h = status.runtime_home;
+    const from = h.source === "member" || h.source === "rig" ? `the seat's own, from its ${h.source} env`
+      : h.source === "daemon" ? "the daemon's" : "the native default";
+    console.log(`Runtime home (${h.variable}) for launches: ${display(h.home)} (${from}; configured, not proof of the login a running session uses)`);
+    if (h.ignored) console.log(`  Ignored: its ${h.ignored.source} env sets ${h.variable}=${h.ignored.value}, which isn't an absolute path`);
+  }
   if (status.typingGuard) {
     const g = status.typingGuard;
     const mode = g.effectiveLevel ?? g.effectiveMode ?? (g.effective ? "on" : "off");

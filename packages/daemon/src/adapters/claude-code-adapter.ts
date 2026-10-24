@@ -957,17 +957,18 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const statePaths: string[] = [];
     const failures: string[] = [];
     if (managed) {
-      if (cwd) statePaths.push(managed.configPaths(cwd).statePath);
+      // The seat's own home when it declares one (member or rig `env:`), else the daemon's.
+      if (cwd) statePaths.push(managed.configPaths(cwd, binding.nodeId).statePath);
     } else {
       if (home) statePaths.push(nodePath.join(home, ".claude.json"));
       // A classic seat types `claude` into its pane's shell, which inherits the tmux server's
       // environment, not the daemon's, so the bootstrap cannot see which home that child reads.
-      // When the daemon selects CLAUDE_CONFIG_DIR, provision that home too. This deliberately
+      // When the seat's own `env:` or the daemon selects CLAUDE_CONFIG_DIR, provision that home too. This deliberately
       // replaces #565's rule that classic bootstrap writes exactly one file and leaves the
       // selected home untouched: a child that inherits the daemon's selection read neither.
       try {
         const selectedCwd = cwd ?? (binding.nodeId ? this.claudeManagedLaunch?.boundCwd(binding.nodeId) : undefined);
-        const selected = selectedCwd ? this.claudeManagedLaunch?.selectedStatePath(selectedCwd) : undefined;
+        const selected = selectedCwd ? this.claudeManagedLaunch?.selectedStatePath(selectedCwd, binding.nodeId) : undefined;
         if (selected && !statePaths.includes(selected)) statePaths.push(selected);
       } catch (err) {
         failures.push((err as Error).message);

@@ -43,9 +43,10 @@ export type InPlaceRestartTmux = Pick<TmuxAdapter,
 export interface InPlaceCodexLauncher {
   buildResumeCommand(binding: NodeBinding, opts: { name: string; resumeToken: string; running?: RunningCodexLaunch }):
     Promise<{ ok: true; command: string; core: string } | { ok: false; error: string }>;
-  verifyResumeInPane(tmuxSession: string, resumeToken: string): Promise<HarnessLaunchResult>;
+  /** `nodeId` lets the resume proof read the seat's own CODEX_HOME when it declares one. */
+  verifyResumeInPane(tmuxSession: string, resumeToken: string, nodeId?: string): Promise<HarnessLaunchResult>;
   /** Types a built command into the pane's shell and verifies the resume, preparing nothing again. */
-  sendResumeCommand(tmuxSession: string, command: string, resumeToken: string): Promise<HarnessLaunchResult>;
+  sendResumeCommand(tmuxSession: string, command: string, resumeToken: string, nodeId?: string): Promise<HarnessLaunchResult>;
 }
 
 /** What one process shows about itself, read without touching any credential: cwd, executable, and only
@@ -292,7 +293,7 @@ export class CodexInPlaceRestart {
       // The shell is back: type the exact resume command the checks ran on, built from the running Codex's
       // choices, and prove the resume. Preparing the launch again here would decide those choices afresh.
       progress.stage = "resume";
-      launch = await this.deps.codex.sendResumeCommand(sessionName, relaunch.command, report.conversationId);
+      launch = await this.deps.codex.sendResumeCommand(sessionName, relaunch.command, report.conversationId, target.seat.nodeId);
       if (!launch.ok) return this.incomplete(report, launch, recoveryCommand);
       progress.stage = "identity check";
       return this.verifyReplacement(target, report, oldExe);
@@ -324,7 +325,7 @@ export class CodexInPlaceRestart {
     }
     if (respawned.warnings) report.warnings.push(...respawned.warnings);
     progress.stage = "resume";
-    launch = await this.deps.codex.verifyResumeInPane(sessionName, report.conversationId);
+    launch = await this.deps.codex.verifyResumeInPane(sessionName, report.conversationId, target.seat.nodeId);
     if (!launch.ok) return this.incomplete(report, launch, recoveryCommand, held);
     progress.stage = "identity check";
     const verified = await this.verifyReplacement(target, report, oldExe);

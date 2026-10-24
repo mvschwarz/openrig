@@ -21,7 +21,7 @@ function fixture(opts: { rigEnv?: object; memberEnv?: object; sessionMarker?: st
   const claude = path.join(bin, "claude");
   writeFileSync(claude, `#!/bin/sh
 if [ "$1" = --help ]; then printf '%s\\n' '--permission-mode <mode> (choices: "auto", "default")'; exit 0; fi
-printf '{"FOO":"%s","DECLARED_UNSET":"%s","LEAKED":"%s","HOME":"%s"}' "\${FOO-absent}" "\${DECLARED_UNSET-absent}" "\${LEAKED-absent}" "$HOME"
+printf '{"FOO":"%s","DECLARED_UNSET":"%s","LEAKED":"%s","HOME":"%s","CCD":"%s"}' "\${FOO-absent}" "\${DECLARED_UNSET-absent}" "\${LEAKED-absent}" "$HOME" "\${CLAUDE_CONFIG_DIR-absent}"
 `);
   chmodSync(claude, 0o700);
   const db = new Database(":memory:"); cleanup.push(() => { db.close(); });
@@ -105,6 +105,32 @@ exec ${JSON.stringify(process.execPath)} -e 'process.stdout.write(JSON.stringify
     const seen = await f.run(command, { HOME: "/elsewhere", FOO: "1" });
     expect(seen.HOME).toBe(f.home);
     expect(seen.FOO).toBe("1");
+  });
+
+  it("selects the seat's own CLAUDE_CONFIG_DIR over the daemon's, member over rig", async () => {
+    const f = fixture({ rigEnv: { CLAUDE_CONFIG_DIR: "/homes/rig-claude" }, memberEnv: { CLAUDE_CONFIG_DIR: "/homes/seat-claude" },
+      sessionEnv: { CLAUDE_CONFIG_DIR: "/homes/daemon-claude" } });
+    const command = (await f.managed.prepare(target, "auto")).command(["--permission-mode", "auto"]);
+    expect((await f.run(command, { CLAUDE_CONFIG_DIR: "/homes/daemon-claude" })).CCD).toBe("/homes/seat-claude");
+    expect(f.managed.configPaths("/work", "node")).toEqual({ configDir: "/homes/seat-claude", statePath: "/homes/seat-claude/.claude.json" });
+    expect(f.managed.selectedStatePath("/work", "node")).toBe("/homes/seat-claude/.claude.json");
+  });
+
+  it("uses a rig's CLAUDE_CONFIG_DIR when the member declares none, even with the daemon unset", async () => {
+    const f = fixture({ rigEnv: { CLAUDE_CONFIG_DIR: "/homes/rig-claude" } });
+    const command = (await f.managed.prepare(target, "auto")).command(["--permission-mode", "auto"]);
+    expect((await f.run(command, {})).CCD).toBe("/homes/rig-claude");
+  });
+
+  it("keeps the daemon's selection for a seat that declares none or a relative one, and leaves an unset selection unset", async () => {
+    const daemon = fixture({ memberEnv: { CLAUDE_CONFIG_DIR: "relative/claude" }, sessionEnv: { CLAUDE_CONFIG_DIR: "/homes/daemon-claude" } });
+    const daemonCommand = (await daemon.managed.prepare(target, "auto")).command(["--permission-mode", "auto"]);
+    expect((await daemon.run(daemonCommand, { CLAUDE_CONFIG_DIR: "relative/claude" })).CCD).toBe("/homes/daemon-claude");
+    const unset = fixture({});
+    const unsetCommand = (await unset.managed.prepare(target, "auto")).command(["--permission-mode", "auto"]);
+    expect((await unset.run(unsetCommand, {})).CCD).toBe("absent");
+    expect(unset.managed.selectedStatePath("/work", "node")).toBeUndefined();
+    expect(unset.managed.configPaths("/work", "node").statePath).toBe(path.join(unset.home, ".claude.json"));
   });
 
   it("builds the same command as before when nothing is declared", async () => {

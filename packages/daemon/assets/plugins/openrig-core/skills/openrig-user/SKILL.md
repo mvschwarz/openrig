@@ -997,6 +997,24 @@ rig auth seats … --runtime codex         # seat -> profile registry (metadata 
 
 **Hard secret boundary:** no token value is ever printed, logged, queued, streamed, or committed; status/validate report presence/mode/login-state only; seat labels are metadata, not live-account proof. MVP is `--runtime codex`; other runtimes use the same surface with a different `--runtime`, never a parallel command.
 
+### Give a seat its own Claude or Codex account
+
+A runtime's login lives in its home: Claude Code's in its config dir (`CLAUDE_CONFIG_DIR`, default `~/.claude`), Codex's
+in `CODEX_HOME` (default `~/.codex`). A seat that names its own home in `env:` runs on that home's login.
+
+1. **Prepare the home once, natively,** in a terminal: `CLAUDE_CONFIG_DIR=/abs/path claude`, then `/login`; or
+   `CODEX_HOME=/abs/path codex login`. The person signs in; never copy credential files between homes.
+2. **Name it in the member's `env:`** in `rig.yaml` (`CLAUDE_CONFIG_DIR: /abs/path` or `CODEX_HOME: /abs/path`), or in
+   the rig's `env:` for every seat of that runtime. The member's value wins. It must be an absolute path: any other
+   value is reported and ignored, and the seat keeps the daemon's home.
+3. **It takes effect at the seat's next launch** (a fresh launch, restore or handover); a running seat keeps the home
+   it started with. A conversation saved under the old home doesn't resume from the new one.
+4. **Check it:** `rig seat status <seat>` shows the home and where it came from, and `rig provider status` lists it as
+   the seat's configured account. Both say what's configured, not which login a running session holds.
+
+Seats may share a home. OpenRig writes its own settings (Codex hooks, managed `config.toml` and plugin; Claude's
+first-run trust settings) into the seat's home.
+
 ### Manage subscriptions across a fleet (when the person asks you to)
 
 **This applies only when the person has asked you to manage their subscriptions.** Otherwise, don't take this job on. Installing or upgrading OpenRig appoints no agent, launches no bundle and starts no
