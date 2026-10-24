@@ -295,25 +295,25 @@ export function recordJudgment(missionsRoot: string, input: JudgeInput, actor: s
  * @param readPolicy - Reader function for determining applicable proof policy.
  * @returns Evaluated mission readiness, including revision, state, slices, and any issues.
  */
-export function readMissionReadiness(missionDir: string, readPolicy: ProofPolicyRead = defaultPolicyRead, root?: string): MissionReadiness {
+export function readMissionReadiness(missionDir: string, readPolicy: ProofPolicyRead = defaultPolicyRead, root?: string, io: ScopeFsDeps = proofFs): MissionReadiness {
   const issues: string[] = [], slices: MissionReadiness["slices"] = [];
   // #1280: each member's directory, for reading its declared node identity only when a dependency needs it.
   const dirs = new Map<MissionReadiness["slices"][number], string>();
   let historicalStatus: string | null = null;
   try {
-    const doc = manifest(proofFs, path.join(missionDir, "mission.yaml"));
+    const doc = manifest(io, path.join(missionDir, "mission.yaml"));
     if (!doc) return { revision: hash("legacy"), state: "legacy", slices, issues, historicalStatus };
     const metadata = doc.metadata != null ? mapping(doc.metadata, "mission metadata") : {};
     historicalStatus = typeof metadata.status === "string" ? metadata.status : null;
     const members = validateMissionComposition(doc, path.join(missionDir, "mission.yaml")).filter(m => m.active);
     for (const member of members) {
-      const dir = path.dirname(member.path), data = manifest(proofFs, member.path);
+      const dir = path.dirname(member.path), data = manifest(io, member.path);
       const execution = data?.execution as { depends_on?: unknown } | undefined;
       const depends = execution?.depends_on ?? [];
       if (!Array.isArray(depends) || depends.some(x => typeof x !== "string")) throw new JudgmentError("dependencies_invalid", `${member.path}: execution.depends_on must be a list`);
       const id = (data?.metadata as { id?: unknown } | undefined)?.id ?? path.basename(dir);
       if (typeof id !== "string" || !id || slices.some(s => s.id === id)) throw new JudgmentError("dependency_identity", `${member.path}: missing or repeated slice identity`);
-      const slice = { scope: path.basename(dir), id, readiness: readSliceReadiness(dir, proofFs, readPolicy, root), dependsOn: depends as string[], eligible: null };
+      const slice = { scope: path.basename(dir), id, readiness: readSliceReadiness(dir, io, readPolicy, root), dependsOn: depends as string[], eligible: null };
       slices.push(slice);
       dirs.set(slice, dir);
     }
@@ -360,8 +360,10 @@ function declaredNodeId(dir: string): string | null {
   }
 }
 
-export function readProjectReadiness(missionsRoot: string, readPolicy: ProofPolicyRead = defaultPolicyRead, root?: string) {
-  const missions = fs.readdirSync(missionsRoot).filter(n => fs.statSync(path.join(missionsRoot, n)).isDirectory()).map(name => ({ name, ...readMissionReadiness(contained(missionsRoot, path.join(missionsRoot, name)), readPolicy, root) }));
+/** `io` lets a caller observe which files the evaluation reads (the proof source watcher derives its subscriptions
+ *  from them); it defaults to the ordinary filesystem reader and changes nothing about the evaluation. */
+export function readProjectReadiness(missionsRoot: string, readPolicy: ProofPolicyRead = defaultPolicyRead, root?: string, io: ScopeFsDeps = proofFs) {
+  const missions = fs.readdirSync(missionsRoot).filter(n => fs.statSync(path.join(missionsRoot, n)).isDirectory()).map(name => ({ name, ...readMissionReadiness(contained(missionsRoot, path.join(missionsRoot, name)), readPolicy, root, io) }));
   const active = missions.filter(m => ["active", "release-candidate"].includes(m.historicalStatus ?? ""));
   return { revision: hash(active), state: active.length && active.every(m => m.state === "ready") ? "ready" : active.some(m => m.state === "unknown") ? "unknown" : "not-ready", missions, basis: "Active mission readiness; distinct outcome judgment and publication remain separate" };
 }

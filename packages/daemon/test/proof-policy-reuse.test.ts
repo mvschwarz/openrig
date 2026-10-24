@@ -224,6 +224,37 @@ describe("watch-local proof-policy reuse", () => {
     } finally { o.watch.close(); }
   });
 
+  it("observes accepted evidence outside the missions root at its parent, never recursively, through edit and atomic replacement", () => {
+    const f = fixture(), dir = f.dirs[0]!, outside = path.join(f.root, "build", "out"), evidence = path.join(outside, "report.md");
+    f.write(evidence, "accepted observation");
+    const item = readSliceReadiness(dir).items[0]!;
+    recordJudgment(f.missions, { scope: "trial/slices/slice-0", item: item.id, verdict: "accept", reason: "observed", evidence: [evidence], expectedRevision: item.revision, expectedPrevious: null }, "judge@trial", "fixture");
+    vi.useFakeTimers();
+    const listeners = new Map<string, (event: string, name: string | null) => void>(), recursive = new Map<string, boolean>();
+    vi.spyOn(fs, "watch").mockImplementation(((root: string, options: { recursive: boolean }, listener: (event: string, name: string | null) => void) => {
+      listeners.set(root, listener); recursive.set(root, options.recursive);
+      return { on: vi.fn(), close: vi.fn() };
+    }) as unknown as typeof fs.watch);
+    const invalidate = vi.fn();
+    const watch = watchProofSources(f.missions, invalidate, { emit: vi.fn() } as unknown as EventBus);
+    const oracle = () => createHash("sha256").update(JSON.stringify(readProjectReadiness(f.missions).missions.map(m => [m.name, m.revision]))).digest("hex");
+    try {
+      expect(watch.observation()).toEqual({ state: "watching", revision: oracle() });
+      expect(recursive.get(f.missions)).toBe(true);
+      expect(recursive.get(outside)).toBe(false);
+      expect([...recursive].filter(([root, deep]) => deep && root !== f.missions)).toEqual([]);
+      f.write(evidence, "changed observation");
+      listeners.get(outside)!("change", "report.md"); vi.advanceTimersByTime(50);
+      expect(readSliceReadiness(dir).state).toBe("unknown");
+      expect(watch.observation()).toEqual({ state: "watching", revision: oracle() });
+      fs.writeFileSync(`${evidence}.tmp`, "accepted observation"); fs.renameSync(`${evidence}.tmp`, evidence);
+      listeners.get(outside)!("rename", "report.md"); vi.advanceTimersByTime(50);
+      expect(readSliceReadiness(dir).state).toBe("ready");
+      expect(watch.observation()).toEqual({ state: "watching", revision: oracle() });
+      expect(invalidate).toHaveBeenCalledTimes(2);
+    } finally { watch.close(); }
+  });
+
   it("rechecks accepted evidence between events without reusing judgment inputs", () => {
     const f = fixture(), dir = f.dirs[0]!, evidence = path.join(dir, "proof/evidence.md");
     f.write(evidence, "accepted observation");
