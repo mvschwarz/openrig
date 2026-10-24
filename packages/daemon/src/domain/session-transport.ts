@@ -1567,7 +1567,7 @@ export function readInputBox(pane: string | null, runtime: "claude-code" | "code
 }
 
 export interface SendOpts {
-  /** Internal provenance derived by the authenticated transport route. */
+  /** Internal provenance derived by the transport route. */
   identityProvenance?: string;
   /** Internal wake provenance, never accepted from the public transport route. */
   queueWake?: boolean;

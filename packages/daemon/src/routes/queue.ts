@@ -601,7 +601,7 @@ export function queueRoutes(): Hono {
         summary: body.summary,
         evidenceRef: body.evidenceRef,
         nudge: (body as { nudge?: boolean }).nudge,
-        identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header proved it here, else claimed:v1 (resolveRecordedProvenance degrades)
+        identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header named the actor here, else claimed:v1 (resolveRecordedProvenance degrades)
       });
       const advisory = destinationAdvisory(c, item.destinationSession);
       return c.json({ ...item, ...(advisory ? { advisories: [advisory] } : {}) }, 201);
@@ -712,7 +712,7 @@ export function queueRoutes(): Hono {
         wakeAfterSeconds: body.wakeAfterSeconds,
         summary: body.summary,
         evidenceRef: body.evidenceRef,
-        identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header proved it here, else claimed:v1 (resolveRecordedProvenance degrades)
+        identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header named the actor here, else claimed:v1 (resolveRecordedProvenance degrades)
       });
       return c.json(item);
     } catch (err) {
@@ -797,7 +797,7 @@ export function queueRoutes(): Hono {
         evidenceRef: body.evidenceRef,
         nudge: (body as { nudge?: boolean }).nudge,
         humanAlert: body.humanAlert,
-        identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header proved it here, else claimed:v1 (resolveRecordedProvenance degrades)
+        identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header named the actor here, else claimed:v1 (resolveRecordedProvenance degrades)
       });
       const advisory = destinationAdvisory(c, result.created.destinationSession);
       return c.json({ ...result, ...(advisory ? { advisories: [advisory] } : {}) }, 201);
@@ -881,7 +881,7 @@ export function queueRoutes(): Hono {
         evidenceRef: body.evidenceRef,
         nudge: body.nudge,
         humanAlert: body.humanAlert,
-        identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header proved it here, else claimed:v1 (resolveRecordedProvenance degrades)
+        identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header named the actor here, else claimed:v1 (resolveRecordedProvenance degrades)
       });
       const advisory = destinationAdvisory(c, result.created.destinationSession);
       return c.json({ ...result, ...(advisory ? { advisories: [advisory] } : {}) }, 201);
@@ -1269,7 +1269,7 @@ export function queueRoutes(): Hono {
   // ---- Inbox routes (mailbox) ----
 
   app.post("/inbox/drop", async (c) => {
-    // P18 sender-provenance: the sender is DERIVED from the authenticated transport header (stamped
+    // P18 sender-provenance: the sender is DERIVED from the transport header (stamped
     // once by the CLI from the seat env), NEVER from the request body. senderSession/authenticatedSender
     // are intentionally NOT read from the body — a body-supplied identity is forgeable false history in
     // the channel of record (inbox_entries.sender_session → absorb → the receiver's queue).
@@ -1378,7 +1378,7 @@ export function queueRoutes(): Hono {
       tags: body.tags,
       urgency: body.urgency,
       auditPointer: body.auditPointer,
-      identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header proved it here, else claimed:v1 (resolveRecordedProvenance degrades)
+      identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header named the actor here, else claimed:v1 (resolveRecordedProvenance degrades)
     });
     return c.json(entry, 201);
   });

@@ -40,7 +40,7 @@ export interface ScopeApproveInput {
    *  delegation). */
   actorSession: string;
   /** P21 era-stamp: how actorSession was established. The route passes `transport:v1` when it derived
-   *  the actor from the authenticated transport chokepoint; omitted (null) ⇒ claimed-era (a direct
+   *  the actor from the transport chokepoint; omitted (null) ⇒ claimed-era (a direct
    *  caller / pre-P21 row), rendered "recorded (pre-verification era)", never re-labeled. */
   identityProvenance?: string | null;
   /** DELEGATED APPROVAL: whose decision this stamp records when an agent

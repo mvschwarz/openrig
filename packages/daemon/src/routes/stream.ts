@@ -84,7 +84,7 @@ export function streamRoutes(): Hono {
       hintDestination: body.hintDestination ?? null,
       hintTags: body.hintTags ?? null,
       interrupt: body.interrupt,
-      identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header proved it here, else claimed:v1 (resolveRecordedProvenance degrades)
+      identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header named the actor here, else claimed:v1 (resolveRecordedProvenance degrades)
     });
     return c.json(item, 201);
   });

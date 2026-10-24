@@ -12,7 +12,7 @@ import { WAKE_INTENT_PREFIX, type OutboxHandler, type OutboxEntry } from "./outb
 import type { QueueWakeFacts } from "./draft-aware-delivery.js";
 import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
 import { lastMeaningfulTransition, readWaitingView, type WaitingView, type WaitingActivityReader } from "./queue-waiting.js";
-import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
+import { isOpenRigSender, OPENRIG_SENDER, wrapPaneEnvelope } from "../lib/pane-envelope.js";
 import { isBoundTerminalSeat } from "./terminal-seat.js";
 import { renderQueueHandoffNudge } from "./queue-nudge-text.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
@@ -1700,13 +1700,16 @@ export class QueueRepository {
     }
 
     let wakeStaged = false;
+    // A row OpenRig creates itself (a sweep finding, an escalation, a health or mode notice) keeps its source for the
+    // record, but its wake comes from OpenRig: the seat named as source didn't send it.
+    const wakeFrom = input.wakeTrigger === "openrig" && !isOpenRigSender(input.sourceSession) ? OPENRIG_SENDER : input.sourceSession;
     const txn = this.db.transaction(() => {
       const created = this.createInTransactionalContext(input);
       if (this.outbox && input.nudge !== false) {
         try {
           // A savepoint removes any partial intent when staging fails, while
           // preserving ordinary create's existing acceptance of the task.
-          this.db.transaction(() => this.stageWakeIntent(created.qitemId, input.sourceSession, input.destinationSession, input.identityProvenance ?? null, input.nudge, input.wakeTrigger))();
+          this.db.transaction(() => this.stageWakeIntent(created.qitemId, wakeFrom, input.destinationSession, input.identityProvenance ?? null, input.nudge, input.wakeTrigger))();
           wakeStaged = true;
         } catch (err) {
           this.recordNudgeAttempt(created.qitemId, `failed:wake not retained: ${err instanceof Error ? err.message : String(err)}`);
@@ -1769,7 +1772,7 @@ export class QueueRepository {
     if (this.outbox) {
       if (wakeStaged) this.deliverWakeIntentAfterCommit(`${WAKE_INTENT_PREFIX}${id}`);
     } else {
-      await this.maybeNudge(id, input.destinationSession, input.nudge, input.sourceSession, undefined, input.wakeTrigger);
+      await this.maybeNudge(id, input.destinationSession, input.nudge, wakeFrom, undefined, input.wakeTrigger);
     }
     return this.getByIdOrThrow(id);
   }

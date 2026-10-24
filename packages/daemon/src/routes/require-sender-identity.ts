@@ -4,8 +4,10 @@ import { getSelfHostId } from "../domain/hosts/fanout-contract.js";
 /**
  * P21 sender-provenance chokepoint — the ONE shared route helper that generalizes P18's inline
  * `/inbox/drop` form (b2437104) across every caller-identity site. The acting seat's identity is
- * DERIVED from the authenticated transport header the CLI's DaemonClient stamps once from the seat
- * env (X-OpenRig-Session), and the row records WHICH ERA that derivation came from.
+ * DERIVED from the transport header (X-OpenRig-Session) that the CLI's DaemonClient stamps from the seat's
+ * environment (OPENRIG_SESSION_NAME), and the row records WHICH ERA that derivation came from. The header
+ * isn't authentication: a process that can reach the daemon can set it. `transport:v1` records how the
+ * name was established (from the header, not a body claim), which is what a trusted network needs.
  *
  * P18 DELIVER-AND-LABEL (founder ruling, over-engineering audit — the refusals are deleted). The two
  * refusals this helper used to raise both asserted "this sender is ILLEGITIMATE" when the only thing
@@ -16,7 +18,7 @@ import { getSelfHostId } from "../domain/hosts/fanout-contract.js";
  *     `claimed:v1`.
  *   - 409 `identity_mismatch` (body claim ≠ transport identity) — DELETED (PM, 2026-08-11, ruling (A):
  *     both refusals die, folded into this ONE sweep — the earlier one-atom-each split was retired as
- *     unnecessary ceremony). A certified wire identity is exactly why refusing was wrong: the wire decides
+ *     unnecessary ceremony). The wire identity is exactly why refusing was wrong: the wire decides
  *     the actor and the body never does, so a disagreeing body claim is NOISE TO BE SUPERSEDED, not a
  *     reason to refuse. Deliver under the wire identity, labelled transport:v1; the discrepancy is NOT
  *     persisted (no new field/schema). The byte-identical 409 in resolveActorWithDeferral (below) is
@@ -68,7 +70,7 @@ function transportProvenance(c: Context): Exclude<IdentityProvenance, "relay:v1"
 
 export type SenderIdentity =
   // `provenance` is the NON-RELAY subset — this helper only ever derives locally: transport:v1 when the
-  // header proved it here, claimed:v1 when it did not. relay:v1 belongs to the cross-host forward and is
+  // header named the actor here, claimed:v1 when it did not. relay:v1 belongs to the cross-host forward and is
   // decided by resolveRecordedProvenance, never here.
   | { ok: true; session: string; provenance: Exclude<IdentityProvenance, "relay:v1"> }
   | { ok: false; response: Response };
@@ -81,7 +83,7 @@ export function requireSenderIdentity(
   const session = transportSenderSession(c);
   const claim = opts?.bodyClaim?.trim();
   if (session) {
-    // Transport path — the header PROVED the actor at this hop. P18 SWEEP: the wire SUPERSEDES any body
+    // Transport path — the header named the actor at this hop. P18 SWEEP: the wire SUPERSEDES any body
     // claim (the 409 identity_mismatch refusal is retired). A disagreeing body actor is noise to be
     // superseded, not an attack to refuse — the wire decides the actor, the body never does. Deliver
     // under the transport seat identity, preserving any unknown-origin marker; the discrepancy is not
@@ -97,7 +99,7 @@ export function requireSenderIdentity(
     response: c.json({
       error: "actor_required",
       message:
-        `Cannot record ${verb}: no authenticated transport identity (X-OpenRig-Session absent) and no ` +
+        `Cannot record ${verb}: no transport identity (no X-OpenRig-Session header, which the CLI sets from the seat's OPENRIG_SESSION_NAME) and no ` +
         "actor named in the request body. The channel of record needs an actor to attribute the row to — " +
         "name one, or run from a managed seat so the identity is derived for you.",
     }, 400),
@@ -162,7 +164,7 @@ export function resolveActorWithDeferral(
       response: c.json({
         error: "actor_required",
         message:
-          `Refusing ${verb}: no authenticated transport identity (X-OpenRig-Session absent) and no body ` +
+          `Refusing ${verb}: no transport identity (no X-OpenRig-Session header, which the CLI sets from the seat's OPENRIG_SESSION_NAME) and no body ` +
           "actor to record. The channel of record needs at least a claimed-era actor.",
       }, 400),
     };
@@ -172,7 +174,7 @@ export function resolveActorWithDeferral(
 
 /**
  * The wire header a FORWARDING daemon stamps to carry the provenance it resolved for the actor it is
- * re-stamping, so the origin hop records the TRUTH about that actor's verification instead of inferring
+ * re-stamping, so the origin hop records how that actor was established instead of inferring
  * it from the mere presence of a re-stamped X-OpenRig-Session. SAME token alphabet as the store
  * (IdentityProvenance) — never an ad-hoc string. Its absence is meaningful (see resolveRecordedProvenance).
  */
@@ -182,19 +184,19 @@ export const RELAY_HEADER = "x-openrig-relay";
 
 /**
  * P21 §4 — the SOLE decider of the provenance RECORDED on a row (rail 2: exactly one place can ever say
- * `transport:v1`, and only when the transport actually proved it at THIS hop). `identity` is the local
+ * `transport:v1`, and only when the header named the actor at THIS hop). `identity` is the local
  * derivation from resolveActorWithDeferral (transport:v1 = header present; claimed:v1 = the deferral).
  *
- * Direct request (no relay hop): record exactly what this hop proved — identity.provenance verbatim.
+ * Direct request (no relay hop): record exactly what this hop saw — identity.provenance verbatim.
  *
  * Relayed request (a forwarding daemon re-stamped the header): NEVER `transport:v1` — the actor was, at
- * best, verified ONE HOP AWAY, so the strongest honest claim is `relay:v1`, and ONLY when the forwarder
+ * best, named by a header ONE HOP AWAY, so the strongest honest claim is `relay:v1`, and ONLY when the forwarder
  * explicitly carried a `transport:v1` marker. Rail 1 — DEGRADE DOWN AS THE DEFAULT BRANCH: any other
  * carried value, AND a MISSING marker (an old forwarder that predates this plumbing), records `claimed:v1`.
  * NB the honesty nuance: a missing marker and a forwarder-declared `claimed:v1` are INDISTINGUISHABLE here
  * and that is correct — both are "not verified at this boundary". `claimed:v1` on a relayed row therefore
  * means "unverified", NEVER proof the origin action was a UI tap. Uncertainty weakens the claim; it can
- * never strengthen it — a claimed-era actor can never be laundered into a verified one across a hop.
+ * never strengthen it — a claimed-era actor can never be laundered into a transport-derived one across a hop.
  */
 export function resolveRecordedProvenance(
   c: Context,
