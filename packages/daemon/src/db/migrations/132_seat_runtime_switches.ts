@@ -8,7 +8,7 @@ import type { Migration } from "../migrate.js";
  * a decision, and status shows it instead of guessing. At most one open switch per seat.
  */
 export const seatRuntimeSwitchesSchema: Migration = {
-  name: "130_seat_runtime_switches.sql",
+  name: "132_seat_runtime_switches.sql",
   sql: `
     CREATE TABLE seat_runtime_switches (
       id TEXT PRIMARY KEY,

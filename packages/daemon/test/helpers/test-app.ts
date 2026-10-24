@@ -1,5 +1,5 @@
 import { terminalPolicySchema } from "../../src/db/migrations/128_terminal_policy.js";
-import { seatRuntimeSwitchesSchema } from "../../src/db/migrations/130_seat_runtime_switches.js";
+import { seatRuntimeSwitchesSchema } from "../../src/db/migrations/132_seat_runtime_switches.js";
 import { seatIdentityPanePidSchema } from "../../src/db/migrations/119_seat_identity_pane_pid.js";
 import { rigStartupLayersSchema } from "../../src/db/migrations/121_rig_startup_layers.js";
 import { humanOperatingModesSchema } from "../../src/db/migrations/122_human_operating_modes.js";
@@ -170,6 +170,7 @@ export const migrationsForFullTestDbExclusions: Record<string, string> = {
   "100_typing_guard_modes.sql": "extends outbox_entries and its typing guard (027 and 087 are excluded); guard-mode and retry suites use ALL_MIGRATIONS.",
   "089_classification_identity_provenance.sql": "extends project_classifications (028 is excluded); classifier fixtures migrate it inline.",
   "129_stream_dispositions.sql": "companion of project_classifications (028 is excluded); stream-disposition suites migrate it inline.",
+  "130_stream_subscriptions.sql": "stream reader subscriptions and retention marks; stream suites migrate it inline.",
   "030_views_custom.sql": "custom-views subsystem table — views suites migrate it inline.",
   "032_watchdog_history.sql": "watchdog history table — watchdog suites migrate it inline (watchdog_jobs is the only watchdog base the core edge carries).",
   "033_workflow_specs.sql": "workflow subsystem table — workflow-* suites migrate the workflow schema inline.",
