@@ -78,7 +78,8 @@ export class CodexResumeAdapter {
     }
     const codexHome = seatCodexHome ?? this.options.codexHome;
 
-    await this.options.ensureManagedConfig?.(codexHome);
+    // Only a seat's own home is passed on, so a call for a seat without one is exactly as before.
+    await (seatCodexHome ? this.options.ensureManagedConfig?.(seatCodexHome) : this.options.ensureManagedConfig?.());
 
     if (codexConfigProfile?.trim()) {
       const { verifyCodexProfileLoads } = await import("../domain/codex-profile-preflight.js");
@@ -95,7 +96,8 @@ export class CodexResumeAdapter {
     }
 
     // #69: detect for the Codex the restored pane runs (its cwd, the launch PATH).
-    const daemonSupport = this.options.detectDaemonSupport ? await this.options.detectDaemonSupport(cwd, codexHome) : undefined;
+    const daemonSupport = this.options.detectDaemonSupport
+      ? await (seatCodexHome ? this.options.detectDaemonSupport(cwd, seatCodexHome) : this.options.detectDaemonSupport(cwd)) : undefined;
     if (daemonSupport?.kind === "unknown") {
       return { ok: false, code: "resume_failed", message: unknownDaemonSupportMessage(daemonSupport.detail) };
     }
@@ -105,7 +107,8 @@ export class CodexResumeAdapter {
     const appliedLaunch = observeCodexSandbox(posture);
     const postureArg = posture + operationalLaunchArg("codex", { kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture });
     const readNetworkDefault = this.options.readNetworkDefault;
-    const networkArg = await codexNetworkDefaultArg(readNetworkDefault && ((dir: string) => readNetworkDefault(dir, codexHome)), appliedLaunch, cwd, tmuxSessionName);
+    const networkArg = await codexNetworkDefaultArg(seatCodexHome && readNetworkDefault ? ((dir: string) => readNetworkDefault(dir, seatCodexHome)) : readNetworkDefault,
+      appliedLaunch, cwd, tmuxSessionName);
     const workspaceArg = teamPermissionDefault && !codexConfigProfile?.trim()
       && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write"
       ? codexTeamWorkspaceArg(this.options.prepareTeamWorkspace, tmuxSessionName) : "";
@@ -123,7 +126,7 @@ export class CodexResumeAdapter {
 
     const launchEnv = [this.options.launchPath ? `PATH=${shellQuote(this.options.launchPath)}` : "", codexHome ? `CODEX_HOME=${shellQuote(codexHome)}` : ""].filter(Boolean);
     const textResult = await this.tmux.sendShellCommand(tmuxSessionName, this.options.seatLaunchEnvironment
-      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { codexCwd: cwd, runtime: "codex", codexHome })
+      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { codexCwd: cwd, runtime: "codex", ...(seatCodexHome ? { codexHome: seatCodexHome } : {}) })
       : launchEnv.length ? `env ${launchEnv.join(" ")} ${cmd}` : cmd);
     if (!textResult.ok) {
       return { ok: false, code: "resume_failed", message: textResult.message };

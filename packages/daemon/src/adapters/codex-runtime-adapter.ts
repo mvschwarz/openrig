@@ -270,7 +270,30 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   /** The home a seat's Codex uses: its own from its member or rig `env:`, else the daemon's explicit CODEX_HOME. Undefined
    *  keeps the legacy OS/PID home behavior. */
   private homeFor(binding: { nodeId?: string } | undefined): string | undefined {
-    return (binding?.nodeId ? this.seatHome?.(binding.nodeId) : undefined) ?? this.codexHome;
+    return this.ownHome(binding) ?? this.codexHome;
+  }
+
+  /** Only the seat's own CODEX_HOME, undefined when it declares none. Probes and readers get it as an extra argument
+   *  only when it's set, so a seat without one calls them exactly as before. */
+  private ownHome(binding: { nodeId?: string } | undefined): string | undefined {
+    return binding?.nodeId ? this.seatHome?.(binding.nodeId) : undefined;
+  }
+
+  private ownHomeCommandOpt(binding: { nodeId?: string }): { codexHome?: string } {
+    const own = this.ownHome(binding);
+    return own ? { codexHome: own } : {};
+  }
+
+  private ownHomeOpt(binding: { nodeId?: string }): { home?: string } {
+    const own = this.ownHome(binding);
+    return own ? { home: own } : {};
+  }
+
+  /** A thread id read for this seat's process, in the seat's own home when it declares one. */
+  private readThreadIdForSeat(binding: { nodeId?: string }, pid: number, identity?: string): Promise<string | undefined> | string | undefined {
+    const own = this.ownHome(binding);
+    if (own) return this.readThreadIdByPid(pid, identity, own);
+    return identity === undefined ? this.readThreadIdByPid(pid) : this.readThreadIdByPid(pid, identity);
   }
 
   /** The thread-id resolver for one Codex home (undefined: the daemon's), kept so its process-home cache is reused. */
@@ -756,7 +779,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     if (updatePrompt.failure) return updatePrompt.failure;
 
     if (opts.resumeToken) {
-      const verification = await this.verifyResumeLaunch(binding.tmuxSession, updatePrompt, { resumeToken: opts.resumeToken, home: this.homeFor(binding) });
+      const verification = await this.verifyResumeLaunch(binding.tmuxSession, updatePrompt, { resumeToken: opts.resumeToken, ...this.ownHomeOpt(binding) });
       if (!verification.ok) return verification;
       return { ok: true, resumeToken: opts.resumeToken, resumeType: "codex_id", appliedLaunch,
         ...(verification.resumedProcess ? { resumedProcess: verification.resumedProcess } : {}) };
@@ -800,7 +823,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const updatePrompt: UpdatePromptAttempt = { handled: false };
     await this.dismissSkippableCodexUpdatePrompt(tmuxSession, updatePrompt);
     if (updatePrompt.failure) return updatePrompt.failure;
-    return this.verifyResumeLaunch(tmuxSession, updatePrompt, { resumeToken, home: this.homeFor({ nodeId }) });
+    return this.verifyResumeLaunch(tmuxSession, updatePrompt, { resumeToken, ...this.ownHomeOpt({ nodeId }) });
   }
 
   /** Launch flags shared by fresh, fork and resume, decided once per launch. With `running`, the probed and
@@ -811,6 +834,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // concurrent launches never interleave them. An unselected seat's launch never installs.
     // A seat with its own CODEX_HOME gets OpenRig's managed config (hooks, feature flag) and plugin in that home.
     const home = this.homeFor(binding);
+    const own = this.ownHome(binding);
     await this.withConfigLock(async () => {
       const managed = await this.applyManagedConfig(home);
       if (opts.installCorePlugin && managed?.hooksEnabled && this.resolveCorePluginSelected?.(binding.nodeId)) {
@@ -847,7 +871,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // `codex -p <profile> resume` failure. An absent .config.toml passes
     // (Codex default-layers it; advisor Option B).
     if (profile) {
-      const probeResult = await this.verifyProfilePreflight(profile, binding.cwd, home);
+      const probeResult = await (own ? this.verifyProfilePreflight(profile, binding.cwd, own) : this.verifyProfilePreflight(profile, binding.cwd));
       if (!probeResult.ok) {
         return {
           ok: false,
@@ -866,7 +890,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       ? "" : teamWorkspaceArg || this.buildQueueStateAddDirArg(name);
     // #69: one daemon-support decision for this launch, for the Codex the seat pane runs
     // (its cwd, the launch PATH), applied to fresh, fork and resume.
-    const daemonSupport = this.detectDaemonSupport ? await this.detectDaemonSupport(binding.cwd, home) : undefined;
+    const daemonSupport = this.detectDaemonSupport ? await (own ? this.detectDaemonSupport(binding.cwd, own) : this.detectDaemonSupport(binding.cwd)) : undefined;
     if (daemonSupport?.kind === "unknown") {
       return { ok: false, error: unknownDaemonSupportMessage(daemonSupport.detail) };
     }
@@ -874,7 +898,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const daemonArg = daemonOptOut ? " --no-daemon" : "";
     // #275: on the plain floor, network access unless Codex reports an opt-out or policy.
     const networkArg = binding.codexRebuildPermissions ? ""
-      : await codexNetworkDefaultArg(this.readNetworkDefault && ((cwd: string) => this.readNetworkDefault!(cwd, home)), appliedLaunch, binding.cwd, name);
+      : await codexNetworkDefaultArg(own && this.readNetworkDefault ? ((cwd: string) => this.readNetworkDefault!(cwd, own)) : this.readNetworkDefault, appliedLaunch, binding.cwd, name);
 
     // The launch facts keep the probed daemon choice, so a printed recovery command can repeat it; no probe, no fact.
     const launchFacts = daemonSupport ? { ...appliedLaunch, daemonOptOut } : appliedLaunch;
@@ -888,7 +912,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   private async seatCommand(binding: NodeBinding, cmd: string): Promise<string> {
     return this.seatLaunchEnvironment
-      ? await this.seatLaunchEnvironment.command(binding.tmuxSession!, cmd, { codexCwd: binding.cwd, nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime, codexHome: this.homeFor(binding) })
+      ? await this.seatLaunchEnvironment.command(binding.tmuxSession!, cmd, { codexCwd: binding.cwd, nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime, ...this.ownHomeCommandOpt(binding) })
       : this.launchCommand(cmd, this.homeFor(binding));
   }
 
@@ -1022,7 +1046,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     if (!before || lstartToMinTs(before.process.startedAt) === undefined) return null;
     // Gate PID logs by process start time, then re-observe the whole foreground
     // chain. Neither a reused PID nor a replacement pane proves this child.
-    const child = (await this.readThreadIdByPid(before.process.pid, before.process.startedAt, this.homeFor(binding)))?.trim();
+    const child = (await this.readThreadIdForSeat(binding, before.process.pid, before.process.startedAt))?.trim();
     if (!child || child === parentToken) return null;
     const after = await observeCodexForkProcess(input);
     return after?.fingerprint === before.fingerprint ? { resumeToken: child, resumeType: "codex_id" } : null;
@@ -1345,7 +1369,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       if (shellPid) {
         const codexPids = await this.findCodexDescendantPids(shellPid);
         for (const codexPid of codexPids) {
-          const threadId = await this.readThreadIdByPid(codexPid, undefined, this.homeFor(binding));
+          const threadId = await this.readThreadIdForSeat(binding, codexPid);
           if (threadId) return threadId;
         }
       }
@@ -1422,7 +1446,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
     let evidence: CodexResumeEvidence | null;
     try {
-      evidence = await this.beforeResumeDeadline(() => this.readResumeEvidence(before.process.pid, before.process.startedAt!, home), deadline);
+      evidence = await this.beforeResumeDeadline(() => home ? this.readResumeEvidence(before.process.pid, before.process.startedAt!, home) : this.readResumeEvidence(before.process.pid, before.process.startedAt!), deadline);
     } catch (err) {
       return { kind: "unknown", reason: `Codex's records couldn't be read (${(err as Error).message})` };
     }

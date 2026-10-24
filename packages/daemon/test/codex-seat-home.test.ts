@@ -45,7 +45,8 @@ function seed(root: string, id: string) {
   state.prepare("INSERT INTO threads VALUES (?,?,?)").run(id, "cli", path.join(root, "rollout.jsonl")); state.close();
 }
 
-const HOOKS_MARKER = "# BEGIN OPENRIG MANAGED ACTIVITY HOOKS";
+// OpenRig's managed config: without an activity relay it's the hooks feature flag alone.
+const MANAGED_FLAG = "codex_hooks = true";
 
 it.each(["fresh", "resume", "fork"])("a seat's own CODEX_HOME wins over the daemon's for a %s launch, and gets OpenRig's managed config", async kind => {
   const f = fixture();
@@ -60,7 +61,7 @@ it.each(["fresh", "resume", "fork"])("a seat's own CODEX_HOME wins over the daem
     { name: "seat", ...(kind === "resume" ? { resumeToken: "old" } : kind === "fork" ? { forkSource: { kind: "native_id" as const, value: "parent" } } : {}) });
   expect(result.ok).toBe(true);
   expect(JSON.parse((await f.run(f.tmux.sendShellCommand.mock.calls.at(-1)![1])).stdout).home).toBe(f.seatHome);
-  expect(fs.readFileSync(path.join(f.seatHome, "config.toml"), "utf8")).toContain(HOOKS_MARKER);
+  expect(fs.readFileSync(path.join(f.seatHome, "config.toml"), "utf8")).toContain(MANAGED_FLAG);
   expect(fs.existsSync(path.join(f.daemonHome, "config.toml"))).toBe(false);
   if (kind === "resume") expect(verify).toHaveBeenCalledWith("seat@rig", expect.anything(), expect.objectContaining({ home: f.seatHome }));
 });
@@ -74,7 +75,7 @@ it("a seat without its own home keeps the daemon's CODEX_HOME and config", async
   vi.spyOn(adapter as any, "captureFreshThreadId").mockResolvedValue("fresh");
   expect((await adapter.launchHarness({ nodeId: "other", tmuxSession: "seat@rig", cwd: f.cwd } as any, { name: "seat" })).ok).toBe(true);
   expect(JSON.parse((await f.run(f.tmux.sendShellCommand.mock.calls.at(-1)![1])).stdout).home).toBe(f.daemonHome);
-  expect(fs.readFileSync(path.join(f.daemonHome, "config.toml"), "utf8")).toContain(HOOKS_MARKER);
+  expect(fs.readFileSync(path.join(f.daemonHome, "config.toml"), "utf8")).toContain(MANAGED_FLAG);
   expect(fs.readdirSync(f.seatHome)).toEqual([]);
 });
 
@@ -108,7 +109,8 @@ it("the in-place restart's resume proof reads the seat's own home", async () => 
   expect((await adapter.sendResumeCommand("seat@rig", "codex resume conversation-1", "conversation-1", "node")).ok).toBe(true);
   expect((await adapter.verifyResumeInPane("seat@rig", "conversation-1")).ok).toBe(true);
   expect(verify).toHaveBeenCalledTimes(3);
-  expect(homes).toEqual([f.seatHome, f.seatHome, f.daemonHome]);
+  // Without a seat, the proof is asked exactly as before: no home, so its reader keeps the daemon's.
+  expect(homes).toEqual([f.seatHome, f.seatHome, undefined]);
 });
 
 it("the resume proof itself reads evidence from the home it's given", async () => {
@@ -121,7 +123,7 @@ it("the resume proof itself reads evidence from the home it's given", async () =
     readResumeEvidence: evidence as never });
   const proved = await (adapter as any).proveResumedProcess("seat@rig", "conversation-1", Date.now() + 5000, f.seatHome);
   expect(evidence).toHaveBeenCalledWith(901, expect.any(String), f.seatHome);
-  expect(proved).toMatchObject({ ok: true });
+  expect(proved).toMatchObject({ kind: "match" });
 });
 
 it("the legacy Codex resume launches in the seat's own home when one is passed, and in the daemon's otherwise", async () => {
@@ -135,7 +137,7 @@ it("the legacy Codex resume launches in the seat's own home when one is passed, 
   expect(await homeOf()).toBe(f.seatHome);
   expect((await adapter.resume("seat@rig", "codex_id", "old", f.cwd)).ok).toBe(true);
   expect(await homeOf()).toBe(f.daemonHome);
-  expect(ensured).toEqual([f.seatHome, f.daemonHome]);
+  expect(ensured).toEqual([f.seatHome, undefined]);
 });
 
 it("context usage finds a thread's state in a declared seat home", () => {
