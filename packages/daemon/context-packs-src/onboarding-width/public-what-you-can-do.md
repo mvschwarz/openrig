@@ -961,9 +961,10 @@ reaching them is ordinary work rather than an escalation.
   to the external participant, not a separate outbound route.
 - **`rig gateway human add`** — register a person and their connector binding. Registration or
   connector changes do not themselves authorize a message.
-- **Every ask to a person lands on Steering and the TUI's Feed**, where they can answer it. Whether
-  it also posts to Slack is their subscription: `rig gateway human set <id> slack-subscription
-  every-ask|urgent-only|unset` (`every-ask` is the default). Under `urgent-only`, only an ask
+- **Every ask to a person lands on the TUI's Feed**, where they can answer it (and on Steering for
+  anyone running the Steering app). Whether it also posts to Slack is their subscription:
+  `rig gateway human set <id> slack-subscription every-ask|urgent-only|unset` (`every-ask` is the
+  default). Under `urgent-only`, only an ask
   created or handed off with `--alert` posts. `--alert` also makes an ask stand out in Slack (an
   interrupt with a mention) under either setting, so keep it for something only they can do, or an
   approval whose wait costs now. Don't assume every ask pings them on Slack.
