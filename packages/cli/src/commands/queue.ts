@@ -332,7 +332,8 @@ async function withClient<T>(
       // render owns the 3-part fact/consequence/action + the io exit (response-integrity
       // contract). One render authority, layered context — never a swallowed exit.
       const where = hostContext ? ` (routing to host '${hostContext}')` : "";
-      console.error(`queue transport failure${where}: ${err.message}`);
+      const what = err instanceof DaemonTimeoutError ? "queue request got no answer in time" : "queue transport failure";
+      console.error(`${what}${where}: ${err.message}`);
       console.error("The write outcome is INDETERMINATE if the request may have reached a daemon — reconcile by ID before any retry.");
     }
     throw err;
@@ -438,6 +439,15 @@ function writeReceipt(full: boolean | undefined, ctx: ReceiptContext): ReceiptCo
  *  equals the selected daemon's own host id is settled by {@link settleReceiptHost}. */
 function remoteHostOf(hostId: string | undefined): string | undefined {
   return hostId && hostId !== "local" ? hostId : undefined;
+}
+
+/** A cross-host queue write waits for the selected daemon's own answer. That daemon gives the remote 10 s
+ *  (`QUEUE_FORWARD_TIMEOUT_MS` in the daemon's routes/queue.ts), so waiting only the client's 5 s default
+ *  turns a slow remote's answer into an unknown outcome. */
+const CROSS_HOST_QUEUE_WRITE_TIMEOUT_MS = 15_000;
+
+function crossHostWriteOptions(hostId: string | undefined): { timeoutMs: number } | undefined {
+  return remoteHostOf(hostId) ? { timeoutMs: CROSS_HOST_QUEUE_WRITE_TIMEOUT_MS } : undefined;
 }
 
 /** The daemon's own rule (`resolvesToLocalHost`): a `--host` naming the selected
@@ -948,7 +958,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           // OPR.0.4.6.MH3 FR-1: the out-of-band host envelope (omitted for
           // plain local writes — the local path stays byte-identical).
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
-        }).catch((error: unknown) => {
+        }, crossHostWriteOptions(hostResolved.hostId)).catch((error: unknown) => {
           // A pre-header disconnect can follow a committed create. Preserve the
           // typed error, but do not let the shared renderer assert nondelivery.
           if (error instanceof DaemonConnectionError) error.writeOutcome = "unknown";
@@ -1290,7 +1300,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           targetRepo: opts.targetRepo,
           nudge: opts.nudge,
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
-        });
+        }, crossHostWriteOptions(hostResolved.hostId));
         const hint = hostSubstitutionHint(res.status, res.data, opts.to, opts.host, hostResolved);
         if (hint) console.error(hint);
         await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, {
@@ -1392,7 +1402,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           targetRepo: opts.targetRepo,
           nudge: opts.nudge,
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
-        });
+        }, crossHostWriteOptions(hostResolved.hostId));
         const hint = hostSubstitutionHint(res.status, res.data, opts.to, opts.host, hostResolved);
         if (hint) console.error(hint);
         await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, {

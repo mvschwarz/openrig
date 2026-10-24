@@ -317,12 +317,15 @@ export function queueRoutes(): Hono {
       case "bearer":
         return fail(res.detail, "auth-failed");
       case "timeout":
+        // The write was sent, so the origin may still commit it after this deadline: its outcome is
+        // unknown, never a failed write. The caller reconciles by the row's ID before any retry.
         return fail(
           res.phase === "body"
             ? `remote queue write timed out: response headers arrived (HTTP ${res.status}) but the body never completed`
-            : `remote queue write timed out after ${QUEUE_FORWARD_TIMEOUT_MS}ms`,
+            : `remote queue write timed out after ${QUEUE_FORWARD_TIMEOUT_MS}ms; the remote may still commit it`,
           "unreachable",
           res.status,
+          "indeterminate",
         );
       case "network":
         return fail(res.detail, "unreachable", res.status, res.outcome);
