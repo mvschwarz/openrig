@@ -182,6 +182,8 @@ function world(options: WorldOptions = {}) {
   } as unknown as TmuxAdapter;
 
   const launches: Array<{ command: string; resumeToken: string }> = [];
+  /** The Codex home each resume proof was asked to read. */
+  const proofHomes: Array<string | undefined> = [];
   const builds: Array<{ running?: unknown }> = [];
   const codex = {
     runtime: "codex",
@@ -194,15 +196,17 @@ function world(options: WorldOptions = {}) {
         + `${(running?.addDirs ?? []).map((dir) => ` --add-dir '${dir}'`).join("")} '${opts.resumeToken}'`;
       return { ok: true as const, core, command: `env CODEX_HOME='${HOME}' ${core}` };
     },
-    async sendResumeCommand(_session: string, command: string, resumeToken: string): Promise<HarnessLaunchResult> {
+    async sendResumeCommand(_session: string, command: string, resumeToken: string, _nodeId?: string, home?: string): Promise<HarnessLaunchResult> {
       launches.push({ command, resumeToken });
+      proofHomes.push(home);
       maybeThrow("sendResumeCommand");
       const result = options.launch ?? { ok: true, resumeToken, resumeType: "codex_id" };
       if (result.ok && !options.identityFails) relaunch();
       return result;
     },
-    async verifyResumeInPane(): Promise<HarnessLaunchResult> {
+    async verifyResumeInPane(_session?: string, _token?: string, _nodeId?: string, home?: string): Promise<HarnessLaunchResult> {
       calls.push("verifyResumeInPane");
+      proofHomes.push(home);
       maybeThrow("verifyResumeInPane");
       return options.launch ?? { ok: true };
     },
@@ -249,7 +253,7 @@ function world(options: WorldOptions = {}) {
   });
   const events = () => (db.prepare("SELECT type, payload FROM events WHERE type LIKE 'seat.restart_in_place%' ORDER BY seq").all() as Array<{ type: string; payload: string }>)
     .map((row) => ({ type: row.type, ...JSON.parse(row.payload) }));
-  return { db, service, node, session, calls, launches, builds, events, sessionRegistry, tmux,
+  return { db, service, node, session, calls, launches, proofHomes, builds, events, sessionRegistry, tmux,
     replacementYields, get replacementReads() { return replacementReads; }, get relaunched() { return relaunched; },
     setRows: (next: NativeProcessRow[]) => { rows = next; },
     print: (text: string) => { paneLines.push(...text.split("\n").filter(Boolean)); },
@@ -694,6 +698,16 @@ describe("rig seat restart --keep-conversation: outcomes", () => {
     const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
     expect(result).toMatchObject({ outcome: "incomplete", remainingStep: expect.stringContaining("no fresh session was started") });
     expect(w.launches).toHaveLength(1);
+  });
+
+  it("proves the resume in the home the running Codex uses, in both pane shapes, though the seat declares none", async () => {
+    // The seat has no env: home, so the adapter would fall back to the daemon's; the restart already read the real one.
+    for (const shape of ["shell_backed", "direct_native"] as const) {
+      const w = world({ shape, ...(shape === "direct_native" ? { remainOnExit: null } : {}) });
+      const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+      expect(result).toMatchObject({ ok: true, outcome: "restarted_account_unverified", paneShape: shape });
+      expect(w.proofHomes).toEqual([HOME]);
+    }
   });
 
   it("native_unknown when the resumed process cannot be proven to be the conversation", async () => {
