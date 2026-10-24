@@ -12,7 +12,7 @@ import { ProjectionManifestStore } from "./projection-manifest-store.js";
 import { isKeptPluginSkill, reconcileSkillLoadout, type SkillLoadout } from "./skill-catalog.js";
 import { reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import { ensureSeatSkillPlugin, seatCatalogKeptNote, seatSkillLocation, seatSkillPaths, writeSeatSkillCatalog, type SeatSkillPaths } from "./seat-skill-storage.js";
-import { seatSkillsPointerStartupFile } from "./rigspec-instantiator.js";
+import { seatSkillsPointerStartupFile } from "./seat-skills-pointer.js";
 import { readSeatEffort } from "./seat-effort.js";
 import type { ClaudeManagedBlockFile } from "./managed-blocks.js";
 
