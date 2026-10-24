@@ -156,13 +156,15 @@ describe("request-local proof-policy reuse", () => {
 describe("watch-local proof-policy reuse", () => {
   function observe(missions: string) {
     vi.useFakeTimers();
-    let changed!: () => void;
-    vi.spyOn(fs, "watch").mockImplementation(((_root: unknown, _options: unknown, listener: () => void) => {
-      changed = listener;
+    // Each watched directory's listener, by path: "a change" is delivered by the missions root's own watch.
+    const listeners = new Map<string, () => void>();
+    vi.spyOn(fs, "watch").mockImplementation(((root: string, _options: unknown, listener: () => void) => {
+      listeners.set(root, listener);
       return { on: vi.fn(), close: vi.fn() };
-    }) as typeof fs.watch);
+    }) as unknown as typeof fs.watch);
     const invalidate = vi.fn(), emit = vi.fn();
     const watch = watchProofSources(missions, invalidate, { emit } as unknown as EventBus);
+    const changed = () => listeners.get(missions)!();
     const oracle = () => createHash("sha256").update(JSON.stringify(readProjectReadiness(missions).missions.map(m => [m.name, m.revision]))).digest("hex");
     const event = () => {
       const previous = watch.observation().revision, calls = invalidate.mock.calls.length;
@@ -267,5 +269,68 @@ describe("watch-local proof-policy reuse", () => {
       f.write(evidence, "accepted observation"); o.event(); expect(readSliceReadiness(dir).state).toBe("ready");
       expect(o.invalidate).toHaveBeenCalledTimes(2);
     } finally { o.watch.close(); }
+  });
+});
+
+describe("QA bounded adverse coverage at 8b236e06", () => {
+  function adverseFixture() {
+    const f = fixture(), dir = f.dirs[0]!, outside = path.join(f.root, "build", "out"), evidence = path.join(outside, "report.md");
+    f.write(evidence, "accepted observation");
+    const item = readSliceReadiness(dir).items[0]!;
+    recordJudgment(f.missions, { scope: "trial/slices/slice-0", item: item.id, verdict: "accept", reason: "observed", evidence: [evidence], expectedRevision: item.revision, expectedPrevious: null }, "judge@trial", "fixture");
+    vi.useFakeTimers();
+    const handles = new Map<string, { event: (event: string, name: string | null) => void; error?: () => void }>();
+    vi.spyOn(fs, "watch").mockImplementation(((root: string, _options: unknown, listener: (event: string, name: string | null) => void) => {
+      const h = { event: listener, error: undefined as (() => void) | undefined }; handles.set(root, h);
+      return { on: (_kind: string, cb: () => void) => { h.error = cb; }, close: vi.fn() };
+    }) as unknown as typeof fs.watch);
+    const invalidate = vi.fn(), emit = vi.fn(), watch = watchProofSources(f.missions, invalidate, { emit } as unknown as EventBus);
+    const oracle = () => createHash("sha256").update(JSON.stringify(readProjectReadiness(f.missions).missions.map(m => [m.name, m.revision]))).digest("hex");
+    return { f, dir, outside, evidence, handles, watch, oracle, invalidate, emit };
+  }
+  it("QA retains unavailable after an async required-handle error and another valid event unless coverage is replaced", () => {
+    const t = adverseFixture();
+    try {
+      expect(t.watch.observation()).toEqual({ state: "watching", revision: t.oracle() });
+      const failed = t.handles.get(t.outside)!; failed.error!();
+      expect(t.watch.observation().state).toBe("unavailable");
+      t.f.write(t.evidence, "changed observation");
+      t.handles.get(t.f.missions)!.event("change", "trial/slices/slice-0/SPEC.md"); vi.advanceTimersByTime(50);
+      expect(readSliceReadiness(t.dir).state).toBe("unknown");
+      expect(t.watch.observation().revision).toBe(t.oracle());
+      // A fresh semantic read is not repaired notification coverage for the errored, unreplaced handle.
+      expect(t.watch.observation().state).toBe("unavailable");
+    } finally { t.watch.close(); }
+  });
+  it("rebinds a replaced evidence parent when its structural parent reports a change without a filename", () => {
+    const t = adverseFixture();
+    try {
+      const opened = () => vi.mocked(fs.watch).mock.calls.filter(([root]) => root === t.outside).length;
+      expect(opened()).toBe(1);
+      fs.renameSync(t.outside, `${t.outside}.old`); t.f.write(t.evidence, "changed observation");
+      // The platform names nothing: only the structural parent of the replaced directory reports a change.
+      t.handles.get(path.dirname(t.outside))!.event("rename", null); vi.advanceTimersByTime(50);
+      expect(readSliceReadiness(t.dir).state).toBe("unknown");
+      expect(t.watch.observation().revision).toBe(t.oracle());
+      // The old same-path handle cannot certify coverage: it is replaced, or the sources are reported unobserved.
+      expect(opened() === 2 || t.watch.observation().state === "unavailable").toBe(true);
+    } finally { t.watch.close(); }
+  });
+  it("QA observes replacement of an external evidence parent or honestly reports unavailable", () => {
+    const t = adverseFixture();
+    try {
+      const previous = t.watch.observation().revision;
+      expect(readSliceReadiness(t.dir).state).toBe("ready");
+      fs.renameSync(t.outside, `${t.outside}.old`); t.f.write(t.evidence, "changed observation");
+      // Directory replacement is visible at structural parents, not as a leaf event on the old directory inode.
+      for (const [root, h] of t.handles) {
+        if (root === path.dirname(t.outside)) h.event("rename", path.basename(t.outside));
+        if (root === t.f.root) h.event("rename", "build");
+      }
+      vi.advanceTimersByTime(50);
+      expect(readSliceReadiness(t.dir).state).toBe("unknown");
+      expect(t.oracle()).not.toBe(previous);
+      expect(t.watch.observation().state === "unavailable" || t.watch.observation().revision === t.oracle()).toBe(true);
+    } finally { t.watch.close(); }
   });
 });

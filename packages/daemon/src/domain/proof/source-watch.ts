@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { createHash } from "node:crypto";
 import type { EventBus } from "../event-bus.js";
 import type { ScopeFsDeps } from "../scope/scope-view-projection.js";
-import { createProofPolicyRead, proofFs, readProjectReadiness } from "./judgments.js";
+import { createProofPolicyRead, proofFs, readProjectReadiness, resolveProjectRoot } from "./judgments.js";
 
 export interface ProofSourceWatch {
   close(): void;
@@ -16,22 +16,32 @@ export function proofSourceObservation(c: { get: (key: never) => unknown }) {
 /** A needed watch could not be attached: the sources are not observed (distinct from an input that can't be read). */
 class WatchFailure extends Error {}
 
-/** Per directory outside the missions root, the entry names a readiness evaluation read there. */
+/** Per directory outside the missions root, the entry names that matter there. */
 type Shallow = Map<string, Set<string>>;
 
+const within = (p: string, root: string) => p === root || p.startsWith(root + path.sep);
+function add(out: Shallow, dir: string, name: string) {
+  const names = out.get(dir) ?? new Set<string>();
+  names.add(name);
+  out.set(dir, names);
+}
+
 /** Where each path the evaluation read outside the missions root is observed: its parent, shallow, filtered to its
- *  name; for a missing parent, the nearest existing ancestor, filtered to the next segment toward it. */
-function shallowWatches(missionsRoot: string, read: Iterable<string>): Shallow {
+ *  name (for a missing parent, the nearest existing ancestor, filtered to the next segment toward it). Every watched
+ *  directory, the missions root included, is also anchored at each ancestor up to `top`, filtered to the next segment,
+ *  so a replaced or re-pointed directory on the way is seen and its watch rebound. */
+function shallowWatches(missionsRoot: string, top: string, read: Iterable<string>): Shallow {
   const out: Shallow = new Map();
   for (const file of read) {
     const target = path.resolve(file);
-    if (target === missionsRoot || target.startsWith(missionsRoot + path.sep)) continue;
+    if (within(target, missionsRoot)) continue;
     let child = target, dir = path.dirname(target);
     while (dir !== child && !proofFs.exists(dir)) { child = dir; dir = path.dirname(dir); }
     if (dir === child) continue;
-    const names = out.get(dir) ?? new Set<string>();
-    names.add(path.basename(child));
-    out.set(dir, names);
+    add(out, dir, path.basename(child));
+  }
+  for (const watched of [...out.keys(), missionsRoot]) {
+    for (let p = watched; within(p, top) && p !== top; p = path.dirname(p)) add(out, path.dirname(p), path.basename(p));
   }
   return out;
 }
@@ -44,6 +54,9 @@ function shallowWatches(missionsRoot: string, read: Iterable<string>): Shallow {
  */
 export function watchProofSources(missionsRoot: string, invalidate: () => void, bus: EventBus): ProofSourceWatch {
   missionsRoot = path.resolve(missionsRoot);
+  let projectRoot = path.dirname(missionsRoot);
+  try { projectRoot = resolveProjectRoot(missionsRoot) ?? projectRoot; } catch { /* Legacy roots keep the missions root's parent. */ }
+  const top = path.dirname(path.resolve(projectRoot));
   // ponytail: bounded local workspaces use a full semantic read after a file burst.
   // Keep this workload measured; subtree indexing is warranted only when that bound is exceeded.
   const basis = () => {
@@ -57,36 +70,51 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
       isDirectory: (p) => proofFs.isDirectory(note(p)),
     };
     const hash = createHash("sha256").update(JSON.stringify(readProjectReadiness(missionsRoot, createProofPolicyRead(), undefined, io).missions.map(m => [m.name, m.revision]))).digest("hex");
-    return { hash, watches: shallowWatches(missionsRoot, read) };
+    return { hash, watches: shallowWatches(missionsRoot, top, read) };
   };
-  let closed = false, covered = false, readable = false;
+  // failed latches for this instance: a watcher that errored is not trusted to be replaced by a later read.
+  let closed = false, failed = false, covered = false, readable = false;
   let revision = "unavailable", timer: NodeJS.Timeout | undefined;
   let wanted: Shallow = new Map();
   const shallow = new Map<string, fs.FSWatcher>();
   let recursive: fs.FSWatcher | undefined;
   const notify = (next: string) => { try { bus.emit({ type: "proof.sources_changed", scope: missionsRoot, revision: next }); } catch { /* Quiet refresh remains the repair path. */ } };
+  /** A directory at or below `changed` may have been replaced: its watches are dropped, to be reattached by path. */
+  const stale = (changed: string) => {
+    for (const [dir, watcher] of shallow) if (within(dir, changed)) { watcher.close(); shallow.delete(dir); }
+    if (recursive && within(missionsRoot, changed)) { recursive.close(); recursive = undefined; }
+  };
   const onEvent = (dir: string | null) => (_event: string, filename: string | Buffer | null) => {
     if (closed) return;
-    // No filename (null, or none given) means "something here changed": re-read rather than guess.
-    if (dir !== null && filename != null && !wanted.get(dir)?.has(filename.toString())) return;
+    if (dir !== null) {
+      // No filename (null, or none given): anything here may have been replaced, so every watch at or below this
+      // directory is rebound by path on the next read (the recursive root too, if it lies below).
+      if (filename == null) stale(dir);
+      else if (!wanted.get(dir)?.has(filename.toString())) return;
+      else stale(path.join(dir, filename.toString()));
+    }
     schedule();
   };
   const onError = () => {
     if (closed) return;
-    covered = false; revision = "unavailable";
+    failed = true; covered = false; revision = "unavailable";
     invalidate(); notify("unavailable");
   };
-  /** Attach watches for directories newly needed, then release ones no longer needed (new coverage first).
-   *  Returns whether any were added. */
+  const watchDir = (dir: string, recursiveWatch: boolean) => {
+    try {
+      const watcher = fs.watch(dir, { recursive: recursiveWatch, persistent: false }, onEvent(recursiveWatch ? null : dir));
+      watcher.on("error", onError);
+      return watcher;
+    } catch (e) { throw new WatchFailure(`${dir}: ${(e as Error).message}`); }
+  };
+  /** Attach watches for directories newly needed (the recursive root too, if it was dropped), then release ones no
+   *  longer needed (new coverage first). Returns whether anything was attached. */
   const resubscribe = (next: Shallow): boolean => {
     let added = false;
+    if (!recursive) { recursive = watchDir(missionsRoot, true); added = true; }
     for (const dir of next.keys()) {
       if (shallow.has(dir)) continue;
-      let watcher: fs.FSWatcher;
-      try { watcher = fs.watch(dir, { recursive: false, persistent: false }, onEvent(dir)); }
-      catch (e) { throw new WatchFailure(`${dir}: ${(e as Error).message}`); }
-      watcher.on("error", onError);
-      shallow.set(dir, watcher);
+      shallow.set(dir, watchDir(dir, false));
       added = true;
     }
     wanted = next;
@@ -94,13 +122,17 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
     return added;
   };
   /** Read the sources and keep the subscriptions in step with what was read, even when the result is unchanged.
-   *  After attaching new watches it reads again, so a change between the read and the watch is not missed. */
+   *  Coverage is certified only by a read whose every dependency was already watched before it; if the dependencies
+   *  keep moving past a small budget, the sources are reported unobserved rather than read forever. */
   const evaluate = (): string => {
     let read = basis();
-    for (let i = 0; i < 2 && resubscribe(read.watches); i++) read = basis();
-    covered = true;
-    return read.hash;
+    for (let i = 0; ; i++) {
+      if (!resubscribe(read.watches)) { covered = true; return read.hash; }
+      if (i === 2) { covered = false; return read.hash; }
+      read = basis();
+    }
   };
+  const observed = () => !closed && !failed && covered && readable;
   const schedule = () => {
     if (timer || closed) return;
     timer = setTimeout(() => {
@@ -125,8 +157,7 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
     timer.unref();
   };
   try {
-    recursive = fs.watch(missionsRoot, { recursive: true, persistent: false }, onEvent(null));
-    recursive.on("error", onError);
+    recursive = watchDir(missionsRoot, true);
     try { revision = evaluate(); readable = true; } catch (e) {
       if (e instanceof WatchFailure) throw e;
       // Direct reads name unavailable inputs; watching may recover them.
@@ -140,7 +171,7 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
     return { close() {}, observation: () => ({ state: "unavailable", revision }) };
   }
   return {
-    observation: () => ({ state: !closed && covered && readable ? "watching" : "unavailable", revision }),
+    observation: () => ({ state: observed() ? "watching" : "unavailable", revision }),
     close: () => {
       closed = true;
       if (timer) clearTimeout(timer);
