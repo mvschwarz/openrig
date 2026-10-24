@@ -11,7 +11,7 @@ describe("restore-check Claude activity-hook contract", () => {
       readFile: (file) => readFileSync(file, "utf-8"),
     }, manifestPath).map(({ event }) => event);
 
-    expect(events).toEqual(["SessionStart", "UserPromptSubmit", "Stop", "Notification"]);
+    expect(events).toEqual(["SessionStart", "UserPromptSubmit", "Stop", "StopFailure", "Notification"]);
   });
 
   it("does not claim hook readiness when the canonical manifest is unavailable", () => {

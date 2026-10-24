@@ -352,7 +352,7 @@ describe("openrig-core plugin — hooks (HG-2.6 + HG-2.7)", () => {
       // OPR.0.4.1.09: PreCompact added so the PRODUCT plugin owns the marker WRITER
       // (precompact-hook.mjs generates the restore packet + writes restore-pending/<seat>.json
       // on PreCompact), instead of depending on the drift-prone host skill copy.
-      "Notification", "PostCompact", "PreCompact", "SessionStart", "Stop", "UserPromptSubmit",
+      "Notification", "PostCompact", "PreCompact", "SessionStart", "Stop", "StopFailure", "UserPromptSubmit",
     ]);
   });
 

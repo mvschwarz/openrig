@@ -1,4 +1,5 @@
 import { physicalSessionName } from "./session-registry.js";
+import { isClaudeRateLimitHook } from "./provider/claude-interruption.js";
 import type Database from "better-sqlite3";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity, PersistedEvent } from "./types.js";
@@ -444,7 +445,8 @@ function normalizeHookActivity(input: {
     normalizedReason = "permission_prompt";
   } else if (rawEvent === "PermissionPromptCleared") {
     normalizedReason = "permission_prompt_cleared";
-  } else if (rawEvent === "at_limit") {
+  } else if (rawEvent === "at_limit"
+    || (runtime === input.seatRuntime && isClaudeRateLimitHook(runtime, rawEvent, rawSubtype))) {
     normalizedReason = "usage_limit";
   } else if (rawEvent === "Notification") {
     if (state === "unknown") normalizedReason = rawSubtype ? reason : "notification";

@@ -67,3 +67,34 @@ directory: its timestamp should advance and its `session_id` should match the
 current Claude session. A visible custom status line alone does not verify
 collection or end-to-end adoption/handover recovery. The wrapper above suppresses
 collector errors; remove its stderr redirection temporarily when diagnosing it.
+
+## Claude usage-limit detection
+
+The status line supplies subscription usage windows and their reset timestamps.
+OpenRig also registers Claude's [`StopFailure` hook](https://code.claude.com/docs/en/hooks#stopfailure),
+available since Claude Code 2.1.78. Its exact `error: "rate_limit"` value reports a
+provider interruption even when no status line window is available. This path
+requires the updated OpenRig hook configuration and the current seat's runtime
+and occupant generation. Unknown identity or an expired event cannot trigger a
+usage-limit pause; a later hook supersedes the event, which expires after five
+minutes in any case.
+
+The event carries no usage percentage, account identity or reset timestamp.
+It marks the Claude provider pool as limited and preserves a current
+`agentActivity.reason` of `usage_limit` over a cached idle reading. It does not
+count as a request for human input; a newer permission prompt still takes
+precedence in the seat's activity display. Conflicting seat windows retain the
+existing `explicit_unknown` host diagnosis.
+
+Pending work handled by the wake ladder uses the existing local Claude pool
+(the one-account-per-host assumption). An exhausted status line window with a
+known reset supplies the timer. Otherwise a typed failure uses
+`queue.wake_retry_interval_seconds` (default 300) from the event time, plus the
+existing wake jitter, and records `config-fallback`. That is a retry time, not a
+claim that the provider's quota will reset then. The timer releases the shared
+blocker once and retains the existing durable wake delivery behavior.
+
+Authentication, billing and overloaded errors are not classified as usage
+limits. Claude limit banners are not scraped, and older runtimes or failures
+that do not emit this hook still depend on status line data. Without either
+source, provider usage remains unknown.

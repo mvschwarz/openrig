@@ -13,6 +13,7 @@ import type { RuntimeAdapter } from "./runtime-adapter.js";
 import type { ContextUsageStore } from "./context-usage-store.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import type { AgentActivityStore } from "./agent-activity-store.js";
+import { isClaudeRateLimitHook } from "./provider/claude-interruption.js";
 import type { SeatActivityService } from "./seat-activity-service.js";
 import { deriveDisplayActivity, type ArbitratedSeatState, type EvidenceRungId } from "./activity-taxonomy.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
@@ -1551,7 +1552,7 @@ export async function attachAgentActivity(
       };
     }
 
-    // #763: a typed provider-interruption row (at_limit) is positive evidence
+    // A typed provider-interruption row (Codex at_limit or Claude StopFailure/rate_limit) is positive evidence
     // even though its state is unknown by construction (it must never count
     // as waiting-on-a-person). Deliver it instead of the cached pane reading
     // so a limited seat shows the limit, not idle — but only while current.
@@ -1559,7 +1560,11 @@ export async function attachAgentActivity(
     // Only a strictly newer, current attention observation outranks it.
     // A demoted row (aged out or generation-mismatched) falls through to the
     // structural reading like any other stale hook.
-    if (hookActivity?.rawEvent === "at_limit" && hookActivity.stale !== true && !(
+    if (hookActivity && (
+      hookActivity.rawEvent === "at_limit"
+      || (hookActivity.runtime === entry.runtime
+        && isClaudeRateLimitHook(hookActivity.runtime, hookActivity.rawEvent, hookActivity.rawSubtype))
+    ) && hookActivity.stale !== true && !(
       structural?.state === "attention" &&
       Date.parse(structural.observedAt) > Date.parse(hookActivity.eventAt ?? "")
     )) {

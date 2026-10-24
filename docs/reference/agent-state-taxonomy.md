@@ -41,6 +41,13 @@ state. Attention/alarm values likewise stay in their own machinery (`attentionCo
 Both herdr and omnigent converged on this exclusion, with warning comments on the
 collision in both codebases.
 
+The legacy `agentActivity` field distinguishes a typed provider interruption from
+a request for a person: fresh Codex `at_limit` and Claude `StopFailure/rate_limit`
+events carry `state: unknown` and `reason: usage_limit`, never a `needs_input`
+hook. A permission prompt can independently supply human-input evidence. See
+[Claude usage-limit detection](claude-status-line.md#claude-usage-limit-detection)
+for the separate provider signal and queue timer.
+
 ### Per-seat attention in the node inventory
 
 `rig ps --nodes` carries the daemon's `needsAttention` result, using the same predicate

@@ -133,7 +133,9 @@ issue's current status; a similar symptom alone is not a diagnosis.
 
 - Claude seats reported as needing attention after a restore: [#86](https://github.com/mvschwarz/openrig/issues/86),
   [#273](https://github.com/mvschwarz/openrig/issues/273).
-- Claude usage limits may not be detected: [#99](https://github.com/mvschwarz/openrig/issues/99).
+- Claude usage limits may not be detected when neither a status line window nor a current
+  `StopFailure/rate_limit` hook is available: [#99](https://github.com/mvschwarz/openrig/issues/99).
+  See [Claude usage-limit detection](claude-status-line.md#claude-usage-limit-detection) for the inputs and retry behavior.
 - Codex prompt variants not recognised as idle: [#79](https://github.com/mvschwarz/openrig/issues/79).
 - Codex asks about hook trust at first launch: [#17](https://github.com/mvschwarz/openrig/issues/17), not reproduced
   by the team.

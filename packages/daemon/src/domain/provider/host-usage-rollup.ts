@@ -100,11 +100,12 @@ export function rollupHostUsage(input: HostUsageRollupInput): HostUsageRow[] {
   return rows;
 }
 
-// ——— Claude: the C3 seat-keyed statusline lane (meter rows + explicit-unknown rows) ———
+// ——— Claude: seat-keyed statusline readings and typed provider failures ———
 
 function rollupClaude(input: HostUsageRollupInput): HostUsageRow | null {
   const lane = input.signals.filter((s) => s.provider === "claude");
   if (lane.length === 0) return null; // no claude deployment presence → no row
+  const freshAtLimit = freshAtLimitSignals(lane, input.now);
 
   const meterRows = lane.filter(
     (s) => s.sourceClass === "provider_statusline" && typeof s.usedPercent === "number",
@@ -130,6 +131,7 @@ function rollupClaude(input: HostUsageRollupInput): HostUsageRow | null {
   };
 
   if (meterRows.length === 0) {
+    if (freshAtLimit.length > 0) return { ...base, state: "limited" };
     // Only explicit-unknown seat rows (absent cache / pre-first-response / api-key):
     // the host state is honestly unknown, carrying the lane's own reason.
     const reason = lane.find((s) => s.unknownReason)?.unknownReason ?? "no_usable_claude_usage_rows";
@@ -187,21 +189,19 @@ function rollupClaude(input: HostUsageRollupInput): HostUsageRow | null {
       : undefined;
     return { ...base, state: "limited", ...(resetsAt !== undefined ? { resetsAt } : {}) };
   }
+  // A failure proves interruption even when an earlier meter was below 100%; it does not
+  // identify a window or its reset. Preserve conflicting-window handling above this branch.
+  if (freshAtLimit.length > 0) return { ...base, state: "limited" };
   if (maxUsed >= NEARING_THRESHOLD_PERCENT) return { ...base, state: "nearing" };
   return { ...base, state: "ok" };
 }
 
-// ——— Codex: the C4 reactive lane (exhaustion evidence only — no meter until C2) ———
-
-function rollupCodex(input: HostUsageRollupInput): HostUsageRow | null {
-  const lane = input.signals.filter((s) => s.provider === "codex");
-  if (lane.length === 0 && !input.codexProfilesPresent) return null; // no deployment presence
-
-  const nowMs = Date.parse(input.now);
+function freshAtLimitSignals(lane: ProviderSignal[], now: string): ProviderSignal[] {
+  const nowMs = Date.parse(now);
   // At-limit exhaustion evidence = a reactive_error event row the C4 tap marked as an
   // actionable switch trigger (at_limit → allow_switch_decision; stream/stop errors are
   // advisory and are NOT usage evidence). Freshness is inclusive-expiry (BR-2 class).
-  const freshAtLimit = lane.filter(
+  return lane.filter(
     (s) =>
       s.sourceClass === "provider_event" &&
       s.authority === "reactive_error" &&
@@ -211,6 +211,14 @@ function rollupCodex(input: HostUsageRollupInput): HostUsageRow | null {
       Number.isFinite(nowMs) &&
       nowMs < Date.parse(s.staleAfter),
   );
+}
+
+// ——— Codex: the C4 reactive lane (exhaustion evidence only — no meter until C2) ———
+
+function rollupCodex(input: HostUsageRollupInput): HostUsageRow | null {
+  const lane = input.signals.filter((s) => s.provider === "codex");
+  if (lane.length === 0 && !input.codexProfilesPresent) return null; // no deployment presence
+  const freshAtLimit = freshAtLimitSignals(lane, input.now);
 
   const base: Omit<HostUsageRow, "state"> = {
     host: "local",

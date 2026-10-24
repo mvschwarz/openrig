@@ -212,20 +212,19 @@ export function claudeStatuslineSignals(input: ClaudeSignalInput): ProviderSigna
 
 export type ReactiveEventKind = "at_limit" | "stream_failure" | "stop_error";
 
-export interface ReactiveEventInput {
-  provider: ProviderKind;
-  accountRef: string;
+export type ReactiveEventInput = {
   kind: ReactiveEventKind;
   asOf: string;
   // Required: a reactive event without a freshness bound could never pass BR-2, and a momentary
   // event must always carry when it expires. Staleness itself stays the shared predicate's job.
   staleAfter: string;
-}
+} & ({ provider: ProviderKind; accountRef: string; seatSession?: never }
+  | { provider: "claude"; seatSession: string; accountRef?: never });
 
 export function reactiveEventSignal(input: ReactiveEventInput): ProviderSignal {
   return {
     provider: input.provider,
-    accountRef: input.accountRef,
+    ...(input.accountRef !== undefined ? { accountRef: input.accountRef } : { seatSession: input.seatSession }),
     sourceClass: "provider_event",
     authority: "reactive_error",
     asOf: input.asOf,
@@ -291,11 +290,12 @@ export function deriveUsageLimitPools(input: {
     const statedResets = pool.signals
       .map((signal) => Date.parse(signal.resetsAt ?? ""))
       .filter((value) => Number.isFinite(value) && value > nowMs);
-    const fallbackResets = pool.provider === "codex"
-      ? pool.signals
-          .map((signal) => Date.parse(signal.asOf) + input.fallbackSeconds * 1000)
-          .filter((value) => Number.isFinite(value) && value > nowMs)
-      : [];
+    // A typed Claude failure has no reset timestamp. Use the existing bounded retry interval,
+    // as for Codex events; a Claude meter missing its reset still cannot invent one.
+    const fallbackResets = pool.signals
+      .filter((signal) => pool.provider === "codex" || (signal.sourceClass === "provider_event" && signal.authority === "reactive_error"))
+      .map((signal) => Date.parse(signal.asOf) + input.fallbackSeconds * 1000)
+      .filter((value) => Number.isFinite(value) && value > nowMs);
     const expiryMs = statedResets.length > 0
       ? Math.max(...statedResets)
       : fallbackResets.length > 0

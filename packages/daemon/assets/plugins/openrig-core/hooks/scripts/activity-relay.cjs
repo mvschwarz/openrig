@@ -63,15 +63,19 @@ function buildOpenRigPayload(providerPayload, env = process.env, now = () => new
 
   if ((!sessionName && !nodeId) || !runtime || !hookEvent) return null;
 
-  const subtype = firstString(
-    providerPayload.subtype,
-    providerPayload.notification_type,
-    providerPayload.notificationType,
-    providerPayload.tool_name,
-    providerPayload.toolName,
-    providerPayload.source,
-    providerPayload.matcher
-  );
+  // StopFailure has a typed error field. Never infer it from rendered error text,
+  // a tool name, or another event's subtype; those are not provider failures.
+  const subtype = runtime === "claude-code" && hookEvent === "StopFailure"
+    ? firstString(providerPayload.error)
+    : firstString(
+      providerPayload.subtype,
+      providerPayload.notification_type,
+      providerPayload.notificationType,
+      providerPayload.tool_name,
+      providerPayload.toolName,
+      providerPayload.source,
+      providerPayload.matcher
+    );
 
   return {
     sessionName,
