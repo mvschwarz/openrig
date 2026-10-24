@@ -2,6 +2,9 @@ import { Hono } from "hono";
 import { CAPTURE_INPUT_BOX_DEADLINE_MS, type SessionTransport, type TargetSpec } from "../domain/session-transport.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import { requireSenderIdentity, transportSenderSession } from "./require-sender-identity.js";
+import { OCCUPANT_GENERATION_HEADER, runtimeSwitchCustodyRefusal } from "./runtime-switch-custody.js";
+import { runtimeSwitchCommittedSince, runtimeSwitchSummary } from "../domain/seat-runtime-switch-service.js";
+import type Database from "better-sqlite3";
 import type { OutboxHandler } from "../domain/outbox-handler.js";
 import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
 
@@ -41,6 +44,8 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       submitOnly?: boolean;
       expectedStagedText?: string;
       expectedStagedLineCount?: number;
+      /** The unwrapped text; typed instead of `text` when the recipient is a terminal seat. */
+      exactText?: string;
       urgent?: boolean;
     }>();
 
@@ -93,6 +98,10 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     if (body.typeWithoutChecking && (!body.dangerouslyInteract || !body.reason?.trim())) return c.json({ ok: false, reason: "invalid_dangerously_interact",
       error: "--type-without-checking requires --dangerously-interact and --reason. No text was sent." }, 400);
     const derivedActor = transportSenderSession(c) ?? null;
+    // Slice 16: a runtime switch's own predecessor or not-yet-committed successor doesn't send as the seat.
+    const db = c.get("db" as never) as Database.Database;
+    const switchHeld = runtimeSwitchCustodyRefusal(db, derivedActor, c.req.header(OCCUPANT_GENERATION_HEADER));
+    if (switchHeld) return c.json(switchHeld.body, switchHeld.status);
 
     // Check for ambiguity first
     const resolved = await transport.resolveSessions({ session: body.session });
@@ -100,6 +109,18 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       const status = resolved.code === "ambiguous" ? 409 : 404;
       return c.json({ ok: false, error: resolved.error }, status);
     }
+
+    const exactText = typeof body.exactText === "string" ? body.exactText : undefined;
+    // Slice 16: a seat that is switching runtime takes no input until its switch ends. Rather than wait behind the
+    // switch's lease (its whole confirmation window), the send is held at once, like any held send, and says why.
+    const target = resolved.sessions.length === 1 ? resolved.sessions[0]!.sessionName : null;
+    const switching = target ? runtimeSwitchSummary(db, { session: target }) : null;
+    if (target && switching && (switching.phase === "preparing" || switching.phase === "confirmed")) {
+      return c.json({ ok: true, sessionName: target, outcome: "retained", sent: false, verified: false, reason: "runtime_switch_in_progress",
+        runtimeSwitch: switching,
+        warning: `${target} is switching runtime (${switching.from} -> ${switching.to}, switch ${switching.id}) until about ${switching.deadlineAt}. Send it again after the switch; it then reaches whoever holds the seat.` });
+    }
+    const sendStartedAt = new Date().toISOString();
 
     const result = await transport.send(body.session, body.text ?? "", {
       deliveryId: body.deliveryId,
@@ -118,6 +139,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       submitOnly: body.submitOnly,
       expectedStagedText: body.expectedStagedText,
       expectedStagedLineCount: body.expectedStagedLineCount,
+      exactText,
       // The caller's request: if it goes away while the send still waits, nothing is typed later.
       signal: c.req.raw.signal,
     });
@@ -164,6 +186,12 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
         pane_in_mode: 409,
       };
       const status = (statusMap[result.reason ?? ""] ?? 500) as 400 | 404 | 409 | 500 | 502 | 503;
+      // A send that waited while its seat switched runtime: say so, and that it needs sending again.
+      const moved = result.reason === "guard_target_changed" && result.sent === false && target ? runtimeSwitchCommittedSince(db, target, sendStartedAt) : null;
+      if (moved) {
+        Object.assign(result, { runtimeSwitch: moved,
+          error: `${result.error ?? "The seat changed while this send waited."} ${target} moved to ${moved.to} (runtime switch ${moved.id}) while this send waited, so nothing was typed. Send it again to reach its new occupant.` });
+      }
       return c.json(result, status);
     }
 
@@ -183,7 +211,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
           const entry = outbox.record({
             senderSession: derivedActor,
             destinationSession: body.session,
-            body: body.text,
+            body: result.envelopeOmitted && exactText !== undefined ? exactText : body.text,
             identityProvenance: "transport:v1",
           });
           // The input was dispatched successfully; mark its audit row as broadcast does.
@@ -292,6 +320,9 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     if (body.typeWithoutChecking && (!body.dangerouslyInteract || !body.reason?.trim())) return c.json({ ok: false, reason: "invalid_dangerously_interact",
       error: "--type-without-checking requires --dangerously-interact and --reason. No text was sent." }, 400);
     const derivedActor = transportSenderSession(c) ?? null;
+    // Slice 16: a runtime switch's own predecessor or not-yet-committed successor doesn't send as the seat.
+    const switchHeld = runtimeSwitchCustodyRefusal(c.get("db" as never) as Database.Database, derivedActor, c.req.header(OCCUPANT_GENERATION_HEADER));
+    if (switchHeld) return c.json(switchHeld.body, switchHeld.status);
 
     // P21 I4 (orch ruling from specimen 5 — the false "From: pm-lead" the incident acted upon): the
     // From: line rendered into every recipient's terminal MUST DERIVE from the transport identity, never

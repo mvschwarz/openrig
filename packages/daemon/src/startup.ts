@@ -320,8 +320,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // reader. The resolved default remains the writer/network-reader/session root.
   const dbPath = opts?.dbPath ?? ":memory:";
   const seatDbPath = dbPath === ":memory:" ? dbPath : nodePath.resolve(dbPath);
+  const allowDbConflict = process.env.OPENRIG_ALLOW_DB_CONFLICT === "1";
+  delete process.env.OPENRIG_ALLOW_DB_CONFLICT; // this boot only; never pass the go-ahead to seats
   const databaseWarnings = await daemonDatabaseWarnings(dbPath, OPENRIG_HOME,
-    process.env.OPENRIG_DB === dbPath ? "OPENRIG_DB" : process.env.RIGGED_DB === dbPath ? "RIGGED_DB" : undefined);
+    process.env.OPENRIG_DB === dbPath ? "OPENRIG_DB" : process.env.RIGGED_DB === dbPath ? "RIGGED_DB" : undefined,
+    { conflictPolicy: new ContextPackSettingsStore().resolveOne("daemon.db_conflict").value as string,
+      allowConflict: allowDbConflict });
   for (const warning of databaseWarnings) console.warn(`Warning: ${warning}`);
   const db = createDb(dbPath);
   migrate(db, ALL_MIGRATIONS);
@@ -732,13 +736,24 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const rigs = rigRepo.listRigs();
   let reconcileChecked = 0;
   let reconcileDetached = 0;
+  let reconcileUnseen = 0;
   let reconcileErrors = 0;
   for (const rig of rigs) {
     try {
       const result = await reconciler.reconcile(rig.id);
       reconcileChecked += result.checked;
       reconcileDetached += result.detached;
+      reconcileUnseen += result.unseen.length;
       reconcileErrors += result.errors.length;
+      for (const u of result.unseen) {
+        try {
+          // eslint-disable-next-line no-console
+          console.warn(`startup reconcile: ${u.sessionName} isn't on this daemon's tmux server, but its last observed process ${u.pid} is still running`
+            + `${u.parent ? ` (parent process ${u.parent.pid}: ${u.parent.command.slice(0, 160)})` : ""}, so it was left as it was: not marked`
+            + ` detached and not relaunched. The daemon is probably using a different tmux server from its seats (it didn't inherit their`
+            + ` TMUX). Restart the daemon from inside the seats' tmux server, or with TMUX set to it.`);
+        } catch { /* logging must never throw */ }
+      }
       for (const e of result.errors) {
         try {
           // eslint-disable-next-line no-console
@@ -755,7 +770,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   }
   try {
     // eslint-disable-next-line no-console
-    console.log(`startup reconcile: rigs=${rigs.length} checked=${reconcileChecked} detached=${reconcileDetached} errors=${reconcileErrors}`);
+    console.log(`startup reconcile: rigs=${rigs.length} checked=${reconcileChecked} detached=${reconcileDetached} unseen=${reconcileUnseen} errors=${reconcileErrors}`);
   } catch { /* logging must never throw */ }
 
   // Transcript rotators are process-local. Reattach them after lifecycle
@@ -1298,6 +1313,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const { SeatAttentionReconciler, attentionProbeSend } = await import("./domain/seat-attention-reconciler.js");
   const seatAttentionReconciler = new SeatAttentionReconciler({
     sessionRegistry, eventBus, agentActivityStore, db, tmux: tmuxAdapter,
+    settlePermissionPrompt: (sessionName) => seatActivityService.settlePermissionPrompt(sessionName),
     reconcileRestoreOutcome: (rigId, nodeId) => restoreOrchestrator.reconcileNodeRuntimeTruth(rigId, nodeId),
     sendVerify: attentionProbeSend(() => deps.sessionTransport),
     capture: async (session, opts) => {
@@ -2517,6 +2533,16 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     queue: queueRepoInstance,
     log: (msg) => console.warn(msg),
   });
+
+  // Slice 16 — finish any runtime switch a stop interrupted, from its durable record, before the daemon serves:
+  // before its commit the predecessor keeps the seat; after it the successor does and the predecessor is retired.
+  {
+    const { SeatRuntimeSwitchService } = await import("./domain/seat-runtime-switch-service.js");
+    const switches = new SeatRuntimeSwitchService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter,
+      queueRepo: queueRepoInstance, runtimeAdapters: runtimeAdaptersMap, sessionEnv: launchSessionEnv, runtimeSessionEnv, tmuxOptionDefaults,
+      occupantInvalidator: deps.occupantInvalidator, activityOracle: seatActivityService, openrigHome: OPENRIG_HOME });
+    for (const warning of await switches.recoverAll()) console.warn(`[runtime-switch] recovery: ${warning}`);
+  }
 
   // OPR.0.3.4.9 — periodic snapshot scheduler (crash-insurance floor).
   const { PeriodicSnapshotScheduler } = await import("./domain/periodic-snapshot-scheduler.js");

@@ -285,6 +285,10 @@ export class TerminalSessionBroker {
   async input(msg: TerminalInputMessage): Promise<void> {
     if (this.torndown) return;
     await this.enqueueInput(async () => {
+      // A caller may have queued this write while an earlier input was in
+      // flight. Drop it if the last subscriber detached before its turn;
+      // otherwise stale terminal input would reach the seat after teardown.
+      if (this.torndown) return;
       const write = async () => {
         if (msg.type === "keys") await this.tmux.sendKeys(this.sessionName, msg.keys);
         else if (msg.type === "text") await this.tmux.sendText(this.sessionName, msg.text);

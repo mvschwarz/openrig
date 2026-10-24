@@ -2676,6 +2676,107 @@ describe("SessionTransport", () => {
       expect(sendTextSpy).not.toHaveBeenCalled();
     } finally { clock.restore(); }
   });
+
+  // A terminal seat's shell runs every typed line, so it gets the exact text, never the envelope.
+  function seedTerminalSeat() {
+    const rig = rigRepo.createRig("term-rig");
+    const node = rigRepo.addNode(rig.id, "infra.ui", { role: "ui", runtime: "terminal" });
+    const session = sessionRegistry.registerSession(node.id, "infra-ui@term-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "infra-ui@term-rig" });
+  }
+  const HEREDOC = "cat <<'EOF'\nSent: as typed\nEOF";
+
+  it("send to a terminal seat types exactText exactly, with no envelope and no delivered segment", async () => {
+    seedTerminalSeat();
+    const sent: string[] = [];
+    const tmux = mockTmux({ getPaneCommand: async () => "zsh", sendText: async (_t, text) => { sent.push(text); return { ok: true }; } });
+    // The write moment is 30s after the compose stamp: an enveloped send would gain "delivered +30s".
+    const transport = createTransport(tmux, { now: () => new Date("2026-08-06T17:42:39Z") });
+
+    const result = await transport.send("infra-ui@term-rig", H_ENVELOPE, { exactText: HEREDOC, stampISO: "2026-08-06T17:42:09Z" });
+
+    expect(result.ok).toBe(true);
+    expect(result.envelopeOmitted).toBe(true);
+    expect(sent).toEqual([HEREDOC]);
+  });
+
+  it("send to an agent seat ignores exactText and keeps the envelope", async () => {
+    seedCanonicalRig();
+    const sent: string[] = [];
+    const transport = createTransport(mockTmux({ sendText: async (_t, text) => { sent.push(text); return { ok: true }; } }));
+
+    const result = await transport.send("dev-impl@my-rig", H_ENVELOPE, { exactText: "hi" });
+
+    expect(result.ok).toBe(true);
+    expect(result.envelopeOmitted).toBeUndefined();
+    expect(sent).toEqual([H_ENVELOPE]);
+  });
+
+  it("enveloped fan-out to a terminal seat and an agent seat gives each the right text", async () => {
+    seedCanonicalRig(); // dev-impl@my-rig, claude-code
+    seedTerminalSeat(); // infra-ui@term-rig, terminal
+    const sent = new Map<string, string>();
+    const tmux = mockTmux({ getPaneCommand: async () => "zsh", sendText: async (target, text) => { sent.set(target, text); return { ok: true }; } });
+    const transport = createTransport(tmux);
+
+    const result = await transport.broadcast(
+      { sessions: ["dev-impl@my-rig", "infra-ui@term-rig"] },
+      "make test",
+      { envelopeSender: "orch@my-rig", stampISO: "2026-08-06T17:42:09Z" },
+    );
+
+    expect(result.sent).toBe(2);
+    expect(sent.get("infra-ui@term-rig")).toBe("make test");
+    expect(sent.get("dev-impl@my-rig")).toContain("From: orch@my-rig");
+    expect(sent.get("dev-impl@my-rig")).toContain("make test");
+    const byName = new Map(result.results.map((r) => [r.sessionName, r]));
+    expect(byName.get("infra-ui@term-rig")?.envelopeOmitted).toBe(true);
+    expect(byName.get("dev-impl@my-rig")?.envelopeOmitted).toBeUndefined();
+  });
+
+  it("a person's send (a seat actor) to a terminal seat still gets the exact text", async () => {
+    seedTerminalSeat();
+    const sent: string[] = [];
+    const transport = createTransport(mockTmux({ getPaneCommand: async () => "zsh", sendText: async (_t, text) => { sent.push(text); return { ok: true }; } }));
+    const result = await transport.send("infra-ui@term-rig", H_ENVELOPE, { exactText: "make test", actorSession: "dev-impl@my-rig" });
+    expect(result).toMatchObject({ ok: true, envelopeOmitted: true });
+    expect(sent).toEqual(["make test"]);
+  });
+
+  it("an urgent send to a terminal seat types the exact text without the urgent line, and keeps the mark", async () => {
+    seedTerminalSeat();
+    const sent: string[] = [];
+    const transport = createTransport(mockTmux({ getPaneCommand: async () => "zsh", sendText: async (_t, text) => { sent.push(text); return { ok: true }; } }));
+    const result = await transport.send("infra-ui@term-rig", H_ENVELOPE, { exactText: "make test", actorSession: "dev-impl@my-rig", urgent: { by: "dev-impl@my-rig" } });
+    expect(result).toMatchObject({ ok: true, envelopeOmitted: true, urgent: { by: "dev-impl@my-rig" } });
+    expect(sent).toEqual(["make test"]);
+  });
+
+  it("a terminal seat known only by its composed name (binding, no session row): exact text for a person; a watchdog notice carries only its marker (with no delivery guard here, it types as given)", async () => {
+    const rig = rigRepo.createRig("term-rig");
+    const node = rigRepo.addNode(rig.id, "infra.logs", { role: "logs", runtime: "terminal" });
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "infra-logs@term-rig" });
+    const sent: string[] = [];
+    const transport = createTransport(mockTmux({ getPaneCommand: async () => "zsh", sendText: async (_t, text) => { sent.push(text); return { ok: true }; } }));
+
+    const personal = await transport.send("infra-logs@term-rig", H_ENVELOPE, { exactText: "tail -f app.log", actorSession: "dev-impl@my-rig" });
+    expect(personal).toMatchObject({ ok: true, envelopeOmitted: true });
+    expect(sent).toEqual(["tail -f app.log"]);
+
+    const notice = await transport.send("infra-logs@term-rig", "[OpenRig watchdog] a reminder", { actorSession: "watchdog@system", openrigNotice: true });
+    expect(notice).toMatchObject({ ok: true });
+    expect(sent).toEqual(["tail -f app.log", "[OpenRig watchdog] a reminder"]);
+  });
+
+  it("a person's send from a seat in a rig named system still gets the exact text", async () => {
+    seedTerminalSeat();
+    const sent: string[] = [];
+    const transport = createTransport(mockTmux({ getPaneCommand: async () => "zsh", sendText: async (_t, text) => { sent.push(text); return { ok: true }; } }));
+    const result = await transport.send("infra-ui@term-rig", H_ENVELOPE, { exactText: "make test", actorSession: "ops-member@system" });
+    expect(result).toMatchObject({ ok: true, envelopeOmitted: true });
+    expect(sent).toEqual(["make test"]);
+  });
 });
 
 // #1084/#1103 edge cases, contributed by z4cc in review (taken verbatim,

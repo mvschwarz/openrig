@@ -11,7 +11,7 @@ function summarizeSettings(store: ConfigStore): Record<ValidKey, ResolvedSetting
 }
 
 // These settings remain boot-only; capture interval/line settings reload live.
-const BOOT_ONLY_KEYS = ["daemon.port", "daemon.host", "db.path"];
+const BOOT_ONLY_KEYS = ["daemon.port", "daemon.host", "daemon.db_conflict", "db.path"];
 const BOOT_ONLY_PREFIXES = ["transcripts.enabled", "transcripts.path"];
 
 function isBootOnlyKey(key: string): boolean {

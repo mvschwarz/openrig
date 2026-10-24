@@ -25,7 +25,7 @@ const DEFAULT_EXTRA_INSTRUCTION_FILE_SUFFIX = "compaction/post-compact-extra.md"
 
 function clearEnv(): () => void {
   const keys = [
-    "OPENRIG_PORT", "OPENRIG_HOST", "OPENRIG_DB",
+    "OPENRIG_PORT", "OPENRIG_HOST", "OPENRIG_DB", "OPENRIG_DAEMON_DB_CONFLICT",
     "OPENRIG_TRANSCRIPTS_ENABLED", "OPENRIG_TRANSCRIPTS_PATH",
     "OPENRIG_TRANSCRIPTS_LINES", "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS",
     "OPENRIG_WORKSPACE_ROOT", "OPENRIG_WORKSPACE_SLICES_ROOT",
@@ -91,7 +91,7 @@ describe("SettingsStore (User Settings v0)", () => {
 
   it("SETTINGS_VALID_KEYS matches the documented settings key set", () => {
     expect([...SETTINGS_VALID_KEYS]).toEqual([
-      "daemon.port", "daemon.host",
+      "daemon.port", "daemon.host", "daemon.db_conflict",
       // OPR.0.4.6.MH1 FR-1/FR-4 — host-selection pointer + own-host name.
       "host.selected",
       "host.name",
@@ -214,6 +214,14 @@ describe("SettingsStore (User Settings v0)", () => {
     writeFileSync(configPath, "{}\n");
     process.env["OPENRIG_CONTEXT_PACKS_ROOT"] = "/legacy-env";
     expect(() => store.resolveOne("context.root")).toThrow(/OPENRIG_CONTEXT_PACKS_ROOT.*OPENRIG_CONTEXT_ROOT/i);
+  });
+
+  it("defaults database conflict handling to warn and persists the optional stop", () => {
+    const store = new SettingsStore(configPath);
+    expect(store.resolveOne("daemon.db_conflict").value).toBe("warn");
+    store.set("daemon.db_conflict", "stop");
+    expect(store.resolveOne("daemon.db_conflict").value).toBe("stop");
+    expect(() => store.set("daemon.db_conflict", "always")).toThrow(/warn or stop/);
   });
 
   it("defaults the advisor session to the kernel's advisor seat", () => {

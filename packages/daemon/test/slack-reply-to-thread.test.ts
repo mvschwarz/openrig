@@ -270,7 +270,7 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       await humanReply("1.1", "903.1");
       await vi.waitFor(() => expect(repo.getById(decision.qitemId)?.state).toBe("done"));
       await postPendingNotice(decision.qitemId);
-      const inbound = inboundRow("903.1")!;
+      const inbound = repo.getHumanAnswer(decision.qitemId, decision.destinationSession)!;
       expect(inbound).toMatchObject({ destinationSession: "author@rig", replyTo: decision.qitemId });
 
       const answer = await repo.create({ ...request, humanIntent: "update", body: "On it.", replyTo: inbound.qitemId });
@@ -294,7 +294,7 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
           actions: [{ type: "button", block_id: "or-q:q1", action_id: "or-opt:yes", value: "yes", action_ts: "910.1" }],
         },
       }) });
-      const answerId = `qitem-slack-answers-${createHash("sha256").update(decision.qitemId).digest("hex").slice(0, 20)}`;
+      const answerId = `qitem-human-answer-${createHash("sha256").update(decision.qitemId).digest("hex").slice(0, 20)}`;
       await vi.waitFor(() => expect(repo.getById(answerId)).not.toBeNull());
       await vi.waitFor(() => expect(repo.getById(decision.qitemId)?.state).toBe("done"));
       const inbound = repo.getById(answerId)!;
@@ -434,7 +434,7 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       await humanReply("1.1", "905.1");
       await vi.waitFor(() => expect(repo.getById(decision.qitemId)?.state).toBe("done"));
       await postPendingNotice(decision.qitemId);
-      const inbound = inboundRow("905.1")!;
+      const inbound = repo.getHumanAnswer(decision.qitemId, decision.destinationSession)!;
       expect(inbound.replyTo).toBe(decision.qitemId);
 
       repo.update({ qitemId: inbound.qitemId, actorSession: "author@rig", state: "blocked", blockedOn: "human-founder@kernel", summary: "Which branch?", evidenceRef: "/proof/branches.md", transitionNote: "parked for a question" });

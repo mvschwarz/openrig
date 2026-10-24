@@ -38,6 +38,7 @@ Examples:
   // rig env status <rig>
   cmd
     .command("status")
+    .description("Show the state of a rig's services")
     .argument("<rig>", "Rig name or ID")
     .option("--json", "JSON output")
     .action(async (rig: string, opts: { json?: boolean }) => {
@@ -94,6 +95,7 @@ Examples:
   // rig env logs <rig> [service]
   cmd
     .command("logs")
+    .description("Print recent logs from a rig's services, or from one service")
     .argument("<rig>", "Rig name or ID")
     .argument("[service]", "Specific service name")
     .option("--tail <n>", "Number of lines", "100")
@@ -126,6 +128,7 @@ Examples:
   // rig env down <rig> [--volumes]
   cmd
     .command("down")
+    .description("Stop a rig's services as its down_policy says; --volumes also removes volumes")
     .argument("<rig>", "Rig name or ID")
     .option("--volumes", "Also remove volumes")
     .action(async (rig: string, opts: { volumes?: boolean }) => {

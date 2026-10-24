@@ -64,7 +64,7 @@ const codexHookTrust = createRequire(import.meta.url)("../../assets/plugins/open
   codexHookHash(eventLabel: string, handler: { command: string; timeoutSec: number; matcher?: string | null; statusMessage?: string | null }): string;
 };
 
-import { listNativeProcesses, observeCodexPaneProcess, observeCodexForkProcess, verifyPaneIdleShell, type NativeProcessRow } from "../domain/native-process-lineage.js";
+import { listNativeProcesses, observeCodexPaneProcess, observeCodexForkProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type NativeProcessRow } from "../domain/native-process-lineage.js";
 import { recordSeatSkillWrite, seatPluginSkillsLossNote, seatProjectionComplete, seatSkillWriteRefusal } from "../domain/seat-skill-storage.js";
 
 // Shared by all probes of ONE launch, never reset by a delayed screen or an
@@ -951,11 +951,22 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
     const paneCommand = await this.tmux.getPaneCommand(binding.tmuxSession);
     const paneContent = await this.captureProbeScreen(binding.tmuxSession);
-    const probe = assessNativeResumeProbe({
+    let probe = assessNativeResumeProbe({
       runtime: "codex",
       paneCommand,
       paneContent,
     });
+
+    if (probe.code === "returned_to_shell" || probe.code === "awaiting_runtime") {
+      const process = await verifyCodexPaneProcess({ target: binding.tmuxSession, tmux: this.tmux as { getPanePid(target: string): Promise<number | null> },
+        listProcesses: this.listProcesses as never });
+      if (process) {
+        const currentPaneCommand = await this.tmux.getPaneCommand(binding.tmuxSession);
+        const currentPaneContent = await this.captureProbeScreen(binding.tmuxSession);
+        probe = assessNativeResumeProbe({ runtime: "codex", paneCommand: currentPaneCommand,
+          paneContent: currentPaneContent, codexProcessVerified: true });
+      }
+    }
 
     if (probe.code === "returned_to_shell") {
       const isIdleShell = await verifyPaneIdleShell({
@@ -1479,6 +1490,27 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         paneCommand,
         paneContent,
       });
+
+      if (probe.code === "returned_to_shell" || probe.code === "awaiting_runtime") {
+        const process = resumeToken
+          ? await this.beforeResumeDeadline(() => verifyCodexPaneProcess({ target: tmuxSession, tmux: this.tmux as { getPanePid(target: string): Promise<number | null> },
+            listProcesses: this.listProcesses as never }), deadline)
+          : await verifyCodexPaneProcess({ target: tmuxSession, tmux: this.tmux as { getPanePid(target: string): Promise<number | null> },
+            listProcesses: this.listProcesses as never });
+        if (process) {
+          const current = resumeToken
+            ? await this.beforeResumeDeadline(async () => ({
+              command: await this.tmux.getPaneCommand(tmuxSession),
+              content: await this.captureProbeScreen(tmuxSession),
+            }), deadline)
+            : { command: await this.tmux.getPaneCommand(tmuxSession), content: await this.captureProbeScreen(tmuxSession) };
+          if (!current) break;
+          paneCommand = current.command;
+          paneContent = current.content;
+          lastPaneContent = paneContent;
+          probe = assessNativeResumeProbe({ runtime: "codex", paneCommand, paneContent, codexProcessVerified: true });
+        }
+      }
 
       if (probe.code === "no_saved_session") {
         return {

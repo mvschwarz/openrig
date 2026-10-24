@@ -274,7 +274,10 @@ describe("UI Enhancement Pack v0 — /api/files routes", () => {
         body: JSON.stringify({ root: "workspace", path: "STEERING.md", content: "x", expectedMtime, expectedContentHash }),
       });
       expect(res.status).toBe(400);
-      expect(((await res.json()) as { error: string }).error).toBe("actor_required");
+      const err = (await res.json()) as { error: string; message: string };
+      expect(err.error).toBe("actor_required");
+      expect(err.message).toContain("no transport identity (no X-OpenRig-Session header, which the CLI sets from the seat's OPENRIG_SESSION_NAME)");
+      expect(err.message).not.toMatch(/authenticated/i);
     });
 
     it("rejects missing required fields with 400", async () => {

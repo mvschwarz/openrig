@@ -21,7 +21,7 @@ import { runWakeLadderTick, makePromptStateReader, classifyPromptAfterRefusal, q
 const databases: Database.Database[] = [];
 afterEach(() => { for (const db of databases.splice(0)) db.close(); });
 
-function fixture(runtime = "claude-code", permissionPromptReader?: (sessionName: string) => Promise<boolean | null>) {
+function fixture(runtime = "claude-code", permissionPromptReader?: (sessionName: string) => Promise<boolean | null>, pane = "unrecognized provider content") {
   const db = createFullTestDb(); databases.push(db);
   const rigRepo = new RigRepository(db), sessionRegistry = new SessionRegistry(db), bus = new EventBus(db);
   const rig = rigRepo.createRig("r1001"), node = rigRepo.addNode(rig.id, "worker.a", { role: "worker", runtime });
@@ -37,7 +37,7 @@ function fixture(runtime = "claude-code", permissionPromptReader?: (sessionName:
   const paste = vi.fn(async () => ({ ok: true as const })), enter = vi.fn(async () => ({ ok: true as const }));
   const tmux = { hasSession: async () => true, probeSession: async () => ({ state: "present" as const }),
     getPaneCommand: async () => runtime === "codex" ? "codex" : "claude", getPanePid: async () => null,
-    listPanes: async () => [], hasSessionEnv: async () => false, capturePaneContent: async () => "unrecognized provider content",
+    listPanes: async () => [], hasSessionEnv: async () => false, capturePaneContent: async () => pane,
     sendText: paste, sendKeys: enter, readPaneLastActivity: async () => now().getTime() / 1000 - 120,
   };
   const newOracle = () => new SeatActivityService({ tmux: tmux as never, defaultWindowSeconds: 3, now,
@@ -124,6 +124,19 @@ it.each([false, true])("a held Claude wake escalates to the orchestrator (activi
   await f.hook("Notification", "permission_prompt", 600_000);
   if (rebuilt) f.reconstruct(); // same durable DB and occupant, a new daemon service
   expect((await refuseAndClimb(f, rebuilt ? "unknown" : undefined)).targets).toContain("lead@r1001");
+});
+
+// #81: Claude's usage-limit dialog is a choice prompt that no hook announces, so the seat's own evidence stays unknown and
+// only the transport's refusal knows it waits. Before the fix the refused wake escalated to no one.
+it("a Claude seat at a choice prompt no hook announced: the refused wake reaches its orchestrator after one retry interval", async () => {
+  const dialog = ["You've hit your weekly limit. What do you want to do?", "❯ 1. Stop and wait for the limit to reset",
+    "  2. Switch to another account", "Enter to select · ↑/↓ to navigate · Esc to cancel"].join("\n");
+  const f = fixture("claude-code", undefined, dialog);
+  const { targets, repo } = await refuseAndClimb(f, "unknown");
+  const refusals = repo.list({ limit: 1000 }).flatMap(r => repo.listTransitions(r.qitemId))
+    .filter(t => t.transitionNote?.startsWith(REFUSED_PREFIX));
+  expect(refusals.map(t => t.transitionNote).join("\n")).toContain("(selection_prompt)");
+  expect(targets).toEqual(["lead@r1001"]);
 });
 
 it.each([false, true])("a held Codex wake escalates to the orchestrator (activity service rebuilt=%s)", async rebuilt => {

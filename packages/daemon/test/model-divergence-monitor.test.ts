@@ -396,6 +396,46 @@ describe("Claude context-window pins", () => {
   });
 });
 
+// A pinned Claude id answers as its dated snapshot: herdr-researcher@lab, pinned to claude-haiku-4-5, reported
+// claude-haiku-4-5-20251001 and was proclaimed divergent. The snapshot is the same model; a different one still diverges.
+describe("Claude snapshot pins", () => {
+  it.each([
+    ["claude-haiku-4-5", "claude-haiku-4-5-20251001"],
+    ["  Claude-Haiku-4-5 ", " CLAUDE-HAIKU-4-5-20251001 "],
+    ["claude-haiku-4-5-20251001", "claude-haiku-4-5"],
+    ["claude-sonnet-4-5[1m]", "claude-sonnet-4-5-20250929"],
+    ["fable", "claude-fable-5-1-20261001"],
+  ])("matches %s to %s without proclaiming", async (pinnedModel, model) => {
+    const { monitor, sent, recorded } = makeMonitor({
+      listPinnedSeats: () => [{ ...SEAT, runtime: "claude-code", pinnedModel }],
+      readEffectiveModel: () => ({ ok: true, model }),
+    });
+    expect(await monitor.checkOnce()).toEqual([]);
+    expect(sent).toEqual([]);
+    expect(recorded).toEqual([]);
+  });
+
+  it.each([
+    ["claude-code", "claude-haiku-4-5", "claude-sonnet-4-5-20250929"],
+    ["claude-code", "claude-haiku-4-5-20251001", "claude-haiku-4-5-20260101"],
+    ["claude-code", "claude-haiku-4", "claude-haiku-4-5-20251001"],
+    ["claude-code", "claude-haiku-4-5", "claude-haiku-4-5-20251001-extra"],
+    ["claude-code", "haiku", "claude-haiku-4-5-20251001"],
+    ["codex", "claude-haiku-4-5", "claude-haiku-4-5-20251001"],
+    ["pi", "claude-haiku-4-5", "claude-haiku-4-5-20251001"],
+    [null, "claude-haiku-4-5", "claude-haiku-4-5-20251001"],
+  ])("keeps real divergence for runtime=%s pin=%s effective=%s", async (runtime, pinnedModel, model) => {
+    const { monitor, recorded } = makeMonitor({
+      listPinnedSeats: () => [{ ...SEAT, runtime, pinnedModel }],
+      readEffectiveModel: () => ({ ok: true, model }),
+    });
+    const fired = await monitor.checkOnce();
+    expect(fired).toHaveLength(1);
+    expect(fired[0]).toMatchObject({ runtime, pinnedModel, effectiveModel: model });
+    expect(recorded).toHaveLength(1);
+  });
+});
+
 // The settled set is in memory, so a daemon restart used to alert again on an unchanged divergence (five alerts in eleven
 // minutes for two unchanged seats across one recovery). The occurrence id is content-derived, and the proclamation's own
 // durable record keeps it.

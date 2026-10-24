@@ -12,7 +12,8 @@ import { WAKE_INTENT_PREFIX, type OutboxHandler, type OutboxEntry } from "./outb
 import type { QueueWakeFacts } from "./draft-aware-delivery.js";
 import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
 import { lastMeaningfulTransition, readWaitingView, type WaitingView, type WaitingActivityReader } from "./queue-waiting.js";
-import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
+import { isOpenRigSender, OPENRIG_SENDER, wrapPaneEnvelope } from "../lib/pane-envelope.js";
+import { isBoundTerminalSeat } from "./terminal-seat.js";
 import { renderQueueHandoffNudge } from "./queue-nudge-text.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { parseSessionName, isHumanSeatSessionRef } from "./session-name.js";
@@ -1596,6 +1597,16 @@ export class QueueRepository {
     if (destClass.class === "unroutable") {
       return { classified: "failed", nudgeResult: destClass.teaching };
     }
+    // A terminal seat runs a shell or a TUI, not an agent. Typed wake text would run there as a
+    // command line (it carries the row's summary), and nothing there can claim the row. So nothing
+    // is typed; the row stays queued and visible. `failed:` keeps it on the wake ladder, whose
+    // retries come back here and type nothing before it escalates.
+    if (isBoundTerminalSeat(this.db, destinationSession)) {
+      return {
+        classified: "failed",
+        nudgeResult: `failed:terminal-seat: '${destinationSession}' is a terminal seat (runtime: terminal), not an agent, so no wake was typed into it and nothing there can claim this row. The row stays queued; route it to an agent seat.`,
+      };
+    }
     const stampISO = new Date().toISOString();
     let text: string;
     if (prebuiltText !== undefined) {
@@ -1651,6 +1662,30 @@ export class QueueRepository {
     }
   }
 
+  /** First committed return of a direct ask, including pre-shared-ID Slack replies. */
+  getHumanAnswer(qitemId: string, actorSession: string): QueueItem | null {
+    const ask = this.getById(qitemId);
+    if (!this.hasReplyToColumn || !ask || ask.destinationSession !== actorSession
+      || ask.humanIntent === "update" || !this.isPersonAddress(actorSession)) return null;
+    const row = this.db.prepare(`SELECT qitem_id FROM queue_items
+      WHERE reply_to = ? AND source_session = ? AND destination_session = ?
+        AND (EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = 'human-answer')
+          OR (qitem_id LIKE 'qitem-slack-inbound-%' AND COALESCE(summary, '') NOT LIKE '[Recovered after gap] %'))
+      ORDER BY ts_created, rowid LIMIT 1`).get(qitemId, actorSession, ask.sourceSession) as { qitem_id: string } | undefined;
+    return row ? this.getById(row.qitem_id) : null;
+  }
+
+  /** The lookup and create's insert run synchronously before its first delivery await.
+   * Every new surface uses the same ID; old IDs and their original bodies remain intact. */
+  async createHumanAnswer(input: QueueCreateInput & { inboundReplyTo: string }): Promise<QueueItem> {
+    const existing = this.getHumanAnswer(input.inboundReplyTo, input.sourceSession);
+    if (existing) return existing;
+    return this.create({ ...input,
+      qitemId: `qitem-human-answer-${createHash("sha256").update(input.inboundReplyTo).digest("hex").slice(0, 20)}`,
+      tags: [...new Set([...(input.tags ?? []), "human-answer"])],
+    });
+  }
+
   async create(input: QueueCreateInput): Promise<QueueItem & {
     /** Response-only: the retry's changed body was not written. Never stored on the row. */
     createWarning?: { code: "qitem_body_not_saved"; message: string };
@@ -1665,13 +1700,16 @@ export class QueueRepository {
     }
 
     let wakeStaged = false;
+    // A row OpenRig creates itself (a sweep finding, an escalation, a health or mode notice) keeps its source for the
+    // record, but its wake comes from OpenRig: the seat named as source didn't send it.
+    const wakeFrom = input.wakeTrigger === "openrig" && !isOpenRigSender(input.sourceSession) ? OPENRIG_SENDER : input.sourceSession;
     const txn = this.db.transaction(() => {
       const created = this.createInTransactionalContext(input);
       if (this.outbox && input.nudge !== false) {
         try {
           // A savepoint removes any partial intent when staging fails, while
           // preserving ordinary create's existing acceptance of the task.
-          this.db.transaction(() => this.stageWakeIntent(created.qitemId, input.sourceSession, input.destinationSession, input.identityProvenance ?? null, input.nudge, input.wakeTrigger))();
+          this.db.transaction(() => this.stageWakeIntent(created.qitemId, wakeFrom, input.destinationSession, input.identityProvenance ?? null, input.nudge, input.wakeTrigger))();
           wakeStaged = true;
         } catch (err) {
           this.recordNudgeAttempt(created.qitemId, `failed:wake not retained: ${err instanceof Error ? err.message : String(err)}`);
@@ -1734,7 +1772,7 @@ export class QueueRepository {
     if (this.outbox) {
       if (wakeStaged) this.deliverWakeIntentAfterCommit(`${WAKE_INTENT_PREFIX}${id}`);
     } else {
-      await this.maybeNudge(id, input.destinationSession, input.nudge, input.sourceSession, undefined, input.wakeTrigger);
+      await this.maybeNudge(id, input.destinationSession, input.nudge, wakeFrom, undefined, input.wakeTrigger);
     }
     return this.getByIdOrThrow(id);
   }
@@ -1923,6 +1961,16 @@ export class QueueRepository {
     if (isHumanSeatSessionRef(destination)) return true;
     const registry = this.loadHumanRegistryFn();
     return registry.ok && resolveRegisteredHumanAddress(destination, registry.entities) !== null;
+  }
+
+  /** The asked person, when a different registered person is acting on what was asked of them; else null. An agent, the
+   *  asked person under another spelling, and an ask to no registered person aren't someone else. */
+  askedSomeoneElse(actorSession: string, askedSession: string | null | undefined): string | null {
+    const registry = this.loadHumanRegistryFn();
+    if (!registry.ok) return null;
+    const asked = resolveRegisteredHumanAddress(askedSession, registry.entities);
+    const actor = resolveRegisteredHumanAddress(actorSession, registry.entities);
+    return asked && actor && actor !== asked ? asked : null;
   }
 
   private validateReplyTo(replyTo: string, humanIntent: QueueCreateInput["humanIntent"]): void {
@@ -4580,6 +4628,29 @@ export class QueueRepository {
           actorSession: "system",
           transitionNote: "released: claimant generation retired (seat handover)",
         });
+      }
+    });
+    txn();
+    return rows.length;
+  }
+
+  /**
+   * Slice 16: a runtime switch moves the seat's in-progress claims from its predecessor's generation to its successor's,
+   * inside the switch's commit, so none is released or held twice. Only in-progress rows the predecessor claimed move;
+   * pending, blocked and unstamped rows are untouched. Appends an audit transition per item. Returns the count moved.
+   */
+  transferClaimsByGeneration(fromGeneration: string, toGeneration: string, note: string): number {
+    if (!this.hasClaimedGenColumn || !fromGeneration || !toGeneration) return 0;
+    const rows = this.db
+      .prepare(`SELECT qitem_id FROM queue_items WHERE state = 'in-progress' AND claimed_by_generation_uuid = ?`)
+      .all(fromGeneration) as Array<{ qitem_id: string }>;
+    if (rows.length === 0) return 0;
+    const ts = new Date().toISOString();
+    const txn = this.db.transaction(() => {
+      for (const { qitem_id } of rows) {
+        this.db.prepare(`UPDATE queue_items SET claimed_by_generation_uuid = ?, ts_updated = ? WHERE qitem_id = ?`)
+          .run(toGeneration, ts, qitem_id);
+        this.transitionLog.append({ qitemId: qitem_id, state: "in-progress", actorSession: "system", transitionNote: note });
       }
     });
     txn();

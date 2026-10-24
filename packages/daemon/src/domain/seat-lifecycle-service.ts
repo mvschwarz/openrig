@@ -278,7 +278,7 @@ interface PersistedStartupContextRow {
   runtime: string | null;
 }
 
-interface ParsedStartupContext {
+export interface ParsedStartupContext {
   plan: ProjectionPlan;
   resolvedStartupFiles: ResolvedStartupFile[];
   startupActions: StartupAction[];
@@ -1781,7 +1781,7 @@ export class SeatLifecycleService {
     return row?.resume_token?.trim() || null;
   }
 
-  private readStartupContext(
+  readStartupContext(
     nodeId: string,
     cwd: string,
   ): { ok: true; context: ParsedStartupContext } | { ok: false; refusal: SeatRefusal } {

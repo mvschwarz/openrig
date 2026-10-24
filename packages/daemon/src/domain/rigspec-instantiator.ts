@@ -320,6 +320,7 @@ import { StartupOrchestrator } from "./startup-orchestrator.js";
 import { PodRepository } from "./pod-repository.js";
 import type { RigSpec as PodRigSpec, RigSpecPod, RigSpecPodMember, StartupAction, StartupFile } from "./types.js";
 import type { RuntimeAdapter, NodeBinding, ResolvedStartupFile } from "./runtime-adapter.js";
+import { seatSkillsPointerStartupFile } from "./seat-skills-pointer.js";
 import { resolveConcreteHint } from "./runtime-adapter.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { installTopologyDefaults } from "./topology-defaults-installer.js";
@@ -336,17 +337,7 @@ import type { SeatEnv } from "./seat-env.js";
 /** OPR.0.7.0.13: the constant seat-skills pointer, merged into the project's managed guidance for a Codex seat. It
  *  names no seat, path or skill, so pod-mates share one identical block, and it tells a non-OpenRig agent it doesn't
  *  apply. Each seat reads its own list with `rig skill loadout --seat self`. */
-function seatSkillsPointerStartupFile(): ResolvedStartupFile {
-  const assetsRoot = nodePath.resolve(import.meta.dirname, "../../assets");
-  return {
-    path: "openrig-seat-skills.md",
-    absolutePath: nodePath.join(assetsRoot, "guidance/openrig-seat-skills.md"),
-    ownerRoot: assetsRoot,
-    deliveryHint: "guidance_merge",
-    required: false,
-    appliesOn: ["fresh_start", "restore"],
-  };
-}
+export { seatSkillsPointerStartupFile };
 
 function defaultCultureStartupFile(): ResolvedStartupFile {
   const assetsRoot = nodePath.resolve(import.meta.dirname, "../../assets");
@@ -511,6 +502,11 @@ export class PodRigInstantiator {
     if (deps.db !== deps.nodeLauncher.db) throw new Error("PodRigInstantiator: nodeLauncher must share the same db handle");
     this.db = deps.db;
     this.deps = deps;
+  }
+
+  /** Slice 16: the skill-catalog context a launch resolves with, so a runtime switch's target materials match it. */
+  runtimeSwitchMaterialContext(): { skillsRoot?: string; systemSkills?: string[]; systemWorldError?: string } {
+    return { skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext() };
   }
 
   /** One configured catalog root for preflight, materialization, and launch. */

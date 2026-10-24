@@ -143,6 +143,31 @@ describe("TerminalSessionBroker", () => {
     expect(order.join("")).toBe("echo");
   });
 
+  it("drops input queued behind an in-flight write after final teardown", async () => {
+    let releaseFirst!: () => void;
+    let firstStarted!: () => void;
+    const firstStartedGate = new Promise<void>((resolve) => { firstStarted = resolve; });
+    const seen: string[] = [];
+    const sendText = vi.fn(async (_n: string, text: string) => {
+      seen.push(text);
+      if (text === "first") {
+        firstStarted();
+        await new Promise<void>((resolve) => { releaseFirst = resolve; });
+      }
+    });
+    const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({ sendText })));
+    await broker.attach(makeSub());
+
+    const first = broker.input({ type: "text", text: "first" });
+    await firstStartedGate;
+    const second = broker.input({ type: "text", text: "second" });
+    broker.dispose();
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    expect(seen).toEqual(["first"]);
+  });
+
   it("test 4: disconnecting one subscriber keeps the broker alive for the rest", async () => {
     const stopPipePane = vi.fn(async () => ({ ok: true as const }));
     const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({ stopPipePane }), { pollMs: 10 }));

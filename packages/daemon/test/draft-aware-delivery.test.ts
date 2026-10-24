@@ -48,6 +48,9 @@ function fixture(saved?: Buffer, opts: { runtime?: string; idleHook?: boolean } 
   const observations: unknown[] = [];
   const hooks: { load?: () => void | Promise<void>; paste?: () => void | Promise<void>; sleep?: (ms: number) => void | Promise<void> } = {};
   let staged = "";
+  // A terminal pane shows a submitted line as typed; an agent pane echoes a sent message under its prompt, as Claude does.
+  const echo = (node: string, body: string) => (db.prepare("SELECT runtime FROM nodes WHERE id=?").get(node) as { runtime: string }).runtime === "terminal"
+    ? `${body}\n` : `${body.split("\n").map((row, i) => (i ? "  " : "❯ ") + row).join("\n")}\n`;
   const tmux = new TmuxAdapter(async command => {
     if (command.includes("load-buffer")) await hooks.load?.();
     const node = command.includes("%2") ? "b" : "a";
@@ -58,7 +61,7 @@ function fixture(saved?: Buffer, opts: { runtime?: string; idleHook?: boolean } 
     if (command.includes("send-keys")) {
       writes.push(`keys:${node}:${command}`);
       if (command.includes("Enter")) {
-        submissions.push(bodies[node] ?? ""); history[node] += `${bodies[node]}\n`; bodies[node] = "";
+        submissions.push(bodies[node] ?? ""); history[node] += echo(node, bodies[node] ?? ""); bodies[node] = "";
       }
     }
     return "";
@@ -107,7 +110,7 @@ describe("current draft-aware delivery through the real transport", () => {
   });
 
   it("submits its delayed collapsed paste once, leaving the next queue wake deliverable", async () => {
-    const f = fixture(); await f.enable();
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
     const text = "first line\nsecond line\nlast line";
     let readsAfterPaste = 0;
     vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async name => {
@@ -342,7 +345,7 @@ describe("current draft-aware delivery through the real transport", () => {
 
 describe("supported seat and queue integration", () => {
   it.each(["failed", "indeterminate", "sending"])("startup recovery attempts a still-current %s queue wake", async state => {
-    const f = fixture(); await f.enable();
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
     const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work", nudge: false });
     f.repo.stageWakeIntent(item.qitemId, "sender@test", "worker@test", null, true);
     const id = "wake-intent-" + item.qitemId;
@@ -364,7 +367,7 @@ describe("supported seat and queue integration", () => {
   });
 
   it.each(["delivered", "retained", "retired"])("startup recovery leaves a %s queue wake alone", async state => {
-    const f = fixture(); await f.enable();
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
     const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work", nudge: false });
     f.repo.stageWakeIntent(item.qitemId, "sender@test", "worker@test", null, true);
     const id = "wake-intent-" + item.qitemId;
@@ -378,7 +381,7 @@ describe("supported seat and queue integration", () => {
 
   it.each(["closed", "claimed", "reassigned", "absent-pane", "replacement"].flatMap(state =>
     [false, true].map(draftAware => ({ state, draftAware }))))("recovery does not paste for $state work (draft-aware: $draftAware)", async ({ state, draftAware }) => {
-    const f = fixture(); if (draftAware) await f.enable();
+    const f = fixture(undefined, { runtime: "claude-code" }); if (draftAware) await f.enable();
     const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work", nudge: false });
     f.repo.stageWakeIntent(item.qitemId, "sender@test", "worker@test", null, true);
     const id = "wake-intent-" + item.qitemId;
@@ -396,7 +399,7 @@ describe("supported seat and queue integration", () => {
   });
 
   it("tries a failed recovery once per pass even when the native result stays unknown", async () => {
-    const f = fixture(); await f.enable();
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
     const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work", nudge: false });
     f.repo.stageWakeIntent(item.qitemId, "sender@test", "worker@test", null, true);
     const id = "wake-intent-" + item.qitemId;
@@ -410,7 +413,7 @@ describe("supported seat and queue integration", () => {
   });
 
   it("keeps earlier uncertainty when a recovery fails before input", async () => {
-    const f = fixture();
+    const f = fixture(undefined, { runtime: "claude-code" });
     const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "work", nudge: false });
     const id = "wake-intent-" + item.qitemId;
     f.repo.stageWakeIntent(item.qitemId, "sender@test", "worker@test", null, true);
@@ -423,7 +426,7 @@ describe("supported seat and queue integration", () => {
   });
 
   it("does not describe an earlier attempt for a never-attempted pending wake", async () => {
-    const f = fixture();
+    const f = fixture(undefined, { runtime: "claude-code" });
     const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "work", nudge: false });
     f.repo.stageWakeIntent(item.qitemId, "sender@test", "worker@test", null, true);
     await f.repo.drainPendingWakeIntents();
@@ -432,7 +435,7 @@ describe("supported seat and queue integration", () => {
   });
 
   it("reads current recovery candidates without visiting historical uncertain notifications", async () => {
-    const f = fixture();
+    const f = fixture(undefined, { runtime: "claude-code" });
     const old = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "old work", nudge: false });
     f.db.prepare("UPDATE queue_items SET state='done' WHERE qitem_id=?").run(old.qitemId);
     f.db.transaction(() => { for (let i = 0; i < 600; i++) f.outbox.record({ outboxId: `wake-intent-history-${i}`, senderSession: "sender@test", destinationSession: "worker@test", body: "historical", auditPointer: old.qitemId }); })();
@@ -448,7 +451,7 @@ describe("supported seat and queue integration", () => {
 
   it.each(["draft_input_changed", "delivery_indeterminate", "submit_failed", "send_failed"])(
     "keeps a committed wake's %s outcome indeterminate in the queue", async reason => {
-      const f = fixture(); await f.enable();
+      const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
       const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work", nudge: false });
       const id = "wake-intent-" + item.qitemId;
       f.repo.stageWakeIntent(item.qitemId, "sender@test", "worker@test", null, true);
@@ -468,7 +471,7 @@ describe("supported seat and queue integration", () => {
   );
 
   it.each(["ladder", "legacy-boot"])("delivers a %s nudge without a precommitted outbox entry", async path => {
-    const f = fixture(); await f.enable();
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
     const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work", nudge: false });
     if (path === "ladder") await f.repo.maybeNudge(item.qitemId, "worker@test", true, "sender@test");
     else await f.repo.recoverLostNudge(item.qitemId, "worker@test", "sender@test");
@@ -479,7 +482,7 @@ describe("supported seat and queue integration", () => {
   });
 
   it.each(["current", "closed", "reassigned"])("checks the %s queue facts without saved delivery bookkeeping", async state => {
-    const f = fixture(); await f.enable();
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
     const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work", nudge: false });
     f.db.exec("CREATE TRIGGER unavailable_nudge_receipt BEFORE UPDATE OF guard_delivery ON outbox_entries BEGIN SELECT RAISE(ABORT, 'fixture receipt unavailable'); END;");
     f.hooks.load = () => {
@@ -549,8 +552,9 @@ describe("supported seat and queue integration", () => {
     expect(f.submissions).toEqual(["sibling message", "incoming message"]);
   });
 
+  // Queue wakes go to an agent seat: a wake to a terminal seat types nothing before any draft check (gateway-destination-routing covers it).
   it("a held queue wake remains on the existing queue recovery path without a second scheduler", async () => {
-    const f = fixture(); await f.enable(); f.bodies.a = "draft";
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
     const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work" });
     await vi.waitFor(() => expect(f.repo.getById(item.qitemId)!.lastNudgeResult).toBe("retained:draft_aware"));
     const id = "wake-intent-" + item.qitemId;
@@ -561,7 +565,7 @@ describe("supported seat and queue integration", () => {
   });
 
   it("rechecks queue applicability before paste", async () => {
-    const f = fixture(); await f.enable();
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
     const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work", nudge: false });
     const id = "wake-intent-" + item.qitemId; f.repo.stageWakeIntent(item.qitemId, "sender@test", "worker@test", null, true);
     f.hooks.load = () => { f.db.prepare("UPDATE queue_items SET state='done' WHERE qitem_id=?").run(item.qitemId); };
@@ -571,7 +575,7 @@ describe("supported seat and queue integration", () => {
   });
 
   it.each([false, true])("coalesced wakes preserve every original ID and body (held: %s)", async held => {
-    const f = fixture(); await f.enable(); if (held) f.bodies.a = "draft"; const ids: string[] = [];
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); if (held) f.bodies.a = "draft"; const ids: string[] = [];
     for (let i = 0; i < 2; i++) {
       const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "work " + i, nudge: false });
       f.repo.stageWakeIntent(item.qitemId, "sender@test", "worker@test", null, true);

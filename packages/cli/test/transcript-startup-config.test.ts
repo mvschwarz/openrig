@@ -51,3 +51,17 @@ it.each(["daemon", "start", "up"])("%s startup leaves file settings live and pre
   await vi.advanceTimersByTimeAsync(1000);
   expect(resolve()).toEqual({ lines: 60, pollIntervalMs: 5000 });
 });
+
+it("daemon start --allow-db-conflict applies to its child only, not a later unflagged start", async () => {
+  vi.stubEnv("OPENRIG_ALLOW_DB_CONFLICT", undefined);
+  await daemonCommand({} as never).exitOverride().parseAsync(["start", "--allow-db-conflict"], { from: "user" });
+  const options = vi.mocked(startDaemon).mock.calls[0]![0];
+  const base = { KEEP: "parent" };
+  expect(buildDaemonEnv(base, { ...options, port: 7433, db: "fixture.sqlite" }).OPENRIG_ALLOW_DB_CONFLICT).toBe("1");
+  expect(base).toEqual({ KEEP: "parent" });
+  expect(process.env.OPENRIG_ALLOW_DB_CONFLICT).toBeUndefined();
+  vi.mocked(startDaemon).mockClear();
+  await daemonCommand({} as never).parseAsync(["start"], { from: "user" });
+  const next = vi.mocked(startDaemon).mock.calls[0]![0];
+  expect(buildDaemonEnv({}, { ...next, port: 7433, db: "fixture.sqlite" }).OPENRIG_ALLOW_DB_CONFLICT).toBeUndefined();
+});

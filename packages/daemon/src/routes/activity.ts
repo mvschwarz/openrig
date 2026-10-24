@@ -1,3 +1,4 @@
+import { runtimeSwitchActivityRole } from "./runtime-switch-custody.js";
 import { physicalSessionName } from "../domain/session-registry.js";
 import { existsSync } from "node:fs";
 import { Hono, type Context } from "hono";
@@ -208,6 +209,18 @@ activityRoutes.post("/hooks", async (c) => {
   }
 
   if (typeof body.sessionName === "string") body = { ...body, sessionName: physicalSessionName(store.db, body.sessionName) };
+
+  // Slice 16: a runtime switch's staged successor (before commit) and retired predecessor (after) don't speak for the
+  // seat. The staged successor's native identity is kept on the switch record, which the commit applies.
+  const switchRole = runtimeSwitchActivityRole(store.db, stringOrNull(body.sessionName), stringOrNull(body.generation));
+  if (switchRole) {
+    if (switchRole.role === "staged_successor" && body.eventFamily === "session_identity" && typeof body.sessionId === "string") {
+      store.db.prepare(`UPDATE seat_runtime_switches SET successor_resume_type = ?, successor_resume_token = ?,
+        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND committed_at IS NULL`)
+        .run(stringOrNull(body.runtime), body.sessionId, switchRole.id);
+    }
+    return c.json({ ok: true, ignored: switchRole.role, switchId: switchRole.id, tokenPersisted: false });
+  }
 
   if (body.eventFamily === "session_identity") {
     const sessionId = typeof body.sessionId === "string" ? body.sessionId : null;

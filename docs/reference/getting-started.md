@@ -735,6 +735,56 @@ with `rig grow` and no YAML, or optionally author a custom rig. It covers
 new-seat context/work ownership, concurrency costs and saving the expanded spec.
 This guide remains the short first-use path.
 
+## Move a seat to the other runtime
+
+When a provider reaches its usage limit, or a seat would do better on the other
+runtime, move that one seat instead of rebuilding the team. Ask your operator
+agent, or run it yourself:
+
+```bash
+rig seat set-runtime dev-review@starter --runtime claude-code --reason "Codex limit" --dry-run
+rig seat set-runtime dev-review@starter --runtime claude-code --reason "Codex limit"
+```
+
+The dry run shows the target's settings and where each comes from (an explicit
+option, the seat's agent spec for the target runtime, or the runtime's own
+default), what is cleared, and the costs below. Nothing changes until you run it
+without `--dry-run`.
+
+The new runtime takes over before the old one stops. Its successor starts beside
+the current occupant, reads a handover (the seat's recap, its open rows and the
+predecessor's screen), and confirms it with `rig seat set-runtime <seat>
+--confirm <switch-id> --note "<what it will do first>"`. Only then does the seat
+move: same address, connections and queue rows, with in-progress claims moved
+to the successor. If the successor doesn't confirm within 180 seconds
+(`--confirm-timeout`), nothing changes and the current occupant keeps the seat.
+A seat can switch itself. `rig seat status <seat>` shows an open or interrupted
+switch, and `rig seat set-runtime <seat> --recover` finishes one from its record.
+
+What it costs:
+
+- **A new conversation.** Native history isn't converted; only the handover
+  carries over.
+- **The same address, a different terminal.** The seat's pane and scrollback
+  change.
+- **The team file isn't rewritten.** The database and `rig export` show the new
+  runtime; the YAML you imported keeps the old one, so a later converge against
+  it reports a deferred `change_runtime`. Export the rig, or edit the member's
+  `runtime:`, to keep them in step.
+- **Source settings are cleared, not mapped.** The model, effort, Codex profile
+  and an explicit native permission choice don't carry over, and neither does a
+  model or effort the agent spec declares for the source runtime. Member and rig
+  permission policy are kept.
+- **Two processes until cutover.** The successor runs on the target's account
+  while the switch is open.
+- **Messages are held during the switch.** A `rig send` to the seat while it
+  switches isn't typed; it says the seat is switching and until when. Send it
+  again afterwards to reach whoever holds the seat.
+- **Leftover files after a failed switch.** The target runtime's prepared seat
+  storage and projections can remain.
+- **Codex and Claude Code, single-pane seats.** Startup slash commands aren't
+  run by a switch; the dry run lists them.
+
 ## Stop your teams
 
 `rig down <rig-name>` ends that rig's agent sessions and work in progress.
@@ -1174,6 +1224,28 @@ it does not establish the socket's owner. Identity can change between observatio
 and connection, and equal UIDs do not distinguish separate instances belonging
 to one account. The check
 does not add authentication to the daemon or protect direct HTTP clients.
+
+## Optional database-conflict stop
+
+By default, daemon startup warns and continues when another live daemon is confirmed
+using the selected database. To stop before opening that database instead, run
+`rig config set daemon.db_conflict stop` (set it to `warn` for the default).
+The check requires an open-file holder, a matching `daemon.json`, and a listener
+reporting the same PID; missing or inconclusive evidence does not stop startup.
+Selecting a database outside `OPENRIG_HOME` alone only warns; a confirmed live-daemon
+conflict there still stops when `daemon.db_conflict` is `stop`.
+
+To proceed deliberately for one start, use
+`rig daemon start --allow-db-conflict` with the original start options.
+The flag sets the override on that child only and does not change the setting.
+The underlying `OPENRIG_ALLOW_DB_CONFLICT=1` environment override is also supported:
+exporting it applies to every later start from that shell, even after changing
+`OPENRIG_HOME`. An inherited copy can also bypass the stop in a later seat or test
+home. An inherited `OPENRIG_DAEMON_DB_CONFLICT` overrides that home's file setting;
+inspect or unset inherited overrides when changing homes.
+Separate instances should use separate databases; the check is a startup observation,
+not a lock against later concurrent starts. Changing the setting applies on the next
+daemon start.
 
 ## Custom settings and precedence
 

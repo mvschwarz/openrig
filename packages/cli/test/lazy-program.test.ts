@@ -32,6 +32,20 @@ describe("lazy-program", () => {
     }
   });
 
+  // `--help` lists each subcommand with its description; without one it shows a blank summary.
+  it("gives every command a help summary", () => {
+    const blank: string[] = [];
+    const walk = (command: typeof full, path: string): void => {
+      for (const child of command.commands) {
+        const childPath = `${path} ${child.name()}`;
+        if (!child.description().trim()) blank.push(childPath);
+        walk(child, childPath);
+      }
+    };
+    walk(full, "rig");
+    expect(blank).toEqual([]);
+  });
+
   it("keeps the root's name, description and version", async () => {
     const program = await createLazyProgram("--version");
     expect(program?.name()).toBe(full.name());
