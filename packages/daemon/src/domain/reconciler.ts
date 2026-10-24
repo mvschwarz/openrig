@@ -118,9 +118,10 @@ export class Reconciler {
     return { checked, detached, unseen, errors };
   }
 
-  /** The seat's recorded process when it is still the same running process: the identity reconciler's last observation
-   *  of this very session, and a process with that pid that started no later than the observation (a pid reused since
-   *  started after it). An unreadable table or record is no evidence. */
+  /** The seat's recorded process, as a conservative hint that it still runs, not proof of identity: the identity
+   *  reconciler's last observation of this very session, and a process with that pid whose start isn't observably later
+   *  than the observation. Start times are whole seconds, so a pid reused within the observation's second still passes.
+   *  An unreadable table or record is no evidence. */
   private async recordedProcessStillRunning(
     session: { nodeId: string; sessionName: string },
     processes: () => Promise<ProcessTableRow[] | null>,
