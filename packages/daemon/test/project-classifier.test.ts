@@ -234,5 +234,8 @@ describe("ProjectClassifier (PL-004 Phase B; L2 classifier write path)", () => {
     });
     const planning = classifier.list({ classificationDestination: "planning@rig" });
     expect(planning).toHaveLength(2);
+    // Slice 22: one stream item's classification, for the poster's view of what became of it.
+    expect(classifier.list({ streamItemId: "s2" }).map(p => [p.streamItemId, p.classificationDestination])).toEqual([["s2", "delivery@rig"]]);
+    expect(classifier.list({ streamItemId: "s9" })).toEqual([]);
   });
 });

@@ -32,6 +32,7 @@ function makeDeps(overrides?: Partial<SetupDeps>): SetupDeps {
     mkdirp: vi.fn(),
     // Never the person's real config: a path that doesn't exist reads as unanswered.
     routerLineStore: new ConfigStore(join(tmpdir(), "setup-router-line-none", "config.json")),
+    recordProviders: vi.fn(),
     ...overrides,
   };
 }
@@ -1028,6 +1029,36 @@ describe("--providers: a provider the person didn't choose reads not selected, n
     const result = await runSetup(makeDeps(), { dryRun: true, providers: ["codex"] });
     expect(result.steps.find((s) => s.id === "claude_install")?.message).toContain("Not selected");
     expect(result.steps.find((s) => s.id === "codex_install")?.message).toContain("would be attempted");
+  });
+
+  it("records the choice as provider.selected, in a fixed order, so kernel boot can honour it", async () => {
+    const recordProviders = vi.fn();
+    const result = await runSetup(makeDeps({ recordProviders }), { providers: ["codex", "claude"] });
+    expect(recordProviders.mock.calls).toEqual([["claude,codex"]]);
+    expect(result.steps.find((s) => s.id === "providers_record")).toMatchObject({ status: "applied", message: expect.stringContaining("provider.selected=claude,codex") });
+    expect(result.steps.find((s) => s.id === "providers_record")?.message).toContain("a kernel that already exists keeps its seats");
+    const overridden = await runSetup(makeDeps({ recordProviders, env: { ...process.env, OPENRIG_PROVIDER_SELECTED: "codex" } }), { providers: ["claude"] });
+    expect(overridden.steps.find((s) => s.id === "providers_record")?.message).toContain("OPENRIG_PROVIDER_SELECTED=codex in this environment takes precedence");
+  });
+
+  it("records nothing without --providers or on a dry run", async () => {
+    const recordProviders = vi.fn();
+    const bare = await runSetup(makeDeps({ recordProviders }), {});
+    expect(bare.steps.find((s) => s.id === "providers_record")).toBeUndefined();
+    const plan = await runSetup(makeDeps({ recordProviders }), { dryRun: true, providers: ["codex"] });
+    expect(plan.steps.find((s) => s.id === "providers_record")).toMatchObject({ status: "skipped", message: "Dry run: would record provider.selected=codex." });
+    expect(recordProviders).not.toHaveBeenCalled();
+  });
+
+  it("a choice that can't be saved is a warning with the command to save it, and setup stays ready", async () => {
+    const deps = { ...claudeOnlyMachine([]), recordProviders: () => { throw new Error("config is read-only"); } };
+    const result = await runSetup(deps, { providers: ["claude"] });
+    expect(result.steps.find((s) => s.id === "providers_record")).toMatchObject({
+      status: "warn",
+      message: expect.stringContaining("config is read-only"),
+      fixHint: "Run rig config set provider.selected claude.",
+    });
+    expect(result.ready).toBe(true);
   });
 
   it("parses the person's choice and rejects an unknown provider", async () => {

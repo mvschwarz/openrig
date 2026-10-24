@@ -182,6 +182,8 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "output.whoami_peers",
       // Slice 01 (OPR.0.7.0.1) — Codex usage windows switch.
       "provider.usage_windows",
+      // The providers chosen at rig setup --providers, which kernel boot honours.
+      "provider.selected",
       "bundle.services_enabled",
       "usage.pi_cost_facts",
       "usage.pi_openrouter_charge",
@@ -233,6 +235,17 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
   it("defaults the advisor session to the kernel's advisor seat", () => {
     const store = new ConfigStore(configPath);
     expect(store.resolveWithSource("agents.advisor_session")).toMatchObject({ value: "advisor-lead@kernel", source: "default" });
+  });
+
+  it("defaults provider.selected to empty and accepts only claude, codex or both", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.resolveWithSource("provider.selected")).toMatchObject({ value: "", source: "default" });
+    store.set("provider.selected", "codex");
+    expect(store.resolveWithSource("provider.selected")).toMatchObject({ value: "codex", source: "file" });
+    expect(store.resolve().provider.selected).toBe("codex");
+    for (const raw of ["gemini", "both", "claude,", "Claude", "claude codex"]) {
+      expect(() => store.set("provider.selected", raw)).toThrow(/provider\.selected/);
+    }
   });
 
   it("resolves context.system_world with visible default, file, and env provenance", () => {

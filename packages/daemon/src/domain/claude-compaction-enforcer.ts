@@ -1221,7 +1221,8 @@ export class ClaudeCompactionEnforcer {
       } else prep = null;
     }
     const writeAttempted = prep?.inputPhase === "attempted" || prep?.inputPhase === "written" || prep?.sent === true;
-    const notSent = !writeAttempted && (prep?.outcome === "retained"
+    // `not_reached` is a positive pre-input result: a guard refusal before any write, such as a draft hold.
+    const notSent = !writeAttempted && (prep?.outcome === "retained" || prep?.inputPhase === "not_reached"
       || ["preparation_stopped", "terminal_policy_refused", "terminal_policy_unavailable", "target_needs_input", "session_missing", "typing_guard_enabled", "mid_work", "tmux_unavailable"].includes(prep?.reason ?? "")
       || (prep?.sent === false && ["target_runtime_not_running", "target_runtime_unverified", "target_runtime_conflict", "transport_unavailable"].includes(prep.reason ?? "")));
     // Record this attempt's effect even if cancellation/retry happened during the await.
@@ -1294,7 +1295,10 @@ export class ClaudeCompactionEnforcer {
       if (notSent && marked) this.persist(input.sessionName, attempt.attemptId, { compactSending: undefined });
       // Only a known pre-input idle deferral keeps the automatic attempt armed for a later poll; the transport
       // marks those `not_reached`. reconcilePreparations still ends it at the deadline or on an occupant change.
-      if (attempt.mode === "automatic" && notSent && phase === "not_reached") {
+      // A typing-guard draft hold (`draft_*`) is `not_reached` too, but it is a refusal, not an idle wait: it stops
+      // as not sent, and a fresh attempt may begin after the retry cooldown.
+      const draftHold = typeof result.reason === "string" && result.reason.startsWith("draft_");
+      if (attempt.mode === "automatic" && notSent && phase === "not_reached" && !draftHold) {
         return { ok: false, reason: "waiting_for_idle" };
       }
       // A compact may have been sent despite a lost result. Never replay automatically.

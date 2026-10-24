@@ -78,6 +78,8 @@ export interface SetupDeps {
   configStore?: Pick<ConfigStore, "resolve">;
   /** Where the router-line answer is read and saved (default: the OpenRig config). */
   routerLineStore?: Pick<ConfigStore, "resolveWithSource" | "set">;
+  /** Saves the --providers choice as provider.selected (default: the OpenRig config). */
+  recordProviders?: (value: string) => void;
 }
 
 const ROUTER_LINE_KEY = "skills.router_line.enabled";
@@ -422,6 +424,35 @@ function notSelectedSteps(provider: SetupProvider, chosen: readonly SetupProvide
   ];
 }
 
+/** The --providers choice as the provider.selected value, in a fixed order. */
+function providersValue(chosen: readonly SetupProvider[]): string {
+  return (["claude", "codex"] as const).filter((p) => chosen.includes(p)).join(",");
+}
+
+/** Save the --providers choice so kernel boot uses only the chosen providers. */
+function recordProvidersStep(deps: SetupDeps, chosen: readonly SetupProvider[]): SetupStep {
+  const value = providersValue(chosen);
+  try {
+    (deps.recordProviders ?? ((v: string) => new ConfigStore().set("provider.selected", v)))(value);
+  } catch (err) {
+    return {
+      id: "providers_record",
+      status: "warn",
+      message: `Could not record provider.selected=${value}: ${(err as Error).message}`,
+      reason: "A kernel's first boot then uses provider.selected as it already was: an earlier choice, or every signed-in provider when it's empty.",
+      fixHint: `Run rig config set provider.selected ${value}.`,
+    };
+  }
+  // An environment value wins over the saved one; only setup's own environment is visible here, not the daemon's.
+  const envValue = (deps.env ?? process.env)["OPENRIG_PROVIDER_SELECTED"];
+  const envNote = envValue ? ` OPENRIG_PROVIDER_SELECTED=${envValue} in this environment takes precedence over the saved value.` : "";
+  return {
+    id: "providers_record",
+    status: "applied",
+    message: `Saved provider.selected=${value} for the kernel's first boot; a kernel that already exists keeps its seats.${envNote}`,
+  };
+}
+
 export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?: boolean; policy?: string; specPath?: string; herdr?: boolean; ghostty?: boolean; providers?: readonly SetupProvider[]; doctorDeps?: DoctorDeps; routerLine?: "yes" | "no" }): Promise<SetupResult> {
   const profile = opts.full ? "full" : "core";
   const platform = deps.platform ?? process.platform;
@@ -452,6 +483,9 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
     }
     const routerLine = routerLineStep(deps, opts.routerLine, true);
     steps.push(routerLine.step);
+    if (opts.providers) {
+      steps.push({ id: "providers_record", status: "skipped", message: `Dry run: would record provider.selected=${providersValue(opts.providers)}.` });
+    }
     return { profile, platform, ready: false, steps, runtimeConfig, routerLine: routerLine.preview };
   }
 
@@ -676,6 +710,8 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   if (opts.policy !== undefined) {
     steps.push(recordPermissionPolicyStep(deps, opts.policy, opts.specPath));
   }
+  // Only with --providers: a bare run records nothing, so the kernel keeps counting every signed-in provider.
+  if (opts.providers) steps.push(recordProvidersStep(deps, opts.providers));
 
   // ready = no fail statuses in steps or verification checks
   const stepsFailed = steps.some((s) => s.status === "fail");

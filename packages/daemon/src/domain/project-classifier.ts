@@ -81,6 +81,8 @@ export interface ProjectClassifyInput {
 }
 
 export interface ProjectListOptions {
+  /** Slice 22: the classification of one stream item (at most one exists). */
+  streamItemId?: string;
   classifierSession?: string;
   classificationDestination?: string;
   area?: string;
@@ -313,6 +315,10 @@ export class ProjectClassifier {
     const limit = opts?.limit ?? 100;
     const conditions: string[] = [];
     const params: unknown[] = [];
+    if (opts?.streamItemId) {
+      conditions.push("stream_item_id = ?");
+      params.push(opts.streamItemId);
+    }
     if (opts?.classifierSession) {
       conditions.push("classifier_session = ?");
       params.push(opts.classifierSession);

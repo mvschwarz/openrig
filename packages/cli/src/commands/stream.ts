@@ -3,6 +3,7 @@ import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
+import { streamOutcome } from "./stream-outcome.js";
 
 /**
  * `rig stream` — coordination primitive L1 commands (PL-004 Phase A).
@@ -211,13 +212,16 @@ export function streamCommand(depsOverride?: StreamDeps): Command {
 
   cmd
     .command("show <streamItemId>")
-    .description("Fetch one stream item by id")
+    .description("Fetch one stream item by id, with what became of it (routing, linked work and its state)")
     .option("--json", "JSON output for agents")
     .action(async (streamItemId: string, opts: { json?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const res = await client.get<unknown>(`/api/stream/${encodeURIComponent(streamItemId)}`);
-        printResult(opts.json ?? false, res.data, res.status);
+        if (res.status >= 400 || !res.data || typeof res.data !== "object") { printResult(opts.json ?? false, res.data, res.status); return; }
+        const outcome = await streamOutcome(client, streamItemId)
+          .catch((error: unknown) => ({ stage: "unavailable", summary: error instanceof Error ? error.message : "routing records unavailable" }));
+        printResult(opts.json ?? false, { ...(res.data as Record<string, unknown>), outcome }, res.status);
       });
     });
 

@@ -42,7 +42,7 @@ function kindFor(key: string): Kind {
   if (IDENTITIES.has(key)) return "identity";
   if (INSTRUCTIONS.has(key)) return "withheld";
   if (key === "files.allowlist" || key === "progress.scan_roots") return "paths";
-  if (key === "recovery.provider_auth_env_allowlist" || key === "policies.idle_gate_qitem.opt_in_sessions") return "names";
+  if (key === "recovery.provider_auth_env_allowlist" || key === "policies.idle_gate_qitem.opt_in_sessions" || key === "provider.selected") return "names";
   return "scalar";
 }
 

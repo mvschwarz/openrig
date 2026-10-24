@@ -374,7 +374,8 @@ export function projectsRoutes(): Hono {
     const parsed = queryLimit(c);
     if (!parsed.ok) return parsed.response;
     const limit = parsed.limit;
-    const items = getClassifier(c).list({ classifierSession, classificationDestination, area, scopeRef, needsHuman, limit });
+    const streamItemId = c.req.query("streamItemId") || undefined;
+    const items = getClassifier(c).list({ streamItemId, classifierSession, classificationDestination, area, scopeRef, needsHuman, limit });
     return c.json(items);
   });
 

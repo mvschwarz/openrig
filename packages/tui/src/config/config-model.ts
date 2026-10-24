@@ -68,6 +68,7 @@ const LABELS: Record<string, string> = {
   "output.compact": "Compact command output",
   "output.whoami_peers": "Peers listed by whoami (compact)",
   "provider.usage_windows": "Codex and Claude usage windows",
+  "provider.selected": "Providers chosen at setup",
   "usage.pi_cost_facts": "Pi cost from persisted entries",
   "usage.pi_openrouter_charge": "OpenRouter charge for Pi requests",
   "transport.verify_input_box": "Verify by input box (Claude Code, Codex)",

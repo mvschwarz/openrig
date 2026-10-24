@@ -181,6 +181,8 @@ export interface RiggedConfig {
   // off). Read by the daemon; the CLI key is the lockstep twin.
   provider: {
     usageWindows: boolean;
+    /** The providers the person chose at rig setup --providers ("claude", "codex" or "claude,codex"); "" when none was recorded. */
+    selected: string;
   };
   bundle: { servicesEnabled: boolean };
   // Slice 02 (OPR.0.7.0.2) — Pi seats report model-priced cost from persisted session entries
@@ -362,6 +364,7 @@ const DEFAULTS = {
   // Slice 01 — Codex usage windows OFF until the switch is on.
   provider: {
     usageWindows: false,
+    selected: "",
   },
   bundle: { servicesEnabled: false },
   // Slice 02 — Pi cost facts OFF until the switch is on.
@@ -505,6 +508,8 @@ export const VALID_KEYS = [
   "output.whoami_peers",
   // Slice 01 — Codex and Claude usage windows in the provider view; lockstep with the daemon twin.
   "provider.usage_windows",
+  // The providers chosen at rig setup --providers, which kernel boot honours; lockstep with the daemon twin.
+  "provider.selected",
   // Service-backed archives, including packing, preview and durable-target admission; default off.
   "bundle.services_enabled",
   "usage.pi_cost_facts",
@@ -619,6 +624,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "output.compact": { primary: "OPENRIG_OUTPUT_COMPACT" },
   "output.whoami_peers": { primary: "OPENRIG_OUTPUT_WHOAMI_PEERS" },
   "provider.usage_windows": { primary: "OPENRIG_PROVIDER_USAGE_WINDOWS" },
+  "provider.selected": { primary: "OPENRIG_PROVIDER_SELECTED" },
   "bundle.services_enabled": { primary: "OPENRIG_BUNDLE_SERVICES_ENABLED" },
   "usage.pi_cost_facts": { primary: "OPENRIG_USAGE_PI_COST_FACTS" },
   "usage.pi_openrouter_charge": { primary: "OPENRIG_USAGE_PI_OPENROUTER_CHARGE" },
@@ -714,6 +720,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "output.compact": ["output", "compact"],
   "output.whoami_peers": ["output", "whoamiPeers"],
   "provider.usage_windows": ["provider", "usageWindows"],
+  "provider.selected": ["provider", "selected"],
   "bundle.services_enabled": ["bundle", "servicesEnabled"],
   "usage.pi_cost_facts": ["usage", "piCostFacts"],
   "usage.pi_openrouter_charge": ["usage", "piOpenRouterCharge"],
@@ -997,6 +1004,11 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
   // e.g. 50 = compact earlier; range is 1-100 inclusive. A value of 0
   // would fire /compact on every poll tick (catastrophic without
   // default-off as backstop).
+  "provider.selected": (_raw, value) => {
+    if (typeof value !== "string" || !/^(|claude|codex|claude,codex|codex,claude)$/.test(value)) {
+      throw new Error("Invalid provider.selected: use claude, codex, claude,codex, or an empty string for no recorded choice");
+    }
+  },
   "policies.claude_compaction.preparation_root": (_raw, value) => {
     if (typeof value !== "string" || (value !== "" && (!isAbsolute(value) || value.includes("\0")))) {
       throw new Error("Invalid policies.claude_compaction.preparation_root: use an absolute path or an empty string for the default");
@@ -1304,6 +1316,7 @@ export class ConfigStore {
       },
       provider: {
         usageWindows: v("provider.usage_windows") as boolean,
+        selected: v("provider.selected") as string,
       },
       bundle: { servicesEnabled: v("bundle.services_enabled") as boolean },
       usage: {

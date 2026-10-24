@@ -49,6 +49,8 @@ for (const key of [
   "OUTPUT_COMPACT",
   // Slice 01: a seat with usage windows on must not change what the suite reads.
   "PROVIDER_USAGE_WINDOWS",
+  // A seat whose setup recorded a provider choice must not change which kernel variant the suite picks.
+  "PROVIDER_SELECTED",
   // A seat with input-box verification on must not change what the transport suites verify.
   "TRANSPORT_VERIFY_INPUT_BOX",
   "TRANSPORT_LOCAL_USER_GUARD",

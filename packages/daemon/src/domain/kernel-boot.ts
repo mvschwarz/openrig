@@ -27,6 +27,7 @@ import type { EventBus } from "./event-bus.js";
 import type { SessionRegistry } from "./session-registry.js";
 import { KernelBootTracker } from "./kernel-boot-tracker.js";
 import { RigSpecCodec } from "./rigspec-codec.js";
+import { SettingsStore } from "./user-settings/settings-store.js";
 
 export type RuntimeAuthStatus = "ok" | "unavailable";
 
@@ -53,6 +54,8 @@ export interface KernelBootDeps {
   cwdOverride: string;
   /** Runtime auth probe — defaults to live shellouts; tests inject. */
   probeRuntimes?: () => Promise<RuntimeProbeResult>;
+  /** The providers the person chose at `rig setup --providers` (`provider.selected`); defaults to the setting. */
+  selectedProviders?: () => string;
   /** Logger sink; defaults to console.log/warn so daemon stdout/stderr
    *  carry the boot trace. */
   log?: (level: "info" | "warn" | "error", message: string) => void;
@@ -115,11 +118,12 @@ export async function bootKernelIfNeeded(deps: KernelBootDeps): Promise<KernelBo
     return tracker;
   }
 
-  // 3. Probe runtime auth state to pick a variant.
-  const probe = await (deps.probeRuntimes ?? defaultProbeRuntimes)();
+  // 3. Probe runtime auth state to pick a variant. A provider the person didn't choose at setup counts as unavailable.
+  const selected = (deps.selectedProviders ?? readSelectedProviders)();
+  const probe = chosenRuntimes(await (deps.probeRuntimes ?? defaultProbeRuntimes)(), selected);
 
   if (probe.claudeCode === "unavailable" && probe.codex === "unavailable") {
-    const msg = authBlockMessage();
+    const msg = authBlockMessage(selected);
     log("error", msg);
     tracker.setAuthBlocked(msg);
     return tracker;
@@ -215,6 +219,26 @@ export function classifyManagedKernel(rigRepo: RigRepository, sessionRegistry: S
 export function kernelAlreadyManaged(rigRepo: RigRepository): boolean {
   const rigs = rigRepo.listRigs();
   return rigs.some((r) => r.name === "kernel");
+}
+
+/** The setting `rig setup --providers` records; "" when no choice was recorded, so both providers count. */
+function readSelectedProviders(): string {
+  try {
+    const value = new SettingsStore().resolveOne("provider.selected").value;
+    return typeof value === "string" ? value : "";
+  } catch {
+    return "";
+  }
+}
+
+/** The probe with any provider the person didn't choose marked unavailable. */
+export function chosenRuntimes(probe: RuntimeProbeResult, selected: string): RuntimeProbeResult {
+  if (!selected) return probe;
+  const chosen = selected.split(",");
+  return {
+    claudeCode: chosen.includes("claude") ? probe.claudeCode : "unavailable",
+    codex: chosen.includes("codex") ? probe.codex : "unavailable",
+  };
 }
 
 /** Choose a rig variant from the auth probe. */
@@ -317,7 +341,15 @@ export async function probeCodexReadiness(deps: {
 
 /** Honest 3-part-error message for the auth-block path. Per IMPL-PRD
  *  §6.3 + the building-agent-software skill discipline. */
-export function authBlockMessage(): string {
+export function authBlockMessage(selected = ""): string {
+  if (selected) {
+    const login = selected.split(",").map((p) => p === "claude" ? "`claude auth login`" : "`codex login`").join(" or ");
+    return [
+      `Error: Kernel rig cannot boot — no provider chosen at setup (${selected}) is authenticated.`,
+      `Reason: provider.selected is ${selected} (saved by rig setup --providers or rig config set, or OPENRIG_PROVIDER_SELECTED in the daemon's environment), and the kernel uses only chosen providers.`,
+      `Fix: Run ${login}, or change the choice with rig setup --providers or rig config set provider.selected (a daemon environment value overrides both). Then run \`rig daemon start\` (or \`rig setup\`) again.`,
+    ].join("\n");
+  }
   return [
     "Error: Kernel rig cannot boot — no AI runtime is authenticated.",
     "Reason: Kernel rig requires at least one of Claude Code or Codex authenticated. Both are unavailable.",

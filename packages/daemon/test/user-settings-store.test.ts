@@ -164,6 +164,8 @@ describe("SettingsStore (User Settings v0)", () => {
       "output.whoami_peers",
       // Slice 01 (OPR.0.7.0.1) — Codex usage windows switch.
       "provider.usage_windows",
+      // The providers chosen at rig setup --providers, which kernel boot honours.
+      "provider.selected",
       "bundle.services_enabled",
       "usage.pi_cost_facts",
       "usage.pi_openrouter_charge",
@@ -232,6 +234,18 @@ describe("SettingsStore (User Settings v0)", () => {
     expect(store.resolveOne("terminal.history_limit")).toMatchObject({ value: 50000, source: "file" });
     for (const raw of ["0", "-5000", "1999", "1000001", "2.5", "10000rows", "many"]) {
       expect(() => store.set("terminal.history_limit", raw)).toThrow(/terminal\.history_limit/);
+    }
+  });
+
+  it("defaults provider.selected to empty and accepts only claude, codex or both", () => {
+    const store = new SettingsStore(configPath);
+    expect(store.resolveOne("provider.selected")).toMatchObject({ value: "", source: "default" });
+    store.set("provider.selected", "codex");
+    expect(store.resolveOne("provider.selected")).toMatchObject({ value: "codex", source: "file" });
+    store.set("provider.selected", "claude,codex");
+    expect(store.resolveOne("provider.selected")).toMatchObject({ value: "claude,codex", source: "file" });
+    for (const raw of ["gemini", "both", "claude,", "Claude", "claude codex"]) {
+      expect(() => store.set("provider.selected", raw)).toThrow(/provider\.selected/);
     }
   });
 
