@@ -553,11 +553,18 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(await findingsFor(row.qitemId)).toHaveLength(1);
   });
 
-  it("RESOLUTION CLOSES: when the underlying row resolves, the next sweep closes the finding with its reason", async () => {
+  it.each(["pending", "in-progress"] as const)("#1419 RESOLUTION ACTOR: closes a %s finding as the sweep while preserving its ownership", async (findingState) => {
     const row = await mkRow();
     repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
     makeOverdue(row.qitemId);
     await runSweep();
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding).toBeDefined();
+    if (findingState === "in-progress") {
+      repo.claim({ qitemId: finding!.qitemId, destinationSession: "worker@r" });
+    }
+    const before = repo.getById(finding!.qitemId)!;
+    expect(before).toMatchObject({ state: findingState, sourceSession: "sender@r", destinationSession: "worker@r" });
     repo.update({
       qitemId: row.qitemId,
       actorSession: "worker@r",
@@ -565,11 +572,30 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
       closureReason: "no-follow-on",
       transitionNote: "finished the work",
     });
-    await runSweep();
+    const sourceAfterWork = repo.getById(row.qitemId);
+    const { result } = await runSweep();
+    expect(result.findings).toContainEqual({ kind: "overdue-claim", qitemId: row.qitemId, findingQitemId: before.qitemId, action: "closed" });
     const findings = await findingsFor(row.qitemId);
     expect(findings).toHaveLength(1);
-    expect(findings[0]!.state).toBe("done");
-    expect(findings[0]!.closureReason).toBeTruthy();
+    expect(findings[0]).toMatchObject({
+      state: "done", closureReason: "no-follow-on",
+      sourceSession: before.sourceSession, destinationSession: before.destinationSession,
+      claimedAt: before.claimedAt, evidenceRef: before.evidenceRef,
+    });
+    expect(repo.getById(row.qitemId)).toEqual(sourceAfterWork);
+    expect(repo.transitionLog.listForQitem(before.qitemId).at(-1)).toMatchObject({
+      state: "done", actorSession: "stuck-sweep@system", closureReason: "no-follow-on",
+      transitionNote: `stuck-sweep resolved: overdue-claim on ${row.qitemId} no longer detected`,
+    });
+    const closingEvents = () => (db.prepare(
+      "SELECT payload FROM events WHERE type = 'queue.updated' AND json_extract(payload, '$.qitemId') = ? AND json_extract(payload, '$.toState') = 'done'",
+    ).all(before.qitemId) as Array<{ payload: string }>).map((event) => JSON.parse(event.payload));
+    expect(closingEvents()).toEqual([expect.objectContaining({
+      qitemId: before.qitemId, fromState: findingState, toState: "done", actorSession: "stuck-sweep@system",
+    })]);
+    await runSweep();
+    expect(repo.transitionLog.listForQitem(before.qitemId).filter((t) => t.state === "done")).toHaveLength(1);
+    expect(closingEvents()).toHaveLength(1);
   });
 
   it("QUIET IS CHEAP: a clean sweep creates zero rows and records one observable heartbeat", async () => {
@@ -1759,6 +1785,9 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
     expect(second.findings).toContainEqual(expect.objectContaining({ findingQitemId: finding!.qitemId, action: "closed" }));
     expect(repo.getById(finding!.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
     expect(repo.getById(row.qitemId)).toMatchObject({ state: "pending", destinationSession: "human-owner@external" });
+    expect(repo.transitionLog.listForQitem(finding!.qitemId).at(-1)).toMatchObject({
+      state: "done", actorSession: "stuck-sweep@system", closureReason: "no-follow-on",
+    });
   });
 
   const unclaimedFinding = async (qitemId: string) => (await findingsFor(qitemId))
