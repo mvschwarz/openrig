@@ -84,6 +84,8 @@ export const spawnRex: RexRun = (argv, stdin, timeoutMs) => new Promise((resolve
   const timer = setTimeout(() => {
     if (settled) return;
     settled = true;
+    // Past its deadline rex has nothing left to read, so end it now instead of after stopGroup's stdin grace.
+    try { process.kill(-child.pid!, "SIGTERM"); } catch { /* already gone */ }
     void stopGroup(child, STOP_GRACE_MS).then(() => reject(new RexRunError(`did not answer within ${timeoutMs} ms`, null, stderr)));
   }, timeoutMs);
   child.once("error", (err) => {

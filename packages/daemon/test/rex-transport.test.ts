@@ -183,7 +183,9 @@ describe("spawnRex", () => {
     const { file, cleanup } = script('sleep 30 & echo $! > "$(dirname "$0")/child.pid"; wait');
     try {
       const failure = vi.fn();
+      const started = performance.now();
       await spawnRex([file], "{}", 300).catch(failure);
+      expect(performance.now() - started).toBeLessThan(1_000);
       expect(failure).toHaveBeenCalledOnce();
       expect(failure.mock.calls[0]![0]).toMatchObject({ exitCode: null, message: "did not answer within 300 ms" });
       const child = Number(fs.readFileSync(path.join(path.dirname(file), "child.pid"), "utf8"));
