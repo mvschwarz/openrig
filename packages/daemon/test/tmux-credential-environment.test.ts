@@ -16,7 +16,7 @@ for (const transport of ["argv", "legacy"] as const) {
       const calls: string[] = [], writes = new Map<string, string>(); let sequence = 0;
       const respond = async (args: string[]) => {
         calls.push(...args);
-        if (args.includes("default-shell")) return "/bin/bash";
+        if (args.some(arg => arg.includes("default-shell"))) return "/bin/bash";
         return args.includes("new-session") || args.includes("source-file") ? "%1" : "";
       };
       const files = { writeFile: vi.fn(async (p: string, content: string, _options?: { mode: number; flag: "wx" }) => { writes.set(p, content); }), unlink: async () => {}, tmpName: () => `/tmp/synthetic-env-${++sequence}`, bufferName: () => "unused" };
@@ -28,8 +28,8 @@ for (const transport of ["argv", "legacy"] as const) {
       expect(calls.some(arg => Object.values(credentials).some(value => arg.includes(value)))).toBe(false);
       if (scoped) {
         // source-file hides the tmux client's inputs, but the nested shell argv must be safe too.
-        const plan = await (a as unknown as { scopedLaunchCommand(env: Record<string, string>, command: string): Promise<string[]> }).scopedLaunchCommand(env, "/bin/sh");
-        expect(plan.some(arg => Object.values(credentials).some(value => arg.includes(value)))).toBe(false);
+        const plan = await (a as unknown as { scopedLaunchCommand(env: Record<string, string>, command: string): Promise<string[] | null> }).scopedLaunchCommand(env, "/bin/sh");
+        expect(plan?.some(arg => Object.values(credentials).some(value => arg.includes(value)))).toBe(false);
       }
       expect([...writes.values()].some(content => content.includes(credentials.OPENRIG_ACTIVITY_HOOK_TOKEN))).toBe(true);
       for (const call of files.writeFile.mock.calls) expect(call[2]).toEqual({ mode: 0o600, flag: "wx" });
