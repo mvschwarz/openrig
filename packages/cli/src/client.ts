@@ -3,7 +3,7 @@ import { assessLocalDaemonOwner, ForeignLocalDaemonError, type LocalDaemonOwner 
 export { ForeignLocalDaemonError } from "./local-daemon-owner.js";
 import path from "node:path";
 import { ConfigStore } from "./config-store.js";
-import { getOpenRigHome, readOpenRigEnv } from "./openrig-compat.js";
+import { getOpenRigHome, readOpenRigEnv, readOpenRigUrl } from "./openrig-compat.js";
 import { fetchWithTimeout, FetchTimeoutError } from "./fetch-with-timeout.js";
 
 export function terminalAuthHeaders(): Record<string, string> {
@@ -174,7 +174,7 @@ export class DaemonClient {
     const localHeaders = senderIdentityHeaders(undefined, this.sessionName);
     const session = localHeaders[SENDER_IDENTITY_HEADER];
     if (!session || session.split("@").length >= 3) return localHeaders;
-    const directTarget = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
+    const directTarget = readOpenRigUrl();
     if (!this.remoteTarget && !directTarget) return localHeaders;
     // Imported here, not at the top: it loads better-sqlite3 and yaml, which only a seat on a direct endpoint needs.
     const origin = this.originSelfHostId ?? (await import("./local-origin.js")).readLocalOrigin();
@@ -205,7 +205,7 @@ export class DaemonClient {
     if (baseUrl) {
       this.baseUrl = baseUrl;
     } else {
-      const envUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
+      const envUrl = readOpenRigUrl();
       if (envUrl) {
         this.baseUrl = envUrl;
       } else {

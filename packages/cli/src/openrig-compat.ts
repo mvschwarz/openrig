@@ -55,12 +55,12 @@ function warnOnce(key: string, message: string): void {
   console.warn(message);
 }
 
-export function readOpenRigEnv(primary: string, legacy?: string): string | undefined {
-  const primaryValue = process.env[primary];
+export function readOpenRigEnv(primary: string, legacy?: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const primaryValue = env[primary];
   if (primaryValue !== undefined && primaryValue !== "") return primaryValue;
 
   if (legacy) {
-    const legacyValue = process.env[legacy];
+    const legacyValue = env[legacy];
     if (legacyValue !== undefined && legacyValue !== "") {
       warnOnce(`env:${legacy}`, `Warning: ${legacy} is deprecated; use ${primary} instead.`);
       return legacyValue;
@@ -68,6 +68,23 @@ export function readOpenRigEnv(primary: string, legacy?: string): string | undef
   }
 
   return undefined;
+}
+
+/** An explicit daemon URL with trailing slashes removed, so `http://h:7433/` addresses the
+ *  same daemon as `http://h:7433`. A URL with a query or fragment is returned exactly as
+ *  written, and so is a value that would strip down to no host (such as `/`), which stays
+ *  an explicit (if invalid) target. */
+export function normalizeOpenRigUrl(raw: string): string {
+  if (/[?#]/.test(raw)) return raw;
+  const stripped = raw.replace(/\/+$/, "");
+  return /:\/\/[^/]/.test(stripped) ? stripped : raw;
+}
+
+/** OPENRIG_URL (legacy RIGGED_URL), normalized by normalizeOpenRigUrl. `env` defaults to
+ *  process.env; callers with an injected environment pass theirs. */
+export function readOpenRigUrl(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const raw = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL", env);
+  return raw === undefined ? undefined : normalizeOpenRigUrl(raw);
 }
 
 export function getPreferredOpenRigHome(): string {
