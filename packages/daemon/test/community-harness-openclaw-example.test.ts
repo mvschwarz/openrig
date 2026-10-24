@@ -11,11 +11,11 @@ const EXAMPLE = resolve(__dirname, "../../../docs/reference/community-harness-ex
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
-function run(env: Record<string, string>, keys: string[] = []) {
+function run(env: Record<string, string>, keys: string[] = [], listingExit = 0) {
   const dir = mkdtempSync(join(tmpdir(), "openclaw-example-")); dirs.push(dir);
   const fake = join(dir, "openclaw");
   const listing = JSON.stringify({ sessions: keys.map((key) => ({ agentId: "main", key })) });
-  writeFileSync(fake, `#!/bin/sh\nif [ "$1" = sessions ]; then echo '${listing}'; exit 0; fi\necho "$@ STATE=$OPENCLAW_STATE_DIR" > "${dir}/started"\n`);
+  writeFileSync(fake, `#!/bin/sh\nif [ "$1" = sessions ]; then echo '${listing}'; exit ${listingExit}; fi\necho "$@ STATE=$OPENCLAW_STATE_DIR" > "${dir}/started"\n`);
   chmodSync(fake, 0o755);
   let failure: string | undefined;
   try {
@@ -29,18 +29,29 @@ function run(env: Record<string, string>, keys: string[] = []) {
 describe("the documented OpenClaw launcher and preset", () => {
   it("starts a local chat on the session key OpenRig named, in the seat's own state folder", () => {
     const { started, state } = run({ OPENRIG_CONVERSATION: "openrig-dev-impl-1a2b3c4d" });
-    expect(started).toBe(`chat --session openrig-dev-impl-1a2b3c4d STATE=${state}`);
+    expect(started).toBe(`tui --local --session agent:main:openrig-dev-impl-1a2b3c4d STATE=${state}`);
   });
 
-  it.each([["bare", "openrig-dev-impl-1a2b3c4d"], ["agent-scoped", "agent:main:openrig-dev-impl-1a2b3c4d"]])(
-    "reopens a named session its sessions list (%s key)", (_case, stored) => {
-      expect(run({ OPENRIG_RESUME_REF: "openrig-dev-impl-1a2b3c4d" }, [stored]).started).toMatch(/^chat --session openrig-dev-impl-1a2b3c4d STATE=/);
-    });
+  it("reopens the main agent's exact canonical session key", () => {
+    expect(run({ OPENRIG_RESUME_REF: "openrig-dev-impl-1a2b3c4d" }, ["agent:main:openrig-dev-impl-1a2b3c4d"]).started)
+      .toMatch(/^tui --local --session agent:main:openrig-dev-impl-1a2b3c4d STATE=/);
+  });
 
   it("starts nothing on a resume whose key its sessions don't list, so a gone conversation isn't recreated", () => {
     const { started, failure } = run({ OPENRIG_RESUME_REF: "openrig-dev-impl-1a2b3c4d" }, ["agent:main:main"]);
     expect(started).toBeUndefined();
-    expect(failure).toMatch(/don't list "openrig-dev-impl-1a2b3c4d"/);
+    expect(failure).toMatch(/don't list "agent:main:openrig-dev-impl-1a2b3c4d"/);
+  });
+
+  it("does not reopen another agent's conversation with the same suffix", () => {
+    const { started } = run({ OPENRIG_RESUME_REF: "openrig-dev-impl-1a2b3c4d" }, ["agent:other:openrig-dev-impl-1a2b3c4d"]);
+    expect(started).toBeUndefined();
+  });
+
+  it("does not launch when the listing command fails after printing a matching row", () => {
+    const { started, failure } = run({ OPENRIG_RESUME_REF: "openrig-dev-impl-1a2b3c4d" }, ["agent:main:openrig-dev-impl-1a2b3c4d"], 1);
+    expect(started).toBeUndefined();
+    expect(failure).toMatch(/couldn't be listed/);
   });
 
   it("is a preset this OpenRig loads, declaring names_conversation and not resume", () => {

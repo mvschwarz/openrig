@@ -142,10 +142,10 @@ Copy them and maintain them as your own.
 
 [`community-harness-examples/openclaw/`](community-harness-examples/openclaw/) has a preset and a small launcher for
 OpenClaw's CLI.
-- **The launcher:** it runs `openclaw chat` (the TUI with `--local`) on the session key OpenRig named, with its own
+- **The launcher:** it runs `openclaw tui --local` with the canonical `agent:main:<OpenRig name>` key, with its own
   OpenClaw state folder per seat, so the agent runs in the seat's pane with no Gateway.
-- **Its resume check:** before reopening a key, the launcher checks that the seat's `openclaw sessions --json` lists it,
-  and stops if not, so a gone conversation isn't recreated under its old key. That check is the launcher's code, not
+- **Its resume check:** before reopening a key, the launcher checks that the seat's `openclaw sessions --agent main --json --limit all` lists that exact main-agent key.
+  A missing key or an unavailable listing stops the launch, so a gone conversation isn't recreated under its old key. That check is the launcher's code, not
   OpenRig's.
 - **Resets must stay off:** OpenClaw can start a new conversation under the same key on a reset rule
   (`session.reset`). That's off by default; with it on, a key no longer names one conversation. Likewise, typing `/new`
