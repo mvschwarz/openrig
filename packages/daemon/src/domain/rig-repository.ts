@@ -6,6 +6,7 @@ import { ulid } from "ulid";
 import { deriveComposeProjectName } from "./compose-project-name.js";
 import type { ClaudeManagedBlockFile } from "./managed-blocks.js";
 import { mergeSeatEnv, parseStoredSeatEnv, type SeatEnv } from "./seat-env.js";
+import { withoutIgnoredRuntimeHomes } from "./seat-runtime-home.js";
 import type {
   Rig,
   Node,
@@ -247,13 +248,15 @@ export class RigRepository {
   }
 
   /** What a seat's process gets: its rig's `env:` with the member's own `env:` over it. A launch,
-   *  a restore and a handover successor all read this, so they cannot disagree. */
+   *  a restore and a handover successor all read this, so they cannot disagree. A CLAUDE_CONFIG_DIR or
+   *  CODEX_HOME that isn't an absolute path is left out: OpenRig reports it as ignored (seat-runtime-home.ts),
+   *  so the runtime resolves as if the seat declared none. */
   getEffectiveSeatEnv(nodeId: string): SeatEnv {
     if (!this.hasNodeColumn("env_json")) return {};
     const row = this.db.prepare("SELECT rig_id, env_json FROM nodes WHERE id = ?")
       .get(nodeId) as { rig_id: string; env_json: string | null } | undefined;
     if (!row) return {};
-    return mergeSeatEnv(this.getRigEnv(row.rig_id), parseStoredSeatEnv(row.env_json));
+    return withoutIgnoredRuntimeHomes(mergeSeatEnv(this.getRigEnv(row.rig_id), parseStoredSeatEnv(row.env_json)));
   }
 
   /** OPR.0.4.8.3 Seam B — persist a rig's attached permission_policy REF (builtin:<name> or a

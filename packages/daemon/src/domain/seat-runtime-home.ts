@@ -1,6 +1,6 @@
 import path from "node:path";
 import type Database from "better-sqlite3";
-import { parseStoredSeatEnv } from "./seat-env.js";
+import { parseStoredSeatEnv, type SeatEnv } from "./seat-env.js";
 
 /** The native variable that selects each runtime's home, and with it the account that home is logged in to. */
 export const RUNTIME_HOME_VAR = { "claude-code": "CLAUDE_CONFIG_DIR", codex: "CODEX_HOME" } as const;
@@ -57,4 +57,25 @@ export function declaredRuntimeHomes(db: Database.Database, runtime: HomeRuntime
     }
   } catch { /* A database from before seat env has no columns to read. */ }
   return [...homes];
+}
+
+/** A seat's env without a runtime-home variable whose value isn't an absolute path. OpenRig reports such a value as
+ *  ignored, so the launch leaves it out too and the runtime resolves as if the seat declared none. */
+export function withoutIgnoredRuntimeHomes(env: SeatEnv): SeatEnv {
+  const out = { ...env };
+  for (const name of Object.values(RUNTIME_HOME_VAR)) {
+    const value = out[name];
+    if (value !== undefined && !path.isAbsolute(value)) delete out[name];
+  }
+  return out;
+}
+
+/** The own home of the seat whose current session has this name (its newest session row), or undefined. */
+export function seatRuntimeHomeBySession(db: Database.Database, sessionName: string, runtime: HomeRuntime): string | undefined {
+  let row: { node_id: string } | undefined;
+  try {
+    row = db.prepare("SELECT node_id FROM sessions WHERE session_name = ? ORDER BY created_at DESC, id DESC LIMIT 1")
+      .get(sessionName) as typeof row;
+  } catch { return undefined; }
+  return row ? seatRuntimeHome(db, row.node_id, runtime).home : undefined;
 }

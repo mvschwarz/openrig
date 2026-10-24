@@ -1,4 +1,5 @@
 import os from "node:os";
+import { shellQuote } from "../adapters/shell-quote.js";
 import fs from "node:fs";
 import nodePath from "node:path";
 import type { SessionRegistry } from "./session-registry.js";
@@ -40,7 +41,8 @@ interface ResumeMetadataRefresherDeps {
   tmuxAdapter: TmuxAdapter;
   listProcesses?: () => Array<{ pid: number; ppid: number; command: string }> | Promise<Array<{ pid: number; ppid: number; command: string }>>;
   readCodexThreadIdByPid?: (pid: number, identity?: string, report?: CodexCaptureReporter, home?: string) => Promise<string | undefined> | string | undefined;
-  probeClaudeResume?: (sessionName: string, resumeToken: string, cwd?: string | null) => Promise<"resumable" | "not_resumable" | "inconclusive">;
+  /** `configDir` is the seat's own Claude config dir, passed only when it declares one. */
+  probeClaudeResume?: (sessionName: string, resumeToken: string, cwd?: string | null, configDir?: string) => Promise<"resumable" | "not_resumable" | "inconclusive">;
   resolveHomeDirByPid?: ResolveHomeDirByPid;
   sleep?: (ms: number) => Promise<void>;
   homeDir?: string;
@@ -68,7 +70,7 @@ export class ResumeMetadataRefresher {
   private tmuxAdapter: TmuxAdapter;
   private listProcesses: () => Array<{ pid: number; ppid: number; command: string }> | Promise<Array<{ pid: number; ppid: number; command: string }>>;
   private readCodexThreadIdByPid: (pid: number, identity?: string, report?: CodexCaptureReporter, home?: string) => Promise<string | undefined> | string | undefined;
-  private probeClaudeResume: (sessionName: string, resumeToken: string, cwd?: string | null) => Promise<"resumable" | "not_resumable" | "inconclusive">;
+  private probeClaudeResume: (sessionName: string, resumeToken: string, cwd?: string | null, configDir?: string) => Promise<"resumable" | "not_resumable" | "inconclusive">;
   private resolveHomeDirByPid: ResolveHomeDirByPid;
   private sleep: (ms: number) => Promise<void>;
   private homeDir: string;
@@ -104,7 +106,7 @@ export class ResumeMetadataRefresher {
     // through the named ungated escape hatch — never a silent fallback (r1 owed item 3).
     this.readCodexThreadIdByPid = deps.readCodexThreadIdByPid
       ?? ((pid, identity, report, home) => identity === undefined ? resolverFor(home).resolveUngatedLegacy(pid, report) : resolverFor(home).resolve(pid, identity, report));
-    this.probeClaudeResume = deps.probeClaudeResume ?? ((sessionName, resumeToken, cwd) => this.defaultProbeClaudeResume(sessionName, resumeToken, cwd));
+    this.probeClaudeResume = deps.probeClaudeResume ?? ((sessionName, resumeToken, cwd, configDir) => this.defaultProbeClaudeResume(sessionName, resumeToken, cwd, configDir));
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.homeDir = deps.homeDir ?? os.homedir();
     this.contextUsageStore = deps.contextUsageStore ?? null;
@@ -234,7 +236,11 @@ export class ResumeMetadataRefresher {
           }
           continue;
         }
-        const probe = await this.probeClaudeResume(session.sessionName, session.resumeToken, session.cwd ?? null);
+        // A seat with its own Claude config dir keeps its conversations there, so the probe looks there.
+        const seatHome = session.nodeId ? this.seatHome?.(session.nodeId, "claude-code") : undefined;
+        const probe = await (seatHome
+          ? this.probeClaudeResume(session.sessionName, session.resumeToken, session.cwd ?? null, seatHome)
+          : this.probeClaudeResume(session.sessionName, session.resumeToken, session.cwd ?? null));
         // OPR.0.4.3.20 FR-6 §2.1b — record the probe result WITHOUT clearing:
         // `not_resumable`/`inconclusive` marks the present token stale (the plan
         // surfaces it as `stale — re-verify`), `resumable` stamps freshness. The
@@ -371,11 +377,14 @@ export class ResumeMetadataRefresher {
     sessionName: string,
     resumeToken: string,
     cwd?: string | null,
+    configDir?: string,
   ): Promise<"resumable" | "not_resumable" | "inconclusive"> {
-    const command = buildNativeResumeCommand("claude-code", resumeToken, sessionName);
-    if (!command) {
+    const resume = buildNativeResumeCommand("claude-code", resumeToken, sessionName);
+    if (!resume) {
       return "not_resumable";
     }
+    // A leading assignment, as the classic launch uses, so an rc alias or function for `claude` still resolves.
+    const command = configDir ? `CLAUDE_CONFIG_DIR=${shellQuote(configDir)} ${resume}` : resume;
 
     const probeSession = `rigged-refresh-${sanitizeTmuxName(sessionName)}-${Date.now().toString(36)}`;
     const create = this.tmuxAdapter.deliveryGuard

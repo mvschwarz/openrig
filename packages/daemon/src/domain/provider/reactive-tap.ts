@@ -90,6 +90,8 @@ export function collectReactiveEventSignals(deps: ReactiveTapDeps): ReactiveTapR
 
   for (const seat of deps.seats) {
     if (seat.runtime !== "codex") continue;
+    // The registry belongs to the daemon's CODEX_HOME; a seat with its own home isn't on any of its accounts.
+    if (seat.runtimeHome?.home) continue;
     const accountRef = accountBySeat.get(seat.seatSession);
     if (!accountRef) continue;
 

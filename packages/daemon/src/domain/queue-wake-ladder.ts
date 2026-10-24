@@ -1,4 +1,5 @@
 import type { ArbitratedSeatState } from "./activity-taxonomy.js";
+import { seatRuntimeHomeBySession } from "./seat-runtime-home.js";
 import { quietHoldCustody } from "./quiet-hold-custody.js";
 import { latestHookMovedOn, latestHookPermissionPending, latestHookWaitsOnPerson } from "./agent-activity-store.js";
 import type { AgentActivity } from "./types.js";
@@ -664,6 +665,8 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
           ...model,
           now,
           fallbackSeconds: intervalS,
+          // A Claude seat with its own config dir has its own login and limit, so it pools apart.
+          claudeHomeOf: (seatSession) => seatRuntimeHomeBySession(deps.db, seatSession, "claude-code"),
         });
         for (const pool of pools) {
           for (const seat of pool.seatSessions) usagePoolBySeat.set(seat, pool);
