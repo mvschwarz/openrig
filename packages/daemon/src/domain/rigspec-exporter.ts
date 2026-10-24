@@ -97,6 +97,8 @@ export class RigSpecExporter {
       if (node.advisor) specNode.advisor = node.advisor;
       const rules = node.runtime === "claude-code" ? readClaudePermissionRules(this.db, node.id) : undefined;
       if (rules !== undefined) specNode.claudePermissions = rules;
+      const envelope = node.runtime === "codex" ? readCodexMemberPermissions(this.db, node.id) : undefined;
+      if (envelope !== undefined) specNode.codexPermissions = envelope;
       if (node.cwd) specNode.cwd = node.cwd;
       if (node.surfaceHint) specNode.surfaceHint = node.surfaceHint;
       if (node.workspace) specNode.workspace = node.workspace;

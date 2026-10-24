@@ -1057,6 +1057,7 @@ export interface LegacyRigSpecNode {
   effort?: string;
   advisor?: string;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
+  codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   cwd?: string;
   surfaceHint?: string;
   workspace?: string;

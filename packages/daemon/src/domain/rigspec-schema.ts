@@ -1386,6 +1386,11 @@ export class LegacyRigSpecSchema {
           try { validateClaudePermissionRules(node["claude_permissions"], `nodes.${nodeWhere}.claude_permissions`); }
           catch (error) { errors.push((error as Error).message); }
         }
+        if (node["codex_permissions"] !== undefined) {
+          if (node["runtime"] !== "codex") errors.push(`nodes.${nodeWhere}.codex_permissions: only valid when runtime is "codex"`);
+          try { validateCodexMemberPermissions(node["codex_permissions"], `nodes.${nodeWhere}.codex_permissions`); }
+          catch (error) { errors.push((error as Error).message); }
+        }
         if (node["effort"] !== undefined) {
           if (typeof node["effort"] !== "string" || !node["effort"].trim()) {
             advisories.push(`nodes.${nodeWhere}.effort: non-string value "${node["effort"]}" ignored; effort must be a text value`);
@@ -1451,6 +1456,7 @@ export class LegacyRigSpecSchema {
       effort: typeof n["effort"] === "string" && n["effort"].trim() ? n["effort"].trim() : undefined,
       advisor: typeof n["advisor"] === "string" && n["advisor"].trim() ? n["advisor"].trim() : undefined,
       ...(n["claude_permissions"] === undefined ? {} : { claudePermissions: validateClaudePermissionRules(n["claude_permissions"]) }),
+      ...(n["codex_permissions"] === undefined ? {} : { codexPermissions: validateCodexMemberPermissions(n["codex_permissions"]) }),
       cwd: (n["cwd"] as string) ?? undefined,
       surfaceHint: (n["surface_hint"] as string) ?? undefined,
       workspace: (n["workspace"] as string) ?? undefined,

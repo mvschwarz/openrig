@@ -121,6 +121,7 @@ export class RigInstantiator {
             effort: specNode.effort,
             advisor: specNode.advisor,
             claudePermissions: specNode.claudePermissions,
+            codexPermissions: specNode.codexPermissions,
             cwd: specNode.cwd,
             surfaceHint: specNode.surfaceHint,
             workspace: specNode.workspace,

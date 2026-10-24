@@ -247,6 +247,7 @@ export class LegacyRigSpecCodec {
         if (node.effort != null) n["effort"] = node.effort;
         if (node.advisor != null) n["advisor"] = node.advisor;
         if (node.claudePermissions !== undefined) n["claude_permissions"] = node.claudePermissions;
+        if (node.codexPermissions !== undefined) n["codex_permissions"] = node.codexPermissions;
         if (node.cwd != null) n["cwd"] = node.cwd;
         if (node.surfaceHint != null) n["surface_hint"] = node.surfaceHint;
         if (node.workspace != null) n["workspace"] = node.workspace;

@@ -882,7 +882,11 @@ export class SeatLifecycleService {
       return { ok: false, code: "permission_selection_refused", message: "A Codex profile name uses letters, digits, '.', '_' and '-'; use inherit to clear it." };
     }
     const observer = this.runtimeAdapters["codex"] as unknown as Partial<CodexProfileObserver> | undefined;
-    const observed = to !== null && cwd && observer?.observeProfile ? await observer.observeProfile(to, cwd) : undefined;
+    // The check is evidence: if it fails unexpectedly, record that instead of failing the request.
+    const observed = to !== null && cwd && observer?.observeProfile
+      ? await observer.observeProfile(to, cwd).catch((error: unknown) => ({ vantage: "unestablished" as const, home: null, file: "unverified" as const,
+        load: "not_run" as const, detail: `The profile check couldn't run (${(error as Error).message}); each launch runs the native check.`, observedAt: new Date().toISOString() }))
+      : undefined;
     if (observed?.load === "failed") {
       return { ok: false, code: "permission_selection_refused", message: `Codex profile not changed: ${observed.detail}` };
     }
@@ -895,8 +899,11 @@ export class SeatLifecycleService {
         // Re-recording the same profile compares its bytes with the last recorded observation, in the same home.
         const last = this.db.prepare("SELECT payload FROM events WHERE node_id = ? AND type = 'node.codex_profile_changed' ORDER BY seq DESC LIMIT 1").get(seat.nodeId) as { payload: string } | undefined;
         const lastObserved = last ? (JSON.parse(last.payload) as { to?: string | null; observation?: { home?: string | null; sha256?: string; file?: string } }) : undefined;
+        // Only two readings of the file (present or absent) compare; an unread or unverified one says nothing.
+        const read = (file: string | undefined) => file === "present" || file === "absent";
         const fileChanged = observed?.vantage === "configured_codex_home" && lastObserved?.to === to && lastObserved.observation?.home === observed.home
-          && lastObserved.observation.file !== undefined && (lastObserved.observation.file !== observed.file || lastObserved.observation.sha256 !== observed.sha256);
+          && read(lastObserved.observation.file) && read(observed.file)
+          && (lastObserved.observation.file !== observed.file || lastObserved.observation.sha256 !== observed.sha256);
         const observation = observed ? { ...observed, ...(fileChanged ? { changedSinceRecorded: true } : {}) } : undefined;
         const changed = from !== to;
         if (changed || observation) {
