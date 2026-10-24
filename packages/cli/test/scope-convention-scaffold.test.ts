@@ -240,7 +240,7 @@ describe("scope create — the mode-neutral SPEC/NOTES convention lands on disk"
       expect(parseYaml(fs.readFileSync(path.join(missionPath, "mission.yaml"), "utf8"))).toEqual({
         schema: "openrig.mission/v0alpha1",
         kind: "mission",
-        metadata: { status: "planned" },
+        metadata: { name, status: "planned" },
         composition: { mission_markdown: { spec: "SPEC.md" }, slices: [] },
       });
     }
