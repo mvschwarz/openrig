@@ -68,6 +68,7 @@
     "internal-only (example)"
   ],
   "allowed_context_lines": [
-    "   `<launch cwd>/.openrig/compaction/preparation/<session>/<attempt>/RESTORE-MAP.md`; its parent"
+    "   `<launch cwd>/.openrig/compaction/preparation/<session>/<attempt>/RESTORE-MAP.md`; its parent",
+    "OpenRig uses `<cwd>/.openrig/compaction/preparation/`, falling back to its instance home when"
   ]
 }
