@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DaemonClient, remoteDaemonClient, senderIdentityHeaders, SENDER_IDENTITY_HEADER } from "../src/client.js";
+import { DaemonClient, remoteDaemonClient, senderIdentityHeaders, SENDER_IDENTITY_HEADER, OCCUPANT_GENERATION_HEADER } from "../src/client.js";
 import { resolveOriginSelfHostId } from "../src/daemon-lifecycle.js";
 
 /** Walk every non-test, non-dist .ts under a package's src/, returning [absPath, contents]. */
@@ -135,6 +135,34 @@ describe("DaemonClient sender-identity header (P18)", () => {
     const { client, box } = captureHeaders();
     await client.post("/inbox/drop", { body: "x" }, { headers: { [SENDER_IDENTITY_HEADER]: "mallory@rig" } });
     expect(box.headers[SENDER_IDENTITY_HEADER]).toBe("alice@rig"); // the seat env wins, not the caller's claim
+  });
+});
+
+describe("slice 16: a seat's request carries its own occupant generation", () => {
+  const saved = { session: process.env.OPENRIG_SESSION_NAME, generation: process.env.OPENRIG_OCCUPANT_GENERATION };
+  afterEach(() => {
+    if (saved.session === undefined) delete process.env.OPENRIG_SESSION_NAME; else process.env.OPENRIG_SESSION_NAME = saved.session;
+    if (saved.generation === undefined) delete process.env.OPENRIG_OCCUPANT_GENERATION; else process.env.OPENRIG_OCCUPANT_GENERATION = saved.generation;
+  });
+
+  it("so a runtime switch can tell the seat's two processes apart", () => {
+    process.env.OPENRIG_SESSION_NAME = "dev-impl@rig";
+    process.env.OPENRIG_OCCUPANT_GENERATION = "0b9d8c7e-1111-4222-8333-444455556666";
+    expect(senderIdentityHeaders()).toEqual({ [SENDER_IDENTITY_HEADER]: "dev-impl@rig", [OCCUPANT_GENERATION_HEADER]: "0b9d8c7e-1111-4222-8333-444455556666" });
+  });
+
+  it("no generation without one in the seat env, and none for a client acting for another caller", () => {
+    process.env.OPENRIG_SESSION_NAME = "dev-impl@rig";
+    delete process.env.OPENRIG_OCCUPANT_GENERATION;
+    expect(senderIdentityHeaders()).toEqual({ [SENDER_IDENTITY_HEADER]: "dev-impl@rig" });
+    process.env.OPENRIG_OCCUPANT_GENERATION = "0b9d8c7e-1111-4222-8333-444455556666";
+    expect(senderIdentityHeaders(undefined, "alice@team")).toEqual({ [SENDER_IDENTITY_HEADER]: "alice@team" });
+  });
+
+  it("a malformed generation isn't sent", () => {
+    process.env.OPENRIG_SESSION_NAME = "dev-impl@rig";
+    process.env.OPENRIG_OCCUPANT_GENERATION = "not a generation\nX-Injected: 1";
+    expect(senderIdentityHeaders()).toEqual({ [SENDER_IDENTITY_HEADER]: "dev-impl@rig" });
   });
 });
 

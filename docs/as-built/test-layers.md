@@ -283,9 +283,11 @@ Four scenarios run in CI: `queue-baton-survives-restart` (since #243) with its s
 and `transcript-reads-addressed-seat`, `capture-returns-addressed-seat` and
 `daemon-restart-preserves-team-identity` in passing form only. Three more,
 `down-stops-every-seat`, `send-renders-in-addressed-pane` and
-`up-relaunch-restores-a-two-seat-team`, run with the local runner but not in CI. Those six later scenarios are not in this table; see "Status
+`up-relaunch-restores-a-two-seat-team`, run with the local runner but not in CI, and
+`compaction-restore-resumes-role` runs the compaction round-trip's success path the same
+way. Those seven later scenarios are not in this table; see "Status
 today" under [Help wanted](#help-wanted-command-families-without-a-behavioural-scenario). The
-other ten scenarios are authored but not yet runnable as meaningful checks:
+other nine scenarios are authored but not yet runnable as meaningful checks:
 
 | Scenario | Why it doesn't run as a check yet | Smallest useful next step |
 |---|---|---|
@@ -294,7 +296,6 @@ other ten scenarios are authored but not yet runnable as meaningful checks:
 | `ps-scope-honesty` | The second `up` reuses the first topology, and the expected match tolerates the other rig | Make `up` honour the per-step topology, then assert the exclusion |
 | `send-verify-means-rendered` | The `send` step drops `verify`, and the stub has no input loop | Build the input-consuming stub and assert a response derived from the nonce |
 | `home-divergence-preseed-visible` | The pipeline ignores `env.pre_existing_tmux`, and the default script never prints the expected `trust reached` | Recreate the real HOME split and whatever consumes it |
-| `compaction-restore-resumes-role` | Step-time `emit` is unbound | Input-triggered hooks plus evidence specific to one seat |
 | `stream-emit-durable-replay-live` | Step-time `emit` is unbound | Assert the actual stream contract |
 | `policy-posture-survives-structural-edit` | `policy` and `mutate` are unbound | Rewrite around current per-seat permission selection and an observed launch |
 | `locked-restore-never-permissive` | `policy` and `restore` are unbound | Keep the invariant (the selection survives a restore) and use current modes |
@@ -441,8 +442,12 @@ that loses the team's row, or changes its seat counts or status, fails on the po
 `rig down` then records it stopped, so the restart left a governable team. It does not prove
 that queue items survive the restart (that is `queue-baton-survives-restart.yaml`), that a
 kill inside a handoff window is reconciled (that is `kill-daemon-mid-handoff.yaml`), the
-port-and-process half of the row, or that the panes are gone after `down`. Everything else
-has none.
+port-and-process half of the row, or that the panes are gone after `down`.
+`compaction-restore-resumes-role` covers the compaction round-trip's success path: the
+seat's launch script (delivered through `env.stub_scripts`) fires the real precompact and
+restore seams in order, and impl's own pane carries the injected directive. It runs with
+the local runner, not in CI (container mode refuses `env.stub_scripts` loud and named), and
+its seeded wrong-seat-restore negative case is not armed yet.
 
 Before you start, two honest constraints:
 

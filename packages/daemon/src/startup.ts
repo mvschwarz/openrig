@@ -2550,6 +2550,16 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     log: (msg) => console.warn(msg),
   });
 
+  // Slice 16 — finish any runtime switch a stop interrupted, from its durable record, before the daemon serves:
+  // before its commit the predecessor keeps the seat; after it the successor does and the predecessor is retired.
+  {
+    const { SeatRuntimeSwitchService } = await import("./domain/seat-runtime-switch-service.js");
+    const switches = new SeatRuntimeSwitchService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter,
+      queueRepo: queueRepoInstance, runtimeAdapters: runtimeAdaptersMap, sessionEnv: launchSessionEnv, runtimeSessionEnv, tmuxOptionDefaults,
+      occupantInvalidator: deps.occupantInvalidator, activityOracle: seatActivityService, openrigHome: OPENRIG_HOME });
+    for (const warning of await switches.recoverAll()) console.warn(`[runtime-switch] recovery: ${warning}`);
+  }
+
   // OPR.0.3.4.9 — periodic snapshot scheduler (crash-insurance floor).
   const { PeriodicSnapshotScheduler } = await import("./domain/periodic-snapshot-scheduler.js");
   // OPR.0.5.3.10 — the snapshot tick shares ONE census across all rigs/seats.

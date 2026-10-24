@@ -340,4 +340,25 @@ describe("rig stream CLI", () => {
     expect(process.exitCode).toBe(1);
     process.exitCode = undefined;
   });
+  it("act sends exactly one action: linked work, a decline with its reason, or a duplicate", async () => {
+    const { deps, calls } = makeDeps();
+    const run = async (...args: string[]) => {
+      const program = createProgram({ streamDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "stream", "act", "S1", ...args, "--json"]);
+    };
+    await run("--work", "q-7");
+    await run("--decline", "not mine");
+    await run("--duplicate", "q-2", "--reader", "qa@rig");
+    expect(calls).toEqual([
+      { method: "POST", path: "/api/stream/S1/act", body: { action: "act", workQitemId: "q-7" } },
+      { method: "POST", path: "/api/stream/S1/act", body: { action: "decline", reason: "not mine" } },
+      { method: "POST", path: "/api/stream/S1/act", body: { action: "duplicate", duplicateOf: "q-2", reader: "qa@rig" } },
+    ]);
+    await run("--work", "q-7", "--decline", "x");
+    await run();
+    expect(calls).toHaveLength(3);
+    expect(errors.filter((e) => e === "Give exactly one of --work, --decline or --duplicate")).toHaveLength(2);
+    process.exitCode = undefined;
+  });
 });

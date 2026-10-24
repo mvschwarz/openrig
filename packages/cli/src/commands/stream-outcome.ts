@@ -6,7 +6,8 @@ import type { DaemonClient } from "../client.js";
  * Derived each time from existing records, never stored: the automatic path's disposition (accepted, or
  * deferred to intake), intake's classification, and each linked work row's current state and closure, followed through handoffs.
  * Classification, queue persistence, custody and completion stay distinct, and a closed row is reported
- * as its owner's outcome, not as proof a fix shipped.
+ * as its owner's outcome, not as proof a fix shipped. Readers' recorded actions (act, decline, duplicate) are shown beside
+ * it; when nothing automatic linked work, the newest reader-linked work decides the stage.
  */
 
 type Get = Pick<DaemonClient, "get">;
@@ -17,6 +18,7 @@ type Classification = { streamItemId: string; classifierSession: string; classif
 type QueueRow = { qitemId: string; destinationSession: string; state: string; closureReason: string | null; closureTarget: string | null;
   resolution: string | null; evidenceRef: string | null; tsUpdated: string };
 type Work = { qitemId: string; owner?: string; state: string; closedToward?: string | null; handedOnFrom?: string[]; unknown?: string };
+type ReaderAction = { actionId?: string; readerSession: string; action: string; workQitemId: string | null; duplicateOf: string | null; reason: string | null; actedAt: string };
 
 const OPEN = ["pending", "in-progress", "blocked"];
 const HOPS = 8;
@@ -46,7 +48,7 @@ async function work(client: Get, qitemId: string): Promise<Work> {
   }
 }
 
-export async function streamOutcome(client: Get, streamItemId: string) {
+async function routed(client: Get, streamItemId: string) {
   const id = encodeURIComponent(streamItemId);
   const [dispositionRes, classificationRes] = await Promise.all([
     client.get<unknown>(`/api/projects/dispositions/${id}`),
@@ -92,4 +94,39 @@ export async function streamOutcome(client: Get, streamItemId: string) {
       ? `Joined to ${linked}${moved}, which is ${row.state}${row.owner ? ` (owner ${row.owner})` : ""}.`
       : `Opened ${linked} for ${d.ownerSession}${moved}; it's ${row.state}${row.owner && row.owner !== d.ownerSession ? ` and now with ${row.owner}` : ""}.`,
     accepted, application: d.applied, classification, work: rows, note };
+}
+
+/** Stages where no automatic work is live (none linked, or its effect ended with intake); a reader's linked work decides them. */
+const READER_DECIDES = ["awaiting_intake", "deferred_to_intake", "decided_by_intake", "no_action", "with_intake", "unavailable"];
+
+export async function streamOutcome(client: Get, streamItemId: string) {
+  const [base, actionsRes] = await Promise.all([routed(client, streamItemId),
+    client.get<unknown>(`/api/stream/${encodeURIComponent(streamItemId)}/actions`)]);
+  if (actionsRes.status !== 200 || !object(actionsRes.data) || !Array.isArray(actionsRes.data.current)) return { ...base, readers: "unavailable" };
+  const current = actionsRes.data.current as ReaderAction[];
+  if (!current.length) return base;
+  const readers = current.map(a => ({ reader: a.readerSession, action: a.action, at: a.actedAt, ...(a.workQitemId ? { work: a.workQitemId } : {}),
+    ...(a.duplicateOf ? { duplicateOf: a.duplicateOf } : {}), ...(a.reason ? { reason: a.reason } : {}) }));
+  // Newest first; within the same millisecond, record order (the monotonic action id) decides.
+  const acted = current.filter(a => a.action === "act" && a.workQitemId)
+    .sort((a, b) => b.actedAt.localeCompare(a.actedAt) || (b.actionId ?? "").localeCompare(a.actionId ?? ""));
+  const auto = READER_DECIDES.includes(base.stage) ? undefined : (base as { work?: Work[] }).work?.[0];
+  // Work is compared by its current row, handoffs followed, so one handed-on chain isn't parallel work. A link whose
+  // current row is unknown keeps its own id.
+  const followed = new Map<string, Work>();
+  for (const id of new Set(acted.map(a => a.workQitemId!))) followed.set(id, await work(client, id));
+  const key = (w: Work, linkedId: string) => w.unknown ? linkedId : w.qitemId;
+  const lineages = new Set([...[...followed].map(([id, w]) => key(w, id)), ...(auto ? [key(auto, auto.handedOnFrom?.[0] ?? auto.qitemId)] : [])]);
+  const parallel = lineages.size > 1 ? { parallelWork: [...lineages] } : {};
+  if (!acted.length || !READER_DECIDES.includes(base.stage)) return { ...base, readers, ...parallel };
+  // Nothing automatic linked work: the newest reader-linked work is what the poster follows.
+  const by = acted[0]!;
+  const row = followed.get(by.workQitemId!)!;
+  const moved = row.handedOnFrom ? `, handed on to ${row.qitemId}` : "";
+  const why = `${(row.unknown ?? "").replace(/_/g, " ")}${row.closedToward ? `; closed toward ${row.closedToward}` : ""}`;
+  return { ...base, readers, ...parallel, work: [row],
+    stage: row.unknown ? "work_unknown" : OPEN.includes(row.state) ? "work_open" : "work_closed",
+    summary: row.unknown ? `${by.readerSession} linked ${by.workQitemId}${moved}; its current state is unknown (${why}).`
+      : `${by.readerSession} linked ${by.workQitemId}${moved}; it's ${row.state}${row.owner && row.owner !== by.readerSession ? ` and now with ${row.owner}` : ""}.`,
+    ...(row.unknown || OPEN.includes(row.state) ? {} : { note: "A closed work row reports its owner's outcome; it isn't proof that a fix shipped." }) };
 }

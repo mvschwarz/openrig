@@ -1,6 +1,7 @@
 import type { SessionRegistry } from "../domain/session-registry.js";
 import { Hono, type Context } from "hono";
 import { classifierOccupant } from "../domain/classification-sources.js";
+import { OCCUPANT_GENERATION_HEADER, runtimeSwitchCustodyRefusal } from "./runtime-switch-custody.js";
 import type { ClassifierLeaseManager } from "../domain/classifier-lease-manager.js";
 import { streamSSE } from "hono/streaming";
 import type { EventBus } from "../domain/event-bus.js";
@@ -97,6 +98,12 @@ export function queueRoutes(): Hono {
     } catch (error) {
       return c.json({ error: (error as { code?: string }).code ?? "no_active_lease" }, 409);
     }
+  }
+  /** Slice 16: a runtime switch's own predecessor or not-yet-committed successor doesn't act as the seat. */
+  function switchCustody(c: Context, actor: string): Response | null {
+    const db = c.get("db" as never) as Database.Database | undefined;
+    const refusal = db ? runtimeSwitchCustodyRefusal(db, actor, c.req.header(OCCUPANT_GENERATION_HEADER)) : null;
+    return refusal ? c.json(refusal.body, refusal.status) : null;
   }
   function destinationAdvisory(c: { get: (key: string) => unknown }, sessionRef: string) {
     // This observation runs after the write commits. An unavailable lookup
@@ -548,6 +555,7 @@ export function queueRoutes(): Hono {
     const identity = requireSenderIdentity(c, { verb: "queue create", bodyClaim: body.sourceSession });
     if (!identity.ok) return identity.response;
     const sourceSession = identity.session;
+    { const held = switchCustody(c, sourceSession); if (held) return held; }
     // Required destination and body, then PL-007: validate target_repo against
     // source rig's workspace.repos[].
     // GUARD FIXBACK (OPR.0.4.6.MH3 review of 86ba8b42, Finding 1): this runs
@@ -623,6 +631,7 @@ export function queueRoutes(): Hono {
     const identity = requireSenderIdentity(c, { verb: "queue claim", bodyClaim: body.destinationSession });
     if (!identity.ok) return identity.response;
     const destinationSession = identity.session;
+    { const held = switchCustody(c, destinationSession); if (held) return held; }
     try {
       const item = getRepo(c).claim({ qitemId, destinationSession, identityProvenance: resolveRecordedProvenance(c, identity) });
       return c.json(item);
@@ -639,6 +648,7 @@ export function queueRoutes(): Hono {
     const identity = requireSenderIdentity(c, { verb: "queue unclaim", bodyClaim: body.destinationSession });
     if (!identity.ok) return identity.response;
     const destinationSession = identity.session;
+    { const held = switchCustody(c, destinationSession); if (held) return held; }
     try {
       const item = getRepo(c).unclaim(qitemId, destinationSession, body.reason ?? "manual", resolveRecordedProvenance(c, identity));
       return c.json(item);
@@ -696,6 +706,7 @@ export function queueRoutes(): Hono {
     const identity = requireSenderIdentity(c, { verb: "queue update", bodyClaim: body.actorSession });
     if (!identity.ok) return identity.response;
     const actorSession = identity.session;
+    { const held = switchCustody(c, actorSession); if (held) return held; }
 
     try {
       const fence = classificationRefusal(c, actorSession, body.classificationBinding);
@@ -751,6 +762,7 @@ export function queueRoutes(): Hono {
     const identity = requireSenderIdentity(c, { verb: "queue handoff", bodyClaim: body.fromSession });
     if (!identity.ok) return identity.response;
     const fromSession = identity.session;
+    { const held = switchCustody(c, fromSession); if (held) return held; }
     if (!body.toSession) return c.json({ error: "toSession is required" }, 400);
 
     // PL-007 — GUARD FIXBACK (Finding 1): an EXPLICIT targetRepo validates
@@ -837,6 +849,7 @@ export function queueRoutes(): Hono {
     const identity = requireSenderIdentity(c, { verb: "queue handoff-and-complete", bodyClaim: body.fromSession });
     if (!identity.ok) return identity.response;
     const fromSession = identity.session;
+    { const held = switchCustody(c, fromSession); if (held) return held; }
     if (!body.toSession) return c.json({ error: "toSession is required" }, 400);
 
     // PL-007 — GUARD FIXBACK (Finding 1): same source-host-authority ordering

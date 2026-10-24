@@ -93,6 +93,48 @@ describe("what became of a stream observation", () => {
     expect(loop).toMatchObject({ stage: "work_unknown", work: [{ unknown: "too_many_handoffs" }] });
   });
 
+  it("readers' actions: shown beside the outcome, and reader-linked work decides the stage when nothing automatic linked any", async () => {
+    const ACTIONS = "/api/stream/S1/actions";
+    const actions = (...current: Array<Record<string, unknown>>) => ({ status: 200, data: { streamItemId: "S1", current, history: current } });
+    const a = (reader: string, action: string, over: Record<string, unknown> = {}) => ({ readerSession: reader, action, workQitemId: null, duplicateOf: null,
+      reason: null, actedAt: "t5", ...over });
+    // A decline alone changes nothing for others: still awaiting intake, with the reason shown.
+    expect(await streamOutcome(client({ [ACTIONS]: actions(a("qa@rig", "decline", { reason: "not mine" })) }), "S1"))
+      .toMatchObject({ stage: "awaiting_intake", readers: [{ reader: "qa@rig", action: "decline", reason: "not mine" }] });
+    // No automatic work: the reader's linked work is what the poster follows, through handoffs.
+    const linked = await streamOutcome(client({ [ACTIONS]: actions(a("qa@rig", "decline", { reason: "not mine" }), a("dev-lead@rig", "act", { workQitemId: "q-7", actedAt: "t6" })),
+      "/api/queue/q-7": row("in-progress", { qitemId: "q-7", destinationSession: "dev-two@rig" }) }), "S1");
+    expect(linked).toMatchObject({ stage: "work_open", work: [{ qitemId: "q-7", owner: "dev-two@rig" }],
+      readers: [{ reader: "qa@rig", action: "decline" }, { reader: "dev-lead@rig", action: "act", work: "q-7" }] });
+    expect(linked.summary).toBe("dev-lead@rig linked q-7; it's in-progress and now with dev-two@rig.");
+    const fixed = await streamOutcome(client({ [ACTIONS]: actions(a("dev-lead@rig", "act", { workQitemId: "q-7" })),
+      "/api/queue/q-7": row("done", { qitemId: "q-7", closureReason: "no-follow-on", resolution: "fixed in #1900", evidenceRef: "pr-1900" }) }), "S1");
+    expect(fixed).toMatchObject({ stage: "work_closed", work: [{ resolution: "fixed in #1900", evidence: "pr-1900" }], note: expect.stringContaining("isn't proof") });
+    // Automatic work already linked: its stage stands, and a second work row is flagged.
+    const both = await streamOutcome(client({ [DISP]: disposition({}), "/api/queue/qitem-stream-S1": row("in-progress"),
+      [ACTIONS]: actions(a("dev-lead@rig", "act", { workQitemId: "q-7" })) }), "S1");
+    expect(both).toMatchObject({ stage: "work_open", work: [{ qitemId: "qitem-stream-S1" }], parallelWork: ["q-7", "qitem-stream-S1"] });
+    // The automatic effect ended with intake; the work intake then linked is what the poster follows, and isn't parallel.
+    const withIntake = await streamOutcome(client({ [DISP]: disposition({ applied: { outcome: "target_closed" } }), "/api/queue/q-7": row("pending", { qitemId: "q-7" }),
+      [ACTIONS]: actions(a("intake@rig", "act", { workQitemId: "q-7" })) }), "S1");
+    expect(withIntake).toMatchObject({ stage: "work_open", work: [{ qitemId: "q-7" }], application: { outcome: "target_closed" } });
+    expect(withIntake).not.toHaveProperty("parallelWork");
+    // One handed-on chain is one piece of work, not parallel work: A linked q-1, which was handed on to q-8, and B linked q-8.
+    const chain = await streamOutcome(client({ [ACTIONS]: actions(a("a@rig", "act", { workQitemId: "q-1", actedAt: "t5" }), a("b@rig", "act", { workQitemId: "q-8", actedAt: "t6" })),
+      "/api/queue/q-1": row("handed-off", { qitemId: "q-1", closureReason: "handed_off_to", closureTarget: "b@rig" }),
+      "/api/queue/list?handedOffFrom=q-1": { status: 200, data: [{ qitemId: "q-8", handedOffFrom: "q-1" }] },
+      "/api/queue/q-8": row("in-progress", { qitemId: "q-8", destinationSession: "b@rig" }) }), "S1");
+    expect(chain).toMatchObject({ stage: "work_open", work: [{ qitemId: "q-8" }] });
+    expect(chain).not.toHaveProperty("parallelWork");
+    // Two actions in the same millisecond: record order (the action id) decides which is newest.
+    const tied = await streamOutcome(client({ [ACTIONS]: actions(a("a@rig", "act", { workQitemId: "q-1", actedAt: "t5", actionId: "01A" }),
+      a("b@rig", "act", { workQitemId: "q-2", actedAt: "t5", actionId: "01B" })),
+      "/api/queue/q-1": row("done", { qitemId: "q-1", closureReason: "no-follow-on" }), "/api/queue/q-2": row("pending", { qitemId: "q-2" }) }), "S1");
+    expect(tied).toMatchObject({ stage: "work_open", work: [{ qitemId: "q-2" }] });
+    // A daemon without reader actions says so instead of implying there are none.
+    expect(await streamOutcome(client({}), "S1")).toMatchObject({ stage: "awaiting_intake", readers: "unavailable" });
+  });
+
   it("join, duplicate and no_action", async () => {
     const join = disposition({ disposition: "join", ownerSession: "qa-one@rig", workQitemId: "q-1", effect: { operation: "note", qitemId: "q-1" }, applied: { outcome: "noted" } });
     expect(await streamOutcome(client({ [DISP]: join, "/api/queue/q-1": row("blocked", { qitemId: "q-1", destinationSession: "qa-one@rig" }) }), "S1"))

@@ -216,6 +216,11 @@ export type RigEvent =
   // persisted node WITHOUT launch/relaunch/input. Distinct from node.claimed so
   // the operator is never misled about which op happened.
   | { type: "node.reconciled"; rigId: string; nodeId: string; logicalId: string; sessionName: string }
+  // Slice 16: a seat's live runtime switch committed; the seat now runs on `to` in a new conversation.
+  | { type: "seat.runtime_changed"; rigId: string; nodeId: string; switchId: string; from: string; to: string; reason: string;
+      requestedBy: string | null; generation: string; previousGeneration: string;
+      settings: Record<string, { value: string | null; source: string }>; dropped: Array<{ setting: string; value: string }>;
+      permissionSelection: string; claimsMoved: number }
   | { type: "seat.handover_completed"; rigId: string; nodeId: string; logicalId: string; previousOccupant: string; currentOccupant: string; source: string; reason: string; operator: string | null;
       /** OPR.0.5.5.5 (fix B2) — the executed source outcome, persisted so the DURABLE
        *  record (not just the command response) carries what primed the successor:
