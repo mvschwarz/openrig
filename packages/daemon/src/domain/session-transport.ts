@@ -2474,6 +2474,7 @@ export class SessionTransport {
       attachmentType: meta.attachmentType,
       timeoutMs,
       binding: { sessionName, nodeId: meta.nodeId, occupant: meta.occupant, pane: meta.pane },
+      privateInput: opts.dangerouslyInteract === true,
       readinessFromPaneOnly: opts.readinessFromPaneOnly === true,
       signal: callerSignal(opts), cancelledBy: "caller",
     });
@@ -2723,6 +2724,7 @@ export class SessionTransport {
         attachmentType: sessionMeta.attachmentType,
         timeoutMs: waitForIdleMs,
         binding: observed?.binding,
+        privateInput: opts?.dangerouslyInteract === true,
         readinessFromPaneOnly: opts?.readinessFromPaneOnly === true,
         signal: callerSignal(opts), cancelledBy: "caller",
       });
@@ -2780,6 +2782,7 @@ export class SessionTransport {
           // Message-only: the re-wait runs on the leftover budget, but the
           // timeout names the configured --wait-for-idle value.
           timeoutLabelMs: waitForIdleMs,
+          privateInput: opts.dangerouslyInteract === true,
           binding: observed?.binding,
           readinessFromPaneOnly: opts.readinessFromPaneOnly === true,
           signal: callerSignal(opts), cancelledBy: "caller",
@@ -2807,7 +2810,7 @@ export class SessionTransport {
           attachmentType: sessionMeta.attachmentType,
           binding: observed?.binding,
           readinessFromPaneOnly: opts.readinessFromPaneOnly === true,
-        });
+        }, opts.dangerouslyInteract === true);
         if (recheck.state !== "idle") {
           const late: { reason: string; error: string } =
             recheck.state === "needs_input"
@@ -2856,8 +2859,9 @@ export class SessionTransport {
     // the positive-picker guard (FR-4 — the footgun separation). The advisory is carried on the
     // success result via `warning` so the honest telemetry is surfaced.
     let sendAdvisory: string | undefined;
-    const promptOverride = waitForIdleMs === undefined && Boolean(opts?.dangerouslyInteract);
-    if (waitForIdleMs === undefined) {
+    // Broadcast can carry wait + override: after waiting, it still uses the same deliberate-input boundary.
+    const promptOverride = Boolean(opts?.dangerouslyInteract);
+    if (waitForIdleMs === undefined || promptOverride) {
       const readiness = await this.classifySendReadiness({
         sessionName,
         runtime,
@@ -3198,6 +3202,7 @@ export class SessionTransport {
     signal?: AbortSignal;
     /** Whose cancellation the signal carries: managed preparation (the default) or the send's caller. */
     cancelledBy?: "caller";
+    privateInput?: boolean;
     binding?: ObservedBinding;
     readinessFromPaneOnly?: boolean;
     // Optional display value for timeout messages. The deadline always comes
@@ -3292,12 +3297,12 @@ export class SessionTransport {
    *  caller's cancellation. Null when the deadline or the cancellation wins; the abandoned observation is ignored,
    *  never delivered on. */
   private async observeReadinessWithin(
-    input: { sessionName: string; runtime: string | null; attachmentType: string | null; binding?: ObservedBinding; readinessFromPaneOnly?: boolean },
+    input: { sessionName: string; runtime: string | null; attachmentType: string | null; binding?: ObservedBinding; readinessFromPaneOnly?: boolean; privateInput?: boolean },
     remainingMs: number,
     cancel?: AbortSignal,
   ): Promise<AgentActivity | null> {
     if (cancel?.aborted) return null;
-    const observation = this.classifySendReadiness(input);
+    const observation = this.classifySendReadiness(input, input.privateInput);
     observation.catch(() => undefined);
     let timer: ReturnType<typeof setTimeout> | undefined;
     let onAbort: (() => void) | undefined;

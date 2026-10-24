@@ -639,6 +639,21 @@ describe("deliberate override preserves existing input", () => {
     expect(f.submissions).toEqual([]); // Unreadable input cannot prove the answer staged for Enter.
   });
 
+  it.each(["R1-existing-draft", ""])("broadcast wait plus override checks current input before typing: %j", async draft => {
+    const f = fixture(); await f.guard.set("a", { mode: "hold" }, "human@test", "fixture quiet");
+    f.bodies.a = draft;
+    const response = await f.post("/api/transport/broadcast", { sessions: ["worker@test"], text: "outgoing", ...override, verify: true, waitForIdleMs: 100 });
+    expect(response.status).toBe(200);
+    const { results } = await response.json();
+    expect(results[0]).toMatchObject(draft
+      ? { ok: false, sent: false, reason: "override_input_present", existingInput: { rows: [draft], classification: "typed_or_pasted" } }
+      : { ok: true, sent: true, existingInput: { classification: "empty" } });
+    expect(f.writes).toEqual(draft ? [] : ["paste:a:outgoing"]);
+    expect(f.submissions).toEqual([]); // Terminal fixture cannot prove a native answer staged for Enter.
+    expect(f.observations).toEqual([]);
+    expect(f.db.serialize().includes(Buffer.from("R1-existing-draft"))).toBe(false);
+  });
+
   it("unchecked API requests require explicit interaction and a reason", async () => {
     const f = fixture();
     for (const [route, dangerouslyInteract] of [["send", false], ["broadcast", true]] as const) {
