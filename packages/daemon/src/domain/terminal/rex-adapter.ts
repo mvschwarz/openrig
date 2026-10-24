@@ -7,7 +7,7 @@ import type {
   ProviderStatus,
   TerminalProvider,
 } from "./terminal-provider.js";
-import type { RexTransport } from "./rex-transport.js";
+import type { RexProbeResult, RexTransport } from "./rex-transport.js";
 import { buildRexGrid, REX_LABEL_LIMIT, rexLabel } from "./rex-layout.js";
 import { planTileLabels } from "./tile-layout.js";
 
@@ -18,6 +18,8 @@ export const REX_PANES_PER_PAGE = 16;
 /** The wait before the one check of the opened tiles: each block's login shell starts before its command runs. */
 export const REX_TILE_SETTLE_MS = 2_000;
 const CHECK_BATCH = 16;
+const PROBE_REUSE_MS = 1_000;
+type ProbeEntry = { result: Promise<RexProbeResult>; settledAt?: number };
 export const REX_TILE_CLOSED_REASON = "the tile had already closed when OpenRig checked it after opening";
 export const REX_TILES_UNCONFIRMED_NOTE = "Rex couldn't confirm the tiles after opening, so those seats are listed as opened without that check.";
 
@@ -74,17 +76,31 @@ export class RexAdapter implements TerminalProvider {
   private readonly transport: RexTransport;
   private readonly newLaunchToken: () => string;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly now: () => number;
   private launchCounter = 0;
+  private lastProbe: ProbeEntry | null = null;
 
-  constructor(deps: { transport: RexTransport; newLaunchToken?: () => string; sleep?: (ms: number) => Promise<void> }) {
+  constructor(deps: { transport: RexTransport; newLaunchToken?: () => string; sleep?: (ms: number) => Promise<void>; now?: () => number }) {
     this.transport = deps.transport;
     this.newLaunchToken = deps.newLaunchToken ?? (() => `l${(this.launchCounter += 1)}`);
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.now = deps.now ?? Date.now;
+  }
+
+  /** A status report asks for status() then liveness(); one probe answers both. */
+  private probe(): Promise<RexProbeResult> {
+    const last = this.lastProbe;
+    if (last && (last.settledAt === undefined || this.now() - last.settledAt < PROBE_REUSE_MS)) return last.result;
+    const entry: ProbeEntry = { result: this.transport.probe() };
+    const settle = () => { entry.settledAt = this.now(); };
+    entry.result.then(settle, settle);
+    this.lastProbe = entry;
+    return entry.result;
   }
 
   async status(): Promise<ProviderStatus> {
     try {
-      const probe = await this.transport.probe();
+      const probe = await this.probe();
       return {
         provider: this.name,
         available: probe.alive,
@@ -99,7 +115,7 @@ export class RexAdapter implements TerminalProvider {
 
   async liveness(): Promise<ProviderLiveness> {
     try {
-      const probe = await this.transport.probe();
+      const probe = await this.probe();
       return probe.alive ? { alive: true } : { alive: false, detail: probe.detail ?? "the Rex server is not answering" };
     } catch (err) {
       return { alive: false, detail: describe(err) };

@@ -86,6 +86,19 @@ describe("rex adapter: status and liveness", () => {
     expect(await broken.status()).toEqual({ provider: "rex", available: false, capabilities: {} });
     expect(await broken.liveness()).toEqual({ alive: false, detail: "boom" });
   });
+
+  it("answers status and liveness from one probe", async () => {
+    let probes = 0;
+    let clock = 0;
+    const transport: RexTransport = { probe: async () => { probes++; return { alive: true, version: "1", instanceId: "i" }; }, request: async () => ({}) };
+    const adapter = new RexAdapter({ transport, now: () => clock });
+    await adapter.status();
+    await adapter.liveness();
+    expect(probes).toBe(1);
+    clock += 1_000;
+    await adapter.liveness();
+    expect(probes).toBe(2);
+  });
 });
 
 describe("rex adapter: openView", () => {

@@ -38,6 +38,8 @@ export interface RexTransport {
 }
 
 const REQUEST_TIMEOUT_MS = 30_000;
+// A healthy server answers a probe in tens of milliseconds; a hung one must not hold up `rig terminal status`.
+const PROBE_TIMEOUT_MS = 2_000;
 const STOP_GRACE_MS = 1_000;
 const MAX_OUTPUT_CHARS = 4 * 1024 * 1024;
 
@@ -112,17 +114,18 @@ function classify(method: string, err: unknown): RexError {
  * stdin. Env is read once here, as the herdr provider reads its endpoint; the binary is found on each call, so a
  * Rex installed after the daemon started is still used.
  */
-export function createRexCliTransport(opts: { run?: RexRun; env?: NodeJS.ProcessEnv; binary?: () => string | null; timeoutMs?: number } = {}): RexTransport {
+export function createRexCliTransport(opts: { run?: RexRun; env?: NodeJS.ProcessEnv; binary?: () => string | null; timeoutMs?: number; probeTimeoutMs?: number } = {}): RexTransport {
   const env = { ...(opts.env ?? process.env) };
   const server = env["REX_SERVER"]?.trim();
   const run = opts.run ?? spawnRex;
   const binary = opts.binary ?? (() => resolveRexBinary(env));
-  const request = async (method: string, params: unknown): Promise<Record<string, unknown>> => {
+  const probeTimeoutMs = opts.probeTimeoutMs ?? PROBE_TIMEOUT_MS;
+  const request = async (method: string, params: unknown, timeoutMs = opts.timeoutMs ?? REQUEST_TIMEOUT_MS): Promise<Record<string, unknown>> => {
     const file = binary();
     if (!file) throw new RexError("the rex command was not found in $REX_BIN_DIR, on PATH or in the Rex app", "unavailable");
     let out: string;
     try {
-      out = await run([file, "--autostart=false", ...(server ? ["-S", server] : []), "api", "call", method, "-"], JSON.stringify(params ?? {}), opts.timeoutMs ?? REQUEST_TIMEOUT_MS);
+      out = await run([file, "--autostart=false", ...(server ? ["-S", server] : []), "api", "call", method, "-"], JSON.stringify(params ?? {}), timeoutMs);
     } catch (err) {
       throw classify(method, err);
     }
@@ -134,7 +137,7 @@ export function createRexCliTransport(opts: { run?: RexRun; env?: NodeJS.Process
   return {
     request,
     async probe() {
-      const [version, status] = await Promise.allSettled([request("server.version", {}), request("server.status", {})]);
+      const [version, status] = await Promise.allSettled([request("server.version", {}, probeTimeoutMs), request("server.status", {}, probeTimeoutMs)]);
       if (version.status === "rejected") {
         return { alive: false, version: null, instanceId: null, detail: (version.reason as Error).message };
       }

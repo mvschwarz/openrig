@@ -255,6 +255,26 @@ describe("TerminalService — view resolution + one-shape result", () => {
     const one = await svc.status("tmate");
     expect(one.providers[0]?.status.available).toBe(false);
   });
+
+  it("checks providers side by side, so a slow one never delays the others", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const asked: string[] = [];
+    const provider = (name: string, wait?: Promise<void>): TerminalProvider => Object.assign(new RecordingProvider(name), {
+      async status(): Promise<ProviderStatus> {
+        asked.push(name);
+        await wait;
+        return { provider: name, available: true, capabilities: {} };
+      },
+    });
+    const map: Record<string, TerminalProvider> = { herdr: provider("herdr", gate), cmux: provider("cmux"), rex: provider("rex") };
+    const { deps } = makeDeps({ resolveProvider: (name) => map[name] ?? null });
+    const report = new TerminalService(deps).status();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(asked).toEqual(["herdr", "cmux", "rex"]);
+    release();
+    expect((await report).providers.map((p) => p.name)).toEqual(["herdr", "cmux", "rex"]);
+  });
 });
 
 describe("one terminal catalog inventory", () => {

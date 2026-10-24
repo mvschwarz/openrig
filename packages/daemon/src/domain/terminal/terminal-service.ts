@@ -318,19 +318,18 @@ export class TerminalService {
         status: await selected.provider.status(), liveness: await selected.provider.liveness() }] };
     }
     const names: string[] = providerName ? [providerName] : ["herdr", "cmux", "rex"];
-    const providers: ProviderStatusReport[] = [];
-    for (const name of names) {
+    // Checked side by side, so a slow provider never delays the others.
+    const providers = await Promise.all(names.map(async (name): Promise<ProviderStatusReport> => {
       const p = this.deps.resolveProvider(name);
       if (!p) {
-        providers.push({
+        return {
           name,
           status: { provider: name, available: false, capabilities: {} },
           liveness: { alive: false, detail: `unknown provider '${name}'` },
-        });
-        continue;
+        };
       }
-      providers.push({ name, status: await p.status(), liveness: await p.liveness() });
-    }
+      return { name, status: await p.status(), liveness: await p.liveness() };
+    }));
     return { providers };
   }
 

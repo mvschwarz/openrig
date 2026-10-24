@@ -103,6 +103,14 @@ describe("rex CLI transport", () => {
       .toEqual({ alive: true, version: "0.0.1792787366-g623b2d", instanceId: "aa6e4a93" });
   });
 
+  it("probes with a short timeout, so a hung server can't hold up a status report", async () => {
+    const { run, calls } = recording((argv) => argv.includes("server.version") ? '{"rex_version":"1"}' : '{"instance_id":"i"}');
+    const transport = createRexCliTransport({ run, binary: () => BIN, env: {} });
+    await transport.probe();
+    await transport.request("session.list", {});
+    expect(calls.map((c) => [c.argv.at(-2), c.timeoutMs])).toEqual([["server.version", 2_000], ["server.status", 2_000], ["session.list", 30_000]]);
+  });
+
   it("a probe never throws: an unreachable server is alive:false with the reason", async () => {
     const transport = createRexCliTransport({ run: async () => { throw new RexRunError("exit 4", 4, "Error: rex server is not running\n"); }, binary: () => BIN, env: {} });
     const probe = await transport.probe();
