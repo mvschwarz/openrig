@@ -857,7 +857,6 @@ export class RigRepository {
       effortChoice: row.effort_choice ?? null,
       codexConfigProfile: row.codex_config_profile ?? null,
       permissionPolicy: row.permission_policy ?? null,
-      claudePermissionsJson: row.claude_permissions_json ?? null,
       env: parseStoredSeatEnv(row.env_json),
       cwd: row.cwd,
       surfaceHint: row.surface_hint ?? null,
@@ -950,7 +949,6 @@ interface NodeRow {
   effort_choice?: string | null;
   codex_config_profile?: string | null;
   permission_policy?: string | null;
-  claude_permissions_json?: string | null;
   env_json?: string | null;
   cwd: string | null;
   surface_hint: string | null;

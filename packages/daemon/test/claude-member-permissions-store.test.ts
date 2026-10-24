@@ -60,6 +60,31 @@ describe("current member Claude rules (offline, no native enforcement claim)", (
     expect(store.launchOverride(f.a.id, "claude-code").claudePermissions).toEqual({ allow: [], deny: [] });
   });
 
+  it.each([false, true])("keeps Claude rules dormant through a different runtime and restores them on return (pods=%s)", async podAware => {
+    const f = fixture();
+    expect(await f.service.setPermissions(update)).toMatchObject({ ok: true });
+    const podRepo = new PodRepository(f.db);
+    if (podAware) {
+      const pod = podRepo.createPod(f.a.rigId, "dev", "Dev");
+      f.db.prepare("UPDATE nodes SET pod_id=? WHERE rig_id=?").run(pod.id, f.a.rigId);
+    }
+    const exporter = new RigSpecExporter({ rigRepo: f.rigRepo, sessionRegistry: new SessionRegistry(f.db), ...(podAware ? { podRepo } : {}) });
+    const stored = () => (f.db.prepare("SELECT claude_permissions_json v FROM nodes WHERE id=?").get(f.a.id) as { v: string }).v;
+    const before = stored();
+    // Simulate the separately implemented runtime switch's persisted commit.
+    f.db.prepare("UPDATE nodes SET runtime='codex' WHERE id=?").run(f.a.id);
+    expect(JSON.stringify(exporter.exportRig(f.a.rigId))).not.toContain("claudePermissions");
+    const store = new NativePermissionStore(f.db), codex = store.launchOverride(f.a.id, "codex");
+    expect(codex.claudePermissions).toBeUndefined();
+    expect(operationalLaunchArgs("codex", codex).join(" ")).not.toContain(rules.deny[0]);
+    // A switch back plans Claude's launch before committing its runtime column.
+    expect(store.launchOverride(f.a.id, "claude-code").claudePermissions).toEqual(rules);
+    f.db.prepare("UPDATE nodes SET runtime='claude-code' WHERE id=?").run(f.a.id);
+    expect(store.launchOverride(f.a.id, "claude-code").claudePermissions).toEqual(rules);
+    expect(JSON.stringify(exporter.exportRig(f.a.rigId))).toContain(JSON.stringify(rules));
+    expect(stored()).toBe(before);
+  });
+
   it("rolls back an update when its audit cannot be persisted", async () => {
     const f = fixture(); vi.spyOn(f.eventBus, "persistWithinTransaction").mockImplementation(() => { throw Error("audit unavailable"); });
     expect(await f.service.setPermissions(update)).toMatchObject({ ok: false });

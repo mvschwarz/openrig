@@ -94,7 +94,7 @@ export class RigSpecExporter {
       if (node.model) specNode.model = node.model;
       if (node.effort) specNode.effort = node.effort;
       if (node.advisor) specNode.advisor = node.advisor;
-      const rules = readClaudePermissionRules(this.db, node.id);
+      const rules = node.runtime === "claude-code" ? readClaudePermissionRules(this.db, node.id) : undefined;
       if (rules !== undefined) specNode.claudePermissions = rules;
       if (node.cwd) specNode.cwd = node.cwd;
       if (node.surfaceHint) specNode.surfaceHint = node.surfaceHint;
@@ -183,7 +183,7 @@ export class RigSpecExporter {
         // OPR.0.4.8.3 Seam B: the seat's RAW permission_policy ref round-trips
         // (export truth = the ref, never the resolved provenance).
         if (node.permissionPolicy) member.permissionPolicy = node.permissionPolicy;
-        const rules = readClaudePermissionRules(this.rigRepo.db, node.id);
+        const rules = node.runtime === "claude-code" ? readClaudePermissionRules(this.rigRepo.db, node.id) : undefined;
         if (rules !== undefined) member.claudePermissions = rules;
         if (node.env) member.env = node.env;
         if (node.sessionSource) member.sessionSource = node.sessionSource;

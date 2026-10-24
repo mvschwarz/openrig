@@ -248,7 +248,7 @@ unchanged; they apply at the next separately authorized managed launch or resume
 Restore and same-seat handover read that same record. A fork copies the source's
 currently recorded rules independently, including retained-seat updates. Export
 contains the current record. An invalid or unreadable record refuses that seat's
-launch with a repair message rather than silently omitting its denies.
+launch, fork or export with a repair message rather than silently omitting its denies.
 
 OpenRig composes these rules into its one operational `--settings` value, preserving
 team/kernel defaults, hooks and managed-compaction settings. It never writes them

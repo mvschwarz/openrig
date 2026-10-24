@@ -42,7 +42,6 @@ export interface Node {
   /** OPR.0.4.8.3 Seam B: attached permission_policy REF (builtin:<name> or spec-relative custom
    *  path), or null when none is attached (= the floor). */
   permissionPolicy?: string | null;
-  claudePermissionsJson?: string | null;
   /** The member's own declared launch environment (not merged with the rig's), or null. */
   env?: Record<string, string> | null;
   cwd: string | null;

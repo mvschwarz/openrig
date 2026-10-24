@@ -30,10 +30,9 @@ export function validateClaudePermissionRules(value: unknown, label = "claude_pe
 export function readClaudePermissionRules(db: Database.Database, nodeId: string): ClaudePermissionRules | undefined {
   let seat = nodeId;
   try {
-    const row = db.prepare("SELECT * FROM nodes WHERE id = ?").get(nodeId) as { runtime?: string; logical_id?: string; claude_permissions_json?: string | null } | undefined;
+    const row = db.prepare("SELECT * FROM nodes WHERE id = ?").get(nodeId) as { logical_id?: string; claude_permissions_json?: string | null } | undefined;
     if (row?.claude_permissions_json == null) return undefined;
     if (row.logical_id) seat += ` (${row.logical_id})`;
-    if (row.runtime !== "claude-code") throw new Error("rules are only valid for claude-code seats");
     return validateClaudePermissionRules(JSON.parse(row.claude_permissions_json));
   } catch (error) {
     throw new Error(`Seat ${seat}: cannot read claude_permissions (${(error as Error).message}). Repair the rules with rig seat set-permissions <seat> --rules <file> --reason <reason> before launching.`);
