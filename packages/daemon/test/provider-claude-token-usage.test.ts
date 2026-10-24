@@ -93,10 +93,10 @@ describe("selected Claude credential usage", () => {
       VALUES ('codex','codex-old','native-id','bucket','account/rateLimits/read accountId',?,'[]')`).run(NOW);
     const before = d.prepare("SELECT * FROM provider_account_readings WHERE provider='codex'").all();
     const store = new ProviderAccountReadingsStore<ClaudeTokenIdentity>(d, "claude");
-    await new ClaudeTokenUsage({ read: async () => answer(), store, now: () => NOW }).refresh(A);
+    await new ClaudeTokenUsage({ read: async () => { const a = answer(); return { ...a, probe: { ...a.probe, warnings: ["token file is a symlink; the opened target is checked"] } }; }, store, now: () => NOW }).refresh(A);
     const read = vi.fn(); const afterRestart = new ClaudeTokenUsage({ read, store, now: () => NOW });
     expect(read).not.toHaveBeenCalled();
-    expect(afterRestart.project(NOW)[0]).toMatchObject({ retained: "before_restart", identity: { credentialLabel: A.label }, probe: { overageStatus: "rejected" } });
+    expect(afterRestart.project(NOW)[0]).toMatchObject({ retained: "before_restart", identity: { credentialLabel: A.label }, probe: { overageStatus: "rejected", warnings: ["token file is a symlink; the opened target is checked"] } });
     expect(afterRestart.project(NOW)[0]!.windows.every(w => w.freshness === "stale")).toBe(true);
     expect(d.prepare("SELECT * FROM provider_account_readings WHERE provider='codex'").all()).toEqual(before);
     expect(new ProviderAccountReadingsStore(d).latestAll()).toHaveLength(1);

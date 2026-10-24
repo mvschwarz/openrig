@@ -171,7 +171,8 @@ For a Claude login supplied by `CLAUDE_CODE_OAUTH_TOKEN`, an explicit one-creden
 rig provider status --refresh --provider claude --claude-token-file /absolute/private/personal.token --credential-label Personal
 ```
 
-The file must be owned by the daemon user, mode 0600 or 0400, and contain only the token. Provision it through your existing credential
+The file must be readable by the daemon, regular, at most 8 KiB, and contain only the token. Ownership by the daemon user and mode 0600 or
+0400 are recommended; different ownership, broader permissions and symlinks produce warnings, not refusals. Provision it through your existing credential
 custody; never put token values in arguments, seat environment settings, evidence or a queue item. The path is on the selected daemon's
 machine. Repeat the command for another labelled file when you want to compare subscriptions. This option does not fan out with
 `--all-hosts` or `--hosts`.

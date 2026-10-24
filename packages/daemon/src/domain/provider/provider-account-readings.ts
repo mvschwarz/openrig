@@ -95,7 +95,8 @@ export class ProviderAccountReadingsStore<I extends UsageAllowanceIdentity | Cla
       source: identity.source, credentialLabel: identity.credentialLabel, credentialRef: identity.credentialRef, limitId: identity.limitId,
     }, ...(reading.probe ? { probe: { exitCode: reading.probe.exitCode, requestOutcome: reading.probe.requestOutcome,
       cliVersion: reading.probe.cliVersion, status: reading.probe.status, overageStatus: reading.probe.overageStatus,
-      overageDisabledReason: reading.probe.overageDisabledReason, isUsingOverage: reading.probe.isUsingOverage } } : {}) }) : null;
+      overageDisabledReason: reading.probe.overageDisabledReason, isUsingOverage: reading.probe.isUsingOverage,
+      ...(reading.probe.warnings?.length ? { warnings: reading.probe.warnings } : {}) } } : {}) }) : null;
     const windowsJson = JSON.stringify(reading.windows.map(selectWindow));
     const limitEvidence = str(reading.limitEvidence);
     const last = this.db.prepare("SELECT observed_at, windows_json, limit_evidence, metadata_json FROM provider_account_readings WHERE identity_key = ? ORDER BY observed_at DESC, id DESC LIMIT 1")

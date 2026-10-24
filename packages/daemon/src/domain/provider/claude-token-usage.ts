@@ -52,16 +52,20 @@ export function parseClaudeTokenUsage(stdout: string): ClaudeTokenAnswer | null 
 export function claudeTokenUsageReader(options: { launchPath?: string; timeoutMs?: number; graceMs?: number; now?: () => string } = {}) {
   return async (selection: ClaudeTokenSelection): Promise<UsageReadOutcome<ClaudeTokenAnswer>> => {
     const now = options.now ?? (() => new Date().toISOString());
-    const fail = (reason: string, detail: string) => ({ ok: false as const, at: now(), reason, detail });
+    const warnings: string[] = [];
+    const fail = (reason: string, detail: string) => ({ ok: false as const, at: now(), reason, detail: [detail, ...warnings].join("; ") });
     const executable = resolveClaudeExecutable({ PATH: options.launchPath ?? process.env.PATH });
     if (!executable) return fail("binary_not_found", "no claude executable on the daemon's PATH");
     let scratch: string | undefined;
     try {
-      const fd = fs.openSync(selection.tokenFile, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+      if (fs.lstatSync(selection.tokenFile).isSymbolicLink()) warnings.push("token file is a symlink; the opened target is checked");
+      const fd = fs.openSync(selection.tokenFile, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
       let token: string;
       try {
         const st = fs.fstatSync(fd);
-        if (!st.isFile() || (st.mode & 0o077) !== 0 || (process.getuid && st.uid !== process.getuid()) || st.size > 8192) return fail("credential_file_unavailable", "token file must be an owner-only regular file (0600 or 0400, at most 8 KiB)");
+        if (!st.isFile() || st.size > 8192) return fail("credential_file_unavailable", "token file must be a regular file, at most 8 KiB");
+        if ((st.mode & 0o077) !== 0) warnings.push("token file has group/others permission bits; mode 0600 or 0400 is recommended");
+        if (process.getuid && st.uid !== process.getuid()) warnings.push(`token file is owned by uid ${st.uid}, not the daemon user`);
         token = fs.readFileSync(fd, "utf8").trim();
       } finally { fs.closeSync(fd); }
       if (!token || /\s/.test(token)) return fail("credential_file_unavailable", "token file must hold one nonempty token");
@@ -85,7 +89,7 @@ export function claudeTokenUsageReader(options: { launchPath?: string; timeoutMs
         const match = version.code === 0 ? /^(\d+\.\d+\.\d+)(?: \(Claude Code\))?\s*$/.exec(version.stdout.trim()) : null;
         answer.probe.cliVersion = match?.[1] ?? null;
       }
-      return { ok: true, observedAt, ...answer, probe: { ...answer.probe, exitCode: r.code } };
+      return { ok: true, observedAt, ...answer, probe: { ...answer.probe, exitCode: r.code, ...(warnings.length ? { warnings } : {}) } };
     } catch { return fail("credential_or_probe_failed", "credential file or isolated probe unavailable; no raw provider output retained"); }
     finally { if (scratch) fs.rmSync(scratch, { recursive: true, force: true }); }
   };

@@ -205,6 +205,7 @@ export interface ClaudeTokenIdentity {
   limitId: string;
 }
 export interface ClaudeTokenProbe {
+  warnings?: string[];
   exitCode: number | null;
   requestOutcome: "completed" | "failed" | "unknown";
   cliVersion: string | null;
