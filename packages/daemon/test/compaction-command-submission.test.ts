@@ -8,7 +8,7 @@ import {mkdtempSync, mkdirSync, writeFileSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, dirname} from 'node:path';
 import {compactionRoutes} from '../src/routes/compaction.js';
-import {ClaudeCompactionEnforcer, AUTO_PREP_WAIT_MS_DEFAULT, MANAGED_COMPACT_COMMAND_MAX_CHARS, MANAGED_COMPACT_PREFIX, MANAGED_COMPACT_TRUST_NOTE, composeManagedCompactCommand, buildCompactCommand} from '../src/domain/claude-compaction-enforcer.js';
+import {ClaudeCompactionEnforcer, AUTO_PREP_WAIT_MS_DEFAULT, AUTO_RETRY_AFTER_STOP_MS_DEFAULT, MANAGED_COMPACT_COMMAND_MAX_CHARS, MANAGED_COMPACT_PREFIX, MANAGED_COMPACT_TRUST_NOTE, composeManagedCompactCommand, buildCompactCommand} from '../src/domain/claude-compaction-enforcer.js';
 import {SessionTransport} from '../src/domain/session-transport.js';
 import {SeatDeliveryGuard} from '../src/domain/seat-delivery-guard.js';
 
@@ -404,6 +404,40 @@ it('a draft_* receipt from the paste stage is classified not_sent (the guard\'s 
   f.onText((text) => (text.startsWith('/compact') ? {ok: false, code: 'draft_input_busy', message: 'The seat has an unsubmitted input.'} : undefined));
   await f.e.maybeAutoCompact(input);
   expect(f.e.getPreparationState(seat)).toMatchObject({status: 'stopped', compact: 'not_sent'});
+});
+
+for (const code of ['draft_input_busy', 'draft_input_unknown', 'draft_input_changed']) {
+  it(`automatic: a ${code} hold is labeled not_reached by the transport, and still stops as not sent instead of waiting for idle`, async () => {
+    const f = fixture();
+    await armed(f);
+    const real = f.transport.send.bind(f.transport);
+    const results: unknown[] = [];
+    vi.spyOn(f.transport, 'send').mockImplementation(async (s: string, text: string, opts?: any) => { const r = await real(s, text, opts); if (text.startsWith('/compact')) results.push(r); return r; });
+    f.onText((text) => (text.startsWith('/compact') ? {ok: false, code, message: 'The seat has an unsubmitted input.'} : undefined));
+    expect(await f.e.maybeAutoCompact(input)).toEqual({triggered: false, reason: 'send_failed'});
+    expect(results[0]).toMatchObject({ok: false, reason: code, sent: false, inputPhase: 'not_reached'});
+    expect(f.e.getPreparationState(seat)).toMatchObject({status: 'stopped', reason: code, compact: 'not_sent'});
+  });
+}
+
+it('automatic: once a draft hold clears, the next poll before the cooldown does not reuse the stopped attempt; after it, a fresh one begins', async () => {
+  const f = fixture();
+  await armed(f);
+  f.onText((text) => (text.startsWith('/compact') ? {ok: false, code: 'draft_input_busy', message: 'The seat has an unsubmitted input.'} : undefined));
+  await f.e.maybeAutoCompact(input);
+  const stopped = f.e.getPreparationState(seat)!;
+  expect(stopped).toMatchObject({status: 'stopped', compact: 'not_sent'});
+  f.onText(() => undefined);
+  expect(await f.e.maybeAutoCompact(input)).toEqual({triggered: false, reason: 'preparation_stopped'});
+  // The fake records the refused call, so one /compact call exists; the cleared poll adds none.
+  expect(compactWrites(f)).toBe(1);
+  expect(f.e.getPreparationState(seat)).toMatchObject({attemptId: stopped.attemptId, status: 'stopped'});
+  f.advance(AUTO_RETRY_AFTER_STOP_MS_DEFAULT);
+  await f.e.maybeAutoCompact(input);
+  const fresh = f.e.getPreparationState(seat)!;
+  expect(fresh.attemptId).not.toBe(stopped.attemptId);
+  expect(fresh).toMatchObject({status: 'waiting', compact: 'not_sent'});
+  expect(compactWrites(f)).toBe(1);
 });
 
 it('--skip-map with only the temporary map written: the restore request names the .tmp that carries the marker', async () => {

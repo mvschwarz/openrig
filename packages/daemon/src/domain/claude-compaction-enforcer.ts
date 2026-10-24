@@ -1294,7 +1294,10 @@ export class ClaudeCompactionEnforcer {
       if (notSent && marked) this.persist(input.sessionName, attempt.attemptId, { compactSending: undefined });
       // Only a known pre-input idle deferral keeps the automatic attempt armed for a later poll; the transport
       // marks those `not_reached`. reconcilePreparations still ends it at the deadline or on an occupant change.
-      if (attempt.mode === "automatic" && notSent && phase === "not_reached") {
+      // A typing-guard draft hold (`draft_*`) is `not_reached` too, but it is a refusal, not an idle wait: it stops
+      // as not sent, and a fresh attempt may begin after the retry cooldown.
+      const draftHold = typeof result.reason === "string" && result.reason.startsWith("draft_");
+      if (attempt.mode === "automatic" && notSent && phase === "not_reached" && !draftHold) {
         return { ok: false, reason: "waiting_for_idle" };
       }
       // A compact may have been sent despite a lost result. Never replay automatically.
