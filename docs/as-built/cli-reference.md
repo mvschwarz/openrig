@@ -419,6 +419,7 @@ the sections that were not read are `null`.
 | `rig stream unsubscribe <readerSession>` | — | `--json` |
 | `rig stream subscriptions` | — | `--json` |
 | `rig stream read` | — | `--limit <n>`<br>`--reader <session>`<br>`--json` |
+| `rig stream act <streamItemId>` | — | `--work <qitemId>`<br>`--decline <reason>`<br>`--duplicate <id>`<br>`--reader <session>`<br>`--json` |
 
 ### queue
 
