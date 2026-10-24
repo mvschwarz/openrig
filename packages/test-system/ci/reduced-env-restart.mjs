@@ -156,6 +156,7 @@ export async function reducedEnvRestart(daemon, scaffold, rigBin, proof = {},
       await pause(500); await snapshot('poll');
       if (polled(proof)) break;
     }
+    proof.stage = 'poll-check';
     assert.ok(polled(proof), 'normal null-PID poll not observed within30s');
     preserved(proof.before, proof.poll);
     await blind('second');
@@ -176,6 +177,7 @@ export async function reducedEnvRestart(daemon, scaffold, rigBin, proof = {},
       if (proof.delivery.after.includes(marker)) break;
       await pause(250);
     }
+    assert.ok(proof.delivery.after.includes(marker), 'recovered send did not reach the addressed pane');
     proof.stage = 'complete';
     verifyReducedEnvRestart(proof);
     // Run just before the existing down step: the preceding two-seat expectation stays meaningful.

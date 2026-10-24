@@ -235,7 +235,7 @@ test('the packet-off control admits only the labelled root fallback', () => {
 
 
 for (const failure of [null, 'after-restart', 'before-private-panes', 'after-private-panes',
-  'after-default-panes', 'second-restart', 'recovery-restart', 'recovered-delivery', 'gone-restart', 'missing-poll']) {
+  'after-default-panes', 'second-restart', 'recovery-restart', 'recovered-delivery', 'gone-restart', 'wrong-owned-pane', 'missing-poll']) {
   test(`reduced-env sequence retains proof at ${failure ?? 'completion'}`, async () => {
     // Only synthetic command/SQLite seams; no process, addon, socket or real poll.
     const proof = {}, controls = {}, events = [];
@@ -273,7 +273,7 @@ for (const failure of [null, 'after-restart', 'before-private-panes', 'after-pri
         if (failure === (killed ? 'gone-restart' : blind === 1 ? 'after-restart' : 'second-restart')) throw new Error('synthetic restart failure');
         return { stdout: '' };
       }
-      if (args.includes('display-message')) return { stdout: 'peer\t%2\t112\t0\n' };
+      if (args.includes('display-message')) return { stdout: 'peer\t%2\t' + (failure === 'wrong-owned-pane' ? '999' : '112') + '\t0\n' };
       if (failure === proof.stage) throw Object.assign(new Error('synthetic unreadable socket'),
         { code: 13, stdout: '', stderr: 'permission denied' });
       return { stdout: args[0] !== '-S' ? '' : 'worker\t%1\t111\t0\n' + (killed ? '' : 'peer\t%2\t112\t0\n') };
@@ -287,10 +287,11 @@ for (const failure of [null, 'after-restart', 'before-private-panes', 'after-pri
     const run = () => reducedEnvRestart(daemon,
       { root: '/fixture', stateDir: '/fixture/state', tmuxSocketPath: '/fixture/tmux.sock' },
       '/fixture/rig.cjs', proof, { execute, withDatabase, controls, pause: async () => { ticks++; events.push('poll-read'); } });
-    if (failure === 'gone-restart') {
-      await run(); await assert.rejects(controls.goneProcess(), /synthetic/);
-      assert.equal(proof.gone.failedStage, 'restart');
-      assert.equal(proof.gone.processAbsent, true);
+    if (failure === 'gone-restart' || failure === 'wrong-owned-pane') {
+      await run(); await assert.rejects(controls.goneProcess());
+      assert.equal(proof.gone.failedStage, failure === 'gone-restart' ? 'restart' : 'confirm-owned-pane');
+      assert.equal(proof.gone.processAbsent, failure === 'gone-restart' ? true : undefined);
+      if (failure === 'wrong-owned-pane') assert.ok(!events.includes('kill'));
       assert.equal(proof.gone.before.sessions.length, 2);
     } else if (failure) {
       await assert.rejects(run());
