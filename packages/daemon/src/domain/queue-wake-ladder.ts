@@ -1026,6 +1026,15 @@ function refusedWatchdogJobs(db: Database.Database, clearedAlert: (dest: string)
   });
 }
 
+/** Another open prompt alert on this machine whose operator rung already went to the delivery engine. */
+function postedPromptAlert(db: Database.Database, except: string): string | null {
+  const row = db.prepare(`SELECT qitem_id FROM queue_items WHERE qitem_id != ? AND state IN ('pending','in-progress','blocked')
+      AND ${PROMPT_ALERT_ROWS} AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)
+      AND EXISTS (SELECT 1 FROM queue_transitions t WHERE t.qitem_id = queue_items.qitem_id AND t.transition_note LIKE ?)
+    ORDER BY ts_created LIMIT 1`).get(except, PROMPT_ALERT_TAG, `${LADDER_RUNG_PREFIX} operator dispatched-to-engine%`) as { qitem_id: string } | undefined;
+  return row?.qitem_id ?? null;
+}
+
 /** Positive refusals enter the existing rungs without ever retrying the blocked
  * seat. One aggregate carries the episode's obligations and notification key;
  * original work remains owned by its current recipient. */
@@ -1038,7 +1047,7 @@ async function advancePromptRefusals(
   attemptWake: (qitemId: string, target: string) => Promise<string>,
   actions: WakeLadderAction[],
 ): Promise<void> {
-  const groups = new Map<string, { keys: string[]; rows: Map<string, QueueItem>; jobs: Map<string, string>; refusedAt: string }>();
+  const groups = new Map<string, { keys: string[]; rows: Map<string, QueueItem>; jobs: Map<string, string>; refusedAt: string; choiceSince?: string }>();
   const unreadableDestinations = new Set<string>();
   const loggedRows = new Set<string>();
   const readCandidate = (id: string, destination: string): QueueItem | null => {
@@ -1087,6 +1096,9 @@ async function advancePromptRefusals(
       let group = groups.get(primary.destinationSession);
       if (!group) { group = { keys: [], rows: new Map(), jobs: new Map(), refusedAt: episode.refusedAt }; groups.set(primary.destinationSession, group); }
       if (Date.parse(episode.refusedAt) > Date.parse(group.refusedAt)) group.refusedAt = episode.refusedAt;
+      // The transport refused at a choice prompt, such as a usage-limit dialog, that no permission hook announces.
+      if (episode.note.includes("(selection_prompt)")
+        && (!group.choiceSince || Date.parse(episode.refusedAt) < Date.parse(group.choiceSince))) group.choiceSince = episode.refusedAt;
       group.keys.push(`${PROMPT_EPISODE_TAG}${episode.key}`);
       for (const row of rows) group.rows.set(row.qitemId, row);
     }
@@ -1114,8 +1126,15 @@ async function advancePromptRefusals(
     group.jobs.set(job.jobId, job.registeredBy);
   }
 
-  const promptState = (dest: string) => {
-    try { return deps.readPromptState?.(dest, groups.get(dest)?.refusedAt ?? now.toISOString()) ?? "unknown"; } catch { return "unknown"; }
+  const promptState = (dest: string): "blocked" | "clear" | "unknown" => {
+    const group = groups.get(dest);
+    let state: "blocked" | "clear" | "unknown";
+    try { state = deps.readPromptState?.(dest, group?.refusedAt ?? now.toISOString()) ?? "unknown"; } catch { state = "unknown"; }
+    // A choice prompt no hook announces leaves the seat's own evidence unknown, and the transport's refusal is a read of
+    // that prompt. With the episode open and nothing newer clearing it, a prompt held one retry interval reads blocked;
+    // one answered within seconds never escalates.
+    if (state === "unknown" && group?.choiceSince && now.getTime() - Date.parse(group.choiceSince) >= intervalS * 1000) return "blocked";
+    return state;
   };
   const aggregates = deps.db.prepare(`SELECT qitem_id FROM queue_items WHERE state IN ('pending','in-progress','blocked')
     AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)`)
@@ -1211,6 +1230,16 @@ async function advancePromptRefusals(
         continue;
       }
       appendMarker(deps.queueRepo, row, `${LADDER_RUNG_PREFIX} orchestrator self-skip reason=${reason}`);
+    }
+    // One person alert at a time on this machine: a prompt many seats hit together, such as a shared usage limit, posts
+    // once. Each other seat's alert stays open, names the alert it waits on, and posts after that one retires.
+    const posted = deps.deliveryEngine ? postedPromptAlert(deps.db, row.qitemId) : null;
+    if (posted) {
+      const waiting = `${LADDER_RUNG_PREFIX} operator waiting on ${posted}`;
+      if (!deps.queueRepo.listTransitions(row.qitemId).some(t => t.transitionNote?.startsWith(waiting))) {
+        appendMarker(deps.queueRepo, row, `${waiting} reason=one person alert at a time for seats blocked at a prompt`);
+      }
+      continue;
     }
     if (await operatorRung(deps, row, reason, actions, view, false)) appendExhausted(deps.queueRepo, row, "operator rung resolved");
   }
