@@ -7,6 +7,8 @@ const IN_REX = { HOME: "/home/p", TERM_PROGRAM: "rex", REX_SESSION: "session:her
 const APP = { client_id: "client:app", connection_state: "connected", info: { kind: "app", label: "laptop" } };
 const REMOTE_APP = { client_id: "client:remote", connection_state: "connected", info: { kind: "app", label: "desktop" } };
 const CLI = { client_id: "client:cli", info: { kind: "cli", name: "rex" } };
+const UNSAID = { client_id: "client:unsaid", connection_state: "connected", info: null };
+const notFound = () => Object.assign(new Error("Command failed"), { stderr: "Error: client not found (status=404 code=not_found)\n" });
 const SELECTABLE = { actions: [{ name: "session.new" }, { name: "session.select", args: { required: ["session_id"] } }] };
 
 interface Options {
@@ -46,7 +48,10 @@ function fixture(o: Options = {}) {
     if (rest[0] === "whoami") return JSON.stringify({ instance_id: o.callerInstance ?? "inst-1" });
     const [method, params] = [rest[2], JSON.parse(rest[3] ?? "{}")];
     if (method === "session.list_clients" || method === "client.list") return JSON.stringify({ clients: o.clients ?? [APP, CLI] });
-    if (method === "client.inspect") return JSON.stringify(params.client_id === CLI.client_id ? { client: CLI } : { client: {}, ...SELECTABLE });
+    if (method === "client.inspect") {
+      if (params.client_id === CLI.client_id || params.client_id === UNSAID.client_id) throw notFound();
+      return JSON.stringify({ client: {}, ...SELECTABLE });
+    }
     if (method === "session.list_blocks") return JSON.stringify({ blocks: [{ block_id: "block:mine", owner: o.owner }] });
     if (method === "client.perform") return o.perform ? o.perform() : JSON.stringify({ performed_by: params.client_id });
     throw new Error(`unexpected ${method}`);
@@ -68,7 +73,6 @@ describe("rig terminal open --window from Rex", () => {
       "whoami",
       'session.list_clients {"session_id":"session:here"}',
       'client.inspect {"client_id":"client:app"}',
-      'client.inspect {"client_id":"client:cli"}',
       'client.perform {"client_id":"client:app","action":"session.select","args":{"session_id":"session:new"},"origin":"cli","timeout_ms":10000}',
     ]);
     expect(f.exec.mock.calls.filter(([file]) => file === REX).every(([, args]) => args[0] === "--autostart=false" && args[1] === "-S" && args[2] === "unix:///rex.sock")).toBe(true);
@@ -88,6 +92,14 @@ describe("rig terminal open --window from Rex", () => {
     const calls = f.exec.mock.calls.filter(([file]) => file === REX).map(([, args]) => args);
     expect(calls.length).toBeGreaterThan(0);
     expect(calls.every((args) => args[0] === "--autostart=false" && !args.includes("-S"))).toBe(true);
+  });
+
+  it("skips this command's own rex client and any client that is gone by the time it is inspected", async () => {
+    const f = fixture({ clients: [CLI, UNSAID, APP] });
+    const result = await openTerminalWindow(f.client, "acme", undefined, f.deps);
+    expect(result.notes).toEqual(['The Rex app "laptop" switched to session "acme".']);
+    const inspected = f.rexCalls().filter((call) => call.startsWith("client.inspect"));
+    expect(inspected).toEqual(['client.inspect {"client_id":"client:unsaid"}', 'client.inspect {"client_id":"client:app"}']);
   });
 
   it("takes the Rex path from a tmux inside a Rex block", async () => {

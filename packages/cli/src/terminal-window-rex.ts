@@ -10,7 +10,7 @@ interface RexPreview {
   composed: { opened: unknown[]; absent: OpenViewResult["absent"]; degraded: OpenViewResult["degraded"] };
 }
 interface RexStatus { providers?: Array<{ status?: { available?: boolean; server?: { instanceId?: string } }; liveness?: { detail?: string } }> }
-interface RexClient { client_id?: string | null; connection_state?: string; info?: { label?: string; name?: string } }
+interface RexClient { client_id?: string | null; connection_state?: string; info?: { kind?: string; label?: string; name?: string } | null }
 type RexCall = (method: string, params: Record<string, unknown>, timeoutMs?: number) => Promise<Record<string, unknown>>;
 
 const BUNDLED_REX = ["Library", "Application Support", "com.superlogical.rex", "RexServer", "Versions", "Current", "Rex Server.app", "Contents", "MacOS", "rex"];
@@ -35,11 +35,16 @@ const reason = (err: unknown): string => {
 async function selectableApps(call: RexCall, env: NodeJS.ProcessEnv): Promise<Array<RexClient & { client_id: string }>> {
   const here = env["REX_SESSION"];
   const listed = here ? await call("session.list_clients", { session_id: here }) : await call("client.list", {});
+  // The listing includes this command's own short-lived `rex` client, gone by the time it would be inspected.
   const clients = (Array.isArray(listed["clients"]) ? listed["clients"] as RexClient[] : [])
-    .filter((c): c is RexClient & { client_id: string } => typeof c?.client_id === "string" && c.connection_state !== "lost");
+    .filter((c): c is RexClient & { client_id: string } => typeof c?.client_id === "string" && c.connection_state !== "lost" && (!c.info || c.info.kind === "app"));
   const apps = (await Promise.all(clients.map(async (c) => {
-    const actions = (await call("client.inspect", { client_id: c.client_id }))["actions"];
-    return Array.isArray(actions) && actions.some((a) => a?.name === "session.select") ? [c] : [];
+    try {
+      const actions = (await call("client.inspect", { client_id: c.client_id }))["actions"];
+      return Array.isArray(actions) && actions.some((a) => a?.name === "session.select") ? [c] : [];
+    } catch {
+      return [];
+    }
   }))).flat();
   if (apps.length < 2 || !here) return apps;
   // Several apps view this session; the one that owns the caller's block is the one being typed in.
