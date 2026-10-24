@@ -12,7 +12,7 @@ import { createHash } from "node:crypto";
 import { planHerdrLayout } from "../src/domain/terminal/herdr-adapter.js";
 import { TerminalService, type TerminalServiceDeps } from "../src/domain/terminal/terminal-service.js";
 import { RexAdapter } from "../src/domain/terminal/rex-adapter.js";
-import { createRexCliTransport, RexRunError, type RexRun } from "../src/domain/terminal/rex-transport.js";
+import { createRexCliTransport, type RexRun } from "../src/domain/terminal/rex-transport.js";
 import type {
   ComposedView,
   OpenViewResult,
@@ -280,10 +280,10 @@ describe("TerminalService — view resolution + one-shape result", () => {
 
   it("a stalled Rex leaves a usable status beside a healthy provider, well inside the CLI's 5 s request", async () => {
     const budgets: number[] = [];
-    // Stands in for spawnRex: a rex that never answers, ended at the run's timeout.
+    // A rex that never answers and can't even be stopped: its run never settles.
     const stalled: RexRun = (_argv, _stdin, timeoutMs) => {
       budgets.push(timeoutMs);
-      return new Promise((_resolve, reject) => setTimeout(() => reject(new RexRunError(`did not answer within ${timeoutMs} ms`, null)), timeoutMs));
+      return new Promise(() => {});
     };
     const rex = new RexAdapter({ transport: createRexCliTransport({ run: stalled, binary: () => "/opt/rex/bin/rex", env: {} }) });
     const map: Record<string, TerminalProvider> = { herdr: new RecordingProvider("herdr"), rex };

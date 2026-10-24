@@ -120,6 +120,13 @@ describe("rex CLI transport", () => {
     expect(calls.map((c) => [c.argv.at(-2), c.timeoutMs])).toEqual([["server.version", 1_000], ["server.status", 1_000], ["session.list", 30_000]]);
   });
 
+  it("answers by its budget even when a stuck rex can't be stopped", async () => {
+    const transport = createRexCliTransport({ run: () => new Promise(() => {}), binary: () => BIN, env: {}, probeTimeoutMs: 50 });
+    const started = performance.now();
+    expect(await transport.probe()).toEqual({ alive: false, version: null, instanceId: null, detail: "the Rex server did not answer within 50 ms" });
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
   it("a probe never throws: an unreachable server is alive:false with the reason", async () => {
     const transport = createRexCliTransport({ run: async () => { throw new RexRunError("exit 4", 4, "Error: rex server is not running\n"); }, binary: () => BIN, env: {} });
     const probe = await transport.probe();

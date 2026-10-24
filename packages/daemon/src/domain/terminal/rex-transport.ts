@@ -41,6 +41,7 @@ export interface RexTransport {
 const REQUEST_TIMEOUT_MS = 30_000;
 // A healthy server answers a probe in tens of milliseconds; discovery has to fit well inside the CLI's 5 s status request.
 const PROBE_TIMEOUT_MS = 1_000;
+const PROBE_SLACK_MS = 250;
 const STOP_GRACE_MS = 1_000;
 const MAX_OUTPUT_CHARS = 4 * 1024 * 1024;
 
@@ -141,7 +142,14 @@ export function createRexCliTransport(opts: { run?: RexRun; env?: NodeJS.Process
   return {
     request,
     async probe() {
-      const [version, status] = await Promise.allSettled([request("server.version", {}, probeTimeoutMs), request("server.status", {}, probeTimeoutMs)]);
+      const answered = Promise.allSettled([request("server.version", {}, probeTimeoutMs), request("server.status", {}, probeTimeoutMs)]);
+      // The runs end at the budget, but stopping a stuck rex can take longer; discovery answers by the budget regardless.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const late = new Promise<"late">((resolve) => { timer = setTimeout(() => resolve("late"), probeTimeoutMs + PROBE_SLACK_MS); });
+      const outcome = await Promise.race([answered, late]);
+      clearTimeout(timer);
+      if (outcome === "late") return { alive: false, version: null, instanceId: null, detail: `the Rex server did not answer within ${probeTimeoutMs} ms` };
+      const [version, status] = outcome;
       if (version.status === "rejected") {
         return { alive: false, version: null, instanceId: null, detail: (version.reason as Error).message };
       }
