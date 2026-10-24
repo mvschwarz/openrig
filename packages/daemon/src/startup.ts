@@ -736,13 +736,24 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const rigs = rigRepo.listRigs();
   let reconcileChecked = 0;
   let reconcileDetached = 0;
+  let reconcileUnseen = 0;
   let reconcileErrors = 0;
   for (const rig of rigs) {
     try {
       const result = await reconciler.reconcile(rig.id);
       reconcileChecked += result.checked;
       reconcileDetached += result.detached;
+      reconcileUnseen += result.unseen.length;
       reconcileErrors += result.errors.length;
+      for (const u of result.unseen) {
+        try {
+          // eslint-disable-next-line no-console
+          console.warn(`startup reconcile: ${u.sessionName} isn't on this daemon's tmux server, but its last observed process ${u.pid} is still running`
+            + `${u.parent ? ` (parent process ${u.parent.pid}: ${u.parent.command.slice(0, 160)})` : ""}, so it was left as it was: not marked`
+            + ` detached and not relaunched. The daemon is probably using a different tmux server from its seats (it didn't inherit their`
+            + ` TMUX). Restart the daemon from inside the seats' tmux server, or with TMUX set to it.`);
+        } catch { /* logging must never throw */ }
+      }
       for (const e of result.errors) {
         try {
           // eslint-disable-next-line no-console
@@ -759,7 +770,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   }
   try {
     // eslint-disable-next-line no-console
-    console.log(`startup reconcile: rigs=${rigs.length} checked=${reconcileChecked} detached=${reconcileDetached} errors=${reconcileErrors}`);
+    console.log(`startup reconcile: rigs=${rigs.length} checked=${reconcileChecked} detached=${reconcileDetached} unseen=${reconcileUnseen} errors=${reconcileErrors}`);
   } catch { /* logging must never throw */ }
 
   // Transcript rotators are process-local. Reattach them after lifecycle

@@ -48,12 +48,17 @@ function rowToVerdict(row: VerdictRow): SeatIdentityVerdict {
 export class SeatIdentityStore {
   constructor(private readonly db: Database.Database) {}
 
-  /** Upsert one node's verdict (last-writer-wins per node). */
+  /** Upsert one node's verdict (last-writer-wins per node). The current verdict is always replaced, pids included. The
+   *  last observed process (`evidence_*`, with its own time) is refreshed only by a verdict that carries a pid; one
+   *  without a pid keeps it for the same session and clears it for another. */
   upsert(v: SeatIdentityVerdict): void {
+    const observedProcess = v.evidence.observedPid != null || v.evidence.observedPanePid != null;
     this.db.prepare(`
       INSERT INTO seat_identity_verdicts
-        (node_id, verdict, evidence_source, reason, registered_pane, observed_pid, observed_pane_pid, observed_command, matched_layer, session_name, observed_at)
-      VALUES (@node_id, @verdict, @evidence_source, @reason, @registered_pane, @observed_pid, @observed_pane_pid, @observed_command, @matched_layer, @session_name, @observed_at)
+        (node_id, verdict, evidence_source, reason, registered_pane, observed_pid, observed_pane_pid, observed_command, matched_layer, session_name, observed_at,
+         evidence_pid, evidence_pane_pid, evidence_at)
+      VALUES (@node_id, @verdict, @evidence_source, @reason, @registered_pane, @observed_pid, @observed_pane_pid, @observed_command, @matched_layer, @session_name, @observed_at,
+         @evidence_pid, @evidence_pane_pid, @evidence_at)
       ON CONFLICT(node_id) DO UPDATE SET
         verdict = excluded.verdict,
         evidence_source = excluded.evidence_source,
@@ -64,7 +69,13 @@ export class SeatIdentityStore {
         observed_command = excluded.observed_command,
         matched_layer = excluded.matched_layer,
         session_name = excluded.session_name,
-        observed_at = excluded.observed_at
+        observed_at = excluded.observed_at,
+        evidence_pid = CASE WHEN excluded.evidence_at IS NOT NULL THEN excluded.evidence_pid
+          WHEN excluded.session_name IS seat_identity_verdicts.session_name THEN seat_identity_verdicts.evidence_pid END,
+        evidence_pane_pid = CASE WHEN excluded.evidence_at IS NOT NULL THEN excluded.evidence_pane_pid
+          WHEN excluded.session_name IS seat_identity_verdicts.session_name THEN seat_identity_verdicts.evidence_pane_pid END,
+        evidence_at = CASE WHEN excluded.evidence_at IS NOT NULL THEN excluded.evidence_at
+          WHEN excluded.session_name IS seat_identity_verdicts.session_name THEN seat_identity_verdicts.evidence_at END
     `).run({
       node_id: v.nodeId,
       verdict: v.verdict,
@@ -77,6 +88,9 @@ export class SeatIdentityStore {
       matched_layer: v.evidence.matchedLayer,
       session_name: v.sessionName,
       observed_at: v.observedAt,
+      evidence_pid: observedProcess ? v.evidence.observedPid : null,
+      evidence_pane_pid: observedProcess ? v.evidence.observedPanePid ?? null : null,
+      evidence_at: observedProcess ? v.observedAt : null,
     });
   }
 
@@ -118,6 +132,19 @@ export class SeatIdentityStore {
       // Table absent (partial fixture) — degrade to no verdicts.
     }
     return out;
+  }
+
+  /** The last process observed for a node, with that observation's own time and the session the row belongs to, or
+   *  null when none is recorded. Defensive. */
+  getProcessEvidence(nodeId: string): { sessionName: string | null; pid: number | null; panePid: number | null; observedAt: string } | null {
+    try {
+      const row = this.db.prepare(
+        "SELECT session_name, evidence_pid, evidence_pane_pid, evidence_at FROM seat_identity_verdicts WHERE node_id = ?",
+      ).get(nodeId) as { session_name: string | null; evidence_pid: number | null; evidence_pane_pid: number | null; evidence_at: string | null } | undefined;
+      return row?.evidence_at ? { sessionName: row.session_name, pid: row.evidence_pid, panePid: row.evidence_pane_pid, observedAt: row.evidence_at } : null;
+    } catch {
+      return null;
+    }
   }
 
   /** Read a single node's verdict, or null. Defensive. */
