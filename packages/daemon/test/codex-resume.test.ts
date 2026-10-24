@@ -242,6 +242,31 @@ describe("CodexResumeAdapter", () => {
       expect(result).toEqual({ ok: true, appliedLaunch: CODEX_FLOOR_EFFECT });
     });
 
+    it("does not promote a screen captured before process verification", async () => {
+      let captures = 0;
+      const tmux = Object.assign(mockTmux({
+        getPaneCommand: async () => "zsh",
+        capturePaneContent: async () => {
+          captures++;
+          return captures === 1
+            ? "› \n  Ready · Context 13% used · anthropic/claude-3.5-sonnet         ⚠ 2 warnings · f2 to view"
+            : "  project2 · main\n› codex resume uuid-123";
+        },
+      }), { getPanePid: async () => 900 });
+      const adapter = new CodexResumeAdapter(tmux, {
+        ...fastOptions,
+        listProcesses: () => [
+          { pid: 900, ppid: 1, pgid: 900, tpgid: 901, executableName: "zsh", command: "-zsh", startedAt: "Sat Jan  1 12:00:00 2000" },
+          { pid: 901, ppid: 900, pgid: 901, tpgid: 901, executableName: "codex", command: "codex --model anthropic/claude-3.5-sonnet", startedAt: "Sat Jan  1 12:00:01 2000" },
+        ],
+      });
+
+      const result = await adapter.resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo");
+
+      expect(result.ok).toBe(false);
+      expect(captures).toBeGreaterThan(1);
+    });
+
     it("probe sees `No saved session found` -> { ok: false, code: 'retry_fresh' }", async () => {
       const adapter = new CodexResumeAdapter(
         mockTmux({

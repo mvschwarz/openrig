@@ -210,6 +210,52 @@ describe("Codex runtime adapter", () => {
     expect(result.ready).toBe(true);
   });
 
+  it("checkReady accepts a non-gpt warning footer only with a verified Codex process", async () => {
+    const tmux = mockTmux({
+      getPaneCommand: vi.fn(async () => "zsh"),
+      getPanePid: vi.fn(async () => 900),
+      capturePaneContent: vi.fn(async () => [
+        "› ",
+        "  Ready · Context 13% used · anthropic/claude-3.5-sonnet         ⚠ 2 warnings · f2 to view",
+      ].join("\n")),
+    });
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [
+        { pid: 900, ppid: 1, command: "/bin/zsh", pgid: 900, tpgid: 901, executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000" },
+        { pid: 901, ppid: 900, command: "codex --model anthropic/claude-3.5-sonnet", pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:01 2000" },
+      ],
+    });
+
+    expect(await adapter.checkReady(makeBinding())).toEqual({ ready: true });
+  });
+
+  it("does not promote a stale shell capture after a verified Codex process appears", async () => {
+    let captures = 0;
+    const tmux = mockTmux({
+      getPaneCommand: vi.fn(async () => "zsh"),
+      getPanePid: vi.fn(async () => 900),
+      capturePaneContent: vi.fn(async () => {
+        captures++;
+        return captures === 1
+          ? "› \n  Ready · Context 13% used · anthropic/claude-3.5-sonnet         ⚠ 2 warnings · f2 to view"
+          : "  project2 · main\n› codex resume 019a136b-0000-7000-8000-000000000001";
+      }),
+    });
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [
+        { pid: 900, ppid: 1, command: "/bin/zsh", pgid: 900, tpgid: 901, executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000" },
+        { pid: 901, ppid: 900, command: "codex --model anthropic/claude-3.5-sonnet", pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:01 2000" },
+      ],
+    });
+
+    expect(await adapter.checkReady(makeBinding())).toMatchObject({ ready: false });
+    expect(captures).toBe(2);
+  });
+
   it("checkReady returns false when the pane has fallen back to a shell prompt", async () => {
     const tmux = mockTmux({
       getPaneCommand: vi.fn(async () => "zsh"),

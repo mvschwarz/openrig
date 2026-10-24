@@ -4030,6 +4030,26 @@ describe("RestoreOrchestrator", () => {
       expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(usable ? 1 : 0);
     });
 
+    it("reconciles a verified Codex resume with the issue 1764 non-gpt status footer", async () => {
+      const tmux = mockTmuxForReconciler();
+      vi.mocked(tmux.hasSession).mockResolvedValue(true);
+      vi.mocked(tmux.getPaneCommand).mockResolvedValue("zsh");
+      vi.mocked(tmux.capturePaneContent).mockResolvedValue([
+        "› ",
+        "  Ready · Context 13% used · anthropic/claude-3.5-sonnet         ⚠ 2 warnings · f2 to view",
+      ].join("\n"));
+      const seeded = seedFailedAttempt({ runtime: "codex", restoreOutcome: "attention_required", withResumeToken: true });
+      const listProcesses = async () => [
+        { pid: 1234, ppid: 1, pgid: 1234, tpgid: 1235, command: "zsh", executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000" },
+        { pid: 1235, ppid: 1234, pgid: 1235, tpgid: 1235, command: "codex resume tok-abc-123", executableName: "codex", startedAt: "Sat Jan  1 12:00:01 2000" },
+      ];
+
+      const result = await createOrchestrator({ tmux, listProcesses }).reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+
+      expect(result).toMatchObject({ ok: true, to: "operator_recovered" });
+      expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(1);
+    });
+
     it.each([
       ["Claude Code v2.1.220\n ❯ accept edits on", true],
       ["Choose a conversation to resume:\n  1. project-foo", false],

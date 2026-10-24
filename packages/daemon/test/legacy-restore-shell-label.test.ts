@@ -106,6 +106,20 @@ describe.each(runtimes)("legacy $runtime restore with a shell label", (runtime) 
     if (runtime.runtime === "claude-code") expect(launched?.resume_launch_token).toBe(TOKEN);
   });
 
+  it.skipIf(runtime.runtime !== "codex")("keeps the launch when an idle shell is observed before the launch wrapper appears", async () => {
+    let n = 0;
+    const { result, launched, binding, snapshotToken, killed } = await legacyRestore(runtime, "zsh", () => {
+      n++;
+      return n <= 2 ? idleShell : launchWrapper;
+    });
+    expect(result.status).toBe("attention_required");
+    expect(result.error).toContain("isn't a proven idle shell");
+    expect(killed).toBe(false);
+    expect(launched?.status).toBe("running");
+    expect(binding?.tmuxSession).toBe(launched?.session_name);
+    expect(snapshotToken).toBe(TOKEN);
+  });
+
   it("still rolls back a proven, stable idle shell as a return to the shell", async () => {
     const { result, launched, killed } = await legacyRestore(runtime, "zsh", () => idleShell);
     expect(result.status).toBe("awaiting-decision");

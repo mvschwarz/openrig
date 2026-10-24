@@ -2199,6 +2199,7 @@ export class RestoreOrchestrator {
       // Headerless readiness requires the same stable foreground/argv proof
       // as the resume adapter; a token-bearing descendant alone is insufficient.
       ...(runtime === "claude-code" ? { claudeResumeIdentityVerified } : {}),
+      ...(runtime === "codex" ? { codexProcessVerified: true } : {}),
     });
     const fgProcess = runtime === "claude-code" ? "claude" as const : runtime === "codex" ? "codex" as const : null;
     if (!fgProcess) {

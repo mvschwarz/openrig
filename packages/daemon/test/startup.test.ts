@@ -145,6 +145,20 @@ describe("createDaemon startup composition", () => {
     }
   }, 30000);
 
+  it("does not route the reduced model census through native process lineage checks", async () => {
+    const cmuxFactory: CmuxTransportFactory = async () => {
+      throw Object.assign(new Error("no socket"), { code: "ENOENT" });
+    };
+    const { db, deps } = await createDaemon({ cmuxFactory, tmuxExec: async () => "" });
+    try {
+      // The model census deliberately omits foreground-group fields. Native
+      // lineage readers must retain their full process-table default instead.
+      expect(deps.listProcesses).toBeUndefined();
+    } finally {
+      db.close();
+    }
+  }, 30000);
+
   // GHOST-STAGE (e/Class-B) seam-coexist pin: dev-driver's fold added the invalidateRetiringOccupant
   // CALL at SeatHandoverService.commit() but no concrete invalidator was ever wired, so in production
   // the call was a silent no-op. This asserts createDaemon now constructs + injects a real

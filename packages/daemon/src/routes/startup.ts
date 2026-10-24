@@ -22,7 +22,7 @@ import { assessCurrentStateRehydrateEligibility, snapshotMatchesCurrentOccupants
 import { deriveCanonicalSessionName, deriveSessionName } from "../domain/session-name.js";
 import { observeSolePane } from "../domain/pane-binding-observation.js";
 import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
-import { verifyPaneIdleShell, type NativeProcessLister } from "../domain/native-process-lineage.js";
+import { verifyCodexPaneProcess, verifyPaneIdleShell, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { RigSpecCodec } from "../domain/rigspec-codec.js";
 import { RigSpecSchema } from "../domain/rigspec-schema.js";
 import { seatLifecycleService } from "./seat.js";
@@ -79,12 +79,22 @@ async function observeSeat(c: Context, rig: RigWithRelations, node: Node) {
     const pane = await observeSolePane(tmux(c), name);
     if (!pane.ok) return { state: "unverified", detail: pane.detail, sessionName: name };
     if (node.runtime === "terminal") return { state: "running", detail: "Terminal is available", sessionName: name };
-    const probe = assessNativeResumeProbe({ runtime: node.runtime,
-      paneCommand: await tmux(c).getPaneCommand(pane.pane),
-      paneContent: (tmux(c).capturePaneScreen ? await tmux(c).capturePaneScreen(pane.pane) : await tmux(c).capturePaneContent(pane.pane, 40)) ?? "" });
+    const paneCommand = await tmux(c).getPaneCommand(pane.pane);
+    const paneContent = (tmux(c).capturePaneScreen ? await tmux(c).capturePaneScreen(pane.pane) : await tmux(c).capturePaneContent(pane.pane, 40)) ?? "";
+    const listProcesses = dep<NativeProcessLister | undefined>(c, "listProcesses");
+    let probe = assessNativeResumeProbe({ runtime: node.runtime, paneCommand, paneContent });
+    if (node.runtime === "codex" && (probe.code === "returned_to_shell" || probe.code === "awaiting_runtime")) {
+      const process = await verifyCodexPaneProcess({ target: pane.pane, tmux: tmux(c), listProcesses });
+      if (process) {
+        const currentPaneCommand = await tmux(c).getPaneCommand(pane.pane);
+        const currentPaneContent = (tmux(c).capturePaneScreen ? await tmux(c).capturePaneScreen(pane.pane) : await tmux(c).capturePaneContent(pane.pane, 40)) ?? "";
+        probe = assessNativeResumeProbe({ runtime: node.runtime, paneCommand: currentPaneCommand,
+          paneContent: currentPaneContent, codexProcessVerified: true });
+      }
+    }
     // A script-launched runtime reads as `sh` until the script hands over the foreground: name a shell only when proven idle.
     if (probe.code === "returned_to_shell" && !await verifyPaneIdleShell({ target: pane.pane, tmux: tmux(c),
-      listProcesses: c.get("listProcesses" as never) as NativeProcessLister | undefined })) {
+      listProcesses })) {
       return { state: "attention_required", sessionName: name,
         detail: `The pane shows a shell that is not a proven idle shell; a launch script may still be starting ${node.runtime === "claude-code" ? "Claude" : "Codex"}.` };
     }
