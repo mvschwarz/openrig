@@ -144,3 +144,24 @@ images or other agents' containers.
 These are controlled hook invocations against the actual scenario daemon, not native Claude/Codex hook scheduling or agent consumption. Fixtures and fault launchers stay under the scenario scaffold; installed hooks are unchanged. The pre-existing queue-durability and passing-only cases are retained.
 
 Managed-compaction coverage uses `managed-compaction-effect.test.ts` in ordinary daemon CI instead: the shipped compact route deliberately refuses `runtime:stub`, and the precompact seam exposes a keyed marker rather than a daemon stream event. The bounded helper fallback drives the real enforcer's command through a stub input model (recorded Claude2.1.282 success792/paste850-851) into the real precompact hook. Healthy and851-character seeded controls assert marker presence/absence, rather than a submit receipt or pane token. This is not native compaction or an installed `rig compact` journey. No runtime filter or ordinary-send behavior changes.
+
+The `daemon-restart` case exercises team-only recovery without the inherited
+`TMUX`/`TMUX_TMPDIR` or the scaffold's forced-socket wrapper. It requires recorded
+process evidence before the first blind restart; then it waits for the actual
+normal poll to persist fresh `tmux_unavailable` verdicts with null current PID
+fields, and performs a second blind restart. Original sessions, running status,
+bindings and private panes/PIDs must survive both restarts without default-socket
+duplicates or supersession. It then restarts with the correct environment and
+sends a unique marker, captured in the addressed seat's pane (rendered delivery,
+not agent consumption).
+
+Immediately before the existing `down` action, a gone-process control rechecks
+one private pane's identity, closes only that fixture pane, independently proves
+its shell, children and recorded seat PIDs gone, and blindly restarts again.
+The dead seat must detach or restore
+with a different live process, while the untouched peer remains unchanged. A
+correct-environment restart then permits the ordinary cleanup. Each partial DB,
+pane and poll observation, and any failed stage, remains in the report; an
+unreadable socket is never an empty census. **Kernel duplication and native
+runtime behavior are not exercised.** The same helper is applied to the release
+cut and the published comparator archive, preserving each one's actual outcome.

@@ -29,7 +29,7 @@ interface TmuxShellCommandOptions {
 export type ArgvExecFn = (argv: string[]) => Promise<string>;
 
 /**
- * Injectable file/buffer operations for `sendText`.
+ * Injectable file/buffer operations for terminal payloads and launch environments.
  * Split out so tests can observe temp-file writes and unique-name generation
  * without touching the real filesystem; production wires node fs + os.tmpdir.
  */
@@ -252,6 +252,13 @@ function shellQuote(s: string): string {
   return "'" + s.replace(/'/g, "'\"'\"'") + "'";
 }
 
+/** tmux config joins physical newlines even inside single quotes. Encode multiline words
+ * with its double-quoted escapes instead of passing shell syntax to source-file. */
+function tmuxConfigQuote(s: string): string {
+  if (!s.includes("\n")) return shellQuote(s);
+  return '"' + s.replace(/[\\"$\n\r\t]/g, c => ({ "\\": "\\\\", '"': '\\"', "$": "\\$", "\n": "\\n", "\r": "\\r", "\t": "\\t" })[c]!) + '"';
+}
+
 /**
  * An exact tmux target for a session name. tmux resolves a bare name by prefix when no session has that exact name,
  * so a read or pipe for a session that just ended would act on another (`dev-impl@my-rig` on `dev-impl@my-rig2`).
@@ -370,10 +377,16 @@ export class TmuxAdapter {
       const baseline = { ...Object.fromEntries(updated.map(key => [key, process.env[key]])), ...policy.env };
       removeParentSessionEnv(baseline);
       const values = Object.entries({ ...baseline, ...seatEnv })
-        .filter((entry): entry is [string,string] => entry[1] !== undefined)
-        .map(([key,value]) => shellQuote(`${key}=${value}`));
-      const reset = `exec /usr/bin/env -i -- ${values.join(" ")} TMUX="$TMUX" TMUX_PANE="$TMUX_PANE" TERM="$TERM" SHELL="$SHELL" "$@"`;
-      return ["/bin/sh", "-c", reset, "sh", shell, ...(command ? ["-c", command] : ["-l"])];
+        .filter((entry): entry is [string,string] => entry[1] !== undefined && !["TMUX", "TMUX_PANE", "TERM", "SHELL"].includes(entry[0]))
+        .map(([key,value]) => {
+          if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error("Invalid environment name");
+          return `export ${key}=${shellQuote(value)}`;
+        });
+      const file = this.fileOps.tmpName();
+      // Builtin exports keep values off env/sh argv; the pane owns removal once started.
+      await this.fileOps.writeFile(file, `/bin/rm -f -- ${shellQuote(file)}\n${values.join("\n")}\nexec "$@"\n`, { mode: 0o600, flag: "wx" });
+      const reset = 'exec /usr/bin/env -i -- TMUX="$TMUX" TMUX_PANE="$TMUX_PANE" TERM="$TERM" SHELL="$SHELL" /bin/sh "$@"';
+      return ["/bin/sh", "-c", reset, "sh", file, shell, ...(command ? ["-c", command] : ["-l"])];
     } catch {
       // Keep the working launch, with a diagnostic; this option is not a new admission gate.
       const warning = "Scoped tmux environment unavailable; retaining the previous environment for this launch.";
@@ -532,6 +545,18 @@ export class TmuxAdapter {
     return this.exec(legacy ?? posixJoinArgv(argv));
   }
 
+  /** Environment-bearing commands travel in a private config, never a client's argv.
+   * Values stay in tmux's session environment, including for later panes. No global mutation.
+   * A failed/uncertain call retains its private file: it may not have been consumed yet.
+   */
+  private async runEnvironmentCommand(argv: string[], legacy?: string, startServer = false): Promise<string> {
+    const file = this.fileOps.tmpName();
+    await this.fileOps.writeFile(file, (legacy ?? posixJoinArgv(argv)).slice("tmux ".length) + "\n", { mode: 0o600, flag: "wx" });
+    const output = await this.run(["tmux", ...(startServer ? ["start-server", ";"] : []), "source-file", file]);
+    await this.fileOps.unlink(file).catch(() => {});
+    return output;
+  }
+
   /** Ends the daemon's tmux control client, and with it its session (tmux-control.ts), when tmux is driven through one. */
   async closeControlClient(): Promise<void> {
     await (this.argvExec as Partial<TmuxControlExec> | undefined)?.close?.();
@@ -674,16 +699,16 @@ export class TmuxAdapter {
     for (const [k, v] of Object.entries(seatEnv)) argv.push("-e", `${k}=${v}`);
     // The pane new-session itself made: an after-new-session hook may select another window.
     argv.push("-P", "-F", "#{pane_id}");
-    const legacyParts = ["tmux", "new-session", "-d", "-s", shellQuote(name)];
-    if (cwd != null) legacyParts.push("-c", shellQuote(cwd));
-    for (const [k, v] of Object.entries(seatEnv)) legacyParts.push("-e", shellQuote(`${k}=${v}`));
-    legacyParts.push("-P", "-F", shellQuote("#{pane_id}"));
+    const legacyParts = ["tmux", "new-session", "-d", "-s", tmuxConfigQuote(name)];
+    if (cwd != null) legacyParts.push("-c", tmuxConfigQuote(cwd));
+    for (const [k, v] of Object.entries(seatEnv)) legacyParts.push("-e", tmuxConfigQuote(`${k}=${v}`));
+    legacyParts.push("-P", "-F", tmuxConfigQuote("#{pane_id}"));
     const warnings: string[] = [];
     const scopedCommand = await this.scopedLaunchCommand(seatEnv, undefined, warnings);
-    if (scopedCommand) { argv.push(...scopedCommand); legacyParts.push(...scopedCommand.map(shellQuote)); }
+    if (scopedCommand) { argv.push(...scopedCommand); legacyParts.push(...scopedCommand.map(tmuxConfigQuote)); }
     let created: string;
     try {
-      created = (await this.run(argv, legacyParts.join(" "))).trim();
+      created = (await this.runEnvironmentCommand(argv, legacyParts.join(" "), true)).trim();
     } catch (err) {
       return classifyWriteError(err);
     }
@@ -1003,11 +1028,12 @@ export class TmuxAdapter {
     // Legacy commands remain one argument; the scoped wrapper executes directly before the user shell.
     if (scopedCommand) argv.push(...scopedCommand);
     else if (command != null && command.length > 0) argv.push(command);
-    const legacyRespawn = ["tmux", "respawn-pane", "-t", shellQuote(exact)];
-    if (opts?.cwd != null) legacyRespawn.push("-c", shellQuote(opts.cwd));
-    if (opts?.env) for (const [k, v] of Object.entries(opts.env)) legacyRespawn.push("-e", shellQuote(`${k}=${v}`));
-    if (scopedCommand) legacyRespawn.push(...scopedCommand.map(shellQuote));
-    else if (command != null && command.length > 0) legacyRespawn.push(shellQuote(command));
+    const quote = opts?.env && Object.keys(opts.env).length ? tmuxConfigQuote : shellQuote;
+    const legacyRespawn = ["tmux", "respawn-pane", "-t", quote(exact)];
+    if (opts?.cwd != null) legacyRespawn.push("-c", quote(opts.cwd));
+    if (opts?.env) for (const [k, v] of Object.entries(opts.env)) legacyRespawn.push("-e", quote(`${k}=${v}`));
+    if (scopedCommand) legacyRespawn.push(...scopedCommand.map(quote));
+    else if (command != null && command.length > 0) legacyRespawn.push(quote(command));
     // The successor starts from the session environment: exclude inherited
     // parent-session identity there first (sessions made before this existed).
     // A failure here is a warning; the respawn goes ahead as it did before.
@@ -1017,7 +1043,8 @@ export class TmuxAdapter {
       warnings.push(parentSessionEnvWarning(exact, err));
     }
     try {
-      await this.run(argv, legacyRespawn.join(" "));
+      if (opts?.env && Object.keys(opts.env).length) await this.runEnvironmentCommand(argv, legacyRespawn.join(" "));
+      else await this.run(argv, legacyRespawn.join(" "));
       return warnings.length ? { ok: true, warnings } : { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -1237,13 +1264,12 @@ export class TmuxAdapter {
     }
   }
 
-  /** Set one variable in a session's environment: what its next spawned process inherits, not a
-   *  running one. Callers that pass a value are putting it on a tmux command line. */
+  /** Set one variable for later panes, through the same private-file channel as launch. */
   async setSessionEnv(session: string, key: string, value: string): Promise<void> {
     if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) throw new Error("Invalid session environment key.");
     const target = exactTarget(session, "session");
-    await this.run(["tmux", "set-environment", "-t", target, key, value],
-      `tmux set-environment -t ${shellQuote(target)} ${shellQuote(key)} ${shellQuote(value)}`);
+    await this.runEnvironmentCommand(["tmux", "set-environment", "-t", target, key, value],
+      `tmux set-environment -t ${tmuxConfigQuote(target)} ${tmuxConfigQuote(key)} ${tmuxConfigQuote(value)}`);
   }
 
   /** Remove one variable from a session's environment, so a process spawned there afterwards

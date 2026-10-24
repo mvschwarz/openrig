@@ -1,4 +1,5 @@
 import { seatIdentityPanePidSchema } from "../../src/db/migrations/119_seat_identity_pane_pid.js";
+import { seatIdentityProcessEvidenceSchema } from "../../src/db/migrations/135_seat_identity_process_evidence.js";
 // Host-shaped synthetic seeder for the /api/ps + /api/rigs/summary event-loop
 // regression asset (qitem-20260721000001-ps-stall-driver, slice-04).
 //
@@ -62,7 +63,7 @@ import { sessionStopIntentSchema } from "../../src/db/migrations/103_session_sto
 // index-independent).
 export function createMigratedDb(): Database.Database {
   const db = createDb();
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, nodePermissionPolicySchema, rigPermissionPolicySchema, nodePolicyProvenanceSchema, rigPolicyProvenanceSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema, resumeVerificationSchema, seatIdentityVerdictsSchema, eventsNodeTypeIndexSchema, sessionsNodeIdIndexSchema, occupantTenuresSchema, sessionStopIntentSchema, seatIdentityPanePidSchema]);
+  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, nodePermissionPolicySchema, rigPermissionPolicySchema, nodePolicyProvenanceSchema, rigPolicyProvenanceSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema, resumeVerificationSchema, seatIdentityVerdictsSchema, eventsNodeTypeIndexSchema, sessionsNodeIdIndexSchema, occupantTenuresSchema, sessionStopIntentSchema, seatIdentityPanePidSchema, seatIdentityProcessEvidenceSchema]);
   return db;
 }
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
@@ -7,13 +7,13 @@ import { promisify } from "node:util";
 import Database from "better-sqlite3";
 import { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js";
 
-// The managed Claude launch runs `env -i`, which drops everything the pane shell has. These run the
+// The managed Claude launch retains only its selected environment. These run the
 // command it builds in a real shell and read back what the (fake) claude process was left with.
 const exec = promisify(execFile);
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const f of cleanup.splice(0)) f(); });
 
-function fixture(opts: { rigEnv?: object; memberEnv?: object; sessionMarker?: string; sessionReadFails?: boolean }) {
+function fixture(opts: { rigEnv?: object; memberEnv?: object; sessionMarker?: string; sessionReadFails?: boolean; sessionEnv?: Record<string, string> }) {
   const root = mkdtempSync(path.join(tmpdir(), "seat-env-claude-"));
   cleanup.push(() => rmSync(root, { recursive: true, force: true }));
   const bin = path.join(root, "bin"); const home = path.join(root, "home"); const cwd = path.join(root, "work");
@@ -32,7 +32,7 @@ printf '{"FOO":"%s","DECLARED_UNSET":"%s","LEAKED":"%s","HOME":"%s"}' "\${FOO-ab
   db.prepare("INSERT INTO rigs VALUES ('rig', ?)").run(opts.rigEnv ? JSON.stringify(opts.rigEnv) : null);
   db.prepare("INSERT INTO nodes VALUES ('node', 'rig', 'claude-code', ?, ?)").run(cwd, opts.memberEnv ? JSON.stringify(opts.memberEnv) : null);
   db.exec("INSERT INTO bindings VALUES ('b', 'node', 'seat@rig', '%1'); INSERT INTO occupant_tenures VALUES ('node', 'gen', 1)");
-  const env = { PATH: `${bin}:/usr/bin:/bin`, HOME: home };
+  const env = { PATH: `${bin}:/usr/bin:/bin`, HOME: home, ...opts.sessionEnv };
   const reads: Array<[string, string]> = [];
   const managed = new ClaudeManagedLaunch(db, env, {}, async (session, key) => {
     reads.push([session, key]);
@@ -43,13 +43,34 @@ printf '{"FOO":"%s","DECLARED_UNSET":"%s","LEAKED":"%s","HOME":"%s"}' "\${FOO-ab
     const { stdout } = await exec("/bin/sh", ["-c", command], { env: { PATH: "/usr/bin:/bin", ...paneEnv }, timeout: 5000 });
     return JSON.parse(stdout) as Record<string, string>;
   };
-  return { managed, run, reads, home };
+  return { managed, run, reads, home, bin, claude };
 }
 
 const target = { nodeId: "node", session: "seat@rig", pane: "%1" };
 
 describe.skipIf(process.platform === "win32")("managed Claude launch and a seat's declared env", () => {
-  it("passes the declared variables through env -i, and only those", async () => {
+  it("delivers credentials without expanding them into an environment client's argv", async () => {
+    const secrets = { OPENAI_API_KEY: "SYNTHETIC-PROVIDER-ONLY\nSYNTHETIC-INTERNAL-LINE=value", OPENRIG_ACTIVITY_HOOK_TOKEN: "SYNTHETIC-HOOK-ONLY" };
+    const f = fixture({ sessionEnv: secrets, rigEnv: { TERM: "" } });
+    const log = path.join(f.bin, "env-argv.jsonl"), shim = path.join(f.bin, "env-observer");
+    writeFileSync(shim, `#!${process.execPath}
+const fs=require('fs'), cp=require('child_process');
+fs.appendFileSync(${JSON.stringify(log)},JSON.stringify(process.argv.slice(2))+"\\n");
+const r=cp.spawnSync('/usr/bin/env',process.argv.slice(2),{env:process.env,encoding:'utf8',stdio:['inherit','pipe','pipe']});
+process.stdout.write(r.stdout||''); process.stderr.write(r.stderr||''); process.exit(r.status??1);
+`);
+    chmodSync(shim, 0o700);
+    writeFileSync(f.claude, `#!/bin/sh
+if [ "$1" = --help ]; then printf '%s\\n' '--permission-mode <mode> (choices: "auto", "default")'; exit 0; fi
+exec ${JSON.stringify(process.execPath)} -e 'process.stdout.write(JSON.stringify({OPENAI_API_KEY:process.env.OPENAI_API_KEY,OPENRIG_ACTIVITY_HOOK_TOKEN:process.env.OPENRIG_ACTIVITY_HOOK_TOKEN,LEAKED:process.env.LEAKED,invalid:process.env["invalid-name"],SHELLOPTS:process.env.SHELLOPTS,TERM:process.env.TERM}))'
+`);
+    const command = (await f.managed.prepare(target, "auto")).command([]).replaceAll("/usr/bin/env", JSON.stringify(shim));
+    expect(await f.run(command, { ...secrets, LEAKED: "unselected", "invalid-name": "unselected", SHELLOPTS: "braceexpand", TERM: "" })).toEqual({ ...secrets, TERM: "" });
+    const calls = readFileSync(log, "utf8").trim().split("\n").flatMap(line => JSON.parse(line) as string[]).join("\n");
+    for (const value of [...Object.values(secrets), "SYNTHETIC-INTERNAL-LINE"]) expect(calls).not.toContain(value);
+  });
+
+  it("passes the declared variables, and only those", async () => {
     const f = fixture({ rigEnv: { FOO: "from-rig" }, memberEnv: { FOO: "from-member" } });
     const command = (await f.managed.prepare(target, "auto")).command(["--permission-mode", "auto"]);
     const seen = await f.run(command, { FOO: "from-member", LEAKED: "should-not-pass" });

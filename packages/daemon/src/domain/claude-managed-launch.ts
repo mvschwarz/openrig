@@ -59,16 +59,15 @@ const PANE_TERMINAL_KEYS = ["TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_V
 const PANE_SESSION_KEYS = ["EDITOR", "VISUAL", "DISPLAY", "XAUTHORITY"];
 
 /** WAYLAND_DISPLAY without XDG_RUNTIME_DIR: a client resolves a relative socket name against XDG_RUNTIME_DIR, but an
- *  absolute path needs nothing else. The pane shell computes the value into a variable ahead of `env -i`: an absolute
+ *  absolute path needs nothing else. The pane shell computes the value into a variable ahead of the environment reset: an absolute
  *  value is kept, a relative one is joined to the pane's XDG_RUNTIME_DIR, and a relative one with no XDG_RUNTIME_DIR (or
  *  an unset or empty one) leaves the variable empty, so the name is never forwarded. An assignment is not word-split or
  *  globbed, so a value with a space or a `*` arrives whole. The case patterns are balanced `(…)` so that shells that
  *  mis-parse an unbalanced `)` inside `$(…)` (bash before 4.0, a macOS /bin/sh) accept it. The variable stays in the
- *  shell that runs the command, which is a staged `/bin/sh` script for a managed launch; `env -i` does not pass it on. */
+ *  shell that runs the command, which is a staged `/bin/sh` script for a managed launch; the final environment excludes it. */
 const WAYLAND_DISPLAY_VAR = "__openrig_wayland_display";
 const WAYLAND_DISPLAY_ASSIGNMENT = `${WAYLAND_DISPLAY_VAR}=$(case "\${WAYLAND_DISPLAY-}" in (/*) printf %s "$WAYLAND_DISPLAY";; `
   + `(?*) if [ -n "\${XDG_RUNTIME_DIR-}" ]; then printf %s/%s "$XDG_RUNTIME_DIR" "$WAYLAND_DISPLAY"; fi;; esac)`;
-const WAYLAND_DISPLAY_WORD = `\${${WAYLAND_DISPLAY_VAR}:+"WAYLAND_DISPLAY=$${WAYLAND_DISPLAY_VAR}"}`;
 
 export class ClaudeManagedLaunch {
   constructor(private readonly db: Database.Database,
@@ -81,7 +80,7 @@ export class ClaudeManagedLaunch {
 
   /** Names the seat's rig and member declare in `env:`, plus any one-off `rig up --env` names the
    *  launch recorded on the tmux session. Their values are already in the pane shell, which is
-   *  where `env -i` forwards them from. The launch keeps ownership of its own variables. */
+   *  where the launch forwards them from. The launch keeps ownership of its own variables. */
   private async seatEnvKeys(nodeId: string, session: string | undefined): Promise<string[]> {
     const keys = new Set<string>();
     try {
@@ -208,28 +207,42 @@ export class ClaudeManagedLaunch {
       ...(generation ? { OPENRIG_OCCUPANT_GENERATION: generation } : {}) };
     const seatKeys = await this.seatEnvKeys(target.nodeId, before.session ?? undefined);
     const publicEnv = publicSeatEnvironment(this.sessionEnv);
-    const assignments = Object.entries({ ...context.env, ...publicEnv, ...identity }).map(([key, value]) => shellQuote(`${key}=${value}`));
-    const forwarded = inherited.filter(key => !(key in identity) && !(key in publicEnv)).map(key => `"${key}=\${${key}-}"`);
+    const assignments = Object.entries({ ...context.env, ...publicEnv, ...identity }).map(([key, value]) => `export ${shellQuote(`${key}=${value}`)}`);
+    const forwarded = inherited.filter(key => !(key in identity) && !(key in publicEnv)).map(key => `export ${key}="\${${key}-}"`);
     // A declared name is forwarded only when the pane shell has it set, so a one-off name recorded on
     // the session never reaches a successor pane that was not given it. Set-but-empty stays empty.
     const seatForwarded = seatKeys.filter(key => !inherited.includes(key) && !(key in identity) && !(key in publicEnv))
-      .map(key => `\${${key}+"${key}=$${key}"}`);
+      .map(key => `if [ "\${${key}+set}" ]; then export ${key}; fi`);
     // A seat that loads the openrig-core plugin has its launch project in its pane (OPENRIG_SEAT_PROJECT_DIR): the plugin's
     // hooks use it to tell the seat from a Claude started elsewhere inside it. Forwarded by name; the pane supplies the value.
     const loadsCorePlugin = seatCorePluginDir({ id: target.nodeId, runtime: "claude-code" }, this.db, undefined, this.pluginsDir) !== undefined;
     const projectForwarded = loadsCorePlugin ? [SEAT_PROJECT_DIR_ENV, SEAT_NODE_ENV]
-      .map(key => `\${${key}+"${key}=$${key}"}`) : [];
+      .map(key => `if [ "\${${key}+set}" ]; then export ${key}; fi`) : [];
     // Expand in the target pane shell, whose terminal can differ from the daemon.
-    // Empty and absent values remain absent after env -i. TERM_PROGRAM is how Claude tells it runs
+    // Empty and absent values remain absent after the reset. TERM_PROGRAM is how Claude tells it runs
     // inside tmux; without it Claude never asks tmux for extended keys, and Shift+Enter reaches it
     // as a plain Enter. TMUX is left out on purpose: a bare `tmux` follows $TMUX ahead of
     // TMUX_TMPDIR, so tools the seat runs (and any daemon it starts) would follow the seat's own tmux server.
-    const terminal = [...PANE_TERMINAL_KEYS, ...PANE_SESSION_KEYS].map(key => `\${${key}:+"${key}=$${key}"}`);
-    terminal.push(WAYLAND_DISPLAY_WORD);
+    const terminalKeys = [...PANE_TERMINAL_KEYS, ...PANE_SESSION_KEYS];
+    const selectedKeys = [...Object.keys(context.env), ...Object.keys(publicEnv), ...Object.keys(identity), ...inherited,
+      ...seatKeys, ...(loadsCorePlugin ? [SEAT_PROJECT_DIR_ENV, SEAT_NODE_ENV] : [])];
+    const otherwise = (key: string) => selectedKeys.includes(key) ? "" : ` else unset ${key};`;
+    const terminal = terminalKeys.map(key => `if [ -n "\${${key}-}" ]; then export ${key};${otherwise(key)} fi`);
+    terminal.push(`if [ -n "$${WAYLAND_DISPLAY_VAR}" ]; then export WAYLAND_DISPLAY="$${WAYLAND_DISPLAY_VAR}";${otherwise("WAYLAND_DISPLAY")} fi`);
     return Object.freeze({ assertCurrent, configDir: context.configDir, executable: context.executable, executableIsScript: context.executableIsScript, command: (args: readonly string[], launchEnv: Readonly<Record<string, string>> = {}) => {
       assertCurrent();
-      const launch = Object.entries(launchEnv).map(([key, value]) => shellQuote(`${key}=${value}`));
-      return `${WAYLAND_DISPLAY_ASSIGNMENT}; cd ${shellQuote(cwd)} && /usr/bin/env -i ${[...assignments, ...forwarded, ...seatForwarded, ...projectForwarded, ...terminal, ...launch, shellQuote(context.executable), ...args.map(shellQuote)].join(" ")}`;
+      const launch = Object.entries(launchEnv).map(([key, value]) => `export ${shellQuote(`${key}=${value}`)}`);
+      const keep = [...selectedKeys, ...terminalKeys, "WAYLAND_DISPLAY", ...Object.keys(launchEnv)];
+      // env -0 keeps multiline values out of the name parser. The existing daemon's Node reads
+      // that pipe with an empty environment (no pane NODE_OPTIONS); only removal names reach argv.
+      const removalArgs = `const data=require("node:fs").readFileSync(0,"utf8"); if(!data.endsWith("\\0"))process.exit(1); `
+        + `const keep=new Set(${JSON.stringify(keep)}); const quote=${shellQuote.toString()}; `
+        + `process.stdout.write("set -- "+data.split("\\0").filter(s=>s.includes("=")).map(s=>s.slice(0,s.indexOf("="))).filter(k=>!keep.has(k)).flatMap(k=>["-u",quote(k)]).join(" "));`;
+      const clear = `__openrig_remove=$(/usr/bin/env -0 | /usr/bin/env -i ${shellQuote(process.execPath)} -e ${shellQuote(removalArgs)}) && eval "$__openrig_remove"`;
+      return `${WAYLAND_DISPLAY_ASSIGNMENT}; cd ${shellQuote(cwd)} && {
+${[...assignments, ...forwarded, ...seatForwarded, ...projectForwarded, ...terminal, ...launch].join("\n")}
+${clear} && exec /usr/bin/env "$@" ${[shellQuote(context.executable), ...args.map(shellQuote)].join(" ")}
+}`;
     } });
   }
 }

@@ -6,10 +6,12 @@ import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { networkInterfaces } from 'node:os';
 import { join } from 'node:path';
+import { runRig } from '../../daemon/test/helpers/scenario-daemon.ts';
 import { defaultHostDaemon, runScenarioFile } from '../../daemon/test/helpers/scenario-pipeline.ts';
 import { CASES, PASSING_CASES, RESULT_PREFIX } from './result.mjs';
 import { preserveRefresh } from './preserve-refresh.mjs';
 import { checkMcpStdio } from './mcp-stdio.mjs';
+import { reducedEnvRestart, verifyReducedEnvRestart, verifyGoneProcess } from './reduced-env-restart.mjs';
 
 assert.equal(process.platform, 'linux', 'container execution only');
 assert.notEqual(process.getuid(), 0, 'run as the unprivileged testbed user');
@@ -31,11 +33,21 @@ const report = {
   scenarioSha256: createHash('sha256').update(readFileSync(scenario)).digest('hex'),
 };
 
+let goneProcess;
 try {
   report.result = await runScenarioFile(scenario, {
     rigBin,
     baseEnv: { PATH: '/usr/local/bin:/usr/bin:/bin', TERM: 'xterm-256color' },
     deps: {
+      runRig: async (args, env, bin, timeout) => {
+        if (caseName === 'daemon-restart' && args[0] === 'down') {
+          assert.equal(typeof goneProcess, 'function', 'gone control not prepared');
+          await goneProcess();
+          verifyGoneProcess(report.reducedEnv.gone);
+          goneProcess = undefined;
+        }
+        return runRig(args, env, bin, timeout);
+      },
       appendRecord: record => records.push(record),
       onHookContext: hook => {
         report.hook = hook;
@@ -84,6 +96,11 @@ sys.exit(r.returncode)
         restart: async () => {
           report.preservation = await preserveRefresh(daemon, scaffold.openrigHome, rigBin);
           report.mcp = await checkMcpStdio(rigBin, daemon.readEnv);
+          report.reducedEnv = {};
+          const controls = {};
+          await reducedEnvRestart(daemon, scaffold, rigBin, report.reducedEnv, { controls });
+          verifyReducedEnvRestart(report.reducedEnv);
+          goneProcess = controls.goneProcess;
         },
       };
       if (mode === 'healthy' || selected.kind === 'hook') return daemon;

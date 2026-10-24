@@ -43,7 +43,7 @@ try {
   const live = registry.registerSession(liveNode.id, "worker@demo2");
   registry.updateStatus(missing.id, "running"); registry.updateStatus(live.id, "running");
   const reconciler = new Reconciler({ db, sessionRegistry: registry, eventBus, tmuxAdapter: argv });
-  assert.deepEqual(await reconciler.reconcile(rig.id), { checked: 1, detached: 1, errors: [] });
+  assert.deepEqual(await reconciler.reconcile(rig.id), { checked: 1, detached: 1, unseen: [], errors: [] });
   assert.deepEqual(missingProbes, ["absent", "absent"], "missing session must not prefix-match its neighbor");
   assert.equal(registry.getSessionsForRig(rig.id)[0].status, "detached");
   assert.equal(registry.getSessionsForRig(neighborRig.id)[0].status, "running");
