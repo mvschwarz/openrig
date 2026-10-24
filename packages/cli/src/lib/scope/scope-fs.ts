@@ -554,7 +554,7 @@ export function findSlice(
         continue;
       }
       const mission = buildMissionInfo(missionsRoot, owningMissionPath);
-      const sliceRoot = path.dirname(candidate);
+      const sliceRoot = path.dirname(path.resolve(candidate));
       return buildSliceInfo(mission, sliceRoot, path.basename(candidate));
     }
   }
@@ -567,9 +567,13 @@ export function findSlice(
 }
 
 function findOwningMission(missionsRoot: string, slicePath: string): string | null {
-  let dir = path.dirname(slicePath);
-  while (dir.startsWith(missionsRoot) && dir !== missionsRoot) {
-    if (path.dirname(dir) === missionsRoot) return dir;
+  // path.dirname never ends in a separator, so compare against the normalized root
+  // (a configured or --workspace root may be written as `/w/missions/`); resolve the
+  // slice the same way so a relative root and a relative candidate stay comparable.
+  const root = path.resolve(missionsRoot);
+  let dir = path.dirname(path.resolve(slicePath));
+  while (dir.startsWith(root) && dir !== root) {
+    if (path.dirname(dir) === root) return dir;
     dir = path.dirname(dir);
   }
   return null;

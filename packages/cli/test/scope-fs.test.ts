@@ -356,6 +356,27 @@ describe("findSlice + resolution variants", () => {
     expect(slice.missionName).toBe("release-0.3.2");
   });
 
+  it("finds the owning mission when the missions root ends in a separator", () => {
+    const withSlash = missionsRoot + path.sep;
+    expect(findSlice(withSlash, "07-target", "release-0.3.2").missionName).toBe("release-0.3.2");
+    const abs = path.join(missionsRoot, "release-0.3.2", "slices", "07-target");
+    expect(findSlice(withSlash, abs).missionName).toBe("release-0.3.2");
+  });
+
+  it("finds the owning mission for a relative missions root with a bare name and --mission, or a mission path", () => {
+    const prev = process.cwd();
+    process.chdir(root);
+    try {
+      const hinted = findSlice("missions", "07-target", "release-0.3.2");
+      expect(hinted.missionName).toBe("release-0.3.2");
+      expect(hinted.absPath).toBe(path.join(fs.realpathSync(root), "missions", "release-0.3.2", "slices", "07-target"));
+      expect(findSlice("missions/", "07-target", "release-0.3.2").missionName).toBe("release-0.3.2");
+      expect(findSlice("missions", "release-0.3.2/slices/07-target").missionName).toBe("release-0.3.2");
+    } finally {
+      process.chdir(prev);
+    }
+  });
+
   it.each(["workspace", "missions", "declared mission"])(
     "resolves a hinted bare slice past an unrelated %s directory",
     (collision) => {
