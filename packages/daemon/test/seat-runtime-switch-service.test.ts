@@ -10,6 +10,7 @@ import { Hono } from "hono";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { queueRoutes } from "../src/routes/queue.js";
 import { seatRoutes } from "../src/routes/seat.js";
+import { transportRoutes } from "../src/routes/transport.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
@@ -193,6 +194,37 @@ describe("live seat runtime switch", () => {
     expect(claude.launchHarness).toHaveBeenCalledWith(expect.objectContaining({
       claudePermissions: rules, permissionMode: "acceptEdits",
     }), expect.objectContaining({ name: SEAT }));
+  });
+
+  it("refuses unreadable target rules while keeping sends to the current occupant available", async () => {
+    db.prepare("UPDATE nodes SET claude_permissions_json = 'broken' WHERE id = ?").run(nodeId);
+    const svc = service();
+    await expect(svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "switch to Claude" }))
+      .resolves.toMatchObject({ ok: false, committed: false, message: expect.stringContaining("Repair the rules") });
+    expect(openSwitch()).toBeUndefined();
+    expect(fakeTmux.createSession).not.toHaveBeenCalled();
+    expect(nodeRow().runtime).toBe("codex");
+    expect(sessionRegistry.currentOccupantTenure(nodeId)!.generationUuid).toBe(predecessorGeneration);
+
+    const transport = { resolveSessions: vi.fn(async () => ({ ok: true, sessions: [{ sessionName: SEAT }] })),
+      send: vi.fn(async () => ({ ok: true, sent: true })) };
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("db" as never, db as never);
+      c.set("sessionTransport" as never, transport as never);
+      await next();
+    });
+    app.route("/api/transport", transportRoutes());
+    const response = await app.request("/api/transport/send", { method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "operator@kernel" },
+      body: JSON.stringify({ session: SEAT, text: "please continue" }) });
+    expect(await response.json()).toMatchObject({ ok: true, sent: true });
+    expect(transport.send).toHaveBeenCalledTimes(1);
+
+    db.prepare("UPDATE nodes SET claude_permissions_json = NULL WHERE id = ?").run(nodeId);
+    successorConfirms(svc);
+    expect(await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "retry after repairing rules" }))
+      .toMatchObject({ ok: true, to: "claude-code" });
   });
 
   it("the handover asks the successor to confirm, carries the seat's open work, and tells it not to act as the seat yet", async () => {

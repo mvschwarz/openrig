@@ -289,6 +289,13 @@ export class SeatRuntimeSwitchService {
     const { node, sessionName, target, materials } = ctx;
     const failed = (message: string, guidance?: string): RuntimeSwitchRefusal => ({ ok: false, code: "runtime_switch_failed", committed: false, message,
       guidance: guidance ?? `${ctx.seatRef} is unchanged on ${node.runtime}. Correct the cause and try again.` });
+    // Refuse unreadable target settings before an active switch can hold sends to the current occupant.
+    let override: ReturnType<NativePermissionStore["launchOverride"]>;
+    try {
+      override = new NativePermissionStore(db).launchOverride(node.id, target, {
+        selection: ctx.selection, codexProfile: materials.settings.codexConfigProfile.value,
+      });
+    } catch (error) { return failed((error as Error).message); }
     const successorGeneration = sessionRegistry.reserveOccupantGeneration();
     if (!successorGeneration) return failed("No occupant generation could be reserved for the successor (the tenure ledger is unavailable).");
 
@@ -316,8 +323,6 @@ export class SeatRuntimeSwitchService {
     };
 
     // 1. The successor, on the target runtime, beside the predecessor.
-    const permissions = new NativePermissionStore(db);
-    const override = permissions.launchOverride(node.id, target, { selection: ctx.selection, codexProfile: materials.settings.codexConfigProfile.value });
     const policyPosture = rigRepo.getNodePolicyProvenance(node.id)?.launchPosture ?? rigRepo.getRigPolicyProvenance(node.rigId)?.launchPosture ?? "floor";
     const posture = override.launchPosture ?? policyPosture;
     // Codex has no auto mode; it launches at the floor, as its permission resolution says.
