@@ -384,13 +384,14 @@ caller's Herdr endpoint must match the daemon's endpoint; a mismatch is reported
 without opening a window or putting the view in another session.
 
 The shared TUI (`rig tui --shared`) runs in the daemon's tmux server, so its own environment never
-carries the Herdr you are looking at; the markers are on the tmux client attached to it. When you
+carries the Herdr or Rex you are looking at; the markers are on the tmux client attached to it. When you
 open a terminal view from it on Linux, the TUI passes the markers of the client that was active last
-(normally the one that pressed the key) to the command, which then opens the view in that Herdr. The
+(normally the one that pressed the key) to the command, which then opens the view in that Herdr, or as
+a new session on that Rex server. The
 chosen client may belong to a different viewer: tmux only counts keys a client types, so a key sent
 by an agent (`send-keys`) or by a control-mode client doesn't count as any client's activity, and the
-view opens in the Herdr of the interactive client that typed last, however long ago. With no client
-attached, more than one client active in the same second, or a client that isn't in Herdr or can't be
+view opens in the Herdr or Rex of the interactive client that typed last, however long ago. With no client
+attached, more than one client active in the same second, or a client that is in neither or can't be
 read, nothing is passed and the result is what it was before. Other platforms, and every other way of
 running `rig terminal open`, keep the previous result too.
 

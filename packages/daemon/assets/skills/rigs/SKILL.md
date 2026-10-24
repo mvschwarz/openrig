@@ -59,14 +59,14 @@ person needs in their project or home folder and name that path.
   itself, using herdr when installed or plain tmux otherwise:
   - **Inside Herdr** (you run in a Herdr pane): it switches the person's Herdr to an `openrig kernel` space, reusing a live
     one. No new window and no macOS prompt; their own spaces stay in the sidebar.
-  - **Inside Rex** (you run in a Rex block): it opens an `openrig kernel` session on the same Rex server and asks the
+  - **Inside Rex** (you run in a Rex block, or in a tmux started in one): it opens an `openrig kernel` session on the same Rex server and asks the
     Rex app to switch to it. No new window and no macOS prompt. Opening it again adds a numbered session.
   - **In Terminal or Ghostty:** a new tab or window the size of theirs.
   - **From Claude Desktop, iTerm or VS Code on a Mac:** a new Ghostty window when supported, otherwise Terminal. Only
     here, tell the person before running it that **Allow is fine** if macOS asks to control that app.
-    `echo $TERM_PROGRAM $__CFBundleIdentifier` tells you where you run. `herdr`, `rex`, `Apple_Terminal` or `ghostty`, or
-    `tmux` with `com.apple.Terminal` or `com.mitchellh.ghostty`, mean no macOS prompt, so don't mention one. `tmux`
-    with anything else (iTerm, VS Code) can prompt, so say Allow is fine first.
+    `echo $TERM_PROGRAM $__CFBundleIdentifier $REX_BLOCK` tells you where you run. `herdr`, `rex`, `Apple_Terminal` or
+    `ghostty`, or `tmux` with `com.apple.Terminal`, `com.mitchellh.ghostty` or a `REX_BLOCK` value, mean no macOS
+    prompt, so don't mention one. `tmux` with anything else (iTerm, VS Code) can prompt, so say Allow is fine first.
   - **Layout:** under 120 columns the operator fills the first page; from 120, the dashboard and operator share it. The
     advisor has its own tab or tmux window.
 
