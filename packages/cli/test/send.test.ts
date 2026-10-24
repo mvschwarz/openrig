@@ -617,6 +617,29 @@ describe("Send CLI", () => {
     expect("actorSession" in (lastSendBody ?? {})).toBe(true);
   });
 
+  it("explicit unchecked interaction is forwarded, and cannot be used as an ordinary send", async () => {
+    const args = ["node", "rig", "send", "dev-impl@my-rig", "1", "--type-without-checking"];
+    expect((await captureLogs(() => makeCmd().parseAsync(args).then(() => {}))).exitCode).toBe(1);
+    expect(lastSendBody).toBeNull();
+    await captureLogs(() => makeCmd().parseAsync([...args, "--dangerously-interact", "--reason", "deliberate input"]).then(() => {}));
+    expect(lastSendBody).toMatchObject({ dangerouslyInteract: true, typeWithoutChecking: true, text: "1" });
+  });
+
+  it("shows typed input separately from suggestions to the caller, escaping control bytes", async () => {
+    const existingInput = { classification: "typed_or_pasted", rows: ["私の下書き😀\n\u001b[31m"], suggestionRows: ["suggested next"],
+      cursor: { x: 3, y: 2, width: 120, height: 40 }, fullContentsVisible: false };
+    const post = vi.fn(async () => ({ status: 409, data: { ok: false, existingInput, error: "Nothing typed. Deliberately clear, then retry." } }));
+    const result = await captureChannels(() => makeCmd(runningDeps(port, () => ({ post } as unknown as DaemonClient)))
+      .parseAsync(["node", "rig", "send", "dev-impl@my-rig", "1", "--dangerously-interact", "--reason", "inspect"]).then(() => {}));
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.join("\n")).toContain("typed or pasted; author unknown");
+    expect(result.stderr.join("\n")).toContain(JSON.stringify(existingInput.rows));
+    expect(result.stderr.join("\n")).toContain("Suggestion rows (display only)");
+    expect(result.stderr.join("\n")).not.toContain("\u001b");
+    expect(post).toHaveBeenCalledTimes(1); // No retry and no capture text sent back to the seat.
+    expect(JSON.stringify(post.mock.calls)).not.toContain("suggested next");
+  });
+
   it("send --dangerously-interact without --reason is rejected before contacting the daemon", async () => {
     const { logs, exitCode } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "1", "--dangerously-interact"]);
@@ -644,12 +667,13 @@ describe("Send CLI", () => {
       crossHostRun: async (_host, argv) => { captured = argv; return { ok: true, stdout: "remote ok", stderr: "" }; },
     };
     await captureLogs(async () => {
-      await makeCmd(deps).parseAsync(["node", "rig", "send", "dev-impl@my-rig", "1", "--host", "vm-test", "--raw", "--dangerously-interact", "--reason", "why now"]);
+      await makeCmd(deps).parseAsync(["node", "rig", "send", "dev-impl@my-rig", "1", "--host", "vm-test", "--raw", "--dangerously-interact", "--type-without-checking", "--reason", "why now"]);
     });
     expect(captured).not.toBeNull();
     const argv = captured as unknown as string[];
     expect(argv).toContain("--raw");
     expect(argv).toContain("--dangerously-interact");
+    expect(argv).toContain("--type-without-checking");
     const ri = argv.indexOf("--reason");
     expect(ri).toBeGreaterThan(-1);
     expect(argv[ri + 1]).toBe("why now");
@@ -969,9 +993,10 @@ describe("Send CLI", () => {
 
   it("fan-out --dangerously-interact --reason plumbs the danger fields (bare text, no envelope)", async () => {
     await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "send", "--to", "dev-impl@my-rig,dev-qa@my-rig", "1", "--dangerously-interact", "--reason", "drive stuck prompts"]);
+      await makeCmd().parseAsync(["node", "rig", "send", "--to", "dev-impl@my-rig,dev-qa@my-rig", "1", "--dangerously-interact", "--type-without-checking", "--reason", "drive stuck prompts"]);
     });
     expect(lastBroadcastBody?.dangerouslyInteract).toBe(true);
+    expect(lastBroadcastBody?.typeWithoutChecking).toBe(true);
     expect(lastBroadcastBody?.reason).toBe("drive stuck prompts");
     expect(lastBroadcastBody?.text).toBe("1");
     expect("envelopeSender" in (lastBroadcastBody ?? {})).toBe(false);

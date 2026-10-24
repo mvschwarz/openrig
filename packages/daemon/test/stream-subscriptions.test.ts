@@ -125,6 +125,29 @@ describe("stream hub readers (slice 22 outcome 9)", () => {
     expect(stream.list({ limit: 10 }).map(i => i.streamItemId)).toEqual(["P2"]);
   });
 
+  it("retention keeps history that existed before the upgrade and prunes what's emitted after; a fresh install has no floor", () => {
+    const later = new Date(Date.now() + 40 * 86_400_000).toISOString();
+    const upgraded = createDb();
+    migrate(upgraded, ALL_MIGRATIONS.slice(0, ALL_MIGRATIONS.findIndex((m) => m.name === "130_stream_subscriptions.sql"))); // an install at 129
+    new StreamStore(upgraded, new EventBus(upgraded)).emit({ streamItemId: "OLD", sourceSession: "poster@rig", body: "history before the upgrade" });
+    migrate(upgraded, ALL_MIGRATIONS); // the upgrade
+    const after = new StreamStore(upgraded, new EventBus(upgraded));
+    after.emit({ streamItemId: "NEW", sourceSession: "poster@rig", body: "emitted after the upgrade" });
+    expect(pruneStreamItems(upgraded, { nowIso: later })).toEqual({ deletedRows: 1 });
+    expect(after.getById("OLD")).not.toBeNull();
+    expect(after.getById("NEW")).toBeNull();
+    // The count cap doesn't touch it either.
+    expect(pruneStreamItems(upgraded, { nowIso: new Date().toISOString(), streamMaxItems: 1 })).toEqual({ deletedRows: 0 });
+    upgraded.close();
+    const fresh = createDb();
+    migrate(fresh, ALL_MIGRATIONS);
+    const freshStream = new StreamStore(fresh, new EventBus(fresh));
+    freshStream.emit({ streamItemId: "F1", sourceSession: "poster@rig", body: "a fresh install's item" });
+    expect(pruneStreamItems(fresh, { nowIso: later })).toEqual({ deletedRows: 1 });
+    expect(freshStream.getById("F1")).toBeNull();
+    fresh.close();
+  });
+
   it("the daemon's retention sweep runs the stream pass", async () => {
     const full = createDb();
     migrate(full, ALL_MIGRATIONS);
