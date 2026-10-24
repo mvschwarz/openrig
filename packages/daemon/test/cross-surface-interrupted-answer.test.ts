@@ -40,7 +40,8 @@ async function fixture() {
   const ask = await repo.create({ sourceSession: ASKER, destinationSession: PERSON, body: "Synthetic one-question ask", summary: "Proceed?",
     humanIntent: "decision", humanAlert: true, humanQuestions: questions, evidenceRef: "/fixture/decision", nudge: false });
   const resolveHumanReply = vi.fn(makeHumanReplyResolver(repo, contract));
-  const router = new InboundRouter({ queue: makeQueuePorts(repo), destination: ASKER, seen: new SeenStore(join(home, "seen.jsonl")),
+  const seen = new SeenStore(join(home, "seen.jsonl"));
+  const router = new InboundRouter({ queue: makeQueuePorts(repo), destination: ASKER, seen,
     deadLetter: new DeadLetterStore(join(home, "dead.jsonl")), resolveSender: () => ({ admitted: true, source: PERSON }),
     resolveRoute: () => ({ destination: ASKER, correlationQitemId: ask.qitemId }),
     acknowledgeAnswer: async ({ text }) => { acknowledgements.push(text); },
@@ -67,8 +68,8 @@ async function fixture() {
       replyCount: replies.length, resolutionCount: resolved.length, nudgeCount: nudges.filter(n => n.session === ASKER).length };
   };
   closes.push(() => { db.close(); rmSync(home, { recursive: true, force: true }); });
-  return { repo, ask, slack, steering, snapshot, acknowledgements, resolveHumanReply,
-    typedSlack: (text: string, recoveredThreadReply = false, ts = "3.3") => router.route({ type: "message", user: "UTEST", channel: "CTEST", thread_ts: "1.1", ts, text, recoveredThreadReply }) };
+  return { repo, ask, slack, steering, snapshot, acknowledgements, resolveHumanReply, seen,
+    typedSlack: (text: string, recoveredThreadReply = false, ts = "3.3", channel = "CTEST") => router.route({ type: "message", user: "UTEST", channel, thread_ts: "1.1", ts, text, recoveredThreadReply }) };
 }
 
 describe("completed human answer interrupted before ask close", () => {
@@ -157,6 +158,30 @@ describe("completed human answer interrupted before ask close", () => {
     expect(f.repo.getById(followup.id)?.tags).not.toContain("human-answer");
     expect(f.resolveHumanReply).toHaveBeenCalledTimes(resolveCalls);
     expect(f.acknowledgements.some(text => text.startsWith("Already answered"))).toBe(false);
+  });
+
+  it("the same Slack event replayed after close and before its seen mark returns the original answer once", async () => {
+    const f = await fixture();
+    const mark = vi.spyOn(f.seen, "mark").mockImplementationOnce(() => { throw new Error("fixture interruption after close, before seen append"); });
+    await expect(f.typedSlack("Original words")).rejects.toThrow("before seen append");
+    mark.mockRestore();
+    const beforeReplay = f.snapshot();
+    expect(beforeReplay).toMatchObject({ committedReplyCount: 1, askState: "done", replyCount: 1, resolutionCount: 1, nudgeCount: 1 });
+    expect(f.seen.load().has("CTEST:3.3")).toBe(false);
+    const resolveCalls = f.resolveHumanReply.mock.calls.length;
+    const replay = await f.typedSlack("Original words");
+    expect(f.snapshot()).toMatchObject({ committedReplyCount: 1, askState: "done", replyCount: 1, resolutionCount: 1, nudgeCount: 1, replies: beforeReplay.replies });
+    expect(replay).toMatchObject({ disposition: "accepted", qitemId: beforeReplay.replies[0]!.id });
+    expect(f.resolveHumanReply).toHaveBeenCalledTimes(resolveCalls);
+    expect(f.seen.load().has("CTEST:3.3")).toBe(true);
+    expect(await f.typedSlack("Original words")).toMatchObject({ disposition: "ignored", reason: "dup" });
+    expect(f.snapshot()).toMatchObject({ replyCount: 1, resolutionCount: 1, nudgeCount: 1 });
+  });
+
+  it("the same timestamp in another channel is a different follow-up event", async () => {
+    const f = await fixture(); await f.typedSlack("Original words");
+    expect(await f.typedSlack("Context from another channel", false, "3.3", "COTHER")).toMatchObject({ disposition: "accepted" });
+    expect(f.snapshot()).toMatchObject({ committedReplyCount: 2, replyCount: 2, resolutionCount: 1, nudgeCount: 2 });
   });
 
   it("a wrong person cannot reuse the answer, and a recovered late message remains separate", async () => {
