@@ -165,7 +165,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
   function identityLabel(id: Record<string, unknown>): string {
     // Codex: account, else the workspace account/read reported; Claude: the organisation and email auth status
     // reported at the last refresh; else unresolved. For Codex the email is a label.
-    return id["accountId"] ? `account ${id["accountId"]}`
+    return id["source"] === "configured credential label" ? `credential ${id["credentialLabel"]} (operator label)` : id["accountId"] ? `account ${id["accountId"]}`
       : id["workspaceId"] ? `workspace ${id["workspaceId"]} (from account/read; no usage account id)`
         : id["source"] !== "unresolved" && id["orgId"] ? `organisation ${id["orgName"] ? `${id["orgName"]} (${id["orgId"]})` : id["orgId"]}`
           : "identity unresolved";
@@ -217,6 +217,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       : id["source"] === "unresolved" ? "  [from an earlier read; possibly this same login]"
         : "  [from an earlier read; the latest read didn't match this row]";
     console.log(`${pad}${r["provider"]}  ${labels.join(" · ")}${earlier}`);
+    if (r["probe"]) console.log(`${pad}  token probe: ${JSON.stringify(r["probe"])}`);
     if (r["identityNote"]) console.log(`${pad}  ${r["identityNote"]}`);
     const unresolved = r["unresolved"] as Record<string, unknown> | undefined;
     if (unresolved) {
@@ -228,7 +229,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       const level = w["levelReason"] ? `${w["level"]} (${w["levelReason"]})` : String(w["level"]);
       const fresh = w["freshnessReason"] ? `${w["freshness"]}: ${w["freshnessReason"]}` : String(w["freshness"]);
       const seat = w["seatSession"] ? ` by seat ${w["seatSession"]}` : "";
-      console.log(`${pad}  ${windowName(w)}  ${left}  ${level}  resets ${w["resetsAt"] ?? "unknown"}  observed ${w["observedAt"]}${seat} (${fresh})`);
+      console.log(`${pad}  ${windowName(w)}  ${left}  ${level}  resets ${w["resetsAt"] ?? "unknown"}  observed ${w["observedAt"]}${seat} (${fresh})${w["status"] ? ` · provider ${w["status"]}` : ""}`);
       for (const d of (w["disagreeingSeats"] as Array<Record<string, unknown>> | undefined) ?? []) {
         console.log(`${pad}    seat ${d["seatSession"]} reports ${Math.max(0, 100 - Number(d["usedPercent"]))}% left  resets ${d["resetsAt"] ?? "unknown"}  observed ${d["observedAt"]}`);
       }
@@ -241,7 +242,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     const last = r["lastRefresh"] as Record<string, unknown> | null;
     if (last?.["outcome"] === "failed") {
       // Claude's refresh reads identity only; its windows keep coming from the seats' samples.
-      console.log(r["provider"] === "claude"
+      console.log(r["provider"] === "claude" && (r["source"] as Record<string, unknown> | undefined)?.["kind"] !== "claude_token_probe"
         ? `${pad}  identity refresh failed at ${last["at"]}: ${failureText(last)}; the identity shown is from the last refresh that worked, if any`
         : `${pad}  refresh failed at ${last["at"]}: ${failureText(last)}; last reading kept, marked old`);
     }
@@ -369,14 +370,22 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     .option("--json", "Output as parseable JSON")
     .option("--refresh", "First read the Codex login's usage windows and the Claude login's identity natively (up to 35 s here, 75 s with --all-hosts/--hosts; provider.usage_windows is off by default: rig config set provider.usage_windows true)")
     .option("--provider <p>", "With --refresh, read only this provider (codex|claude)")
+    .option("--claude-token-file <path>", "With --refresh --provider claude, probe this absolute token-file reference on the selected daemon (one model turn; no token value in argv)")
+    .option("--credential-label <label>", "Operator label for the selected Claude token file; not provider-observed account identity")
     .option("--all-hosts", "Usage windows across every registered host, as each host already holds them (off by default: rig config set provider.usage_windows true)")
     .option("--hosts <ids>", "Like --all-hosts, for these registered hosts (comma-separated); this host is always included, so --hosts b --refresh also reads this daemon")
-    .action(async (opts: { json?: boolean; refresh?: boolean; provider?: string; allHosts?: boolean; hosts?: string }) => {
+    .action(async (opts: { json?: boolean; refresh?: boolean; provider?: string; allHosts?: boolean; hosts?: string; claudeTokenFile?: string; credentialLabel?: string }) => {
       if (opts.provider !== undefined && opts.provider !== "codex" && opts.provider !== "claude") {
         console.error(`--provider must be codex or claude (got ${opts.provider})`);
         process.exitCode = 1;
         return;
       }
+      const tokenSelected = opts.claudeTokenFile !== undefined || opts.credentialLabel !== undefined;
+      if (tokenSelected && (!opts.claudeTokenFile || !opts.credentialLabel || !opts.refresh || opts.provider !== "claude" || opts.allHosts || opts.hosts !== undefined)) {
+        console.error("A token probe requires --refresh --provider claude --claude-token-file <absolute path> --credential-label <label>, on one daemon (no --all-hosts/--hosts).");
+        process.exitCode = 1; return;
+      }
+      if (tokenSelected) console.error("Claude token usage refresh spends one model turn; timeout or refusal does not prove no allowance was consumed.");
       const client = await getClient(getDeps());
       if (!client) {
         process.exitCode = 1;
@@ -395,7 +404,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
         const providers = opts.provider ? [opts.provider] : ["codex", "claude"];
         const answered = await Promise.all(providers.map(async (provider) => ({
           provider,
-          answer: await client.post<Record<string, unknown>>("/api/provider/usage/refresh", { provider }, { timeoutMs: 60_000 }),
+          answer: await client.post<Record<string, unknown>>("/api/provider/usage/refresh", { provider, ...(tokenSelected ? { claudeToken: { label: opts.credentialLabel, tokenFile: opts.claudeTokenFile } } : {}) }, { timeoutMs: 60_000 }),
         })));
         // Bare --refresh keeps main's Codex exit: Claude is read too, but where it doesn't apply on this host
         // (no claude, no login, not a subscription login), or the daemon has no Claude refresh (400/404, an

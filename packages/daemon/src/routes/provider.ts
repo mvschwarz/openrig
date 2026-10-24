@@ -1,3 +1,4 @@
+import path from "node:path";
 import { Hono, type Context } from "hono";
 import { getSelfHostId, LOCAL_HOST_ID } from "../domain/hosts/fanout-contract.js";
 import { loadHostRegistry } from "../domain/hosts/hosts-registry-reader.js";
@@ -90,7 +91,17 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
     if (provider !== "codex" && provider !== "claude") {
       return c.json({ error: `usage windows can be refreshed for codex or claude (got ${String(provider)})` }, 400);
     }
-    const result = await svc.refreshUsage(provider);
+    const token = (raw as Record<string, unknown> | null)?.["claudeToken"];
+    if (token !== undefined) {
+      const t = token as Record<string, unknown> | null;
+      if (provider !== "claude" || !t || typeof t !== "object" || Array.isArray(t) ||
+        Object.keys(t).some(key => key !== "label" && key !== "tokenFile") ||
+        typeof t.label !== "string" || !t.label.trim() || t.label.length > 120 || /[\x00-\x1f\x7f]/.test(t.label) ||
+        typeof t.tokenFile !== "string" || !path.isAbsolute(t.tokenFile) || t.tokenFile.length > 4096 || /[\x00-\x1f\x7f]/.test(t.tokenFile) || findCredential(t)) {
+        return c.json({ error: "invalid_claude_token_selection", message: "select Claude with a non-secret label and absolute token-file reference; never send token contents" }, 400);
+      }
+    }
+    const result = await svc.refreshUsage(provider, token === undefined ? undefined : { label: String((token as Record<string, unknown>).label), tokenFile: path.normalize(String((token as Record<string, unknown>).tokenFile)) });
     if ("disabled" in result) {
       return c.json({
         error: "usage_windows_disabled",

@@ -36,5 +36,5 @@ export interface ProviderService {
   /** Precheck-gated switch; returns an explicit business outcome (never a transport error). */
   switchAccount(input: ProviderSwitchInput): Promise<ProviderSwitchResult>;
   /** Slice 01: one bounded native read of the usage windows (coalesced); `disabled` while the switch is off. */
-  refreshUsage?(provider: "codex" | "claude"): Promise<UsageRefreshResult | { disabled: true } | { unavailable: true }>;
+  refreshUsage?(provider: "codex" | "claude", token?: import("./claude-token-usage.js").ClaudeTokenSelection): Promise<UsageRefreshResult | { disabled: true } | { unavailable: true }>;
 }

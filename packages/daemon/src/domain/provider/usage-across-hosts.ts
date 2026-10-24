@@ -111,7 +111,7 @@ export interface UsageAcrossHosts extends AggregatedPayload<UsageAllowanceGroup>
 
 /** The key a host keyed this row by (the same functions the hosts use); null when unresolved or never read. */
 export function allowanceKey(row: ProviderUsageAllowance): string | null {
-  if (!row.identity) return null;
+  if (!row.identity || row.source.kind === "claude_token_probe") return null;
   return row.provider === "codex"
     ? codexUsageIdentityKey(row.identity as UsageAllowanceIdentity)
     : claudeUsageIdentityKey(row.identity as ClaudeUsageIdentity);

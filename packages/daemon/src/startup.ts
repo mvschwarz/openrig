@@ -1,3 +1,5 @@
+import { ClaudeTokenUsage, claudeTokenUsageReader } from "./domain/provider/claude-token-usage.js";
+import type { ClaudeTokenIdentity } from "./domain/provider/provider-types.js";
 import { TerminalPolicyStore } from "./domain/terminal-policy.js";
 import { daemonDatabaseWarnings } from "./daemon-db-path.js";
 import { physicalSessionName } from "./domain/session-registry.js";
@@ -1353,6 +1355,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         enabled: () => new ContextPackSettingsStore().resolveOne("provider.usage_windows").value === true,
         windows: new CodexUsageWindows({ read: codexUsageReader({ launchPath: process.env.PATH, home: daemonHome, codexHome }),
           store: new ProviderAccountReadingsStore(db) }),
+        claudeTokens: new ClaudeTokenUsage({ read: claudeTokenUsageReader({ launchPath: process.env.PATH }),
+          store: new ProviderAccountReadingsStore<ClaudeTokenIdentity>(db, "claude") }),
         claude: new ClaudeUsageWindows({
           readIdentity: claudeAuthStatusReader({ launchPath: process.env.PATH, home: daemonHome, claudeConfigDir: process.env.CLAUDE_CONFIG_DIR }),
           listSamples: () => latestClaudeWindowSamples(db),
