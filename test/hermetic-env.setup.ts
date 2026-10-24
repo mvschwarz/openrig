@@ -58,6 +58,9 @@ for (const key of [
   delete process.env[`OPENRIG_${key}`];
   delete process.env[`RIGGED_${key}`];
 }
+// A suite run from a Rex block must not make the CLI and TUI pick Rex, or reach the person's Rex server.
+for (const key of ["REX_SESSION", "REX_BLOCK", "REX_SERVER", "REX_BIN_DIR", "REX_CLIENT"]) delete process.env[key];
+if (process.env["TERM_PROGRAM"] === "rex") delete process.env["TERM_PROGRAM"];
 
 // (2) FORCE a fixture-scoped home — BEFORE importing openrig-compat (whose
 // OPENRIG_HOME const is eager). Node builtins above do not load it; the dynamic
