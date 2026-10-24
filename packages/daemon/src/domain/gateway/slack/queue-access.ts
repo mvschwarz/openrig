@@ -66,6 +66,7 @@ export interface CreateQitemInput {
 /** What the inbound router needs: land a durable qitem, get its id (or throw). */
 export interface InboundQueuePort {
   createQitem(input: CreateQitemInput): Promise<string>;
+  getQitem?(qitemId: string): QueueItem | null;
   getHumanAnswer?(qitemId: string, actorSession: string): { qitemId: string; body: string } | null;
 }
 
@@ -141,13 +142,13 @@ export function makeQueuePorts(
   opts: { loadHumanRegistry?: () => LoadResult } = {},
 ): InboundQueuePort & OutboundQueuePort {
   return {
+    getQitem: (qitemId) => queueRepo.getById(qitemId),
     getHumanAnswer: (qitemId, actorSession) => queueRepo.getHumanAnswer(qitemId, actorSession),
     async createQitem(input: CreateQitemInput): Promise<string> {
       const ask = input.inReplyTo ? queueRepo.getById(input.inReplyTo) : null;
       const directAnswer = input.humanAnswer && ask && ask.destinationSession === input.source && ask.humanIntent !== "update"
         && queueRepo.isPersonAddress(input.source);
-      const create = directAnswer ? queueRepo.createHumanAnswer.bind(queueRepo) : queueRepo.create.bind(queueRepo);
-      const created = await create({
+      const createInput = {
         qitemId: input.qitemId,
         sourceSession: input.source,
         destinationSession: input.destination,
@@ -155,8 +156,11 @@ export function makeQueuePorts(
         summary: input.summary,
         priority: (input.priority ?? "routine") as never,
         tags: input.tags ?? ["founder-slack", "inbound"],
-        inboundReplyTo: input.inReplyTo!,
-      });
+        inboundReplyTo: input.inReplyTo ?? null,
+      };
+      const created = directAnswer && input.inReplyTo
+        ? await queueRepo.createHumanAnswer({ ...createInput, inboundReplyTo: input.inReplyTo })
+        : await queueRepo.create(createInput);
       return (created as unknown as { qitemId: string }).qitemId;
     },
     async listHumanAlerts(filter: AlertFilterOpts): Promise<QueueItem[]> {

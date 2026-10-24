@@ -329,7 +329,11 @@ export class InboundRouter {
       const { summary, body } = this.summaryOf(ev, transfer, route.correlationQitemId);
       // A person's top-level message (not a reply in a thread) becomes the root its answer lands under.
       const mintsRoot = Boolean(this.deps.mintThread && ev.channel && (!ev.thread_ts || ev.thread_ts === ev.ts));
-      const earlierAnswer = !ev.recoveredThreadReply && route.correlationQitemId
+      const correlated = route.correlationQitemId ? this.deps.queue.getQitem?.(route.correlationQitemId) : null;
+      const askPending = correlated?.state === "pending";
+      const closed = correlated?.state === "done" || correlated?.state === "handed-off";
+      // Only the open ask's interrupted return is a retry. A closed thread remains a conversation.
+      const earlierAnswer = askPending && !ev.recoveredThreadReply && route.correlationQitemId
         ? this.deps.queue.getHumanAnswer?.(route.correlationQitemId, who.source) : null;
       let qitemId: string;
       try {
@@ -342,14 +346,14 @@ export class InboundRouter {
           summary,
           body,
           ...(route.correlationQitemId ? { inReplyTo: route.correlationQitemId } : {}),
-          ...(!ev.recoveredThreadReply && route.correlationQitemId ? { humanAnswer: true } : {}),
+          ...(askPending && !ev.recoveredThreadReply ? { humanAnswer: true } : {}),
         });
       } catch (e) {
         this.deps.log?.(`qitem create failed ts=${ts}: ${(e as Error).message}`);
         return { landed: false, reason: "create_failed" };
       }
       let replyResolution: "resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable" | undefined;
-      if (route.correlationQitemId && this.deps.resolveHumanReply && !ev.recoveredThreadReply) {
+      if (!closed && route.correlationQitemId && this.deps.resolveHumanReply && !ev.recoveredThreadReply) {
         try {
           replyResolution = await this.deps.resolveHumanReply({
             qitemId: route.correlationQitemId,

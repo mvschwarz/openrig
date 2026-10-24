@@ -506,9 +506,11 @@ export class MissionControlWriteContract {
         `qitem ${input.qitemId} isn't an ask to ${input.actorSession}, so ${input.actorSession} can't answer it.`, { qitemId: input.qitemId });
     }
     const before = snapshotQitem(ask);
+    const questions = ask.humanQuestions ?? [];
     const existing = this.queueRepo.getHumanAnswer(input.qitemId, input.actorSession);
     if (existing && (ask.state === "pending" || ask.state === "done")) {
-      const decision = humanAnswerText(existing.body);
+      const decision = questions.length && unansweredQuestions(questions, ask.humanAnswers ?? {}).length === 0
+        ? formatHumanAnswers(questions, ask.humanAnswers ?? {}).join("; ") : humanAnswerText(existing.body);
       if (ask.state === "pending" && !this.queueRepo.resolveDirectHumanReply({ qitemId: input.qitemId, actorSession: input.actorSession, decision })) {
         throw new MissionControlWriteContractError("answer_not_closed", `The answer is already in ${existing.qitemId}, but ${input.qitemId} didn't close.`, { qitemId: input.qitemId });
       }
@@ -520,7 +522,6 @@ export class MissionControlWriteContract {
         `qitem ${input.qitemId} is ${ask.state}, not waiting on an answer (it may already be answered), so nothing was recorded or sent.`,
         { qitemId: input.qitemId, state: ask.state });
     }
-    const questions = ask.humanQuestions ?? [];
     const chose = input.questionId !== undefined || input.optionId !== undefined;
     const words = input.decision?.trim() ?? "";
     // A complete set whose return didn't finish (it failed, or the process stopped): sending again returns exactly those
@@ -567,7 +568,8 @@ export class MissionControlWriteContract {
         { qitemId: input.qitemId });
     }
     const replyId = returned.qitemId;
-    const decision = humanAnswerText(returned.body);
+    const decision = chose || resume
+      ? formatHumanAnswers(questions, this.queueRepo.getById(input.qitemId)?.humanAnswers ?? {}).join("; ") : humanAnswerText(returned.body);
     if (!this.queueRepo.resolveDirectHumanReply({ qitemId: input.qitemId, actorSession: input.actorSession, decision })
       && this.queueRepo.getById(input.qitemId)?.state !== "done") {
       throw new MissionControlWriteContractError("answer_not_closed",
