@@ -831,6 +831,19 @@ describe("SeatHandoverService", () => {
     expect(binding.codexRebuildPermissions).toEqual(mode === null ? envelope : undefined);
   });
 
+  it("rebuild uses the seat's own envelope over the observed predecessor policy", async () => {
+    const { node } = seedSeat();
+    const own = { sandbox: "read-only", approval: "on-request" };
+    db.prepare("UPDATE nodes SET codex_permissions_json = ? WHERE id = ?").run(JSON.stringify(own), node.id);
+    currentCodexPermissions.mockResolvedValue({ state: "observed", envelope: { approvalPolicy: "never", sandboxPolicy: { type: "danger-full-access" } },
+      profile: null, processStartedAt: "Mon Apr 20 12:00:00 2026", observedAt: "2026-04-20T12:01:00Z" });
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", source: "rebuild", reason: "context wall" });
+    expect(result).toMatchObject({ ok: true, result: { sourceOutcome: { permissions: { state: "selection_used" } } } });
+    const binding = launchHarness.mock.calls[0]![0];
+    expect(binding.codexRebuildPermissions).toBeUndefined();
+    expect(binding.codexPermissions).toEqual(own);
+  });
+
   it.each(["observed", "unverified", "changed selection", "cleared selection", "profile change", "older selection"])(
     "rebuild permission result: %s", async state => {
       const { node } = seedSeat(state === "profile change" ? { codexConfigProfile: "next-profile" } : undefined);

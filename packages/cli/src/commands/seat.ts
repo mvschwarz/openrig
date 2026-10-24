@@ -650,8 +650,9 @@ identity remains unverified; a version number alone cannot clear it.
         ? await client.post<Record<string, unknown>>(route, body, { timeoutMs: 120_000 })
         // #260: a dynamic Claude mode waits up to 5 s for the capability query before the
         // daemon answers, so the 5 s default deadline would abort before its refusal arrives.
+        // A Codex profile change runs the native profile check (up to 10 s) before answering.
         : path === "set-permissions"
-          ? await client.post<Record<string, unknown>>(route, body, { timeoutMs: 10_000 })
+          ? await client.post<Record<string, unknown>>(route, body, { timeoutMs: (body as Record<string, unknown>)["codexProfile"] !== undefined ? 30_000 : 10_000 })
           : await client.post<Record<string, unknown>>(route, body);
     } catch (err) {
       if ((path !== "launch" && path !== "launch-plan" && path !== "continue" && path !== "restart" && path !== "set-cwd") || !(err instanceof DaemonTimeoutError)) throw err;
@@ -731,23 +732,43 @@ identity remains unverified; a version number alone cannot clear it.
     .argument("<seat>", "Canonical session name or logical seat ref")
     .option("--mode <mode>", "floor, full_bypass, inherit, or a Claude mode supported by the bound managed launch context")
     .option("--rules <file>", "JSON allow/deny lists for this Claude seat; replaces its recorded rules without changing its mode")
+    .option("--codex-permissions <file>", "JSON sandbox/approval envelope for this Codex seat; replaces its recorded mode")
+    .option("--codex-profile <name>", "Codex config profile for this seat, or inherit to clear it; approval stays with the envelope or session")
     .requiredOption("--reason <text>", "Reason for the audited future-launch selection")
     .option("--operator <address>", "Operator recorded on the audit event when no session identity is present")
     .option("--json", "JSON output for agents")
     .description("Select native permissions for future managed launches; no relaunch or work-posture change")
-    .addHelpText("after", "\nUse inherit to clear this seat's explicit selection. Current native processes, history, rules and hooks remain unchanged. A later lifecycle action needs its own authorization.\n--rules takes a JSON object with allow and deny lists only. Use empty lists to clear the seat rules. It does not remove inherited grants or change the running process.")
-    .action(async (seat: string, opts: { mode?: string; rules?: string; reason: string; operator?: string; json?: boolean }) => {
-      if ((opts.mode === undefined) === (opts.rules === undefined)) {
-        console.error("Choose exactly one of --mode or --rules <file>."); process.exitCode = 1; return;
+    .addHelpText("after", "\nUse inherit to clear this seat's explicit selection. Current native processes, history, rules and hooks remain unchanged. A later lifecycle action needs its own authorization.\n--rules takes a JSON object with allow and deny lists only. Use empty lists to clear the seat rules. It does not remove inherited grants or change the running process.\n--codex-permissions takes a JSON object: sandbox (workspace-write or read-only), approval (never, on-request or untrusted), and for workspace-write network_access, writable_roots (absolute paths), exclude_tmpdir_env_var and exclude_slash_tmp. It replaces a recorded mode; --mode replaces the envelope. Full access stays --mode full_bypass.\n--codex-profile reports an absent, changed or unchecked profile file without refusing; a profile that fails to load is refused.")
+    .action(async (seat: string, opts: { mode?: string; rules?: string; codexPermissions?: string; codexProfile?: string; reason: string; operator?: string; json?: boolean }) => {
+      if ([opts.mode, opts.rules, opts.codexPermissions, opts.codexProfile].filter(value => value !== undefined).length !== 1) {
+        console.error("Choose exactly one of --mode, --rules <file>, --codex-permissions <file> or --codex-profile <name>."); process.exitCode = 1; return;
       }
       let rules: unknown;
       if (opts.rules !== undefined) {
         try { rules = JSON.parse(readFileSync(opts.rules, "utf8")); }
         catch { console.error(`Cannot read JSON rules from ${opts.rules}; provide an allow/deny mapping.`); process.exitCode = 1; return; }
       }
-      await runLifecycleVerb("set-permissions", seat, { ...(opts.rules === undefined ? { mode: opts.mode } : { rules }), reason: opts.reason, operator: opts.operator }, opts, data => {
+      let codexPermissions: unknown;
+      if (opts.codexPermissions !== undefined) {
+        try { codexPermissions = JSON.parse(readFileSync(opts.codexPermissions, "utf8")); }
+        catch { console.error(`Cannot read JSON from ${opts.codexPermissions}; provide a sandbox/approval mapping.`); process.exitCode = 1; return; }
+      }
+      const choice = opts.rules !== undefined ? { rules } : codexPermissions !== undefined ? { codexPermissions }
+        : opts.codexProfile !== undefined ? { codexProfile: opts.codexProfile } : { mode: opts.mode };
+      await runLifecycleVerb("set-permissions", seat, { ...choice, reason: opts.reason, operator: opts.operator }, opts, data => {
         if (opts.rules !== undefined) {
           console.log(`Claude tool rules ${data["changed"] === false ? "unchanged" : "recorded and audited"}.`);
+          console.log(String(data["effect"])); return;
+        }
+        if (codexPermissions !== undefined) {
+          const replaced = data["replaced"] as { mode?: { mode?: string } } | undefined;
+          console.log(`Codex permission envelope ${data["changed"] === false ? "unchanged" : "recorded and audited"}${replaced?.mode?.mode ? `; it replaces the recorded ${replaced.mode.mode} mode` : ""}.`);
+          console.log(String(data["effect"])); return;
+        }
+        if (opts.codexProfile !== undefined) {
+          const observed = data["observation"] as { file?: string; detail?: string; changedSinceRecorded?: boolean } | undefined;
+          console.log(`Codex profile: ${(data["to"] as string | null) ?? "inherit"}${data["changed"] === false ? " (unchanged)" : " (audited)"}`);
+          if (observed?.detail) console.log(`Profile file: ${observed.file ?? "unverified"}${observed.changedSinceRecorded ? ", changed since last recorded" : ""}. ${observed.detail}`);
           console.log(String(data["effect"])); return;
         }
         const selection = data["to"] as { mode: string } | null;

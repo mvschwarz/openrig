@@ -372,11 +372,17 @@ seatRoutes.post("/set-permissions/:seatRef", async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
   const actor = transportSenderSession(c) ?? (typeof body?.operator === "string" ? body.operator.trim() : undefined);
   if (!actor) return c.json({ error: "Sender identity is required; pass --operator <address> when running outside a managed seat." }, 400);
-  if (!body || Array.isArray(body) || (body.rules === undefined && typeof body.mode !== "string")) return c.json({ error: "mode is required" }, 400);
-  if (body.rules !== undefined && body.mode !== undefined) return c.json({ error: "Choose exactly one of mode or rules" }, 400);
+  if (!body || Array.isArray(body)) return c.json({ error: "mode is required" }, 400);
+  const given = [body.mode, body.rules, body.codexPermissions, body.codexProfile].filter(value => value !== undefined).length;
+  if (given === 0) return c.json({ error: "mode is required" }, 400);
+  if (given > 1) return c.json({ error: "Choose exactly one of mode, rules, codexPermissions or codexProfile" }, 400);
+  if (body.mode !== undefined && typeof body.mode !== "string") return c.json({ error: "mode must be a string" }, 400);
+  if (body.codexProfile !== undefined && typeof body.codexProfile !== "string") return c.json({ error: "codexProfile must be a string" }, 400);
   if (typeof body.reason !== "string") return c.json({ error: "reason is required" }, 400);
+  const choice = typeof body.mode === "string" ? { mode: body.mode } : body.rules !== undefined ? { rules: body.rules }
+    : body.codexPermissions !== undefined ? { codexPermissions: body.codexPermissions } : { codexProfile: body.codexProfile as string };
   const result = await seatLifecycleService(c).setPermissions({
-    seatRef: c.req.param("seatRef"), ...(typeof body.mode === "string" ? { mode: body.mode } : { rules: body.rules }), reason: body.reason, actor,
+    seatRef: c.req.param("seatRef"), ...choice, reason: body.reason, actor,
   });
   return c.json(result, result.ok ? 200 : seatLifecycleStatus(result.code));
 });

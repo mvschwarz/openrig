@@ -2551,3 +2551,67 @@ describe("rebuild permission continuity", () => {
     expect(prepareSeatFolder).not.toHaveBeenCalled();
   });
 });
+
+describe("a seat's own permission envelope (argv only, not native enforcement)", () => {
+  const lease = { sandbox: "workspace-write" as const, approval: "never" as const, network_access: false,
+    writable_roots: ["/lease/a"], exclude_tmpdir_env_var: false, exclude_slash_tmp: true };
+  const reader = { sandbox: "read-only" as const, approval: "on-request" as const };
+  const launch = async (binding: NodeBinding, name: string) => {
+    const tmux = mockTmux();
+    const readNetworkDefault = vi.fn(async () => ({ apply: true, elapsedMs: 0 }));
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, readNetworkDefault,
+      resolveGitAddDirs: vi.fn(async () => ["/same/.git"]), prepareTeamWorkspace: vi.fn(() => ["/workspace"]),
+      verifyProfilePreflight: async profile => ({ ok: true, profile }) });
+    const result = await adapter.launchHarness(binding, { name });
+    return { result, command: vi.mocked(tmux.sendText).mock.calls[0]![1], readNetworkDefault, adapter };
+  };
+
+  it("gives two seats in one folder their own flags in place of the posture decision", async () => {
+    const a = await launch({ ...makeBinding("/same"), codexPermissions: lease, launchPosture: "full_bypass", teamPermissionDefault: true }, "dev-a@test-rig");
+    const b = await launch({ ...makeBinding("/same"), codexPermissions: reader }, "dev-b@test-rig");
+    expect(a.result).toMatchObject({ ok: true, appliedLaunch: { state: "observed", value: "workspace-write", approvalPolicy: "never" } });
+    expect(a.command).toContain(" -s workspace-write -a never");
+    expect(a.command).toContain('sandbox_workspace_write.writable_roots=["/lease/a"]');
+    expect(a.command).toContain("sandbox_workspace_write.exclude_slash_tmp=true");
+    expect(a.command).not.toContain("danger-full-access");
+    expect(a.command).not.toContain("hide_full_access_warning");
+    // OpenRig's own roots stay for workspace-write, with no second network grant and no team workspace.
+    expect(a.command).toContain("--add-dir '/same/.git'");
+    expect(a.command).toContain("--add-dir");
+    expect(a.command).not.toContain("/workspace");
+    expect(a.command.match(/network_access/g)).toHaveLength(1);
+    expect(a.readNetworkDefault).not.toHaveBeenCalled();
+    expect(b.command).toContain(" -s read-only -a on-request");
+    expect(b.command).not.toContain("--add-dir");
+    expect(b.command).not.toContain("sandbox_workspace_write");
+  });
+
+  it("wins over ambient YOLO and keeps a named profile for the settings it doesn't state", async () => {
+    vi.stubEnv("OPENRIG_YOLO", "1");
+    try {
+      const { command } = await launch({ ...makeBinding("/same"), codexConfigProfile: "lease", codexPermissions: lease }, "dev-a@test-rig");
+      expect(command).toContain(" -p 'lease' -s workspace-write -a never");
+      expect(command).not.toContain("danger-full-access");
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("carries the same flags into a pod-aware resume", async () => {
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {},
+      readNetworkDefault: vi.fn(async () => ({ apply: true, elapsedMs: 0 })) });
+    const built = await adapter.buildResumeCommand({ ...makeBinding("/same"), codexPermissions: lease, launchPosture: "full_bypass" },
+      { name: "dev-a@test-rig", resumeToken: "thread-1" });
+    expect(built).toMatchObject({ ok: true });
+    if (!built.ok) return;
+    expect(built.core).toContain(" -s workspace-write -a never");
+    expect(built.core).toContain(" resume ");
+    expect(built.core).not.toContain("danger-full-access");
+  });
+
+  it("leaves an unconfigured seat's launch as it was", async () => {
+    const { command } = await launch({ ...makeBinding("/same") }, "dev-c@test-rig");
+    expect(command).toContain(" -s workspace-write");
+    expect(command).not.toContain(" -a ");
+    expect(command).not.toContain("exclude_slash_tmp");
+  });
+});

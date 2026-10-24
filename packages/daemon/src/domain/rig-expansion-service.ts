@@ -146,6 +146,7 @@ export class RigExpansionService {
             ...(member.profile ? { profile: member.profile } : {}),
             ...(member.codexConfigProfile ? { codex_config_profile: member.codexConfigProfile } : {}),
             ...(member.claudePermissions === undefined ? {} : { claude_permissions: member.claudePermissions }),
+            ...(member.codexPermissions === undefined ? {} : { codex_permissions: member.codexPermissions }),
             // OPR.0.4.8.3 Seam B: permission_policy rides the fragment→spec map like role.
             // R2 (4ac243c3): PRESENCE-preserving — present-invalid values (null, …) flow
             // to the canonical validator; only a truly absent key is omitted.

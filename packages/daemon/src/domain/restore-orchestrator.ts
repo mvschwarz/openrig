@@ -1486,7 +1486,7 @@ export class RestoreOrchestrator {
             this.sessionRegistry.recordResumeLaunch(launchedSessionId, resumeToken);
           } catch { /* best-effort: without it a rotation stays unproved, as before */ }
         }
-        const resumeOutcome = await this.attemptResume(node.id, sessionName, resumeType, resumeToken, node.cwd ?? "/", node.codexConfigProfile, node.model, this.resolveRestorePosture(node.id, rigId), effortForRestore(), warnings, node.advisor);
+        const resumeOutcome = await this.attemptResume(node.id, sessionName, resumeType, resumeToken, node.cwd ?? "/", this.liveCodexProfile(rigId, node), node.model, this.resolveRestorePosture(node.id, rigId), effortForRestore(), warnings, node.advisor);
         if (resumeOutcome.kind === "resumed") {
           baseStatus = "resumed";
           if (launchedSessionId && this.claudeResume.canResume(resumeType, resumeToken)) {
@@ -1708,7 +1708,7 @@ export class RestoreOrchestrator {
           const binding = {
             ...launchResult.binding,
             cwd: node.cwd ?? ".",
-            codexConfigProfile: node.codexConfigProfile ?? undefined,
+            codexConfigProfile: this.liveCodexProfile(rigId, node) ?? undefined,
             // OPR.0.4.8.3 Seam B: the pod-aware restore path binds the restored posture too
             // (both restore paths consume persisted provenance — preflight surface 3).
             launchPosture: this.resolveRestorePosture(node.id, rigId),
@@ -2020,6 +2020,15 @@ export class RestoreOrchestrator {
     return "floor";
   }
 
+  /** The live seat's current Codex profile: a setter change made after the snapshot is the newer choice, so an older
+   *  snapshot can't bring back the profile it replaced. The seat is found by logical id, as effort's restore does; a
+   *  seat with no live row keeps the snapshot's value. */
+  private liveCodexProfile(rigId: string, node: { logicalId: string; codexConfigProfile?: string | null }): string | null {
+    const row = this.db.prepare("SELECT codex_config_profile FROM nodes WHERE rig_id = ? AND logical_id = ?").get(rigId, node.logicalId) as
+      { codex_config_profile: string | null } | undefined;
+    return row ? row.codex_config_profile : node.codexConfigProfile ?? null;
+  }
+
   private async attemptResume(
     nodeId: string,
     sessionName: string,
@@ -2046,6 +2055,7 @@ export class RestoreOrchestrator {
     let kernelAuthority = false;
     let teamPermissionDefault = false;
     let claudePermissions: import("./claude-permission-rules.js").ClaudePermissionRules | undefined;
+    let codexPermissions: import("./codex-member-permissions.js").CodexMemberPermissions | undefined;
     let permissionMode: string | undefined;
     try {
       const runtime = this.claudeResume.canResume(resumeType, resumeToken) ? "claude-code"
@@ -2054,6 +2064,7 @@ export class RestoreOrchestrator {
       kernelAuthority = override.kernelAuthority === true;
       teamPermissionDefault = override.teamPermissionDefault === true;
       claudePermissions = override.claudePermissions;
+      codexPermissions = override.codexPermissions;
       resolvedPosture = override.launchPosture ?? resolvedPosture;
       permissionMode = override.permissionMode ?? (resolvedPosture === "auto" && runtime === "claude-code" ? "auto" : undefined);
     } catch (error) { return { kind: "failed", message: `Permission selection: ${(error as Error).message}` }; }
@@ -2098,13 +2109,16 @@ export class RestoreOrchestrator {
     }
 
     if (this.codexResume.canResume(resumeType, resumeToken)) {
-      // A seat with its own CODEX_HOME resumes the conversation that home holds; without one the call is unchanged.
+      // A seat with its own CODEX_HOME resumes the conversation that home holds, and a seat's envelope follows that home in
+      // the tail; with neither the call is unchanged.
       const seatHome = seatRuntimeHome(this.db, nodeId, "codex").home;
-      const codexTail = seatHome ? [...launchTail, ...Array(4 - launchTail.length).fill(undefined), seatHome] : launchTail;
+      const codexTail: unknown[] = seatHome || codexPermissions !== undefined
+        ? [...launchTail, ...Array(4 - launchTail.length).fill(undefined), seatHome, ...(codexPermissions !== undefined ? [codexPermissions] : [])]
+        : launchTail;
       const result = await this.codexResume.resume(sessionName, resumeType, resumeToken, cwd, codexConfigProfile, resolvedPosture, model,
-        ...(codexTail as [...typeof launchTail, seatCodexHome?: string]));
+        ...(codexTail as [...typeof launchTail, seatCodexHome?: string, codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions]));
       if (result.ok) {
-        const notice = nonInterruptiveNotice("codex", { nonInterruptive, launchPosture: resolvedPosture, permissionMode });
+        const notice = nonInterruptiveNotice("codex", { nonInterruptive, launchPosture: codexPermissions ? undefined : resolvedPosture, permissionMode });
         if (notice) warnings?.push(`${sessionName}: ${notice}`);
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
         return { kind: "resumed" };
