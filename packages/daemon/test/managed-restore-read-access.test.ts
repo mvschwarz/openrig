@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
@@ -36,6 +36,16 @@ function fixture(managed = false) {
   const binding = { nodeId: "node", cwd, tmuxSession: "owner@rig", launchPosture: "floor", teamPermissionDefault: true, ...(managed ? { permissionMode: "acceptEdits" } : {}) } as NodeBinding;
   return { root, cwd, home, marker, commands, tmux, adapter, binding, claudeManagedLaunch };
 }
+/** A directory's two spellings, as Claude Code checks a read through a symlink: as given, and where it resolves (macOS's
+ *  /tmp is /private/tmp). The same when nothing on the way is a link. */
+function spellings(dir: string): string[] {
+  let real = dir; const rest: string[] = [];
+  for (;;) {
+    try { real = path.join(realpathSync.native(real), ...rest); break; }
+    catch { rest.unshift(path.basename(real)); real = path.dirname(real); }
+  }
+  return [...new Set([path.resolve(dir), real])];
+}
 function settings(command: string) {
   // No provider executable: a private shell function records its arguments with NUL separators.
   const args = execFileSync("/bin/sh", ["-c", `claude() { printf '%s\\0' "$@"; }; ${command}`], { encoding: "utf8" }).split("\0");
@@ -53,14 +63,17 @@ it.each([
     ...(kind === "resume" ? { resumeToken: CHILD } : {}) })).ok).toBe(true);
   const allow = settings(f.commands[0]!).permissions.allow as string[];
   expect(allow.filter(rule => rule.startsWith("Read(") && rule !== "Read(./**)")).toEqual([
-    `Read(/${f.marker})`,
-    `Read(/${f.home}/plugins/openrig-core/skills/refocusing/SKILL.md)`,
-    `Read(/${f.home}/plugins/openrig-core/skills/claude-compaction-restore/SKILL.md)`,
-    `Read(/${f.home}/compaction/post-compact-extra/owner@rig.md)`,
-    `Read(/${f.home}/compaction/preparation/owner@rig/*/RESTORE-MAP.md)`,
-    `Read(/${f.cwd}/.openrig/compaction/preparation/owner@rig/*/RESTORE-MAP.md)`,
-    ...["restore-instructions.md", "restore-summary.json", "transcript.txt", "transcript-narrative.txt", "touched-files.md"]
-      .map(file => `Read(//tmp/claude-compaction-restore/${CHILD}-*/${file})`),
+    ...spellings(f.home).flatMap(home => [
+      `Read(/${home}/compaction/restore-pending/owner@rig.json)`,
+      `Read(/${home}/plugins/openrig-core/skills/refocusing/SKILL.md)`,
+      `Read(/${home}/plugins/openrig-core/skills/claude-compaction-restore/SKILL.md)`,
+      `Read(/${home}/compaction/post-compact-extra/owner@rig.md)`,
+      `Read(/${home}/compaction/preparation/owner@rig/*/RESTORE-MAP.md)`,
+    ]),
+    ...spellings(f.cwd).map(cwd => `Read(/${cwd}/.openrig/compaction/preparation/owner@rig/*/RESTORE-MAP.md)`),
+    ...spellings("/tmp/claude-compaction-restore").flatMap(packets =>
+      ["restore-instructions.md", "restore-summary.json", "transcript.txt", "transcript-narrative.txt", "touched-files.md"]
+        .map(file => `Read(/${packets}/${CHILD}-*/${file})`)),
   ]);
 });
 
@@ -99,4 +112,26 @@ it("keeps native deny/ask and hook settings while adding only this seat's restor
   expect(withManagedRestoreReads(once, context)).toEqual(once);
   const legacy = JSON.parse(withManagedRestoreReads([], { ...context, nativeSessionId: "legacy name" })[1]!);
   expect(legacy.permissions.allow.some((rule: string) => rule.includes("claude-compaction-restore/legacy"))).toBe(false);
+});
+
+it("grants each restore file both where it's named and where it resolves, when a directory on the way is a symlink", async () => {
+  // Claude Code applies an allow rule to a read through a symlink only when the requested path and the file it resolves to
+  // both match, so a Mac seat (whose /tmp is /private/tmp) or a symlinked home or project needs both spellings.
+  const { withManagedRestoreReads } = await import("../src/domain/managed-restore-read-access.js");
+  const root = realpathSync(mkdtempSync(path.join(tmpdir(), "restore-link-"))); roots.push(root);
+  for (const dir of ["home", "project", "packets"]) mkdirSync(path.join(root, `real-${dir}`));
+  for (const dir of ["home", "project", "packets"]) symlinkSync(path.join(root, `real-${dir}`), path.join(root, dir));
+  // The packet root may not exist yet at launch: it keeps its name under the nearest real parent.
+  vi.stubEnv("OPENRIG_COMPACTION_OUT_ROOT", path.join(root, "packets", "not-yet"));
+  const allow = JSON.parse(withManagedRestoreReads([], { openrigHome: path.join(root, "home"), session: "owner@rig",
+    cwd: path.join(root, "project"), nativeSessionId: CHILD })[1]!).permissions.allow as string[];
+  for (const [named, real] of [["home", "real-home"], ["project", "real-project"]] as const) {
+    const rule = named === "home" ? "compaction/restore-pending/owner@rig.json" : ".openrig/compaction/preparation/owner@rig/*/RESTORE-MAP.md";
+    expect(allow).toContain(`Read(/${root}/${named}/${rule})`);
+    expect(allow).toContain(`Read(/${root}/${real}/${rule})`);
+  }
+  expect(allow).toContain(`Read(/${root}/packets/not-yet/${CHILD}-*/restore-instructions.md)`);
+  expect(allow).toContain(`Read(/${root}/real-packets/not-yet/${CHILD}-*/restore-instructions.md)`);
+  // Every grant stays inside the fixture at either spelling.
+  expect(allow.every(rule => rule.startsWith(`Read(/${root}/`))).toBe(true);
 });
