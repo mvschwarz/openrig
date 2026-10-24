@@ -69,7 +69,7 @@ describe("the documented OpenClaw launcher and preset", () => {
   it("is a preset this OpenRig loads, declaring named conversations and local resume", () => {
     expect(loadCommunityHarnessPreset("openclaw", EXAMPLE)).toMatchObject({ ok: true, preset: { namesConversation: true, launchResult: false, resume: true } });
     expect(loadCommunityHarnessPreset("openclaw-gateway", EXAMPLE)).toMatchObject({ ok: true, preset: {
-      command: "openrig-openclaw-launch --gateway", namesConversation: true, resume: false,
+      command: "openrig-openclaw-launch --gateway", namesConversation: true, resume: true,
     } });
   });
 });

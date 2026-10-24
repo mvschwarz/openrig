@@ -142,17 +142,14 @@ Copy them and maintain them as your own.
 
 [`community-harness-examples/openclaw/`](community-harness-examples/openclaw/) has a preset and a small launcher for
 OpenClaw's CLI.
-- **The launcher:** it runs `openclaw tui --local` with the canonical `agent:main:<OpenRig name>` key, with its own
-  OpenClaw state folder per seat, so the agent runs in the seat's pane with no Gateway.
-- **Its resume check:** before reopening a key, the launcher checks that the seat's `openclaw sessions --agent main --json --limit all` lists that exact main-agent key.
-  A missing key or an unavailable listing stops the launch, so a gone conversation isn't recreated under its old key. That check is the launcher's code, not
-  OpenRig's.
-- **Resets must stay off:** OpenClaw can start a new conversation under the same key on a reset rule
-  (`session.reset`). That's off by default; with it on, a key no longer names one conversation. Likewise, typing `/new`
-  in the pane moves the chat to a fresh session key, while the seat still holds the name OpenRig gave it.
-- **The preset:** it declares `names_conversation` and `resume`. Local CLI reopen preserved the key, native session id and stored reply on OpenClaw 2026.10.6; a missing key started nothing. The saved name remains labelled as passed by OpenRig, not observed by the adapter. Gateway use is not covered by this preset.
+- **Choose the mode:** `openclaw.yaml` runs an embedded agent with `tui --local`. `openclaw-gateway.yaml` runs a TUI client of an existing Gateway. Configure that client's Gateway route and authentication through `OPENCLAW_CONFIG_PATH`; the launcher never starts or stops the Gateway.
+- **The conversation:** both examples use only agent `main`, mapping OpenRig's name to the full native key `agent:main:<OpenRig name>`. Each seat has its own client state folder.
+- **Its resume check:** local mode checks `sessions --agent main --json --limit all`; Gateway mode calls the selected Gateway's `sessions.describe`. Both require the exact canonical key. An unavailable lookup stops the launch; a confirmed missing key is never recreated. A client's local cache cannot authorize Gateway resume.
+- **Stopping:** a Gateway client's pane closing detaches it. The Gateway and an accepted turn can keep running; stopping that service is separate. Local mode runs its embedded agent in the pane.
+- **Resets must stay off:** automatic session resets can create a new conversation under the same key. Typing `/new` also moves to a fresh key while the seat keeps the name OpenRig gave it.
+- **The presets:** both declare `names_conversation` and `resume`. On OpenClaw 2026.10.6, native CLI checks preserved the key, session id and stored reply on reopen; local missing-key refusal and Gateway present/missing lookup were checked. OpenRig still labels the saved name as passed, not observed by its adapter.
 
-Copy both and maintain them as your own.
+Copy the launcher and the preset for your mode, and maintain them as your own.
 
 **Not supported for community harnesses:** restarting a seat in place (`rig seat restart` is for Codex seats) and
 switching harness on a running seat. Each says so before anything changes.
