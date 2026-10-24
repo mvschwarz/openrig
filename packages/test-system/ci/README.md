@@ -151,4 +151,4 @@ HOME/DB, stub runtimes and `--no-kernel`. It first waits until the daemon has
 recorded each running team seat's process, then compares both original team panes
 and processes, node/session identities, session status and bindings, and rejects new
 default-socket panes, superseded sessions or a running session marked detached. This covers **team seats only; kernel duplication
-is not exercised**. A cut comparison runs the same helper on both exact archives.
+is not exercised**. The report keeps each completed observation and the failed stage if startup or a socket read fails; an unreadable socket is never an empty census. A cut comparison runs the same helper on both exact archives.

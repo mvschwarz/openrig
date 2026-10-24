@@ -85,7 +85,8 @@ sys.exit(r.returncode)
         restart: async () => {
           report.preservation = await preserveRefresh(daemon, scaffold.openrigHome, rigBin);
           report.mcp = await checkMcpStdio(rigBin, daemon.readEnv);
-          report.reducedEnv = await reducedEnvRestart(daemon, scaffold, rigBin);
+          report.reducedEnv = {};
+          await reducedEnvRestart(daemon, scaffold, rigBin, report.reducedEnv);
           verifyReducedEnvRestart(report.reducedEnv);
         },
       };

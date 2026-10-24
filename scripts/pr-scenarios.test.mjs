@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { reducedEnvRestart } from '../packages/test-system/ci/reduced-env-restart.mjs';
 import assert from 'node:assert/strict';
 import { readReport, verifyPassingRun, verifyRun, PASSING_CASES, RESULT_PREFIX, SCENARIO } from '../packages/test-system/ci/result.mjs';
 
@@ -100,7 +101,7 @@ test('a passing-only case admits only a clean PASS of its own scenario', () => {
         sessions: [{ id: 's1', node_id: 'worker', session_name: 'worker', status: 'running' },
           { id: 's2', node_id: 'peer', session_name: 'peer', status: 'running' }],
         privatePanes: ['worker\t%1\t111\t0', 'peer\t%2\t222\t0'], defaultPanes: [] };
-      pass.reducedEnv = { scope: 'team seats only; kernel duplication not exercised',
+      pass.reducedEnv = { stage: 'complete', scope: 'team seats only; kernel duplication not exercised',
         environment: { TMUX: false, TMUX_TMPDIR: false, wrapperOnPath: false },
         removed: ['TMUX', 'TMUX_TMPDIR', 'scaffold tmux wrapper'], before: snapshot, after: structuredClone(snapshot),
         evidence: [{ node_id: 'peer', session_name: 'peer', pid: 222 }, { node_id: 'worker', session_name: 'worker', pid: 111 }] };
@@ -115,6 +116,10 @@ test('a passing-only case admits only a clean PASS of its own scenario', () => {
         { ...snapshot, privatePanes: ['replacement'] }, { ...snapshot, defaultPanes: ['duplicate'] },
       ]) assert.throws(() => verifyPassingRun(0, { ...pass, reducedEnv: { ...pass.reducedEnv, after } }, caseName));
       assert.throws(() => verifyPassingRun(0, { ...pass, reducedEnv: undefined }, caseName));
+      const detached = snapshot.sessions.map(row => ({ ...row, status: 'detached' }));
+      assert.throws(() => verifyPassingRun(0, { ...pass, reducedEnv: { ...pass.reducedEnv,
+        before: { ...snapshot, sessions: detached }, after: { ...snapshot, sessions: detached } } }, caseName));
+      assert.throws(() => verifyPassingRun(0, { ...pass, reducedEnv: { ...pass.reducedEnv, stage: 'restart' } }, caseName));
       assert.throws(() => verifyPassingRun(0, { ...pass, reducedEnv: { ...pass.reducedEnv, evidence: pass.reducedEnv.evidence.slice(1) } }, caseName));
       assert.throws(() => verifyPassingRun(0, { ...pass, reducedEnv: { ...pass.reducedEnv,
         environment: { ...pass.reducedEnv.environment, wrapperOnPath: true } } }, caseName));
@@ -199,3 +204,56 @@ test('the packet-off control admits only the labelled root fallback', () => {
     assert.throws(() => verifyPassingRun(0, { ...pass, hook: hookOf(context) }, 'refocus-parked-off'));
   }
 });
+
+for (const failure of [null, 'restart', 'before-private-panes', 'after-private-panes', 'after-default-panes']) {
+  test(`reduced-env collection retains its proof at ${failure ?? 'completion'}`, async () => {
+    // Synthetic command/SQLite seams: no process, socket, addon or fixture daemon.
+    const proof = {};
+    let restarted = false, stopped = false;
+    const sessions = [{ id: 's1', node_id: 'worker', session_name: 'worker', status: 'running' },
+      { id: 's2', node_id: 'peer', session_name: 'peer', status: 'running' }];
+    const evidence = sessions.map((row, i) => ({ node_id: row.node_id, session_name: row.session_name, pid: 111 + i }));
+    const withDatabase = read => read({ prepare: sql => ({ all: () => {
+      if (sql.includes('seat_identity_verdicts')) return evidence;
+      if (sql.includes('FROM nodes')) return sessions.map(row => ({ id: row.node_id }));
+      if (sql.includes('FROM bindings')) return sessions.map(row => ({ id: row.id, node_id: row.node_id }));
+      assert.ok(sql.includes('FROM sessions'));
+      return sessions;
+    } }) });
+    const execute = async (file, args) => {
+      if (file !== '/usr/bin/tmux') {
+        if (failure === 'restart') throw new Error('synthetic restart failure');
+        restarted = true;
+        return { stdout: '' };
+      }
+      const stage = (restarted ? 'after' : 'before') + (args[0] === '-S' ? '-private-panes' : '-default-panes');
+      if (failure === stage) throw Object.assign(new Error('synthetic unreadable socket'),
+        { code: 13, stdout: '', stderr: 'permission denied' });
+      return { stdout: args[0] === '-S' ? 'worker\t%1\t111\t0\npeer\t%2\t112\t0\n' : '' };
+    };
+    const daemon = { port: 12345, readEnv: { PATH: '/fixture/bin:/usr/bin:/bin', TMUX: 'synthetic', TMUX_TMPDIR: '/fixture' },
+      sigterm: async () => { stopped = true; } };
+    const run = reducedEnvRestart(daemon, { root: '/fixture', stateDir: '/fixture/state', tmuxSocketPath: '/fixture/tmux.sock' },
+      '/fixture/rig.cjs', proof, { execute, withDatabase });
+    if (!failure) {
+      assert.equal(await run, proof);
+      assert.equal(proof.stage, 'complete');
+      assert.equal(proof.after.privatePanes.length, 2);
+      return;
+    }
+    await assert.rejects(run, /synthetic/);
+    assert.equal(proof.failedStage, failure);
+    assert.deepEqual(proof.evidence, evidence);
+    assert.equal(proof.before.nodes.length, 2);
+    assert.equal(proof.before.bindings.length, 2);
+    assert.equal(proof.before.sessions.length, 2);
+    assert.equal(stopped, failure !== 'before-private-panes');
+    const partial = failure.startsWith('before-') ? proof.before : proof.after;
+    if (failure.includes('private-panes')) assert.equal(Object.hasOwn(partial, 'privatePanes'), false);
+    if (failure.startsWith('after-')) assert.equal(proof.after.sessions.length, 2);
+    if (failure === 'after-default-panes') {
+      assert.equal(proof.after.privatePanes.length, 2);
+      assert.equal(Object.hasOwn(proof.after, 'defaultPanes'), false);
+    }
+  });
+}
