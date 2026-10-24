@@ -29,7 +29,7 @@ interface TmuxShellCommandOptions {
 export type ArgvExecFn = (argv: string[]) => Promise<string>;
 
 /**
- * Injectable file/buffer operations for `sendText`.
+ * Injectable file/buffer operations for terminal payloads and launch environments.
  * Split out so tests can observe temp-file writes and unique-name generation
  * without touching the real filesystem; production wires node fs + os.tmpdir.
  */
@@ -370,10 +370,16 @@ export class TmuxAdapter {
       const baseline = { ...Object.fromEntries(updated.map(key => [key, process.env[key]])), ...policy.env };
       removeParentSessionEnv(baseline);
       const values = Object.entries({ ...baseline, ...seatEnv })
-        .filter((entry): entry is [string,string] => entry[1] !== undefined)
-        .map(([key,value]) => shellQuote(`${key}=${value}`));
-      const reset = `exec /usr/bin/env -i -- ${values.join(" ")} TMUX="$TMUX" TMUX_PANE="$TMUX_PANE" TERM="$TERM" SHELL="$SHELL" "$@"`;
-      return ["/bin/sh", "-c", reset, "sh", shell, ...(command ? ["-c", command] : ["-l"])];
+        .filter((entry): entry is [string,string] => entry[1] !== undefined && !["TMUX", "TMUX_PANE", "TERM", "SHELL"].includes(entry[0]))
+        .map(([key,value]) => {
+          if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error("Invalid environment name");
+          return `export ${key}=${shellQuote(value)}`;
+        });
+      const file = this.fileOps.tmpName();
+      // Builtin exports keep values off env/sh argv; the pane owns removal once started.
+      await this.fileOps.writeFile(file, `/bin/rm -f -- ${shellQuote(file)}\n${values.join("\n")}\nexec "$@"\n`, { mode: 0o600, flag: "wx" });
+      const reset = 'exec /usr/bin/env -i -- TMUX="$TMUX" TMUX_PANE="$TMUX_PANE" TERM="$TERM" SHELL="$SHELL" /bin/sh "$@"';
+      return ["/bin/sh", "-c", reset, "sh", file, shell, ...(command ? ["-c", command] : ["-l"])];
     } catch {
       // Keep the working launch, with a diagnostic; this option is not a new admission gate.
       const warning = "Scoped tmux environment unavailable; retaining the previous environment for this launch.";
@@ -532,6 +538,18 @@ export class TmuxAdapter {
     return this.exec(legacy ?? posixJoinArgv(argv));
   }
 
+  /** Environment-bearing commands travel in a private config, never a client's argv.
+   * Values stay in tmux's session environment, including for later panes. No global mutation.
+   * A failed/uncertain call retains its private file: it may not have been consumed yet.
+   */
+  private async runEnvironmentCommand(argv: string[], legacy?: string, startServer = false): Promise<string> {
+    const file = this.fileOps.tmpName();
+    await this.fileOps.writeFile(file, (legacy ?? posixJoinArgv(argv)).slice("tmux ".length) + "\n", { mode: 0o600, flag: "wx" });
+    const output = await this.run(["tmux", ...(startServer ? ["start-server", ";"] : []), "source-file", file]);
+    await this.fileOps.unlink(file).catch(() => {});
+    return output;
+  }
+
   /** Ends the daemon's tmux control client, and with it its session (tmux-control.ts), when tmux is driven through one. */
   async closeControlClient(): Promise<void> {
     await (this.argvExec as Partial<TmuxControlExec> | undefined)?.close?.();
@@ -683,7 +701,7 @@ export class TmuxAdapter {
     if (scopedCommand) { argv.push(...scopedCommand); legacyParts.push(...scopedCommand.map(shellQuote)); }
     let created: string;
     try {
-      created = (await this.run(argv, legacyParts.join(" "))).trim();
+      created = (await this.runEnvironmentCommand(argv, legacyParts.join(" "), true)).trim();
     } catch (err) {
       return classifyWriteError(err);
     }
@@ -1017,7 +1035,8 @@ export class TmuxAdapter {
       warnings.push(parentSessionEnvWarning(exact, err));
     }
     try {
-      await this.run(argv, legacyRespawn.join(" "));
+      if (opts?.env && Object.keys(opts.env).length) await this.runEnvironmentCommand(argv, legacyRespawn.join(" "));
+      else await this.run(argv, legacyRespawn.join(" "));
       return warnings.length ? { ok: true, warnings } : { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -1237,12 +1256,11 @@ export class TmuxAdapter {
     }
   }
 
-  /** Set one variable in a session's environment: what its next spawned process inherits, not a
-   *  running one. Callers that pass a value are putting it on a tmux command line. */
+  /** Set one variable for later panes, through the same private-file channel as launch. */
   async setSessionEnv(session: string, key: string, value: string): Promise<void> {
     if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) throw new Error("Invalid session environment key.");
     const target = exactTarget(session, "session");
-    await this.run(["tmux", "set-environment", "-t", target, key, value],
+    await this.runEnvironmentCommand(["tmux", "set-environment", "-t", target, key, value],
       `tmux set-environment -t ${shellQuote(target)} ${shellQuote(key)} ${shellQuote(value)}`);
   }
 

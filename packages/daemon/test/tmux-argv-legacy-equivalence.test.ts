@@ -49,7 +49,7 @@ function respond(cmd: string, failing: string[], composer = false): string {
     case "display-message":
       return cmd.includes("session_id") ? "$7\n" : cmd.includes("pane_pid") ? "4242\n" : "1\n";
     case "show-environment": return "OPENRIG_NODE_ID=n1\nCLAUDECODE=1\nHERDR_PANE_ID=p1\n";
-    case "new-session": return "%1\n";
+    case "new-session": case "source-file": case "start-server": return "%1\n";
     default: return "";
   }
 }
