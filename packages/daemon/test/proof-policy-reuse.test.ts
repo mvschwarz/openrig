@@ -357,6 +357,32 @@ describe("QA bounded adverse coverage at 8b236e06", () => {
       expect(opened.some((h) => !h.root.startsWith(f.root) && h.root !== path.dirname(f.root))).toBe(false);
     } finally { watch.close(); }
   });
+  for (const start of ["outside", "inside"] as const) it(`reports unavailable while a linked missions root's real location is outside the project (starts ${start})`, () => {
+    const f = fixture(), linked = path.join(f.root, "linked-missions"), inside = path.join(f.root, "real", "missions");
+    const other = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "policy-reuse-other-"))); roots.push(other);
+    const outside = path.join(other, "missions");
+    // Another project's missions tree, readable on its own.
+    fs.cpSync(f.missions, outside, { recursive: true }); fs.copyFileSync(f.projectFile, path.join(other, "project.yaml")); fs.mkdirSync(path.dirname(inside)); fs.renameSync(f.missions, inside);
+    fs.symlinkSync(start === "outside" ? outside : inside, linked);
+    vi.useFakeTimers();
+    const opened: Array<{ root: string; event: (event: string, name: string | null) => void }> = [];
+    vi.spyOn(fs, "watch").mockImplementation(((root: string, _options: unknown, listener: (event: string, name: string | null) => void) => {
+      opened.push({ root, event: listener });
+      return { on: vi.fn(), close: vi.fn() };
+    }) as unknown as typeof fs.watch);
+    const emit = vi.fn(), watch = watchProofSources(linked, vi.fn(), { emit } as unknown as EventBus);
+    try {
+      if (start === "inside") {
+        expect(watch.observation().state).toBe("watching");
+        // The supported alias is re-pointed outside the project; the link's own parent sees it.
+        fs.unlinkSync(linked); fs.symlinkSync(outside, linked);
+        opened.filter((h) => h.root === f.root).at(-1)!.event("rename", "linked-missions"); vi.advanceTimersByTime(50);
+        expect(emit.mock.calls.map(([e]) => e.revision)).toContain("unavailable");
+      }
+      expect(watch.observation().state).toBe("unavailable");
+      expect(opened.some((h) => h.root.startsWith(other))).toBe(false);
+    } finally { watch.close(); }
+  });
   it("QA observes replacement of an external evidence parent or honestly reports unavailable", () => {
     const t = adverseFixture();
     try {

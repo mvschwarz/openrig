@@ -109,13 +109,14 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
   let wanted: Shallow = new Map();
   const shallow = new Map<string, fs.FSWatcher>();
   let recursive: fs.FSWatcher | undefined;
-  // The real location the recursive watch was attached at (it follows a linked root to that directory).
-  let recursiveReal = missionsRoot;
+  // The real location the recursive watch was attached at (it follows a linked root to that directory); null if
+  // it could not be established.
+  let recursiveReal: string | null = null;
   const notify = (next: string) => { try { bus.emit({ type: "proof.sources_changed", scope: missionsRoot, revision: next }); } catch { /* Quiet refresh remains the repair path. */ } };
   /** A directory at or below `changed` may have been replaced: its watches are dropped, to be reattached by path. */
   const stale = (changed: string) => {
     for (const [dir, watcher] of shallow) if (within(dir, changed)) { watcher.close(); shallow.delete(dir); }
-    if (recursive && (within(missionsRoot, changed) || within(recursiveReal, changed))) { recursive.close(); recursive = undefined; }
+    if (recursive && (within(missionsRoot, changed) || (recursiveReal !== null && within(recursiveReal, changed)))) { recursive.close(); recursive = undefined; }
   };
   const onEvent = (dir: string | null) => (_event: string, filename: string | Buffer | null) => {
     if (closed) return;
@@ -144,7 +145,7 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
    *  longer needed (new coverage first). Returns whether anything was attached. */
   const resubscribe = (next: Shallow): boolean => {
     let added = false;
-    const real = canonical(missionsRoot) ?? missionsRoot;
+    const real = canonical(missionsRoot);
     if (recursive && real !== recursiveReal) { recursive.close(); recursive = undefined; }
     if (!recursive) { recursive = watchDir(missionsRoot, true); recursiveReal = real; added = true; }
     for (const dir of next.keys()) {
@@ -162,7 +163,8 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
   const evaluate = (): string => {
     let read = basis();
     for (let i = 0; ; i++) {
-      if (!resubscribe(read.watches)) { covered = true; return read.hash; }
+      // A root whose real location is unknown or outside the project has no anchors there: never certified.
+      if (!resubscribe(read.watches)) { covered = recursiveReal !== null && within(recursiveReal, project); return read.hash; }
       if (i === 2) { covered = false; return read.hash; }
       read = basis();
     }
@@ -195,7 +197,7 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
     timer.unref();
   };
   try {
-    recursiveReal = canonical(missionsRoot) ?? missionsRoot;
+    recursiveReal = canonical(missionsRoot);
     recursive = watchDir(missionsRoot, true);
     try { revision = evaluate(); readable = true; } catch (e) {
       if (e instanceof WatchFailure) throw e;
