@@ -117,9 +117,26 @@ describe("native resume probe", () => {
         paneContent: `› Continue\n${footer}`,
       }).status).toBe("resumed");
     });
+    // george661's footer on closed #1764: a GPT-6.1 display name plus its reasoning label, once the header has scrolled off.
+    it.each([
+      "  GPT-6.1 Sol medium · /data/workspaces/proof-a · …",
+      "  Context 81% left · GPT-6.1 Luna xhigh · /project",
+    ])("recognizes a model name with a reasoning label as a resumed conversation: %s", (footer) => {
+      expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "sh",
+        paneContent: `Restored conversation\n› Continue\n${footer}`,
+      })).toMatchObject({ status: "resumed", code: "active_runtime" });
+    });
+    it.each([
+      "› Continue\n  GPT-6.1 Sol was picked for this run because it costs less · see the plan",
+      "› Continue\n  GPT-6.1 Sol medium plus more words · /project",
+    ])("does not read status prose that starts with a model name as a footer: %s", (paneContent) => {
+      expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "sh", paneContent }))
+        .toMatchObject({ status: "failed", code: "returned_to_shell" });
+    });
     it.each([
       "  local-model-7b medium · /project",
       "  anthropic/claude-3.5-sonnet · /project",
+      "  local-model-7b Coder high · /project",
     ])("recognizes a versioned non-gpt model identifier after process verification: %s", (footer) => {
       expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "sh",
         paneContent: `› Continue\n${footer}`,

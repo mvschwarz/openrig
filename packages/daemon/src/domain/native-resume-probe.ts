@@ -33,8 +33,10 @@ export interface ProbeShellReadyInput {
 
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
 // Provider model identifiers are not limited to the default gpt-* family.
-// Keep the fallback structural so ordinary status prose cannot prove readiness.
-const CODEX_MODEL_FIELD = /^[A-Za-z][A-Za-z0-9._:/@-]*[._:/@-]\d[A-Za-z0-9._:/@-]*(?: [A-Za-z][\w-]*)?(?:\s+⚠ \d+ warnings?)?$/i;
+// Keep the fallback structural so ordinary status prose cannot prove readiness:
+// a model field is the versioned id plus at most three words (a display name
+// and a reasoning label, as in "GPT-6.1 Sol medium").
+const CODEX_MODEL_FIELD = /^[A-Za-z][A-Za-z0-9._:/@-]*[._:/@-]\d[A-Za-z0-9._:/@-]*(?: [A-Za-z][\w-]*){0,3}(?:\s+⚠ \d+ warnings?)?$/i;
 
 export function buildNativeResumeCommand(
   runtime: string | null,
@@ -464,7 +466,7 @@ function isCodexGptModelFooterLine(line: string): boolean {
   if (/^\s{2,}gpt-[^\n]+ · [^\n]+$/.test(line)) return true;
   const fields = line.trim().split(" · ");
   return /^[ \t]{2,}\S/.test(line) && fields.length > 1
-    && fields.some((field) => /^gpt-\d[\w.-]*(?: [\w-]+)?$/i.test(field));
+    && fields.some((field) => /^gpt-\d[\w.-]*(?: [\w-]+){0,3}$/i.test(field));
 }
 
 function hasCodexGptModelFooter(paneContent: string): boolean {
