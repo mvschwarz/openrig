@@ -23,6 +23,11 @@ export function capStreamBody(body: string): { body: string; truncated?: { keptB
   return { body: kept + marker(used), truncated: { keptBytes: used, originalBytes } };
 }
 
+/** A list cursor whose anchor item is gone (pruned by stream retention, or never emitted). */
+export class StreamCursorExpiredError extends Error {
+  constructor(readonly afterSortKey: string) { super(`no stream item has sort key ${afterSortKey}`); }
+}
+
 export interface StreamItem {
   streamItemId: string;
   tsEmitted: string;
@@ -36,7 +41,7 @@ export interface StreamItem {
   hintTags: string[] | null;
   interrupt: boolean;
   archivedAt: string | null;
-  /** Set on emit's result only, when the body was over the cap and stored truncated. */
+  /** Present when the body was over the cap and is stored truncated: the bytes kept and the bytes emitted. */
   bodyTruncated?: { keptBytes: number; originalBytes: number };
 }
 
@@ -80,6 +85,8 @@ interface StreamItemRow {
   hint_tags: string | null;
   interrupt: number;
   archived_at: string | null;
+  body_kept_bytes?: number | null;
+  body_original_bytes?: number | null;
 }
 
 /**
@@ -92,13 +99,15 @@ export class StreamStore {
   /** P21 §4: detected once — a curated-migration test DB (or a pre-067 daemon) may lack the
    *  era-stamp column, so the writer degrades (omits it) instead of throwing. */
   private readonly hasIdentityProvenanceColumn: boolean;
+  /** Slice 22: absent on a curated test DB without migration 130; the marker in the body still says it. */
+  private readonly hasTruncationColumns: boolean;
 
   constructor(db: Database.Database, eventBus: EventBus) {
     this.db = db;
     this.eventBus = eventBus;
-    this.hasIdentityProvenanceColumn = (
-      this.db.prepare("PRAGMA table_info(stream_items)").all() as Array<{ name: string }>
-    ).some((col) => col.name === "identity_provenance");
+    const columns = (this.db.prepare("PRAGMA table_info(stream_items)").all() as Array<{ name: string }>).map((col) => col.name);
+    this.hasIdentityProvenanceColumn = columns.includes("identity_provenance");
+    this.hasTruncationColumns = columns.includes("body_original_bytes");
   }
 
   /**
@@ -162,6 +171,11 @@ export class StreamStore {
           );
       }
 
+      if (capped.truncated && this.hasTruncationColumns) {
+        this.db.prepare("UPDATE stream_items SET body_kept_bytes = ?, body_original_bytes = ? WHERE stream_item_id = ?")
+          .run(capped.truncated.keptBytes, capped.truncated.originalBytes, id);
+      }
+
       return this.eventBus.persistWithinTransaction({
         type: "stream.emitted",
         streamItemId: id,
@@ -177,7 +191,7 @@ export class StreamStore {
     this.eventBus.notifySubscribers(persistedEvent);
 
     const item = this.rowToItem(this.getByIdRaw(id)!);
-    return capped.truncated ? { ...item, bodyTruncated: capped.truncated } : item;
+    return capped.truncated && !item.bodyTruncated ? { ...item, bodyTruncated: capped.truncated } : item;
   }
 
   getById(streamItemId: string): StreamItem | null {
@@ -194,8 +208,12 @@ export class StreamStore {
       conditions.push("archived_at IS NULL");
     }
     if (opts?.afterSortKey) {
-      conditions.push("(ts_emitted, stream_sort_key) > (SELECT ts_emitted, stream_sort_key FROM stream_items WHERE stream_sort_key = ?)");
-      params.push(opts.afterSortKey);
+      // Without its anchor the comparison is against NULL and would read as an exhausted stream.
+      const anchor = this.db.prepare("SELECT ts_emitted, stream_sort_key FROM stream_items WHERE stream_sort_key = ?").get(opts.afterSortKey) as
+        { ts_emitted: string; stream_sort_key: string } | undefined;
+      if (!anchor) throw new StreamCursorExpiredError(opts.afterSortKey);
+      conditions.push("(ts_emitted, stream_sort_key) > (?, ?)");
+      params.push(anchor.ts_emitted, anchor.stream_sort_key);
     }
     if (opts?.sourceSession) {
       conditions.push("source_session = ?");
@@ -263,6 +281,7 @@ export class StreamStore {
       hintTags: row.hint_tags ? (JSON.parse(row.hint_tags) as string[]) : null,
       interrupt: row.interrupt === 1,
       archivedAt: row.archived_at,
+      ...(row.body_original_bytes != null ? { bodyTruncated: { keptBytes: row.body_kept_bytes ?? 0, originalBytes: row.body_original_bytes } } : {}),
     };
   }
 }

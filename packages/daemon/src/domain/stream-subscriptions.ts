@@ -13,12 +13,16 @@ import type Database from "better-sqlite3";
 export const READ_PAGE_ITEMS = 20;
 export const READ_EXCERPT_CHARS = 2000;
 export const READ_PAGE_BYTES = 64 * 1024;
+/** Metadata in a page is clipped too, visibly, so the serialized page stays under READ_PAGE_BYTES. */
+const FIELD_CHARS = 256;
+const TAGS_BYTES = 2048;
 
 type Position = { ts: string; key: string };
 type SubscriptionRow = { reader_session: string; hint_tags: string | null; hint_type: string | null; read_through_ts: string;
   read_through_key: string; created_by: string; created_at: string; updated_at: string };
 type ItemRow = { stream_item_id: string; ts_emitted: string; stream_sort_key: string; source_session: string; body: string;
-  hint_type: string | null; hint_urgency: string | null; hint_destination: string | null; hint_tags: string | null; interrupt: number };
+  hint_type: string | null; hint_urgency: string | null; hint_destination: string | null; hint_tags: string | null; interrupt: number;
+  body_kept_bytes: number | null; body_original_bytes: number | null };
 
 export interface StreamSubscription {
   readerSession: string;
@@ -96,17 +100,49 @@ function retentionMark(db: Database.Database): (Position & { prunedItems: number
   return r ? { ts: r.pruned_through_ts, key: r.pruned_through_key, prunedItems: r.pruned_items } : null;
 }
 
+const noLoneHigh = (s: string) => /[\uD800-\uDBFF]$/.test(s) ? s.slice(0, -1) : s;
 function excerptOf(body: string): string {
-  if (body.length <= READ_EXCERPT_CHARS) return body;
-  const cut = body.slice(0, READ_EXCERPT_CHARS);
-  return /[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut;
+  return body.length <= READ_EXCERPT_CHARS ? body : noLoneHigh(body.slice(0, READ_EXCERPT_CHARS));
+}
+
+/** Clips page metadata, noting in `cut` that something was clipped. Stored values are never changed. */
+function clip(value: string | null, cut: { hit: boolean }): string | null {
+  if (value === null || value.length <= FIELD_CHARS) return value;
+  cut.hit = true;
+  return `${noLoneHigh(value.slice(0, FIELD_CHARS))}…`;
+}
+function clipTags(tags: unknown[] | null, cut: { hit: boolean }): string[] | null {
+  if (!tags) return null;
+  const kept: string[] = [];
+  let bytes = 0;
+  for (const tag of tags) {
+    const value = clip(typeof tag === "string" ? tag : JSON.stringify(tag), cut)!;
+    const n = Buffer.byteLength(JSON.stringify(value)) + 1;
+    if (bytes + n > TAGS_BYTES) { cut.hit = true; break; }
+    kept.push(value); bytes += n;
+  }
+  return kept;
+}
+
+function pageItem(r: ItemRow) {
+  const cut = { hit: false };
+  const excerpt = excerptOf(r.body);
+  const tags = r.hint_tags ? JSON.parse(r.hint_tags) as unknown : null;
+  return { streamItemId: clip(r.stream_item_id, cut)!, streamSortKey: r.stream_sort_key, tsEmitted: r.ts_emitted, sourceSession: clip(r.source_session, cut)!,
+    hintType: clip(r.hint_type, cut), hintUrgency: clip(r.hint_urgency, cut), hintDestination: clip(r.hint_destination, cut),
+    hintTags: clipTags(Array.isArray(tags) ? tags : tags === null ? null : [tags], cut), interrupt: r.interrupt === 1, bytes: Buffer.byteLength(r.body), excerpt,
+    ...(excerpt.length < r.body.length ? { excerptTruncated: true } : {}),
+    ...(r.body_original_bytes != null ? { bodyTruncated: { keptBytes: r.body_kept_bytes ?? 0, originalBytes: r.body_original_bytes } } : {}),
+    ...(cut.hit ? { metadataTruncated: true } : {}) };
 }
 
 /**
  * One bounded page for the reader: at most `limit` (≤ 20) items, excerpts of at most 2,000 characters, and at most
- * 64 KiB of excerpts (always at least one item). The cursor advances past the items returned and no further. When
- * retention has pruned beyond the reader's cursor, `gap` says so on every page until the cursor passes it.
- * Returns null when the reader has no subscription.
+ * 64 KiB for the whole serialized page, metadata included (always at least one item; oversized metadata is clipped
+ * and marked). A body stored truncated at the emit cap says so (`bodyTruncated`), apart from an excerpt that's only
+ * shortened (`excerptTruncated`; `rig stream show` reads the stored body). The cursor advances past the items returned
+ * and no further. When retention has pruned beyond the reader's cursor, `gap` says so on every page until the cursor
+ * passes it. Returns null when the reader has no subscription.
  */
 export function readPage(db: Database.Database, reader: string, opts: { limit?: number; nowIso?: string } = {}) {
   const s = getSubscription(db, reader);
@@ -114,17 +150,25 @@ export function readPage(db: Database.Database, reader: string, opts: { limit?: 
   const limit = Math.min(Math.max(1, Math.trunc(opts.limit ?? READ_PAGE_ITEMS)), READ_PAGE_ITEMS);
   const m = matching(s, s.readThrough);
   const rows = db.prepare(`SELECT stream_item_id, ts_emitted, stream_sort_key, source_session, body, hint_type, hint_urgency, hint_destination,
-    hint_tags, interrupt FROM stream_items WHERE ${m.where} ORDER BY ts_emitted, stream_sort_key LIMIT ?`).all(...m.params, limit + 1) as ItemRow[];
-  const page: ItemRow[] = [];
-  let pageBytes = 0;
-  for (const r of rows.slice(0, limit)) {
-    const size = Buffer.byteLength(excerptOf(r.body));
-    if (page.length && pageBytes + size > READ_PAGE_BYTES) break;
-    page.push(r); pageBytes += size;
-  }
+    hint_tags, interrupt, body_kept_bytes, body_original_bytes FROM stream_items WHERE ${m.where} ORDER BY ts_emitted, stream_sort_key LIMIT ?`)
+    .all(...m.params, limit + 1) as ItemRow[];
   const mark = retentionMark(db);
   const gap = mark && before(s.readThrough, mark) ? { reason: "retention", from: s.readThrough.ts, through: mark.ts, prunedItemsTotal: mark.prunedItems,
     detail: "Items in this range that weren't classified, disposed or acted on were pruned before you read them; some may have matched your filter." } : undefined;
+  const cut = { hit: false };
+  const subscription = { readerSession: clip(s.readerSession, cut)!, hintTags: clipTags(s.hintTags, cut) ?? [], hintType: clip(s.hintType, cut),
+    ...(cut.hit ? { metadataTruncated: true } : {}) };
+  // The envelope at its largest (cursor strings and counts at full width), then items while the whole page fits.
+  let pageBytes = Buffer.byteLength(JSON.stringify({ subscription, items: [], readThrough: { ts: "x".repeat(64), key: "x".repeat(64) }, more: false,
+    unread: { items: Number.MAX_SAFE_INTEGER, bytes: Number.MAX_SAFE_INTEGER }, ...(gap ? { gap } : {}) }));
+  const page: ItemRow[] = [];
+  const items: Array<ReturnType<typeof pageItem>> = [];
+  for (const r of rows.slice(0, limit)) {
+    const item = pageItem(r);
+    const size = Buffer.byteLength(JSON.stringify(item)) + (items.length ? 1 : 0);
+    if (items.length && pageBytes + size > READ_PAGE_BYTES) break;
+    page.push(r); items.push(item); pageBytes += size;
+  }
   const last = page.at(-1);
   // With nothing retained to read, the cursor moves to the pruned edge so the same gap isn't reported again.
   const next = last ? { ts: last.ts_emitted, key: last.stream_sort_key } : gap && mark ? { ts: mark.ts, key: mark.key } : s.readThrough;
@@ -132,17 +176,5 @@ export function readPage(db: Database.Database, reader: string, opts: { limit?: 
     db.prepare("UPDATE stream_subscriptions SET read_through_ts = ?, read_through_key = ?, updated_at = ? WHERE reader_session = ?")
       .run(next.ts, next.key, opts.nowIso ?? new Date().toISOString(), reader);
   }
-  return {
-    subscription: { readerSession: s.readerSession, hintTags: s.hintTags, hintType: s.hintType },
-    items: page.map(r => {
-      const excerpt = excerptOf(r.body);
-      return { streamItemId: r.stream_item_id, tsEmitted: r.ts_emitted, sourceSession: r.source_session, hintType: r.hint_type,
-        hintUrgency: r.hint_urgency, hintDestination: r.hint_destination, hintTags: r.hint_tags ? JSON.parse(r.hint_tags) as string[] : null,
-        interrupt: r.interrupt === 1, bytes: Buffer.byteLength(r.body), excerpt, ...(excerpt.length < r.body.length ? { excerptTruncated: true } : {}) };
-    }),
-    readThrough: next,
-    more: rows.length > page.length,
-    unread: unread(db, s, next),
-    ...(gap ? { gap } : {}),
-  };
+  return { subscription, items, readThrough: next, more: rows.length > page.length, unread: unread(db, s, next), ...(gap ? { gap } : {}) };
 }

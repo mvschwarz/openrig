@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { EventBus } from "../domain/event-bus.js";
-import type { StreamStore } from "../domain/stream-store.js";
+import { StreamCursorExpiredError, type StreamStore } from "../domain/stream-store.js";
 import { listSubscriptions, readPage, subscribe, unsubscribe } from "../domain/stream-subscriptions.js";
 import { requireSenderIdentity, resolveRecordedProvenance } from "./require-sender-identity.js";
 import { queryLimit } from "./query-limit.js";
@@ -130,18 +130,29 @@ export function streamRoutes(): Hono {
     const includeArchived = c.req.query("includeArchived") === "true";
 
     const store = getStore(c);
-    const items = store.list({
-      limit,
-      afterSortKey,
-      sourceSession,
-      hintDestination,
-      hintTag,
-      since,
-      until,
-      includeArchived,
-      ...(parsedDirection ? { direction: parsedDirection } : {}),
-    });
-    return c.json(items);
+    try {
+      const items = store.list({
+        limit,
+        afterSortKey,
+        sourceSession,
+        hintDestination,
+        hintTag,
+        since,
+        until,
+        includeArchived,
+        ...(parsedDirection ? { direction: parsedDirection } : {}),
+      });
+      return c.json(items);
+    } catch (err) {
+      if (!(err instanceof StreamCursorExpiredError)) throw err;
+      let prunedThrough: string | null = null;
+      try {
+        prunedThrough = (store.db.prepare("SELECT pruned_through_ts AS ts FROM stream_retention_marks WHERE id = 1").get() as { ts?: string } | undefined)?.ts ?? null;
+      } catch { /* a daemon database without stream retention */ }
+      return c.json({ error: "stream_cursor_expired", afterSortKey: err.afterSortKey, prunedThrough,
+        message: `No stream item has sort key ${err.afterSortKey}: stream retention pruned it, or it never existed. Items after it may have been pruned too. ` +
+          (prunedThrough ? `Resume with --since ${prunedThrough}.` : "Resume with --since <time>.") }, 410);
+    }
   });
 
   // GET /watch — SSE for new stream.emitted events.

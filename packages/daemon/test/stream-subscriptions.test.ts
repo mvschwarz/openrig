@@ -67,23 +67,43 @@ describe("stream hub readers (slice 22 outcome 9)", () => {
     expect(readPage(db, "nobody@rig")).toBeNull();
   });
 
-  it("a burst stays bounded: bodies capped at 16 KiB with a visible marker, excerpts and pages bounded", () => {
+  it("a burst stays bounded: bodies capped at 16 KiB with a visible marker, and read says which content was discarded", () => {
+    subscribe(db, { readerSession: "hub@rig", hintTags: ["ci"], actor: "desk@rig" }, EARLIER);
     const big = emit("BIG", { body: "é".repeat(20_000), hintTags: ["ci"] });
     expect(big.bodyTruncated).toEqual({ keptBytes: expect.any(Number), originalBytes: 40_000 });
-    const stored = stream.getById("BIG")!.body;
-    expect(Buffer.byteLength(stored)).toBeLessThanOrEqual(STREAM_BODY_CAP_BYTES);
-    expect(stored).toMatch(new RegExp(`\\[truncated by OpenRig: kept ${big.bodyTruncated!.keptBytes} of 40000 bytes\\]$`));
-    expect(stored).not.toContain("�");
-    expect(emit("SMALL", { body: "x".repeat(100) }).bodyTruncated).toBeUndefined();
-    // 20 items of 2,000 two-byte characters would be 80 KB of excerpts; the page stops under 64 KiB.
-    subscribe(db, { readerSession: "hub@rig", hintTags: ["burst"], actor: "desk@rig" }, EARLIER);
-    for (let i = 0; i < 20; i++) emit(`W${String(i).padStart(2, "0")}`, { body: "é".repeat(3_000), hintTags: ["burst"] });
+    const stored = stream.getById("BIG")!;
+    expect(Buffer.byteLength(stored.body)).toBeLessThanOrEqual(STREAM_BODY_CAP_BYTES);
+    expect(stored.body).toMatch(new RegExp(`\\[truncated by OpenRig: kept ${big.bodyTruncated!.keptBytes} of 40000 bytes\\]$`));
+    expect(stored.body).not.toContain("\uFFFD");
+    expect(stored.bodyTruncated).toEqual(big.bodyTruncated); // show reads it back, not only emit's reply
+    expect(emit("SMALL", { body: "x".repeat(100), hintTags: ["ci"] }).bodyTruncated).toBeUndefined();
     const page = readPage(db, "hub@rig")!;
-    expect(page.items.length).toBeLessThan(20);
-    expect(page.items.reduce((n, i) => n + Buffer.byteLength(i.excerpt), 0)).toBeLessThanOrEqual(READ_PAGE_BYTES);
-    expect(page.items[0]).toMatchObject({ bytes: 6_000, excerptTruncated: true });
-    expect(page.items[0]!.excerpt).toHaveLength(2_000);
-    expect(page.more).toBe(true);
+    // The excerpt is shortened (recoverable with show); the stored body also lost content (not recoverable).
+    expect(page.items[0]).toMatchObject({ streamItemId: "BIG", excerptTruncated: true, bodyTruncated: big.bodyTruncated });
+    expect(page.items[1]).toMatchObject({ streamItemId: "SMALL" });
+    expect(page.items[1]).not.toHaveProperty("bodyTruncated");
+    expect(page.items[1]).not.toHaveProperty("excerptTruncated");
+  });
+
+  it("the whole serialized page stays under 64 KiB: multiline multibyte excerpts, an oversized tag, a long subscription", () => {
+    const size = (page: unknown) => Buffer.byteLength(JSON.stringify(page));
+    subscribe(db, { readerSession: "hub@rig", hintTags: ["burst"], actor: "desk@rig" }, EARLIER);
+    // 20 items of 2,000-character excerpts, half newlines and quotes (escaped to 2 bytes) and half two-byte characters.
+    for (let i = 0; i < 20; i++) emit(`W${String(i).padStart(2, "0")}`, { body: "\n\"é".repeat(1_000), hintTags: ["burst"] });
+    const first = readPage(db, "hub@rig")!;
+    expect(size(first)).toBeLessThanOrEqual(READ_PAGE_BYTES);
+    expect(first.items.length).toBeLessThan(20);
+    expect(first.more).toBe(true);
+    const rest = readPage(db, "hub@rig")!;
+    expect(first.items.length + rest.items.length + (rest.more ? readPage(db, "hub@rig")!.items.length : 0)).toBe(20); // nothing skipped
+    // One item whose tag alone is 70,000 characters: clipped in the page, marked, and the cursor still moves past it.
+    subscribe(db, { readerSession: "tags@rig", hintTags: ["t".repeat(70_000), "x"], actor: "desk@rig" }, EARLIER);
+    emit("HUGE", { body: "small", hintTags: ["t".repeat(70_000)] });
+    const huge = readPage(db, "tags@rig")!;
+    expect(size(huge)).toBeLessThanOrEqual(READ_PAGE_BYTES);
+    expect(huge.items).toMatchObject([{ streamItemId: "HUGE", metadataTruncated: true }]);
+    expect(huge.subscription).toMatchObject({ metadataTruncated: true });
+    expect(readPage(db, "tags@rig")!.items).toEqual([]);
   });
 
   it("retention keeps referenced items, prunes the rest by age or count, and a reader behind it sees the gap", async () => {
@@ -149,6 +169,16 @@ describe("stream hub readers (slice 22 outcome 9)", () => {
       expect(await read.json()).toMatchObject({ items: [{ streamItemId: "R1", excerpt: "obs R1" }], unread: { items: 0 } });
       expect((await call("/subscriptions/dev-lead%40rig", "DELETE")).status).toBe(200);
       expect((await call("/subscriptions/dev-lead%40rig", "DELETE")).status).toBe(404);
+    });
+
+    it("a list cursor whose anchor was pruned reports it, instead of an empty success", async () => {
+      const a = emit("L1"); emit("L2");
+      expect(await (await call(`/list?afterSortKey=${a.streamSortKey}`, "GET")).json()).toMatchObject([{ streamItemId: "L2" }]);
+      pruneStreamItems(db, { nowIso: new Date().toISOString(), streamMaxItems: 1 }); // deletes only the anchor
+      const res = await call(`/list?afterSortKey=${a.streamSortKey}`, "GET");
+      expect(res.status).toBe(410);
+      expect(await res.json()).toMatchObject({ error: "stream_cursor_expired", prunedThrough: a.tsEmitted, message: expect.stringContaining("--since") });
+      expect(await (await call(`/list?since=${a.tsEmitted}`, "GET")).json()).toMatchObject([{ streamItemId: "L2" }]);
     });
 
     it("emit reports a truncated body instead of refusing it", async () => {
