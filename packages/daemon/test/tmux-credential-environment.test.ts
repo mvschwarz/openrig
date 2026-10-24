@@ -71,7 +71,7 @@ describe.skipIf(process.platform === "win32")("owned tmux credential delivery (n
       if (mode === "fallback" && args.includes("default-shell")) throw new Error("synthetic unavailable inspection");
       return tmux(args.slice(1));
     });
-    const selected = { ...credentials, OPENRIG_NODE_ID: "synthetic-node", OPENRIG_DB: path.join(home, "selected db.sqlite"), TMUX_TMPDIR: path.join(home, "tmux directory"), EMPTY: "", QUOTED: "quote ' and \\ and\nnewline" };
+    const selected = { ...credentials, OPENRIG_NODE_ID: "synthetic-node", OPENRIG_DB: path.join(home, "selected db.sqlite"), TMUX_TMPDIR: path.join(home, "tmux directory"), BACKSLASH_LF: "one\\\ntwo", INDENTED: "one\n  two", HASH_LINE: "one\n#two\nthree", EMPTY: "", QUOTED: "quote ' and \\ and\nnewline" };
     a.launchEnvironment = () => ({ inheritTmuxEnvironment: mode === "inherited", env });
     const session = "seat' x", target = `=${session}:`;
     const receiver = path.join(home, "receive.cjs");
@@ -100,6 +100,10 @@ describe.skipIf(process.platform === "win32")("owned tmux credential delivery (n
       await tmux(["respawn-pane", "-k", "-t", target, "/bin/sh", "-c", "exit"]);
       for (let i = 0; i < 100 && await tmux(["display-message", "-p", "-t", target, "#{pane_dead}"]) !== "1"; i++) await new Promise(r => setTimeout(r, 25));
       expect((await a.respawnPane(target, command, { env: selected, cwd: home })).ok).toBe(true);
+      expect(await read()).toEqual(selected); rmSync(output);
+      // Read restored values from a new process, not tmux display formatting.
+      for (const [key, value] of Object.entries(selected)) await a.setSessionEnv(session, key, value);
+      await tmux(["new-window", "-d", "-t", target, command]);
       expect(await read()).toEqual(selected);
       await a.setSessionEnv(session, "CLAUDE_CODE_OAUTH_TOKEN", credentials.CLAUDE_CODE_OAUTH_TOKEN);
       expect(await a.getSessionEnv(session, "CLAUDE_CODE_OAUTH_TOKEN")).toBe(credentials.CLAUDE_CODE_OAUTH_TOKEN);

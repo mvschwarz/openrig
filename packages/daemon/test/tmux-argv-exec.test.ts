@@ -34,9 +34,7 @@ describe("tmux argv exec path", () => {
     expect(exec).not.toHaveBeenCalled();
     expect(seen).toEqual([["tmux", "start-server", ";", "source-file", "/tmp/text.txt"], ["tmux", "show-environment", "-g"]]);
     const config = files.writeFile.mock.calls[0]![1];
-    expect(config).toContain("-c '/home/user/my project/code'");
-    expect(config).toContain("'PATH=/a b:/c'");
-    expect(config).toContain("'EMPTY='");
+    expect(config).toBe("new-session -d -s 'r01-dev1-impl' -c '/home/user/my project/code' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS=' -e 'PATH=/a b:/c' -e 'EMPTY=' -P -F '#{pane_id}'\n");
   });
 
   it("sendKeys passes key names as separate verbatim units", async () => {
@@ -59,7 +57,7 @@ describe("tmux argv exec path", () => {
     const adapter = new TmuxAdapter(async () => "", files, async args => { seen.push(args); return ""; });
     await adapter.respawnPane("%1", "codex resume 'tok en'", { cwd: "/w", env: { A: "b c" } });
     expect(seen).toEqual([["tmux", "show-environment", "-g"], ["tmux", "source-file", "/tmp/text.txt"]]);
-    expect(files.writeFile.mock.calls[0]![1]).toContain("-c '/w' -e 'A=b c'");
+    expect(files.writeFile.mock.calls[0]![1]).toBe("respawn-pane -t '%1' -c '/w' -e 'A=b c' 'codex resume '\"'\"'tok en'\"'\"''\n");
   });
 
   it("capture and display probes build atomic argv (no shell join artifacts)", async () => {
