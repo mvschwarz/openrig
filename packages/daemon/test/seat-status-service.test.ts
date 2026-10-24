@@ -48,6 +48,30 @@ describe("SeatStatusService", () => {
     expect(db.prepare("SELECT * FROM sessions WHERE id = ?").get(session.id)).toEqual(stored);
   });
 
+  it("reports the runtime home a Claude or Codex seat's launches use, and where it comes from", () => {
+    const rig = rigRepo.createRig("home-rig");
+    const nodes = {
+      own: rigRepo.addNode(rig.id, "dev.own", { runtime: "codex" }),
+      rel: rigRepo.addNode(rig.id, "dev.rel", { runtime: "codex" }),
+      plain: rigRepo.addNode(rig.id, "dev.plain", { runtime: "claude-code" }),
+      term: rigRepo.addNode(rig.id, "dev.term", { runtime: "terminal" }),
+    };
+    for (const [name, node] of Object.entries(nodes)) sessionRegistry.registerSession(node.id, `dev-${name}@home-rig`);
+    db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?").run(JSON.stringify({ CODEX_HOME: "/homes/own" }), nodes.own.id);
+    db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?").run(JSON.stringify({ CODEX_HOME: "rel/codex" }), nodes.rel.id);
+    const svc = new SeatStatusService({ rigRepo, env: { HOME: "/users/op", CODEX_HOME: "/daemon/codex" } });
+    const status = (ref: string) => {
+      const result = svc.getStatus(ref);
+      if (!result.ok) throw new Error(result.code);
+      return result.status;
+    };
+    expect(status("dev-own@home-rig").runtime_home).toEqual({ variable: "CODEX_HOME", home: "/homes/own", source: "member" });
+    expect(status("dev-rel@home-rig").runtime_home).toEqual({ variable: "CODEX_HOME", home: "/daemon/codex", source: "daemon",
+      ignored: { source: "member", value: "rel/codex" } });
+    expect(status("dev-plain@home-rig").runtime_home).toEqual({ variable: "CLAUDE_CONFIG_DIR", home: "/users/op/.claude", source: "native_default" });
+    expect(status("dev-term@home-rig")).not.toHaveProperty("runtime_home");
+  });
+
   it("returns honest no-handover defaults for an existing active node", () => {
     const rig = rigRepo.createRig("seat-rig");
     const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "codex", cwd: "/project" });

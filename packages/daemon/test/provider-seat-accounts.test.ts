@@ -206,6 +206,55 @@ function tree(dir: string): string[] {
   return out;
 }
 
+describe("configuredSeatAccounts — a seat's own home", () => {
+  const own = (home: string, source: "member" | "rig") => ({ runtimeHome: { home, source } });
+
+  it("a Codex seat's own CODEX_HOME is its configured home; a registry row in the daemon's home isn't applied", () => {
+    const [row] = configuredSeatAccounts(input({
+      seats: [{ ...seat("dev-qa@r", "codex"), ...own("/homes/qa", "member") }],
+      auth: { profiles: ["work-a"], seats: [reg("dev-qa@r", "codex", "work-a")] },
+    }));
+    expect(row!.configured).toEqual({ source: "default_login", home: "/homes/qa", homeFrom: "member",
+      homeNote: "the login active in this seat's own CODEX_HOME (from its member env) when it launched" });
+    expect(row!.registryNotes).toEqual(["the registry in the daemon's CODEX_HOME names profile work-a (recorded 2026-10-12T10:00:00Z); not applied: this seat launches with its own CODEX_HOME"]);
+    expect(row!.allowance.linked).toBe(false);
+  });
+
+  it("an unreadable registry in the daemon's home doesn't make a seat with its own home unknown", () => {
+    const [row] = configuredSeatAccounts(input({
+      seats: [{ ...seat("dev-cx@r", "codex"), ...own("/homes/cx", "rig") }],
+      auth: { profiles: [], seats: [], registry: { status: "unreadable", code: "EACCES", malformedRows: 0 } },
+    }));
+    expect(row!.configured).toMatchObject({ source: "default_login", home: "/homes/cx", homeFrom: "rig" });
+  });
+
+  it("a Claude seat's own CLAUDE_CONFIG_DIR is its configured home", () => {
+    const [row] = configuredSeatAccounts(input({ seats: [{ ...seat("dev-build@r", "claude-code"), ...own("/homes/build", "member") }] }));
+    expect(row!.configured).toEqual({ source: "default_login", home: "/homes/build", homeFrom: "member",
+      homeNote: "the login in this seat's own Claude config dir (from its member env)" });
+  });
+
+  it("a declared value that isn't absolute is reported, and the seat reads as the daemon's", () => {
+    const rows = configuredSeatAccounts(input({ seats: [
+      { ...seat("dev-cx@r", "codex"), runtimeHome: { ignored: { source: "member", value: "codex-home" } } },
+      { ...seat("dev-build@r", "claude-code"), runtimeHome: { ignored: { source: "rig", value: "claude-home" } } },
+    ] }));
+    expect(rows[0]!.configured).toMatchObject({ source: "default_login", home: "/h/.codex" });
+    expect(rows[0]!.configured).not.toHaveProperty("homeFrom");
+    expect(rows[0]!.ignoredHome).toEqual({ from: "member", variable: "CODEX_HOME", value: "codex-home" });
+    expect(rows[1]!.configured).toMatchObject({ source: "default_login", home: "/h/.claude" });
+    expect(rows[1]!.ignoredHome).toEqual({ from: "rig", variable: "CLAUDE_CONFIG_DIR", value: "claude-home" });
+  });
+
+  it("seats without a home of their own are unchanged", () => {
+    const rows = configuredSeatAccounts(input({ seats: [seat("dev-cx@r", "codex"), seat("dev-build@r", "claude-code")] }));
+    for (const row of rows) {
+      expect(row.configured).not.toHaveProperty("homeFrom");
+      expect(row).not.toHaveProperty("ignoredHome");
+    }
+  });
+});
+
 describe("seatAccounts through the provider service", () => {
   function setup(enabled: boolean) {
     const fake = makeFakeCodex();
@@ -231,8 +280,20 @@ describe("seatAccounts through the provider service", () => {
     const base = { db, listRigs: () => [{ id: "rig-1" }], env, now: () => ASOF };
     const svc = new ProviderServiceImpl({ ...base, usageWindows: { enabled: () => enabled, windows } });
     const mainSvc = new ProviderServiceImpl(base);
-    return { fake, svc, mainSvc, home };
+    return { fake, svc, mainSvc, home, db };
   }
+
+  it("switch on: a Codex seat with its own CODEX_HOME reads as that home, and the daemon home's registry binds it to nothing", async () => {
+    const { svc, db } = setup(true);
+    db.prepare("UPDATE nodes SET env_json = ? WHERE id = 'qa'").run(JSON.stringify({ CODEX_HOME: "/homes/qa" }));
+    db.prepare("UPDATE rigs SET env_json = ? WHERE id = 'rig-1'").run(JSON.stringify({ CLAUDE_CONFIG_DIR: "/homes/claude-team" }));
+    const model = await svc.getReadModel();
+    const bySeat = new Map(model.seatAccounts!.map((row) => [row.seatSession, row]));
+    expect(bySeat.get("dev-qa@r")!.configured).toMatchObject({ source: "default_login", home: "/homes/qa", homeFrom: "member" });
+    expect(bySeat.get("dev-qa@r")!.registryNotes).toEqual([expect.stringMatching(/names profile work-a .*not applied: this seat launches with its own CODEX_HOME$/)]);
+    expect(bySeat.get("dev-build@r")!.configured).toMatchObject({ source: "default_login", home: "/homes/claude-team", homeFrom: "rig" });
+    expect(model.bindings.find((b) => b.seatSession === "dev-qa@r")).toMatchObject({ accountId: null });
+  });
 
   it("switch off: no seatAccounts, and the read model is today's byte for byte", async () => {
     const { svc, mainSvc } = setup(false);
