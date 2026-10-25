@@ -262,6 +262,9 @@ applies to future launches and successors, not running agents or your personal t
 If the scoped environment cannot be prepared, launch keeps its previous environment and
 reports a warning in fresh launch results and the daemon log. For handovers, check
 that log for this warning. This is not a promise that shell startup cannot add or override values.
+On Linux, a seat also gets the daemon's `XDG_RUNTIME_DIR`, so tools whose sockets live there work in seats,
+with `DBUS_SESSION_BUS_ADDRESS=disabled:` so its D-Bus clients don't find your session bus on their own. A seat's
+own `env:` value for either name wins. See "The runtime directory, on Linux" in the rig spec reference.
 
 
 ## Start the kernel and check its state

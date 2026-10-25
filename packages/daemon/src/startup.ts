@@ -53,6 +53,7 @@ import { ClaudeResumeAdapter } from "./adapters/claude-resume.js";
 import { CodexResumeAdapter } from "./adapters/codex-resume.js";
 import { codexDaemonSupportProbe } from "./domain/codex-daemon-support.js";
 import { claudeConfigRootFor, declaredRuntimeHomes, seatRuntimeHome } from "./domain/seat-runtime-home.js";
+import { seatRuntimeDir } from "./domain/seat-runtime-dir.js";
 import { codexNetworkDefaultReader } from "./domain/codex-network-default.js";
 import { codexUsageReader } from "./domain/provider/codex-usage-reader.js";
 import { CodexUsageWindows } from "./domain/provider/codex-usage-windows.js";
@@ -670,6 +671,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // Ordinary shell/config roots remain daemon-selected; seat overrides are merged by the adapter.
     env: { ...Object.fromEntries(["LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "CLAUDE_CONFIG_DIR"]
       .map(key => [key, process.env[key]])), ...launchSessionEnv },
+    // #2030: on Linux, the daemon's runtime directory, with a session bus address that can't connect.
+    runtimeDir: seatRuntimeDir(process.env),
   });
   const tmuxOptionDefaults = new TmuxOptionDefaultsApplier({
     tmuxAdapter,

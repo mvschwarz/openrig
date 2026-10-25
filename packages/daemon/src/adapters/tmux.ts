@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import type { ComposerSnapshot } from "../domain/composer-prompts.js";
 import { inspectComposerInput } from "../domain/session-transport.js";
 import { parentSessionEnvKeys, removeParentSessionEnv } from "../domain/parent-session-env.js";
+import { addSeatRuntimeDir } from "../domain/seat-runtime-dir.js";
 import type { TmuxControlExec } from "./tmux-control.js";
 
 export type ExecFn = (cmd: string) => Promise<string>;
@@ -369,7 +370,9 @@ function usableEnvLine(lines: readonly string[], name: string): boolean {
 
 export class TmuxAdapter {
   /** Read for each new agent/successor. Unconfigured adapters retain legacy behavior. */
-  launchEnvironment?: () => { inheritTmuxEnvironment: boolean; env: Readonly<Record<string, string | undefined>> };
+  launchEnvironment?: () => { inheritTmuxEnvironment: boolean; env: Readonly<Record<string, string | undefined>>;
+    /** The runtime directory a seat gets when it has none of its own (seat-runtime-dir.ts); none on macOS. */
+    runtimeDir?: string };
 
   /** Reset before the selected user shell runs, without changing the server or other sessions.
    * Multiple tmux command arguments execute directly; only this fixed non-interactive sh runs
@@ -391,7 +394,10 @@ export class TmuxAdapter {
         .trim().split(/\s+/).filter(key => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key));
       const baseline = { ...Object.fromEntries(updated.map(key => [key, process.env[key]])), ...policy.env };
       removeParentSessionEnv(baseline);
-      const values = Object.entries({ ...baseline, ...seatEnv })
+      // A seat's own value (its env:, a one-off name, or a name in update-environment) wins over the runtime directory.
+      const selected: Record<string, string | undefined> = { ...baseline, ...seatEnv };
+      addSeatRuntimeDir(selected, policy.runtimeDir);
+      const values = Object.entries(selected)
         .filter((entry): entry is [string,string] => entry[1] !== undefined && !["TMUX", "TMUX_PANE", "TERM", "SHELL"].includes(entry[0]))
         .map(([key,value]) => {
           if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error("Invalid environment name");
