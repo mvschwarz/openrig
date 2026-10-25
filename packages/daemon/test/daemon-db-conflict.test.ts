@@ -104,6 +104,31 @@ it("says ownership is unknown when a matching record's listener doesn't answer i
   expect(console.warn).toHaveBeenCalledWith(expect.stringContaining(`the listener recorded for pid ${pid} on port 17433 didn't answer within 500 ms): ownership is unknown`));
 });
 
+// A health answer that starts but can't be read: its body aborts, or a 200 isn't JSON.
+const unreadable = {
+  "body aborts": () => new Response(new ReadableStream({ start(controller) { controller.error(new DOMException("body aborted", "AbortError")); } }), { status: 200 }),
+  "not JSON": () => new Response("{invalid", { status: 200 }),
+};
+it.each(Object.keys(unreadable))("says ownership is unknown when a matching record's listener answer can't be read (%s), in both modes", async kind => {
+  vi.stubGlobal("fetch", vi.fn(async () => unreadable[kind as keyof typeof unreadable]()));
+  for (const mode of ["warn", "stop"]) {
+    policy = mode;
+    vi.mocked(console.warn).mockClear();
+    openDb.mockClear();
+    await expect(createDaemon({ dbPath })).rejects.toThrow("fixture reached database open");
+    expect(openDb).toHaveBeenCalledExactlyOnceWith(dbPath);
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining(`the listener recorded for pid ${pid} on port 17433 gave an answer that couldn't be read): ownership is unknown`));
+  }
+});
+
+it("adds no warning when the recorded listener answers for another pid", async () => {
+  policy = "stop";
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ pid: pid + 1 })));
+  await expect(createDaemon({ dbPath })).rejects.toThrow("fixture reached database open");
+  expect(console.warn).not.toHaveBeenCalledWith(expect.stringContaining("Couldn't verify"));
+  expect(console.warn).not.toHaveBeenCalledWith(expect.stringContaining("Another live daemon"));
+});
+
 it("says ownership is unknown when the holder's own files can't be read and no record confirms it", async () => {
   writeFileSync(join(root, "daemon.json"), JSON.stringify({ pid: pid + 1, db: dbPath, port: 17433 }));
   holders.mockImplementation((args: string[]) => args[0] === "-t" ? `${pid}\n` : { error: lsofEnded["timed out"] });

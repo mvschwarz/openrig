@@ -118,17 +118,27 @@ export async function daemonDatabaseWarnings(dbPath: string, home: string, selec
         const modifiedAt = statSync(recordPath).mtime.toISOString();
         if (record.pid !== pid || typeof record.db !== "string" || resolveForContainment(record.db) !== db
           || !Number.isInteger(record.port) || record.port < 1 || record.port > 65535) continue;
+        // A matching record whose listener gives no answer, or an answer that can't be read, is unknown, not a
+        // stale record. Only an answer that parses and names another pid is a definite non-match.
+        const listener = `the listener recorded for pid ${pid} on port ${record.port}`;
         let response: Response;
         try {
           response = await fetch(`http://127.0.0.1:${record.port}/healthz`, { signal: AbortSignal.timeout(500) });
         } catch (error) {
-          // A matching record whose listener gives no answer is unknown, not a stale record.
-          unknown = `the listener recorded for pid ${pid} on port ${record.port} ${(error as { name?: unknown }).name === "TimeoutError" ? "didn't answer within 500 ms" : "didn't answer"}`;
+          unknown = `${listener} ${(error as { name?: unknown }).name === "TimeoutError" ? "didn't answer within 500 ms" : "didn't answer"}`;
           continue;
         }
-        if (!response.ok || (await response.json() as { pid?: unknown }).pid !== pid) continue;
+        if (!response.ok) continue;
+        let health: { pid?: unknown };
+        try {
+          health = await response.json() as { pid?: unknown };
+        } catch (error) {
+          unknown = `${listener} ${(error as { name?: unknown }).name === "TimeoutError" ? "didn't finish answering within 500 ms" : "gave an answer that couldn't be read"}`;
+          continue;
+        }
+        if (health?.pid !== pid) continue;
         return { confirmed: `At startup: Another live daemon (pid ${pid}) had database ${db} open. Matching record ${recordPath}, modified ${modifiedAt}: recorded home ${resolveForContainment(candidate)} (current home unconfirmed). This daemon's OPENRIG_HOME is ${resolvedHome}.` };
-      } catch { /* A stale/unreadable record or a listener that answers for another pid is not a live-daemon claim. */ }
+      } catch { /* A stale or unreadable record is not a live-daemon claim. */ }
     }
     return unknown === undefined ? undefined : { unknown };
   }));
