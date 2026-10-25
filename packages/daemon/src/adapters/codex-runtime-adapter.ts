@@ -613,7 +613,17 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
     const command = `node "${relay}"`;
     const keySource = canonicalCodexHookSource(hooksPath);
-    let config = upsertCodexFeaturesHooksEnabled(stripCodexActivityHooks(existing));
+    const stripped = upsertCodexFeaturesHooksEnabled(stripCodexActivityHooks(existing));
+    let before: unknown = null;
+    let expected: { hooks?: { state?: CodexHookState } } | null = null;
+    try { before = parseToml(existing); expected = parseToml(stripped) as { hooks?: { state?: CodexHookState } }; }
+    catch (err) {
+      console.error(`[openrig] codex activity hooks skipped: ${configPath} can't be read as TOML (${(err as Error).message}); left untouched`);
+      return;
+    }
+    if (!expected) return;
+    const inlineSource = canonicalCodexHookSource(configPath);
+    let config = stripped;
     for (const event of OPENRIG_ACTIVITY_HOOK_EVENTS) {
       const groups = document.hooks[event] ?? [];
       const found = groups.findIndex(isOpenRigActivityGroup);
@@ -622,6 +632,21 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       document.hooks[event] = groups;
       const { key, hash } = computeCodexHookTrust(event, { keySource, command, timeoutSec: 5, groupIndex, statusMessage: OPENRIG_ACTIVITY_STATUS });
       config = upsertCodexHookTrust(config, key, hash);
+      // A person's disable of OpenRig's inline hook moves with it; an existing choice at the new key is kept as it is.
+      const inlineIndex = openRigInlineGroupIndex(before, event);
+      const disabled = inlineIndex >= 0
+        && codexHookStateOf(before)[`${inlineSource}:${CODEX_HOOK_EVENT_KEY_LABEL[event]}:${inlineIndex}:0`]?.enabled === false;
+      if (disabled) config = upsertCodexHookDisabled(config, key);
+      const state = ((expected.hooks ??= {}).state ??= {});
+      state[key] = { ...state[key], trusted_hash: hash, ...(disabled ? { enabled: false } : {}) };
+    }
+    // The line writers must give exactly the planned fields in valid TOML (they don't read every TOML spelling);
+    // otherwise neither file changes, and OpenRig's old inline block, if any, stays working.
+    try {
+      if (!isDeepStrictEqual(parseToml(config), expected)) throw new Error("its trust records couldn't be written exactly");
+    } catch (err) {
+      console.error(`[openrig] codex activity hooks skipped: ${configPath}: ${(err as Error).message}; left untouched`);
+      return;
     }
     const json = `${JSON.stringify(document, null, 2)}\n`;
     if (json !== original) this.fs.writeFile(hooksPath, json);
@@ -668,28 +693,37 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   removeCodexActivityHooks(home?: string): void {
     const configPath = this.resolveCodexConfigPath(home);
     const hooksPath = nodePath.join(nodePath.dirname(configPath), "hooks.json");
+    const existing = this.fs.exists(configPath) ? this.fs.readFile(configPath) : null;
+    let updated = existing === null ? null : stripCodexActivityHooks(existing);
     if (this.fs.exists(hooksPath)) {
-      // Only OpenRig's marked groups leave; the user's stay in place.
+      // Only OpenRig's groups leave. Codex keys trust and disables by position, so each later group's state moves with it.
       try {
         const original = this.fs.readFile(hooksPath);
         const document = parseCodexHooksJson(original);
+        const keySource = canonicalCodexHookSource(hooksPath);
+        let config = updated ?? "";
+        const expected = parseToml(config) as { hooks?: { state?: CodexHookState } };
         for (const event of OPENRIG_ACTIVITY_HOOK_EVENTS) {
           const groups = document.hooks[event];
           if (!groups) continue;
-          const kept = groups.filter((group) => !isOpenRigActivityGroup(group));
-          if (kept.length > 0) document.hooks[event] = kept;
+          const kept = groups.flatMap((group, index) => isOpenRigActivityGroup(group) ? [] : [index]);
+          if (kept.length === groups.length) continue;
+          const prefix = `${keySource}:${CODEX_HOOK_EVENT_KEY_LABEL[event]}:`;
+          const newIndexOf = (index: number) => { const at = kept.indexOf(index); return at < 0 ? null : at; };
+          config = rekeyCodexHookStateText(config, prefix, newIndexOf);
+          if (expected.hooks?.state) expected.hooks.state = rekeyCodexHookState(expected.hooks.state, prefix, newIndexOf);
+          if (kept.length > 0) document.hooks[event] = kept.map((index) => groups[index]!);
           else delete document.hooks[event];
         }
+        if (!isDeepStrictEqual(parseToml(config), expected)) throw new Error("its hooks' trust records couldn't be moved exactly");
         const json = `${JSON.stringify(document, null, 2)}\n`;
         if (json !== original) this.fs.writeFile(hooksPath, json);
+        if (updated !== null) updated = config;
       } catch (err) {
-        console.error(`[openrig] codex activity hook removal skipped for ${hooksPath}: ${(err as Error).message}`);
+        console.error(`[openrig] codex activity hook removal skipped for ${hooksPath}: ${(err as Error).message}; left untouched`);
       }
     }
-    if (!this.fs.exists(configPath)) return;
-    const existing = this.fs.readFile(configPath);
-    const updated = stripCodexActivityHooks(existing);
-    if (updated !== existing) {
+    if (existing !== null && updated !== null && updated !== existing) {
       this.fs.writeFile(configPath, updated);
     }
   }
@@ -2079,14 +2113,94 @@ function openRigActivityGroup(command: string): { hooks: Array<Record<string, un
   return { hooks: [{ type: "command", command, timeout: 5, statusMessage: OPENRIG_ACTIVITY_STATUS }] };
 }
 
-/** OpenRig's own group, for any relay path: no matcher, one command handler running the activity relay, with our status. */
+/** Where OpenRig's activity relay ships, in this install or an earlier one (the absolute path moves on upgrade). */
+const OPENRIG_ACTIVITY_RELAY_SUFFIX = "/assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs";
+
+/** A hook command that runs OpenRig's own shipped activity relay, not a person's script that shares its name. */
+function isOpenRigRelayCommand(command: unknown): boolean {
+  const relay = typeof command === "string" ? /^node "(.*)"$/.exec(command)?.[1] : undefined;
+  return relay !== undefined && relay.replaceAll("\\", "/").endsWith(OPENRIG_ACTIVITY_RELAY_SUFFIX);
+}
+
+/** OpenRig's own group, exactly as it authors it: no matcher, and one handler with only our fields, our status and
+ *  timeout, running OpenRig's shipped relay. Anything else is a person's group and is left alone. */
 function isOpenRigActivityGroup(group: unknown): boolean {
   if (group === null || typeof group !== "object") return false;
   const { hooks, ...rest } = group as { hooks?: unknown };
   if (Object.keys(rest).length > 0 || !Array.isArray(hooks) || hooks.length !== 1) return false;
-  const handler = hooks[0] as Record<string, unknown> | null;
-  return !!handler && handler.type === "command" && handler.statusMessage === OPENRIG_ACTIVITY_STATUS
-    && typeof handler.command === "string" && /^node ".*activity-relay\.cjs"$/.test(handler.command);
+  const handler = hooks[0];
+  if (handler === null || typeof handler !== "object") return false;
+  const { type, command, timeout, statusMessage, ...extra } = handler as Record<string, unknown>;
+  return Object.keys(extra).length === 0 && type === "command" && timeout === 5 && statusMessage === OPENRIG_ACTIVITY_STATUS
+    && isOpenRigRelayCommand(command);
+}
+
+type CodexHookState = Record<string, Record<string, unknown>>;
+
+function codexHookStateOf(document: unknown): CodexHookState {
+  return (document as { hooks?: { state?: CodexHookState } } | null)?.hooks?.state ?? {};
+}
+
+/** The index of OpenRig's inline group for `event` among a parsed config.toml's inline groups, or -1. */
+function openRigInlineGroupIndex(document: unknown, event: string): number {
+  const groups = (document as { hooks?: Record<string, unknown> } | null)?.hooks?.[event];
+  if (!Array.isArray(groups)) return -1;
+  return groups.findIndex((group) => {
+    const handlers = (group as { hooks?: unknown } | null)?.hooks;
+    const handler = Array.isArray(handlers) && handlers.length === 1 ? handlers[0] as Record<string, unknown> | null : null;
+    return !!handler && handler.type === "command" && Number(handler.timeout) === 5 && isOpenRigRelayCommand(handler.command);
+  });
+}
+
+/** Write `enabled = false` into one `[hooks.state."<key>"]` table (the trust write creates it first). */
+function upsertCodexHookDisabled(content: string, key: string): string {
+  const header = `[hooks.state.${JSON.stringify(key)}]`;
+  const lines = content.split("\n");
+  const at = lines.findIndex((line) => line.trim() === header);
+  if (at < 0) return `${content.replace(/\n*$/, "")}\n\n${header}\nenabled = false\n`;
+  let end = lines.length;
+  for (let i = at + 1; i < lines.length; i++) if (lines[i]!.trim().startsWith("[")) { end = i; break; }
+  const enabledAt = lines.findIndex((line, i) => i > at && i < end && /^\s*enabled\s*=/.test(line));
+  if (enabledAt >= 0) lines[enabledAt] = "enabled = false";
+  else lines.splice(at + 1, 0, "enabled = false");
+  return lines.join("\n");
+}
+
+/** The parsed `hooks.state` after an event's groups move (`newIndexOf`; null = the group left): a group's tables move with it. */
+function rekeyCodexHookState(state: CodexHookState, prefix: string, newIndexOf: (index: number) => number | null): CodexHookState {
+  const next: CodexHookState = {};
+  for (const [key, value] of Object.entries(state)) {
+    const tail = key.startsWith(prefix) ? /^(\d+):(\d+)$/.exec(key.slice(prefix.length)) : null;
+    if (!tail) { next[key] = value; continue; }
+    const index = newIndexOf(Number(tail[1]));
+    if (index !== null) next[`${prefix}${index}:${tail[2]}`] = value;
+  }
+  return next;
+}
+
+/** The same move on config.toml's text: rename each moved group's `[hooks.state."<key>"]` header, and drop a removed
+ *  group's table. Other spellings aren't touched; the caller compares the parsed result before writing. */
+function rekeyCodexHookStateText(content: string, prefix: string, newIndexOf: (index: number) => number | null): string {
+  const out: string[] = [];
+  let dropping = false;
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("[")) {
+      dropping = false;
+      const quoted = /^\[hooks\.state\.(".*")\]$/.exec(trimmed)?.[1];
+      let key: string | undefined;
+      try { key = quoted ? JSON.parse(quoted) as string : undefined; } catch { key = undefined; }
+      const tail = key?.startsWith(prefix) ? /^(\d+):(\d+)$/.exec(key.slice(prefix.length)) : null;
+      if (tail) {
+        const index = newIndexOf(Number(tail[1]));
+        if (index === null) { dropping = true; continue; }
+        out.push(`[hooks.state.${JSON.stringify(`${prefix}${index}:${tail[2]}`)}]`);
+        continue;
+      }
+    }
+    if (!dropping) out.push(line);
+  }
+  return out.join("\n");
 }
 
 /**
