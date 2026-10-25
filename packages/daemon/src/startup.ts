@@ -111,7 +111,7 @@ import { TranscriptStore } from "./domain/transcript-store.js";
 import { resumeRunningTranscriptCaptures, wireTranscriptCaptureStops } from "./domain/transcript-capture.js";
 import { probeSessionActivity, SessionTransport } from "./domain/session-transport.js";
 import { AgentActivityStore } from "./domain/agent-activity-store.js";
-import { hookOrPaneActivity } from "./domain/node-inventory.js";
+import { hookOrPaneActivity, nodeSessionConfirmedMissing } from "./domain/node-inventory.js";
 import { HistoryQuery } from "./domain/history-query.js";
 import { AskService } from "./domain/ask-service.js";
 import { WakeResolveService, WAKE_SESSIONS_SQL } from "./domain/wake-resolve-service.js";
@@ -2195,7 +2195,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     queueRepoInstance.attachActivityReader((session) => {
       session = physicalSessionName(db, session);
       const node = db.prepare("SELECT node_id FROM sessions WHERE session_name = ? ORDER BY id DESC LIMIT 1").get(session) as { node_id: string } | undefined;
-      return node ? seatActivityService.getSeatState(node.node_id) : null;
+      // A confirmed-missing session reads unknown, as in the node inventory: its last Stop
+      // or pane sample can't stand for a seat that no longer exists.
+      return node && !nodeSessionConfirmedMissing(db, node.node_id) ? seatActivityService.getSeatState(node.node_id) : null;
     });
     const watchdogPolicyEngine = new WatchdogPolicyEngine({
       jobsRepo: watchdogJobsRepoInstance,
