@@ -2,10 +2,10 @@ import { expect, it } from "vitest";
 import { DaemonClient } from "../src/daemon-client.js";
 import { hydrateSnapshot } from "../src/hydrate.js";
 import { createViewState, emptySnapshot, computeExplorerRows } from "../src/state.js";
-import { attentionLines, replyAct } from "../src/attention/attention-model.js";
+import { attentionLines, replyAct, answerRequest } from "../src/attention/attention-model.js";
 import { parseCommand } from "../src/grammar.js";
 import type { AttentionRead } from "@openrig/daemon/attention";
-import type { FleetSnapshot } from "../src/types.js";
+import type { Action, FleetSnapshot } from "../src/types.js";
 
 it.each([140, 80])("keeps readable summaries, passive exact source navigation and Back at width %i", async width => {
   const requests: string[] = [];
@@ -85,10 +85,10 @@ it("answers an ask from its request view as Steering does: the served Approve, a
   wanted = parked;
   view.dispatch({ type: "back" }); view.dispatch({ type: "attention-open", id: parked.id }); await refresh();
   expect(attentionLines(view.get(), snap, 140).some(l => l.action?.type === "act")).toBe(false);
-  // What the driver loop sends for that act: Steering's own write, nothing else.
-  await client.missionControlAction({ verb: "approve", qitemId: "quiet-ask", actorSession: "human-founder@kernel" });
+  // What the driver loop sends for that act: Steering's own write, with the primary user's authority, nothing else.
+  await client.missionControlAction(answerRequest(approve!.action as Extract<Action, { type: "act"; act: "answer" }>));
   expect(requests.filter(r => r.method === "POST")).toEqual([
-    { method: "POST", path: "/api/mission-control/action", body: { verb: "approve", qitemId: "quiet-ask", actorSession: "human-founder@kernel" } },
+    { method: "POST", path: "/api/mission-control/action", body: { verb: "approve", qitemId: "quiet-ask", actorSession: "human-founder@kernel", authority: "primary-user" } },
   ]);
 });
 

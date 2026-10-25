@@ -1,0 +1,155 @@
+// Primary-user actions: the person at the terminal acts on anyone's ask, and the record says both who acted and who was
+// asked. A registered person without that authority can't settle another person's ask. Real SQLite (all migrations),
+// people registered in a temporary home, and the real Mission Control route and write contract, called with no seat
+// header, as the TUI calls it.
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type Database from "better-sqlite3";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Hono } from "hono";
+import { createDb } from "../src/db/connection.js";
+import { migrate } from "../src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { EventBus } from "../src/domain/event-bus.js";
+import { QueueRepository } from "../src/domain/queue-repository.js";
+import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
+import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
+import { missionControlRoutes } from "../src/routes/mission-control.js";
+import { addHumanFragment } from "../src/domain/gateway/human-registry.js";
+import { setDefaultPerson } from "../src/domain/gateway/participants.js";
+
+const ASKER = "writer@rig";
+
+describe("the primary user acts on anyone's ask, recorded as themselves on that person's ask", () => {
+  let db: Database.Database;
+  let repo: QueueRepository;
+  let home: string;
+  let app: Hono;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "primary-user-actions-"));
+    vi.stubEnv("OPENRIG_HOME", home);
+    db = createDb();
+    migrate(db, ALL_MIGRATIONS);
+    const bus = new EventBus(db);
+    repo = new QueueRepository(db, bus, { validateRig: () => true });
+    const contract = new MissionControlWriteContract({ db, eventBus: bus, queueRepo: repo, actionLog: new MissionControlActionLog(db) });
+    app = new Hono();
+    app.use("*", async (c, next) => { c.set("queueRepo" as never, repo as never); c.set("eventBus" as never, bus as never); c.set("missionControlWriteContract" as never, contract as never); await next(); });
+    app.route("/api/mission-control", missionControlRoutes());
+  });
+  afterEach(() => { vi.unstubAllEnvs(); db.close(); rmSync(home, { recursive: true, force: true }); });
+
+  const register = (...ids: string[]) => {
+    for (const entityId of ids) expect(addHumanFragment({
+      entityId, class: "human", displayName: entityId, address: `${entityId}@external`,
+      connectorBindings: [{ kind: "slack", connectorRef: "primary", secretsRef: `vault://slack/${entityId}`, role: "primary", handle: `U${entityId.toUpperCase()}` }],
+      prefs: { deliveryClass: "B" },
+    }, home)).toMatchObject({ ok: true });
+  };
+  const ask = (to: string, extra: Record<string, unknown> = {}) => repo.create({ sourceSession: ASKER, destinationSession: to, body: "Ship the draft?",
+    summary: "Ship the draft?", humanIntent: "decision", evidenceRef: "/fixture/ask", nudge: false, ...extra } as never);
+  async function act(body: Record<string, unknown>, headers: Record<string, string> = {}) {
+    const response = await app.request("/api/mission-control/action", { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body) });
+    return { status: response.status, body: await response.json() as Record<string, unknown> };
+  }
+  const lastTransition = (qitemId: string) => db.prepare("SELECT state, actor_session, transition_note FROM queue_transitions WHERE qitem_id = ? ORDER BY transition_id DESC LIMIT 1")
+    .get(qitemId) as { state: string; actor_session: string; transition_note: string };
+  const audit = (qitemId: string) => {
+    const row = db.prepare("SELECT action_verb, actor_session, audit_notes_json FROM mission_control_actions WHERE qitem_id = ? ORDER BY rowid DESC LIMIT 1")
+      .get(qitemId) as { action_verb: string; actor_session: string; audit_notes_json: string | null };
+    return { verb: row.action_verb, actor: row.actor_session, notes: row.audit_notes_json ? JSON.parse(row.audit_notes_json) : null };
+  };
+
+  it("answers Sarah's ask in the primary user's words: Mike answered, on Sarah's ask, and the asker reads exactly that", async () => {
+    register("mike", "sarah"); expect(setDefaultPerson("mike", home).ok).toBe(true);
+    const sarahs = await ask("sarah@external");
+    // The TUI claims the actor it shows; the daemon records the primary user whatever the claim.
+    const result = await act({ verb: "answer", qitemId: sarahs.qitemId, actorSession: "sarah@external", authority: "primary-user", decision: "Ship it" });
+    expect(result.status).toBe(200);
+    expect(repo.getById(sarahs.qitemId)?.state).toBe("done");
+    expect(lastTransition(sarahs.qitemId)).toMatchObject({ state: "done", actor_session: "mike@external" });
+    expect(lastTransition(sarahs.qitemId).transition_note).toContain("mike@external, the primary user at the terminal, on sarah@external's ask; not answered by sarah@external");
+    expect(audit(sarahs.qitemId)).toEqual({ verb: "answer", actor: "mike@external", notes: { authority: "primary-user", asked: "sarah@external" } });
+    const reply = repo.list({ limit: 50 }).find((item) => item.replyTo === sarahs.qitemId)!;
+    expect(reply).toMatchObject({ sourceSession: "mike@external", destinationSession: ASKER, summary: "mike@external answered sarah@external's ask: Ship the draft?" });
+    expect(reply.body).toContain("Answered by mike@external, the primary user at the terminal, on sarah@external's ask in OpenRig.");
+  });
+
+  it("records a choice on a question ask the same way", async () => {
+    register("mike", "sarah"); expect(setDefaultPerson("mike", home).ok).toBe(true);
+    const sarahs = await ask("sarah@external", { humanQuestions: [{ id: "go", question: "Ship?", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] }] });
+    const result = await act({ verb: "answer", qitemId: sarahs.qitemId, actorSession: "mike@external", authority: "primary-user", questionId: "go", optionId: "yes" });
+    expect(result.status).toBe(200);
+    expect(repo.getById(sarahs.qitemId)).toMatchObject({ state: "done", humanAnswers: { go: "yes" } });
+    expect(audit(sarahs.qitemId).notes).toEqual({ authority: "primary-user", asked: "sarah@external" });
+    expect(repo.list({ limit: 50 }).find((item) => item.replyTo === sarahs.qitemId)?.sourceSession).toBe("mike@external");
+  });
+
+  it("approves Sarah's pending ask and resolves a row parked on her, recorded as Mike on her ask", async () => {
+    register("mike", "sarah"); expect(setDefaultPerson("mike", home).ok).toBe(true);
+    const pending = await ask("sarah@external");
+    expect((await act({ verb: "approve", qitemId: pending.qitemId, actorSession: "mike@external", authority: "primary-user" })).status).toBe(200);
+    expect(lastTransition(pending.qitemId)).toMatchObject({ state: "done", actor_session: "mike@external" });
+    expect(lastTransition(pending.qitemId).transition_note).toBe("mission-control:approve; by mike@external, the primary user at the terminal, on sarah@external's ask");
+    expect(audit(pending.qitemId)).toEqual({ verb: "approve", actor: "mike@external", notes: { authority: "primary-user", asked: "sarah@external" } });
+
+    const work = await repo.create({ sourceSession: ASKER, destinationSession: "designer@rig", body: "Layout", summary: "Layout", evidenceRef: "/fixture/layout", nudge: false });
+    await repo.update({ qitemId: work.qitemId, actorSession: "designer@rig", state: "blocked", blockedOn: "sarah@external" } as never);
+    expect((await act({ verb: "resolve", qitemId: work.qitemId, actorSession: "mike@external", authority: "primary-user", decision: "Use the wide layout" })).status).toBe(200);
+    expect(lastTransition(work.qitemId)).toMatchObject({ state: "in-progress", actor_session: "mike@external",
+      transition_note: "Use the wide layout; by mike@external, the primary user at the terminal, on sarah@external's ask" });
+    expect(audit(work.qitemId).notes).toEqual({ authority: "primary-user", asked: "sarah@external" });
+  });
+
+  it("resolves a row parked on a registered person's address, which the Feed lists, and only with the authority", async () => {
+    register("mike", "sarah"); expect(setDefaultPerson("mike", home).ok).toBe(true);
+    const work = await repo.create({ sourceSession: ASKER, destinationSession: "designer@rig", body: "Layout", summary: "Layout", evidenceRef: "/fixture/layout", nudge: false });
+    await repo.update({ qitemId: work.qitemId, actorSession: "designer@rig", state: "blocked", blockedOn: "sarah@external" } as never);
+    expect(await act({ verb: "resolve", qitemId: work.qitemId, actorSession: "mike@external", decision: "Wide" })).toMatchObject({ status: 400, body: { error: "answer_not_recorded" } });
+    expect((await act({ verb: "resolve", qitemId: work.qitemId, actorSession: "mike@external", authority: "primary-user", decision: "Wide" })).status).toBe(200);
+    expect(lastTransition(work.qitemId)).toMatchObject({ state: "in-progress", actor_session: "mike@external",
+      transition_note: "Wide; by mike@external, the primary user at the terminal, on sarah@external's ask" });
+  });
+
+  it("with several people and no default, the primary user is unnamed and recorded as the generic human seat", async () => {
+    register("mike", "sarah");
+    const sarahs = await ask("sarah@external");
+    expect((await act({ verb: "approve", qitemId: sarahs.qitemId, actorSession: "sarah@external", authority: "primary-user" })).status).toBe(200);
+    expect(audit(sarahs.qitemId)).toEqual({ verb: "approve", actor: "human@host", notes: { authority: "primary-user", asked: "sarah@external" } });
+  });
+
+  it("a registered person without that authority can't settle another person's ask, pending or parked", async () => {
+    // A legacy seat address is a registered person's when its whole local part is their id.
+    register("mike", "sarah", "human-ana");
+    const pending = await ask("sarah@external");
+    for (const body of [{ verb: "approve" }, { verb: "deny", reason: "no" }, { verb: "answer", decision: "Ship it" }]) {
+      const refused = await act({ qitemId: pending.qitemId, actorSession: "mike@external", ...body });
+      expect(refused).toMatchObject({ status: 400, body: { error: "answer_not_recorded" } });
+    }
+    expect(repo.getById(pending.qitemId)?.state).toBe("pending");
+
+    const work = await repo.create({ sourceSession: ASKER, destinationSession: "designer@rig", body: "Layout", summary: "Layout", evidenceRef: "/fixture/layout", nudge: false });
+    await repo.update({ qitemId: work.qitemId, actorSession: "designer@rig", state: "blocked", blockedOn: "human-ana@host" } as never);
+    expect(await act({ verb: "resolve", qitemId: work.qitemId, actorSession: "mike@external", decision: "Wide" })).toMatchObject({ status: 400, body: { error: "answer_not_recorded" } });
+    expect(repo.getById(work.qitemId)?.state).toBe("blocked");
+    // Sarah settles her own.
+    expect((await act({ verb: "approve", qitemId: pending.qitemId, actorSession: "sarah@external" })).status).toBe(200);
+    expect(audit(pending.qitemId)).toEqual({ verb: "approve", actor: "sarah@external", notes: null });
+  });
+
+  it("a seat's own transport identity is never replaced by the authority", async () => {
+    register("mike", "sarah"); expect(setDefaultPerson("mike", home).ok).toBe(true);
+    const sarahs = await ask("sarah@external");
+    expect((await act({ verb: "approve", qitemId: sarahs.qitemId, actorSession: "mike@external", authority: "primary-user" }, { "X-OpenRig-Session": "orch@rig" })).status).toBe(200);
+    expect(audit(sarahs.qitemId)).toEqual({ verb: "approve", actor: "orch@rig", notes: null });
+  });
+
+  it("with no one registered, acts are recorded as the claimed actor, as before", async () => {
+    const legacy = await ask("human@host");
+    expect((await act({ verb: "answer", qitemId: legacy.qitemId, actorSession: "human@host", authority: "primary-user", decision: "Yes" })).status).toBe(200);
+    expect(audit(legacy.qitemId)).toEqual({ verb: "answer", actor: "human@host", notes: { authority: "primary-user", asked: "human@host" } });
+    expect(repo.list({ limit: 50 }).find((item) => item.replyTo === legacy.qitemId)?.summary).toBe("human@host answered: Ship the draft?");
+  });
+});

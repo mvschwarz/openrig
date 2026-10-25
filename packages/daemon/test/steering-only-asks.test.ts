@@ -278,7 +278,8 @@ describe("an ask to a person is on Steering and the TUI; Slack gets it by their 
     const read = await feed(app, row);
     const item = read.items.find((entry) => entry.id === `queue:${row.qitemId}`)!;
     expect(item.answer).toEqual({ verb: "approve", actorSession: `${HUMAN}@kernel` });
-    expect(read.items.find((entry) => entry.id === `queue:${parked.qitemId}`)?.answer).toBeUndefined();
+    // A row parked on the person is resolved in words, not approved.
+    expect(read.items.find((entry) => entry.id === `queue:${parked.qitemId}`)?.answer).toEqual({ verb: "resolve", actorSession: `${HUMAN}@kernel` });
     const act = (body: Record<string, unknown>) => app.request("/api/mission-control/action", { method: "POST",
       headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     // The TUI posts the served answer; Steering's Approve posts its own card's body for the twin.
