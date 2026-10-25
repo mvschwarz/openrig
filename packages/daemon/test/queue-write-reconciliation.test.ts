@@ -214,17 +214,16 @@ describe("queue unknown-write reconciliation", () => {
     }
   });
 
-  it("keeps the ID in an unreadable-response JSON error and reconciles the full stored body", async () => {
+  it("reads a create back by its ID when its response is unreadable, and reports the full stored body", async () => {
     h.corruptNext();
     const first = await h.run([...createArgs, "--no-nudge"]);
-    expect(first.code).not.toBe(0);
+    expect(first.code).toBe(0);
     const id = h.rows()[0]!.qitem_id;
-    expect(JSON.stringify(first.data)).toContain("unreadable response");
+    expect(first.stderr.join("\n")).toContain(`The create committed after all: row ${id}`);
     expect(JSON.stringify(first.data)).toContain(id);
-    const retry = await h.run([...createArgs, "--id", id, "--no-nudge"]);
-    expect(retry.code).toBe(0);
-    expect(retry.data.body).toBe(BODY);
+    expect(first.data.body).toBe(BODY);
     expect(h.rows()).toHaveLength(1);
+    expect(h.requests.filter((r) => r.path === "/api/queue/create")).toHaveLength(1);
   });
 
   it("does not conflate intentional new creates with equal content; retry must reuse --id", async () => {

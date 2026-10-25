@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import type { QueueDeps } from "../src/commands/queue.js";
 import { createProgram } from "../src/index.js";
-import { DaemonTimeoutError } from "../src/client.js";
+import { DaemonResponseError, DaemonTimeoutError } from "../src/client.js";
 
 vi.mock("../src/daemon-lifecycle.js", async () => {
   const actual = await vi.importActual<Record<string, unknown>>("../src/daemon-lifecycle.js");
@@ -22,13 +22,18 @@ const LOCAL = "http://localhost:7433";
 const REMOTE = "http://vps-b.example:7433";
 const ID = "qitem-20261025050000-0123456789abcdef";
 const AUTH_VALUE = "fixture-only-value";
-const ROW = { qitemId: ID, destinationSession: "dev@rig-b", state: "pending" };
+// What the daemon stores for this create: the destination and body sent, and the sender's session as its source (stamped
+// with the forwarding daemon's host id on a cross-host row).
+const ROW = { qitemId: ID, destinationSession: "dev@rig-b", sourceSession: "lead@rig-a", body: "b", state: "pending" };
+const REMOTE_ROW = { ...ROW, sourceSession: "lead@rig-a@host-a" };
 const FORWARD_UNKNOWN = { status: 502, data: { error: "remote_queue_write_failed", failureClass: "unreachable", outcome: "indeterminate" } };
 
 type Reply = { status: number; data: unknown } | Error;
 type Call = { base: string; method: "get" | "post"; path: string; options?: { timeoutMs?: number; headers?: Record<string, string> } };
 
 function makeDeps(posts: Reply[], gets: Record<string, Reply>): { deps: QueueDeps; calls: Call[] } {
+  // --verify reads the row once and reports what it holds, without waiting.
+  const deliveryVerify = { timeoutMs: 0, intervalMs: 0, sleep: async () => {} };
   const calls: Call[] = [];
   const answer = (reply: Reply | undefined, fallback: Reply) => {
     const r = reply ?? fallback;
@@ -38,6 +43,7 @@ function makeDeps(posts: Reply[], gets: Record<string, Reply>): { deps: QueueDep
   return {
     calls,
     deps: {
+      deliveryVerify,
       lifecycleDeps: {} as QueueDeps["lifecycleDeps"],
       clientFactory: (base: string) => ({
         baseUrl: base,
@@ -78,13 +84,13 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     process.exitCode = undefined;
   });
 
-  async function run(destination: string, posts: Reply[], gets: Record<string, Reply> = {}): Promise<{ calls: Call[]; error: unknown }> {
+  async function run(destination: string, posts: Reply[], gets: Record<string, Reply> = {}, extra: string[] = []): Promise<{ calls: Call[]; error: unknown }> {
     const { deps, calls } = makeDeps(posts, gets);
     const program = createProgram({ queueDeps: deps });
     program.exitOverride();
     let error: unknown = null;
     try {
-      await program.parseAsync(["node", "rig", "queue", "create", "--destination", destination, "--body", "b", "--summary", "s", "--id", ID, "--json"]);
+      await program.parseAsync(["node", "rig", "queue", "create", "--destination", destination, "--body", "b", "--summary", "s", "--id", ID, "--json", ...extra]);
     } catch (err) { error = err; }
     return { calls, error };
   }
@@ -117,7 +123,7 @@ describe("a queue create that got no answer is read back once by its ID", () => 
   it("a cross-host create the destination committed late reads back from that host, with its bearer, never printed", async () => {
     fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${REMOTE}\n    bearer_env: XH_AUTH\n`);
     vi.stubEnv("XH_AUTH", AUTH_VALUE);
-    const { calls, error } = await run("dev@rig-b@vps-b", [FORWARD_UNKNOWN], { [`${REMOTE}/api/queue/${ID}`]: { status: 200, data: ROW } });
+    const { calls, error } = await run("dev@rig-b@vps-b", [FORWARD_UNKNOWN], { [`${REMOTE}/api/queue/${ID}`]: { status: 200, data: REMOTE_ROW } });
     expect(error).toBeNull();
     expect(posts(calls)).toHaveLength(1);
     expect(readBacks(calls)).toEqual([expect.objectContaining({ base: REMOTE, options: expect.objectContaining({ headers: { Authorization: `Bearer ${AUTH_VALUE}` } }) })]);
@@ -134,5 +140,42 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     expect(all).toContain("couldn't read the row back from host 'vps-b'");
     expect(all).toContain("The write outcome is INDETERMINATE");
     expect(process.exitCode).toBe(2);
+  });
+
+  // The daemon returns the stored row for a same-ID create only when its destination and source match, and says when the body
+  // wasn't saved. The read-back holds a row to the same test: a row with this ID that isn't this create leaves it unknown.
+  it.each([
+    ["destination", { ...ROW, destinationSession: "other@rig-c", sourceSession: "other@rig-c", body: "older work" }],
+    ["source", { ...ROW, sourceSession: "someone@rig-z" }],
+    ["body", { ...ROW, body: "older work" }],
+  ])("a row with this ID whose %s differs isn't this create: the outcome stays unknown, and the ID isn't for other work", async (field, row) => {
+    const { calls, error } = await run("dev@rig-b", [new DaemonTimeoutError(`Request to ${LOCAL}/api/queue/create timed out after 5000ms`)],
+      { [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: row } });
+    expect(error).not.toBeNull();
+    expect(posts(calls)).toHaveLength(1);
+    expect(readBacks(calls)).toHaveLength(1);
+    const all = stderr.join("\n");
+    expect(all).not.toContain("committed after all");
+    expect(all).toContain(`Row ${ID} exists but isn't this create (its ${field} differs)`);
+    expect(all).toContain("Don't reuse this ID for other work");
+    expect(all).toContain("The write outcome is INDETERMINATE");
+  });
+
+  it("a create read back after it timed out keeps --verify: its delivery is reported as on any create", async () => {
+    const { calls, error } = await run("dev@rig-b", [new DaemonTimeoutError(`Request to ${LOCAL}/api/queue/create timed out after 5000ms`)],
+      { [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: { ...ROW, lastNudgeResult: "retained:typing_guard" } } }, ["--verify"]);
+    expect(error).toBeNull();
+    expect(posts(calls)).toHaveLength(1);
+    expect(stderr.join("\n")).toContain(`committed after all: row ${ID}`);
+    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ qitemId: ID, persisted: true, delivery: expect.any(Object) });
+  });
+
+  it("a create whose response body was lost after its headers is read back too", async () => {
+    const { calls, error } = await run("dev@rig-b", [new DaemonResponseError(201, "")], { [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: ROW } });
+    expect(error).toBeNull();
+    expect(posts(calls)).toHaveLength(1);
+    expect(readBacks(calls)).toHaveLength(1);
+    expect(stderr.join("\n")).toContain(`committed after all: row ${ID}`);
+    expect(process.exitCode ?? 0).toBe(0);
   });
 });
