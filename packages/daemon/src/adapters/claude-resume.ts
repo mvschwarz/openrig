@@ -1,4 +1,4 @@
-import { withManagedRestoreReads } from "../domain/managed-restore-read-access.js";
+import { withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
 import { operationalLaunchArgs } from "./kernel-authority.js";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { TmuxAdapter } from "./tmux.js";
@@ -30,6 +30,8 @@ export function isClaudeResumeType(resumeType: string | null | undefined): boole
 
 interface ClaudeResumeOptions {
   openrigHome?: string;
+  /** The compaction settings the restore reads from, so the launch grants those files too. */
+  restoreReadPolicy?: () => RestoreReadPolicy | null;
   seatLaunchEnvironment?: SeatLaunchEnvironment;
   claudeManagedLaunch?: ClaudeManagedLaunch;
   listProcesses?: NativeProcessLister;
@@ -97,6 +99,7 @@ export class ClaudeResumeAdapter {
     const appliedLaunch = observeClaudePermission(posture);
     const launchArgs = withManagedRestoreReads(operationalLaunchArgs("claude-code", choice), {
       openrigHome: this.options.openrigHome, session: tmuxSessionName, cwd, nativeSessionId: resumeToken!,
+      ...(this.options.restoreReadPolicy?.() ?? {}),
     });
     const permissionMode = posture + launchArgs.map(arg => ` ${shellQuote(arg)}`).join("");
     const cmd = managed ? managed.command(["--permission-mode", selectedPermissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...additionArgs, "--resume", resumeToken!], claudeResumeLaunchEnv(resumeToken!))

@@ -1,12 +1,19 @@
 import fs from "node:fs";
 import path from "node:path";
 
-interface RestoreReadContext {
+export interface RestoreReadContext {
   openrigHome: string | null | undefined;
   session: string;
   cwd: string;
   nativeSessionId: string;
+  /** `policies.claude_compaction.message_file_path`: the extra the restore request names when the seat has no per-seat one. */
+  extraInstructionFile?: string | null;
+  /** `policies.claude_compaction.preparation_root`: where restore maps go instead of the home's, when set. */
+  preparationRoot?: string | null;
 }
+
+/** The two compaction settings a launch passes so the restore can read the files they name. */
+export type RestoreReadPolicy = Pick<RestoreReadContext, "extraInstructionFile" | "preparationRoot">;
 
 // These are permission patterns, not shell arguments. Keep literal path components
 // literal; only the attempt/timestamp segment below is a wildcard.
@@ -45,9 +52,15 @@ export function withManagedRestoreReads(args: string[], context: RestoreReadCont
       `${home}/plugins/openrig-core/skills/refocusing/SKILL.md`,
       `${home}/plugins/openrig-core/skills/claude-compaction-restore/SKILL.md`,
       `${home}/compaction/post-compact-extra/${seat}.md`,
+      // The generic extra the restore falls back to without a per-seat one; named even before it exists, so granted always.
+      `${home}/compaction/post-compact-extra.md`,
       `${home}/compaction/preparation/${seat}/*/RESTORE-MAP.md`,
     ]),
     ...spellings(context.cwd).map(cwd => `${cwd}/.openrig/compaction/preparation/${seat}/*/RESTORE-MAP.md`),
+    ...(context.extraInstructionFile
+      ? spellings(path.dirname(context.extraInstructionFile)).map(dir => `${dir}/${literalPath(path.basename(context.extraInstructionFile!))}`)
+      : []),
+    ...(context.preparationRoot ? spellings(context.preparationRoot).map(root => `${root}/${seat}/*/RESTORE-MAP.md`) : []),
   ];
   // Fresh/fork launches know their own UUID. Never grant the fork parent's or
   // another seat's packet directory; a legacy name is not a packet identity.
