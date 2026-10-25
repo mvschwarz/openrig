@@ -352,6 +352,13 @@ function parseLines<T>(output: string, parser: (line: string) => T | null): T[] 
     .filter((result): result is T => result !== null);
 }
 
+/** A session-environment listing line gives `name` a usable value: an exact `NAME=` line whose value is not blank
+ *  (any such line counts). A removed (`-NAME`), empty or whitespace-only entry does not. */
+function usableEnvLine(lines: readonly string[], name: string): boolean {
+  const prefix = `${name}=`;
+  return lines.some((line) => line.startsWith(prefix) && line.slice(prefix.length).trim().length > 0);
+}
+
 export class TmuxAdapter {
   /** Read for each new agent/successor. Unconfigured adapters retain legacy behavior. */
   launchEnvironment?: () => { inheritTmuxEnvironment: boolean; env: Readonly<Record<string, string | undefined>> };
@@ -1404,14 +1411,24 @@ export class TmuxAdapter {
    *  distinguishes a genuinely absent var from `tmux show-environment <var>`'s
    *  nonzero lookup exit. */
   async hasSessionEnv(sessionName: string, varName: string): Promise<boolean | null> {
+    const lines = await this.sessionEnvLines(sessionName);
+    return lines === null ? null : usableEnvLine(lines, varName);
+  }
+
+  /** The same usable-presence reading for several variables from ONE fresh listing of the session environment.
+   *  Each requested name maps to true/false; every one maps to null when the environment cannot be inspected. Only
+   *  the requested names are returned, and no value, listing or error text leaves this method. */
+  async hasSessionEnvBatch(sessionName: string, varNames: readonly string[]): Promise<Record<string, boolean | null>> {
+    const lines = await this.sessionEnvLines(sessionName);
+    return Object.fromEntries(varNames.map((name) => [name, lines === null ? null : usableEnvLine(lines, name)]));
+  }
+
+  private async sessionEnvLines(sessionName: string): Promise<string[] | null> {
     const target = exactTarget(sessionName, "session");
     try {
       const output = await this.run(["tmux", "show-environment", "-t", target],
         `tmux show-environment -t ${shellQuote(target)}`);
-      const prefix = `${varName}=`;
-      return output.split(/\r?\n/).some(
-        (line) => line.startsWith(prefix) && line.slice(prefix.length).trim().length > 0,
-      );
+      return output.split(/\r?\n/);
     } catch {
       return null;
     }
