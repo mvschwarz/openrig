@@ -340,6 +340,7 @@ export class SeatRuntimeSwitchService {
       node: { id: node.id, runtime: target, cwd: node.cwd, model: materials.settings.model.value, effort: materials.settings.effort.value,
         advisor: materials.settings.advisor.value, codexConfigProfile: materials.settings.codexConfigProfile.value,
         claudePermissions: override.claudePermissions, kernelAuthority: override.kernelAuthority, teamPermissionDefault: override.teamPermissionDefault,
+        ...(override.codexPermissions ? { codexPermissions: override.codexPermissions } : {}),
         nonInterruptive: rigRepo.getRigNonInterruptive(node.rigId), launchPosture, ...(permissionMode ? { permissionMode } : {}),
         seatEnv: withPluginDirs(rigRepo.getEffectiveSeatEnv(node.id), [corePluginDir, target === "claude-code" ? materials.seatSkills.pluginDir : undefined]),
         ...((corePluginDir || codexCorePluginDir) && node.cwd ? { seatProjectDir: node.cwd } : {}) },

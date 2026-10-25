@@ -249,6 +249,19 @@ describe("live seat runtime switch", () => {
     expect(nodeRow()).toMatchObject({ runtime: "codex", codex_config_profile: "deep", advisor: null });
   });
 
+  it("launches the Codex successor with the seat's retained Codex envelope, not the policy's posture alone", async () => {
+    // A narrow envelope kept while the seat ran Claude, under a policy that would bypass approvals and the sandbox.
+    const envelope = { sandbox: "read-only", approval: "on-request" };
+    db.prepare(`UPDATE nodes SET runtime = 'claude-code', codex_config_profile = NULL, codex_permissions_json = ?,
+      permission_policy = 'builtin:yolo', policy_origin = 'builtin', policy_launch_posture = 'full_bypass' WHERE id = ?`).run(JSON.stringify(envelope), nodeId);
+    const codex = adapter("codex");
+    const svc = service({ runtimeAdapters: { codex, "claude-code": adapter("claude-code") } });
+    successorConfirms(svc);
+    expect(await svc.setRuntime({ seatRef: SEAT, runtime: "codex", reason: "back to Codex" })).toMatchObject({ ok: true, to: "codex" });
+    // The staged successor's own binding carries the envelope, which the Codex adapter emits in place of the posture.
+    expect(codex.launchHarness).toHaveBeenCalledWith(expect.objectContaining({ codexPermissions: envelope }), expect.objectContaining({ name: SEAT }));
+  });
+
   it("without a confirmation in time nothing changes: the current occupant keeps the seat and its claim, and the staged successor is retired", async () => {
     const claimed = await queueRepo.create({ sourceSession: "orch-lead@seat-rig", destinationSession: SEAT, body: "review" });
     queueRepo.claim({ qitemId: claimed.qitemId, destinationSession: SEAT });
