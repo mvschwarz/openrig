@@ -10,7 +10,7 @@ import { prepareHerdrLaunchConfig } from "./herdr-launch-config.js";
 import { openRexView } from "./terminal-window-rex.js";
 import type { OpenViewResult } from "./commands/terminal.js";
 
-interface Pane { seat: string; label: string; paneCommand: string }
+interface Pane { seat: string; label: string; paneCommand: string; recoveryCommand?: string }
 interface HerdrTab { workspace_id: string; tab_id: string; label: string }
 interface Preview {
   planId: string;
@@ -233,7 +233,7 @@ async function hasLiveAttachments(existing: HerdrTab, tabs: HerdrTab[], pages: P
       const label = pageLabel(index);
       const matches = tabs.filter(tab => tab.workspace_id === existing.workspace_id && tab.label === label);
       if (matches.length !== 1) return false;
-      const remaining = page.map(pane => pane.paneCommand);
+      const remaining = page.map(pane => pane.recoveryCommand ?? pane.paneCommand);
       for (const pane of panes.filter(pane => pane.tab_id === matches[0]!.tab_id)) {
         if (remaining.length === 0) break;
         const result = JSON.parse(await deps.exec("/usr/bin/env", [...herdrArgs, "pane", "process-info", "--pane", pane.pane_id]));
@@ -359,7 +359,8 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
     const directCommand = herdr && socket
       ? `${configPrefix}env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH=${shellQuote(socket)}${configEnv} ${shellQuote(herdr)}`
       : `env -u TMUX ${composed.opened[0]!.paneCommand.replace(/^ssh /, "ssh -t ")}`;
-    manualCommand = directCommand;
+    manualCommand = herdr && socket ? directCommand
+      : `env -u TMUX ${(composed.opened[0]!.recoveryCommand ?? composed.opened[0]!.paneCommand).replace(/^ssh /, "ssh -t ")}`;
     if (typeof launchWindow === "string") {
       const headless = deps.env["SSH_CONNECTION"] || deps.env["SSH_CLIENT"] || deps.env["SSH_TTY"]
         || (deps.platform === "linux" && !deps.env["DISPLAY"] && !deps.env["WAYLAND_DISPLAY"]);
@@ -375,7 +376,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       // A CLI session would override the daemon's resolved socket in Herdr.
       if (typeof launchWindow === "function") {
         windowAttempted = true;
-        window = await launchWindow(configPrefix ? `/bin/sh -c ${shellQuote(manualCommand)}` : manualCommand);
+        window = await launchWindow(configPrefix ? `/bin/sh -c ${shellQuote(directCommand)}` : directCommand);
       }
       await measureWindow();
       let alive = false;

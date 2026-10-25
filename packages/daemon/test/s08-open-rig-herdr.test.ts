@@ -84,11 +84,14 @@ function service(herdr: TerminalProvider, cmux = new RecordingCmux()): { svc: Te
   return { svc: new TerminalService(deps), cmux };
 }
 
-const cellSeats = (root: unknown): string[] => {
+const cellSeats = (root: unknown, composed: ComposedView): string[] => {
   const out: string[] = [];
   const walk = (n: any) => {
     if (!n || typeof n !== "object") return;
-    if (n.type === "pane" && Array.isArray(n.command)) { const m = /attach -t '([^']+)'/.exec(n.command.join(" ")); if (m) out.push(m[1]!); }
+    if (n.type === "pane" && Array.isArray(n.command)) {
+      const pane = composed.opened.find(pane => pane.paneCommand === n.command[2]);
+      if (pane) out.push(pane.seat);
+    }
     for (const k of ["first", "second", "children", "left", "right", "top", "bottom"]) {
       const v = n[k]; if (Array.isArray(v)) v.forEach(walk); else walk(v);
     }
@@ -110,8 +113,8 @@ describe("S08 — the rig opens as one Herdr space, 16 cells per tab", () => {
     expect(create.params).toEqual({ focus: false, label: RIG });
     const applies = requests.filter((r) => r.method === "layout.apply");
     expect(applies.map((a) => a.params["tab_label"])).toEqual([`openrig:rig:${RIG}#${preview.planId.slice(0, 16)}#tok/1`, `openrig:rig:${RIG}#${preview.planId.slice(0, 16)}#tok/2`]);
-    expect(applies.map((a) => cellSeats(a.params["root"]).length)).toEqual([16, 1]);
-    expect([...cellSeats(applies[0]!.params["root"]), ...cellSeats(applies[1]!.params["root"])]).toEqual(rows.map((r) => r.canonicalSessionName));
+    expect(applies.map((a) => cellSeats(a.params["root"], preview.composed).length)).toEqual([16, 1]);
+    expect([...cellSeats(applies[0]!.params["root"], preview.composed), ...cellSeats(applies[1]!.params["root"], preview.composed)]).toEqual(rows.map((r) => r.canonicalSessionName));
   });
 
   it("the first tab is a 4×4 equal grid; the preview plan pages the same way", async () => {

@@ -82,19 +82,22 @@ it.skipIf(process.platform === "win32")("keeps all four terminal tiles on their 
   });
 });
 
-it.skipIf(process.platform === "win32").each(["detach", "identity", "removed", "unmanaged"])("ends the tile on %s without attaching a sibling", async mode => {
+it.skipIf(process.platform === "win32").each(["detach", "identity", "removed", "unmanaged", "removed-marker"])("ends the tile on %s without attaching a sibling", async mode => {
   await fixture(async ({ socket, seats, viewer, adapter }) => {
     await seats(["new-session", "-d", "-s", "seat", ...(mode === "unmanaged" ? [] : ["-e", "OPENRIG_NODE_ID=original"]), "sleep 60"]);
-    const command = tileAttachArgv("tmux", ["-S", socket], "seat", false, 2).map(shellQuote).join(" ");
+    if (mode === "removed-marker") await seats(["set-environment", "-r", "-t", "=seat", "OPENRIG_NODE_ID"]);
+    const command = tileAttachArgv("tmux", ["-S", socket], "seat", false, mode === "detach" ? 4 : 2).map(shellQuote).join(" ");
     await viewer(["new-session", "-d", "-s", "view", terminal(command)]);
     await until(async () => (await seats(["list-clients", "-t", "=seat", "-F", "#{session_name}"])) === "seat");
     if (mode === "detach") await seats(["detach-client", "-s", "=seat"]);
     else {
       expect((await adapter.killSession("seat")).ok).toBe(true);
       const name = mode === "removed" ? "seat-prefix" : "seat";
-      await seats(["new-session", "-d", "-s", name, "-e", "OPENRIG_NODE_ID=other-seat", "sleep 60"]);
+      await seats(["new-session", "-d", "-s", name, "-e", "OPENRIG_NODE_ID=other-seat", "sleep 60",
+        ...(mode === "removed-marker" ? [";", "set-environment", "-r", "-t", "=seat", "OPENRIG_NODE_ID"] : [])]);
     }
     await until(async () => (await viewer(["display-message", "-p", "-t", "=view:", "#{pane_dead}"])) === "1");
     expect(await seats(["list-clients", "-F", "#{session_name}"])).toBe("");
+    if (mode === "detach") expect(await viewer(["capture-pane", "-p", "-t", "=view:"])).not.toContain("No replacement");
   });
 });

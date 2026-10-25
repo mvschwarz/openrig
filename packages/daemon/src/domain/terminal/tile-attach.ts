@@ -12,7 +12,8 @@ export function tileAttachArgv(
     'target=$1; shift;',
     `snapshot=$("$@" display-message -p -t "=$target:" "#{pid} #{session_id}" 2>/dev/null) || exec "$@" attach ${ro}-t "=$target";`,
     'node=$("$@" show-environment -t "${snapshot#* }" OPENRIG_NODE_ID 2>/dev/null) || node=;',
-    'if [ -z "${node#*=}" ]; then',
+    'case "$node" in OPENRIG_NODE_ID=?*) ;; *) node=;; esac;',
+    'if [ -z "$node" ]; then',
     'printf "%s\\n" "No managed identity for $target; reopen this view after replacement.";',
     `exec "$@" attach ${ro}-t "\${snapshot#* }"; fi;`,
     'while :; do',
@@ -30,7 +31,7 @@ export function tileAttachArgv(
     // finish; an ordinary Ctrl-b d leaves the original alive and ends the tile.
     'same=$((same + 1)); if [ "$same" -ge 3 ]; then exit 0; fi;',
     'else same=0; fi; else same=0; fi;',
-    '/bin/sleep 1; left=$((left - 1));',
+    'sleep 1; left=$((left - 1));',
     'done;',
     'if [ "$left" -eq 0 ]; then printf "%s\\n" "No replacement for $target; reopen the view with rig terminal open."; exit 0; fi;',
     'done',

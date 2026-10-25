@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { DaemonClient } from "../src/client.js";
 import { openTerminalWindow, type WindowDeps } from "../src/terminal-window.js";
 import { shellQuote } from "../src/cross-host-executor.js";
+import { composeView } from "../../daemon/src/domain/terminal/view-composer.js";
 
 function fixture(options: { herdr?: boolean; ghostty?: string; refusal?: number; empty?: boolean; alive?: boolean } = {}) {
   const panes = ["tui", "advisor", "operator"].map(seat => ({ seat, label: seat, paneCommand: `tmux attach-session -t '=fixture-${seat}'` }));
@@ -182,7 +183,10 @@ describe("desktop terminal view", () => {
     const f = fixture({ herdr });
     f.deps.env = {};
     Object.assign(f.preview, { status: {} });
-    f.preview.composed.opened[0]!.paneCommand = "ssh 'user@remote-host' 'tmux attach-session -t =operator'";
+    Object.assign(f.preview.composed.opened[0]!, {
+      paneCommand: "ssh 'user@remote-host' 'long reconnect loop'",
+      recoveryCommand: "ssh 'user@remote-host' 'tmux attach-session -t =operator'",
+    });
     const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
     expect(result).toMatchObject({ ok: false, windowAttempted: false });
     expect(result.error).toContain("run: env -u TMUX ssh -t 'user@remote-host' 'tmux attach-session -t =operator'");
@@ -233,8 +237,11 @@ describe("desktop terminal view", () => {
 
   it("opens the previewed tmux layout when the expected plan still matches", async () => {
     const f = fixture({ herdr: false });
+    const tile = composeView("kernel", [{ seat: "tui", label: "tui", tmuxSession: "fixture-tui", host: null, readOnly: false, alive: true }], { resolveHost: () => null }).opened[0]!;
+    Object.assign(f.preview.composed.opened[0]!, tile);
     const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps, "bound-plan");
     expect(result).toMatchObject({ ok: true, provider: "tmux", opened: ["tui", "advisor", "operator"] });
+    expect(f.exec.mock.calls.some(([file, args]) => file === "/fixture/bin/tmux" && args.includes(`env -u TMUX ${tile.paneCommand}`))).toBe(true);
   });
 
   it("opens a new Ghostty tab and applies the same daemon plan and Herdr endpoint", async () => {

@@ -52,7 +52,7 @@ A deliberate detach closes the tile after about two seconds. A different seat
 under the old name is never followed. If no replacement returns in time, or a
 session has no managed identity, reopen the rig view with
 `rig terminal open rig:<name> --window` (or your explicit provider). Views
-opened before this change must also be reopened to get this behavior.
+opened before this change must be closed and reopened to get this behavior.
 
 ## Desktop windows and previews
 
