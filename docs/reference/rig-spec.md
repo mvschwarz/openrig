@@ -329,6 +329,10 @@ rig seat status dev-impl@team --json
 Choose one of `--mode`, `--rules`, `--codex-permissions` or `--codex-profile` per call. A seat
 keeps one explicit permission choice: setting an envelope replaces a recorded mode, and setting
 a mode (including `inherit`) clears the envelope, in the same audited write that names both.
+A runtime switch keeps the envelope while the seat runs Claude Code and applies it again when
+`rig seat set-runtime` brings the seat back to Codex. A switch back to Codex with an explicit
+`--permission-mode` replaces the envelope when the switch commits, and the switch's plan and
+event name it. A switch that doesn't commit leaves it in place.
 A profile name is separate from the envelope and from approval: a resumed conversation keeps
 its saved approval unless an envelope sets one. `--codex-profile inherit` clears the profile.
 

@@ -16,6 +16,7 @@ import { SeatLifecycleService } from "./seat-lifecycle-service.js";
 import { SuccessorSessionLauncher } from "./successor-session-launcher.js";
 import { buildRestorePacket, type PredecessorRecapResolver } from "./seat-handover-service.js";
 import { NativePermissionStore } from "./native-permission-store.js";
+import { clearCodexMemberPermissions } from "./codex-member-permissions.js";
 import { validateNativePermissionSelection, type NativePermissionSelection } from "./native-permission-selection.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { validateResumeToken } from "./resume-token-validation.js";
@@ -248,7 +249,12 @@ export class SeatRuntimeSwitchService {
         resolution: this.deps.materialResolution, openrigHome: this.deps.openrigHome });
     } catch (error) { return refuse("runtime_target_unavailable", (error as Error).message); }
 
-    const dropped = [...materials.dropped, ...(sourceSelection ? [{ setting: "native permission choice", value: `${sourceSelection.runtime}:${sourceSelection.mode}` }] : [])];
+    // An explicit Codex target mode replaces the seat's envelope, which the commit clears; inherit keeps it.
+    const envelope = target === "codex" && selection
+      ? (db.prepare("SELECT codex_permissions_json FROM nodes WHERE id = ?").get(node.id) as { codex_permissions_json: string | null } | undefined)?.codex_permissions_json
+      : null;
+    const dropped = [...materials.dropped, ...(sourceSelection ? [{ setting: "native permission choice", value: `${sourceSelection.runtime}:${sourceSelection.mode}` }] : []),
+      ...(envelope ? [{ setting: "codex permission envelope", value: envelope }] : [])];
     const plan: RuntimeSwitchPlan = {
       ...base,
       settings: materials.settings,
@@ -457,6 +463,8 @@ export class SeatRuntimeSwitchService {
         .run(target, materials.settings.model.value, materials.settings.effort.value, materials.settings.advisor.value, materials.settings.codexConfigProfile.value,
           ...(spec ? [spec.name, spec.version, spec.hash, spec.restorePolicy] : []), ctx.sessionName, at, node.id);
       new NativePermissionStore(db).write(node.id, ctx.selection, ctx.input.requestedBy?.trim() || ctx.sessionName, ctx.input.reason);
+      // One explicit Codex choice: the switch's mode replaces the seat's envelope here, and the event says so.
+      const replaced = target === "codex" && ctx.selection ? clearCodexMemberPermissions(db, node.id) : undefined;
       db.prepare(`INSERT OR REPLACE INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)`)
         .run(node.id, JSON.stringify(materials.plan.entries.map((e) => ({ category: e.category, effectiveId: e.effectiveId, sourceSpec: e.sourceSpec, sourcePath: e.sourcePath,
           resourcePath: e.resourcePath, absolutePath: e.absolutePath, resourceType: e.resourceType, mergeStrategy: e.mergeStrategy, target: e.target }))),
@@ -493,7 +501,8 @@ export class SeatRuntimeSwitchService {
         .captureSnapshot(node.rigId, "runtime-switch", { deferNotify: (persisted) => notifications.push(persisted) });
       return eventBus.persistWithinTransaction({ type: "seat.runtime_changed", rigId: node.rigId, nodeId: node.id, switchId: ctx.id, from: node.runtime!, to: target,
         reason: ctx.input.reason, requestedBy: ctx.input.requestedBy ?? null, generation: ctx.successorGeneration, previousGeneration: ctx.predecessorGeneration,
-        settings: { ...materials.settings }, dropped: ctx.plan.dropped, permissionSelection: ctx.selection ? ctx.selection.mode : "inherit", claimsMoved });
+        settings: { ...materials.settings }, dropped: ctx.plan.dropped, permissionSelection: ctx.selection ? ctx.selection.mode : "inherit", claimsMoved,
+        ...(replaced !== undefined ? { replaced: { codexPermissions: replaced } } : {}) });
     })();
     return { event, notifications, claimsMoved, afterCommit };
   }

@@ -140,7 +140,7 @@ describe("a Codex seat's current envelope (offline, no native enforcement claim)
     expect(() => new NativePermissionStore(f.db).launchOverride(f.a.id, "codex")).toThrow(/both a Codex permission envelope and the full_bypass mode/);
   });
 
-  it("stays with the seat across a runtime switch, as Claude rules do, and a switch can't launch it beside a mode", async () => {
+  it("stays with the seat across a runtime switch, as Claude rules do, until the switch's explicit mode replaces it", async () => {
     const f = fixture();
     await f.service.setPermissions(set(lease));
     const store = new NativePermissionStore(f.db);
@@ -149,9 +149,13 @@ describe("a Codex seat's current envelope (offline, no native enforcement claim)
     // Back to Codex, inheriting policy: the seat's envelope applies again.
     expect(store.launchOverride(f.a.id, "codex", { selection: null, codexProfile: null }))
       .toEqual({ codexPermissions: lease, kernelAuthority: false, teamPermissionDefault: false });
-    // A switch that also selects a mode is refused, so the switch stops before anything changes rather than guess.
-    expect(() => store.launchOverride(f.a.id, "codex", { selection: { runtime: "codex", mode: "full_bypass" } as never, codexProfile: null }))
-      .toThrow(/both a Codex permission envelope and the full_bypass mode/);
+    // A switch that selects a mode replaces the envelope: that launch uses the mode (the switch's commit clears the envelope),
+    // even when the stored envelope is unreadable.
+    const replacing = { selection: { runtime: "codex", mode: "full_bypass" } as never, codexProfile: null };
+    expect(store.launchOverride(f.a.id, "codex", replacing)).toEqual({ kernelAuthority: false, teamPermissionDefault: false, launchPosture: "full_bypass" });
+    f.db.prepare("UPDATE nodes SET codex_permissions_json = 'broken' WHERE id = ?").run(f.a.id);
+    expect(store.launchOverride(f.a.id, "codex", replacing)).toMatchObject({ launchPosture: "full_bypass" });
+    expect(() => store.launchOverride(f.a.id, "codex", { selection: null, codexProfile: null })).toThrow(/cannot read codex_permissions/);
   });
 
   it("plans the envelope's flags in status, naming the posture it replaces and OpenRig's additions", async () => {

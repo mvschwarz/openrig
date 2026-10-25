@@ -81,6 +81,20 @@ export function readCodexMemberPermissions(db: Database.Database, nodeId: string
   }
 }
 
+/** Clear a seat's envelope inside the caller's transaction, when an explicit mode replaces it; returns what it held, or
+ *  undefined when it held none. Unreadable bytes are returned as such, so the audit shows what was replaced. */
+export function clearCodexMemberPermissions(db: Database.Database, nodeId: string): unknown {
+  let row: { codex_permissions_json: string | null } | undefined;
+  try { row = db.prepare("SELECT codex_permissions_json FROM nodes WHERE id = ?").get(nodeId) as typeof row; }
+  catch { return undefined; } // A minimal fixture without the column has no envelope.
+  if (row?.codex_permissions_json == null) return undefined;
+  let held: unknown;
+  try { held = readCodexMemberPermissions(db, nodeId); }
+  catch { held = { state: "invalid", stored: row.codex_permissions_json }; }
+  db.prepare("UPDATE nodes SET codex_permissions_json = NULL WHERE id = ?").run(nodeId);
+  return held;
+}
+
 /** The setter's check of a named profile, from the config home this seat's launches use. */
 export interface CodexProfileObservation {
   /** configured_codex_home: the daemon's explicit CODEX_HOME, which managed Codex launches reassert. unestablished: the

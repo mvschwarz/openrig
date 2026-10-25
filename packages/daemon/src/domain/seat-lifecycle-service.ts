@@ -1,5 +1,5 @@
 import { readClaudePermissionRules, validateClaudePermissionRules } from "./claude-permission-rules.js";
-import { readCodexMemberPermissions, validateCodexMemberPermissions, type CodexProfileObserver } from "./codex-member-permissions.js";
+import { clearCodexMemberPermissions, readCodexMemberPermissions, validateCodexMemberPermissions, type CodexProfileObserver } from "./codex-member-permissions.js";
 import { parseTerminalPolicy, TerminalPolicyRefusal, TerminalPolicyStore, type TerminalAction } from "./terminal-policy.js";
 import type { NativeProcessLister } from "./native-process-lineage.js";
 import type { CurrentModelReader } from "./model-divergence/current-model-reader.js";
@@ -804,7 +804,7 @@ export class SeatLifecycleService {
         if (currentRuntime?.runtime !== runtime) throw new Error("Seat runtime changed while checking native options; selection was not changed.");
         const from = store.read(seat.nodeId);
         // One explicit Codex choice: a mode replaces the seat's envelope, in this same write, and says so.
-        const replaced = runtime === "codex" ? this.clearCodexEnvelope(seat.nodeId) : undefined;
+        const replaced = runtime === "codex" ? clearCodexMemberPermissions(this.db, seat.nodeId) : undefined;
         const changed = from?.runtime !== to?.runtime || from?.mode !== to?.mode || replaced !== undefined;
         // A Codex re-selection is intent for its next rebuild, even when the saved value is
         // unchanged. Audit inherit too: a cleared selection has no row to carry its timestamp.
@@ -822,19 +822,6 @@ export class SeatLifecycleService {
     } catch (error) {
       return { ok: false, code: "permission_selection_refused", message: (error as Error).message };
     }
-  }
-
-  /** Clear a Codex seat's envelope inside the caller's transaction; returns what it held, or undefined when it held none. */
-  private clearCodexEnvelope(nodeId: string): unknown {
-    let row: { codex_permissions_json: string | null } | undefined;
-    try { row = this.db.prepare("SELECT codex_permissions_json FROM nodes WHERE id = ?").get(nodeId) as typeof row; }
-    catch { return undefined; } // A minimal fixture without the column has no envelope.
-    if (row?.codex_permissions_json == null) return undefined;
-    let held: unknown;
-    try { held = readCodexMemberPermissions(this.db, nodeId); }
-    catch { held = { state: "invalid", stored: row.codex_permissions_json }; }
-    this.db.prepare("UPDATE nodes SET codex_permissions_json = NULL WHERE id = ?").run(nodeId);
-    return held;
   }
 
   /** A Codex seat's envelope: its explicit permission choice, which replaces a recorded mode in the same write. */
