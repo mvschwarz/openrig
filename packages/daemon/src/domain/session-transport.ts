@@ -163,6 +163,12 @@ function findPatternEvidence(lines: string[], patterns: RegExp[]): string | null
   return null;
 }
 
+const PI_DIALOG_HINTS = [
+  /^↑↓ navigate\s+\S.* select\s+\S.* cancel$/,
+  /^\S+ submit\s+\S+ cancel$/,
+  /^\S+ submit\s+\S+ newline\s+\S+ cancel\s+\S+ external editor$/,
+] as const;
+
 /** Adopted Pi TUIs have no runner hooks. Anchor on the selector/input/editor chrome:
  * footer metadata is optional, and an extension can add rows below the dialog. */
 function findCurrentPiDialog(paneContent: string): string | null {
@@ -171,20 +177,24 @@ function findCurrentPiDialog(paneContent: string): string | null {
   const border = (text: string) => /^─{3,}$/.test(text);
   // At most six nonblank footer/widget rows may follow the selector's border.
   for (let help = visible.length - 2; help >= Math.max(1, visible.length - 8); help--) {
-    const hint = visible[help]!.text;
-    const selector = /^↑↓ navigate\s+\S.* select\s+\S.* cancel$/.test(hint);
-    const input = /^\S+ submit\s+\S+ cancel$/.test(hint);
-    const editor = /^\S+ submit\s+\S+ newline\s+\S+ cancel\s+\S+ external editor$/.test(hint);
+    // Text word-wraps the hints. Join at most three adjacent physical rows, not separated prose.
+    const rows = (n: number) => visible.slice(help - n + 1, help + 1).map(row => row.text).join(" ");
+    const span = [1, 2, 3].find(n => help - n >= 0
+      && visible[help]!.at - visible[help - n + 1]!.at === n - 1
+      && PI_DIALOG_HINTS.some(pattern => pattern.test(rows(n)))) ?? 1;
+    const hint = rows(span);
+    const selector = PI_DIALOG_HINTS[0].test(hint);
+    const input = PI_DIALOG_HINTS[1].test(hint);
+    const editor = PI_DIALOG_HINTS[2].test(hint);
     if (!(selector || input || editor) || !border(visible[help + 1]!.text)) continue;
     // A later editor or closing Markdown fence makes the selector historical/quoted.
     if (visible.slice(help + 2).some(row => border(row.text) || /^(?:`{3,}|~{3,})/.test(row.text))) continue;
-    const end = visible[help - 1]!.at;
-    // Input's own `> ` field, or Editor's closing rule, must precede the hint. Keep the scan bounded:
-    // a clipped/tall component without its opening rule is not an inferred dialog.
+    const end = visible[help - span]!.at;
+    // Input needs its field and nearby opening rule. Editor's unique four-action hint and bottom
+    // rule remain visible even when its tall body/top rule is outside the 20-line capture.
     if (input && /^>(?:\s|$)/.test(lines[end]!.trim()) && !lines[end - 1]?.trim()
       && lines.slice(Math.max(0, end - PROMPT_SCAN_LINES), end).some(line => border(line.trim()))) return truncateEvidence(hint);
-    if (editor && /^(?:─{3,}|─+ [↑↓] \d+ more ─*)$/.test(lines[end]!.trim())
-      && lines.slice(Math.max(0, end - PROMPT_SCAN_LINES), end - 1).some(line => /^(?:─{3,}|─+ [↑↓] \d+ more ─*)$/.test(line.trim()))) return truncateEvidence(hint);
+    if (editor && /^(?:─{3,}|─+ [↑↓] \d+ more ─*)$/.test(lines[end]!.trim())) return truncateEvidence(hint);
     if (!selector) continue;
     let start = end;
     // The native spacer before the options separates arbitrary title/description text.
@@ -261,7 +271,12 @@ function findClaudeComposer(paneContent: string, options: ClassifyPaneOptions = 
   // Preserve columns: a multiline draft may contain indented border/prompt text.
   // This classifier scans at most 20 physical lines; captures can be taller.
   // Exhausting the scan without reaching the status head is unknown, not idle.
-  const lines = paneContent.split("\n").slice(-20)
+  // The 20 end at the last drawn row: Claude draws inline, so a short screen in a tall pane leaves its input box above
+  // blank rows that the capture keeps.
+  const physical = paneContent.split("\n");
+  let end = physical.length;
+  while (end > 0 && physical[end - 1]!.trim().length === 0) end--;
+  const lines = physical.slice(Math.max(0, end - 20), end)
     .map((line) => line.trimEnd()).filter((line) => line.trim().length > 0);
   const bar = findClaudeFooterIndex(lines);
   const supportedWarningFooter = lines[bar]?.trim() === "⏵⏵ accept edits on (shift+tab to cycle) · ← for agents";
@@ -3063,6 +3078,7 @@ export class SessionTransport {
         // no-op here (the option is kept for back-compat). needs_input (positive picker) remains the
         // ONLY hard refuse; unknown/stale/missing already proceed-with-advisory above.
         sendAdvisory = [sendAdvisory, "target pane appears mid-task; sent anyway (busy is advisory, not a block)."].filter(Boolean).join(" ");
+        if (runtime === "codex") sendAdvisory += " This message joins its running turn and may redirect it; for separate work, use --wait-for-idle <seconds>.";
         // fall through to the send below.
       }
       // idle (or running/unknown — now advisory-and-proceed) → proceed to send.

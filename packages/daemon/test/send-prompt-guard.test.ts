@@ -256,6 +256,7 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
   // Pi v1.4.0 extension-selector.ts draws this chrome independently of footer metadata.
   const piSelectors = [
     ["named session", piConfirmation],
+    ["48-column selector with wrapped hints", piConfirmation.replaceAll("─".repeat(36), "─".repeat(48)).replace("escape/ctrl+c cancel", "escape/ctrl+c\n cancel")],
     ["unnamed in git", piConfirmation.replace("~/project • tui", "~/project (main)")],
     ["unnamed outside git", piConfirmation.replace("~/project • tui", "~/project")],
     ["extension status", `${piConfirmation}\nplan: on`],
@@ -288,15 +289,31 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
   // Reconstructed from Pi v1.4.0 extension-input/editor source, not a native capture.
   const piDialogBorder = "─".repeat(100);
   const piInput = [piDialogBorder, "", " Your response", "", "> ", "", " enter submit  escape/ctrl+c cancel", "", piDialogBorder, "~/project"].join("\n");
-  const piEditor = [piDialogBorder, "", " Edit response", "", piDialogBorder, "draft line", "", piDialogBorder, "", " enter submit  shift+enter newline  escape/ctrl+c cancel  ctrl+g external editor", "", piDialogBorder, "~/project"].join("\n");
+  const piEditor = [piDialogBorder, "", " Edit response", "", piDialogBorder, "draft line", "", piDialogBorder, "", " enter submit  shift+enter/ctrl+j newline  escape/ctrl+c cancel  ctrl+g external editor", "", piDialogBorder, "~/project"].join("\n");
+  // Text(paddingX=1) wraps default hints at width-2; Editor renders 30% of terminal rows.
+  const piEditor80 = piEditor.replaceAll(piDialogBorder, "─".repeat(80)).replace(
+    "ctrl+g external editor", "ctrl+g\n external editor");
+  const piEditor67 = piEditor.replaceAll(piDialogBorder, "─".repeat(67)).replace(
+    "ctrl+g external editor", "\n ctrl+g external editor");
+  const piTallEditor = piEditor.replace("draft line\n\n", Array.from({ length: 15 }, (_, i) => `line ${i}\n`).join(""));
+  const piScrolledTail = piTallEditor.replace(`\n${piDialogBorder}\n\n enter submit`,
+    `\n${"─".repeat(45)} ↓ 3 more ${"─".repeat(45)}\n\n enter submit`).split("\n").slice(-20).join("\n");
   const piTextDialogs = [
     ["empty input", piInput],
     ["input with text and description", piInput.replace("Your response", "Your response (10s)\n\n Description").replace("> ", "> existing answer")],
     ["input rebound keys", piInput.replace("enter submit  escape/ctrl+c cancel", "ctrl+y submit  ctrl+n cancel")],
     ["editor with blank line", piEditor],
     ["empty editor", piEditor.replace("draft line", "")],
-    ["editor rebound keys", piEditor.replace("enter submit  shift+enter newline  escape/ctrl+c cancel  ctrl+g external editor", "ctrl+y submit  alt+n newline  ctrl+n cancel  ctrl+e external editor")],
+    ["editor rebound keys", piEditor.replace("enter submit  shift+enter/ctrl+j newline  escape/ctrl+c cancel  ctrl+g external editor", "ctrl+y submit  alt+n newline  ctrl+n cancel  ctrl+e external editor")],
     ["scrolling editor", piEditor.replace(`draft line\n\n${piDialogBorder}`, `draft line\nrow 2\nrow 3\nrow 4\n\n${"─".repeat(45)} ↓ 3 more ${"─".repeat(45)}`)],
+    ["80x24 editor with wrapped default hints", piEditor80],
+    ["67x17 editor with wrapped default hints", piEditor67],
+    ["40-column editor with three hint rows", piEditor.replaceAll(piDialogBorder, "─".repeat(40))
+      .replace("ctrl+j newline", "ctrl+j\n newline").replace("ctrl+g external editor", "ctrl+g\n external editor")],
+    ["100x50 editor with 15-row body", piTallEditor],
+    ["100x50 scrolled editor from 20-line capture", piScrolledTail],
+    ["editor opening clipped", piEditor.slice(piEditor.indexOf("draft line"))],
+    ["30-column input with wrapped hints", piInput.replaceAll(piDialogBorder, "─".repeat(30)).replace("escape/ctrl+c cancel", "escape/ctrl+c\n cancel")],
     ["widget and named footer", `${piInput} • named\ncustom status\nwidget below editor`],
   ] as const;
   it.each(piTextDialogs.flatMap(([layout, pane]) => [null, "unknown", "pi"].map(runtime => [layout, runtime, pane] as const)))(
@@ -338,10 +355,14 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
   });
 
   it.each([
+    ["editor missing bottom rule", piEditor.replace(`${piDialogBorder}\n\n enter submit`, "\n enter submit")],
+    ["editor hint exceeds three rows", piEditor.replaceAll(piDialogBorder, "─".repeat(30))
+      .replace("submit  shift+enter", "submit\n shift+enter").replace("newline  escape", "newline\n escape")
+      .replace("ctrl+g external editor", "ctrl+g\n external editor")],
+    ["editor partial hint", piEditor.replace("ctrl+g external editor", "external editor")],
+    ["editor hint split by blank row", piEditor80.replace("ctrl+g\n external editor", "ctrl+g\n\n external editor")],
     ["input opening clipped", piInput.slice(piInput.indexOf(" Your response"))],
     ["input opening past scan bound", piInput.replace("Your response", Array.from({ length: 14 }, () => "description").join("\n"))],
-    ["editor opening clipped", piEditor.slice(piEditor.indexOf("draft line"))],
-    ["editor body past scan bound", piEditor.replace("draft line", Array.from({ length: 14 }, () => "body").join("\n"))],
   ])("does not infer a Pi dialog from incomplete or oversized bodies: %s", (_name, pane) => {
     expect(classifyPaneActivity(pane, { runtime: "unknown" }).state).not.toBe("attention");
   });

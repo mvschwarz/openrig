@@ -550,6 +550,24 @@ function applicableVerdict(
   return verdict;
 }
 
+/** Is this node's current session confirmed missing? The inventory's own rule (an identity
+ *  verdict for the current session and binding that confirms session_missing), for readers
+ *  outside the inventory projection. No verdict, a stale one or an unreadable store: false. */
+export function nodeSessionConfirmedMissing(db: Database.Database, nodeId: string): boolean {
+  try {
+    const row = db.prepare(`
+      SELECT n.handover_at, s.id AS session_id, s.session_name, s.created_at AS session_created_at, b.tmux_pane AS binding_tmux_pane
+        FROM nodes n
+        LEFT JOIN sessions s ON s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
+        LEFT JOIN bindings b ON b.node_id = n.id
+       WHERE n.id = ?
+    `).get(nodeId) as Pick<InventoryRow, "session_id" | "session_name" | "session_created_at" | "binding_tmux_pane" | "handover_at"> | undefined;
+    return !!row && identityVerdictConfirmsSessionMissing(applicableVerdict(new SeatIdentityStore(db).getForNode(nodeId), row));
+  } catch {
+    return false;
+  }
+}
+
 // -- Public API --
 
 /**

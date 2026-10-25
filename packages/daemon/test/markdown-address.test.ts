@@ -108,6 +108,18 @@ describe("parseMarkdownSections — code-fence-protected header tree", () => {
     expect(validateMarkdownAddressability(text)).toEqual([]);
   });
 
+  it("keeps the ATX heading rule: a CRLF title, no line break inside a title, one to six #, a space or the end next", () => {
+    const text = ["## Crlf title\r", "## a\rb", "####### seven", "#nospace", "    ## indented four", "### Under", "## Last  "].join("\n");
+    expect(parseMarkdownSections(text).map((section) => section.headerPath)).toEqual([["crlf-title"], ["crlf-title", "under"], ["last"]]);
+  });
+
+  it("parses a heading line with a long whitespace run in linear time (the old regex was quadratic)", () => {
+    const text = `#${"\t".repeat(200_000)}\n## Next\nprose`;
+    const started = performance.now();
+    expect(parseMarkdownSections(text).map((section) => section.headerPath)).toEqual([["next"]]);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+
   it("spans terminate at the next SAME-OR-HIGHER header (Q1), own text at ANY header", () => {
     const sections = parseMarkdownSections(CORPUS);
     const gettingStarted = sections.find((s) => s.headerPath.join("/") === "getting-started")!;

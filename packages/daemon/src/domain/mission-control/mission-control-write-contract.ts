@@ -41,7 +41,7 @@
 
 import type Database from "better-sqlite3";
 import type { EventBus } from "../event-bus.js";
-import type { QueueRepository, QueueItem } from "../queue-repository.js";
+import { isTypedGateBlocker, type QueueRepository, type QueueItem } from "../queue-repository.js";
 import type { PersistedEvent } from "../types.js";
 import {
   MissionControlActionLog,
@@ -363,8 +363,8 @@ export class MissionControlWriteContract {
    *      update (no state-machine change) + the existing nudge machinery.
    *   4. Resolution routes BACK to the parked owner — the qitem keeps its
    *      destination; no new potato owner is ever created here.
-   *   5. Enforcement symmetry: park required summary + evidence_ref;
-   *      resolve requires NON-EMPTY decision text, daemon-enforced.
+   *   5. Human parks required summary + evidence_ref; human and typed-gate
+   *      resolution requires NON-EMPTY decision/evidence text, daemon-enforced.
    *   6. The human acts on the surface/feed card; this is the ONE write
    *      path (POST /api/mission-control/action verb=resolve) — the CLI
    *      wrapper is a thin client of the same endpoint.
@@ -392,10 +392,11 @@ export class MissionControlWriteContract {
         { qitemId: input.qitemId },
       );
     }
-    if (source.state !== "blocked" || !isHumanSeatSession(source.blockedOn)) {
+    const humanPark = isHumanSeatSession(source.blockedOn);
+    if (source.state !== "blocked" || (!humanPark && !isTypedGateBlocker(source.blockedOn))) {
       throw new MissionControlWriteContractError(
         "qitem_not_leg1_parked",
-        `verb=resolve requires a leg-1 parked qitem (state=blocked with a human-seat blocked_on); ` +
+        `verb=resolve requires state=blocked on a human seat or a well-formed external:, fold: or auth: gate; ` +
           `qitem ${input.qitemId} is state=${source.state}, blocked_on=${source.blockedOn ?? "null"}. ` +
           `Re-resolving an already-resolved item is a no-op error, not a double transition.`,
         { qitemId: input.qitemId, state: source.state, blockedOn: source.blockedOn },
@@ -408,7 +409,8 @@ export class MissionControlWriteContract {
     try {
       this.eventBus.withNotifyEnvelope((register) => {
         // Rail 2+3: blocked → in-progress; decision text = transition_note;
-        // actor_session = the resolving human/relay session. Emits
+        // actor_session = the resolving session. Only a human park records a
+        // human-decision ceremony; typed gates record satisfaction evidence. Emits
         // queue.updated (the P2 refresh-after-action contract). blocked_on is
         // deliberately retained as provenance of whom it was parked on — the
         // attention query keys on state='blocked', so the resolved item drops
@@ -417,8 +419,8 @@ export class MissionControlWriteContract {
           qitemId: input.qitemId,
           actorSession: input.actorSession,
           state: "in-progress",
-          transitionNote: decision,
-          ownerNotificationKind: "human-decision-resolved",
+          transitionNote: humanPark ? decision : `Blocker ${source.blockedOn} resolved: ${decision}`,
+          ownerNotificationKind: humanPark ? "human-decision-resolved" : undefined,
         });
         register(updateResult.persistedEvent);
 
@@ -465,7 +467,7 @@ export class MissionControlWriteContract {
           source.destinationSession,
           input.notify,
           input.actorSession,
-          `Decision resolved on ${input.qitemId}: ${decision} — unparked (blocked → in-progress); you still own it. Check your queue.`,
+          `${humanPark ? "Decision" : "Blocker"} resolved on ${input.qitemId}: ${decision} — unparked (blocked → in-progress); you still own it. Check your queue.`,
         );
         notifyAttempted = true;
         notifyResult = "attempted-best-effort";

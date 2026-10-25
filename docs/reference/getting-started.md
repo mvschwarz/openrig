@@ -39,6 +39,12 @@ The `rigs` skill is the procedure: follow it in order. This page is what it look
 
 ## Before you start
 
+Setup and launch are separate: declining `rig setup` avoids its `~/.tmux.conf` change, but starting Codex seats can
+still write workspace trust and selected MCP/config fragments. `runtime.codex.hooks_enabled=false` controls hooks;
+it isn't a no-global-config option. Setup has no project-only mode. Trusted project `.codex/config.toml` settings
+don't redirect OpenRig's home-config writes. A separate selected `CODEX_HOME` keeps Codex config, login and sessions
+together in that home; it needs its own working sign-in and doesn't relocate `~/.tmux.conf`.
+
 > **What OpenRig changes on your machine**
 > - **Install:** `@openrig/cli` goes in globally with npm.
 > - **Setup:** `rig setup` adds an OpenRig block to `~/.tmux.conf`. It can install tmux (with Homebrew on macOS), and
@@ -46,7 +52,8 @@ The `rigs` skill is the procedure: follow it in order. This page is what it look
 >   Claude Code and Codex and may install a missing one; `rig setup --providers claude` (or `codex`) limits it to
 >   yours.
 > - **Starting OpenRig, for the coding agent you use** (paths are the usual defaults):
->   - Codex: hooks and trust in `~/.codex/config.toml`.
+>   - Codex: hooks, workspace trust and team-selected config fragments (including MCP) in the selected
+>     `CODEX_HOME/config.toml`, default `~/.codex/config.toml`. These affect other Codex sessions using that home.
 >   - Claude Code: workspace trust in `~/.claude.json`, and activity hooks in the project's
 >     `.claude/settings.local.json`, plus a status line unless you already have your own.
 >   - Discovery skills go in `~/.claude/skills` and `~/.agents/skills`.
