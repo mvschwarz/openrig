@@ -120,6 +120,12 @@ unknown outcome, check `rig seat status <seat>` before trying again. For a rig w
 `--non-interruptive` on `rig up` or `rig bundle install` avoids Claude's warning and Codex's notices in the first
 place; see `non-interruptive-mode.md` beside this file.
 
+Codex's initial sign-in chooser and API-key entry are recognised as `login_required`, so startup reports the
+sign-in step instead of waiting for a generic readiness timeout. Finish that step in the seat's terminal, then use
+the continuation command above. A quoted or dismissed login screen is not a current login gate; other layouts
+keep their existing readiness handling. Claude's persistent "Not logged in" footer alone is not a login refusal, because a
+configured gateway may authenticate its requests.
+
 ### You can't tell which instance or configuration is involved
 
 Read [instance layout](instance-layout.md) (`rig context get reference/instance-layout.md`) and

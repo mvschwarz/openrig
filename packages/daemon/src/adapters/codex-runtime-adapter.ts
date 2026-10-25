@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
 import os from "node:os";
+import { isDeepStrictEqual } from "node:util";
 import Database from "better-sqlite3";
 import { parse as parseToml } from "smol-toml";
 import type { TmuxAdapter } from "./tmux.js";
@@ -66,6 +67,7 @@ const codexHookTrust = createRequire(import.meta.url)("../../assets/plugins/open
 
 import { listNativeProcesses, observeCodexPaneProcess, observeCodexForkProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type NativeProcessRow } from "../domain/native-process-lineage.js";
 import { recordSeatSkillWrite, seatPluginSkillsLossNote, seatProjectionComplete, seatSkillWriteRefusal } from "../domain/seat-skill-storage.js";
+import { codexPluginContentHash, planOwnedCodexContentApproval, recordOwnedCodexApproval } from "../domain/codex-owned-plugin-trust.js";
 
 // Shared by all probes of ONE launch, never reset by a delayed screen or an
 // ambiguous transport result. A separately requested launch gets a new attempt.
@@ -358,9 +360,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   /**
    * Install the vendored openrig-core plugin into Codex through Codex's own commands, so a seat that selected it gets its
-   * refocus and skills, trusting only exact shipped hooks on its first install. It runs only when the person's config
+   * refocus and skills, trusting exact shipped hooks on first install and renewing proven owned content approvals. It runs only when the person's config
    * doesn't disable the plugin (codexCorePluginEnablement), and only when the installed version differs from the vendored
-   * one. Codex owns its plugin cache; OpenRig writes the marketplace manifest and first-install exact-hook trust.
+   * one. Codex owns its plugin cache; its immutable legacy trust baseline is never rewritten.
    */
   async ensureCodexCorePlugin(home?: string): Promise<{ outcome: "installed" | "current" | "skipped"; reason: string }> {
     const report = (outcome: "installed" | "current" | "skipped", reason: string) => {
@@ -390,13 +392,19 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       catch { return false; }
     });
     if (!matchesShipped(pluginDir)) return report("skipped", "vendored hook files differ from this daemon's shipped plugin; existing choices are left alone");
+    // Installation retains the hook-file predicate; any approval requires the complete shipped tree.
+    const matchesShippedTree = (dir: string) => {
+      try { return codexPluginContentHash(dir, true) === codexPluginContentHash(shipped, true); }
+      catch { return false; }
+    };
 
     const codexHome = nodePath.dirname(this.resolveCodexConfigPath(home));
-    const layers: CodexConfigLayerRead[] = codexReadableConfigLayers(codexHome, this.codexSystemConfigDir).map((layer) => {
+    const readLayers = (): CodexConfigLayerRead[] => codexReadableConfigLayers(codexHome, this.codexSystemConfigDir).map((layer) => {
       if (!this.fs.exists(layer.path)) return { ...layer, state: "absent" as const };
       try { return { ...layer, state: "read" as const, content: this.fs.readFile(layer.path) }; }
       catch (error) { return { ...layer, state: "unreadable" as const, reason: (error as Error).message }; }
     });
+    const layers = readLayers();
     const enablement = codexCorePluginEnablement(layers);
     if (enablement.decision !== "allow") return report("skipped", enablement.reason);
 
@@ -417,11 +425,33 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const cachedDir = nodePath.join(cacheRoot, version);
     const cached = this.fs.exists(cachedDir);
     // Codex's "continue without trusting" choice writes no state. An existing install/configuration may therefore be a
-    // decline even with no hooks.state entry. Only the very first installation earns automatic trust; reinstalls and
-    // upgrades retain whatever native choices already exist, including an unrecorded decline.
+    // decline even with no hooks.state entry. Absent grants still stay under native review. A proven owned grant may
+    // renew its content approval; an unrecorded skip of that exact owned upgrade cannot be distinguished from pending approval.
     const firstInstall = !this.fs.exists(cacheRoot) && !layers.some(layer => layer.state === "read"
       && Object.hasOwn((parseToml(layer.content).plugins ?? {}) as object, CODEX_CORE_PLUGIN_KEY));
+    const renewContentApproval = (freshGrant = false) => {
+      const configPath = this.resolveCodexConfigPath(home);
+      const currentLayers = readLayers();
+      if (codexCorePluginEnablement(currentLayers).decision !== "allow") return;
+      const before = this.fs.readFile(configPath);
+      const currentSource = recordedMarketplaceSource(before);
+      if (currentSource == null || canonical(currentSource) !== canonical(pluginsDir) || !userLayerEnablesCorePlugin(before)) return;
+      let content = before;
+      const planned = planOwnedCodexContentApproval({ configPath, content, layers: currentLayers, shipped, installed: cachedDir, freshGrant });
+      if (!planned) return;
+      for (const [key, hash] of Object.entries(planned.hashes)) content = upsertCodexHookTrust(content, key, hash, "trusted_content_hash");
+      // The line writer must not alter examples in strings or duplicate quoted keys.
+      try {
+        const expected = parseToml(before) as { hooks: { state: Record<string, Record<string, unknown>> } };
+        for (const [key, hash] of Object.entries(planned.hashes)) expected.hooks.state[key]!.trusted_content_hash = hash;
+        if (!isDeepStrictEqual(parseToml(content), expected)) return;
+      } catch { return; } // Leave native review and owner bytes intact for unsupported TOML spellings.
+      if (this.fs.readFile(configPath) !== before) return; // A concurrent native choice wins.
+      if (content !== before) this.fs.writeFile(configPath, content);
+      recordOwnedCodexApproval(configPath, planned.approval);
+    };
     if (cached && recorded !== undefined && userLayerEnablesCorePlugin(userConfig)) {
+      renewContentApproval();
       return report("current", `${CODEX_CORE_PLUGIN_KEY} ${version} is installed and registered`);
     }
     const manifestPath = nodePath.join(pluginsDir, CODEX_MARKETPLACE_MANIFEST_PATH);
@@ -437,9 +467,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
     const installed = await this.runCodexCli(["plugin", "add", CODEX_CORE_PLUGIN_KEY], env);
     if (installed.status !== 0) return report("skipped", `codex plugin add failed: ${(installed.stderr || installed.stdout).trim() || `exit ${installed.status}`}`);
-    // Trust is over normalized definitions, not script contents. Byte equality is an additional pre-grant check;
-    // Codex remains responsible for later native review if definitions change. No cache files are rewritten here.
-    if (firstInstall && matchesShipped(cachedDir)) {
+    // First install grants declarations; Codex0.164 also requires full-bundle content approval. Existing declaration
+    // choices are never rewritten. No cache files or native baseline files are rewritten here.
+    let freshGrants = 0;
+    const grantLayers = readLayers();
+    if (firstInstall && codexCorePluginEnablement(grantLayers).decision === "allow" && matchesShippedTree(cachedDir)) {
       let content = this.fs.readFile(this.resolveCodexConfigPath(home));
       const hookManifest = JSON.parse(fs.readFileSync(nodePath.join(shipped, "hooks/codex.json"), "utf8"));
       for (const [event, groups] of Object.entries(hookManifest.hooks) as Array<[string, Array<{ matcher?: string; hooks: Array<{ command: string; timeout: number }> }>]> ) {
@@ -454,13 +486,15 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
             const value = doc as { hooks?: { state?: Record<string, unknown> } };
             return Object.hasOwn(value.hooks?.state ?? {}, key) || Object.values(doc).some(hasChoice);
           };
-          if (!hasChoice(parseToml(content)) && !layers.some(layer => layer.state === "read" && hasChoice(parseToml(layer.content)))) {
+          if (!hasChoice(parseToml(content)) && !grantLayers.some(layer => layer.state === "read" && hasChoice(parseToml(layer.content)))) {
             content = upsertCodexHookTrust(content, key, hash);
+            freshGrants++;
           }
         }));
       }
       this.fs.writeFile(this.resolveCodexConfigPath(home), content);
     }
+    renewContentApproval(freshGrants === 6);
     return report("installed", `${CODEX_CORE_PLUGIN_KEY} ${version} through Codex's own install (${enablement.reason})`);
   }
 
@@ -536,6 +570,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
     const configPath = this.resolveCodexConfigPath(home);
     const existing = this.fs.exists(configPath) ? this.fs.readFile(configPath) : "";
+    // A Codex home that keeps its hooks in hooks.json gets OpenRig's there too: Codex warns when one layer mixes both
+    // formats. Without a hooks.json, the inline config.toml block below is unchanged.
+    const hooksPath = nodePath.join(nodePath.dirname(configPath), "hooks.json");
+    if (this.fs.exists(hooksPath)) {
+      this.ensureCodexJsonActivityHooks(existing, configPath, hooksPath, relay);
+      return;
+    }
     const withHooks = upsertCodexActivityHooks(existing, relay);
     if (withHooks !== existing) {
       this.fs.mkdirp(nodePath.dirname(configPath));
@@ -552,6 +593,66 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     if (trusted !== withHooks) {
       this.fs.mkdirp(nodePath.dirname(configPath));
       this.fs.writeFile(configPath, trusted);
+    }
+  }
+
+  /**
+   * OpenRig's activity hooks in an existing hooks.json: one marked group per event (statusMessage "OpenRig activity"),
+   * replaced where it already is or appended after the user's groups, so their positions (and the trust Codex keys by
+   * position) don't move. OpenRig's own inline block from an earlier launch moves out of config.toml; the user's hooks,
+   * in either file, stay where they are. Trust is written for exactly our groups, keyed by the hooks.json path. A file
+   * OpenRig can't read as hooks is left untouched, with a warning.
+   */
+  private ensureCodexJsonActivityHooks(existing: string, configPath: string, hooksPath: string, relay: string): void {
+    const original = this.fs.readFile(hooksPath);
+    let document: { hooks: Record<string, unknown[]> };
+    try { document = parseCodexHooksJson(original); }
+    catch (err) {
+      console.error(`[openrig] codex activity hooks skipped: ${hooksPath} can't be read as hooks (${(err as Error).message}); left untouched`);
+      return;
+    }
+    const command = `node "${relay}"`;
+    const keySource = canonicalCodexHookSource(hooksPath);
+    const stripped = upsertCodexFeaturesHooksEnabled(stripCodexActivityHooks(existing));
+    let before: unknown = null;
+    let expected: { hooks?: { state?: CodexHookState } } | null = null;
+    try { before = parseToml(existing); expected = parseToml(stripped) as { hooks?: { state?: CodexHookState } }; }
+    catch (err) {
+      console.error(`[openrig] codex activity hooks skipped: ${configPath} can't be read as TOML (${(err as Error).message}); left untouched`);
+      return;
+    }
+    if (!expected) return;
+    const inlineSource = canonicalCodexHookSource(configPath);
+    let config = stripped;
+    for (const event of OPENRIG_ACTIVITY_HOOK_EVENTS) {
+      const groups = document.hooks[event] ?? [];
+      const found = groups.findIndex(isOpenRigActivityGroup);
+      const groupIndex = found < 0 ? groups.length : found;
+      groups[groupIndex] = openRigActivityGroup(command);
+      document.hooks[event] = groups;
+      const { key, hash } = computeCodexHookTrust(event, { keySource, command, timeoutSec: 5, groupIndex, statusMessage: OPENRIG_ACTIVITY_STATUS });
+      config = upsertCodexHookTrust(config, key, hash);
+      // A person's disable of OpenRig's inline hook moves with it; an existing choice at the new key is kept as it is.
+      const inlineIndex = openRigInlineGroupIndex(before, event);
+      const disabled = inlineIndex >= 0
+        && codexHookStateOf(before)[`${inlineSource}:${CODEX_HOOK_EVENT_KEY_LABEL[event]}:${inlineIndex}:0`]?.enabled === false;
+      if (disabled) config = upsertCodexHookDisabled(config, key);
+      const state = ((expected.hooks ??= {}).state ??= {});
+      state[key] = { ...state[key], trusted_hash: hash, ...(disabled ? { enabled: false } : {}) };
+    }
+    // The line writers must give exactly the planned fields in valid TOML (they don't read every TOML spelling);
+    // otherwise neither file changes, and OpenRig's old inline block, if any, stays working.
+    try {
+      if (!isDeepStrictEqual(parseToml(config), expected)) throw new Error("its trust records couldn't be written exactly");
+    } catch (err) {
+      console.error(`[openrig] codex activity hooks skipped: ${configPath}: ${(err as Error).message}; left untouched`);
+      return;
+    }
+    const json = `${JSON.stringify(document, null, 2)}\n`;
+    if (json !== original) this.fs.writeFile(hooksPath, json);
+    if (config !== existing) {
+      this.fs.mkdirp(nodePath.dirname(configPath));
+      this.fs.writeFile(configPath, config);
     }
   }
 
@@ -591,10 +692,40 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    */
   removeCodexActivityHooks(home?: string): void {
     const configPath = this.resolveCodexConfigPath(home);
-    if (!this.fs.exists(configPath)) return;
-    const existing = this.fs.readFile(configPath);
-    const updated = stripCodexActivityHooks(existing);
-    if (updated !== existing) {
+    const hooksPath = nodePath.join(nodePath.dirname(configPath), "hooks.json");
+    const existing = this.fs.exists(configPath) ? this.fs.readFile(configPath) : null;
+    let updated = existing === null ? null : stripCodexActivityHooks(existing);
+    if (this.fs.exists(hooksPath)) {
+      // Only OpenRig's groups leave. Codex keys trust and disables by position, so each later group's state moves with it.
+      try {
+        const original = this.fs.readFile(hooksPath);
+        const document = parseCodexHooksJson(original);
+        const keySource = canonicalCodexHookSource(hooksPath);
+        let config = updated ?? "";
+        const expected = parseToml(config) as { hooks?: { state?: CodexHookState } };
+        for (const event of OPENRIG_ACTIVITY_HOOK_EVENTS) {
+          const groups = document.hooks[event];
+          if (!groups) continue;
+          const kept = groups.flatMap((group, index) => isOpenRigActivityGroup(group) ? [] : [index]);
+          if (kept.length === groups.length) continue;
+          const prefix = `${keySource}:${CODEX_HOOK_EVENT_KEY_LABEL[event]}:`;
+          const newIndexOf = (index: number) => { const at = kept.indexOf(index); return at < 0 ? null : at; };
+          config = rekeyCodexHookStateText(config, prefix, newIndexOf);
+          if (expected.hooks?.state) expected.hooks.state = rekeyCodexHookState(expected.hooks.state, prefix, newIndexOf);
+          if (kept.length > 0) document.hooks[event] = kept.map((index) => groups[index]!);
+          else delete document.hooks[event];
+        }
+        if (!isDeepStrictEqual(withoutEmptyHookTables(parseToml(config)), withoutEmptyHookTables(expected))) {
+          throw new Error("its hooks' trust records couldn't be moved exactly");
+        }
+        const json = `${JSON.stringify(document, null, 2)}\n`;
+        if (json !== original) this.fs.writeFile(hooksPath, json);
+        if (updated !== null) updated = config;
+      } catch (err) {
+        console.error(`[openrig] codex activity hook removal skipped for ${hooksPath}: ${(err as Error).message}; left untouched`);
+      }
+    }
+    if (existing !== null && updated !== null && updated !== existing) {
       this.fs.writeFile(configPath, updated);
     }
   }
@@ -810,20 +941,21 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   /** Type a command buildResumeCommand built into the pane's shell, then verify the resume as launchHarness
    *  does. Nothing is prepared again, so the command runs exactly as it was built and checked. */
-  async sendResumeCommand(tmuxSession: string, command: string, resumeToken: string, nodeId?: string): Promise<HarnessLaunchResult> {
+  async sendResumeCommand(tmuxSession: string, command: string, resumeToken: string, nodeId?: string, home?: string): Promise<HarnessLaunchResult> {
     const textResult = await this.tmux.sendShellCommand(tmuxSession, command);
     if (!textResult.ok) return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
-    return this.verifyResumeInPane(tmuxSession, resumeToken, nodeId);
+    return this.verifyResumeInPane(tmuxSession, resumeToken, nodeId, home);
   }
 
   /** launchHarness's resume verification for a resume the caller started itself: dismiss a skippable update
-   *  prompt, then require a proven resumed conversation (never process-alive alone). The proof reads the seat's
-   *  own CODEX_HOME when `nodeId` names a seat that declares one, where its resumed Codex logs. */
-  async verifyResumeInPane(tmuxSession: string, resumeToken: string, nodeId?: string): Promise<HarnessLaunchResult> {
+   *  prompt, then require a proven resumed conversation (never process-alive alone). The proof reads `home` when the
+   *  caller read it from the running Codex, else the seat's own CODEX_HOME when `nodeId` names a seat that declares one,
+   *  where its resumed Codex logs. */
+  async verifyResumeInPane(tmuxSession: string, resumeToken: string, nodeId?: string, home?: string): Promise<HarnessLaunchResult> {
     const updatePrompt: UpdatePromptAttempt = { handled: false };
     await this.dismissSkippableCodexUpdatePrompt(tmuxSession, updatePrompt);
     if (updatePrompt.failure) return updatePrompt.failure;
-    return this.verifyResumeLaunch(tmuxSession, updatePrompt, { resumeToken, ...this.ownHomeOpt({ nodeId }) });
+    return this.verifyResumeLaunch(tmuxSession, updatePrompt, { resumeToken, ...(home ? { home } : this.ownHomeOpt({ nodeId })) });
   }
 
   /** Launch flags shared by fresh, fork and resume, decided once per launch. With `running`, the probed and
@@ -1603,11 +1735,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         const proof = await this.proveResumedProcess(tmuxSession, resumeToken, deadline, opts?.home);
         if (proof.kind === "match") return { ok: true, resumeToken, resumeType: "codex_id", resumedProcess: proof.process };
         if (proof.kind === "mismatch") {
+          const detail = `Codex resume opened a different conversation: the resumed process's records name ${proof.threadId}, not the requested ${resumeToken}.`;
           return {
             ok: false,
-            error: `Codex resume opened a different conversation: the resumed process's records name ${proof.threadId}, not the requested ${resumeToken}. The session was preserved; nothing was restarted.`,
+            error: `${detail} The session was preserved; nothing was restarted.`,
             recovery: "attention_required",
             resumeMismatch: { opened: proof.threadId },
+            resumeDetail: detail,
             verifierInput: verifierInput(),
             evidence: paneContent.split("\n").slice(-12).join("\n"),
           };
@@ -1654,9 +1788,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // Report the newest screen observed; a resumed or booting one names no gate. The loop's own decisions above used
     // lastUnresolved. The text follows the newest screen too, so an older gate's text never stands for a newer screen.
     const shown = report && report.probe.status !== "resumed" && report.probe.code !== "awaiting_runtime" ? report : null;
-    const unprovenText = unproven && report?.probe.status === "resumed"
-      ? `Codex resume could not be proven within the resume window: ${unproven}. The session was preserved; nothing was restarted.`
+    const unprovenDetail = unproven && report?.probe.status === "resumed"
+      ? `Codex resume could not be proven within the resume window: ${unproven}.`
       : null;
+    const unprovenText = unprovenDetail ? `${unprovenDetail} The session was preserved; nothing was restarted.` : null;
     const newestText = unprovenText ? unprovenText : shown ? shown.probe.detail
       : report?.probe.status === "resumed" ? "Codex resume could not be confirmed: the last screen observed looked ready, but the resume check ended before proving a restored conversation."
         : report ? report.probe.detail
@@ -1672,6 +1807,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // With a conversation to prove and no gate on the newest screen, the end is "not proven": whatever the last frame
       // was (a boot, a ready screen, or no capture at all before the deadline), the resumed Codex may be running.
       ...(resumeToken && !shown ? { resumeUnproven: true as const } : {}),
+      ...(unprovenDetail ? { resumeDetail: unprovenDetail } : {}),
       verifierInput: verifierInput(),
       evidence: (report?.paneContent ?? lastPaneContent).split("\n").slice(-12).join("\n"),
     };
@@ -1825,11 +1961,11 @@ export function computeCodexHookTrust(
  * `[hooks.state."<key>"] trusted_hash = "<hash>"` record. Mirrors upsertCodexProjectTrust:
  * find/create the exact table header, splice ONLY its `trusted_hash` line, leave every other
  * `[hooks.state]` / `[projects]` entry and the managed hook block byte-identical. Same key+hash
- * ⇒ no-op. Only called for our authored inline or exact first-install plugin keys (never blanket trust).
+ * ⇒ no-op. Only called for our authored inline or verified owned plugin keys (never blanket trust).
  */
-export function upsertCodexHookTrust(content: string, key: string, hash: string): string {
+export function upsertCodexHookTrust(content: string, key: string, hash: string, field: "trusted_hash" | "trusted_content_hash" = "trusted_hash"): string {
   const header = `[hooks.state.${JSON.stringify(key)}]`;
-  const trustLine = `trusted_hash = ${JSON.stringify(hash)}`;
+  const trustLine = `${field} = ${JSON.stringify(hash)}`;
   const lines = content.length > 0 ? content.split("\n") : [];
   const headerIndex = lines.findIndex((line) => line.trim() === header);
 
@@ -1848,7 +1984,7 @@ export function upsertCodexHookTrust(content: string, key: string, hash: string)
   }
 
   const hashIndex = lines.findIndex(
-    (line, index) => index > headerIndex && index < nextSectionIndex && line.trim().startsWith("trusted_hash"),
+    (line, index) => index > headerIndex && index < nextSectionIndex && line.trim().startsWith(field),
   );
   if (hashIndex >= 0) {
     lines[hashIndex] = trustLine;
@@ -1856,7 +1992,7 @@ export function upsertCodexHookTrust(content: string, key: string, hash: string)
     lines.splice(headerIndex + 1, 0, trustLine);
   }
 
-  return `${lines.join("\n").replace(/\n*$/, "\n")}`;
+  return field === "trusted_content_hash" ? lines.join("\n") : `${lines.join("\n").replace(/\n*$/, "\n")}`;
 }
 
 export function isCodex013xOrLater(version: string): boolean {
@@ -1925,6 +2061,8 @@ function upsertCodexHooksFeature(content: string): string {
 
 // OPR.0.4.1.10 FR-A — config-layer activity-hook projection.
 const OPENRIG_ACTIVITY_HOOKS_BEGIN = "# BEGIN OPENRIG MANAGED ACTIVITY HOOKS";
+/** The status Codex shows while OpenRig's hooks.json activity hook runs; it also marks the group as OpenRig's. */
+const OPENRIG_ACTIVITY_STATUS = "OpenRig activity";
 const OPENRIG_ACTIVITY_HOOKS_END = "# END OPENRIG MANAGED ACTIVITY HOOKS";
 const OPENRIG_ACTIVITY_HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest"] as const;
 
@@ -1956,6 +2094,130 @@ function upsertCodexActivityHooks(content: string, relayPath: string): string {
   }
   const prefix = next.replace(/\n*$/, "");
   return prefix.length > 0 ? `${prefix}\n\n${block}` : block;
+}
+
+function canonicalCodexHookSource(path: string): string {
+  // Codex keys hook trust by the canonical source path; a file not on the real filesystem keeps its plain path.
+  try { return fs.realpathSync.native(path); } catch { return path; }
+}
+
+/** A hooks.json document as Codex reads it: `hooks` maps each event to matcher groups, each with a `hooks` list. */
+function parseCodexHooksJson(content: string): { hooks: Record<string, unknown[]> } {
+  const value: unknown = JSON.parse(content);
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("not a JSON object");
+  const record = value as Record<string, unknown>;
+  if (record.hooks === undefined) record.hooks = {};
+  const hooks = record.hooks;
+  if (hooks === null || typeof hooks !== "object" || Array.isArray(hooks)
+    || Object.values(hooks).some((groups) => !Array.isArray(groups)
+      || groups.some((group) => group === null || typeof group !== "object" || !Array.isArray((group as { hooks?: unknown }).hooks)))) {
+    throw new Error("expected hooks to map each event to matcher groups with a hooks list");
+  }
+  return record as { hooks: Record<string, unknown[]> };
+}
+
+function openRigActivityGroup(command: string): { hooks: Array<Record<string, unknown>> } {
+  return { hooks: [{ type: "command", command, timeout: 5, statusMessage: OPENRIG_ACTIVITY_STATUS }] };
+}
+
+/** Where OpenRig's activity relay ships, in this install or an earlier one (the absolute path moves on upgrade). */
+const OPENRIG_ACTIVITY_RELAY_SUFFIX = "/assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs";
+
+/** A hook command that runs OpenRig's own shipped activity relay, not a person's script that shares its name. */
+function isOpenRigRelayCommand(command: unknown): boolean {
+  const relay = typeof command === "string" ? /^node "(.*)"$/.exec(command)?.[1] : undefined;
+  return relay !== undefined && relay.replaceAll("\\", "/").endsWith(OPENRIG_ACTIVITY_RELAY_SUFFIX);
+}
+
+/** OpenRig's own group, exactly as it authors it: no matcher, and one handler with only our fields, our status and
+ *  timeout, running OpenRig's shipped relay. Anything else is a person's group and is left alone. */
+function isOpenRigActivityGroup(group: unknown): boolean {
+  if (group === null || typeof group !== "object") return false;
+  const { hooks, ...rest } = group as { hooks?: unknown };
+  if (Object.keys(rest).length > 0 || !Array.isArray(hooks) || hooks.length !== 1) return false;
+  const handler = hooks[0];
+  if (handler === null || typeof handler !== "object") return false;
+  const { type, command, timeout, statusMessage, ...extra } = handler as Record<string, unknown>;
+  return Object.keys(extra).length === 0 && type === "command" && timeout === 5 && statusMessage === OPENRIG_ACTIVITY_STATUS
+    && isOpenRigRelayCommand(command);
+}
+
+type CodexHookState = Record<string, Record<string, unknown>>;
+
+function codexHookStateOf(document: unknown): CodexHookState {
+  return (document as { hooks?: { state?: CodexHookState } } | null)?.hooks?.state ?? {};
+}
+
+/** A parsed config without an empty `hooks.state`, or then an empty `hooks`: the text drops a table with its last
+ *  entry, and an empty table means the same as none. */
+function withoutEmptyHookTables(document: unknown): unknown {
+  const { hooks, ...rest } = document as { hooks?: Record<string, unknown> };
+  if (hooks === undefined) return document;
+  const { state, ...otherHooks } = hooks;
+  const kept = state !== undefined && Object.keys(state as object).length > 0 ? hooks : otherHooks;
+  return Object.keys(kept).length > 0 ? { ...rest, hooks: kept } : rest;
+}
+
+/** The index of OpenRig's inline group for `event` among a parsed config.toml's inline groups, or -1. */
+function openRigInlineGroupIndex(document: unknown, event: string): number {
+  const groups = (document as { hooks?: Record<string, unknown> } | null)?.hooks?.[event];
+  if (!Array.isArray(groups)) return -1;
+  return groups.findIndex((group) => {
+    const handlers = (group as { hooks?: unknown } | null)?.hooks;
+    const handler = Array.isArray(handlers) && handlers.length === 1 ? handlers[0] as Record<string, unknown> | null : null;
+    return !!handler && handler.type === "command" && Number(handler.timeout) === 5 && isOpenRigRelayCommand(handler.command);
+  });
+}
+
+/** Write `enabled = false` into one `[hooks.state."<key>"]` table (the trust write creates it first). */
+function upsertCodexHookDisabled(content: string, key: string): string {
+  const header = `[hooks.state.${JSON.stringify(key)}]`;
+  const lines = content.split("\n");
+  const at = lines.findIndex((line) => line.trim() === header);
+  if (at < 0) return `${content.replace(/\n*$/, "")}\n\n${header}\nenabled = false\n`;
+  let end = lines.length;
+  for (let i = at + 1; i < lines.length; i++) if (lines[i]!.trim().startsWith("[")) { end = i; break; }
+  const enabledAt = lines.findIndex((line, i) => i > at && i < end && /^\s*enabled\s*=/.test(line));
+  if (enabledAt >= 0) lines[enabledAt] = "enabled = false";
+  else lines.splice(at + 1, 0, "enabled = false");
+  return lines.join("\n");
+}
+
+/** The parsed `hooks.state` after an event's groups move (`newIndexOf`; null = the group left): a group's tables move with it. */
+function rekeyCodexHookState(state: CodexHookState, prefix: string, newIndexOf: (index: number) => number | null): CodexHookState {
+  const next: CodexHookState = {};
+  for (const [key, value] of Object.entries(state)) {
+    const tail = key.startsWith(prefix) ? /^(\d+):(\d+)$/.exec(key.slice(prefix.length)) : null;
+    if (!tail) { next[key] = value; continue; }
+    const index = newIndexOf(Number(tail[1]));
+    if (index !== null) next[`${prefix}${index}:${tail[2]}`] = value;
+  }
+  return next;
+}
+
+/** The same move on config.toml's text: rename each moved group's `[hooks.state."<key>"]` header, and drop a removed
+ *  group's table. Other spellings aren't touched; the caller compares the parsed result before writing. */
+function rekeyCodexHookStateText(content: string, prefix: string, newIndexOf: (index: number) => number | null): string {
+  const out: string[] = [];
+  let dropping = false;
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("[")) {
+      dropping = false;
+      const quoted = /^\[hooks\.state\.(".*")\]$/.exec(trimmed)?.[1];
+      let key: string | undefined;
+      try { key = quoted ? JSON.parse(quoted) as string : undefined; } catch { key = undefined; }
+      const tail = key?.startsWith(prefix) ? /^(\d+):(\d+)$/.exec(key.slice(prefix.length)) : null;
+      if (tail) {
+        const index = newIndexOf(Number(tail[1]));
+        if (index === null) { dropping = true; continue; }
+        out.push(`[hooks.state.${JSON.stringify(`${prefix}${index}:${tail[2]}`)}]`);
+        continue;
+      }
+    }
+    if (!dropping) out.push(line);
+  }
+  return out.join("\n");
 }
 
 /**

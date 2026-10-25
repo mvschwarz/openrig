@@ -24,7 +24,13 @@ describe("served seat attention across the rig, CLI and TUI", () => {
     { name: "failed startup survives observed clear", signal: false, hook: "idle", cause: "failed", expected: true },
     { name: "held seat survives observed clear", signal: false, hook: "idle", cause: "held", expected: true },
     { name: "recorded error survives observed clear", signal: false, hook: "idle", cause: "error", expected: true },
-  ])("$name", async ({ signal, hook, cause, expected }) => {
+    // A Codex seat at an approval prompt that no hook reports: only the cached pane reading sees it (ring 2, ovh07).
+    { name: "a prompt only the pane reading sees", signal: null, hook: null, cause: "none", pane: true, expected: true },
+    { name: "the pane reading after a stale hook", signal: null, hook: "unknown", cause: "none", pane: true, expected: true },
+    { name: "after a daemon restart, with no arbitrated state yet", signal: null, hook: null, cause: "none", pane: true, restart: true, expected: true },
+    { name: "an observed clear overrides the pane reading", signal: false, hook: null, cause: "none", pane: true, expected: false },
+    { name: "a current running hook outranks the pane reading", signal: null, hook: "running", cause: "none", pane: true, expected: false },
+  ])("$name", async ({ signal, hook, cause, expected, pane = false, restart = false }) => {
     const db = createFullTestDb(); closes.push(() => db.close());
     db.exec(`INSERT INTO rigs(id,name) VALUES('rig','team');
       INSERT INTO nodes(id,rig_id,logical_id,runtime) VALUES('node','rig','worker','codex');
@@ -40,19 +46,21 @@ describe("served seat attention across the rig, CLI and TUI", () => {
       db.exec(`INSERT INTO events(rig_id,node_id,type,payload) VALUES('rig','node','node.startup_failed','{"error":"launch error"}')`);
     }
     const evidence = signal == null ? null : { rung: "needs-input-chrome", observedAt: "2026-10-23T20:00:00Z" };
-    const seatActivity = { getSeatActivity: () => null, getSeatStateBySession: () => ({
+    const seatActivity = { getSeatActivity: () => null, getSeatStateBySession: () => restart ? null : ({
       activity: "working", needsInput: { count: signal ? 1 : 0, reason: signal ? "visible dialog" : null },
       needsInputEvidence: evidence, decidedBy: "window-sampling", seq: 1, lastSwap: null,
     }) } as unknown as SeatActivityService;
+    const structuralActivity = { getStructuralActivity: () => pane
+      ? { state: "attention", reason: "selection_prompt", evidence: "› 1. Yes, proceed", observedAt: new Date().toISOString() } : null };
     const activityStore = { getLatestForNode: () => hook == null ? null : ({
       state: hook, reason: "hook reason", evidenceSource: "runtime_hook", sampledAt: new Date().toISOString(), evidence: null,
     }) } as unknown as AgentActivityStore;
-    const ps = new PsProjectionService({ db, seatActivity, agentActivity: activityStore });
+    const ps = new PsProjectionService({ db, seatActivity, agentActivity: activityStore, structuralActivity });
     const tmux = { getPaneCommand: vi.fn(async () => "node"), capturePaneContent: vi.fn(async () => null) };
     const app = new Hono();
     app.use("*", async (c, next) => {
       for (const [key, value] of Object.entries({ rigRepo: new RigRepository(db), tmuxAdapter: tmux,
-        seatActivityService: seatActivity, agentActivityStore: activityStore })) c.set(key as never, value);
+        seatActivityService: seatActivity, agentActivityStore: activityStore, seatStructuralActivityService: structuralActivity })) c.set(key as never, value);
       await next();
     });
     app.route("/api/rigs/:rigId/nodes", nodesRoutes);
@@ -64,6 +72,11 @@ describe("served seat attention across the rig, CLI and TUI", () => {
     expect(ps.getEntries()[0]!.attentionCount).toBe(nodes.filter((n: { needsAttention: boolean }) => n.needsAttention).length);
     const cli = compactNodeProjection(nodes)[0]!;
     expect(cli).toMatchObject({ needsAttention: expected });
+    if (pane && expected) {
+      // The served activity and the attention flag tell the same truth, and the reason survives into the compact read.
+      expect(nodes[0].agentActivity).toMatchObject({ state: "needs_input", reason: "selection_prompt", evidenceSource: "pane_heuristic" });
+      expect(cli).toMatchObject({ agentActivity: { state: "needs_input", reason: "selection_prompt" } });
+    }
     const stdout = vi.spyOn(console, "log").mockImplementation(() => {});
     vi.stubEnv("ATTENTION_FIXTURE_TOKEN", "fixture-only");
     const command = new Command().addCommand(psCommand({
@@ -75,6 +88,13 @@ describe("served seat attention across the rig, CLI and TUI", () => {
     }));
     await command.parseAsync(["node", "rig", "ps", "--host", "fixture", "--nodes", "--rig", "team", "--json", "--limit", "10", "--fields", "needsAttention,arbitratedNeedsInput,needsInputEvidence"]);
     expect(JSON.parse(String(stdout.mock.calls.at(-1)![0])).entries[0]).toMatchObject({ needsAttention: expected, arbitratedNeedsInput: signal, needsInputEvidence: evidence });
+    if (pane && expected) {
+      // The table a person reads: the reason and ATTN, not "working, —".
+      stdout.mockClear();
+      await command.parseAsync(["node", "rig", "ps", "--host", "fixture", "--nodes", "--rig", "team"]);
+      const row = stdout.mock.calls.map(call => String(call[0])).find(line => line.includes("worker@team"));
+      expect(row).toMatch(/\byes\b.*selection_prompt\s*$/);
+    }
     stdout.mockRestore();
     // The TUI's actual HTTP reader consumes the exact node response, not an independently authored node fixture.
     const client = new DaemonClient({ baseUrl: "http://fixture", fetchImpl: (async (url: string) => {

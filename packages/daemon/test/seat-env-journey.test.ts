@@ -179,6 +179,16 @@ describe("env: reaches the seats from a rig spec", () => {
     f.db.close();
   });
 
+  it("a one-off CODEX_HOME or CLAUDE_CONFIG_DIR isn't applied; other one-off values are", async () => {
+    const f = fixture();
+    await launch(f, { env: { CODEX_HOME: "/homes/one-off", CLAUDE_CONFIG_DIR: "/homes/one-off-claude", EXTRA: "1" } });
+    expect(envOf(f, "dev-impl")).toMatchObject({ EXTRA: "1" });
+    expect(envOf(f, "dev-impl")).not.toHaveProperty("CODEX_HOME", "/homes/one-off");
+    expect(envOf(f, "dev-impl")).not.toHaveProperty("CLAUDE_CONFIG_DIR", "/homes/one-off-claude");
+    expect(envOf(f, "dev-impl").OPENRIG_SEAT_ENV_KEYS?.split(",")).not.toContain("CODEX_HOME");
+    f.db.close();
+  });
+
   it("rig up --env wins over the spec for this launch", async () => {
     const f = fixture();
     await launch(f, { env: { SHARED: "from-flag", EXTRA: "1" } });

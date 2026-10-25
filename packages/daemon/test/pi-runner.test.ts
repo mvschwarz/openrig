@@ -1,6 +1,6 @@
 // OPR.0.4.6.PI1 — hermetic unit tests for the pi-runner core: submitted paste
 // boundaries (including delayed multi-line sends), stdin→RPC routing
-// (idle→prompt / streaming→steer / prefix conventions), the event→mirror and
+// (every block a prompt the runtime queues as a steer while busy / prefix conventions), the event→mirror and
 // event→activity mapping, the get_state identity capture + sidecar, the
 // durable catch-up cursor, and honest pi-exit reporting. No live pi.
 
@@ -249,7 +249,7 @@ describe("runner input", () => {
       core.handlePiLine(JSON.stringify({ type: "agent_start" }));
       t.input.write(start + "second" + end + "\r/followup later\r/abort\r");
       expect(rpc.filter(x => ["prompt", "steer", "follow_up", "abort"].includes(String(x.type)))).toEqual([
-        { type: "prompt", message: "first" }, { type: "steer", message: "second" },
+        { type: "prompt", message: "first", streamingBehavior: "steer" }, { type: "prompt", message: "second", streamingBehavior: "steer" },
         { type: "follow_up", message: "later" }, { type: "abort" },
       ]);
     } finally { t.editor.close(); }
@@ -334,25 +334,55 @@ describe("runner input", () => {
 // ── stdin → RPC routing ──────────────────────────────────────────────────────
 
 describe("RunnerCore.handleUserBlock", () => {
-  it("idle → RPC prompt", () => {
-    const { core, rpc } = readyCore();
+  // Every ordinary block is a prompt with streamingBehavior "steer": Pi and OMP queue it as a steer while they are busy
+  // and run it as a prompt when they are idle, so the runtime decides, not the runner's view of the turn.
+  const prompt = (message: string) => ({ type: "prompt", message, streamingBehavior: "steer" });
+
+  it("idle → RPC prompt that the runtime queues as a steer if it turns out to be busy", () => {
+    const { core, rpc, lines } = readyCore();
     core.handleUserBlock("hello pi");
-    expect(rpc.at(-1)).toEqual({ type: "prompt", message: "hello pi" });
+    expect(rpc.at(-1)).toEqual(prompt("hello pi"));
+    expect(lines.at(-1)).toBe("you ▸ hello pi");
   });
 
-  it("streaming → RPC steer (Pi's documented mid-stream delivery)", () => {
-    const { core, rpc } = readyCore();
+  it("streaming → the same prompt, which Pi queues as a steer (its documented mid-stream delivery)", () => {
+    const { core, rpc, lines } = readyCore();
     core.handlePiLine(JSON.stringify({ type: "agent_start" }));
     core.handleUserBlock("change course");
-    expect(rpc.at(-1)).toEqual({ type: "steer", message: "change course" });
+    expect(rpc.at(-1)).toEqual(prompt("change course"));
+    expect(lines.at(-1)).toBe("you (steer) ▸ change course");
   });
 
-  it("back to prompt after agent_end", () => {
-    const { core, rpc } = readyCore();
+  it("back to an ordinary prompt line after agent_end", () => {
+    const { core, rpc, lines } = readyCore();
     core.handlePiLine(JSON.stringify({ type: "agent_start" }));
     core.handlePiLine(JSON.stringify({ type: "agent_end" }));
     core.handleUserBlock("next task");
-    expect(rpc.at(-1)).toEqual({ type: "prompt", message: "next task" });
+    expect(rpc.at(-1)).toEqual(prompt("next task"));
+    expect(lines.at(-1)).toBe("you ▸ next task");
+  });
+
+  it("a block that arrives after a prompt but before agent_start goes as a prompt the busy runtime queues as a steer (#1932)", () => {
+    const { core, rpc } = readyCore();
+    core.handleUserBlock("first startup block");
+    core.handlePiLine(JSON.stringify({ type: "response", command: "prompt", success: true }));
+    core.handleUserBlock("second startup block");
+    expect(rpc.filter(x => ["prompt", "steer"].includes(String(x.type)))).toEqual([
+      prompt("first startup block"), prompt("second startup block"),
+    ]);
+  });
+
+  it("after a local-only command succeeds with no turn, real work still goes as a prompt and runs", () => {
+    // An extension command or an input handler can consume a prompt: Pi answers success and starts no turn.
+    // A steer then would only queue, with no turn to drain it.
+    const { core, rpc } = readyCore();
+    core.handleUserBlock("/local-command");
+    core.handlePiLine(JSON.stringify({ type: "response", command: "prompt", success: true }));
+    core.handleUserBlock("real work");
+    core.handleUserBlock("more work");
+    expect(rpc.filter(x => x.type === "steer")).toEqual([]);
+    expect(rpc.at(-2)).toMatchObject({ type: "prompt", message: "real work" });
+    expect(rpc.at(-1)).toMatchObject({ type: "prompt", message: "more work" });
   });
 
   it("/abort → RPC abort; /followup → RPC follow_up", () => {

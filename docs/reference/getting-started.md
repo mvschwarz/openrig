@@ -1109,6 +1109,10 @@ absolute working directory, then uses that exact path for discovery and launch.
 It does not use interactive shell aliases or a shell's modified PATH. Relative
 PATH entries and a relative `CLAUDE_CONFIG_DIR` resolve from the seat directory.
 
+In `plan` mode Claude Code answers with Sonnet when the seat's model is the alias
+`haiku` (a full Haiku model id, set with `rig seat set-model`, keeps Haiku), and the
+launch result and `rig seat status` say so for that pairing.
+
 For these explicit native modes, fresh, resume, fork and legacy restore use the
 same managed environment: PATH, HOME, `CLAUDE_CONFIG_DIR` (default HOME/.claude)
 and the configured classic-renderer setting. Other shell customizations are
@@ -1233,6 +1237,9 @@ using the selected database. To stop before opening that database instead, run
 `rig config set daemon.db_conflict stop` (set it to `warn` for the default).
 The check requires an open-file holder, a matching `daemon.json`, and a listener
 reporting the same PID; missing or inconclusive evidence does not stop startup.
+When the check can't run (`lsof` is missing, fails or times out, or a recorded daemon's
+listener doesn't answer), startup warns that ownership is unknown rather than reporting
+no conflict, in either setting.
 Selecting a database outside `OPENRIG_HOME` alone only warns; a confirmed live-daemon
 conflict there still stops when `daemon.db_conflict` is `stop`.
 

@@ -190,6 +190,23 @@ edges:
 
 **Launching one spec under another name.** `rig up <spec> --name <rig>` creates the rig as `<rig>` instead of the spec's `name:`, so one spec can run as several rigs at once, for example `--name alpha` and `--name beta`, with seats `{pod}-{member}@alpha` and `{pod}-{member}@beta`. The spec file is not changed. The rig keeps the chosen name from then on: `rig ps`, `rig down alpha`, `rig up alpha --existing`, snapshots and restore all use it. The same checks as a launch without `--name` apply to the chosen name: a running rig of that name refuses the launch, and a stopped one is archived and replaced, as an explicit spec import does today. `--name` does not rename an existing rig, so the CLI refuses it with the name of an existing rig to restore, with a topology and with a GitHub bundle link. A library spec name works: `rig up starter --name beta` launches the library spec as `beta` even while a rig named `starter` exists. Over `--host`, pass the spec path or bundle file with `--name`. A spec that sets `services.project_name` refuses `--name`: every rig launched from it would share that Compose project, and `rig down` or a failed service boot of one would stop the others' services. Without `project_name`, each rig gets its own project. Two launches of the same spec started at the same moment can answer 409 (already in progress for this source) even under different names; start them one after the other.
 
+### Starting one materialized seat
+
+`rig import ./team.yaml --materialize-only` records the team without starting its harnesses.
+For a seat that has never started, use its positional logical ID:
+
+```bash
+rig launch <rig-id> dev.lead --json
+```
+
+This starts only that seat, preserving the rig's node IDs and the other seats. The daemon retains
+the materialized declaration and resolves its agent and startup files from the original source
+root at launch time; keep those files available. Current saved model, effort and permission
+choices take precedence over the retained declaration; launch reports the differences. A prior snapshot isn't required. Seats with
+session history continue through restore. Explicit `--snapshot-id` and `--seats` use restore too.
+`--plan` previews restore selection; it requires a snapshot and does not preflight this first start.
+Rigs materialized by older daemons lack the retained declaration; this path doesn't retrofit them.
+
 ### Attaching a permission policy
 
 Attach a policy to a rig with `permission_policy`, either at the rig level or on a member:
@@ -410,7 +427,7 @@ pods:
 
 - A seat gets the rig's `env` with its own `env` laid over it, name by name.
 - The same environment is applied on first launch, on `rig up <rig-name>` restore, and to the successor of a seat handover.
-- `rig up <spec> --env KEY=VALUE` (repeatable) adds or overrides a value for one launch. A one-off value belongs to the terminal that launch creates: it stays in that terminal's environment for as long as the terminal lives, and OpenRig removes it from the tmux session's environment as soon as the terminal has started, so a terminal started later in that session does not get it. If OpenRig can't take it out, the seat keeps running and the launch warns, naming the variable and the tmux command to put it back or remove it. Until then, a terminal started later in that session would get it. A restore, a handover successor or any later launch starts from the spec's `env:` alone, so the value is not saved and does not carry forward. To keep a value, put it in `env:`. One exception to "does not carry forward", for a managed Claude seat (see below): a one-off name that the seat's spec does not declare stays on the session's list of names, `OPENRIG_SEAT_ENV_KEYS` (names only, no values), because the first launch and an in-place restart of the same terminal read that list. So if a later pane in that session gets a value for that name from the tmux server's own environment, its managed Claude launch can forward that value, where a launch without `--env` would leave it out. The first launch's one-off value itself is not passed on to that pane. This comes from reading the code and has not been measured. `--env` does not apply to `rig up <rig-name>` (a restore) or to a topology (several rigs from their own specs); the CLI refuses both. For a topology, put `env:` in each rig's spec.
+- `rig up <spec> --env KEY=VALUE` (repeatable) adds or overrides a value for one launch, except `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, which the CLI leaves out with a note (see "A seat's own account" below). A one-off value belongs to the terminal that launch creates: it stays in that terminal's environment for as long as the terminal lives, and OpenRig removes it from the tmux session's environment as soon as the terminal has started, so a terminal started later in that session does not get it. If OpenRig can't take it out, the seat keeps running and the launch warns, naming the variable and the tmux command to put it back or remove it. Until then, a terminal started later in that session would get it. A restore, a handover successor or any later launch starts from the spec's `env:` alone, so the value is not saved and does not carry forward. To keep a value, put it in `env:`. One exception to "does not carry forward", for a managed Claude seat (see below): a one-off name that the seat's spec does not declare stays on the session's list of names, `OPENRIG_SEAT_ENV_KEYS` (names only, no values), because the first launch and an in-place restart of the same terminal read that list. So if a later pane in that session gets a value for that name from the tmux server's own environment, its managed Claude launch can forward that value, where a launch without `--env` would leave it out. The first launch's one-off value itself is not passed on to that pane. This comes from reading the code and has not been measured. `--env` does not apply to `rig up <rig-name>` (a restore) or to a topology (several rigs from their own specs); the CLI refuses both. For a topology, put `env:` in each rig's spec.
 - Names starting `OPENRIG_` are reserved for OpenRig and refused. Empty values are refused, because the launch omits empty variables.
 - `rig export` writes the rig and member `env:` back out.
 
@@ -426,8 +443,10 @@ declares an absolute `CLAUDE_CONFIG_DIR` (Claude Code) or `CODEX_HOME` (Codex) r
 holds. The member's value wins over the rig's. OpenRig follows it everywhere it launches or reads that runtime: the
 launch, Claude's first-run trust settings, Codex's managed `config.toml`, hooks and plugin, conversation capture for
 resume, context usage, `rig seat status` and `rig provider status`. A value that isn't an absolute path isn't used:
-the seat resolves as if it declared none, and `rig seat status` shows the ignored value. Seats may share a home.
-OpenRig doesn't copy logins or conversation history between homes, so a conversation saved under a seat's earlier home
+the seat resolves as if it declared none, and `rig seat status` shows the ignored value. Name the home in `env:`: a
+one-off `rig up --env` value for either variable isn't applied, because a restore, a handover and `rig seat status` read
+only the stored `env:`. Seats may share a home. Live usage refresh (`rig provider status --refresh`) still reads only the
+daemon's own logins; reading each seat's home would need a native reader per home. OpenRig doesn't copy logins or conversation history between homes, so a conversation saved under a seat's earlier home
 doesn't resume after the seat moves to another one. The `openrig-user` skill has the setup steps.
 
 **Do not put secrets in `env:` or `--env`.** The values are not secret, and nothing here encrypts or hides them (see #306):

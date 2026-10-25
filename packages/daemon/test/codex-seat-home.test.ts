@@ -113,6 +113,21 @@ it("the in-place restart's resume proof reads the seat's own home", async () => 
   expect(homes).toEqual([f.seatHome, f.seatHome, undefined]);
 });
 
+it("a home the caller read from the running Codex wins over the seat's declared one and the daemon's", async () => {
+  const f = fixture();
+  const homes: Array<string | undefined> = [];
+  const adapter = new CodexRuntimeAdapter({ tmux: f.tmux as any, fsOps: f.fsOps, codexHome: f.daemonHome, seatHome: f.seatHomeOf,
+    sleep: async () => {} });
+  vi.spyOn(adapter as any, "verifyResumeLaunch").mockImplementation(async (...args: unknown[]) => {
+    homes.push((args[2] as { home?: string }).home); return { ok: true };
+  });
+  vi.spyOn(adapter as any, "dismissSkippableCodexUpdatePrompt").mockResolvedValue(undefined);
+  await adapter.verifyResumeInPane("seat@rig", "conversation-1", "node", "/running/codex-home");
+  await adapter.verifyResumeInPane("seat@rig", "conversation-1", undefined, "/running/codex-home");
+  await adapter.sendResumeCommand("seat@rig", "codex resume conversation-1", "conversation-1", "node", "/running/codex-home");
+  expect(homes).toEqual(["/running/codex-home", "/running/codex-home", "/running/codex-home"]);
+});
+
 it("the resume proof itself reads evidence from the home it's given", async () => {
   const f = fixture();
   const proof = provenCodexResume("conversation-1");

@@ -1,4 +1,5 @@
 import { nonInterruptiveNotice } from "../adapters/non-interruptive.js";
+import { planModelAliasNotice } from "../adapters/yolo-mode.js";
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { SessionRegistry } from "./session-registry.js";
@@ -583,6 +584,8 @@ export class StartupOrchestrator {
             }
             const notice = nonInterruptiveNotice(input.adapter.runtime, input.binding);
             if (notice) warnings.push(`${input.sessionName ?? input.nodeId}: ${notice}`);
+            const planNote = planModelAliasNotice(input.adapter.runtime, input.binding, input.sessionName ?? input.nodeId);
+            if (planNote) warnings.push(`${input.sessionName ?? input.nodeId}: ${planNote}`);
             for (const note of launchResult.warnings ?? []) warnings.push(`${input.sessionName ?? input.nodeId}: ${note}`);
             const normalizedResumeToken = launchResult.resumeToken?.trim();
             if (normalizedResumeToken) {

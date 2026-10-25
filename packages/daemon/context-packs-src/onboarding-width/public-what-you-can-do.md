@@ -1169,9 +1169,10 @@ your circumstances is configuration, and the ones that are not, another agent ca
   behaviour from the web UI. The TUI plus Slack are the human surface; the CLI plus terminal are the agent surface.
 - **`rig mcp serve`** — how an agent that speaks MCP rather than shell drives OpenRig, and which
   operations are exposed that way. Relevant the moment a tool you are integrating cannot run a
-  shell command. Five queue tools (`rig_queue_create`, `rig_queue_show`, `rig_queue_list`,
-  `rig_queue_claim`, `rig_queue_update`) act as the seat named by `OPENRIG_SESSION_NAME`, so an
-  agent with no shell can hand work to the team and read the closing note as its answer. Nothing
+  shell command. Its queue tools (`rig_queue_create`, `rig_queue_show`, `rig_queue_list`,
+  `rig_queue_claim`, `rig_queue_update`, `rig_queue_handoff`, `rig_queue_unclaim`) act as the seat
+  named by `OPENRIG_SESSION_NAME`, so an agent with no shell can hand work to the team, read the
+  closing note as its answer, and pass on or put back work it holds. Nothing
   wakes such an agent; it sees new work when it checks. Its tools cover the whole delegation loop:
   find its seat, team and lead (`rig_whoami`, `rig_team`), hand work on and follow the handoff's
   successor, find finished work and read its artifact, decide inside a person's decision room,

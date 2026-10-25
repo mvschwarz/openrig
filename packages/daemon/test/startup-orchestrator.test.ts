@@ -27,6 +27,9 @@ import { prepareSeatLaunchAdditions, recordConversationPrompt, systemPromptPendi
 import * as nodeFs from "node:fs";
 import * as nodeOs from "node:os";
 import * as nodePath from "node:path";
+import { Hono } from "hono";
+import { nodesRoutes } from "../src/routes/sessions.js";
+import { compactNodeProjection } from "../../cli/src/commands/ps.js";
 
 // -- Mocks --
 
@@ -150,6 +153,62 @@ describe("StartupOrchestrator", () => {
     };
   }
 
+  it("persists a first-login gate as attention and withholds startup context", async () => {
+    const seed = seedSession();
+    db.prepare("UPDATE nodes SET runtime = 'codex' WHERE id = ?").run(seed.nodeId);
+    const firstLoginPrompt = nodeFs.readFileSync(new URL("./fixtures/codex-first-login.txt", import.meta.url), "utf8");
+    const nativeTmux = mockTmux({
+      getPaneCommand: vi.fn(async () => "codex"),
+      getPanePid: vi.fn(async () => null),
+      capturePaneContent: vi.fn(async () => firstLoginPrompt),
+    });
+    const native = new CodexRuntimeAdapter({ tmux: nativeTmux, listProcesses: () => [] });
+    const adapter = mockAdapter({ runtime: "codex", checkReady: vi.fn(binding => native.checkReady(binding)) });
+    const result = await createOrchestrator({ tmux: nativeTmux }).startNode(makeInput(seed, {
+      adapter,
+      plan: { ...emptyPlan(), runtime: "codex" },
+      readinessTimeoutMs: 1_000,
+      resolvedStartupFiles: [{ path: "role.md", absolutePath: "/fixture/role.md", ownerRoot: "/fixture",
+        deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] }],
+      startupActions: [makeAction({ type: "send_text", value: "Start the assigned task" })],
+    }));
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected a login gate");
+    expect(result.startupStatus).toBe("attention_required");
+    expect(result.errors.join("\n")).toMatch(/sign in/i);
+    expect(result.errors.join("\n")).not.toContain("Readiness timeout");
+    expect(adapter.launchHarness).toHaveBeenCalledTimes(1);
+    expect(adapter.checkReady).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(adapter.deliverStartup).mock.calls.flatMap(([files]) => files)).toEqual([]);
+    expect(nativeTmux.sendText).not.toHaveBeenCalled();
+    expect(nativeTmux.sendKeys).not.toHaveBeenCalled();
+    expect(sessionRegistry.getSessionsForRig(seed.rigId).find(session => session.id === seed.sessionId)?.startupStatus)
+      .toBe("attention_required");
+    const inventory = getNodeInventory(db, seed.rigId)[0];
+    expect(inventory).toMatchObject({ startupStatus: "attention_required", lifecycleState: "attention_required" });
+    expect(inventory?.latestError).toMatch(/sign in/i);
+    expect(inventory?.latestError).not.toContain("Readiness timeout");
+    const failure = db.prepare("SELECT payload FROM events WHERE node_id = ? AND type = 'node.startup_failed' ORDER BY seq DESC LIMIT 1")
+      .get(seed.nodeId) as { payload: string };
+    expect(JSON.parse(failure.payload)).toMatchObject({ freshContextPending: true });
+    expect(result.errors.join("\n")).toContain("rig seat continue");
+
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("rigRepo" as never, rigRepo);
+      c.set("tmuxAdapter" as never, nativeTmux);
+      await next();
+    });
+    app.route("/api/rigs/:rigId/nodes", nodesRoutes);
+    const response = await app.request(`/api/rigs/${seed.rigId}/nodes`);
+    expect(response.status).toBe(200);
+    const served = await response.json();
+    expect(served[0]).toMatchObject({ startupStatus: "attention_required", needsAttention: true,
+      latestError: expect.stringMatching(/sign in/i) });
+    expect(compactNodeProjection(served)[0]).toMatchObject({ needsAttention: true,
+      latestError: expect.stringMatching(/sign in/i) });
+  });
+
   // OPR.0.7.0.13 (router, R1.1): a start replaying a saved context delivers the old seat-skills pointer only with the
   // person's recorded yes. The Codex catalog (same logical name, sent as text) and other guidance are unchanged.
   it.each([
@@ -177,6 +236,24 @@ describe("StartupOrchestrator", () => {
     if (delivered) expect(seen).toContainEqual({ path: "openrig-seat-skills.md", deliveryHint: "guidance_merge" });
     else expect(seen).not.toContainEqual({ path: "openrig-seat-skills.md", deliveryHint: "guidance_merge" });
     expect(result).toMatchObject({ ok: true, routerLine: { files: [{ path: expect.stringMatching(/CLAUDE\.md$/), ...outcome }] } });
+  });
+
+  // Claude Code answers plan-mode turns with Sonnet when its model setting is exactly the alias `haiku`. The launch is unchanged;
+  // its result says so for that pairing.
+  it.each([
+    ["claude-code", "haiku", "plan", true], ["claude-code", "claude-haiku-4-5", "plan", false],
+    ["claude-code", "haiku", undefined, false], ["codex", "haiku", "plan", false],
+  ] as const)("a %s launch with model %j and permission mode %j names plan mode's Sonnet answer for the bare alias only", async (runtime, model, permissionMode, named) => {
+    const seed = seedSession();
+    const binding = { ...makeBinding(), model, ...(permissionMode ? { permissionMode } : {}) };
+    const adapter = mockAdapter({ runtime });
+    const result = await createOrchestrator().startNode(makeInput(seed, { adapter, binding, sessionName: "dev-impl@test-rig" }));
+    expect(result.ok).toBe(true);
+    const launched = vi.mocked(adapter.launchHarness).mock.calls[0]![0];
+    expect([launched.model, launched.permissionMode]).toEqual([model, permissionMode]);
+    expect((result.warnings ?? []).filter((w) => w.includes('alias "haiku"'))).toEqual(named ? ['dev-impl@test-rig: Claude Code answers plan-mode turns '
+      + 'with Sonnet when the model is the alias "haiku". To keep Haiku, set a full Haiku model id: rig seat set-model dev-impl@test-rig '
+      + '--model <full Haiku id> --reason "<why>".'] : []);
   });
 
   // R6-F1: the real adapters, not a mock, decide what an unwritable guidance file reports.

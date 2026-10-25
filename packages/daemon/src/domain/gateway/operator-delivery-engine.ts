@@ -106,7 +106,9 @@ export function makeOperatorDeliveryEngine(deps: {
       const payload = {
         qitemId: row.qitemId,
         notificationKey,
-        summary: row.summary ?? `wake-ladder escalation: ${row.qitemId}`,
+        // The person sees which seat the work is waiting on. The sender stays the row's own, so a reply in the thread
+        // still goes where the row's posts go.
+        summary: `Waiting on ${row.destinationSession}: ${row.summary ?? `wake-ladder escalation: ${row.qitemId}`}`,
         body: row.body ?? null,
         destinationSession: human.address,
         sourceSession: row.sourceSession ?? null,

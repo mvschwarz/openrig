@@ -1,4 +1,4 @@
-import { withManagedRestoreReads } from "../domain/managed-restore-read-access.js";
+import { withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
 import { operationalLaunchArgs } from "./kernel-authority.js";
 import nodePath from "node:path";
 import fs from "node:fs";
@@ -60,6 +60,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private sessionIdFactory: () => string;
   private sleep: (ms: number) => Promise<void>;
   private stateDir: string | null;
+  private restoreReadPolicy: (() => RestoreReadPolicy | null) | null;
   private collectorAssetPath: string | null;
   private nodeExecutable: string;
   private autoDriveProviderPrompts: boolean;
@@ -81,6 +82,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     sessionIdFactory?: () => string;
     sleep?: (ms: number) => Promise<void>;
     stateDir?: string;
+    /** The compaction settings the restore reads from, so the launch grants those files too. */
+    restoreReadPolicy?: () => RestoreReadPolicy | null;
     collectorAssetPath?: string;
     /** Interpreter used to write generated Claude commands; defaults to this daemon runtime. */
     nodeExecutable?: string;
@@ -107,6 +110,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.sessionIdFactory = deps.sessionIdFactory ?? randomUUID;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.stateDir = deps.stateDir ?? null;
+    this.restoreReadPolicy = deps.restoreReadPolicy ?? null;
     this.collectorAssetPath = deps.collectorAssetPath ?? null;
     this.nodeExecutable = deps.nodeExecutable ?? process.execPath;
     this.autoDriveProviderPrompts = deps.autoDriveProviderPrompts ?? false;
@@ -285,7 +289,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const posture = claudePostureFlag(process.env, binding.launchPosture, binding.permissionMode);
     const appliedLaunch = observeClaudePermission(posture);
     const permissionArgs = (nativeSessionId: string) => withManagedRestoreReads(operationalLaunchArgs(this.runtime, binding), {
-      openrigHome: this.stateDir, session: opts.name, cwd: binding.cwd, nativeSessionId,
+      openrigHome: this.stateDir, session: opts.name, cwd: binding.cwd, nativeSessionId, ...(this.restoreReadPolicy?.() ?? {}),
     });
     const permissionArg = (args: string[]) => posture + args.map(arg => ` ${shellQuote(arg)}`).join("");
     // OPR.0.5.3.1: classic-renderer env prefix (default on) → native scrollback for every

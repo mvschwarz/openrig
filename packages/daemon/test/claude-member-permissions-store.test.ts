@@ -25,7 +25,7 @@ afterEach(() => { for (const db of opened.splice(0)) db.close(); });
 const rules = { allow: ["Bash(node lane.mjs *)"], deny: ["Read(./private/**)"] };
 function fixture(withMigration = true) {
   const db = new Database(":memory:"); opened.push(db);
-  migrate(db, withMigration ? ALL_MIGRATIONS : ALL_MIGRATIONS.filter(m => !m.name.startsWith("136_")));
+  migrate(db, withMigration ? ALL_MIGRATIONS : ALL_MIGRATIONS.filter(m => m.name !== "139_node_claude_permissions.sql"));
   const rigRepo = new RigRepository(db), rig = rigRepo.createRig("rules");
   const a = rigRepo.addNode(rig.id, "dev.a", { runtime: "claude-code", cwd: "/same/project" });
   const b = rigRepo.addNode(rig.id, "dev.b", { runtime: "claude-code", cwd: "/same/project" });

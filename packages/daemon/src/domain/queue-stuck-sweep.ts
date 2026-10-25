@@ -312,6 +312,12 @@ function minutesSince(iso: string | null | undefined, now: Date): number {
   return Math.max(0, Math.round((now.getTime() - then) / 60_000));
 }
 
+/** Whole minutes, floored as the pickup evidence counts them (queue-pickup.ts). */
+function wholeMinutesSince(iso: string, now: Date): number {
+  const then = Date.parse(iso);
+  return Number.isNaN(then) ? 0 : Math.max(0, Math.floor((now.getTime() - then) / 60_000));
+}
+
 function lastTransitionLine(db: Database.Database, qitemId: string): string {
   const row = db
     .prepare(
@@ -460,14 +466,17 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (!row || isFindingRow(row)) continue;
       const stalled = stalledPickupFinding(row);
       if (!stalled) continue;
+      // Keep this null arm for the 0.5.7 mechanized-pull turn-end hook that knows the in-flight row;
+      // it is the first honest row-scoped writer, and wiring reopens only in that slice.
+      const evidenceAt = latestIso(lastMeaningfulTransition(deps.db, row.qitemId)?.at, row.lastHeartbeat, row.claimedAt);
       candidates.push({
         kind: stalled.kind,
         row,
         route: resolveOrch(stalled.target) ?? stalled.target,
-        ageMinutes: minutesSince(row.claimedAt, now),
-        // Keep this null arm for the 0.5.7 mechanized-pull turn-end hook that knows the in-flight row;
-        // it is the first honest row-scoped writer, and wiring reopens only in that slice.
-        evidenceAt: latestIso(lastMeaningfulTransition(deps.db, row.qitemId)?.at, row.lastHeartbeat, row.claimedAt),
+        // The stall's own age: from the anchor the pickup decision uses, floored as its "why" counts, so a claim
+        // parked and resumed doesn't count its parked time and the headline matches the why to the minute.
+        ageMinutes: wholeMinutesSince(evidenceAt, now),
+        evidenceAt,
         why: stalled.evidence,
       });
     }
@@ -763,11 +772,11 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // with its reason — the sweep cleans up after itself, no human unwind.
     const openFindings = deps.db
       .prepare(
-        `SELECT qitem_id, source_session, tags FROM queue_items
+        `SELECT qitem_id, tags FROM queue_items
           WHERE state IN ('pending', 'in-progress', 'blocked')
             AND tags LIKE ?`,
       )
-      .all(`%"${STUCK_SWEEP_FINDING_TAG}"%`) as Array<{ qitem_id: string; source_session: string; tags: string }>;
+      .all(`%"${STUCK_SWEEP_FINDING_TAG}"%`) as Array<{ qitem_id: string; tags: string }>;
     for (const f of openFindings) {
       let tags: string[] = [];
       try {
@@ -786,7 +795,8 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (suppressedTags.has(dedupTag)) continue;
       await deps.queueRepo.update({
         qitemId: f.qitem_id,
-        actorSession: f.source_session,
+        // The sweep performed this transition; ownership stays on the existing row.
+        actorSession: "stuck-sweep@system",
         state: "done",
         closureReason: "no-follow-on",
         transitionNote: `stuck-sweep resolved: ${kind ?? "finding"} on ${stuckId ?? "row"} no longer detected`,

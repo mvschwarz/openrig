@@ -22,7 +22,7 @@ export interface TerminalPreview {
   status: { available: boolean };
   composed: {
     id: string;
-    pages: Array<Array<{ seat: string; label: string; readOnly: boolean; paneCommand: string }>>;
+    pages: Array<Array<{ seat: string; label: string; readOnly: boolean; paneCommand: string; recoveryCommand?: string }>>;
     opened: Array<{ seat: string }>;
     absent: Array<{ seat: string; reason: string }>;
     degraded: Array<{ seat: string; reason: string }>;
@@ -142,7 +142,7 @@ export function terminalLines(state: ViewState, snap: FleetSnapshot, width: numb
     lines.push({ text: `Headless or remote: open a NEW terminal/tab on the machine running the selected daemon (${read.daemonTarget ?? "address unreported"}), then attach with one command below per terminal. Existing conversations stay in place.` });
     lines.push({ text: "If a command wraps, widen this terminal until it fits on one line before copying." });
     for (const member of page) {
-      const command = member.paneCommand.replace(/^ssh /, "ssh -t ");
+      const command = (member.recoveryCommand ?? member.paneCommand).replace(/^ssh /, "ssh -t ");
       lines.push({ text: `${member.label} · ${member.seat}` }, { text: `env -u TMUX ${command}` });
     }
   }

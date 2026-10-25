@@ -77,6 +77,13 @@ describe("Claude composer below noninteractive status warnings", () => {
     expect((await service.pollSeat("seat@rig"))?.state).not.toBe("agent_idle");
   });
 
+  it("keeps a multiline draft with an empty first line out of idle", async () => {
+    const content = pane([], "❯ \n  second line of draft");
+    expect(classifyPaneActivity(content, { runtime: "claude-code" }).state).toBe("unknown");
+    const service = new SeatStructuralActivityService({ capturePaneContent: async () => content });
+    expect((await service.pollSeat("seat@rig"))?.state).toBe("unknown");
+  });
+
   it("does not confuse completed prompt history with a current draft", () => {
     expect(classifyPaneActivity(pane([update, focus], "❯\u00a0", "❯ previous user request\n● Completed response.")))
       .toMatchObject({ state: "agent_idle", reason: "idle_prompt" });

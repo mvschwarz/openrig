@@ -197,12 +197,19 @@ describe("spawnRex", () => {
     try {
       const failure = vi.fn();
       const started = performance.now();
-      await spawnRex([file], "{}", 300).catch(failure);
-      expect(performance.now() - started).toBeLessThan(1_000);
+      // A deadline the script's start fits well inside, even on a loaded runner.
+      await spawnRex([file], "{}", 1_000).catch(failure);
+      // Ended at the deadline: not after stopGroup's one-second grace, and not when the sleep ends 30 s later.
+      expect(performance.now() - started).toBeLessThan(2_000);
       expect(failure).toHaveBeenCalledOnce();
-      expect(failure.mock.calls[0]![0]).toMatchObject({ exitCode: null, message: "did not answer within 300 ms" });
+      expect(failure.mock.calls[0]![0]).toMatchObject({ exitCode: null, message: "did not answer within 1000 ms" });
+      // An empty file would read as pid 0, which names this test's own process group.
       const child = Number(fs.readFileSync(path.join(path.dirname(file), "child.pid"), "utf8"));
-      expect(() => process.kill(child, 0)).toThrow();
+      expect(Number.isInteger(child) && child > 1, `backgrounded pid ${child}`).toBe(true);
+      // The backgrounded sleep was ended with the run's group. Its parent is gone, so the system reaps it on its own
+      // schedule: wait a bounded moment for that instead of reading the process table at one instant.
+      await expect.poll(() => { try { process.kill(child, 0); return true; } catch { return false; } }, { timeout: 5_000, interval: 20 })
+        .toBe(false);
     } finally {
       cleanup();
     }

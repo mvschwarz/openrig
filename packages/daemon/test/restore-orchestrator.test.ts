@@ -121,6 +121,11 @@ describe("RestoreOrchestrator", () => {
     pi?: PiResumeAdapter;
     omp?: OmpResumeAdapter;
     listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
+    freshLaunch?: (rigId: string, nodeId: string) => Promise<{
+      status: "launched" | "failed" | "attention_required";
+      error?: string;
+      warnings?: string[];
+    }>;
   }) {
     const tmux = opts?.tmux ?? mockTmux();
     const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
@@ -132,6 +137,7 @@ describe("RestoreOrchestrator", () => {
       piResume: opts?.pi,
       ompResume: opts?.omp,
       listProcesses: opts?.listProcesses,
+      freshLaunch: opts?.freshLaunch,
     });
   }
 
@@ -3103,6 +3109,88 @@ describe("RestoreOrchestrator", () => {
       });
       expect(mockAdapter.launchHarness).not.toHaveBeenCalled();
     }
+  });
+
+  it("rebuilds a fresh launch from a persisted recipe when startup context is absent", async () => {
+    const rig = rigRepo.createRig("test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-recipe", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.design", { runtime: "claude-code", podId: "pod-recipe" });
+    const session = sessionRegistry.registerSession(node.id, "dev-design@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+
+    const freshLaunch = vi.fn(async () => ({ status: "launched" as const }));
+    const mockAdapter = {
+      runtime: "claude-code",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness: vi.fn(async () => ({ ok: true as const })),
+    };
+    const result = await createOrchestrator({ freshLaunch }).restore(snap.id, {
+      adapters: { "claude-code": mockAdapter },
+      freshLogicalIds: [node.logicalId],
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(freshLaunch).toHaveBeenCalledWith(rig.id, node.id);
+      expect(result.result.nodes[0]).toMatchObject({ nodeId: node.id, status: "fresh-primed" });
+      expect(mockAdapter.launchHarness).not.toHaveBeenCalled();
+    }
+  });
+
+  it("keeps the provisional shell when retirement is not confirmed", async () => {
+    const rig = rigRepo.createRig("retire-refusal-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-retire-refusal", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.design", { runtime: "claude-code", podId: "pod-retire-refusal" });
+    const session = sessionRegistry.registerSession(node.id, "dev-design@retire-refusal-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+    const tmux = mockTmux();
+    tmux.killSession = vi.fn(async () => ({ ok: false as const, code: "guard_target_unknown", message: "pane ownership was not confirmed" }));
+    const freshLaunch = vi.fn(async () => ({ status: "launched" as const }));
+
+    const result = await createOrchestrator({ tmux, freshLaunch }).restore(snap.id, {
+      adapters: { "claude-code": { runtime: "claude-code" } as RuntimeAdapter },
+      freshLogicalIds: [node.logicalId],
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.result.nodes[0]).toMatchObject({ status: "attention_required", error: expect.stringContaining("retire provisional session") });
+    expect(freshLaunch).not.toHaveBeenCalled();
+    expect(tmux.killSession).toHaveBeenCalledOnce();
+  });
+
+  it("does not restore stale prior state after a replacement session exists", async () => {
+    const rig = rigRepo.createRig("replacement-failure-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-replacement", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.design", { runtime: "claude-code", podId: "pod-replacement" });
+    const prior = sessionRegistry.registerSession(node.id, "dev-design@replacement-failure-rig");
+    sessionRegistry.updateStatus(prior.id, "running");
+    sessionRegistry.updateBinding(node.id, { attachmentType: "tmux", tmuxSession: prior.sessionName });
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(prior.id, "exited");
+    const freshLaunch = vi.fn(async () => {
+      const replacement = sessionRegistry.registerSession(node.id, "replacement@replacement-failure-rig");
+      sessionRegistry.updateStatus(replacement.id, "running");
+      return { status: "failed" as const, error: "post-launch delivery failed" };
+    });
+
+    const result = await createOrchestrator({ freshLaunch }).restore(snap.id, {
+      adapters: { "claude-code": { runtime: "claude-code" } as RuntimeAdapter },
+      freshLogicalIds: [node.logicalId],
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.result.nodes[0]).toMatchObject({ status: "failed", error: "post-launch delivery failed" });
+    expect(sessionRegistry.getSessionsForRig(rig.id).find((candidate) => candidate.sessionName === "replacement@replacement-failure-rig")?.status).toBe("running");
+    expect(db.prepare("SELECT node_id FROM bindings WHERE node_id = ?").get(node.id)).toBeUndefined();
   });
 
   // Updated by codex-auth-refusal-attention-required slice (revision 2):

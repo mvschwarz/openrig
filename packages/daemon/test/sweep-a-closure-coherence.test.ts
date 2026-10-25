@@ -46,6 +46,15 @@ describe("SWEEP-a — closure/blocked coherence guard", () => {
     expect(repo.getById(id)!.state).toBe("pending");
   });
 
+  it("canceled + closure_reason canceled is refused with a message that names the working cancel form", async () => {
+    let err: unknown;
+    try { await repo.update({ qitemId: id, actorSession: "a@rig", state: "canceled", closureReason: "canceled" } as never); }
+    catch (e) { err = e; }
+    expect((err as QueueRepositoryError).code).toBe("closure_fields_not_admitted");
+    expect((err as QueueRepositoryError).message).toContain("To cancel it: --state done --closure-reason canceled");
+    expect(repo.getById(id)!.state).toBe("pending");
+  });
+
   it("blocked_on on state=done REJECTS loud", async () => {
     let err: unknown;
     try { await repo.update({ qitemId: id, actorSession: "a@rig", state: "done", closureReason: "canceled", blockedOn: "x@rig" } as never); }

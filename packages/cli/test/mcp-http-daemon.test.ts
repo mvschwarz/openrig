@@ -18,6 +18,7 @@ import { migrate } from "../../daemon/src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../../daemon/src/db/all-migrations.js";
 import { EventBus } from "../../daemon/src/domain/event-bus.js";
 import { QueueRepository } from "../../daemon/src/domain/queue-repository.js";
+import { OutboxHandler } from "../../daemon/src/domain/outbox-handler.js";
 import { mcpCommand } from "../src/commands/mcp.js";
 import { addGrant, McpHttpConfigError, revokeGrant, startMcpHttpServer, withGrantsLock } from "../src/mcp-http.js";
 
@@ -47,6 +48,8 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     process.env.OPENRIG_SESSION_NAME = "env-seat@elsewhere";
     tokenFile = path.join(home, "mcp-http-tokens.json");
     repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    // The wake store attached, as the daemon attaches it at startup: a handoff makes its successor's wake durable there.
+    repo.attachOutbox(new OutboxHandler(db));
     const inert = async () => ({ ok: false, error: "inert fixture" });
     resolved = [];
     setup = createTestApp(db, {
@@ -159,7 +162,7 @@ describe("rig mcp serve --http on the daemon's routes", () => {
       closers.push(() => client.close());
       return (await client.listTools()).tools.map((tool) => tool.name);
     })();
-    expect(names).toEqual(expect.arrayContaining(["rig_queue_create", "rig_queue_show", "rig_send", "rig_capture", "rig_team", "rig_artifact_read"]));
+    expect(names).toEqual(expect.arrayContaining(["rig_queue_create", "rig_queue_show", "rig_queue_handoff", "rig_queue_unclaim", "rig_send", "rig_capture", "rig_team", "rig_artifact_read"]));
     for (const ownerTool of ["rig_up", "rig_down", "rig_restore", "rig_discover", "rig_add", "rig_bundle_inspect", "rig_telemetry_events", "rig_context_get"]) {
       expect(names).not.toContain(ownerTool);
     }
@@ -218,10 +221,23 @@ describe("rig mcp serve --http on the daemon's routes", () => {
       expect((await asCarol("rig_queue_show", { qitemId: row.qitemId })).isError).toBe(false);
       const update = await asCarol("rig_queue_update", { qitemId: row.qitemId, state: "done", closureReason: "no-follow-on" });
       expect(update.structured).toMatchObject({ ok: false, code: "out_of_scope" });
+      expect((await asCarol("rig_queue_handoff", { qitemId: row.qitemId, to: "qa@team" })).structured).toMatchObject({ ok: false, code: "out_of_scope" });
+      expect((await asCarol("rig_queue_unclaim", { qitemId: row.qitemId })).structured).toMatchObject({ ok: false, code: "out_of_scope" });
       expect(repo.getById(row.qitemId)?.state).toBe("pending");
     }
     const owned = await repo.create({ sourceSession: "lead@other", destinationSession: "impl@team", body: "ours", nudge: false } as never);
     expect((await asCarol("rig_queue_update", { qitemId: owned.qitemId, note: "on it" })).isError).toBe(false);
+
+    // Passing its own row on: never to a seat outside its scope, or to a person; within it, as its own seat.
+    const before = rows();
+    for (const to of ["qa@other", "alex@external"]) {
+      expect((await asCarol("rig_queue_handoff", { qitemId: owned.qitemId, to })).structured).toMatchObject({ ok: false, code: "out_of_scope" });
+    }
+    expect(rows()).toBe(before);
+    expect(repo.getById(owned.qitemId)?.state).toBe("pending");
+    const handedOn = await asCarol("rig_queue_handoff", { qitemId: owned.qitemId, to: "qa@team" });
+    expect(handedOn.isError).toBe(false);
+    expect(repo.getById(handedOn.structured.created.qitemId)?.sourceSession).toMatch(/^carol@team/);
   });
 
   it("captures the rig its scope check authorized: a handle that is one rig's id and another rig's name reaches the first", async () => {

@@ -18,6 +18,7 @@ import { provenCodexResume } from "./helpers/codex-resume-proof.js";
 // 45c70fc01c7d33f4652c9d42523f631734c62aac76f449ff0f2c15e99680ac9b.
 const currentUpdatePrompt = fs.readFileSync(new URL("./fixtures/codex-update-0.160.0.txt", import.meta.url), "utf8");
 const currentTrustPrompt = fs.readFileSync(new URL("./fixtures/codex-trust-0.156.1.txt", import.meta.url), "utf8");
+const firstLoginPrompt = fs.readFileSync(new URL("./fixtures/codex-first-login.txt", import.meta.url), "utf8");
 
 const CODEX_FLOOR_EFFECT = {
   runtime: "codex",
@@ -208,6 +209,44 @@ describe("Codex runtime adapter", () => {
     const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs() });
     const result = await adapter.checkReady(makeBinding());
     expect(result.ready).toBe(true);
+  });
+
+  it("checkReady reports a first-login gate instead of waiting for the runtime", async () => {
+    const tmux = mockTmux({ capturePaneContent: vi.fn(async () => firstLoginPrompt) });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), listProcesses: () => [] });
+    expect(await adapter.checkReady(makeBinding())).toMatchObject({ ready: false, code: "login_required" });
+    expect(tmux.sendText).not.toHaveBeenCalled();
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+  });
+
+  it.each(["bash", "node"])("checkReady rechecks a %s wrapper before reporting its first-login gate", async (paneCommand) => {
+    for (const fixture of ["codex-first-login-no-daemon.txt", "codex-first-login-no-daemon-80x24.txt", "codex-api-key-login-no-daemon.txt"]) {
+      const paneContent = fs.readFileSync(new URL(`./fixtures/${fixture}`, import.meta.url), "utf8");
+      const tmux = mockTmux({
+        getPaneCommand: vi.fn(async () => paneCommand),
+        getPanePid: vi.fn(async () => 900),
+        capturePaneContent: vi.fn(async () => paneContent),
+      });
+      const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), listProcesses: () => [
+        { pid: 900, ppid: 1, command: paneCommand === "bash" ? "/bin/bash" : "node launcher", pgid: 900, tpgid: 901, executableName: paneCommand, startedAt: "Sat Jan  1 12:00:00 2000" },
+        { pid: 901, ppid: 900, command: "codex", pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:01 2000" },
+      ] });
+      expect(await adapter.checkReady(makeBinding()), fixture).toMatchObject({ ready: false, code: "login_required" });
+      expect(tmux.capturePaneContent).toHaveBeenCalledTimes(2);
+    }
+  });
+
+  it("checkReady does not revive a first-login screen left behind in an idle shell", async () => {
+    const paneContent = fs.readFileSync(new URL("./fixtures/codex-api-key-login-no-daemon.txt", import.meta.url), "utf8");
+    const tmux = mockTmux({
+      getPaneCommand: vi.fn(async () => "bash"),
+      getPanePid: vi.fn(async () => 900),
+      capturePaneContent: vi.fn(async () => paneContent),
+    });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), listProcesses: () => [
+      { pid: 900, ppid: 1, command: "/bin/bash", pgid: 900, tpgid: 900, executableName: "bash", startedAt: "Sat Jan  1 12:00:00 2000" },
+    ] });
+    expect(await adapter.checkReady(makeBinding())).toMatchObject({ ready: false, code: "returned_to_shell" });
   });
 
   it("checkReady accepts a non-gpt warning footer only with a verified Codex process", async () => {

@@ -4,9 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { parse } from "smol-toml";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
+import { codexPluginContentHash, codexLegacyPluginTrustPath, planOwnedCodexContentApproval } from "../src/domain/codex-owned-plugin-trust.js";
 
 const shipped = path.resolve(import.meta.dirname, "../assets/plugins/openrig-core");
 const roots: string[] = [];
@@ -50,6 +52,7 @@ it("a fresh install has all six exact plugin hooks trusted before the first seat
   "openrig-core@openrig:hooks/codex.json:permission_request:0:0": "sha256:75c66b08f505a22f84def73ecf6d61e98dd1b24ed8ecdcc05306eba3013e64d4"
 };
   expect(Object.fromEntries(Object.entries(states).map(([key,value]:[string,any])=>[key,value.trusted_hash]))).toEqual(expected);
+  expect(Object.values(states).every((state: any) => state.trusted_content_hash === codexPluginContentHash(shipped))).toBe(true);
   expect(f.calls.map(a=>a.slice(0,2))).toEqual([["plugin","marketplace"],["plugin","add"]]);
 });
 it.each(['[plugins."openrig-core@openrig"]\nenabled = false\n','[plugins._default]\nenabled = false\n'])("a disabled plugin stays disabled on restart and upgrade: %s", async config => {
@@ -69,7 +72,7 @@ it("a recorded hook decline and outside hook state survive restart and upgrade b
   expect(f.read().hooks.state[key]).toEqual({enabled:false});
   expect(f.read().hooks.state["outside:stop:0:0"]).toEqual({trusted_hash:"person-choice"});
 });
-it.each(["hooks/codex.json","hooks/scripts/refocus.cjs"])("modified vendored %s is not automatically installed or trusted", async relative => {
+it.each(["hooks/codex.json","hooks/scripts/refocus.cjs",".codex-plugin/plugin.json"])("modified vendored %s is not automatically installed or trusted", async relative => {
   const f=fixture(); fs.appendFileSync(path.join(f.plugin,relative),"\n ");
   await f.adapter().ensureCodexCorePlugin(); expect(f.read().hooks?.state ?? {}).toEqual({}); expect(f.calls).toEqual([]);
 });
@@ -111,4 +114,158 @@ it("a same-named marketplace owned by someone else is not installed or trusted",
   const config='[marketplaces.openrig]\nsource = "/another/source"\n';
   const f=fixture(config);await f.adapter().ensureCodexCorePlugin();
   expect(fs.readFileSync(f.file,"utf8")).toBe(config);expect(f.calls).toEqual([]);
+});
+
+// The interrupted-upgrade state: the new bundle is already installed, but Codex0.164
+// retains the declaration-only grants and immutable content baseline from published0.7.0.
+async function legacyUpgrade() {
+  const f = fixture();
+  await f.adapter().ensureCodexCorePlugin();
+  fs.writeFileSync(f.file, fs.readFileSync(f.file, "utf8").replace(/^trusted_content_hash = .*\n/gm, ""));
+  fs.rmSync(path.join(f.home, ".openrig-core-hook-trust.json"), { force: true });
+  const identity = createHash("sha256");
+  for (const part of [f.file, "openrig-core@openrig"]) {
+    const bytes = Buffer.from(part), length = Buffer.alloc(8); length.writeBigUInt64LE(BigInt(bytes.length));
+    identity.update(length); identity.update(bytes);
+  }
+  const baseline = path.join(f.home, ".hook-trust", identity.digest("hex"));
+  fs.mkdirSync(path.dirname(baseline), { recursive: true });
+  fs.writeFileSync(baseline, process.platform === "win32" ? "sha256:f94b92a51872b7a5c0ba57d762a8cd68208a10f4e4ffed701220feafab626889" : "sha256:3317076e0df0d10402c17f26a17f26a21264980a6f0b551a1e21a3c0f785efca");
+  return { ...f, baseline };
+}
+
+it("an already-installed owned upgrade renews all six content approvals without changing other choices or the native baseline", async () => {
+  const f = await legacyUpgrade();
+  fs.appendFileSync(f.file, '\n[hooks.state."outside:stop:0:0"]\nenabled = false\ntrusted_hash = "outside-choice"\n\n\n');
+  const before = fs.readFileSync(f.file, "utf8"), baseline = fs.readFileSync(f.baseline, "utf8"), calls = f.calls.length;
+  const expectedContent = codexPluginContentHash(shipped);
+  await f.adapter().ensureCodexCorePlugin();
+  const states = Object.entries(f.read().hooks.state).filter(([key]) => key.startsWith("openrig-core@openrig:"));
+  expect(states).toHaveLength(6);
+  for (const [, state] of states as Array<[string, any]>) {
+    expect(state.trusted_content_hash).toBe(expectedContent);
+  }
+  expect(fs.readFileSync(f.file, "utf8").replace(/^trusted_content_hash = .*\n/gm, "")).toBe(before);
+  expect(fs.readFileSync(f.baseline, "utf8")).toBe(baseline);
+  expect(f.calls).toHaveLength(calls);
+  const renewed = fs.readFileSync(f.file, "utf8");
+  await f.adapter().ensureCodexCorePlugin();
+  expect(fs.readFileSync(f.file, "utf8")).toBe(renewed);
+  expect(JSON.parse(fs.readFileSync(path.join(f.home, ".openrig-core-hook-trust.json"), "utf8"))).toMatchObject({
+    contentHash: expectedContent,
+  });
+});
+
+it.each(["disabled", "refused", "unknown baseline", "changed script", "changed skill", "extra file", ...(process.platform === "win32" ? [] : ["symlink"]), "unknown layer", "profile refusal", "profile plugin disable", "invalid provenance"])(
+  "an owned upgrade preserves native review for %s", async condition => {
+    const f = await legacyUpgrade();
+    const header = '[hooks.state."openrig-core@openrig:hooks/codex.json:stop:0:0"]';
+    if (condition === "disabled") fs.writeFileSync(f.file, fs.readFileSync(f.file, "utf8").replace(header, `${header}\nenabled = false`));
+    if (condition === "refused") fs.writeFileSync(f.file, fs.readFileSync(f.file, "utf8").replace(/trusted_hash = "sha256:bb444[^"]+"/, 'trusted_hash = "not-the-owned-declaration"'));
+    if (condition === "unknown baseline") fs.writeFileSync(f.baseline, "unknown");
+    if (condition === "changed script") fs.appendFileSync(path.join(f.cache, "hooks/scripts/refocus.cjs"), "\nmodified");
+    if (condition === "changed skill") fs.appendFileSync(path.join(f.cache, "skills/openrig-user/SKILL.md"), "\nmodified");
+    if (condition === "extra file") fs.writeFileSync(path.join(f.cache, "unexpected"), "extra");
+    if (condition === "symlink") fs.symlinkSync(f.plugin, path.join(f.cache, "unexpected-link"));
+    if (condition === "unknown layer") { fs.mkdirSync(path.join(f.home, "../etc")); fs.writeFileSync(path.join(f.home, "../etc/config.toml"), "not valid toml"); }
+    if (condition === "profile refusal") fs.appendFileSync(f.file, '\n[profiles.special.hooks.state."openrig-core@openrig:hooks/codex.json:stop:0:0"]\nenabled = false\n');
+    if (condition === "profile plugin disable") fs.appendFileSync(f.file, '\n[profiles.special.plugins."openrig-core@openrig"]\nenabled = false\n');
+    if (condition === "invalid provenance") fs.writeFileSync(path.join(f.home, ".openrig-core-hook-trust.json"), "broken");
+    const before = fs.readFileSync(f.file, "utf8");
+    await f.adapter().ensureCodexCorePlugin();
+    expect(fs.readFileSync(f.file, "utf8")).toBe(before);
+    if (condition !== "invalid provenance") expect(fs.existsSync(path.join(f.home, ".openrig-core-hook-trust.json"))).toBe(false);
+  });
+
+it("the owned receipt carries approval into a later bundle while preserving the previous declarations", async () => {
+  const f = fixture(); await f.adapter().ensureCodexCorePlugin();
+  const next = path.join(f.home, "next-shipped"); fs.cpSync(shipped, next, { recursive: true });
+  fs.appendFileSync(path.join(next, "skills/openrig-user/SKILL.md"), "\nnext shipped revision");
+  fs.cpSync(next, f.cache, { recursive: true });
+  const plan = planOwnedCodexContentApproval({ configPath: f.file, content: fs.readFileSync(f.file, "utf8"),
+    layers: [{ name: "user config", path: f.file, state: "read", content: fs.readFileSync(f.file, "utf8") }], shipped: next, installed: f.cache });
+  expect(plan).toBeDefined();
+  expect(Object.values(plan!.hashes)).toEqual(Array(6).fill(codexPluginContentHash(next)));
+  expect(f.read().hooks.state["openrig-core@openrig:hooks/codex.json:stop:0:0"].trusted_hash).toBe(plan!.approval.declarations["openrig-core@openrig:hooks/codex.json:stop:0:0"]);
+});
+
+it("records an already-approved current legacy bundle for subsequent upgrades", async () => {
+  const f = await legacyUpgrade(), current = codexPluginContentHash(shipped);
+  fs.writeFileSync(f.baseline, current);
+  await f.adapter().ensureCodexCorePlugin();
+  expect(Object.values(f.read().hooks.state).every((state: any) => state.trusted_content_hash === current)).toBe(true);
+  expect(JSON.parse(fs.readFileSync(path.join(f.home, ".openrig-core-hook-trust.json"), "utf8"))).toMatchObject({ contentHash: current });
+  expect(fs.readFileSync(f.baseline, "utf8")).toBe(current);
+});
+
+it("renews only the selected Codex home when the daemon has a different default home", async () => {
+  const f = await legacyUpgrade(), selected = path.join(f.home, "selected-home"), file = path.join(selected, "config.toml");
+  const before = fs.readFileSync(f.file, "utf8");
+  fs.mkdirSync(selected); fs.writeFileSync(file, before);
+  const version = path.basename(f.cache);
+  fs.cpSync(f.cache, path.join(selected, "plugins/cache/openrig/openrig-core", version), { recursive: true });
+  const baseline = codexLegacyPluginTrustPath(file);
+  fs.mkdirSync(path.dirname(baseline), { recursive: true }); fs.copyFileSync(f.baseline, baseline);
+  await f.adapter().ensureCodexCorePlugin(selected);
+  const states = (parse(fs.readFileSync(file, "utf8")) as any).hooks.state;
+  expect(Object.values(states).every((state: any) => state.trusted_content_hash === codexPluginContentHash(shipped))).toBe(true);
+  expect(fs.readFileSync(f.file, "utf8")).toBe(before);
+  expect(fs.existsSync(path.join(f.home, ".openrig-core-hook-trust.json"))).toBe(false);
+  expect(fs.existsSync(path.join(selected, ".openrig-core-hook-trust.json"))).toBe(true);
+});
+
+it("uses the native bundle fingerprint and legacy identity recipes", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-fingerprint-")); roots.push(root);
+  fs.mkdirSync(path.join(root, "nested")); fs.writeFileSync(path.join(root, "hello.txt"), "hello\n");
+  fs.writeFileSync(path.join(root, "nested/other.txt"), "world\n");
+  // Independent Python implementation of the rust-v0.164.0 byte stream, not the grant planner.
+  expect(codexPluginContentHash(root)).toBe(process.platform === "win32" ? "sha256:e7690d54fade38332715024d03cf7c7e5cb26f77dbba1c60e589e2be9ef42d5e" : "sha256:bc4d2c619163c3c9e4fd0a0740b7de1e5b39b3eb2cef3d52b8a8f582a1f13ce5");
+  fs.mkdirSync(path.join(root, ".venv")); fs.writeFileSync(path.join(root, ".venv/ignored"), "generated");
+  expect(codexPluginContentHash(root)).toBe(process.platform === "win32" ? "sha256:e7690d54fade38332715024d03cf7c7e5cb26f77dbba1c60e589e2be9ef42d5e" : "sha256:bc4d2c619163c3c9e4fd0a0740b7de1e5b39b3eb2cef3d52b8a8f582a1f13ce5");
+  expect(codexPluginContentHash(root, true)).not.toBe(codexPluginContentHash(root));
+  expect(path.basename(codexLegacyPluginTrustPath("/home/operator/.codex/config.toml"))).toBe("5107db44b2124b5303069076c8cbcc824811a62710c30a9188b2f8465e5e7cb4");
+});
+
+// Independent review controls. All homes and plugin copies belong to fixture().
+it("R2 preserves a quoted content-approval key without invalidating TOML", async () => {
+  const f = await legacyUpgrade();
+  const previous = fs.readFileSync(f.baseline, "utf8");
+  fs.writeFileSync(f.file, fs.readFileSync(f.file, "utf8").replace(/^(trusted_hash = .*\n)/gm, `$1"trusted_content_hash" = "${previous}"\n`));
+  expect(Object.values(f.read().hooks.state).every((s: any) => s.trusted_content_hash === previous)).toBe(true);
+  const before = fs.readFileSync(f.file, "utf8");
+  await f.adapter().ensureCodexCorePlugin();
+  expect(() => f.read()).not.toThrow();
+  expect(fs.readFileSync(f.file, "utf8")).toBe(before);
+  expect(fs.existsSync(path.join(f.home, ".openrig-core-hook-trust.json"))).toBe(false);
+});
+it("R2 keeps an unrelated multiline instruction containing table examples exact", async () => {
+  const f = await legacyUpgrade();
+  const sample = Object.keys(f.read().hooks.state).map(key => `[hooks.state.${JSON.stringify(key)}]`).join("\n");
+  fs.writeFileSync(f.file, `developer_instructions = '''\n${sample}\n'''\n` + fs.readFileSync(f.file, "utf8"));
+  const before = f.read().developer_instructions;
+  await f.adapter().ensureCodexCorePlugin();
+  expect(f.read().developer_instructions).toBe(before);
+  expect(fs.existsSync(path.join(f.home, ".openrig-core-hook-trust.json"))).toBe(false);
+});
+it("an unshipped vendored file permits the upgrade but leaves content approval under native review", async () => {
+  const f = await legacyUpgrade(), before = fs.readFileSync(f.file, "utf8"), calls = f.calls.length;
+  const older = path.join(path.dirname(f.cache), "previous-version");
+  fs.renameSync(f.cache, older);
+  fs.writeFileSync(path.join(f.plugin, "unshipped-file"), "fixture extra");
+  expect(await f.adapter().ensureCodexCorePlugin()).toMatchObject({ outcome: "installed" });
+  expect(f.calls).toHaveLength(calls + 1);
+  expect(fs.existsSync(older)).toBe(true);
+  expect(fs.readFileSync(path.join(f.cache, "unshipped-file"), "utf8")).toBe("fixture extra");
+  expect(fs.readFileSync(f.file, "utf8")).toBe(before);
+  expect(fs.existsSync(path.join(f.home, ".openrig-core-hook-trust.json"))).toBe(false);
+});
+
+it("R2 oa fresh nonmatching bundle gains no declaration-only legacy approval", async () => {
+  const f = fixture();
+  fs.writeFileSync(path.join(f.plugin, "unshipped-file"), "fixture extra");
+  expect(await f.adapter().ensureCodexCorePlugin()).toMatchObject({outcome: "installed"});
+  expect(fs.readFileSync(path.join(f.cache, "unshipped-file"), "utf8")).toBe("fixture extra");
+  expect(fs.existsSync(codexLegacyPluginTrustPath(f.file))).toBe(false);
+  expect(fs.existsSync(path.join(f.home, ".openrig-core-hook-trust.json"))).toBe(false);
+  expect(Object.keys(f.read().hooks?.state ?? {})).toHaveLength(0);
 });

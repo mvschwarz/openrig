@@ -5,12 +5,14 @@ import {
   countAssignedWorkForEntry,
   seatNeedsAttention,
   arbitratedNeedsInputSignal,
+  hookOrPaneActivity,
   getNodeInventoryForAllRigs,
   readAssignedWorkBySession,
   type AssignedWorkCounts,
 } from "./node-inventory.js";
 import { archiveWhereClause, type RigArchiveFilter } from "./rig-repository.js";
 import type { SeatActivityService } from "./seat-activity-service.js";
+import type { SeatStructuralActivityService } from "./seat-structural-activity-service.js";
 import type { AgentActivityStore } from "./agent-activity-store.js";
 
 export interface PsEntry {
@@ -146,13 +148,19 @@ export class PsProjectionService {
    *  predicate's `needs_input` signal. Optional: absent → the signal
    *  contributes false (honest degrade), never a guess. */
   private readonly agentActivity: AgentActivityStore | null;
+  /** The cached pane reading, so the count sees a prompt only the pane shows, as the seat row does. */
+  private readonly structuralActivity: Pick<SeatStructuralActivityService, "getStructuralActivity"> | null;
   private periodicSnapshotActive = false;
   private periodicSnapshotIntervalSeconds = 0;
 
-  constructor(deps: { db: Database.Database; seatActivity?: SeatActivityService; agentActivity?: AgentActivityStore }) {
+  constructor(deps: {
+    db: Database.Database; seatActivity?: SeatActivityService; agentActivity?: AgentActivityStore;
+    structuralActivity?: Pick<SeatStructuralActivityService, "getStructuralActivity">;
+  }) {
     this.db = deps.db;
     this.seatActivity = deps.seatActivity ?? null;
     this.agentActivity = deps.agentActivity ?? null;
+    this.structuralActivity = deps.structuralActivity ?? null;
   }
 
   setPeriodicSnapshotState(active: boolean, intervalSeconds: number): void {
@@ -259,8 +267,9 @@ export class PsProjectionService {
       // OPR.0.4.4.21 — attention fold, same inventory pass. `needs_input` is
       // read from the ARBITRATED seat state first — the same oracle the
       // per-seat row renders (`activityState` on node-inventory), which also
-      // sees pane chrome a hook-silent gated seat never reports. The hook
-      // store is the fallback when the arbitrated signal is `null` — service
+      // sees pane chrome a hook-silent gated seat never reports. The served
+      // activity (the hook store, else the cached pane reading, as the seat row
+      // reads it) is the fallback when the arbitrated signal is `null` — service
       // unwired, session not in the ladder, or a `count: 0` that no authoritative
       // needs-input evidence supplied (#180 review; discussion #879); `now` keeps its
       // staleness honest (stale hooks come back `unknown` and contribute
@@ -274,9 +283,14 @@ export class PsProjectionService {
           && typeof this.seatActivity.getSeatStateBySession === "function"
           ? this.seatActivity.getSeatStateBySession(session)
           : null;
-        const activity = this.agentActivity && session
+        const hook = this.agentActivity && session
           ? this.agentActivity.getLatestForNode({ sessionName: session, now: nowDate })
           : null;
+        // The row's served activity: a live hook, else the cached pane reading. A confirmed-missing session serves
+        // neither, as on the row.
+        const structural = this.structuralActivity && session ? this.structuralActivity.getStructuralActivity(session) : null;
+        const activity = identityVerdictConfirmsSessionMissing(node.identityVerdict) ? null
+          : hookOrPaneActivity(hook, structural)?.activity ?? hook;
         if (seatNeedsAttention(node, activity, arbitratedNeedsInputSignal(arbitrated))) attentionCount++;
       }
 

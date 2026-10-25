@@ -139,7 +139,7 @@ describe("terminal browser → preview → explicit Open", () => {
     expect(text).toContain("saved:remote view");
     expect(text).toContain("selected daemon's desktop");
     expect(text).toContain("Headless or remote");
-    const command = snap.terminals!.preview!.composed.pages[0]![0]!.paneCommand;
+    const command = snap.terminals!.preview!.composed.pages[0]![0]!.recoveryCommand!;
     expect(text).toContain(`env -u TMUX ${command.replace(/^ssh /, "ssh -t ")}`);
     expect(text).toContain("viewer@other.example");
     expect(text).toContain("seat with spaces");

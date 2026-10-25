@@ -1,3 +1,4 @@
+import type { ClaudeCompactionEnforcer, ObservedCompaction } from "./claude-compaction-enforcer.js";
 import path from "node:path";
 import { TerminalPolicyStore } from "./terminal-policy.js";
 import type { RigRepository } from "./rig-repository.js";
@@ -12,6 +13,7 @@ import { RUNTIME_HOME_VAR, seatRuntimeHome, type HomeRuntime } from "./seat-runt
 const SEAT_LOOKUP_GUIDANCE = "List seats with: rig ps --nodes";
 
 export interface SeatStatus {
+  compaction?: ObservedCompaction & { owedRestore: ReturnType<ClaudeCompactionEnforcer["getOwedRestore"]> };
   seat_ref: string;
   rig_id: string;
   rig_name: string;
@@ -64,8 +66,10 @@ interface SeatMatch {
 export class SeatStatusService {
   private rigRepo: RigRepository;
   private env: NodeJS.ProcessEnv;
+  private compactionEnforcer?: Pick<ClaudeCompactionEnforcer, "recoverSeat" | "observedCompaction" | "getOwedRestore">;
 
-  constructor(deps: { rigRepo: RigRepository; env?: NodeJS.ProcessEnv }) {
+  constructor(deps: { rigRepo: RigRepository; env?: NodeJS.ProcessEnv; compactionEnforcer?: SeatStatusService["compactionEnforcer"] }) {
+    this.compactionEnforcer = deps.compactionEnforcer;
     this.rigRepo = deps.rigRepo;
     this.env = deps.env ?? process.env;
   }
@@ -124,6 +128,7 @@ export class SeatStatusService {
 
   private projectStatus(seatRef: string, entry: NodeInventoryEntry): SeatStatus {
     return {
+      ...this.compactionStatus(entry),
       seat_ref: seatRef,
       rig_id: entry.rigId,
       rig_name: entry.rigName,
@@ -146,6 +151,14 @@ export class SeatStatusService {
       permissions: this.permissionStatus(entry.nodeId, entry.runtime, entry.canonicalSessionName ?? deriveCanonicalFromEntry(entry) ?? seatRef),
       terminalPolicy: this.terminalPolicyStatus(entry.nodeId, entry.runtime),
     };
+  }
+
+  private compactionStatus(entry: NodeInventoryEntry): Pick<SeatStatus, "compaction"> {
+    const enforcer = this.compactionEnforcer, session = entry.canonicalSessionName;
+    if (!enforcer || entry.runtime !== "claude-code" || !session) return {};
+    enforcer.recoverSeat({ sessionName: session, cwd: entry.cwd, runtime: entry.runtime });
+    const observed = enforcer.observedCompaction(session);
+    return observed ? { compaction: { ...observed, owedRestore: enforcer.getOwedRestore(session) } } : {};
   }
 
   private runtimeHomeStatus(nodeId: string, runtime: string | null): Pick<SeatStatus, "runtime_home"> {

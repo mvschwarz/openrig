@@ -230,6 +230,9 @@ current parked-row eligibility and stop checks still apply. This changes message
 structured continuity actions such as creating a cutover baton.
 
 The parked-owner supervisor also retries current obligations despite an earlier failed, unknown or unrecorded attempt.
+Its first reminder to a seat waits until the seat's waiting state has been unchanged for 5 minutes, then goes on the next
+watchdog tick, so a seat that just handed work off or asked a person isn't interrupted; a seat still holding the work after
+that is reminded as before. A seat at an approval or question prompt gets no grace, so the prompt-blocked alert isn't delayed.
 A recorded success to the same known occupant waits for a change in its obligations. Rotation includes retained attempts,
 so a held input cannot starve another owner. Interactive prompts stay with the existing prompt-refusal recovery.
 Its own reminders wait while managed compaction owes the turn boundary, restore or audit, including a fresh check

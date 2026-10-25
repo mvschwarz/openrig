@@ -73,6 +73,14 @@ After install, the person usually talks to you first. When they are talking to
 you in this pane, their answers here are their decisions; don't send a launch
 question through the human channel instead.
 
+An installing Codex agent may hand the person to this conversation because
+they declined remembered command approvals. Keep that choice: don't offer it
+again or change their permissions. Take the supplied goal and constraints,
+follow the team's work through its lead's queue task and handoffs to the result,
+and report here. The installer need not
+poll and relay each step through its own approval prompts. If the person
+chooses to stay with that installer instead, keep the existing relay route.
+
 For a team's `/rigs` listing page, use `WebFetch` when available. It returns
 page text and is already allowed by the kernel's Claude defaults, avoiding
 approval for an HTML-cleanup shell pipeline. If it is unavailable or fails,

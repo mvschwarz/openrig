@@ -158,7 +158,7 @@ describe("SeatLifecycleService.launchFresh", () => {
     const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "replace occupant" });
     expect(result.ok).toBe(!fail);
     expect(result.warnings).toEqual(expect.arrayContaining([
-      expect.stringContaining(`Replacing the tmux session for "${seat.sessionName}" detaches its open terminal tiles.`),
+      expect.stringContaining(`Replacing the tmux session for "${seat.sessionName}" detaches its open terminal clients.`),
     ]));
     expect(result.warnings?.join("\n")).toContain("rig terminal open 'rig:fresh-rig' --window");
     expect(result.warnings?.join("\n")).toContain("--provider cmux");
@@ -167,7 +167,7 @@ describe("SeatLifecycleService.launchFresh", () => {
   it("#1939: a clean seat launch does not claim that it replaced an open tile", async () => {
     const seat = seedSeat({ clean: true });
     const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "first occupant" });
-    expect(result.warnings?.some(warning => warning.includes("open terminal tiles"))).not.toBe(true);
+    expect(result.warnings?.some(warning => warning.includes("open terminal clients"))).not.toBe(true);
   });
 
   it.each([true, false])("#729: retains warnings independently of fresh identity (verified=%s)", async verified => {
@@ -179,7 +179,7 @@ describe("SeatLifecycleService.launchFresh", () => {
     ]), seat.node.id);
     const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "explicit fresh" });
     expect(result.ok).toBe(verified);
-    expect(result.warnings).toEqual(["Existing projection warning", expect.stringContaining("Startup submission unverified"), expect.stringContaining("open terminal tiles")]);
+    expect(result.warnings).toEqual(["Existing projection warning", expect.stringContaining("Startup submission unverified"), expect.stringContaining("open terminal clients")]);
     if (verified) expect(new SeatIdentityStore(db).getForNode(seat.node.id)?.verdict).toBe("verified");
     else expect(result).toMatchObject({ code: "runtime_identity_unverified", status: "attention_required" });
   });

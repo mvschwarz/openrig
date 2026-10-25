@@ -40,6 +40,20 @@ and slice views, pagination, absent seats and partial results all use the same
 composer. Selecting a session changes where those tiles are placed. It does
 not relaunch the seats' tmux sessions or move queue ownership.
 
+## Replacing a seat's session
+
+New tiles keep their place when a seat's tmux session is replaced. They wait up
+to 30 seconds for the same session name and managed seat identity to return,
+then reattach with the original read-only setting. This uses the shared tile
+command for Herdr, cmux, Rex and plain tmux, including SSH tiles. In-place
+handover and restart keep the existing attachment.
+
+A deliberate detach closes the tile after about two seconds. A different seat
+under the old name is never followed. If no replacement returns in time, or a
+session has no managed identity, reopen the rig view with
+`rig terminal open rig:<name> --window` (or your explicit provider). Views
+opened before this change must be closed and reopened to get this behavior.
+
 ## Desktop windows and previews
 
 ```sh

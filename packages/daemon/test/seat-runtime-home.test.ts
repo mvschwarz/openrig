@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3";
-import { declaredRuntimeHomes, effectiveRuntimeHome, seatRuntimeHome } from "../src/domain/seat-runtime-home.js";
+import { claudeConfigRootFor, declaredRuntimeHomes, effectiveRuntimeHome, seatRuntimeHome, withoutRuntimeHomes } from "../src/domain/seat-runtime-home.js";
 
 // A seat's own runtime home comes from its stored `env:`: the member's value, else the rig's.
 const open: Database.Database[] = [];
@@ -50,6 +50,20 @@ describe("seatRuntimeHome", () => {
     d.exec("CREATE TABLE rigs(id TEXT); CREATE TABLE nodes(id TEXT, rig_id TEXT);");
     expect(seatRuntimeHome(d, "a", "codex")).toEqual({});
     expect(declaredRuntimeHomes(d, "codex")).toEqual([]);
+  });
+});
+
+describe("withoutRuntimeHomes and claudeConfigRootFor", () => {
+  it("leaves both home variables out of a one-off env and keeps the rest", () => {
+    expect(withoutRuntimeHomes({ CODEX_HOME: "/homes/b", CLAUDE_CONFIG_DIR: "/homes/c", DEBUG: "1" })).toEqual({ DEBUG: "1" });
+  });
+
+  it("reads a seat's own Claude config dir, else the daemon's selection, else ~/.claude", () => {
+    const d = db({ members: { own: { CLAUDE_CONFIG_DIR: "/homes/own" }, plain: undefined } });
+    expect(claudeConfigRootFor(d, "own", { CLAUDE_CONFIG_DIR: "/daemon/claude" }, "/users/op")).toBe("/homes/own");
+    expect(claudeConfigRootFor(d, "plain", { CLAUDE_CONFIG_DIR: "/daemon/claude" }, "/users/op")).toBe("/daemon/claude");
+    expect(claudeConfigRootFor(d, "plain", {}, "/users/op")).toBe("/users/op/.claude");
+    expect(claudeConfigRootFor(d, undefined, {}, "/users/op")).toBe("/users/op/.claude");
   });
 });
 

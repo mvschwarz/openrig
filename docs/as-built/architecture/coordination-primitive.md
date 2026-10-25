@@ -178,6 +178,17 @@ the destination's orchestrator when one is derivable, otherwise to the
 destination itself, and that seat may be dead. Overdue claims go to their
 destination. Repeated detections reuse the existing finding without changing
 its route; when the source condition resolves, the sweep closes its own finding.
+That automatic closure records `stuck-sweep@system` as the actor in both the
+transition and the `queue.updated` audit event. Previously it credited the
+finding's source agent with the detector's action. The finding's source,
+destination and claim remain its existing ownership records; the underlying work
+is not reassigned, and existing transition history is not rewritten.
+
+`queue-stuck-sweep.test.ts` checks this with migrated SQLite: pending and claimed
+findings close once, their transition and event name the sweep, and ownership
+stays intact. The posted-human-notice case also checks the actor while leaving
+the person's original ask open. These checks exercise the detector and queue
+repository, not a live agent or connector.
 
 The sweep reports six finding kinds. Its custody check covers closures that
 name a successor qitem or a seat (`closure_reason = handed_off_to`) in the last

@@ -70,7 +70,7 @@ describe("long human asks (#897)", () => {
     expect(posts.slice(1).some((p) => p.blocks.some((b) => b.type === "actions"))).toBe(false);
     posts.slice(1).forEach((p, i) => expect(p.text).toContain(`Continued (${i + 2} of ${posts.length})`));
     // Joined back, the parts are the whole brief.
-    const bodies = posts.map((p) => unescape(p.blocks[1]!.text!.text));
+    const bodies = posts.map((p) => unescape(p.blocks[2]!.text!.text));
     expect(bodies[0]!.endsWith(NOTE)).toBe(true);
     expect([bodies[0]!.slice(0, -NOTE.length), ...bodies.slice(1)].join("")).toBe(longBody);
     expect(onPosted).toHaveBeenCalledOnce();
@@ -92,9 +92,9 @@ describe("long human asks (#897)", () => {
     expect(await deliver(decision("detail", { body: "Approve or hold?", humanDetail: detail }))).toEqual({ ok: true });
     expect(posts.length).toBeGreaterThan(2);
     // The brief fits, so the primary keeps the usual note.
-    expect(unescape(posts[0]!.blocks[1]!.text!.text)).toBe("Approve or hold?\n\nSupplemental detail follows in this thread.");
+    expect(unescape(posts[0]!.blocks[2]!.text!.text)).toBe("Approve or hold?\n\nSupplemental detail follows in this thread.");
     expect(posts[1]!.text).toContain(`Supplemental detail (1 of ${posts.length - 1})`);
-    const pieces = posts.slice(1).map((p) => unescape(p.blocks[1]!.text!.text)).join("");
+    const pieces = posts.slice(1).map((p) => unescape(p.blocks[2]!.text!.text)).join("");
     expect(pieces).toBe(detail.trimEnd());
   });
 
@@ -136,7 +136,7 @@ describe("long human asks (#897)", () => {
     mention = "U0123456789";
     expect(await subsystemSlackDeliver(opts)(ask)).toEqual({ ok: true });
     // Joined back in posting order, the parts are the whole brief: nothing lost, nothing repeated.
-    const bodies = posted.map((p) => unescape(p.blocks[1]!.text!.text));
+    const bodies = posted.map((p) => unescape(p.blocks[2]!.text!.text));
     expect(bodies[0]!.endsWith(NOTE)).toBe(true);
     expect([bodies[0]!.slice(0, -NOTE.length), ...bodies.slice(1)].join("")).toBe(longBody);
   });
@@ -180,7 +180,7 @@ describe("long human asks (#897)", () => {
     mention = after;
     expect(await subsystemSlackDeliver(opts)(ask)).toEqual({ ok: true });
     // Joined back in posting order, what posted is the whole brief once, as one message or as a split.
-    const bodies = posted.map((p) => unescape(p.blocks[1]!.text!.text));
+    const bodies = posted.map((p) => unescape(p.blocks[2]!.text!.text));
     const first = bodies[0]!.endsWith(NOTE) ? bodies[0]!.slice(0, -NOTE.length) : bodies[0]!;
     expect([first, ...bodies.slice(1)].join("")).toBe(body);
   });
@@ -206,7 +206,7 @@ describe("long human asks (#897)", () => {
     expect(await subsystemSlackDeliver(opts)(ask)).toEqual({ ok: true });
     expect(posted).toHaveLength(1);
     expect(posted[0]!.text).not.toContain("<@U0123456789>");
-    expect(unescape(posted[0]!.blocks[1]!.text!.text)).toBe(body);
+    expect(unescape(posted[0]!.blocks[2]!.text!.text)).toBe(body);
   });
 
   /** An ask from no seat, which is signed with the configured sender label, at the longest brief that fits
@@ -240,7 +240,7 @@ describe("long human asks (#897)", () => {
     expect((await subsystemSlackDeliver({ ...base, sourceLabel: "fixture" })(ask(body))).ok).toBe(false);
     // The label grows by more than ten characters before the retry.
     expect(await subsystemSlackDeliver({ ...base, sourceLabel: "fixture-0123456789" })(ask(body))).toEqual({ ok: true });
-    const bodies = posted.map((p) => unescape(p.blocks[1]!.text!.text));
+    const bodies = posted.map((p) => unescape(p.blocks[2]!.text!.text));
     expect(bodies.length).toBeGreaterThan(1);
     expect(bodies[0]!.endsWith(NOTE)).toBe(true);
     expect([bodies[0]!.slice(0, -NOTE.length), ...bodies.slice(1)].join("")).toBe(body);
@@ -438,7 +438,7 @@ describe("long human asks (#897)", () => {
     expect(posted).toHaveLength(1);
     expect(await subsystemSlackDeliver({ ...base, sourceLabel: "fixture-0123456789" })(ask)).toEqual({ ok: true });
     // Joined back in posting order, the parts are the whole brief: nothing lost, nothing repeated.
-    const bodies = posted.map((p) => unescape(p.blocks[1]!.text!.text));
+    const bodies = posted.map((p) => unescape(p.blocks[2]!.text!.text));
     expect(bodies).toHaveLength(2);
     expect(bodies[0]!.endsWith(NOTE)).toBe(true);
     expect([bodies[0]!.slice(0, -NOTE.length), ...bodies.slice(1)].join("")).toBe(brief);
@@ -533,6 +533,6 @@ describe("long human asks (#897)", () => {
     expect(JSON.stringify(primary.blocks)).not.toContain("Workflow instance:");
     // The supplemental thread reply keeps its full body — the gate check must not eat it.
     expect(detail.thread_ts).toBeTruthy();
-    expect(unescape(detail.blocks[1]!.text!.text)).toContain("Please sign off by Friday");
+    expect(unescape(detail.blocks[2]!.text!.text)).toContain("Please sign off by Friday");
   });
 });

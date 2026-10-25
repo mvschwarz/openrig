@@ -242,8 +242,9 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       inputBox?: boolean;
     }>();
     // Read an agent seat's input box only when the request asks: `rig capture` and the MCP tool do; send --verify and
-    // walk read only the pane text.
+    // walk read only the pane text. The same readers learn when a pane is too small to show a prompt.
     const inputBox = body.inputBox === true;
+    const promptPane = inputBox;
 
     // Multi-target: rig or pod
     if (body.rig || body.pod) {
@@ -260,7 +261,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       const inputBoxBudget = { remainingMs: CAPTURE_INPUT_BOX_DEADLINE_MS };
       const results = [];
       for (const session of resolved.sessions) {
-        const result = await transport.capture(session.sessionName, { lines: body.lines, inputBox, inputBoxBudget });
+        const result = await transport.capture(session.sessionName, { lines: body.lines, inputBox, inputBoxBudget, promptPane });
         results.push(result);
       }
       return c.json({ results });
@@ -271,7 +272,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       return c.json({ error: "Provide session, rig, or pod to capture" }, 400);
     }
 
-    const result = await transport.capture(body.session, { lines: body.lines, inputBox });
+    const result = await transport.capture(body.session, { lines: body.lines, inputBox, promptPane });
     if (!result.ok) {
       const statusMap: Record<string, number> = {
         session_missing: 404,

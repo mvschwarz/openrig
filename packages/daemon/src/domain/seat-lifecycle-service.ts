@@ -1395,10 +1395,10 @@ export class SeatLifecycleService {
         false,
       );
       if (!stopped.ok) return stopped;
-      // All tile providers attach once; the safe detach must not silently look
-      // like a seat disappearing. Report recovery without inventorying or reopening views.
+      // Older open views still attach once. Keep recovery guidance for those
+      // views and replacements that outlast the new tile command's wait.
       const view = shellQuote(`rig:${seat.rigName}`);
-      viewWarnings.push(`Replacing the tmux session for "${canonicalSessionName}" detaches its open terminal tiles. Reopen the view: rig terminal open ${view} --window (Herdr or tmux), or rig terminal open ${view} --provider cmux.`);
+      viewWarnings.push(`Replacing the tmux session for "${canonicalSessionName}" detaches its open terminal clients. New tiles wait up to 30 seconds for the same seat; for older views or a tile that closes, close and reopen the view: rig terminal open ${view} --window (Herdr or tmux), or rig terminal open ${view} --provider cmux.`);
       // Stopping the server's last session ends tmux's server, and every probe
       // below would then be transport_unavailable, never absence. Restore an
       // empty server (no session is invented; a no-op while the server is up)

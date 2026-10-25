@@ -1290,6 +1290,13 @@ export interface RigSpec {
   edges: RigSpecCrossPodEdge[];
 }
 
+/** The validated source needed to recreate a fresh pod-aware seat. */
+export interface NodeLaunchRecipe {
+  version: 1;
+  rigRoot: string;
+  rigSpec: RigSpec;
+}
+
 export interface RigServicesWaitTarget {
   service?: string;
   condition?: "healthy";

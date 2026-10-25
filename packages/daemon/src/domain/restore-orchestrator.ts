@@ -4,6 +4,7 @@ import { restoreRuntimeCompatibilityError } from "./restore-runtime-compatibilit
 import { leftAttachedReason } from "./restore-plan-preview.js";
 import { assessSnapshotCurrentOccupants, stoppedSnapshotReason } from "./rehydrate-eligibility.js";
 import { nonInterruptiveNotice, nonInterruptiveSummary } from "../adapters/non-interruptive.js";
+import { planModelAliasNotice } from "../adapters/yolo-mode.js";
 import { effortPrecedence, readSeatEffort } from "./seat-effort.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -206,6 +207,14 @@ interface RestoreOrchestratorDeps {
   transcriptStore?: TranscriptStore;
   serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
   listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
+  /** Rebuild a deliberate fresh pod-aware launch from its persisted recipe. */
+  freshLaunch?: (rigId: string, nodeId: string) => Promise<{
+    status: "launched" | "failed" | "attention_required";
+    error?: string;
+    warnings?: string[];
+  }>;
+  /** Return whether a persisted fresh launch can be attempted without discarding the current pane. */
+  freshLaunchAvailable?: (rigId: string, nodeId: string) => boolean;
   /** Where the person's seat-skills line answer is read (default: the OpenRig settings). */
   routerLineSettings?: Pick<SettingsStore, "resolveOne">;
 }
@@ -227,6 +236,8 @@ export class RestoreOrchestrator {
   private transcriptStore: TranscriptStore | null;
   private serviceOrchestrator: import("./service-orchestrator.js").ServiceOrchestrator | null;
   private listProcesses: (() => Promise<Array<{ pid: number; ppid: number; command: string }>>) | undefined;
+  private freshLaunch: RestoreOrchestratorDeps["freshLaunch"];
+  private freshLaunchAvailable: RestoreOrchestratorDeps["freshLaunchAvailable"];
   private routerLineSettings: Pick<SettingsStore, "resolveOne"> | undefined;
   private appliedLaunchStore: AppliedLaunchObservationStore;
 
@@ -268,6 +279,8 @@ export class RestoreOrchestrator {
     this.transcriptStore = deps.transcriptStore ?? null;
     this.serviceOrchestrator = deps.serviceOrchestrator ?? null;
     this.listProcesses = deps.listProcesses;
+    this.freshLaunch = deps.freshLaunch;
+    this.freshLaunchAvailable = deps.freshLaunchAvailable;
     this.routerLineSettings = deps.routerLineSettings;
     this.appliedLaunchStore = new AppliedLaunchObservationStore(deps.db);
   }
@@ -1293,6 +1306,23 @@ export class RestoreOrchestrator {
     }
   }
 
+  /** Retire only the provisional session created by this restore attempt. The prior
+   * binding must stay cleared while a replacement launch is handed off. */
+  private async retireProvisionalSession(nodeId: string, sessionName: string, launchedSessionId: string | undefined): Promise<{ ok: true } | { ok: false; error: string }> {
+    let stopped: import("../adapters/tmux.js").TmuxResult;
+    try {
+      stopped = await this.tmuxAdapter.killSession(sessionName);
+    } catch (error) {
+      return { ok: false, error: `could not retire provisional session: ${(error as Error).message}` };
+    }
+    if (!stopped.ok) return { ok: false, error: `could not retire provisional session: ${stopped.message}` };
+    if (launchedSessionId) {
+      try { this.sessionRegistry.updateStatus(launchedSessionId, "superseded"); } catch { /* best-effort */ }
+    }
+    this.sessionRegistry.clearBinding(nodeId);
+    return { ok: true };
+  }
+
   /** The one-seat command a restore reason names for a seat left awaiting a decision. */
   private freshSeatCommand(rigId: string, data: SnapshotData, logicalId: string): string {
     return freshSeatLaunchCommand(logicalId, this.rigRepo.getRig(rigId)?.rig.name ?? data.rig.name);
@@ -1542,6 +1572,47 @@ export class RestoreOrchestrator {
       && startupRuntime !== "terminal"
       && (!startupCtx || !startupAdapter)
     ) {
+      // A deliberate fresh launch with no captured startup context is the
+      // never-occupied-seat case from #49. The restore launcher has already
+      // created a shell, so remove that provisional session before handing the
+      // seat to the normal recipe-backed launch path. Resume requests stay on
+      // the fail-closed path below: no durable context means no safe resume.
+      if (!startupCtx && !resumeRequested && this.freshLaunch) {
+        // Keep the usable provisional shell when the callback exists but its
+        // recipe/member inputs are unavailable. A callback being present alone
+        // is not proof that a fresh launch can actually be attempted.
+        if (this.freshLaunchAvailable && !this.freshLaunchAvailable(rigId, node.id)) {
+          const error = `Harness not started: no usable persisted launch recipe for ${node.logicalId}.`;
+          warnings?.push(`Restore: ${error}`);
+          return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error };
+        }
+        const retired = await this.retireProvisionalSession(node.id, sessionName, launchResult.session.id);
+        if (!retired.ok) {
+          warnings?.push(`Restore: ${retired.error}`);
+          return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error: retired.error };
+        }
+        const replacementExists = () => this.sessionRegistry.getSessionsForRig(rigId)
+          .some((candidate) => candidate.nodeId === node.id
+            && candidate.status === "running"
+            && candidate.id !== launchResult.session.id);
+        try {
+          const fresh = await this.freshLaunch(rigId, node.id);
+          if (fresh.warnings?.length) warnings?.push(...fresh.warnings);
+          if (fresh.status === "launched") {
+            return { nodeId: node.id, logicalId: node.logicalId, status: "fresh-primed" };
+          }
+          if (priorState && !replacementExists()) this.restoreNodeState(node.id, priorState);
+          return { nodeId: node.id, logicalId: node.logicalId, status: fresh.status, error: fresh.error };
+        } catch (err) {
+          if (priorState && !replacementExists()) this.restoreNodeState(node.id, priorState);
+          return {
+            nodeId: node.id,
+            logicalId: node.logicalId,
+            status: "failed",
+            error: `Fresh launch failed: ${(err as Error).message}`,
+          };
+        }
+      }
       const cause = startupCtx ? `no ${startupRuntime} runtime adapter` : "no startup context";
       const error = `Harness not started: ${cause} for ${node.logicalId}.`;
       warnings?.push(`Restore: ${error}`);
@@ -1986,6 +2057,8 @@ export class RestoreOrchestrator {
         if (promptNote) warnings?.push(`${sessionName}: ${promptNote}`);
         const notice = nonInterruptiveNotice("claude-code", { nonInterruptive, launchPosture: resolvedPosture, permissionMode });
         if (notice) warnings?.push(`${sessionName}: ${notice}`);
+        const planNote = planModelAliasNotice("claude-code", { model, permissionMode }, sessionName);
+        if (planNote) warnings?.push(`${sessionName}: ${planNote}`);
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
         return { kind: "resumed", ...(result.launchedProcess ? { launchedProcess: result.launchedProcess } : {}) };
       }

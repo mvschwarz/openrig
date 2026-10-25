@@ -29,6 +29,7 @@ interface SeatStatusResponse {
   runtime: string | null;
   /** Slice 16: an open runtime switch, or one recovery stopped short of finishing. */
   runtimeSwitch?: { id: string; phase: string; from: string; to: string; committed: boolean; startedAt: string; attention: string | null; outcome: string | null };
+  compaction?: { stage: string; detail: string };
   current_occupant: string | null;
   typingGuard?: { desired: boolean; effective: boolean; pending: boolean; heldCount: number;
     desiredMode?: string; effectiveMode?: string; desiredLevel?: string; effectiveLevel?: string; };
@@ -56,6 +57,7 @@ interface SeatStatusResponse {
       openRigAdds: { claudeAllow: string[]; claudeAsk: string[]; claudeDeny?: string[]; notes: string[] };
       unknown: string[];
       controls: string[];
+      advisories?: string[];
     };
   };
   session_status: string | null;
@@ -212,6 +214,7 @@ function printHuman(status: SeatStatusResponse): void {
     else console.log("Hold pauses all automatic input, including writing lifecycle. Changing mode does not replay held messages.");
   }
   console.log(`Session: ${display(status.session_status, "unknown")}`);
+  if (status.compaction) console.log(`Managed compaction (${status.compaction.stage}): ${status.compaction.detail}`);
   const reason = sessionReason(status.session_reason);
   if (reason) console.log(`Reason: ${reason}`);
   if (status.permissions?.account) {
@@ -219,6 +222,7 @@ function printHuman(status: SeatStatusResponse): void {
     const a = p.account!;
     console.log("Permissions, planned for the next fresh managed launch (not observed):");
     console.log(`  ${a.summary}`);
+    for (const advisory of a.advisories ?? []) console.log(`  ${advisory}`);
     if (a.overrides.length) console.log(`  This seat's choice is used instead of the ${a.overrides.join(" and the ")}.`);
     for (const note of a.openRigAdds.notes) console.log(`  ${note}`);
     if (a.openRigAdds.claudeDeny) console.log(`  Claude member rules (planned): ${a.openRigAdds.claudeDeny.length} denies; exact lists are in --json.`);

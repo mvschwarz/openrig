@@ -26,7 +26,10 @@ const TALL = Array.from({ length: 26 }, (_, i) => `row${i + 1}`).join("\n") + "\
 const SHORT = ["$ for i in 1 2 3 4 5", "line1", "line2", "line3", "line4", "line5", "$"].join("\n") + "\n" + "\n".repeat(14);
 // A busy Claude seat: the activity indicator sits above the input box, a few rows from the bottom.
 const BUSY_CLAUDE = ["● Reading the queue row", "", "✻ Waddling… (12s · ↓ 1.2k tokens · esc to interrupt)", "", "╭──────────────────╮", "│ >                │", "╰──────────────────╯", "  ? for shortcuts"].join("\n") + "\n";
-const PANES: Record<string, string> = { "tall@my-rig": TALL, "short@my-rig": SHORT, "busy@my-rig": BUSY_CLAUDE, "ghost@my-rig": "pane text\n", "empty@my-rig": "pane text\n" };
+const PANES: Record<string, string> = { "tall@my-rig": TALL, "short@my-rig": SHORT, "busy@my-rig": BUSY_CLAUDE, "ghost@my-rig": "pane text\n", "empty@my-rig": "pane text\n", "small@my-rig": "Do you want to\n" };
+// What the daemon adds when the captured screen is at a prompt in a pane smaller than 80x24.
+const SMALL_PANE_HINT = "pane 18x12 is smaller than 80x24, so the prompt may be cut off; resize it (tmux resize-window -t =small@my-rig: -x 120 -y 40) and capture again";
+const PROMPT_PANES: Record<string, unknown> = { "small@my-rig": { width: 18, height: 12, hint: SMALL_PANE_HINT } };
 // What the daemon adds for a Claude Code or Codex seat: the input box as the cursor and styling read it.
 const GHOST_HINT = "The input box shows \"/compact\", likely a Claude Code suggestion (cursor at the input's start; text drawn faint), not something the person typed: it isn't their intent, a draft or a staged command.";
 const INPUT_BOXES: Record<string, unknown> = {
@@ -50,7 +53,7 @@ describe("Capture CLI", () => {
           if (parsed.session && PANES[parsed.session] !== undefined) {
             // What `capture-pane -S -N` returns: the history lines asked for, plus the whole visible pane.
             res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ ok: true, sessionName: parsed.session, content: PANES[parsed.session], lines: parsed.lines, ...(INPUT_BOXES[parsed.session] ? { inputBox: INPUT_BOXES[parsed.session] } : {}) }));
+            res.end(JSON.stringify({ ok: true, sessionName: parsed.session, content: PANES[parsed.session], lines: parsed.lines, ...(INPUT_BOXES[parsed.session] ? { inputBox: INPUT_BOXES[parsed.session] } : {}), ...(PROMPT_PANES[parsed.session] ? { promptPane: PROMPT_PANES[parsed.session] } : {}) }));
           } else if (parsed.session) {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: true, sessionName: parsed.session, content: "line1\nline2\n", lines: 20 }));
@@ -141,6 +144,12 @@ describe("Capture CLI", () => {
       const { out, err } = await run(["ghost@my-rig", "--json"]);
       expect(JSON.parse(out.join("\n")).inputBox).toEqual(INPUT_BOXES["ghost@my-rig"]);
       expect(err).toEqual([]);
+    });
+
+    it("a prompt in a pane too small to show it is named on stderr, with the daemon's resize command", async () => {
+      const { out, err } = await run(["small@my-rig"]);
+      expect(out).toEqual(["Do you want to\n"]);
+      expect(err).toEqual([`[rig capture: small@my-rig: ${SMALL_PANE_HINT}]`]);
     });
   });
 
