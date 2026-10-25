@@ -857,8 +857,12 @@ describe("StartupOrchestrator", () => {
 
     // Ordered no-model discriminator: real Claude readiness/classification and file delivery, fake terminal I/O.
     // The response rows/footer match the retained Claude 2.1.309 expired-login frame; no credential is involved.
-    it.each(["before_check", "after_check", "after_paste", "healthy", "stale", "unavailable"] as const)(
-      "a login refusal at %s stops later startup submissions without replaying a staged input", async (arrival) => {
+    it.each([
+      ["before_check", "fresh"], ["after_check", "fresh"], ["after_paste", "fresh"],
+      ["healthy", "fresh"], ["stale", "fresh"], ["unavailable", "fresh"],
+      ["after_paste", "resumed"], ["after_paste", "forked"],
+    ] as const)(
+      "a login refusal at %s on a %s start stops later submissions without replaying a staged input", async (arrival, continuity) => {
         const seed = seedSession();
         const typed: string[] = [];
         const submitted: string[] = [];
@@ -898,7 +902,10 @@ describe("StartupOrchestrator", () => {
           }),
         });
         const orchestrator = createOrchestrator({ tmux: t, readFile: read });
-        const result = await orchestrator.startNode(makeInput(seed, { adapter, resolvedStartupFiles: files, startupActions: [makeIdentityAction()] }));
+        const result = await orchestrator.startNode(makeInput(seed, { adapter, resolvedStartupFiles: files, startupActions: [makeIdentityAction()],
+          ...(continuity === "resumed" ? { isRestore: true, resumeToken: "existing-token" }
+            : continuity === "forked" ? { forkSource: { kind: "native_id" as const, value: "parent-token" } } : {}),
+        }));
         const blocked = ["before_check", "after_check", "after_paste"].includes(arrival);
         expect(sent(submitted), trace.join(" → ")).toEqual(blocked ? ["role.md"] : ["role.md", "a.md", "b.md"]);
         if (!blocked) { expect(result).toMatchObject({ ok: true, startupStatus: "ready" }); return; }
@@ -912,7 +919,16 @@ describe("StartupOrchestrator", () => {
           expect(sent(typed)).toEqual(["role.md", "a.md"]);
           expect(composer).toBe("Contents of a.md");
           expect(errorsOf(result).join(" ")).toContain("1 later startup input wasn't sent");
-          expect(errorsOf(result).join(" ")).toContain("already pasted");
+          const guidance = errorsOf(result).join(" ");
+          expect(guidance).toContain("OpenRig pasted the next startup input in r01-impl but didn't press Enter");
+          if (continuity === "fresh") {
+            expect(guidance).toContain("rig seat launch 'r01-impl' --fresh --stop --reason");
+            expect(guidance).not.toContain("this start was a restore");
+          } else {
+            expect(guidance).toContain("The seat's conversation is kept");
+            expect(guidance).toContain("clear it or send it after signing in");
+            expect(guidance).not.toContain("--fresh");
+          }
           expect(errorsOf(result).join(" ")).not.toContain("Continuing delivers the whole startup again");
           expect(orchestrator.pendingStartupContext(seed.nodeId, seed.sessionId)).toBeNull();
           expect(isRecoverableStartupFailure(db, seed.nodeId, seed.sessionId)).toBe(false);

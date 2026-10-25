@@ -1206,13 +1206,15 @@ export class StartupOrchestrator {
     const held = input.heldInputs
       ? `${input.heldInputs} later startup input${input.heldInputs === 1 ? " wasn't" : "s weren't"} sent. ` : "";
     const why = input.oneShotSent ? "a one-shot startup action already ran and must not run twice"
+      : input.refusedWithStagedInput ? "the next startup input may still be in the input box"
       : "this start was a restore, and continuing delivers a fresh start's context";
     return this.fail(input, "attention_required", [
       refused.reason ?? "The runtime refused a startup turn.",
       ...also,
-      input.refusedWithStagedInput
-        ? `${held}A startup input was already pasted; its submission is uncertain. Check the pane in ${input.binding.tmuxSession}; don't resend it. Continuing isn't offered while that input may still be staged.`
-        : continuable
+      ...(input.refusedWithStagedInput ? [
+        `OpenRig pasted the next startup input in ${input.binding.tmuxSession} but didn't press Enter, because Claude had refused the turn before it. It may still be in the input box, so don't resend it.${continuity !== "fresh" ? " Check the pane; clear it or send it after signing in." : ""}`,
+      ] : []),
+      continuable
         ? `${held}The seat hasn't read its startup context. Continuing delivers the whole startup again, the refused turn included.`
         : continuity !== "fresh"
           ? `${held}The seat's conversation is kept, but it hasn't read ${input.heldInputs ? (input.heldInputs === 1 ? "that input" : "those inputs") : "all of its startup context"}; continuing isn't offered for a ${continuity} start.`
