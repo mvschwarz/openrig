@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import type { EventBus } from "./event-bus.js";
 import { loadHumanRegistry, resolveRegisteredHumanAddress, slackSubscriptionFor, withHumanAlertTag, type LoadResult } from "./gateway/human-registry.js";
 import { resolveExternal } from "./gateway/external-admission.js";
-import type { PersistedEvent } from "./types.js";
+import type { AgentActivity, PersistedEvent } from "./types.js";
 import { QueueTransitionLog, type OwnerNotificationLevel, type QueueTransition, type RecentQueueTransitionScope } from "./queue-transition-log.js";
 import { WAKE_INTENT_PREFIX, type OutboxHandler, type OutboxEntry } from "./outbox-handler.js";
 import type { QueueWakeFacts } from "./draft-aware-delivery.js";
@@ -875,6 +875,7 @@ export class QueueRepository {
    *     best-effort {@link maybeNudge} when no store is attached (P34 made that
    *     fallback real code rather than a promise in a comment). */
   private outbox: OutboxHandler | undefined;
+  private readonly promptBlockedSessions = new Set<string>();
   private resolveOccupantGeneration?: (sessionName: string) => string | null;
   private readonly resolveSessionAddresses: (name: string) => string[];
   private readonly wakeRepo: QueueWakeRepository;
@@ -1542,6 +1543,30 @@ export class QueueRepository {
     if (this.outbox?.getById(outboxId) && this.getById(qitemId)?.state === "pending") return;
     // Boot recovery is OpenRig's own scheduling, whoever created the row.
     await this.maybeNudge(qitemId, destinationSession, undefined, sourceSession, undefined, "openrig");
+  }
+
+  /** One recovery pass on a positive attention-clear transition; the existing sweep remains the backstop. */
+  async retryPromptWakesOnClear(sessionName: string, state: AgentActivity["state"] | undefined): Promise<void> {
+    if (state === "needs_input") { this.promptBlockedSessions.add(sessionName); return; }
+    if ((state !== "running" && state !== "idle") || !this.promptBlockedSessions.delete(sessionName)) return;
+    const addresses = this.resolveSessionAddresses(sessionName);
+    if (!addresses.length) return;
+    const rows = this.db.prepare(`SELECT qitem_id, destination_session, source_session, last_nudge_result
+      FROM queue_items WHERE state = 'pending' AND destination_session IN (${addresses.map(() => "?").join(",")})
+        AND (last_nudge_result LIKE 'failed:Refused:%interactive prompt%' OR last_nudge_result = 'failed:target_needs_input')`)
+      .all(...addresses) as Array<{ qitem_id: string; destination_session: string; source_session: string }>;
+    const attempted = new Set<string>();
+    for (const row of rows) {
+      const intents = this.outbox ? this.db.prepare(`SELECT outbox_id, delivery_state FROM outbox_entries
+        WHERE audit_pointer = ? AND substr(outbox_id, 1, ?) = ?`).all(row.qitem_id, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX) as Array<{ outbox_id: string; delivery_state: string }> : [];
+      if (intents.length) {
+        // Claims, known delivery, uncertainty and deliberate holds are not a prompt-refused wake.
+        for (const intent of intents) if (intent.delivery_state === "failed") await this.deliverWakeIntent(intent.outbox_id, attempted);
+      } else if (this.getById(row.qitem_id)?.state === "pending") {
+        // Older/non-precommitted nudges retain the existing best-effort path.
+        await this.maybeNudge(row.qitem_id, row.destination_session, undefined, row.source_session);
+      }
+    }
   }
 
   /**

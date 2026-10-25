@@ -103,6 +103,31 @@ describe("createDaemon startup composition", () => {
     db.close();
   });
 
+  it("a real hook clearing attention retries the refused handoff through the assembled queue", async () => {
+    const { db, deps } = await createDaemon({ tmuxExec: async () => "",
+      cmuxFactory: async () => { throw Object.assign(new Error("no socket"), { code: "ENOENT" }); } });
+    try {
+      const rig = deps.rigRepo.createRig("hook-retry");
+      const node = deps.rigRepo.addNode(rig.id, "worker", { runtime: "codex" });
+      const sessionName = "worker@hook-retry";
+      deps.sessionRegistry.registerSession(node.id, sessionName);
+      deps.sessionRegistry.updateBinding(node.id, { tmuxSession: sessionName, tmuxPane: "%1" });
+      const hook = (hookEvent: string) => deps.agentActivityStore!.recordHookEvent({ sessionName, runtime: "codex", hookEvent,
+        generation: deps.sessionRegistry.currentOccupantGenerationForSession(sessionName) });
+      const send = vi.spyOn(deps.sessionTransport!, "send")
+        .mockResolvedValueOnce({ ok: false, sessionName, sent: false, reason: "target_needs_input",
+          error: `Refused: '${sessionName}' is at an interactive prompt (selection_prompt). No text was sent.` })
+        .mockResolvedValue({ ok: true, sessionName, sent: true, verified: true });
+      hook("PermissionPromptConfirmed");
+      const source = await deps.queueRepo!.create({ sourceSession: "planner@hook-retry", destinationSession: "builder@hook-retry", body: "build", nudge: false });
+      const { created } = await deps.queueRepo!.handoff({ qitemId: source.qitemId, fromSession: "builder@hook-retry", toSession: sessionName, body: "review" });
+      await vi.waitFor(() => expect(deps.queueRepo!.getById(created.qitemId)?.lastNudgeResult).toContain("failed:Refused:"));
+      hook("PreToolUse");
+      await vi.waitFor(() => expect(deps.queueRepo!.getById(created.qitemId)?.lastNudgeResult).toBe("verified"));
+      expect(send).toHaveBeenCalledTimes(2);
+    } finally { db.close(); }
+  });
+
   // Slice 51-01 stub-runtime — STEP 2 (Registry-B composition, RED-first): the PRODUCTION runtime-adapter
   // registry assembled by createDaemon must register the "stub" adapter, so a runtime:stub seat resolves at
   // the exposed AppDeps.runtimeAdapters map (NOT only via a test-injected instantiator map). RED now:

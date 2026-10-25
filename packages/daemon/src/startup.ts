@@ -110,6 +110,7 @@ import { TranscriptStore } from "./domain/transcript-store.js";
 import { resumeRunningTranscriptCaptures, wireTranscriptCaptureStops } from "./domain/transcript-capture.js";
 import { probeSessionActivity, SessionTransport } from "./domain/session-transport.js";
 import { AgentActivityStore } from "./domain/agent-activity-store.js";
+import { hookOrPaneActivity } from "./domain/node-inventory.js";
 import { HistoryQuery } from "./domain/history-query.js";
 import { AskService } from "./domain/ask-service.js";
 import { WakeResolveService, WAKE_SESSIONS_SQL } from "./domain/wake-resolve-service.js";
@@ -569,6 +570,16 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // per running seat per tick + classifies motion STRUCTURALLY, so the `rig ps` ACTIVITY column reflects
   // real liveness for hook-less / stale-hook / turn-boundary seats WITHOUT a per-request capture storm.
   const seatStructuralActivityService = new SeatStructuralActivityService(tmuxAdapter);
+  // A confirmed prompt clearing recovers its refused queue wakes immediately, using the same
+  // hook/pane resolution as status. No new captures, timer or delivery admission path.
+  const retryPromptWakes = (sessionName: string) => {
+    const state = hookOrPaneActivity(agentActivityStore.getLatestForNode({ sessionName }),
+      seatStructuralActivityService.getStructuralActivity(sessionName))?.activity.state;
+    void queueRepoInstance.retryPromptWakesOnClear(sessionName, state)
+      .catch(error => console.warn(`Prompt-clear wake recovery: ${error instanceof Error ? error.name : typeof error}`));
+  };
+  seatStructuralActivityService.attachActivityChanged(retryPromptWakes);
+  eventBus.subscribe(event => { if (event.type === "agent.activity") retryPromptWakes(event.sessionName); });
   // OPR.0.4.3.19 — SeatIdentityReconciler owns the liveness identity verdict
   // (the THIRD axis). Reconciles each running seat's pane PID/command against
   // the registered binding and persists the verdict so node-inventory can gate
