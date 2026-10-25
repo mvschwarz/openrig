@@ -229,7 +229,12 @@ function findClaudeComposer(paneContent: string, options: ClassifyPaneOptions = 
   // Preserve columns: a multiline draft may contain indented border/prompt text.
   // This classifier scans at most 20 physical lines; captures can be taller.
   // Exhausting the scan without reaching the status head is unknown, not idle.
-  const lines = paneContent.split("\n").slice(-20)
+  // The 20 end at the last drawn row: Claude draws inline, so a short screen in a tall pane leaves its input box above
+  // blank rows that the capture keeps.
+  const physical = paneContent.split("\n");
+  let end = physical.length;
+  while (end > 0 && physical[end - 1]!.trim().length === 0) end--;
+  const lines = physical.slice(Math.max(0, end - 20), end)
     .map((line) => line.trimEnd()).filter((line) => line.trim().length > 0);
   const bar = findClaudeFooterIndex(lines);
   const supportedWarningFooter = lines[bar]?.trim() === "⏵⏵ accept edits on (shift+tab to cycle) · ← for agents";
