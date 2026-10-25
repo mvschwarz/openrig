@@ -335,7 +335,8 @@ describe("v2 bundle apply: launch root lifetime and --target", () => {
       });
       expect(result.status, JSON.stringify(result)).toBe("failed");
       if (scenario === "ambiguous") {
-        expect(commands).toEqual([]);
+        // Only the read-only Compose check ran; no project was started or taken down.
+        expect(commands).toEqual(["docker compose version 2>&1"]);
         expect(result.errors.join(" ")).toContain("multiple predecessor Compose projects");
         for (const id of predecessors) expect(result.errors.join(" ")).toContain(id);
         expect(route).not.toHaveBeenCalled();

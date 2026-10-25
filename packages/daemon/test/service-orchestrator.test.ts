@@ -107,6 +107,14 @@ describe("ComposeServicesAdapter", () => {
       expect(exec.mock.calls.map(([cmd]) => cmd)).toContainEqual("docker ps -aq --filter 'label=com.docker.compose.project=openrig-secrets' 2>&1");
     });
 
+    it("any other failure is reported as it came, with no further Docker commands", async () => {
+      const exec = vi.fn<ExecFn>(async () => { throw new Error("Cannot connect to the Docker daemon"); });
+      const adapter = new ComposeServicesAdapter(exec);
+      expect(await adapter.up({ composeFile: "/rig/compose.yaml", projectName: "openrig-secrets" })).toEqual({ ok: false, code: "compose_up_failed", message: "Cannot connect to the Docker daemon" });
+      expect(await down(adapter)).toEqual({ ok: false, code: "compose_down_failed", message: "Cannot connect to the Docker daemon" });
+      expect(exec).toHaveBeenCalledTimes(2);
+    });
+
     it("down still fails, naming the missing Compose, when the project has containers or Docker can't be read", async () => {
       for (const containers of ["3f2a1b9c\n", new Error("Cannot connect to the Docker daemon")]) {
         expect(await down(new ComposeServicesAdapter(noCompose(containers)))).toMatchObject({ ok: false, code: "compose_down_failed",

@@ -54,8 +54,11 @@ function formatExecError(err: unknown): string {
   return String(err);
 }
 
-/** What a person sees when Docker Compose v2 is missing. Without its plugin, plain `docker` reads Compose's `-f` as its own
- *  flag ("unknown shorthand flag: 'f'"), so every compose command fails. */
+/** Docker's own words when its Compose v2 plugin is missing: plain `docker` reads Compose's `-f` as its own flag ("unknown
+ *  shorthand flag: 'f'"), or doesn't know `compose` at all. So every compose command fails. */
+const COMPOSE_MISSING_SIGNS = /unknown shorthand flag: 'f'|'compose' is not a docker command/;
+
+/** What a person sees when Docker Compose v2 is missing. */
 export function composeMissingMessage(detail: string): string {
   return `Service bundles need Docker Compose v2, and \`docker compose version\` failed${detail ? `: ${detail}` : ""}. Install the Docker Compose v2 plugin for this Docker, then run the same command again.`;
 }
@@ -83,6 +86,12 @@ export class ComposeServicesAdapter {
     }
   }
 
+  /** Whether a failed compose command failed because Compose v2 is missing. Only Docker's own words for that lead to the
+   *  check; any other failure is reported as it came, with no further commands. */
+  private async composeMissingBehind(err: unknown): Promise<{ ok: true } | { ok: false; message: string }> {
+    return COMPOSE_MISSING_SIGNS.test(formatExecError(err)) ? this.composeAvailable() : { ok: true };
+  }
+
   /** The containers Docker has for a Compose project, read with plain `docker` (no Compose plugin needed); null when Docker
    *  can't be read. */
   async projectContainers(projectName: string): Promise<string[] | null> {
@@ -106,7 +115,7 @@ export class ComposeServicesAdapter {
       await this.exec(cmd);
       return { ok: true };
     } catch (err) {
-      const compose = await this.composeAvailable();
+      const compose = await this.composeMissingBehind(err);
       return { ok: false, code: "compose_up_failed", message: compose.ok ? formatExecError(err) : `${compose.message}\n${formatExecError(err)}` };
     }
   }
@@ -131,7 +140,7 @@ export class ComposeServicesAdapter {
     } catch (err) {
       // Without Compose v2 nothing of this project could have started through it. When plain Docker confirms the project
       // has no containers, there's nothing to take down; otherwise say what's missing.
-      const compose = await this.composeAvailable();
+      const compose = await this.composeMissingBehind(err);
       if (!compose.ok && (await this.projectContainers(opts.projectName))?.length === 0) return { ok: true };
       return { ok: false, code: "compose_down_failed", message: compose.ok ? formatExecError(err) : `${compose.message}\n${formatExecError(err)}` };
     }

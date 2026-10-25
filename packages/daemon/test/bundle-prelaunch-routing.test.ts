@@ -218,7 +218,8 @@ describe("bundle contents are routed before any seat launches", () => {
       expect(rescans).toBe(0);
       return { ok: true, health: "healthy", receipt: {} };
     });
-    const result = await orchestrator(undefined, { rigRepo: serviceRepo, serviceOrchestrator: { boot } as never }).bootstrap({
+    const composeAvailable = async () => ({ ok: true as const });
+    const result = await orchestrator(undefined, { rigRepo: serviceRepo, serviceOrchestrator: { boot, composeAvailable } as never }).bootstrap({
       mode: "apply", sourceRef: await buildBundleWithPack(workDir, PACK_MANIFEST, true), sourceKind: "rig_bundle", targetRoot: path.join(workDir, "target"),
     });
     expect(result.status, JSON.stringify(result)).toBe("completed");
