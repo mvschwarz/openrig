@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { randomBytes } from "node:crypto";
 import { Command, InvalidArgumentError } from "commander";
-import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, DaemonResponseError } from "../client.js";
+import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, DaemonResponseError, type DaemonResponse } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 import { sessionRigOf, isHumanSeatSessionRef } from "../session-name.js";
@@ -10,7 +10,7 @@ import { enumArg, positiveIntArg } from "../cli-error.js";
 import type { StatusDeps } from "./status.js";
 import { resolveContextRef } from "../context-resolve.js";
 import { shellQuote } from "../cross-host-executor.js";
-import { loadHostRegistry, resolveHost } from "../host-registry.js";
+import { loadHostRegistry, resolveHost, resolveRemoteBearer } from "../host-registry.js";
 import { loadHostBindings } from "../host-bindings.js";
 import { omittedReadField, readView } from "../read-view.js";
 import { buildWriteReceipt, compactOutputEnabled, type ReceiptContext } from "../queue-receipt.js";
@@ -462,6 +462,39 @@ async function settleReceiptHost(client: DaemonClient, receipt: ReceiptContext):
   } catch { /* An unreadable id must not change or fail the write's output. */ }
   if (selfHostId === receipt.remoteHost) return { ...receipt, remoteHost: undefined };
   return selfHostId === undefined ? { ...receipt, remoteHostUnconfirmed: true } : receipt;
+}
+
+/** How long the one read-back of a create with an unknown outcome waits for its answer. */
+const CREATE_READ_BACK_TIMEOUT_MS = 10_000;
+
+/** A create whose answer didn't arrive in time may still commit. Read the row back once by the ID it was sent with, from
+ *  the daemon that holds it: this one for a local row, the destination's registered daemon for a cross-host one. A found
+ *  row is the create committed; anything else leaves the outcome unknown. It never sends the create again. */
+async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: string | undefined, qitemId: string): Promise<{ row: Record<string, unknown> | null; note: string }> {
+  const remote = remoteHostOf(hostId);
+  const where = remote ? ` on host '${remote}'` : "";
+  let reader = client;
+  let options: { timeoutMs: number; headers?: Record<string, string> } = { timeoutMs: CREATE_READ_BACK_TIMEOUT_MS };
+  if (remote) {
+    const registry = loadHostRegistry();
+    const match = registry.ok ? resolveHost(registry.registry, remote, loadHostBindings().bindings) : undefined;
+    if (!match?.ok || match.host.transport !== "http") {
+      const why = match?.ok ? "its entry in this CLI's host registry is SSH, not a daemon URL" : "it isn't in this CLI's host registry";
+      return { row: null, note: `This CLI couldn't read the row back from host '${remote}' (${why}).` };
+    }
+    const bearer = resolveRemoteBearer(match.host);
+    if (!bearer.ok) return { row: null, note: `This CLI couldn't read the row back from host '${remote}' (${bearer.error}).` };
+    reader = deps.clientFactory(match.host.url);
+    if (bearer.token) options = { ...options, headers: { Authorization: `Bearer ${bearer.token}` } };
+  }
+  try {
+    const res = await reader.get<Record<string, unknown>>(`/api/queue/${encodeURIComponent(qitemId)}`, options);
+    if (res.status === 200 && res.data?.qitemId === qitemId) return { row: res.data, note: `The create committed after all: row ${qitemId}${where} (read back by its ID).` };
+    if (res.status === 404) return { row: null, note: `No row ${qitemId}${where} yet (read back once by its ID); it may still commit.` };
+    return { row: null, note: `Reading row ${qitemId}${where} back answered ${res.status}, so the outcome is still unknown.` };
+  } catch (err) {
+    return { row: null, note: `Reading row ${qitemId}${where} back didn't answer (${(err as Error).message}), so the outcome is still unknown.` };
+  }
 }
 
 async function printWriteResult(client: DaemonClient, json: boolean, body: unknown, status: number, receipt: ReceiptContext | null): Promise<void> {
@@ -937,7 +970,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         const receipt = writeReceipt(opts.full, {
           verb: "create", nudgeSuppressed: opts.nudge === false, idGiven: opts.id !== undefined, remoteHost: remoteHostOf(hostResolved.hostId),
         });
-        const res = await client.post<Record<string, unknown>>("/api/queue/create", {
+        const res: DaemonResponse<Record<string, unknown>> | Error = await client.post<Record<string, unknown>>("/api/queue/create", {
           ...(managedSource === undefined ? { sourceSession: source } : {}),
           qitemId,
           destinationSession: hostResolved.destination,
@@ -958,20 +991,37 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           // OPR.0.4.6.MH3 FR-1: the out-of-band host envelope (omitted for
           // plain local writes — the local path stays byte-identical).
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
-        }, crossHostWriteOptions(hostResolved.hostId)).catch((error: unknown) => {
+        }, crossHostWriteOptions(hostResolved.hostId)).catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
+        if (res instanceof Error) {
           // A pre-header disconnect can follow a committed create. Preserve the
           // typed error, but do not let the shared renderer assert nondelivery.
-          if (error instanceof DaemonConnectionError) error.writeOutcome = "unknown";
-          if (error instanceof DaemonConnectionError || error instanceof DaemonResponseError) {
+          if (res instanceof DaemonConnectionError) res.writeOutcome = "unknown";
+          // No answer in time, or a lost connection: the create may have committed, so read it back once by its ID.
+          if (res instanceof DaemonTimeoutError || res instanceof DaemonConnectionError) {
+            const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId);
+            console.error(late.note);
+            if (late.row) {
+              await printWriteResult(client, opts.json ?? false, late.row, 200, receipt);
+              return;
+            }
+          }
+          if (res instanceof DaemonConnectionError || res instanceof DaemonResponseError) {
             // Keep the shared typed error/exit path, including --json, while
             // supplying the identity missing from an unreadable/late response.
-            error.message += ` ${recovery}`;
+            res.message += ` ${recovery}`;
           }
-          throw error;
-        });
+          throw res;
+        }
         if (res.status >= 400 && res.data?.outcome === "indeterminate") {
           // Forwarded writes may return a structured unknown outcome rather
-          // than throw. Preserve that failure and expose the same recovery ID.
+          // than throw: read the row back once from the destination before reporting it.
+          const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId);
+          console.error(late.note);
+          if (late.row) {
+            await printWriteResult(client, opts.json ?? false, late.row, 200, receipt);
+            return;
+          }
+          // Preserve that failure and expose the same recovery ID.
           printResult(opts.json ?? false, { ...res.data, qitemId, recovery }, res.status);
           return;
         }
