@@ -19,6 +19,23 @@ export function tomlTableHeaderPath(line: string): string[] | null {
   return null;
 }
 
+/** The key path an array-of-tables header line opens (`[[hooks.Stop]]`, `[[hooks."Stop".hooks]]`…), read by the TOML
+ *  parser; null for any other line. */
+export function tomlArrayTableHeaderPath(line: string): string[] | null {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("[[")) return null;
+  let node: unknown;
+  try { node = parseToml(trimmed); } catch { return null; }
+  const path: string[] = [];
+  while (node !== null && typeof node === "object" && !Array.isArray(node)) {
+    const keys = Object.keys(node);
+    if (keys.length !== 1) return null;
+    path.push(keys[0]!);
+    node = (node as Record<string, unknown>)[keys[0]!];
+  }
+  return Array.isArray(node) && node.length === 1 && Object.keys(node[0] as object).length === 0 ? path : null;
+}
+
 /** The document's parsed root, or null when it doesn't parse. */
 export function parseTomlRoot(lines: string[]): Record<string, unknown> | null {
   try { return parseToml(lines.join("\n")); } catch { return null; }

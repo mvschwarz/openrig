@@ -389,4 +389,64 @@ describe("#17 — a config.toml Codex saved after \"Trust all\"", () => {
     expect(next).not.toContain(relay === RELAY ? "# BEGIN OPENRIG" : "/old/openrig/");
     expect(launch(next)).toBe(next);
   });
+
+  // OpenRig's groups are read as TOML, in document context: any key spelling, never text inside a string, and only a
+  // group whose one handler runs OpenRig's relay. (#2035 round 1; the first five are review50-r2's controls.)
+  describe("OpenRig's groups are found by what they are, not by their text", () => {
+    const OLD = "/old/assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs";
+    const group = (event: string, relay = OLD, timeout = 5, quoted = false) => {
+      const key = quoted ? JSON.stringify(event) : event;
+      return `[[hooks.${key}]]\n[[hooks.${key}.hooks]]\ntype = "command"\ncommand = 'node "${relay}"'\ntimeout = ${timeout}\n`;
+    };
+    const marked = (inner: string) => `[features]\nhooks = true\n# BEGIN OPENRIG MANAGED ACTIVITY HOOKS\n${inner}# END OPENRIG MANAGED ACTIVITY HOOKS\n`;
+    const hooksOff = (config: string) => {
+      const fs = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: config });
+      makeAdapter(fs).removeCodexActivityHooks();
+      return fs._store[CONFIG]!;
+    };
+    const read = (config: string) => parseToml(config) as Record<string, any>;
+
+    it("leaves a relay command example inside a person's multi-line instructions exact", () => {
+      const config = `developer_instructions = """\nUse this command in the old installation:\ncommand = 'node "${OLD}"'\nEnd example.\n"""\n${group("Stop")}`;
+      expect(read(launch(config)).developer_instructions).toBe(read(config).developer_instructions);
+    });
+
+    it("leaves a person's own group for another event alone, even when it runs the relay", () => {
+      const next = read(launch(group("PreToolUse", OLD, 60) + group("Stop")));
+      expect(next.hooks.PreToolUse[0].hooks[0].command).toBe(`node "${OLD}"`);
+      expect(next.hooks.Stop[0].hooks[0].command).toBe(COMMAND);
+    });
+
+    it("removes OpenRig's group written with a quoted event key when hooks are turned off", () => {
+      const config = marked(group("Stop", OLD, 5, true));
+      expect(read(config).hooks.Stop).toHaveLength(1);
+      expect(read(hooksOff(config)).hooks?.Stop ?? []).toHaveLength(0);
+    });
+
+    it("replaces OpenRig's group written with a quoted event key rather than keep it beside the new one", () => {
+      expect(read(launch(marked(group("Stop", OLD, 5, true)))).hooks.Stop).toHaveLength(1);
+    });
+
+    it("keeps a section whose multi-line string holds a header example whole, and the file readable", () => {
+      const profile = '[profiles.personal]\ndeveloper_instructions = """\nExample:\n[[hooks.Stop]]\nThis is literal documentation.\n"""\n';
+      const config = marked(group("Stop") + profile);
+      const next = launch(config);
+      expect(read(next).profiles).toEqual(read(config).profiles);
+      expect(read(hooksOff(config)).profiles).toEqual(read(config).profiles);
+    });
+
+    it("keeps a person's own group for one of OpenRig's events that sits inside the markers", () => {
+      const person = '[[hooks.PermissionRequest]]\n[[hooks.PermissionRequest.hooks]]\ntype = "command"\ncommand = "person-approve"\n';
+      const config = marked(group("PermissionRequest") + person);
+      const commands = (text: string) => (read(text).hooks.PermissionRequest ?? []).map((g: any) => g.hooks[0].command);
+      expect(commands(launch(config))).toEqual([COMMAND, "person-approve"]);
+      expect(commands(hooksOff(config))).toEqual(["person-approve"]);
+    });
+
+    it("leaves a config that doesn't parse as it is", () => {
+      const config = `model = "a"\nmodel = "b"\n${marked(group("Stop"))}`;
+      expect(launch(config)).toBe(config);
+      expect(hooksOff(config)).toBe(config);
+    });
+  });
 });

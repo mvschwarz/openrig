@@ -68,7 +68,7 @@ const codexHookTrust = createRequire(import.meta.url)("../../assets/plugins/open
 import { listNativeProcesses, observeCodexPaneProcess, observeCodexForkProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type NativeProcessRow } from "../domain/native-process-lineage.js";
 import { recordSeatSkillWrite, seatPluginSkillsLossNote, seatProjectionComplete, seatSkillWriteRefusal } from "../domain/seat-skill-storage.js";
 import { codexPluginContentHash, planOwnedCodexContentApproval, recordOwnedCodexApproval } from "../domain/codex-owned-plugin-trust.js";
-import { findTomlTable, opensTomlTable, parseTomlRoot, tomlDefines, tomlTableHeaderPath } from "../domain/toml-tables.js";
+import { findTomlTable, opensTomlTable, parseTomlRoot, tomlArrayTableHeaderPath, tomlDefines, tomlTableHeaderPath } from "../domain/toml-tables.js";
 
 // Shared by all probes of ONE launch, never reset by a delayed screen or an
 // ambiguous transport result. A separately requested launch gets a new attempt.
@@ -587,6 +587,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       return;
     }
     const withHooks = upsertCodexActivityHooks(existing, relay);
+    if (!changesOnlyOpenRigActivityHooks(existing, withHooks, `node "${relay}"`)) {
+      console.error(`[openrig] codex activity hooks skipped: ${configPath} can't be read as TOML, or writing OpenRig's hooks would change anything else; left untouched`);
+      return;
+    }
     if (withHooks !== existing) {
       this.fs.mkdirp(nodePath.dirname(configPath));
       this.fs.writeFile(configPath, withHooks);
@@ -622,7 +626,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
     const command = `node "${relay}"`;
     const keySource = canonicalCodexHookSource(hooksPath);
-    const stripped = upsertCodexFeaturesHooksEnabled(stripCodexActivityHooks(existing));
+    const stripped = upsertCodexFeaturesHooksEnabled(stripCodexActivityHooks(existing, command));
     let before: unknown = null;
     let expected: { hooks?: { state?: CodexHookState } } | null = null;
     try { before = parseToml(existing); expected = parseToml(stripped) as { hooks?: { state?: CodexHookState } }; }
@@ -714,7 +718,12 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const configPath = this.resolveCodexConfigPath(home);
     const hooksPath = nodePath.join(nodePath.dirname(configPath), "hooks.json");
     const existing = this.fs.exists(configPath) ? this.fs.readFile(configPath) : null;
-    let updated = existing === null ? null : stripCodexActivityHooks(existing);
+    const current = this.activityRelayPath ? `node "${this.activityRelayPath}"` : undefined;
+    let updated = existing === null ? null : stripCodexActivityHooks(existing, current);
+    if (existing !== null && updated !== existing && !changesOnlyOpenRigActivityHooks(existing, updated!, current)) {
+      console.error(`[openrig] codex activity hook removal skipped for ${configPath}: it can't be read as TOML, or removing OpenRig's hooks would change anything else; left untouched`);
+      updated = existing;
+    }
     if (this.fs.exists(hooksPath)) {
       // Only OpenRig's groups leave. Codex keys trust and disables by position, so each later group's state moves with it.
       try {
@@ -2126,13 +2135,13 @@ function upsertCodexActivityHooks(content: string, relayPath: string): string {
   if (pattern.test(next)) {
     // literal: a string would expand `$` patterns in the path
     return next.replace(pattern, (_span, inner: string) => {
-      const kept = keptInActivityBlock(inner);
+      const kept = keptInActivityBlock(inner, `node "${relayPath}"`);
       return kept ? `${block}\n${kept}\n` : block;
     });
   }
   // Codex's own saves can leave our markers apart from our groups. Groups that already run OpenRig's relay are ours
   // where they sit: point them at this relay rather than append a second set, which Codex would run twice.
-  const relayGroups = retargetOpenRigRelayGroups(next, command);
+  const relayGroups = retargetOpenRigRelayGroups(next, command, `node "${relayPath}"`);
   if (relayGroups !== null) return relayGroups;
   const prefix = next.replace(/\n*$/, "");
   return prefix.length > 0 ? `${prefix}\n\n${block}` : block;
@@ -2141,38 +2150,70 @@ function upsertCodexActivityHooks(content: string, relayPath: string): string {
 /**
  * What else sits between OpenRig's activity-hook markers. When Codex saves config.toml (its "Trust all", say), a
  * table it rewrites loses its file position and is printed after the last hook group, which can be inside our
- * block: Codex 0.164.0 rewrites all of `[hooks.state]` this way. Everything but OpenRig's own
- * `[[hooks.<event>]]` stanzas is kept, each section with the comments just above it.
+ * block: Codex 0.164.0 rewrites all of `[hooks.state]` this way. Every section but OpenRig's own activity groups is
+ * kept whole, with the comments just above it.
  */
-function keptInActivityBlock(inner: string): string {
-  const kept: string[] = [];
-  let pending: string[] = [];
-  let keep = false;
-  for (const line of inner.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed === "" || trimmed.startsWith("#")) { pending.push(line); continue; }
-    if (trimmed.startsWith("[")) {
-      const stanza = /^\[\[\s*hooks\s*\.\s*(\w+)\s*(?:\.\s*hooks\s*)?\]\]/.exec(trimmed)?.[1];
-      keep = !(stanza && (OPENRIG_ACTIVITY_HOOK_EVENTS as readonly string[]).includes(stanza));
-    }
-    if (keep) kept.push(...pending, line);
-    pending = [];
-  }
-  return kept.join("\n").trim();
+function keptInActivityBlock(inner: string, current?: string): string {
+  const lines = inner.split("\n");
+  return tomlSections(inner, current).filter((section) => !section.openRig)
+    .map(({ start, end }) => lines.slice(start, end).join("\n")).join("\n").trim();
 }
 
-/** Point every inline group that runs OpenRig's relay (from any install) at `command`, in place; null when there's
- *  none, or the file can't be read as TOML. A person's own groups and every position stay as they are. */
-function retargetOpenRigRelayGroups(content: string, command: string): string | null {
+/** Point every inline group that runs OpenRig's relay (from any install) at `command` (TOML text), in place; null when
+ *  there's none, or the file can't be read as TOML. Only those groups' own `command` lines change: a person's groups,
+ *  their other text and every position stay as they are. */
+function retargetOpenRigRelayGroups(content: string, command: string, current: string): string | null {
   let document: unknown;
   try { document = parseToml(content); } catch { return null; }
   if (!OPENRIG_ACTIVITY_HOOK_EVENTS.some((event) => openRigInlineGroupIndex(document, event) >= 0)) return null;
-  return content.split("\n").map((line) => {
-    if (!/^\s*command\s*=/.test(line)) return line;
-    let value: unknown;
-    try { value = (parseToml(line.trim()) as { command?: unknown }).command; } catch { return line; }
-    return isOpenRigRelayCommand(value) ? `command = ${command}` : line;
-  }).join("\n");
+  const lines = content.split("\n");
+  const topLevel = lineStartsAtDocumentLevel(content);
+  for (const { header, end, path, openRig } of tomlSections(content, current)) {
+    if (!openRig || path.length !== 3) continue;
+    for (let at = header + 1; at < end; at++) if (topLevel[at] && /^\s*command\s*=/.test(lines[at]!)) lines[at] = `command = ${command}`;
+  }
+  return lines.join("\n");
+}
+
+/** One table section of a config: its header line's index, the lines it spans with the comments and blank lines just
+ *  above it, and its decoded key path. `openRig` marks OpenRig's own activity groups: a `[[hooks.<event>]]` for one of
+ *  OpenRig's events and the sections under it, when, read on their own, they run nothing but OpenRig's relay. */
+type TomlSection = { start: number; header: number; end: number; path: string[]; openRig: boolean };
+
+/** `text` split at its real table headers, never at text inside a string or an array. Lines before the first header
+ *  belong to no section. */
+function tomlSections(text: string, current?: string): TomlSection[] {
+  const lines = text.split("\n");
+  const topLevel = lineStartsAtDocumentLevel(text);
+  const sections: TomlSection[] = [];
+  for (const [at, line] of lines.entries()) {
+    if (!topLevel[at] || !line.trim().startsWith("[")) continue;
+    const path = tomlArrayTableHeaderPath(line) ?? tomlTableHeaderPath(line);
+    if (!path) continue;
+    let start = at;
+    while (start > 0 && topLevel[start - 1] && /^\s*(?:#.*)?$/.test(lines[start - 1]!)) start--;
+    const previous = sections.at(-1);
+    if (previous) previous.end = start;
+    sections.push({ start, header: at, end: lines.length, path, openRig: false });
+  }
+  const events: readonly string[] = OPENRIG_ACTIVITY_HOOK_EVENTS;
+  const under = (section: TomlSection, event: string) => section.path[0] === "hooks" && section.path[1] === event;
+  for (let first = 0; first < sections.length; first++) {
+    const { path } = sections[first]!;
+    const event = path[1]!;
+    if (path[0] !== "hooks" || !events.includes(event) || path.length > 3 || (path.length === 3 && path[2] !== "hooks")) continue;
+    let last = first;
+    while (path.length === 2 && last + 1 < sections.length && sections[last + 1]!.path.length > 2 && under(sections[last + 1]!, event)) last++;
+    let group: unknown;
+    try {
+      const hooks = (parseToml(lines.slice(sections[first]!.start, sections[last]!.end).join("\n")) as { hooks?: Record<string, unknown> }).hooks?.[event];
+      // A group's own header gives a list holding it; a handler stanza on its own reads as the group it adds to.
+      group = path.length === 2 ? (Array.isArray(hooks) && hooks.length === 1 ? hooks[0] : null) : hooks;
+    } catch { group = null; }
+    if (runsOnlyOpenRigRelay(group, current)) for (let at = first; at <= last; at++) sections[at]!.openRig = true;
+    first = last;
+  }
+  return sections;
 }
 
 function canonicalCodexHookSource(path: string): string {
@@ -2248,6 +2289,33 @@ function openRigInlineGroupIndex(document: unknown, event: string): number {
   });
 }
 
+/** An inline group that runs nothing but OpenRig's relay: every command on it or its handlers is OpenRig's shipped relay,
+ *  from any install, or `current`. A person's group with a command of their own is theirs. */
+function runsOnlyOpenRigRelay(group: unknown, current?: string): boolean {
+  if (group === null || typeof group !== "object") return false;
+  const { command, hooks } = group as { command?: unknown; hooks?: unknown };
+  const commands = [...(command === undefined ? [] : [command]),
+    ...(Array.isArray(hooks) ? hooks.map((handler) => (handler as { command?: unknown } | null)?.command) : [])];
+  return commands.length > 0 && commands.every((value) => isOpenRigRelayCommand(value) || (current !== undefined && value === current));
+}
+
+/** Whether `next` changes nothing in `content` but OpenRig's inline activity groups and the `[features].hooks` flag
+ *  OpenRig sets, and still parses. A config that doesn't parse is left as it is. */
+function changesOnlyOpenRigActivityHooks(content: string, next: string, current?: string): boolean {
+  const rest = (text: string) => {
+    const { hooks, features, ...other } = parseToml(text) as { hooks?: Record<string, unknown>; features?: Record<string, unknown> };
+    const { hooks: _flag, ...otherFeatures } = features ?? {};
+    const otherHooks = Object.fromEntries(Object.entries(hooks ?? {}).flatMap(([event, value]) => {
+      const groups = (OPENRIG_ACTIVITY_HOOK_EVENTS as readonly string[]).includes(event) && Array.isArray(value)
+        ? value.filter((group) => !runsOnlyOpenRigRelay(group, current)) : value;
+      return Array.isArray(groups) && groups.length === 0 ? [] : [[event, groups]];
+    }));
+    return { ...other, ...(Object.keys(otherFeatures).length > 0 ? { features: otherFeatures } : {}),
+      ...(Object.keys(otherHooks).length > 0 ? { hooks: otherHooks } : {}) };
+  };
+  try { return isDeepStrictEqual(rest(content), rest(next)); } catch { return false; }
+}
+
 /** Write `enabled = false` into one `[hooks.state."<key>"]` table (the trust write creates it first). */
 function upsertCodexHookDisabled(content: string, key: string): string {
   const path = ["hooks", "state", key];
@@ -2307,7 +2375,7 @@ function rekeyCodexHookStateText(content: string, prefix: string, newIndexOf: (i
  * leaves all other content — user-owned hooks, [features], project trust — untouched. Returns the
  * input unchanged when the block is absent.
  */
-function stripCodexActivityHooks(content: string): string {
+function stripCodexActivityHooks(content: string, current?: string): string {
   const pattern = new RegExp(
     `\\n*${escapeRegExp(OPENRIG_ACTIVITY_HOOKS_BEGIN)}([\\s\\S]*?)${escapeRegExp(OPENRIG_ACTIVITY_HOOKS_END)}[ \\t]*\\n?`,
     "m"
@@ -2315,7 +2383,7 @@ function stripCodexActivityHooks(content: string): string {
   if (!pattern.test(content)) return content;
   // Tables Codex printed inside the block (its rewritten `[hooks.state]`) aren't ours to remove.
   return content.replace(pattern, (_span, inner: string) => {
-    const kept = keptInActivityBlock(inner);
+    const kept = keptInActivityBlock(inner, current);
     return kept ? `\n\n${kept}\n` : "\n";
   });
 }
