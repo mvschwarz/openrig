@@ -90,7 +90,7 @@ const LAUNCH_DEPENDENCY_KINDS = new Set(["delegates_to", "spawned_by"]);
 // usability, and lifecycle projection. Imported and re-exported here so the
 // existing export surface and the execution call sites below are unchanged.
 import { resolveActiveSnapshotSession, activeOccupantAmbiguityError, absentSeatResumeHistory, absentSeatResumeHistoryError, freshSeatLaunchCommand } from "./active-occupant.js";
-import { effectiveRestorePolicy, type RestoreSeatFacts, communityLaunchOnlyRestoreReason } from "./restore-policy.js";
+import { effectiveRestorePolicy, isOrdinaryTerminalSeat, type RestoreSeatFacts, communityLaunchOnlyRestoreReason } from "./restore-policy.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { communityHarnessStopsRestore } from "./community-harness-presets.js";
 import { seatAdapter } from "../adapters/community-harness-runtime-adapter.js";
@@ -111,7 +111,9 @@ export function rollupRestoreRigResult(nodes: RestoreNodeResult[]): RestoreRigRe
   if (allFailed) return "failed";
   // A seat running without part of its guidance keeps its own status; the rig isn't fully restored.
   if (nodes.some((node) => (node.guidanceGaps?.length ?? 0) > 0)) return "partially_restored";
-  if (nodes.some((node) => node.status === "fresh" || node.status === "fresh-primed" || node.status === "awaiting-decision" || node.status === "failed" || node.status === "attention_required")) {
+  // A fresh launch loses a seat's conversation, except for a terminal seat, which has none.
+  const lostConversation = (node: RestoreNodeResult) => (node.status === "fresh" || node.status === "fresh-primed") && !node.noConversation;
+  if (nodes.some((node) => lostConversation(node) || node.status === "awaiting-decision" || node.status === "failed" || node.status === "attention_required")) {
     return "partially_restored";
   }
   return "fully_restored";
@@ -1378,6 +1380,7 @@ export class RestoreOrchestrator {
     // deliberately skips the resume attempt; its launch reports `fresh-primed`.
     const liveRuntime = this.rigRepo.getRig(rigId)?.nodes.find(current => current.logicalId === node.logicalId)?.runtime ?? node.runtime;
     const restorePolicy = effectiveRestorePolicy(seatFacts(data, node.id, node.runtime, liveRuntime), session?.restorePolicy);
+    const noConversation = isOrdinaryTerminalSeat(seatFacts(data, node.id, node.runtime, liveRuntime));
     const resumeType = session?.resumeType ?? null;
     const resumeToken = session?.resumeToken ?? null;
     const freshRequested = opts?.freshLogicalIds?.includes(node.logicalId) ?? false;
@@ -1833,7 +1836,7 @@ export class RestoreOrchestrator {
     if (baseStatus === "resumed") {
       return this.finishJoinedResume(node, sessionName, resumeToken, launchResult?.session.id);
     }
-    return { nodeId: node.id, logicalId: node.logicalId, status: baseStatus };
+    return { nodeId: node.id, logicalId: node.logicalId, status: baseStatus, ...(noConversation && baseStatus === "fresh-primed" ? { noConversation: true as const } : {}) };
   }
 
   /** A native resume is only a full success after the restored terminal is
