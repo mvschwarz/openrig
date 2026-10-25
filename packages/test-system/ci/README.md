@@ -172,7 +172,10 @@ cut and the published comparator archive, preserving each one's actual outcome.
 ## Pane attention and quoted prompt text
 
 `prompt-state` runs one private scenario daemon with two adopted, scripted panes
-whose declared runtimes are Codex and Claude. No native provider runs and neither
+whose declared runtimes are Codex and Claude. The pane is 45 rows tall; the first
+quoted working frame must leave at least 20 blank rows below its composer, with
+the full pre-send screen retained. This covers inline redraws in tall panes.
+No native provider runs and neither
 fixture emits an activity hook. Adoption/runtime/readiness must succeed before
 assertions; the scratch event store is read-only when counting hook events.
 
