@@ -1286,6 +1286,7 @@ export class QueueRepository {
   private async deliverWakeIntent(
     outboxId: string,
     attempted: Set<string> = new Set(), // this pass's attempt history, inherited by any release it delivers
+    eligible: (entry: OutboxEntry) => boolean = () => true,
   ): Promise<"delivered" | "indeterminate" | "failed" | "skipped" | "retained"> {
     if (!this.outbox) return "skipped";
     if (!this.transport) return "skipped"; // no transport → stays pending for a later drain
@@ -1297,7 +1298,7 @@ export class QueueRepository {
     }
     let recovering = false;
     const claim = (entry: OutboxEntry): boolean => {
-      if (attempted.has(entry.outboxId) || !this.outbox!.claimForDelivery(entry.outboxId)) return false;
+      if (!eligible(entry) || attempted.has(entry.outboxId) || !this.outbox!.claimForDelivery(entry.outboxId)) return false;
       attempted.add(entry.outboxId);
       recovering ||= entry.deliveryState !== "pending";
       return true;
@@ -1435,7 +1436,7 @@ export class QueueRepository {
     // send, so never attempted), so nothing already sent here is regrouped, and each released member gets one attempt.
     for (const entry of released) attempted.delete(entry.outboxId);
     for (const entry of released) {
-      await this.deliverWakeIntent(entry.outboxId, attempted).catch((err) => console.error(`Queue wake delivery failed for ${entry.outboxId}:`, err));
+      await this.deliverWakeIntent(entry.outboxId, attempted, eligible).catch((err) => console.error(`Queue wake delivery failed for ${entry.outboxId}:`, err));
     }
     return reportedState;
   }
@@ -1551,6 +1552,14 @@ export class QueueRepository {
     if ((state !== "running" && state !== "idle") || !this.promptBlockedSessions.delete(sessionName)) return;
     const addresses = this.resolveSessionAddresses(sessionName);
     if (!addresses.length) return;
+    // Correlation may expand the group or release members for separate sends. Each claim must
+    // independently qualify for this clear-triggered pass; general recovery keeps its broader policy.
+    const eligible = (entry: OutboxEntry): boolean => {
+      if (entry.deliveryState !== "failed" || !entry.auditPointer) return false;
+      const current = this.getById(entry.auditPointer), refusal = current?.lastNudgeWireResult;
+      return current?.state === "pending" && addresses.includes(current.destinationSession)
+        && (refusal === "failed:target_needs_input" || (refusal?.startsWith("failed:Refused:") === true && refusal.includes("interactive prompt")));
+    };
     const rows = this.db.prepare(`SELECT qitem_id, destination_session, source_session, last_nudge_result
       FROM queue_items WHERE state = 'pending' AND destination_session IN (${addresses.map(() => "?").join(",")})
         AND (last_nudge_result LIKE 'failed:Refused:%interactive prompt%' OR last_nudge_result = 'failed:target_needs_input')`)
@@ -1561,7 +1570,7 @@ export class QueueRepository {
         WHERE audit_pointer = ? AND substr(outbox_id, 1, ?) = ?`).all(row.qitem_id, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX) as Array<{ outbox_id: string; delivery_state: string }> : [];
       if (intents.length) {
         // Claims, known delivery, uncertainty and deliberate holds are not a prompt-refused wake.
-        for (const intent of intents) if (intent.delivery_state === "failed") await this.deliverWakeIntent(intent.outbox_id, attempted);
+        for (const intent of intents) if (intent.delivery_state === "failed") await this.deliverWakeIntent(intent.outbox_id, attempted, eligible);
       } else if (this.getById(row.qitem_id)?.state === "pending") {
         // Older/non-precommitted nudges retain the existing best-effort path.
         await this.maybeNudge(row.qitem_id, row.destination_session, undefined, row.source_session);

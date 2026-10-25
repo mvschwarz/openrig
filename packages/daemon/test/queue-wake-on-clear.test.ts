@@ -80,3 +80,40 @@ it("a claimed row is not woken and a never-observed clear still reaches the exis
     resolveOrchestrator: () => null, unclaimedAgeMinutes: 60, log: () => {}, isRegisteredHost: () => false });
   expect(result.findings).toContainEqual(expect.objectContaining({ kind: "undelivered-wake", qitemId: id, action: "created" }));
 });
+
+it("a prompt-clear retry leaves an uncertain correlated return unsent, while general recovery can still deliver it", async () => {
+  const f = fixture();
+  // Stage a result and its waiter's unpark before attaching their actual transport.
+  const queue = new QueueRepository(f.db, f.bus, { loadHumanRegistry: () => ({ ok: true, entities: [] }) });
+  queue.attachOutbox(f.outbox);
+  const blocker = await queue.create({ sourceSession: "owner@demo", destinationSession: "worker@demo", body: "work", nudge: false });
+  const waiter = await queue.create({ sourceSession: "owner@demo", destinationSession: "owner@demo", body: "wait", nudge: false });
+  queue.update({ qitemId: waiter.qitemId, actorSession: "owner@demo", state: "blocked", blockedOn: blocker.qitemId });
+  const returned = await queue.handoff({ qitemId: blocker.qitemId, fromSession: "worker@demo", toSession: "owner@demo", body: "result" });
+  await new Promise<void>(resolve => setImmediate(resolve));
+  const resultId = WAKE_INTENT_PREFIX + returned.created.qitemId;
+  const peer = (f.db.prepare("SELECT outbox_id FROM outbox_entries WHERE audit_pointer=?").get(waiter.qitemId) as { outbox_id: string }).outbox_id;
+  let initial = true;
+  const attempts: string[][] = [];
+  queue.attachTransport({ send: async (_target, _text, opts) => {
+    if (initial && opts?.recheckMembers) {
+      const split = opts.recheckMembers(input => input.source === "openrig", false);
+      attempts.push(split.outboxIds);
+      return { ok: false, sent: false, reason: "target_needs_input", error: "Refused: 'owner@demo' is at an interactive prompt (selection_prompt). No text was sent." };
+    }
+    attempts.push(opts?.committedOutboxIds ?? []);
+    return { ok: true, verified: !initial };
+  } });
+  await queue.drainPendingWakeIntents();
+  expect(attempts).toEqual([[resultId], [peer]]);
+  expect(f.outbox.getById(resultId)?.deliveryState).toBe("failed");
+  expect(f.outbox.getById(peer)?.deliveryState).toBe("indeterminate");
+  initial = false;
+  await queue.retryPromptWakesOnClear("owner@demo", "needs_input");
+  await queue.retryPromptWakesOnClear("owner@demo", "idle");
+  expect(attempts.slice(2)).toEqual([[resultId]]);
+  expect(f.outbox.getById(peer)?.deliveryState).toBe("indeterminate");
+  await queue.drainPendingWakeIntents();
+  expect(attempts.slice(3)).toEqual([[peer]]);
+  expect(f.outbox.getById(peer)?.deliveryState).toBe("delivered");
+});
