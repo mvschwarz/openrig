@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
-import { DaemonClient, DaemonConnectionError } from "../src/client.js";
+import { DaemonClient, DaemonConnectionError, DaemonResponseError } from "../src/client.js";
 import { FETCH_HEADERS_TIMEOUT_MS, nodeHttpFetch } from "../src/long-request-fetch.js";
 
 // Node's fetch gives up on a response whose headers haven't arrived within 300 s, and a waiting send answers only when its
@@ -16,6 +16,14 @@ describe("a request allowed 300 s or more", () => {
       req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
       req.on("end", () => {
         if (req.url === "/hang") return;
+        if (req.url === "/cut") {
+          // The daemon answered and acted, then the connection dropped partway through the body.
+          seen.push({ method: req.method, path: req.url, session: undefined, body });
+          res.writeHead(200, { "Content-Type": "application/json", "Content-Length": "64" });
+          res.write('{"ok":true,"sent":tr');
+          setTimeout(() => res.socket?.destroy(), 20);
+          return;
+        }
         seen.push({ method: req.method, path: req.url, session: req.headers["x-openrig-session"] as string | undefined, body });
         if (req.url === "/empty") { res.writeHead(204); res.end(); return; }
         res.writeHead(409, { "Content-Type": "application/json" });
@@ -57,6 +65,20 @@ describe("a request allowed 300 s or more", () => {
     const pending = nodeHttpFetch(`${baseUrl}/hang`, { method: "POST", body: "{}", signal: controller.signal });
     setTimeout(() => controller.abort(), 20);
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("a body cut off after the headers reads as the daemon having answered, as on fetch, never as not sent", async () => {
+    const client = new DaemonClient(baseUrl);
+    for (const timeoutMs of [15_000, 405_000]) {
+      const err = await client.post("/cut", {}, { timeoutMs }).catch((e: unknown) => e);
+      expect(err, `timeoutMs ${timeoutMs}`).toBeInstanceOf(DaemonResponseError);
+      expect(err).not.toBeInstanceOf(DaemonConnectionError);
+      expect((err as DaemonResponseError).status).toBe(200);
+    }
+  });
+
+  it("refuses a body it can't send, rather than sending none", async () => {
+    await expect(nodeHttpFetch(`${baseUrl}/empty`, { method: "POST", body: new Uint8Array([1, 2]) })).rejects.toThrow(TypeError);
   });
 
   it("a refused connection keeps its code, so it reads as not connected", async () => {
