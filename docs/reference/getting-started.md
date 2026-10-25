@@ -41,11 +41,9 @@ The `rigs` skill is the procedure: follow it in order. This page is what it look
 
 Setup and launch are separate: declining `rig setup` avoids its `~/.tmux.conf` change, but starting Codex seats can
 still write workspace trust and selected MCP/config fragments. `runtime.codex.hooks_enabled=false` controls hooks;
-it isn't a no-global-config option. An installing agent should name the resolved config path, the changes and their
-scope before starting the kernel, and keep any refusal or project-only constraint. A yes already covering those
-writes still counts. Setup has no project-only mode. Codex supports trusted project `.codex/config.toml` settings,
-but that doesn't redirect OpenRig's home-config writes. A separate selected `CODEX_HOME` keeps Codex config, login
-and sessions together in that home; it needs its own working sign-in and doesn't relocate `~/.tmux.conf`.
+it isn't a no-global-config option. Setup has no project-only mode. Trusted project `.codex/config.toml` settings
+don't redirect OpenRig's home-config writes. A separate selected `CODEX_HOME` keeps Codex config, login and sessions
+together in that home; it needs its own working sign-in and doesn't relocate `~/.tmux.conf`.
 
 > **What OpenRig changes on your machine**
 > - **Install:** `@openrig/cli` goes in globally with npm.

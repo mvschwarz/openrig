@@ -35,6 +35,11 @@ or project `.codex/config.toml` doesn't redirect these writes. An existing separ
 config, login and session state together; it needs its own working sign-in and doesn't relocate `~/.tmux.conf`.
 Carry the person's scope constraint to the operator.
 
+**Codex individual approvals:** explain before installation that even reads may ask repeatedly during setup and
+follow-up, separately from the team's permissions. Use plain, separate commands so each request is readable.
+The one optional six-command approval offer below still applies; don't enable general network access or broaden
+other permission settings to avoid prompts.
+
 When you give the person a file or a command to run in their own terminal, use a path that exists on their side. A
 file a sandboxed agent writes under `/tmp` may not exist in the person's terminal (seen with Codex), so put files the
 person needs in their project or home folder and name that path.
@@ -167,10 +172,6 @@ person needs in their project or home folder and name that path.
   `rig capture <seat>@<rig>`.
 
 ### Codex: one offer, once, after OpenRig starts
-
-Tell a person keeping individual approvals that even reads can ask repeatedly during installation and follow-up.
-This is their installing Codex session's policy, separate from the team's permissions. Use plain, separate commands
-so they can read each request; don't make approval broader to reduce the count.
 
 First the agent resolves the person's real Codex folder (`CODEX_HOME`, or `~/.codex` when that isn't set) and puts the exact path in the
 offer, so the person sees the real file, not a placeholder:
