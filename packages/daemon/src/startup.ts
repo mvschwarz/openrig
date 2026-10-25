@@ -112,7 +112,7 @@ import { TranscriptStore } from "./domain/transcript-store.js";
 import { resumeRunningTranscriptCaptures, wireTranscriptCaptureStops } from "./domain/transcript-capture.js";
 import { probeSessionActivity, SessionTransport } from "./domain/session-transport.js";
 import { AgentActivityStore } from "./domain/agent-activity-store.js";
-import { hookOrPaneActivity } from "./domain/node-inventory.js";
+import { hookOrPaneActivity, nodeSessionConfirmedMissing } from "./domain/node-inventory.js";
 import { HistoryQuery } from "./domain/history-query.js";
 import { AskService } from "./domain/ask-service.js";
 import { WakeResolveService, WAKE_SESSIONS_SQL } from "./domain/wake-resolve-service.js";
@@ -702,6 +702,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const claudeManagedLaunch = new ClaudeManagedLaunch(db, { ...launchSessionEnv, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR }, {
     OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN: process.env.OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN,
   }, (session, key) => tmuxAdapter.getSessionEnv(session, key));
+  claudeManagedLaunch.onTokenNotApplied = (event) => { eventBus.emit(event); };
   // The compaction settings a managed restore reads, at each launch, so the launch grants those files too (#1940).
   const restoreReadPolicy = () => {
     try {
@@ -1421,6 +1422,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         legacyProviderUsageDirectory(OPENRIG_HOME),
       ),
       agentActivityStore,
+      // A Claude seat switch checks what would outrank the seat's own token before it stops anything.
+      claudePrecedence: (nodeId: string, opts?: { storedLogin?: boolean }) => claudeManagedLaunch.credentialPrecedence(nodeId, opts),
       // Slice 01: Codex and Claude usage windows, off unless provider.usage_windows is on (read per call). The native
       // readers (Codex's app-server; Claude's auth status, for identity) run only on an explicit refresh, with the
       // PATH, HOME, CODEX_HOME and CLAUDE_CONFIG_DIR a seat session gets. Claude's windows are the seats' status-line
@@ -2199,7 +2202,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     queueRepoInstance.attachActivityReader((session) => {
       session = physicalSessionName(db, session);
       const node = db.prepare("SELECT node_id FROM sessions WHERE session_name = ? ORDER BY id DESC LIMIT 1").get(session) as { node_id: string } | undefined;
-      return node ? seatActivityService.getSeatState(node.node_id) : null;
+      // A confirmed-missing session reads unknown, as in the node inventory: its last Stop
+      // or pane sample can't stand for a seat that no longer exists.
+      return node && !nodeSessionConfirmedMissing(db, node.node_id) ? seatActivityService.getSeatState(node.node_id) : null;
     });
     const watchdogPolicyEngine = new WatchdogPolicyEngine({
       jobsRepo: watchdogJobsRepoInstance,

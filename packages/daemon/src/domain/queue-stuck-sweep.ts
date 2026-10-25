@@ -24,7 +24,8 @@ import { resolvePickupThresholdMinutes } from "./queue-pickup.js";
 // share one contract instead of two guesses. S03 owns park/wake honesty: state=blocked rows
 // legitimately wait; only an undelivered human notice is a delivery finding.
 
-import { defaultResolveOrchestrator } from "./queue-owner.js";
+import { defaultResolveOrchestrator, resolveOperatorSeat, resolveSessionNodeId } from "./queue-owner.js";
+import { nodeSessionConfirmedMissing } from "./node-inventory.js";
 import type Database from "better-sqlite3";
 import { deriveCrossHostSuccessorId, hasLinkedSuccessor, matchesRecordedHandoffTarget, QueueRepositoryError, type QueueItem, type QueueRepository } from "./queue-repository.js";
 import { stalledPickupFinding } from "./queue-pickup.js";
@@ -152,9 +153,18 @@ export interface StuckSweepDeps {
   status?: StuckSweepStatus;
   /** Route resolution for obligations nobody holds: the destination seat's orchestrator
    *  (delegates_to parentage). null = no orchestrator known → the finding stays with the
-   *  destination (the row is durable there even if the seat is dead — S01 is the wake
-   *  layer). Injectable for tests; default derives from topology. */
+   *  destination, unless that session is confirmed missing (below): S01's ladder covers
+   *  handed-off batons only, so a finding addressed to a dead seat would reach nobody.
+   *  Injectable for tests; default derives from topology. */
   resolveOrchestrator?: (session: string) => string | null;
+  /** Is this session's current binding confirmed missing (node inventory's session_missing
+   *  rule)? A finding is never addressed to such a session. Injectable for tests; default
+   *  reads the seat identity verdicts. */
+  sessionConfirmedMissing?: (session: string) => boolean;
+  /** Where a finding goes instead of a confirmed-missing session, before the stuck row's
+   *  creator: the wake ladder's own floor. Injectable for tests; default reads
+   *  workspace.operator_seat_name. */
+  resolveOperatorSeat?: () => string | null;
   unclaimedAgeMinutes?: number;
   custodyWindowHours?: number;
   now?: Date;
@@ -188,7 +198,7 @@ export interface StuckSweepResult {
   error?: string;
 }
 
-export { resolveSessionNodeId, defaultResolveOrchestrator } from "./queue-owner.js";
+export { resolveSessionNodeId, defaultResolveOrchestrator, resolveOperatorSeat } from "./queue-owner.js";
 
 interface TransitionNoteRow {
   transition_note: string | null;
@@ -705,6 +715,21 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         why: `closed (${row.closureReason ?? "?"}) with successor custody that this local store cannot fully verify`,
         verificationTargets,
       });
+    }
+
+    // Never address a finding INTO a confirmed-missing session: nothing would ever wake it,
+    // since the ladder covers handed-off batons only. Route it as the ladder's own floor
+    // does, to the operator seat, else the stuck row's creator. A live seat keeps its own.
+    const sessionMissing = deps.sessionConfirmedMissing ?? ((session: string) => {
+      const nodeId = resolveSessionNodeId(deps.db, session);
+      return nodeId !== null && nodeSessionConfirmedMissing(deps.db, nodeId);
+    });
+    for (const c of candidates) {
+      if (!sessionMissing(c.route)) continue;
+      const floor = (deps.resolveOperatorSeat ?? resolveOperatorSeat)() ?? c.row.sourceSession;
+      if (floor === c.route) continue;
+      c.why += `; ${c.route} is confirmed missing (session_missing), so this finding goes to ${floor}`;
+      c.route = floor;
     }
 
     // Route: idempotent per (row, kind). An existing open finding refreshes its age; a

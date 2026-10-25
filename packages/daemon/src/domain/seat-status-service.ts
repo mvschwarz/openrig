@@ -9,6 +9,7 @@ import { NativePermissionStore, type StoredNativePermissionSelection, type Resol
 import { AppliedLaunchObservationStore, type StoredAppliedLaunchObservation } from "./applied-launch-observation-store.js";
 import { planPermissionAccount, type PermissionAccount } from "./permission-account.js";
 import { RUNTIME_HOME_VAR, seatRuntimeHome, type HomeRuntime } from "./seat-runtime-home.js";
+import { claudeSeatTokenFallbackNotice, claudeSeatTokenFileProblem, readClaudeSeatTokenRef } from "./claude-seat-token.js";
 
 const SEAT_LOOKUP_GUIDANCE = "List seats with: rig ps --nodes";
 
@@ -41,6 +42,9 @@ export interface SeatStatus {
     source: "member" | "rig" | "daemon" | "native_default";
     ignored?: { source: "member" | "rig"; value: string };
   };
+  /** A Claude seat's own subscription token: its reference (never the value), and whether the file would give Claude the
+   *  token at the next launch. When it wouldn't, Claude starts on the config dir's stored login, and `notice` says so. */
+  claude_token?: { label: string; token_file: string; file: "readable" | "unusable"; problem?: string; notice?: string };
   terminalPolicy: ReturnType<TerminalPolicyStore["account"]> | { state: "unknown"; error: string };
   permissions: {
     selectionState: "explicit" | "inherit" | "unknown";
@@ -148,6 +152,7 @@ export class SeatStatusService {
       handover_at: entry.handoverAt,
       restore_outcome: entry.restoreOutcome,
       ...this.runtimeHomeStatus(entry.nodeId, entry.runtime),
+      ...this.claudeTokenStatus(entry.nodeId, entry.runtime),
       permissions: this.permissionStatus(entry.nodeId, entry.runtime, entry.canonicalSessionName ?? deriveCanonicalFromEntry(entry) ?? seatRef),
       terminalPolicy: this.terminalPolicyStatus(entry.nodeId, entry.runtime),
     };
@@ -173,6 +178,15 @@ export class SeatStatusService {
     const home = this.env.HOME;
     const native = home ? path.join(home, runtime === "codex" ? ".codex" : ".claude") : null;
     return { runtime_home: { variable, home: native, source: "native_default", ...ignored } };
+  }
+
+  private claudeTokenStatus(nodeId: string, runtime: string | null): Pick<SeatStatus, "claude_token"> {
+    if (runtime !== "claude-code") return {};
+    const ref = readClaudeSeatTokenRef(this.rigRepo.db, nodeId);
+    if (!ref) return {};
+    const problem = claudeSeatTokenFileProblem(ref);
+    return { claude_token: { label: ref.label, token_file: ref.tokenFile, file: problem ? "unusable" : "readable",
+      ...(problem ? { problem, notice: claudeSeatTokenFallbackNotice(ref, problem) } : {}) } };
   }
 
   private terminalPolicyStatus(nodeId: string, runtime: string | null): SeatStatus["terminalPolicy"] {

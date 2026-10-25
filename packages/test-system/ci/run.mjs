@@ -12,6 +12,7 @@ import { CASES, PASSING_CASES, RESULT_PREFIX } from './result.mjs';
 import { preserveRefresh } from './preserve-refresh.mjs';
 import { checkMcpStdio } from './mcp-stdio.mjs';
 import { reducedEnvRestart, verifyReducedEnvRestart, verifyGoneProcess } from './reduced-env-restart.mjs';
+import { runPromptState } from './prompt-state.mjs';
 
 assert.equal(process.platform, 'linux', 'container execution only');
 assert.notEqual(process.getuid(), 0, 'run as the unprivileged testbed user');
@@ -35,7 +36,12 @@ const report = {
 
 let goneProcess;
 try {
-  report.result = await runScenarioFile(scenario, {
+  if (selected.kind === 'prompt-state') {
+    report.promptState = {};
+    await runPromptState(rigBin, JSON.parse(readFileSync(scenario, 'utf8')), report.promptState);
+    report.result = { scenario: selected.scenario, verdict: 'PASS' };
+    records.push(report.result);
+  } else report.result = await runScenarioFile(scenario, {
     rigBin,
     baseEnv: { PATH: '/usr/local/bin:/usr/bin:/bin', TERM: 'xterm-256color' },
     deps: {

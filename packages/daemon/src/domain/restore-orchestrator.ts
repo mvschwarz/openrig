@@ -144,7 +144,7 @@ function seatFacts(data: SnapshotData, nodeId: string, savedRuntime: string | nu
 /** What `rig launch` does for this node from this snapshot without --fresh, read as the restore path reads it: the
  *  occupant, then the pre-launch stop-and-ask check, then the resume decision (restoreNodeWithCompensation and the
  *  resume step after it). An exited agent's message offers stop-then-launch as a resume only when this says so. */
-function snapshotLaunchOutcome(data: SnapshotData, nodeId: string, runtime: string | null, savedRuntime: string | null):
+export function snapshotLaunchOutcome(data: SnapshotData, nodeId: string, runtime: string | null, savedRuntime: string | null):
   { kind: "resume" } | { kind: "fresh" | "decision" | "unrecoverable"; why: string } {
   const occupant = resolveActiveSnapshotSession(data, nodeId);
   if (occupant.kind === "ambiguous") return { kind: "unrecoverable", why: "can't tell which saved session is this seat's" };
@@ -567,10 +567,13 @@ export class RestoreOrchestrator {
     };
   }
 
+  /** `keepPane`: the seat is running and is relaunched in its own pane (its process ended in place, the pane and scrollback
+   *  kept) instead of a new session; nothing checks whether it is live first, since that is the point. */
   async launchSingleNode(rigId: string, logicalId: string, opts?: {
     adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>;
     fsOps?: { exists(path: string): boolean };
     snapshotId?: string;
+    keepPane?: boolean;
   }): Promise<NarrowLaunchResult> {
     return this.launchNodeTargets(rigId, [logicalId], { ...opts, nonTargetMode: "unchanged" });
   }
@@ -580,6 +583,7 @@ export class RestoreOrchestrator {
     fsOps?: { exists(path: string): boolean };
     holdReason?: string;
     snapshotId?: string;
+    keepPane?: boolean;
     nonTargetMode: "unchanged" | "detach_and_hold";
   }): Promise<NarrowLaunchResult> {
     const rig = this.rigRepo.getRig(rigId);
@@ -616,6 +620,11 @@ export class RestoreOrchestrator {
     const subsetWarnings: string[] = [];
 
     for (const node of targetNodes) {
+      if (opts.keepPane) {
+        launched.push(await this.restoreNodeWithCompensation({ node }, rigId, snapshot.id, snapshot.data,
+          { adapters: opts.adapters, fsOps: opts.fsOps, keepPane: true }, subsetWarnings));
+        continue;
+      }
       // An external CLI's claim has no tmux session to probe; restoreNodeWithCompensation leaves it attached.
       const external = this.sessionRegistry.getBindingForNode(node.id)?.attachmentType === "external_cli";
       const sessions = external ? [] : this.sessionRegistry.getSessionsForRig(rigId)
@@ -855,8 +864,8 @@ export class RestoreOrchestrator {
     return null;
   }
 
-  private clearStaleState(nodeId: string, rigId: string): void {
-    this.sessionRegistry.clearBinding(nodeId);
+  private clearStaleState(nodeId: string, rigId: string, opts: { keepBinding?: boolean } = {}): void {
+    if (!opts.keepBinding) this.sessionRegistry.clearBinding(nodeId);
     const sessions = this.sessionRegistry.getSessionsForRig(rigId);
     for (const sess of sessions) {
       if (sess.nodeId === nodeId && sess.status !== "superseded" && sess.status !== "exited") {
@@ -982,7 +991,7 @@ export class RestoreOrchestrator {
     rigId: string,
     snapshotId: string,
     data: SnapshotData,
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; onSessionLaunched?: (nodeId: string, sessionId: string) => void; automaticReplacements?: AutomaticSeatReplacement[] },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; onSessionLaunched?: (nodeId: string, sessionId: string) => void; automaticReplacements?: AutomaticSeatReplacement[]; keepPane?: boolean },
     warnings?: string[],
     preserveStoppedCurrent = false,
   ): Promise<RestoreNodeResult> {
@@ -1102,16 +1111,22 @@ export class RestoreOrchestrator {
     }
     // Capture prior state for compensation, including an exited replacement predecessor.
     const priorState = this.captureNodeState(nodeId, rigId);
+    const keptPane = opts?.keepPane ? priorState.binding?.tmuxPane ?? null : null;
+    if (opts?.keepPane && (!keptPane || !priorState.binding?.tmuxSession)) {
+      return { nodeId, logicalId: node.logicalId, status: "failed", error: `${node.logicalId} has no bound tmux pane to keep, so nothing was stopped.` };
+    }
 
-    // Clear stale state so NodeLauncher doesn't see already_bound
-    this.clearStaleState(nodeId, rigId);
+    // Clear stale state so NodeLauncher doesn't see already_bound. A kept pane keeps its binding through the takeover: the
+    // delivery guard resolves the pane through it.
+    this.clearStaleState(nodeId, rigId, { keepBinding: keptPane !== null });
     this.tmuxAdapter.deliveryGuard?.rebindLifecycle(nodeId);
 
     // Derive canonical session name for pod-aware nodes
     const rig = this.rigRepo.getRig(rigId);
-    let launchOpts: { sessionName?: string; cwd?: string } | undefined = node.cwd
+    let launchOpts: { sessionName?: string; cwd?: string; keepPane?: string } | undefined = node.cwd
       ? { cwd: node.cwd }
       : undefined;
+    if (keptPane) launchOpts = { ...launchOpts, keepPane: keptPane };
     let expectedSessionName: string | undefined;
 
     // OPR.0.4.3.20 FR-5 — pin the resume target to the DURABLY-BOUND session.
@@ -2062,6 +2077,7 @@ export class RestoreOrchestrator {
         if (notice) warnings?.push(`${sessionName}: ${notice}`);
         const planNote = planModelAliasNotice("claude-code", { model, permissionMode }, sessionName);
         if (planNote) warnings?.push(`${sessionName}: ${planNote}`);
+        for (const note of result.warnings ?? []) warnings?.push(`${sessionName}: ${note}`);
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
         return { kind: "resumed", ...(result.launchedProcess ? { launchedProcess: result.launchedProcess } : {}) };
       }

@@ -1,5 +1,18 @@
 import { resolveCurrentSessionAddress } from "./session-registry.js";
+import { SettingsStore } from "./user-settings/settings-store.js";
 import type Database from "better-sqlite3";
+
+/** The operator seat (workspace.operator_seat_name — the conventional
+ *  `operator-${USER}@kernel`): the floor for work whose owner can't act. Null when unset or
+ *  when settings resolution fails. */
+export function resolveOperatorSeat(): string | null {
+  try {
+    const v = new SettingsStore().resolveOne("workspace.operator_seat_name" as never).value;
+    return typeof v === "string" && v.length > 0 ? v : null;
+  } catch {
+    return null;
+  }
+}
 
 /** The durable session→node binding (the session-registry precedent: latest sessions row
  *  for the canonical name). Canonical session names (dash form, `review-r2@rig`) and node

@@ -39,6 +39,8 @@ export interface Node {
   /** OPR.0.7.0.7: the seat's explicit effort choice (rig seat set-effort); null = none. */
   effortChoice?: string | null;
   codexConfigProfile?: string | null;
+  /** A Claude seat's own subscription credential, as a reference (operator label and token-file path); null = none. */
+  claudeTokenRef?: { label: string; tokenFile: string } | null;
   /** OPR.0.4.8.3 Seam B: attached permission_policy REF (builtin:<name> or spec-relative custom
    *  path), or null when none is attached (= the floor). */
   permissionPolicy?: string | null;
@@ -193,6 +195,9 @@ export type RigEvent =
   // secret-boundary control — resume tokens are not treated as secret per the
   // 2026-07-02 founder ruling).
   | { type: "session.resume_token_captured"; rigId: string; nodeId: string; sessionName: string; sessionId: string; runtime: string; outcome: "captured" | "preserved" | "skipped"; resumeType?: string; provenance?: "adoption"; reason?: "missing_sidecar" | "parse_error" | "probe_timeout" | "process_unreadable" | "invalid_token" | "stale_sidecar" | "higher_rank_present"; redacted: true }
+  // A Claude launch that didn't give the seat its own subscription token: Claude started on its config dir's stored
+  // login. The reference (label and file path) only; the token value never enters OpenRig.
+  | { type: "seat.claude_token_not_applied"; rigId: string; nodeId: string; label: string; tokenFile: string; reason: string }
   | { type: "seat.attention_cleared"; rigId: string; nodeId: string; sessionName: string; from: string; to: "ready"; clearedBy: "evidence" | "operator_attestation"; evidence?: { kind: string; state?: string; reason?: string }; reason?: string; previousError: string | null }
   | { type: "seat.attention_clear_refused"; rigId: string; nodeId: string; sessionId: string; sessionName: string; attentionClass: "restore_outcome"; code: string; attemptId?: number; probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence }
   | { type: "rig.imported"; rigId: string; specName: string; specVersion: string }

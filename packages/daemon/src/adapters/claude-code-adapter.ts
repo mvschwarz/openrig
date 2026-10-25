@@ -1,5 +1,6 @@
 import { withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
 import { operationalLaunchArgs } from "./kernel-authority.js";
+import { claudeSeatTokenFallbackNotice } from "../domain/claude-seat-token.js";
 import nodePath from "node:path";
 import fs from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
@@ -286,6 +287,24 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
             pane: binding.runtimeSwitchFrom.pane, generation: binding.runtimeSwitchFrom.generation } } : {}) }, binding.permissionMode);
       } catch (error) { return { ok: false, error: (error as Error).message }; }
     }
+    // A seat's own subscription token: the managed launch carries it; the classic launch gets its step in the staged
+    // subshell. A launch that can't apply it still starts, and says so.
+    const seatToken = managed ? null : this.claudeManagedLaunch?.seatTokenLaunch?.(binding.nodeId) ?? null;
+    const tokenWarnings: string[] = [...(managed?.warnings ?? seatToken?.warnings ?? [])];
+    const session = binding.tmuxSession;
+    const sendClassic = async (cmd: string) => {
+      if (!this.seatLaunchEnvironment) {
+        if (seatToken) tokenWarnings.push(this.claudeManagedLaunch?.tokenNotApplied?.(binding.nodeId, seatToken.ref, "this launch path can't run the token step") ?? claudeSeatTokenFallbackNotice(seatToken.ref, "this launch path can't run the token step"));
+        return this.tmux.sendText(session, cmd);
+      }
+      const staged = await this.seatLaunchEnvironment.command(session, cmd, { nodeId: binding.nodeId, generation: binding.launchGeneration,
+        runtime: this.runtime, ...(seatToken ? { claudeTokenStep: seatToken.step } : {}) });
+      if (seatToken && !staged.includes(seatToken.step)) {
+        tokenWarnings.push(this.claudeManagedLaunch?.tokenNotApplied?.(binding.nodeId, seatToken.ref, "the seat's pane shell can't run the token step") ?? claudeSeatTokenFallbackNotice(seatToken.ref, "the seat's pane shell can't run the token step"));
+      }
+      return this.tmux.sendShellCommand(session, staged, undefined, { sourceInPane: true });
+    };
+    const launchNotes = () => (tokenWarnings.length ? { warnings: [...tokenWarnings] } : {});
     const posture = claudePostureFlag(process.env, binding.launchPosture, binding.permissionMode);
     const appliedLaunch = observeClaudePermission(posture);
     const permissionArgs = (nativeSessionId: string) => withManagedRestoreReads(operationalLaunchArgs(this.runtime, binding), {
@@ -337,9 +356,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         // the codex fork path) — a hostile id must not leave --resume.
         : `${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg}${advisorArg}${additionArg} --resume ${shellQuote(parentId)} --fork-session --session-id ${forkSessionId} --name ${opts.name}`;
       const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, managed.assertCurrent)
-        : this.seatLaunchEnvironment
-          ? await this.tmux.sendShellCommand(binding.tmuxSession, await this.seatLaunchEnvironment.command(binding.tmuxSession, cmd, { nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime }), undefined, { sourceInPane: true })
-          : await this.tmux.sendText(binding.tmuxSession, cmd);
+        : await sendClassic(cmd);
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
       }
@@ -349,7 +366,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       }
       // As with a fresh launch, nothing is read back from Claude's session files: a same-name
       // file can belong to an earlier occupant or another seat sharing the config directory.
-      return { ok: true, resumeToken: forkSessionId, resumeType: "claude_id", appliedLaunch };
+      return { ok: true, resumeToken: forkSessionId, resumeType: "claude_id", appliedLaunch, ...launchNotes() };
     }
 
     const generatedSessionId = opts.resumeToken ? null : this.sessionIdFactory();
@@ -362,9 +379,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       : `${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg}${advisorArg}${additionArg} --session-id ${generatedSessionId} --name ${opts.name}`;
 
     const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, managed.assertCurrent)
-      : this.seatLaunchEnvironment
-          ? await this.tmux.sendShellCommand(binding.tmuxSession, await this.seatLaunchEnvironment.command(binding.tmuxSession, cmd, { nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime }), undefined, { sourceInPane: true })
-          : await this.tmux.sendText(binding.tmuxSession, cmd);
+      : await sendClassic(cmd);
     if (!textResult.ok) {
       return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
     }
@@ -384,12 +399,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       // The process readiness pinned first, if it observed one: the caller records it, not a later read.
       const launchedProcess = launch.process ? { launchedProcess: { ...launch.process } } : {};
       if (!verification.ok) return { ...verification, ...launchedProcess };
-      return { ok: true, resumeToken: opts.resumeToken, resumeType: "claude_id", appliedLaunch, ...launchedProcess };
+      return { ok: true, resumeToken: opts.resumeToken, resumeType: "claude_id", appliedLaunch, ...launchedProcess, ...launchNotes() };
     }
 
     // Fresh launches already have an explicit --session-id. A same-name file
     // can belong to another seat sharing the Claude config directory.
-    return { ok: true, resumeToken: generatedSessionId!, resumeType: "claude_id", appliedLaunch };
+    return { ok: true, resumeToken: generatedSessionId!, resumeType: "claude_id", appliedLaunch, ...launchNotes() };
   }
 
   async checkReady(binding: NodeBinding, options?: ReadinessOptions): Promise<ReadinessResult> {

@@ -24,6 +24,22 @@ seats run with an operational default: Codex with `-s danger-full-access -a neve
 tools, web fetches and operational commands, including reads under the home folder, allowed without asking. Say so
 before you start OpenRig ([the full list](https://github.com/mvschwarz/openrig#what-openrig-changes-on-your-machine)).
 
+**If they want changes kept inside their project:** before setup or the first daemon/kernel start, name the selected
+Codex config path (`CODEX_HOME/config.toml`, default `~/.codex/config.toml`) and explain the independent writes.
+Setup adds `~/.tmux.conf`; Codex seat startup adds workspace trust and any declared config fragments, including MCP,
+even when setup was skipped or `runtime.codex.hooks_enabled` is false. That setting controls hooks, not all config
+writes. These settings can reach their other sessions using the same Codex home. Reuse a yes that already covered
+these writes; an explicit project-only request doesn't cover them. If they decline, don't launch that same path or
+remove the writes afterwards as a substitute for consent. Explain that setup has no project-only mode. A git worktree
+or project `.codex/config.toml` doesn't redirect these writes. An existing separate `CODEX_HOME` isolates Codex's
+config, login and session state together; it needs its own working sign-in and doesn't relocate `~/.tmux.conf`.
+Carry the person's scope constraint to the operator.
+
+**Codex individual approvals:** explain before installation that even reads may ask repeatedly during setup and
+follow-up, separately from the team's permissions. Use plain, separate commands so each request is readable.
+The one optional six-command approval offer below still applies; don't enable general network access or broaden
+other permission settings to avoid prompts.
+
 When you give the person a file or a command to run in their own terminal, use a path that exists on their side. A
 file a sandboxed agent writes under `/tmp` may not exist in the person's terminal (seen with Codex), so put files the
 person needs in their project or home folder and name that path.
