@@ -1,4 +1,5 @@
 import { getNodeInventory } from "../src/domain/node-inventory.js";
+import { TerminalAdapter } from "../src/adapters/terminal-adapter.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
@@ -3377,6 +3378,23 @@ describe("RestoreOrchestrator", () => {
       if (!result.ok) throw new Error("restore failed");
       expect(result.result.nodes.find((n) => n.nodeId === node.id)).toMatchObject({ status: "fresh-primed", noConversation: true });
       expect(result.result.rigResult).toBe("fully_restored");
+    });
+
+    // A terminal's restore is its shell and its saved startup; when the startup didn't run, the restore wasn't whole.
+    it("a terminal outside any pod whose saved startup failed doesn't read fully restored, and keeps its shell and the warning", async () => {
+      const { snap, node } = seatSnapshot("terminal", "resume_if_possible");
+      db.prepare("UPDATE nodes SET pod_id = NULL WHERE id = ?").run(node.id);
+      const legacy = updateSnapshotData(snap, (data) => { data.nodes[0].podId = null; });
+      const tmux = mockTmux();
+      tmux.sendText = vi.fn(async () => ({ ok: false as const, code: "tmux_error", message: "fixture send failed" }));
+      const result = await createOrchestrator({ tmux }).restore(legacy.id, { adapters: { terminal: new TerminalAdapter() } });
+      if (!result.ok) throw new Error("restore failed");
+      expect(sessionRegistry.getSessionsForRig(snap.rigId).some((s) => s.nodeId === node.id && s.status === "running")).toBe(true);
+      expect(result.result.warnings.join("\n")).toContain("fixture send failed");
+      expect(getNodeInventory(db, snap.rigId).find((n) => n.nodeId === node.id)?.startupStatus).toBe("failed");
+      expect(result.result.nodes.find((n) => n.nodeId === node.id)).toMatchObject({ status: "fresh-primed" });
+      expect(result.result.nodes.find((n) => n.nodeId === node.id)?.noConversation).toBeUndefined();
+      expect(result.result.rigResult).toBe("partially_restored");
     });
 
     it("an agent seat started fresh still leaves the rig partially restored; only a terminal with no conversation doesn't", () => {
