@@ -8,7 +8,7 @@ import { StartupOrchestrator, isRecoverableStartupFailure, type StartupInput, ty
 import type { RuntimeAdapter, NodeBinding, ResolvedStartupFile, ProjectionResult, StartupDeliveryResult, ReadinessResult } from "../src/domain/runtime-adapter.js";
 import { resolveConcreteHint } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan } from "../src/domain/projection-planner.js";
-import type { TmuxAdapter } from "../src/adapters/tmux.js";
+import { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { StartupAction } from "../src/domain/types.js";
 import { deriveOriented, issueStartupChallenge, verifyStartupProof, STARTUP_PROOF_INSTRUCTION_LINE } from "../src/domain/startup-proof.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
@@ -1334,6 +1334,25 @@ describe("StartupOrchestrator", () => {
     expect(tmux.sendKeys).toHaveBeenCalledWith("r01-impl", ["Enter"]);
   });
 
+  it("does not persist passed-at-launch after a confirmed pre-input failure", async () => {
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "first-input-stage-"));
+    try {
+      nodeFs.writeFileSync(nodePath.join(dir, "synth.yaml"),
+        `format: 1\nname: synth\nmaintainer: Example\nfirst_input: true\ncommand: /bin/true ${"x".repeat(600)}\n`);
+      const exec = vi.fn(async () => "");
+      const transport = new TmuxAdapter(exec, { tmpName: () => "/fixture/stage.txt", bufferName: () => "fixture",
+        writeFile: async () => { throw Object.assign(new Error("fixture write denied"), { code: "EACCES" }); }, unlink: async () => {} });
+      const adapter = new CommunityHarnessRuntimeAdapter("synth", { tmux: transport, presetsDir: () => dir,
+        launchResultRoot: () => nodePath.join(dir, "state", "launch-results") });
+      const seed = seedSession();
+      const result = await createOrchestrator().startNode(makeInput(seed, { adapter, startupActions: [makeIdentityAction()] }));
+      expect(result.ok).toBe(false);
+      expect(exec).not.toHaveBeenCalled();
+      expect(db.prepare("SELECT payload FROM events WHERE node_id=? AND type='node.startup_first_input_passed'").all(seed.nodeId)).toHaveLength(0);
+      expect(JSON.stringify(result)).not.toContain("passed at launch");
+    } finally { nodeFs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it.each([[false, false, false], [true, false, false], [true, true, false], [true, false, true]])("passes the composed first input at launch (%s), assistance (%s), uncertain launch (%s)", async (firstInput, assisted, uncertain) => {
     const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "first-input-"));
     try {
@@ -1343,7 +1362,8 @@ describe("StartupOrchestrator", () => {
       db.prepare("UPDATE nodes SET runtime='synth' WHERE id=?").run(seed.nodeId);
       let path: string | undefined;
       let content: string | undefined;
-      const shell = vi.fn(async (_session: string, command: string) => {
+      const shell = vi.fn(async (_session: string, command: string, beforeInput?: () => void) => {
+        beforeInput?.();
         path = /OPENRIG_FIRST_INPUT='([^']+)'/.exec(command)?.[1];
         if (path) {
           content = nodeFs.readFileSync(path, "utf8");

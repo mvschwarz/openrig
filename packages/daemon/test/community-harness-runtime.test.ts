@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync, symlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { listCommunityHarnessPresets, loadCommunityHarnessPreset } from "../src/domain/community-harness-presets.js";
 import { CommunityHarnessRuntimeAdapter, seatAdapter, withCommunityHarnessResolver, withCommunityHarnesses } from "../src/adapters/community-harness-runtime-adapter.js";
 import { migrate } from "../src/db/migrate.js";
@@ -130,7 +130,7 @@ describe("the community harness adapter", () => {
     const tmux = {
       hasSession: vi.fn(async () => true),
       getPaneCommand: vi.fn(async () => "node"),
-      sendShellCommand: vi.fn(async () => ({ ok: true as const })),
+      sendShellCommand: vi.fn(async (_session: string, _command: string, beforeInput?: () => void) => { beforeInput?.(); return { ok: true as const }; }),
     };
     return { tmux, app: new CommunityHarnessRuntimeAdapter("synth", { tmux, presetsDir: () => dir }) };
   }
@@ -165,7 +165,7 @@ describe("the community harness adapter", () => {
       const file = result.firstInput!.path;
       expect(readFileSync(file, "utf8")).toBe(text);
       expect(statSync(file).mode & 0o777).toBe(0o600);
-      expect(realpathSync(file)).toBe(file);
+      expect(realpathSync(file)).toBe(join(realpathSync(dir), "state", "first-input", encodeURIComponent(session), basename(file)));
       paths.push(file);
     }
     expect(new Set(paths).size).toBe(3);
@@ -174,6 +174,20 @@ describe("the community harness adapter", () => {
     const resumed = await app.launchHarness(binding, { name: "w@r", resumeToken: "saved", resumeType: "community:synth" });
     expect(resumed.firstInput).toBeUndefined();
     expect(tmux.sendShellCommand.mock.calls[0]![1]).toContain("-u OPENRIG_FIRST_INPUT");
+  });
+
+  it("reports no passed input when launch staging fails before terminal input", async () => {
+    const dir = presets({ "synth.yaml": GOOD.replace("synth-harness --serve", "/bin/true " + "x".repeat(600))
+      + "names_conversation: true\nfirst_input: true\n" });
+    const exec = vi.fn(async () => "");
+    const tmux = new TmuxAdapter(exec, { tmpName: () => "/fixture/stage.txt", bufferName: () => "fixture",
+      writeFile: async () => { throw Object.assign(new Error("fixture write denied"), { code: "EACCES" }); }, unlink: async () => {} });
+    const app = new CommunityHarnessRuntimeAdapter("synth", { tmux, presetsDir: () => dir,
+      launchResultRoot: () => join(dir, "state", "launch-results") });
+    const result = await app.launchHarness(binding, { name: "w@r", firstInputText: "first turn" });
+    expect(result.ok).toBe(false);
+    expect(exec).not.toHaveBeenCalled();
+    expect(result.firstInput).toBeUndefined();
   });
 
   it("does not put a first input through a linked session folder", async () => {
