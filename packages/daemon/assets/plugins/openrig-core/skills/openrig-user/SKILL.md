@@ -1580,20 +1580,24 @@ rig mcp token list [--json]
 rig mcp token revoke <name>
 ```
 
-The 34 shipped tools fall into three groups. Over stdio, and over HTTP with no grants, every tool is offered. An HTTP
+The 36 shipped tools fall into three groups. Over stdio, and over HTTP with no grants, every tool is offered. An HTTP
 grant offers the work tools; the workspace tools with `--workspace` or `--owner`; and the owner tools only with
 `--owner`, which offers every tool.
-- **Work (17):** orientation, communication and the durable work loop.
+- **Work (19):** orientation, communication and the durable work loop.
   - `rig_whoami`: the seat the server acts as (rig, pod, peers, edges) and the `caller`: authenticated (an HTTP
     credential, with its principal) or declared (`OPENRIG_SESSION_NAME` where the server was configured, which nothing
     verifies).
   - `rig_status`, `rig_ps`, `rig_rig_nodes`, and `rig_team`: a rig's lead (its one `delegates_to` root, the seat to
     delegate to) and each seat's role, delegation and activity.
   - `rig_send`, `rig_capture`, `rig_chatroom_send`, `rig_chatroom_watch`.
-  - `rig_queue_create`, `rig_queue_show`, `rig_queue_list`, `rig_queue_claim`, `rig_queue_update`:
+  - `rig_queue_create`, `rig_queue_show`, `rig_queue_list`, `rig_queue_claim`, `rig_queue_update`,
+    `rig_queue_handoff`, `rig_queue_unclaim`:
     - `revises` on create asks for a linked revision of an earlier item;
     - show names a handed-off item's successor;
-    - `handedOffFrom` on list follows a handoff.
+    - `handedOffFrom` on list follows a handoff;
+    - handoff passes an item this seat holds on to the next seat in one step, as `rig queue handoff` does: the new item
+      carries the work's lineage;
+    - unclaim puts back a claimed item this seat won't finish.
   - `rig_artifact_read`: a finished item's artifact (its `evidenceRef`) or a named file, through the daemon's shared
     roots (`OPENRIG_FILES_ALLOWLIST`), in windows (`offset`, `nextOffset`). Outside those roots it answers unavailable
     rather than reading a local path.
@@ -1655,7 +1659,8 @@ use the `rig` CLI instead, the same way.
    assignee records it, and `rig_artifact_read` reads an artifact it names. A call that times out has an unknown
    outcome: check `rig_queue_show` with the same id before you retry, and retry only with that id.
 5. **Take work** with `rig_queue_list` (`owned: true`), `rig_queue_claim` and `rig_queue_update`. Close with the
-   answer in `note`.
+   answer in `note`. To pass it to the next seat, use `rig_queue_handoff`; to put back one you won't finish, use
+   `rig_queue_unclaim`.
 
 Limits today:
 - **OpenRig can't wake this agent itself.** `rig send` to an attached external node is refused, and a task's nudge to
