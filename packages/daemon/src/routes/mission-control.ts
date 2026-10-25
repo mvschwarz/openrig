@@ -328,6 +328,7 @@ export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
         optionId?: string;
         notify?: boolean;
         auditNotes?: Record<string, unknown>;
+        authority?: string;
         hostId?: string;
       }>()
       .catch(() => ({} as never));
@@ -434,6 +435,9 @@ export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
         ...(typeof body.optionId === "string" ? { optionId: body.optionId } : {}),
         notify: body.notify,
         auditNotes: body.auditNotes,
+        // The person at the terminal (the TUI sends no seat header): the actor is the primary user, whoever was asked.
+        // A seat's own transport identity is never replaced by it.
+        ...(body.authority === "primary-user" && identity.provenance === "claimed:v1" ? { authority: "primary-user" as const } : {}),
       });
       return c.json(result);
     } catch (err) {

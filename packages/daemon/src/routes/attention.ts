@@ -11,14 +11,18 @@ import { listProjects, insideProject, projectMission, type ProjectRead } from ".
 import { readMissionReadiness } from "../domain/proof/judgments.js";
 import { WorkflowInstanceStore } from "../domain/workflow-instance-store.js";
 import { WorkflowStepTrailLog } from "../domain/workflow-step-trail-log.js";
+import { resolveDefaultPerson } from "../domain/gateway/participants.js";
+import { resolveRegisteredHumanAddress } from "../domain/gateway/human-registry.js";
 
 export function attentionRoutes(): Hono {
   const app = new Hono();
   app.get("/", c => {
     const wanted = c.req.query("item");
     const result: AttentionRead = { scope: "instance", readAt: new Date().toISOString(), items: [], sources: [], detail: null, detailError: null };
+    // Whether an item is in the queue this Feed shows; an item opened by id is shown in full whatever the view.
+    let inView = (_recipient: string | null | undefined): boolean => true;
     const add = (item: AttentionItem, lines: () => string[], files: () => Array<{ label: string; path: string }> = () => []) => {
-      if (!result.items.some(i => i.id === item.id)) result.items.push(item);
+      if (!result.items.some(i => i.id === item.id) && inView(item.recipient)) result.items.push(item);
       if (wanted === item.id) result.detail = { item, lines: lines(), files: files() };
     };
     const unavailable = (source: string, error: unknown) => result.sources.push({ source, state: "unavailable", detail: error instanceof Error ? error.message : String(error) });
@@ -29,6 +33,32 @@ export function attentionRoutes(): Hono {
     } catch (e) { unavailable("project catalog", e); }
     const queue = c.get("queueRepo" as never) as QueueRepository | undefined;
     const posture = c.get("operatingPosture" as never) as OperatingPostureService | undefined;
+    // The Feed's perspective, whose queue it shows (`view`: a person, `default` or `all`). A view, never an identity: acts on
+    // what it shows carry the primary user's authority, the person at the terminal, whoever's queue it is. With no person
+    // registered the Feed is as before.
+    const registry = queue?.humanRegistry();
+    const entities = registry?.ok ? registry.entities : [];
+    if (entities.length) {
+      const person = (session: string | null | undefined) => resolveRegisteredHumanAddress(session, entities);
+      const requested = c.req.query("view")?.trim() || undefined;
+      // The primary user is the default person: the participants file's `default`, else the only registered person.
+      const primaryUser = resolveDefaultPerson(entities);
+      const primary = primaryUser.person?.address ?? null;
+      const named = requested !== undefined && requested !== "all" && requested !== "default";
+      const chosen = named && requested ? person(requested) ?? person(`${requested}@external`) : null;
+      const viewing = requested === "default" ? primary : chosen;
+      const basis: NonNullable<AttentionRead["perspective"]>["basis"] = requested === "default" ? (primary ? "default" : "all")
+        : named ? (chosen ? "chosen-here" : "unknown") : "all";
+      result.perspective = { viewing, basis, ...(basis === "unknown" ? { requested } : {}), defaultSource: primaryUser.source,
+        actingAs: { person: primary, authority: "primary-user" } };
+      // A person's items are in their view. Items for no registered person (instance facts, a bare human seat) are the
+      // primary user's, so they're in theirs.
+      if (basis === "unknown") inView = () => false;
+      else if (basis !== "all") inView = recipient => {
+        const owner = person(recipient);
+        return owner ? owner === viewing : viewing === primary;
+      };
+    }
     try {
       if (!queue) throw new Error("Queue repository unavailable");
       const rows = queue.listAttention({ limit: 1001 });
@@ -60,8 +90,9 @@ export function attentionRoutes(): Hono {
           // An ask addressed to the person is answered on this row, as them: Steering's Approve, or, for an ask with questions,
           // mission control's answer (a choice, their own words, or sending a complete set's recorded answers back), which
           // Approve would close without returning. They can also open the asker's terminal (Chat). A row parked on them is
-          // resolved another way, so it carries neither.
+          // resolved with their decision in words, which unparks it for its owner.
           ...(toPerson && q.state === "pending" ? { answer: { verb: questions ? "answer" as const : "approve" as const, actorSession: q.destinationSession } } : {}),
+          ...(!toPerson && q.state === "blocked" && q.blockedOn && isHumanSeatSessionRef(q.blockedOn) ? { answer: { verb: "resolve" as const, actorSession: q.blockedOn } } : {}),
           ...(toPerson ? { asker: q.sourceSession } : {}),
           ...(questions ? { humanQuestions: questions, humanAnswers: q.humanAnswers ?? {} } : {}),
           summary: q.summary || q.body.trim().split(/\r?\n/).find(Boolean) || "Request summary unavailable", urgency: q.priority, unblocks, at: q.tsUpdated, scope: p ? `project ${p.id}` : "instance · project unknown", project: p ? { id: p.id, root: p.root } : null, source: `/api/queue/${encodeURIComponent(q.qitemId)}` };

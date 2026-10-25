@@ -43,7 +43,8 @@ export function composeHumanUpdates(attention: AttentionRead | null, updates: De
 
 export function attentionLines(state: ViewState, snap: FleetSnapshot, width: number): ContentLine[] {
   const read = snap.attentionRead;
-  const lines: ContentLine[] = [{ text: "FEED · Instance / All humans" }];
+  const lines: ContentLine[] = [{ text: feedTitle(read?.perspective) }];
+  if (read?.perspective?.defaultSource === "none") lines.push({ text: "No default person is chosen: rig gateway default <id> chooses one." });
   if (!read) return wrapDetailLines([...lines, { text: "Unavailable: Feed sources have not answered." }, ...snap.readErrors.map(text => ({ text }))], width);
   if (state.attentionOpen) {
     const d = read.detail;
@@ -65,9 +66,14 @@ export function attentionLines(state: ViewState, snap: FleetSnapshot, width: num
       const qitemId = d.item.id.startsWith("queue:") ? d.item.id.slice("queue:".length) : null;
       if (d.item.answer && qitemId) {
         const { verb, actorSession } = d.item.answer;
+        // Whoever's queue is shown, the act is the primary user's; it says whose ask it settles when that's someone else.
+        const actor = actingAs(read, actorSession);
+        const as = `as ${actor}${d.item.recipient && d.item.recipient !== actor && read.perspective ? ` on ${d.item.recipient}'s ask` : ""}`;
         const open = (d.item.humanQuestions ?? []).filter(q => answerOf(d.item, q.id) == null);
-        if (verb === "approve") {
-          lines.push(listItem(`Approve as ${actorSession} (closes this request, as Steering's Approve does)`, { type: "act", act: "answer", qitemId, verb, actorSession }));
+        if (verb === "resolve") {
+          lines.push({ text: `Resolve it in your own words: reply <your decision>, ${as} (it unparks the row for its owner).` });
+        } else if (verb === "approve") {
+          lines.push(listItem(`Approve ${as} (closes this request, as Steering's Approve does)`, { type: "act", act: "answer", qitemId, verb, actorSession }));
         } else if (!open.length) {
           lines.push(listItem(`Send the recorded answers back to ${d.item.asker ?? "the asker"} and close this request`, { type: "act", act: "answer", qitemId, verb, actorSession }));
         } else {
@@ -75,8 +81,8 @@ export function attentionLines(state: ViewState, snap: FleetSnapshot, width: num
             for (const o of q.options) lines.push(listItem(`Answer "${q.question}": ${o.label}${o.recommended ? " (recommended)" : ""}`,
               { type: "act", act: "answer", qitemId, verb, actorSession, questionId: q.id, optionId: o.id }));
         }
-        if (verb === "approve" || open.length) {
-          lines.push({ text: `Or answer in your own words: reply <text>, as ${actorSession}${verb === "answer" ? " (it fills the first unanswered question and closes the request)" : ""}.` });
+        if (verb !== "resolve" && (verb === "approve" || open.length)) {
+          lines.push({ text: `Or answer in your own words: reply <text>, ${as}${verb === "answer" ? " (it fills the first unanswered question and closes the request)" : ""}.` });
         }
       }
       // Chat, as on the Feed card: open the asker's terminal (its pod's view) to answer in your own words.
@@ -110,13 +116,39 @@ export function attentionLines(state: ViewState, snap: FleetSnapshot, width: num
   return wrapDetailLines(lines, width);
 }
 
+/** The mission-control write for an answer act. Terminal acts carry the primary user's authority; the daemon records who
+ *  that is and whose ask it was. */
+export function answerRequest(action: Extract<Action, { type: "act"; act: "answer" }>) {
+  const { act: _act, type: _type, ...input } = action;
+  return { ...input, authority: "primary-user" as const };
+}
+
+/** Who an act on the Feed is recorded as: the primary user once anyone is registered, else the served actor, as before. */
+export function actingAs(read: AttentionRead | null | undefined, served: string): string {
+  return read?.perspective ? read.perspective.actingAs.person ?? "the primary user" : served;
+}
+
+/** The TUI opens on the default person's Feed only when the participants file chose one, and only while the person hasn't
+ *  moved off the opening view. With none chosen it stays on the topology, as before. */
+export function opensOnDefaultFeed(read: AttentionRead | null | undefined, state: ViewState, untouched: boolean): boolean {
+  return untouched && state.section === "topology" && read?.perspective?.defaultSource === "chosen";
+}
+
+/** Whose queue the Feed shows, and who acts on it: the primary user, whichever queue is shown. */
+function feedTitle(p: AttentionRead["perspective"]): string {
+  if (!p) return "FEED · Instance / All humans";
+  const viewing = p.basis === "unknown" ? `no registered person "${p.requested}"` : p.viewing ?? "everyone";
+  return `FEED · Viewing ${viewing} · you act as ${p.actingAs.person ?? "the primary user"}`;
+}
+
 /** The `reply` command on the open request: the person's own words, answered on that row as the person the Feed served. */
 export function replyAct(read: AttentionRead | null | undefined, openId: string | null | undefined, text: string): Action {
   const item = read?.detail?.item;
   if (!item?.answer || item.id !== openId || !item.id.startsWith("queue:") || !text.trim()) {
     return { type: "notice", message: "reply answers the open request addressed to a person: open it in the Feed, then reply <your words>." };
   }
-  return { type: "act", act: "answer", qitemId: item.id.slice("queue:".length), verb: "answer", actorSession: item.answer.actorSession, decision: text.trim() };
+  return { type: "act", act: "answer", qitemId: item.id.slice("queue:".length), verb: item.answer.verb === "resolve" ? "resolve" : "answer",
+    actorSession: item.answer.actorSession, decision: text.trim() };
 }
 
 /** A question's recorded answer, by own key only (a question id like "constructor" isn't an answer). */

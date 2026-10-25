@@ -48,8 +48,15 @@ import {
   MissionControlActionLogError,
   type MissionControlVerb,
 } from "./mission-control-action-log.js";
-import { isHumanSeatSession } from "../human-route-enforcer.js";
+import { isHumanSeatSessionRef } from "../session-name.js";
 import { humanAnswerText, formatHumanAnswers, unansweredQuestions, type HumanAnswers } from "../human-questions.js";
+import { resolveDefaultPerson } from "../gateway/participants.js";
+
+/** The primary user when several people are registered and none is the default: the generic human seat the web UI also
+ *  records. */
+const UNNAMED_PRIMARY_USER = "human@host";
+/** Verbs that settle what a person was asked. */
+const SETTLING_VERBS = new Set<MissionControlVerb>(["approve", "deny", "resolve", "answer"]);
 
 export class MissionControlWriteContractError extends Error {
   constructor(
@@ -85,6 +92,10 @@ export interface MissionControlActionInput {
   optionId?: string;
   /** Operator-supplied audit context. */
   auditNotes?: Record<string, unknown>;
+  /** `primary-user`: the person at the terminal acts (the TUI), whoever was asked. The actor recorded is the primary user
+   *  (the default person), never the claimed actor, and the audit notes say whose ask it was. Only a request with no
+   *  transport identity carries it. */
+  authority?: "primary-user";
   /**
    * For handoff: opt-in best-effort wake. Default true (PL-004 Phase A R1
    * pattern: durable + waking by default; operators opt out for cold queues).
@@ -146,6 +157,8 @@ export class MissionControlWriteContract {
     }
 
     const source = this.requireMutableQitem(input.qitemId);
+    const acting = this.asActor(input, this.queueRepo.isPersonAddress(source.destinationSession) ? source.destinationSession : null);
+    input = acting.input;
 
     if ((input.verb === "route" || input.verb === "handoff") && !input.destinationSession) {
       throw new MissionControlWriteContractError(
@@ -173,7 +186,7 @@ export class MissionControlWriteContract {
           closureTarget: closure.closureTarget ?? undefined,
           handedOffTo: closure.handedOffTo,
           blockedOn: closure.blockedOn,
-          transitionNote: `mission-control:${input.verb}${input.reason ? ` (${input.reason})` : ""}`,
+          transitionNote: `mission-control:${input.verb}${input.reason ? ` (${input.reason})` : ""}${acting.note}`,
         });
         register(closeResult.persistedEvent);
 
@@ -392,7 +405,8 @@ export class MissionControlWriteContract {
         { qitemId: input.qitemId },
       );
     }
-    if (source.state !== "blocked" || !isHumanSeatSession(source.blockedOn)) {
+    // Parked on a person: a legacy human seat or a registered person's address, as the Feed lists it.
+    if (source.state !== "blocked" || !source.blockedOn || !isHumanSeatSessionRef(source.blockedOn)) {
       throw new MissionControlWriteContractError(
         "qitem_not_leg1_parked",
         `verb=resolve requires a leg-1 parked qitem (state=blocked with a human-seat blocked_on); ` +
@@ -401,6 +415,8 @@ export class MissionControlWriteContract {
         { qitemId: input.qitemId, state: source.state, blockedOn: source.blockedOn },
       );
     }
+    const acting = this.asActor(input, source.blockedOn);
+    input = acting.input;
 
     const evaluatedAt = this.now().toISOString();
     const beforeSnapshot = snapshotQitem(source);
@@ -417,7 +433,7 @@ export class MissionControlWriteContract {
           qitemId: input.qitemId,
           actorSession: input.actorSession,
           state: "in-progress",
-          transitionNote: decision,
+          transitionNote: `${decision}${acting.note}`,
           ownerNotificationKind: "human-decision-resolved",
         });
         register(updateResult.persistedEvent);
@@ -501,17 +517,20 @@ export class MissionControlWriteContract {
     if (!ask) {
       throw new MissionControlWriteContractError("qitem_not_found", `qitem ${input.qitemId} not found`, { qitemId: input.qitemId });
     }
-    if (ask.destinationSession !== input.actorSession || ask.humanIntent === "update" || !this.queueRepo.isPersonAddress(ask.destinationSession)) {
+    const primaryUser = input.authority === "primary-user";
+    input = this.asActor(input, ask.destinationSession).input;
+    // The asked person answers, or the primary user does on anyone's ask.
+    if ((ask.destinationSession !== input.actorSession && !primaryUser) || ask.humanIntent === "update" || !this.queueRepo.isPersonAddress(ask.destinationSession)) {
       throw new MissionControlWriteContractError("answer_not_recorded",
         `qitem ${input.qitemId} isn't an ask to ${input.actorSession}, so ${input.actorSession} can't answer it.`, { qitemId: input.qitemId });
     }
     const before = snapshotQitem(ask);
     const questions = ask.humanQuestions ?? [];
-    const existing = this.queueRepo.getHumanAnswer(input.qitemId, input.actorSession);
+    const existing = this.queueRepo.getHumanAnswer(input.qitemId, input.actorSession, { primaryUser });
     if (existing && (ask.state === "pending" || ask.state === "done")) {
       const decision = questions.length && unansweredQuestions(questions, ask.humanAnswers ?? {}).length === 0
         ? formatHumanAnswers(questions, ask.humanAnswers ?? {}).join("; ") : humanAnswerText(existing.body);
-      if (ask.state === "pending" && !this.queueRepo.resolveDirectHumanReply({ qitemId: input.qitemId, actorSession: input.actorSession, decision })) {
+      if (ask.state === "pending" && !this.queueRepo.resolveDirectHumanReply({ qitemId: input.qitemId, actorSession: input.actorSession, decision, primaryUser })) {
         throw new MissionControlWriteContractError("answer_not_closed", `The answer is already in ${existing.qitemId}, but ${input.qitemId} didn't close.`, { qitemId: input.qitemId });
       }
       return this.recordAnswer(input, before, decision, { outcome: "answered", unanswered: [],
@@ -531,7 +550,7 @@ export class MissionControlWriteContract {
     let reply: string;
     if (chose) {
       const recorded = this.queueRepo.recordHumanAnswer({ qitemId: input.qitemId, actorSession: input.actorSession,
-        questionId: input.questionId ?? "", optionId: input.optionId ?? "" });
+        questionId: input.questionId ?? "", optionId: input.optionId ?? "", primaryUser });
       if (recorded.status !== "recorded") {
         throw new MissionControlWriteContractError("answer_not_recorded", `The answer wasn't recorded: ${recorded.reason}.`,
           { qitemId: input.qitemId, reason: recorded.reason });
@@ -552,12 +571,14 @@ export class MissionControlWriteContract {
       const earlier = formatHumanAnswers(questions, ask.humanAnswers ?? {});
       reply = `${words}\n\n---\n${earlier.length ? `Earlier answers: ${earlier.join("; ")}\n` : ""}In reply to: ${input.qitemId}${questions.length ? " (its humanAnswers field holds these words under its first unanswered question)" : ""}`;
     }
+    // The asker reads who answered, and whose ask it was: never the asked person when someone else answered.
+    const forAsked = ask.destinationSession !== input.actorSession ? ask.destinationSession : null;
     let returned: QueueItem;
     try {
       returned = await this.queueRepo.createHumanAnswer({
         sourceSession: input.actorSession, destinationSession: ask.sourceSession,
-        body: `${reply}\nAnswered by ${input.actorSession} in OpenRig.`,
-        summary: `${input.actorSession} answered: ${ask.summary ?? input.qitemId}`,
+        body: `${reply}\nAnswered by ${input.actorSession}${forAsked ? `, the primary user at the terminal, on ${forAsked}'s ask` : ""} in OpenRig.`,
+        summary: `${input.actorSession} answered${forAsked ? ` ${forAsked}'s ask` : ""}: ${ask.summary ?? input.qitemId}`,
         tags: ["human-answer", ...(ask.tags ?? []).filter((t) => /^(project|mission|slice):/.test(t))],
         inboundReplyTo: input.qitemId, ...(input.notify === false ? { nudge: false } : {}),
       });
@@ -570,7 +591,7 @@ export class MissionControlWriteContract {
     const replyId = returned.qitemId;
     const decision = chose || resume
       ? formatHumanAnswers(questions, this.queueRepo.getById(input.qitemId)?.humanAnswers ?? {}).join("; ") : humanAnswerText(returned.body);
-    if (!this.queueRepo.resolveDirectHumanReply({ qitemId: input.qitemId, actorSession: input.actorSession, decision })
+    if (!this.queueRepo.resolveDirectHumanReply({ qitemId: input.qitemId, actorSession: input.actorSession, decision, primaryUser })
       && this.queueRepo.getById(input.qitemId)?.state !== "done") {
       throw new MissionControlWriteContractError("answer_not_closed",
         `The answer went back to ${ask.sourceSession} as ${replyId}, but qitem ${input.qitemId} didn't close: it changed meanwhile.`,
@@ -596,6 +617,30 @@ export class MissionControlWriteContract {
     for (const e of persistedEvents) this.eventBus.notifySubscribers(e);
     return { actionId: actionEntry!.actionId, verb: "answer", qitemId: input.qitemId, closedQitem: after, createdQitemId,
       notifyAttempted: false, notifyResult: null, auditedAt: evaluatedAt, answer };
+  }
+
+  /**
+   * Who acts, and on whose ask. With primary-user authority the actor is the primary user: the default person, or, with
+   * several people and none chosen, the generic human seat. With no one registered it's the claimed actor, as before. The
+   * audit notes record the authority and the person asked, and the transition says so when they differ. Without it, a
+   * registered person can't settle what was asked of another registered person: that's someone else's answer.
+   */
+  private asActor(input: MissionControlActionInput, asked: string | null): { input: MissionControlActionInput; note: string } {
+    if (input.authority !== "primary-user") {
+      const someoneElse = SETTLING_VERBS.has(input.verb) ? this.queueRepo.askedSomeoneElse(input.actorSession, asked) : null;
+      if (someoneElse) {
+        throw new MissionControlWriteContractError("answer_not_recorded",
+          `qitem ${input.qitemId} was asked of ${someoneElse}, not ${input.actorSession}, so ${input.actorSession} can't settle it.`,
+          { qitemId: input.qitemId, asked: someoneElse });
+      }
+      return { input, note: "" };
+    }
+    const registry = this.queueRepo.humanRegistry();
+    const people = registry.ok ? registry.entities : [];
+    const actor = people.length ? resolveDefaultPerson(people).person?.address ?? UNNAMED_PRIMARY_USER : input.actorSession;
+    const auditNotes = { ...input.auditNotes, authority: "primary-user", asked };
+    const note = asked && asked !== actor ? `; by ${actor}, the primary user at the terminal, on ${asked}'s ask` : "";
+    return { input: { ...input, actorSession: actor, auditNotes }, note };
   }
 
   private requireMutableQitem(qitemId: string): QueueItem {

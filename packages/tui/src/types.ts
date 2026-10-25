@@ -518,6 +518,8 @@ export type Action =
   | { type: "attention-category"; category: "action" | "update" }
   | { type: "attention-open"; id: string }
   | { type: "attention-source"; path: string }
+  /** Whose Feed queue to show: a person, "all" or "default". A view, never who acts. */
+  | { type: "attention-view"; view: string }
   | { type: "file-open"; target: import("./reading.js").FileTarget }
   | { type: "external-open"; url: string }
   /** Leave the TUI briefly and print `value` as one unbroken line for exact copying; Enter returns. */
@@ -574,7 +576,7 @@ export type Action =
   | { type: "act"; act: "run"; rigId: string; agent: string }
   /** Answer a request on its own row, as the person the Feed served: Steering's Approve, or a choice
    * (questionId + optionId) or their own words (decision) through mission control's answer. */
-  | { type: "act"; act: "answer"; qitemId: string; verb: "approve" | "answer"; actorSession: string; questionId?: string; optionId?: string; decision?: string }
+  | { type: "act"; act: "answer"; qitemId: string; verb: "approve" | "answer" | "resolve"; actorSession: string; questionId?: string; optionId?: string; decision?: string }
   /** Answer the open request in your own words (the `reply` command); main resolves it to the served answer act. */
   | { type: "attention-reply"; text: string }
   | { type: "notice"; message: string };
@@ -594,6 +596,8 @@ export interface ViewState {
   terminalView?: string | null;
   terminalPage?: number;
   attentionOpen?: string | null;
+  /** Whose Feed queue is shown: a person, or "all"; null is the default person's (or everyone's when there is none). */
+  attentionView?: string | null;
   attentionCategory?: "action" | "update" | null;
   file?: import("./reading.js").FileTarget | null;
   externalUrl?: string | null;

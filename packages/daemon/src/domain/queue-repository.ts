@@ -1696,11 +1696,12 @@ export class QueueRepository {
     }
   }
 
-  /** First committed return of a direct ask, including pre-shared-ID Slack replies. */
-  getHumanAnswer(qitemId: string, actorSession: string): QueueItem | null {
+  /** First committed return of a direct ask, including pre-shared-ID Slack replies. `primaryUser`: the actor is the
+   *  primary user, who may answer anyone's ask. */
+  getHumanAnswer(qitemId: string, actorSession: string, opts: { primaryUser?: boolean } = {}): QueueItem | null {
     const ask = this.getById(qitemId);
-    if (!this.hasReplyToColumn || !ask || ask.destinationSession !== actorSession
-      || ask.humanIntent === "update" || !this.isPersonAddress(actorSession)) return null;
+    if (!this.hasReplyToColumn || !ask || (ask.destinationSession !== actorSession && !opts.primaryUser)
+      || ask.humanIntent === "update" || !this.isPersonAddress(ask.destinationSession)) return null;
     const row = this.db.prepare(`SELECT qitem_id FROM queue_items
       WHERE reply_to = ? AND source_session = ? AND destination_session = ?
         AND (EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = 'human-answer')
@@ -1995,6 +1996,11 @@ export class QueueRepository {
     if (isHumanSeatSessionRef(destination)) return true;
     const registry = this.loadHumanRegistryFn();
     return registry.ok && resolveRegisteredHumanAddress(destination, registry.entities) !== null;
+  }
+
+  /** The registered people this queue resolves addresses against. */
+  humanRegistry(): LoadResult {
+    return this.loadHumanRegistryFn();
   }
 
   /** The asked person, when a different registered person is acting on what was asked of them; else null. An agent, the
@@ -3591,11 +3597,11 @@ export class QueueRepository {
    * preserving earlier clicks and leaving the other questions unanswered. A completed
    * button set is already final; its resolve continuation must not overwrite those answers.
    */
-  resolveDirectHumanReply(input: { qitemId: string; actorSession: string; decision: string }): boolean {
+  resolveDirectHumanReply(input: { qitemId: string; actorSession: string; decision: string; primaryUser?: boolean }): boolean {
     const result = this.db.transaction(() => {
       const item = this.getById(input.qitemId);
       if (item?.state !== "pending" || item.humanIntent === "update"
-        || item.destinationSession !== input.actorSession
+        || (item.destinationSession !== input.actorSession && !input.primaryUser)
         || !this.isPersonAddress(item.destinationSession)) return null;
 
       const text = input.decision.trim();
@@ -3603,7 +3609,8 @@ export class QueueRepository {
         ? unansweredQuestions(item.humanQuestions ?? [], item.humanAnswers ?? {})
         : [];
       const question = unanswered[0];
-      let transitionNote = "direct human reply received";
+      let transitionNote = item.destinationSession === input.actorSession ? "direct human reply received"
+        : `reply from ${input.actorSession}, the primary user at the terminal, on ${item.destinationSession}'s ask; not answered by ${item.destinationSession}`;
       if (question) {
         const typedReply: TypedHumanReply = {
           kind: "typed-reply", text, placement: "first-unanswered", unansweredCount: unanswered.length - 1,
@@ -3635,7 +3642,7 @@ export class QueueRepository {
    * resolve) with exactly what the seat will read. Anything else is not-applicable (a forged
    * id, a stranger, a decision already resolved), never an error the socket must retry.
    */
-  recordHumanAnswer(input: { qitemId: string; actorSession: string; questionId: string; optionId: string }): RecordHumanAnswerResult {
+  recordHumanAnswer(input: { qitemId: string; actorSession: string; questionId: string; optionId: string; primaryUser?: boolean }): RecordHumanAnswerResult {
     if (!this.hasHumanQuestionsColumn) return { status: "not-applicable", reason: "schema" };
     return this.db.transaction(() => {
       const item = this.getById(input.qitemId);
@@ -3649,7 +3656,7 @@ export class QueueRepository {
         return { status: "not-applicable" as const, reason: `state-${item.state}`, ...(onRecord ? { answerOnRecord: true as const } : {}),
           ...(decidedForThem ? { decidedForThem } : {}) };
       }
-      if (item.destinationSession !== input.actorSession) return { status: "not-applicable" as const, reason: "not-the-asked-human" };
+      if (item.destinationSession !== input.actorSession && !input.primaryUser) return { status: "not-applicable" as const, reason: "not-the-asked-human" };
       const question = item.humanQuestions.find((q) => q.id === input.questionId);
       if (!question?.options.some((o) => o.id === input.optionId)) return { status: "not-applicable" as const, reason: "unknown-option" };
       const recorded = item.humanAnswers ?? {};

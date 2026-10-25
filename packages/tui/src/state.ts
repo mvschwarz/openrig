@@ -86,12 +86,13 @@ export function createViewState(options: CreateViewStateOptions): ViewStateStore
     executionOpen: null,
     healthOpen: null,
     attentionOpen: null,
+    attentionView: null,
   };
   const listeners = new Set<(s: ViewState) => void>();
 
   function dispatch(action: Action): ViewState {
     const previous = state;
-    if (["attention-category", "attention-open", "terminal-preview", "project-select", "jump", "drill", "cross", "tab", "scopes-mission-open", "scopes-open", "health-open", "execution-open", "recent-open", "timezone", "config-category", "config-setting"].includes(action.type)) state = { ...state, file: null, externalUrl: null, recentOpen: null, timeZoneHelp: false, attentionOpen: null, specLaunch: null, ...(state.pendingDrill ? { pendingDrill: null } : {}) };
+    if (["attention-category", "attention-open", "attention-view", "terminal-preview", "project-select", "jump", "drill", "cross", "tab", "scopes-mission-open", "scopes-open", "health-open", "execution-open", "recent-open", "timezone", "config-category", "config-setting"].includes(action.type)) state = { ...state, file: null, externalUrl: null, recentOpen: null, timeZoneHelp: false, attentionOpen: null, specLaunch: null, ...(state.pendingDrill ? { pendingDrill: null } : {}) };
     state = reduce(state, action, getSnapshot());
     // A pending address belongs to the Topology landing it opened; leaving it cancels the address.
     if (state.pendingDrill && (state.section !== "topology" || state.drill.length > 0)) state = { ...state, pendingDrill: null };
@@ -142,6 +143,9 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
       return resetContent({ ...next, terminalPage: Math.max(0, Math.min(action.page, (snap.terminals?.preview?.composed.pages.length ?? 1) - 1)) });
     case "attention-category":
       return syncSelection({ ...resetContent({ ...next, section: "needs", attentionCategory: action.category, attentionOpen: null }), focusedPane: "content" }, snap);
+    case "attention-view":
+      // Whose queue the Feed shows; acts on it are still the primary user's.
+      return syncSelection({ ...resetContent({ ...next, section: "needs", attentionView: action.view === "default" ? null : action.view, attentionCategory: null, attentionOpen: null }), focusedPane: "content" }, snap);
     case "attention-open":
       return syncSelection({ ...resetContent({ ...next, section: "needs", attentionOpen: action.id, file: null, externalUrl: null, healthOpen: null }), focusedPane: "content" }, snap);
     case "attention-source": {

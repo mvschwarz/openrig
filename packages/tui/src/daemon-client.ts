@@ -389,8 +389,9 @@ export class DaemonClient {
    * returns the QueueItem or 404). Used for the BLOCKED ON AGENTS bounded per-row
    * lookup: blockedOn is a qitem POINTER, so the blocking agent is that qitem's
    * owner (destinationSession). NOT a new endpoint. */
-  humanAttention(item?: string | null) {
-    return this.get(`/api/attention${item ? `?item=${encodeURIComponent(item)}` : ""}`);
+  humanAttention(item?: string | null, view?: string | null) {
+    const query = [item ? `item=${encodeURIComponent(item)}` : null, view ? `view=${encodeURIComponent(view)}` : null].filter(Boolean).join("&");
+    return this.get(`/api/attention${query ? `?${query}` : ""}`);
   }
   queueItem(qitemId: string, options: { optional?: boolean } = {}) {
     return this.get(`/api/queue/${encodeURIComponent(qitemId)}`, options.optional ? this.optionalFetchImpl : this.fetchImpl);
@@ -402,7 +403,7 @@ export class DaemonClient {
     return this.get(`/api/review/fleet`);
   }
   /** The mission-control write Steering uses to answer a request (POST /api/mission-control/action). */
-  missionControlAction(input: { verb: "approve" | "answer"; qitemId: string; actorSession: string; questionId?: string; optionId?: string; decision?: string }) {
+  missionControlAction(input: { verb: "approve" | "answer" | "resolve"; qitemId: string; actorSession: string; questionId?: string; optionId?: string; decision?: string; authority?: "primary-user" }) {
     return this.post("/api/mission-control/action", input) as Promise<{ verb: string; qitemId: string; closedQitem: unknown;
       answer?: { outcome: "recorded" | "answered"; unanswered: string[]; message?: string } }>;
   }

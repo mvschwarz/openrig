@@ -57,6 +57,23 @@ go to:
 `rig gateway default` shows the current default; `rig gateway default --clear` clears the choice. Choosing a default
 never changes `workspace.operator_seat_name`, which keeps its own meaning.
 
+## In the TUI: whose queue, and who acts
+
+The person at the terminal is the **primary user**: the default person, or, with several people and none chosen, the
+person at the terminal unnamed. Whatever the TUI shows, its acts are theirs.
+- **Opening:** with a chosen default, the TUI opens on that person's Feed. With none chosen, including a one-person
+  install that never chose one, it opens on the topology, as before.
+- **Whose queue:** `whose <person>` shows one person's asks, `whose all` everyone's, and `whose default` the default
+  person's. The Feed's first line says whose queue it shows and who acts.
+- **Acting on someone else's ask** (answer, approve or resolve from the TUI) records both: the primary user as the actor,
+  and the person asked in the audit notes and the transition. The asking seat reads, for example, "Answered by
+  mike@external, the primary user at the terminal, on sarah@external's ask". With several people and none chosen, the
+  actor is `human@host`.
+- **Viewing Sarah isn't acting as Sarah.** Only Sarah, from her own channel, answers as Sarah. Without the primary
+  user's authority, one registered person can't answer, approve, deny or resolve what was asked of another; that's
+  refused (`answer_not_recorded`) and nothing changes.
+- With no one registered, the TUI and its acts are as before.
+
 ## Where it's stored
 
 - **People** stay exactly as before: one file per person under `$OPENRIG_HOME/gateway/humans/`, plus the generated
@@ -73,6 +90,8 @@ never changes `workspace.operator_seat_name`, which keeps its own meaning.
 For a one-person install, nothing to do: it keeps working as before, that person stays the default, pending rows keep
 their addresses, and no new file is written until you use one of the commands above.
 
+A TUI older than the daemon still works: it sends the person asked as the actor, which is still their own act.
+
 **If several people are already registered** (earlier versions listed hand-added people with an advisory), choose a
 default with `rig gateway default <id>` after upgrading. Until you do, escalations report
 `undeliverable:no-default-person` instead of reaching whoever's id sorted first, and the notice digest waits.
@@ -86,6 +105,8 @@ Older versions don't read `participants.yaml`, and the person files carry nothin
   answer row (it still can't close the ask). Those protections are newer than 0.7.1;
 - **there's no default:** escalations and the notice digest go to the first person by id, Mission Control's my-queue
   has no default person, and pairing needs `--human`;
+- **the TUI** opens on the topology and records a terminal answer as the person asked, as before. Rows already
+  answered by the primary user keep their notes;
 - **shared channels are unknown:** rows addressed to one become undeliverable on the older version;
 - **organizations, groups and policy aren't shown.**
 
