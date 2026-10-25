@@ -160,7 +160,8 @@ async function run(): Promise<void> {
   }
   function enableLive(): boolean {
     if (!live || !client || startup?.state.connection !== "up") return false;
-    if (!liveEnabled) { checkDaemonBuild(); openChosenDefaultFeed(); }
+    if (!liveEnabled) checkDaemonBuild();
+    if (!liveEnabled) openChosenDefaultFeed();
     liveEnabled = true;
     if (!buildMismatch) activityEvents ??= subscribeActivityEvents({ open: () => client.openActivityEvents(), onEvent: (event) => { if (event.type.startsWith("proof.")) reviewCache.clear(); live.pushed(); }, onStatus: (status) => {
       if (status === "dropped") eventsDropped = true;
