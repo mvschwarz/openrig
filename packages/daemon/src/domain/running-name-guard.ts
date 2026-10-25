@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { probeShowsNoServer } from "../adapters/tmux.js";
 
 /**
  * S5b (OPR.0.5.4.11) — the running-name guard, the FLOOR against duplicate rig
@@ -105,7 +106,7 @@ export async function confirmStoppedGenerations(
         return { ok: false, rigId, reason: `tmux could not check session ${name}: ${(err as Error).message}` };
       }
       if (result.state === "absent") continue;
-      if (result.state === "transport_unavailable" && result.cause?.includes("no server running")) continue;
+      if (probeShowsNoServer(result)) continue;
       return {
         ok: false,
         rigId,
