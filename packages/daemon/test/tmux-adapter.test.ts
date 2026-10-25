@@ -247,7 +247,7 @@ describe("TmuxAdapter", () => {
 
     it("throws on generic unrecognized exec error", async () => {
       const adapter = new TmuxAdapter(mockExec({
-        "has-session": { error: new Error("Command failed with exit code 127") },
+        "has-session": { error: Object.assign(new Error("Command failed with exit code 127"), { execStderr: "" }) },
       }));
       await expect(adapter.hasSession("any-session")).rejects.toThrow("exit code 127");
     });

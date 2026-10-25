@@ -773,6 +773,8 @@ describe("RigTeardownOrchestrator", () => {
     "error connecting to /tmp/tmux-501/default (Connection refused)",
     "error connecting to /tmp/no server running/tmux-501/default (Connection refused)",
     "error connecting to /tmp/no server running/tmux-501/default (No such file or directory)",
+    "error connecting to /tmp/\nno server running on x/tmux-501/default (Permission denied)",
+    "error connecting to /tmp/no session/tmux-501/default (No such file or directory)",
     "permission denied: no server running on /tmp/tmux-501/default",
   ])("retains the binding when the server probe is uncertain: %s", async (cause) => {
     const { rigId, nodeId, sessionId } = seedRig();

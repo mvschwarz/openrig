@@ -132,7 +132,12 @@ export type SessionProbe =
 
 /** Positive server absence in this adapter's namespace; match the diagnostic line, never a path or command fragment. */
 export function probeShowsNoServer(probe: { state: string; cause?: string }): boolean {
-  return probe.state === "transport_unavailable" && /^no server running on /m.test(probe.cause ?? "");
+  return probe.state === "transport_unavailable" && /^no server running on /.test(tmuxDiagnosticStart(probe.cause ?? ""));
+}
+
+/** Injected executors may retain exec's one-line command wrapper instead of stderr. */
+function tmuxDiagnosticStart(message: string): string {
+  return message.replace(/^Command failed:[^\r\n]*\r?\n/, "");
 }
 
 const TMUX_FIELD_SEPARATOR = "|";
@@ -185,11 +190,8 @@ function tmuxReportedError(err: unknown): unknown {
 
 function isSessionAbsenceError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
-  const msg = err.message.toLowerCase();
-  return msg.includes("session not found") ||
-    msg.includes("can't find session") ||
-    msg.includes("no current target") ||
-    msg.includes("no session");
+  const msg = tmuxDiagnosticStart(err.message).toLowerCase();
+  return /^(?:session not found|can't find session|no current target|no sessions?)\b/.test(msg);
 }
 
 function isPaneAbsenceError(err: unknown): boolean {
@@ -659,7 +661,7 @@ export class TmuxAdapter {
       if (isNoServerError(error) || isTmuxTransportAbsentError(error)) {
         return { state: "transport_unavailable", cause: (error as Error).message };
       }
-      throw error;
+      throw err;
     }
   }
 
