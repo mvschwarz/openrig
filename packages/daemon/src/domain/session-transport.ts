@@ -514,9 +514,17 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   }
 
   const recentLines = lastNonBlank.slice(-8);
+  const claudeComposer = findClaudeComposer(paneContent, options);
+  // Claude's own timer row above its complete, empty input box means the turn is running, not waiting at a dialogue:
+  // a real dialogue replaces the input box, and a prompt drawn above the box shows no timer row. So for a Claude read,
+  // prompt-looking text above that box is quoted output or history. Only the timer row counts, never a selector-shaped
+  // "mid-work" line.
+  const historyAboveInput = options.runtime === "claude-code" && claudeComposer?.framed === true &&
+    CLAUDE_ANCHORED_MODE_FOOTER.test(claudeComposer.bar) && IDLE_PROMPT_PATTERNS.some(pattern => pattern.test(claudeComposer.text)) &&
+    !!claudeComposer.liveStatus && CLAUDE_LIVE_STATUS_PATTERN.test(claudeComposer.liveStatus);
   // Wider window for prompt SIGNATURES so a tall footer can't push a real prompt out of view (see
   // PROMPT_SCAN_LINES). The generic activity checks below keep the tighter 8-line window.
-  const promptScanLines = lastNonBlank.slice(-PROMPT_SCAN_LINES);
+  const promptScanLines = historyAboveInput ? [] : lastNonBlank.slice(-PROMPT_SCAN_LINES);
   const trailingNonBlank = lastNonBlank.slice(-3);
   const lastLine = lastNonBlank.at(-1) ?? "";
   const idlePromptLine = trailingNonBlank.find((line) =>
@@ -525,7 +533,6 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   const idleStatusBarLine = IDLE_STATUS_BAR_PATTERNS.some((pattern) => pattern.test(lastLine))
     ? lastLine
     : null;
-  const claudeComposer = findClaudeComposer(paneContent, options);
   const oldQuestionEnd = promptScanLines.lastIndexOf(CLAUDE_QUESTION_FOOTER);
   const permissionPromptEvidence = findPatternEvidence(promptScanLines, PERMISSION_PROMPT_PATTERNS);
   // A complete later empty composer with a recognized Claude bar makes the preceding question history.
