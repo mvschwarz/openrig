@@ -683,9 +683,17 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // absolute path is the honest best guess; a canonicalization delta is fail-safe (gate reappears).
     }
     const command = `node "${relay}"`;
+    // upsertCodexActivityHooks has just written our marked block. Codex keys by the
+    // group's position among this event's groups, not its position inside our block.
+    // Count only the groups before the marker: a person's groups after it do not
+    // move ours, and their trust/disable records must not be written as ours.
+    const prefix = parseToml(content.slice(0, content.indexOf(OPENRIG_ACTIVITY_HOOKS_BEGIN))) as {
+      hooks?: Partial<Record<(typeof OPENRIG_ACTIVITY_HOOK_EVENTS)[number], unknown[]>>;
+    };
     let next = content;
     for (const event of OPENRIG_ACTIVITY_HOOK_EVENTS) {
-      const { key, hash } = computeCodexHookTrust(event, { keySource, command, timeoutSec: 5 });
+      const groupIndex = prefix.hooks?.[event]?.length ?? 0;
+      const { key, hash } = computeCodexHookTrust(event, { keySource, command, timeoutSec: 5, groupIndex });
       next = upsertCodexHookTrust(next, key, hash);
     }
     return next;

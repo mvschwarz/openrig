@@ -276,7 +276,8 @@ describe("v2 bundle apply: launch root lifetime and --target", () => {
       order.push("seat");
       return { ok: true, result: { rigId: rig.id, specName: "lifetime-rig", nodes: [{ logicalId: "dev.impl", status: "launched" }] } };
     });
-    const result = await orchestrator({ rigRepo: repo, serviceOrchestrator: { boot } as never, routeBundleContents: route }).bootstrap({
+    const composeAvailable = async () => ({ ok: true as const });
+    const result = await orchestrator({ rigRepo: repo, serviceOrchestrator: { boot, composeAvailable } as never, routeBundleContents: route }).bootstrap({
       mode: "apply", sourceKind: "rig_bundle", sourceRef: await buildV2Bundle(workDir, true), targetRoot: target,
     });
     expect(result.status, JSON.stringify(result)).toBe("completed");
@@ -334,7 +335,8 @@ describe("v2 bundle apply: launch root lifetime and --target", () => {
       });
       expect(result.status, JSON.stringify(result)).toBe("failed");
       if (scenario === "ambiguous") {
-        expect(commands).toEqual([]);
+        // Only the read-only Compose check ran; no project was started or taken down.
+        expect(commands).toEqual(["docker compose version 2>&1"]);
         expect(result.errors.join(" ")).toContain("multiple predecessor Compose projects");
         for (const id of predecessors) expect(result.errors.join(" ")).toContain(id);
         expect(route).not.toHaveBeenCalled();
@@ -363,6 +365,46 @@ describe("v2 bundle apply: launch root lifetime and --target", () => {
       if (scenario !== "cleanup-failure") expect(remaining.sort()).toEqual(predecessors.sort());
     },
   );
+
+  async function withoutCompose(mode: "plan" | "apply") {
+    vi.stubEnv("OPENRIG_BUNDLE_SERVICES_ENABLED", "true");
+    vi.spyOn(preflight, "rigPreflight").mockResolvedValue({ ready: true, errors: [], warnings: [] } as never);
+    Object.assign(podInstantiator, { deps: { fsOps: realFsOps() } });
+    const commands: string[] = [];
+    const repo = new RigRepository(db);
+    const composeAdapter = new ComposeServicesAdapter(async command => {
+      commands.push(command);
+      if (command.startsWith("docker compose")) throw Object.assign(new Error("Command failed"), { stderr: "docker: 'compose' is not a docker command." });
+      return "";
+    });
+    const target = path.join(workDir, `no-compose-${mode}`);
+    const result = await orchestrator({ rigRepo: repo, serviceOrchestrator: new ServiceOrchestrator({ rigRepo: repo, composeAdapter }) }).bootstrap({
+      mode, sourceKind: "rig_bundle", sourceRef: await buildV2Bundle(workDir, true), targetRoot: target,
+    });
+    // Either way: one read-only version check, no install target, no team.
+    expect(commands).toEqual(["docker compose version 2>&1"]);
+    expect(fs.existsSync(target)).toBe(false);
+    expect(podInstantiator.instantiate).not.toHaveBeenCalled();
+    expect(repo.findUnarchivedRigsByName("lifetime-rig")).toEqual([]);
+    return { result, target };
+  }
+
+  it("without Docker Compose v2, a plan still previews the install, with the check's diagnostic as a warning", async () => {
+    const { result, target } = await withoutCompose("plan");
+    expect(result.status).toBe("planned");
+    expect(result.stages).toContainEqual(expect.objectContaining({ stage: "services_plan", status: "ok", detail: expect.objectContaining({ targetRoot: target, materialised: false }) }));
+    expect(result.stages.some(stage => stage.detail?.code === "compose_missing")).toBe(false);
+    expect(result.warnings.join(" ")).toContain("Service bundles need Docker Compose v2, and `docker compose version` failed: docker: 'compose' is not a docker command.");
+    expect(result.warnings.join(" ")).toContain("An install on this machine would stop before writing the install target or creating a team.");
+  });
+
+  it("without Docker Compose v2, an install stops before writing the install target or creating a team", async () => {
+    const { result } = await withoutCompose("apply");
+    expect(result.status).toBe("failed");
+    expect(result.stages).toContainEqual(expect.objectContaining({ detail: expect.objectContaining({ code: "compose_missing" }) }));
+    expect(result.errors.join(" ")).toContain("Service bundles need Docker Compose v2, and `docker compose version` failed: docker: 'compose' is not a docker command.");
+    expect(result.errors.join(" ")).toContain("The install target wasn't written and no team was created.");
+  });
 
   it("plans the target services and view without materialising or launching", async () => {
     vi.stubEnv("OPENRIG_BUNDLE_SERVICES_ENABLED", "true");

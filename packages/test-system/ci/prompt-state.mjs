@@ -34,6 +34,13 @@ export function verifyPromptState(proof) {
     }
   }
   assert.deepEqual(proof.working.map(row => row.kind), ['quoted-selector', 'quoted-permission']);
+  assert.ok(proof.paneHeight >= 40, 'tall-pane geometry not exercised');
+  const screen = proof.working[0].before.split('\n');
+  if (screen.at(-1) === '') screen.pop();
+  assert.equal(screen.length, proof.paneHeight, 'missing full pre-send screen');
+  const lastDrawn = screen.findLastIndex(line => line.trim());
+  assert.match(screen[lastDrawn] ?? '', /^⏵⏵ accept edits on/);
+  assert.ok(screen.length - lastDrawn - 1 >= 20, 'composer not above the bottom 20 rows');
   for (const row of proof.working) {
     assert.equal(row.send.code, 0, `${row.kind}: working send refused`);
     assert.ok(row.pane.includes(row.marker), `${row.kind}: send did not reach pane`);
@@ -60,7 +67,7 @@ export function verifyPromptState(proof) {
 }
 
 // A terminal fixture, not a provider: no runtime SDK, hooks, credentials, or assertions in the child.
-// Keep the current frame at the bottom while recording actual pasted input above it.
+// Draw inline near the top of a tall pane, leaving blank rows under the composer.
 const fixtureProgram = `
 const fs = require('node:fs');
 const frame = process.argv[2];
@@ -73,11 +80,10 @@ setInterval(() => {
   const text = fs.readFileSync(frame, 'utf8');
   const rows = process.stdout.rows || 40;
   const lines = (received.replace(/\\x1b\\[[0-9;]*[A-Za-z~]/g, '') + '\\n' + text).trimEnd().split('\\n').slice(-rows);
-  // Native full-screen UIs keep the composer at the bottom, with the cursor inside it.
-  const padding = Math.max(0, rows - lines.length);
+  // Preserve the inline layout and put the cursor inside the current input box.
   const input = lines.findLastIndex(line => /^[❯›] *$/.test(line));
-  process.stdout.write('\\x1b[2J\\x1b[H' + '\\n'.repeat(padding) + lines.join('\\n') +
-    (input < 0 ? '' : '\\x1b[' + (padding + input + 1) + ';3H'));
+  process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') +
+    (input < 0 ? '' : '\\x1b[' + (input + 1) + ';3H'));
 }, 200);
 `;
 
@@ -123,7 +129,7 @@ export async function runPromptState(rigBin, frames, proof = {}) {
       const cwd = join(scaffold.root, id); mkdirSync(cwd);
       const file = join(cwd, 'frame.txt'); writeFileSync(file, frame, { mode: 0o644 });
       frameFiles.set(name, file);
-      await tmux('new-session', '-d', '-s', name, '-x', '120', '-y', '40', 'node', fixture, file, runtime === 'claude-code' ? 'claude' : 'codex');
+      await tmux('new-session', '-d', '-s', name, '-x', '120', '-y', '45', 'node', fixture, file, runtime === 'claude-code' ? 'claude' : 'codex');
       members.push({ id, runtime, agent_ref: 'local:worker', profile: 'default', cwd });
     }
     // JSON is valid YAML. Adopt materializes and binds these actual private panes without launching a provider.
@@ -135,6 +141,7 @@ export async function runPromptState(rigBin, frames, proof = {}) {
     assert.ok(adopted.rigId, 'adopt did not identify a rig');
     const nodes = () => get(`/api/rigs/${adopted.rigId}/nodes`);
     const setup = await nodes();
+    proof.paneHeight = Number((await tmux('display-message', '-p', '-t', claude, '#{pane_height}')).stdout.trim());
     proof.runtimes = [codex, claude].map(name => named(setup, name)?.runtime);
     assert.deepEqual(proof.runtimes, ['codex', 'claude-code'], 'adoption changed fixture runtime');
     assert.ok(setup.every(row => row.sessionStatus === 'running' && row.startupStatus === 'ready'), 'adopted fixture not ready');
@@ -187,7 +194,7 @@ export async function runPromptState(rigBin, frames, proof = {}) {
     for (const [kind, frame] of [['quoted-selector', frames.workingSelector], ['quoted-permission', frames.workingPermission]]) {
       await setFrame(claude, frame);
       const marker = `send-${randomUUID()}`;
-      const row = { kind, marker, before: await capture(claude) }; proof.working.push(row);
+      const row = { kind, marker, before: (await tmux('capture-pane', '-p', '-t', claude)).stdout }; proof.working.push(row);
       const send = row.send = await cli(['send', claude, marker], codex, false);
       assert.equal(send.code, 0, `#1955 ${kind}: working send refused: ${send.stdout} ${send.stderr}`);
       row.pane = await until(() => capture(claude), pane => pane.includes(marker), 'send absent from addressed pane');

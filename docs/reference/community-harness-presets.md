@@ -33,11 +33,15 @@ first_input: true                # optional: launcher takes the first turn from 
 
 ### Assisted startup
 
-Set `startup_assisted: true` when the harness doesn't reliably submit OpenRig's startup text. OpenRig still pastes the
-text and presses Enter once. If it sends startup text, the running seat then shows **attention required**, rather than
-ready: check its pane and submit any text still in the composer. Don't resend the identity prompt. After the seat responds,
-use the reported `rig seat clear-attention <session> --reason "Startup submission checked; seat responded"` command to
-acknowledge the check. A launch with no startup text needs no such check. Other presets keep their existing behavior.
+Set `startup_assisted: true` when startup submission needs a person's check. The seat may start its first turn
+automatically, including from input passed at launch with `first_input: true`. This declaration requires a check after
+the submission attempt; it does not hold the agent back. Without `first_input`, OpenRig pastes the startup text and
+presses Enter once.
+
+After attempting startup input, OpenRig reports **attention required**: check the pane and submit any text still in the
+composer. OpenRig does not resend the identity prompt. Once the seat responds, use the reported
+`rig seat clear-attention <session> --reason "Startup submission checked; seat responded"` command to acknowledge the
+check. A launch with no startup text needs no such check. Other presets keep their existing behavior.
 
 ## Reporting the conversation a launch created (`launch_result: true`)
 
@@ -143,17 +147,16 @@ Copy them and maintain them as your own.
 
 [`community-harness-examples/openclaw/`](community-harness-examples/openclaw/) has a preset and a small launcher for
 OpenClaw's CLI.
-- **The launcher:** it runs `openclaw chat` (the TUI with `--local`) on the session key OpenRig named, with its own
-  OpenClaw state folder per seat, so the agent runs in the seat's pane with no Gateway.
-- **Its resume check:** before reopening a key, the launcher checks that the seat's `openclaw sessions --json` lists it,
-  and stops if not, so a gone conversation isn't recreated under its old key. That check is the launcher's code, not
-  OpenRig's.
-- **Resets must stay off:** OpenClaw can start a new conversation under the same key on a reset rule
-  (`session.reset`). That's off by default; with it on, a key no longer names one conversation. Likewise, typing `/new`
-  in the pane moves the chat to a fresh session key, while the seat still holds the name OpenRig gave it.
-- **The preset:** it declares `names_conversation` but not `resume`, until both have been checked with a real OpenClaw.
+- **Choose the mode:** `openclaw.yaml` runs an embedded agent with `tui --local`. `openclaw-gateway.yaml` runs a TUI client of an existing Gateway. Configure that client's Gateway route and authentication through `OPENCLAW_CONFIG_PATH`; the launcher never starts or stops the Gateway.
+- **The conversation:** both examples use only agent `main`, mapping OpenRig's name to the full native key `agent:main:<OpenRig name>`. Each seat has its own client state folder.
+- **Its resume check:** local mode checks `sessions --agent main --json --limit all`; Gateway mode calls the selected Gateway's `sessions.describe`. Both require the exact canonical key. An unavailable lookup stops the launch; a confirmed missing key is never recreated. A client's local cache cannot authorize Gateway resume.
+- **Stopping:** a Gateway client's pane closing detaches it. The Gateway and an accepted turn can keep running; stopping that service is separate. Local mode runs its embedded agent in the pane.
+- **Local interruption:** Finish the current local turn before stopping; an interrupted local turn may retain native recovery work and refuse the next request. This launcher does not repair or retry it.
+- **Local startup after resume:** OpenClaw may run its database integrity check during startup. A reported resumed process does not confirm readiness for the next request; check that the TUI has finished starting before sending work.
+- **Resets must stay off:** automatic session resets can create a new conversation under the same key. Typing `/new` also moves to a fresh key while the seat keeps the name OpenRig gave it.
+- **The presets:** both declare `names_conversation`, `resume` and `first_input`. The launcher passes the generated first startup text through OpenClaw's `--message` option. OpenRig labels the saved name as passed, not observed by its adapter.
 
-Copy both and maintain them as your own.
+Copy the launcher and the preset for your mode, and maintain them as your own.
 
 **Not supported for community harnesses:** restarting a seat in place (`rig seat restart` is for Codex seats) and
 switching harness on a running seat. Each says so before anything changes.
@@ -168,8 +171,9 @@ CLI.
 - **The preset:** it declares `launch_result` and `resume`. Cursor's `--resume` with an id it doesn't hold starts a new,
   empty chat without saying so, so on a resume the launcher first checks that the chat's store exists. When it doesn't, the
   launcher reports `error: "missing"` and starts nothing.
-- **Startup is assisted:** identity text has remained in Cursor's composer after the initial Enter. The preset declares
-  `startup_assisted: true`; check and submit it in the pane as above. Unattended startup submission is not confirmed.
+- **First input at launch:** the preset declares `first_input: true` and `startup_assisted: false`. The launcher passes
+  the generated startup text as Cursor's positional first prompt. This route and same-chat resume were checked with
+  Cursor Agent 2026.10.22-27dcf5f. Later tool approvals use Cursor's native prompts; startup submission does not answer them.
 - **Sender names come from the sending session.** A command run from an unattached operator shell can arrive as
   `<unknown sender>`; that doesn't mean the receiving Cursor seat lost its identity.
 

@@ -103,7 +103,7 @@ Verbs: **9** — `sed -n '/^export const MISSION_CONTROL_VERBS = \[/,/\] as cons
 | `hold` | `state="blocked"`, `closure_reason="blocked_on"` |
 | `drop` | `state="done"`, `closure_reason="canceled"` |
 | `handoff` | same closure and new destination item as `route`; the 4-step shape (see below) |
-| `resolve` | only for a `blocked` item parked on a human seat: moves it to `in-progress` with the required decision text as the transition note; no closure and no new item (`:369`, `:386`, `:410–411`). After commit it sends a best-effort nudge with the decision text to the item's owner unless `notify: false` (`:450–467`); the CLI wrapper is `rig queue resolve <qitemId> --decision <text>` (`packages/cli/src/commands/queue.ts:828`) |
+| `resolve` | for a `blocked` item parked on a human seat or a well-formed typed gate (`external:`, `fold:`, `auth:`): moves it to `in-progress` with required decision/satisfaction evidence in the transition note; typed waits are recorded as blocker resolutions, not human decisions. Qitem dependencies, malformed gates and non-blocked items are refused; no closure and no new item (`:369`, `:386`, `:410–411`). After commit it sends a best-effort nudge with the decision text to the item's owner unless `notify: false` (`:450–467`); the CLI wrapper is `rig queue resolve <qitemId> --decision <text>` (`packages/cli/src/commands/queue.ts:828`) |
 | `answer` | only for a `pending` ask addressed to the acting person: a choice (`questionId` + `optionId`) through `QueueRepository.recordHumanAnswer`, or their words (`decision`) through `resolveDirectHumanReply`, each with its existing meaning (a partial choice set stays pending; words fill the first unanswered question). Once answered, one reply row goes to the asking seat (`human-answer` tag, `replyTo` the ask, an id derived from the ask) and then the ask closes once with `human-decision-resolved`, the order Slack's answer continuation uses. With neither a choice nor words, a complete question set whose return didn't finish is sent again with exactly its recorded answers. A closed ask answers 409 `qitem_already_terminal` and records nothing; a refused answer is 400 `answer_not_recorded`; 409 `answer_not_closed` means the ask stayed open: its return failed, it changed before its close, or a retry came in other words than the reply already returned (that retry isn't sent). The TUI's Feed sends it |
 
 `annotate` requires `annotation`, `hold` and `drop` require `reason`, `route`
@@ -114,8 +114,8 @@ the audit record instead; the wrapped `reason_required` error has no status
 mapping, so it returns 500 (`mission-control-action-log.ts:128–133`,
 `mission-control-write-contract.ts:245–248`). Items already `done` or
 `handed-off` are refused with 409 `qitem_already_terminal`, except under
-`resolve`, which answers 409 `qitem_not_leg1_parked` for any item not parked on
-a human seat. An unknown item returns 404 `qitem_not_found`
+`resolve`, which answers 409 `qitem_not_leg1_parked` for any item that is not
+blocked on a human seat or a well-formed typed gate (`external:`, `fold:`, `auth:`). An unknown item returns 404 `qitem_not_found`
 (`routes/mission-control.ts:240–251`, `:330–341`).
 
 Each verb except `answer` is one atomic daemon transaction (`answer`'s queue writes are the repository's own, in the order above, then its audit row and event): the queue mutation via

@@ -91,6 +91,8 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
       // Hermetic default: no registered hosts. Tests that exercise the
       // proof-at-write trust arm inject their own registry view.
       isRegisteredHost: () => false,
+      // Hermetic default: no operator agent configured, whatever this machine's settings say.
+      resolveRecoveryAgentSeat: () => null,
       ...overrides,
     });
     return { mod, status, result };
@@ -333,6 +335,47 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect((await findingsFor(row.qitemId))[0]!.destinationSession).toBe("operator-admin@kernel");
   });
 
+  // workspace.operator_seat_name is the person approvals reach; agents.operator_session is the operator agent. Recovery
+  // reaches the agent when one is configured, without repointing the setting approvals use.
+  it("an operator agent, when configured, takes a dead claimant's finding before the operator seat", async () => {
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    ageClaim(row.qitemId, 60);
+    await runSweep({ sessionConfirmedMissing: (s: string) => s === "worker@r",
+      resolveRecoveryAgentSeat: () => "operator-admin@kernel", resolveOperatorSeat: () => "approver@r" });
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding!.destinationSession).toBe("operator-admin@kernel");
+    expect(finding!.body).toContain("so this finding goes to operator-admin@kernel");
+  });
+
+  it("an operator agent whose own session is confirmed missing is passed over for the operator seat", async () => {
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    ageClaim(row.qitemId, 60);
+    await runSweep({ sessionConfirmedMissing: (s: string) => s === "worker@r" || s === "operator-admin@kernel",
+      resolveRecoveryAgentSeat: () => "operator-admin@kernel", resolveOperatorSeat: () => "approver@r" });
+    expect((await findingsFor(row.qitemId))[0]!.destinationSession).toBe("approver@r");
+  });
+
+  it.each([
+    ["operator-admin@kernel", "operator-admin@kernel"],
+    ["  operator-admin@kernel  ", "operator-admin@kernel"],
+    ["", null],
+    ["human-founder@external", null],
+    ["human@kernel", null],
+    ["not a session", null],
+  ])("the operator agent setting %j resolves to %j", async (value, expected) => {
+    const prior = process.env.OPENRIG_AGENTS_OPERATOR_SESSION;
+    process.env.OPENRIG_AGENTS_OPERATOR_SESSION = value;
+    try {
+      const { resolveRecoveryAgentSeat } = await import("../src/domain/queue-owner.js");
+      expect(resolveRecoveryAgentSeat()).toBe(expected);
+    } finally {
+      if (prior === undefined) delete process.env.OPENRIG_AGENTS_OPERATOR_SESSION;
+      else process.env.OPENRIG_AGENTS_OPERATOR_SESSION = prior;
+    }
+  });
+
   it("an undelivered wake to a dead destination with no orchestrator goes to the row's creator", async () => {
     const row = await mkRow();
     failNudge(row.qitemId);
@@ -340,14 +383,28 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect((await findingsFor(row.qitemId))[0]!.destinationSession).toBe("sender@r");
   });
 
-  it("a dead seat's own row with no operator seat has nowhere better to go, so it stays", async () => {
+  // With no live recovery seat, the finding is still created (it's owed work) to the missing session, and says so.
+  it("a dead seat's own row with no operator agent or seat stays with it, and its why says no live recovery seat is available", async () => {
     const row = await repo.create({ sourceSession: "worker@r", destinationSession: "worker@r", body: "work" });
     repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
     ageClaim(row.qitemId, 60);
     await runSweep({ sessionConfirmedMissing: (s: string) => s === "worker@r", resolveOperatorSeat: () => null });
     const [finding] = await findingsFor(row.qitemId);
     expect(finding!.destinationSession).toBe("worker@r");
-    expect(finding!.body).not.toContain("confirmed missing");
+    expect(finding!.body).toContain("worker@r is confirmed missing (session_missing) and no live recovery seat is available");
+    expect(finding!.body).toContain("so this finding stays addressed to it");
+  });
+
+  it("when the operator agent, the operator seat and the creator are all confirmed missing, the finding stays and says so", async () => {
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    ageClaim(row.qitemId, 60);
+    const dead = new Set(["worker@r", "operator-admin@kernel", "approver@r", "sender@r"]);
+    await runSweep({ sessionConfirmedMissing: (s: string) => dead.has(s),
+      resolveRecoveryAgentSeat: () => "operator-admin@kernel", resolveOperatorSeat: () => "approver@r" });
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding!.destinationSession).toBe("worker@r");
+    expect(finding!.body).toContain("no live recovery seat is available");
   });
 
   it("a verdict from before the seat's relaunch, or no verdict, doesn't count as missing", () => {

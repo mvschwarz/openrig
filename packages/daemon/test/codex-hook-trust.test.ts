@@ -13,6 +13,8 @@
 // fail-safe (gate reappears + Layer-2 keystroke floor), never a false-trusted run.
 import { describe, it, expect, vi } from "vitest";
 import nodeFs from "node:fs";
+import nodePath from "node:path";
+import { parse as parseToml } from "smol-toml";
 import {
   CodexRuntimeAdapter,
   computeCodexHookTrust,
@@ -22,7 +24,7 @@ import {
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
 const RELAY = "/daemon/assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs";
-const CONFIG = "/home/test/.codex/config.toml";
+const CONFIG = nodePath.join("/home/test", ".codex", "config.toml");
 const COMMAND = `node "${RELAY}"`;
 const EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest"] as const;
 
@@ -31,19 +33,19 @@ const EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest"]
 // mock path `/home/test/.codex/config.toml`; the real key_source is std::fs::canonicalize(config.toml).
 const PROVISIONAL_FIXTURE: Record<(typeof EVENTS)[number], { key: string; hash: string }> = {
   SessionStart: {
-    key: "/home/test/.codex/config.toml:session_start:0:0",
+    key: `${CONFIG}:session_start:0:0`,
     hash: "sha256:bbe395fdcffc4448b019a7621ff4c4ca57c43107e775ea286394724944fd4fe1",
   },
   UserPromptSubmit: {
-    key: "/home/test/.codex/config.toml:user_prompt_submit:0:0",
+    key: `${CONFIG}:user_prompt_submit:0:0`,
     hash: "sha256:88a4916f162eb0fb90e90ebfe5844c4d552efb7e9b70f4616ea497026f6b61d4",
   },
   Stop: {
-    key: "/home/test/.codex/config.toml:stop:0:0",
+    key: `${CONFIG}:stop:0:0`,
     hash: "sha256:7349b4836f7c53f7fbe92917a5a598b25a0e699b98a91cf5909bb40dc60da822",
   },
   PermissionRequest: {
-    key: "/home/test/.codex/config.toml:permission_request:0:0",
+    key: `${CONFIG}:permission_request:0:0`,
     hash: "sha256:f3e7b08eef7376efd47d8cd066a2d7284d5ee12b54c7bac2d484b8bbe6ab803c",
   },
 };
@@ -175,6 +177,35 @@ describe("OPR.0.4.3.33 — provisioning-seam coupling (ensureCodexActivityHooks 
     // scope: exactly 4 hooks.state tables, no more, no wildcard/blanket entry
     expect(cfg.match(/^\[hooks\.state\./gm)?.length).toBe(4);
     expect(cfg).not.toContain('[hooks.state."*"]');
+  });
+
+  it.each(EVENTS)("trusts the authored %s group at its real position without changing a person's trust", (event) => {
+    const userGroups = [0, 1].map(index => `[[hooks.${event}]]\n[[hooks.${event}.hooks]]\ntype = "command"\ncommand = "person-${index}"\ntimeout = 9\n`).join("\n");
+    const userKey = computeCodexHookTrust(event, { keySource: CONFIG, command: "person-0", timeoutSec: 9 }).key;
+    const userState = `[hooks.state.${JSON.stringify(userKey)}]\ntrusted_hash = "sha256:person"\nenabled = false\n`;
+    const fs = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: `${userGroups}\n${userState}` });
+    const adapter = makeAdapter(fs);
+    adapter.ensureCodexActivityHooks();
+    const config = fs._store[CONFIG]!;
+    const parsed = parseToml(config) as { hooks: { state: Record<string, unknown> } };
+    const own = computeCodexHookTrust(event, { keySource: CONFIG, command: COMMAND, timeoutSec: 5, groupIndex: 2 });
+    expect(parsed.hooks.state[own.key]).toEqual({ trusted_hash: own.hash });
+    expect(parsed.hooks.state[userKey]).toEqual({ trusted_hash: "sha256:person", enabled: false });
+    expect(config).toContain(userGroups);
+    expect(config).toContain(userState);
+    adapter.ensureCodexActivityHooks();
+    expect(fs._store[CONFIG]).toBe(config);
+  });
+
+  it("does not count a person's groups appended after the managed block as preceding it", () => {
+    const fs = mockCodexFs({ [RELAY]: "// relay" });
+    const adapter = makeAdapter(fs);
+    adapter.ensureCodexActivityHooks();
+    const userGroup = '\n[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\ntype = "command"\ncommand = "person-after"\ntimeout = 9\n';
+    fs._store[CONFIG] += userGroup;
+    const before = fs._store[CONFIG];
+    adapter.ensureCodexActivityHooks();
+    expect(fs._store[CONFIG]).toBe(before);
   });
 
   it("uses native canonical path casing for Codex hook trust keys", () => {
