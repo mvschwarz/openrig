@@ -884,7 +884,7 @@ export class SeatLifecycleService {
     const observer = this.runtimeAdapters["codex"] as unknown as Partial<CodexProfileObserver> | undefined;
     // The check is evidence: if it fails unexpectedly, record that instead of failing the request.
     const observed = to !== null && cwd && observer?.observeProfile
-      ? await observer.observeProfile(to, cwd).catch((error: unknown) => ({ vantage: "unestablished" as const, home: null, file: "unverified" as const,
+      ? await observer.observeProfile(to, cwd, seat.nodeId).catch((error: unknown) => ({ vantage: "unestablished" as const, home: null, file: "unverified" as const,
         load: "not_run" as const, detail: `The profile check couldn't run (${(error as Error).message}); each launch runs the native check.`, observedAt: new Date().toISOString() }))
       : undefined;
     if (observed?.load === "failed") {

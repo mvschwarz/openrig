@@ -332,12 +332,13 @@ a mode (including `inherit`) clears the envelope, in the same audited write that
 A profile name is separate from the envelope and from approval: a resumed conversation keeps
 its saved approval unless an envelope sets one. `--codex-profile inherit` clears the profile.
 
-When the daemon sets an explicit `CODEX_HOME`, the profile command checks the profile there: it
+The profile command checks the profile in the config home this seat's launches use: the seat's
+own `CODEX_HOME` when its `env:` declares one, else the daemon's explicit `CODEX_HOME`. There it
 reports an absent file (Codex loads it as an empty layer, so base config applies), records the
 file's hash so a later check can report a change, and refuses a profile that fails to load,
-keeping the previous one. When the daemon sets no `CODEX_HOME`, a seat's pane keeps its own,
-and the command reports the profile as unverified rather than checking a different home. Every
-launch still runs the native profile check.
+keeping the previous one. When neither sets a `CODEX_HOME`, a seat's pane keeps its own, and the
+command reports the profile as unverified rather than checking a different home. Every launch
+still runs the native profile check.
 
 Updates leave the running process and history unchanged; they apply at the next separately
 authorized managed launch or resume. Restore reads the seat's current record, so an older

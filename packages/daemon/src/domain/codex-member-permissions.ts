@@ -96,7 +96,7 @@ export interface CodexProfileObservation {
 }
 
 export interface CodexProfileObserver {
-  observeProfile(profile: string, cwd: string): Promise<CodexProfileObservation>;
+  observeProfile(profile: string, cwd: string, nodeId: string): Promise<CodexProfileObservation>;
 }
 
 export type ProfileFingerprint = { state: "present"; sha256: string } | { state: "absent" } | { state: "unreadable"; reason: string };

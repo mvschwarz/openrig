@@ -36,7 +36,7 @@ const lease: CodexMemberPermissions = { sandbox: "workspace-write", approval: "n
   writable_roots: ["/lease/a"], exclude_tmpdir_env_var: false, exclude_slash_tmp: false };
 const reader: CodexMemberPermissions = { sandbox: "read-only", approval: "on-request" };
 
-function fixture(observeProfile?: (profile: string, cwd: string) => Promise<CodexProfileObservation>) {
+function fixture(observeProfile?: (profile: string, cwd: string, nodeId: string) => Promise<CodexProfileObservation>) {
   const db = new Database(":memory:"); opened.push(db);
   migrate(db, ALL_MIGRATIONS);
   const rigRepo = new RigRepository(db), rig = rigRepo.createRig("codex-team");
@@ -335,10 +335,32 @@ describe("the setter's profile hash is bounded evidence, never a blocker", () =>
     const tmux = {} as TmuxAdapter, fsOps = {} as CodexAdapterFsOps;
     const unread = new CodexRuntimeAdapter({ tmux, fsOps, codexHome: "/codex-home", profileFingerprint: async () => ({ state: "unreadable", reason: "not a regular file" }),
       verifyProfilePreflight: async profile => ({ ok: true, profile }) });
-    expect(await unread.observeProfile("lease", "/same")).toMatchObject({ file: "unreadable", load: "ok", detail: expect.stringContaining("not a regular file") });
+    expect(await unread.observeProfile("lease", "/same", "node-a")).toMatchObject({ file: "unreadable", load: "ok", detail: expect.stringContaining("not a regular file") });
     const broken = new CodexRuntimeAdapter({ tmux, fsOps, codexHome: "/codex-home", profileFingerprint: async () => { throw new Error("EIO"); },
       verifyProfilePreflight: async () => { throw new Error("spawn failed"); } });
-    expect(await broken.observeProfile("lease", "/same")).toMatchObject({ file: "unreadable", load: "not_run" });
+    expect(await broken.observeProfile("lease", "/same", "node-a")).toMatchObject({ file: "unreadable", load: "not_run" });
+  });
+
+  it("checks and hashes the profile in the home this seat's launches use: its own CODEX_HOME, else the daemon's", async () => {
+    // The profile loads in seat a's own home and fails in the daemon's. Seat b declares no home, so its launches use the daemon's.
+    const checked: Array<string | undefined> = [], hashed: string[] = [];
+    let f!: ReturnType<typeof fixture>;
+    const adapter = new CodexRuntimeAdapter({ tmux: {} as TmuxAdapter, fsOps: {} as CodexAdapterFsOps, codexHome: "/daemon-home",
+      seatHome: (nodeId) => nodeId === f.a.id ? "/seat-home" : undefined,
+      profileFingerprint: async (file) => { hashed.push(file); return { state: "present", sha256: "b".repeat(64) }; },
+      verifyProfilePreflight: async (profile, _cwd, home) => {
+        checked.push(home);
+        return home === "/seat-home" ? { ok: true, profile } : { ok: false, profile, error: `Codex profile '${profile}' failed to load from /daemon-home.` };
+      } });
+    f = fixture((profile, cwd, nodeId) => adapter.observeProfile(profile, cwd, nodeId));
+    expect(await f.service.setPermissions({ seatRef: "dev-a@codex-team", codexProfile: "lease", actor: "operator@codex-team", reason: "Own home" }))
+      .toMatchObject({ ok: true, to: "lease", observation: { home: "/seat-home", load: "ok", sha256: "b".repeat(64) } });
+    expect(hashed).toEqual(["/seat-home/lease.config.toml"]);
+    expect(checked).toEqual(["/seat-home"]);
+    expect(await f.service.setPermissions({ seatRef: "dev-b@codex-team", codexProfile: "lease", actor: "operator@codex-team", reason: "Daemon home" }))
+      .toMatchObject({ ok: false, code: "permission_selection_refused", message: expect.stringContaining("/daemon-home") });
+    expect(hashed.at(-1)).toBe("/daemon-home/lease.config.toml");
+    expect(checked.at(-1)).toBeUndefined();
   });
 
   it("answers the route instead of failing when the check itself throws", async () => {

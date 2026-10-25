@@ -977,22 +977,25 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return this.verifyResumeLaunch(tmuxSession, updatePrompt, { resumeToken, ...(home ? { home } : this.ownHomeOpt({ nodeId })) });
   }
 
-  /** The setter's check of a profile, in the config home this seat's launches use. An absent file is reported, not
-   *  refused: Codex loads a missing profile as an empty layer. A real load failure fails here as it does at launch. */
-  async observeProfile(profile: string, cwd: string): Promise<CodexProfileObservation> {
+  /** The setter's check of a profile, in the config home this seat's launches use: its own CODEX_HOME, else the
+   *  daemon's, resolved as launch resolves it. An absent file is reported, not refused: Codex loads a missing profile as
+   *  an empty layer. A real load failure fails here as it does at launch. */
+  async observeProfile(profile: string, cwd: string, nodeId: string): Promise<CodexProfileObservation> {
     const observedAt = new Date().toISOString();
-    if (!this.codexHome) {
+    const home = this.homeFor({ nodeId });
+    const own = this.ownHome({ nodeId });
+    if (!home) {
       return { vantage: "unestablished", home: null, file: "unverified", load: "not_run", observedAt,
-        detail: "The daemon sets no CODEX_HOME, so this seat's pane keeps its own; OpenRig didn't check the profile there. Each launch still runs the native profile check." };
+        detail: "Neither this seat's env: nor the daemon sets CODEX_HOME, so this seat's pane keeps its own; OpenRig didn't check the profile there. Each launch still runs the native profile check." };
     }
-    const path = nodePath.join(this.codexHome, `${profile}.config.toml`);
+    const path = nodePath.join(home, `${profile}.config.toml`);
     // The hash is optional evidence, read without blocking; the native loader check below decides.
     const print = await this.profileFingerprint(path).catch((error: unknown): ProfileFingerprint => ({ state: "unreadable", reason: (error as Error).message }));
-    const base = { vantage: "configured_codex_home" as const, home: this.codexHome, file: print.state,
+    const base = { vantage: "configured_codex_home" as const, home, file: print.state,
       ...(print.state === "present" ? { sha256: print.sha256 } : {}), observedAt };
     let probe: CodexProfileProbeResult;
     // Only a confirmed native load failure is refused; a check that couldn't run is reported, not refused.
-    try { probe = await this.verifyProfilePreflight(profile, cwd); }
+    try { probe = await (own ? this.verifyProfilePreflight(profile, cwd, own) : this.verifyProfilePreflight(profile, cwd)); }
     catch (error) { return { ...base, load: "not_run", detail: `The native profile check couldn't run (${(error as Error).message}); each launch runs it again.` }; }
     if (!probe.ok) return { ...base, load: "failed", detail: `${probe.error}${probe.migrationHint ? `\n  Fix: ${probe.migrationHint}` : ""}` };
     const unread = print.state === "unreadable" ? ` Its bytes weren't read for a hash (${print.reason}).` : "";
