@@ -41,6 +41,13 @@ export const STUCK_SWEEP_CUSTODY_WINDOW_HOURS = 24;
 /** Stamp tag on every routed finding row: the sweep's self-exclusion mark. */
 export const STUCK_SWEEP_FINDING_TAG = "stuck-sweep-finding";
 
+/** How a confirmed-missing seat's finding names the rule that chose its recovery seat, in the order tried. */
+const RECOVERY_SEAT_RULES = [
+  "the operator agent (agents.operator_session)",
+  "the operator seat (workspace.operator_seat_name)",
+  "the row's creator",
+] as const;
+
 // S01 ladder marker vocabulary (the seam contract). S01 writes these transition-note
 // prefixes; the sweep derives "live ladder" from the latest marker. An attempt/rung is
 // LIVE, an exhausted marker hands the row back, and a later attempt starts a live cycle
@@ -733,13 +740,15 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     for (const c of candidates) {
       if (!sessionMissing(c.route)) continue;
       recoverySeats ??= [(deps.resolveRecoveryAgentSeat ?? resolveRecoveryAgentSeat)(), (deps.resolveOperatorSeat ?? resolveOperatorSeat)()];
-      const floor = [...recoverySeats, c.row.sourceSession]
-        .find((seat): seat is string => !!seat && seat !== c.route && !sessionMissing(seat));
+      const choices = [...recoverySeats, c.row.sourceSession];
+      const chosen = choices.findIndex((seat) => !!seat && seat !== c.route && !sessionMissing(seat));
+      const floor = chosen < 0 ? null : choices[chosen]!;
       if (!floor) {
         c.why += `; ${c.route} is confirmed missing (session_missing) and no live recovery seat is available (operator agent, operator seat and creator are each unset, missing or this seat; an operator agent setting that's unreadable or isn't an agent's session counts as unset), so this finding stays addressed to it`;
         continue;
       }
-      c.why += `; ${c.route} is confirmed missing (session_missing), so this finding goes to ${floor}`;
+      // Name the rule that chose it, so whoever receives the finding knows why, and which setting to change.
+      c.why += `; ${c.route} is confirmed missing (session_missing), so this finding goes to ${floor}, ${RECOVERY_SEAT_RULES[chosen]}`;
       c.route = floor;
     }
 

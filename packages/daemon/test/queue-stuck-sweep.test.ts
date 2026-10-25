@@ -324,7 +324,7 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     await runSweep({ resolveOperatorSeat: () => null });
     const [finding] = await findingsFor(row.qitemId);
     expect(finding!.destinationSession).toBe("sender@r");
-    expect(finding!.body).toContain("worker@r is confirmed missing (session_missing), so this finding goes to sender@r");
+    expect(finding!.body).toContain("worker@r is confirmed missing (session_missing), so this finding goes to sender@r, the row's creator");
   });
 
   it("with an operator seat set, a dead claimant's finding goes there, as the ladder's floor does", async () => {
@@ -345,7 +345,7 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
       resolveRecoveryAgentSeat: () => "operator-admin@kernel", resolveOperatorSeat: () => "approver@r" });
     const [finding] = await findingsFor(row.qitemId);
     expect(finding!.destinationSession).toBe("operator-admin@kernel");
-    expect(finding!.body).toContain("so this finding goes to operator-admin@kernel");
+    expect(finding!.body).toContain("so this finding goes to operator-admin@kernel, the operator agent (agents.operator_session)");
   });
 
   it("an operator agent whose own session is confirmed missing is passed over for the operator seat", async () => {
@@ -354,7 +354,9 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     ageClaim(row.qitemId, 60);
     await runSweep({ sessionConfirmedMissing: (s: string) => s === "worker@r" || s === "operator-admin@kernel",
       resolveRecoveryAgentSeat: () => "operator-admin@kernel", resolveOperatorSeat: () => "approver@r" });
-    expect((await findingsFor(row.qitemId))[0]!.destinationSession).toBe("approver@r");
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding!.destinationSession).toBe("approver@r");
+    expect(finding!.body).toContain("so this finding goes to approver@r, the operator seat (workspace.operator_seat_name)");
   });
 
   it.each([
