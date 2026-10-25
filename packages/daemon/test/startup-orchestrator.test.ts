@@ -842,13 +842,82 @@ describe("StartupOrchestrator", () => {
     };
     function harness(readiness: (typed: string[]) => ReadinessResult, enterFails: (typed: string[]) => boolean = () => false) {
       const typed: string[] = [];
+      const attempted: string[] = [];
       const t = mockTmux({ sendText: vi.fn(async (_session: string, text: string) => { typed.push(text); return { ok: true as const }; }),
-        sendKeys: vi.fn(async () => enterFails(typed) ? { ok: false as const, code: "unknown", message: "tmux: Enter failed" } : { ok: true as const }) });
-      const adapter = mockAdapter({ deliverStartup: vi.fn(deliverStartup), checkReady: vi.fn(async () => readiness(typed)) });
+        sendKeys: vi.fn(async () => {
+          // A request's refusal follows its Enter attempt, not the earlier bracketed paste.
+          attempted.push(typed.at(-1)!);
+          return enterFails(typed) ? { ok: false as const, code: "unknown", message: "tmux: Enter failed" } : { ok: true as const };
+        }) });
+      const adapter = mockAdapter({ deliverStartup: vi.fn(deliverStartup), checkReady: vi.fn(async () => readiness(attempted)) });
       return { typed, orchestrator: createOrchestrator({ tmux: t, readFile: read }), adapter };
     }
     const errorsOf = (result: StartupResult) => result.ok ? [] : result.errors;
     const readyEvents = (nodeId: string) => db.prepare("SELECT count(*) AS n FROM events WHERE node_id = ? AND type = 'node.startup_ready'").get(nodeId);
+
+    // Ordered no-model discriminator: real Claude readiness/classification and file delivery, fake terminal I/O.
+    // The response rows/footer match the retained Claude 2.1.309 expired-login frame; no credential is involved.
+    it.each(["before_check", "after_check", "after_paste", "healthy", "stale", "unavailable"] as const)(
+      "a login refusal at %s stops later startup submissions without replaying a staged input", async (arrival) => {
+        const seed = seedSession();
+        const typed: string[] = [];
+        const submitted: string[] = [];
+        const trace: string[] = [];
+        let refusal = false;
+        let injected = false;
+        let composer = "";
+        const frame = () => arrival === "unavailable" && submitted.length > 0 ? null
+          : `${submitted.length ? "❯ First startup turn\n" : ""}${refusal || arrival === "stale"
+            ? "● Login expired · Please run /login\n\n✻ Worked for 0s · done 7:22 PM\n" : ""}${arrival === "stale"
+              ? "❯ A newer request\n● Ready to work.\n" : ""}────────────────────\n❯ ${composer}\n────────────────────\n⏵⏵ accept edits on (shift+tab to cycle)\n`;
+        const t = mockTmux({
+          getPaneCommand: vi.fn(async () => "claude"),
+          capturePaneContent: vi.fn(async () => { trace.push(`capture:${refusal ? "refused" : "healthy"}:${composer ? "staged" : "clear"}`); return frame(); }),
+          sendText: vi.fn(async (_session, text) => {
+            typed.push(text); composer = text; trace.push(`paste:${typed.length}`);
+            if (typed.length === 2 && arrival === "after_paste") { refusal = true; trace.push("refusal"); }
+            return { ok: true as const };
+          }),
+          sendKeys: vi.fn(async () => {
+            submitted.push(composer); composer = ""; trace.push(`enter:${submitted.length}`);
+            if (submitted.length === 1 && arrival === "before_check") { refusal = true; trace.push("refusal"); }
+            return { ok: true as const };
+          }),
+        });
+        const real = new ClaudeCodeAdapter({ tmux: t, sleep: async () => {}, fsOps: {
+          readFile: read, writeFile: () => {}, exists: () => false, mkdirp: () => {}, copyFile: () => {}, listFiles: () => [],
+        } });
+        const adapter = mockAdapter({
+          deliverStartup: real.deliverStartup.bind(real),
+          checkReady: vi.fn(async (binding) => {
+            const result = await real.checkReady(binding); trace.push(`ready:${result.code ?? result.ready}`);
+            if (submitted.length === 1 && !composer && !injected && arrival === "after_check") {
+              injected = true; refusal = true; trace.push("refusal");
+            }
+            return result;
+          }),
+        });
+        const orchestrator = createOrchestrator({ tmux: t, readFile: read });
+        const result = await orchestrator.startNode(makeInput(seed, { adapter, resolvedStartupFiles: files, startupActions: [makeIdentityAction()] }));
+        const blocked = ["before_check", "after_check", "after_paste"].includes(arrival);
+        expect(sent(submitted), trace.join(" → ")).toEqual(blocked ? ["role.md"] : ["role.md", "a.md", "b.md"]);
+        if (!blocked) { expect(result).toMatchObject({ ok: true, startupStatus: "ready" }); return; }
+        expect(result).toMatchObject({ ok: false, startupStatus: "attention_required" });
+        expect(readyEvents(seed.nodeId)).toEqual({ n: 0 });
+        if (arrival === "before_check") {
+          expect(sent(typed)).toEqual(["role.md"]);
+          expect(errorsOf(result).join(" ")).toContain("2 later startup inputs weren't sent");
+          expect(orchestrator.pendingStartupContext(seed.nodeId, seed.sessionId)).toMatchObject({ mode: "fresh" });
+        } else {
+          expect(sent(typed)).toEqual(["role.md", "a.md"]);
+          expect(composer).toBe("Contents of a.md");
+          expect(errorsOf(result).join(" ")).toContain("1 later startup input wasn't sent");
+          expect(errorsOf(result).join(" ")).toContain("already pasted");
+          expect(errorsOf(result).join(" ")).not.toContain("Continuing delivers the whole startup again");
+          expect(orchestrator.pendingStartupContext(seed.nodeId, seed.sessionId)).toBeNull();
+          expect(isRecoverableStartupFailure(db, seed.nodeId, seed.sessionId)).toBe(false);
+        }
+      });
 
     it("sends nothing more, holds the rest as owed, and a continuation delivers the whole startup in order after sign-in", async () => {
       const seed = seedSession();
