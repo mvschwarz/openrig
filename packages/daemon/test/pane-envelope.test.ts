@@ -32,6 +32,12 @@ describe("wrapPaneEnvelope — slice 23 envelope renderer (daemon-side)", () => 
 
   // Daemon-only: OpenRig's own senders never send through the CLI twin. A seat's name is `{pod}-{member}@{rig}`, so it can't be
   // `daemon@kernel` or a `system:` actor.
+  it("a person's message that names its row tells the agent how to answer in that Slack thread", () => {
+    const out = wrapPaneEnvelope("alex@external", "driver@rig", "Queue handoff: qitem-1 - check your queue.", { replyToQitem: "qitem-1" });
+    expect(out.split("\n").at(-1)).toBe('↩ Reply if needed: rig queue create --destination alex@external --human-intent update --reply-to qitem-1 --summary "<one line>" --body "..." --verify');
+    expect(wrapPaneEnvelope("lead@rig", "driver@rig", "hi", { replyToQitem: "qitem-1" }).split("\n").at(-1)).toBe('↩ Reply: rig send lead@rig "..."');
+  });
+
   it("offers no reply when OpenRig itself sent it (daemon@kernel, a system: actor); a seat on a rig named system still gets one", () => {
     for (const sender of ["daemon@kernel", "system:health"]) {
       const out = wrapPaneEnvelope(sender, "driver@rig", "Queue handoff: qitem-X - check your queue.");

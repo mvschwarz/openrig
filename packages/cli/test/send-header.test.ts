@@ -18,6 +18,12 @@ describe("wrapSendBody — pre-release CLI/daemon Item 2 (email-style envelope)"
     expect(wrapSendBody("driver@external-tools", "guard@rig", "Status.")).toContain('↩ Reply: rig send driver@external-tools "..."');
   });
 
+  it("a person's message that names its row tells the agent how to answer in that Slack thread", () => {
+    const out = wrapSendBody("alex@external", "driver@rig", "Queue handoff: qitem-1 - check your queue.", { replyToQitem: "qitem-1" });
+    expect(out.split("\n").at(-1)).toBe('↩ Reply if needed: rig queue create --destination alex@external --human-intent update --reply-to qitem-1 --summary "<one line>" --body "..." --verify');
+    expect(wrapSendBody("lead@rig", "driver@rig", "hi", { replyToQitem: "qitem-1" }).split("\n").at(-1)).toBe('↩ Reply: rig send lead@rig "..."');
+  });
+
   it("preserves the original body verbatim between the dash separators", () => {
     const body = "Multi-line\nbody with\nthree lines.";
     const out = wrapSendBody("a@r", "b@r", body);
