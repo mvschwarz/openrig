@@ -50,6 +50,18 @@ export function claudePostureFlag(
   return yoloEnabled(env, resolvedPosture) ? "--dangerously-skip-permissions" : "--permission-mode acceptEdits";
 }
 
+/** Claude Code answers plan-mode turns with Sonnet when its model setting is exactly the alias `haiku` (its own
+ *  plan-mode upgrade; a full model id keeps its model). The launch arguments stay as configured; this is the note the
+ *  person sees for that pairing, on the launch or restore result and on `rig seat status`. */
+export function planModelAliasNotice(
+  runtime: string | null | undefined,
+  choice: { model?: string | null; permissionMode?: string },
+  seat: string,
+): string | undefined {
+  if (runtime !== "claude-code" || choice.permissionMode !== "plan" || choice.model?.trim() !== "haiku") return undefined;
+  return `Claude Code answers plan-mode turns with Sonnet when the model is the alias "haiku". To keep Haiku, set a full Haiku model id: rig seat set-model ${seat} --model <full Haiku id> --reason "<why>".`;
+}
+
 /**
  * Codex launch posture segment (leading space included), applied on EVERY managed Codex path
  * (fresh / resume / native-fork). `profileArg` is the already-formatted ` -p <profile>` string or "".

@@ -37,10 +37,12 @@ launched before this change, a manual run) the hooks do what they always did. Th
 the seat's own `settings.local.json` copy only when that entry is exactly OpenRig's and the script it names is the same
 script; an entry from an older install doesn't match, so both report until the seat's next launch refreshes it.
 OpenRig automatically installs its Codex plugin for seats that select it. On its first installation, the six exact shipped
-hook definitions are trusted before launch, after checking the installed hook files against this daemon's shipped copy.
-Existing plugin disables and hook choices are retained. An existing untrusted installation stays under native review:
-Codex's "continue without trusting" leaves no record, so OpenRig does not assume an absent trust record is permission.
-The file check happens only when trust is granted: a later edit to the cached hook scripts keeps that trust, as with any hook trusted in Codex.
+hook definitions and bundle content are trusted before launch, after checking the entire installed plugin against this daemon's shipped copy.
+On upgrade, OpenRig renews content approval only for a previously approved OpenRig-owned bundle with unchanged approved hook definitions.
+It keeps explicit disables, refusals, unknown config layers and other plugins' state. An installation without a proven prior approval stays under native review.
+Codex's "continue without trusting" leaves no record: a skip of an otherwise eligible OpenRig-owned update may therefore be superseded on retry.
+OpenRig records its approved bundle in `CODEX_HOME/.openrig-core-hook-trust.json` and leaves Codex's immutable `.hook-trust` baseline untouched.
+Codex 0.164 checks bundle contents when hooks run; a later edit requires native approval again. Older Codex versions enforce their own trust rules.
 The Codex
 column above then applies only to a Codex seat whose plugin selection includes openrig-core: every Codex hook command
 exits 0 before running anything unless OpenRig gave that seat `OPENRIG_SEAT_PROJECT_DIR` and an explicit

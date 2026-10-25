@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
 import os from "node:os";
+import { isDeepStrictEqual } from "node:util";
 import Database from "better-sqlite3";
 import { parse as parseToml } from "smol-toml";
 import type { TmuxAdapter } from "./tmux.js";
@@ -66,6 +67,7 @@ const codexHookTrust = createRequire(import.meta.url)("../../assets/plugins/open
 
 import { listNativeProcesses, observeCodexPaneProcess, observeCodexForkProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type NativeProcessRow } from "../domain/native-process-lineage.js";
 import { recordSeatSkillWrite, seatPluginSkillsLossNote, seatProjectionComplete, seatSkillWriteRefusal } from "../domain/seat-skill-storage.js";
+import { codexPluginContentHash, planOwnedCodexContentApproval, recordOwnedCodexApproval } from "../domain/codex-owned-plugin-trust.js";
 
 // Shared by all probes of ONE launch, never reset by a delayed screen or an
 // ambiguous transport result. A separately requested launch gets a new attempt.
@@ -358,9 +360,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   /**
    * Install the vendored openrig-core plugin into Codex through Codex's own commands, so a seat that selected it gets its
-   * refocus and skills, trusting only exact shipped hooks on its first install. It runs only when the person's config
+   * refocus and skills, trusting exact shipped hooks on first install and renewing proven owned content approvals. It runs only when the person's config
    * doesn't disable the plugin (codexCorePluginEnablement), and only when the installed version differs from the vendored
-   * one. Codex owns its plugin cache; OpenRig writes the marketplace manifest and first-install exact-hook trust.
+   * one. Codex owns its plugin cache; its immutable legacy trust baseline is never rewritten.
    */
   async ensureCodexCorePlugin(home?: string): Promise<{ outcome: "installed" | "current" | "skipped"; reason: string }> {
     const report = (outcome: "installed" | "current" | "skipped", reason: string) => {
@@ -390,13 +392,19 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       catch { return false; }
     });
     if (!matchesShipped(pluginDir)) return report("skipped", "vendored hook files differ from this daemon's shipped plugin; existing choices are left alone");
+    // Installation retains the hook-file predicate; any approval requires the complete shipped tree.
+    const matchesShippedTree = (dir: string) => {
+      try { return codexPluginContentHash(dir, true) === codexPluginContentHash(shipped, true); }
+      catch { return false; }
+    };
 
     const codexHome = nodePath.dirname(this.resolveCodexConfigPath(home));
-    const layers: CodexConfigLayerRead[] = codexReadableConfigLayers(codexHome, this.codexSystemConfigDir).map((layer) => {
+    const readLayers = (): CodexConfigLayerRead[] => codexReadableConfigLayers(codexHome, this.codexSystemConfigDir).map((layer) => {
       if (!this.fs.exists(layer.path)) return { ...layer, state: "absent" as const };
       try { return { ...layer, state: "read" as const, content: this.fs.readFile(layer.path) }; }
       catch (error) { return { ...layer, state: "unreadable" as const, reason: (error as Error).message }; }
     });
+    const layers = readLayers();
     const enablement = codexCorePluginEnablement(layers);
     if (enablement.decision !== "allow") return report("skipped", enablement.reason);
 
@@ -417,11 +425,33 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const cachedDir = nodePath.join(cacheRoot, version);
     const cached = this.fs.exists(cachedDir);
     // Codex's "continue without trusting" choice writes no state. An existing install/configuration may therefore be a
-    // decline even with no hooks.state entry. Only the very first installation earns automatic trust; reinstalls and
-    // upgrades retain whatever native choices already exist, including an unrecorded decline.
+    // decline even with no hooks.state entry. Absent grants still stay under native review. A proven owned grant may
+    // renew its content approval; an unrecorded skip of that exact owned upgrade cannot be distinguished from pending approval.
     const firstInstall = !this.fs.exists(cacheRoot) && !layers.some(layer => layer.state === "read"
       && Object.hasOwn((parseToml(layer.content).plugins ?? {}) as object, CODEX_CORE_PLUGIN_KEY));
+    const renewContentApproval = (freshGrant = false) => {
+      const configPath = this.resolveCodexConfigPath(home);
+      const currentLayers = readLayers();
+      if (codexCorePluginEnablement(currentLayers).decision !== "allow") return;
+      const before = this.fs.readFile(configPath);
+      const currentSource = recordedMarketplaceSource(before);
+      if (currentSource == null || canonical(currentSource) !== canonical(pluginsDir) || !userLayerEnablesCorePlugin(before)) return;
+      let content = before;
+      const planned = planOwnedCodexContentApproval({ configPath, content, layers: currentLayers, shipped, installed: cachedDir, freshGrant });
+      if (!planned) return;
+      for (const [key, hash] of Object.entries(planned.hashes)) content = upsertCodexHookTrust(content, key, hash, "trusted_content_hash");
+      // The line writer must not alter examples in strings or duplicate quoted keys.
+      try {
+        const expected = parseToml(before) as { hooks: { state: Record<string, Record<string, unknown>> } };
+        for (const [key, hash] of Object.entries(planned.hashes)) expected.hooks.state[key]!.trusted_content_hash = hash;
+        if (!isDeepStrictEqual(parseToml(content), expected)) return;
+      } catch { return; } // Leave native review and owner bytes intact for unsupported TOML spellings.
+      if (this.fs.readFile(configPath) !== before) return; // A concurrent native choice wins.
+      if (content !== before) this.fs.writeFile(configPath, content);
+      recordOwnedCodexApproval(configPath, planned.approval);
+    };
     if (cached && recorded !== undefined && userLayerEnablesCorePlugin(userConfig)) {
+      renewContentApproval();
       return report("current", `${CODEX_CORE_PLUGIN_KEY} ${version} is installed and registered`);
     }
     const manifestPath = nodePath.join(pluginsDir, CODEX_MARKETPLACE_MANIFEST_PATH);
@@ -437,9 +467,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
     const installed = await this.runCodexCli(["plugin", "add", CODEX_CORE_PLUGIN_KEY], env);
     if (installed.status !== 0) return report("skipped", `codex plugin add failed: ${(installed.stderr || installed.stdout).trim() || `exit ${installed.status}`}`);
-    // Trust is over normalized definitions, not script contents. Byte equality is an additional pre-grant check;
-    // Codex remains responsible for later native review if definitions change. No cache files are rewritten here.
-    if (firstInstall && matchesShipped(cachedDir)) {
+    // First install grants declarations; Codex0.164 also requires full-bundle content approval. Existing declaration
+    // choices are never rewritten. No cache files or native baseline files are rewritten here.
+    let freshGrants = 0;
+    const grantLayers = readLayers();
+    if (firstInstall && codexCorePluginEnablement(grantLayers).decision === "allow" && matchesShippedTree(cachedDir)) {
       let content = this.fs.readFile(this.resolveCodexConfigPath(home));
       const hookManifest = JSON.parse(fs.readFileSync(nodePath.join(shipped, "hooks/codex.json"), "utf8"));
       for (const [event, groups] of Object.entries(hookManifest.hooks) as Array<[string, Array<{ matcher?: string; hooks: Array<{ command: string; timeout: number }> }>]> ) {
@@ -454,13 +486,15 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
             const value = doc as { hooks?: { state?: Record<string, unknown> } };
             return Object.hasOwn(value.hooks?.state ?? {}, key) || Object.values(doc).some(hasChoice);
           };
-          if (!hasChoice(parseToml(content)) && !layers.some(layer => layer.state === "read" && hasChoice(parseToml(layer.content)))) {
+          if (!hasChoice(parseToml(content)) && !grantLayers.some(layer => layer.state === "read" && hasChoice(parseToml(layer.content)))) {
             content = upsertCodexHookTrust(content, key, hash);
+            freshGrants++;
           }
         }));
       }
       this.fs.writeFile(this.resolveCodexConfigPath(home), content);
     }
+    renewContentApproval(freshGrants === 6);
     return report("installed", `${CODEX_CORE_PLUGIN_KEY} ${version} through Codex's own install (${enablement.reason})`);
   }
 
@@ -1886,11 +1920,11 @@ export function computeCodexHookTrust(
  * `[hooks.state."<key>"] trusted_hash = "<hash>"` record. Mirrors upsertCodexProjectTrust:
  * find/create the exact table header, splice ONLY its `trusted_hash` line, leave every other
  * `[hooks.state]` / `[projects]` entry and the managed hook block byte-identical. Same key+hash
- * ⇒ no-op. Only called for our authored inline or exact first-install plugin keys (never blanket trust).
+ * ⇒ no-op. Only called for our authored inline or verified owned plugin keys (never blanket trust).
  */
-export function upsertCodexHookTrust(content: string, key: string, hash: string): string {
+export function upsertCodexHookTrust(content: string, key: string, hash: string, field: "trusted_hash" | "trusted_content_hash" = "trusted_hash"): string {
   const header = `[hooks.state.${JSON.stringify(key)}]`;
-  const trustLine = `trusted_hash = ${JSON.stringify(hash)}`;
+  const trustLine = `${field} = ${JSON.stringify(hash)}`;
   const lines = content.length > 0 ? content.split("\n") : [];
   const headerIndex = lines.findIndex((line) => line.trim() === header);
 
@@ -1909,7 +1943,7 @@ export function upsertCodexHookTrust(content: string, key: string, hash: string)
   }
 
   const hashIndex = lines.findIndex(
-    (line, index) => index > headerIndex && index < nextSectionIndex && line.trim().startsWith("trusted_hash"),
+    (line, index) => index > headerIndex && index < nextSectionIndex && line.trim().startsWith(field),
   );
   if (hashIndex >= 0) {
     lines[hashIndex] = trustLine;
@@ -1917,7 +1951,7 @@ export function upsertCodexHookTrust(content: string, key: string, hash: string)
     lines.splice(headerIndex + 1, 0, trustLine);
   }
 
-  return `${lines.join("\n").replace(/\n*$/, "\n")}`;
+  return field === "trusted_content_hash" ? lines.join("\n") : `${lines.join("\n").replace(/\n*$/, "\n")}`;
 }
 
 export function isCodex013xOrLater(version: string): boolean {

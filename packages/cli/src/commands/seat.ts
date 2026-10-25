@@ -55,6 +55,7 @@ interface SeatStatusResponse {
       openRigAdds: { claudeAllow: string[]; claudeAsk: string[]; notes: string[] };
       unknown: string[];
       controls: string[];
+      advisories?: string[];
     };
   };
   session_status: string | null;
@@ -218,6 +219,7 @@ function printHuman(status: SeatStatusResponse): void {
     const a = p.account!;
     console.log("Permissions, planned for the next fresh managed launch (not observed):");
     console.log(`  ${a.summary}`);
+    for (const advisory of a.advisories ?? []) console.log(`  ${advisory}`);
     if (a.overrides.length) console.log(`  This seat's choice is used instead of the ${a.overrides.join(" and the ")}.`);
     for (const note of a.openRigAdds.notes) console.log(`  ${note}`);
     if (a.openRigAdds.claudeAllow.length) console.log("  The exact allowance and ask lists are in --json, under permissions.account.openRigAdds.");

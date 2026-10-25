@@ -1,3 +1,4 @@
+import os from "node:os";
 import path from "node:path";
 import type Database from "better-sqlite3";
 import { parseStoredSeatEnv, type SeatEnv } from "./seat-env.js";
@@ -78,4 +79,19 @@ export function seatRuntimeHomeBySession(db: Database.Database, sessionName: str
       .get(sessionName) as typeof row;
   } catch { return undefined; }
   return row ? seatRuntimeHome(db, row.node_id, runtime).home : undefined;
+}
+
+/** A one-off launch env without the runtime-home variables. A seat's home comes only from its stored `env:`, which restore,
+ *  handover and status all read, so a one-off value would put the seat on a home nothing else reports or keeps. */
+export function withoutRuntimeHomes(env: SeatEnv): SeatEnv {
+  const out = { ...env };
+  for (const name of Object.values(RUNTIME_HOME_VAR)) delete out[name];
+  return out;
+}
+
+/** The Claude config root OpenRig reads for a seat: its own home when it declares one, else the daemon's selection, else
+ *  `~/.claude`. */
+export function claudeConfigRootFor(db: Database.Database, nodeId: string | null | undefined,
+  env: NodeJS.ProcessEnv = process.env, homeDir = os.homedir()): string {
+  return seatRuntimeHome(db, nodeId, "claude-code").home ?? env.CLAUDE_CONFIG_DIR ?? path.join(homeDir, ".claude");
 }

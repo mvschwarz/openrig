@@ -339,6 +339,23 @@ describe("rig seat status", () => {
     expect(output).not.toContain("Permission mode for future launches");
   });
 
+  it("prints each advisory the account carries, after the summary", async () => {
+    const advisory = 'Claude Code answers plan-mode turns with Sonnet when the model is the alias "haiku". To keep Haiku, set a full Haiku model id: '
+      + 'rig seat set-model dev-impl@seat-rig --model <full Haiku id> --reason "<why>".';
+    const account = { summary: "Next launch: --permission-mode plan, from this seat's own choice (person@host: careful review).",
+      overrides: [], unknown: [], openRigAdds: { claudeAllow: [], claudeAsk: [], notes: [] }, controls: [], advisories: [advisory] };
+    const deps = makeDeps({ status: 200, data: { ...STATUS, permissions: { selectionState: "explicit", desired: null, lastLaunchArguments: null, nativeEffect: "unverified", account } } }, []);
+
+    const { logs } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
+    });
+
+    const lines = logs.join("\n").split("\n");
+    const summaryAt = lines.indexOf(`  ${account.summary}`);
+    expect(summaryAt).toBeGreaterThan(-1);
+    expect(lines[summaryAt + 1]).toBe(`  ${advisory}`);
+  });
+
   it("explains a confirmed missing tmux session", async () => {
     const deps = makeDeps({
       status: 200,

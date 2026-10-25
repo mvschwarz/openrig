@@ -1109,6 +1109,10 @@ absolute working directory, then uses that exact path for discovery and launch.
 It does not use interactive shell aliases or a shell's modified PATH. Relative
 PATH entries and a relative `CLAUDE_CONFIG_DIR` resolve from the seat directory.
 
+In `plan` mode Claude Code answers with Sonnet when the seat's model is the alias
+`haiku` (a full Haiku model id, set with `rig seat set-model`, keeps Haiku), and the
+launch result and `rig seat status` say so for that pairing.
+
 For these explicit native modes, fresh, resume, fork and legacy restore use the
 same managed environment: PATH, HOME, `CLAUDE_CONFIG_DIR` (default HOME/.claude)
 and the configured classic-renderer setting. Other shell customizations are

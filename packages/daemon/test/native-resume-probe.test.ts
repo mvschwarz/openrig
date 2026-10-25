@@ -117,9 +117,39 @@ describe("native resume probe", () => {
         paneContent: `› Continue\n${footer}`,
       }).status).toBe("resumed");
     });
+    // george661's footer on closed #1764: Codex renders "{display name} {effort}{ tier}", so a GPT-6.1 footer has two
+    // or three words after the id once the header has scrolled off.
+    it.each([
+      "  GPT-6.1 Sol medium · /data/workspaces/proof-a · …",
+      "  Context 81% left · GPT-6.1 Luna xhigh · /project",
+      "  GPT-6.1 Sol medium Fast · /project",
+      "  GPT-6.1 Sol medium fast · /project",
+      "  GPT-6-Astra xhigh · /project",
+    ])("recognizes a model name with its effort label as a resumed conversation: %s", (footer) => {
+      expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "sh",
+        paneContent: `Restored conversation\n› Continue\n${footer}`,
+      })).toMatchObject({ status: "resumed", code: "active_runtime" });
+    });
+    // Short prose after a model id must not let a shell or log capture read as a ready Codex screen.
+    describe.each([false, true])("status prose that starts with a model name, process verified=%s", (codexProcessVerified) => {
+      it.each([
+        "  GPT-6.1 is not ready · retry later",
+        "  GPT-6.1 is default · see the docs",
+        "  GPT-6.1 Sol failed · retry later",
+        "  Notes · GPT-6.1 is unavailable · retry later",
+        "  GPT-6.1 Sol was picked for this run because it costs less · see the plan",
+        "  GPT-6.1 Sol medium plus more words · /project",
+        "  local-model-7b is not ready · retry later",
+      ])("is not read as a footer: %s", (line) => {
+        expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: codexProcessVerified ? "codex" : "sh",
+          paneContent: `› Continue\n${line}`, codexProcessVerified,
+        }).status).not.toBe("resumed");
+      });
+    });
     it.each([
       "  local-model-7b medium · /project",
       "  anthropic/claude-3.5-sonnet · /project",
+      "  local-model-7b Coder high · /project",
     ])("recognizes a versioned non-gpt model identifier after process verification: %s", (footer) => {
       expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "sh",
         paneContent: `› Continue\n${footer}`,

@@ -1004,7 +1004,8 @@ in `CODEX_HOME` (default `~/.codex`). A seat that names its own home in `env:` r
 
 1. **Prepare the home once, natively,** in a terminal: `CLAUDE_CONFIG_DIR=/abs/path claude`, then `/login`; or
    `CODEX_HOME=/abs/path codex login`. The person signs in; never copy credential files between homes.
-2. **Name it in the member's `env:`** in `rig.yaml` (`CLAUDE_CONFIG_DIR: /abs/path` or `CODEX_HOME: /abs/path`), or in
+2. **Name it in the member's `env:`** in `rig.yaml`, not with `rig up --env`, which leaves these two out
+   (`CLAUDE_CONFIG_DIR: /abs/path` or `CODEX_HOME: /abs/path`), or in
    the rig's `env:` for every seat of that runtime. The member's value wins. It must be an absolute path: any other
    value is reported and ignored, and the seat keeps the daemon's home.
 3. **It takes effect at the seat's next launch** (a fresh launch, restore or handover); a running seat keeps the home
