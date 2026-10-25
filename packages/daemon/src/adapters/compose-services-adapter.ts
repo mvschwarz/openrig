@@ -58,9 +58,10 @@ function formatExecError(err: unknown): string {
  *  shorthand flag: 'f'"), or doesn't know `compose` at all. So every compose command fails. */
 const COMPOSE_MISSING_SIGNS = /unknown shorthand flag: 'f'|'compose' is not a docker command/;
 
-/** What a person sees when Docker Compose v2 is missing. */
+/** What a person sees when the Compose check fails. The check's own diagnostic is the cause as far as it's known: a missing
+ *  plugin is the usual one, not the only one. */
 export function composeMissingMessage(detail: string): string {
-  return `Service bundles need Docker Compose v2, and \`docker compose version\` failed${detail ? `: ${detail}` : ""}. Install the Docker Compose v2 plugin for this Docker, then run the same command again.`;
+  return `Service bundles need Docker Compose v2, and \`docker compose version\` failed${detail ? `: ${detail}` : ""}. Make sure this Docker has its Compose v2 plugin.`;
 }
 
 // -- Adapter --
