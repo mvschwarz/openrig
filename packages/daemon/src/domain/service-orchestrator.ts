@@ -29,6 +29,11 @@ export class ServiceOrchestrator {
     this.composeAdapter = deps.composeAdapter;
   }
 
+  /** Whether Docker Compose v2 is available, before anything that needs it is set up. */
+  composeAvailable(): Promise<{ ok: true } | { ok: false; message: string }> {
+    return this.composeAdapter.composeAvailable();
+  }
+
   /**
    * Boot services for a rig. Called by bootstrap orchestrator as a stage before agent launch.
    * 1. Load persisted services record
@@ -36,11 +41,6 @@ export class ServiceOrchestrator {
    * 3. Evaluate wait targets
    * 4. Persist receipt
    */
-  /** Whether Docker Compose v2 is available, before anything that needs it is set up. */
-  composeAvailable(): Promise<{ ok: true } | { ok: false; message: string }> {
-    return this.composeAdapter.composeAvailable();
-  }
-
   async boot(rigId: string, opts?: { waitTimeoutMs?: number; waitPollIntervalMs?: number }): Promise<ServiceBootResult> {
     const record = this.rigRepo.getServicesRecord(rigId);
     if (!record) {
