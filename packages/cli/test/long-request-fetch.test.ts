@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
-import { DaemonClient, DaemonConnectionError, DaemonResponseError } from "../src/client.js";
+import { DaemonClient, DaemonConnectionError, DaemonResponseError, DaemonTimeoutError } from "../src/client.js";
 import { FETCH_HEADERS_TIMEOUT_MS, nodeHttpFetch } from "../src/long-request-fetch.js";
 
 // Node's fetch gives up on a response whose headers haven't arrived within 300 s, and a waiting send answers only when its
@@ -16,6 +16,12 @@ describe("a request allowed 300 s or more", () => {
       req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
       req.on("end", () => {
         if (req.url === "/hang") return;
+        if (req.url === "/stall") {
+          // The daemon answered, then its body stopped arriving.
+          res.writeHead(200, { "Content-Type": "application/json", "Content-Length": "64" });
+          res.write('{"ok":true,"sent":tr');
+          return;
+        }
         if (req.url === "/cut") {
           // The daemon answered and acted, then the connection dropped partway through the body.
           seen.push({ method: req.method, path: req.url, session: undefined, body });
@@ -74,6 +80,15 @@ describe("a request allowed 300 s or more", () => {
       expect(err, `timeoutMs ${timeoutMs}`).toBeInstanceOf(DaemonResponseError);
       expect(err).not.toBeInstanceOf(DaemonConnectionError);
       expect((err as DaemonResponseError).status).toBe(200);
+    }
+  });
+
+  it("the request's own deadline, reached while the body streams, stays a timeout on both paths", async () => {
+    // A short deadline stands in for the long one; the second client sends every request over the long path.
+    for (const client of [new DaemonClient(baseUrl), new DaemonClient(baseUrl, { fetchImpl: nodeHttpFetch })]) {
+      const err = await client.post("/stall", {}, { timeoutMs: 150 }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(DaemonTimeoutError);
+      expect((err as Error).message).toContain("timed out after 150ms");
     }
   });
 
