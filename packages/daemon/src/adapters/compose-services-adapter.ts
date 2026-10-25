@@ -61,7 +61,8 @@ const COMPOSE_MISSING_SIGNS = /unknown shorthand flag: 'f'|'compose' is not a do
 /** What a person sees when the Compose check fails. The check's own diagnostic is the cause as far as it's known: a missing
  *  plugin is the usual one, not the only one. */
 export function composeMissingMessage(detail: string): string {
-  return `Service bundles need Docker Compose v2, and \`docker compose version\` failed${detail ? `: ${detail}` : ""}. Make sure this Docker has its Compose v2 plugin.`;
+  const reason = detail.replace(/\.+$/, "");
+  return `Service bundles need Docker Compose v2, and \`docker compose version\` failed${reason ? `: ${reason}` : ""}. Make sure this Docker has its Compose v2 plugin.`;
 }
 
 // -- Adapter --
@@ -83,7 +84,10 @@ export class ComposeServicesAdapter {
       await this.exec("docker compose version 2>&1");
       return { ok: true };
     } catch (err) {
-      return { ok: false, message: composeMissingMessage(formatExecError(err).split("\n").filter(Boolean).pop() ?? "") };
+      // Docker's own reason: not the exec's "Command failed" header, nor Docker's pointer to its help after it.
+      const reason = formatExecError(err).split("\n").map((line) => line.trim())
+        .find((line) => line && !line.startsWith("Command failed") && !/^See '.*--help'/.test(line));
+      return { ok: false, message: composeMissingMessage(reason ?? "") };
     }
   }
 
