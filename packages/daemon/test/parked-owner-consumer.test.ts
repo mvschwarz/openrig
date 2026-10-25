@@ -673,8 +673,8 @@ describe("parked-owner-consumer — R2 integration hard checks (OPR.0.5.6.24)", 
 });
 
 // #1933 — a seat that just handed work off, or just asked a person, has only started waiting. The first reminder
-// waits a grace from the start of that wait (the end of the seat's own turn); a seat still holding the work after
-// it is reminded as before, and an unknown start keeps the reminder.
+// waits until its arbitrated waiting state has been unchanged for a grace; a seat still holding the work after it is
+// reminded as before, an unknown start keeps the reminder, and a seat at a prompt gets no grace.
 describe("#1933: the first reminder waits a grace after the seat starts waiting", () => {
   const NOW = Date.parse("2026-10-25T03:00:00.000Z");
   const GRACE_MS = 5 * 60_000;
@@ -700,6 +700,13 @@ describe("#1933: the first reminder waits a grace after the seat starts waiting"
 
   it("an unknown start of the wait assumes no grace: the reminder still goes", async () => {
     expect((await evaluate(waitingFor(null))).action).toBe("send");
+  });
+
+  it("a seat stopped at a prompt 30 s ago is still attempted, so whoever can clear the prompt hears as soon as today", async () => {
+    const atPrompt = parkedSeat({
+      activity: { value: "idle-at-prompt", needsInput: { count: 1, reason: "selection_prompt" }, since: new Date(NOW - 30_000).toISOString() },
+    } as Partial<ParkedSeatDiagnosisView>);
+    expect((await evaluate(atPrompt)).action).toBe("send");
   });
 
   it("the grace reaches the consumer from the shipped diagnosis: the arbitrated state's last change is the start of the wait", async () => {
