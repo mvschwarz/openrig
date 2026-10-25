@@ -96,6 +96,13 @@ describe("ComposeServicesAdapter", () => {
       expect(result).toEqual({ ok: false, message: "Service bundles need Docker Compose v2, and `docker compose version` failed: unknown shorthand flag: 'f' in -f. Make sure this Docker has its Compose v2 plugin." });
     });
 
+    it("names Docker's own reason, not the exec header or Docker's pointer to its help", async () => {
+      // How the daemon's exec reports a failed `docker compose version` without the plugin.
+      const exec = vi.fn<ExecFn>(async () => { throw new Error("Command failed: docker compose version 2>&1\ndocker: 'compose' is not a docker command.\nSee 'docker --help'"); });
+      expect(await new ComposeServicesAdapter(exec).composeAvailable()).toEqual({ ok: false,
+        message: "Service bundles need Docker Compose v2, and `docker compose version` failed: docker: 'compose' is not a docker command. Make sure this Docker has its Compose v2 plugin." });
+    });
+
     it("up names the missing Compose before Docker's own error", async () => {
       const result = await new ComposeServicesAdapter(noCompose("")).up({ composeFile: "/rig/compose.yaml", projectName: "openrig-secrets" });
       expect(result).toMatchObject({ ok: false, code: "compose_up_failed", message: expect.stringMatching(/^Service bundles need Docker Compose v2[\s\S]*unknown shorthand flag/) });
