@@ -398,7 +398,7 @@ export class TmuxAdapter {
       const selected: Record<string, string | undefined> = { ...baseline, ...seatEnv };
       addSeatRuntimeDir(selected, policy.runtimeDir);
       const values = Object.entries(selected)
-        .filter((entry): entry is [string,string] => entry[1] !== undefined && !["TMUX", "TMUX_PANE", "TERM", "SHELL"].includes(entry[0]))
+        .filter((entry): entry is [string,string] => entry[1] !== undefined && !["TMUX", "TMUX_PANE", "TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "SHELL"].includes(entry[0]))
         .map(([key,value]) => {
           if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error("Invalid environment name");
           return `export ${key}=${shellQuote(value)}`;
@@ -406,7 +406,8 @@ export class TmuxAdapter {
       const file = this.fileOps.tmpName();
       // Builtin exports keep values off env/sh argv; the pane owns removal once started.
       await this.fileOps.writeFile(file, `/bin/rm -f -- ${shellQuote(file)}\n${values.join("\n")}\nexec "$@"\n`, { mode: 0o600, flag: "wx" });
-      const reset = 'exec /usr/bin/env -i -- TMUX="$TMUX" TMUX_PANE="$TMUX_PANE" TERM="$TERM" SHELL="$SHELL" /bin/sh "$@"';
+      // tmux supplies its terminal identity per pane; the daemon's terminal may be different.
+      const reset = 'exec /usr/bin/env -i -- TMUX="$TMUX" TMUX_PANE="$TMUX_PANE" TERM="$TERM" TERM_PROGRAM="${TERM_PROGRAM-}" TERM_PROGRAM_VERSION="${TERM_PROGRAM_VERSION-}" SHELL="$SHELL" /bin/sh "$@"';
       return ["/bin/sh", "-c", reset, "sh", file, shell, ...(command ? ["-c", command] : ["-l"])];
     } catch {
       // Keep the working launch, with a diagnostic; this option is not a new admission gate.
