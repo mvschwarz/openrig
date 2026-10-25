@@ -276,7 +276,8 @@ describe("v2 bundle apply: launch root lifetime and --target", () => {
       order.push("seat");
       return { ok: true, result: { rigId: rig.id, specName: "lifetime-rig", nodes: [{ logicalId: "dev.impl", status: "launched" }] } };
     });
-    const result = await orchestrator({ rigRepo: repo, serviceOrchestrator: { boot } as never, routeBundleContents: route }).bootstrap({
+    const composeAvailable = async () => ({ ok: true as const });
+    const result = await orchestrator({ rigRepo: repo, serviceOrchestrator: { boot, composeAvailable } as never, routeBundleContents: route }).bootstrap({
       mode: "apply", sourceKind: "rig_bundle", sourceRef: await buildV2Bundle(workDir, true), targetRoot: target,
     });
     expect(result.status, JSON.stringify(result)).toBe("completed");
@@ -363,6 +364,31 @@ describe("v2 bundle apply: launch root lifetime and --target", () => {
       if (scenario !== "cleanup-failure") expect(remaining.sort()).toEqual(predecessors.sort());
     },
   );
+
+  it.each(["plan", "apply"] as const)("without Docker Compose v2, says so in %s before writing or creating anything", async mode => {
+    vi.stubEnv("OPENRIG_BUNDLE_SERVICES_ENABLED", "true");
+    vi.spyOn(preflight, "rigPreflight").mockResolvedValue({ ready: true, errors: [], warnings: [] } as never);
+    Object.assign(podInstantiator, { deps: { fsOps: realFsOps() } });
+    const commands: string[] = [];
+    const repo = new RigRepository(db);
+    const composeAdapter = new ComposeServicesAdapter(async command => {
+      commands.push(command);
+      if (command.startsWith("docker compose")) throw Object.assign(new Error("Command failed"), { stderr: "docker: 'compose' is not a docker command." });
+      return "";
+    });
+    const target = path.join(workDir, `no-compose-${mode}`);
+    const result = await orchestrator({ rigRepo: repo, serviceOrchestrator: new ServiceOrchestrator({ rigRepo: repo, composeAdapter }) }).bootstrap({
+      mode, sourceKind: "rig_bundle", sourceRef: await buildV2Bundle(workDir, true), targetRoot: target,
+    });
+    expect(result.status).toBe("failed");
+    expect(result.stages).toContainEqual(expect.objectContaining({ detail: expect.objectContaining({ code: "compose_missing" }) }));
+    expect(result.errors.join(" ")).toContain("Service bundles need Docker Compose v2, and `docker compose version` failed: docker: 'compose' is not a docker command.");
+    expect(result.errors.join(" ")).toContain("Nothing was written and no team was created.");
+    expect(commands).toEqual(["docker compose version 2>&1"]);
+    expect(fs.existsSync(target)).toBe(false);
+    expect(podInstantiator.instantiate).not.toHaveBeenCalled();
+    expect(repo.findUnarchivedRigsByName("lifetime-rig")).toEqual([]);
+  });
 
   it("plans the target services and view without materialising or launching", async () => {
     vi.stubEnv("OPENRIG_BUNDLE_SERVICES_ENABLED", "true");
