@@ -1175,7 +1175,13 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
       expect(guarded.candidateSql.length).toBeGreaterThan(0);
       expect(guarded.candidateSql.every((sql) => sql.includes("CASE WHEN queue_items.state IN ('pending','in-progress')"))).toBe(true);
       expect(unguarded(guarded.candidateSql[0]!)).not.toBe(guarded.candidateSql[0]);
-      expect(guarded.doc).toEqual(reference.doc);
+      // The free-disk reading is taken live at read time (fs.statfsSync), so two builds can differ there; nothing else may.
+      const withoutLiveDisk = (doc: Record<string, unknown>) => {
+        const copy = structuredClone(doc) as { q6_parallelism?: { df_margin?: { available_kib?: unknown } } };
+        if (copy.q6_parallelism?.df_margin) delete copy.q6_parallelism.df_margin.available_kib;
+        return copy;
+      };
+      expect(withoutLiveDisk(guarded.doc)).toEqual(withoutLiveDisk(reference.doc));
 
       const lanes = guarded.doc.q1_lanes as Record<string, unknown>[];
       expect(lanes.find((l) => l.qitem_id === "qitem-lane-31")).toMatchObject({ pickup: { state: "working" } });
