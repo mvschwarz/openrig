@@ -2194,6 +2194,54 @@ describe("Codex runtime adapter", () => {
       .toBe("https://exa.internal.example/mcp");
   });
 
+  // Codex 0.164.0's own saves, run natively in a scratch CODEX_HOME (fixtures/codex-config-saves-0.164.0.json): `codex mcp
+  // add` prints every [mcp_servers] table after the others and drops the comment above the first, so OpenRig's markers
+  // come apart from its tables; `codex features enable` prints a new [features] table between OpenRig's markers.
+  const codexSaves = JSON.parse(fs.readFileSync(new URL("./fixtures/codex-config-saves-0.164.0.json", import.meta.url), "utf8")) as
+    Record<string, { before: string; after: string }>;
+  const savedByCodex = (name: string) => codexSaves[name]!.after.replaceAll("shared:codex-default-config", "codex-default-config");
+  const FRAGMENT_BEGIN = "# BEGIN OPENRIG MANAGED CODEX CONFIG FRAGMENT: codex-default-config";
+  const FRAGMENT_END = "# END OPENRIG MANAGED CODEX CONFIG FRAGMENT: codex-default-config";
+  const fragmentMarkers = (text: string) => text.split("\n").filter((line) => line === FRAGMENT_BEGIN || line === FRAGMENT_END);
+  const fragmentBlock = (text: string) => text.slice(text.indexOf(FRAGMENT_BEGIN), text.indexOf(FRAGMENT_END));
+  async function projectsOnceAndStays(before: string) {
+    const { project, read } = await projectFragment(before);
+    expect(await project()).toEqual({ projected: ["codex-default-config"], skipped: [], failed: [] });
+    const after = read();
+    expect(await project()).toEqual({ projected: ["codex-default-config"], skipped: [], failed: [] });
+    expect(read()).toBe(after);
+    // Nothing the person or Codex set changes, and there's one block.
+    expect(parseToml(after)).toEqual(parseToml(before));
+    expect(fragmentMarkers(after)).toEqual([FRAGMENT_BEGIN, FRAGMENT_END]);
+    return after;
+  }
+
+  it.each(["mcpAddMidFile", "mcpAddBlockLast"])("keeps managing its tables after Codex's save moved them (%s)", async (name) => {
+    const after = await projectsOnceAndStays(savedByCodex(name));
+    expect(fragmentBlock(after)).toContain("[mcp_servers.exa]");
+    expect(fragmentBlock(after)).toContain("[mcp_servers.context7]");
+    expect(fragmentBlock(after)).not.toContain("[mcp_servers.gk]");
+  });
+
+  it("keeps a table Codex printed between OpenRig's markers", async () => {
+    const after = await projectsOnceAndStays(savedByCodex("featuresEnableBlockLast"));
+    expect((parseToml(after) as Record<string, any>).features.unified_exec).toBe(true);
+    expect(fragmentBlock(after)).not.toContain("[features]");
+  });
+
+  it("gathers its moved tables back from the empty block an earlier launch appended", async () => {
+    // What the previous writer made of the moved save: a stray END, OpenRig's tables where Codex left them, an empty block.
+    const after = await projectsOnceAndStays(`${savedByCodex("mcpAddMidFile").replace(/\n*$/, "")}\n\n${FRAGMENT_BEGIN}\n\n${FRAGMENT_END}\n`);
+    expect(fragmentBlock(after)).toContain("[mcp_servers.exa]");
+  });
+
+  it("leaves a moved table the person has since changed as theirs", async () => {
+    const after = await projectsOnceAndStays(savedByCodex("mcpAddMidFile").replace("https://mcp.exa.ai/mcp", "https://exa.internal.example/mcp"));
+    expect((parseToml(after) as Record<string, any>).mcp_servers.exa.url).toBe("https://exa.internal.example/mcp");
+    expect(fragmentBlock(after)).not.toContain("[mcp_servers.exa]");
+    expect(fragmentBlock(after)).toContain("[mcp_servers.context7]");
+  });
+
   it("keeps $ sequences in a fragment literal when it is re-projected", async () => {
     const userConfig = '[projects."/tmp/workspace"]\ntrust_level = "trusted"\n';
     const fragment = '[mcp_servers.dollar]\ncommand = "echo $$ $& $` $\'"\n';

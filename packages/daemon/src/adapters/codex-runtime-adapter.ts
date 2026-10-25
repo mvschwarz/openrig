@@ -1443,6 +1443,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     assertFragmentOpensWithTable(fragment, entry.absolutePath, entry.effectiveId);
     const rendered = upsertManagedCodexConfigFragment(existing, entry.effectiveId, fragment);
     assertRendersAsLoadableToml(rendered, configPath, entry.effectiveId);
+    if (!changesOnlyFragmentTables(existing, rendered, fragment)) {
+      throw new Error(`Codex config projection '${entry.effectiveId}' would change more than its own tables in ${configPath}; left unchanged.`);
+    }
     this.fs.writeFile(configPath, rendered);
     return true;
   }
@@ -2605,22 +2608,89 @@ function dropCollidingFragmentTables(
 function upsertManagedCodexConfigFragment(content: string, id: string, fragment: string): string {
   const start = `# BEGIN OPENRIG MANAGED CODEX CONFIG FRAGMENT: ${id}`;
   const end = `# END OPENRIG MANAGED CODEX CONFIG FRAGMENT: ${id}`;
-  const pattern = new RegExp(`${escapeRegExp(start)}[\\s\\S]*?${escapeRegExp(end)}\\n?`, "m");
+  const lines = content.split("\n");
+  const topLevel = lineStartsAtDocumentLevel(content);
+  const isMarker = (at: number) => topLevel[at] === true && (lines[at]!.trim() === start || lines[at]!.trim() === end);
+  const begin = lines.findIndex((line, at) => isMarker(at) && line.trim() === start);
+  const close = begin < 0 ? -1 : lines.findIndex((line, at) => at > begin && isMarker(at) && line.trim() === end);
+  const inBlock = (at: number) => close >= 0 && at > begin && at < close;
 
-  // Everything outside THIS block is what the fragment must not collide with.
-  // Our own previous block is excluded because re-projection replaces it
-  // wholesale — counting it would make the second projection drop everything
-  // the first one legitimately landed.
-  const userOwned = content.replace(pattern, "");
-  const { kept } = dropCollidingFragmentTables(fragment, userOwned);
-  const block = `${start}\n${kept}\n${end}\n`;
+  // Codex 0.164.0 prints every table it rewrites (all of `[mcp_servers]` on `codex mcp add`) after the others, and the
+  // comment above the first goes with it, so a save can leave our markers apart from our tables. Outside the block, a
+  // fragment table still holding exactly the fragment's values is ours where Codex left it, and our stray markers go.
+  const ours = fragmentTableValues(fragment);
+  const drop = new Set<number>();
+  for (const section of tomlSections(content)) {
+    const value = ours.get(JSON.stringify(section.path));
+    if (inBlock(section.header) || value === undefined) continue;
+    let stop = section.end;
+    while (stop - 1 > section.header && /^\s*(?:#.*)?$/.test(lines[stop - 1]!)) stop--;
+    if (!isDeepStrictEqual(tomlTableValue(lines.slice(section.header, stop).join("\n"), section.path), value)) continue;
+    for (let at = section.start; at < stop; at++) if (at >= section.header || !/\S/.test(lines[at]!)) drop.add(at);
+  }
+  lines.forEach((_, at) => { if (isMarker(at) && !(close >= 0 && (at === begin || at === close))) drop.add(at); });
+  const outside = (from: number, to: number) => lines.slice(from, to).filter((_, offset) => !drop.has(from + offset));
 
-  if (pattern.test(content)) {
-    return content.replace(pattern, () => block); // literal: a string would expand `$` patterns in the fragment
+  if (close >= 0) {
+    // Codex can print a table of its own between our markers (a new `[features]`, say): that's the person's, and it's
+    // kept after the block. Our tables inside are replaced whole.
+    const inner = lines.slice(begin + 1, close);
+    const theirs = tomlSections(inner.join("\n")).filter((section) => !ours.has(JSON.stringify(section.path)))
+      .map(({ start: from, end: to }) => inner.slice(from, to).join("\n")).join("\n").trim();
+    const before = outside(0, begin);
+    const after = outside(close + 1, lines.length);
+    const { kept } = dropCollidingFragmentTables(fragment, [...before, theirs, ...after].join("\n"));
+    const block = `${start}\n${kept}\n${end}${theirs ? `\n\n${theirs}` : ""}`;
+    return [...before, block, ...(after.length > 0 ? after : [""])].join("\n");
   }
 
-  const prefix = content.replace(/\n*$/, "");
+  const rest = outside(0, lines.length).join("\n");
+  const { kept } = dropCollidingFragmentTables(fragment, rest);
+  const block = `${start}\n${kept}\n${end}\n`;
+  const prefix = rest.replace(/\n*$/, "");
   return prefix.length > 0 ? `${prefix}\n\n${block}` : block;
+}
+
+/** The fragment's tables by key path (JSON), each with the values it sets. An array-of-tables entry has no single
+ *  value, so it's only ever recognized between our markers. */
+function fragmentTableValues(fragment: string): Map<string, unknown> {
+  const values = new Map<string, unknown>();
+  for (const block of splitAtTableHeaders(fragment)) {
+    const path = block.header === null ? null : tomlTableHeaderPath(block.header);
+    if (path) values.set(JSON.stringify(path), tomlTableValue(block.text, path));
+  }
+  return values;
+}
+
+/** The value one table's text sets at `path`, or undefined when it doesn't parse. */
+function tomlTableValue(text: string, path: string[]): unknown {
+  let node: unknown;
+  try { node = parseToml(text); } catch { return undefined; }
+  for (const key of path) node = node !== null && typeof node === "object" ? (node as Record<string, unknown>)[key] : undefined;
+  return node;
+}
+
+/** Whether `next` changes nothing in `content` but the fragment's own tables: the person's settings, and every table
+ *  Codex wrote, read the same. Both must parse. */
+function changesOnlyFragmentTables(content: string, next: string, fragment: string): boolean {
+  const paths = [...fragmentTableValues(fragment).keys()].map((key) => JSON.parse(key) as string[]);
+  const rest = (text: string) => {
+    const root = parseToml(text) as Record<string, unknown>;
+    for (const path of paths) withoutTomlPath(root, path);
+    return root;
+  };
+  try { return isDeepStrictEqual(rest(content), rest(next)); } catch { return false; }
+}
+
+/** Delete `path` from a parsed document in place, and any table it leaves empty. */
+function withoutTomlPath(node: Record<string, unknown>, path: string[]): void {
+  const [key, ...more] = path;
+  if (key === undefined || !Object.hasOwn(node, key)) return;
+  const child = node[key];
+  if (more.length === 0) { delete node[key]; return; }
+  if (child === null || typeof child !== "object" || Array.isArray(child)) return;
+  withoutTomlPath(child as Record<string, unknown>, more);
+  if (Object.keys(child).length === 0) delete node[key];
 }
 
 /**

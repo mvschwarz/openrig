@@ -1,0 +1,15 @@
+{
+  "source": "codex-cli 0.164.0 on Ubuntu 26.04, run in a scratch CODEX_HOME with no login: `codex mcp add gk -- echo hi` and `codex features enable unified_exec`, on configs holding OpenRig's shipped codex-default-config block",
+  "mcpAddMidFile": {
+    "before": "[features]\nexample = true\n\n[projects.\"/tmp/a\"]\ntrust_level = \"trusted\"\n\n# BEGIN OPENRIG MANAGED CODEX CONFIG FRAGMENT: shared:codex-default-config\n[mcp_servers.exa]\nurl = \"https://mcp.exa.ai/mcp\"\n\n[mcp_servers.context7]\nurl = \"https://mcp.context7.com/mcp\"\n# END OPENRIG MANAGED CODEX CONFIG FRAGMENT: shared:codex-default-config\n\n[projects.\"/tmp/b\"]\ntrust_level = \"trusted\"\n",
+    "after": "[features]\nexample = true\n\n[projects.\"/tmp/a\"]\ntrust_level = \"trusted\"\n# END OPENRIG MANAGED CODEX CONFIG FRAGMENT: shared:codex-default-config\n\n[projects.\"/tmp/b\"]\ntrust_level = \"trusted\"\n\n[mcp_servers.exa]\nurl = \"https://mcp.exa.ai/mcp\"\n\n[mcp_servers.context7]\nurl = \"https://mcp.context7.com/mcp\"\n\n[mcp_servers.gk]\ncommand = \"echo\"\nargs = [\"hi\"]\n"
+  },
+  "mcpAddBlockLast": {
+    "before": "[features]\nexample = true\n\n[projects.\"/tmp/a\"]\ntrust_level = \"trusted\"\n\n# BEGIN OPENRIG MANAGED CODEX CONFIG FRAGMENT: shared:codex-default-config\n[mcp_servers.exa]\nurl = \"https://mcp.exa.ai/mcp\"\n\n[mcp_servers.context7]\nurl = \"https://mcp.context7.com/mcp\"\n# END OPENRIG MANAGED CODEX CONFIG FRAGMENT: shared:codex-default-config\n",
+    "after": "[features]\nexample = true\n\n[projects.\"/tmp/a\"]\ntrust_level = \"trusted\"\n\n[mcp_servers.exa]\nurl = \"https://mcp.exa.ai/mcp\"\n\n[mcp_servers.context7]\nurl = \"https://mcp.context7.com/mcp\"\n\n[mcp_servers.gk]\ncommand = \"echo\"\nargs = [\"hi\"]\n# END OPENRIG MANAGED CODEX CONFIG FRAGMENT: shared:codex-default-config\n"
+  },
+  "featuresEnableBlockLast": {
+    "before": "[projects.\"/tmp/a\"]\ntrust_level = \"trusted\"\n\n# BEGIN OPENRIG MANAGED CODEX CONFIG FRAGMENT: shared:codex-default-config\n[mcp_servers.exa]\nurl = \"https://mcp.exa.ai/mcp\"\n\n[mcp_servers.context7]\nurl = \"https://mcp.context7.com/mcp\"\n# END OPENRIG MANAGED CODEX CONFIG FRAGMENT: shared:codex-default-config\n",
+    "after": "[projects.\"/tmp/a\"]\ntrust_level = \"trusted\"\n\n# BEGIN OPENRIG MANAGED CODEX CONFIG FRAGMENT: shared:codex-default-config\n[mcp_servers.exa]\nurl = \"https://mcp.exa.ai/mcp\"\n\n[mcp_servers.context7]\nurl = \"https://mcp.context7.com/mcp\"\n\n[features]\nunified_exec = true\n# END OPENRIG MANAGED CODEX CONFIG FRAGMENT: shared:codex-default-config\n"
+  }
+}
