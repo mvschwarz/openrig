@@ -163,6 +163,18 @@ function findPatternEvidence(lines: string[], patterns: RegExp[]): string | null
   return null;
 }
 
+/** Pi's direct TUI has no runner hooks when adopted. Match its current Yes/No
+ * select widget plus the trailing native footer, not a question in chat history. */
+function findCurrentPiConfirmation(lines: string[]): string | null {
+  const footer = lines.length - 4;
+  if (footer < 2 || !/^↑↓ navigate\s+enter select\s+escape\/ctrl\+c cancel$/.test(lines[footer]!)) return null;
+  if (!/^─{3,}$/.test(lines[footer + 1]!) || !/\S.* • \S/.test(lines[footer + 2]!) ||
+      !/^↑[\d.]+[kM]?\s+↓[\d.]+[kM]?\b/.test(lines[footer + 3]!)) return null;
+  const choices = lines.slice(footer - 2, footer);
+  return choices.join("\n") === "→ Yes\nNo" || choices.join("\n") === "Yes\n→ No"
+    ? choices.find(line => line.startsWith("→ "))! : null;
+}
+
 function findCurrentClaudeQuestion(paneContent: string): string | null {
   // Claude 2.1.289 can wrap a current choice beyond the general prompt window.
   // Anchor at its terminal footer, then follow only the adjoining choice block.
@@ -525,6 +537,9 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   if (lastNonBlank.length === 0) {
     return { state: "unknown", reason: "empty_capture", evidence: null };
   }
+
+  const piConfirmation = findCurrentPiConfirmation(lastNonBlank);
+  if (piConfirmation) return { state: "attention", reason: "selection_prompt", evidence: piConfirmation };
 
   const recentLines = lastNonBlank.slice(-8);
   const claudeComposer = findClaudeComposer(paneContent, options);

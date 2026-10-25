@@ -243,6 +243,77 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(mirror).toContain("[omp-runner] ERROR 529 overloaded");
   });
 
+  // Reconstructed from a filtered Pi 1.4 capture (blank lines removed, columns cut).
+  // The help footer is followed by one divider, cwd/session and token/model status.
+  const piConfirmation = [
+    " Allow?", " → Yes", "   No",
+    " ↑↓ navigate  enter select  escape/ctrl+c cancel",
+    "────────────────────────────────────",
+    "~/project • tui",
+    "↑3.6k ↓1.6k R24k CH95.0% $0.026 (sub) 0.8%/500k (auto)    gpt-6.1-sol • low",
+  ].join("\n");
+
+  it.each([null, "unknown", "pi"])("plain send refuses the adopted Pi confirmation with runtime %s", async (runtime) => {
+    const node = rigRepo.addNode(rigId, "adopted.worker", { role: "worker" });
+    db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(runtime, node.id);
+    const seat = "adopted-tui";
+    sessionRegistry.registerClaimedSession(node.id, seat);
+    sessionRegistry.updateBinding(node.id, { tmuxSession: seat, tmuxPane: "%42" });
+    const { sendText, sendKeys } = spies();
+    const capturePaneContent = vi.fn(async () => piConfirmation);
+    const result = await makeTransport(mockTmux({ capturePaneContent, sendText, sendKeys })).send(seat, "hello?");
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("target_needs_input");
+    expect(result.error).toContain("A message must not select or approve it");
+    expect(result.activity?.state).toBe("needs_input");
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+    expect(capturePaneContent).toHaveBeenCalledWith("%42", 20);
+  });
+
+  it("recognizes the Pi confirmation when No is selected", () => {
+    expect(classifyPaneActivity(piConfirmation.replace(" → Yes\n   No", "   Yes\n → No")))
+      .toMatchObject({ state: "attention", reason: "selection_prompt", evidence: "→ No" });
+  });
+
+  it("keeps the audited deliberate-input path for an adopted Pi dialog", async () => {
+    const node = rigRepo.addNode(rigId, "adopted.worker", { role: "worker" });
+    const seat = "adopted-tui";
+    sessionRegistry.registerClaimedSession(node.id, seat);
+    sessionRegistry.updateBinding(node.id, { tmuxSession: seat, tmuxPane: "%42" });
+    const { sendText, sendKeys } = spies();
+    const result = await makeTransport(mockTmux({ capturePaneContent: async () => piConfirmation, sendText, sendKeys }))
+      .send(seat, "n", { dangerouslyInteract: true, reason: "operator deliberately declines" });
+    expect(result.ok).toBe(true);
+    expect(sendText).toHaveBeenCalledWith(seat, "n", undefined, { bracketed: false });
+    expect(sendKeys).not.toHaveBeenCalled();
+    expect(overrideEvents()).toHaveLength(1);
+  });
+
+  it.each([
+    ["historical dialog above a later input", `${piConfirmation}\n────────────────────────────────────\nhello\n────────────────────────────────────\n~/project • tui\n↑3.6k ↓1.6k R24k CH95.0% $0.026 (sub) 0.8%/500k (auto)    gpt-6.1-sol • low`],
+    ["footer quoted in output", "The hint is: ↑↓ navigate  enter select  escape/ctrl+c cancel"],
+    ["question without the select UI", "Allow?\nYes or No\nReady for messages"],
+  ])("does not treat %s as a current Pi confirmation", (_name, pane) => {
+    expect(classifyPaneActivity(pane, { runtime: "unknown" }).state).not.toBe("attention");
+  });
+
+  // Adopted TUI seats have no managed runner hooks and may retain an unknown runtime.
+  it.each([null, "unknown", "pi"])("ordinary send still reaches a quiet adopted seat with runtime %s", async (runtime) => {
+    const node = rigRepo.addNode(rigId, "adopted.worker", { role: "worker" });
+    db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(runtime, node.id);
+    const seat = "adopted-tui";
+    sessionRegistry.registerClaimedSession(node.id, seat);
+    sessionRegistry.updateBinding(node.id, { tmuxSession: seat, tmuxPane: "%42" });
+    const { sendText, sendKeys } = spies();
+    const capturePaneContent = vi.fn(async () => "Ready for another message.");
+    const result = await makeTransport(mockTmux({ capturePaneContent, sendText, sendKeys })).send(seat, "hello");
+    expect(result.ok).toBe(true);
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendKeys).toHaveBeenCalledWith(seat, ["Enter"]);
+    expect(capturePaneContent).toHaveBeenCalledWith("%42", 20);
+  });
+
   // K-1: default send to a pane at an interactive prompt → refused, nothing typed/submitted.
   it("K-1: default send to an AskUserQuestion refuses (target_needs_input) and never types or submits", async () => {
     const { sendText, sendKeys } = spies();
