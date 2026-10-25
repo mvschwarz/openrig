@@ -3,7 +3,7 @@
 // The runner is what makes a Pi seat behave like a normal OpenRig tmux seat
 // while everything underneath stays structured RPC:
 //
-//   pane stdin (rig send / human typing)  ──▶ RPC prompt / steer / follow_up
+//   pane stdin (rig send / human typing)  ──▶ RPC prompt (queued as a steer while busy) / follow_up
 //   pi RPC events (typed JSONL)           ──▶ (a) human-readable pane mirror
 //                                             (b) activity + session_identity
 //                                                 POSTs to the daemon
@@ -533,15 +533,12 @@ export class RunnerCore {
       this.io.mirrorLine(`you (follow-up) ▸ ${message}`);
       return;
     }
-    if (this.streaming) {
-      // Mid-stream: steer delivers after the current turn's tool calls,
-      // before the next model call (Pi's documented semantics).
-      this.io.sendRpc({ type: "steer", message: block });
-      this.io.mirrorLine(`you (steer) ▸ ${block}`);
-      return;
-    }
-    this.io.sendRpc({ type: "prompt", message: block });
-    this.io.mirrorLine(`you ▸ ${block}`);
+    // The runtime decides, not the runner: with streamingBehavior "steer", Pi and OMP run the prompt when idle and,
+    // while busy, queue it as a steer, delivered after the current turn's tool calls and before the next model call.
+    // The runner's `streaming` starts only at agent_start, so it can't tell when a turn is about to start (#1932) or
+    // when a prompt was consumed locally and started none. It labels the mirror line only.
+    this.io.sendRpc({ type: "prompt", message: block, streamingBehavior: "steer" });
+    this.io.mirrorLine(this.streaming ? `you (steer) ▸ ${block}` : `you ▸ ${block}`);
   }
 
   /** Child process exit — honest, loud, durable. */

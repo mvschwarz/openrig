@@ -216,6 +216,11 @@ export type RigEvent =
   // persisted node WITHOUT launch/relaunch/input. Distinct from node.claimed so
   // the operator is never misled about which op happened.
   | { type: "node.reconciled"; rigId: string; nodeId: string; logicalId: string; sessionName: string }
+  // Slice 16: a seat's live runtime switch committed; the seat now runs on `to` in a new conversation.
+  | { type: "seat.runtime_changed"; rigId: string; nodeId: string; switchId: string; from: string; to: string; reason: string;
+      requestedBy: string | null; generation: string; previousGeneration: string;
+      settings: Record<string, { value: string | null; source: string }>; dropped: Array<{ setting: string; value: string }>;
+      permissionSelection: string; claimsMoved: number }
   | { type: "seat.handover_completed"; rigId: string; nodeId: string; logicalId: string; previousOccupant: string; currentOccupant: string; source: string; reason: string; operator: string | null;
       /** OPR.0.5.5.5 (fix B2) — the executed source outcome, persisted so the DURABLE
        *  record (not just the command response) carries what primed the successor:
@@ -234,6 +239,7 @@ export type RigEvent =
   | { type: "pod.created"; rigId: string; podId: string; namespace: string; label: string }
   | { type: "pod.deleted"; rigId: string; podId: string }
   | { type: "node.startup_pending"; rigId: string; nodeId: string; startupProof?: StartupProofSelection }
+  | { type: "node.startup_first_input_passed"; rigId: string; nodeId: string; sessionId: string; path: string; submission: "unconfirmed" }
   | { type: "node.startup_ready"; rigId: string; nodeId: string; previousStatus?: "failed" | "attention_required"; submission?: { status: "unverified" | "staged"; reasons: string[]; warning?: string; diagnostics?: StartupSubmissionDiagnostic[] } }
   | { type: "node.startup_failed"; rigId: string; nodeId: string; error: string; sessionId?: string; freshContextPending?: boolean; forkContextPending?: { parentToken: string; isRestore: boolean }; submissionDiagnostics?: StartupSubmissionDiagnostic[]; stage?: StartupFailureStage; hasPendingWork?: boolean; requestedResumeToken?: string | null; requestedResumeType?: string | null; probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence }
   // OPR.0.4.3.06 — startup proof (challenge-verified orientation). Append-only.
@@ -500,6 +506,9 @@ export interface RestoreNodeResult {
   /** Managed guidance block ids the seat's guidance file still lacks after restore. The seat keeps
    *  its own status (a resumed session is still running); this only discloses the gap. */
   guidanceGaps?: string[];
+  /** An ordinary terminal seat (`isOrdinaryTerminalSeat`) has no conversation, so its fresh launch is its whole restore
+   *  and doesn't leave the rig partially restored. */
+  noConversation?: true;
 }
 
 export type RestoreOutcome =
@@ -1280,6 +1289,13 @@ export interface RigSpec {
   workspace?: WorkspaceSpec;
   pods: RigSpecPod[];
   edges: RigSpecCrossPodEdge[];
+}
+
+/** The validated source needed to recreate a fresh pod-aware seat. */
+export interface NodeLaunchRecipe {
+  version: 1;
+  rigRoot: string;
+  rigSpec: RigSpec;
 }
 
 export interface RigServicesWaitTarget {

@@ -100,6 +100,21 @@ describe("provider routes", () => {
     expect(res.status).toBe(400);
   });
 
+  it("precheck and switch lend the service the seat's in-place restart, so both act on the home the seat runs on", async () => {
+    const lent: unknown[] = [];
+    const app = appWith({
+      ...stubService,
+      precheck: async (_input, seatRestart) => { lent.push(seatRestart); return { safe: true }; },
+      switchAccount: async (_input, seatRestart) => { lent.push(seatRestart); return { outcome: "rebind_in_progress" }; },
+    });
+    expect((await app.request("/api/provider/precheck?seat=s1&toAccount=work")).status).toBe(200);
+    expect((await app.request("/api/provider/switch", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ seat: "s1", toAccount: "work" }),
+    })).status).toBe(200);
+    expect(lent).toHaveLength(2);
+    for (const seatRestart of lent) expect(seatRestart).toMatchObject({ plan: expect.any(Function), run: expect.any(Function) });
+  });
+
   it("switch business outcomes are 200 payloads, not transport errors (failed_safely = 200)", async () => {
     const res = await appWith(stubService).request("/api/provider/switch", {
       method: "POST",

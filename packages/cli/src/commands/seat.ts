@@ -26,6 +26,9 @@ interface SeatStatusResponse {
   pod_id: string | null;
   pod_namespace: string | null;
   runtime: string | null;
+  /** Slice 16: an open runtime switch, or one recovery stopped short of finishing. */
+  runtimeSwitch?: { id: string; phase: string; from: string; to: string; committed: boolean; startedAt: string; attention: string | null; outcome: string | null };
+  compaction?: { stage: string; detail: string };
   current_occupant: string | null;
   typingGuard?: { desired: boolean; effective: boolean; pending: boolean; heldCount: number;
     desiredMode?: string; effectiveMode?: string; desiredLevel?: string; effectiveLevel?: string; };
@@ -53,10 +56,17 @@ interface SeatStatusResponse {
       openRigAdds: { claudeAllow: string[]; claudeAsk: string[]; notes: string[] };
       unknown: string[];
       controls: string[];
+      advisories?: string[];
     };
   };
   session_status: string | null;
   launch_cwd?: string | null;
+  runtime_home?: {
+    variable: string;
+    home: string | null;
+    source: "member" | "rig" | "daemon" | "native_default";
+    ignored?: { source: string; value: string };
+  };
   session_reason?: string | null;
   startup_status: string | null;
   occupant_lifecycle: string;
@@ -185,6 +195,13 @@ function printHuman(status: SeatStatusResponse): void {
   console.log(`Logical ID: ${status.logical_id}`);
   console.log(`Current occupant: ${display(status.current_occupant)}`);
   if (status.launch_cwd !== undefined) console.log(`Working directory for future launches: ${display(status.launch_cwd)}`);
+  if (status.runtime_home) {
+    const h = status.runtime_home;
+    const from = h.source === "member" || h.source === "rig" ? `the seat's own, from its ${h.source} env`
+      : h.source === "daemon" ? "the daemon's" : "the native default";
+    console.log(`Runtime home (${h.variable}) for launches: ${display(h.home)} (${from}; configured, not proof of the login a running session uses)`);
+    if (h.ignored) console.log(`  Ignored: its ${h.ignored.source} env sets ${h.variable}=${h.ignored.value}, which isn't an absolute path`);
+  }
   if (status.typingGuard) {
     const g = status.typingGuard;
     const mode = g.effectiveLevel ?? g.effectiveMode ?? (g.effective ? "on" : "off");
@@ -196,6 +213,7 @@ function printHuman(status: SeatStatusResponse): void {
     else console.log("Hold pauses all automatic input, including writing lifecycle. Changing mode does not replay held messages.");
   }
   console.log(`Session: ${display(status.session_status, "unknown")}`);
+  if (status.compaction) console.log(`Managed compaction (${status.compaction.stage}): ${status.compaction.detail}`);
   const reason = sessionReason(status.session_reason);
   if (reason) console.log(`Reason: ${reason}`);
   if (status.permissions?.account) {
@@ -203,6 +221,7 @@ function printHuman(status: SeatStatusResponse): void {
     const a = p.account!;
     console.log("Permissions, planned for the next fresh managed launch (not observed):");
     console.log(`  ${a.summary}`);
+    for (const advisory of a.advisories ?? []) console.log(`  ${advisory}`);
     if (a.overrides.length) console.log(`  This seat's choice is used instead of the ${a.overrides.join(" and the ")}.`);
     for (const note of a.openRigAdds.notes) console.log(`  ${note}`);
     if (a.openRigAdds.claudeAllow.length) console.log("  The exact allowance and ask lists are in --json, under permissions.account.openRigAdds.");
@@ -250,6 +269,12 @@ function printHuman(status: SeatStatusResponse): void {
   console.log(`Handover result: ${display(status.handover_result)}`);
   console.log(`Previous occupant: ${display(status.previous_occupant)}`);
   console.log(`Handover at: ${display(status.handover_at)}`);
+  if (status.runtimeSwitch) {
+    const sw = status.runtimeSwitch;
+    console.log(`Runtime switch: ${sw.from} -> ${sw.to} (switch ${sw.id}, since ${sw.startedAt}): ${sw.committed
+      ? `committed; the ${sw.to} occupant holds the seat` : `not committed; the ${sw.from} occupant holds the seat`}, ${sw.phase}`);
+    if (sw.attention) console.log(`  Needs attention: ${sw.attention} Finish it with rig seat set-runtime ${status.seat_ref} --recover.`);
+  }
 }
 
 function printHumanHandoverPlan(plan: SeatHandoverPlan): void {
@@ -542,7 +567,7 @@ rig seat handover, THEN retarget the view. Examples:
   cmd
     .command("clear-attention")
     .argument("<session>", "Canonical session name (e.g. dev-impl@my-rig)")
-    .option("--reason <text>", "Attest startup or subset-restore attention; cannot bypass full-restore or pane-identity checks")
+    .option("--reason <text>", "Attest startup or subset-restore attention, or that a prompt the latest hook names is gone; cannot bypass full-restore or pane-identity checks")
     .option("--json", "JSON output for agents")
     .description("Reconcile seat attention using the checks for its attention class")
     .addHelpText("after", `
@@ -551,7 +576,11 @@ Examples:
   rig seat clear-attention dev-impl@my-rig --reason "founder re-authed, confirmed live"
   rig seat clear-attention dev-impl@my-rig --json
 
---reason can acknowledge startup-status and subset-restore attention. It does
+--reason can acknowledge startup-status and subset-restore attention. It can
+also say a prompt is gone: when the seat's latest hook still says it waits on a
+person (a permission prompt declined or answered with no hook after) and sends
+are refused, --reason "<what you saw>" records the prompt cleared. Each send
+still checks the pane for a prompt it recognizes. It does
 not bypass full-restore continuity or pane-identity checks. Acknowledgment alone
 does not prove that the original conversation resumed.
 If the recorded native token needs correction and you know the actual token:
@@ -802,6 +831,145 @@ resume/successor launch reads it at call time. Examples:
         console.log(`Model for ${s?.logicalId}@${s?.rigName}: ${String(data["from"] ?? "none")} -> ${String(data["to"])} (audited).`);
         console.log("The next managed resume/successor launch composes the new model.");
       });
+    });
+
+  cmd
+    .command("set-runtime")
+    .argument("<seat>", "Canonical session name or logical seat ref")
+    .option("--runtime <runtime>", "codex or claude-code")
+    .option("--reason <text>", "Why the seat moves; recorded with the switch")
+    .option("--model <id>", "Target model; otherwise the seat's agent spec for the target, else the target's default")
+    .option("--effort <level>", "Target effort, the target runtime's own level (not translated)")
+    .option("--codex-config-profile <name>", "Codex configuration profile for a Codex successor")
+    .option("--permission-mode <mode>", "Target native permission choice; default: inherit the seat's member and rig policy")
+    .option("--confirm-timeout <seconds>", "How long the successor has to confirm the handover (default 180)")
+    .option("--dry-run", "Show the plan (settings, what is cleared, costs) without changing anything")
+    .option("--confirm <switch-id>", "For the staged successor only: confirm the handover (with --note)")
+    .option("--note <text>", "With --confirm: what you'll do first")
+    .option("--recover", "Finish an interrupted switch from its record")
+    .option("--json", "JSON output for agents")
+    .description("Move a live Codex or Claude Code seat to the other runtime, successor first")
+    .addHelpText("after", `
+The seat keeps its address, connections, queue rows and claims. Its successor
+starts on the target runtime beside the current occupant, reads a handover, and
+confirms it; only then does the seat move to it and the old runtime retire.
+Without a confirmation in time, nothing changes and the current occupant keeps
+the seat.
+
+Costs: a new conversation (history isn't converted, only the handover carries
+over); the seat's pane and scrollback change; the team file isn't rewritten (a
+later converge reports a deferred change_runtime); the source runtime's model,
+effort, Codex profile and native permission choice are cleared, not mapped; two
+processes run until cutover; messages sent to the seat during the switch are
+held, not typed, and need sending again afterwards.
+Codex and Claude Code, single-pane seats only. --dry-run lists the details.
+
+A seat can switch itself (its CLI may end when it retires; the daemon finishes).
+  rig seat set-runtime dev-impl@my-rig --runtime claude-code --reason "Codex limit" --dry-run
+  rig seat set-runtime dev-impl@my-rig --runtime claude-code --reason "Codex limit"
+  rig seat status dev-impl@my-rig            # an open or interrupted switch shows here
+  rig seat set-runtime dev-impl@my-rig --recover`)
+    .action(async (seat: string, opts: { runtime?: string; reason?: string; model?: string; effort?: string; codexConfigProfile?: string;
+      permissionMode?: string; confirmTimeout?: string; dryRun?: boolean; confirm?: string; note?: string; recover?: boolean; json?: boolean }) => {
+      const modes = [opts.confirm !== undefined, opts.recover === true, opts.runtime !== undefined].filter(Boolean).length;
+      if (modes !== 1) {
+        console.error("Pass exactly one of --runtime <runtime> (with --reason), --confirm <switch-id> (with --note), or --recover.");
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.runtime !== undefined && !opts.reason?.trim()) {
+        console.error("Pass --reason with --runtime; it is recorded with the switch.");
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.confirm !== undefined && !opts.note?.trim()) {
+        console.error('Pass --note with --confirm, saying what you\'ll do first.');
+        process.exitCode = 1;
+        return;
+      }
+      let confirmTimeoutSeconds: number | undefined;
+      if (opts.confirmTimeout !== undefined) {
+        confirmTimeoutSeconds = Number(opts.confirmTimeout);
+        if (!Number.isInteger(confirmTimeoutSeconds) || confirmTimeoutSeconds < 10 || confirmTimeoutSeconds > 3600) {
+          console.error("--confirm-timeout must be a whole number of seconds from 10 to 3600.");
+          process.exitCode = 1;
+          return;
+        }
+      }
+      const deps = getDeps();
+      const daemon = await getDaemonStatus(deps.lifecycleDeps);
+      if (!daemonStatusGuard(daemon)) return;
+      const client = deps.clientFactory(getDaemonUrl(daemon));
+      const base = `/api/seat/set-runtime/${encodeURIComponent(seat)}`;
+      let res;
+      try {
+        res = opts.confirm !== undefined
+          ? await client.post<Record<string, unknown>>(`${base}/confirm`, { switchId: opts.confirm, note: opts.note })
+          : opts.recover
+            ? await client.post<Record<string, unknown>>(`${base}/recover`, {}, { timeoutMs: 60_000 })
+            : await client.post<Record<string, unknown>>(base, {
+              runtime: opts.runtime, reason: opts.reason, dryRun: opts.dryRun === true,
+              ...(opts.model !== undefined ? { model: opts.model } : {}), ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
+              ...(opts.codexConfigProfile !== undefined ? { codexConfigProfile: opts.codexConfigProfile } : {}),
+              ...(opts.permissionMode !== undefined ? { permissionMode: opts.permissionMode } : {}),
+              ...(confirmTimeoutSeconds !== undefined ? { confirmTimeoutSeconds } : {}),
+            }, { timeoutMs: opts.dryRun ? 30_000 : ((confirmTimeoutSeconds ?? 180) + 120) * 1000 });
+      } catch (err) {
+        if (!(err instanceof DaemonTimeoutError) || opts.dryRun) throw err;
+        const unknown = { ok: false as const, code: "runtime_switch_outcome_unknown", status: "unknown",
+          message: "The CLI stopped waiting; the daemon may still be switching the seat.",
+          guidance: `Check it before anything else: rig seat status ${shellQuote(seat)}` };
+        if (opts.json) console.log(JSON.stringify(unknown, null, 2));
+        else printSeatError(unknown, unknown.message);
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.json) {
+        console.log(JSON.stringify(res.data, null, 2));
+        process.exitCode = res.status >= 500 ? 2 : res.status >= 400 || res.data["recoveryPending"] === true ? 1 : 0;
+        return;
+      }
+      if (res.status >= 400) {
+        printSeatError(res.data as unknown as SeatStatusError, `Runtime switch failed (HTTP ${res.status})`);
+        process.exitCode = res.status >= 500 ? 2 : 1;
+        return;
+      }
+      const data = res.data;
+      if (opts.confirm !== undefined || opts.recover) {
+        console.log(String(data["message"] ?? data["outcome"] ?? "Done."));
+        return;
+      }
+      const seatInfo = data["seat"] as { ref?: string } | undefined;
+      const name = seatInfo?.ref ?? seat;
+      if (data["changed"] === false) {
+        console.log(`${name} already runs ${String(data["to"])}. Nothing changed.`);
+        return;
+      }
+      const label = (source: string) => source === "explicit" ? "as given" : source === "agent_spec" ? "from the seat's agent spec" : "the runtime's default";
+      const settings = (data["settings"] ?? {}) as Record<string, { value: string | null; source: string }>;
+      if (data["dryRun"]) console.log(`Runtime switch plan for ${name}: ${String(data["from"])} -> ${String(data["to"])}. Nothing changes until you run it without --dry-run.`);
+      else console.log(`Switched ${name} from ${String(data["from"])} to ${String(data["to"])} (switch ${String(data["switchId"])}).`);
+      console.log(`Settings on ${String(data["to"])}:`);
+      for (const [key, title] of [["model", "model"], ["effort", "effort"], ["advisor", "advisor"], ["codexConfigProfile", "Codex profile"]] as const) {
+        const setting = settings[key];
+        if (!setting || (key === "advisor" && data["to"] !== "claude-code") || (key === "codexConfigProfile" && data["to"] !== "codex")) continue;
+        console.log(`  ${title}: ${setting.value ?? "none"} (${label(setting.source)})`);
+      }
+      const permission = data["permission"] as { mode: string; source: string } | undefined;
+      if (permission) console.log(`  permissions: ${permission.source === "explicit" ? `${permission.mode} (as given)` : "the seat's member and rig policy"}`);
+      const dropped = (data["dropped"] as Array<{ setting: string; value: string }> | undefined) ?? [];
+      if (dropped.length) console.log(`Cleared from ${String(data["from"])}: ${dropped.map((d) => `${d.setting} ${d.value}`).join("; ")}.`);
+      for (const line of (data["notRun"] as string[] | undefined) ?? []) console.log(`Not run: ${line}`);
+      if (data["dryRun"]) {
+        console.log("Costs:");
+        for (const cost of (data["costs"] as string[] | undefined) ?? []) console.log(`  - ${cost}`);
+      } else {
+        const confirmation = data["confirmation"] as { note: string } | undefined;
+        if (confirmation) console.log(`The successor confirmed the handover: "${confirmation.note}"`);
+        console.log(`Queue: ${String(data["openRows"] ?? 0)} open rows stay addressed to the seat; ${String(data["claimsMoved"] ?? 0)} claims moved to the successor.`);
+      }
+      for (const warning of (data["warnings"] as string[] | undefined) ?? []) console.warn(`Warning: ${warning}`);
+      if (data["recoveryPending"] === true) process.exitCode = 1;
     });
 
   cmd

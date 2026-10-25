@@ -1,4 +1,5 @@
-import { operationalLaunchArgs, operationalLaunchArg } from "./kernel-authority.js";
+import { withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
+import { operationalLaunchArgs } from "./kernel-authority.js";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { TmuxAdapter } from "./tmux.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
@@ -28,6 +29,9 @@ export function isClaudeResumeType(resumeType: string | null | undefined): boole
 }
 
 interface ClaudeResumeOptions {
+  openrigHome?: string;
+  /** The compaction settings the restore reads from, so the launch grants those files too. */
+  restoreReadPolicy?: () => RestoreReadPolicy | null;
   seatLaunchEnvironment?: SeatLaunchEnvironment;
   claudeManagedLaunch?: ClaudeManagedLaunch;
   listProcesses?: NativeProcessLister;
@@ -93,8 +97,12 @@ export class ClaudeResumeAdapter {
     const choice = { kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture, permissionMode: selectedPermissionMode };
     const posture = claudePostureFlag(process.env, resolvedPosture, selectedPermissionMode);
     const appliedLaunch = observeClaudePermission(posture);
-    const permissionMode = posture + operationalLaunchArg("claude-code", choice);
-    const cmd = managed ? managed.command(["--permission-mode", selectedPermissionMode!, ...operationalLaunchArgs("claude-code", choice), ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...additionArgs, "--resume", resumeToken!], claudeResumeLaunchEnv(resumeToken!))
+    const launchArgs = withManagedRestoreReads(operationalLaunchArgs("claude-code", choice), {
+      openrigHome: this.options.openrigHome, session: tmuxSessionName, cwd, nativeSessionId: resumeToken!,
+      ...(this.options.restoreReadPolicy?.() ?? {}),
+    });
+    const permissionMode = posture + launchArgs.map(arg => ` ${shellQuote(arg)}`).join("");
+    const cmd = managed ? managed.command(["--permission-mode", selectedPermissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...additionArgs, "--resume", resumeToken!], claudeResumeLaunchEnv(resumeToken!))
       : `${claudeResumeLaunchPrefix(resumeToken!)}${claudeClassicRendererEnvPrefix(process.env)}claude ${permissionMode}${modelArg}${effortArg}${advisorArg}${additionArg} --resume ${shellQuote(resumeToken!)}`;
 
     const textResult = managed ? await this.tmux.sendShellCommand(tmuxSessionName, cmd, managed.assertCurrent)

@@ -396,6 +396,94 @@ describe("Claude context-window pins", () => {
   });
 });
 
+// A pinned Claude id answers as its dated snapshot: herdr-researcher@lab, pinned to claude-haiku-4-5, reported
+// claude-haiku-4-5-20251001 and was proclaimed divergent. The snapshot is the same model; a different one still diverges.
+describe("Claude snapshot pins", () => {
+  it.each([
+    ["claude-haiku-4-5", "claude-haiku-4-5-20251001"],
+    ["  Claude-Haiku-4-5 ", " CLAUDE-HAIKU-4-5-20251001 "],
+    ["claude-haiku-4-5-20251001", "claude-haiku-4-5"],
+    ["claude-sonnet-4-5[1m]", "claude-sonnet-4-5-20250929"],
+    ["fable", "claude-fable-5-1-20261001"],
+  ])("matches %s to %s without proclaiming", async (pinnedModel, model) => {
+    const { monitor, sent, recorded } = makeMonitor({
+      listPinnedSeats: () => [{ ...SEAT, runtime: "claude-code", pinnedModel }],
+      readEffectiveModel: () => ({ ok: true, model }),
+    });
+    expect(await monitor.checkOnce()).toEqual([]);
+    expect(sent).toEqual([]);
+    expect(recorded).toEqual([]);
+  });
+
+  it.each([
+    ["claude-code", "claude-haiku-4-5", "claude-sonnet-4-5-20250929"],
+    ["claude-code", "claude-haiku-4-5-20251001", "claude-haiku-4-5-20260101"],
+    ["claude-code", "claude-haiku-4", "claude-haiku-4-5-20251001"],
+    ["claude-code", "claude-haiku-4-5", "claude-haiku-4-5-20251001-extra"],
+    ["claude-code", "haiku", "claude-haiku-4-5-20251001"],
+    ["codex", "claude-haiku-4-5", "claude-haiku-4-5-20251001"],
+    ["pi", "claude-haiku-4-5", "claude-haiku-4-5-20251001"],
+    [null, "claude-haiku-4-5", "claude-haiku-4-5-20251001"],
+  ])("keeps real divergence for runtime=%s pin=%s effective=%s", async (runtime, pinnedModel, model) => {
+    const { monitor, recorded } = makeMonitor({
+      listPinnedSeats: () => [{ ...SEAT, runtime, pinnedModel }],
+      readEffectiveModel: () => ({ ok: true, model }),
+    });
+    const fired = await monitor.checkOnce();
+    expect(fired).toHaveLength(1);
+    expect(fired[0]).toMatchObject({ runtime, pinnedModel, effectiveModel: model });
+    expect(recorded).toHaveLength(1);
+  });
+});
+
+// #1926: a Claude Code seat on Amazon Bedrock is pinned to an inference-profile id (global.anthropic.claude-opus-5-5),
+// which Bedrock needs, and reports the bare model id. Every such seat was proclaimed divergent after a daemon restart.
+describe("Claude Bedrock inference-profile pins", () => {
+  it.each([
+    ["global.anthropic.claude-opus-5-5", "claude-opus-5-5"],
+    ["global.anthropic.claude-sonnet-5-5", "claude-sonnet-5-5"],
+    ["us.anthropic.claude-opus-5-5", "claude-opus-5-5"],
+    ["eu.anthropic.claude-opus-5-5", "claude-opus-5-5"],
+    ["apac.anthropic.claude-opus-5-5", "claude-opus-5-5"],
+    ["jp.anthropic.claude-opus-5-5", "claude-opus-5-5"],
+    ["au.anthropic.claude-opus-5-5", "claude-opus-5-5"],
+    ["us-gov.anthropic.claude-opus-5-5", "claude-opus-5-5"],
+    ["anthropic.claude-opus-5-5", "claude-opus-5-5"],
+    ["  Global.Anthropic.Claude-Opus-5-5 ", " claude-opus-5-5 "],
+    ["global.anthropic.claude-opus-5-5[1m]", "claude-opus-5-5"],
+    ["global.anthropic.claude-haiku-4-5", "claude-haiku-4-5-20251001"],
+    ["us.anthropic.claude-sonnet-4-5-20250929", "claude-sonnet-4-5"],
+  ])("matches %s to %s without proclaiming", async (pinnedModel, model) => {
+    const { monitor, sent, recorded } = makeMonitor({
+      listPinnedSeats: () => [{ ...SEAT, runtime: "claude-code", pinnedModel }],
+      readEffectiveModel: () => ({ ok: true, model }),
+    });
+    expect(await monitor.checkOnce()).toEqual([]);
+    expect(sent).toEqual([]);
+    expect(recorded).toEqual([]);
+  });
+
+  it.each([
+    ["claude-code", "global.anthropic.claude-opus-5-5", "claude-sonnet-5-5"],
+    ["claude-code", "global.anthropic.claude-opus-5", "claude-opus-5-5"],
+    ["claude-code", "global.claude-opus-5-5", "claude-opus-5-5"],
+    ["claude-code", "ca.anthropic.claude-opus-5-5", "claude-opus-5-5"],
+    ["claude-code", "global.anthropic.claude-haiku-4-5-20251001", "claude-haiku-4-5-20260101"],
+    ["codex", "global.anthropic.claude-opus-5-5", "claude-opus-5-5"],
+    ["pi", "global.anthropic.claude-opus-5-5", "claude-opus-5-5"],
+    [null, "global.anthropic.claude-opus-5-5", "claude-opus-5-5"],
+  ])("keeps real divergence for runtime=%s pin=%s effective=%s", async (runtime, pinnedModel, model) => {
+    const { monitor, recorded } = makeMonitor({
+      listPinnedSeats: () => [{ ...SEAT, runtime, pinnedModel }],
+      readEffectiveModel: () => ({ ok: true, model }),
+    });
+    const fired = await monitor.checkOnce();
+    expect(fired).toHaveLength(1);
+    expect(fired[0]).toMatchObject({ runtime, pinnedModel, effectiveModel: model });
+    expect(recorded).toHaveLength(1);
+  });
+});
+
 // The settled set is in memory, so a daemon restart used to alert again on an unchanged divergence (five alerts in eleven
 // minutes for two unchanged seats across one recovery). The occurrence id is content-derived, and the proclamation's own
 // durable record keeps it.

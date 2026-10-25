@@ -59,6 +59,21 @@ describe("the planned permission account", () => {
     expect(account.summary).toContain("this seat's own choice (person@host: careful review)");
   });
 
+  // Claude Code answers plan-mode turns with Sonnet when its model setting is exactly the alias `haiku`; a full id keeps it.
+  it.each([
+    ["haiku", "plan", true], [" haiku ", "plan", true],
+    ["claude-haiku-4-5", "plan", false], ["opusplan", "plan", false], ["sonnet", "plan", false],
+    ["haiku", "acceptEdits", false], ["haiku", null, false],
+  ] as const)("model %j with saved mode %j: names plan mode's Sonnet answer for the bare haiku alias only (%s)", (model, mode, named) => {
+    const { db, node } = seat("claude-code");
+    db.prepare("UPDATE nodes SET model = ? WHERE id = ?").run(model, node.id);
+    if (mode) new NativePermissionStore(db).write(node.id, { runtime: "claude-code", mode }, "person@host", "careful review");
+    const account = planPermissionAccount(db, node.id, "dev-builder@workshop", "claude-code", env);
+    expect(account.advisories).toEqual(named ? ['Claude Code answers plan-mode turns with Sonnet when the model is the alias "haiku". To keep Haiku, '
+      + 'set a full Haiku model id: rig seat set-model dev-builder@workshop --model <full Haiku id> --reason "<why>".'] : []);
+    expect(account.nativeArgument).toBe(mode ? `--permission-mode ${mode}` : "--permission-mode acceptEdits");
+  });
+
   it("follows a member's full-bypass policy", () => {
     const { db, rigRepo, node } = seat("claude-code");
     attach(rigRepo, db, node.id, "builtin:yolo", "full_bypass");

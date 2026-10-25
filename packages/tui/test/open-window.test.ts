@@ -3,13 +3,13 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openTerminalInWindow, terminalWindowNotice, viewerHerdrEnv } from "../src/terminals/open-window.js";
+import { inRex, openTerminalInWindow, terminalWindowNotice, viewerTerminalEnv, windowProvider } from "../src/terminals/open-window.js";
 import { createViewState } from "../src/state.js";
 import { demoSnapshot } from "../src/demo-data.js";
 import { parseCommand } from "../src/grammar.js";
 import { renderScreen } from "../src/render.js";
 import { hydrateSnapshot } from "../src/hydrate.js";
-import { terminalLines } from "../src/terminals/terminal-model.js";
+import { readTerminals, terminalLines } from "../src/terminals/terminal-model.js";
 import type { DaemonClient } from "../src/daemon-client.js";
 
 // Keep the prior implementation callable: it ignores the optional recovery hook.
@@ -157,7 +157,8 @@ describe("TUI desktop terminal action", () => {
 });
 
 const viewerMarkers = { TERM_PROGRAM: "herdr", HERDR_ENV: "1", HERDR_PANE_ID: "p-viewer", HERDR_SOCKET_PATH: "/run/viewer/herdr.sock" };
-const herdrKeys = ["TERM_PROGRAM", "HERDR_ENV", "HERDR_PANE_ID", "HERDR_SOCKET_PATH", "HERDR_SESSION"];
+const rexMarkers = { TERM_PROGRAM: "rex", REX_SESSION: "session:viewer", REX_BLOCK: "block:viewer", REX_SERVER: "unix:///viewer/rex.sock", REX_BIN_DIR: "/viewer/rex" };
+const herdrKeys = ["TERM_PROGRAM", "HERDR_ENV", "HERDR_PANE_ID", "HERDR_SOCKET_PATH", "HERDR_SESSION", "REX_SESSION", "REX_BLOCK", "REX_SERVER", "REX_BIN_DIR"];
 
 describe("TUI terminal action, viewed from a Herdr pane", () => {
   // The inert CLI reports the Herdr-related environment it was started with.
@@ -187,6 +188,45 @@ console.log(${JSON.stringify(JSON.stringify(opened))});`);
     const f = envChild();
     await openTerminalInWindow("saved:kernel", "http://localhost:7433", f.entry, undefined, undefined, async () => undefined);
     expect(f.seen()).toEqual({ TERM_PROGRAM: "tmux" });
+  });
+
+  it("hands the child a Rex viewer's markers, so it opens in that Rex", async () => {
+    ownEnv({ TERM_PROGRAM: "tmux", REX_SERVER: "unix:///daemon/rex.sock" });
+    const f = envChild();
+    await openTerminalInWindow("saved:kernel", "http://localhost:7433", f.entry, undefined, undefined, async () => rexMarkers);
+    expect(f.seen()).toEqual(rexMarkers);
+  });
+
+  it("keeps its own Rex markers and never looks for a viewer", async () => {
+    ownEnv({ TERM_PROGRAM: "rex", REX_SESSION: "session:own", REX_BLOCK: "block:own", REX_SERVER: "unix:///own/rex.sock" });
+    const f = envChild();
+    const viewer = vi.fn(async () => viewerMarkers);
+    await openTerminalInWindow("saved:kernel", "http://localhost:7433", f.entry, undefined, undefined, viewer);
+    expect(viewer).not.toHaveBeenCalled();
+    expect(f.seen()).toEqual({ TERM_PROGRAM: "rex", REX_SESSION: "session:own", REX_BLOCK: "block:own", REX_SERVER: "unix:///own/rex.sock" });
+  });
+
+  it.each([
+    ["inside Rex", { TERM_PROGRAM: "rex" }, undefined, "rex"],
+    ["in a tmux inside a Rex block", { TERM_PROGRAM: "tmux", REX_SESSION: "s", REX_BLOCK: "b", REX_SERVER: "x" }, undefined, "rex"],
+    ["viewed from Rex", { TERM_PROGRAM: "tmux" }, rexMarkers, "rex"],
+    ["viewed from Herdr", { TERM_PROGRAM: "tmux" }, viewerMarkers, "herdr"],
+    ["inside Herdr, whatever views it", { TERM_PROGRAM: "herdr", REX_SESSION: "s", REX_BLOCK: "b", REX_SERVER: "x" }, rexMarkers, "herdr"],
+    ["with no viewer", { TERM_PROGRAM: "tmux", REX_SERVER: "x" }, undefined, "herdr"],
+  ] as const)("previews with the provider the window opener picks %s", async (_name, env, viewed, provider) => {
+    ownEnv(env);
+    expect(await windowProvider(async () => viewed)).toBe(provider);
+    const previewed: string[] = [];
+    const client = { baseUrl: "http://localhost:7433", terminalViews: async () => ({ saved: [], rigs: [] }),
+      previewTerminal: async (_view: string, selected: string) => { previewed.push(selected); return null; } } as unknown as DaemonClient;
+    await readTerminals(client, "saved:kernel", () => windowProvider(async () => viewed));
+    expect(previewed).toEqual([provider]);
+  });
+
+  it("reads Rex's markers as the CLI does", () => {
+    expect(inRex({ TERM_PROGRAM: "tmux", REX_SESSION: "s", REX_BLOCK: "b" })).toBe(false);
+    expect(inRex({ TERM_PROGRAM: "tmux", REX_SESSION: "s", REX_BLOCK: "b", REX_SERVER: "x", HERDR_ENV: "1", HERDR_PANE_ID: "p", HERDR_SOCKET_PATH: "/h" })).toBe(false);
+    expect(inRex({ TERM_PROGRAM: "rex", HERDR_ENV: "1", HERDR_PANE_ID: "p", HERDR_SOCKET_PATH: "/h" })).toBe(false);
   });
 
   it("keeps its own Herdr markers and never looks for a viewer", async () => {
@@ -220,12 +260,12 @@ describe.skipIf(process.platform !== "linux")("the viewer's Herdr markers, read 
 
   it("returns only the Herdr markers of a single attached client", async () => {
     tmuxListing([10, inHerdrProcess()]);
-    expect(await viewerHerdrEnv()).toEqual(viewerMarkers);
+    expect(await viewerTerminalEnv()).toEqual(viewerMarkers);
   });
 
   it("uses the client that was active last", async () => {
     tmuxListing([10, inHerdrProcess({ HERDR_PANE_ID: "p-old" })], [11, inHerdrProcess({ HERDR_PANE_ID: "p-new" })]);
-    expect(await viewerHerdrEnv()).toMatchObject({ HERDR_PANE_ID: "p-new" });
+    expect(await viewerTerminalEnv()).toMatchObject({ HERDR_PANE_ID: "p-new" });
   });
 
   it.each([
@@ -235,23 +275,23 @@ describe.skipIf(process.platform !== "linux")("the viewer's Herdr markers, read 
     ["no client", () => tmuxListing()],
   ])("gives no answer for %s", async (_name, arrange) => {
     arrange();
-    expect(await viewerHerdrEnv()).toBeUndefined();
+    expect(await viewerTerminalEnv()).toBeUndefined();
   });
 
   it("ignores a control-mode client when choosing the viewer", async () => {
     tmuxListing([10, inHerdrProcess()], [11, process.pid, 1]);
-    expect(await viewerHerdrEnv()).toMatchObject({ HERDR_PANE_ID: "p-viewer" });
+    expect(await viewerTerminalEnv()).toMatchObject({ HERDR_PANE_ID: "p-viewer" });
   });
 
   it("gives no answer when tmux fails", async () => {
     tmuxListing([10, inHerdrProcess()]);
     writeFileSync(join(roots[roots.length - 1]!, "tmux"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
-    expect(await viewerHerdrEnv()).toBeUndefined();
+    expect(await viewerTerminalEnv()).toBeUndefined();
   });
 
   it("gives no answer outside tmux", async () => {
     tmuxListing([10, inHerdrProcess()]);
     vi.stubEnv("TMUX", "");
-    expect(await viewerHerdrEnv()).toBeUndefined();
+    expect(await viewerTerminalEnv()).toBeUndefined();
   });
 });

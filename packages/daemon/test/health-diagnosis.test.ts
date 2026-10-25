@@ -95,6 +95,23 @@ it("ignores a canceled topical Markdown receipt in the census and scheduled eval
   expect(t.queue.listTransitions(foreignId)).toEqual(transitions);
 });
 
+it("reads the census without projecting non-owned topical rows, and still refuses a full census before ownership", async () => {
+  const t = setup(); const p = t.policy.read().policy;
+  t.policy.apply({ ...p, diagnosis: { ...p.diagnosis, enabled: true, owner: "owner@rig" } }, "actor@rig");
+  const id = (await t.service.evaluate("actor@rig", true)).actions[0]!.qitemId;
+  // A topical row (not an occurrence) whose unrelated structured field is malformed: only a full row projection reads it.
+  const foreign = await t.queue.create({ sourceSession: "peer@rig", destinationSession: "owner@rig", nudge: false,
+    body: "topical note", tags: ["health-diagnosis"] });
+  t.db.prepare("UPDATE queue_items SET chain_of_record = ? WHERE qitem_id = ?").run("{not json", foreign.qitemId);
+  expect(t.service.list().map((o) => o.row.qitemId)).toEqual([id]);
+
+  // Exactly 10000 tagged rows refuses the census even though none of the extra rows is owned.
+  const insert = t.db.prepare(`INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, body, tags)
+    VALUES (?, ?, ?, 'peer@rig', 'owner@rig', 'done', 'x', '["health-diagnosis"]')`);
+  t.db.transaction(() => { for (let i = 0; i < 9998; i++) insert.run(`qitem-topical-${i}`, "2026-09-01T00:00:00Z", "2026-09-01T00:00:00Z"); })();
+  expect(() => t.service.list()).toThrow("health_diagnosis_census_truncated");
+});
+
 it.each(["markdown", "null", "schema", "finding-id", "authority", "presentedAt"])("refuses corrupt owned occurrence state (%s) instead of hiding or certifying it", async (defect) => {
   const t = setup(); const p = t.policy.read().policy;
   t.policy.apply({ ...p, diagnosis: { ...p.diagnosis, enabled: true, owner: "owner@rig" } }, "actor@rig");

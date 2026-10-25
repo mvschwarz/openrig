@@ -1,4 +1,5 @@
-import { operationalLaunchArgs, operationalLaunchArg } from "./kernel-authority.js";
+import { withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
+import { operationalLaunchArgs } from "./kernel-authority.js";
 import nodePath from "node:path";
 import fs from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
@@ -59,6 +60,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private sessionIdFactory: () => string;
   private sleep: (ms: number) => Promise<void>;
   private stateDir: string | null;
+  private restoreReadPolicy: (() => RestoreReadPolicy | null) | null;
   private collectorAssetPath: string | null;
   private nodeExecutable: string;
   private autoDriveProviderPrompts: boolean;
@@ -80,6 +82,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     sessionIdFactory?: () => string;
     sleep?: (ms: number) => Promise<void>;
     stateDir?: string;
+    /** The compaction settings the restore reads from, so the launch grants those files too. */
+    restoreReadPolicy?: () => RestoreReadPolicy | null;
     collectorAssetPath?: string;
     /** Interpreter used to write generated Claude commands; defaults to this daemon runtime. */
     nodeExecutable?: string;
@@ -106,6 +110,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.sessionIdFactory = deps.sessionIdFactory ?? randomUUID;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.stateDir = deps.stateDir ?? null;
+    this.restoreReadPolicy = deps.restoreReadPolicy ?? null;
     this.collectorAssetPath = deps.collectorAssetPath ?? null;
     this.nodeExecutable = deps.nodeExecutable ?? process.execPath;
     this.autoDriveProviderPrompts = deps.autoDriveProviderPrompts ?? false;
@@ -276,12 +281,17 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       try {
         if (!this.claudeManagedLaunch) await unresolvedClaudePermissionModes();
         managed = await this.claudeManagedLaunch!.prepare({ nodeId: binding.nodeId, cwd: binding.cwd,
-          session: binding.tmuxSession, pane: binding.tmuxPane, generation: binding.launchGeneration }, binding.permissionMode);
+          session: binding.tmuxSession, pane: binding.tmuxPane, generation: binding.launchGeneration,
+          ...(binding.runtimeSwitchFrom ? { runtimeSwitch: { fromRuntime: binding.runtimeSwitchFrom.runtime, session: binding.runtimeSwitchFrom.session,
+            pane: binding.runtimeSwitchFrom.pane, generation: binding.runtimeSwitchFrom.generation } } : {}) }, binding.permissionMode);
       } catch (error) { return { ok: false, error: (error as Error).message }; }
     }
     const posture = claudePostureFlag(process.env, binding.launchPosture, binding.permissionMode);
     const appliedLaunch = observeClaudePermission(posture);
-    const permissionMode = posture + operationalLaunchArg(this.runtime, binding);
+    const permissionArgs = (nativeSessionId: string) => withManagedRestoreReads(operationalLaunchArgs(this.runtime, binding), {
+      openrigHome: this.stateDir, session: opts.name, cwd: binding.cwd, nativeSessionId, ...(this.restoreReadPolicy?.() ?? {}),
+    });
+    const permissionArg = (args: string[]) => posture + args.map(arg => ` ${shellQuote(arg)}`).join("");
     // OPR.0.5.3.1: classic-renderer env prefix (default on) → native scrollback for every
     // managed launch path (fresh/resume/fork). "" when overridden off → byte-identical command.
     const rendererPrefix = claudeClassicRendererEnvPrefix(process.env);
@@ -318,7 +328,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         return { ok: false, error: "claude-code fork: forkSource.value is required (parent native_id)" };
       }
       const forkSessionId = this.sessionIdFactory();
-      const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...operationalLaunchArgs(this.runtime, binding), ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...additionArgs,
+      const launchArgs = permissionArgs(forkSessionId);
+      const permissionMode = permissionArg(launchArgs);
+      const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...additionArgs,
         "--resume", parentId, "--fork-session", "--session-id", forkSessionId, "--name", opts.name])
         // The non-managed command text is parsed by the pane shell, so the
         // parent id needs the same quoting as --model/--effort above (and as
@@ -341,7 +353,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
 
     const generatedSessionId = opts.resumeToken ? null : this.sessionIdFactory();
-    const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...operationalLaunchArgs(this.runtime, binding), ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...additionArgs,
+    const launchArgs = permissionArgs(opts.resumeToken ?? generatedSessionId!);
+    const permissionMode = permissionArg(launchArgs);
+    const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...additionArgs,
       ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name],
       opts.resumeToken ? claudeResumeLaunchEnv(opts.resumeToken) : undefined) : opts.resumeToken
       ? `${claudeResumeLaunchPrefix(opts.resumeToken)}${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg}${advisorArg}${additionArg} --resume ${shellQuote(opts.resumeToken)} --name ${opts.name}`
@@ -955,17 +969,18 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const statePaths: string[] = [];
     const failures: string[] = [];
     if (managed) {
-      if (cwd) statePaths.push(managed.configPaths(cwd).statePath);
+      // The seat's own home when it declares one (member or rig `env:`), else the daemon's.
+      if (cwd) statePaths.push(managed.configPaths(cwd, binding.nodeId).statePath);
     } else {
       if (home) statePaths.push(nodePath.join(home, ".claude.json"));
       // A classic seat types `claude` into its pane's shell, which inherits the tmux server's
       // environment, not the daemon's, so the bootstrap cannot see which home that child reads.
-      // When the daemon selects CLAUDE_CONFIG_DIR, provision that home too. This deliberately
+      // When the seat's own `env:` or the daemon selects CLAUDE_CONFIG_DIR, provision that home too. This deliberately
       // replaces #565's rule that classic bootstrap writes exactly one file and leaves the
       // selected home untouched: a child that inherits the daemon's selection read neither.
       try {
         const selectedCwd = cwd ?? (binding.nodeId ? this.claudeManagedLaunch?.boundCwd(binding.nodeId) : undefined);
-        const selected = selectedCwd ? this.claudeManagedLaunch?.selectedStatePath(selectedCwd) : undefined;
+        const selected = selectedCwd ? this.claudeManagedLaunch?.selectedStatePath(selectedCwd, binding.nodeId) : undefined;
         if (selected && !statePaths.includes(selected)) statePaths.push(selected);
       } catch (err) {
         failures.push((err as Error).message);

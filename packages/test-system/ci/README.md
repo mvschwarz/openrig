@@ -111,9 +111,11 @@ DOCKER_HOST=ssh://your-test-executor bash scripts/run-pr-scenarios.sh \
 Leave `DOCKER_CONTEXT` unset when selecting `DOCKER_HOST`, so a saved context cannot
 override the explicitly selected executor. This does not change Docker configuration.
 Use a fresh output directory for each retained run. Without `--mode` the selected
-case runs healthy / lost-baton / healthy. Without `--case` both cases run. CI keeps
-its existing six-run default. A single healthy run establishes only that leg; it is
-not the paired seeded-regression proof.
+seeded case runs healthy / lost-baton / healthy. Without `--case` all eight cases run,
+fourteen container runs by default: the `fixture` and `library` seeded pairs (healthy /
+lost-baton / healthy each), the `refocus-parked` seeded pair (healthy / seeded /
+healthy), and the five passing-only cases (healthy once each). A single healthy run
+establishes only that leg; it is not the paired seeded-regression proof.
 
 The client can be macOS/arm64 while Docker is Linux/amd64: the build reads the
 **server** OS/architecture and passes the same platform to the image builds and

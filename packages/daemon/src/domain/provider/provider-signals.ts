@@ -260,6 +260,9 @@ export function deriveUsageLimitPools(input: {
   bindings: ProviderBinding[];
   now: Date;
   fallbackSeconds: number;
+  /** A Claude seat's own config dir, when it declares one: its login, and so its limit, is separate from the
+   *  daemon's and from other homes'. Absent, every Claude seat shares one pool as before. */
+  claudeHomeOf?: (seatSession: string) => string | undefined;
 }): UsageLimitPool[] {
   const nowMs = input.now.getTime();
   if (!Number.isFinite(nowMs)) return [];
@@ -273,10 +276,14 @@ export function deriveUsageLimitPools(input: {
       (signal.sourceClass === "provider_event" && signal.authority === "reactive_error"),
   );
 
+  const claudePoolKey = (seatSession: string | undefined) => {
+    const home = seatSession ? input.claudeHomeOf?.(seatSession) : undefined;
+    return home ? `claude:home:${home}` : "claude:local";
+  };
   const pools = new Map<string, { provider: ProviderKind; signals: ProviderSignal[] }>();
   for (const signal of exhausted) {
     const poolKey = signal.provider === "claude"
-      ? "claude:local"
+      ? claudePoolKey(signal.seatSession)
       : signal.accountRef
         ? `codex:${signal.accountRef}`
         : null;
@@ -305,7 +312,8 @@ export function deriveUsageLimitPools(input: {
 
     const seatSessions = pool.provider === "claude"
       ? input.signals
-          .filter((signal) => signal.provider === "claude" && typeof signal.seatSession === "string")
+          .filter((signal) => signal.provider === "claude" && typeof signal.seatSession === "string"
+            && claudePoolKey(signal.seatSession) === poolKey)
           .map((signal) => signal.seatSession!)
       : input.bindings
           .filter((binding) => binding.accountId === pool.signals[0]!.accountRef)

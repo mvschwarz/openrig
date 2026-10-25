@@ -555,6 +555,32 @@ describe("Up CLI", () => {
     for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
   });
 
+  it("up --env leaves out CLAUDE_CONFIG_DIR and CODEX_HOME with a note, and still sends the rest", async () => {
+    let lastBody: Record<string, unknown> = {};
+    const origListeners = server.listeners("request");
+    server.removeAllListeners("request");
+    server.on("request", async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      if (req.url === "/api/up") {
+        lastBody = JSON.parse(body);
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "completed", runId: "r", rigId: "g", stages: [], errors: [] }));
+      }
+    });
+    try {
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "up", "/tmp/rig.yaml", "--env", "CODEX_HOME=/homes/b", "--env", "CLAUDE_CONFIG_DIR=/homes/c", "--env", "DEBUG=1"]);
+      });
+      expect(lastBody.envOverride).toEqual({ DEBUG: "1" });
+      expect(logs.join("\n")).toContain("--env CODEX_HOME isn't applied");
+      expect(logs.join("\n")).toContain("--env CLAUDE_CONFIG_DIR isn't applied");
+    } finally {
+      server.removeAllListeners("request");
+      for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+    }
+  });
+
   it("up without --env sends no envOverride", async () => {
     let lastBody: Record<string, unknown> = {};
     const origListeners = server.listeners("request");

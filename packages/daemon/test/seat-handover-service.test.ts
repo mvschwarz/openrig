@@ -903,7 +903,8 @@ describe("SeatHandoverService", () => {
     if (!result.ok || !("result" in result)) throw new Error("expected handover result");
     // The FR-3 derive-helper was reused; the token is persisted with provenance
     // "adoption" on the new claimed session, and never appears in the event log.
-    expect(captureCodexThreadId).toHaveBeenCalledWith("successor-session");
+    // The seat's node goes with it, so a seat with its own CODEX_HOME is searched there.
+    expect(captureCodexThreadId).toHaveBeenCalledWith("successor-session", { nodeId: node.id });
     const newSession = db.prepare(
       "SELECT resume_type, resume_token, resume_provenance FROM sessions WHERE node_id = ? AND session_name = ?"
     ).get(node.id, "successor-session") as Record<string, string | null>;

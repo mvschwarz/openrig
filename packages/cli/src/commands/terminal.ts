@@ -2,9 +2,9 @@
 // the operator's terminal-provider-ride entry). Three subcommands, all hitting
 // the ONE canonical daemon composer (`/api/terminal/...`):
 //
-//   rig terminal open <view> [--provider herdr|cmux] [--json]
+//   rig terminal open <view> [--provider herdr|cmux|rex] [--json]
 //   rig terminal views [--json]
-//   rig terminal status [--provider herdr|cmux] [--json]
+//   rig terminal status [--provider herdr|cmux|rex] [--json]
 //
 // `<view>` resolves daemon-side: a rig name (per-rig derived) | `mission:<id>` |
 // `slice:<id>` (derived) | a saved-view id. The result is the ONE shared
@@ -38,6 +38,7 @@ export interface OpenViewResult {
   code?: string;
   notes?: string[];
   window?: { app: string; surface: string };
+  space?: { id: string; label: string };
   reusedWorkspace?: { id: string; tabId: string; view: string };
   /** On window failures, false means no desktop launch was attempted. */
   windowAttempted?: boolean;
@@ -78,6 +79,7 @@ function humanOpen(r: OpenViewResult): string {
           : `No tiles opened in ${target}.`,
   );
   if (r.window) lines.push(`  Terminal: ${r.window.app} (${r.window.surface}).`);
+  if (r.space) lines.push(`  ${r.provider} session: ${JSON.stringify(r.space.label)} (${r.space.id}).`);
   if (r.error && r.code !== "terminal_window_failed") lines.push(`  provider: ${r.error}${r.code ? ` (${r.code})` : ""}`);
   for (const seat of r.opened) lines.push(`  ● ${seat}`);
   for (const a of r.absent) lines.push(`  ○ ${a.seat} — absent: ${a.reason}`);
@@ -101,7 +103,7 @@ function printOpen(json: boolean, r: OpenViewResult, status: number): void {
 export function terminalCommand(depsOverride?: TerminalDeps): Command {
   const cmd = new Command("terminal").description(
     "Open the OpenRig view and agent conversations in terminal tiles",
-  ).addHelpText("after", "\nThe OpenRig TUI and operator (after install, and whenever the person wants their agents):\n  rig terminal open saved:kernel --window\n  Opens the window itself on the daemon's desktop; an agent can run it from its shell.\n  Uses herdr when installed, otherwise the same layout in plain tmux.\n  Herdr needs a terminal the person can see; TUI navigation does not open one.\n  Over headless SSH, give the exact connection/attach command for a new terminal/tab.\n  Only if the window cannot open: rig tui --shared is the dashboard-only fallback.\n  On a desktop, the agent opens the view; it does not finish by printing a command to copy.\n");
+  ).addHelpText("after", "\nThe OpenRig TUI and operator (after install, and whenever the person wants their agents):\n  rig terminal open saved:kernel --window\n  Opens the window itself on the daemon's desktop; an agent can run it from its shell.\n  Inside Rex it opens a Rex session and shows it in the Rex app; otherwise it uses herdr when installed, else the same layout in plain tmux.\n  Herdr needs a terminal the person can see; TUI navigation does not open one.\n  Over headless SSH, give the exact connection/attach command for a new terminal/tab.\n  Only if the window cannot open: rig tui --shared is the dashboard-only fallback.\n  On a desktop, the agent opens the view; it does not finish by printing a command to copy.\n");
 
   const getDeps = (): TerminalDeps =>
     depsOverride ?? {
@@ -113,7 +115,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
     .command("open")
     .argument("<view>", "a rig name, mission:<id>, slice:<id>, or a saved-view id")
     .description("Open a desktop terminal showing the view's live agents as interactive tiles")
-    .option("--provider <name>", "herdr or cmux: use an existing workspace without opening a window; tmux requires --window")
+    .option("--provider <name>", "herdr, cmux or rex: use an existing workspace without opening a window; tmux requires --window. Inside Rex, the default opens in Rex")
     .option("--session <name>", "Herdr session on the daemon's host; --session default selects Herdr's default session")
     .option("--window", "Open a new desktop terminal tab/window (the default when --provider is omitted)")
     .option("--expected-plan <id>", "Open only if the view still matches this preview")
@@ -169,7 +171,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
   cmd
     .command("status")
     .description("Show terminal provider availability + liveness (doctor)")
-    .option("--provider <name>", "restrict to one provider (herdr / cmux)")
+    .option("--provider <name>", "restrict to one provider (herdr / cmux / rex)")
     .option("--session <name>", "Inspect a named Herdr session on the daemon's host")
     .option("--json", "JSON output for agents")
     .action(async (opts: { provider?: string; session?: string; json?: boolean }) => {

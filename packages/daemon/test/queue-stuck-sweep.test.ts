@@ -296,6 +296,41 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     });
   });
 
+  // A stalled claim's age is the stall's own: minutes since the latest meaningful change, floored as the "why" counts
+  // them. The claim time alone would count time spent parked, and rounding would drift a minute from the "why".
+  function ageTransitions(qitemId: string, minutesAgo: number[]): void {
+    const ids = db.prepare("SELECT transition_id FROM queue_transitions WHERE qitem_id = ? ORDER BY transition_id").all(qitemId) as Array<{ transition_id: number }>;
+    expect(ids).toHaveLength(minutesAgo.length);
+    ids.forEach(({ transition_id }, i) => db.prepare("UPDATE queue_transitions SET ts = ? WHERE transition_id = ?")
+      .run(new Date(Date.now() - minutesAgo[i]! * 60_000).toISOString(), transition_id));
+  }
+
+  it("claimed, parked, resumed, then quiet: the finding's headline and body count minutes since the resume, not since the claim", async () => {
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    await repo.update({ qitemId: row.qitemId, actorSession: "worker@r", state: "blocked", blockedOn: "external:vendor" } as never);
+    await repo.update({ qitemId: row.qitemId, actorSession: "worker@r", state: "in-progress" } as never);
+    ageClaim(row.qitemId, 77);
+    ageTransitions(row.qitemId, [78, 77, 76, 20]); // created, claimed, parked, resumed
+    expect(repo.getById(row.qitemId)!.pickup?.state).toBe("stalled-after-claim");
+    await runSweep();
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding!.summary).toBe(`Stuck sweep: stalled-after-claim on ${row.qitemId} (20 min)`);
+    expect(finding!.body).toContain("\nage: 20 min\n");
+    expect(finding!.body).toContain("no meaningful queue change for 20 min");
+  });
+
+  it("a stall of 30 min 40 s reads 30 min in the headline, the body and the why alike", async () => {
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    ageClaim(row.qitemId, 30 + 40 / 60);
+    await runSweep();
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding!.summary).toBe(`Stuck sweep: stalled-after-claim on ${row.qitemId} (30 min)`);
+    expect(finding!.body).toContain("\nage: 30 min\n");
+    expect(finding!.body).toMatch(/why: (claimed|no meaningful queue change for) 30 min/);
+  });
+
   it("UNDELIVERED HALF: a pending row whose nudge failed yields exactly one finding routed to the destination's orchestrator", async () => {
     const row = await mkRow();
     failNudge(row.qitemId);
@@ -553,11 +588,18 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(await findingsFor(row.qitemId)).toHaveLength(1);
   });
 
-  it("RESOLUTION CLOSES: when the underlying row resolves, the next sweep closes the finding with its reason", async () => {
+  it.each(["pending", "in-progress"] as const)("#1419 RESOLUTION ACTOR: closes a %s finding as the sweep while preserving its ownership", async (findingState) => {
     const row = await mkRow();
     repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
     makeOverdue(row.qitemId);
     await runSweep();
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding).toBeDefined();
+    if (findingState === "in-progress") {
+      repo.claim({ qitemId: finding!.qitemId, destinationSession: "worker@r" });
+    }
+    const before = repo.getById(finding!.qitemId)!;
+    expect(before).toMatchObject({ state: findingState, sourceSession: "sender@r", destinationSession: "worker@r" });
     repo.update({
       qitemId: row.qitemId,
       actorSession: "worker@r",
@@ -565,11 +607,30 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
       closureReason: "no-follow-on",
       transitionNote: "finished the work",
     });
-    await runSweep();
+    const sourceAfterWork = repo.getById(row.qitemId);
+    const { result } = await runSweep();
+    expect(result.findings).toContainEqual({ kind: "overdue-claim", qitemId: row.qitemId, findingQitemId: before.qitemId, action: "closed" });
     const findings = await findingsFor(row.qitemId);
     expect(findings).toHaveLength(1);
-    expect(findings[0]!.state).toBe("done");
-    expect(findings[0]!.closureReason).toBeTruthy();
+    expect(findings[0]).toMatchObject({
+      state: "done", closureReason: "no-follow-on",
+      sourceSession: before.sourceSession, destinationSession: before.destinationSession,
+      claimedAt: before.claimedAt, evidenceRef: before.evidenceRef,
+    });
+    expect(repo.getById(row.qitemId)).toEqual(sourceAfterWork);
+    expect(repo.transitionLog.listForQitem(before.qitemId).at(-1)).toMatchObject({
+      state: "done", actorSession: "stuck-sweep@system", closureReason: "no-follow-on",
+      transitionNote: `stuck-sweep resolved: overdue-claim on ${row.qitemId} no longer detected`,
+    });
+    const closingEvents = () => (db.prepare(
+      "SELECT payload FROM events WHERE type = 'queue.updated' AND json_extract(payload, '$.qitemId') = ? AND json_extract(payload, '$.toState') = 'done'",
+    ).all(before.qitemId) as Array<{ payload: string }>).map((event) => JSON.parse(event.payload));
+    expect(closingEvents()).toEqual([expect.objectContaining({
+      qitemId: before.qitemId, fromState: findingState, toState: "done", actorSession: "stuck-sweep@system",
+    })]);
+    await runSweep();
+    expect(repo.transitionLog.listForQitem(before.qitemId).filter((t) => t.state === "done")).toHaveLength(1);
+    expect(closingEvents()).toHaveLength(1);
   });
 
   it("QUIET IS CHEAP: a clean sweep creates zero rows and records one observable heartbeat", async () => {
@@ -1759,6 +1820,9 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
     expect(second.findings).toContainEqual(expect.objectContaining({ findingQitemId: finding!.qitemId, action: "closed" }));
     expect(repo.getById(finding!.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
     expect(repo.getById(row.qitemId)).toMatchObject({ state: "pending", destinationSession: "human-owner@external" });
+    expect(repo.transitionLog.listForQitem(finding!.qitemId).at(-1)).toMatchObject({
+      state: "done", actorSession: "stuck-sweep@system", closureReason: "no-follow-on",
+    });
   });
 
   const unclaimedFinding = async (qitemId: string) => (await findingsFor(qitemId))

@@ -671,3 +671,58 @@ describe("parked-owner-consumer — R2 integration hard checks (OPR.0.5.6.24)", 
     expect(job).toBeDefined();
   });
 });
+
+// #1933 — a seat that just handed work off, or just asked a person, has only started waiting. The first reminder
+// waits until its arbitrated waiting state has been unchanged for a grace; a seat still holding the work after it is
+// reminded as before, an unknown start keeps the reminder, and a seat at a prompt gets no grace.
+describe("#1933: the first reminder waits a grace after the seat starts waiting", () => {
+  const NOW = Date.parse("2026-10-25T03:00:00.000Z");
+  const GRACE_MS = 5 * 60_000;
+  const waitingFor = (ms: number | null) => parkedSeat({
+    activity: { value: "idle-at-prompt", needsInput: { count: 0, reason: null }, ...(ms === null ? {} : { since: new Date(NOW - ms).toISOString() }) },
+  } as Partial<ParkedSeatDiagnosisView>);
+  const evaluate = (seat: ParkedSeatDiagnosisView, store = new RowStore()) =>
+    makeParkedOwnerConsumerPolicy({ ...makeDeps([seat], store), now: () => NOW } as ParkedOwnerConsumerDeps).evaluate(makeJob());
+
+  it("a seat that started waiting 30 s ago is not reminded on this tick, and nothing is reserved", async () => {
+    const store = new RowStore();
+    const ev = await evaluate(waitingFor(30_000), store);
+    expect(ev.action).toBe("skip");
+    expect((ev as { notes?: { skippedSeats?: unknown } }).notes?.skippedSeats).toEqual([{ seat: SEAT, why: "waiting-grace" }]);
+    expect(store.appended).toEqual([]);
+  });
+
+  it("a seat still idle with its rows after the grace is reminded as before", async () => {
+    const ev = await evaluate(waitingFor(GRACE_MS + 1_000));
+    expect(ev.action).toBe("send");
+    expect((ev as { target?: { session: string } }).target?.session).toBe(SEAT);
+  });
+
+  it("an unknown start of the wait assumes no grace: the reminder still goes", async () => {
+    expect((await evaluate(waitingFor(null))).action).toBe("send");
+  });
+
+  it("a seat stopped at a prompt 30 s ago is still attempted, so whoever can clear the prompt hears as soon as today", async () => {
+    const atPrompt = parkedSeat({
+      activity: { value: "idle-at-prompt", needsInput: { count: 1, reason: "selection_prompt" }, since: new Date(NOW - 30_000).toISOString() },
+    } as Partial<ParkedSeatDiagnosisView>);
+    expect((await evaluate(atPrompt)).action).toBe("send");
+  });
+
+  it("the grace reaches the consumer from the shipped diagnosis: the arbitrated state's last change is the start of the wait", async () => {
+    const { diagnoseRigParked } = await import("../src/domain/parked-query.js");
+    const seatState = (changedAt: string) => ({
+      seatNodeId: "node-1", activity: "idle-at-prompt" as const, needsInput: { count: 0, reason: null }, needsInputEvidence: null,
+      decidedBy: "lifecycle-hooks" as const, seq: 3, changedAt, rungs: [], lastSwap: null,
+    });
+    const diagnose = (changedAt: string) => diagnoseRigParked({
+      getSeatState: () => seatState(changedAt),
+      listOpenObligations: (_d, limit) => ({ rows: [{ qitemId: ROW_IDS[0]!, state: "in-progress" }], limit }),
+    }, [{ seatNodeId: "node-1", sessionName: SEAT }]);
+    const run = (changedAt: string) => makeParkedOwnerConsumerPolicy({
+      ...makeDeps([], new RowStore()), diagnoseRig: () => diagnose(changedAt) as never, now: () => NOW,
+    } as ParkedOwnerConsumerDeps).evaluate(makeJob());
+    expect((await run(new Date(NOW - 60_000).toISOString())).action).toBe("skip");
+    expect((await run(new Date(NOW - GRACE_MS - 1_000).toISOString())).action).toBe("send");
+  });
+});

@@ -1,11 +1,13 @@
+import path from "node:path";
 import { Hono, type Context } from "hono";
 import { getSelfHostId, LOCAL_HOST_ID } from "../domain/hosts/fanout-contract.js";
 import { loadHostRegistry } from "../domain/hosts/hosts-registry-reader.js";
-import type { ProviderService } from "../domain/provider/provider-service.js";
+import type { ProviderService, SeatRestart } from "../domain/provider/provider-service.js";
 import type { ProviderKind } from "../domain/provider/provider-types.js";
 import { checkMoveReport, credentialRefusal, findCredential, MOVE_REPORT_TAG, readMoveReport, renderMoveReport, type MoveReport } from "../domain/provider/subscription-move-report.js";
 import { QueueRepositoryError, type QueueRepository } from "../domain/queue-repository.js";
 import { requireSenderIdentity, resolveRecordedProvenance } from "./require-sender-identity.js";
+import { seatLifecycleService } from "./seat.js";
 import {
   readUsageAcrossHosts,
   selectUsageHosts,
@@ -27,6 +29,15 @@ export interface ProviderRoutesOptions {
     viewDeadlineMs?: number;
     refreshDeadlineMs?: Partial<Record<ProviderKind, number>>;
     now?: () => string;
+  };
+}
+
+/** The seat's in-place restart for this request, built only when used: precheck and switch act on the Codex home the
+ *  running seat uses, and the restart keeps its conversation and launch settings. */
+function seatRestartOf(c: Context): SeatRestart {
+  return {
+    plan: (seat) => seatLifecycleService(c).restartInPlace({ seatRef: seat, plan: true }),
+    run: (seat, reason) => seatLifecycleService(c).restartInPlace({ seatRef: seat, reason }),
   };
 }
 
@@ -90,7 +101,17 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
     if (provider !== "codex" && provider !== "claude") {
       return c.json({ error: `usage windows can be refreshed for codex or claude (got ${String(provider)})` }, 400);
     }
-    const result = await svc.refreshUsage(provider);
+    const token = (raw as Record<string, unknown> | null)?.["claudeToken"];
+    if (token !== undefined) {
+      const t = token as Record<string, unknown> | null;
+      if (provider !== "claude" || !t || typeof t !== "object" || Array.isArray(t) ||
+        Object.keys(t).some(key => key !== "label" && key !== "tokenFile") ||
+        typeof t.label !== "string" || !t.label.trim() || t.label.length > 120 || /[\x00-\x1f\x7f]/.test(t.label) ||
+        typeof t.tokenFile !== "string" || !path.isAbsolute(t.tokenFile) || t.tokenFile.length > 4096 || /[\x00-\x1f\x7f]/.test(t.tokenFile) || findCredential(t)) {
+        return c.json({ error: "invalid_claude_token_selection", message: "select Claude with a non-secret label and absolute token-file reference; never send token contents" }, 400);
+      }
+    }
+    const result = await svc.refreshUsage(provider, token === undefined ? undefined : { label: String((token as Record<string, unknown>).label), tokenFile: path.normalize(String((token as Record<string, unknown>).tokenFile)) });
     if ("disabled" in result) {
       return c.json({
         error: "usage_windows_disabled",
@@ -238,7 +259,7 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
       return c.json({ error: "seat and toAccount are required" }, 400);
     }
     // An unsafe verdict is a valid 200 response, not an error.
-    return c.json(await svc.precheck({ seat, toAccount }), 200);
+    return c.json(await svc.precheck({ seat, toAccount }, seatRestartOf(c)), 200);
   });
 
   router.post("/switch", async (c) => {
@@ -265,7 +286,7 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
       return c.json({ error: "forceUnsafe must be a boolean" }, 400);
     }
     // Business outcome (incl. failed_safely / rebind_in_progress) is an explicit 200 payload.
-    return c.json(await svc.switchAccount({ seat, toAccount, forceUnsafe }), 200);
+    return c.json(await svc.switchAccount({ seat, toAccount, forceUnsafe }, seatRestartOf(c)), 200);
   });
 
   // Slice 18 — subscription move reports: queue items tagged subscription-move, filed by the agent that moved a Codex

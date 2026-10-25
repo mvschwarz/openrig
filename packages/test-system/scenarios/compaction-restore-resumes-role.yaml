@@ -4,21 +4,26 @@
 # SEED (class: wrong-seat-restore): the seeded regression makes restore read/deliver
 #   the WRONG seat's restore marker. Because the real restore is SEAT-KEYED (fireRestore
 #   reads THIS seat's keyed marker), the seeded cross-seat delivery makes the `expect
-#   pane` below (impl's own restore directive) fail — the diff names the class.
+#   pane` below (impl's own restore directive) fail — the diff names the class. Arming
+#   that fault needs it to ride the same launch script, which the harness does not do
+#   yet — the runnable check below covers the success path.
 #
-# REAL EMIT FORM (51-01 items 6-8 in main 9cf78106): `restore` is an EMIT BEHAVIOR, not a
-# seat verb. `emit compaction` fires the real precompact-hook.mjs → a seat-keyed
-# restore-pending marker; `emit restore` fires the real compaction-restore-bridge.cjs →
-# injects ONE additionalContext directive (one-shot, deliveredAt/deliveryCount) which the
-# runner mirrors to the pane verbatim ("[stub] restore delivered — injected restore
-# directive:"). Real seams, never fabricated.
-# Deps: R-10 runner + the folded emit behaviors (in main).
+# REAL EMIT FORM (D2 ruling): a step-time emit cannot be honestly bound — the stub
+#   runner has no input channel, and behaviors execute only from the LAUNCH script it
+#   reads at boot. The v1 path is env.stub_scripts: this scenario declares impl's own
+#   script, whose steps carry the behaviors, and the stub runner fires the real seams
+#   from inside the seat at launch — precompact-hook.mjs writes impl's keyed
+#   restore-pending marker, compaction-restore-bridge.cjs reads it and injects ONE
+#   directive, mirrored to the pane by the runner itself. Real seams, never fabricated.
+# Deps: host-mode staging (D1); container mode refuses env.stub_scripts loud and named,
+#   so this scenario runs with the local runner and not in the CI container job.
 scenario: compaction-restore-resumes-role
 topology: ./dev-pair-stub.yaml
+env:
+  stub_scripts:
+    impl: ./scripts/compaction-restore-impl.json
 steps:
   - up: {}
-  - emit: {seat: impl, behavior: compaction}   # real precompact seam → seat-keyed marker
-  - emit: {seat: impl, behavior: restore}       # real bridge → injects impl's own directive, mirrored
   - expect:
       surface: pane
       seat: impl

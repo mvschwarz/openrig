@@ -7,9 +7,10 @@ import { promisify } from "node:util";
 import type { DaemonClient } from "./client.js";
 import { shellQuote } from "./cross-host-executor.js";
 import { prepareHerdrLaunchConfig } from "./herdr-launch-config.js";
+import { openRexView } from "./terminal-window-rex.js";
 import type { OpenViewResult } from "./commands/terminal.js";
 
-interface Pane { seat: string; label: string; paneCommand: string }
+interface Pane { seat: string; label: string; paneCommand: string; recoveryCommand?: string }
 interface HerdrTab { workspace_id: string; tab_id: string; label: string }
 interface Preview {
   planId: string;
@@ -88,6 +89,17 @@ function localDaemon(url: string): boolean {
     || Object.values(networkInterfaces()).flat().some(iface => iface?.address === host);
 }
 
+/** A tmux started inside a Herdr pane sets TERM_PROGRAM=tmux but inherits Herdr's pane markers. */
+function inHerdrPane(env: NodeJS.ProcessEnv): boolean {
+  return env["HERDR_ENV"] === "1" && !!env["HERDR_PANE_ID"] && !!env["HERDR_SOCKET_PATH"];
+}
+
+/** Rex's markers, read the same way; inside a Herdr pane, Herdr keeps the view. */
+export function inRex(env: NodeJS.ProcessEnv): boolean {
+  return !inHerdrPane(env) && (env["TERM_PROGRAM"] === "rex"
+    || (env["TERM_PROGRAM"] !== "herdr" && !!env["REX_SESSION"] && !!env["REX_BLOCK"] && !!env["REX_SERVER"]));
+}
+
 async function herdrBinary(deps: WindowDeps): Promise<string | null> {
   const dir = deps.env["HERDR_INSTALL_DIR"] ?? path.join(deps.env["HOME"] ?? homedir(), ".local", "bin");
   for (const candidate of ["herdr", path.join(dir, "herdr")]) {
@@ -109,9 +121,7 @@ async function windowLauncher(deps: WindowDeps, notes: string[]): Promise<((comm
     : deps.env["KONSOLE_VERSION"] ? "konsole" : deps.env["XTERM_VERSION"] ? "xterm" : undefined;
   const host = !program || program === "tmux" ? deps.env["__CFBundleIdentifier"] ?? linuxHost : program;
   if (deps.env["CI"] && !["0", "false"].includes(deps.env["CI"])) return "This is a CI run.";
-  // A tmux started inside a Herdr pane sets TERM_PROGRAM=tmux but inherits Herdr's pane markers, so read those too.
-  const inHerdrPane = deps.env["HERDR_ENV"] === "1" && !!deps.env["HERDR_PANE_ID"] && !!deps.env["HERDR_SOCKET_PATH"];
-  if (host === "herdr" || inHerdrPane) return { currentHerdr: true };
+  if (host === "herdr" || inHerdrPane(deps.env)) return { currentHerdr: true };
   if (deps.env["SSH_CONNECTION"] || deps.env["SSH_CLIENT"] || deps.env["SSH_TTY"]) return "This is an SSH session; no desktop window is opened over SSH.";
   if (deps.platform === "darwin") {
     const inGhostty = host === "ghostty" || host === "com.mitchellh.ghostty";
@@ -223,7 +233,7 @@ async function hasLiveAttachments(existing: HerdrTab, tabs: HerdrTab[], pages: P
       const label = pageLabel(index);
       const matches = tabs.filter(tab => tab.workspace_id === existing.workspace_id && tab.label === label);
       if (matches.length !== 1) return false;
-      const remaining = page.map(pane => pane.paneCommand);
+      const remaining = page.map(pane => pane.recoveryCommand ?? pane.paneCommand);
       for (const pane of panes.filter(pane => pane.tab_id === matches[0]!.tab_id)) {
         if (remaining.length === 0) break;
         const result = JSON.parse(await deps.exec("/usr/bin/env", [...herdrArgs, "pane", "process-info", "--pane", pane.pane_id]));
@@ -251,6 +261,9 @@ async function hasLiveAttachments(existing: HerdrTab, tabs: HerdrTab[], pages: P
 /** Render the daemon's existing composition; never rediscover/relaunch kernel seats here. */
 export async function openTerminalWindow(client: DaemonClient, view: string, requestedProvider?: string, deps = defaultWindowDeps(), expectedPlan?: string, requestedSession?: string): Promise<OpenViewResult> {
   const session = requestedSession?.trim();
+  if (session === undefined && (requestedProvider === "rex" || (requestedProvider === undefined && inRex(deps.env)))) {
+    return openRexView(client, view, deps, expectedPlan);
+  }
   const selectedProvider = requestedProvider ?? (session !== undefined ? "herdr" : undefined);
   const sessionFlag = session === undefined ? "" : ` --session ${shellQuote(session)}`;
   const sessionQuery = session === undefined ? "" : `&session=${encodeURIComponent(session)}`;
@@ -270,7 +283,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
   try {
     if (!localDaemon(client.baseUrl)) throw new Error("The window launcher must run on the daemon's own desktop; the configured daemon is remote.");
     if (session !== undefined && selectedProvider !== "herdr") throw new Error("--session selects a Herdr session; use --provider herdr.");
-    if (selectedProvider && !["herdr", "tmux"].includes(selectedProvider)) throw new Error("--window supports herdr or tmux. Use cmux without --window.");
+    if (selectedProvider && !["herdr", "tmux"].includes(selectedProvider)) throw new Error("--window supports herdr, rex or tmux. Use cmux without --window.");
     const launchWindow = await windowLauncher(deps, windowNotes);
     const measured = typeof launchWindow !== "string" ? await deps.columns?.().catch(() => undefined) : undefined;
     let viewportColumns = Number.isSafeInteger(measured) && measured! > 0 ? measured : undefined;
@@ -346,7 +359,8 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
     const directCommand = herdr && socket
       ? `${configPrefix}env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH=${shellQuote(socket)}${configEnv} ${shellQuote(herdr)}`
       : `env -u TMUX ${composed.opened[0]!.paneCommand.replace(/^ssh /, "ssh -t ")}`;
-    manualCommand = directCommand;
+    manualCommand = herdr && socket ? directCommand
+      : `env -u TMUX ${(composed.opened[0]!.recoveryCommand ?? composed.opened[0]!.paneCommand).replace(/^ssh /, "ssh -t ")}`;
     if (typeof launchWindow === "string") {
       const headless = deps.env["SSH_CONNECTION"] || deps.env["SSH_CLIENT"] || deps.env["SSH_TTY"]
         || (deps.platform === "linux" && !deps.env["DISPLAY"] && !deps.env["WAYLAND_DISPLAY"]);
@@ -362,7 +376,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       // A CLI session would override the daemon's resolved socket in Herdr.
       if (typeof launchWindow === "function") {
         windowAttempted = true;
-        window = await launchWindow(configPrefix ? `/bin/sh -c ${shellQuote(manualCommand)}` : manualCommand);
+        window = await launchWindow(configPrefix ? `/bin/sh -c ${shellQuote(directCommand)}` : directCommand);
       }
       await measureWindow();
       let alive = false;

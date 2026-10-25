@@ -1,3 +1,4 @@
+import { claudeTokenReadingsSchema } from "./migrations/134_claude_token_readings.js";
 // The canonical ordered migration list. SINGLE SOURCE: the daemon boot path
 // (startup.ts) and any test/tool that needs a schema-faithful DB both migrate from THIS array,
 // so a reader DB is never seeded from a stale hand-copied subset (the perf-fixture-migration-parity
@@ -8,6 +9,8 @@ import { terminalPolicySchema } from "./migrations/128_terminal_policy.js";
 import { streamDispositionsSchema } from "./migrations/129_stream_dispositions.js";
 import { streamSubscriptionsSchema } from "./migrations/130_stream_subscriptions.js";
 import { streamRetentionFloorSchema } from "./migrations/131_stream_retention_floor.js";
+import { seatRuntimeSwitchesSchema } from "./migrations/132_seat_runtime_switches.js";
+import { streamReaderActionsSchema } from "./migrations/133_stream_reader_actions.js";
 import { seatIdentityProcessEvidenceSchema } from "./migrations/135_seat_identity_process_evidence.js";
 import { bindingsSessionsSchema } from "./migrations/002_bindings_sessions.js";
 import { eventsSchema } from "./migrations/003_events.js";
@@ -122,6 +125,7 @@ import { queueTransitionsTsQitemSchema } from "./migrations/112_queue_transition
 import { appliedLaunchDaemonOptOutSchema } from "./migrations/113_applied_launch_daemon_opt_out.js";
 import { sessionAgentAppSchema as sessionCommunityHarnessSchema } from "./migrations/114_session_agent_app.js";
 import { threadSeatMapChannelKeySchema } from "./migrations/115_thread_seat_map_channel_key.js";
+import { nodeLaunchRecipeSchema } from "./migrations/136_node_launch_recipe.js";
 import { queueItemWakeInputBoxSchema } from "./migrations/116_queue_item_wake_input_box.js";
 import { providerAccountReadingsSchema } from "./migrations/117_provider_account_readings.js";
 import { humanQuietWindowsSchema } from "./migrations/118_human_quiet_windows.js";
@@ -262,5 +266,9 @@ export const ALL_MIGRATIONS: Migration[] = [
   streamDispositionsSchema,
   streamSubscriptionsSchema,
   streamRetentionFloorSchema,
+  seatRuntimeSwitchesSchema,
+  streamReaderActionsSchema,
+  claudeTokenReadingsSchema,
   seatIdentityProcessEvidenceSchema,
+  nodeLaunchRecipeSchema,
 ];

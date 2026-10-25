@@ -85,7 +85,7 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
     .option("--snapshot-id <id>", "Use this exact restore-usable snapshot")
     .option("--retry-startup-from <member-file>", "Retry a stopped first start that failed during projection, using its original member fragment")
     .option("--rig-root <path>", "Original absolute source root for --retry-startup-from")
-    .option("--plan", "Show subset selection and non-target effects without mutation")
+    .option("--plan", "Show restore selection and non-target effects without mutation; does not preview first start of a never-started materialized seat")
     .option("--json", "JSON output")
     .option("--host <id>", "Run on a remote host declared in ~/.openrig/hosts.yaml")
     .action(async (rigHandle: string, nodeRef: string | undefined, opts: { json?: boolean; holdReason?: string; seats?: string; host?: string; snapshotId?: string; plan?: boolean; retryStartupFrom?: string; rigRoot?: string }) => {

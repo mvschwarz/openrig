@@ -861,7 +861,7 @@ export class SeatHandoverService {
   }): Promise<void> {
     try {
       const derived = await deriveResumeToken(
-        { runtime: input.runtime, sessionName: input.sessionName },
+        { runtime: input.runtime, sessionName: input.sessionName, nodeId: input.nodeId },
         this.captureDeps,
       );
       if (derived.outcome === "exempt" || derived.outcome === "noop") return;

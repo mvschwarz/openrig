@@ -29,6 +29,8 @@ export interface ComposedPane {
   label: string;
   /** Provider-neutral shell command; a provider may wrap it using runtime metadata. */
   paneCommand: string;
+  /** Short, one-shot attach for a person's manual recovery instructions. */
+  recoveryCommand?: string;
   /** The same local attach as an argv, for a provider that reruns it without a shell (a Herdr restart). Absent for an ssh tile. */
   attachArgv?: string[];
   /** True when the attach is view-only (`tmux attach -r`) — cross-rig / saved read-only. */
@@ -80,6 +82,8 @@ export interface ProviderStatus {
   capabilities: Record<string, boolean>;
   /** Herdr endpoint the local desktop client must attach to. */
   launch?: { socketPath: string; session?: string };
+  /** The provider server's identity, so a caller can tell whether it talks to the same server (Rex). */
+  server?: { instanceId: string };
 }
 
 /** Liveness of the provider surface itself (herdr: `herdr status`; NOT a daemon ping). */
@@ -110,6 +114,8 @@ export interface OpenViewResult {
   /** Plain-language facts about how the open was done that the user should know
    *  (e.g. a suffixed workspace name, or a focus step the provider refused). */
   notes?: string[];
+  /** The provider space the view opened in (a Rex session), for a caller that shows it. */
+  space?: { id: string; label: string };
 }
 
 /**

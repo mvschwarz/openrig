@@ -82,6 +82,10 @@
     "./local-reading": {
       "types": "./dist/local-reading-surface.d.ts",
       "import": "./dist/local-reading-surface.js"
+    },
+    "./codex-auth": {
+      "types": "./dist/codex-auth-surface.d.ts",
+      "import": "./dist/codex-auth-surface.js"
     }
   },
   "scripts": {

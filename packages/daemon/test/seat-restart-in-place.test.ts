@@ -182,6 +182,8 @@ function world(options: WorldOptions = {}) {
   } as unknown as TmuxAdapter;
 
   const launches: Array<{ command: string; resumeToken: string }> = [];
+  /** The Codex home each resume proof was asked to read. */
+  const proofHomes: Array<string | undefined> = [];
   const builds: Array<{ running?: unknown }> = [];
   const codex = {
     runtime: "codex",
@@ -194,15 +196,17 @@ function world(options: WorldOptions = {}) {
         + `${(running?.addDirs ?? []).map((dir) => ` --add-dir '${dir}'`).join("")} '${opts.resumeToken}'`;
       return { ok: true as const, core, command: `env CODEX_HOME='${HOME}' ${core}` };
     },
-    async sendResumeCommand(_session: string, command: string, resumeToken: string): Promise<HarnessLaunchResult> {
+    async sendResumeCommand(_session: string, command: string, resumeToken: string, _nodeId?: string, home?: string): Promise<HarnessLaunchResult> {
       launches.push({ command, resumeToken });
+      proofHomes.push(home);
       maybeThrow("sendResumeCommand");
       const result = options.launch ?? { ok: true, resumeToken, resumeType: "codex_id" };
       if (result.ok && !options.identityFails) relaunch();
       return result;
     },
-    async verifyResumeInPane(): Promise<HarnessLaunchResult> {
+    async verifyResumeInPane(_session?: string, _token?: string, _nodeId?: string, home?: string): Promise<HarnessLaunchResult> {
       calls.push("verifyResumeInPane");
+      proofHomes.push(home);
       maybeThrow("verifyResumeInPane");
       return options.launch ?? { ok: true };
     },
@@ -249,7 +253,7 @@ function world(options: WorldOptions = {}) {
   });
   const events = () => (db.prepare("SELECT type, payload FROM events WHERE type LIKE 'seat.restart_in_place%' ORDER BY seq").all() as Array<{ type: string; payload: string }>)
     .map((row) => ({ type: row.type, ...JSON.parse(row.payload) }));
-  return { db, service, node, session, calls, launches, builds, events, sessionRegistry, tmux,
+  return { db, service, node, session, calls, launches, proofHomes, builds, events, sessionRegistry, tmux,
     replacementYields, get replacementReads() { return replacementReads; }, get relaunched() { return relaunched; },
     setRows: (next: NativeProcessRow[]) => { rows = next; },
     print: (text: string) => { paneLines.push(...text.split("\n").filter(Boolean)); },
@@ -564,6 +568,26 @@ describe("rig seat restart --keep-conversation: outcomes", () => {
     expect(r.remainingStep).not.toContain("didn't prove the conversation in time");
   });
 
+  // An in-place restart did restart the pane, so its result never repeats the adapter's "nothing was restarted",
+  // which stays true for a caller that restarted nothing.
+  const ready = "OpenAI Codex (v0.120.0)\n› Ask Codex to do anything";
+  const readyTmux = () => ({ getPanePid: async () => 901, getPaneCommand: async () => "codex", capturePaneScreen: async () => ready, capturePaneContent: async () => ready } as unknown as TmuxAdapter);
+  it.each([
+    ["unproven: no Codex process tied to the conversation", "codex", () => ({ threadId: "tok" })],
+    ["disproved: the records name another conversation", "codex resume tok", () => ({ threadId: "another-thread" })],
+  ] as const)("through the adapter, %s: the in-place result says the pane restarted and to check it", async (_case, command, evidence) => {
+    const adapter = new CodexRuntimeAdapter({ tmux: readyTmux(), fsOps: {} as never, sleep: async () => {}, resumeProofWindowMs: 40,
+      listProcesses: () => [{ pid: 901, ppid: 1, pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000", command }],
+      readResumeEvidence: evidence });
+    const launch = await adapter.verifyResumeInPane("impl", "tok");
+    // What every other caller shows is unchanged: the adapter's own result still says nothing was restarted.
+    expect(launch).toMatchObject({ ok: false, error: expect.stringContaining("The session was preserved; nothing was restarted.") });
+    const r = await report(launch);
+    expect(r.message).toMatch(/^The pane restarted: the original Codex exited and the resume started in the same pane, but /);
+    expect(r.message).toContain(`Check the pane with rig capture ${SEAT}.`);
+    expect(JSON.stringify(r)).not.toContain("nothing was restarted");
+  });
+
   // Round 4: the report's message, startupGate and step all describe the newest moment, through the real adapter.
   const UPDATING = ["✨ Update available! 0.120.0 -> 0.121.0", "Updating Codex..."].join("\n");
   const SKIPPABLE = ["✨ Update available! 0.120.0 -> 0.121.0", "› 1. Update now (runs `npm install -g @openai/codex`)", "  2. Skip", "  3. Skip until next version", "Press enter to continue"].join("\n");
@@ -694,6 +718,16 @@ describe("rig seat restart --keep-conversation: outcomes", () => {
     const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
     expect(result).toMatchObject({ outcome: "incomplete", remainingStep: expect.stringContaining("no fresh session was started") });
     expect(w.launches).toHaveLength(1);
+  });
+
+  it("proves the resume in the home the running Codex uses, in both pane shapes, though the seat declares none", async () => {
+    // The seat has no env: home, so the adapter would fall back to the daemon's; the restart already read the real one.
+    for (const shape of ["shell_backed", "direct_native"] as const) {
+      const w = world({ shape, ...(shape === "direct_native" ? { remainOnExit: null } : {}) });
+      const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+      expect(result).toMatchObject({ ok: true, outcome: "restarted_account_unverified", paneShape: shape });
+      expect(w.proofHomes).toEqual([HOME]);
+    }
   });
 
   it("native_unknown when the resumed process cannot be proven to be the conversation", async () => {

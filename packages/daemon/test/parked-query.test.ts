@@ -56,6 +56,8 @@ describe("S19 A7 — the derived diagnosis, both park causes", () => {
     expect(d.parked).toBe(true);
     expect(d.activity.value).toBe("idle-at-prompt");
     expect(d.activity.confidence).toBe("oracle");
+    // #1933: when the arbitrated state last changed, which for a stopped seat is when it began waiting.
+    expect(d.activity.since).toBe("2026-08-26T23:00:00.000Z");
     expect(d.obligations.openCount).toBe(1);
     expect(d.obligations.items[0]!.qitemId).toBe("qitem-1");
     expect(d.reason).toMatch(/idle/i);

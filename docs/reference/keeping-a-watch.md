@@ -165,6 +165,27 @@ says so. Use it rather than the single-machine `rig provider status --json`: one
 machines appears once, with each machine's own observation beside it, so you can't count it twice. If it answers that
 usage windows are off, tell the person that before setting the watch, as you would an unreachable channel.
 
+For a Claude login supplied by `CLAUDE_CODE_OAUTH_TOKEN`, an explicit one-credential read is available:
+
+```sh
+rig provider status --refresh --provider claude --claude-token-file /absolute/private/personal.token --credential-label Personal
+```
+
+The file must be readable by the daemon, regular, at most 8 KiB, and contain only the token. Ownership by the daemon user and mode 0600 or
+0400 are recommended; different ownership, broader permissions and symlinks produce warnings, not refusals. Provision it through your existing credential
+custody; never put token values in arguments, seat environment settings, evidence or a queue item. The path is on the selected daemon's
+machine. Repeat the command for another labelled file when you want to compare subscriptions. This option does not fan out with
+`--all-hosts` or `--hosts`.
+
+**Each token refresh spends one model turn.** Status and TUI reads show the cached result and never probe. A timeout or refusal does not
+prove no allowance was spent. The probe uses a temporary home/config/work directory and a single Haiku turn, with CLI flags requesting no tools, hooks or MCP. Unsupported CLI flags or missing events are reported as failures/unknown, not as free capacity. The event format is evidenced on
+Claude Code 2.1.310; other versions may report different fields. These are credential labels you supplied, not provider-verified account
+names, and do not prove a running seat uses that credential. The ordinary status-line sample/account join remains unproven.
+
+Only actually reported window percentages and resets are measurements. A rejected window can have an unknown percentage; overage rejection
+is separate from subscription rejection. Readings and their times survive daemon restart, marked historical until refreshed. Files with
+different references/labels stay separate; equal resets or matching labels on another host never establish one allowance or extra room.
+
 **Never put `--refresh` in the timer's check.** `rig provider status --all-hosts --refresh` starts a native read of the
 accounts on every machine. Run it only when the person asks for a fresh reading now.
 

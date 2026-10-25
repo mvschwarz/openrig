@@ -104,13 +104,17 @@ describe("single topology-creation ingress (OPR.0.5.8.9)", () => {
     const census = {
       createMemberNode: [...source.matchAll(/\bthis\.createMemberNode\(/g)].length,
       launchBinding: [...source.matchAll(/\bthis\.launchBinding\(/g)].length,
+      launchValidatedMember: [...source.matchAll(/\bthis\.launchValidatedMember\(/g)].length,
     };
     const addMemberBody = source.slice(
       source.indexOf("  async addMemberToPod("),
       source.indexOf("  async instantiate(", source.indexOf("  async addMemberToPod(")),
     );
 
-    expect(census).toEqual({ createMemberNode: 1, launchBinding: 1 });
+    // Ordinary topology growth and persisted fresh restore share the validated
+    // member launch effect. The relaunch is an additional caller by design, but
+    // it is not a second direct launch-binding ingress or topology constructor.
+    expect(census).toEqual({ createMemberNode: 1, launchBinding: 1, launchValidatedMember: 2 });
     expect(addMemberBody).toContain("this.materializeValidatedSpec(");
     expect(addMemberBody).toContain("this.launchValidatedSpec(");
     expect(addMemberBody).not.toContain("this.createMemberNode(");

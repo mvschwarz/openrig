@@ -1,3 +1,5 @@
+import { tileAttachArgv } from "../src/domain/terminal/tile-attach.js";
+import { shellQuote } from "../src/adapters/shell-quote.js";
 // #707 — a seat's tile must not depend on the terminal provider's PATH to find tmux, and a pane that
 // exits at once must not be reported as opened. The shell parsing below is real; no terminal
 // provider, tmux server or ssh server is claimed, and the herdr replies are fakes.
@@ -22,7 +24,7 @@ describe("#707 local tiles run the tmux the daemon resolves", () => {
     mkdirSync(narrow);
     mkdirSync(elsewhere);
     const tmux = join(elsewhere, "tmux");
-    writeFileSync(tmux, '#!/bin/sh\nprintf "%s\\n" "$@" > "$OPR_ARGS"\n', { mode: 0o700 });
+    writeFileSync(tmux, '#!/bin/sh\ncase $1 in display-message) target=$4; target=${target#=}; printf "7 session-id:%s\\n" "${target%:}";; show-environment) exit 1;; attach) printf "%s\\n" "$@" > "$OPR_ARGS";; esac\n', { mode: 0o700 });
     const argsFile = join(root, "args");
     const env = { PATH: narrow, OPR_ARGS: argsFile };
     try {
@@ -33,7 +35,7 @@ describe("#707 local tiles run the tmux the daemon resolves", () => {
 
         const resolved = composeView("v", [local("seat'a", readOnly)], { resolveHost: () => null, localTmux: tmux });
         execFileSync("/bin/sh", ["-c", resolved.opened[0]!.paneCommand], { env });
-        expect(readFileSync(argsFile, "utf8").trimEnd().split("\n")).toEqual(["attach", ...(readOnly ? ["-r"] : []), "-t", "seat'a"]);
+        expect(readFileSync(argsFile, "utf8").trimEnd().split("\n")).toEqual(["attach", ...(readOnly ? ["-r"] : []), "-t", "session-id"]);
         expect(resolved.opened[0]!.readOnly).toBe(readOnly);
       }
     } finally {
@@ -54,7 +56,7 @@ describe("#707 local tiles run the tmux the daemon resolves", () => {
     const members = [local("a"), local("b", true)];
     const before = composeView("v", members, { resolveHost: () => null });
     expect(JSON.stringify(composeView("v", members, { resolveHost: () => null, localTmux: undefined }))).toBe(JSON.stringify(before));
-    expect(before.opened.map((p) => p.paneCommand)).toEqual(["tmux attach -t 'a'", "tmux attach -r -t 'b'"]);
+    expect(before.opened.map((p) => p.paneCommand)).toEqual([tileAttachArgv("tmux", [], "a", false).map(shellQuote).join(" "), tileAttachArgv("tmux", [], "b", true).map(shellQuote).join(" ")]);
   });
 });
 
@@ -99,7 +101,7 @@ describe("#707 the service passes only an absolute resolved tmux to the composer
     const { svc, herdr } = service(resolver);
     const res = await svc.openView({ view: "rig:r" });
     expect(res.ok).toBe(true);
-    expect(herdr.last!.opened[0]!.paneCommand).toBe(expected);
+    expect(herdr.last!.opened[0]!.recoveryCommand).toBe(expected);
   });
 
   it("resolves once, so the preview's plan still matches the open", async () => {

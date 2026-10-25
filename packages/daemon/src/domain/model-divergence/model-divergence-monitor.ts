@@ -304,8 +304,24 @@ export class ModelDivergenceMonitor {
 export function modelsMatch(pinned: string, effective: string, runtime?: string | null): boolean {
   // Claude's [1m] selects the context window, not a different model. Other runtimes keep it literal.
   const modelId = (model: string) => runtime === "claude-code" ? model.trim().replace(/\[1m\]$/i, "") : model;
-  return canonicalModelPin(modelId(pinned)) === modelId(effective).trim().toLowerCase();
+  if (canonicalModelPin(modelId(pinned)) === modelId(effective).trim().toLowerCase()) return true;
+  if (runtime !== "claude-code") return false;
+  // On Amazon Bedrock a seat is pinned to an inference-profile id (global.anthropic.claude-opus-5-5) and reports the
+  // bare model id, so a recognised profile prefix is dropped from whichever side carries it.
+  const pin = canonicalModelPin(modelId(pinned)).replace(BEDROCK_PROFILE, "");
+  const seen = modelId(effective).trim().toLowerCase().replace(BEDROCK_PROFILE, "");
+  if (pin === seen) return true;
+  // A Claude id answers as its dated snapshot (claude-haiku-4-5 as claude-haiku-4-5-20251001), and a pinned snapshot
+  // can be read back undated. When only one side carries the date, it's the same model; two different dates are not.
+  return CLAUDE_SNAPSHOT.test(pin) !== CLAUDE_SNAPSHOT.test(seen)
+    && pin.replace(CLAUDE_SNAPSHOT, "") === seen.replace(CLAUDE_SNAPSHOT, "");
 }
+
+/** The -YYYYMMDD date a Claude snapshot id ends with. */
+const CLAUDE_SNAPSHOT = /-\d{8}$/;
+
+/** Bedrock's Anthropic model-id prefix: `anthropic.`, alone or after a cross-Region inference-profile geography. */
+const BEDROCK_PROFILE = /^(?:(?:global|us|eu|apac|jp|au|us-gov)\.)?anthropic\./;
 
 /** The pin as modelsMatch compares it: trimmed, lower-cased, through CANONICAL_MODEL_PINS. */
 export function canonicalModelPin(pinned: string): string {

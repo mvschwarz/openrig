@@ -16,7 +16,7 @@ function run(env: Record<string, string>, keys: string[] = [], listingExit = 0, 
   const fake = join(dir, "openclaw");
   const listing = JSON.stringify({ sessions: keys.map((key) => ({ agentId: "main", key })) });
   const description = JSON.stringify({ session: gatewayKey ? { key: gatewayKey } : null });
-  writeFileSync(fake, `#!/bin/sh\nif [ "$1" = sessions ]; then echo '${listing}'; exit ${listingExit}; fi\nif [ "$1" = gateway ]; then echo '${description}'; exit ${listingExit}; fi\necho "$@ STATE=$OPENCLAW_STATE_DIR" > "${dir}/started"\n`);
+  writeFileSync(fake, `#!/bin/sh\nif [ "$1" = sessions ]; then echo '${listing}'; exit ${listingExit}; fi\nif [ "$1" = gateway ]; then echo '${description}'; exit ${listingExit}; fi\necho "$@ STATE=$OPENCLAW_STATE_DIR" > "${dir}/started"\nprintf '%s\\0' "$@" > "${dir}/args"\n`);
   chmodSync(fake, 0o755);
   let failure: string | undefined;
   try {
@@ -24,13 +24,27 @@ function run(env: Record<string, string>, keys: string[] = [], listingExit = 0, 
       OPENRIG_HOME: join(dir, "home"), OPENRIG_NODE_ID: "node-1", ...env }, timeout: 20_000, stdio: "pipe" });
   } catch (error) { failure = String((error as { stderr?: Buffer }).stderr); }
   const started = join(dir, "started");
-  return { started: existsSync(started) ? readFileSync(started, "utf8").trim() : undefined, failure, state: join(dir, "home", "state", "openclaw", "node-1") };
+  return { args: existsSync(join(dir, "args")) ? readFileSync(join(dir, "args"), "utf8").split("\0").slice(0, -1) : [], started: existsSync(started) ? readFileSync(started, "utf8").trim() : undefined, failure, state: join(dir, "home", "state", "openclaw", "node-1") };
 }
 
 describe("the documented OpenClaw launcher and preset", () => {
   it("starts a local chat on the session key OpenRig named, in the seat's own state folder", () => {
     const { started, state } = run({ OPENRIG_CONVERSATION: "openrig-dev-impl-1a2b3c4d" });
     expect(started).toBe(`tui --local --session agent:main:openrig-dev-impl-1a2b3c4d STATE=${state}`);
+  });
+
+  it.each([false, true])("passes exact multiline first input to the native message option (Gateway %s)", gateway => {
+    const dir = mkdtempSync(join(tmpdir(), "openclaw-first-")); dirs.push(dir);
+    const file = join(dir, "first.txt"); const text = "identity\n'quoted' $literal\n";
+    writeFileSync(file, text, { mode: 0o600 });
+    expect(run({ OPENRIG_CONVERSATION: "named", OPENRIG_FIRST_INPUT: file }, [], 0, gateway ? ["--gateway"] : []).args)
+      .toEqual(["tui", ...(gateway ? [] : ["--local"]), "--session", "agent:main:named", "--message", text]);
+  });
+
+  it("starts nothing when the first-input file is unreadable", () => {
+    const { started, failure } = run({ OPENRIG_CONVERSATION: "named", OPENRIG_FIRST_INPUT: "/missing/first-input" });
+    expect(started).toBeUndefined();
+    expect(failure).toBeDefined();
   });
 
   it("reopens the main agent's exact canonical session key", () => {

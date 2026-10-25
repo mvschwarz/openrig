@@ -311,7 +311,7 @@ describe("TmuxAdapter", () => {
 
   describe("createSession", () => {
     it("calls exec with exact command (name + cwd, both quoted)", async () => {
-      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const exec = vi.fn<ExecFn>().mockImplementation(async (cmd) => cmd.startsWith("tmux new-session") ? "%1\n" : ""); // new-session -P prints its pane
       const adapter = adapterFor(exec);
 
       await adapter.createSession("r01-dev1-impl", "/home/user/code");
@@ -323,7 +323,7 @@ describe("TmuxAdapter", () => {
     });
 
     it("with cwd containing spaces: path is quoted", async () => {
-      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const exec = vi.fn<ExecFn>().mockImplementation(async (cmd) => cmd.startsWith("tmux new-session") ? "%1\n" : ""); // new-session -P prints its pane
       const adapter = adapterFor(exec);
 
       await adapter.createSession("r01-dev1-impl", "/home/user/my project/code");
@@ -335,7 +335,7 @@ describe("TmuxAdapter", () => {
     });
 
     it("with shell-sensitive session name: name is quoted", async () => {
-      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const exec = vi.fn<ExecFn>().mockImplementation(async (cmd) => cmd.startsWith("tmux new-session") ? "%1\n" : ""); // new-session -P prints its pane
       const adapter = adapterFor(exec);
 
       await adapter.createSession("r01-dev's session", "/tmp");
@@ -347,7 +347,7 @@ describe("TmuxAdapter", () => {
     });
 
     it("without cwd omits -c flag", async () => {
-      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const exec = vi.fn<ExecFn>().mockImplementation(async (cmd) => cmd.startsWith("tmux new-session") ? "%1\n" : ""); // new-session -P prints its pane
       const adapter = adapterFor(exec);
 
       await adapter.createSession("r01-dev1-impl");
@@ -695,7 +695,7 @@ describe("TmuxAdapter", () => {
 
   describe("canonical session names with @", () => {
     it("createSession + sendKeys with @ in name produce correct quoted commands", async () => {
-      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const exec = vi.fn<ExecFn>().mockImplementation(async (cmd) => cmd.startsWith("tmux new-session") ? "%1\n" : ""); // new-session -P prints its pane
       const adapter = adapterFor(exec);
 
       // createSession with canonical name

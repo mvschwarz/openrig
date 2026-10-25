@@ -224,7 +224,7 @@ describe("OMP RPC lifecycle", () => {
     core.handlePiLine(JSON.stringify({ type: "agent_end", isTerminal: false }));
     expect(activity.filter((event) => event.hookEvent === "Stop")).toHaveLength(0);
     core.handleUserBlock("steer ongoing work");
-    expect(rpc.at(-1)).toEqual({ type: "steer", message: "steer ongoing work" });
+    expect(rpc.at(-1)).toEqual({ type: "prompt", message: "steer ongoing work", streamingBehavior: "steer" });
     core.handlePiLine(JSON.stringify({ type: "auto_compaction_start" }));
     expect(activity.at(-1)).toMatchObject({ hookEvent: "active", subtype: "compaction", generation: "occupant-42" });
     core.handlePiLine(JSON.stringify({ type: "agent_end", isTerminal: true }));
@@ -308,6 +308,35 @@ describe("OMP RPC lifecycle", () => {
     core.retrySessionIdentity();
     core.handlePiLine(JSON.stringify({ type: "agent_end" }));
     expect(pending).toHaveLength(3);
+  });
+
+  it("a second startup block before agent_start goes as a prompt OMP queues as a steer, with no runtime_error (#1932)", () => {
+    const { core, rpc, activity } = runner();
+    core.handleUserBlock("first startup block");
+    core.handlePiLine(JSON.stringify({ id: "p1", type: "response", command: "prompt", success: true }));
+    core.handleUserBlock("second startup block");
+    expect(rpc.filter((x) => ["prompt", "steer"].includes(String(x.type)))).toEqual([
+      { type: "prompt", message: "first startup block", streamingBehavior: "steer" },
+      { type: "prompt", message: "second startup block", streamingBehavior: "steer" },
+    ]);
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end", isTerminal: true }));
+    expect(activity.filter((event) => event.subtype === "runtime_error")).toHaveLength(0);
+  });
+
+  it("after a local-only command (agentInvoked false), real work still goes as a prompt and runs", () => {
+    // OMP answers a consumed builtin with agentInvoked:false, in its response or a later prompt_result, and starts no turn.
+    for (const noTurn of [
+      { id: "p1", type: "response", command: "prompt", success: true, data: { agentInvoked: false } },
+      { type: "prompt_result", id: "p1", agentInvoked: false },
+    ]) {
+      const { core, rpc } = runner();
+      core.handleUserBlock("/local-command");
+      core.handlePiLine(JSON.stringify(noTurn));
+      core.handleUserBlock("real work");
+      expect(rpc.filter((x) => x.type === "steer")).toEqual([]);
+      expect(rpc.at(-1)).toMatchObject({ type: "prompt", message: "real work" });
+    }
   });
 
   it("keeps prompt rejections visible as attention after the turn ends", () => {

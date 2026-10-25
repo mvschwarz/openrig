@@ -157,7 +157,13 @@ team back with its conversations, run rig up <rig-name> --existing, not the spec
           return;
         }
         const eq = assignment.indexOf("=");
-        envOverride[assignment.slice(0, eq)] = assignment.slice(eq + 1);
+        const name = assignment.slice(0, eq);
+        // A seat's Claude or Codex home comes from env: in the spec, which restore, handover and status all read.
+        if (name === "CLAUDE_CONFIG_DIR" || name === "CODEX_HOME") {
+          console.error(`--env ${name} isn't applied: a seat's runtime home comes from env: in its rig spec (member or rig), so a restore, a handover and rig seat status all agree. Declare it there.`);
+          continue;
+        }
+        envOverride[name] = assignment.slice(eq + 1);
       }
       const envOverrideBody = Object.keys(envOverride).length > 0 ? envOverride : undefined;
       if (envOverrideBody && sourceLooksLikeTopology(source)) {

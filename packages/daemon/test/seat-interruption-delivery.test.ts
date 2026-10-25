@@ -148,6 +148,28 @@ describe("queue wakes: who triggered the wake decides its source", () => {
     await vi.waitFor(() => expect(f.typed.join("\n")).toContain(peerAsk.qitemId));
   });
 
+  it("a row OpenRig creates itself is typed as from OpenRig, not from the seat it names as source; the row keeps its source", async () => {
+    const f = fixture();
+    await f.level("openrig-urgent");
+    const finding = await f.queue.create({ sourceSession: "peer@test", destinationSession: seat, body: "Stuck sweep: unclaimed", wakeTrigger: "openrig" });
+    const health = await f.queue.create({ sourceSession: "system:health", destinationSession: seat, body: "Health finding", wakeTrigger: "openrig" });
+    const peerAsk = await f.queue.create({ sourceSession: "peer@test", destinationSession: seat, body: "A deliberate ask" });
+    const wakeFor = async (id: string) => { await vi.waitFor(() => expect(f.typed.join("\n")).toContain(id)); return f.typed.find((t) => t.includes(id))!; };
+    const findingWake = await wakeFor(finding.qitemId);
+    expect(findingWake).toContain("From: daemon@kernel");
+    expect(findingWake).not.toContain("peer@test");
+    expect(findingWake).toContain("↩ Sent by OpenRig itself, not by a seat. Act on the row it names.");
+    expect(f.queue.getById(finding.qitemId)!.sourceSession).toBe("peer@test");
+    // A source that's already OpenRig's keeps its more specific name.
+    expect(await wakeFor(health.qitemId)).toContain("From: system:health");
+    // A seat's own row still wakes from that seat, with a reply (held at this level).
+    await vi.waitFor(() => expect(f.queue.getById(peerAsk.qitemId)!.lastNudgeResult).toBe("retained:typing_guard"));
+    const askWake = f.held().find((h) => h.body.includes(peerAsk.qitemId))!;
+    expect(askWake).toMatchObject({ senderSession: "peer@test" });
+    expect(askWake.body).toContain("From: peer@test");
+    expect(askWake.body).toContain('↩ Reply: rig send peer@test "..."');
+  });
+
   it("OpenRig's own urgent row is marked urgent by OpenRig, not by the person it's about", async () => {
     const f = fixture();
     await f.level("urgent-only");
@@ -170,6 +192,7 @@ describe("an urgent queue wake shows who marked it, typed or held, exactly once"
     expect(heldFor(agentRow.qitemId)).toMatchObject({ urgency: "urgent", senderSession: "peer@test" });
     expect(heldFor(agentRow.qitemId).body).toContain("Urgent (marked by peer@test):");
     expect(heldFor(openrigRow.qitemId).body).toContain("Urgent (marked by OpenRig):");
+    expect(heldFor(openrigRow.qitemId)).toMatchObject({ senderSession: "daemon@kernel" });
     expect(lines(heldFor(openrigRow.qitemId).body)).toBe(1);
   });
 

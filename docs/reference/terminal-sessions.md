@@ -40,6 +40,20 @@ and slice views, pagination, absent seats and partial results all use the same
 composer. Selecting a session changes where those tiles are placed. It does
 not relaunch the seats' tmux sessions or move queue ownership.
 
+## Replacing a seat's session
+
+New tiles keep their place when a seat's tmux session is replaced. They wait up
+to 30 seconds for the same session name and managed seat identity to return,
+then reattach with the original read-only setting. This uses the shared tile
+command for Herdr, cmux, Rex and plain tmux, including SSH tiles. In-place
+handover and restart keep the existing attachment.
+
+A deliberate detach closes the tile after about two seconds. A different seat
+under the old name is never followed. If no replacement returns in time, or a
+session has no managed identity, reopen the rig view with
+`rig terminal open rig:<name> --window` (or your explicit provider). Views
+opened before this change must be closed and reopened to get this behavior.
+
 ## Desktop windows and previews
 
 ```sh
@@ -73,6 +87,43 @@ as an unknown outcome; inspect the selected session before retrying.
 when Herdr is absent, and combining a session with cmux is rejected. Existing
 workspaces are kept during reuse checks. Any suggested cleanup command for a
 stale named-session workspace includes the selected socket.
+
+## Rex
+
+```sh
+rig terminal open future-rig --provider rex --json
+rig terminal open future-rig --window --json
+rig terminal status --provider rex --json
+```
+
+`--provider rex` opens the view as a new session on the daemon's Rex server,
+one window per page of the view, without switching any app to it. A tile whose
+attach fails within ten seconds stays open showing the error, and the result
+lists that seat as degraded when the failure shows up in the check made about
+two seconds after opening. OpenRig picks
+Rex only when it is named, or for `--window` (or no provider) when the command
+runs inside a Rex block, including in a tmux started there. Everywhere else the
+defaults above are unchanged, and the daemon's open and preview APIs never pick
+Rex for a request that names no provider.
+
+From inside Rex, the window form first checks that the daemon uses the same Rex
+server as the calling terminal. When they differ, nothing is opened. After the
+open it asks the Rex app showing the caller's session to switch to the new one,
+choosing the app whose window holds the caller's terminal when several show it.
+When no app can be chosen, or the app refuses the switch, the result names the
+session to select by hand. A Rex app accepts the switch only with Remote Control
+turned on in its Settings, under Rex Server.
+
+The daemon finds `rex` in `$REX_BIN_DIR`, then on `PATH`, then inside the Rex
+app on macOS, and uses its own `REX_SERVER` when set. It never starts a Rex
+server. An open view is not reused: opening it again adds a numbered session,
+such as `future-rig (2)`. `--session` applies to Herdr only. An unreachable Rex
+server returns `rex_unavailable` and a failed session create returns
+`rex_session_failed`, both as HTTP 200 results with `ok: false`. When Rex
+doesn't confirm a session create or a page, for example because its reply
+timed out, OpenRig closes nothing: the result says `rex_outcome_unknown`, or
+adds a note when other pages opened, and names the session to check in Rex
+before retrying. `rig terminal status` gives Rex about a second to answer.
 
 ## HTTP API
 

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
 import { providerCommand } from "../src/commands/provider.js";
-import { DaemonClient } from "../src/client.js";
+import { DaemonClient, DaemonTimeoutError } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
 
@@ -215,5 +215,41 @@ describe("rig provider CLI grammar (daemon-backed)", () => {
     const { logs, exitCode } = await run(["status", "--json"], downDeps);
     expect(exitCode).toBe(1);
     expect(logs.join(" ")).toMatch(/not running/i);
+  });
+});
+
+describe("rig provider switch --seat tells the person what follows", () => {
+  function switchDeps(post: (path: string, body: unknown, opts?: { timeoutMs?: number }) => Promise<unknown>): StatusDeps {
+    return { ...runningDeps(1), clientFactory: () => ({ post }) as never };
+  }
+
+  it("waits as long as a seat restart does, and prints each peer's home and the restart a same-home peer needs", async () => {
+    let timeoutMs: number | undefined;
+    const deps = switchDeps(async (_path, _body, opts) => {
+      timeoutMs = opts?.timeoutMs;
+      return { status: 200, data: { outcome: "rebind_in_progress", seat: { home: "/h", account: "work", loginChanged: true, undo: null, peers: [
+        { logicalId: "dev.qa", sessionName: "dev-qa@rig", home: "same", effect: "Not restarted.", step: "rig seat restart dev-qa@rig --keep-conversation" },
+        { logicalId: "dev.guard", sessionName: "dev-guard@rig", home: "different", effect: "Not restarted; uses a different Codex home." },
+        { logicalId: "dev.pi", sessionName: null, home: "unknown", effect: "Not restarted; its Codex home could not be observed." },
+      ] } } };
+    });
+    const { logs } = await run(["switch", "--seat", "s1", "--to-account", "work"], deps);
+    expect(timeoutMs).toBe(120_000);
+    expect(logs).toContain("peer on this home: dev-qa@rig: Not restarted.");
+    expect(logs).toContain("  then: rig seat restart dev-qa@rig --keep-conversation");
+    expect(logs).toContain("seat on another home: dev-guard@rig: Not restarted; uses a different Codex home.");
+    expect(logs).toContain("seat, home unknown: dev.pi: Not restarted; its Codex home could not be observed.");
+  });
+
+  it("a CLI timeout reports the switch as unknown, with how to check it before running it again", async () => {
+    const deps = switchDeps(async () => { throw new DaemonTimeoutError("timed out"); });
+    const { logs, exitCode } = await run(["switch", "--seat", "s1", "--to-account", "work"], deps);
+    expect(exitCode).toBe(1);
+    expect(logs[0]).toBe("unknown: switch_outcome_unknown");
+    expect(logs.join("\n")).toContain("rig seat restart s1 --keep-conversation --plan");
+    // A switch still queued behind another on the home hasn't restarted anything, so an eligible plan isn't the end of it.
+    expect(logs.join("\n")).toContain("queued behind another switch on the same Codex home");
+    expect(logs.join("\n")).toMatch(/lastRestart that started after \d{4}-\d{2}-\d{2}T/);
+    expect(logs.join("\n")).toContain("don't run the switch again");
   });
 });

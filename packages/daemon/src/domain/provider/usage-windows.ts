@@ -32,6 +32,7 @@ export function sameReset(a: string | null, b: string | null): boolean {
 export const UNRESOLVED_READS_KEPT = 3;
 
 export interface UsageReadWindow {
+  status?: string;
   /** The provider-native window name. */
   window: string;
   durationMins: number | null;
@@ -40,6 +41,7 @@ export interface UsageReadWindow {
 }
 
 export interface UsageReading<I> {
+  probe?: import("./provider-types.js").ClaudeTokenProbe;
   identity: I;
   windows: UsageReadWindow[];
   limitEvidence: string | null;
@@ -101,6 +103,7 @@ export function usageFreshness(observedAt: string, now: string, failedAfter: { a
 /** Level of one window as of its observation. Absent data is never nearing or exhausted. */
 export function usageLevel(window: UsageReadWindow, limitEvidence: string | null, now: string):
   Pick<UsageWindowRow, "level" | "levelReason"> {
+  if (window.status === "rejected" && !(window.resetsAt && Date.parse(now) >= Date.parse(window.resetsAt))) return { level: "exhausted", levelReason: "provider rejected this window (percentage may be unknown)" };
   if (window.usedPercent === null) return { level: "unknown", levelReason: "no usage reported for this window" };
   const resetMs = window.resetsAt === null ? NaN : Date.parse(window.resetsAt);
   const nowMs = Date.parse(now);
@@ -280,6 +283,7 @@ export class UsageWindows<I extends { source: string }, R> {
       // Every keyed reading is its allowance's latest known one; an unresolved earlier read may be a duplicate.
       const expects = key !== null || reading.latest;
       const windows: UsageWindowRow[] = reading.windows.map((w) => ({
+        ...(w.status ? { status: w.status } : {}),
         window: w.window,
         durationMins: w.durationMins,
         usedPercent: w.usedPercent,
@@ -296,6 +300,7 @@ export class UsageWindows<I extends { source: string }, R> {
         && windows.every((w) => w.freshness === "fresh" && w.level !== "unknown");
       rows.push({
         provider,
+        ...(reading.probe ? { probe: reading.probe } : {}),
         identity: reading.identity as unknown as ProviderUsageAllowance["identity"],
         source,
         observedAt: reading.observedAt,

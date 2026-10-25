@@ -4,6 +4,7 @@ import nodePath from "node:path";
 import Database from "better-sqlite3";
 import { describe, it, expect, vi } from "vitest";
 import { ResumeMetadataRefresher } from "../src/domain/resume-metadata-refresher.js";
+import { deriveResumeToken } from "../src/domain/resume-token-capture.js";
 import { seedCodexThreads } from "./helpers/codex-state.js";
 import type { SessionRegistry } from "../src/domain/session-registry.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
@@ -656,5 +657,58 @@ describe("ResumeMetadataRefresher", () => {
       expect(probeClaudeResume).not.toHaveBeenCalled();
       expect(sessionRegistry.updateResumeToken).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe("a seat's own runtime home in capture and the fallback probe", () => {
+  const seatHome = (nodeId: string, runtime: string) =>
+    nodeId === "node-own" ? (runtime === "codex" ? "/homes/qa-codex" : "/homes/build-claude") : undefined;
+
+  it("adoption and discovered-handover capture finds a thread that exists only in the seat's own CODEX_HOME", async () => {
+    const homes: Array<string | undefined> = [];
+    const refresher = new ResumeMetadataRefresher({
+      sessionRegistry: {} as unknown as SessionRegistry,
+      tmuxAdapter: mockTmux({ getPanePid: vi.fn(async () => 900) }),
+      listProcesses: () => [{ pid: 900, ppid: 1, command: "-zsh" }, { pid: 901, ppid: 900, command: "codex" }],
+      // The thread is logged only in the seat's own home.
+      readCodexThreadIdByPid: (pid, _identity, _report, home) => {
+        homes.push(home);
+        return pid === 901 && home === "/homes/qa-codex" ? "thread-in-seat-home" : undefined;
+      },
+      seatHome,
+      sleep: async () => {},
+    });
+    expect(await deriveResumeToken({ runtime: "codex", sessionName: "dev-qa@r", nodeId: "node-own" }, { resumeTokenCapturer: refresher }))
+      .toMatchObject({ outcome: "captured", token: "thread-in-seat-home" });
+    expect(homes).toEqual(["/homes/qa-codex"]);
+    // A seat without its own home reads the daemon's, where this thread isn't.
+    expect(await deriveResumeToken({ runtime: "codex", sessionName: "dev-qa@r", nodeId: "node-plain" }, { resumeTokenCapturer: refresher }))
+      .toMatchObject({ outcome: "skipped" });
+    expect(homes.slice(1).every((home) => home === undefined)).toBe(true);
+  });
+
+  it("the fallback resume probe looks in the seat's own Claude config dir, and a seat without one is probed as before", async () => {
+    const sessionRegistry = {
+      isForkClaimingHeldToken: vi.fn(() => false), updateResumeToken: vi.fn(), clearResumeToken: vi.fn(), markResumeProbeResult: vi.fn(),
+    } as unknown as SessionRegistry;
+    const probeClaudeResume = vi.fn(async () => "resumable" as const);
+    const refresher = new ResumeMetadataRefresher({ sessionRegistry, tmuxAdapter: mockTmux(), probeClaudeResume, seatHome, sleep: async () => {} });
+    await refresher.refresh([
+      { nodeId: "node-own", sessionId: "s-own", sessionName: "dev-build@r", runtime: "claude-code", resumeType: "claude_id", resumeToken: "tok-own", cwd: "/repo" },
+      { nodeId: "node-plain", sessionId: "s-plain", sessionName: "dev-plain@r", runtime: "claude-code", resumeType: "claude_id", resumeToken: "tok-plain", cwd: "/repo" },
+    ]);
+    expect(probeClaudeResume).toHaveBeenCalledWith("dev-build@r", "tok-own", "/repo", "/homes/build-claude");
+    expect(probeClaudeResume).toHaveBeenCalledWith("dev-plain@r", "tok-plain", "/repo");
+  });
+
+  it("the default probe runs claude with the seat's config dir as a leading assignment", async () => {
+    const tmux = mockTmux({ getPaneCommand: vi.fn(async () => "zsh") });
+    const refresher = new ResumeMetadataRefresher({ sessionRegistry: {} as unknown as SessionRegistry, tmuxAdapter: tmux, sleep: async () => {} });
+    vi.spyOn(refresher as never, "waitForProbeShellReady" as never).mockResolvedValue(true as never);
+    await (refresher as unknown as { defaultProbeClaudeResume: (...a: unknown[]) => Promise<string> })
+      .defaultProbeClaudeResume("dev-build@r", "tok-own", "/repo", "/homes/build-claude");
+    const sent = vi.mocked(tmux.sendText).mock.calls.map((call) => call[1] as string);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatch(/^CLAUDE_CONFIG_DIR='?\/homes\/build-claude'? claude .*--resume /);
   });
 });

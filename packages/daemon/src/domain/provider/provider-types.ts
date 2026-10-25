@@ -127,11 +127,31 @@ export type PrecheckReason =
   | "target_needs_reauth" // target authState === "needs_reauth"
   | "target_auth_unknown" // target authState === "unknown" — fails closed, NOT relabeled as re-auth
   | "signal_unknown_or_stale"
-  | "rebind_unsupported_for_runtime";
+  | "rebind_unsupported_for_runtime"
+  | "seat_restart_refused" // the seat's in-place restart plan refused, so nothing would change
+  | "target_not_in_seat_home"; // no login by that name is saved in the Codex home the seat runs on
 
-export type PrecheckResult = { safe: true } | { safe: false; reasons: PrecheckReason[] };
+/** A seat on the same Codex home, as the in-place restart reports it (its `PeerReport`). Declared here rather than
+ *  imported, so the provider types don't import the restart module and its tmux dependencies. */
+export interface SeatPeer {
+  logicalId: string;
+  sessionName: string | null;
+  home: "same" | "different" | "unknown";
+  effect: string;
+}
 
-export type SwitchOutcome = "succeeded" | "rebind_in_progress" | "failed_safely";
+/** What a seat-aware precheck saw: the Codex home the seat runs on, what the seat is doing, and its peers on that home. */
+export interface SeatSwitchView {
+  home: string;
+  activity: string;
+  peers: SeatPeer[];
+}
+
+export type PrecheckResult =
+  | { safe: true; seat?: SeatSwitchView }
+  | { safe: false; reasons: PrecheckReason[]; message?: string; seat?: SeatSwitchView };
+
+export type SwitchOutcome = "succeeded" | "rebind_in_progress" | "failed_safely" | "unknown";
 
 /** The whole four-block read model, emitted by `rig provider status --json`. */
 export interface FourBlockReadModel {
@@ -152,10 +172,12 @@ export interface FourBlockReadModel {
 }
 
 /** Slice 01 — where a seat's account configuration comes from. A registry row is metadata: it doesn't prove
- *  which login a running session uses. A default login is whatever the daemon's home held at the seat's launch. */
+ *  which login a running session uses. A default login is whatever the seat's home held at its launch: the seat's
+ *  own home when its `env:` declares one (`homeFrom` names where; optional, so older readers keep accepting the
+ *  record), else the daemon's. */
 export type SeatAccountConfiguration =
   | { source: "registry"; profileRef: string; recordedAt: string; profileSaved: boolean | null }
-  | { source: "default_login"; home: string | null; homeNote: string }
+  | { source: "default_login"; home: string | null; homeNote: string; homeFrom?: "member" | "rig" }
   | { source: "unknown"; reason: string };
 
 export interface SeatConfiguredAccount {
@@ -166,6 +188,9 @@ export interface SeatConfiguredAccount {
   /** A registry row that exists but isn't applied or doesn't match (stale after a runtime change, another
    *  runtime in its column, or a profile not saved on this host). */
   registryNotes?: string[];
+  /** A home the seat's `env:` declares that isn't an absolute path, so it isn't used: the seat resolves as if
+   *  it declared none. Reported, never refused. */
+  ignoredHome?: { from: "member" | "rig"; variable: string; value: string };
   /** Always unlinked: nothing supported links a configured account to an observed allowance. */
   allowance: { linked: false; reason: string };
   /** What this seat itself was observed reporting. Claude: its own status-line samples, and the seats whose
@@ -198,7 +223,25 @@ export interface ClaudeUsageIdentity {
   source: "claude auth status orgId and email" | "unresolved";
 }
 
+export interface ClaudeTokenIdentity {
+  source: "configured credential label";
+  credentialLabel: string;
+  credentialRef: string;
+  limitId: string;
+}
+export interface ClaudeTokenProbe {
+  warnings?: string[];
+  exitCode: number | null;
+  requestOutcome: "completed" | "failed" | "unknown";
+  cliVersion: string | null;
+  status: string | null;
+  overageStatus: string | null;
+  overageDisabledReason: string | null;
+  isUsingOverage: boolean | null;
+}
+
 export interface UsageWindowRow {
+  status?: string;
   /** The provider-native window name (Codex: primary / secondary). */
   window: string;
   durationMins: number | null;
@@ -240,10 +283,11 @@ export interface UsageRefreshOutcome {
 }
 
 export interface ProviderUsageAllowance {
+  probe?: ClaudeTokenProbe;
   provider: ProviderKind;
   /** Null only for the explicit row of a source never read since the daemon started. */
-  identity: UsageAllowanceIdentity | ClaudeUsageIdentity | null;
-  source: { kind: "codex_app_server" | "claude_statusline_samples"; host: "local" };
+  identity: UsageAllowanceIdentity | ClaudeUsageIdentity | ClaudeTokenIdentity | null;
+  source: { kind: "codex_app_server" | "claude_statusline_samples" | "claude_token_probe"; host: "local" };
   observedAt: string | null;
   /** Seat links are not observed by this read. */
   seats: "unknown";

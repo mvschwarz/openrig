@@ -13,6 +13,85 @@ const currentUpdatePrompt = fs.readFileSync(new URL("./fixtures/codex-update-0.1
 // Codex's own rust-v0.156.1 snapshot at b412ff32c417f855c2b2d1581b77058eed87c84b:
 // https://github.com/openai/codex/blob/b412ff32c417f855c2b2d1581b77058eed87c84b/codex-rs/tui/src/onboarding/snapshots/codex_tui__onboarding__trust_directory__tests__renders_snapshot_for_git_repo.snap
 const currentTrustPrompt = fs.readFileSync(new URL("./fixtures/codex-trust-0.156.1.txt", import.meta.url), "utf8");
+const firstLoginPrompt = fs.readFileSync(new URL("./fixtures/codex-first-login.txt", import.meta.url), "utf8");
+const legacyFirstLoginPrompt = fs.readFileSync(new URL("./fixtures/codex-first-login-0.162.1.txt", import.meta.url), "utf8");
+const apiKeyLoginPrompt = fs.readFileSync(new URL("./fixtures/codex-api-key-login.txt", import.meta.url), "utf8");
+const narrowFirstLoginPrompt = fs.readFileSync(new URL("./fixtures/codex-first-login-80x24.txt", import.meta.url), "utf8");
+const managedFirstLoginPrompts = ["codex-first-login-no-daemon.txt", "codex-first-login-no-daemon-80x24.txt", "codex-api-key-login-no-daemon.txt"]
+  .map(name => fs.readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8"));
+
+describe("Codex first-login readiness", () => {
+  it.each([
+    firstLoginPrompt,
+    legacyFirstLoginPrompt,
+    legacyFirstLoginPrompt.replace("> 1.", "  1.").replace("  2.", "> 2."),
+    legacyFirstLoginPrompt.replace("> 1.", "  1.").replace("  3.", "> 3."),
+    firstLoginPrompt.replace("> 1.", "  1.").replace("  2.", "> 2."),
+    firstLoginPrompt.replace("> 1.", "  1.").replace("  3.", "> 3."),
+    firstLoginPrompt.replace("> 1.", "  1.").replace("  4.", "> 4."),
+    apiKeyLoginPrompt,
+    narrowFirstLoginPrompt,
+    ...managedFirstLoginPrompts,
+  ])("identifies the current sign-in screen as login_required", (paneContent) => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "codex", paneContent }))
+      .toMatchObject({ status: "attention_required", code: "login_required" });
+  });
+
+  it.each([firstLoginPrompt, legacyFirstLoginPrompt])("identifies a first-login picker under a verified native process wrapper", (paneContent) => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "bash", paneContent,
+      codexProcessVerified: true }))
+      .toMatchObject({ status: "attention_required", code: "login_required" });
+  });
+
+  it.each(["bash", "zsh", "node"])("does not infer a live login from an unverified %s pane", (paneCommand) => {
+    for (const paneContent of [firstLoginPrompt, legacyFirstLoginPrompt, ...managedFirstLoginPrompts]) {
+      const probe = assessNativeResumeProbe({ runtime: "codex", paneCommand, paneContent });
+      expect(probe.code).not.toBe("login_required");
+      expect(probe.status).not.toBe("resumed");
+    }
+  });
+
+  it.each([
+    "The guide says Sign in with ChatGPT or Provide your own API key.",
+    ...[firstLoginPrompt, legacyFirstLoginPrompt].flatMap(prompt => [
+      prompt.replace("> 1.", "  1."),
+      prompt.replace("  Press enter to continue", ""),
+      prompt.split("\n").map(line => `> ${line}`).join("\n"),
+      prompt.split("\n").map(line => `    ${line}`).join("\n"),
+      `\`\`\`text\n${prompt}\`\`\``,
+      `\`\`\`text\n${prompt}`,
+      `${prompt}\n› Explain this sign-in screen\n  gpt-5.4 default · /project`,
+      `${prompt}\nOpenAI Codex (v0.164.0)\n› Ask Codex to do anything`,
+      `${prompt}\n› New task\nPress enter to continue`,
+      `${prompt.replace("  Press enter to continue", "")}\n› New task\nPress enter to continue`,
+    ]),
+    legacyFirstLoginPrompt.replace("  or connect an API key for usage-based billing\n", ""),
+    legacyFirstLoginPrompt.replace("  3. Provide your own API key\n", ""),
+    legacyFirstLoginPrompt.replace("  3. Provide your own API key", "  3. Sign in with ChatGPT"),
+    apiKeyLoginPrompt.replace("  Press enter to save", ""),
+    `${apiKeyLoginPrompt}\n› New task\nPress enter to save\nPress esc to go back`,
+  ])("does not turn prose, an incomplete panel or dismissed history into a login gate", (paneContent) => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "codex", paneContent }).code)
+      .not.toBe("login_required");
+  });
+
+  it.each([
+    [currentTrustPrompt, "trust_gate"],
+    [currentUpdatePrompt, "update_gate"],
+  ])("keeps a newer native menu authoritative after a first-login picker", (panel, code) => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "codex", paneContent: `${firstLoginPrompt}\n${panel}` }).code)
+      .toBe(code);
+  });
+
+  it.each(["bash", "node"])("keeps an unverified first-login screen out of stale update automation under %s", (paneCommand) => {
+    const oldUpdate = "Update available!\n  1. Update now\n  2. Skip once\n  3. Skip until next version\n";
+    const paneContent = `${oldUpdate}\n${managedFirstLoginPrompts[2]}`;
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand, paneContent }))
+      .toMatchObject({ code: paneCommand === "bash" ? "returned_to_shell" : "awaiting_runtime" });
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand, paneContent, codexProcessVerified: true }))
+      .toMatchObject({ status: "attention_required", code: "login_required" });
+  });
+});
 
 describe("default-path consent", () => {
   it.each([CLAUDE_BYPASS_CONSENT, CLAUDE_BYPASS_CONSENT.replace("    No, exit\n  ❯ Yes, I accept", "  ❯ No, exit\n    Yes, I accept")])("recognizes the current consent menu", screen => {
@@ -117,17 +196,102 @@ describe("native resume probe", () => {
         paneContent: `› Continue\n${footer}`,
       }).status).toBe("resumed");
     });
+    // george661's footer on closed #1764: Codex renders "{display name} {effort}{ tier}", so a GPT-6.1 footer has two
+    // or three words after the id once the header has scrolled off.
+    it.each([
+      "  GPT-6.1 Sol medium · /data/workspaces/proof-a · …",
+      "  Context 81% left · GPT-6.1 Luna xhigh · /project",
+      "  GPT-6.1 Sol medium Fast · /project",
+      "  GPT-6.1 Sol medium fast · /project",
+      "  GPT-6-Astra xhigh · /project",
+    ])("recognizes a model name with its effort label as a resumed conversation: %s", (footer) => {
+      expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "sh",
+        paneContent: `Restored conversation\n› Continue\n${footer}`,
+      })).toMatchObject({ status: "resumed", code: "active_runtime" });
+    });
+    // Short prose after a model id must not let a shell or log capture read as a ready Codex screen.
+    describe.each([false, true])("status prose that starts with a model name, process verified=%s", (codexProcessVerified) => {
+      it.each([
+        "  GPT-6.1 is not ready · retry later",
+        "  GPT-6.1 is default · see the docs",
+        "  GPT-6.1 Sol failed · retry later",
+        "  Notes · GPT-6.1 is unavailable · retry later",
+        "  GPT-6.1 Sol was picked for this run because it costs less · see the plan",
+        "  GPT-6.1 Sol medium plus more words · /project",
+        "  local-model-7b is not ready · retry later",
+      ])("is not read as a footer: %s", (line) => {
+        expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: codexProcessVerified ? "codex" : "sh",
+          paneContent: `› Continue\n${line}`, codexProcessVerified,
+        }).status).not.toBe("resumed");
+      });
+    });
+    it.each([
+      "  local-model-7b medium · /project",
+      "  anthropic/claude-3.5-sonnet · /project",
+      "  local-model-7b Coder high · /project",
+    ])("recognizes a versioned non-gpt model identifier after process verification: %s", (footer) => {
+      expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "sh",
+        paneContent: `› Continue\n${footer}`,
+        codexProcessVerified: true,
+      }).status).toBe("resumed");
+    });
+    it("recognizes the issue 1764 warning footer after process verification", () => {
+      const paneContent = [
+        "› ",
+        "  Ready · Context 13% used · anthropic/claude-3.5-sonnet         ⚠ 2 warnings · f2 to view",
+      ].join("\n");
+      expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "zsh", paneContent,
+        codexProcessVerified: true,
+      })).toMatchObject({ status: "resumed", code: "active_runtime" });
+    });
+    it("does not promote a verified Codex process while the captured screen is still a shell", () => {
+      const paneContent = [
+        "  project2 · main",
+        "› codex resume 019a136b-0000-7000-8000-000000000001",
+      ].join("\n");
+      expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "zsh", paneContent,
+        codexProcessVerified: true,
+      }).status).not.toBe("resumed");
+    });
     it.each([
       "› Continue",
       "› Continue\n  weekly 24% left · Context 81% left",
+      "› Continue\n  Context81 · /project",
       "› Continue\n  Notes · discussing GPT-8-Example medium · more text",
       "› Continue\n  Notes · gpt-like prose · more text",
       "› Continue\n  GPT-8-Example medium",
+      "› Continue\n  local-model medium · /project",
+      "› \n  Ready · Context 13% used · anthropic/claude-3.5-sonnet         ⚠ 2 warnings · f2 to view",
+      "  project2 · main\n› ",
+      "  project2 · main\n› codex resume 019a136b-0000-7000-8000-000000000001",
       reportedFooter,
       `model: loading\n› Continue\n${reportedFooter}`,
     ])("does not promote absent, vague or booting corroboration: %s", (paneContent) => {
       expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "codex", paneContent }).status)
         .toBe("inconclusive");
+    });
+    it("keeps a trust panel authoritative over a look-alike non-gpt footer", () => {
+      const paneContent = [
+        "Do you trust the contents of this directory?",
+        "› 1. Yes, continue",
+        "  2. No, quit",
+        "  Ready · Context 13% used · anthropic/claude-3.5-sonnet         ⚠ 2 warnings · f2 to view",
+      ].join("\n");
+      expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "zsh", paneContent,
+        codexProcessVerified: true,
+      })).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+    });
+    it("accepts a verified custom footer after a legacy trust panel has been dismissed", () => {
+      const paneContent = [
+        "Do you trust the contents of this directory?",
+        "› 1. Yes, continue",
+        "  2. No, quit",
+        "› Continue",
+        "  Ready · Context 13% used · anthropic/claude-3.5-sonnet         ⚠ 2 warnings · f2 to view",
+      ].join("\n");
+      expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "zsh", paneContent,
+        codexProcessVerified: true,
+      })).toMatchObject({ status: "resumed", code: "active_runtime" });
     });
     it.each(["›", "»"])("keeps %s menus blocked with the custom footer", (prompt) => {
       for (const [panel, code] of [

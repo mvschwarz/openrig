@@ -23,7 +23,8 @@ import type { WatchdogHistoryEntry } from "../watchdog-history-log.js";
 export interface ParkedSeatDiagnosisView {
   sessionName: string;
   parked: boolean | "indeterminate";
-  activity: { value: string; needsInput: { count: number; reason: string | null } };
+  /** `since`: when the seat's arbitrated state last changed, so for a stopped seat, when it began waiting. */
+  activity: { value: string; needsInput: { count: number; reason: string | null }; since?: string | null };
   obligations: {
     items: Array<{ qitemId: string; state: string; summary: string | null }>;
     held: Array<{ qitemId: string; healthy: boolean }>;
@@ -65,9 +66,14 @@ export interface ParkedOwnerConsumerDeps {
   occupantGeneration?: (sessionName: string) => string | null;
   /** The same enforcer's owed turn-boundary/restore/audit state, not an idle-time inference. */
   hasPendingPostCompactStage?: (sessionName: string) => boolean;
+  /** The clock the waiting grace is measured on; the wall clock when absent. */
+  now?: () => number;
 }
 
 export const PARKED_OWNER_POLICY_NAME = "parked-owner-consumer";
+/** A seat that just handed work off or asked a person has only started waiting (#1933): its first reminder waits
+ *  until its arbitrated waiting state has been unchanged this long. A seat at a prompt gets no grace. */
+export const PARKED_OWNER_IDLE_GRACE_MS = 5 * 60_000;
 
 /** Stable per-rig registration anchor: member@rig shape, policy name as slug. */
 export function makeRigAnchor(rigName: string): string {
@@ -153,13 +159,13 @@ function openKeysOnRow(transitions: RowTransitionView[]): string[] {
 }
 
 /** Open positive refusals and the exact obligation set reserved before delivery. */
-export function openPromptRefusals(transitions: RowTransitionView[]): Array<{ key: string; ids: string[]; refusedAt: string }> {
+export function openPromptRefusals(transitions: RowTransitionView[]): Array<{ key: string; ids: string[]; refusedAt: string; note: string }> {
   return openKeysOnRow(transitions).flatMap(key => {
     const refusal = transitions.find(t => t.transitionNote?.startsWith(REFUSED_PREFIX) && keyOfNote(t.transitionNote) === key);
     if (!refusal) return [];
     const reserve = transitions.find(t => t.transitionNote?.startsWith(RESERVE_PREFIX) && keyOfNote(t.transitionNote) === key);
     const ids = reserve?.transitionNote?.split("; obligations ")[1]?.split(",") ?? [];
-    return [{ key, ids, refusedAt: refusal.ts }];
+    return [{ key, ids, refusedAt: refusal.ts, note: refusal.transitionNote ?? "" }];
   });
 }
 
@@ -266,6 +272,16 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
           continue;
         }
 
+        // A seat idle for moments has just handed off or asked someone, not got stuck holding work. The diagnosis says
+        // how long its waiting state has been unchanged; with no start known, the reminder goes as before. A seat at a
+        // prompt gets no grace: this attempt's refusal is what alerts whoever can clear the prompt.
+        const waitingSince = seat.activity.since ? Date.parse(seat.activity.since) : Number.NaN;
+        if (seat.activity.needsInput.count === 0 && Number.isFinite(waitingSince)
+          && (deps.now?.() ?? Date.now()) - waitingSince < PARKED_OWNER_IDLE_GRACE_MS) {
+          skipped.push({ seat: seat.sessionName, why: "waiting-grace" });
+          continue;
+        }
+
         // B1 — the delivery-boundary recheck: re-read the seat's open rows NOW;
         // an obligation closed after diagnosis must not be named or woken.
         const fresh = new Set(deps.rows.listOpenIds(seat.sessionName));
@@ -314,6 +330,8 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
           `You are parked (arbitrated: idle at prompt) while holding ${namedIds.length} open ` +
           `obligation${namedIds.length === 1 ? "" : "s"}: ${namedIds.join(", ")}. ` +
           `Resume the work or update each row honestly (close, park-with-wake, or hand off). ` +
+          `If you're waiting on a person's answer, don't ask again; hold the row with rig queue block <id> --on <who> --wake-after <duration> ` +
+          `(a hold on a person also needs --summary and --evidence-ref unless the row has them). ` +
           `After a recorded delivery to this occupant, this check waits for your rows to change. An interrupted or unconfirmed attempt may repeat; interactive-prompt recovery stays with the wake-or-escalate ladder. ` +
           `Held rows stay listed in rig view show held; for a claimed in-progress row, the wake-or-escalate ladder also retries a failed wake.`;
         return {

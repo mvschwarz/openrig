@@ -327,12 +327,12 @@ describe("each post names its machine", () => {
 
   it("adds the machine after a seat sender, once", () => {
     const local = buildOutboundMessage(q, { sourceLabel: "openrig", attribution: attributionFromSession("operator-agent@kernel"), machine: "vps04" });
-    expect(local.text).toContain("from operator-agent@kernel on vps04");
+    expect(local.text).toContain("From operator-agent@kernel on vps04");
     const remote = buildOutboundMessage(q, { sourceLabel: "openrig", attribution: attributionFromSession("operator-agent@kernel@vps05"), machine: "vps04" });
-    expect(remote.text).toContain("from operator-agent@kernel@vps05");
+    expect(remote.text).toContain("From operator-agent@kernel@vps05");
     expect(remote.text).not.toContain(" on vps04");
     const unchanged = buildOutboundMessage(q, { sourceLabel: "openrig", attribution: attributionFromSession("operator-agent@kernel") });
-    expect(unchanged.text).toContain("from operator-agent@kernel");
+    expect(unchanged.text).toContain("From operator-agent@kernel");
     expect(unchanged.text).not.toContain(" on ");
   });
 });

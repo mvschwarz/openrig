@@ -70,7 +70,7 @@ import type {
   HerdrTransport,
   HerdrTransportFactory,
 } from "./herdr-transport.js";
-import { autoGridCols } from "../cmux-layout-service.js";
+import { buildTileGrid, planTileLabels, type TileGrid, type TileNodes } from "./tile-layout.js";
 
 /** Sentinel host for herdr-surface degrades (a pane herdr itself failed to render). */
 const HERDR_SURFACE_HOST = "herdr";
@@ -180,28 +180,6 @@ export interface HerdrSplitNode {
 
 export type HerdrLayoutNode = HerdrPaneNode | HerdrSplitNode;
 
-/**
- * Combine N nodes into an equal N-way strip along one direction. PURE.
- * Equal N-way BSP is first-vs-rest at ratio 1/N, recursively 1/(N-1) —
- * NOT midpoint 0.5 (the VM-reproduced defect: alternating 0.5 splits gave
- * N=7 a 4×2 layout with one double-width cell instead of the promised 3×3).
- */
-export function equalStrip(nodes: HerdrLayoutNode[], direction: "right" | "down"): HerdrLayoutNode {
-  if (nodes.length === 1) return nodes[0]!;
-  return {
-    type: "split",
-    direction,
-    ratio: 1 / nodes.length,
-    first: nodes[0]!,
-    second: equalStrip(nodes.slice(1), direction),
-  };
-}
-
-/** An inert blank pane — pads an incomplete grid rectangle (cmux's blank-surface precedent). */
-function blankPane(): HerdrPaneNode {
-  return { type: "pane", label: "", command: ["sh"] };
-}
-
 /** Herdr's own agent label for a seat's runtime, or null when Herdr doesn't recognise it. */
 function herdrAgent(pane: ComposedPane): "claude" | "codex" | "pi" | null {
   return pane.runtime === "claude-code" ? "claude" : pane.runtime === "codex" ? "codex" : pane.runtime === "pi" ? "pi" : null;
@@ -231,33 +209,17 @@ function herdrResumeArgv(pane: ComposedPane, tile: string): string[] | null {
 const RESUME_REPORT_ROUNDS = 7;
 const RESUME_REPORT_INTERVAL_MS = 500;
 
-/**
- * Build an equal grid for one page. Explicit columns are capped to its pane
- * count, as in cmux; otherwise use the UI TerminalLauncher `suggestLayout` —
- * cols = ceil(sqrt(N)), rows = ceil(N/cols): N=2 → 2×1, N=5 → 3×2, N=7 → 3×3
- * (cols×rows). An incomplete rectangle is padded with inert blank panes so
- * every cell is the same size; blanks are layout filler only — they are never
- * reported as opened seats. Each real leaf runs the composer's shell
- * `paneCommand` via `["sh","-c",…]` so the composed quoting (read-only `-r`,
- * ssh-wrap) is preserved; a known Claude/Codex/Pi runtime adds Herdr's detection
- * hint. Rows are built as equal `right` strips,
- * then combined with equal `down` strips.
- */
-export function buildGridRoot(panes: ComposedPane[], columns?: number): { root: HerdrLayoutNode; blanks: number; columns: number; rows: number } {
-  const cols = Math.min(columns ?? autoGridCols(panes.length), panes.length || 1);
-  const rows = Math.ceil(panes.length / cols);
-  const blanks = rows * cols - panes.length;
-  const leaves: HerdrLayoutNode[] = panes.map((pane) => ({
-    type: "pane",
-    label: pane.label,
-    command: ["sh", "-c", herdrPaneCommand(pane)],
-  }));
-  for (let i = 0; i < blanks; i++) leaves.push(blankPane());
-  const rowStrips: HerdrLayoutNode[] = [];
-  for (let r = 0; r < rows; r++) {
-    rowStrips.push(equalStrip(leaves.slice(r * cols, (r + 1) * cols), "right"));
-  }
-  return { root: equalStrip(rowStrips, "down"), blanks, columns: cols, rows };
+/** Herdr's spelling of the shared grid: `right`/`down` splits, and inert `sh` blanks (cmux's blank-surface precedent). */
+const HERDR_TILE_NODES: TileNodes<HerdrLayoutNode> = {
+  // `sh -c` keeps the composed quoting (read-only `-r`, ssh-wrap); a known runtime adds Herdr's detection hint.
+  tile: (pane) => ({ type: "pane", label: pane.label, command: ["sh", "-c", herdrPaneCommand(pane)] }),
+  blank: () => ({ type: "pane", label: "", command: ["sh"] }),
+  split: (direction, ratio, first, second) => ({ type: "split", direction: direction === "across" ? "right" : "down", ratio, first, second }),
+};
+
+/** The equal grid for one page (see `buildTileGrid`): N=2 → 2×1, N=5 → 3×2, N=7 → 3×3 (cols×rows). */
+export function buildGridRoot(panes: ComposedPane[], columns?: number): TileGrid<HerdrLayoutNode> {
+  return buildTileGrid(panes, columns, HERDR_TILE_NODES);
 }
 
 /** The per-page socket request plan — pure, so it is asserted directly in tests. */
@@ -276,37 +238,25 @@ export interface HerdrLayoutPlan {
   pages: HerdrPagePlan[];
 }
 
-/** A named view's tab: its panes' names in reading order, such as "dashboard · operator". */
-export function namedTabLabel(page: ComposedPane[]): string {
-  return page.map((pane) => pane.label).join(" · ");
-}
-
 /**
  * Build the herdr socket plan for a composed view. PURE — no I/O. Each page
  * gets a fresh tab labeled `${tabPrefix}:${view.id}#<plan>#${launchToken}/<pageIndex>`;
  * two calls with different `launchToken`s produce DIFFERENT labels, which is
- * exactly the fresh-tab-on-relaunch (not-replace) invariant.
+ * exactly the fresh-tab-on-relaunch (not-replace) invariant. A named view's
+ * tabs carry their panes' names instead; the CLI confirms reuse by live
+ * attachments, not labels.
  */
 export function planHerdrLayout(
   view: ComposedView,
   launchToken: string,
   tabPrefix: string = "openrig",
 ): HerdrLayoutPlan {
-  // Older callers without a preview fingerprint still get fresh, non-reusable tabs.
-  const base = `${tabPrefix}:${view.id}${view.planId ? `#${view.planId.slice(0, 16)}` : ""}#${launchToken}`;
-  // The workspace is named for people: a named view's own label, the rig name for a rig view, else the view id.
-  // Tab labels keep the launch token, so every open is still a fresh, distinct space. A named view's
-  // tabs carry their panes' names instead; the CLI confirms reuse by live attachments, not labels.
-  const workspaceLabel = view.spaceLabel ?? (view.id.startsWith("rig:") ? view.id.slice("rig:".length) : view.id);
+  const labels = planTileLabels(view, launchToken, tabPrefix);
   const pages: HerdrPagePlan[] = view.pages.map((page, pageIndex) => {
     const grid = buildGridRoot(page, view.columns);
-    return {
-      tabLabel: view.spaceLabel ? namedTabLabel(page) : view.pages.length > 1 ? `${base}/${pageIndex + 1}` : base,
-      root: grid.root,
-      blanks: grid.blanks,
-    };
+    return { tabLabel: labels.pages[pageIndex]!, root: grid.root, blanks: grid.blanks };
   });
-  return { workspaceLabel, pages };
+  return { workspaceLabel: labels.space, pages };
 }
 
 /**

@@ -298,7 +298,7 @@ export class ClaimService {
       // seat-handover discovered-mode capture); persistence + events stay here so
       // FR-3's adoption provenance/audit semantics are unchanged.
       const derived = await deriveResumeToken(
-        { runtime: input.runtime, sessionName: input.sessionName },
+        { runtime: input.runtime, sessionName: input.sessionName, nodeId: input.nodeId },
         { contextUsageStore: this.contextUsageStore, claudeProcessStartedAt: this.claudeProcessStartedAt, resumeTokenCapturer: this.resumeTokenCapturer, piRunnerStateStore: this.piRunnerStateStore, ompRunnerStateStore: this.ompRunnerStateStore },
       );
       if (derived.outcome === "exempt" || derived.outcome === "noop") return { outcome: derived.outcome };

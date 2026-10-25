@@ -89,6 +89,9 @@ function renderCapture(data: Record<string, unknown>): void {
     if (box && typeof box.hint === "string" && box.status !== "empty" && box.status !== "no-input-box") {
       console.error(`[rig capture: ${r["sessionName"]}: input box: ${box.hint}]`);
     }
+    // A prompt in a pane too small to show it: say so, with the resize command, rather than leave a reader guessing.
+    const pane = r["promptPane"] as { hint?: string } | undefined;
+    if (pane && typeof pane.hint === "string") console.error(`[rig capture: ${r["sessionName"]}: ${pane.hint}]`);
   };
 
   // Multi-target result
@@ -146,6 +149,10 @@ Supported notes:
     A suggestion isn't the person's intent, a draft or a staged command. Ambiguous evidence says
     unknown. --json has it as inputBox: status, confidence, the cursor and the input and
     suggestion regions on the visible screen (zero-based rows and columns), evidence and hint.
+  - When the captured screen is at a prompt and the seat's pane is smaller than 80x24, a
+    "[rig capture: ...: pane WxH is smaller than 80x24, ...]" note on stderr says the prompt may be
+    cut off and gives the tmux resize-window command that makes it readable. --json has it as
+    promptPane: width, height and hint.
   - --lines N shows at most the last N lines, counted up from the last non-blank line. When lines
     above them are left out, a "[rig capture: ...]" note on stderr says how many; --json reports
     lines (returned), requestedLines and omittedLines. Trailing rows that are entirely whitespace

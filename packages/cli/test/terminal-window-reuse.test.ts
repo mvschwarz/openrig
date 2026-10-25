@@ -2,6 +2,7 @@ import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { terminalCommand, type TerminalDeps } from "../src/commands/terminal.js";
 import type { WindowDeps } from "../src/terminal-window.js";
+import { composeView } from "../../daemon/src/domain/terminal/view-composer.js";
 
 vi.mock("../src/daemon-lifecycle.js", async () => ({
   ...await vi.importActual<Record<string, unknown>>("../src/daemon-lifecycle.js"),
@@ -15,7 +16,9 @@ interface Tab { workspace_id: string; tab_id: string; label: string }
 const spaceLabels: Record<string, string> = { "openrig-kernel": "openrig kernel", "old-name": "switchboard" };
 function fixture(tabs: Tab[] = [], id = "kernel", session?: string) {
   const socketPath = session === undefined ? "/daemon home/herdr.sock" : `/daemon home/sessions/${session}/herdr.sock`;
-  const panes = ["tui", "advisor", "operator"].map(seat => ({ seat, label: seat, paneCommand: `tmux attach -t 'fixture-${seat}'` }));
+  const panes = composeView(id, ["tui", "advisor", "operator"].map(seat => ({ seat, label: seat,
+    tmuxSession: `fixture-${seat}`, host: null, readOnly: false, alive: true,
+  })), { resolveHost: () => null, localTmux: "/fixture/bin/tmux" }).opened;
   const composed = { id, opened: panes, pages: [panes], absent: [] as Array<{ seat: string; host: string | null; reason: string }>, degraded: [] as Array<{ seat: string; host: string; reason: string }> };
   const get = vi.fn(async (url: string) => ({ status: 200, data: url.includes("preview") ? {
     planId, composed, ...(session !== undefined ? { session } : {}),
@@ -170,7 +173,7 @@ describe("reopening a Herdr view in a desktop window", () => {
 
   it("confirms an absolute tmux command, quoted session alias and read-only attachment", async () => {
     const f = fixture([{ workspace_id: "old", tab_id: "first", label: label() }]);
-    f.composed.opened[0]!.paneCommand = "'/fixture/bin/tmux' attach -r -t 'alias'\"'\"'s session'";
+    f.composed.opened[0]!.recoveryCommand = "'/fixture/bin/tmux' attach -r -t 'alias'\"'\"'s session'";
     f.clients.mockResolvedValue("101\talias's session\t1\n102\tfixture-advisor\t0\n103\tfixture-operator\t0");
     await f.run();
     expect(f.focus).toHaveBeenCalledExactlyOnceWith("first");
@@ -190,7 +193,7 @@ describe("reopening a Herdr view in a desktop window", () => {
 
   it("creates a fresh SSH view when local attachment inventory cannot prove it", async () => {
     const f = fixture([{ workspace_id: "old", tab_id: "first", label: label() }]);
-    f.composed.opened[0]!.paneCommand = "ssh 'remote' 'tmux attach -t remote-seat'";
+    f.composed.opened[0]!.recoveryCommand = "ssh 'remote' 'tmux attach -t remote-seat'";
     await f.run();
     expect(f.focus).not.toHaveBeenCalled();
     expect(f.post).toHaveBeenCalledTimes(1);
