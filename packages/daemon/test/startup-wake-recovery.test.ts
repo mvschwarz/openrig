@@ -37,6 +37,7 @@ it("does not reclaim a live exception wake started by the current startup sweep"
   const route = vi.spyOn(WorkflowRuntime.prototype, "resolveExceptionRouteFor").mockReturnValue({
     position: "orchestrator", destinationSession: "reviewer@test", tier: "routine", humanRouted: false, resolvedVia: "workflow-declared",
   });
+  const drain = vi.spyOn(QueueRepository.prototype, "drainPendingWakeIntents");
   const previous = process.env.OPENRIG_NO_KERNEL; process.env.OPENRIG_NO_KERNEL = "1";
   let daemon: Awaited<ReturnType<typeof createDaemon>> | undefined;
   try {
@@ -44,12 +45,19 @@ it("does not reclaim a live exception wake started by the current startup sweep"
     expect(exceptions).toHaveLength(1);
     const id = "wake-intent-" + exceptions[0];
     expect(daemon.deps.outboxHandler!.getById(id)!.deliveryState).toBe("sending");
+    // The recovery pass runs once the daemon listens (index.ts); run it here, while that live send is still pending.
+    daemon.wakeRecovery.start();
+    await vi.waitFor(() => expect(drain).toHaveBeenCalledOnce());
+    await drain.mock.results[0]!.value;
+    expect(exceptions).toHaveLength(1);
+    expect(daemon.deps.outboxHandler!.getById(id)!.deliveryState).toBe("sending");
     release(); await completed;
     await vi.waitFor(() => expect(daemon!.deps.outboxHandler!.getById(id)!.deliveryState).toBe("delivered"));
     expect(exceptions).toHaveLength(1);
   } finally {
     release(); if (exceptions.length) await completed;
-    send.mockRestore(); route.mockRestore();
+    await daemon?.wakeRecovery.stop();
+    send.mockRestore(); route.mockRestore(); drain.mockRestore();
     if (previous === undefined) delete process.env.OPENRIG_NO_KERNEL; else process.env.OPENRIG_NO_KERNEL = previous;
     daemon?.eventLoopMonitor.stop(); daemon?.contextMonitor.stop(); daemon?.db.close();
     rmSync(home, { recursive: true, force: true });

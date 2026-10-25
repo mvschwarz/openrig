@@ -59,6 +59,18 @@ describe("rig auth command surface (OPR.0.4.1.29)", () => {
     expect(code).toBe(1);
   });
 
+  it("a successful restore distinguishes saved credential bytes from verified sign-in", async () => {
+    fs.writeFileSync(path.join(home, "auth.json"), JSON.stringify({ OPENAI_API_KEY: "synthetic-fixture-key" }), { mode: 0o600 });
+    await run(["save", "work"]);
+    const { out, code } = await run(["switch", "work"]);
+    expect(code).toBeUndefined();
+    expect(out).toContain("activated_profile: work");
+    expect(out).toContain("Restored saved credential bytes only; sign-in is unverified.");
+    expect(out).toContain("may expire, be revoked, or be superseded by refresh elsewhere");
+    expect(out).toContain("Restart the affected seat and use the existing account verification; fresh sign-in may be required.");
+    expect(out).not.toContain("synthetic-fixture-key");
+  });
+
   it("seats output carries the labels-are-not-proof-of-live-account disclaimer", async () => {
     await run(["seats", "set", "--seat", "a@r", "--rig", "r", "--profile", "work"]);
     const { out } = await run(["seats", "list"]);

@@ -564,7 +564,10 @@ Limits of this first increment:
         if (message) console.log(message);
         if (seat) {
           console.log(`home: ${seat.home}${seat.loginChanged ? ` (now "${seat.account}")` : ""}`);
-          if (seat.undo) console.log(`to switch the home back: ${seat.undo}`);
+          if (seat.undo) {
+            console.log(`to restore the home's saved credential bytes: ${seat.undo}`);
+            console.log("undo restores saved credential bytes only; sign-in is unverified. Saved credentials may expire, be revoked, or be superseded by refresh elsewhere. Restart the affected seat and use the existing account verification; fresh sign-in may be required.");
+          }
           if (seat.restart?.recoveryCommand) console.log(`recovery: ${seat.restart.recoveryCommand}`);
           printSeat({ peers: seat.peers });
           if (seat.next) console.log(`next: ${seat.next}`);

@@ -103,7 +103,8 @@ interface PreparedCodexLaunch {
   appliedLaunch: AppliedLaunchObservation;
   postureArg: string;
   queueStateDirArg: string;
-  suppressAutoAddDirs: boolean;
+  /** The git metadata `--add-dir`s, the same for fresh, resume and fork; empty for a rebuild or a provably read-only profile. */
+  gitDirArg: string;
   daemonOptOut: boolean;
   daemonArg: string;
   networkArg: string;
@@ -167,7 +168,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   // #275: Codex's own answer on whether the plain floor may get network access. Startup wires the
   // real reader; absent keeps every invocation unchanged.
   private readNetworkDefault?: CodexNetworkDefaultReader;
-  // Issue #121: git metadata dirs for the fresh-launch `--add-dir`s (a linked worktree's `.git` is a file).
+  // Issue #121: git metadata dirs for the `--add-dir`s of fresh, resume and fork (a linked worktree's `.git` is a file).
   // Default = the real resolver; tests may inject a controlled one.
   private resolveGitAddDirs: CodexGitAddDirResolver;
   private prepareTeamWorkspace?: PrepareCodexTeamWorkspace;
@@ -838,7 +839,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // Only a launch that starts a conversation may install the core plugin; a resume never does.
     const prepared = await this.prepareLaunch(binding, opts.name, undefined, { installCorePlugin: !opts.resumeToken });
     if (!prepared.ok) return prepared;
-    const { modelArg, effortArg, appliedLaunch, postureArg, queueStateDirArg, daemonArg, networkArg, suppressAutoAddDirs } = prepared;
+    const { modelArg, effortArg, appliedLaunch, postureArg, queueStateDirArg, gitDirArg, daemonArg, networkArg } = prepared;
 
     // Fork branch: `codex fork <parent_thread_id>`. Captures the NEW thread id
     // post-fork. Parent thread id is NOT persisted onto the new seat record
@@ -858,7 +859,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // -s danger-full-access on every seat; otherwise the named profile, or OpenRig's explicit
       // -s workspace-write floor flag.
       // 0.5.2-07 A2-3: the FORK path threads the SPEC model too (fork-instantiate reverted it before).
-      const cmd = `codex${daemonArg}${postureArg}${networkArg}${modelArg}${effortArg} fork${queueStateDirArg} ${shellQuote(parentId)}`;
+      // The git dirs follow the parent id: ps flattens argv, so a git dir with a space placed before the id would be
+      // read as the id when the fork is verified.
+      const cmd = `codex${daemonArg}${postureArg}${networkArg}${modelArg}${effortArg} fork${queueStateDirArg} ${shellQuote(parentId)}${gitDirArg}`;
       const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, await this.seatCommand(binding, cmd));
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
@@ -891,10 +894,6 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // OPR.0.4.8.2: one posture decision (codexPostureArg) for the fresh launch too — YOLO forces
     // -s danger-full-access (overrides even a named profile); otherwise the named profile, or
     // OpenRig's explicit -s workspace-write floor flag.
-    // Issue #121: only the fresh launch adds git metadata dirs; resume and fork never did.
-    const gitDirArg = opts.resumeToken || binding.codexRebuildPermissions
-      ? ""
-      : suppressAutoAddDirs ? "" : (await this.resolveGitAddDirs(binding.cwd)).map((dir) => ` --add-dir ${shellQuote(dir)}`).join("");
     const cmd = opts.resumeToken
       // 0.5.2-07 A2-3: the pod-aware RESUME path threads the SPEC model too (reverted before — the
       // grounding map assumed codex parity with the claude adapter, but only fresh emitted -m).
@@ -991,9 +990,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
     if (running) {
       // The running Codex already loaded its profile; drift in -p is the caller's to compare.
+      // Its own --add-dirs, git dirs included, carry over as they ran; none are resolved again.
       return { ok: true, model, modelArg, effort, effortArg, profile, appliedLaunch, postureArg,
         queueStateDirArg: running.addDirs.map((dir) => ` --add-dir ${shellQuote(dir)}`).join(""),
-        suppressAutoAddDirs: false,
+        gitDirArg: "",
         daemonOptOut: running.daemonOptOut, daemonArg: running.daemonOptOut ? " --no-daemon" : "",
         networkArg: running.networkOverride ? ` -c ${shellQuote(CODEX_NETWORK_DEFAULT_OVERRIDE)}` : "" };
     }
@@ -1015,6 +1015,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // suppress OpenRig's generated roots when later project layers cannot make it writable.
     const suppressAutoAddDirs = Boolean(!binding.codexRebuildPermissions && profile
       && posture === profileArg && this.profileRemainsReadOnly(profile, binding.cwd, home));
+    // Issue #121: fresh, resume and fork get the same git metadata dirs, so a restored or forked seat can still commit.
+    // A rebuild keeps the writable roots its observed envelope names instead.
+    const gitDirArg = binding.codexRebuildPermissions || suppressAutoAddDirs
+      ? "" : (await this.resolveGitAddDirs(binding.cwd)).map((dir) => ` --add-dir ${shellQuote(dir)}`).join("");
     const teamWorkspaceArg = !binding.codexRebuildPermissions && binding.teamPermissionDefault && !profile
       && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write"
       ? codexTeamWorkspaceArg(this.prepareTeamWorkspace, name) : "";
@@ -1034,12 +1038,14 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
     // The launch facts keep the probed daemon choice, so a printed recovery command can repeat it; no probe, no fact.
     const launchFacts = daemonSupport ? { ...appliedLaunch, daemonOptOut } : appliedLaunch;
-    return { ok: true, model, modelArg, effort, effortArg, profile, appliedLaunch: launchFacts, postureArg, queueStateDirArg, suppressAutoAddDirs, daemonOptOut, daemonArg, networkArg };
+    return { ok: true, model, modelArg, effort, effortArg, profile, appliedLaunch: launchFacts, postureArg, queueStateDirArg, gitDirArg, daemonOptOut, daemonArg, networkArg };
   }
 
   private resumeCore(prepared: PreparedCodexLaunch, resumeToken: string, binding: NodeBinding): string {
-    const { profile, queueStateDirArg, model, postureArg, networkArg, daemonOptOut, effort } = prepared;
-    return buildCodexResumeCore(resumeToken, profile, false, queueStateDirArg.trim() || undefined, binding.launchPosture, model, `${postureArg}${networkArg}`, daemonOptOut, effort);
+    const { profile, queueStateDirArg, gitDirArg, model, postureArg, networkArg, daemonOptOut, effort } = prepared;
+    // The git dirs follow the conversation id, as on a fork, so the resume proof reads the id even from a cwd with a space.
+    return buildCodexResumeCore(resumeToken, profile, false, queueStateDirArg.trim() || undefined, binding.launchPosture, model, `${postureArg}${networkArg}`, daemonOptOut, effort)
+      + gitDirArg;
   }
 
   private async seatCommand(binding: NodeBinding, cmd: string): Promise<string> {

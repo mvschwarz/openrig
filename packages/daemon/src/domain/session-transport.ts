@@ -3628,7 +3628,30 @@ export class SessionTransport {
     let hasUrl: boolean | null = null;
     let hasToken: boolean | null = null;
     let hasRuntime: boolean | null = null;
-    if (typeof this.tmuxAdapter?.hasSessionEnv === "function") {
+    const urlNames = ["OPENRIG_URL", "RIGGED_URL", "OPENRIG_PORT", "RIGGED_PORT"];
+    const tokenNames = ["OPENRIG_ACTIVITY_HOOK_TOKEN", "RIGGED_ACTIVITY_HOOK_TOKEN"];
+    const runtimeNames = ["OPENRIG_RUNTIME", "RIGGED_RUNTIME"];
+    const inspected = typeof this.tmuxAdapter?.hasSessionEnvBatch === "function" || typeof this.tmuxAdapter?.hasSessionEnv === "function";
+    if (typeof this.tmuxAdapter?.hasSessionEnvBatch === "function") {
+      // One fresh listing for every name, read once per diagnosis: all aliases see the same moment. A failed listing
+      // leaves every name unknown (never absent) and is not retried name by name.
+      let presence: Record<string, boolean | null> = {};
+      try {
+        presence = await this.tmuxAdapter.hasSessionEnvBatch(sessionName, [...urlNames, ...tokenNames, ...runtimeNames]);
+      } catch { /* every name stays unknown */ }
+      const anyPresent = (names: string[]): boolean | null => {
+        let unknown = false;
+        for (const name of names) {
+          const present = presence[name];
+          if (present === true) return true;
+          if (present !== false) unknown = true;
+        }
+        return unknown ? null : false;
+      };
+      hasUrl = anyPresent(urlNames);
+      hasToken = anyPresent(tokenNames);
+      hasRuntime = anyPresent(runtimeNames);
+    } else if (typeof this.tmuxAdapter?.hasSessionEnv === "function") {
       const anyPresent = async (names: string[]): Promise<boolean | null> => {
         let unknown = false;
         for (const name of names) {
@@ -3642,9 +3665,9 @@ export class SessionTransport {
         }
         return unknown ? null : false;
       };
-      hasUrl = await anyPresent(["OPENRIG_URL", "RIGGED_URL", "OPENRIG_PORT", "RIGGED_PORT"]);
-      hasToken = await anyPresent(["OPENRIG_ACTIVITY_HOOK_TOKEN", "RIGGED_ACTIVITY_HOOK_TOKEN"]);
-      hasRuntime = await anyPresent(["OPENRIG_RUNTIME", "RIGGED_RUNTIME"]);
+      hasUrl = await anyPresent(urlNames);
+      hasToken = await anyPresent(tokenNames);
+      hasRuntime = await anyPresent(runtimeNames);
     }
     let fileEndpoint: { baseUrl: string; token: string } | null = null;
     try {
@@ -3657,8 +3680,7 @@ export class SessionTransport {
       { label: "OPENRIG_RUNTIME", present: hasRuntime },
     ];
     const absent = prerequisites.filter((p) => p.present === false).map((p) => p.label);
-    const unread = typeof this.tmuxAdapter?.hasSessionEnv === "function"
-      ? prerequisites.filter((p) => p.present === null).map((p) => p.label) : [];
+    const unread = inspected ? prerequisites.filter((p) => p.present === null).map((p) => p.label) : [];
     const envNote = absent.length > 0 || unread.length > 0
       ? `seat-env UNKNOWN — ${[
         absent.length > 0 ? `${absent.join(", ")} absent from the tmux session environment` : null,

@@ -239,6 +239,56 @@ describe("KernelStatusCard — kernel-status not /healthz; consumes the kernel v
   beforeEach(() => mockFetch.mockReset());
   afterEach(cleanup);
 
+  function serveKernelStatus(body: unknown) {
+    mockFetch.mockImplementation((url: unknown) => {
+      if (String(url).includes("/api/kernel/status")) return jsonResponse(body);
+      if (String(url).includes("/api/rigs/summary")) {
+        return jsonResponse([{ id: "rig_kernel", name: "kernel", nodeCount: 1 }]);
+      }
+      return jsonResponse({});
+    });
+  }
+
+  it.each([
+    ["existing ready kernel", "kernel rig already managed", ["ready", "ready"]],
+    ["existing failed agent", "kernel rig already managed", ["failed"]],
+    ["automatic boot disabled", "OPENRIG_NO_KERNEL=1", []],
+  ] as const)("%s reports skipped boot without inferring readiness", async (_case, detail, startupStatuses) => {
+    serveKernelStatus({
+      kernel_state: "skipped",
+      detail,
+      agents: startupStatuses.map((startup_status, i) => ({
+        session_name: `agent-${i}@kernel`, runtime: "claude-code", startup_status,
+      })),
+    });
+    renderWithClient(<KernelStatusCard />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("rig-status-badge-rig_kernel").textContent).toContain("boot not tracked");
+    });
+    expect(screen.getByTestId("kernel-status-card").getAttribute("data-status")).toBe("untracked");
+    expect(screen.getByTestId("rig-status-badge-rig_kernel").className).not.toContain("text-success");
+    expect(screen.getByText("Kernel boot was skipped; readiness is not tracked.")).toBeTruthy();
+    expect(screen.getByTestId("rig-status-src-rig_kernel").textContent).toContain(detail);
+    expect(mockFetch.mock.calls.some(([url]) => String(url).includes("/healthz"))).toBe(false);
+  });
+
+  it.each([
+    ["missing state", { agents: [{ startup_status: "ready" }] }],
+    ["unrecognized state", { kernel_state: "future_state", agents: [{ startup_status: "ready" }] }],
+    ["missing agents", { kernel_state: "skipped" }],
+  ] as const)("%s remains unknown after the response arrives", async (_case, body) => {
+    serveKernelStatus(body);
+    renderWithClient(<KernelStatusCard />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("rig-status-src-rig_kernel").textContent).toContain("kernel-status.kernel_state=");
+    });
+    expect(screen.getByTestId("kernel-status-card").getAttribute("data-status")).toBe("unknown");
+    expect(screen.getByTestId("rig-status-badge-rig_kernel").textContent).toContain("unknown");
+    expect(screen.getByTestId("rig-status-badge-rig_kernel").className).not.toContain("text-success");
+  });
+
   it("reads /api/kernel/status, renders a down kernel non-green, and NEVER calls /healthz", async () => {
     mockFetch.mockImplementation((rawUrl?: unknown) => {
       const url = typeof rawUrl === "string" ? rawUrl : String((rawUrl as { url?: string })?.url ?? "");
@@ -281,9 +331,10 @@ describe("KernelStatusCard — kernel-status not /healthz; consumes the kernel v
 
     renderWithClient(<KernelStatusCard />);
     await waitFor(() => {
-      const card = screen.getByTestId("kernel-status-card");
-      expect(card.getAttribute("data-status")).toBe("unknown");
+      expect(screen.getByTestId("rig-status-src-kernel").textContent).toContain("kernel-status: unavailable");
     });
+    expect(screen.getByTestId("kernel-status-card").getAttribute("data-status")).toBe("unknown");
+    expect(screen.getByTestId("rig-status-badge-kernel").className).not.toContain("text-success");
   });
 });
 
