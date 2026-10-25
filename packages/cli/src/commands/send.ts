@@ -8,8 +8,7 @@ import { loadHostRegistry, resolveHost, hostDisplayTarget, type HttpHostEntry } 
 import { runCrossHostCommand, type RunCrossHostCommandOpts } from "../cross-host-executor.js";
 import { emitCrossHostError, emitCrossHostFailure, emitRemoteHttpFailure } from "../cross-host-cli-helpers.js";
 import { resolveCrossHostTarget } from "../cross-host-target.js";
-import { runRemoteHttpOp, type RemoteOpResult } from "../remote-host-ops.js";
-import { sendWaitingForIdle, daemonSendBody, WAIT_FOR_IDLE_STEP_MS, type SendBodyAccess } from "../wait-for-idle.js";
+import { runRemoteHttpOp } from "../remote-host-ops.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 import { resolveSenderSession, SENDER_FALLBACK } from "../sender-identity.js";
 import { COMPOSER_PROMPT_CLASS } from "@openrig/daemon/composer-prompts";
@@ -239,7 +238,7 @@ export function sendCommand(depsOverride?: SendDeps): Command {
     .option("--rig <name>", "Send to every seat in a rig (fan-out, per-recipient results)")
     .option("--verify", "Verify pane only delivery by checking content after send")
     .option("--force", "Back-compat no-op: a mid-task/busy pane already sends-with-advisory by default; --force never bypasses the interactive-prompt/permission guard")
-    .option("--wait-for-idle <seconds>", `Wait until the target is explicitly idle before sending. Any length: a wait over ${WAIT_FOR_IDLE_STEP_MS / 1000} s runs as consecutive waits, and nothing is sent until the seat is idle`)
+    .option("--wait-for-idle <seconds>", "Wait until the target is explicitly idle before sending")
     .option("--raw", "Send exact text/keystrokes without the From/To messaging envelope (still guarded against interactive prompts)")
     .option("--dangerously-interact", "DANGEROUS: type an answer as keystrokes into an interactive prompt (implies --raw; requires --reason). Letters can select menu shortcuts; CR/ESC act as keys. Enter is added only for the complete visibly staged answer.")
     .option("--type-without-checking", "With --dangerously-interact: type without reading or clearing existing input; may join or submit that text")
@@ -520,11 +519,11 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       const outboundText = raw ? payload : wrapSendBody(senderSession, session, payload, { stampISO: new Date().toISOString() });
       let res: { status: number; data: Record<string, unknown> };
       try {
-        res = await sendWaitingForIdle(waitForIdleMs, (waitMs) => client.post<Record<string, unknown>>("/api/transport/send", {
-          session, text: outboundText, exactText: raw ? undefined : payload, verify: opts.verify, force: opts.force, waitForIdleMs: waitMs,
+        res = await client.post<Record<string, unknown>>("/api/transport/send", {
+          session, text: outboundText, exactText: raw ? undefined : payload, verify: opts.verify, force: opts.force, waitForIdleMs,
           dangerouslyInteract: opts.dangerouslyInteract, typeWithoutChecking: opts.typeWithoutChecking, reason: opts.reason, actorSession: senderSession ?? null,
           ...(opts.urgent ? { urgent: true } : {}),
-        }, transportRequestOptions(waitMs)), daemonSendBody);
+        }, transportRequestOptions(waitForIdleMs));
       } catch (err) {
         if (err instanceof DaemonConnectionError) {
           // The REAL transport outcome, honestly surfaced (names the
@@ -914,11 +913,11 @@ async function runHttpHostSend(
   const raw = Boolean(opts.raw || opts.dangerouslyInteract);
   const outboundText = raw ? text : wrapSendBody(originSender, session, text, { stampISO: new Date().toISOString() });
 
-  const result = await sendWaitingForIdle(waitForIdleMs, (waitMs) => runRemoteHttpOp(host.id, "POST", "/api/transport/send", {
-    session, text: outboundText, exactText: raw ? undefined : text, verify: opts.verify, force: opts.force, waitForIdleMs: waitMs,
+  const result = await runRemoteHttpOp(host.id, "POST", "/api/transport/send", {
+    session, text: outboundText, exactText: raw ? undefined : text, verify: opts.verify, force: opts.force, waitForIdleMs,
     dangerouslyInteract: opts.dangerouslyInteract, typeWithoutChecking: opts.typeWithoutChecking, reason: opts.reason, actorSession: senderSession ?? null,
     ...(opts.urgent ? { urgent: true } : {}),
-  }, deps, { timeoutMs: (waitMs ?? 0) + CROSS_HOST_SEND_TIMEOUT_MS }), remoteSendBody);
+  }, deps, { timeoutMs: (waitForIdleMs ?? 0) + CROSS_HOST_SEND_TIMEOUT_MS });
 
   // A send that may have reached the remote is unconfirmed, not unreachable: it may have been delivered, and a
   // resend without checking risks a duplicate.
@@ -1161,12 +1160,6 @@ function parseWaitForIdleMs(value: string | undefined): number | undefined | nul
   if (!Number.isFinite(seconds) || seconds <= 0) return null;
   return Math.ceil(seconds * 1000);
 }
-
-/** A remote daemon's answer inside a cross-host http result. */
-const remoteSendBody: SendBodyAccess<RemoteOpResult> = {
-  read: (result) => result.data && typeof result.data === "object" ? result.data as Record<string, unknown> : undefined,
-  write: (result, data) => ({ ...result, data }),
-};
 
 function waitForIdleRequestOptions(waitForIdleMs: number | undefined): { timeoutMs: number } | undefined {
   if (waitForIdleMs === undefined) return undefined;
