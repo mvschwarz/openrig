@@ -23,7 +23,8 @@ import type { WatchdogHistoryEntry } from "../watchdog-history-log.js";
 export interface ParkedSeatDiagnosisView {
   sessionName: string;
   parked: boolean | "indeterminate";
-  activity: { value: string; needsInput: { count: number; reason: string | null } };
+  /** `since`: when the seat's arbitrated state last changed, so for a stopped seat, when it began waiting. */
+  activity: { value: string; needsInput: { count: number; reason: string | null }; since?: string | null };
   obligations: {
     items: Array<{ qitemId: string; state: string; summary: string | null }>;
     held: Array<{ qitemId: string; healthy: boolean }>;
@@ -65,9 +66,14 @@ export interface ParkedOwnerConsumerDeps {
   occupantGeneration?: (sessionName: string) => string | null;
   /** The same enforcer's owed turn-boundary/restore/audit state, not an idle-time inference. */
   hasPendingPostCompactStage?: (sessionName: string) => boolean;
+  /** The clock the waiting grace is measured on; the wall clock when absent. */
+  now?: () => number;
 }
 
 export const PARKED_OWNER_POLICY_NAME = "parked-owner-consumer";
+/** A seat that just handed work off or asked a person has only started waiting (#1933): its first reminder waits
+ *  this long after the start of that wait, which is the end of its own turn. */
+export const PARKED_OWNER_IDLE_GRACE_MS = 5 * 60_000;
 
 /** Stable per-rig registration anchor: member@rig shape, policy name as slug. */
 export function makeRigAnchor(rigName: string): string {
@@ -263,6 +269,14 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
         // Leave this wake unreserved: the existing next pass can remind the owner after restore/audit.
         if (deps.hasPendingPostCompactStage?.(seat.sessionName)) {
           skipped.push({ seat: seat.sessionName, why: "managed-compaction-pending" });
+          continue;
+        }
+
+        // A wait that began moments ago is a seat that just handed off or asked someone, not one stuck holding work.
+        // The diagnosis says when it began; with no start known, the reminder goes as before.
+        const waitingSince = seat.activity.since ? Date.parse(seat.activity.since) : Number.NaN;
+        if (Number.isFinite(waitingSince) && (deps.now?.() ?? Date.now()) - waitingSince < PARKED_OWNER_IDLE_GRACE_MS) {
+          skipped.push({ seat: seat.sessionName, why: "waiting-grace" });
           continue;
         }
 

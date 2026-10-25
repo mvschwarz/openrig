@@ -76,6 +76,8 @@ export interface SeatParkedDiagnosis {
     needsInput: NeedsInput;
     decidedBy: string | null;
     confidence: "oracle" | "unknown";
+    /** When the arbitrated state last changed; for a stopped seat, when it began waiting. Null without a state. */
+    since: string | null;
   };
   obligations: {
     /** The EXACT scope that ran — named, so a false absence is auditable. */
@@ -155,6 +157,7 @@ export function diagnoseSeatParked(
     needsInput: state?.needsInput ?? { count: 0, reason: null },
     decidedBy: state?.decidedBy ?? null,
     confidence: activityKnown ? "oracle" : "unknown",
+    since: state?.changedAt ?? null,
   };
   const confidence: SeatParkedDiagnosis["confidence"] = {
     activity: activityKnown ? "high" : "none",
