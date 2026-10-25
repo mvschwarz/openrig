@@ -36,6 +36,11 @@ export class ServiceOrchestrator {
    * 3. Evaluate wait targets
    * 4. Persist receipt
    */
+  /** Whether Docker Compose v2 is available, before anything that needs it is set up. */
+  composeAvailable(): Promise<{ ok: true } | { ok: false; message: string }> {
+    return this.composeAdapter.composeAvailable();
+  }
+
   async boot(rigId: string, opts?: { waitTimeoutMs?: number; waitPollIntervalMs?: number }): Promise<ServiceBootResult> {
     const record = this.rigRepo.getServicesRecord(rigId);
     if (!record) {

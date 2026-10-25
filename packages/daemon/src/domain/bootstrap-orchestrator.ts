@@ -224,6 +224,18 @@ export class BootstrapOrchestrator {
               }
             } catch { /* YAML parse failure — let handlePodAwareSpec deal with it */ }
 
+            // A service bundle needs Docker Compose v2. Say so before anything is written, in a plan as in an install.
+            if (serviceBundleTarget && (opts.mode === "apply" || planningServices) && this.deps.serviceOrchestrator) {
+              const compose = await this.deps.serviceOrchestrator.composeAvailable();
+              if (!compose.ok) {
+                const msg = `${compose.message} Nothing was written and no team was created.`;
+                stages.push({ stage: "resolve_spec", status: "failed", detail: { code: "compose_missing", error: msg } });
+                errors.push(msg);
+                this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
+                return { runId: run.id, status: "failed" as BootstrapStatus, stages, errors, warnings };
+              }
+            }
+
             // Apply with an explicit target: launch from a copy of the bundle in the
             // target, not from the temp extraction removed in the finally below —
             // otherwise `cwd: "."`, the spec dir and agent refs point at a deleted dir.
