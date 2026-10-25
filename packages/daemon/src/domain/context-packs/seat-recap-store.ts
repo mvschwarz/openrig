@@ -21,7 +21,7 @@
 //   contract's semantic halves (temporal order, derived-values-as-commands)
 //   are not mechanically checkable and are NOT pretended at.
 
-import { closeSync, copyFileSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
+import { closeSync, copyFileSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { validateMarkdownAddressability, parseMarkdownSections } from "../markdown-address.js";
@@ -118,6 +118,44 @@ export function writeSeatRecap(opts: { seatDir: string; content: string; now?: (
       try { unlinkSync(archived); } catch { /* failed attempts do not supersede the current recap */ }
     }
   }
+}
+
+const SEAT_ADDRESS_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/** Write a seat's recap by its topology address (`rigs/<rig>/seats/<seat>`), the one path the CLI and the daemon share:
+ *  each name is one bounded segment, the rig already exists, none of the rig, `seats` or seat folders is a symlink or a
+ *  file, and a missing seat folder is created. Inside the seat folder the store works as it always has: a link already at
+ *  RECAP.md or recap-superseded/ is followed (planting one takes write access to the seat folder). Returns where the
+ *  recap landed and how many predecessors the chain retains. */
+export function writeSeatRecapAt(opts: { topologyRoot: string; rig: string; seat: string; content: string; now?: () => number }): { path: string; superseded: number } {
+  for (const [kind, value] of [["rig", opts.rig], ["seat", opts.seat]] as const) {
+    if (value === "." || value === ".." || !SEAT_ADDRESS_SEGMENT.test(value)) {
+      throw new RecapWriteError(`unsafe ${kind} segment '${value}' — topology addresses require one bounded path segment`);
+    }
+  }
+  const rigsDir = join(opts.topologyRoot, "rigs");
+  const rigDir = join(rigsDir, opts.rig);
+  if (!existsSync(rigDir)) {
+    throw new RecapWriteError(`rig directory ${rigDir} does not exist — check --rig against the topology tree (topology.root=${opts.topologyRoot}).`);
+  }
+  let cursor = rigsDir;
+  for (const segment of [opts.rig, "seats", opts.seat]) {
+    cursor = join(cursor, segment);
+    let stat: ReturnType<typeof lstatSync>;
+    try {
+      stat = lstatSync(cursor);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") break;
+      throw err;
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new RecapWriteError(`unsafe seat address '${opts.rig}/seats/${opts.seat}' — '${cursor}' is a symlink or not a directory, so the recap would land outside the topology tree.`);
+    }
+  }
+  const seatDir = join(rigDir, "seats", opts.seat);
+  mkdirSync(seatDir, { recursive: true });
+  writeSeatRecap({ seatDir, content: opts.content, now: opts.now });
+  return { path: join(seatDir, RECAP_FILENAME), superseded: listRecapChain(seatDir).length };
 }
 
 /** The superseded chain, oldest first. Empty when no recap was ever superseded. */
