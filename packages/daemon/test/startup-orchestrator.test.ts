@@ -1334,6 +1334,54 @@ describe("StartupOrchestrator", () => {
     expect(tmux.sendKeys).toHaveBeenCalledWith("r01-impl", ["Enter"]);
   });
 
+  it.each([[false, false, false], [true, false, false], [true, true, false], [true, false, true]])("passes the composed first input at launch (%s), assistance (%s), uncertain launch (%s)", async (firstInput, assisted, uncertain) => {
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "first-input-"));
+    try {
+      nodeFs.writeFileSync(nodePath.join(dir, "synth.yaml"),
+        `format: 1\nname: synth\ncommand: synth\nmaintainer: Example\nnames_conversation: true\n${firstInput ? "first_input: true\n" : ""}startup_assisted: ${assisted}\n`);
+      const seed = seedSession();
+      db.prepare("UPDATE nodes SET runtime='synth' WHERE id=?").run(seed.nodeId);
+      let path: string | undefined;
+      let content: string | undefined;
+      const shell = vi.fn(async (_session: string, command: string) => {
+        path = /OPENRIG_FIRST_INPUT='([^']+)'/.exec(command)?.[1];
+        if (path) {
+          content = nodeFs.readFileSync(path, "utf8");
+          expect(nodeFs.statSync(path).mode & 0o777).toBe(0o600);
+          expect(command).not.toContain("first role");
+        }
+        if (uncertain) throw new Error("fixture uncertain launch");
+        return { ok: true as const };
+      });
+      const adapter = new CommunityHarnessRuntimeAdapter("synth", { presetsDir: () => dir,
+        launchResultRoot: () => nodePath.join(dir, "state", "launch-results"),
+        tmux: { hasSession: async () => true, getPaneCommand: async () => "node", sendShellCommand: shell } });
+      const delivery = vi.spyOn(adapter, "deliverStartup");
+      const files: ResolvedStartupFile[] = ["first", "second"].map(name => ({ path: `${name}.md`, absolutePath: `/${name}.md`,
+        ownerRoot: "/", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] }));
+      const orchestrator = createOrchestrator({ readFile: path => path === "/first.md" ? "first role\n'quoted' $literal\n" : "second role" });
+      const result = await orchestrator.startNode(makeInput(seed, { adapter, includeDurableObligations: true, resolvedStartupFiles: files,
+          startupActions: [makeAction({ type: "startup_proof", value: "authenticated" }), makeIdentityAction(), makeAction({ value: "later action" })] }));
+      expect(result.ok).toBe(!assisted && !uncertain);
+      if (firstInput && (assisted || uncertain)) expect(orchestrator.canContinueStartup(seed.nodeId, seed.sessionId)).toBe(false);
+      const typed = vi.mocked(tmux.sendText).mock.calls.map(call => call[1]);
+      const first = firstInput ? content : typed[0];
+      expect(first).toContain("OpenRig-generated identity context");
+      expect(first).toContain("first role\n'quoted' $literal\n");
+      expect(first).toContain("read durable obligations with rig queue list");
+      expect(first).toContain("startup orientation challenge");
+      expect(typed).toHaveLength(uncertain ? 0 : firstInput ? 1 : 2);
+      if (!uncertain) {
+        expect(typed.at(-1)).toBe("later action");
+        expect(delivery.mock.calls.flatMap(([files]) => files.map(file => file.path))).toEqual(["second.md"]);
+      }
+      const records = db.prepare("SELECT payload FROM events WHERE node_id=? AND type='node.startup_first_input_passed'").all(seed.nodeId) as { payload: string }[];
+      expect(records).toHaveLength(firstInput ? 1 : 0);
+      if (firstInput) expect(JSON.parse(records[0]!.payload)).toMatchObject({ path, submission: "unconfirmed" });
+      else expect(path).toBeUndefined();
+    } finally { nodeFs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it.each([
     [true, true, "attention_required", false],
     [false, true, "ready", false],

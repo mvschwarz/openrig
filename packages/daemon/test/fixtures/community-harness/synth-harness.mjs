@@ -1,10 +1,16 @@
 // A synthetic community harness for the community-harness runtime tests. It runs in the seat's pane as a Node process and
 // reads one line at a time, skipping the envelope lines `rig send` adds: "busy" prints changing output for a few seconds, "ask" shows an approval prompt, "quit"
 // exits back to the shell, and anything else is echoed back.
+import { readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const write = (text) => process.stdout.write(text);
 write("synth-harness 1.0 started\napp> ");
+if (process.env.OPENRIG_FIRST_INPUT) {
+  const text = readFileSync(process.env.OPENRIG_FIRST_INPUT, "utf8");
+  writeFileSync(`${process.env.OPENRIG_FIRST_INPUT}.received`, text, { mode: 0o600 });
+  write("first input received at launch\n");
+}
 const rl = createInterface({ input: process.stdin });
 let asking = false;
 // `rig send` wraps a message in a short envelope (sender lines, a separator, a reply hint). Those lines aren't input.

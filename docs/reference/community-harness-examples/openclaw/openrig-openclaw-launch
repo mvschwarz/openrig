@@ -16,6 +16,13 @@ OPENCLAW_STATE_DIR="${OPENRIG_HOME:-$HOME/.openrig}/state/openclaw/${OPENRIG_NOD
 export OPENCLAW_STATE_DIR
 mkdir -p "$OPENCLAW_STATE_DIR"
 
+# Preserve the file's exact bytes, including trailing newlines. A read error stops before the harness starts.
+if [ -n "${OPENRIG_FIRST_INPUT:-}" ]; then
+  first_input=$(cat "$OPENRIG_FIRST_INPUT" && printf '.')
+  first_input=${first_input%.}
+  set -- "$@" --message "$first_input"
+fi
+
 if [ -n "${OPENRIG_RESUME_REF:-}" ]; then
   key="$OPENRIG_RESUME_REF"
   # A key may be stored bare or as agent:<id>:<key>; either counts as this conversation.

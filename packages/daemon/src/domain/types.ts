@@ -239,6 +239,7 @@ export type RigEvent =
   | { type: "pod.created"; rigId: string; podId: string; namespace: string; label: string }
   | { type: "pod.deleted"; rigId: string; podId: string }
   | { type: "node.startup_pending"; rigId: string; nodeId: string; startupProof?: StartupProofSelection }
+  | { type: "node.startup_first_input_passed"; rigId: string; nodeId: string; sessionId: string; path: string; submission: "unconfirmed" }
   | { type: "node.startup_ready"; rigId: string; nodeId: string; previousStatus?: "failed" | "attention_required"; submission?: { status: "unverified" | "staged"; reasons: string[]; warning?: string; diagnostics?: StartupSubmissionDiagnostic[] } }
   | { type: "node.startup_failed"; rigId: string; nodeId: string; error: string; sessionId?: string; freshContextPending?: boolean; forkContextPending?: { parentToken: string; isRestore: boolean }; submissionDiagnostics?: StartupSubmissionDiagnostic[]; stage?: StartupFailureStage; hasPendingWork?: boolean; requestedResumeToken?: string | null; requestedResumeType?: string | null; probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence }
   // OPR.0.4.3.06 — startup proof (challenge-verified orientation). Append-only.

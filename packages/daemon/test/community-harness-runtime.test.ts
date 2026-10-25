@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync, symlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { listCommunityHarnessPresets, loadCommunityHarnessPreset } from "../src/domain/community-harness-presets.js";
@@ -49,11 +49,18 @@ it("loads a maintainer's declaration that startup needs assistance, and rejects 
     message: expect.stringContaining("startup_assisted must be true or false") });
 });
 
+it.each([true, false])("loads first_input=%s independently from other declarations", value => {
+  const dir = presets({ "synth.yaml": GOOD + `first_input: ${value}\n` });
+  expect(loadCommunityHarnessPreset("synth", dir)).toMatchObject({ ok: true, preset: { firstInput: value } });
+  writeFileSync(join(dir, "synth.yaml"), GOOD + "first_input: yes\n");
+  expect(loadCommunityHarnessPreset("synth", dir)).toMatchObject({ ok: false, message: expect.stringContaining("first_input must be true or false") });
+});
+
 describe("community harness presets", () => {
   it("loads a preset with the fields this format reads", () => {
     const dir = presets({ "synth.yaml": GOOD });
     expect(loadCommunityHarnessPreset("synth", dir)).toEqual({ ok: true, preset: {
-      name: "synth", command: "synth-harness --serve", maintainer: "Example Maintainer", limits: ["resume unsupported"], launchResult: false, namesConversation: false, resume: false, startupAssisted: false, path: join(dir, "synth.yaml") } });
+      name: "synth", command: "synth-harness --serve", maintainer: "Example Maintainer", limits: ["resume unsupported"], launchResult: false, namesConversation: false, resume: false, startupAssisted: false, firstInput: false, path: join(dir, "synth.yaml") } });
   });
 
   it.each([
@@ -142,6 +149,46 @@ describe("the community harness adapter", () => {
     expect(await app.launchHarness(binding, { name: "w@r" })).toEqual({ ok: true });
     expect(command).toHaveBeenCalledWith("w@r", "synth-harness --serve", { runtime: "synth" });
     expect(tmux.sendShellCommand).toHaveBeenCalledWith("w@r", "/usr/bin/env OPENRIG_RUNTIME=synth synth-harness --serve", undefined, { stageIfLong: true, execInScript: true });
+  });
+
+  it("gives each launch a private first-input file, including separate session folders", async () => {
+    const dir = presets({ "synth.yaml": GOOD + "names_conversation: true\nresume: true\nfirst_input: true\n" });
+    const { tmux } = adapter(dir);
+    const app = new CommunityHarnessRuntimeAdapter("synth", { tmux, presetsDir: () => dir,
+      launchResultRoot: () => join(dir, "state", "launch-results") });
+    const text = "a first turn\n'quoted' $literal\n";
+    const paths: string[] = [];
+    for (const session of ["seat/a@rig", "seat_a@rig", "seat/a@rig"]) {
+      const result = await app.launchHarness({ ...binding, tmuxSession: session }, { name: session, firstInputText: text });
+      expect(result.ok).toBe(true);
+      expect(result.firstInput?.submission).toBe("unconfirmed");
+      const file = result.firstInput!.path;
+      expect(readFileSync(file, "utf8")).toBe(text);
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+      expect(realpathSync(file)).toBe(file);
+      paths.push(file);
+    }
+    expect(new Set(paths).size).toBe(3);
+    expect(paths[0]!.split("/").slice(0, -1)).not.toEqual(paths[1]!.split("/").slice(0, -1));
+    tmux.sendShellCommand.mockClear();
+    const resumed = await app.launchHarness(binding, { name: "w@r", resumeToken: "saved", resumeType: "community:synth" });
+    expect(resumed.firstInput).toBeUndefined();
+    expect(tmux.sendShellCommand.mock.calls[0]![1]).toContain("-u OPENRIG_FIRST_INPUT");
+  });
+
+  it("does not put a first input through a linked session folder", async () => {
+    const dir = presets({ "synth.yaml": GOOD + "first_input: true\n" });
+    const outside = presets({ "keep": "unchanged" });
+    const root = join(dir, "state", "first-input");
+    mkdirSync(root, { recursive: true });
+    symlinkSync(outside, join(root, "w%40r"));
+    const { tmux } = adapter(dir);
+    const app = new CommunityHarnessRuntimeAdapter("synth", { tmux, presetsDir: () => dir,
+      launchResultRoot: () => join(dir, "state", "launch-results") });
+    expect(await app.launchHarness(binding, { name: "w@r", firstInputText: "first turn" }))
+      .toMatchObject({ ok: false, error: expect.stringContaining("first-input folder points outside") });
+    expect(tmux.sendShellCommand).not.toHaveBeenCalled();
+    expect(readFileSync(join(outside, "keep"), "utf8")).toBe("unchanged");
   });
 
   it("refuses resume and fork without starting anything", async () => {
