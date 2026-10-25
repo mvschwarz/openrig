@@ -687,7 +687,7 @@ describe("RestoreOrchestrator", () => {
     (orch as any).claudeResume.canResume = vi.fn(() => false);
     await (orch as any).attemptResume(node.id, "codex-session", "codex_id", "token-codex", "/work", null, "o3", "full_bypass", "medium");
     expect(codexResume).toHaveBeenCalledWith("codex-session", "codex_id", "token-codex", "/work", null, "full_bypass", "o3",
-      "medium", false, false, false, undefined, envelope);
+      "medium", undefined, undefined, undefined, undefined, envelope);
   });
 
   it("attemptResume forwards the resolved effort to the Pi resume adapter", async () => {

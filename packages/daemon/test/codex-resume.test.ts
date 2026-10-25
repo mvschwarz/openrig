@@ -421,7 +421,7 @@ describe("a seat's own permission envelope on the legacy resume (argv only)", ()
     const readNetworkDefault = vi.fn(async () => ({ apply: true, elapsedMs: 0 }));
     const prepareTeamWorkspace = vi.fn(() => ["/workspace"]);
     const adapter = new CodexResumeAdapter(mockTmux({ sendText }), { readNetworkDefault, prepareTeamWorkspace });
-    await adapter.resume("dev-a@rig", "codex_id", "uuid-1", "/repo", null, "full_bypass", null, undefined, true, false, false,
+    await adapter.resume("dev-a@rig", "codex_id", "uuid-1", "/repo", null, "full_bypass", null, undefined, true, false, false, undefined,
       { sandbox: "workspace-write", approval: "never", network_access: false, writable_roots: ["/lease"], exclude_tmpdir_env_var: false, exclude_slash_tmp: false });
     const command = (sendText.mock.calls[0] as unknown as [string, string])[1];
     expect(command).toContain(" -s workspace-write -a never");
