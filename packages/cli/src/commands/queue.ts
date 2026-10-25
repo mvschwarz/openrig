@@ -467,18 +467,46 @@ async function settleReceiptHost(client: DaemonClient, receipt: ReceiptContext):
 /** How long the one read-back of a create with an unknown outcome waits for its answer. */
 const CREATE_READ_BACK_TIMEOUT_MS = 10_000;
 
-/** What a create sent, for telling its row from another with the same ID. */
-interface SentCreate { destinationSession: string; sourceSession: string | undefined; body: string; crossHost: boolean }
+/** What a create sent, for telling its row from another with the same ID. `claimedSource` is the body's source, which the
+ *  daemon records only when the request carries no sender. */
+interface SentCreate { destinationSession: string; claimedSource: string | undefined; body: string; crossHost: boolean }
+
+/** The daemon's host id: null when it reports none, undefined when it can't be read. */
+async function daemonSelfHostId(client: DaemonClient): Promise<string | null | undefined> {
+  try {
+    const health = await client.get<{ selfHostId?: unknown }>("/healthz", { timeoutMs: 1_000 });
+    if (health.status !== 200) return undefined;
+    return typeof health.data?.selfHostId === "string" && health.data.selfHostId ? health.data.selfHostId : null;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The source the daemon this client reached stores for the create, by its own rules: the sender this client sent, trimmed and
+ *  without a trailing `@<that daemon's host id>` (canonicalSenderSession), or with no sender the body's claimed source, trimmed.
+ *  A forwarded create's source then gains the forwarding daemon's host id (stampSelfHostSuffix), unless its origin was marked
+ *  unknown. Undefined when that host id is needed and can't be read. */
+async function storedSourceOf(client: DaemonClient, sent: SentCreate): Promise<string | undefined> {
+  const { session, originUnknown } = await client.senderIdentity();
+  const source = (session ?? sent.claimedSource)?.trim();
+  if (!source) return undefined;
+  const parts = source.split("@");
+  const canonicalizes = session !== undefined && parts.length === 3 && parts.every(Boolean);
+  const stamps = sent.crossHost && !originUnknown;
+  if (!canonicalizes && !(stamps && parts.length === 2)) return source;
+  const selfId = await daemonSelfHostId(client);
+  if (selfId === undefined) return undefined;
+  const canonical = canonicalizes && parts[2] === selfId ? `${parts[0]}@${parts[1]}` : source;
+  return stamps && selfId && canonical.split("@").length === 2 ? `${canonical}@${selfId}` : canonical;
+}
 
 /** Which field shows a stored row isn't this create, by the rule the daemon applies to a create whose ID already exists
- *  (the same destination and source), plus the body, which that rule reports as not saved. A forwarded row's source
- *  carries the forwarding daemon's host id. Null when the row is this create. */
-function notThisCreate(row: Record<string, unknown>, sent: SentCreate): "destination" | "source" | "body" | null {
+ *  (the same destination and source, compared exactly), plus the body, which that rule reports as not saved. "unread" when
+ *  the source this create would have can't be established. Null when the row is this create. */
+function notThisCreate(row: Record<string, unknown>, sent: SentCreate, storedSource: string | undefined): "destination" | "unread" | "source" | "body" | null {
   if (row.destinationSession !== sent.destinationSession) return "destination";
-  const source = row.sourceSession;
-  const stamped = sent.crossHost && typeof source === "string" && sent.sourceSession !== undefined
-    && sent.sourceSession.split("@").length === 2 && source.split("@").length === 3 && source.startsWith(`${sent.sourceSession}@`);
-  if (sent.sourceSession !== undefined && source !== sent.sourceSession && !stamped) return "source";
+  if (storedSource === undefined) return "unread";
+  if (row.sourceSession !== storedSource) return "source";
   if (row.body !== sent.body) return "body";
   return null;
 }
@@ -507,7 +535,10 @@ async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: str
   try {
     const res = await reader.get<Record<string, unknown>>(`/api/queue/${encodeURIComponent(qitemId)}`, options);
     if (res.status === 200 && res.data?.qitemId === qitemId) {
-      const differs = notThisCreate(res.data, sent);
+      const differs = notThisCreate(res.data, sent, await storedSourceOf(client, sent));
+      if (differs === "unread") {
+        return { row: null, note: `Row ${qitemId}${where} exists, but this CLI couldn't read this daemon's host id to tell whether its source is this create's, so the outcome is still unknown.` };
+      }
       if (differs) {
         return { row: null, note: `Row ${qitemId}${where} exists but isn't this create (its ${differs} differs), so the outcome is still unknown. Don't reuse this ID for other work.` };
       }
@@ -1015,7 +1046,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           // plain local writes — the local path stays byte-identical).
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
         }, crossHostWriteOptions(hostResolved.hostId)).catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
-        const sent: SentCreate = { destinationSession: hostResolved.destination, sourceSession: managedSource ?? source, body: resolvedBody,
+        const sent: SentCreate = { destinationSession: hostResolved.destination, claimedSource: managedSource === undefined ? source : undefined, body: resolvedBody,
           crossHost: remoteHostOf(hostResolved.hostId) !== undefined };
         // Every create that's answered with a row ends here: its warning, --verify's delivery, and the output.
         const finish = async (created: Record<string, unknown>, status: number) => {
