@@ -1638,11 +1638,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         const proof = await this.proveResumedProcess(tmuxSession, resumeToken, deadline, opts?.home);
         if (proof.kind === "match") return { ok: true, resumeToken, resumeType: "codex_id", resumedProcess: proof.process };
         if (proof.kind === "mismatch") {
+          const detail = `Codex resume opened a different conversation: the resumed process's records name ${proof.threadId}, not the requested ${resumeToken}.`;
           return {
             ok: false,
-            error: `Codex resume opened a different conversation: the resumed process's records name ${proof.threadId}, not the requested ${resumeToken}. The session was preserved; nothing was restarted.`,
+            error: `${detail} The session was preserved; nothing was restarted.`,
             recovery: "attention_required",
             resumeMismatch: { opened: proof.threadId },
+            resumeDetail: detail,
             verifierInput: verifierInput(),
             evidence: paneContent.split("\n").slice(-12).join("\n"),
           };
@@ -1689,9 +1691,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // Report the newest screen observed; a resumed or booting one names no gate. The loop's own decisions above used
     // lastUnresolved. The text follows the newest screen too, so an older gate's text never stands for a newer screen.
     const shown = report && report.probe.status !== "resumed" && report.probe.code !== "awaiting_runtime" ? report : null;
-    const unprovenText = unproven && report?.probe.status === "resumed"
-      ? `Codex resume could not be proven within the resume window: ${unproven}. The session was preserved; nothing was restarted.`
+    const unprovenDetail = unproven && report?.probe.status === "resumed"
+      ? `Codex resume could not be proven within the resume window: ${unproven}.`
       : null;
+    const unprovenText = unprovenDetail ? `${unprovenDetail} The session was preserved; nothing was restarted.` : null;
     const newestText = unprovenText ? unprovenText : shown ? shown.probe.detail
       : report?.probe.status === "resumed" ? "Codex resume could not be confirmed: the last screen observed looked ready, but the resume check ended before proving a restored conversation."
         : report ? report.probe.detail
@@ -1707,6 +1710,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // With a conversation to prove and no gate on the newest screen, the end is "not proven": whatever the last frame
       // was (a boot, a ready screen, or no capture at all before the deadline), the resumed Codex may be running.
       ...(resumeToken && !shown ? { resumeUnproven: true as const } : {}),
+      ...(unprovenDetail ? { resumeDetail: unprovenDetail } : {}),
       verifierInput: verifierInput(),
       evidence: (report?.paneContent ?? lastPaneContent).split("\n").slice(-12).join("\n"),
     };

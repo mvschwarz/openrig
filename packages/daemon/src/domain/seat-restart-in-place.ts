@@ -675,9 +675,13 @@ export class CodexInPlaceRestart {
     const attention = launch.recovery === "attention_required";
     // The native decision a named startup gate is waiting for. Nothing answers it: the step names it.
     const named = attention && launch.gate ? startupGateStep(launch, report.sessionName, report.pane, recoveryCommand) : null;
+    // The pane did restart here, so an unproven or disproved resume is reported without the adapter's closing
+    // "nothing was restarted", which is true only for a caller that restarted nothing.
+    const restarted = launch.resumeUnproven || launch.resumeMismatch;
+    const error = launch.resumeDetail ?? launch.error;
     return {
       ...report, outcome: "incomplete", recoveryCommand, ...(paneHeld ? { paneHeld } : {}),
-      account: { ...report.account, startupGate: attention ? launch.error : null, startupGateKind: attention ? launch.gate ?? null : null },
+      account: { ...report.account, startupGate: attention ? error : null, startupGateKind: attention ? launch.gate ?? null : null },
       remainingStep: signIn
         ? `Whoever owns the sign-in signs in to Codex in ${report.codexHome}, then the conversation resumes with the recovery command.`
         : missing
@@ -694,7 +698,9 @@ export class CodexInPlaceRestart {
               // OpenRig's own key is part of what the person needs to know, even with no screen named.
               ? `Resolve what Codex shows in the pane, then resume with the recovery command. ${typedSentence(launch)}`
               : "Resolve what Codex shows in the pane, then resume with the recovery command. Nothing was retried."),
-      message: `The original Codex exited, but the resume was not proven: ${launch.error}`,
+      message: restarted
+        ? `The pane restarted: the original Codex exited and the resume started in the same pane, but ${launch.resumeMismatch ? "it opened another conversation" : "it wasn't proven"}: ${error} Check the pane with rig capture ${report.sessionName}.`
+        : `The original Codex exited, but the resume was not proven: ${launch.error}`,
     };
   }
 

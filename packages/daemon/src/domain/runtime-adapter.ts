@@ -154,6 +154,9 @@ export type HarnessLaunchResult =
     resumeUnproven?: true;
     /** Codex (#1524), reporting only: the resumed process's own records name a different conversation (`opened`). */
     resumeMismatch?: { opened: string };
+    /** Codex, reporting only, with `resumeUnproven` or `resumeMismatch`: `error` without its closing "The session was
+     *  preserved; nothing was restarted.", for a caller that did restart the pane (an in-place restart). */
+    resumeDetail?: string;
     /** The native fork command was sent, but its child identity is not yet available. */
     forkIdentityPending?: boolean;
     launchedProcess?: import("./native-process-lineage.js").ClaudeLaunchedProcess };
