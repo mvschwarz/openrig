@@ -7,7 +7,23 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
-## Current-main audit, 2026-10-21
+## Main rebase, 2026-10-26
+
+Rebased onto main c241fbb45fe248191dc34b40d31ea0a26de29f58.
+Windows launch paths retain upstream runtime-home selection, launch identity and
+wake-recovery shutdown ordering. The shutdown consumer fixture now supplies the
+new wake-recovery assembly dependency; it does not exercise wake scheduling.
+
+Native Windows workspace build and lint passed. The focused daemon selection
+passed 312 tests, with 13 platform-skipped tests. UI: 1753 passed, five failed,
+one skipped (Windows executable-path, CRLF and locale assumptions). Full npm test
+is not green; repository fixtures hit Windows shell/path/permission limitations.
+These checks do not establish Linux/macOS, installed-package or full native
+provider acceptance. The new upstream per-seat Claude token launch step remains
+POSIX-specific and is not exercised by this Windows experiment. Local fleet policy
+and recovery overlays are separate from this public branch.
+
+## Historical main audit, 2026-10-21
 
 The experiment is rebased onto main `3657af0b59e82d6b3fb1c136eb7da28ac8ed6ad0`.
 The previously reproduced Windows `ProcessCensus` failure (`spawn ps ENOENT`)

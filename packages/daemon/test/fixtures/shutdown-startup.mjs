@@ -37,6 +37,7 @@ export async function createDaemon({ dbPath }) {
   }
   const app = new Hono(); app.get('/healthz', c => c.json({ status: 'ok' }));
   return { app, db,
+    wakeRecovery: { start() {}, async stop() {} },
     contextMonitor: { start() {} }, eventLoopMonitor: { stop() {} },
     injectWebSocket(server) {
       server.on('upgrade', (req, socket) => {
