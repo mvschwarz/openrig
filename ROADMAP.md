@@ -8,13 +8,8 @@ Issues labelled `good first issue` are also listed on the [contribute page](http
 
 ## Planned for 0.7.1
 
-- **Team skills:** Team skills load through one router and stay out of your project.
-- **Interruption levels:** Per-seat interruption levels, plus presets for managed compaction and model or effort changes.
-- **Permissions:** See each existing seat's planned and current permissions.
-- **Bundles:** Preview and install bundles that run services; the feature remains off by default.
 - **Subscriptions (if ready):** One Fleet agent manages two registered Codex subscriptions across two Linux machines, following
   your standing preferences.
-- **Community:** Community contributions to launch, lifecycle, runtimes, observation and delivery.
 
 ## How to help
 
