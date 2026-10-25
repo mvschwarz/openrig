@@ -955,12 +955,13 @@ export class PodRigInstantiator {
     if (saved.effortChoice && saved.effortChoice !== (context.member.effort ?? null)) changes.push("saved effort choice");
     if (saved.policyRef !== (context.member.permissionPolicy ?? null)
       || saved.rigPolicyRef !== (source.spec.permissionPolicy ?? null)) changes.push("permission policy");
-    const result = await this.launchBinding({ rigId, rigSpec: selected, rigRoot: source.root,
-      pod: context.pod, member: saved.member, qualifiedId: node.logicalId, nodeId });
+    const launched = await this.launchValidatedSpec(selected, source.root, rigId);
+    if (!launched.ok) return failure(launched.code, "message" in launched ? launched.message : launched.errors.join("; "));
+    const result = launched.result.nodes[0]!;
     if (changes.length) preflight.warnings.push(`First start uses the seat's current saved ${changes.join(", ")} instead of the materialized declaration.`);
     return { ok: result.status === "launched", rigId, nodeId, logicalId: node.logicalId,
       ...(result.status !== "launched" ? { code: result.status, error: result.error } : {}),
-      sessionName: result.sessionName, warnings: [...preflight.warnings, ...(result.warnings ?? [])] };
+      sessionName: result.sessionName, warnings: [...preflight.warnings, ...(launched.result.warnings ?? [])] };
   }
 
   async launchMaterialized(
