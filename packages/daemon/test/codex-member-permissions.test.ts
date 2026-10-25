@@ -195,7 +195,7 @@ describe("a Codex seat's current profile", () => {
     const f = fixture(observe);
     const result = await f.service.setPermissions({ seatRef: "dev-a@codex-team", codexProfile: "lease", actor: "operator@codex-team", reason: "Use the lease profile" });
     expect(result).toMatchObject({ ok: true, changed: true, from: null, to: "lease", observation: { file: "present", load: "ok" } });
-    expect(observe).toHaveBeenCalledWith("lease", "/same/project");
+    expect(observe).toHaveBeenCalledWith("lease", "/same/project", f.a.id);
     expect(f.rigRepo.getRig(f.rig.id)!.nodes.find(n => n.id === f.a.id)!.codexConfigProfile).toBe("lease");
     expect(events(f.db, "node.codex_profile_changed")[0]).toMatchObject({ from: null, to: "lease", observation: { sha256: "a".repeat(64) } });
     // Profile and approval are separate: the profile doesn't touch the envelope or mode.

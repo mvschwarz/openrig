@@ -279,7 +279,7 @@ describe("live seat runtime switch", () => {
       expect(await svc.setRuntime({ seatRef: SEAT, runtime: "codex", permissionMode: "floor", reason: "back to Codex at the floor" }))
         .toMatchObject({ ok: true, to: "codex", permission: { mode: "floor", source: "explicit" } });
       expect(codex.launchHarness).toHaveBeenCalledWith(expect.objectContaining({ launchPosture: "floor" }), expect.objectContaining({ name: SEAT }));
-      expect((codex.launchHarness as ReturnType<typeof vi.fn>).mock.calls[0]![0]).not.toHaveProperty("codexPermissions");
+      expect((codex.launchHarness as ReturnType<typeof vi.fn>).mock.calls[0]![0].codexPermissions).toBeUndefined();
       expect(storedEnvelope()).toBeNull();
       expect(new NativePermissionStore(db).read(nodeId)).toMatchObject({ runtime: "codex", mode: "floor" });
       const event = db.prepare("SELECT payload FROM events WHERE type = 'seat.runtime_changed'").get() as { payload: string };
