@@ -759,14 +759,17 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
   const missionRefs = mission === INDETERMINATE ? [] : missionReferences(missionsRoot, mission);
   const missionLikes = mission === INDETERMINATE ? ["%"] : missionRefs.map((reference) => `%${reference}%`);
   const missionWhere = missionLikes.map(() => "(tags LIKE ? OR body LIKE ?)").join(" OR ");
+  // post_claim_motion feeds only derivePickup's legacy fallback, which pending and in-progress rows reach: a blocked row
+  // returns parked and a closed row terminal before the count is read. Every row and body is still selected here (the
+  // ladder, EC-3 and wave-map evidence need historical rows); only their unused history count is skipped.
   const candidateRows = deps.db
     .prepare(
       `SELECT qitem_id, source_session, destination_session, state, tags, body, summary, claimed_at,
               last_heartbeat, blocked_on, ts_created, ts_updated,
-              (SELECT COUNT(*) FROM queue_transitions t
+              CASE WHEN queue_items.state IN ('pending','in-progress') THEN (SELECT COUNT(*) FROM queue_transitions t
                  WHERE t.qitem_id = queue_items.qitem_id
                    AND t.ts > queue_items.claimed_at
-                   AND t.transition_note IS NOT 'claimed') AS post_claim_motion
+                   AND t.transition_note IS NOT 'claimed') ELSE 0 END AS post_claim_motion
          FROM queue_items
         WHERE (${missionWhere})`,
     )
