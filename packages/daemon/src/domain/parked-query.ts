@@ -76,7 +76,8 @@ export interface SeatParkedDiagnosis {
     needsInput: NeedsInput;
     decidedBy: string | null;
     confidence: "oracle" | "unknown";
-    /** When the arbitrated state last changed; for a stopped seat, when it began waiting. Null without a state. */
+    /** When the arbitrated state last changed (activity, or needs-input count, reason or evidence rung). For a stopped
+     *  seat, when its current waiting state began. Null without a state. */
     since: string | null;
   };
   obligations: {

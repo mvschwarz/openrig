@@ -72,7 +72,7 @@ export interface ParkedOwnerConsumerDeps {
 
 export const PARKED_OWNER_POLICY_NAME = "parked-owner-consumer";
 /** A seat that just handed work off or asked a person has only started waiting (#1933): its first reminder waits
- *  this long after the start of that wait, which is the end of its own turn. */
+ *  until its arbitrated waiting state has been unchanged this long. A seat at a prompt gets no grace. */
 export const PARKED_OWNER_IDLE_GRACE_MS = 5 * 60_000;
 
 /** Stable per-rig registration anchor: member@rig shape, policy name as slug. */
@@ -272,10 +272,12 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
           continue;
         }
 
-        // A wait that began moments ago is a seat that just handed off or asked someone, not one stuck holding work.
-        // The diagnosis says when it began; with no start known, the reminder goes as before.
+        // A seat idle for moments has just handed off or asked someone, not got stuck holding work. The diagnosis says
+        // how long its waiting state has been unchanged; with no start known, the reminder goes as before. A seat at a
+        // prompt gets no grace: this attempt's refusal is what alerts whoever can clear the prompt.
         const waitingSince = seat.activity.since ? Date.parse(seat.activity.since) : Number.NaN;
-        if (Number.isFinite(waitingSince) && (deps.now?.() ?? Date.now()) - waitingSince < PARKED_OWNER_IDLE_GRACE_MS) {
+        if (seat.activity.needsInput.count === 0 && Number.isFinite(waitingSince)
+          && (deps.now?.() ?? Date.now()) - waitingSince < PARKED_OWNER_IDLE_GRACE_MS) {
           skipped.push({ seat: seat.sessionName, why: "waiting-grace" });
           continue;
         }
@@ -328,6 +330,8 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
           `You are parked (arbitrated: idle at prompt) while holding ${namedIds.length} open ` +
           `obligation${namedIds.length === 1 ? "" : "s"}: ${namedIds.join(", ")}. ` +
           `Resume the work or update each row honestly (close, park-with-wake, or hand off). ` +
+          `If you're waiting on a person's answer, don't ask again; hold the row with rig queue block <id> --on <who> --wake-after <duration> ` +
+          `(a hold on a person also needs --summary and --evidence-ref unless the row has them). ` +
           `After a recorded delivery to this occupant, this check waits for your rows to change. An interrupted or unconfirmed attempt may repeat; interactive-prompt recovery stays with the wake-or-escalate ladder. ` +
           `Held rows stay listed in rig view show held; for a claimed in-progress row, the wake-or-escalate ladder also retries a failed wake.`;
         return {
