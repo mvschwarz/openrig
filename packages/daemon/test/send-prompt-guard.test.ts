@@ -286,8 +286,9 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
   });
 
   // Reconstructed from Pi v1.4.0 extension-input/editor source, not a native capture.
-  const piInput = ["────────────────────────────────────", "", " Your response", "", "> ", "", " enter submit  escape/ctrl+c cancel", "", "────────────────────────────────────", "~/project"].join("\n");
-  const piEditor = ["────────────────────────────────────", "", " Edit response", "", "────────────────────────────────────", "draft line", "", "────────────────────────────────────", "", " enter submit  shift+enter newline  escape/ctrl+c cancel  ctrl+g external editor", "", "────────────────────────────────────", "~/project"].join("\n");
+  const piDialogBorder = "─".repeat(100);
+  const piInput = [piDialogBorder, "", " Your response", "", "> ", "", " enter submit  escape/ctrl+c cancel", "", piDialogBorder, "~/project"].join("\n");
+  const piEditor = [piDialogBorder, "", " Edit response", "", piDialogBorder, "draft line", "", piDialogBorder, "", " enter submit  shift+enter newline  escape/ctrl+c cancel  ctrl+g external editor", "", piDialogBorder, "~/project"].join("\n");
   const piTextDialogs = [
     ["empty input", piInput],
     ["input with text and description", piInput.replace("Your response", "Your response (10s)\n\n Description").replace("> ", "> existing answer")],
@@ -295,7 +296,7 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     ["editor with blank line", piEditor],
     ["empty editor", piEditor.replace("draft line", "")],
     ["editor rebound keys", piEditor.replace("enter submit  shift+enter newline  escape/ctrl+c cancel  ctrl+g external editor", "ctrl+y submit  alt+n newline  ctrl+n cancel  ctrl+e external editor")],
-    ["scrolling editor", piEditor.replace("draft line\n\n────────────────────────────────────", "draft line\n\n──── ↓ 3 more ────")],
+    ["scrolling editor", piEditor.replace(`draft line\n\n${piDialogBorder}`, `draft line\nrow 2\nrow 3\nrow 4\n\n${"─".repeat(45)} ↓ 3 more ${"─".repeat(45)}`)],
     ["widget and named footer", `${piInput} • named\ncustom status\nwidget below editor`],
   ] as const;
   it.each(piTextDialogs.flatMap(([layout, pane]) => [null, "unknown", "pi"].map(runtime => [layout, runtime, pane] as const)))(
