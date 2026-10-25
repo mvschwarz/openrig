@@ -588,6 +588,13 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   if (claudeComposer && (!claudeComposer.headSeen || (claudeComposer.hasWarnings && !claudeComposer.framed))) {
     return { state: "unknown", reason: "no_activity_signal", evidence: truncateEvidence(lastLine) };
   }
+  // An empty prompt row is not an empty box: authored text can start on a continuation row.
+  // Read the same bounded composer region as the input check before a mode footer can imply idle.
+  const inputBox = options.runtime !== "codex" ? composerRegion(paneContent, "claude-code") : null;
+  if (inputBox?.body && inputBox.markerLine !== null &&
+      /^\s*❯\s*$/.test(paneContent.split("\n")[inputBox.markerLine - 1]!)) {
+    return { state: "unknown", reason: "no_activity_signal", evidence: truncateEvidence(lastLine) };
+  }
   // Below warning rows, any Claude mode footer completes the frame for an EMPTY composer (#808).
   // Drafts keep the narrower check above: attention is needs_input, a send refusal for other modes.
   if (claudeComposer && (!claudeComposer.hasWarnings || claudeComposer.modeFooter) &&
