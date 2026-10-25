@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import type { NodeBinding, RuntimeAdapter } from "../src/domain/runtime-adapter.js";
@@ -25,6 +26,20 @@ function fixture() {
 }
 const launch = (adapter: ClaudeCodeAdapter, opts: Partial<Parameters<RuntimeAdapter["launchHarness"]>[1]> = {}) =>
   adapter.launchHarness(binding, { name: "seat", freshInPlace: true, ...opts });
+
+// Claude Code 2.1.309's Resume session picker, from dev50-qa's native capture of a bare `claude --resume` (100×80).
+const resumePicker = (JSON.parse(readFileSync(new URL("./fixtures/claude-resume-picker-2.1.309.json", import.meta.url), "utf8")) as
+  Record<string, string>).first100x80!;
+
+describe("Claude's Resume session picker is not ready", () => {
+  it.each(["adopted", "resume"])("checkReady waits for a person at the picker (%s)", async mode => {
+    const f = fixture();
+    f.capturePaneContent.mockResolvedValue(resumePicker);
+    f.getPaneCommand.mockResolvedValue("claude");
+    if (mode === "resume") await launch(f.adapter, { resumeToken: token });
+    expect(await f.adapter.checkReady(binding)).toMatchObject({ ready: false, code: "claude_resume_selection_prompt" });
+  });
+});
 
 describe("fresh in-place readiness scope and fallback", () => {
   it.each(["adopted", "ordinary-fresh", "resume", "fork"])("preserves %s readiness without reading the current frame", async mode => {
@@ -63,6 +78,7 @@ describe("fresh in-place readiness scope and fallback", () => {
     ["new MCP servers found in .mcp.json\nSelect any you wish to enable\nEnter to confirm", "mcp_gate"],
     [CLAUDE_BYPASS_CONSENT, "bypass_consent_gate"],
     ["How would you like to resume?\n❯ Resume from summary\n  Resume full session as-is", "claude_resume_selection_prompt"],
+    [resumePicker, "claude_resume_selection_prompt"],
     ["● Not logged in · Please run /login\n❯\u00a0", "login_required"],
     ["No conversation found", "no_conversation_found"],
   ])("does not replace a visible gate with the history fallback: %s", async (screen, code) => {

@@ -1364,3 +1364,54 @@ describe("native resume probe", () => {
     });
   });
 });
+
+// Claude Code 2.1.309's "Resume session" picker, from dev50-qa's native capture of a bare `claude --resume` in a 100×80
+// pane (release-0.7.2 evidence q2010-qa, DIRECT-UI-FIRST/LAST-FRAME.json). It is drawn at the top with 68 blank rows below.
+describe("Claude's Resume session picker", () => {
+  const picker = JSON.parse(fs.readFileSync(new URL("./fixtures/claude-resume-picker-2.1.309.json", import.meta.url), "utf8")) as Record<string, string>;
+  const native = picker.first100x80!;
+  const rows = native.trimEnd().split("\n");
+  // The real search box row sets the inner width; a changed row keeps the box's right edge.
+  const searchRow = rows.findIndex(row => row.includes("⌕"));
+  const boxRow = (text: string) => `  │ ${text.padEnd(rows[searchRow]!.length - 5)}│`;
+  const cards = rows.findIndex(row => row.includes("❯"));
+  const hint = rows.findIndex(row => row.includes("Ctrl+A to show all projects"));
+  const replaced = (from: number, to: number, ...next: string[]) => [...rows.slice(0, from), ...next, ...rows.slice(to)].join("\n");
+  const shapes: Array<[string, string]> = [
+    ["the native first frame, 100×80", native],
+    ["the native last frame, 100×80", picker.last100x80!],
+    ["the native frame replayed in a 100×24 pane", `${rows.join("\n")}\n${Array<string>(11).fill("").join("\n")}`],
+    ["a search for a name that matched nothing", replaced(searchRow, hint + 2, boxRow("⌕ probe-claude@elsewhere"), rows[searchRow + 1]!, "",
+      '    No sessions match "probe-claude@elsewhere".', "", "    Type to Search · Enter to select · Esc to clear")],
+    ["a long query wrapped inside the box", replaced(searchRow, searchRow + 1, boxRow(`⌕ ${"q".repeat(rows[searchRow]!.length - 7)}`), boxRow("  the rest of it"))],
+    ["a heading with its count", replaced(searchRow - 2, searchRow - 1, "  Resume session (2 of 9)")],
+    ["a project with no conversations", replaced(cards, cards + 2, "    No conversations found in this project.")],
+  ];
+  it.each(shapes)("reads %s as waiting for a person", (_shape, paneContent) => {
+    expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent }))
+      .toMatchObject({ status: "attention_required", code: "claude_resume_selection_prompt" });
+  });
+
+  // #2010's rule: a picker counts only while it is the last thing drawn.
+  const plainRule = "─".repeat(100);
+  const labelledRule = `${"─".repeat(77)} probe-claude@q2010-native ─`;
+  const resumed = (topRule: string) => ["Claude Code v2.1.309", "", "● Picked up where we left off.", "", topRule, "❯ ", plainRule,
+    "  ⏵⏵ accept edits on (shift+tab to cycle)"].join("\n");
+  it.each([["plain", plainRule], ["labelled", labelledRule]])("reads an old picker above a resumed session (%s frame) as resumed", (_frame, rule) => {
+    const paneContent = `${rows.join("\n")}\n\n${resumed(rule)}\n${Array<string>(40).fill("").join("\n")}`;
+    expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent }))
+      .toMatchObject({ status: "resumed", code: "active_runtime" });
+  });
+  it("reads a reply quoting the picker above a live composer as resumed", () => {
+    const quoted = ["● The picker looked like this:", ...rows.slice(2, hint + 2).map(row => `  ${row}`), "", plainRule, "❯ ", plainRule,
+      "  ⏵⏵ accept edits on (shift+tab to cycle)"].join("\n");
+    expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent: quoted }))
+      .toMatchObject({ status: "resumed", code: "active_runtime" });
+  });
+  it("doesn't take a heading with no search box under it for the picker", () => {
+    const paneContent = ["● Tomorrow's plan:", "  Resume session", "  then rebase the branch.", "", plainRule, "❯ ", plainRule,
+      "  ⏵⏵ accept edits on (shift+tab to cycle)"].join("\n");
+    expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent }))
+      .toMatchObject({ status: "resumed", code: "active_runtime" });
+  });
+});

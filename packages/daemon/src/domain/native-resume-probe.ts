@@ -338,6 +338,7 @@ function looksLikeClaudeTrustPrompt(paneContent: string): boolean {
 // operator choose; later reconciliation upgrades to `operator_recovered` only
 // when the operator reaches a usable state.
 function looksLikeClaudeResumeSelectionPrompt(paneContent: string): boolean {
+  if (currentClaudeResumePicker(paneContent)) return true;
   // Current Claude chooser (observed 2026-09-04) asks which fidelity to
   // resume with. Require the heading, both option rows after it, and a selection cursor;
   // prose containing the labels is intentionally insufficient. A chooser drawn
@@ -369,6 +370,33 @@ function looksLikeClaudeResumeSelectionPrompt(paneContent: string): boolean {
   const lastOption = drawn.map((line, at) => at >= recentStart && /^\s*(?:[›»]\s*)?\d+\.\s+\S/.test(line)).lastIndexOf(true);
   // A draft's own numbered rows can read as the last options, so the input frame counts anywhere after the heading.
   return lastOption >= 0 && !claudeDrawnAfter(drawn.slice(lastOption + 1)) && !hasClaudeInputFrame(drawn.slice(verb + 1));
+}
+
+/** Claude Code's "Resume session" picker (2.1.309), drawn when `claude --resume` has no exact session to open: a bare
+ *  `--resume`, or a name that matches no session title or several. Its heading row (an optional detail follows, such as
+ *  " (2 of 9)"), then its search box directly under it: `╭─…─╮`, a `│ ⌕` row, any rows a long query wraps to, `╰─…─╯`.
+ *  The cards, the query and the hint row vary with the mode (a list, a search with no match, rename), so none of them
+ *  is required. A paste or typed text goes into its search, and Enter resumes the focused card. The last picker drawn
+ *  counts while nothing of Claude's own follows its box; a later input frame, header or reply makes it history.
+ *  Returns the heading row, or null. */
+export function currentClaudeResumePicker(paneContent: string): string | null {
+  const rows = paneContent.trimEnd().split(/\r?\n/);
+  for (let at = rows.length - 1; at >= 0; at--) {
+    if (!/^\s*Resume session\b/.test(rows[at]!)) continue;
+    const boxEnd = claudeSearchBoxEnd(rows, at + 1);
+    if (boxEnd < 0) continue;
+    return claudeDrawnAfter(rows.slice(boxEnd + 1)) ? null : rows[at]!.trim();
+  }
+  return null;
+}
+
+function claudeSearchBoxEnd(rows: string[], top: number): number {
+  if (!/^\s*╭─+╮\s*$/.test(rows[top] ?? "") || !/^\s*│\s*⌕/.test(rows[top + 1] ?? "")) return -1;
+  for (let at = top + 2; at < rows.length; at++) {
+    if (/^\s*╰─+╯\s*$/.test(rows[at]!)) return at;
+    if (!/^\s*│.*│\s*$/.test(rows[at]!)) return -1;
+  }
+  return -1;
 }
 
 /** Claude's own UI drawn after a chooser's options: its framed input box, its version header or a reply. A bare ❯ row

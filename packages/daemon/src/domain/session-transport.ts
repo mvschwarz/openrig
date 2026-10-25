@@ -1,5 +1,6 @@
 import { physicalSessionName } from "./session-registry.js";
 import { currentClaudeMcpMenu } from "./claude-mcp-menu.js";
+import { currentClaudeResumePicker } from "./native-resume-probe.js";
 import stringWidth from "string-width";
 import { CODEX_TURN_STATUS_PATTERN } from "./codex-pane-patterns.js";
 import { randomUUID } from "node:crypto";
@@ -624,7 +625,8 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   const currentComposerSelection = currentComposerText
     ? findPatternEvidence(currentComposerText.split("\n").map(line => line.trimStart()), [COMPOSER_SELECTION_SCAN_PATTERN])
     : null;
-  const selectionPromptEvidence = currentClaudeMcpMenu(paneContent) ?? findCurrentClaudeQuestion(paneContent) ??
+  // Claude's resume picker types a paste into its search and resumes a card on Enter.
+  const selectionPromptEvidence = currentClaudeResumePicker(paneContent) ?? currentClaudeMcpMenu(paneContent) ?? findCurrentClaudeQuestion(paneContent) ??
     currentComposerSelection ?? (options.currentClaudeDialogueOnly ? null
       : findPatternEvidence(selectionLines, [COMPOSER_SELECTION_SCAN_PATTERN]));
   if (selectionPromptEvidence) {

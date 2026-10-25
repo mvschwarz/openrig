@@ -5,6 +5,7 @@
 // freshness fallback). Detector covered on BOTH the fresh-runtime-hook path and the capture-pane
 // fallback (Codex's sole prompt guard — exact render from qa-codex-approval-render-research-20260627).
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import type Database from "better-sqlite3";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
@@ -373,6 +374,35 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     [`${kind} beyond the footer bound`, `${pane}\n${Array.from({ length: 8 }, (_, i) => `later output ${i}`).join("\n")}`],
   ]))("keeps %s out of current Pi dialog recognition", (_name, pane) => {
     expect(classifyPaneActivity(pane, { runtime: "unknown" }).state).not.toBe("attention");
+  });
+
+  // Claude Code 2.1.309's Resume session picker (dev50-qa's native 100×80 capture): a paste goes into its search and
+  // Enter resumes the focused card, so a plain send refuses and types nothing.
+  const resumePicker = (JSON.parse(readFileSync(new URL("./fixtures/claude-resume-picker-2.1.309.json", import.meta.url), "utf8")) as
+    Record<string, string>).first100x80!;
+  const pickerRows = resumePicker.trimEnd();
+  it.each([
+    ["the native 100×80 frame", resumePicker],
+    ["the native frame in a 100×24 pane", `${pickerRows}\n${Array<string>(11).fill("").join("\n")}`],
+  ].flatMap(([layout, pane]) => [null, "claude-code"].map(runtime => [layout, runtime, pane] as const)))(
+    "plain send refuses Claude's Resume session picker (%s) with runtime %s", async (_layout, runtime, pane) => {
+      const node = rigRepo.addNode(rigId, "adopted.worker", { role: "worker" });
+      db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(runtime, node.id);
+      const seat = "adopted-tui";
+      sessionRegistry.registerClaimedSession(node.id, seat);
+      sessionRegistry.updateBinding(node.id, { tmuxSession: seat, tmuxPane: "%42" });
+      const { sendText, sendKeys } = spies();
+      const result = await makeTransport(mockTmux({ capturePaneContent: async () => pane, sendText, sendKeys })).send(seat, "a peer message");
+      expect(result.reason).toBe("target_needs_input");
+      expect(result.activity?.state).toBe("needs_input");
+      expect(sendText).not.toHaveBeenCalled();
+      expect(sendKeys).not.toHaveBeenCalled();
+    },
+  );
+  it("doesn't read an old Resume session picker above Claude's live composer as a dialog", () => {
+    const rule = "─".repeat(100);
+    const pane = `${pickerRows}\n\nClaude Code v2.1.309\n\n● Picked up where we left off.\n\n${rule}\n❯ \n${rule}\n  ⏵⏵ accept edits on (shift+tab to cycle)\n`;
+    expect(classifyPaneActivity(pane, { runtime: "claude-code" }).reason).not.toBe("selection_prompt");
   });
 
   it.each([

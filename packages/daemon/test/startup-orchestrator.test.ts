@@ -1510,6 +1510,24 @@ describe("StartupOrchestrator", () => {
     expect(row.startup_status).toBe("attention_required");
   });
 
+  it("Claude's resume chooser or picker becomes attention_required without waiting out the timeout or typing", async () => {
+    const seed = seedSession();
+    const adapter = mockAdapter({
+      checkReady: vi.fn(async () => ({
+        ready: false,
+        code: "claude_resume_selection_prompt",
+        reason: "Claude is at a resume-selection prompt; an operator must choose the conversation to continue.",
+      })),
+    });
+    const orch = createOrchestrator();
+    const result = await orch.startNode(makeInput(seed, { adapter, readinessTimeoutMs: 1500 }));
+
+    expect(result.ok).toBe(false);
+    expect(result.startupStatus).toBe("attention_required");
+    expect(adapter.checkReady).toHaveBeenCalledTimes(1);
+    expect(tmux.sendText).not.toHaveBeenCalled();
+  });
+
   it("Claude MCP approval blockers become attention_required", async () => {
     const seed = seedSession();
     const adapter = mockAdapter({
