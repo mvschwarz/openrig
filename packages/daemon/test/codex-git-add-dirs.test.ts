@@ -238,9 +238,9 @@ describe("Codex seat folder add-dir (a seat keeps its LEARNED.md and recap writa
   });
 });
 
-// A restore after a reboot (`rig up --existing`) resumes through CodexResumeAdapter, not the launch adapter. It gets the
-// same git dirs a fresh launch gets, from the real resolver, so a restored seat can still commit.
-describe("Codex restore-path git add-dirs (a seat restored after a reboot keeps .git writable)", () => {
+// A Codex seat without a pod restores through CodexResumeAdapter (a seat in a pod resumes through the launch adapter,
+// which #2000 already covers). It gets the same git dirs a fresh launch gets, from the real resolver, so it can still commit.
+describe("Codex restore-path git add-dirs (a pod-less seat restored through CodexResumeAdapter keeps .git writable)", () => {
   async function restoreCommand(cwd: string): Promise<string> {
     const tmux = mockTmux();
     await new CodexResumeAdapter(tmux, { resolveGitAddDirs: resolveCodexGitAddDirs, pollMs: 1, maxWaitMs: 1, sleep: async () => {}, listProcesses: () => [] })

@@ -176,8 +176,8 @@ describe("CodexResumeAdapter", () => {
       expect(profileFolder).not.toHaveBeenCalled();
     });
 
-    // #2000 gave fresh, resume and fork launches the git metadata dirs; a restore resumes through this adapter, so it
-    // needs them too, or a restored seat can't commit. Same floor as the seat folder, and the git dirs come first.
+    // #2000 gave fresh, resume and fork launches the git metadata dirs; a seat without a pod restores through this adapter,
+    // so it needs them too, or it can't commit. Same floor as the seat folder, and the git dirs come first.
     it("a restore on the plain floor adds the git dirs, then the seat folder, after the conversation id; a named profile adds none", async () => {
       const resolveGitAddDirs = vi.fn(async () => ["/repo/.git"]);
       const prepareSeatFolder = vi.fn(() => "/topology/rigs/demo/seats/r99-demo1-impl");
