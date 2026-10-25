@@ -15,13 +15,19 @@ export interface RestoreReadContext {
 /** The two compaction settings a launch passes so the restore can read the files they name. */
 export type RestoreReadPolicy = Pick<RestoreReadContext, "extraInstructionFile" | "preparationRoot">;
 
+/** The configured extra instruction file as the restore request names it: trimmed, or none when blank. The enforcer's
+ *  resolver reads the setting through this too, so the grant and the request name the same file. */
+export function postCompactExtraSetting(value: string | null | undefined): string | null {
+  return value?.trim() || null;
+}
+
 // These are permission patterns, not shell arguments. Keep literal path components
 // literal; only the attempt/timestamp segment below is a wildcard.
 function literalPath(value: string): string {
   return value.replaceAll(path.sep, "/").replace(/[\\*?\[\]()!{}]/g, "\\$&");
 }
 
-/** A directory as resolved and as it really is. Claude Code applies an allow rule to a read through a symlink only when
+/** A path as resolved and as it really is. Claude Code applies an allow rule to a read through a symlink only when
  *  the requested path and the file it resolves to both match, so a seat whose restore files sit under a symlink (macOS's
  *  /tmp is /private/tmp) needs both. A part that doesn't exist yet keeps its name under its nearest real parent. */
 function spellings(value: string): string[] {
@@ -46,6 +52,7 @@ function spellings(value: string): string[] {
 export function withManagedRestoreReads(args: string[], context: RestoreReadContext): string[] {
   if (!context.openrigHome) return args;
   const seat = context.session.replace(/[^a-zA-Z0-9_.@-]/g, "_");
+  const extra = postCompactExtraSetting(context.extraInstructionFile);
   const files = [
     ...spellings(context.openrigHome).flatMap(home => [
       `${home}/compaction/restore-pending/${seat}.json`,
@@ -57,9 +64,8 @@ export function withManagedRestoreReads(args: string[], context: RestoreReadCont
       `${home}/compaction/preparation/${seat}/*/RESTORE-MAP.md`,
     ]),
     ...spellings(context.cwd).map(cwd => `${cwd}/.openrig/compaction/preparation/${seat}/*/RESTORE-MAP.md`),
-    ...(context.extraInstructionFile
-      ? spellings(path.dirname(context.extraInstructionFile)).map(dir => `${dir}/${literalPath(path.basename(context.extraInstructionFile!))}`)
-      : []),
+    // The exact file, where it's named and where it resolves (a symlink at the file itself included).
+    ...(extra ? spellings(extra) : []),
     ...(context.preparationRoot ? spellings(context.preparationRoot).map(root => `${root}/${seat}/*/RESTORE-MAP.md`) : []),
   ];
   // Fresh/fork launches know their own UUID. Never grant the fork parent's or

@@ -3,6 +3,7 @@ import { TerminalPolicyRefusal } from "./terminal-policy.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
 import type { SessionTransport, SendResult } from "./session-transport.js";
 import type { ClaudeCompactionPolicy, SettingsStore } from "./user-settings/settings-store.js";
+import { postCompactExtraSetting } from "./managed-restore-read-access.js";
 import * as fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import * as os from "node:os";
@@ -318,7 +319,7 @@ function resolvePostCompactExtra(
     }
     return { filePath: perSeatPath, ignoredWrongSeat: false };
   }
-  const trimmed = globalPath?.trim();
+  const trimmed = postCompactExtraSetting(globalPath);
   if (!trimmed) return { filePath: null, ignoredWrongSeat: false };
   const global = readExtraDeclaredSeat(trimmed);
   // Configured-but-absent: keep the path (the operator may populate it before restore;
