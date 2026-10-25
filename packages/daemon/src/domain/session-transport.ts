@@ -30,6 +30,7 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import { claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
+import { tmuxResizeWindowCommand } from "../adapters/tmux-server.js";
 import { latestHookPermissionPending, latestHookWaitsOnPerson, type AgentActivityStore } from "./agent-activity-store.js";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity } from "./types.js";
@@ -1787,6 +1788,8 @@ export interface CaptureResult {
   /** Claude Code and Codex seats, when the caller asked: what the live input box holds, and which part is likely a
    *  harness suggestion. */
   inputBox?: InputBoxAnnotation;
+  /** When the caller asked: the captured screen is at a prompt in a pane smaller than 80x24, which may cut it off. */
+  promptPane?: { width: number; height: number; hint: string };
 }
 
 export interface BroadcastResult {
@@ -3679,7 +3682,7 @@ export class SessionTransport {
   /** `inputBox`: also describe a Claude Code or Codex seat's live input box (three more tmux reads), for callers that
    *  use it: the capture route asks when its request does (`rig capture`, the MCP tool). `inputBoxBudget` is the time
    *  those reads may still take, shared across a fan-out; a single capture gets its own CAPTURE_INPUT_BOX_DEADLINE_MS. */
-  async capture(sessionName: string, opts?: { lines?: number; inputBox?: boolean; inputBoxBudget?: InputBoxBudget }): Promise<CaptureResult> {
+  async capture(sessionName: string, opts?: { lines?: number; inputBox?: boolean; inputBoxBudget?: InputBoxBudget; promptPane?: boolean }): Promise<CaptureResult> {
     sessionName = physicalSessionName(this.db, sessionName);
     const sessionMeta = this.getSessionMeta(sessionName);
     if (sessionMeta.attachmentType === "external_cli") {
@@ -3740,7 +3743,20 @@ export class SessionTransport {
     const inputBox = opts?.inputBox && (runtime === "claude-code" || runtime === "codex")
       ? await this.captureInputBox(sessionName, runtime, opts.inputBoxBudget ?? { remainingMs: CAPTURE_INPUT_BOX_DEADLINE_MS })
       : undefined;
-    return { ok: true, sessionName, content, lines, ...(inputBox ? { inputBox } : {}) };
+    const promptPane = opts?.promptPane ? await this.capturePromptPane(sessionName, content, runtime) : undefined;
+    return { ok: true, sessionName, content, lines, ...(inputBox ? { inputBox } : {}), ...(promptPane ? { promptPane } : {}) };
+  }
+
+  /** A prompt drawn in a pane smaller than an 80x24 terminal may be cut off, so a reader can't see what the seat asks.
+   *  The pane size is read only when the captured screen shows a prompt. */
+  private async capturePromptPane(sessionName: string, content: string, runtime: string | null | undefined): Promise<CaptureResult["promptPane"]> {
+    const prompt = classifyPaneActivity(content, { runtime });
+    if (prompt.reason !== "permission_prompt" && prompt.reason !== "selection_prompt") return undefined;
+    const panes = await this.tmuxAdapter.listPanes(sessionName).catch(() => []);
+    const pane = panes.find(entry => entry.active) ?? panes[0];
+    if (!pane || (pane.width >= 80 && pane.height >= 24)) return undefined;
+    return { width: pane.width, height: pane.height,
+      hint: `pane ${pane.width}x${pane.height} is smaller than 80x24, so the prompt may be cut off; resize it (${tmuxResizeWindowCommand(sessionName, 120, 40)}) and capture again` };
   }
 
   /** The input box, or unknown when its reads don't finish within the budget's remaining time (or none is left): the
