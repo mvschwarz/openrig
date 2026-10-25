@@ -99,7 +99,7 @@ after an upgrade it can still hold the previous version's note.
 - **A daemon restart picks up a managed compaction where it stopped.** An owed restore step resumes, a `/compact` that
   may have been sent is never sent again, and `rig compact --state` shows anything stranded or owed.
 - **A Claude seat whose startup turn is refused** (an expired login, say) holds the rest of its startup context as owed.
-  A startup input sent before the refusal is noticed can still be typed (see Known issues in the
+  A startup input sent before the refusal is noticed can still be submitted (see Known issues in the
   [0.7.1 release notes](https://github.com/mvschwarz/openrig/releases/tag/v0.7.1)).
 - **`rig send` refuses with `target_needs_input`** when a Claude seat's hook has just reported it running and its screen
   shows an MCP enablement menu, a question or a permission prompt.
