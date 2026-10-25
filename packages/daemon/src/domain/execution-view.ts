@@ -849,7 +849,8 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     const arbitrated = deps.seatActivity?.getSeatStateBySession(r.destination_session) ?? null;
     const pickup = derivePickup({
       state: r.state,
-      lastMeaningfulAt: lastMeaningfulTransition(deps.db, r.qitem_id)?.at,
+      // A blocked row's pickup is parked before it reads its history, so that history is not read at all.
+      lastMeaningfulAt: r.state === "blocked" ? undefined : lastMeaningfulTransition(deps.db, r.qitem_id)?.at,
       activity: arbitrated?.activity, needsInput: arbitrated?.needsInput.count, needsInputReason: arbitrated?.needsInput.reason,
       claimedAt: r.claimed_at,
       lastHeartbeat: r.last_heartbeat,
@@ -1183,7 +1184,8 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     .map((r) => {
       const activity = deps.seatActivity?.getSeatStateBySession(r.destination_session);
       const pickup = derivePickup({
-        lastMeaningfulAt: lastMeaningfulTransition(deps.db, r.qitem_id)?.at,
+        // As in Q1: a blocked row is parked before its history is read; its armed wake is still looked up below.
+        lastMeaningfulAt: r.state === "blocked" ? undefined : lastMeaningfulTransition(deps.db, r.qitem_id)?.at,
         activity: activity?.activity, needsInput: activity?.needsInput.count, needsInputReason: activity?.needsInput.reason,
         state: r.state,
         claimedAt: r.claimed_at,

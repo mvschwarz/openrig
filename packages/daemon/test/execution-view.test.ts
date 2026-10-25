@@ -1201,6 +1201,61 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     });
   });
 
+  describe("a blocked row's pickup history is not read", () => {
+    // Records whose meaningful-history query ran (by qitem), and can make that query fail.
+    function watchHistory(opts: { fail?: boolean } = {}) {
+      const readFor: string[] = [];
+      const prepare = db.prepare.bind(db);
+      db.prepare = ((sql: string) => {
+        const stmt = prepare(sql);
+        if (!sql.includes("LAG(state) OVER")) return stmt;
+        const get = stmt.get.bind(stmt);
+        return Object.assign(stmt, { get: (...binds: unknown[]) => {
+          readFor.push(String(binds[0]));
+          if (opts.fail) throw new Error("history unavailable");
+          return get(...binds);
+        } });
+      }) as typeof db.prepare;
+      return { readFor, restore: () => { db.prepare = prepare; } };
+    }
+    const externalPark = () => {
+      const t = "2026-08-29T21:30:00.000Z";
+      db.prepare(
+        `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, body, claimed_at, blocked_on)
+         VALUES ('qitem-pr-34', ?, ?, 'lead@exec-fixture', ?, 'blocked', 'normal', 'light', ?, 'In review upstream.', ?, 'external:pr-77')`,
+      ).run(t, t, SEAT_B, JSON.stringify([`mission:${MISSION}`, "slice:OPR.9.9.32"]), t);
+      db.prepare("INSERT INTO queue_transitions (qitem_id, ts, state, transition_note, actor_session) VALUES ('qitem-pr-34', ?, 'blocked', 'parked', ?)").run(t, SEAT_B);
+    };
+
+    it("reads history only for live rows, while blocked lanes and parks keep their pickup and armed-wake output", async () => {
+      externalPark();
+      db.prepare("UPDATE queue_items SET state = 'done' WHERE qitem_id = 'qitem-lane-32'").run();
+      const history = watchHistory();
+      let doc: Record<string, unknown>;
+      try { doc = await show(); } finally { history.restore(); }
+      // One live lane (Q1) and its claimed row (Q5); never the external park or the parked row.
+      expect(history.readFor.sort()).toEqual(["qitem-lane-31", "qitem-lane-31"]);
+      const lane = (doc.q1_lanes as Record<string, unknown>[]).find((l) => l.qitem_id === "qitem-pr-34");
+      expect(lane).toMatchObject({ waiting: { on: "external:pr-77" }, pickup: { state: "parked" } });
+      const parks = doc.q5_park as Record<string, unknown>[];
+      expect(parks.find((p) => p.qitem_id === "qitem-parked-33")).toMatchObject({ pickup_state: "parked", park_kind: "deliberate-with-wake", wake_target: "wake-timer-33" });
+      expect(parks.find((p) => p.qitem_id === "qitem-pr-34")).toMatchObject({ pickup_state: "parked" });
+    });
+
+    it("keeps a failure of a live row's history read, and no longer depends on a blocked row's", async () => {
+      db.prepare("UPDATE queue_items SET state = 'done' WHERE qitem_id IN ('qitem-lane-31', 'qitem-lane-32')").run();
+      const quiet = watchHistory({ fail: true });
+      let doc: Record<string, unknown>;
+      try { doc = await show(); } finally { quiet.restore(); }
+      expect(quiet.readFor).toEqual([]); // only blocked rows remain: nothing reads history, so its failure cannot surface
+      expect((doc.q5_park as Record<string, unknown>[]).find((p) => p.qitem_id === "qitem-parked-33")).toMatchObject({ pickup_state: "parked" });
+      db.prepare("UPDATE queue_items SET state = 'in-progress' WHERE qitem_id = 'qitem-lane-31'").run();
+      const loud = watchHistory({ fail: true });
+      try { await expect(projector.show("execution", { mission: MISSION })).rejects.toThrow("history unavailable"); } finally { loud.restore(); }
+      expect(loud.readFor).toContain("qitem-lane-31");
+    });
+  });
+
   it("park honesty: armed wake => deliberate-with-wake; removing the wake flips park_kind to INDETERMINATE, never idle/dead", async () => {
     const before = await show();
     const parkedBefore = (before.q5_park as Record<string, unknown>[]).find((p) => p.qitem_id === "qitem-parked-33")!;
