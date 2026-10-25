@@ -123,8 +123,10 @@ export function writeSeatRecap(opts: { seatDir: string; content: string; now?: (
 const SEAT_ADDRESS_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 /** Write a seat's recap by its topology address (`rigs/<rig>/seats/<seat>`), the one path the CLI and the daemon share:
- *  each name is one bounded segment, the rig already exists, no part of the seat's path is a symlink or a file, and a
- *  missing seat directory is created. Returns where the recap landed and how many predecessors the chain retains. */
+ *  each name is one bounded segment, the rig already exists, none of the rig, `seats` or seat folders is a symlink or a
+ *  file, and a missing seat folder is created. Inside the seat folder the store works as it always has: a link already at
+ *  RECAP.md or recap-superseded/ is followed (planting one takes write access to the seat folder). Returns where the
+ *  recap landed and how many predecessors the chain retains. */
 export function writeSeatRecapAt(opts: { topologyRoot: string; rig: string; seat: string; content: string; now?: () => number }): { path: string; superseded: number } {
   for (const [kind, value] of [["rig", opts.rig], ["seat", opts.seat]] as const) {
     if (value === "." || value === ".." || !SEAT_ADDRESS_SEGMENT.test(value)) {

@@ -795,7 +795,7 @@ Examples:
             ? "ADVISORY no-decisions-section: the authoring contract asks for decisions WITH rationale — conclusions alone are the lossy handoff shape."
             : `ADVISORY nonstandard-unverified-marker (line ${f.line}): use the canonical 'UNVERIFIED:' form so uncertain facts stay findable.`);
         }
-        let written: { path: string; superseded: number };
+        let written: { path: string; superseded: number; daemonUrl?: string };
         try {
           written = writeSeatRecapAt({ topologyRoot, rig: opts.rig, seat: opts.seat, content });
         } catch (err) {
@@ -807,9 +807,10 @@ Examples:
           const client = await getClient();
           const res = await client.post<{ path?: string; superseded?: number; message?: string }>("/api/context-packs/seat-recap", { rig: opts.rig, seat: opts.seat, content });
           if (res.status !== 200 || typeof res.data.path !== "string") throw new Error(res.data.message ?? `Daemon returned HTTP ${res.status}`);
-          written = { path: res.data.path, superseded: res.data.superseded ?? 0 };
+          written = { path: res.data.path, superseded: res.data.superseded ?? 0, daemonUrl: client.baseUrl };
         }
-        console.log(`Recap written: ${written.path}${written.superseded > 0 ? ` (${written.superseded} superseded predecessor${written.superseded === 1 ? "" : "s"} retained)` : ""}`);
+        console.log(`Recap written: ${written.path}${written.superseded > 0 ? ` (${written.superseded} superseded predecessor${written.superseded === 1 ? "" : "s"} retained)` : ""}`
+          + (written.daemonUrl ? `, by the daemon at ${written.daemonUrl}` : ""));
       } catch (err) {
         // A daemon write that timed out says its outcome is unknown, so it's checked before a retry supersedes it again.
         if (!renderCaughtTransportError(err)) console.error((err as Error).message);

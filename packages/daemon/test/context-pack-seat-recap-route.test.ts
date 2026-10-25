@@ -65,6 +65,13 @@ describe("POST /api/context-packs/seat-recap", () => {
     expect(existsSync(join(tmp, "topology", "rigs", "r1", "seats", "s1", "RECAP.md"))).toBe(false);
   });
 
+  it("answers a recap with a long whitespace run in a heading line promptly: the heading scan is linear", async () => {
+    const started = performance.now();
+    const res = await write({ rig: "r1", seat: "s1", content: `#${"\t".repeat(200_000)}\n## Recent Decisions\nkept the shared parser linear` });
+    expect(res.status).toBe(200);
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
+
   it("refuses a body without rig, seat and content as strings", async () => {
     const res = await write({ rig: "r1", seat: "s1" });
     expect(res.status).toBe(400);

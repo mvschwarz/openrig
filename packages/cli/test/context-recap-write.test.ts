@@ -233,7 +233,7 @@ describe.skipIf(process.getuid?.() === 0)("rig context recap-write when this pro
       expect(res.exitCode ?? 0).toBe(0);
       expect(received).toEqual([{ method: "POST", url: "/api/context-packs/seat-recap",
         body: { rig: "r1", seat: "s1", content: "## Recent Decisions\nchose the daemon because the seat can't write here" } }]);
-      expect(res.logs.join("\n")).toBe("Recap written: /daemon/topology/rigs/r1/seats/s1/RECAP.md (1 superseded predecessor retained)");
+      expect(res.logs.join("\n")).toBe(`Recap written: /daemon/topology/rigs/r1/seats/s1/RECAP.md (1 superseded predecessor retained), by the daemon at http://127.0.0.1:${port}`);
       expect(res.errLogs.join("\n")).toMatch(/can't write the topology tree \(EACCES.*\), so the daemon writes the recap instead/);
       expect(existsSync(join(rigDir, "seats"))).toBe(false);
     } finally {
