@@ -738,6 +738,25 @@ describe("MCP Server", () => {
     await cleanup();
   });
 
+  it("rig_send with a wait longer than one request waits in steps of up to 240 s", async () => {
+    const postFn = vi.fn()
+      .mockResolvedValueOnce({ status: 409, data: { ok: false, reason: "wait_for_idle_timeout", sent: false, waitedMs: 240000, error: "Target was still busy. No text was sent." } })
+      .mockResolvedValueOnce({ status: 200, data: { ok: true, sessionName: "dev-impl@my-rig" } });
+    await setup({ post: postFn });
+
+    const result = await mcpClient.callTool({
+      name: "rig_send",
+      arguments: { session: "dev-impl@my-rig", text: "hello", waitForIdleSeconds: 400 },
+    });
+
+    expect(postFn.mock.calls.map((call) => [(call[1] as { waitForIdleMs: number }).waitForIdleMs, call[2]])).toEqual([
+      [240000, { timeoutMs: 245000 }],
+      [160000, { timeoutMs: 165000 }],
+    ]);
+    expect(result.isError).toBeUndefined();
+    await cleanup();
+  });
+
   it("rig_send rejects waitForIdleSeconds with force before daemon contact", async () => {
     const postFn = vi.fn(async () => ({
       status: 200,
