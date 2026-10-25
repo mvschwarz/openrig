@@ -21,6 +21,9 @@ apply. `--raw` and `--force` do not bypass the typing guard. A deliberate
 `--dangerously-interact --reason` remains available at every interruption level
 and uses the existing-input check below. Direct human input remains available.
 
+A message sent to a busy Codex seat joins its running turn and may redirect it.
+For separate work, use `rig send <seat> "<message>" --wait-for-idle <seconds>`.
+
 ## Configure and inspect
 
 ### Who may intervene
