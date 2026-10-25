@@ -23,8 +23,8 @@
 // guard (setup's instance) close over one allowlist while a test's allowFetchTarget
 // writes another — the guard would then refuse every registered fixture. One
 // globalThis-backed allowlist keeps the setup install and every test in agreement.
-// The daemon client's one other path: a request allowed 300 s or more goes over node:http or https (fetch would cut it at
-// 300 s), so the same rule guards http.request and https.request.
+// The CLI daemon client's one other path: a request allowed 300 s or more goes over node:http or https (fetch would cut it
+// at 300 s), so the CLI suite also guards http.request and https.request (installHttpRequestGuard).
 import http from "node:http";
 import https from "node:https";
 
@@ -89,6 +89,12 @@ export function installFetchGuard(): void {
     if (isPermitted(t)) return orig(input as never, init);
     return Promise.reject(refusal(t));
   }) as typeof globalThis.fetch;
+}
+
+/** Install the same rule on http.request and https.request (idempotent): the CLI's long-request path (node:http) goes through
+ *  them. CLI tests only, from the CLI's own setup: daemon tests make raw requests to their own fixtures by design. */
+export function installHttpRequestGuard(): void {
+  if (state.originalRequests) return;
   state.originalRequests = [];
   for (const mod of [http, https]) {
     const original = mod.request;
