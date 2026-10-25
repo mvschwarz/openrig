@@ -12,7 +12,7 @@ it("keeps remote session names intact through both POSIX shell boundaries", () =
   // Simulate ssh's remote-command reconstruction. The local and remote shell
   // parsing are real; no SSH server or terminal provider is claimed here.
   writeFileSync(join(bin, "ssh"), '#!/bin/sh\nshift\nexec /bin/sh -c "$*"\n', { mode: 0o700 });
-  writeFileSync(join(bin, "tmux"), '#!/bin/sh\ncase $1 in display-message) printf "%s\\n" "$4" >> "$OPR_ARGS"; printf "7 session-id\\n";; show-environment) exit 1;; attach) printf "%s\\n" "$@" >> "$OPR_ARGS";; esac\n', { mode: 0o700 });
+  writeFileSync(join(bin, "tmux"), '#!/bin/sh\ncase $1 in display-message) printf "%s\\n" "$4" >> "$OPR_ARGS"; target=$4; target=${target#=}; printf "7 session-id:%s\\n" "${target%:}";; show-environment) exit 1;; attach) printf "%s\\n" "$@" >> "$OPR_ARGS";; esac\n', { mode: 0o700 });
   const argsFile = join(root, "args");
   try {
     for (const session of ["seat-normal", "seat space", "seat'quote"]) {

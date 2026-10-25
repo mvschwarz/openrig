@@ -10,7 +10,10 @@ export function tileAttachArgv(
   // argv as its restart command. All external values stay positional arguments.
   const script = [
     'target=$1; shift;',
-    `snapshot=$("$@" display-message -p -t "=$target:" "#{pid} #{session_id}" 2>/dev/null) || exec "$@" attach ${ro}-t "=$target";`,
+    `snapshot=$("$@" display-message -p -t "=$target:" "#{pid} #{session_id}:#{session_name}" 2>/dev/null) || exec "$@" attach ${ro}-t "=$target";`,
+    // display-message may succeed with empty/fallback context for a missing target.
+    `if [ "\${snapshot#*:}" != "$target" ]; then exec "$@" attach ${ro}-t "=$target"; fi;`,
+    'snapshot=${snapshot%%:*};',
     'node=$("$@" show-environment -t "${snapshot#* }" OPENRIG_NODE_ID 2>/dev/null) || node=;',
     'case "$node" in OPENRIG_NODE_ID=?*) ;; *) node=;; esac;',
     'if [ -z "$node" ]; then',
@@ -20,7 +23,8 @@ export function tileAttachArgv(
     `"$@" attach ${ro}-t "\${snapshot#* }";`,
     `left=${retrySeconds}; same=0;`,
     'while [ "$left" -gt 0 ]; do',
-    'next=$("$@" display-message -p -t "=$target:" "#{pid} #{session_id}" 2>/dev/null) || next=;',
+    'next=$("$@" display-message -p -t "=$target:" "#{pid} #{session_id}:#{session_name}" 2>/dev/null) || next=;',
+    'if [ "${next#*:}" = "$target" ]; then next=${next%%:*}; else next=; fi;',
     'if [ -n "$next" ]; then',
     'identity=$("$@" show-environment -t "${next#* }" OPENRIG_NODE_ID 2>/dev/null) || identity=;',
     // A session can disappear between the two metadata reads; unknown waits.

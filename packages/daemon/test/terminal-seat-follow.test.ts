@@ -1,7 +1,7 @@
 // Real private tmux servers and terminal seats; no provider apps or model calls.
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
@@ -99,5 +99,38 @@ it.skipIf(process.platform === "win32").each(["detach", "identity", "removed", "
     await until(async () => (await viewer(["display-message", "-p", "-t", "=view:", "#{pane_dead}"])) === "1");
     expect(await seats(["list-clients", "-F", "#{session_name}"])).toBe("");
     if (mode === "detach") expect(await viewer(["capture-pane", "-p", "-t", "=view:"])).not.toContain("No replacement");
+  });
+});
+
+it.skipIf(process.platform === "win32")("waits through missing-target observations without reading a sibling's identity", async () => {
+  await fixture(async ({ socket, seats, viewer, adapter }) => {
+    await seats(["set-environment", "-t", "=anchor", "OPENRIG_NODE_ID", "sibling"]);
+    const create = () => seats(["new-session", "-d", "-s", "seat", "-e", "OPENRIG_NODE_ID=original", "printf 'REPLACEMENT\\n'; sleep 60"]);
+    await create();
+    const wrapper = `${socket}-probe`, missing = `${socket}-missing`;
+    // Observe actual tmux absence; don't create the replacement until two retry probes saw it.
+    writeFileSync(wrapper, `#!/bin/sh
+if [ "$3" = display-message ] && ! tmux -S ${shellQuote(socket)} has-session -t =seat 2>/dev/null; then
+  printf '%s\\n' missing >> ${shellQuote(missing)}
+fi
+exec tmux "$@"
+`, { mode: 0o700 });
+    const command = tileAttachArgv(wrapper, ["-S", socket], "seat", false).map(shellQuote).join(" ");
+    await viewer(["new-session", "-d", "-s", "view", terminal(command)]);
+    await until(async () => (await seats(["list-clients", "-t", "=seat", "-F", "#{session_name}"])) === "seat");
+    expect((await adapter.killSession("seat")).ok).toBe(true);
+    await until(async () => existsSync(missing) && readFileSync(missing, "utf8").trim().split("\n").length >= 2);
+    await create();
+    await until(async () => (await seats(["list-clients", "-F", "#{session_name}"])) === "seat");
+    expect(await viewer(["display-message", "-p", "-t", "=view:", "#{pane_dead}"])).toBe("0");
+  });
+});
+it.skipIf(process.platform === "win32")("does not attach a sibling when the requested session disappeared before opening", async () => {
+  await fixture(async ({ socket, seats, viewer }) => {
+    await seats(["set-environment", "-t", "=anchor", "OPENRIG_NODE_ID", "sibling"]);
+    const command = tileAttachArgv("tmux", ["-S", socket], "missing", false).map(shellQuote).join(" ");
+    await viewer(["new-session", "-d", "-s", "view", terminal(command)]);
+    await until(async () => (await viewer(["display-message", "-p", "-t", "=view:", "#{pane_dead}"])) === "1");
+    expect(await seats(["list-clients", "-F", "#{session_name}"])).toBe("");
   });
 });
