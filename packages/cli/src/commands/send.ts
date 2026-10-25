@@ -57,6 +57,9 @@ export interface EnvelopeMeta {
   /** GHOST-STAGE (g): the SENDER's atom-B occupant generation-uuid, stamped ONCE at transport.
    *  ABSENT ⇒ UNKNOWN → the render OMITS the suffix (never forges). Twin of pane-envelope's field. */
   genUuid?: string;
+  /** Twin of pane-envelope's field: the row a person's (@external) message delivers, named in the
+   *  reply hint with --reply-to so the answer joins its Slack thread. ABSENT ⇒ the plain hint. */
+  replyToQitem?: string;
 }
 
 /** The To-line projection + anti-storm scale (header-alone distinguishability). */
@@ -98,7 +101,7 @@ export function wrapSendBody(
     header.push(`Sent: ${renderShortStamp(meta.stampISO)}${genSuffix}`);
   }
   const reply = senderLabel.endsWith("@external")
-    ? `↩ Reply if needed: rig queue create --destination ${senderLabel} --summary "<one line>" --body "..." --verify`
+    ? `↩ Reply if needed: rig queue create --destination ${senderLabel}${meta?.replyToQitem ? ` --human-intent update --reply-to ${meta.replyToQitem}` : ""} --summary "<one line>" --body "..." --verify`
     : `↩ Reply: rig send ${senderLabel} "..."`;
   return [...header, "---", body, "---", reply].join("\n");
 }

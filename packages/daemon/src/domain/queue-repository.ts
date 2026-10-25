@@ -1156,6 +1156,7 @@ export class QueueRepository {
     this.recordWakeIntent({
       outboxId: `${WAKE_INTENT_PREFIX}${successorQitemId}`,
       auditPointer: successorQitemId,
+      qitemId: successorQitemId,
       fromSession,
       toSession,
       identityProvenance,
@@ -1169,6 +1170,8 @@ export class QueueRepository {
   private recordWakeIntent(input: {
     outboxId: string;
     auditPointer: string;
+    /** The row this wake delivers, for the reply hint (see EnvelopeMeta.replyToQitem). */
+    qitemId?: string;
     fromSession: string;
     toSession: string;
     identityProvenance: string | null;
@@ -1184,7 +1187,7 @@ export class QueueRepository {
       input.fromSession,
       input.toSession,
       input.bareBody,
-      { stampISO, genUuid },
+      { stampISO, genUuid, ...(input.qitemId ? { replyToQitem: input.qitemId } : {}) },
     );
     const admission = this.wakeAdmission(input.auditPointer, input.tags?.includes(WAKE_TRIGGER_OPENRIG_TAG) ? "openrig" : "agent");
     // An urgent wake's frozen body carries the line naming who marked it, so a person reading it held sees it too; the
@@ -1664,7 +1667,7 @@ export class QueueRepository {
       const genUuid = sourceSession
         ? (this.resolveOccupantGeneration?.(sourceSession) ?? undefined)
         : undefined;
-      text = wrapPaneEnvelope(sourceSession, destinationSession, bareBody, { stampISO, genUuid });
+      text = wrapPaneEnvelope(sourceSession, destinationSession, bareBody, { stampISO, genUuid, replyToQitem: qitemId });
     }
     const deliveryId = `guard-nudge-${qitemId}-${createHash("sha256").update(JSON.stringify([sourceSession, destinationSession, bodyOverride ?? null])).digest("hex")}`;
     const held = !committedOutboxIds ? this.outbox?.getById(deliveryId) : null;
