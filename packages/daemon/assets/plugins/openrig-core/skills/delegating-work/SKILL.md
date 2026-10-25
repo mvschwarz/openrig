@@ -1,6 +1,6 @@
 ---
 name: delegating-work
-description: "Use when you have a task and must decide WHO does it — yourself, a spawned subagent, or another agent in the topology that already holds the context — or how to brief the agent you hand it to, which depends on the model it runs. The rule: how much would a blank slate have to read in to do this correctly? A lot → route to a context-holding agent; a little → subagent; unsure → a real agent or yourself. NOT the mechanics of fanning out (that's dispatching-parallel-agents / subagent-driven-development) — this is the who/whether decision, and the failure mode that makes teams abandon subagents."
+description: "Use when you have a task and must decide WHO does it — yourself, a spawned subagent, or another agent in the topology that already holds the context — or how to brief the agent you hand it to, which depends on the model it runs. The rule: how much would a blank slate have to read in to do this correctly? A lot → route to a context-holding agent; a little → subagent; unsure → a real agent or yourself. NOT the mechanics of fanning out (that's dispatching-parallel-agents / subagent-driven-development) — this is the who/whether decision, and the failure mode that makes teams abandon subagents. Also use it to decide how far to trust a delegated result."
 metadata:
   openrig:
     stage: field-captured

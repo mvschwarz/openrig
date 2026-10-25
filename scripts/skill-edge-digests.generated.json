@@ -71,7 +71,7 @@
       "claude-compaction-restore/scripts/restore-from-jsonl.mjs": "5584cff4ab36cd843e14c81bd201e4a2f8e498e995abacc4f81ec6c1fc556b10",
       "claude-compaction-restore/templates/compact-instruction.md": "682c778464517b831902ddc2678c055545899b4751a1d32391ce965d5eb7061d",
       "claude-compaction-restore/templates/post-compact-restore-instruction.md": "10a5a7e5e052f3aa000a4209f386dc4eb90a3c2bba449ca685f124714f59e47a",
-      "delegating-work/SKILL.md": "f40346ec08f0ba22d8dccab0dca8442a8d3783173275d36a4e913185e0e29fbd",
+      "delegating-work/SKILL.md": "fc5638949ce7600446a04e59dbe94996ea910e94beef1fa71cb7a31fa140fce6",
       "forming-an-openrig-mental-model/SKILL.md": "cd7bfdcc5a87485140cfcac94bc2c703aec5c5b220a3397e139c4fd6db4339e6",
       "loading-addressable-markdown/SKILL.md": "104dc6a02ae6e2d0eff519387c6839cb09803945b9ee35ec3498af8feaaa8d1e",
       "loading-addressable-markdown/scripts/resolve-markdown.mjs": "61a6d52c6c94fb1878361d19bdfaeb4524062fc4c483f557ab2f140e516d15f9",
