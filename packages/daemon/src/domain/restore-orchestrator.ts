@@ -1758,7 +1758,7 @@ export class RestoreOrchestrator {
                 return this.finishJoinedResume(node, sessionName, resumeToken, launchResult?.session.id,
                   isPodAware && node.runtime === "claude-code", startupResult.resumedProcess);
               }
-              return { nodeId: node.id, logicalId: node.logicalId, status: finalStatus };
+              return { nodeId: node.id, logicalId: node.logicalId, status: finalStatus, ...(noConversation && finalStatus === "fresh-primed" ? { noConversation: true as const } : {}) };
             }
             // Pod-aware attention_required: hoisted above both the
             // resume-requested and non-resume-requested failed branches so

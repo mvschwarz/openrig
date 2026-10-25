@@ -239,7 +239,7 @@ describe("Down CLI", () => {
     const { logs, exitCode } = await captureLogs(async () => {
       await makeCmd().parseAsync(["down", "rig-1"], { from: "user" });
     }, line => { if (line.startsWith("Before stopping")) events.push("notice"); });
-    expect(logs[0]).toBe("Before stopping rig-1: recorded agent sessions: busy@team (activity: working), idle@team (activity: idle), uncertain@team (activity: unknown), waiting@team (activity: needs-input).");
+    expect(logs[0]).toBe("Before stopping rig-1: recorded agent sessions: busy@team (activity: working), idle@team (activity: idle), uncertain@team (activity: unknown), waiting@team (activity: needs-input); terminal sessions: tool@team.");
     expect(events).toEqual(["inventory", "notice", "down"]);
     expect(downCallCount).toBe(1);
     expect(exitCode).toBeUndefined();
