@@ -18,7 +18,7 @@ import os from "node:os";
 import nodePath from "node:path";
 import { execFileSync } from "node:child_process";
 import { codexEnvelopeArgs } from "../src/domain/codex-rebuild-permissions.js";
-import { codexMemberEnvelope, readCodexMemberPermissions, readProfileFingerprint, validateCodexMemberPermissions,
+import { clearCodexMemberPermissions, codexMemberEnvelope, readCodexMemberPermissions, readProfileFingerprint, validateCodexMemberPermissions,
   type CodexMemberPermissions, type CodexProfileObservation } from "../src/domain/codex-member-permissions.js";
 import { CodexRuntimeAdapter, type CodexAdapterFsOps } from "../src/adapters/codex-runtime-adapter.js";
 import { seatRoutes } from "../src/routes/seat.js";
@@ -156,6 +156,21 @@ describe("a Codex seat's current envelope (offline, no native enforcement claim)
     f.db.prepare("UPDATE nodes SET codex_permissions_json = 'broken' WHERE id = ?").run(f.a.id);
     expect(store.launchOverride(f.a.id, "codex", replacing)).toMatchObject({ launchPosture: "full_bypass" });
     expect(() => store.launchOverride(f.a.id, "codex", { selection: null, codexProfile: null })).toThrow(/cannot read codex_permissions/);
+  });
+
+  it("clears an envelope only after reading it: a schema without the column has none, and any other read error propagates", () => {
+    const f = fixture();
+    f.db.prepare("UPDATE nodes SET codex_permissions_json = ? WHERE id = ?").run(JSON.stringify(reader), f.a.id);
+    expect(clearCodexMemberPermissions(f.db, f.a.id)).toEqual(reader);
+    expect(readCodexMemberPermissions(f.db, f.a.id)).toBeUndefined();
+    // Malformed bytes are still replaced, and returned as such for the audit.
+    f.db.prepare("UPDATE nodes SET codex_permissions_json = 'broken' WHERE id = ?").run(f.a.id);
+    expect(clearCodexMemberPermissions(f.db, f.a.id)).toEqual({ state: "invalid", stored: "broken" });
+    const bare = new Database(":memory:"); opened.push(bare);
+    bare.exec("CREATE TABLE nodes (id TEXT PRIMARY KEY)"); bare.prepare("INSERT INTO nodes (id) VALUES ('n')").run();
+    expect(clearCodexMemberPermissions(bare, "n")).toBeUndefined();
+    const failing = { prepare: () => { throw Object.assign(new Error("disk I/O error"), { code: "SQLITE_IOERR" }); } } as unknown as Database.Database;
+    expect(() => clearCodexMemberPermissions(failing, "n")).toThrow("disk I/O error");
   });
 
   it("plans the envelope's flags in status, naming the posture it replaces and OpenRig's additions", async () => {

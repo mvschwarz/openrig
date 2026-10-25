@@ -86,7 +86,12 @@ export function readCodexMemberPermissions(db: Database.Database, nodeId: string
 export function clearCodexMemberPermissions(db: Database.Database, nodeId: string): unknown {
   let row: { codex_permissions_json: string | null } | undefined;
   try { row = db.prepare("SELECT codex_permissions_json FROM nodes WHERE id = ?").get(nodeId) as typeof row; }
-  catch { return undefined; } // A minimal fixture without the column has no envelope.
+  catch (error) {
+    // Only a schema without the column (a minimal fixture) has no envelope. Any other read failure propagates, so the
+    // caller's transaction rolls back rather than record a mode beside an envelope it never cleared.
+    if ((error as { code?: string }).code === "SQLITE_ERROR" && /no such column: codex_permissions_json\b/.test((error as Error).message)) return undefined;
+    throw error;
+  }
   if (row?.codex_permissions_json == null) return undefined;
   let held: unknown;
   try { held = readCodexMemberPermissions(db, nodeId); }

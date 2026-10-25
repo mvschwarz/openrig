@@ -286,6 +286,30 @@ describe("live seat runtime switch", () => {
       expect(JSON.parse(event.payload)).toMatchObject({ permissionSelection: "floor", replaced: { codexPermissions: envelope } });
     });
 
+    it("a read error while clearing the envelope rolls the whole commit back, so no mode is recorded beside the envelope", async () => {
+      const svc = service({ runtimeAdapters: { codex, "claude-code": adapter("claude-code") } });
+      const prepare = db.prepare.bind(db);
+      let failClearingRead = false;
+      vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
+        if (failClearingRead && sql === "SELECT codex_permissions_json FROM nodes WHERE id = ?") throw Object.assign(new Error("disk I/O error"), { code: "SQLITE_IOERR" });
+        return prepare(sql);
+      }) as typeof db.prepare);
+      // The successor confirms, and the commit's read of the envelope then fails.
+      onSleep = () => {
+        const row = openSwitch();
+        if (row?.phase !== "preparing" || !handoverTyped()) return;
+        failClearingRead = true;
+        svc.confirm({ seatRef: SEAT, switchId: row.id, note: "ready", actorSession: SEAT, generation: row.successor_generation });
+      };
+      const result = await svc.setRuntime({ seatRef: SEAT, runtime: "codex", permissionMode: "floor", reason: "back to Codex at the floor" });
+      failClearingRead = false;
+      expect(result).toMatchObject({ ok: false, code: "runtime_switch_failed", committed: false, message: expect.stringContaining("disk I/O error") });
+      expect(JSON.parse(storedEnvelope()!)).toEqual(envelope);
+      expect(new NativePermissionStore(db).read(nodeId)).toBeNull();
+      expect(nodeRow().runtime).toBe("claude-code");
+      expect(sessionRegistry.getBindingForNode(nodeId)).toMatchObject({ tmuxPane: "%0" });
+    });
+
     it("a switch that doesn't commit leaves the envelope and the seat's permission choice as they were", async () => {
       const result = await service({ runtimeAdapters: { codex, "claude-code": adapter("claude-code") } })
         .setRuntime({ seatRef: SEAT, runtime: "codex", permissionMode: "floor", reason: "limit", confirmTimeoutMs: 10_000 });
