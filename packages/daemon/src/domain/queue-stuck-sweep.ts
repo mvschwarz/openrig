@@ -312,6 +312,12 @@ function minutesSince(iso: string | null | undefined, now: Date): number {
   return Math.max(0, Math.round((now.getTime() - then) / 60_000));
 }
 
+/** Whole minutes, floored as the pickup evidence counts them (queue-pickup.ts). */
+function wholeMinutesSince(iso: string, now: Date): number {
+  const then = Date.parse(iso);
+  return Number.isNaN(then) ? 0 : Math.max(0, Math.floor((now.getTime() - then) / 60_000));
+}
+
 function lastTransitionLine(db: Database.Database, qitemId: string): string {
   const row = db
     .prepare(
@@ -460,14 +466,17 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (!row || isFindingRow(row)) continue;
       const stalled = stalledPickupFinding(row);
       if (!stalled) continue;
+      // Keep this null arm for the 0.5.7 mechanized-pull turn-end hook that knows the in-flight row;
+      // it is the first honest row-scoped writer, and wiring reopens only in that slice.
+      const evidenceAt = latestIso(lastMeaningfulTransition(deps.db, row.qitemId)?.at, row.lastHeartbeat, row.claimedAt);
       candidates.push({
         kind: stalled.kind,
         row,
         route: resolveOrch(stalled.target) ?? stalled.target,
-        ageMinutes: minutesSince(row.claimedAt, now),
-        // Keep this null arm for the 0.5.7 mechanized-pull turn-end hook that knows the in-flight row;
-        // it is the first honest row-scoped writer, and wiring reopens only in that slice.
-        evidenceAt: latestIso(lastMeaningfulTransition(deps.db, row.qitemId)?.at, row.lastHeartbeat, row.claimedAt),
+        // The stall's own age: from the anchor the pickup decision uses, floored as its "why" counts, so a claim
+        // parked and resumed doesn't count its parked time and the headline matches the why to the minute.
+        ageMinutes: wholeMinutesSince(evidenceAt, now),
+        evidenceAt,
         why: stalled.evidence,
       });
     }
