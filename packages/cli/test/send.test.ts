@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { sendCommand, type SendDeps } from "../src/commands/send.js";
-import { DaemonClient } from "../src/client.js";
+import { DaemonClient, DaemonResponseError } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
 
@@ -529,6 +529,51 @@ describe("Send CLI", () => {
     expect(sentText?.text).toContain("To: dev-impl@my-rig");
     expect(sentText?.text).toContain("---\nhello\n---");
     expect(sentText?.text).toContain('↩ Reply: rig send');
+  });
+
+  // Node's fetch gives up on a response that hasn't started within 300 s, and a waiting send answers only when its wait
+  // ends. A longer wait is still one request, so the daemon keeps one deadline and one binding to the seat's occupant.
+  it("send --wait-for-idle over 300 s whose answer is cut off after the headers never reads as not sent", async () => {
+    let sends = 0;
+    const cut = http.createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        if (req.method !== "POST" || req.url !== "/api/transport/send") { res.writeHead(404).end(); return; }
+        // The daemon delivered and answered, then the connection dropped partway through the body.
+        sends += 1;
+        res.writeHead(200, { "Content-Type": "application/json", "Content-Length": "64" });
+        res.write('{"ok":true,"sent":tr');
+        setTimeout(() => res.socket?.destroy(), 20);
+      });
+    });
+    await new Promise<void>((resolve) => { cut.listen(0, resolve); });
+    try {
+      let thrown: unknown;
+      const { logs } = await captureLogs(async () => {
+        await makeCmd(runningDeps((cut.address() as { port: number }).port))
+          .parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello", "--wait-for-idle", "400"]).catch((err: unknown) => { thrown = err; });
+      });
+      expect(sends).toBe(1);
+      expect(thrown).toBeInstanceOf(DaemonResponseError);
+      expect((thrown as DaemonResponseError).status).toBe(200);
+      expect(logs.join("\n")).not.toContain("The message was not sent.");
+    } finally {
+      cut.closeAllConnections();
+      cut.close();
+    }
+  });
+
+  it("send --wait-for-idle longer than 300 s is one request carrying the whole wait, and the daemon's answer as it came", async () => {
+    const postFn = vi.fn().mockResolvedValueOnce({ status: 409, data: { ok: false, sessionName: "dev-impl@my-rig", reason: "wait_for_idle_timeout",
+      sent: false, waitedMs: 600000, error: "Target was still busy (running) when the 600000ms wait ended (8 checks). No text was sent." } });
+    const deps = runningDeps(port, () => ({ post: postFn } as unknown as DaemonClient));
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd(deps).parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello", "--wait-for-idle", "600"]);
+    });
+    expect(postFn.mock.calls.map((call) => [(call[1] as { waitForIdleMs: number }).waitForIdleMs, call[2]])).toEqual([[600000, { timeoutMs: 605000 }]]);
+    expect(logs.join("\n")).toContain("when the 600000ms wait ended (8 checks). No text was sent.");
+    expect(logs.join("\n")).not.toMatch(/did not respond|consecutive/i);
+    expect(exitCode).toBe(1);
   });
 
   it("send without wait-for-idle uses default client timeout path", async () => {

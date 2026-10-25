@@ -64,6 +64,7 @@ import {
   LADDER_RUNG_PREFIX,
   LADDER_EXHAUSTED_PREFIX,
   defaultResolveOrchestrator,
+  resolveOperatorSeat,
   resolveSessionNodeId,
 } from "./queue-stuck-sweep.js";
 
@@ -153,17 +154,6 @@ export function createWakeLadderStatus(): WakeLadderStatus {
       return { ...state };
     },
   };
-}
-
-/** The operator seat for the self-skip floor (workspace.operator_seat_name — the
- *  conventional `operator-${USER}@kernel`); null when settings resolution fails. */
-function resolveOperatorSeat(): string | null {
-  try {
-    const v = new SettingsStore().resolveOne("workspace.operator_seat_name" as never).value;
-    return typeof v === "string" && v.length > 0 ? v : null;
-  } catch {
-    return null;
-  }
 }
 
 function resolveNumber(key: string, fallback: number): number {

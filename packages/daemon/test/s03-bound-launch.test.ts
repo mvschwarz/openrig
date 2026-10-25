@@ -11,6 +11,9 @@ import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { seatLifecycleService } from "../src/routes/seat.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
+import { NO_SESSION_BUS } from "../src/domain/seat-runtime-dir.js";
+import { SEAT_ENV_KEYS_VAR } from "../src/domain/seat-env.js";
+import { shellQuote } from "../src/adapters/shell-quote.js";
 
 // No provider, tmux or startup. Config-selection cases execute only a private
 // fake Claude through the generated shell command; other child calls are mocked.
@@ -204,7 +207,8 @@ else console.log(JSON.stringify(Object.fromEntries(['TMUX', 'TERM_PROGRAM', 'TER
   // without a per-spec value. WAYLAND_DISPLAY is resolved to an absolute path instead of forwarding XDG_RUNTIME_DIR.
   const sessionNames = ["EDITOR", "VISUAL", "DISPLAY", "XAUTHORITY"];
   // Present in the pane on purpose: they must stay out. XDG_RUNTIME_DIR is where sd-bus, GDBus and libdbus look for the
-  // session bus when DBUS_SESSION_BUS_ADDRESS is unset; the bus and desktop names reach services (keyring, notifications,
+  // session bus when DBUS_SESSION_BUS_ADDRESS is unset, so the pane's own pair stays out; only OpenRig's pair, with the
+  // bus address that can't connect, is forwarded (#2030, below). The desktop names reach services (notifications,
   // xdg-open) that nothing in the editor or paste path uses; SSH_AUTH_SOCK is a credential channel.
   const withheldNames = ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP", "SSH_AUTH_SOCK", "TMUX", "TMUX_PANE"];
   const paneNames = [...sessionNames, "WAYLAND_DISPLAY", ...withheldNames];
@@ -284,9 +288,35 @@ else console.log(JSON.stringify(Object.fromEntries(${JSON.stringify(paneNames)}
     const cmd = f.calls[0]!;
     for (const key of sessionNames) expect(cmd).toContain(`if [ -n "\${${key}-}" ]; then export ${key}; else unset ${key}; fi`);
     expect(cmd).toContain('export WAYLAND_DISPLAY="$__openrig_wayland_display"');
-    // XDG_RUNTIME_DIR is read to resolve WAYLAND_DISPLAY, never forwarded as a variable.
+    // XDG_RUNTIME_DIR resolves WAYLAND_DISPLAY, and it and the bus address are forwarded only as OpenRig's pair.
     expect(cmd).not.toMatch(/XDG_RUNTIME_DIR=\$|"XDG_RUNTIME_DIR=/);
-    for (const key of withheldNames.filter(key => key !== "XDG_RUNTIME_DIR")) expect(cmd).not.toContain(key);
+    expect(cmd).toContain(`if [ "\${DBUS_SESSION_BUS_ADDRESS-}" = ${shellQuote(NO_SESSION_BUS)} ]; then export DBUS_SESSION_BUS_ADDRESS; else unset DBUS_SESSION_BUS_ADDRESS; fi`);
+    for (const key of withheldNames.filter(key => !["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"].includes(key))) expect(cmd).not.toContain(key);
+  });
+  // #2030: a pane with OpenRig's runtime-dir pair hands it to Claude; a pane's own runtime directory or bus address, from a
+  // shell profile or tmux's update-environment, stays out as before.
+  const openRigPair = { XDG_RUNTIME_DIR: "/run/user/1000", DBUS_SESSION_BUS_ADDRESS: NO_SESSION_BUS };
+  const runtimeDirCases: [string, Record<string, string>, Record<string, string>][] = [
+    ["OpenRig's pair", openRigPair, openRigPair],
+    ["OpenRig's bus address with no runtime directory", { DBUS_SESSION_BUS_ADDRESS: NO_SESSION_BUS }, { DBUS_SESSION_BUS_ADDRESS: NO_SESSION_BUS }],
+    ["a runtime directory alone", { XDG_RUNTIME_DIR: "/run/user/1000" }, {}],
+    ["a runtime directory with the pane's own bus address", { XDG_RUNTIME_DIR: "/run/user/1000", DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus" }, {}],
+  ];
+  it.each(shells.flatMap(shell => runtimeDirCases.map(([label, pane, expected]) => [label, shell, pane, expected] as const)))(
+    "hands Claude the runtime directory only with OpenRig's bus address: %s under %s", async (_label, shell, pane, expected) => {
+    const unset = ["WAYLAND_DISPLAY", ...["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"].filter(key => !(key in pane))];
+    expect(await runPane(fixture(), { ...withheldInPane, ...pane }, unset, shell)).toEqual(expected);
+  });
+  it.each([
+    ["own bus address", "DBUS_SESSION_BUS_ADDRESS", { XDG_RUNTIME_DIR: "/run/user/1000", DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus" },
+      { XDG_RUNTIME_DIR: "/run/user/1000", DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus" }],
+    ["own runtime directory", "XDG_RUNTIME_DIR", { XDG_RUNTIME_DIR: "/run/user/1000" }, { XDG_RUNTIME_DIR: "/run/user/1000" }],
+  ])("forwards a seat's %s as declared, with the runtime directory beside a declared bus address", async (_label, declared, pane, expected) => {
+    const f = fixture();
+    // A one-off launch name, read from the session, is a declared name like an env: entry.
+    const managed = new ClaudeManagedLaunch(f.db, f.env, f.renderer, async (_session, key) => key === SEAT_ENV_KEYS_VAR ? declared : undefined);
+    const unset = ["WAYLAND_DISPLAY", ...["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"].filter(key => !(key in pane))];
+    expect(await runPane({ ...f, managed }, { ...withheldInPane, ...pane }, unset)).toEqual(expected);
   });
   it("detects unset config becoming explicit even when the storage directory stays the same", async () => {
     const f = fixture(); delete f.env.CLAUDE_CONFIG_DIR;

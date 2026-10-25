@@ -4,6 +4,7 @@
 // single home. Same pattern as the other subpath surfaces beside it.
 export {
   writeSeatRecap,
+  writeSeatRecapAt,
   listRecapChain,
   validateRecapContract,
   RECAP_FILENAME,

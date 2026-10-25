@@ -1,4 +1,5 @@
-import { codexTeamWorkspaceArg, type PrepareCodexTeamWorkspace } from "../domain/codex-team-workspace.js";
+import { codexTeamWorkspaceArg, type PrepareCodexSeatFolder, type PrepareCodexTeamWorkspace } from "../domain/codex-team-workspace.js";
+import type { CodexGitAddDirResolver } from "../domain/codex-git-add-dirs.js";
 import { operationalLaunchArg } from "./kernel-authority.js";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { TmuxAdapter } from "./tmux.js";
@@ -20,6 +21,10 @@ export { type ResumeResult };
 
 interface CodexResumeOptions {
   prepareTeamWorkspace?: PrepareCodexTeamWorkspace;
+  /** The seat's own topology folder, ready to write (its LEARNED.md and recap). Absent: no seat folder is added. */
+  prepareSeatFolder?: PrepareCodexSeatFolder;
+  /** The git metadata dirs a resumed seat may write (#2000's rule). Absent: none are added. */
+  resolveGitAddDirs?: CodexGitAddDirResolver;
   seatLaunchEnvironment?: SeatLaunchEnvironment;
   launchPath?: string;
   codexHome?: string;
@@ -112,6 +117,13 @@ export class CodexResumeAdapter {
     const workspaceArg = teamPermissionDefault && !codexConfigProfile?.trim()
       && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write"
       ? codexTeamWorkspaceArg(this.options.prepareTeamWorkspace, tmuxSessionName) : "";
+    // The seat's own writable roots, as a launch gets them: its git metadata dirs (so it can still commit) and its topology
+    // folder (its LEARNED.md and recap). Only on the plain workspace-write floor: a named profile here isn't checked for
+    // read-only, and Codex refuses a writable root under one, so it gets none. After the conversation id, so the resume
+    // proof reads the id even from a path with a space.
+    const plainFloor = !codexConfigProfile?.trim() && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write";
+    const ownRoots = plainFloor
+      ? [...(await this.options.resolveGitAddDirs?.(cwd) ?? []), this.options.prepareSeatFolder?.(tmuxSessionName)] : [];
     const cmd = buildCodexResumeCore(
       resumeToken ?? "",
       codexConfigProfile,
@@ -122,7 +134,7 @@ export class CodexResumeAdapter {
       `${postureArg}${networkArg}`,
       daemonSupport?.kind === "supported",
       effort,
-    );
+    ) + ownRoots.filter((root): root is string => !!root).map((root) => ` --add-dir ${shellQuote(root)}`).join("");
 
     const launchEnv = [this.options.launchPath ? `PATH=${shellQuote(this.options.launchPath)}` : "", codexHome ? `CODEX_HOME=${shellQuote(codexHome)}` : ""].filter(Boolean);
     const textResult = await this.tmux.sendShellCommand(tmuxSessionName, this.options.seatLaunchEnvironment

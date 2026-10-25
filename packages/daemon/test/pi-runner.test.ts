@@ -73,6 +73,34 @@ describe("inOrder", () => {
   });
 });
 
+describe("Pi extension UI requests", () => {
+  it.each(["confirm", "select", "input", "editor"])("shows a %s request, cancels it and retains attention until the next turn", method => {
+    const f = readyCore();
+    f.core.handlePiLine(JSON.stringify({ type: "extension_ui_request", id: "probe", method, title: "Probe", message: "Proceed?" }));
+    expect(f.rpc.at(-1)).toEqual({ type: "extension_ui_response", id: "probe", cancelled: true });
+    expect(f.lines.at(-1)).toContain("Probe — Proceed?");
+    expect(f.lines.at(-1)).toMatch(/cancelled.*Operator action required/);
+    expect(f.activity.at(-1)).toMatchObject({ runtime: "pi", hookEvent: "Notification", subtype: "permission_prompt" });
+    f.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    f.core.heartbeat();
+    expect(f.activity.at(-1)).toMatchObject({ hookEvent: "Notification", subtype: "permission_prompt" });
+    f.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    f.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect(f.activity.at(-1)).toMatchObject({ runtime: "pi", hookEvent: "Stop" });
+  });
+
+  it("shows notify text without replying or raising attention", () => {
+    const f = readyCore();
+    const before = f.rpc.length;
+    f.core.handlePiLine(JSON.stringify({ type: "extension_ui_request", id: "notice", method: "notify", message: "\u001b[31mprobe notify\u001b[0m\nnext line" }));
+    expect(f.lines.at(-1)).toBe("[pi-runner] probe notify next line");
+    expect(f.rpc).toHaveLength(before);
+    expect(f.activity).not.toContainEqual(expect.objectContaining({ hookEvent: "Notification" }));
+    f.core.heartbeat();
+    expect(f.activity.at(-1)).toMatchObject({ hookEvent: "Stop", subtype: "idle_heartbeat" });
+  });
+});
+
 // ── Idle heartbeat ──────────────────────────────────────────────────────────
 
 describe("idle heartbeat", () => {

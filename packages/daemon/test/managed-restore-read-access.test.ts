@@ -209,3 +209,14 @@ it("both Claude launch paths grant the configured extra file the restore will na
   await resume.resume("owner@rig", "claude_id", CHILD, f.cwd, "floor", undefined, undefined, "node", undefined, undefined, false, true);
   expect(settings(f.commands.at(-1)!).permissions.allow).toContain(`Read(/${spellings(path.dirname(custom))[0]}/team-restore.md)`);
 });
+
+it.each([false, true])("legacy resume composes member deny rules with managed restore reads in one settings argument (explicit=%s)", async managed => {
+  const f = fixture(managed);
+  const adapter = new ClaudeResumeAdapter(f.tmux, { openrigHome: f.home, ...(managed ? { claudeManagedLaunch: f.claudeManagedLaunch } : {}) });
+  vi.spyOn(adapter as any, "verifyResume").mockResolvedValue({ ok: true });
+  await adapter.resume("owner@rig", "claude_id", CHILD, f.cwd, "floor", undefined, managed ? "acceptEdits" : undefined,
+    "node", undefined, undefined, false, true, undefined, undefined, { allow: ["Read(./work/**)"], deny: ["Read(./private/**)"] });
+  const result = settings(f.commands[0]!);
+  expect(result.permissions.allow).toEqual(expect.arrayContaining(["Read(./work/**)", `Read(/${f.marker})`]));
+  expect(result.permissions.deny).toEqual(["Read(./private/**)"]);
+});

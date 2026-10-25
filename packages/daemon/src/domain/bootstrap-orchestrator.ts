@@ -224,6 +224,21 @@ export class BootstrapOrchestrator {
               }
             } catch { /* YAML parse failure — let handlePodAwareSpec deal with it */ }
 
+            // A service bundle needs Docker Compose v2. An install stops here, before the install target is written or a
+            // team is created. A plan says so and goes on: it may be previewing an install for a machine that has Compose.
+            if (serviceBundleTarget && (opts.mode === "apply" || planningServices) && this.deps.serviceOrchestrator) {
+              const compose = await this.deps.serviceOrchestrator.composeAvailable();
+              if (!compose.ok && planningServices) {
+                warnings.push(`${compose.message} An install on this machine would stop before writing the install target or creating a team.`);
+              } else if (!compose.ok) {
+                const msg = `${compose.message} The install target wasn't written and no team was created.`;
+                stages.push({ stage: "resolve_spec", status: "failed", detail: { code: "compose_missing", error: msg } });
+                errors.push(msg);
+                this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
+                return { runId: run.id, status: "failed" as BootstrapStatus, stages, errors, warnings };
+              }
+            }
+
             // Apply with an explicit target: launch from a copy of the bundle in the
             // target, not from the temp extraction removed in the finally below —
             // otherwise `cwd: "."`, the spec dir and agent refs point at a deleted dir.

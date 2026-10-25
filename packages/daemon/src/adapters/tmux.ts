@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import type { ComposerSnapshot } from "../domain/composer-prompts.js";
 import { inspectComposerInput } from "../domain/session-transport.js";
 import { parentSessionEnvKeys, removeParentSessionEnv } from "../domain/parent-session-env.js";
+import { addSeatRuntimeDir } from "../domain/seat-runtime-dir.js";
 import type { TmuxControlExec } from "./tmux-control.js";
 
 export type ExecFn = (cmd: string) => Promise<string>;
@@ -130,6 +131,16 @@ export type SessionProbe =
   | { state: "absent" }
   | { state: "transport_unavailable"; cause: string };
 
+/** Positive server absence in this adapter's namespace; match the diagnostic line, never a path or command fragment. */
+export function probeShowsNoServer(probe: { state: string; cause?: string }): boolean {
+  return probe.state === "transport_unavailable" && /^no server running on /.test(tmuxDiagnosticStart(probe.cause ?? ""));
+}
+
+/** Injected executors may retain exec's one-line command wrapper instead of stderr. */
+function tmuxDiagnosticStart(message: string): string {
+  return message.replace(/^Command failed:[^\r\n]*\r?\n/, "");
+}
+
 const TMUX_FIELD_SEPARATOR = "|";
 const SESSION_FORMAT = [
   "#{session_name}",
@@ -167,7 +178,8 @@ const CURSOR_FORMAT = [
 ].join(TMUX_FIELD_SEPARATOR);
 
 function isNoServerError(err: unknown): boolean {
-  return err instanceof Error && err.message.includes("no server running");
+  const error = tmuxReportedError(err);
+  return error instanceof Error && probeShowsNoServer({ state: "transport_unavailable", cause: error.message });
 }
 
 /** The error tmux reported, without the stdout an exec error carries: in a chain that stdout is the earlier panes'
@@ -179,11 +191,8 @@ function tmuxReportedError(err: unknown): unknown {
 
 function isSessionAbsenceError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
-  const msg = err.message.toLowerCase();
-  return msg.includes("session not found") ||
-    msg.includes("can't find session") ||
-    msg.includes("no current target") ||
-    msg.includes("no session");
+  const msg = tmuxDiagnosticStart(err.message).toLowerCase();
+  return /^(?:session not found|can't find session|no current target|no sessions?)\b/.test(msg);
 }
 
 function isPaneAbsenceError(err: unknown): boolean {
@@ -352,9 +361,18 @@ function parseLines<T>(output: string, parser: (line: string) => T | null): T[] 
     .filter((result): result is T => result !== null);
 }
 
+/** A session-environment listing line gives `name` a usable value: an exact `NAME=` line whose value is not blank
+ *  (any such line counts). A removed (`-NAME`), empty or whitespace-only entry does not. */
+function usableEnvLine(lines: readonly string[], name: string): boolean {
+  const prefix = `${name}=`;
+  return lines.some((line) => line.startsWith(prefix) && line.slice(prefix.length).trim().length > 0);
+}
+
 export class TmuxAdapter {
   /** Read for each new agent/successor. Unconfigured adapters retain legacy behavior. */
-  launchEnvironment?: () => { inheritTmuxEnvironment: boolean; env: Readonly<Record<string, string | undefined>> };
+  launchEnvironment?: () => { inheritTmuxEnvironment: boolean; env: Readonly<Record<string, string | undefined>>;
+    /** The runtime directory a seat gets when it has none of its own (seat-runtime-dir.ts); none on macOS. */
+    runtimeDir?: string };
 
   /** Reset before the selected user shell runs, without changing the server or other sessions.
    * Multiple tmux command arguments execute directly; only this fixed non-interactive sh runs
@@ -367,7 +385,10 @@ export class TmuxAdapter {
       const policy = this.launchEnvironment();
       if (policy.inheritTmuxEnvironment) return null;
       if (process.platform === "win32") throw new Error("POSIX launch boundary unavailable");
-      const shell = await this.getDefaultShell();
+      let shell = await this.getDefaultShell();
+      // tmux reads these options from a running server. The first seat on a new server starts the empty server here,
+      // as a first start does, so it gets the same scoped environment as every later seat (#2041).
+      if (!shell && (await this.startServer()).ok) shell = await this.getDefaultShell();
       if (!shell) throw new Error("Default shell unavailable");
       if (command === undefined) command = (await this.run(["tmux", "show-options", "-gv", "default-command"])).replace(/\r?\n$/, "");
       // tmux normally copies these client values from the daemon on new-session.
@@ -376,7 +397,10 @@ export class TmuxAdapter {
         .trim().split(/\s+/).filter(key => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key));
       const baseline = { ...Object.fromEntries(updated.map(key => [key, process.env[key]])), ...policy.env };
       removeParentSessionEnv(baseline);
-      const values = Object.entries({ ...baseline, ...seatEnv })
+      // A seat's own value (its env:, a one-off name, or a name in update-environment) wins over the runtime directory.
+      const selected: Record<string, string | undefined> = { ...baseline, ...seatEnv };
+      addSeatRuntimeDir(selected, policy.runtimeDir);
+      const values = Object.entries(selected)
         .filter((entry): entry is [string,string] => entry[1] !== undefined && !["TMUX", "TMUX_PANE", "TERM", "SHELL"].includes(entry[0]))
         .map(([key,value]) => {
           if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error("Invalid environment name");
@@ -646,11 +670,12 @@ export class TmuxAdapter {
         `tmux has-session -t ${shellQuote(target)}`);
       return { state: "present" }; // exit 0 = session exists
     } catch (err) {
-      if (isSessionAbsenceError(err)) {
+      const error = tmuxReportedError(err);
+      if (isSessionAbsenceError(error)) {
         return { state: "absent" };
       }
-      if (isNoServerError(err) || isTmuxTransportAbsentError(err)) {
-        return { state: "transport_unavailable", cause: (err as Error).message };
+      if (isNoServerError(error) || isTmuxTransportAbsentError(error)) {
+        return { state: "transport_unavailable", cause: (error as Error).message };
       }
       throw err;
     }
@@ -1407,14 +1432,24 @@ export class TmuxAdapter {
    *  distinguishes a genuinely absent var from `tmux show-environment <var>`'s
    *  nonzero lookup exit. */
   async hasSessionEnv(sessionName: string, varName: string): Promise<boolean | null> {
+    const lines = await this.sessionEnvLines(sessionName);
+    return lines === null ? null : usableEnvLine(lines, varName);
+  }
+
+  /** The same usable-presence reading for several variables from ONE fresh listing of the session environment.
+   *  Each requested name maps to true/false; every one maps to null when the environment cannot be inspected. Only
+   *  the requested names are returned, and no value, listing or error text leaves this method. */
+  async hasSessionEnvBatch(sessionName: string, varNames: readonly string[]): Promise<Record<string, boolean | null>> {
+    const lines = await this.sessionEnvLines(sessionName);
+    return Object.fromEntries(varNames.map((name) => [name, lines === null ? null : usableEnvLine(lines, name)]));
+  }
+
+  private async sessionEnvLines(sessionName: string): Promise<string[] | null> {
     const target = exactTarget(sessionName, "session");
     try {
       const output = await this.run(["tmux", "show-environment", "-t", target],
         `tmux show-environment -t ${shellQuote(target)}`);
-      const prefix = `${varName}=`;
-      return output.split(/\r?\n/).some(
-        (line) => line.startsWith(prefix) && line.slice(prefix.length).trim().length > 0,
-      );
+      return output.split(/\r?\n/);
     } catch {
       return null;
     }

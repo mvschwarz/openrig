@@ -9,7 +9,7 @@ CASES=(fixture library)
 MODES=(healthy lost-baton healthy)
 # Stub-script scenarios run once each, healthy only: their planted failures are
 # product-code mutations, kept as per-PR evidence outside CI.
-PASSING_CASES=(transcript capture daemon-restart refocus-active refocus-parked-off)
+PASSING_CASES=(transcript capture daemon-restart refocus-active refocus-parked-off prompt-state)
 EFFECT_CASES=(refocus-parked)
 OUT="$REPO_ROOT/dist/pr-scenarios"
 while [ "$#" -gt 0 ]; do
@@ -19,8 +19,8 @@ while [ "$#" -gt 0 ]; do
       case "${2:-}" in
         fixture|library) CASES=("$2"); PASSING_CASES=(); EFFECT_CASES=();;
         refocus-parked) CASES=(); PASSING_CASES=(); EFFECT_CASES=("$2");;
-        transcript|capture|daemon-restart|refocus-active|refocus-parked-off) CASES=(); PASSING_CASES=("$2"); EFFECT_CASES=();;
-        *) echo 'Expected --case fixture|library|transcript|capture|daemon-restart|refocus-parked|refocus-active|refocus-parked-off' >&2; exit 2;;
+        transcript|capture|daemon-restart|refocus-active|refocus-parked-off|prompt-state) CASES=(); PASSING_CASES=("$2"); EFFECT_CASES=();;
+        *) echo 'Expected --case fixture|library|transcript|capture|daemon-restart|refocus-parked|refocus-active|refocus-parked-off|prompt-state' >&2; exit 2;;
       esac
       shift 2 ;;
     --mode)

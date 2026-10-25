@@ -115,7 +115,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
     .command("open")
     .argument("<view>", "a rig name, mission:<id>, slice:<id>, or a saved-view id")
     .description("Open a desktop terminal showing the view's live agents as interactive tiles")
-    .option("--provider <name>", "herdr, cmux or rex: use an existing workspace without opening a window; tmux requires --window. Inside Rex, the default opens in Rex")
+    .option("--provider <name>", "herdr, cmux or rex: open in the running provider without a desktop window; each open adds a new workspace (inside Herdr, --window reuses a matching one); tmux requires --window. Inside Rex, the default opens in Rex")
     .option("--session <name>", "Herdr session on the daemon's host; --session default selects Herdr's default session")
     .option("--window", "Open a new desktop terminal tab/window (the default when --provider is omitted)")
     .option("--expected-plan <id>", "Open only if the view still matches this preview")

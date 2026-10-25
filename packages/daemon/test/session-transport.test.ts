@@ -1161,8 +1161,8 @@ describe("SessionTransport", () => {
 
   // Test 7: send with mid-work detected → DELIVER WITH ADVISORY (OPR.0.4.3.28 fast-follow —
   // mid_work downgraded from a hard refuse to a non-blocking advisory; busy is not a block).
-  it("send with mid-work detected DELIVERS with a non-blocking advisory (not a refusal)", async () => {
-    seedCanonicalRig();
+  it.each(["codex", "claude-code"])("%s send with mid-work detected DELIVERS with a non-blocking advisory (not a refusal)", async (runtime) => {
+    seedCanonicalRig(runtime);
     const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
     const tmux = mockTmux({
       capturePaneContent: async () => "Working on task...\n⠋ Processing files\nesc to interrupt",
@@ -1174,6 +1174,13 @@ describe("SessionTransport", () => {
     expect(result.ok).toBe(true);
     expect(result.warning).toContain("mid-task");
     expect(result.warning).toContain("busy is advisory");
+    if (runtime === "codex") {
+      expect(result.warning).toContain("joins its running turn and may redirect it");
+      expect(result.warning).toContain("--wait-for-idle <seconds>");
+    } else {
+      expect(result.warning).not.toContain("joins its running turn");
+      expect(result.warning).not.toContain("--wait-for-idle");
+    }
     expect(sendTextSpy).toHaveBeenCalled();
   });
 

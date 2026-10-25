@@ -34,6 +34,13 @@ chat_store() {
   printf '%s/chats/%s/%s/store.db' "$CURSOR_CONFIG_DIR" "$sum" "$1"
 }
 
+# Preserve the file's exact bytes, including trailing newlines. A read error stops before the harness starts.
+if [ -n "${OPENRIG_FIRST_INPUT:-}" ]; then
+  first_input=$(cat "$OPENRIG_FIRST_INPUT" && printf '.')
+  first_input=${first_input%.}
+  set -- "$@" "$first_input"
+fi
+
 if [ -n "${OPENRIG_RESUME_REF:-}" ]; then
   id="$OPENRIG_RESUME_REF"
   plain_id "$id" || { echo "openrig-cursor-launch: refusing an unusual chat id" >&2; exit 2; }

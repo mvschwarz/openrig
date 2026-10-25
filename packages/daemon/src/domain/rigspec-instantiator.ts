@@ -121,6 +121,7 @@ export class RigInstantiator {
             model: specNode.model,
             effort: specNode.effort,
             advisor: specNode.advisor,
+            claudePermissions: specNode.claudePermissions,
             cwd: specNode.cwd,
             surfaceHint: specNode.surfaceHint,
             workspace: specNode.workspace,
@@ -1332,7 +1333,7 @@ export class PodRigInstantiator {
     const initialRefusal = eligible();
     if (initialRefusal) return refuse(initialRefusal);
 
-    const retainedFields = new Set(["id", "label", "agent_ref", "profile", "runtime", "model", "effort", "advisor", "cwd", "role", "codex_config_profile", "permission_policy", "restore_policy"]);
+    const retainedFields = new Set(["id", "label", "agent_ref", "profile", "runtime", "model", "effort", "advisor", "cwd", "role", "codex_config_profile", "permission_policy", "claude_permissions", "restore_policy"]);
     if (Object.keys(memberFragment).some(key => !retainedFields.has(key))) return refuse("Retry accepts only retained member fields; topology and startup overrides require a separate change.");
     const rawSpec = { version: "0.2", name: rig.rig.name, pods: [{ id: podRow.namespace, label: podRow.label, members: [memberFragment], edges: [] }], edges: [] };
     const validation = PodRigSpecSchema.validate(rawSpec);
@@ -1672,6 +1673,7 @@ export class PodRigInstantiator {
             // site (see the role wire note above) — same member-ref persistence as
             // createMemberNode or `rig up <spec>` seats lose their policy ref.
             permissionPolicy: member.permissionPolicy,
+            claudePermissions: member.claudePermissions,
             env: member.env,
             sessionSource: member.sessionSource,
             cwd: configResult.config.cwd,
@@ -2061,6 +2063,7 @@ export class PodRigInstantiator {
       // OPR.0.4.8.3 Seam B: the member's OWN raw ref persists on the node (like role);
       // rig-level lives on the rig row; precedence applies at RESOLUTION, not storage.
       permissionPolicy: input.member.permissionPolicy,
+      claudePermissions: input.member.claudePermissions,
       env: input.member.env,
       sessionSource: input.member.sessionSource,
       cwd: effectiveCwd,

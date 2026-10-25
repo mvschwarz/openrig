@@ -342,13 +342,21 @@ six destinations (Topology, Project, For You, Library, Search & Audit,
 Settings); and `DashboardFooter`. Its glyphs come from
 `dashboard/vellum/fidelity-glyphs.js`.
 
+The kernel card renders `kernel_state: "skipped"` as a neutral **boot not
+tracked** state. Built-in boot can be skipped because a kernel rig is already
+managed or because automatic boot was disabled; the served reason remains
+visible. Ready-agent counts do not promote this state to healthy. An unavailable
+tracker or a malformed status envelope remains **unknown**. Recovery still uses
+the existing launch-plan and daemon restore guards.
+
 The vellum barrel `dashboard/vellum/index.ts` still exports
 `BackLayerContent` and `BackVellumSheet`; `/lab/vellum-lab`
 (`lab/VellumLab.tsx`) imports from it.
 
 > Source: `components/dashboard/Dashboard.tsx` (header comment `:1-24`,
 > glyph import, `DESTINATIONS`, data wiring, render order);
-> `hooks/useDaemonVersion.ts`; `components/dashboard/vellum/index.ts:5-6`.
+> `hooks/useDaemonVersion.ts`; `components/dashboard/vellum/index.ts:5-6`;
+> `components/KernelStatusCard.tsx`; `components/RigStatusCard.tsx`.
 
 ## 5. Cross-cutting properties
 

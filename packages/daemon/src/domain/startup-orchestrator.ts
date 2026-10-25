@@ -169,6 +169,8 @@ export function isSeatSkillsBootstrapLine(file: Pick<ResolvedStartupFile, "path"
 }
 
 export interface StartupInput {
+  /** Internal attempt state: a launch input may already have reached the harness, so it cannot be replayed. */
+  firstInputPassed?: boolean;
   rigId: string;
   nodeId: string;
   sessionId: string;
@@ -552,6 +554,10 @@ export class StartupOrchestrator {
       return this.fail(input, "failed", [`Startup context persistence failed: ${String(error)}`], undefined, false, undefined, false, "persistence", true);
     }
 
+    const identityAction = this.extractSessionIdentityAction(input.startupActions, context);
+    let launchPrompt: { prompt: string; remainingFiles: ResolvedStartupFile[] } | undefined;
+    let launchChallenge: ReturnType<typeof issueStartupChallenge> | null = null;
+
     // 5. Launch harness (unless skipped for legacy nodes)
     // A community harness's seat: record the selection on this session before the app starts. It's provenance for
     // later reads (identity, activity, labels, restore), not launch success or identity proof.
@@ -572,12 +578,27 @@ export class StartupOrchestrator {
               this.sessionRegistry.recordResumeLaunch(input.sessionId, launchResumeToken ?? null);
             } catch { /* best-effort: without it a rotation stays unproved, as before */ }
           }
+          if (input.adapter instanceof CommunityHarnessRuntimeAdapter && input.adapter.firstInput()
+            && !launchResumeToken && continuityOutcome === "fresh" && identityAction) {
+            launchChallenge = startupProof.mode === "authenticated" ? issueStartupChallenge(this.eventBus, {
+              rigId: input.rigId, nodeId: input.nodeId, contractSource: JSON.stringify(input.resolvedStartupFiles),
+            }) : null;
+            launchPrompt = this.composeInitialSessionPrompt(deliveryInput, identityAction, postLaunchFiles,
+              launchChallenge?.promptBlock ?? null, input.includeDurableObligations);
+          }
           const launchResult = await input.adapter.launchHarness(input.binding, {
             name: input.sessionName ?? input.binding.tmuxSession ?? "",
+            ...(launchPrompt ? { firstInputText: launchPrompt.prompt } : {}),
             resumeToken: launchResumeToken,
             ...(launchResumeToken && input.resumeType ? { resumeType: input.resumeType } : {}),
             ...(input.forkSource && !launchResumeToken ? { forkSource: input.forkSource } : {}),
           });
+          if (launchResult.firstInput) {
+            input.firstInputPassed = deliveryInput.firstInputPassed = true;
+            this.eventBus.emit({ type: "node.startup_first_input_passed", rigId: input.rigId, nodeId: input.nodeId,
+              sessionId: input.sessionId, ...launchResult.firstInput });
+            warnings.push("First startup input passed at launch; submission is not confirmed.");
+          }
           if (launchResult.ok) {
             appliedLaunch = launchResult.appliedLaunch;
             resumedProcess = launchResult.resumedProcess;
@@ -617,7 +638,7 @@ export class StartupOrchestrator {
           }
 
           const shouldRetryFresh =
-            !!launchResumeToken
+            !!launchResumeToken && !input.firstInputPassed
             && input.allowFreshFallback !== false
             && launchResult.recovery === "retry_fresh"
             && !attemptedFreshFallback;
@@ -764,23 +785,24 @@ export class StartupOrchestrator {
       this.appliedLaunchStore.recordGeneration(launchGeneration, appliedLaunch);
     }
 
-    // Issue selected proof only once the runtime can receive its prompt.
-    // Persist ground truth BEFORE delivering any proof prompt.
-    const identityAction = this.extractSessionIdentityAction(input.startupActions, context);
-    const challenge = shouldChallenge
+    // Normally issue proof after readiness; an opted-in launcher already received its challenge in the first input.
+    // Ground truth is persisted before either delivery path.
+    const challenge = launchChallenge ?? (shouldChallenge
       ? issueStartupChallenge(this.eventBus, {
           rigId: input.rigId,
           nodeId: input.nodeId,
           contractSource: JSON.stringify(input.resolvedStartupFiles),
         })
-      : null;
+      : null);
 
     // A selected proof still works without a session_identity action: deliver
     // its standalone prompt after the post-launch contract files below.
     const consumedActions = new Set<StartupAction>();
     let challengeOnlyPrompt: string | null = null;
     if (continuityOutcome === "fresh" && identityAction) {
-      const initialPrompt = await this.deliverInitialSessionPrompt(deliveryInput, identityAction, postLaunchFiles, challenge?.promptBlock ?? null, input.includeDurableObligations);
+      const initialPrompt = input.firstInputPassed && launchPrompt
+        ? { ok: true as const, remainingFiles: launchPrompt.remainingFiles }
+        : await this.deliverInitialSessionPrompt(deliveryInput, identityAction, postLaunchFiles, challenge?.promptBlock ?? null, input.includeDurableObligations);
       if (!initialPrompt.ok) {
         errors.push(initialPrompt.error);
         return this.fail(input, "failed", errors, undefined, false, undefined, false, "initial_prompt", true);
@@ -919,9 +941,9 @@ export class StartupOrchestrator {
 
     // Keep the running conversation, but don't call an explicitly assisted startup ready.
     // The paste and Enter were attempted; continuing startup must not paste that context a second time.
-    if (deliveryInput.sendOrder > 0 && startupAssisted) {
+    if ((deliveryInput.sendOrder > 0 || input.firstInputPassed) && startupAssisted) {
       return this.fail(deliveryInput, "attention_required", [
-        `Startup assisted for community harness "${input.adapter.runtime}" in ${input.binding.tmuxSession}: text and Enter were sent, but submission isn't confirmed. `
+        `Startup assisted for community harness "${input.adapter.runtime}" in ${input.binding.tmuxSession}: ${input.firstInputPassed ? "first input was passed at launch" : "text and Enter were sent"}, but submission isn't confirmed. `
           + `Check the pane and submit any staged startup text; don't resend it. Once the seat has responded, acknowledge it with `
           + `rig seat clear-attention ${shellQuote(input.binding.tmuxSession!)} --reason ${shellQuote("Startup submission checked; seat responded")}.`,
       ], undefined, false, undefined, false, "assisted_startup", false);
@@ -999,6 +1021,10 @@ export class StartupOrchestrator {
     hasPendingWork?: boolean,
     probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence,
   ): StartupResult {
+    if (input.firstInputPassed) {
+      pendingContext = false;
+      errors.push("First startup input was passed at launch; submission is unconfirmed. Inspect the pane before sending anything again.");
+    }
     if (status === "attention_required" && typeof pendingContext === "object") {
       // The reasons above stay visible; this only says what the status means for the fork.
       errors.push("The fork's startup context is waiting to be sent: this attention status doesn't mean the forked conversation is healthy");
@@ -1079,18 +1105,14 @@ export class StartupOrchestrator {
     return actions.find((action) => isSessionIdentityAction(action) && action.appliesOn.includes(context)) ?? null;
   }
 
-  private async deliverInitialSessionPrompt(
+  private composeInitialSessionPrompt(
     input: StartupDeliveryInput,
     identityAction: StartupAction,
     postLaunchFiles: ResolvedStartupFile[],
     challengeBlock: string | null,
     includeDurableObligations = false,
-  ): Promise<{ ok: true; remainingFiles: ResolvedStartupFile[] } | { ok: false; error: string }> {
+  ): { prompt: string; remainingFiles: ResolvedStartupFile[] } {
     const { binding } = input;
-    if (!binding.tmuxSession) {
-      return { ok: false, error: "No tmux session for the initial session identity prompt" };
-    }
-
     const firstSendTextIndex = postLaunchFiles.findIndex((file) => file.deliveryHint === "send_text");
     const identityContext = `OpenRig-generated identity context (not a project task):\n${identityAction.value}\nEnd of generated identity context.`;
     let prompt = identityContext;
@@ -1122,6 +1144,22 @@ export class StartupOrchestrator {
       prompt = `${prompt}\n\n${challengeBlock}`;
     }
 
+    return { prompt, remainingFiles };
+  }
+
+  private async deliverInitialSessionPrompt(
+    input: StartupDeliveryInput,
+    identityAction: StartupAction,
+    postLaunchFiles: ResolvedStartupFile[],
+    challengeBlock: string | null,
+    includeDurableObligations = false,
+  ): Promise<{ ok: true; remainingFiles: ResolvedStartupFile[] } | { ok: false; error: string }> {
+    const { binding } = input;
+    if (!binding.tmuxSession) {
+      return { ok: false, error: "No tmux session for the initial session identity prompt" };
+    }
+
+    const { prompt, remainingFiles } = this.composeInitialSessionPrompt(input, identityAction, postLaunchFiles, challengeBlock, includeDurableObligations);
     const sendError = await this.sendInteractiveText(input, prompt, "initial_identity");
     if (sendError) {
       return { ok: false, error: `Initial session identity prompt failed: ${sendError.error}` };

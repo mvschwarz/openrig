@@ -198,9 +198,10 @@ unseen — which makes messages the one delivery channel that never gets skipped
   `env -u TMUX <tmuxAttachCommand>`. Inspect the result and visible content, or
   say what cannot be verified. On a desktop, do not finish by printing a command for the person to
   type. Only if the window cannot open, `rig tui --shared` is the dashboard-only fallback; explain
-  the failure. `--provider herdr` or `--provider cmux` adds tiles inside a workspace that is
-  already visible, without opening a window; in `--json` output, `reusedWorkspace` with no new
-  tiles means an existing view was reused, which is success.
+  the failure. In the window's `--json` output, `reusedWorkspace` with no new tiles means an
+  existing view was reused, which is success. `--provider herdr` or `--provider cmux` opens the
+  view in a provider that is already running, without opening a window; each such open adds a new
+  workspace, so to come back to a view, focus its open space.
   Add `--session <name>` to select a Herdr session for that request; `--session default`
   explicitly selects its default session. `rig terminal status --session <name>` inspects
   the same endpoint. Omitting the flag keeps the daemon's configured endpoint. Herdr tiles come

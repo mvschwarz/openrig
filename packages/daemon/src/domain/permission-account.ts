@@ -23,7 +23,7 @@ export interface PermissionAccount {
   /** Recorded policies this seat's explicit choice is used instead of. */
   overrides: string[];
   /** What OpenRig adds to the launch beyond the native argument. Claude's lists are passed per launch, never saved. */
-  openRigAdds: { claudeAllow: string[]; claudeAsk: string[]; notes: string[] };
+  openRigAdds: { claudeAllow: string[]; claudeAsk: string[]; claudeDeny?: string[]; notes: string[] };
   /** What this read can't know. */
   unknown: string[];
   /** The existing controls that change it, for future launches only. */
@@ -101,6 +101,15 @@ export function planPermissionAccount(db: Database.Database, nodeId: string, sea
     openRigAdds.claudeAllow = [...TEAM_CLAUDE_ALLOW];
     openRigAdds.claudeAsk = [...TEAM_CLAUDE_ASK];
     openRigAdds.notes.push("A hook asks before the listed lifecycle commands.");
+  }
+  if (planned.claudePermissions !== undefined) {
+    openRigAdds.claudeAllow.push(...planned.claudePermissions.allow);
+    openRigAdds.claudeDeny = [...planned.claudePermissions.deny];
+    openRigAdds.notes.push("This seat's allow/deny rules are composed into the same launch settings; no shared project settings are changed.",
+      "Inherited grants remain. Managed policy, native modes and installed mods can change the effect; this read does not verify enforcement.",
+      "Rules are not OS or credential isolation. Older readers may ignore the record; check rollback compatibility and preserve restrictions before downgrading.");
+    if (posture === "full_bypass" || mode === "bypassPermissions") openRigAdds.notes.push("In bypassPermissions, allow rules do not constrain access; native deny behavior remains subject to the harness's documented exceptions.");
+    controls.push(`rig seat set-permissions ${seat} --rules <file.json> --reason "<why>"`);
   }
   if (runtime === "codex") {
     openRigAdds.notes.push(planned.teamPermissionDefault && !profile && nativeArgument === "-s workspace-write"

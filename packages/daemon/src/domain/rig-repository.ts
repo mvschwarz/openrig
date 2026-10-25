@@ -1,3 +1,4 @@
+import { validateClaudePermissionRules } from "./claude-permission-rules.js";
 import type Database from "better-sqlite3";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
 import { decodeStoredSnapshotData } from "./snapshot-repository.js";
@@ -7,6 +8,7 @@ import { deriveComposeProjectName } from "./compose-project-name.js";
 import type { ClaudeManagedBlockFile } from "./managed-blocks.js";
 import { mergeSeatEnv, parseStoredSeatEnv, type SeatEnv } from "./seat-env.js";
 import { withoutIgnoredRuntimeHomes } from "./seat-runtime-home.js";
+import { parseClaudeSeatTokenRef, type ClaudeSeatTokenRef } from "./claude-seat-token.js";
 import type {
   Rig,
   Node,
@@ -307,6 +309,7 @@ interface NodeOptions {
   codexConfigProfile?: string;
   /** OPR.0.4.8.3 Seam B: per-seat permission_policy REF (builtin:<name> or spec-relative path). */
   permissionPolicy?: string;
+  claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
   /** The member's declared launch environment (spec `env:`); not merged with the rig's. */
   env?: SeatEnv;
   cwd?: string;
@@ -597,6 +600,12 @@ export class RigRepository {
   }
 
   addNode(rigId: string, logicalId: string, opts?: NodeOptions): Node {
+    if (opts?.claudePermissions !== undefined) {
+      if (opts.runtime !== "claude-code") throw new Error("claude_permissions requires a claude-code seat");
+      validateClaudePermissionRules(opts.claudePermissions);
+      // Required rule persistence is atomic with creation, including direct repository callers.
+      if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
+    }
     // Same-rig guard for podId
     if (opts?.podId) {
       const pod = this.db.prepare("SELECT rig_id FROM pods WHERE id = ?").get(opts.podId) as { rig_id: string } | undefined;
@@ -693,6 +702,12 @@ export class RigRepository {
         );
     }
 
+    if (opts?.claudePermissions !== undefined) {
+      if (opts.runtime !== "claude-code") throw new Error("claude_permissions requires a claude-code seat");
+      this.db.prepare("UPDATE nodes SET claude_permissions_json = ? WHERE id = ?")
+        .run(JSON.stringify(validateClaudePermissionRules(opts.claudePermissions)), id);
+    }
+
     if (opts?.sessionSource && this.hasNodeColumn("session_source_json")) {
       this.db.prepare("UPDATE nodes SET session_source_json = ? WHERE id = ?")
         .run(JSON.stringify(opts.sessionSource), id);
@@ -774,6 +789,13 @@ export class RigRepository {
       .prepare("UPDATE nodes SET effort = NULL WHERE id = ?")
       .run(nodeId);
     return result.changes > 0;
+  }
+
+  /** A Claude seat's own subscription credential, by reference only; null clears it. */
+  setNodeClaudeTokenRef(nodeId: string, ref: ClaudeSeatTokenRef | null): boolean {
+    if (!this.hasNodeColumn("claude_token_ref")) return false;
+    return this.db.prepare("UPDATE nodes SET claude_token_ref = ? WHERE id = ?")
+      .run(ref ? JSON.stringify({ label: ref.label, tokenFile: ref.tokenFile }) : null, nodeId).changes > 0;
   }
 
   /** Persist the resolved Advisor; null removes a previous spec's selection. */
@@ -1033,6 +1055,7 @@ export class RigRepository {
       advisor: row.advisor ?? null,
       effortChoice: row.effort_choice ?? null,
       codexConfigProfile: row.codex_config_profile ?? null,
+      claudeTokenRef: parseClaudeSeatTokenRef(row.claude_token_ref),
       permissionPolicy: row.permission_policy ?? null,
       env: parseStoredSeatEnv(row.env_json),
       cwd: row.cwd,
@@ -1125,6 +1148,7 @@ interface NodeRow {
   advisor?: string | null;
   effort_choice?: string | null;
   codex_config_profile?: string | null;
+  claude_token_ref?: string | null;
   permission_policy?: string | null;
   env_json?: string | null;
   cwd: string | null;

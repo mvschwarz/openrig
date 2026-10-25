@@ -36,7 +36,7 @@ import { CODEX_NETWORK_DEFAULT_OVERRIDE, codexNetworkDefaultArg, type CodexNetwo
 import { resolveCodexGitAddDirs, type CodexGitAddDirResolver } from "../domain/codex-git-add-dirs.js";
 import { isPerSeatRoleGuidance, mergeManagedBlock, perSeatRoleSkipWarning } from "../domain/managed-blocks.js";
 import { excludeNewGeneratedFiles } from "../domain/generated-file-hygiene.js";
-import { codexQueueStateRoot, codexTeamWorkspaceArg, type PrepareCodexTeamWorkspace } from "../domain/codex-team-workspace.js";
+import { codexQueueStateRoot, codexTeamWorkspaceArg, type PrepareCodexSeatFolder, type PrepareCodexTeamWorkspace } from "../domain/codex-team-workspace.js";
 import { shellQuote } from "./shell-quote.js";
 import { execRuntimeProbe } from "./runtime-probe-exec.js";
 import { resolveReadinessTimeoutMs } from "../domain/readiness-timeout.js";
@@ -68,6 +68,7 @@ const codexHookTrust = createRequire(import.meta.url)("../../assets/plugins/open
 import { listNativeProcesses, observeCodexPaneProcess, observeCodexForkProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type NativeProcessRow } from "../domain/native-process-lineage.js";
 import { recordSeatSkillWrite, seatPluginSkillsLossNote, seatProjectionComplete, seatSkillWriteRefusal } from "../domain/seat-skill-storage.js";
 import { codexPluginContentHash, planOwnedCodexContentApproval, recordOwnedCodexApproval } from "../domain/codex-owned-plugin-trust.js";
+import { findTomlTable, opensTomlTable, parseTomlRoot, tomlArrayTableHeaderPath, tomlDefines, tomlTableHeaderPath } from "../domain/toml-tables.js";
 
 // Shared by all probes of ONE launch, never reset by a delayed screen or an
 // ambiguous transport result. A separately requested launch gets a new attempt.
@@ -103,7 +104,10 @@ interface PreparedCodexLaunch {
   appliedLaunch: AppliedLaunchObservation;
   postureArg: string;
   queueStateDirArg: string;
-  suppressAutoAddDirs: boolean;
+  /** The git metadata `--add-dir`s, the same for fresh, resume and fork; empty for a rebuild or a provably read-only profile. */
+  gitDirArg: string;
+  /** The seat's own topology folder (its LEARNED.md and recap) as an `--add-dir`, under the same rules as the git dirs. */
+  seatFolderArg: string;
   daemonOptOut: boolean;
   daemonArg: string;
   networkArg: string;
@@ -167,9 +171,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   // #275: Codex's own answer on whether the plain floor may get network access. Startup wires the
   // real reader; absent keeps every invocation unchanged.
   private readNetworkDefault?: CodexNetworkDefaultReader;
-  // Issue #121: git metadata dirs for the fresh-launch `--add-dir`s (a linked worktree's `.git` is a file).
+  // Issue #121: git metadata dirs for the `--add-dir`s of fresh, resume and fork (a linked worktree's `.git` is a file).
   // Default = the real resolver; tests may inject a controlled one.
   private resolveGitAddDirs: CodexGitAddDirResolver;
+  // The seat's own topology folder for the `--add-dir`s of fresh, resume and fork. Absent: none is added.
+  private prepareSeatFolder?: PrepareCodexSeatFolder;
   private prepareTeamWorkspace?: PrepareCodexTeamWorkspace;
   private resolveManagedConfigSettings?: () => Promise<{ enabled: boolean; codexVersion?: string }>;
   private resolveHooksEnabled?: () => Promise<boolean>;
@@ -214,6 +220,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     detectDaemonSupport?: CodexDaemonSupportDetector;
     readNetworkDefault?: CodexNetworkDefaultReader;
     resolveGitAddDirs?: CodexGitAddDirResolver;
+    /** The seat's own topology folder, ready to write (its LEARNED.md and recap). Absent: no seat folder is added. */
+    prepareSeatFolder?: PrepareCodexSeatFolder;
     prepareTeamWorkspace?: PrepareCodexTeamWorkspace;
     /** Resolves the hooks setting and Codex version that ensureManagedConfig applies. Absent: no managed config write. */
     resolveManagedConfigSettings?: () => Promise<{ enabled: boolean; codexVersion?: string }>;
@@ -235,6 +243,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.resolveManagedConfigSettings = deps.resolveManagedConfigSettings;
     this.resolveHooksEnabled = deps.resolveHooksEnabled;
     this.prepareTeamWorkspace = deps.prepareTeamWorkspace;
+    this.prepareSeatFolder = deps.prepareSeatFolder;
     this.seatLaunchEnvironment = deps.seatLaunchEnvironment;
     this.fs = deps.fsOps;
     this.codexHome = deps.codexHome;
@@ -578,6 +587,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       return;
     }
     const withHooks = upsertCodexActivityHooks(existing, relay);
+    if (!changesOnlyOpenRigActivityHooks(existing, withHooks, `node "${relay}"`)) {
+      console.error(`[openrig] codex activity hooks skipped: ${configPath} can't be read as TOML, or writing OpenRig's hooks would change anything else; left untouched`);
+      return;
+    }
     if (withHooks !== existing) {
       this.fs.mkdirp(nodePath.dirname(configPath));
       this.fs.writeFile(configPath, withHooks);
@@ -613,7 +626,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
     const command = `node "${relay}"`;
     const keySource = canonicalCodexHookSource(hooksPath);
-    const stripped = upsertCodexFeaturesHooksEnabled(stripCodexActivityHooks(existing));
+    const stripped = upsertCodexFeaturesHooksEnabled(stripCodexActivityHooks(existing, command));
     let before: unknown = null;
     let expected: { hooks?: { state?: CodexHookState } } | null = null;
     try { before = parseToml(existing); expected = parseToml(stripped) as { hooks?: { state?: CodexHookState } }; }
@@ -675,9 +688,20 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // absolute path is the honest best guess; a canonicalization delta is fail-safe (gate reappears).
     }
     const command = `node "${relay}"`;
+    // upsertCodexActivityHooks has just written our marked block. Codex keys by the
+    // group's position among this event's groups, not its position inside our block.
+    // Count only the groups before the marker: a person's groups after it do not
+    // move ours, and their trust/disable records must not be written as ours.
+    // Without a marker (Codex's save left our groups where they sit), each group's own position.
+    const begin = content.indexOf(OPENRIG_ACTIVITY_HOOKS_BEGIN);
+    const parsed = parseToml(begin >= 0 ? content.slice(0, begin) : content) as {
+      hooks?: Partial<Record<(typeof OPENRIG_ACTIVITY_HOOK_EVENTS)[number], unknown[]>>;
+    };
     let next = content;
     for (const event of OPENRIG_ACTIVITY_HOOK_EVENTS) {
-      const { key, hash } = computeCodexHookTrust(event, { keySource, command, timeoutSec: 5 });
+      const groupIndex = begin >= 0 ? parsed.hooks?.[event]?.length ?? 0 : openRigInlineGroupIndex(parsed, event);
+      if (groupIndex < 0) continue;
+      const { key, hash } = computeCodexHookTrust(event, { keySource, command, timeoutSec: 5, groupIndex });
       next = upsertCodexHookTrust(next, key, hash);
     }
     return next;
@@ -694,7 +718,12 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const configPath = this.resolveCodexConfigPath(home);
     const hooksPath = nodePath.join(nodePath.dirname(configPath), "hooks.json");
     const existing = this.fs.exists(configPath) ? this.fs.readFile(configPath) : null;
-    let updated = existing === null ? null : stripCodexActivityHooks(existing);
+    const current = this.activityRelayPath ? `node "${this.activityRelayPath}"` : undefined;
+    let updated = existing === null ? null : stripCodexActivityHooks(existing, current);
+    if (existing !== null && updated !== existing && !changesOnlyOpenRigActivityHooks(existing, updated!, current)) {
+      console.error(`[openrig] codex activity hook removal skipped for ${configPath}: it can't be read as TOML, or removing OpenRig's hooks would change anything else; left untouched`);
+      updated = existing;
+    }
     if (this.fs.exists(hooksPath)) {
       // Only OpenRig's groups leave. Codex keys trust and disables by position, so each later group's state moves with it.
       try {
@@ -838,7 +867,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // Only a launch that starts a conversation may install the core plugin; a resume never does.
     const prepared = await this.prepareLaunch(binding, opts.name, undefined, { installCorePlugin: !opts.resumeToken });
     if (!prepared.ok) return prepared;
-    const { modelArg, effortArg, appliedLaunch, postureArg, queueStateDirArg, daemonArg, networkArg, suppressAutoAddDirs } = prepared;
+    const { modelArg, effortArg, appliedLaunch, postureArg, queueStateDirArg, gitDirArg, seatFolderArg, daemonArg, networkArg } = prepared;
 
     // Fork branch: `codex fork <parent_thread_id>`. Captures the NEW thread id
     // post-fork. Parent thread id is NOT persisted onto the new seat record
@@ -858,7 +887,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // -s danger-full-access on every seat; otherwise the named profile, or OpenRig's explicit
       // -s workspace-write floor flag.
       // 0.5.2-07 A2-3: the FORK path threads the SPEC model too (fork-instantiate reverted it before).
-      const cmd = `codex${daemonArg}${postureArg}${networkArg}${modelArg}${effortArg} fork${queueStateDirArg} ${shellQuote(parentId)}`;
+      // The git dirs and the seat folder follow the parent id: ps flattens argv, so a path with a space placed before the
+      // id would be read as the id when the fork is verified.
+      const cmd = `codex${daemonArg}${postureArg}${networkArg}${modelArg}${effortArg} fork${queueStateDirArg} ${shellQuote(parentId)}${gitDirArg}${seatFolderArg}`;
       const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, await this.seatCommand(binding, cmd));
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
@@ -891,15 +922,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // OPR.0.4.8.2: one posture decision (codexPostureArg) for the fresh launch too — YOLO forces
     // -s danger-full-access (overrides even a named profile); otherwise the named profile, or
     // OpenRig's explicit -s workspace-write floor flag.
-    // Issue #121: only the fresh launch adds git metadata dirs; resume and fork never did.
-    const gitDirArg = opts.resumeToken || binding.codexRebuildPermissions
-      ? ""
-      : suppressAutoAddDirs ? "" : (await this.resolveGitAddDirs(binding.cwd)).map((dir) => ` --add-dir ${shellQuote(dir)}`).join("");
     const cmd = opts.resumeToken
       // 0.5.2-07 A2-3: the pod-aware RESUME path threads the SPEC model too (reverted before — the
       // grounding map assumed codex parity with the claude adapter, but only fresh emitted -m).
       ? this.resumeCore(prepared, opts.resumeToken, binding)
-      : `codex${daemonArg}${postureArg}${networkArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}${effortArg}`;
+      : `codex${daemonArg}${postureArg}${networkArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${seatFolderArg}${queueStateDirArg}${modelArg}${effortArg}`;
 
     const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, await this.seatCommand(binding, cmd));
     if (!textResult.ok) {
@@ -991,9 +1018,12 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
     if (running) {
       // The running Codex already loaded its profile; drift in -p is the caller's to compare.
+      // Its own --add-dirs, git dirs included, carry over as they ran; none are resolved again. They follow the
+      // conversation id, as on every resume, so the resume proof reads the id even when a dir has a space.
       return { ok: true, model, modelArg, effort, effortArg, profile, appliedLaunch, postureArg,
-        queueStateDirArg: running.addDirs.map((dir) => ` --add-dir ${shellQuote(dir)}`).join(""),
-        suppressAutoAddDirs: false,
+        queueStateDirArg: "",
+        gitDirArg: running.addDirs.map((dir) => ` --add-dir ${shellQuote(dir)}`).join(""),
+        seatFolderArg: "",
         daemonOptOut: running.daemonOptOut, daemonArg: running.daemonOptOut ? " --no-daemon" : "",
         networkArg: running.networkOverride ? ` -c ${shellQuote(CODEX_NETWORK_DEFAULT_OVERRIDE)}` : "" };
     }
@@ -1015,6 +1045,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // suppress OpenRig's generated roots when later project layers cannot make it writable.
     const suppressAutoAddDirs = Boolean(!binding.codexRebuildPermissions && profile
       && posture === profileArg && this.profileRemainsReadOnly(profile, binding.cwd, home));
+    // Issue #121: fresh, resume and fork get the same git metadata dirs, so a restored or forked seat can still commit.
+    // A rebuild keeps the writable roots its observed envelope names instead.
+    const gitDirArg = binding.codexRebuildPermissions || suppressAutoAddDirs
+      ? "" : (await this.resolveGitAddDirs(binding.cwd)).map((dir) => ` --add-dir ${shellQuote(dir)}`).join("");
+    // The seat's own topology folder, so it can keep its LEARNED.md and recap: the same launches and the same suppression.
+    const seatFolder = binding.codexRebuildPermissions || suppressAutoAddDirs ? undefined : this.prepareSeatFolder?.(name);
+    const seatFolderArg = seatFolder ? ` --add-dir ${shellQuote(seatFolder)}` : "";
     const teamWorkspaceArg = !binding.codexRebuildPermissions && binding.teamPermissionDefault && !profile
       && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write"
       ? codexTeamWorkspaceArg(this.prepareTeamWorkspace, name) : "";
@@ -1034,12 +1071,15 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
     // The launch facts keep the probed daemon choice, so a printed recovery command can repeat it; no probe, no fact.
     const launchFacts = daemonSupport ? { ...appliedLaunch, daemonOptOut } : appliedLaunch;
-    return { ok: true, model, modelArg, effort, effortArg, profile, appliedLaunch: launchFacts, postureArg, queueStateDirArg, suppressAutoAddDirs, daemonOptOut, daemonArg, networkArg };
+    return { ok: true, model, modelArg, effort, effortArg, profile, appliedLaunch: launchFacts, postureArg, queueStateDirArg, gitDirArg, seatFolderArg, daemonOptOut, daemonArg, networkArg };
   }
 
   private resumeCore(prepared: PreparedCodexLaunch, resumeToken: string, binding: NodeBinding): string {
-    const { profile, queueStateDirArg, model, postureArg, networkArg, daemonOptOut, effort } = prepared;
-    return buildCodexResumeCore(resumeToken, profile, false, queueStateDirArg.trim() || undefined, binding.launchPosture, model, `${postureArg}${networkArg}`, daemonOptOut, effort);
+    const { profile, queueStateDirArg, gitDirArg, seatFolderArg, model, postureArg, networkArg, daemonOptOut, effort } = prepared;
+    // The git dirs and the seat folder follow the conversation id, as on a fork, so the resume proof reads the id even
+    // from a path with a space.
+    return buildCodexResumeCore(resumeToken, profile, false, queueStateDirArg.trim() || undefined, binding.launchPosture, model, `${postureArg}${networkArg}`, daemonOptOut, effort)
+      + gitDirArg + seatFolderArg;
   }
 
   private async seatCommand(binding: NodeBinding, cmd: string): Promise<string> {
@@ -1838,11 +1878,13 @@ function hashContent(content: string): string {
 }
 
 function upsertCodexProjectTrust(content: string, projectPath: string): string {
+  const path = ["projects", projectPath];
   const header = `[projects.${JSON.stringify(projectPath)}]`;
   const lines = content.length > 0 ? content.split("\n") : [];
-  const headerIndex = lines.findIndex((line) => line.trim() === header);
+  const headerIndex = findTomlTable(lines, path);
 
   if (headerIndex === -1) {
+    if (tomlDefines(content, path)) return content;
     const trimmed = content.trimEnd();
     const prefix = trimmed.length > 0 ? `${trimmed}\n\n` : "";
     return `${prefix}${header}\ntrust_level = "trusted"\n`;
@@ -1959,17 +2001,19 @@ export function computeCodexHookTrust(
 /**
  * OPR.0.4.3.33 — idempotent, non-clobbering, section-scoped writer for a single
  * `[hooks.state."<key>"] trusted_hash = "<hash>"` record. Mirrors upsertCodexProjectTrust:
- * find/create the exact table header, splice ONLY its `trusted_hash` line, leave every other
+ * find the table by its key in any spelling (or create it), splice ONLY its `trusted_hash` line, leave every other
  * `[hooks.state]` / `[projects]` entry and the managed hook block byte-identical. Same key+hash
  * ⇒ no-op. Only called for our authored inline or verified owned plugin keys (never blanket trust).
  */
 export function upsertCodexHookTrust(content: string, key: string, hash: string, field: "trusted_hash" | "trusted_content_hash" = "trusted_hash"): string {
+  const path = ["hooks", "state", key];
   const header = `[hooks.state.${JSON.stringify(key)}]`;
   const trustLine = `${field} = ${JSON.stringify(hash)}`;
   const lines = content.length > 0 ? content.split("\n") : [];
-  const headerIndex = lines.findIndex((line) => line.trim() === header);
+  const headerIndex = findTomlTable(lines, path);
 
   if (headerIndex === -1) {
+    if (tomlDefines(content, path)) return content;
     const trimmed = content.trimEnd();
     const prefix = trimmed.length > 0 ? `${trimmed}\n\n` : "";
     return `${prefix}${header}\n${trustLine}\n`;
@@ -2086,14 +2130,91 @@ function upsertCodexActivityHooks(content: string, relayPath: string): string {
   let next = upsertCodexFeaturesHooksEnabled(content);
 
   const pattern = new RegExp(
-    `${escapeRegExp(OPENRIG_ACTIVITY_HOOKS_BEGIN)}[\\s\\S]*?${escapeRegExp(OPENRIG_ACTIVITY_HOOKS_END)}\\n?`,
+    `${escapeRegExp(OPENRIG_ACTIVITY_HOOKS_BEGIN)}([\\s\\S]*?)${escapeRegExp(OPENRIG_ACTIVITY_HOOKS_END)}\\n?`,
     "m"
   );
   if (pattern.test(next)) {
-    return next.replace(pattern, () => block); // literal: a string would expand `$` patterns in the path
+    // literal: a string would expand `$` patterns in the path
+    return next.replace(pattern, (_span, inner: string) => {
+      const kept = keptInActivityBlock(inner, `node "${relayPath}"`);
+      return kept ? `${block}\n${kept}\n` : block;
+    });
   }
+  // Codex's own saves can leave our markers apart from our groups. Groups that already run OpenRig's relay are ours
+  // where they sit: point them at this relay rather than append a second set, which Codex would run twice.
+  const relayGroups = retargetOpenRigRelayGroups(next, command, `node "${relayPath}"`);
+  if (relayGroups !== null) return relayGroups;
   const prefix = next.replace(/\n*$/, "");
   return prefix.length > 0 ? `${prefix}\n\n${block}` : block;
+}
+
+/**
+ * What else sits between OpenRig's activity-hook markers. When Codex saves config.toml (its "Trust all", say), a
+ * table it rewrites loses its file position and is printed after the last hook group, which can be inside our
+ * block: Codex 0.164.0 rewrites all of `[hooks.state]` this way. Every section but OpenRig's own activity groups is
+ * kept whole, with the comments just above it.
+ */
+function keptInActivityBlock(inner: string, current?: string): string {
+  const lines = inner.split("\n");
+  return tomlSections(inner, current).filter((section) => !section.openRig)
+    .map(({ start, end }) => lines.slice(start, end).join("\n")).join("\n").trim();
+}
+
+/** Point every inline group that runs OpenRig's relay (from any install) at `command` (TOML text), in place; null when
+ *  there's none, or the file can't be read as TOML. Only those groups' own `command` lines change: a person's groups,
+ *  their other text and every position stay as they are. */
+function retargetOpenRigRelayGroups(content: string, command: string, current: string): string | null {
+  let document: unknown;
+  try { document = parseToml(content); } catch { return null; }
+  if (!OPENRIG_ACTIVITY_HOOK_EVENTS.some((event) => openRigInlineGroupIndex(document, event) >= 0)) return null;
+  const lines = content.split("\n");
+  const topLevel = lineStartsAtDocumentLevel(content);
+  for (const { header, end, path, openRig } of tomlSections(content, current)) {
+    if (!openRig || path.length !== 3) continue;
+    for (let at = header + 1; at < end; at++) if (topLevel[at] && /^\s*command\s*=/.test(lines[at]!)) lines[at] = `command = ${command}`;
+  }
+  return lines.join("\n");
+}
+
+/** One table section of a config: its header line's index, the lines it spans with the comments and blank lines just
+ *  above it, and its decoded key path. `openRig` marks OpenRig's own activity groups: a `[[hooks.<event>]]` for one of
+ *  OpenRig's events and the sections under it, when, read on their own, they run nothing but OpenRig's relay. */
+type TomlSection = { start: number; header: number; end: number; path: string[]; openRig: boolean };
+
+/** `text` split at its real table headers, never at text inside a string or an array. Lines before the first header
+ *  belong to no section. */
+function tomlSections(text: string, current?: string): TomlSection[] {
+  const lines = text.split("\n");
+  const topLevel = lineStartsAtDocumentLevel(text);
+  const sections: TomlSection[] = [];
+  for (const [at, line] of lines.entries()) {
+    if (!topLevel[at] || !line.trim().startsWith("[")) continue;
+    const path = tomlArrayTableHeaderPath(line) ?? tomlTableHeaderPath(line);
+    if (!path) continue;
+    let start = at;
+    while (start > 0 && topLevel[start - 1] && /^\s*(?:#.*)?$/.test(lines[start - 1]!)) start--;
+    const previous = sections.at(-1);
+    if (previous) previous.end = start;
+    sections.push({ start, header: at, end: lines.length, path, openRig: false });
+  }
+  const events: readonly string[] = OPENRIG_ACTIVITY_HOOK_EVENTS;
+  const under = (section: TomlSection, event: string) => section.path[0] === "hooks" && section.path[1] === event;
+  for (let first = 0; first < sections.length; first++) {
+    const { path } = sections[first]!;
+    const event = path[1]!;
+    if (path[0] !== "hooks" || !events.includes(event) || path.length > 3 || (path.length === 3 && path[2] !== "hooks")) continue;
+    let last = first;
+    while (path.length === 2 && last + 1 < sections.length && sections[last + 1]!.path.length > 2 && under(sections[last + 1]!, event)) last++;
+    let group: unknown;
+    try {
+      const hooks = (parseToml(lines.slice(sections[first]!.start, sections[last]!.end).join("\n")) as { hooks?: Record<string, unknown> }).hooks?.[event];
+      // A group's own header gives a list holding it; a handler stanza on its own reads as the group it adds to.
+      group = path.length === 2 ? (Array.isArray(hooks) && hooks.length === 1 ? hooks[0] : null) : hooks;
+    } catch { group = null; }
+    if (runsOnlyOpenRigRelay(group, current)) for (let at = first; at <= last; at++) sections[at]!.openRig = true;
+    first = last;
+  }
+  return sections;
 }
 
 function canonicalCodexHookSource(path: string): string {
@@ -2169,12 +2290,40 @@ function openRigInlineGroupIndex(document: unknown, event: string): number {
   });
 }
 
+/** An inline group that runs nothing but OpenRig's relay: every command on it or its handlers is OpenRig's shipped relay,
+ *  from any install, or `current`. A person's group with a command of their own is theirs. */
+function runsOnlyOpenRigRelay(group: unknown, current?: string): boolean {
+  if (group === null || typeof group !== "object") return false;
+  const { command, hooks } = group as { command?: unknown; hooks?: unknown };
+  const commands = [...(command === undefined ? [] : [command]),
+    ...(Array.isArray(hooks) ? hooks.map((handler) => (handler as { command?: unknown } | null)?.command) : [])];
+  return commands.length > 0 && commands.every((value) => isOpenRigRelayCommand(value) || (current !== undefined && value === current));
+}
+
+/** Whether `next` changes nothing in `content` but OpenRig's inline activity groups and the `[features].hooks` flag
+ *  OpenRig sets, and still parses. A config that doesn't parse is left as it is. */
+function changesOnlyOpenRigActivityHooks(content: string, next: string, current?: string): boolean {
+  const rest = (text: string) => {
+    const { hooks, features, ...other } = parseToml(text) as { hooks?: Record<string, unknown>; features?: Record<string, unknown> };
+    const { hooks: _flag, ...otherFeatures } = features ?? {};
+    const otherHooks = Object.fromEntries(Object.entries(hooks ?? {}).flatMap(([event, value]) => {
+      const groups = (OPENRIG_ACTIVITY_HOOK_EVENTS as readonly string[]).includes(event) && Array.isArray(value)
+        ? value.filter((group) => !runsOnlyOpenRigRelay(group, current)) : value;
+      return Array.isArray(groups) && groups.length === 0 ? [] : [[event, groups]];
+    }));
+    return { ...other, ...(Object.keys(otherFeatures).length > 0 ? { features: otherFeatures } : {}),
+      ...(Object.keys(otherHooks).length > 0 ? { hooks: otherHooks } : {}) };
+  };
+  try { return isDeepStrictEqual(rest(content), rest(next)); } catch { return false; }
+}
+
 /** Write `enabled = false` into one `[hooks.state."<key>"]` table (the trust write creates it first). */
 function upsertCodexHookDisabled(content: string, key: string): string {
+  const path = ["hooks", "state", key];
   const header = `[hooks.state.${JSON.stringify(key)}]`;
   const lines = content.split("\n");
-  const at = lines.findIndex((line) => line.trim() === header);
-  if (at < 0) return `${content.replace(/\n*$/, "")}\n\n${header}\nenabled = false\n`;
+  const at = findTomlTable(lines, path);
+  if (at < 0) return tomlDefines(content, path) ? content : `${content.replace(/\n*$/, "")}\n\n${header}\nenabled = false\n`;
   let end = lines.length;
   for (let i = at + 1; i < lines.length; i++) if (lines[i]!.trim().startsWith("[")) { end = i; break; }
   const enabledAt = lines.findIndex((line, i) => i > at && i < end && /^\s*enabled\s*=/.test(line));
@@ -2195,18 +2344,19 @@ function rekeyCodexHookState(state: CodexHookState, prefix: string, newIndexOf: 
   return next;
 }
 
-/** The same move on config.toml's text: rename each moved group's `[hooks.state."<key>"]` header, and drop a removed
- *  group's table. Other spellings aren't touched; the caller compares the parsed result before writing. */
+/** The same move on config.toml's text: rename each moved group's `[hooks.state.<key>]` header (any key spelling), and
+ *  drop a removed group's table. An inline or dotted entry isn't touched; the caller compares the parsed result before writing. */
 function rekeyCodexHookStateText(content: string, prefix: string, newIndexOf: (index: number) => number | null): string {
   const out: string[] = [];
   let dropping = false;
-  for (const line of content.split("\n")) {
+  const lines = content.split("\n");
+  const root = parseTomlRoot(lines);
+  for (const [at, line] of lines.entries()) {
     const trimmed = line.trim();
     if (trimmed.startsWith("[")) {
       dropping = false;
-      const quoted = /^\[hooks\.state\.(".*")\]$/.exec(trimmed)?.[1];
-      let key: string | undefined;
-      try { key = quoted ? JSON.parse(quoted) as string : undefined; } catch { key = undefined; }
+      const path = tomlTableHeaderPath(trimmed);
+      const key = path?.length === 3 && path[0] === "hooks" && path[1] === "state" && opensTomlTable(lines, at, root) ? path[2] : undefined;
       const tail = key?.startsWith(prefix) ? /^(\d+):(\d+)$/.exec(key.slice(prefix.length)) : null;
       if (tail) {
         const index = newIndexOf(Number(tail[1]));
@@ -2226,13 +2376,17 @@ function rekeyCodexHookStateText(content: string, prefix: string, newIndexOf: (i
  * leaves all other content — user-owned hooks, [features], project trust — untouched. Returns the
  * input unchanged when the block is absent.
  */
-function stripCodexActivityHooks(content: string): string {
+function stripCodexActivityHooks(content: string, current?: string): string {
   const pattern = new RegExp(
-    `\\n*${escapeRegExp(OPENRIG_ACTIVITY_HOOKS_BEGIN)}[\\s\\S]*?${escapeRegExp(OPENRIG_ACTIVITY_HOOKS_END)}[ \\t]*\\n?`,
+    `\\n*${escapeRegExp(OPENRIG_ACTIVITY_HOOKS_BEGIN)}([\\s\\S]*?)${escapeRegExp(OPENRIG_ACTIVITY_HOOKS_END)}[ \\t]*\\n?`,
     "m"
   );
   if (!pattern.test(content)) return content;
-  return content.replace(pattern, "\n");
+  // Tables Codex printed inside the block (its rewritten `[hooks.state]`) aren't ours to remove.
+  return content.replace(pattern, (_span, inner: string) => {
+    const kept = keptInActivityBlock(inner, current);
+    return kept ? `\n\n${kept}\n` : "\n";
+  });
 }
 
 /** Ensure `[features].hooks = true` (canonical key; not the deprecated codex_hooks alias). */

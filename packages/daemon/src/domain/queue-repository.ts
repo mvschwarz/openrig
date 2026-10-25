@@ -1479,8 +1479,9 @@ export class QueueRepository {
   }
 
   /** Recover current notifications once per pass. A snapshot horizon and seek cursor
-   * prevent new arrivals or persistent failures from making this pass unbounded. */
-  async drainPendingWakeIntents(): Promise<{ delivered: number; indeterminate: number; failed: number; retained: number }> {
+   * prevent new arrivals or persistent failures from making this pass unbounded. `stopRequested` is checked before
+   * each delivery: a stopped pass leaves the notifications it has not attempted as they are, for the next start. */
+  async drainPendingWakeIntents(opts?: { stopRequested?: () => boolean }): Promise<{ delivered: number; indeterminate: number; failed: number; retained: number }> {
     const tally = { delivered: 0, indeterminate: 0, failed: 0, retained: 0 };
     if (!this.outbox || !this.transport) return tally;
     const BATCH = 200;
@@ -1493,6 +1494,8 @@ export class QueueRepository {
           AND q.state = 'pending' AND q.destination_session = o.destination_session)`)
       .run(horizon, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX).changes;
     const attempted = new Set<string>();
+    // A stop also refuses every later claim inside a delivery: coalesced peers and members it releases for their own send.
+    const eligible = () => !opts?.stopRequested?.();
     let cursor = 0;
     for (;;) {
       const pending = this.db.prepare(`SELECT o.rowid AS id, o.outbox_id FROM outbox_entries o
@@ -1503,8 +1506,9 @@ export class QueueRepository {
         .all(cursor, horizon, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX, BATCH) as Array<{ id: number; outbox_id: string }>;
       if (pending.length === 0) break;
       for (const intent of pending) {
+        if (opts?.stopRequested?.()) return tally;
         cursor = intent.id;
-        const outcome = await this.deliverWakeIntent(intent.outbox_id, attempted);
+        const outcome = await this.deliverWakeIntent(intent.outbox_id, attempted, eligible);
         if (outcome !== "skipped") tally[outcome]++;
       }
       if (pending.length < BATCH) break; // served short batch ⇒ drained

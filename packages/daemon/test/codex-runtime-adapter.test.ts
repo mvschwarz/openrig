@@ -13,6 +13,7 @@ import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { seedCodexThreads } from "./helpers/codex-state.js";
 import { execFileSync } from "node:child_process";
 import { provenCodexResume } from "./helpers/codex-resume-proof.js";
+import { codexCommandResumeToken } from "../src/domain/native-process-lineage.js";
 
 // Verbatim 250-byte Codex 0.160.0 menu capture, SHA-256
 // 45c70fc01c7d33f4652c9d42523f631734c62aac76f449ff0f2c15e99680ac9b.
@@ -103,18 +104,24 @@ function expectedFreshLaunchCommand(options: { cwd?: string; model?: string; eff
   return `codex -s workspace-write '-c' 'check_for_update_on_startup=false' -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg}${effortArg}`;
 }
 
-function expectedResumeCommand(token = "sess-456", queueRoot: string | null = testQueueRoot(), model?: string, effort?: string): string {
-  const queueDirArg = queueRoot === null ? "" : `--add-dir ${quote(queueRoot)} `;
-  const modelArg = model ? ` -m ${quote(model)}` : "";
-  const effortArg = effort ? ` -c ${quote(`model_reasoning_effort="${effort}"`)}` : "";
-  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false'${modelArg}${effortArg} resume ${queueDirArg}${quote(token)}`;
+// A resume and a fork add the same git metadata dir as the fresh launch, after the conversation id (`gitCwd` null: none,
+// as for a read-only profile).
+function gitDirOption(gitCwd: string | null): string {
+  return gitCwd === null ? "" : ` --add-dir ${quote(nodePath.join(gitCwd, ".git"))}`;
 }
 
-function expectedForkCommand(parentId = "parent-thread-id", options: { model?: string; effort?: string; queueRoot?: string | null } = {}): string {
+function expectedResumeCommand(token = "sess-456", queueRoot: string | null = testQueueRoot(), model?: string, effort?: string, gitCwd: string | null = "/project"): string {
+  const queueDirArg = queueRoot === null ? "" : ` --add-dir ${quote(queueRoot)}`;
+  const modelArg = model ? ` -m ${quote(model)}` : "";
+  const effortArg = effort ? ` -c ${quote(`model_reasoning_effort="${effort}"`)}` : "";
+  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false'${modelArg}${effortArg} resume ${quote(token)}${queueDirArg}${gitDirOption(gitCwd)}`;
+}
+
+function expectedForkCommand(parentId = "parent-thread-id", options: { model?: string; effort?: string; queueRoot?: string | null; gitCwd?: string | null } = {}): string {
   const queueDirArg = options.queueRoot === null ? "" : ` --add-dir ${quote(options.queueRoot ?? testQueueRoot())}`;
   const modelArg = options.model ? ` -m ${quote(options.model)}` : "";
   const effortArg = options.effort ? ` -c ${quote(`model_reasoning_effort="${options.effort}"`)}` : "";
-  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false'${modelArg}${effortArg} fork${queueDirArg} ${quote(parentId)}`;
+  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false'${modelArg}${effortArg} fork${queueDirArg} ${quote(parentId)}${gitDirOption(options.gitCwd === undefined ? "/project" : options.gitCwd)}`;
 }
 
 function expectedProfileFreshLaunchCommand(profile: string, options: { cwd?: string; model?: string; queueRoot?: string | null } = {}): string {
@@ -125,9 +132,9 @@ function expectedProfileFreshLaunchCommand(profile: string, options: { cwd?: str
   return `codex -p ${quote(profile)} '-c' 'check_for_update_on_startup=false' -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg}`;
 }
 
-function expectedProfileResumeCommand(profile: string, token = "sess-456", queueRoot: string | null = testQueueRoot()): string {
-  const queueDirArg = queueRoot === null ? "" : `--add-dir ${quote(queueRoot)} `;
-  return `codex -p ${quote(profile)} '-c' 'check_for_update_on_startup=false' resume ${queueDirArg}${quote(token)}`;
+function expectedProfileResumeCommand(profile: string, token = "sess-456", queueRoot: string | null = testQueueRoot(), gitCwd: string | null = "/project"): string {
+  const queueDirArg = queueRoot === null ? "" : ` --add-dir ${quote(queueRoot)}`;
+  return `codex -p ${quote(profile)} '-c' 'check_for_update_on_startup=false' resume ${quote(token)}${queueDirArg}${gitDirOption(gitCwd)}`;
 }
 
 beforeEach(() => {
@@ -643,6 +650,7 @@ describe("Codex runtime adapter", () => {
     const codexHome = "/private/codex";
     const fsOps = mockFs({ [`${codexHome}/locked.config.toml`]: 'sandbox_mode = "read-only"\napproval_policy = "never"\n' });
     const resolveGitAddDirs = vi.fn(async () => ["/project/.git"]);
+    const prepareSeatFolder = vi.fn(() => "/topology/rigs/test-rig/seats/dev-qa");
     const options = [
       { name: "dev-qa@test-rig" },
       { name: "dev-qa@test-rig", resumeToken: "sess-456" },
@@ -652,7 +660,7 @@ describe("Codex runtime adapter", () => {
       const proof = provenCodexResume("sess-456");
       const tmux = mockTmux({ getPanePid: proof.getPanePid });
       const adapter = new CodexRuntimeAdapter({
-        tmux, fsOps, codexHome, resolveGitAddDirs,
+        tmux, fsOps, codexHome, resolveGitAddDirs, prepareSeatFolder,
         listProcesses: proof.listProcesses as never, readResumeEvidence: proof.readResumeEvidence,
         sleep: async () => {},
         verifyProfilePreflight: async (profile) => ({ ok: true, profile }),
@@ -670,6 +678,7 @@ describe("Codex runtime adapter", () => {
       expect(command).not.toContain("danger-full-access");
     }
     expect(resolveGitAddDirs).not.toHaveBeenCalled();
+    expect(prepareSeatFolder).not.toHaveBeenCalled();
   });
 
   it.each(['sandbox_mode = "workspace-write"\n', 'sandbox_mode = [\n'])(
@@ -829,7 +838,7 @@ describe("Codex runtime adapter", () => {
       expect(result, JSON.stringify(opts)).toMatchObject({ ok: true });
       const command = vi.mocked(tmux.sendText).mock.calls[0]?.[1];
       expect(command).toContain("-p 'locked'");
-      if (!opts.resumeToken && !opts.forkSource) expect(command).toContain("--add-dir '/project/.git'");
+      expect(command).toContain("--add-dir '/project/.git'");
       expect(command).toContain(`--add-dir '${testQueueRoot()}'`);
     }
     expect(fsOps.readFile(projectPath)).toBe(projectContent);
@@ -1438,6 +1447,22 @@ describe("Codex runtime adapter", () => {
     });
   });
 
+  it("keeps the resume identity readable with a spaced shared-docs root", async () => {
+    const sharedDocsRoot = "/configured/shared docs";
+    vi.stubEnv("OPENRIG_SHARED_DOCS_ROOT", sharedDocsRoot);
+    const proof = provenCodexResume("sess-456");
+    const tmux = mockTmux({ getPanePid: proof.getPanePid });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), listProcesses: proof.listProcesses as never, readResumeEvidence: proof.readResumeEvidence });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig", resumeToken: "sess-456" });
+
+    expect(result.ok).toBe(true);
+    const command = vi.mocked(tmux.sendText).mock.calls[0]![1];
+    // ps joins argv with spaces; it does not retain the shell's quotes around each path.
+    expect(codexCommandResumeToken(command.replace(/'/g, ""))).toBe("sess-456");
+    expect(command).toContain(`resume 'sess-456' --add-dir '${testQueueRoot(sharedDocsRoot)}' --add-dir '/project/.git'`);
+  });
+
   it("launchHarness sends correct resume command", async () => {
     const proof = provenCodexResume("sess-456");
     const tmux = mockTmux({ getPanePid: proof.getPanePid });
@@ -1974,6 +1999,46 @@ describe("Codex runtime adapter", () => {
     expect(content).toContain('trust_level = "trusted"');
     expect(content).not.toContain('[mcp_servers.exa]');
     expect(content).not.toContain('[mcp_servers.context7]');
+  });
+
+  // #2029: Codex saves project trust with literal-quoted keys. Finding the table by key means no second table for the
+  // same project, which Codex rejects as a duplicate key and then refuses to start.
+  it.each([
+    ["a literal-quoted table Codex saved", "[projects.'/tmp/workspace']\ntrust_level = 'trusted'\n", 1],
+    ["an inline entry", "[projects]\n'/tmp/workspace' = { trust_level = 'trusted' }\n", 0],
+  ])("deliverStartup reuses %s for the project's trust and adds no duplicate", async (_name, existing, tables) => {
+    const fs = mockFs({ "/home/tester/.codex/config.toml": existing });
+    const fsWithHome = { ...fs, homedir: "/home/tester" };
+    const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fsWithHome });
+
+    await adapter.deliverStartup([], makeBinding("/tmp/workspace"));
+
+    const content = (fsWithHome as unknown as { _store: Record<string, string> })._store["/home/tester/.codex/config.toml"]!;
+    expect((parseToml(content) as Record<string, any>).projects["/tmp/workspace"].trust_level).toBe("trusted");
+    expect(content.match(/^\[projects\.['"]\/tmp\/workspace['"]\]/gm)?.length ?? 0).toBe(tables);
+  });
+
+  it("deliverStartup leaves a project-table example in a person's multi-line instructions exact and writes the real trust", async () => {
+    const existing = `developer_instructions = """\n[projects.'/tmp/workspace']\ntrust_level = 'example only'\n"""\n`;
+    const fs = mockFs({ "/home/tester/.codex/config.toml": existing });
+    const fsWithHome = { ...fs, homedir: "/home/tester" };
+    await new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fsWithHome }).deliverStartup([], makeBinding("/tmp/workspace"));
+    const parsed = parseToml((fsWithHome as unknown as { _store: Record<string, string> })._store["/home/tester/.codex/config.toml"]!) as Record<string, any>;
+    expect(parsed.developer_instructions).toBe((parseToml(existing) as Record<string, any>).developer_instructions);
+    expect(parsed.projects["/tmp/workspace"].trust_level).toBe("trusted");
+  });
+
+  // An earlier OpenRig's double-quoted table beside Codex's own is a duplicate Codex won't start with. Each launch leaves it
+  // exactly as it is, so removing the extra table once is the whole repair.
+  it("deliverStartup leaves a config that doesn't parse (#2029's duplicate project table) byte-identical, launch after launch", async () => {
+    const existing = "[projects.'/tmp/workspace']\ntrust_level = 'trusted'\n\n[projects.\"/tmp/workspace\"]\ntrust_level = \"trusted\"\n";
+    expect(() => parseToml(existing)).toThrow();
+    const fs = mockFs({ "/home/tester/.codex/config.toml": existing });
+    const fsWithHome = { ...fs, homedir: "/home/tester" };
+    const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fsWithHome });
+    await adapter.deliverStartup([], makeBinding("/tmp/workspace"));
+    await adapter.deliverStartup([], makeBinding("/tmp/workspace"));
+    expect((fsWithHome as unknown as { _store: Record<string, string> })._store["/home/tester/.codex/config.toml"]).toBe(existing);
   });
 
   it("applies codex_config_fragment runtime resources to the global Codex config idempotently", async () => {
@@ -2521,8 +2586,9 @@ describe("rebuild permission continuity", () => {
     const readNetworkDefault = vi.fn(async () => ({ apply: true, elapsedMs: 0 }));
     const resolveGitAddDirs = vi.fn(async () => ["/repo/.git"]);
     const prepareTeamWorkspace = vi.fn(() => ["/workspace", "/shared-docs"]);
+    const prepareSeatFolder = vi.fn(() => "/topology/rigs/test-rig/seats/dev-review");
     const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {},
-      readNetworkDefault, resolveGitAddDirs, prepareTeamWorkspace });
+      readNetworkDefault, resolveGitAddDirs, prepareTeamWorkspace, prepareSeatFolder });
     const envelope = { approvalPolicy: "on-request", sandboxPolicy: { type: "workspace-write",
       network_access: false, exclude_tmpdir_env_var: true, exclude_slash_tmp: false,
       writable_roots: ["/kept dir", "/kept'quote"] } } satisfies CodexPermissionEnvelope;
@@ -2539,5 +2605,6 @@ describe("rebuild permission continuity", () => {
     expect(readNetworkDefault).not.toHaveBeenCalled();
     expect(resolveGitAddDirs).not.toHaveBeenCalled();
     expect(prepareTeamWorkspace).not.toHaveBeenCalled();
+    expect(prepareSeatFolder).not.toHaveBeenCalled();
   });
 });

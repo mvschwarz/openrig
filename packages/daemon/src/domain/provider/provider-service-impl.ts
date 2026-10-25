@@ -29,7 +29,10 @@ import type {
   ProviderSwitchResult,
   SeatRestart,
   SeatSwitchReport,
+  ClaudeCredentialPrecedence,
+  ClaudeSeatRelaunch,
 } from "./provider-service.js";
+import { checkClaudeSeat, switchClaudeSeat } from "./claude-seat-switch.js";
 import type { FourBlockReadModel, PrecheckResult, ProviderSignal } from "./provider-types.js";
 import { authList, authSave, authSwitch, resolveCodexHome } from "../codex-auth.js";
 import type { PeerReport } from "../seat-restart-in-place.js";
@@ -103,6 +106,8 @@ export interface ProviderServiceImplDeps {
   usageWindows?: { enabled: () => boolean; windows: CodexUsageWindows; claude?: ClaudeUsageWindows; claudeTokens?: import("./claude-token-usage.js").ClaudeTokenUsage };
   /** The logins saved in a Codex home; defaults to `rig auth`'s files. A seat switch acts on the home the seat runs on. */
   codexLogins?: CodexHomeLogins;
+  /** What would outrank a Claude seat's own token; without it, Claude seats aren't moved. */
+  claudePrecedence?: ClaudeCredentialPrecedence;
 }
 
 export class ProviderServiceImpl implements ProviderService {
@@ -201,7 +206,9 @@ export class ProviderServiceImpl implements ProviderService {
     return seats;
   }
 
-  async precheck(input: ProviderPrecheckInput, seatRestart?: SeatRestart): Promise<PrecheckResult> {
+  async precheck(input: ProviderPrecheckInput, seatRestart?: SeatRestart, claudeSeat?: ClaudeSeatRelaunch): Promise<PrecheckResult> {
+    const claude = claudeSeat?.seat(input.seat);
+    if (claude) return (await checkClaudeSeat(input, claude, this.deps.claudePrecedence)).verdict;
     if (seatRestart) return (await this.seatPrecheck(input, seatRestart)).verdict;
     const model = await this.getReadModel();
     const target = model.accounts.find((a) => a.accountId === input.toAccount);
@@ -216,7 +223,9 @@ export class ProviderServiceImpl implements ProviderService {
     });
   }
 
-  async switchAccount(input: ProviderSwitchInput, seatRestart?: SeatRestart): Promise<ProviderSwitchResult> {
+  async switchAccount(input: ProviderSwitchInput, seatRestart?: SeatRestart, claudeSeat?: ClaudeSeatRelaunch): Promise<ProviderSwitchResult> {
+    const claude = claudeSeat?.seat(input.seat);
+    if (claudeSeat && claude) return switchClaudeSeat(input, claudeSeat, claude, this.deps.claudePrecedence);
     if (seatRestart) return this.switchSeat(input, seatRestart);
     // Precheck-gate: never switch past an unsafe verdict unless explicitly forced.
     const verdict = await this.precheck({ seat: input.seat, toAccount: input.toAccount });

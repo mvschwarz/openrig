@@ -133,6 +133,7 @@ async function driveEveryMethod(): Promise<RunCall[]> {
   await a.setSessionEnv(SESSION, "SEAT_FLAG", "it's a value");
   await a.unsetSessionEnv(SESSION, "SEAT_FLAG");
   await a.hasSessionEnv(SESSION, "OPENRIG_NODE_ID");
+  await a.hasSessionEnvBatch(SESSION, ["OPENRIG_NODE_ID", "OPENRIG_RUNTIME"]);
   await a.startPipePane(SESSION, "/tmp/out dir/it's.log");
   await a.stopPipePane(SESSION);
   await a.capturePanesContent([SESSION, "alpha", "missing"], 50);

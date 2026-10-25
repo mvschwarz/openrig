@@ -247,7 +247,7 @@ describe("TmuxAdapter", () => {
 
     it("throws on generic unrecognized exec error", async () => {
       const adapter = new TmuxAdapter(mockExec({
-        "has-session": { error: new Error("Command failed with exit code 127") },
+        "has-session": { error: Object.assign(new Error("Command failed with exit code 127"), { execStderr: "" }) },
       }));
       await expect(adapter.hasSession("any-session")).rejects.toThrow("exit code 127");
     });
@@ -306,6 +306,39 @@ describe("TmuxAdapter", () => {
       }));
 
       expect(await adapter.hasSessionEnv("missing", "OPENRIG_URL")).toBeNull();
+    });
+
+    it("reads several names from one listing, with the same reading, returning only the names asked for", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue([
+        "OPENRIG_URL=http://127.0.0.1:7433",
+        "OPENRIG_ACTIVITY_HOOK_TOKEN=",
+        "RIGGED_URL=   ",
+        "-RIGGED_ACTIVITY_HOOK_TOKEN",
+        "OPENRIG_RUNTIME=",
+        "OPENRIG_RUNTIME=claude-code",
+        "OPENRIG_URL_EXTRA=yes",
+        "SECRET_TOKEN=sk-private-value",
+      ].join("\n"));
+      const adapter = new TmuxAdapter(exec);
+      const names = ["OPENRIG_URL", "RIGGED_URL", "OPENRIG_PORT", "RIGGED_PORT", "OPENRIG_ACTIVITY_HOOK_TOKEN", "RIGGED_ACTIVITY_HOOK_TOKEN", "OPENRIG_RUNTIME", "RIGGED_RUNTIME"];
+      const presence = await adapter.hasSessionEnvBatch("seat@rig", names);
+      expect(exec).toHaveBeenCalledTimes(1);
+      expect(exec).toHaveBeenCalledWith("tmux show-environment -t '=seat@rig'");
+      expect(presence).toEqual({ OPENRIG_URL: true, RIGGED_URL: false, OPENRIG_PORT: false, RIGGED_PORT: false,
+        OPENRIG_ACTIVITY_HOOK_TOKEN: false, RIGGED_ACTIVITY_HOOK_TOKEN: false, OPENRIG_RUNTIME: true, RIGGED_RUNTIME: false });
+      expect(JSON.stringify(presence)).not.toMatch(/sk-private|127\.0\.0\.1|claude-code|SECRET|EXTRA/);
+      // Fresh each call: no cache between reads.
+      exec.mockResolvedValueOnce("RIGGED_PORT=7433");
+      expect(await adapter.hasSessionEnvBatch("seat@rig", ["OPENRIG_URL", "RIGGED_PORT"])).toEqual({ OPENRIG_URL: false, RIGGED_PORT: true });
+      expect(exec).toHaveBeenCalledTimes(2);
+    });
+
+    it("makes every requested name unknown when the one listing fails, and lets no error text through", async () => {
+      const exec = vi.fn<ExecFn>().mockRejectedValue(new Error("can't find session: token=sk-private-value"));
+      const presence = await new TmuxAdapter(exec).hasSessionEnvBatch("missing", ["OPENRIG_URL", "OPENRIG_RUNTIME"]);
+      expect(presence).toEqual({ OPENRIG_URL: null, OPENRIG_RUNTIME: null });
+      expect(exec).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(presence)).not.toContain("sk-private");
     });
   });
 

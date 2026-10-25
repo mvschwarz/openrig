@@ -116,14 +116,17 @@ describe.skipIf(!nativeAvailable)("tmux shell and argv transports against a real
       noServerSessions: [],
     });
     expect(shell.result.captured).toEqual(["openrig-native"]);
-    // The first line names the command, which each transport renders its own way; the tmux stderr after it,
-    // which every error classifier reads, is the same apart from each run's private directory.
+    for (const run of [shell, argv]) {
+      expect(run.result.noServerCause).toMatch(/^(no server running on|error connecting to) /);
+    }
+    // Write errors retain a command-wrapper line; a probe cause is already tmux's own stderr.
+    // Compare both transports after normalizing only each run's private directory.
     const stderr = ({ result: r, root }: typeof shell) => {
       const tail = (message: string) => message.split("\n").slice(1).join("\n").replaceAll(root, "<root>").trim();
       return {
         missingKill: tail((r.missingKill as { message: string }).message),
         missingKeys: `${(r.missingKeys as { code: string }).code}: ${tail((r.missingKeys as { message: string }).message)}`,
-        noServerCause: tail(r.noServerCause as string),
+        noServerCause: (r.noServerCause as string).replaceAll(root, "<root>").trim(),
       };
     };
     expect(stderr(argv)).toEqual(stderr(shell));

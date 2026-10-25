@@ -116,6 +116,25 @@ describe("ClaudeResumeAdapter", () => {
       );
     });
 
+    it("keeps member rules when a classic resume applies the seat's own subscription token", async () => {
+      const step = "fixture-seat-token-step";
+      const sendShellCommand = vi.fn(async (_target: string, _command: string) => ({ ok: true as const }));
+      const command = vi.fn(async (_target: string, text: string, options: { claudeTokenStep?: string }) => `${options.claudeTokenStep}; ${text}`);
+      const adapter = new ClaudeResumeAdapter({ ...mockTmux(), sendShellCommand }, {
+        claudeManagedLaunch: { seatTokenLaunch: () => ({ step, ref: { label: "work", tokenFile: "/fixture/work.token" }, warnings: ["fixture token warning"] }) } as never,
+        seatLaunchEnvironment: { command } as never,
+      });
+      const result = await adapter.resume("seat@rig", "claude_id", "conversation", "/repo", undefined, undefined, undefined, "node",
+        undefined, undefined, undefined, undefined, undefined, undefined, { deny: ["Read(../peer/**)"] });
+      expect(result).toMatchObject({ ok: true, warnings: ["fixture token warning"] });
+      expect(command.mock.calls[0]![2].claudeTokenStep).toBe(step);
+      expect(sendShellCommand).toHaveBeenCalledTimes(1);
+      const launch = sendShellCommand.mock.calls[0]![1];
+      expect(launch).toContain(step);
+      expect(launch).toContain('"deny":["Read(../peer/**)"]');
+      expect(launch).toContain("--resume 'conversation'");
+    });
+
     it("returns { ok: true } on success", async () => {
       const adapter = new ClaudeResumeAdapter(mockTmux());
       const result = await adapter.resume("r99-demo1-lead", "claude_name", "my-session", "/repo");
