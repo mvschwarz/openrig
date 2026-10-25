@@ -3370,6 +3370,24 @@ describe("RestoreOrchestrator", () => {
       },
     );
 
+    // After an abrupt power cut, a team of one terminal came back as a working shell, yet its restore read partially_restored.
+    it("a rig whose only seat is an ordinary terminal comes back fully restored: a fresh shell is its whole restore", async () => {
+      const { snap, node } = seatSnapshot("terminal", "resume_if_possible");
+      const result = await createOrchestrator({ tmux: mockTmux() }).restore(snap.id, { adapters: { terminal: adapterFor("terminal") } });
+      if (!result.ok) throw new Error("restore failed");
+      expect(result.result.nodes.find((n) => n.nodeId === node.id)).toMatchObject({ status: "fresh-primed", noConversation: true });
+      expect(result.result.rigResult).toBe("fully_restored");
+    });
+
+    it("an agent seat started fresh still leaves the rig partially restored; only a terminal with no conversation doesn't", () => {
+      expect(rollupRestoreRigResult([{ nodeId: "a", logicalId: "a", status: "fresh-primed" }])).toBe("partially_restored");
+      expect(rollupRestoreRigResult([{ nodeId: "t", logicalId: "t", status: "fresh-primed", noConversation: true }])).toBe("fully_restored");
+      expect(rollupRestoreRigResult([
+        { nodeId: "t", logicalId: "t", status: "fresh-primed", noConversation: true },
+        { nodeId: "a", logicalId: "a", status: "awaiting-decision" },
+      ])).toBe("partially_restored");
+    });
+
     it("still stops an agent seat saved with resume_if_possible and no token", async () => {
       const { status, tmux, forecast } = await restoreSeat("claude-code", "resume_if_possible");
       expect(status).toBe("awaiting-decision");

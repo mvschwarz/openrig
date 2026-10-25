@@ -282,6 +282,13 @@ describe("Down CLI", () => {
     expect(downCallCount).toBe(1);
   });
 
+  it("names a live terminal session it will stop, since a terminal isn't an agent", async () => {
+    inventory = { status: 200, data: [node("fixture.terminal", { nodeKind: "infrastructure", canonicalSessionName: "fixture-terminal@team" })] };
+    const { logs } = await captureLogs(() => makeCmd().parseAsync(["down", "rig-1"], { from: "user" }).then(() => {}));
+    expect(logs[0]).toBe("Before stopping rig-1: no agent sessions reported live; terminal sessions: fixture-terminal@team.");
+    expect(downCallCount).toBe(1);
+  });
+
   it("preserves one JSON result without an inventory read or human notice", async () => {
     const { logs } = await captureLogs(() => makeCmd().parseAsync(["down", "rig-1", "--json"], { from: "user" }).then(() => {}));
     expect(events).toEqual(["down"]);
