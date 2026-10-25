@@ -1,4 +1,4 @@
-import { nodeClaudePermissionsSchema } from "../../src/db/migrations/136_node_claude_permissions.js";
+import { nodeClaudePermissionsSchema } from "../../src/db/migrations/139_node_claude_permissions.js";
 import { claudeTokenReadingsSchema } from "../../src/db/migrations/134_claude_token_readings.js";
 import { terminalPolicySchema } from "../../src/db/migrations/128_terminal_policy.js";
 import { seatRuntimeSwitchesSchema } from "../../src/db/migrations/132_seat_runtime_switches.js";
