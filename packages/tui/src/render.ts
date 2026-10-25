@@ -694,6 +694,19 @@ interface MotionCtx {
   loading: boolean;
 }
 
+/** A host page's line for a host with no rigs listed. Another host's rigs are read only once it is drilled into, through
+ *  this daemon, so for it "none" is claimed only when that read answered. */
+function noRigsText(snap: FleetSnapshot, host: FleetSnapshot["hosts"][number], local: boolean, motion: MotionCtx): string {
+  if (local) return "  (no local rigs served — proven empty)";
+  if (motion.loading) {
+    if (!motion.reduced) motion.used = true;
+    return `  ${motion.frame} ${host.name} rigs read pending`;
+  }
+  return snap.readErrors.some((error) => error.startsWith(`rigs-summary(${host.name})`))
+    ? "  ✕ rigs read failed — named in the status line"
+    : `  (no rigs served by ${host.name})`;
+}
+
 function instanceContentLines(
   state: ViewState,
   snap: FleetSnapshot,
@@ -705,10 +718,11 @@ function instanceContentLines(
   const scope = { kind: "instance", local: host === snap.hosts[0] } as const;
   if (state.viewTab === "health") return [...lines, { text: "" }, ...healthListLines(snap, scope, contentWidth)];
   if (state.viewTab === "recent") {
-    const recent = recentLines(snap, scope, contentWidth, true, state.timeZone);
+    // This host's queue changes are never listed under another host's name.
+    const recent = scope.local ? recentLines(snap, scope, contentWidth, true, state.timeZone) : [];
     return recent.length > 0
       ? [...lines, ...recent]
-      : [...lines, { text: "" }, { text: motion.loading ? `${motion.frame} instance RECENT read pending` : "(instance RECENT window not served)" }];
+      : [...lines, { text: "" }, { text: motion.loading && scope.local ? `${motion.frame} instance RECENT read pending` : "(instance RECENT window not served)" }];
   }
   if (state.viewTab === "overview") {
     return [
@@ -719,17 +733,18 @@ function instanceContentLines(
           fields: [
             { label: "identity", value: host.name },
             { label: "transport", value: host.id ?? "local" },
-            { label: "shape", value: host.rigs.some(r => r.inventoryUnavailable) ? `${host.rigs.length} rigs · seat inventory incomplete` : `${host.rigs.length} rigs · ${host.rigs.reduce((n, rig) => n + rig.pods.reduce((m, pod) => m + pod.agents.length, 0), 0)} seats` },
+            { label: "shape", value: !scope.local ? `${host.rigs.length} rigs · seats not read here`
+              : host.rigs.some(r => r.inventoryUnavailable) ? `${host.rigs.length} rigs · seat inventory incomplete` : `${host.rigs.length} rigs · ${host.rigs.reduce((n, rig) => n + rig.pods.reduce((m, pod) => m + pod.agents.length, 0), 0)} seats` },
           ],
         },
         {
           title: "rigs",
           lines: host.rigs.length > 0
             ? host.rigs.map((rig) => listItem(
-                alignedRow([[rig.name, 20], [rig.lifecycleState ?? "unknown", 20], [rig.inventoryUnavailable ? "inventory unavailable" : `${rig.pods.length} pods · ${rig.pods.reduce((n, pod) => n + pod.agents.length, 0)} seats`, 24]]),
+                alignedRow([[rig.name, 20], [rig.lifecycleState ?? "unknown", 20], [rig.remoteHost ? "seats not read here" : rig.inventoryUnavailable ? "inventory unavailable" : `${rig.pods.length} pods · ${rig.pods.reduce((n, pod) => n + pod.agents.length, 0)} seats`, 24]]),
                 { type: "drill", resource: "rig", name: rig.name, target: { host: host.name } },
               ))
-            : [{ text: "  (no local rigs served — proven empty)" }],
+            : [{ text: noRigsText(snap, host, scope.local, motion) }],
         },
       ]),
     ];
@@ -738,7 +753,9 @@ function instanceContentLines(
     for (const rig of host.rigs) {
       lines.push({ text: "" }, sectionRule(`rig ${rig.name} · ${rig.lifecycleState ?? "unknown"}`, contentWidth));
       if (!rig.graph) {
-        if (motion.loading) {
+        if (rig.remoteHost) {
+          lines.push({ text: "  (another host's topology graph isn't read in this view)" });
+        } else if (motion.loading) {
           if (!motion.reduced) motion.used = true;
           lines.push({ text: `  ${motion.frame} topology graph read pending` });
         } else if (snap.readErrors.some((error) => error.startsWith(`graph(${rig.name})`))) {
@@ -757,10 +774,26 @@ function instanceContentLines(
         zones: canvas.zones.filter((zone) => zone.y === row).map((zone) => ({ start: zone.start, end: zone.end, action: zone.action })),
       });
     }
-    if (host.rigs.length === 0) lines.push({ text: "" }, { text: "  (no local rigs served — proven empty)" });
+    if (host.rigs.length === 0) lines.push({ text: "" }, { text: noRigsText(snap, host, scope.local, motion) });
     lines.push({ text: "" }, { text: `  style: ${state.graphStyle} · style hatchet|braille|braille-fallback rides the command bar` });
     return lines;
   }
+
+  // Another registered host: its reachability and its rigs' names and states, read through this daemon. Its seats and
+  // queue aren't read here, so none of this machine's are shown under its name.
+  if (!scope.local) return [
+    ...lines,
+    healthSummaryLine(snap, scope, contentWidth),
+    ...wrapDetailLines([
+      { text: `host ${host.name} · ${host.reachable ? "reachable" : "not reachable"}` },
+      { text: `Its seats aren't read in this view: rig ps --host ${host.name} --nodes -A` },
+    ], contentWidth),
+    { text: "" },
+    ...(host.rigs.length > 0
+      ? host.rigs.map((rig) => listItem(alignedRow([[rig.name, 20], [rig.lifecycleState ?? "unknown", 20]]),
+        { type: "drill", resource: "rig", name: rig.name, target: { host: host.name } }))
+      : [{ text: noRigsText(snap, host, false, motion) }]),
+  ];
 
   lines.push(healthSummaryLine(snap, scope, contentWidth));
   lines.push(...queueSampleLines(snap, contentWidth));
@@ -892,8 +925,16 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       if (snap.readErrors.some((e) => e.startsWith("rigs-summary"))) {
         return [{ text: "✕ rigs read failed — named in the status line (honest-empty, not fabricated)" }];
       }
+      // A drilled host this snapshot doesn't list proves nothing about its rigs.
+      if (hostName && !host) return [{ text: snap.readErrors.some((e) => e.startsWith("hosts:"))
+        ? `✕ host ${hostName} not listed: the hosts read failed — named in the status line`
+        : `host ${hostName} is not a registered host here · rig host list` }];
       return [{ text: "(no rigs served — proven empty, not fabricated)" }];
     }
+    if (rig.remoteHost) return [
+      { text: `rig ${rig.name} on ${rig.remoteHost} · ${rig.lifecycleState ?? "unknown"}` },
+      { text: `Its seats aren't read in this view: rig ps --host ${rig.remoteHost} --nodes --rig ${rig.name}` },
+    ];
     if (rig.inventoryNotLoaded) return [{ text: `Reading ${rig.name}…` }];
     if (rig.inventoryUnavailable) return [{ text: `Inventory unavailable for ${rig.name} · refresh to Retry` }];
     const podFilter = leaf?.kind === "pod" ? leaf.name : null;
