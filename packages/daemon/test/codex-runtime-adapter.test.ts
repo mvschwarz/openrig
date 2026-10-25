@@ -2242,6 +2242,44 @@ describe("Codex runtime adapter", () => {
     expect(fragmentBlock(after)).toContain("[mcp_servers.context7]");
   });
 
+  // A fragment may add array-of-tables entries, such as a Codex hook group with its handler.
+  const HOOK_GROUP = '[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = "echo done"\n';
+  const stopGroups = (text: string) => (parseToml(text) as Record<string, any>).hooks.Stop as unknown[];
+  async function projectsArrayFragment(before: string, fragment: string) {
+    const { project, read } = await projectFragment(before, fragment);
+    expect(await project()).toEqual({ projected: ["codex-default-config"], skipped: [], failed: [] });
+    const after = read();
+    expect(await project()).toEqual({ projected: ["codex-default-config"], skipped: [], failed: [] });
+    expect(read()).toBe(after);
+    expect(fragmentMarkers(after)).toEqual([FRAGMENT_BEGIN, FRAGMENT_END]);
+    return after;
+  }
+
+  it.each([
+    ["on its own", HOOK_GROUP],
+    ["beside tables", `${SHIPPED_FRAGMENT.replace(/\n*$/, "")}\n${HOOK_GROUP}`],
+  ])("projects a fragment's array-of-tables entries once, and again unchanged (%s)", async (_, fragment) => {
+    const after = await projectsArrayFragment('model = "person-model"\n', fragment);
+    expect(stopGroups(after)).toEqual([{ hooks: [{ type: "command", command: "echo done" }] }]);
+    expect((parseToml(after) as Record<string, any>).model).toBe("person-model");
+    if (fragment !== HOOK_GROUP) expect(fragmentBlock(after)).toContain("[mcp_servers.exa]");
+  });
+
+  it("keeps the person's own entries in the array, and a table Codex printed between the markers", async () => {
+    const theirs = '[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = "their-notifier"\n';
+    const before = `${theirs}\n${FRAGMENT_BEGIN}\n${HOOK_GROUP}\n[features]\nunified_exec = true\n${FRAGMENT_END}\n`;
+    const after = await projectsArrayFragment(before, HOOK_GROUP);
+    expect(stopGroups(after).map((group: any) => group.hooks[0].command)).toEqual(["their-notifier", "echo done"]);
+    expect((parseToml(after) as Record<string, any>).features.unified_exec).toBe(true);
+    expect(fragmentBlock(after)).not.toContain("[features]");
+  });
+
+  it("replaces its array-of-tables entries when the fragment changes them", async () => {
+    const before = `model = "person-model"\n\n${FRAGMENT_BEGIN}\n${HOOK_GROUP.replace("echo done", "echo old")}${FRAGMENT_END}\n`;
+    const after = await projectsArrayFragment(before, HOOK_GROUP);
+    expect(stopGroups(after)).toEqual([{ hooks: [{ type: "command", command: "echo done" }] }]);
+  });
+
   it("keeps $ sequences in a fragment literal when it is re-projected", async () => {
     const userConfig = '[projects."/tmp/workspace"]\ntrust_level = "trusted"\n';
     const fragment = '[mcp_servers.dollar]\ncommand = "echo $$ $& $` $\'"\n';
