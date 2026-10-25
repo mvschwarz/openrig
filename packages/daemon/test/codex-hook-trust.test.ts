@@ -174,6 +174,31 @@ describe("OPR.0.4.3.33 — upsertCodexHookTrust (idempotent, non-clobbering, sec
     expect(parsed.developer_instructions).toBe((parseToml(existing) as { developer_instructions: string }).developer_instructions);
     expect(parsed.hooks.state[KEY]!.trusted_hash).toBe(HASH);
   });
+
+  // Appending can't make an unreadable config readable, and would stack another table on every launch.
+  it("leaves a config that doesn't parse exactly as it is", () => {
+    const existing = `model = "gpt-6"\nmodel = "gpt-6.1"\n\n[hooks.state.'${KEY}']\ntrusted_hash = 'sha256:old'\n`;
+    expect(() => parseToml(existing)).toThrow();
+    expect(upsertCodexHookTrust(existing, KEY, HASH)).toBe(existing);
+  });
+
+  // The probe header's name is one the document doesn't already have, so a person's own key or table of that name can't
+  // stand in for it.
+  it.each(['"""', "'''"])("leaves a table example in %s instructions alone beside a root key named like the probe", (quote) => {
+    const existing = `openrig-header-probe-2 = 'personal'\ndeveloper_instructions = ${quote}\n[hooks.state.'${KEY}']\ntrusted_hash = 'example only'\n${quote}\n`;
+    const out = upsertCodexHookTrust(existing, KEY, HASH);
+    const parsed = parseToml(out) as Record<string, any>;
+    expect(parsed.developer_instructions).toBe((parseToml(existing) as Record<string, any>).developer_instructions);
+    expect(parsed["openrig-header-probe-2"]).toBe("personal");
+    expect(parsed.hooks.state[KEY].trusted_hash).toBe(HASH);
+  });
+
+  it("finds the real table when the document already has a table named like the probe", () => {
+    const existing = `[hooks.state.'${KEY}']\ntrusted_hash = 'sha256:old'\n\n[openrig-header-probe-0]\nkept = true\n`;
+    const out = upsertCodexHookTrust(existing, KEY, HASH);
+    expect(out).toBe(existing.replace("trusted_hash = 'sha256:old'", `trusted_hash = "${HASH}"`));
+    expect((parseToml(out) as Record<string, any>)["openrig-header-probe-0"]).toEqual({ kept: true });
+  });
 });
 
 describe("OPR.0.4.3.33 — provisioning-seam coupling (ensureCodexActivityHooks pre-trusts our 4 hooks)", () => {

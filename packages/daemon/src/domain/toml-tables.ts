@@ -19,24 +19,36 @@ export function tomlTableHeaderPath(line: string): string[] | null {
   return null;
 }
 
+/** The document's parsed root, or null when it doesn't parse. */
+export function parseTomlRoot(lines: string[]): Record<string, unknown> | null {
+  try { return parseToml(lines.join("\n")); } catch { return null; }
+}
+
 /** Whether line `at` opens a table in the document, rather than sitting inside a multi-line string (an example in a
- *  person's instructions, say): swapped for a probe header, the parsed document gains that table. */
-export function opensTomlTable(lines: string[], at: number): boolean {
-  const probe = `openrig-header-probe-${at}`;
+ *  person's instructions, say): swapped for a probe header the document doesn't already have, the parsed document gains
+ *  that table. An unreadable document proves nothing, so its writers leave it as it is. */
+export function opensTomlTable(lines: string[], at: number, root = parseTomlRoot(lines)): boolean {
+  if (!root) return false;
+  let probe = `openrig-header-probe-${at}`;
+  while (Object.hasOwn(root, probe)) probe += "-";
   try { return Object.hasOwn(parseToml([...lines.slice(0, at), `[${probe}]`, ...lines.slice(at + 1)].join("\n")), probe); }
   catch { return false; }
 }
 
 /** The line that opens table `path`, in any key spelling, or -1. */
 export function findTomlTable(lines: string[], path: string[]): number {
-  return lines.findIndex((line, at) => isDeepStrictEqual(tomlTableHeaderPath(line), path) && opensTomlTable(lines, at));
+  const candidates = lines.flatMap((line, at) => isDeepStrictEqual(tomlTableHeaderPath(line), path) ? [at] : []);
+  if (candidates.length === 0) return -1;
+  const root = parseTomlRoot(lines);
+  return candidates.find((at) => opensTomlTable(lines, at, root)) ?? -1;
 }
 
-/** Whether a readable document already defines `path` another way (an inline table, dotted keys). Appending a
- *  table for it would then be a duplicate key, and Codex refuses to start. */
+/** Whether a document already defines `path` another way (an inline table, dotted keys). Appending a table for it would
+ *  then be a duplicate key, and Codex refuses to start. An unreadable document counts as defined: it's left as it is,
+ *  since an append can't make it readable and would stack another table on every launch. */
 export function tomlDefines(content: string, path: string[]): boolean {
   let node: unknown;
-  try { node = parseToml(content); } catch { return false; }
+  try { node = parseToml(content); } catch { return true; }
   for (const key of path) {
     if (node === null || typeof node !== "object" || !Object.hasOwn(node, key)) return false;
     node = (node as Record<string, unknown>)[key];
