@@ -91,9 +91,9 @@ describe("ComposeServicesAdapter", () => {
     });
     const down = (adapter: ComposeServicesAdapter) => adapter.down({ composeFile: "/rig/compose.yaml", projectName: "openrig-secrets", policy: "down" });
 
-    it("says Docker Compose v2 is missing, naming the check", async () => {
+    it("says the Compose check failed, with its own diagnostic, without claiming one cause", async () => {
       const result = await new ComposeServicesAdapter(noCompose("")).composeAvailable();
-      expect(result).toEqual({ ok: false, message: expect.stringContaining("Service bundles need Docker Compose v2, and `docker compose version` failed") });
+      expect(result).toEqual({ ok: false, message: "Service bundles need Docker Compose v2, and `docker compose version` failed: unknown shorthand flag: 'f' in -f. Make sure this Docker has its Compose v2 plugin." });
     });
 
     it("up names the missing Compose before Docker's own error", async () => {
