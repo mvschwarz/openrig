@@ -130,6 +130,11 @@ export type SessionProbe =
   | { state: "absent" }
   | { state: "transport_unavailable"; cause: string };
 
+/** Positive server absence in this adapter's namespace; match the diagnostic line, never a path or command fragment. */
+export function probeShowsNoServer(probe: { state: string; cause?: string }): boolean {
+  return probe.state === "transport_unavailable" && /^no server running on /m.test(probe.cause ?? "");
+}
+
 const TMUX_FIELD_SEPARATOR = "|";
 const SESSION_FORMAT = [
   "#{session_name}",
@@ -167,7 +172,8 @@ const CURSOR_FORMAT = [
 ].join(TMUX_FIELD_SEPARATOR);
 
 function isNoServerError(err: unknown): boolean {
-  return err instanceof Error && err.message.includes("no server running");
+  const error = tmuxReportedError(err);
+  return error instanceof Error && probeShowsNoServer({ state: "transport_unavailable", cause: error.message });
 }
 
 /** The error tmux reported, without the stdout an exec error carries: in a chain that stdout is the earlier panes'
@@ -646,13 +652,14 @@ export class TmuxAdapter {
         `tmux has-session -t ${shellQuote(target)}`);
       return { state: "present" }; // exit 0 = session exists
     } catch (err) {
-      if (isSessionAbsenceError(err)) {
+      const error = tmuxReportedError(err);
+      if (isSessionAbsenceError(error)) {
         return { state: "absent" };
       }
-      if (isNoServerError(err) || isTmuxTransportAbsentError(err)) {
-        return { state: "transport_unavailable", cause: (err as Error).message };
+      if (isNoServerError(error) || isTmuxTransportAbsentError(error)) {
+        return { state: "transport_unavailable", cause: (error as Error).message };
       }
-      throw err;
+      throw error;
     }
   }
 

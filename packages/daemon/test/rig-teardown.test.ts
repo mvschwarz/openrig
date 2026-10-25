@@ -7,7 +7,7 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { RigTeardownOrchestrator } from "../src/domain/rig-teardown.js";
-import type { TmuxAdapter } from "../src/adapters/tmux.js";
+import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import { SnapshotRepository } from "../src/domain/snapshot-repository.js";
 import { CheckpointStore } from "../src/domain/checkpoint-store.js";
@@ -15,7 +15,7 @@ import { ResumeMetadataRefresher } from "../src/domain/resume-metadata-refresher
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { checkRunningNameGuard, makeRunningSessionCounter } from "../src/domain/running-name-guard.js";
+import { checkRunningNameGuard, makeRunningSessionCounter, confirmStoppedGenerations } from "../src/domain/running-name-guard.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { managedBlockText, mergeManagedBlock } from "../src/domain/managed-blocks.js";
 import { SEAT_SKILLS_BOOTSTRAP_LINE } from "../src/domain/seat-skill-storage.js";
@@ -761,6 +761,7 @@ describe("RigTeardownOrchestrator", () => {
     expect(checkRunningNameGuard({ findRigsByName: (name) => rigRepo.findRigsByName(name),
       countRunningSessions: makeRunningSessionCounter(db) }, "test-rig")).toEqual({ ok: true });
     expect(terminal.commands).toEqual(["tmux has-session -t '=r01-dev'"]);
+    expect((await confirmStoppedGenerations(db, [rigId], tmux.probeSession.bind(tmux))).ok).toBe(true);
     rigRepo.archiveRig(rigId);
     expect(db.prepare("SELECT archived_at FROM rigs WHERE id = ?").get(rigId))
       .toEqual({ archived_at: expect.any(String) });
@@ -768,13 +769,19 @@ describe("RigTeardownOrchestrator", () => {
 
   it.each([
     "error connecting to /other-caller/tmux-501/default (No such file or directory)",
+    // Synthetic Connection refused shape: real tmux 3.6a prints "no server running on ..." for a stale socket.
     "error connecting to /tmp/tmux-501/default (Connection refused)",
+    "error connecting to /tmp/no server running/tmux-501/default (Connection refused)",
+    "error connecting to /tmp/no server running/tmux-501/default (No such file or directory)",
     "permission denied: no server running on /tmp/tmux-501/default",
   ])("retains the binding when the server probe is uncertain: %s", async (cause) => {
     const { rigId, nodeId, sessionId } = seedRig();
     sessionRegistry.updateBinding(nodeId, { tmuxSession: "r01-dev" });
     const tmux = mockTmux();
-    tmux.probeSession = vi.fn(async () => ({ state: "transport_unavailable", cause }));
+    const adapter = new TmuxAdapter(async () => { throw new Error("unexpected legacy exec"); }, undefined, async () => {
+      throw Object.assign(new Error(`Command failed: /fixture/tmux has-session -t =r01-dev\n${cause}`), { execStderr: cause });
+    });
+    tmux.probeSession = vi.fn((name) => adapter.probeSession(name));
 
     const result = await buildTeardown(tmux).teardown(rigId, { delete: true });
 
@@ -783,6 +790,8 @@ describe("RigTeardownOrchestrator", () => {
     expect(rigRepo.getRig(rigId)).not.toBeNull();
     expect(sessionRegistry.getBindingForNode(nodeId)?.tmuxSession).toBe("r01-dev");
     expect(sessionRegistry.getSessionsForRig(rigId).find((session) => session.id === sessionId)?.status).toBe("running");
+    sessionRegistry.updateStatus(sessionId, "detached");
+    expect((await confirmStoppedGenerations(db, [rigId], tmux.probeSession.bind(tmux))).ok).toBe(false);
   });
 
   it("retains the binding if the tmux server vanishes between probe and kill", async () => {

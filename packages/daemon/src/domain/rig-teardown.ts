@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
-import type { TmuxAdapter, SessionProbe } from "../adapters/tmux.js";
+import { probeShowsNoServer, type TmuxAdapter, type SessionProbe } from "../adapters/tmux.js";
 import type { SnapshotCapture } from "./snapshot-capture.js";
 import type { EventBus } from "./event-bus.js";
 import { RigNotFoundError } from "./errors.js";
@@ -189,9 +189,7 @@ export class RigTeardownOrchestrator {
         try {
           const probe = await this.deps.tmuxAdapter.probeSession(session.sessionName);
           // This is the daemon's own tmux namespace, as in the import guard; a missing socket file is not enough.
-          absent = probe.state === "absent" || (probe.state === "transport_unavailable" &&
-            /no server running/i.test(probe.cause) &&
-            !/permission denied|operation not permitted|EACCES|EPERM/i.test(probe.cause));
+          absent = probe.state === "absent" || probeShowsNoServer(probe);
           if (probe.state !== "present" && !absent) {
             result.errors.push(`Could not confirm session '${session.sessionName}' is absent: ${probe.state === "transport_unavailable" ? probe.cause : probe.state}`);
             killFailures++;
