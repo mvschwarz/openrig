@@ -296,6 +296,41 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     });
   });
 
+  // A stalled claim's age is the stall's own: minutes since the latest meaningful change, floored as the "why" counts
+  // them. The claim time alone would count time spent parked, and rounding would drift a minute from the "why".
+  function ageTransitions(qitemId: string, minutesAgo: number[]): void {
+    const ids = db.prepare("SELECT transition_id FROM queue_transitions WHERE qitem_id = ? ORDER BY transition_id").all(qitemId) as Array<{ transition_id: number }>;
+    expect(ids).toHaveLength(minutesAgo.length);
+    ids.forEach(({ transition_id }, i) => db.prepare("UPDATE queue_transitions SET ts = ? WHERE transition_id = ?")
+      .run(new Date(Date.now() - minutesAgo[i]! * 60_000).toISOString(), transition_id));
+  }
+
+  it("claimed, parked, resumed, then quiet: the finding's headline and body count minutes since the resume, not since the claim", async () => {
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    await repo.update({ qitemId: row.qitemId, actorSession: "worker@r", state: "blocked", blockedOn: "external:vendor" } as never);
+    await repo.update({ qitemId: row.qitemId, actorSession: "worker@r", state: "in-progress" } as never);
+    ageClaim(row.qitemId, 77);
+    ageTransitions(row.qitemId, [78, 77, 76, 20]); // created, claimed, parked, resumed
+    expect(repo.getById(row.qitemId)!.pickup?.state).toBe("stalled-after-claim");
+    await runSweep();
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding!.summary).toBe(`Stuck sweep: stalled-after-claim on ${row.qitemId} (20 min)`);
+    expect(finding!.body).toContain("\nage: 20 min\n");
+    expect(finding!.body).toContain("no meaningful queue change for 20 min");
+  });
+
+  it("a stall of 30 min 40 s reads 30 min in the headline, the body and the why alike", async () => {
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    ageClaim(row.qitemId, 30 + 40 / 60);
+    await runSweep();
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding!.summary).toBe(`Stuck sweep: stalled-after-claim on ${row.qitemId} (30 min)`);
+    expect(finding!.body).toContain("\nage: 30 min\n");
+    expect(finding!.body).toMatch(/why: (claimed|no meaningful queue change for) 30 min/);
+  });
+
   it("UNDELIVERED HALF: a pending row whose nudge failed yields exactly one finding routed to the destination's orchestrator", async () => {
     const row = await mkRow();
     failNudge(row.qitemId);
