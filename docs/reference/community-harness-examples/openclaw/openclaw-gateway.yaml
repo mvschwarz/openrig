@@ -12,3 +12,4 @@ limits:
   - needs-input and approval prompts are read from the screen only
 names_conversation: true
 resume: true
+first_input: true

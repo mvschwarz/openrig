@@ -23,6 +23,13 @@ case "$name" in
   *) key="agent:main:$name" ;;
 esac
 
+# Preserve the file's exact bytes, including trailing newlines. A read error stops before the harness starts.
+if [ -n "${OPENRIG_FIRST_INPUT:-}" ]; then
+  first_input=$(cat "$OPENRIG_FIRST_INPUT" && printf '.')
+  first_input=${first_input%.}
+  set -- "$@" --message "$first_input"
+fi
+
 if [ -n "${OPENRIG_RESUME_REF:-}" ]; then
   if [ "$mode" = gateway ]; then
     params=$(KEY="$key" node -e 'process.stdout.write(JSON.stringify({ key: process.env.KEY, agentId: "main" }))')
