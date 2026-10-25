@@ -140,6 +140,20 @@ describe("a Codex seat's current envelope (offline, no native enforcement claim)
     expect(() => new NativePermissionStore(f.db).launchOverride(f.a.id, "codex")).toThrow(/both a Codex permission envelope and the full_bypass mode/);
   });
 
+  it("stays with the seat across a runtime switch, as Claude rules do, and a switch can't launch it beside a mode", async () => {
+    const f = fixture();
+    await f.service.setPermissions(set(lease));
+    const store = new NativePermissionStore(f.db);
+    // Leaving Codex: the envelope isn't the target runtime's.
+    expect(store.launchOverride(f.a.id, "claude-code", { selection: null, codexProfile: null })).not.toHaveProperty("codexPermissions");
+    // Back to Codex, inheriting policy: the seat's envelope applies again.
+    expect(store.launchOverride(f.a.id, "codex", { selection: null, codexProfile: null }))
+      .toEqual({ codexPermissions: lease, kernelAuthority: false, teamPermissionDefault: false });
+    // A switch that also selects a mode is refused, so the switch stops before anything changes rather than guess.
+    expect(() => store.launchOverride(f.a.id, "codex", { selection: { runtime: "codex", mode: "full_bypass" } as never, codexProfile: null }))
+      .toThrow(/both a Codex permission envelope and the full_bypass mode/);
+  });
+
   it("plans the envelope's flags in status, naming the posture it replaces and OpenRig's additions", async () => {
     const f = fixture();
     f.db.prepare("UPDATE nodes SET permission_policy = 'builtin:yolo', policy_origin = 'builtin', policy_launch_posture = 'full_bypass' WHERE id = ?").run(f.a.id);
