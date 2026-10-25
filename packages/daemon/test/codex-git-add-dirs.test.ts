@@ -8,6 +8,8 @@ import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 import { codexCommandResumeToken, observeCodexForkProcess, observeCodexPaneProcess } from "../src/domain/native-process-lineage.js";
 import { prepareCodexSeatFolder } from "../src/domain/codex-team-workspace.js";
+import { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
+import { resolveCodexGitAddDirs } from "../src/domain/codex-git-add-dirs.js";
 
 // Issue #121: in a linked git worktree `<cwd>/.git` is a FILE ("gitdir: ..."), so passing it to Codex as
 // `--add-dir` breaks the Linux sandbox for every command. These tests use real temporary Git repositories
@@ -233,6 +235,36 @@ describe("Codex seat folder add-dir (a seat keeps its LEARNED.md and recap writa
     const fork = await launchCommand(repo, { fork: true });
     expect(await observeCodexForkProcess({ target: "r01-qa", tmux: pane, listProcesses: () => row(fork),
       parentToken: "parent-thread" })).not.toBeNull();
+  });
+});
+
+// A restore after a reboot (`rig up --existing`) resumes through CodexResumeAdapter, not the launch adapter. It gets the
+// same git dirs a fresh launch gets, from the real resolver, so a restored seat can still commit.
+describe("Codex restore-path git add-dirs (a seat restored after a reboot keeps .git writable)", () => {
+  async function restoreCommand(cwd: string): Promise<string> {
+    const tmux = mockTmux();
+    await new CodexResumeAdapter(tmux, { resolveGitAddDirs: resolveCodexGitAddDirs, pollMs: 1, maxWaitMs: 1, sleep: async () => {}, listProcesses: () => [] })
+      .resume("dev@issue121-rig", "codex_id", "thread-1", cwd);
+    return vi.mocked(tmux.sendText).mock.calls[0]![1] as string;
+  }
+
+  it("an ordinary repository's restore adds <cwd>/.git, as its fresh launch does, after the conversation id", async () => {
+    const repo = ordinaryRepo();
+    const restore = await restoreCommand(repo);
+    expect(addDirs(restore)).toEqual(addDirs(await freshLaunchCommand(repo)));
+    expect(restore).toMatch(/ resume 'thread-1' --add-dir '[^']*\/\.git'$/);
+    // ps shows argv unquoted; the id is still read when the cwd has a space.
+    expect(repo).toContain(" ");
+    expect(codexCommandResumeToken(restore.slice(restore.indexOf("codex ")).replace(/'/g, ""))).toBe("thread-1");
+  });
+
+  it("a linked worktree's restore adds its worktree and common git dirs, never the .git file", async () => {
+    const { repo, worktree, worktreeGitDir } = linkedWorktree();
+    const dirs = addDirs(await restoreCommand(worktree));
+    expect(dirs).toEqual(addDirs(await freshLaunchCommand(worktree)));
+    expect(dirs).toContain(worktreeGitDir);
+    expect(dirs).toContain(nodePath.join(repo, ".git"));
+    expect(dirs).not.toContain(nodePath.join(worktree, ".git"));
   });
 });
 
