@@ -46,6 +46,30 @@ const AFTER_COMPACT = [...ABOVE, ...BOX].join("\n");
 const LIVE = "✻ Compacting conversation… (3s · ↓ 242 tokens)";
 const HIDDEN_WORK = [LIVE, ...Array.from({ length: 21 }, (_, i) => `  □ Pending task ${i + 1}`), ...BOX].join("\n");
 const HIDDEN_WORK_GLYPHS = [LIVE, "  ⎿  ◼ Running the migration", ...Array.from({ length: 20 }, (_, i) => `     ◻ Pending task ${i + 1}`), ...BOX].join("\n");
+// A seat streaming a reply taller than the window: Claude hides its status while it streams, and the reply's "●" is out of
+// view. From the same native run, during its restore reply and before that turn's Stop hook, with the path made generic.
+const STREAMING_REPLY = [
+  "  Status: FULL",
+  "  Ranges and reason: Read in this window.",
+  "  ────────────────────────────────────────",
+  "  Item: Pending marker restore-pending/worker@my-rig.json",
+  "  Status: FULL",
+  "  Ranges and reason: Whole file. Session, transcript and packet paths confirmed.",
+  "  ────────────────────────────────────────",
+  "  Item: post-compact-extra.md",
+  "  Status: FULL",
+  "  Ranges and reason: One line, read in full.",
+  "  ────────────────────────────────────────",
+  "  Item: Restore map RESTORE-MAP.md",
+  "  Status: FULL",
+  "  Ranges and reason: Whole file, all 5 sections, marker on last line.",
+  "  ────────────────────────────────────────",
+  "  Item: refocusing/SKILL.md",
+  "  Status:",
+  "  Ranges and reason:",
+  "",
+  ...BOX,
+].join("\n");
 const CLAUDE = { runtime: "claude-code" } as const;
 const BOUNDARY = { runtime: "claude-code", postCompactTurnBoundary: true } as const;
 
@@ -73,6 +97,11 @@ describe("the managed compaction's post-compaction turn boundary reads a just-co
       expect(classifyPaneActivity(pane, CLAUDE)).toMatchObject({ state: "unknown", reason: "no_activity_signal" });
       expect(classifyPaneActivity(pane, BOUNDARY)).toMatchObject({ state: "unknown", reason: "no_activity_signal" });
     }
+  });
+
+  it("a seat streaming a reply taller than the window stays unknown for the turn boundary", () => {
+    expect(classifyPaneActivity(STREAMING_REPLY, CLAUDE)).toMatchObject({ state: "unknown", reason: "no_activity_signal" });
+    expect(classifyPaneActivity(STREAMING_REPLY, BOUNDARY)).toMatchObject({ state: "unknown", reason: "no_activity_signal" });
   });
 });
 
@@ -114,11 +143,13 @@ describe("through the real send: the turn boundary reaches a just-compacted seat
     expect(sendText).toHaveBeenCalledTimes(1);
   });
 
-  it("the turn boundary isn't typed into a working seat whose task list hides its live status", async () => {
-    pane = HIDDEN_WORK;
-    const result = await transport.send("worker@my-rig", "OpenRig post-compaction turn boundary.",
-      { openrigNotice: true, waitForIdleMs: 50, readinessFromPaneOnly: true, postCompactTurnBoundary: true });
-    expect(result).toMatchObject({ ok: false, reason: "target_activity_unknown" });
+  it("the turn boundary isn't typed into a working seat whose task list or streaming reply hides its live status", async () => {
+    for (const working of [HIDDEN_WORK, STREAMING_REPLY]) {
+      pane = working;
+      const result = await transport.send("worker@my-rig", "OpenRig post-compaction turn boundary.",
+        { openrigNotice: true, waitForIdleMs: 50, readinessFromPaneOnly: true, postCompactTurnBoundary: true });
+      expect(result).toMatchObject({ ok: false, reason: "target_activity_unknown" });
+    }
     expect(sendText).not.toHaveBeenCalled();
   });
 });
