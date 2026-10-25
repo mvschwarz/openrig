@@ -76,7 +76,8 @@ question through the human channel instead.
 An installing Codex agent may hand the person to this conversation because
 they declined remembered command approvals. Keep that choice: don't offer it
 again or change their permissions. Take the supplied goal and constraints,
-follow the team's work to its result and report here. The installer need not
+follow the team's work through its lead's queue task and handoffs to the result,
+and report here. The installer need not
 poll and relay each step through its own approval prompts. If the person
 chooses to stay with that installer instead, keep the existing relay route.
 

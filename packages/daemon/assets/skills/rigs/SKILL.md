@@ -129,7 +129,7 @@ person needs in their project or home folder and name that path.
   way. The operator helps them pick a team that fits their logins, starts it (`rig up`) only on their yes to the plan it
   shows, and gives the goal to the team's lead. Before that yes, it says what launching into their folder changes for their own agent there; relay
   that with the question. Show them where the operator answers, and don't build the project yourself.
-- **Relay the operator's questions when the person stays here:** the operator asks in its own pane, and the person may not be looking there.
+- **Relay the operator's questions** unless the person declined the Codex offer below and explicitly chose the operator route: the operator asks in its own pane, and the person may not be looking there.
   After each step you hand it, read its screen with `rig capture <canonicalSessionName>`. When it asks the person
   something (start this team? which folder? which option?), ask them here in the operator's words and send their
   answer back with `rig send`, or tell them to answer in the operator's pane. Unlike a prompt or a menu, a question
@@ -190,7 +190,7 @@ offer, so the person sees the real file, not a placeholder:
 
 ## 3. Follow the work to its result
 
-Follow these steps when the person stays here. After a direct handoff, the operator owns this follow-through.
+Follow these steps by default. Only when the person declined the Codex offer above and explicitly chose the operator route does the operator own this follow-through.
 
 - **Find the team's task:** the operator gives the goal to the team's lead as a queue task: `dev-build@starter`, or
   `orch-lead` in `workshop` and `factory` (for starter and factory, `rig specs preview <name> --kind rig` says what
