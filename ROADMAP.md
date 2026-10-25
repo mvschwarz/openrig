@@ -6,22 +6,23 @@ This isn't a schedule or a promise: we release often, and an item ships when a g
 To see what's being worked on, by release and theme, open the [OpenRig roadmap board](https://github.com/users/mvschwarz/projects/1).
 Issues labelled `good first issue` are also listed on the [contribute page](https://github.com/mvschwarz/openrig/contribute).
 
-## Planned for 0.7.2
+## Released in 0.7.2
 
-- **Outside assistants over MCP (if ready):** Assistants such as ChatGPT and Claude Desktop find your team, delegate
-  work, follow it and get the results through a maintained MCP server, locally or over an authenticated network
-  connection.
-- **More harnesses as seats (if ready):** One plug-in point for other coding-agent CLIs, with Hermes, OpenClaw and
-  Cursor running as normal seats.
-- **Accounts (if ready):** Each seat can use its own provider account, and an agent can move one seat to another account
-  and keep its conversation.
-- **Subscriptions (if ready):** One Fleet agent manages two registered Codex subscriptions across two Linux machines, following
-  your standing preferences.
-- **Member permissions (if ready):** Each seat gets its own permission rules, even when seats share a project folder.
-- **Stream decisions (if ready):** Opt in, and observations on a rig's stream reach the work they belong to, with
-  visible results and effects you can recover.
-- **Named people in Slack (if ready):** Agents can address several named people in one Slack workspace, and each person
-  sees and answers their own requests.
+[0.7.2 is published](https://github.com/mvschwarz/openrig/releases/tag/v0.7.2).
+See its release notes for what shipped, upgrade instructions, contributor credits and the remaining testing gaps.
+
+Hermes and Cursor through the shared plug-in point were not included. The Codex counterpart to per-member Claude
+permission rules was not included either; that work has since merged on main in
+[#2048](https://github.com/mvschwarz/openrig/pull/2048). These follow-ups have no release promise here.
+
+## Active: 0.7.3 — people and agent teams through one gateway
+
+- **Participant foundation:** people and vetted shared channels, an explicit default, organization and groups, and readable policy.
+- **Attributed shared-channel conversations:** reach a support seat with who spoke, the configured role and policy, and the thread;
+  send answers back to that thread.
+- **Actions and perspective for the primary user:** see whose work needs attention and preserve who actually spoke or acted.
+
+These are the active themes, not claims that the changes have shipped or a release-date promise.
 
 ## How to help
 
