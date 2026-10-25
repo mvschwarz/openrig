@@ -568,6 +568,26 @@ describe("rig seat restart --keep-conversation: outcomes", () => {
     expect(r.remainingStep).not.toContain("didn't prove the conversation in time");
   });
 
+  // An in-place restart did restart the pane, so its result never repeats the adapter's "nothing was restarted",
+  // which stays true for a caller that restarted nothing.
+  const ready = "OpenAI Codex (v0.120.0)\n› Ask Codex to do anything";
+  const readyTmux = () => ({ getPanePid: async () => 901, getPaneCommand: async () => "codex", capturePaneScreen: async () => ready, capturePaneContent: async () => ready } as unknown as TmuxAdapter);
+  it.each([
+    ["unproven: no Codex process tied to the conversation", "codex", () => ({ threadId: "tok" })],
+    ["disproved: the records name another conversation", "codex resume tok", () => ({ threadId: "another-thread" })],
+  ] as const)("through the adapter, %s: the in-place result says the pane restarted and to check it", async (_case, command, evidence) => {
+    const adapter = new CodexRuntimeAdapter({ tmux: readyTmux(), fsOps: {} as never, sleep: async () => {}, resumeProofWindowMs: 40,
+      listProcesses: () => [{ pid: 901, ppid: 1, pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000", command }],
+      readResumeEvidence: evidence });
+    const launch = await adapter.verifyResumeInPane("impl", "tok");
+    // What every other caller shows is unchanged: the adapter's own result still says nothing was restarted.
+    expect(launch).toMatchObject({ ok: false, error: expect.stringContaining("The session was preserved; nothing was restarted.") });
+    const r = await report(launch);
+    expect(r.message).toMatch(/^The pane restarted: the original Codex exited and the resume started in the same pane, but /);
+    expect(r.message).toContain(`Check the pane with rig capture ${SEAT}.`);
+    expect(JSON.stringify(r)).not.toContain("nothing was restarted");
+  });
+
   // Round 4: the report's message, startupGate and step all describe the newest moment, through the real adapter.
   const UPDATING = ["✨ Update available! 0.120.0 -> 0.121.0", "Updating Codex..."].join("\n");
   const SKIPPABLE = ["✨ Update available! 0.120.0 -> 0.121.0", "› 1. Update now (runs `npm install -g @openai/codex`)", "  2. Skip", "  3. Skip until next version", "Press enter to continue"].join("\n");
