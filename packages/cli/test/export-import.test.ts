@@ -278,7 +278,7 @@ describe("rig export + import", () => {
     expect(output).not.toContain("optional-start.md");
   });
 
-  it.each(["copy", "existing", "symlink", "missing", "remote"].filter(mode => mode !== "symlink" || process.platform !== "win32"))("export: shares culture and explains nonportable refs/name (%s)", async mode => {
+  it.each(["copy", "existing", "symlink", "missing", "remote", "relative"].filter(mode => mode !== "symlink" || process.platform !== "win32"))("export: shares culture and explains nonportable refs/name (%s)", async mode => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "export-share-"));
     const source = path.join(root, "source"), out = path.join(root, "out"), outside = path.join(root, "outside");
     for (const dir of [source, out, outside]) fs.mkdirSync(dir);
@@ -287,7 +287,7 @@ describe("rig export + import", () => {
     if (mode !== "missing") fs.writeFileSync(path.join(source, "culture", "CULTURE.md"), bytes);
     if (mode === "existing") { fs.mkdirSync(path.join(out, "culture")); fs.writeFileSync(path.join(out, "culture", "CULTURE.md"), "recipient's file"); }
     if (mode === "symlink") fs.symlinkSync(outside, path.join(out, "culture"), "dir");
-    srv.exports.set("shared", { root: source, yaml: "version: '0.2'\nname: starter\nculture_file: culture/CULTURE.md\npods:\n  - id: main\n    members:\n      - id: lead\n        agent_ref: path:/author/agents/lead\n        runtime: codex\n        profile: default\n        cwd: .\n    edges: []\nedges: []\n" });
+    srv.exports.set("shared", { root: source, yaml: "version: '0.2'\nname: starter\nculture_file: culture/CULTURE.md\npods:\n  - id: main\n    members:\n      - id: lead\n        agent_ref: path:/author/agents/lead\n        runtime: codex\n        profile: default\n        cwd: .\n    edges: []\nedges: []\n".replace("path:/author/agents/lead", mode === "relative" ? "local:../../agents/x" : "path:/author/agents/lead") });
     try {
       const output = path.join(out, "rig.yaml");
       const client = new DaemonClient(`http://127.0.0.1:${port}`);

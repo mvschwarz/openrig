@@ -33,7 +33,8 @@ Export keeps the rig's name, including an old `starter` name; choose a descripti
 before sharing. `rig bundle create --name` names the archive, not the installed rig.
 For a local daemon, export copies the declared culture file from its recorded rig root and keeps any
 existing destination file. Check that file before sharing. A missing, inaccessible or remote source is
-reported for manual copying. Absolute agent refs are reported as nonportable: copy those agents and their
+reported for manual copying. If the daemon is reached through a localhost tunnel, copy the culture from
+that host and check it yourself. Agent refs outside the folder are reported as nonportable: copy those agents and their
 imports into the folder and use `local:` refs, or let `rig bundle create --rig-root <original-root>` vendor
 agents into an archive. To include an existing README, declare `docs: [{ path: README.md }]` in `rig.yaml`;
 export does not invent a README or its contents. Check the folder after these edits.

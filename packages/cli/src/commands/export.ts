@@ -90,8 +90,10 @@ export function exportCommand(depsOverride?: ExportDeps): Command {
             const pods = parsed["pods"] as Array<{ id?: string; members?: Array<{ id?: string; agent_ref?: string }> }> | undefined;
             for (const pod of Array.isArray(pods) ? pods : []) {
               for (const member of Array.isArray(pod.members) ? pod.members : []) {
-                if (typeof member.agent_ref === "string" && (member.agent_ref.startsWith("path:") || nodePath.isAbsolute(member.agent_ref.replace(/^local:/, "")))) {
-                  console.warn(`Warning: ${pod.id}.${member.id} has an absolute agent_ref and is not portable. Copy that agent and its imports into this folder and use local: refs before sharing, or use rig bundle create with the original --rig-root to vendor them into an archive.`);
+                const local = typeof member.agent_ref === "string" && member.agent_ref.startsWith("local:") ? nodePath.normalize(member.agent_ref.slice(6)) : null;
+                if (typeof member.agent_ref === "string" && (member.agent_ref.startsWith("path:") || nodePath.isAbsolute(member.agent_ref.replace(/^local:/, ""))
+                    || (local !== null && (local === ".." || local.startsWith(".." + nodePath.sep))))) {
+                  console.warn(`Warning: ${pod.id}.${member.id} has an agent_ref outside this folder and is not portable. Copy that agent and its imports into this folder and use local: refs before sharing, or use rig bundle create with the original --rig-root to vendor them into an archive.`);
                 }
               }
             }
