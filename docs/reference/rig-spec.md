@@ -190,6 +190,22 @@ edges:
 
 **Launching one spec under another name.** `rig up <spec> --name <rig>` creates the rig as `<rig>` instead of the spec's `name:`, so one spec can run as several rigs at once, for example `--name alpha` and `--name beta`, with seats `{pod}-{member}@alpha` and `{pod}-{member}@beta`. The spec file is not changed. The rig keeps the chosen name from then on: `rig ps`, `rig down alpha`, `rig up alpha --existing`, snapshots and restore all use it. The same checks as a launch without `--name` apply to the chosen name: a running rig of that name refuses the launch, and a stopped one is archived and replaced, as an explicit spec import does today. `--name` does not rename an existing rig, so the CLI refuses it with the name of an existing rig to restore, with a topology and with a GitHub bundle link. A library spec name works: `rig up starter --name beta` launches the library spec as `beta` even while a rig named `starter` exists. Over `--host`, pass the spec path or bundle file with `--name`. A spec that sets `services.project_name` refuses `--name`: every rig launched from it would share that Compose project, and `rig down` or a failed service boot of one would stop the others' services. Without `project_name`, each rig gets its own project. Two launches of the same spec started at the same moment can answer 409 (already in progress for this source) even under different names; start them one after the other.
 
+### Starting one materialized seat
+
+`rig import ./team.yaml --materialize-only` records the team without starting its harnesses.
+For a seat that has never started, use its positional logical ID:
+
+```bash
+rig launch <rig-id> dev.lead --json
+```
+
+This starts only that seat, preserving the rig's node IDs and the other seats. The daemon retains
+the materialized declaration and resolves its agent and startup files from the original source
+root at launch time; keep those files available. A prior snapshot isn't required. Seats with
+session history continue through restore. Explicit `--snapshot-id` and `--seats` use restore too.
+`--plan` previews restore selection; it requires a snapshot and does not preflight this first start.
+Rigs materialized by older daemons lack the retained declaration; this path doesn't retrofit them.
+
 ### Attaching a permission policy
 
 Attach a policy to a rig with `permission_policy`, either at the rig level or on a member:

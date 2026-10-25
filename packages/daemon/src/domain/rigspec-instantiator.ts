@@ -823,6 +823,14 @@ export class PodRigInstantiator {
           this.deps.rigRepo.addEdge(materializedRigId, fromId, toId, edge.kind);
         }
 
+        const layers = this.deps.rigRepo.getRigStartupLayers(materializedRigId) ?? { root: nodePath.resolve(rigRoot) };
+        this.deps.rigRepo.setRigStartupLayers(materializedRigId, { ...layers, materializedSources: [
+          ...(layers.materializedSources ?? []),
+          { root: nodePath.resolve(rigRoot), spec: rigSpec,
+            nodeIds: nodeResults.map(result => logicalIdToNodeId.get(result.logicalId)!),
+            ...(opts?.cwdOverride ? { cwdOverride: opts.cwdOverride } : {}) },
+        ] });
+
         persistedEvents.push(this.deps.eventBus.persistWithinTransaction({
           type: "topology.roster_recorded",
           rigId: materializedRigId,
@@ -881,6 +889,52 @@ export class PodRigInstantiator {
       }
       return { ok: false, code: "materialize_error", message: err instanceof Error ? err.message : String(err) };
     }
+  }
+
+  /** Ordinary single-seat launch can start a never-occupied materialized member.
+   * Reuse the original declaration and launch effect; history always stays on restore. */
+  async launchFirstMaterializedNode(rigId: string, nodeId: string): Promise<{
+    ok: boolean; rigId: string; nodeId: string; logicalId: string; code?: string;
+    error?: string; sessionName?: string; warnings?: string[];
+  } | null> {
+    const guard = this.deps.tmuxAdapter?.deliveryGuard;
+    if (guard && !guard.ownsLifecycle(nodeId)) {
+      return guard.lifecycle([nodeId], () => this.launchFirstMaterializedNode(rigId, nodeId));
+    }
+    const rig = this.deps.rigRepo.getRig(rigId);
+    const node = rig?.nodes.find(entry => entry.id === nodeId);
+    const source = this.deps.rigRepo.getRigStartupLayers(rigId)?.materializedSources?.find(entry => entry.nodeIds.includes(nodeId));
+    if (!rig || !node || !source) return null;
+    const pristine = () => !this.deps.sessionRegistry.getBindingForNode(nodeId)
+      && !this.deps.sessionRegistry.getSessionsForRig(rigId).some(session => session.nodeId === nodeId)
+      && !this.db.prepare("SELECT 1 FROM node_startup_context WHERE node_id = ?").get(nodeId);
+    if (!pristine()) return null;
+    const failure = (code: string, error: string) => ({ ok: false, rigId, nodeId, logicalId: node.logicalId, code, error });
+    const context = this.findMemberContext(source.spec, node.logicalId);
+    if (!context || context.member.agentRef !== node.agentRef || context.member.profile !== node.profile
+      || context.member.runtime !== node.runtime || (context.member.model ?? null) !== node.model
+      || (context.member.effort ?? null) !== node.effort) {
+      return failure("first_start_source_changed", "The seat differs from its materialized startup declaration; nothing was launched.");
+    }
+    const selected = { ...source.spec, name: rig.rig.name, pods: [{ ...context.pod, members: [context.member], edges: [] }], edges: [] };
+    const preflight = await preflightValidatedSpec(selected, { rigRoot: source.root, cwdOverride: source.cwdOverride,
+      fsOps: this.deps.fsOps, skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext(),
+      inheritedPermissionPolicy: this.inheritedPermissionPolicy(rigId), exec: this.deps.exec, claudeActivityAssets: this.deps.claudeActivityAssets });
+    if (!preflight.ready) return failure("preflight_failed", preflight.errors.join("; "));
+    const name = deriveCanonicalSessionName(context.pod.id, context.member.id, rig.rig.name);
+    if ((await this.deps.tmuxAdapter?.probeSession(name))?.state !== "absent") {
+      return failure("target_liveness_unknown", `Session "${name}" is present or could not be proved absent; nothing was launched.`);
+    }
+    const current = this.deps.rigRepo.getRig(rigId);
+    if (!pristine() || current?.rig.name !== rig.rig.name
+      || JSON.stringify(current.nodes.find(entry => entry.id === nodeId)) !== JSON.stringify(node)) {
+      return failure("selection_changed", "The seat changed during first-start checks; inspect it before launching.");
+    }
+    const result = await this.launchBinding({ rigId, rigSpec: { ...source.spec, name: rig.rig.name }, rigRoot: source.root,
+      pod: context.pod, member: context.member, qualifiedId: node.logicalId, nodeId, cwdOverride: source.cwdOverride });
+    return { ok: result.status === "launched", rigId, nodeId, logicalId: node.logicalId,
+      ...(result.status !== "launched" ? { code: result.status, error: result.error } : {}),
+      sessionName: result.sessionName, warnings: [...preflight.warnings, ...(result.warnings ?? [])] };
   }
 
   async launchMaterialized(
