@@ -627,6 +627,10 @@ export class TmuxAdapter {
    * A failed/uncertain call retains its private file: it may not have been consumed yet.
    */
   private async runEnvironmentCommand(argv: string[], legacy?: string, startServer = false): Promise<string> {
+    // psmux 3.4 has one server per session; `start-server ; source-file` does
+    // not execute new-session from the file. Retain its literal argv transport.
+    // Native environment values therefore retain the experiment's argv visibility.
+    if (this.terminalKind === "psmux") return this.run(argv, legacy);
     const file = this.fileOps.tmpName();
     await this.fileOps.writeFile(file, (legacy ?? posixJoinArgv(argv)).slice("tmux ".length) + "\n", { mode: 0o600, flag: "wx" });
     const output = await this.run(["tmux", ...(startServer ? ["start-server", ";"] : []), "source-file", file]);

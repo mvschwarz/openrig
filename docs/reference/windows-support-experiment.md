@@ -23,6 +23,12 @@ provider acceptance. The new upstream per-seat Claude token launch step remains
 POSIX-specific and is not exercised by this Windows experiment. Local fleet policy
 and recovery overlays are separate from this public branch.
 
+The upstream empty-server `start-server; source-file` environment transport does
+not create a session on psmux 3.4.0. The native branch retains direct literal argv
+transport; environment values retain the experiment's command-line visibility,
+so the POSIX private-file environment protection is not claimed for psmux.
+A transport regression plus both real psmux multiline/argv tests passed (3 tests).
+
 ## Historical main audit, 2026-10-21
 
 The experiment is rebased onto main `3657af0b59e82d6b3fb1c136eb7da28ac8ed6ad0`.
