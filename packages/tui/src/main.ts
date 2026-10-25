@@ -160,7 +160,7 @@ async function run(): Promise<void> {
   }
   function enableLive(): boolean {
     if (!live || !client || startup?.state.connection !== "up") return false;
-    if (!liveEnabled) checkDaemonBuild();
+    if (!liveEnabled) { checkDaemonBuild(); openChosenDefaultFeed(); }
     liveEnabled = true;
     if (!buildMismatch) activityEvents ??= subscribeActivityEvents({ open: () => client.openActivityEvents(), onEvent: (event) => { if (event.type.startsWith("proof.")) reviewCache.clear(); live.pushed(); }, onStatus: (status) => {
       if (status === "dropped") eventsDropped = true;
@@ -169,14 +169,15 @@ async function run(): Promise<void> {
     } });
     return true;
   }
-  // Once, at startup: the chosen default person's Feed opens first (see opensOnDefaultFeed).
+  // Once, when the TUI first reaches the daemon, whichever startup path gets there: the chosen default person's Feed opens
+  // first, only for someone who hasn't touched anything since the TUI started (see opensOnDefaultFeed).
   let defaultFeedChecked = false;
   function openChosenDefaultFeed(): void {
     if (defaultFeedChecked || !client) return;
     defaultFeedChecked = true;
-    const revision = inputRevision;
+    if (inputRevision !== 0) return;
     void client.humanAttention(null, "default").then((read) => {
-      if (!opensOnDefaultFeed(read as AttentionRead | null, view.get(), revision === inputRevision)) return;
+      if (!opensOnDefaultFeed(read as AttentionRead | null, view.get(), inputRevision === 0)) return;
       view.dispatch({ type: "jump", section: "needs" });
       draw();
       void live?.refresh();
@@ -249,7 +250,7 @@ async function run(): Promise<void> {
       draw();
       // Skip during the probe must remain skipped, but can start reads when
       // the connection later answers. This never changes the chosen page.
-      if (!startup?.state.open && startup?.state.connection === "up" && !liveEnabled && enableLive()) { void live?.refresh(); openChosenDefaultFeed(); }
+      if (!startup?.state.open && startup?.state.connection === "up" && !liveEnabled && enableLive()) void live?.refresh();
     },
     onHelp: () => { view.dispatch({ type: "palette-open" }); draw(); },
     readLocal: (request) => readLocal(cliEntry, request),

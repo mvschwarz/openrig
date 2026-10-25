@@ -94,7 +94,7 @@ export const COMMAND_REGISTRY: readonly CommandEntry[] = [
   { name: "terminal", aliases: [], args: "<view>", description: "open a rig:name, pod:rig/pod, mission:id, slice:id or saved:id view in a new terminal (Rex, Herdr or plain tmux)", context: "standard", sample: "terminal rig:example",
     complete: ({ snapshot }) => snapshot.hosts.flatMap((h) => h.rigs.map((r) => `rig:${r.name}`)),
     build: view => view ? ({ type: "act", act: "open-terminal", view }) : ({ type: "error", message: "terminal needs a view, for example rig:<name>" }) },
-  { name: "reply", aliases: [], args: "<your words>", description: "answer the open Feed request in your own words, as the person it's addressed to; it goes back to the asker", context: "standard", sample: "reply Ship it on Friday",
+  { name: "reply", aliases: [], args: "<your words>", description: "answer or resolve the open Feed request in your own words, as the primary user (it records whose ask it was); it goes back to the asker", context: "standard", sample: "reply Ship it on Friday",
     build: text => text.trim() ? ({ type: "attention-reply", text }) : ({ type: "error", message: "reply needs your answer, for example reply Ship it on Friday" }) },
   { name: "whose", aliases: [], args: "<person|all|default>", description: "choose whose queue the Feed shows: one person's, everyone's, or the default person's; you still act as the primary user", context: "standard", sample: "whose default",
     complete: () => ["default", "all"],

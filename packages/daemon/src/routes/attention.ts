@@ -11,8 +11,7 @@ import { listProjects, insideProject, projectMission, type ProjectRead } from ".
 import { readMissionReadiness } from "../domain/proof/judgments.js";
 import { WorkflowInstanceStore } from "../domain/workflow-instance-store.js";
 import { WorkflowStepTrailLog } from "../domain/workflow-step-trail-log.js";
-import { resolveDefaultPerson } from "../domain/gateway/participants.js";
-import { resolveRegisteredHumanAddress } from "../domain/gateway/human-registry.js";
+import { feedPerspective } from "../domain/feed-perspective.js";
 
 export function attentionRoutes(): Hono {
   const app = new Hono();
@@ -33,32 +32,10 @@ export function attentionRoutes(): Hono {
     } catch (e) { unavailable("project catalog", e); }
     const queue = c.get("queueRepo" as never) as QueueRepository | undefined;
     const posture = c.get("operatingPosture" as never) as OperatingPostureService | undefined;
-    // The Feed's perspective, whose queue it shows (`view`: a person, `default` or `all`). A view, never an identity: acts on
-    // what it shows carry the primary user's authority, the person at the terminal, whoever's queue it is. With no person
-    // registered the Feed is as before.
-    const registry = queue?.humanRegistry();
-    const entities = registry?.ok ? registry.entities : [];
-    if (entities.length) {
-      const person = (session: string | null | undefined) => resolveRegisteredHumanAddress(session, entities);
-      const requested = c.req.query("view")?.trim() || undefined;
-      // The primary user is the default person: the participants file's `default`, else the only registered person.
-      const primaryUser = resolveDefaultPerson(entities);
-      const primary = primaryUser.person?.address ?? null;
-      const named = requested !== undefined && requested !== "all" && requested !== "default";
-      const chosen = named && requested ? person(requested) ?? person(`${requested}@external`) : null;
-      const viewing = requested === "default" ? primary : chosen;
-      const basis: NonNullable<AttentionRead["perspective"]>["basis"] = requested === "default" ? (primary ? "default" : "all")
-        : named ? (chosen ? "chosen-here" : "unknown") : "all";
-      result.perspective = { viewing, basis, ...(basis === "unknown" ? { requested } : {}), defaultSource: primaryUser.source,
-        actingAs: { person: primary, authority: "primary-user" } };
-      // A person's items are in their view. Items for no registered person (instance facts, a bare human seat) are the
-      // primary user's, so they're in theirs.
-      if (basis === "unknown") inView = () => false;
-      else if (basis !== "all") inView = recipient => {
-        const owner = person(recipient);
-        return owner ? owner === viewing : viewing === primary;
-      };
-    }
+    // The Feed's perspective, whose queue it shows (`view`). With no person registered the Feed is as before.
+    const view = feedPerspective(queue, c.req.query("view"));
+    if (view.perspective) result.perspective = view.perspective;
+    inView = view.inView;
     try {
       if (!queue) throw new Error("Queue repository unavailable");
       const rows = queue.listAttention({ limit: 1001 });

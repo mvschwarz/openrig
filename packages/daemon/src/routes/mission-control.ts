@@ -376,7 +376,8 @@ export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
       // RE-STAMP X-OpenRig-Session from THIS daemon's derived actor (`identity.session`, from the
       // chokepoint above) + mark relay provenance — the origin derives the RE-STAMPED actor, never the
       // forwarded body claim (the census's #5/#17 forward sites).
-      const { hostId: _dropped, actorSession: _claim, ...forwardBody } = body as Record<string, unknown>;
+      // The primary user's authority is the terminal's here, never forwarded: the origin sees this daemon's identity.
+      const { hostId: _dropped, actorSession: _claim, authority: _authority, ...forwardBody } = body as Record<string, unknown>;
       const res = await remoteJsonRequest(resolved.host, "/api/mission-control/action", {
         method: "POST",
         body: forwardBody,

@@ -162,7 +162,8 @@ export class DaemonClient {
     return data;
   }
 
-  humanUpdates() { return this.get("/api/queue/human-updates?limit=20"); }
+  /** Delivered updates, in the same Feed view as the asks (`view`). */
+  humanUpdates(view?: string | null) { return this.get(`/api/queue/human-updates?limit=20${view ? `&view=${encodeURIComponent(view)}` : ""}`); }
   connections() { return this.get("/api/gateway/connections"); }
   slackManifest() { return this.get("/api/gateway/slack/manifest"); }
 

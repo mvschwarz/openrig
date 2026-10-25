@@ -401,7 +401,7 @@ export async function hydrateSnapshot(
   if (viewContext?.section === "needs") {
     const [attention, updates, roots] = await Promise.all([
       safe<NonNullable<FleetSnapshot["attentionRead"]>>("Feed", () => client.humanAttention(viewContext.attentionOpen, viewContext.attentionView ?? "default")),
-      safe<DeliveredHumanUpdates>("delivered updates", () => client.humanUpdates()),
+      safe<DeliveredHumanUpdates>("delivered updates", () => client.humanUpdates(viewContext.attentionView ?? "default")),
       safe<Awaited<ReturnType<DaemonClient["fileRoots"]>>>("file-roots", () => client.fileRoots()),
     ]);
     const attentionRead = composeHumanUpdates(attention, updates, viewContext.attentionOpen);

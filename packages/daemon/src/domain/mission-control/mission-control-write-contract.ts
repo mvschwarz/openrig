@@ -157,7 +157,9 @@ export class MissionControlWriteContract {
     }
 
     const source = this.requireMutableQitem(input.qitemId);
-    const acting = this.asActor(input, this.queueRepo.isPersonAddress(source.destinationSession) ? source.destinationSession : null);
+    // Whose ask this settles: the person a row is parked on, else a person it's addressed to.
+    const parkedOn = source.state === "blocked" && source.blockedOn && isHumanSeatSessionRef(source.blockedOn) ? source.blockedOn : null;
+    const acting = this.asActor(input, parkedOn ?? (this.queueRepo.isPersonAddress(source.destinationSession) ? source.destinationSession : null));
     input = acting.input;
 
     if ((input.verb === "route" || input.verb === "handoff") && !input.destinationSession) {

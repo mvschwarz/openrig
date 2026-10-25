@@ -33,6 +33,7 @@ import type Database from "better-sqlite3";
 import { HumanModeService } from "../domain/gateway/human-operating-modes.js";
 import type { HumanQuestion } from "../domain/human-questions.js";
 import { queryLimit, SQL_LIMIT_BOUND } from "./query-limit.js";
+import { feedPerspective } from "../domain/feed-perspective.js";
 
 /**
  * Coordination L3 — Queue HTTP routes (PL-004 Phase A).
@@ -1109,8 +1110,13 @@ export function queueRoutes(): Hono {
   app.get("/human-updates", (c) => {
     const raw = Number(c.req.query("limit") ?? 20);
     if (!Number.isInteger(raw) || raw < 1 || raw > 100) return c.json({ error: "limit must be an integer from 1 to 100" }, 400);
-    const rows = getRepo(c).listDeliveredHumanUpdates({ limit: raw + 1 });
-    return c.json({ items: rows.slice(0, raw), limit: raw, truncated: rows.length > raw });
+    // With `view`, only the updates in that Feed view (the same rule as /api/attention's), read from the widest window; a
+    // full window means more of them may be older than it.
+    const { perspective, inView } = feedPerspective(getRepo(c), c.req.query("view"));
+    const window = getRepo(c).listDeliveredHumanUpdates({ limit: perspective ? 101 : raw + 1 });
+    const rows = window.filter((row) => inView(row.destinationSession));
+    return c.json({ items: rows.slice(0, raw), limit: raw, truncated: rows.length > raw || (perspective !== undefined && window.length > 100),
+      ...(perspective ? { perspective } : {}) });
   });
 
   app.get("/list", (c) => {

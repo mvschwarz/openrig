@@ -73,6 +73,10 @@ person at the terminal unnamed. Whatever the TUI shows, its acts are theirs.
   user's authority, one registered person can't answer, approve, deny or resolve what was asked of another; that's
   refused (`answer_not_recorded`) and nothing changes.
 - With no one registered, the TUI and its acts are as before.
+- **Where the authority applies:** only on a request that carries no seat identity header, which is how the TUI calls
+  the daemon. Seats and the CLI send that header, so their acts stay theirs. This is the existing trusted-network
+  distinction, not an authentication check: a request that leaves the header out is taken as the terminal's, as any
+  such request already is.
 
 ## Where it's stored
 

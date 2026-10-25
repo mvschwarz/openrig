@@ -138,7 +138,8 @@ export function opensOnDefaultFeed(read: AttentionRead | null | undefined, state
 function feedTitle(p: AttentionRead["perspective"]): string {
   if (!p) return "FEED · Instance / All humans";
   const viewing = p.basis === "unknown" ? `no registered person "${p.requested}"` : p.viewing ?? "everyone";
-  return `FEED · Viewing ${viewing} · you act as ${p.actingAs.person ?? "the primary user"}`;
+  // One person's queue leaves others' asks out of view: say how to see everyone's.
+  return `FEED · Viewing ${viewing} · you act as ${p.actingAs.person ?? "the primary user"}${p.viewing ? " · whose all shows everyone" : ""}`;
 }
 
 /** The `reply` command on the open request: the person's own words, answered on that row as the person the Feed served. */
