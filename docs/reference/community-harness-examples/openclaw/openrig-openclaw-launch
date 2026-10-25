@@ -1,38 +1,70 @@
 #!/bin/sh
-# A reference launcher for OpenClaw's CLI as an OpenRig community harness. Copy it, own it, and change it: OpenRig
-# doesn't ship or run it. It follows docs/reference/community-harness-presets.md (`names_conversation`):
-#   - a new launch (OPENRIG_CONVERSATION set): OpenClaw's local chat starts on the session key OpenRig named;
-#   - a resume (OPENRIG_RESUME_REF set): it first checks that this seat's sessions list the key, and stops if they
-#     don't, so a gone conversation isn't quietly recreated under its old key.
-# It runs `openclaw chat` (the TUI with --local): the agent runs in the seat's own pane, with no Gateway. Arguments after
-# the launcher's name go to every launch and resume alike.
+# Reference launcher for OpenClaw 2026.10.6 (fe06181), not installed by OpenRig.
+# Each seat owns its client state and uses the main agent. OpenRig's opaque name maps to its full native key.
+# --gateway selects an existing Gateway configured for this client; the default is an embedded local agent.
+# Resume checks that exact key at its owner; an unavailable lookup is not a missing conversation.
 set -eu
 
 openclaw="${OPENRIG_OPENCLAW:-openclaw}"
-
-# Each seat gets its own OpenClaw state folder: --local needs it to itself, and seats don't share sessions.
-# Its provider settings and credentials come from that folder's config or the environment, not the person's ~/.openclaw.
+mode=local
+if [ "${1:-}" = --gateway ]; then mode=gateway; shift; fi
 OPENCLAW_STATE_DIR="${OPENRIG_HOME:-$HOME/.openrig}/state/openclaw/${OPENRIG_NODE_ID:-${OPENRIG_SESSION_NAME:-default}}"
 export OPENCLAW_STATE_DIR
 mkdir -p "$OPENCLAW_STATE_DIR"
 
+name="${OPENRIG_RESUME_REF:-${OPENRIG_CONVERSATION:-}}"
+if [ -z "$name" ]; then
+  echo "openrig-openclaw-launch: OpenRig passed no conversation name; is names_conversation set in the preset?" >&2
+  exit 2
+fi
+case "$name" in
+  agent:main:*) key="$name" ;;
+  agent:*) echo "openrig-openclaw-launch: this example supports only the main OpenClaw agent" >&2; exit 2 ;;
+  *) key="agent:main:$name" ;;
+esac
+
+# Preserve the file's exact bytes, including trailing newlines. A read error stops before the harness starts.
+if [ -n "${OPENRIG_FIRST_INPUT:-}" ]; then
+  first_input=$(cat "$OPENRIG_FIRST_INPUT" && printf '.')
+  first_input=${first_input%.}
+  set -- "$@" --message "$first_input"
+fi
+
 if [ -n "${OPENRIG_RESUME_REF:-}" ]; then
-  key="$OPENRIG_RESUME_REF"
-  # A key may be stored bare or as agent:<id>:<key>; either counts as this conversation.
-  if ! "$openclaw" sessions --json --limit all | KEY="$key" node -e '
+  if [ "$mode" = gateway ]; then
+    params=$(KEY="$key" node -e 'process.stdout.write(JSON.stringify({ key: process.env.KEY, agentId: "main" }))')
+    if listing=$("$openclaw" gateway call sessions.describe --params "$params" --json); then listed=true; else listed=false; fi
+  else
+    if listing=$("$openclaw" sessions --agent main --json --limit all); then listed=true; else listed=false; fi
+  fi
+  if [ "$listed" = false ]; then
+    echo "openrig-openclaw-launch: this seat's OpenClaw sessions couldn't be listed; not starting" >&2
+    exit 4
+  fi
+  if printf '%s' "$listing" | KEY="$key" MODE="$mode" node -e '
     let raw = ""; process.stdin.on("data", (chunk) => { raw += chunk; });
     process.stdin.on("end", () => {
-      const key = process.env.KEY;
-      const sessions = JSON.parse(raw).sessions || [];
-      process.exit(sessions.some((s) => s.key === key || String(s.key).endsWith(`:${key}`)) ? 0 : 1);
+      try {
+        const data = JSON.parse(raw);
+        if (process.env.MODE === "gateway") {
+          if (data.session === null) process.exit(3);
+          process.exit(data.session?.key === process.env.KEY ? 0 : 4);
+        }
+        const { sessions } = data;
+        if (!Array.isArray(sessions)) process.exit(4);
+        process.exit(sessions.some((s) => s?.agentId === "main" && s.key === process.env.KEY) ? 0 : 3);
+      } catch { process.exit(4); }
     });'; then
-    echo "openrig-openclaw-launch: this seat's OpenClaw sessions don't list \"$key\" (or couldn't be listed); not starting a new one under that key" >&2
-    exit 3
+    :
+  else
+    result=$?
+    if [ "$result" -eq 3 ]; then
+      echo "openrig-openclaw-launch: this seat's OpenClaw sessions don't list \"$key\"; not starting a new one under that key" >&2
+    else
+      echo "openrig-openclaw-launch: this seat's OpenClaw sessions couldn't be listed; not starting" >&2
+    fi
+    exit "$result"
   fi
-  exec "$openclaw" chat --session "$key" "$@"
 fi
-if [ -n "${OPENRIG_CONVERSATION:-}" ]; then
-  exec "$openclaw" chat --session "$OPENRIG_CONVERSATION" "$@"
-fi
-echo "openrig-openclaw-launch: OpenRig passed no conversation name; is names_conversation set in the preset?" >&2
-exit 2
+if [ "$mode" = gateway ]; then exec "$openclaw" tui --session "$key" "$@"; fi
+exec "$openclaw" tui --local --session "$key" "$@"

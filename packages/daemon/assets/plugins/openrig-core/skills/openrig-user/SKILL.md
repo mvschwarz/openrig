@@ -94,10 +94,23 @@ rig queue handoff <qitem-id> \
 
 A queue write (`create`, `claim`, `update`, `handoff`, `handoff-and-complete`) answers with the row it wrote; a
 handoff answers with the closed row and its successor. When that answer shows what you need to establish, use it.
-Read back (`rig queue show <id> --full --json`, or `rig queue transitions <id>`) when it doesn't, for example:
 
-- the outcome was INDETERMINATE (a transport failure, or a 502 `remote_queue_write_failed`), or the write warned
-  `qitem_body_not_saved` (an existing row came back). Reconcile by the original ID before any retry;
+`create` also prints `Queue create request ID: <id> (not proof of persistence)` on stderr *before* it sends the write,
+so an interrupted create can be reconciled. That ID names a request, not a row. The row is the `qitemId` on stdout
+when the command exits 0. A non-zero exit means no row was confirmed, even when stdout carries a `qitemId`: an
+indeterminate answer repeats the request ID so you can reconcile by it. Don't merge stderr into stdout and keep the
+first `qitem-…` you find there; a refused create prints its request ID first, too.
+
+Read back (`rig queue show <id> --full --json`, or `rig queue transitions <id>`) when the answer doesn't show what you
+need, for example:
+
+- the outcome was INDETERMINATE (a transport failure, or a 502 `remote_queue_write_failed` that may have reached the
+  other host), or the write warned `qitem_body_not_saved` (an existing row came back). Reconcile by the original ID
+  before any retry. A 502 whose `failureClass` is `unknown-host`, `unsupported-transport` or `registry` isn't
+  indeterminate: the daemon refused before contacting any host and wrote nothing (`create` says "No row was
+  created"). `unsupported-transport` means that host entry is SSH-declared. Use the http entry for the same machine
+  from `rig host list`; if there isn't one, add it with that machine's daemon URL (`rig host add --id <id>
+  --transport http --url <daemon-url>`), asking whoever runs that host for the URL;
 - the output was compact or truncated and the field you need isn't in it (the compact receipt shows `bodyBytes`, not
   the body, and its footer names what it left out);
 - you need a transition note, a closure or blocker detail, or a successor that the output you saw omits;
@@ -984,6 +997,68 @@ rig auth seats … --runtime codex         # seat -> profile registry (metadata 
 
 **Hard secret boundary:** no token value is ever printed, logged, queued, streamed, or committed; status/validate report presence/mode/login-state only; seat labels are metadata, not live-account proof. MVP is `--runtime codex`; other runtimes use the same surface with a different `--runtime`, never a parallel command.
 
+### Give a seat its own Claude or Codex account
+
+A runtime's login lives in its home: Claude Code's in its config dir (`CLAUDE_CONFIG_DIR`, default `~/.claude`), Codex's
+in `CODEX_HOME` (default `~/.codex`). A seat that names its own home in `env:` runs on that home's login.
+
+1. **Prepare the home once, natively,** in a terminal: `CLAUDE_CONFIG_DIR=/abs/path claude`, then `/login`; or
+   `CODEX_HOME=/abs/path codex login`. The person signs in; never copy credential files between homes.
+2. **Name it in the member's `env:`** in `rig.yaml`, not with `rig up --env`, which leaves these two out
+   (`CLAUDE_CONFIG_DIR: /abs/path` or `CODEX_HOME: /abs/path`), or in
+   the rig's `env:` for every seat of that runtime. The member's value wins. It must be an absolute path: any other
+   value is reported and ignored, and the seat keeps the daemon's home.
+3. **It takes effect at the seat's next launch** (a fresh launch, restore or handover); a running seat keeps the home
+   it started with. A conversation saved under the old home doesn't resume from the new one.
+4. **Check it:** `rig seat status <seat>` shows the home and where it came from, and `rig provider status` lists it as
+   the seat's configured account. Both say what's configured, not which login a running session holds.
+
+Seats may share a home. OpenRig writes its own settings (Codex hooks, managed `config.toml` and plugin; Claude's
+first-run trust settings) into the seat's home.
+
+### Move one Codex seat to another login
+
+For a Codex seat on Linux. The login must already be saved in the Codex home the seat runs on (`rig seat status <seat>`
+shows it). Other operating systems, and moving a seat to another home, aren't supported by this command yet: say so instead
+of improvising. A Claude seat moves differently; see the next section.
+
+1. **Save each login once, in that home:** `CODEX_HOME=<home> codex login` (the person signs in), then
+   `CODEX_HOME=<home> rig auth save <name>`. `rig auth list --codex-home <home>` lists them.
+2. **Check:** `rig provider precheck --seat <seat> --to-account <name>` shows the home, what the seat is doing, and every
+   peer on that home. A refusal says what's missing, and nothing changes.
+3. **Move:** `rig provider switch --seat <seat> --to-account <name>`. It saves the home's current login as
+   `before-switch-<time>`, activates the chosen one, and restarts the seat in place on the same conversation. If the
+   current login can't be saved first, nothing changes. Peers on the home aren't restarted. Each keeps its current login
+   only until its next token refresh, when Codex stops it with "signed in to another account". Run the printed
+   `rig seat restart <peer> --keep-conversation --reason "..."` for each to move it too. Don't sign in again in that home: that replaces
+   the login you just switched to.
+4. **Confirm:** after the seat completes a real tool-using turn, run the printed
+   `rig seat restart <seat> --keep-conversation --verify --expect-account <its Account line>`. Until then the move is
+   unconfirmed. An uncertain restart is reported; never restart it a second time.
+
+### Move one Claude seat to its own subscription token
+
+The seat keeps its config dir and gets its own `CLAUDE_CODE_OAUTH_TOKEN`, read from a file as Claude starts. OpenRig keeps only
+the file's path and your label, never the token.
+
+1. **Prepare the token once:** the person runs `claude setup-token`, which prints a one-year subscription token, and saves it to a
+   file only their user can read (`chmod 600`). Never paste the token into a message, a row or a command line.
+2. **Check:** `rig provider precheck --seat <seat> --to-account <label> --token-file <absolute path>`. It refuses, changing
+   nothing, if the file wouldn't apply, the seat isn't running, or something Claude Code ranks above the token is set (a cloud
+   provider, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, an `apiKeyHelper`). It names each one and how to remove it for that
+   seat. When the token applies, the launch unsets those names for Claude's process, so the pane shell's own exports can't
+   outrank it. Managed settings can't be read; the seat's `/status` shows what it actually uses.
+3. **Move:** `rig provider switch --seat <seat> --to-account <label> --token-file <absolute path>`. It takes a snapshot that
+   resumes the seat's conversation, sets the reference, and relaunches the seat from that snapshot in its own pane: the pane
+   and its scrollback stay, but work in flight when Claude ended doesn't carry over. Seats sharing the config dir keep their
+   own login. `--stored-login` moves the seat back; if the seat still receives a `CLAUDE_CODE_OAUTH_TOKEN`, Claude uses that
+   instead of the stored login, and the report names it.
+4. **Confirm:** after the seat completes a real tool-using turn, its `/status` shows token auth, with no account email. The
+   label is yours, not an account Claude observed: say so. A token session can't use claude.ai connectors or Remote Control.
+   The token is in Claude's environment, so the tools, hooks and MCP servers it starts inherit it; don't have it print its
+   environment. A relaunch that didn't resume reads unknown, with its recovery command; never run the switch again for it.
+   `rig seat status <seat>` shows the reference, and says when its file won't apply at the next launch.
+
 ### Manage subscriptions across a fleet (when the person asks you to)
 
 **This applies only when the person has asked you to manage their subscriptions.** Otherwise, don't take this job on. Installing or upgrading OpenRig appoints no agent, launches no bundle and starts no
@@ -1009,7 +1084,8 @@ and there's no threshold to obey.
 - **The Observatory is optional:** it can show readings, but you don't need it to rotate.
 
 **The unit is a Codex home, with every seat on it.** Moving some seats on a shared home to a different account, and
-moving Claude seats, aren't supported moves yet: say so instead of improvising.
+moving Claude seats, aren't supported moves yet: say so instead of improvising. A Codex seat with a home of its own
+moves alone, with `rig provider switch --seat` (above).
 
 0. **Load the person's account policy.**
    - It's the context pack named `account-policy`: check `rig context list` for it, then read it with
@@ -1548,20 +1624,24 @@ rig mcp token list [--json]
 rig mcp token revoke <name>
 ```
 
-The 34 shipped tools fall into three groups. Over stdio, and over HTTP with no grants, every tool is offered. An HTTP
+The 36 shipped tools fall into three groups. Over stdio, and over HTTP with no grants, every tool is offered. An HTTP
 grant offers the work tools; the workspace tools with `--workspace` or `--owner`; and the owner tools only with
 `--owner`, which offers every tool.
-- **Work (17):** orientation, communication and the durable work loop.
+- **Work (19):** orientation, communication and the durable work loop.
   - `rig_whoami`: the seat the server acts as (rig, pod, peers, edges) and the `caller`: authenticated (an HTTP
     credential, with its principal) or declared (`OPENRIG_SESSION_NAME` where the server was configured, which nothing
     verifies).
   - `rig_status`, `rig_ps`, `rig_rig_nodes`, and `rig_team`: a rig's lead (its one `delegates_to` root, the seat to
     delegate to) and each seat's role, delegation and activity.
   - `rig_send`, `rig_capture`, `rig_chatroom_send`, `rig_chatroom_watch`.
-  - `rig_queue_create`, `rig_queue_show`, `rig_queue_list`, `rig_queue_claim`, `rig_queue_update`:
+  - `rig_queue_create`, `rig_queue_show`, `rig_queue_list`, `rig_queue_claim`, `rig_queue_update`,
+    `rig_queue_handoff`, `rig_queue_unclaim`:
     - `revises` on create asks for a linked revision of an earlier item;
     - show names a handed-off item's successor;
-    - `handedOffFrom` on list follows a handoff.
+    - `handedOffFrom` on list follows a handoff;
+    - handoff passes an item this seat holds on to the next seat in one step, as `rig queue handoff` does: the new item
+      carries the work's lineage;
+    - unclaim puts back a claimed item this seat won't finish.
   - `rig_artifact_read`: a finished item's artifact (its `evidenceRef`) or a named file, through the daemon's shared
     roots (`OPENRIG_FILES_ALLOWLIST`), in windows (`offset`, `nextOffset`). Outside those roots it answers unavailable
     rather than reading a local path.
@@ -1623,7 +1703,8 @@ use the `rig` CLI instead, the same way.
    assignee records it, and `rig_artifact_read` reads an artifact it names. A call that times out has an unknown
    outcome: check `rig_queue_show` with the same id before you retry, and retry only with that id.
 5. **Take work** with `rig_queue_list` (`owned: true`), `rig_queue_claim` and `rig_queue_update`. Close with the
-   answer in `note`.
+   answer in `note`. To pass it to the next seat, use `rig_queue_handoff`; to put back one you won't finish, use
+   `rig_queue_unclaim`.
 
 Limits today:
 - **OpenRig can't wake this agent itself.** `rig send` to an attached external node is refused, and a task's nudge to

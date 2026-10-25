@@ -16,6 +16,7 @@ import { migrate } from "../../daemon/src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../../daemon/src/db/all-migrations.js";
 import { EventBus } from "../../daemon/src/domain/event-bus.js";
 import { QueueRepository } from "../../daemon/src/domain/queue-repository.js";
+import { OutboxHandler } from "../../daemon/src/domain/outbox-handler.js";
 import { DaemonClient } from "../src/client.js";
 import { createMcpServer } from "../src/mcp-server.js";
 
@@ -40,10 +41,13 @@ describe("MCP queue tools on the daemon's queue routes", () => {
     // One shared root, canonical as the daemon resolves it at startup (a temp directory can sit behind a symlink).
     shared = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mcp-shared-")));
     const inert = async () => ({ ok: false, error: "inert fixture" });
+    const queueRepo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    // The wake store attached, as the daemon attaches it at startup: a handoff makes its successor's wake durable there.
+    queueRepo.attachOutbox(new OutboxHandler(db));
     const { app } = createTestApp(db, {
       appDeps: {
         sessionTransport: { resolveSessions: async () => ({ ok: false, code: "not_found", error: "inert fixture" }), send: inert, capture: inert, broadcast: inert } as never,
-        queueRepo: new QueueRepository(db, new EventBus(db), { validateRig: () => true }),
+        queueRepo,
         filesAllowlist: [{ name: "proof", canonicalPath: shared }],
       },
     });
@@ -135,7 +139,7 @@ describe("MCP queue tools on the daemon's queue routes", () => {
     // An open item has no successor key: its result reads as before.
     expect("successor" in (await desk("rig_queue_show", { qitemId })).data).toBe(false);
 
-    // The assignee hands it on with the CLI's route; the MCP tools don't hand off.
+    // The assignee hands it on with the CLI's route, as a seat with a shell does.
     const handoff = await fetch(`${url}/api/queue/${qitemId}/handoff`, {
       method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": IMPL },
       body: JSON.stringify({ toSession: "qa@team", nudge: false }),
@@ -156,6 +160,44 @@ describe("MCP queue tools on the daemon's queue routes", () => {
     const invalid = await desk("rig_queue_list", { destination: "qa@team", since: "yesterday" });
     expect(invalid.isError).toBe(true);
     expect(invalid.structured).toMatchObject({ ok: false, code: "updated_since_invalid", status: 400 });
+  });
+
+  it("lets a seat with no shell pass its task on in one step, and put back one it won't finish", async () => {
+    const desk = await connectAs(DESK);
+    const impl = await connectAs(IMPL);
+    const rows = () => (db.prepare("SELECT COUNT(*) AS n FROM queue_items").get() as { n: number }).n;
+    const qitemId = (await desk("rig_queue_create", { destination: IMPL, body: "Fix the stale fixture." })).data.qitemId as string;
+    expect((await impl("rig_queue_claim", { qitemId })).isError).toBe(false);
+
+    const handed = await impl("rig_queue_handoff", { qitemId, to: "qa@team", note: "fixed; needs a check", summary: "check the fixture fix" });
+    expect(handed.isError).toBe(false);
+    const created = (handed.structured as { created: { qitemId: string } }).created;
+    expect(handed.structured).toMatchObject({
+      closed: { qitemId, state: "handed-off", closureReason: "handed_off_to", closureTarget: "qa@team" },
+      created: { destinationSession: "qa@team", sourceSession: expect.stringMatching(/^impl@team/), state: "pending", chainOfRecord: [qitemId], body: "Fix the stale fixture." },
+    });
+    // The person who delegated follows it from their own item, and the transition says who passed it on and why.
+    const shown = await desk("rig_queue_show", { qitemId });
+    expect(shown.structured).toMatchObject({ successor: { qitemId: created.qitemId, destinationSession: "qa@team", state: "pending" } });
+    const transitions = JSON.stringify(shown.data.transitions);
+    expect(transitions).toContain("fixed; needs a check");
+    expect(transitions).toContain("transport:v1");
+
+    // A retry after the handoff landed opens nothing new: the daemon names the closed item.
+    const before = rows();
+    const again = await impl("rig_queue_handoff", { qitemId, to: "qa@team" });
+    expect(again.structured).toMatchObject({ ok: false, code: "qitem_already_terminal", status: 409 });
+    expect(rows()).toBe(before);
+
+    // Putting back: only a claimed item, which returns to pending for the same seat with the reason recorded.
+    const second = (await desk("rig_queue_create", { destination: IMPL, body: "Profile the slow test." })).data.qitemId as string;
+    expect((await impl("rig_queue_unclaim", { qitemId: second })).structured).toMatchObject({ ok: false, code: "qitem_not_in_progress", status: 409 });
+    expect((await impl("rig_queue_claim", { qitemId: second })).isError).toBe(false);
+    const putBack = await impl("rig_queue_unclaim", { qitemId: second, reason: "no capacity today" });
+    expect(putBack.isError).toBe(false);
+    expect(putBack.structured).toMatchObject({ qitemId: second, state: "pending", destinationSession: IMPL, claimedAt: null });
+    expect(JSON.stringify((await desk("rig_queue_show", { qitemId: second })).data.transitions)).toContain("unclaimed: no capacity today");
+    expect((await impl("rig_queue_claim", { qitemId: second })).isError).toBe(false);
   });
 
   it("records the configured seat as the source even when nothing else names it", async () => {

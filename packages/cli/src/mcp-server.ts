@@ -290,12 +290,14 @@ export const MCP_OPERATIONS: ReadonlyArray<{ tool: string; routes: readonly stri
   { tool: "rig_artifact_read", routes: ["GET /api/queue/:qitemId", "GET /api/files/roots", "GET /api/files/read"], effect: "read", access: "work" },
   { tool: "rig_human_decision_room", routes: ["GET /api/queue/:qitemId", "GET /api/gateway/human/:entityId/decision-room"], effect: "read", access: "work" },
   { tool: "rig_queue_decide", routes: ["POST /api/queue/:qitemId/delegated-decision"], effect: "destructive", access: "work" },
+  { tool: "rig_queue_handoff", routes: ["POST /api/queue/:qitemId/handoff"], effect: "destructive", access: "work" },
+  { tool: "rig_queue_unclaim", routes: ["POST /api/queue/:qitemId/unclaim"], effect: "destructive", access: "work" },
 ];
 
 // Short guidance a client may show the model (the server's MCP instructions).
 const INSTRUCTIONS = [
   "This server reaches an OpenRig team as one seat: the one named by OPENRIG_SESSION_NAME where the server was configured, or, over authenticated HTTP, the seat of the caller's grant (rig_whoami shows which, and whether the caller is authenticated; rig_team shows a rig's seats and its lead). The daemon attributes this server's writes to that seat.",
-  "To hand work to a seat, use rig_queue_create and keep its qitemId; read the answer later with rig_queue_show, which names the next item when the work was handed on. Queue items are durable: they outlive this conversation and this server.",
+  "To hand work to a seat, use rig_queue_create and keep its qitemId; read the answer later with rig_queue_show, which names the next item when the work was handed on. To pass on work this seat holds, use rig_queue_handoff rather than closing it and creating another, so the work stays one chain. Queue items are durable: they outlive this conversation and this server.",
   "Tools marked read-only change nothing. A seat whose activity is unknown is not idle, and an accepted request (a restore's attemptId) is not a finished one.",
   "A question reserved for a person is theirs to answer: don't answer it on their behalf. rig_queue_decide records a decision only inside the decision room of the mode they have on, beside their answers and never as one.",
 ].join("\n");
@@ -1323,6 +1325,61 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const denied = await itemOutOfScope(qitemId);
         if (denied) return denied;
         return mapResult(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/delegated-decision`, { applicationId, choices, reason, reversible }), undefined, { structured: true });
+      } catch (err) {
+        return caught(err);
+      }
+    },
+  );
+
+  // 35. rig_queue_handoff — pass an item on to the next seat in one step, the route `rig queue handoff` uses
+  if (offered("rig_queue_handoff")) server.tool(
+    "rig_queue_handoff",
+    "Pass a queue item this seat holds on to the next seat in one step: the item closes as handed off and a new item opens for that seat, carrying the work's lineage in chainOfRecord, so whoever follows the work reaches the new item from rig_queue_show. Without body the new item keeps the task's text. If the call times out, check rig_queue_show on this qitemId before retrying: when it reads handed off, its successor is the new item, so don't hand it off again.",
+    {
+      qitemId: z.string().describe("The queue item to pass on"),
+      to: z.string().describe("The next seat (e.g. qa@my-rig)"),
+      body: z.string().optional().describe("The task as the next seat should read it (default: the item's own text)"),
+      note: z.string().optional().describe("Transition note on the item passed on: why it goes there"),
+      summary: z.string().optional().describe("One-line summary for the new item"),
+      tags: z.array(z.string()).optional().describe("Tags for the new item (default: the item's own)"),
+      priority: z.string().optional().describe("Priority for the new item (default: the item's own)"),
+      evidenceRef: z.string().optional().describe("Pointer to the durable artifact, which a new item for a person needs"),
+    },
+    DESTRUCTIVE,
+    async ({ qitemId, to, body, note, summary, tags, priority, evidenceRef }) => {
+      if (scope && !scope.session(to)) return outOfScope(`Destination ${to}`);
+      try {
+        const denied = await itemOutOfScope(qitemId, "owner");
+        if (denied) return denied;
+      } catch (err) {
+        return caught(err);
+      }
+      try {
+        return mapResult(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/handoff`, {
+          toSession: to, body, transitionNote: note, summary, tags, priority, evidenceRef,
+        }), undefined, { structured: true });
+      } catch (err) {
+        const failure = caught(err);
+        const text = `${(err as Error).message} The outcome is unknown: check rig_queue_show with qitemId ${qitemId} before retrying. If it reads handed off, its successor is the new item, so don't hand it off again.`;
+        return { ...failure, content: [{ type: "text", text }], structuredContent: { ...failure.structuredContent, qitemId, outcome: "unknown" } };
+      }
+    },
+  );
+
+  // 36. rig_queue_unclaim — put back an item this seat claimed and won't finish
+  if (offered("rig_queue_unclaim")) server.tool(
+    "rig_queue_unclaim",
+    "Put back a queue item this seat claimed and won't finish: it returns to pending for its destination seat, ready to be claimed again, and the transition records why. Only a claimed (in-progress) item can be put back. To pass the work to another seat instead, use rig_queue_handoff.",
+    {
+      qitemId: z.string().describe("The claimed queue item to put back"),
+      reason: z.string().optional().describe("Why it's put back, recorded as 'unclaimed: <reason>' (default: manual)"),
+    },
+    DESTRUCTIVE,
+    async ({ qitemId, reason }) => {
+      try {
+        const denied = await itemOutOfScope(qitemId, "owner");
+        if (denied) return denied;
+        return mapResult(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/unclaim`, { reason }), undefined, { structured: true });
       } catch (err) {
         return caught(err);
       }

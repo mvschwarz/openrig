@@ -18,6 +18,7 @@ import { provenCodexResume } from "./helpers/codex-resume-proof.js";
 // 45c70fc01c7d33f4652c9d42523f631734c62aac76f449ff0f2c15e99680ac9b.
 const currentUpdatePrompt = fs.readFileSync(new URL("./fixtures/codex-update-0.160.0.txt", import.meta.url), "utf8");
 const currentTrustPrompt = fs.readFileSync(new URL("./fixtures/codex-trust-0.156.1.txt", import.meta.url), "utf8");
+const firstLoginPrompt = fs.readFileSync(new URL("./fixtures/codex-first-login.txt", import.meta.url), "utf8");
 
 const CODEX_FLOOR_EFFECT = {
   runtime: "codex",
@@ -102,18 +103,24 @@ function expectedFreshLaunchCommand(options: { cwd?: string; model?: string; eff
   return `codex -s workspace-write '-c' 'check_for_update_on_startup=false' -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg}${effortArg}`;
 }
 
-function expectedResumeCommand(token = "sess-456", queueRoot: string | null = testQueueRoot(), model?: string, effort?: string): string {
+// A resume and a fork add the same git metadata dir as the fresh launch, after the conversation id (`gitCwd` null: none,
+// as for a read-only profile).
+function gitDirOption(gitCwd: string | null): string {
+  return gitCwd === null ? "" : ` --add-dir ${quote(nodePath.join(gitCwd, ".git"))}`;
+}
+
+function expectedResumeCommand(token = "sess-456", queueRoot: string | null = testQueueRoot(), model?: string, effort?: string, gitCwd: string | null = "/project"): string {
   const queueDirArg = queueRoot === null ? "" : `--add-dir ${quote(queueRoot)} `;
   const modelArg = model ? ` -m ${quote(model)}` : "";
   const effortArg = effort ? ` -c ${quote(`model_reasoning_effort="${effort}"`)}` : "";
-  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false'${modelArg}${effortArg} resume ${queueDirArg}${quote(token)}`;
+  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false'${modelArg}${effortArg} resume ${queueDirArg}${quote(token)}${gitDirOption(gitCwd)}`;
 }
 
-function expectedForkCommand(parentId = "parent-thread-id", options: { model?: string; effort?: string; queueRoot?: string | null } = {}): string {
+function expectedForkCommand(parentId = "parent-thread-id", options: { model?: string; effort?: string; queueRoot?: string | null; gitCwd?: string | null } = {}): string {
   const queueDirArg = options.queueRoot === null ? "" : ` --add-dir ${quote(options.queueRoot ?? testQueueRoot())}`;
   const modelArg = options.model ? ` -m ${quote(options.model)}` : "";
   const effortArg = options.effort ? ` -c ${quote(`model_reasoning_effort="${options.effort}"`)}` : "";
-  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false'${modelArg}${effortArg} fork${queueDirArg} ${quote(parentId)}`;
+  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false'${modelArg}${effortArg} fork${queueDirArg} ${quote(parentId)}${gitDirOption(options.gitCwd === undefined ? "/project" : options.gitCwd)}`;
 }
 
 function expectedProfileFreshLaunchCommand(profile: string, options: { cwd?: string; model?: string; queueRoot?: string | null } = {}): string {
@@ -124,9 +131,9 @@ function expectedProfileFreshLaunchCommand(profile: string, options: { cwd?: str
   return `codex -p ${quote(profile)} '-c' 'check_for_update_on_startup=false' -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg}`;
 }
 
-function expectedProfileResumeCommand(profile: string, token = "sess-456", queueRoot: string | null = testQueueRoot()): string {
+function expectedProfileResumeCommand(profile: string, token = "sess-456", queueRoot: string | null = testQueueRoot(), gitCwd: string | null = "/project"): string {
   const queueDirArg = queueRoot === null ? "" : `--add-dir ${quote(queueRoot)} `;
-  return `codex -p ${quote(profile)} '-c' 'check_for_update_on_startup=false' resume ${queueDirArg}${quote(token)}`;
+  return `codex -p ${quote(profile)} '-c' 'check_for_update_on_startup=false' resume ${queueDirArg}${quote(token)}${gitDirOption(gitCwd)}`;
 }
 
 beforeEach(() => {
@@ -208,6 +215,91 @@ describe("Codex runtime adapter", () => {
     const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs() });
     const result = await adapter.checkReady(makeBinding());
     expect(result.ready).toBe(true);
+  });
+
+  it.each(["codex-first-login.txt", "codex-first-login-0.162.1.txt"])("checkReady reports %s as a first-login gate instead of waiting for the runtime", async (fixture) => {
+    const firstLoginPrompt = fs.readFileSync(new URL(`./fixtures/${fixture}`, import.meta.url), "utf8");
+    const tmux = mockTmux({ capturePaneContent: vi.fn(async () => firstLoginPrompt) });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), listProcesses: () => [] });
+    expect(await adapter.checkReady(makeBinding())).toMatchObject({ ready: false, code: "login_required" });
+    expect(tmux.sendText).not.toHaveBeenCalled();
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+  });
+
+  it.each(["bash", "node"])("checkReady rechecks a %s wrapper before reporting its first-login gate", async (paneCommand) => {
+    for (const fixture of ["codex-first-login-no-daemon.txt", "codex-first-login-no-daemon-80x24.txt", "codex-api-key-login-no-daemon.txt", "codex-first-login-0.162.1.txt"]) {
+      const paneContent = fs.readFileSync(new URL(`./fixtures/${fixture}`, import.meta.url), "utf8");
+      const tmux = mockTmux({
+        getPaneCommand: vi.fn(async () => paneCommand),
+        getPanePid: vi.fn(async () => 900),
+        capturePaneContent: vi.fn(async () => paneContent),
+      });
+      const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), listProcesses: () => [
+        { pid: 900, ppid: 1, command: paneCommand === "bash" ? "/bin/bash" : "node launcher", pgid: 900, tpgid: 901, executableName: paneCommand, startedAt: "Sat Jan  1 12:00:00 2000" },
+        { pid: 901, ppid: 900, command: "codex", pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:01 2000" },
+      ] });
+      expect(await adapter.checkReady(makeBinding()), fixture).toMatchObject({ ready: false, code: "login_required" });
+      expect(tmux.capturePaneContent).toHaveBeenCalledTimes(2);
+    }
+  });
+
+  it("checkReady does not revive a first-login screen left behind in an idle shell", async () => {
+    const paneContent = fs.readFileSync(new URL("./fixtures/codex-api-key-login-no-daemon.txt", import.meta.url), "utf8");
+    const tmux = mockTmux({
+      getPaneCommand: vi.fn(async () => "bash"),
+      getPanePid: vi.fn(async () => 900),
+      capturePaneContent: vi.fn(async () => paneContent),
+    });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), listProcesses: () => [
+      { pid: 900, ppid: 1, command: "/bin/bash", pgid: 900, tpgid: 900, executableName: "bash", startedAt: "Sat Jan  1 12:00:00 2000" },
+    ] });
+    expect(await adapter.checkReady(makeBinding())).toMatchObject({ ready: false, code: "returned_to_shell" });
+  });
+
+  it("checkReady accepts a non-gpt warning footer only with a verified Codex process", async () => {
+    const tmux = mockTmux({
+      getPaneCommand: vi.fn(async () => "zsh"),
+      getPanePid: vi.fn(async () => 900),
+      capturePaneContent: vi.fn(async () => [
+        "› ",
+        "  Ready · Context 13% used · anthropic/claude-3.5-sonnet         ⚠ 2 warnings · f2 to view",
+      ].join("\n")),
+    });
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [
+        { pid: 900, ppid: 1, command: "/bin/zsh", pgid: 900, tpgid: 901, executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000" },
+        { pid: 901, ppid: 900, command: "codex --model anthropic/claude-3.5-sonnet", pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:01 2000" },
+      ],
+    });
+
+    expect(await adapter.checkReady(makeBinding())).toEqual({ ready: true });
+  });
+
+  it("does not promote a stale shell capture after a verified Codex process appears", async () => {
+    let captures = 0;
+    const tmux = mockTmux({
+      getPaneCommand: vi.fn(async () => "zsh"),
+      getPanePid: vi.fn(async () => 900),
+      capturePaneContent: vi.fn(async () => {
+        captures++;
+        return captures === 1
+          ? "› \n  Ready · Context 13% used · anthropic/claude-3.5-sonnet         ⚠ 2 warnings · f2 to view"
+          : "  project2 · main\n› codex resume 019a136b-0000-7000-8000-000000000001";
+      }),
+    });
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [
+        { pid: 900, ppid: 1, command: "/bin/zsh", pgid: 900, tpgid: 901, executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000" },
+        { pid: 901, ppid: 900, command: "codex --model anthropic/claude-3.5-sonnet", pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:01 2000" },
+      ],
+    });
+
+    expect(await adapter.checkReady(makeBinding())).toMatchObject({ ready: false });
+    expect(captures).toBe(2);
   });
 
   it("checkReady returns false when the pane has fallen back to a shell prompt", async () => {
@@ -743,7 +835,7 @@ describe("Codex runtime adapter", () => {
       expect(result, JSON.stringify(opts)).toMatchObject({ ok: true });
       const command = vi.mocked(tmux.sendText).mock.calls[0]?.[1];
       expect(command).toContain("-p 'locked'");
-      if (!opts.resumeToken && !opts.forkSource) expect(command).toContain("--add-dir '/project/.git'");
+      expect(command).toContain("--add-dir '/project/.git'");
       expect(command).toContain(`--add-dir '${testQueueRoot()}'`);
     }
     expect(fsOps.readFile(projectPath)).toBe(projectContent);

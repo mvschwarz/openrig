@@ -31,6 +31,9 @@ export interface NodeBinding extends Binding {
   teamPermissionDefault?: boolean;
   /** Reserved successor generation; current tenure remains the input fence until commit. */
   launchGeneration?: string;
+  /** Slice 16: a successor staged beside the seat's current occupant on another runtime. That occupant stays the
+   *  bound one until the runtime switch commits. */
+  runtimeSwitchFrom?: { runtime: string; session: string; pane: string; generation: string };
   /** OPR.0.7.0.13: where this seat's skills go, its own storage outside the project (the plugin there is already on the
    *  seat's CLAUDE_CODE_PLUGIN_DIRS). Absent = the project, as before. Only the Claude adapter reads it. */
   seatSkillsRoot?: string;
@@ -116,7 +119,7 @@ export type HarnessLaunchRecovery = "retry_fresh" | "attention_required";
 
 // `launchedProcess` (Claude resume launches): the first process the launch's own readiness check
 // pinned as the one it started, kept even when a later sample saw it replaced (#1077).
-export type HarnessLaunchResult =
+export type HarnessLaunchResult = { firstInput?: import("./community-harness-first-input.js").FirstInputPassed } & (
   | { ok: true; resumeToken?: string; resumeType?: string; appliedLaunch?: import("./permission-drift.js").AppliedLaunchObservation;
     /** Where resumeToken came from, when not a pane scrape: a community harness's launcher reported it. */
     resumeProvenance?: "launcher" | "passed";
@@ -151,9 +154,12 @@ export type HarnessLaunchResult =
     resumeUnproven?: true;
     /** Codex (#1524), reporting only: the resumed process's own records name a different conversation (`opened`). */
     resumeMismatch?: { opened: string };
+    /** Codex, reporting only, with `resumeUnproven` or `resumeMismatch`: `error` without its closing "The session was
+     *  preserved; nothing was restarted.", for a caller that did restart the pane (an in-place restart). */
+    resumeDetail?: string;
     /** The native fork command was sent, but its child identity is not yet available. */
     forkIdentityPending?: boolean;
-    launchedProcess?: import("./native-process-lineage.js").ClaudeLaunchedProcess };
+    launchedProcess?: import("./native-process-lineage.js").ClaudeLaunchedProcess });
 
 // -- Shared concrete-hint resolver --
 
@@ -231,6 +237,8 @@ export interface RuntimeAdapter {
   launchHarness(
     binding: NodeBinding,
     opts: { name: string; resumeToken?: string; forkSource?: ForkSource;
+      /** Community opt-in only: the already composed first interactive startup turn. */
+      firstInputText?: string;
       /** The saved token's type, when known (a community harness resumes only its own `community:<name>` ids). */
       resumeType?: string;
       /** Fresh successor in the retired occupant's pane; not an adopt, resume or fork. */

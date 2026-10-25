@@ -224,7 +224,8 @@ export class InboundRouter {
     this.botLimiter = new BotLimiter(deps.now);
   }
 
-  private summaryOf(ev: SlackEvent, transfer?: InboundFileResult | null, correlationQitemId?: string): { summary: string; body: string } {
+  /** The row's summary names the person who actually wrote (their registered address); its tags stay as they were. */
+  private summaryOf(ev: SlackEvent, sender: string, transfer?: InboundFileResult | null, correlationQitemId?: string): { summary: string; body: string } {
     const text = String(ev.text ?? "");
     const meta = `slack channel=${ev.channel} user=${ev.user} ts=${ev.ts}`;
     // OPR.0.5.6.2 — attachments ride the row BODY by LOCAL path (Slack owns
@@ -253,7 +254,7 @@ export class InboundRouter {
     const firstFileName = transfer?.stored[0]?.name ?? transfer?.failed[0]?.name;
     const headline = text.trim() ? text : firstFileName ? `[file] ${firstFileName}` : text;
     return {
-      summary: `${ev.recoveredAfterGap ? "[Recovered after gap] " : ""}Founder via Slack: ${headline.slice(0, 90)}`,
+      summary: `${ev.recoveredAfterGap ? "[Recovered after gap] " : ""}${sender} via Slack: ${headline.slice(0, 90)}`,
       body: `${sections.filter((s) => s.length > 0).join("\n\n")}\n\n---\nSource: ${meta}${correlationQitemId ? `\nIn reply to: ${correlationQitemId}` : ""}\nRouted by openrig slack-inbound. Default destination per config; re-route via queue as needed.`,
     };
   }
@@ -326,7 +327,7 @@ export class InboundRouter {
       if (!isCurrent()) return { landed: false, reason: "inactive" };
       // S10 — deterministic route (thread map) when wired; static destination otherwise.
       const route = this.deps.resolveRoute?.(ev) ?? { destination: this.deps.destination };
-      const { summary, body } = this.summaryOf(ev, transfer, route.correlationQitemId);
+      const { summary, body } = this.summaryOf(ev, who.source, transfer, route.correlationQitemId);
       // A person's top-level message (not a reply in a thread) becomes the root its answer lands under.
       const mintsRoot = Boolean(this.deps.mintThread && ev.channel && (!ev.thread_ts || ev.thread_ts === ev.ts));
       const correlated = route.correlationQitemId ? this.deps.queue.getQitem?.(route.correlationQitemId) : null;
@@ -540,7 +541,7 @@ export class InboundRouter {
         tags: [...route.tags ?? ["founder-slack", "inbound"], "human-answer"],
         inReplyTo: qitemId,
         humanAnswer: true,
-        summary: `Founder via Slack: answered ${lines.length === 1 ? "1 question" : `${lines.length} questions`}`,
+        summary: `${who.source} via Slack: answered ${lines.length === 1 ? "1 question" : `${lines.length} questions`}`,
         body: `${lines.join("\n")}\n\n---\nAnswers (question id → option id): ${JSON.stringify(recorded.answers)}\nIn reply to: ${qitemId} (its humanAnswers field holds the same)\nRouted by openrig slack-inbound (button click).`,
       });
       resolution = await this.deps.resolveHumanReply?.({ qitemId, actorSession: who.source, decision: lines.join("; ") });
@@ -611,7 +612,7 @@ export class InboundRouter {
         priority: "routine",
         tags: [...route.tags ?? ["founder-slack", "inbound"], "human-reaction"],
         inReplyTo: ask,
-        summary: `Founder via Slack: reacted :${ev.reaction}: to ${ask}`,
+        summary: `${who.source} via Slack: reacted :${ev.reaction}: to ${ask}`,
         body: [
           `${who.source} reacted :${ev.reaction}: to your ask ${ask} in Slack.`,
           "",

@@ -133,6 +133,7 @@ async function driveEveryMethod(): Promise<RunCall[]> {
   await a.setSessionEnv(SESSION, "SEAT_FLAG", "it's a value");
   await a.unsetSessionEnv(SESSION, "SEAT_FLAG");
   await a.hasSessionEnv(SESSION, "OPENRIG_NODE_ID");
+  await a.hasSessionEnvBatch(SESSION, ["OPENRIG_NODE_ID", "OPENRIG_RUNTIME"]);
   await a.startPipePane(SESSION, "/tmp/out dir/it's.log");
   await a.stopPipePane(SESSION);
   await a.capturePanesContent([SESSION, "alpha", "missing"], 50);
@@ -150,6 +151,9 @@ async function driveEveryMethod(): Promise<RunCall[]> {
   await a.readPaneLastActivity(SESSION);
   await a.listClients();
   await a.switchClient("/dev/ttys001", SESSION);
+  // A runtime switch's exchange: two session-id reads, then the guarded if-shell swap (nested quoting); and its env writes.
+  await a.swapRuntimeSwitchPanes({ nodeId: "n1", stagingSession: "staging'q a", canonicalSession: SESSION, canonicalPane: "%1", stagedPane: "%1" });
+  await a.setRuntimeSwitchEnvironment(SESSION, "claude-code", "gen 'q 1");
   // A failed paste deletes the loaded buffer; the guarded kill reads the session id first.
   await recordingAdapter(calls, { failing: ["paste-buffer"] }).sendText(SESSION, "hello");
   await recordingAdapter(calls, { guard: true }).killSession(SESSION);

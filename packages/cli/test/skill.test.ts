@@ -109,4 +109,25 @@ describe("rig skill audit", () => {
     expect(process.exitCode).toBeUndefined();
     expect(logs.some((l) => l.includes("PASS"))).toBe(true);
   });
+
+  it("the human output closes by saying the audit doesn't judge refresh safety and naming the read-only loadout check, on PASS and FAIL", async () => {
+    for (const data of [{ ok: true, entries: [], totalFindings: 0 }, { ok: true, entries: [], totalFindings: 0, mirrorDriftError: "x" }]) {
+      logs.length = 0;
+      await skillCommand(makeDeps({ status: 200, data })).parseAsync(["node", "rig", "audit"]);
+      expect(logs.at(-1)).toContain("doesn't say whether that's safe");
+      expect(logs.at(-1)).toContain("rig skill loadout --runtime <claude-code|codex> --cwd <target> --project-root <project> --json");
+    }
+  });
+
+  it("--help says what stale means, that the audit doesn't judge refresh safety, and which read-only check does", () => {
+    const audit = skillCommand(makeDeps({ status: 200, data: {} })).commands.find((c) => c.name() === "audit")!;
+    let help = "";
+    audit.configureOutput({ writeOut: (s) => { help += s; } });
+    audit.outputHelp();
+    expect(help).toContain('"stale" is a date finding');
+    expect(help).toContain("whether a copy is safe to refresh or overwrite");
+    expect(help).toContain("rig skill loadout --runtime <claude-code|codex> --cwd <target> --project-root <project> --json");
+    expect(help).toContain("which leaves any difference unknown");
+    expect(help).toContain("its origin stays unknown");
+  });
 });

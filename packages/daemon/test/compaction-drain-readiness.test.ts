@@ -203,7 +203,7 @@ describe("post-compact drain readiness", () => {
         await monitor.pollOnce();
         expect(tmux.sendText).toHaveBeenCalledTimes(index);
         expect(tmux.sendKeys).toHaveBeenCalledTimes(index);
-        expect(enforcer.observedCompaction(sessionName)).toEqual(before);
+        expect(enforcer.observedCompaction(sessionName)?.stage).toBe(before?.stage);
 
         // No new hook/sample authorizes this advance: the actual pane becomes idle.
         pane = COMPACTED_PANE;

@@ -54,6 +54,7 @@ export class SeatStructuralActivityService {
   private readonly capturedActivity = new Map<string, { activity: number; size?: string; startSec: number; fullAt: number }>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private sweeping = false; // single-flight guard: one whole-fleet sweep at a time (MUST-FIX 2)
+  private activityChanged?: (sessionName: string) => void;
   private bannerEmitter:
     | ((sessionName: string, banner: CodexLimitBanner | null, observedAt: Date) => void)
     | null = null;
@@ -75,6 +76,9 @@ export class SeatStructuralActivityService {
   ): void {
     this.bannerEmitter = emitter;
   }
+
+  /** Notify from the existing captures only, after the cache holds the new verdict. */
+  attachActivityChanged(listener: (sessionName: string) => void): void { this.activityChanged = listener; }
 
   /** The cached structural observation — ONLY while current (capture-FREE read). Returns null AND evicts
    *  once the observation is older than the freshness window, so a stalled/failed poller never leaves a
@@ -125,7 +129,9 @@ export class SeatStructuralActivityService {
         && readSeatBeforePaste(content, runtime, sessionName) === "idle"
         ? { idleFrame: { sessionName, runtime, captureStartedAt: captureStartedAt.toISOString() } } : {}),
     };
+    const previous = this.latestBySession.get(sessionName);
     this.latestBySession.set(sessionName, obs);
+    if (previous?.state !== obs.state || previous?.reason !== obs.reason) this.activityChanged?.(sessionName);
     // #763: a Codex usage-limit banner is invisible to the hook vocabulary,
     // so the reactive tap never fires for it. Report what the seat shows, on
     // transition only (the recorder skips an already-reported banner). A poll

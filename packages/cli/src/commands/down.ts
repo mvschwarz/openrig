@@ -108,8 +108,10 @@ async function showAgentsBeforeDown(rigId: string, readInventory: () => Promise<
     const inventory = await readInventory();
     if (Array.isArray(inventory) && inventory.every(n => n && typeof n.nodeKind === "string"
       && typeof n.logicalId === "string" && (n.sessionStatus === null || typeof n.sessionStatus === "string"))) {
-      const agents = (inventory as DownAgentEntry[]).filter(n => n.nodeKind === "agent"
-        && ["running", "idle", "unknown"].includes(n.sessionStatus ?? ""));
+      const live = (inventory as DownAgentEntry[]).filter(n => ["running", "idle", "unknown"].includes(n.sessionStatus ?? ""));
+      const agents = live.filter(n => n.nodeKind === "agent");
+      // A terminal member isn't an agent, but stopping the rig ends its session too.
+      const terminals = live.filter(n => n.nodeKind !== "agent").map(n => n.canonicalSessionName || n.logicalId);
       facts = agents.length === 0 ? "no agent sessions reported live" : "recorded agent sessions: " + agents.map(n => {
         // A running process or an assigned queue row does not prove work in progress.
         // Prefer the daemon's arbitrated activity; older daemons expose agentActivity.
@@ -121,6 +123,7 @@ async function showAgentsBeforeDown(rigId: string, readInventory: () => Promise<
         const work = ["working", "idle", "needs-input"].includes(activity ?? "") ? activity : "unknown";
         return `${n.canonicalSessionName || n.logicalId} (activity: ${work})`;
       }).join(", ");
+      if (terminals.length > 0) facts += `; terminal sessions: ${terminals.join(", ")}`;
     }
   } catch { /* Unavailable inventory is an unknown fact, never a teardown gate. */ }
   console.error(`Before stopping ${rigId}: ${facts}.`);

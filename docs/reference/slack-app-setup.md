@@ -305,7 +305,7 @@ decisions, and posts its own replies.
   removed. An enabled connector retries them; disabling it pauses retry without deleting them.
   Let relays finish before removing a forward entry. A zero dead-letter backlog alone does not
   prove they have drained: it does not count relay HTTP requests still in flight.
-- **Who answered:** every post ends `from <seat> on <machine>`, using the machine's host id (set
+- **Who answered:** every post starts `From <seat> on <machine>`, using the machine's host id (set
   it with `host.name`).
 - **The hub's own channels** are handled on the hub, as before. A channel can be relayed to one
   machine only, and never the hub's own default channel.

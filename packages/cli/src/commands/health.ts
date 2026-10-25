@@ -470,7 +470,7 @@ list/explain never mutate. Diagnosis mutations use explicit subcommands; automat
     .option("--json", "Summary JSON with omitted fields, original byte size and exact full command")
     .option("--full", "Complete original record; use --full --json for lossless JSON (may be large)")
     .action(async (id: string, o: { json?: boolean; full?: boolean }) => diagnosisRequest(`/${encodeURIComponent(id)}`, o));
-  diagnosis.command("record <qitem-id>").requiredOption("--file <path>", "Disposition JSON with verdict, causalStart, steering, uncertainty, evidenceRefs").option("--json")
+  diagnosis.command("record <qitem-id>").description("Record an agent's disposition for one occurrence from a JSON --file").requiredOption("--file <path>", "Disposition JSON with verdict, causalStart, steering, uncertainty, evidenceRefs").option("--json")
     .action(async (id: string, o: { file: string; json?: boolean }) => diagnosisRequest(`/${encodeURIComponent(id)}/disposition`, o, { value: fromFile(o.file) }));
   diagnosis.command("notify <qitem-id>").description("Explicitly request human delivery under policy and verified connector readiness").option("--json")
     .action(async (id: string, o: { json?: boolean }) => diagnosisRequest(`/${encodeURIComponent(id)}/notify`, o, {}));

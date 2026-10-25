@@ -192,6 +192,14 @@ describe("real adapter/transport guard boundaries with no external effects", () 
     expect(await f.tmux.sendKeys("a",["Enter"])).toMatchObject({ok:false,code:"guard_target_changed"});
     expect(f.commands).toEqual([]);expect(f.files).toEqual([]);f.db.close();
   });
+  it("allows a sibling pane while writing only to the recorded bound pane", async () => {
+    const f = transportFixture();
+    vi.mocked(f.tmux.listPanes).mockResolvedValue([{ id: "%1" } as never, { id: "%sibling" } as never]);
+    expect(await f.tmux.sendText("a", "bound pane only")).toMatchObject({ ok: true });
+    expect(f.commands.some(command => command.includes("%1"))).toBe(true);
+    expect(f.commands.some(command => command.includes("%sibling"))).toBe(false);
+    f.db.close();
+  });
   it("whole multi-node lifecycle keeps activation pending through rebind and final submit", async () => {
     const f=transportFixture();const started=signal(),finish=signal();
     const work=f.guard.lifecycle(["b","a"],async()=>{

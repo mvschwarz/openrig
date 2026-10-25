@@ -1,3 +1,5 @@
+import { tileAttachArgv } from "../src/domain/terminal/tile-attach.js";
+import { shellQuote } from "../src/adapters/shell-quote.js";
 // A Herdr server restart restores its layout but not the pane processes, so OpenRig's tiles came back
 // as empty shells. After each page applies, OpenRig now gives Herdr each tile's reattach command as a
 // session-only report under the runtime's own label, which Herdr reruns after a restart while its
@@ -78,7 +80,7 @@ describe("Herdr tiles carry their reattach command, so a Herdr restart brings th
     expect(res.opened).toEqual(["dev-impl@r"]);
     expect(reports()).toEqual([{
       pane_id: "w1:p1", source: "openrig", agent: "claude",
-      resume_argv: ["env", "HERDR_AGENT=claude", "OPENRIG_TILE=w1:p1", "/usr/bin/tmux", "-L", "openrig", "attach", "-t", "dev-impl@r"],
+      resume_argv: ["env", "HERDR_AGENT=claude", "OPENRIG_TILE=w1:p1", ...tileAttachArgv("/usr/bin/tmux", ["-L", "openrig"], "dev-impl@r", false)],
     }]);
     // A held state report would replace Herdr's screen detection of the agent in the tile.
     expect(requests.some((r) => r.method === "pane.report_agent")).toBe(false);
@@ -97,9 +99,9 @@ describe("Herdr tiles carry their reattach command, so a Herdr restart brings th
     expect(res.opened).toEqual(["qa@r", "shell@r", "remote@r", "pi@r"]);
     expect(reports()).toEqual([
       { pane_id: "w1:p1", source: "openrig", agent: "codex",
-        resume_argv: ["env", "HERDR_AGENT=codex", "OPENRIG_TILE=w1:p1", "/usr/bin/tmux", "-L", "openrig", "attach", "-r", "-t", "qa@r"] },
+        resume_argv: ["env", "HERDR_AGENT=codex", "OPENRIG_TILE=w1:p1", ...tileAttachArgv("/usr/bin/tmux", ["-L", "openrig"], "qa@r", true)] },
       { pane_id: "w1:p4", source: "openrig", agent: "pi",
-        resume_argv: ["env", "HERDR_AGENT=pi", "OPENRIG_TILE=w1:p4", "/usr/bin/tmux", "-L", "openrig", "attach", "-t", "pi@r"] },
+        resume_argv: ["env", "HERDR_AGENT=pi", "OPENRIG_TILE=w1:p4", ...tileAttachArgv("/usr/bin/tmux", ["-L", "openrig"], "pi@r", false)] },
     ]);
   });
 
@@ -107,14 +109,14 @@ describe("Herdr tiles carry their reattach command, so a Herdr restart brings th
     const { adapter, reports } = herdr();
     const res = await adapter.openView(compose(member("seat'a@r", "claude-code"), member("b@r", "claude-code")));
     expect(res.opened).toEqual(["seat'a@r", "b@r"]);
-    expect(reports().map((r) => (r["resume_argv"] as string[]).at(-1))).toEqual(["b@r"]);
+    expect(reports().map((r) => (r["resume_argv"] as string[])[7])).toEqual(["b@r"]);
   });
 
   it("a pane that exited right after opening gets no report; its siblings still do", async () => {
     const { adapter, reports } = herdr({ liveLabels: (labels) => labels.filter((l) => l !== "b@r") });
     const res = await adapter.openView(compose(member("a@r", "claude-code"), member("b@r", "claude-code"), member("c@r", "claude-code")));
     expect(res.opened).toEqual(["a@r", "c@r"]);
-    expect(reports().map((r) => [r["pane_id"], (r["resume_argv"] as string[]).at(-1)])).toEqual([["w1:p1", "a@r"], ["w1:p3", "c@r"]]);
+    expect(reports().map((r) => [r["pane_id"], (r["resume_argv"] as string[])[7]])).toEqual([["w1:p1", "a@r"], ["w1:p3", "c@r"]]);
   });
 
   it("a report Herdr refuses for another reason isn't retried: the seat stays opened and a note says to reopen after a restart", async () => {
@@ -180,10 +182,12 @@ describe("Herdr tiles carry their reattach command, so a Herdr restart brings th
 describe("the composer gives a local tile the same attach as an argv", () => {
   it("local tiles carry the attach argv beside the shell command; ssh tiles don't", () => {
     const v = compose(member("a@r", "claude-code"), member("b@r", "codex", { readOnly: true }), member("s@r", "claude-code", { host: "vm1" }));
-    expect(v.opened.map((p) => [p.paneCommand, p.attachArgv])).toEqual([
-      ["'/usr/bin/tmux' -L 'openrig' attach -t 'a@r'", ["/usr/bin/tmux", "-L", "openrig", "attach", "-t", "a@r"]],
-      ["'/usr/bin/tmux' -L 'openrig' attach -r -t 'b@r'", ["/usr/bin/tmux", "-L", "openrig", "attach", "-r", "-t", "b@r"]],
-      ["ssh 'admin@vm1.local' 'tmux attach -t '\"'\"'s@r'\"'\"''", undefined],
-    ]);
+    for (const [index, seat] of ["a@r", "b@r"].entries()) {
+      const argv = tileAttachArgv("/usr/bin/tmux", ["-L", "openrig"], seat, index === 1);
+      expect(v.opened[index]!.attachArgv).toEqual(argv);
+      expect(v.opened[index]!.paneCommand).toBe(argv.map(shellQuote).join(" "));
+    }
+    expect(v.opened[2]!.attachArgv).toBeUndefined();
+    expect(v.opened[2]!.paneCommand).toContain("ssh 'admin@vm1.local'");
   });
 });

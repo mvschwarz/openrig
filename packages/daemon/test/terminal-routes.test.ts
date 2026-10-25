@@ -78,13 +78,13 @@ describe("POST /api/terminal/open", () => {
     expect(res.status).toBe(404);
   });
 
-  it("a provider-unavailable / honest-partial result is a truthful 200 body", async () => {
+  it.each(["herdr_unavailable", "rex_unavailable", "rex_session_failed"])("a provider-unavailable / honest-partial result (%s) is a truthful 200 body", async (code) => {
     const { app } = makeApp({
-      openImpl: () => ({ provider: "herdr", ok: false, opened: [], absent: [], degraded: [], pages: 0, code: "herdr_unavailable", error: "no binary" }),
+      openImpl: () => ({ provider: code.split("_")[0]!, ok: false, opened: [], absent: [], degraded: [], pages: 0, code, error: "no binary" }),
     });
     const res = await post(app, "/api/terminal/open", { view: "acme-build" });
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ ok: false, code: "herdr_unavailable" });
+    expect(await res.json()).toMatchObject({ ok: false, code });
   });
 
   it("a non-JSON body → 400 body_invalid", async () => {

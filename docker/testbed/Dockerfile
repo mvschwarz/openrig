@@ -24,7 +24,7 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 
 # --- layer 2: pinned node (an in-range engines version — see scripts/check-engines) ---
-ARG NODE_VERSION=22.22.1
+ARG NODE_VERSION=22.23.4
 ARG TARGETARCH
 RUN set -eux; \
     case "${TARGETARCH}" in \
@@ -33,10 +33,14 @@ RUN set -eux; \
       "") echo "TARGETARCH is empty — the legacy (non-BuildKit) builder does not populate it. Pass --build-arg TARGETARCH explicitly (build-testbed-image.sh does) or enable BuildKit. REFUSING to default to amd64, which would install wrong-arch Node." >&2; exit 1 ;; \
       *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
-    curl -fsSLo /tmp/node.tar.xz \
-      "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz"; \
-    tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --no-same-owner; \
-    rm -f /tmp/node.tar.xz; \
+    NODE_TARBALL="node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz"; \
+    curl -fsSLo "/tmp/${NODE_TARBALL}" \
+      "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_TARBALL}"; \
+    curl -fsSLo /tmp/SHASUMS256.txt \
+      "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt"; \
+    (cd /tmp && awk -v tarball="${NODE_TARBALL}" '$2 == tarball' SHASUMS256.txt | sha256sum -c -); \
+    tar -xJf "/tmp/${NODE_TARBALL}" -C /usr/local --strip-components=1 --no-same-owner; \
+    rm -f "/tmp/${NODE_TARBALL}" /tmp/SHASUMS256.txt; \
     node --version; npm --version
 
 # --- layer 3: the OpenRig package from the LOCAL pack tarball, never the npm registry ---

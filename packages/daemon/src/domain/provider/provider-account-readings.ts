@@ -1,9 +1,9 @@
-// Slice 01: the durable half of the Codex usage rows. Each reading of a resolved allowance (keyed by
+// Slice 01: durable provider readings (Codex account identity; Claude configured credential labels). Each reading of a resolved allowance (keyed by
 // codexUsageIdentityKey) is stored with only selected, normalized fields, so a restart or a login switch keeps the
-// account's last reading, its reset and its last observed exhaustion. Nothing here reads a provider, an auth file or a
+// last reading, its reset and its last observed exhaustion. A Claude label/reference is not provider account identity. Nothing here reads a provider, an auth file or a
 // profile, and nothing is matched by percentages or reset times: the key is the only join.
 import type Database from "better-sqlite3";
-import type { UsageAllowanceIdentity } from "./provider-types.js";
+import type { UsageAllowanceIdentity, ClaudeTokenIdentity, ClaudeTokenProbe } from "./provider-types.js";
 import type { UsageReading, UsageReadWindow } from "./usage-windows.js";
 
 /** Exhaustion episodes kept per allowance key. */
@@ -30,11 +30,13 @@ interface Row {
   observed_at: string;
   limit_evidence: string | null;
   windows_json: string;
+  metadata_json?: string | null;
 }
 
 /** The fields kept for one window: selected one by one, so nothing else on the object is ever stored. */
 function selectWindow(w: UsageReadWindow): UsageReadWindow {
   return {
+    ...(w.status ? { status: w.status } : {}),
     window: String(w.window),
     durationMins: typeof w.durationMins === "number" ? w.durationMins : null,
     usedPercent: typeof w.usedPercent === "number" ? w.usedPercent : null,
@@ -53,7 +55,12 @@ function windowsOf(row: Row): UsageReadWindow[] | null {
   return (parsed as UsageReadWindow[]).map(selectWindow);
 }
 
-function toReading(row: Row, windows: UsageReadWindow[]): UsageReading<UsageAllowanceIdentity> {
+function toReading(row: Row, windows: UsageReadWindow[]): UsageReading<UsageAllowanceIdentity | ClaudeTokenIdentity> {
+  if (row.identity_source === "configured credential label") {
+    const m = JSON.parse(row.metadata_json ?? "null") as { identity: ClaudeTokenIdentity; probe?: ClaudeTokenProbe };
+    if (m?.identity?.source !== "configured credential label" || typeof m.identity.credentialLabel !== "string" || typeof m.identity.credentialRef !== "string") throw new Error("unreadable credential reading");
+    return { identity: m.identity, probe: m.probe, windows, observedAt: row.observed_at, limitEvidence: row.limit_evidence };
+  }
   return {
     identity: { accountId: row.account_id, workspaceId: row.workspace_id, limitId: row.limit_id, email: row.email, planType: row.plan_type, source: row.identity_source as UsageAllowanceIdentity["source"] },
     windows,
@@ -64,7 +71,7 @@ function toReading(row: Row, windows: UsageReadWindow[]): UsageReading<UsageAllo
 
 /** The episodes one stored reading shows: each exhausted window under its reset, or the limit evidence alone. */
 function episodesOf(row: Row, windows: UsageReadWindow[]): Array<Omit<ExhaustionEpisode, "lastObservedAt"> & { id: string }> {
-  const exhausted = windows.filter((w) => w.usedPercent !== null && w.usedPercent >= 100);
+  const exhausted = windows.filter((w) => (w.usedPercent !== null && w.usedPercent >= 100) || w.status === "rejected");
   if (exhausted.length > 0) {
     return exhausted.map((w) => ({ id: `${w.window}|${w.resetsAt ?? ""}`, window: w.window, resetsAt: w.resetsAt, evidence: row.limit_evidence ?? "at the limit" }));
   }
@@ -75,23 +82,30 @@ function episodesOf(row: Row, windows: UsageReadWindow[]): Array<Omit<Exhaustion
   return [];
 }
 
-export class ProviderAccountReadingsStore {
-  constructor(private readonly db: Database.Database) {}
+export class ProviderAccountReadingsStore<I extends UsageAllowanceIdentity | ClaudeTokenIdentity = UsageAllowanceIdentity> {
+  constructor(private readonly db: Database.Database, private readonly provider: "codex" | "claude" = "codex") {}
 
   /** Store one reading of `key`. Only the identity labels, the windows' four fields, the limit evidence and the
    *  observation time are written. The same observation (time and values) isn't written twice; a newer observation
    *  with equal values is. Then the key's rows are pruned (other keys are untouched). */
-  record(key: string, reading: UsageReading<UsageAllowanceIdentity>): void {
-    const id = reading.identity;
+  record(key: string, reading: UsageReading<I>): void {
+    const identity = reading.identity;
+    const id = identity as UsageAllowanceIdentity;
+    const metadata = identity.source === "configured credential label" ? JSON.stringify({ identity: {
+      source: identity.source, credentialLabel: identity.credentialLabel, credentialRef: identity.credentialRef, limitId: identity.limitId,
+    }, ...(reading.probe ? { probe: { exitCode: reading.probe.exitCode, requestOutcome: reading.probe.requestOutcome,
+      cliVersion: reading.probe.cliVersion, status: reading.probe.status, overageStatus: reading.probe.overageStatus,
+      overageDisabledReason: reading.probe.overageDisabledReason, isUsingOverage: reading.probe.isUsingOverage,
+      ...(reading.probe.warnings?.length ? { warnings: reading.probe.warnings } : {}) } } : {}) }) : null;
     const windowsJson = JSON.stringify(reading.windows.map(selectWindow));
     const limitEvidence = str(reading.limitEvidence);
-    const last = this.db.prepare("SELECT observed_at, windows_json, limit_evidence FROM provider_account_readings WHERE identity_key = ? ORDER BY observed_at DESC, id DESC LIMIT 1")
-      .get(key) as Pick<Row, "observed_at" | "windows_json" | "limit_evidence"> | undefined;
-    if (last && last.observed_at === reading.observedAt && last.windows_json === windowsJson && last.limit_evidence === limitEvidence) return;
+    const last = this.db.prepare("SELECT observed_at, windows_json, limit_evidence, metadata_json FROM provider_account_readings WHERE identity_key = ? ORDER BY observed_at DESC, id DESC LIMIT 1")
+      .get(key) as Pick<Row, "observed_at" | "windows_json" | "limit_evidence" | "metadata_json"> | undefined;
+    if (last && last.observed_at === reading.observedAt && last.windows_json === windowsJson && last.limit_evidence === limitEvidence && last.metadata_json === metadata) return;
     this.db.prepare(`INSERT INTO provider_account_readings
-        (provider, identity_key, account_id, workspace_id, limit_id, email, plan_type, identity_source, observed_at, limit_evidence, windows_json)
-        VALUES ('codex', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(key, str(id.accountId), str(id.workspaceId), String(id.limitId), str(id.email), str(id.planType), String(id.source), reading.observedAt, limitEvidence, windowsJson);
+        (provider, identity_key, account_id, workspace_id, limit_id, email, plan_type, identity_source, observed_at, limit_evidence, windows_json, metadata_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(this.provider, key, str(id.accountId), str(id.workspaceId), String(id.limitId), str(id.email), str(id.planType), String(id.source), reading.observedAt, limitEvidence, windowsJson, metadata);
     this.prune(key);
   }
 
@@ -126,14 +140,14 @@ export class ProviderAccountReadingsStore {
   }
 
   /** The key's latest readable stored reading, or null. */
-  latest(key: string): UsageReading<UsageAllowanceIdentity> | null {
+  latest(key: string): UsageReading<I> | null {
     const first = this.readable(key)[0];
-    return first ? toReading(first.row, first.windows) : null;
+    try { return first ? toReading(first.row, first.windows) as UsageReading<I> : null; } catch { return null; }
   }
 
   /** Every stored key's latest readable reading, as the projection held it. Retention bounds each key's rows. */
-  latestAll(): Array<{ key: string; reading: UsageReading<UsageAllowanceIdentity> }> {
-    const keys = this.db.prepare("SELECT DISTINCT identity_key FROM provider_account_readings ORDER BY identity_key").pluck().all() as string[];
+  latestAll(): Array<{ key: string; reading: UsageReading<I> }> {
+    const keys = this.db.prepare("SELECT DISTINCT identity_key FROM provider_account_readings WHERE provider = ? ORDER BY identity_key").pluck().all(this.provider) as string[];
     return keys.flatMap((key) => { const reading = this.latest(key); return reading ? [{ key, reading }] : []; });
   }
 

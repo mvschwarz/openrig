@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import type Database from "better-sqlite3";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -24,6 +27,17 @@ describe("SeatStatusService", () => {
     db.close();
   });
 
+  it("shows an owed restore's delivery failure on the same seat status the operator reads", () => {
+    const rig = rigRepo.createRig("restore-status");
+    const node = rigRepo.addNode(rig.id, "writer", { runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "writer@restore-status");
+    sessionRegistry.updateStatus(session.id, "running");
+    const owedRestore = { stage: "turn_boundary" as const, held: true, detail: "OpenRig owes the turn boundary. Last delivery: target_activity_unknown." };
+    const observer = { recoverSeat: () => {}, observedCompaction: () => ({ stage: "compacting" as const, detail: owedRestore.detail }), getOwedRestore: () => owedRestore };
+    const status = new SeatStatusService({ rigRepo, compactionEnforcer: observer }).getStatus(session.sessionName);
+    expect(status.ok && status.status.compaction).toEqual({ stage: "compacting", detail: owedRestore.detail, owedRestore });
+  });
+
   it("reports a confirmed missing current session as detached while preserving its registration", async () => {
     const { app, rigRepo: repo, sessionRegistry: registry } = createTestApp(db);
     const rig = repo.createRig("missing-seat");
@@ -46,6 +60,60 @@ describe("SeatStatusService", () => {
       occupant_lifecycle: "unknown", current_occupant: session.sessionName,
     });
     expect(db.prepare("SELECT * FROM sessions WHERE id = ?").get(session.id)).toEqual(stored);
+  });
+
+  it("reports the runtime home a Claude or Codex seat's launches use, and where it comes from", () => {
+    const rig = rigRepo.createRig("home-rig");
+    const nodes = {
+      own: rigRepo.addNode(rig.id, "dev.own", { runtime: "codex" }),
+      rel: rigRepo.addNode(rig.id, "dev.rel", { runtime: "codex" }),
+      plain: rigRepo.addNode(rig.id, "dev.plain", { runtime: "claude-code" }),
+      term: rigRepo.addNode(rig.id, "dev.term", { runtime: "terminal" }),
+    };
+    for (const [name, node] of Object.entries(nodes)) sessionRegistry.registerSession(node.id, `dev-${name}@home-rig`);
+    db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?").run(JSON.stringify({ CODEX_HOME: "/homes/own" }), nodes.own.id);
+    db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?").run(JSON.stringify({ CODEX_HOME: "rel/codex" }), nodes.rel.id);
+    const svc = new SeatStatusService({ rigRepo, env: { HOME: "/users/op", CODEX_HOME: "/daemon/codex" } });
+    const status = (ref: string) => {
+      const result = svc.getStatus(ref);
+      if (!result.ok) throw new Error(result.code);
+      return result.status;
+    };
+    expect(status("dev-own@home-rig").runtime_home).toEqual({ variable: "CODEX_HOME", home: "/homes/own", source: "member" });
+    expect(status("dev-rel@home-rig").runtime_home).toEqual({ variable: "CODEX_HOME", home: "/daemon/codex", source: "daemon",
+      ignored: { source: "member", value: "rel/codex" } });
+    expect(status("dev-plain@home-rig").runtime_home).toEqual({ variable: "CLAUDE_CONFIG_DIR", home: "/users/op/.claude", source: "native_default" });
+    expect(status("dev-term@home-rig")).not.toHaveProperty("runtime_home");
+  });
+
+  it("names a Claude seat's own subscription token by its label and file, and says when that file wouldn't apply at the next launch", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "seat-token-status-"));
+    try {
+      const ready = path.join(dir, "ready");
+      writeFileSync(ready, "fixture-file-contents", { mode: 0o600 });
+      const rig = rigRepo.createRig("token-rig");
+      const nodes = {
+        ok: rigRepo.addNode(rig.id, "dev.ok", { runtime: "claude-code" }),
+        missing: rigRepo.addNode(rig.id, "dev.missing", { runtime: "claude-code" }),
+        none: rigRepo.addNode(rig.id, "dev.none", { runtime: "claude-code" }),
+      };
+      for (const [name, node] of Object.entries(nodes)) sessionRegistry.registerSession(node.id, `dev-${name}@token-rig`);
+      rigRepo.setNodeClaudeTokenRef(nodes.ok.id, { label: "work", tokenFile: ready });
+      rigRepo.setNodeClaudeTokenRef(nodes.missing.id, { label: "personal", tokenFile: path.join(dir, "gone") });
+      const status = (ref: string) => {
+        const result = service.getStatus(ref);
+        if (!result.ok) throw new Error(result.code);
+        return result.status;
+      };
+      expect(status("dev-ok@token-rig").claude_token).toEqual({ label: "work", token_file: ready, file: "readable" });
+      expect(status("dev-missing@token-rig").claude_token).toMatchObject({ label: "personal", token_file: path.join(dir, "gone"),
+        file: "unusable", problem: expect.stringContaining("doesn't exist"), notice: expect.stringContaining("wasn't applied") });
+      expect(status("dev-none@token-rig")).not.toHaveProperty("claude_token");
+      // The file is checked, never read: its contents appear nowhere.
+      expect(JSON.stringify(status("dev-ok@token-rig"))).not.toContain("fixture-file-contents");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("returns honest no-handover defaults for an existing active node", () => {

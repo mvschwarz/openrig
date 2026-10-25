@@ -9,7 +9,7 @@ CASES=(fixture library)
 MODES=(healthy lost-baton healthy)
 # Stub-script scenarios run once each, healthy only: their planted failures are
 # product-code mutations, kept as per-PR evidence outside CI.
-PASSING_CASES=(transcript capture daemon-restart refocus-active refocus-parked-off)
+PASSING_CASES=(transcript capture daemon-restart refocus-active refocus-parked-off prompt-state)
 EFFECT_CASES=(refocus-parked)
 OUT="$REPO_ROOT/dist/pr-scenarios"
 while [ "$#" -gt 0 ]; do
@@ -19,8 +19,8 @@ while [ "$#" -gt 0 ]; do
       case "${2:-}" in
         fixture|library) CASES=("$2"); PASSING_CASES=(); EFFECT_CASES=();;
         refocus-parked) CASES=(); PASSING_CASES=(); EFFECT_CASES=("$2");;
-        transcript|capture|daemon-restart|refocus-active|refocus-parked-off) CASES=(); PASSING_CASES=("$2"); EFFECT_CASES=();;
-        *) echo 'Expected --case fixture|library|transcript|capture|daemon-restart|refocus-parked|refocus-active|refocus-parked-off' >&2; exit 2;;
+        transcript|capture|daemon-restart|refocus-active|refocus-parked-off|prompt-state) CASES=(); PASSING_CASES=("$2"); EFFECT_CASES=();;
+        *) echo 'Expected --case fixture|library|transcript|capture|daemon-restart|refocus-parked|refocus-active|refocus-parked-off|prompt-state' >&2; exit 2;;
       esac
       shift 2 ;;
     --mode)
@@ -61,9 +61,11 @@ BASE="openrig-testbed:$SHA"
 IMAGE="openrig-pr-scenarios:$SHA"
 CONTEXT="$(mktemp -d)"
 CONTAINER=""
+CONTAINER_CID=""
+IMAGE_ID=""
 cleanup() {
   if [ -n "$CONTAINER" ]; then
-    node scripts/scenario-executor.mjs timeout 30 docker rm -f "$CONTAINER" >/dev/null || echo "Cleanup incomplete; retained container name: $CONTAINER" >&2
+    node scripts/scenario-executor.mjs settle "$CONTAINER_CID" "$CONTAINER" "$IMAGE_ID" >/dev/null || echo "Cleanup incomplete; retained container name: $CONTAINER" >&2
   fi
   rm -rf "$CONTEXT"
 }
@@ -78,17 +80,20 @@ node_modules/.bin/esbuild packages/test-system/ci/run.mjs --bundle --platform=no
   --outfile="$CONTEXT/runner.mjs" --metafile="$OUT/runner-inputs.json"
 docker build --network none --platform "$TARGET_PLATFORM" --build-arg TESTBED_IMAGE="$BASE" -t "$IMAGE" "$CONTEXT"
 docker image inspect "$IMAGE" > "$OUT/image-inspect.json"
+IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$IMAGE")"
 
 attempt=0
 run_case() {  # run_case <case> <mode>
   local scenario="$1" mode="$2" status=0 LOG
   attempt=$((attempt + 1))
   LOG="$OUT/$attempt-$scenario-$mode.log"
+  CONTAINER_CID="$OUT/$attempt-$scenario-$mode.cid"
+  test ! -e "$CONTAINER_CID" || { echo "Retained cidfile: $CONTAINER_CID" >&2; exit 2; }
   CONTAINER="openrig-pr-${SHA:0:12}-$attempt-$$"
   printf '%s\n' "$CONTAINER" > "$OUT/$attempt-$scenario-$mode.container-name.txt"
   # Fresh writable scratch only. No mounts, host networking, credentials or Docker
   # socket; the container is non-root, resource bounded and removed even on failure.
-  node scripts/scenario-executor.mjs timeout 300 docker run --name "$CONTAINER" --platform "$TARGET_PLATFORM" --network none \
+  node scripts/scenario-executor.mjs timeout 300 docker run --name "$CONTAINER" --cidfile "$CONTAINER_CID" --platform "$TARGET_PLATFORM" --network none \
     --read-only --tmpfs /tmp:rw,exec,nosuid,nodev,size=512m,mode=1777 \
     --cap-drop ALL --security-opt no-new-privileges --pids-limit 256 \
     --memory 2g --memory-swap 2g --cpus 2 "$IMAGE" node /opt/openrig-testbed/runner.mjs "$mode" "$scenario" \
@@ -96,7 +101,7 @@ run_case() {  # run_case <case> <mode>
   printf '%s\n' "$status" > "$OUT/$attempt-$scenario-$mode.exit-code.txt"
   cat "$LOG"
   node scripts/scenario-executor.mjs timeout 30 docker inspect "$CONTAINER" > "$OUT/$attempt-$scenario-$mode.container.json"
-  node scripts/scenario-executor.mjs timeout 30 docker rm -f "$CONTAINER" >/dev/null
+  node scripts/scenario-executor.mjs settle "$CONTAINER_CID" "$CONTAINER" "$IMAGE_ID" >/dev/null || { echo "Cleanup incomplete; retained container name: $CONTAINER" >&2; CONTAINER=""; exit 2; }
   CONTAINER=""
   node --input-type=module - "$mode" "$status" "$LOG" "$scenario" <<'JS'
 import { readFileSync } from 'node:fs';

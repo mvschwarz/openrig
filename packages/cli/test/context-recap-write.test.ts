@@ -4,14 +4,37 @@
 // the write flows through the ONE store (supersession + addressability gate),
 // advisory contract findings ride stderr, and the gate refuses loud.
 
-import { describe, it, expect } from "vitest";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
+import { describe, it, expect, vi } from "vitest";
+import http from "node:http";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Command } from "commander";
 import { contextCommand } from "../src/commands/context.js";
+import { DaemonClient, DaemonConnectionError, DaemonTimeoutError } from "../src/client.js";
+import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
+import type { StatusDeps } from "../src/commands/status.js";
 
-async function runRecapWrite(argv: string[]): Promise<{ logs: string[]; errLogs: string[]; exitCode: number | undefined }> {
+/** A running daemon on `port`, as the CLI's status check sees it. */
+function lifecycleDeps(port: number): LifecycleDeps {
+  return {
+    spawn: vi.fn(() => ({ pid: 1, unref: vi.fn() }) as never),
+    fetch: vi.fn(async () => ({ ok: true })),
+    kill: vi.fn(() => true),
+    readFile: vi.fn((p: string) => p === STATE_FILE
+      ? JSON.stringify({ pid: 123, port, db: "test.sqlite", startedAt: "2026-10-25T00:00:00Z" } as DaemonState) : null),
+    writeFile: vi.fn(),
+    removeFile: vi.fn(),
+    exists: vi.fn((p: string) => p === STATE_FILE),
+    mkdirp: vi.fn(),
+    openForAppend: vi.fn(() => 3),
+    isProcessAlive: vi.fn(() => true),
+  };
+}
+
+const daemonDeps = (port: number): StatusDeps => ({ lifecycleDeps: lifecycleDeps(port), clientFactory: (url) => new DaemonClient(url) });
+
+async function runRecapWrite(argv: string[], deps?: StatusDeps): Promise<{ logs: string[]; errLogs: string[]; exitCode: number | undefined }> {
   const logs: string[] = [];
   const errLogs: string[] = [];
   const origLog = console.log;
@@ -24,7 +47,7 @@ async function runRecapWrite(argv: string[]): Promise<{ logs: string[]; errLogs:
   try {
     const program = new Command();
     program.exitOverride();
-    program.addCommand(contextCommand());
+    program.addCommand(contextCommand(deps));
     await program.parseAsync(["node", "rig", "context", ...argv]);
   } catch { /* commander exitOverride */ } finally {
     exitCode = process.exitCode;
@@ -172,6 +195,103 @@ describe("rig context recap-write — the boundary write verb", () => {
       expect(res.errLogs.join("\n")).toMatch(/addressab|duplicate/i);
       expect(existsSync(join(seatDir, "RECAP.md"))).toBe(false);
     } finally {
+      if (saved === undefined) delete process.env["OPENRIG_TOPOLOGY_ROOT"];
+      else process.env["OPENRIG_TOPOLOGY_ROOT"] = saved;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+// A sandboxed seat (a default Codex seat) can't write the topology tree. The OS refuses the write (EPERM under a
+// sandbox; EACCES here, from a read-only rig folder), so the CLI hands the same recap to the daemon, which owns the tree.
+describe.skipIf(process.getuid?.() === 0)("rig context recap-write when this process may not write the topology tree", () => {
+  it("hands the recap to the daemon, which writes it; nothing is written by this process", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "recap-via-daemon-"));
+    const saved = process.env["OPENRIG_TOPOLOGY_ROOT"];
+    const received: unknown[] = [];
+    const server = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (chunk) => { body += chunk; });
+      req.on("end", () => {
+        received.push({ method: req.method, url: req.url, body: JSON.parse(body || "null") });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ path: "/daemon/topology/rigs/r1/seats/s1/RECAP.md", superseded: 1 }));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as { port: number }).port;
+    const rigDir = join(tmp, "topology", "rigs", "r1");
+    try {
+      process.env["OPENRIG_TOPOLOGY_ROOT"] = join(tmp, "topology");
+      mkdirSync(rigDir, { recursive: true });
+      chmodSync(rigDir, 0o555);
+      const recap = join(tmp, "recap.md");
+      writeFileSync(recap, "## Recent Decisions\nchose the daemon because the seat can't write here");
+
+      const res = await runRecapWrite(["recap-write", "--rig", "r1", "--seat", "s1", "--file", recap], daemonDeps(port));
+
+      expect(res.exitCode ?? 0).toBe(0);
+      expect(received).toEqual([{ method: "POST", url: "/api/context-packs/seat-recap",
+        body: { rig: "r1", seat: "s1", content: "## Recent Decisions\nchose the daemon because the seat can't write here" } }]);
+      expect(res.logs.join("\n")).toBe(`Recap written: /daemon/topology/rigs/r1/seats/s1/RECAP.md (1 superseded predecessor retained), by the daemon at http://127.0.0.1:${port}`);
+      expect(res.errLogs.join("\n")).toMatch(/can't write the topology tree \(EACCES.*\), so the daemon writes the recap instead/);
+      expect(existsSync(join(rigDir, "seats"))).toBe(false);
+    } finally {
+      chmodSync(rigDir, 0o755);
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      if (saved === undefined) delete process.env["OPENRIG_TOPOLOGY_ROOT"];
+      else process.env["OPENRIG_TOPOLOGY_ROOT"] = saved;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("says the outcome is unknown when the daemon's write times out, so it's checked before a retry", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "recap-daemon-timeout-"));
+    const saved = process.env["OPENRIG_TOPOLOGY_ROOT"];
+    const rigDir = join(tmp, "topology", "rigs", "r1");
+    try {
+      process.env["OPENRIG_TOPOLOGY_ROOT"] = join(tmp, "topology");
+      mkdirSync(rigDir, { recursive: true });
+      chmodSync(rigDir, 0o555);
+      const recap = join(tmp, "recap.md");
+      writeFileSync(recap, "## Recent Decisions\nnone");
+      const post = vi.fn(async () => { throw new DaemonTimeoutError("Request to /api/context-packs/seat-recap timed out after 5000ms"); });
+
+      const res = await runRecapWrite(["recap-write", "--rig", "r1", "--seat", "s1", "--file", recap],
+        { lifecycleDeps: lifecycleDeps(4242), clientFactory: (() => ({ post })) as never });
+
+      expect(post).toHaveBeenCalledTimes(1);
+      expect(res.exitCode).toBe(1);
+      expect(res.errLogs.join("\n")).toContain("outcome is UNKNOWN");
+    } finally {
+      chmodSync(rigDir, 0o755);
+      if (saved === undefined) delete process.env["OPENRIG_TOPOLOGY_ROOT"];
+      else process.env["OPENRIG_TOPOLOGY_ROOT"] = saved;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("says why it needed the daemon when the daemon can't be reached", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "recap-no-daemon-"));
+    const saved = process.env["OPENRIG_TOPOLOGY_ROOT"];
+    const rigDir = join(tmp, "topology", "rigs", "r1");
+    try {
+      process.env["OPENRIG_TOPOLOGY_ROOT"] = join(tmp, "topology");
+      mkdirSync(rigDir, { recursive: true });
+      chmodSync(rigDir, 0o555);
+      const recap = join(tmp, "recap.md");
+      writeFileSync(recap, "## Recent Decisions\nnone");
+
+      const post = vi.fn(async () => { throw new DaemonConnectionError("connect ECONNREFUSED 127.0.0.1:4242", "ECONNREFUSED"); });
+
+      const res = await runRecapWrite(["recap-write", "--rig", "r1", "--seat", "s1", "--file", recap],
+        { lifecycleDeps: lifecycleDeps(4242), clientFactory: (() => ({ post })) as never });
+
+      expect(res.exitCode).toBe(1);
+      expect(res.errLogs[0]).toMatch(/can't write the topology tree \(EACCES.*\), so the daemon writes the recap instead/);
+      expect(res.errLogs.slice(1).join("\n")).toMatch(/ECONNREFUSED|daemon/i);
+    } finally {
+      chmodSync(rigDir, 0o755);
       if (saved === undefined) delete process.env["OPENRIG_TOPOLOGY_ROOT"];
       else process.env["OPENRIG_TOPOLOGY_ROOT"] = saved;
       rmSync(tmp, { recursive: true, force: true });

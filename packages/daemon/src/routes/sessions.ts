@@ -27,6 +27,7 @@ import type { SessionTransport } from "../domain/session-transport.js";
 import type { PreviewRateLimiter } from "../domain/preview/preview-rate-limiter.js";
 import type { ClaimService } from "../domain/claim-service.js";
 import type { PodRigInstantiator } from "../domain/rigspec-instantiator.js";
+import type { SnapshotCapture } from "../domain/snapshot-capture.js";
 import { convergeOp } from "../domain/topology-converge.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
 import { launchStatusIsRunning } from "../domain/restore-orchestrator.js";
@@ -284,6 +285,14 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
   }
 
   if (node.podId) {
+    if (body.snapshotId === undefined) {
+      const instantiator = c.get("podInstantiator" as never) as PodRigInstantiator | undefined;
+      const firstStart = await instantiator?.launchFirstMaterializedNode(rigId, node.id);
+      if (firstStart) {
+        if (firstStart.ok) (c.get("snapshotCapture" as never) as SnapshotCapture | undefined)?.captureSnapshot(rigId, "auto-rehydrate");
+        return c.json(firstStart, firstStart.ok ? 201 : firstStart.code === "target_liveness_unknown" ? 503 : 409);
+      }
+    }
     const { restoreOrchestrator } = getDeps(c);
     if (!restoreOrchestrator) {
       return c.json({ ok: false, code: "internal_error", error: "Restore orchestrator not available" }, 500);

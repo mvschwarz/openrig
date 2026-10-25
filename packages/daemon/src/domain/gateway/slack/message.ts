@@ -352,7 +352,9 @@ export function buildGateContextLine(tags: readonly string[], instanceOnly = fal
 }
 
 /** Pure, deterministic rendering. Queue metadata stays in the durable request;
- * the human sees one subject, complete body and one sender attribution. */
+ * the human sees one sender attribution first, then one subject and the complete body.
+ * Where many agents post to one channel, who is asking comes before the ask, in the
+ * blocks and in the fallback text a notification shows. */
 export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): SlackMessagePayload {
   const summary = inert(String(q.summary || "(no summary)"));
   // #1013 — a gate parked on a human renders from the structured fields: the headline IS
@@ -381,7 +383,7 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
   const mention = opts.mentionUserId ? `<@${opts.mentionUserId}> :rotating_light: ` : "";
   const headline = bounded(`${mention}*${summary}*`, SLACK_SECTION_CAP, "subject");
   const machine = opts.attribution && !opts.attribution.host && opts.machine ? ` on ${inert(opts.machine)}` : "";
-  const attr = bounded(`from ${inert(opts.attribution?.session || opts.sourceLabel)}${machine}`, 2000, "sender");
+  const attr = bounded(`From ${inert(opts.attribution?.session || opts.sourceLabel)}${machine}`, 2000, "sender");
   const imageBlocks = buildImageBlocks(opts.mediaRefs);
   const attachmentText = imageBlocks.map((b) => `Image: ${(b as { alt_text: string }).alt_text}`).join("\n");
   const evidence = buildEvidenceLink(opts.evidenceLink);
@@ -391,7 +393,7 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
   }
   const replyHint = q.ownerNotificationKind === "human-required"
     ? "Reply in this thread after this question to answer it. Earlier and extra messages still reach the agent as conversation." : null;
-  const fallback = (context: string | null, repeat: string | null = null) => [headline, repeat, context, body, questionParts?.text, replyHint, attr, evidence ? evidence.text : null, attachmentText, opts.reconcileMarker].filter(Boolean).join("\n");
+  const fallback = (context: string | null, repeat: string | null = null) => [attr, headline, repeat, context, body, questionParts?.text, replyHint, evidence ? evidence.text : null, attachmentText, opts.reconcileMarker].filter(Boolean).join("\n");
   // The gate context line is supplementary: when it alone would push the complete fallback over
   // budget, the instance part alone is tried, and the line is left out only when even that
   // doesn't fit, rather than refusing the gate.
@@ -403,16 +405,16 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
   // The repeat note is supplementary too: left out rather than refusing a message it would push over a limit.
   const shownRepeat = opts.possibleRepeat && fallback(shownContext, POSSIBLE_REPEAT_NOTE).length <= SLACK_TEXT_CAP ? POSSIBLE_REPEAT_NOTE : null;
   const text = bounded(fallback(shownContext, shownRepeat), SLACK_TEXT_CAP, "complete fallback");
-  const blocks: unknown[] = [{ type: "section", text: { type: "mrkdwn", text: headline } }];
-  if (shownRepeat) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: shownRepeat }] });
+  const blocks: unknown[] = [{ type: "context", elements: [{ type: "mrkdwn", text: attr }] }, { type: "section", text: { type: "mrkdwn", text: headline } }];
+  const repeatBlock = shownRepeat ? { type: "context", elements: [{ type: "mrkdwn", text: shownRepeat }] } : null;
+  if (repeatBlock) blocks.push(repeatBlock);
   if (shownContext) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: shownContext }] });
   if (body.trim()) blocks.push({ type: "section", text: { type: "mrkdwn", text: body } });
   if (questionParts) blocks.push(...questionParts.blocks);
   if (replyHint) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: replyHint }] });
   blocks.push(...imageBlocks);
   if (evidence) blocks.push(evidence.block);
-  blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: attr }] });
-  if (shownRepeat && blocks.length > 50) blocks.splice(1, 1);
+  if (repeatBlock && blocks.length > 50) blocks.splice(blocks.indexOf(repeatBlock), 1);
   if (blocks.length > 50) throw new HumanMessageShapeError("Message exceeds 50 Slack blocks. Reduce attachments before sending.");
   return { text, blocks };
 }

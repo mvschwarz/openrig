@@ -101,12 +101,15 @@ function makeStdout(): Stdout {
   return { write: (text: string) => process.stdout.write(text) };
 }
 
-const MISSION_MANIFEST = `schema: openrig.mission/v0alpha1
+/** The lifecycle compiler names a mission's workflow by `metadata.name`, so the scaffold records it (quoted: a name
+ *  only excludes whitespace and path separators). */
+const missionManifest = (name: string) => `schema: openrig.mission/v0alpha1
 kind: mission
 # The project proof rollup counts only missions whose status is active or
 # release-candidate. A new mission is planned, so it stays outside the rollup
 # until you change this to active (or release-candidate).
 metadata:
+  name: ${JSON.stringify(name)}
   status: planned
 composition:
   mission_markdown:
@@ -950,7 +953,7 @@ function buildMissionCreateCommand(): Command {
         // New scaffolds author SPEC.md; existing README-backed nodes are never rewritten.
         const readmePath = path.join(absPath, "SPEC.md");
         fs.writeFileSync(readmePath, readmeBody, "utf8");
-        fs.writeFileSync(path.join(absPath, "mission.yaml"), MISSION_MANIFEST, "utf8");
+        fs.writeFileSync(path.join(absPath, "mission.yaml"), missionManifest(name), "utf8");
         const progressPath = path.join(absPath, "PROGRESS.md");
         fs.writeFileSync(progressPath, progressBody, "utf8");
         const capabilityDeltaPath = capabilityDeltaBody

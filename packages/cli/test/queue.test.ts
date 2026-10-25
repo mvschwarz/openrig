@@ -1958,6 +1958,14 @@ describe("rig queue CLI", () => {
       expect(help).not.toContain("resolution_already_closed");
     });
 
+    it("update --help says how to cancel a row: --state done --closure-reason canceled", async () => {
+      const { deps } = makeDeps();
+      const program = createProgram({ queueDeps: deps });
+      const help = program.commands.find((c) => c.name() === "queue")!.commands.find((c) => c.name() === "update")!.helpInformation().replace(/\s+/g, " ");
+      expect(help).toContain("To cancel a row: --state done --closure-reason canceled");
+      expect(help).toContain("--state canceled takes no reason, except 'superseded'");
+    });
+
     it("update without --resolution sends no resolution", async () => {
       const { deps, calls } = makeDeps();
       const program = createProgram({ queueDeps: deps });

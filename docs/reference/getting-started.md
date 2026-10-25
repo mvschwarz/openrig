@@ -39,6 +39,12 @@ The `rigs` skill is the procedure: follow it in order. This page is what it look
 
 ## Before you start
 
+Setup and launch are separate: declining `rig setup` avoids its `~/.tmux.conf` change, but starting Codex seats can
+still write workspace trust and selected MCP/config fragments. `runtime.codex.hooks_enabled=false` controls hooks;
+it isn't a no-global-config option. Setup has no project-only mode. Trusted project `.codex/config.toml` settings
+don't redirect OpenRig's home-config writes. A separate selected `CODEX_HOME` keeps Codex config, login and sessions
+together in that home; it needs its own working sign-in and doesn't relocate `~/.tmux.conf`.
+
 > **What OpenRig changes on your machine**
 > - **Install:** `@openrig/cli` goes in globally with npm.
 > - **Setup:** `rig setup` adds an OpenRig block to `~/.tmux.conf`. It can install tmux (with Homebrew on macOS), and
@@ -46,7 +52,8 @@ The `rigs` skill is the procedure: follow it in order. This page is what it look
 >   Claude Code and Codex and may install a missing one; `rig setup --providers claude` (or `codex`) limits it to
 >   yours.
 > - **Starting OpenRig, for the coding agent you use** (paths are the usual defaults):
->   - Codex: hooks and trust in `~/.codex/config.toml`.
+>   - Codex: hooks, workspace trust and team-selected config fragments (including MCP) in the selected
+>     `CODEX_HOME/config.toml`, default `~/.codex/config.toml`. These affect other Codex sessions using that home.
 >   - Claude Code: workspace trust in `~/.claude.json`, and activity hooks in the project's
 >     `.claude/settings.local.json`, plus a status line unless you already have your own.
 >   - Discovery skills go in `~/.claude/skills` and `~/.agents/skills`.
@@ -384,13 +391,14 @@ caller's Herdr endpoint must match the daemon's endpoint; a mismatch is reported
 without opening a window or putting the view in another session.
 
 The shared TUI (`rig tui --shared`) runs in the daemon's tmux server, so its own environment never
-carries the Herdr you are looking at; the markers are on the tmux client attached to it. When you
+carries the Herdr or Rex you are looking at; the markers are on the tmux client attached to it. When you
 open a terminal view from it on Linux, the TUI passes the markers of the client that was active last
-(normally the one that pressed the key) to the command, which then opens the view in that Herdr. The
+(normally the one that pressed the key) to the command, which then opens the view in that Herdr, or as
+a new session on that Rex server. The
 chosen client may belong to a different viewer: tmux only counts keys a client types, so a key sent
 by an agent (`send-keys`) or by a control-mode client doesn't count as any client's activity, and the
-view opens in the Herdr of the interactive client that typed last, however long ago. With no client
-attached, more than one client active in the same second, or a client that isn't in Herdr or can't be
+view opens in the Herdr or Rex of the interactive client that typed last, however long ago. With no client
+attached, more than one client active in the same second, or a client that is in neither or can't be
 read, nothing is passed and the result is what it was before. Other platforms, and every other way of
 running `rig terminal open`, keep the previous result too.
 
@@ -735,6 +743,56 @@ with `rig grow` and no YAML, or optionally author a custom rig. It covers
 new-seat context/work ownership, concurrency costs and saving the expanded spec.
 This guide remains the short first-use path.
 
+## Move a seat to the other runtime
+
+When a provider reaches its usage limit, or a seat would do better on the other
+runtime, move that one seat instead of rebuilding the team. Ask your operator
+agent, or run it yourself:
+
+```bash
+rig seat set-runtime dev-review@starter --runtime claude-code --reason "Codex limit" --dry-run
+rig seat set-runtime dev-review@starter --runtime claude-code --reason "Codex limit"
+```
+
+The dry run shows the target's settings and where each comes from (an explicit
+option, the seat's agent spec for the target runtime, or the runtime's own
+default), what is cleared, and the costs below. Nothing changes until you run it
+without `--dry-run`.
+
+The new runtime takes over before the old one stops. Its successor starts beside
+the current occupant, reads a handover (the seat's recap, its open rows and the
+predecessor's screen), and confirms it with `rig seat set-runtime <seat>
+--confirm <switch-id> --note "<what it will do first>"`. Only then does the seat
+move: same address, connections and queue rows, with in-progress claims moved
+to the successor. If the successor doesn't confirm within 180 seconds
+(`--confirm-timeout`), nothing changes and the current occupant keeps the seat.
+A seat can switch itself. `rig seat status <seat>` shows an open or interrupted
+switch, and `rig seat set-runtime <seat> --recover` finishes one from its record.
+
+What it costs:
+
+- **A new conversation.** Native history isn't converted; only the handover
+  carries over.
+- **The same address, a different terminal.** The seat's pane and scrollback
+  change.
+- **The team file isn't rewritten.** The database and `rig export` show the new
+  runtime; the YAML you imported keeps the old one, so a later converge against
+  it reports a deferred `change_runtime`. Export the rig, or edit the member's
+  `runtime:`, to keep them in step.
+- **Source settings are cleared, not mapped.** The model, effort, Codex profile
+  and an explicit native permission choice don't carry over, and neither does a
+  model or effort the agent spec declares for the source runtime. Member and rig
+  permission policy are kept.
+- **Two processes until cutover.** The successor runs on the target's account
+  while the switch is open.
+- **Messages are held during the switch.** A `rig send` to the seat while it
+  switches isn't typed; it says the seat is switching and until when. Send it
+  again afterwards to reach whoever holds the seat.
+- **Leftover files after a failed switch.** The target runtime's prepared seat
+  storage and projections can remain.
+- **Codex and Claude Code, single-pane seats.** Startup slash commands aren't
+  run by a switch; the dry run lists them.
+
 ## Stop your teams
 
 `rig down <rig-name>` ends that rig's agent sessions and work in progress.
@@ -1058,6 +1116,10 @@ absolute working directory, then uses that exact path for discovery and launch.
 It does not use interactive shell aliases or a shell's modified PATH. Relative
 PATH entries and a relative `CLAUDE_CONFIG_DIR` resolve from the seat directory.
 
+In `plan` mode Claude Code answers with Sonnet when the seat's model is the alias
+`haiku` (a full Haiku model id, set with `rig seat set-model`, keeps Haiku), and the
+launch result and `rig seat status` say so for that pairing.
+
 For these explicit native modes, fresh, resume, fork and legacy restore use the
 same managed environment: PATH, HOME, `CLAUDE_CONFIG_DIR` (default HOME/.claude)
 and the configured classic-renderer setting. Other shell customizations are
@@ -1182,6 +1244,9 @@ using the selected database. To stop before opening that database instead, run
 `rig config set daemon.db_conflict stop` (set it to `warn` for the default).
 The check requires an open-file holder, a matching `daemon.json`, and a listener
 reporting the same PID; missing or inconclusive evidence does not stop startup.
+When the check can't run (`lsof` is missing, fails or times out, or a recorded daemon's
+listener doesn't answer), startup warns that ownership is unknown rather than reporting
+no conflict, in either setting.
 Selecting a database outside `OPENRIG_HOME` alone only warns; a confirmed live-daemon
 conflict there still stops when `daemon.db_conflict` is `stop`.
 

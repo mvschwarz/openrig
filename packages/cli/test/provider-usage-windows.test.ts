@@ -85,6 +85,17 @@ describe("rig provider status — usage windows", () => {
   afterAll(() => new Promise<void>((resolve) => server.close(() => resolve())));
   beforeEach(() => { model = MODEL; posts.length = 0; refreshByProvider = {}; });
 
+  it("an explicitly selected labelled token refresh sends its reference once and ordinary status never probes it", async () => {
+    const args = ["status", "--refresh", "--provider", "claude", "--claude-token-file", "/private/selected.token", "--credential-label", "Personal"];
+    const result = await run(args, port);
+    expect(posts).toEqual([{ provider: "claude", claudeToken: { label: "Personal", tokenFile: "/private/selected.token" } }]);
+    expect(result.err).toContain("spends one model turn");
+    posts.length = 0;
+    await run(["status"], port); expect(posts).toEqual([]);
+    const invalid = await run([...args, "--all-hosts"], port);
+    expect(invalid.exitCode).toBe(1); expect(posts).toEqual([]);
+  });
+
   it("switch off (no usage key): no USAGE section", async () => {
     const { out } = await run(["status"], port);
     expect(out).not.toContain("USAGE");

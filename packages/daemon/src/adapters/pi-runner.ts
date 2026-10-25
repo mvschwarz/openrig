@@ -3,7 +3,7 @@
 // The runner is what makes a Pi seat behave like a normal OpenRig tmux seat
 // while everything underneath stays structured RPC:
 //
-//   pane stdin (rig send / human typing)  ──▶ RPC prompt / steer / follow_up
+//   pane stdin (rig send / human typing)  ──▶ RPC prompt (queued as a steer while busy) / follow_up
 //   pi RPC events (typed JSONL)           ──▶ (a) human-readable pane mirror
 //                                             (b) activity + session_identity
 //                                                 POSTs to the daemon
@@ -533,15 +533,12 @@ export class RunnerCore {
       this.io.mirrorLine(`you (follow-up) ▸ ${message}`);
       return;
     }
-    if (this.streaming) {
-      // Mid-stream: steer delivers after the current turn's tool calls,
-      // before the next model call (Pi's documented semantics).
-      this.io.sendRpc({ type: "steer", message: block });
-      this.io.mirrorLine(`you (steer) ▸ ${block}`);
-      return;
-    }
-    this.io.sendRpc({ type: "prompt", message: block });
-    this.io.mirrorLine(`you ▸ ${block}`);
+    // The runtime decides, not the runner: with streamingBehavior "steer", Pi and OMP run the prompt when idle and,
+    // while busy, queue it as a steer, delivered after the current turn's tool calls and before the next model call.
+    // The runner's `streaming` starts only at agent_start, so it can't tell when a turn is about to start (#1932) or
+    // when a prompt was consumed locally and started none. It labels the mirror line only.
+    this.io.sendRpc({ type: "prompt", message: block, streamingBehavior: "steer" });
+    this.io.mirrorLine(this.streaming ? `you (steer) ▸ ${block}` : `you ▸ ${block}`);
   }
 
   /** Child process exit — honest, loud, durable. */
@@ -729,15 +726,24 @@ export class RunnerCore {
   }
 
   private handleEvent(event: Record<string, unknown>): void {
-    if (this.runtime === "omp" && event.type === "extension_ui_request") {
+    if ((this.runtime === "omp" || this.runtime === "pi") && event.type === "extension_ui_request") {
       const method = event.method;
+      const dialog = method === "select" || method === "confirm" || method === "input" || method === "editor";
+      const detail = [event.title, event.message].filter((text): text is string => typeof text === "string")
+        .map(stripVTControlCharacters).join(" — ").replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").slice(0, 400);
+      if (this.runtime === "pi" && !dialog) {
+        if (method === "notify") this.io.mirrorLine(`[pi-runner] ${detail}`);
+        return; // Pi notifications and other fire-and-forget UI requests expect no answer.
+      }
       // RPC does not mount an interactive UI. Reply at once; otherwise the
       // child can wait forever for approval that cannot be given in the pane.
       if (typeof event.id === "string") {
         this.io.sendRpc({ type: "extension_ui_response", id: event.id, cancelled: true });
       }
-      if (method === "select" || method === "confirm" || method === "input" || method === "editor") {
-        this.io.mirrorLine("[omp-runner] Approval/input requested; cancelled because the managed RPC pane cannot answer it. Operator action required: review the denied action and re-send a safe instruction, or change the seat permission policy explicitly.");
+      if (dialog) {
+        this.io.mirrorLine(this.runtime === "pi"
+          ? `[pi-runner] Extension ${method}: ${detail}; cancelled because the managed RPC pane cannot answer it. Operator action required: review the cancelled request and re-send an instruction the extension can complete without a dialog.`
+          : "[omp-runner] Approval/input requested; cancelled because the managed RPC pane cannot answer it. Operator action required: review the denied action and re-send a safe instruction, or change the seat permission policy explicitly.");
         this.raiseAttention("permission_prompt");
       }
       return;
@@ -753,8 +759,8 @@ export class RunnerCore {
       this.writeSidecar({});
     }
 
+    if (event.type === "agent_start") this.clearAttention();
     if (this.runtime === "omp") {
-      if (event.type === "agent_start") this.clearAttention();
       if (event.type === "agent_start" || event.type === "turn_start"
         || (event.type === "message_start" && message?.role === "assistant")
         || ((event.type === "message_end" || event.type === "turn_end")

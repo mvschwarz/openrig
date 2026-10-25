@@ -41,9 +41,10 @@ describe("MCP Server", () => {
     if (cleanup) await cleanup();
   });
 
-  // T1: MCP server lists all 34 tools: the original 18, the five queue tools, the telemetry events read, restore status, whoami,
-  // the team, slice, mission and two context reads, the artifact read, and the decision room and delegated decision
-  it("lists all 34 tools", async () => {
+  // T1: MCP server lists all 36 tools: the original 18, the five queue tools, the telemetry events read, restore status, whoami,
+  // the team, slice, mission and two context reads, the artifact read, the decision room and delegated decision, and the
+  // worker's handoff and unclaim
+  it("lists all 36 tools", async () => {
     await setup();
     const result = await mcpClient.listTools();
     const names = result.tools.map((t) => t.name).sort();
@@ -66,8 +67,10 @@ describe("MCP Server", () => {
       "rig_queue_claim",
       "rig_queue_create",
       "rig_queue_decide",
+      "rig_queue_handoff",
       "rig_queue_list",
       "rig_queue_show",
+      "rig_queue_unclaim",
       "rig_queue_update",
       "rig_restore",
       "rig_restore_status",
@@ -236,8 +239,9 @@ describe("MCP Server", () => {
       "rig_team", "rig_slices", "rig_mission", "rig_context_pack", "rig_context_get", "rig_artifact_read", "rig_human_decision_room"];
     const additive = ["rig_add", "rig_chatroom_send", "rig_queue_create", "rig_snapshot_create"];
     // Discover refreshes and retires discovered facts; claim ends a blocked row's wait. Both change existing state.
-    // A delegated decision closes the person's ask.
-    const destructive = ["rig_bind", "rig_discover", "rig_down", "rig_queue_claim", "rig_queue_decide", "rig_queue_update", "rig_restore", "rig_send", "rig_up"];
+    // A delegated decision closes the person's ask; a handoff closes the item passed on; an unclaim ends a claim.
+    const destructive = ["rig_bind", "rig_discover", "rig_down", "rig_queue_claim", "rig_queue_decide", "rig_queue_handoff", "rig_queue_unclaim",
+      "rig_queue_update", "rig_restore", "rig_send", "rig_up"];
     const hints = Object.fromEntries(tools.map((tool) => [tool.name, tool.annotations]));
     expect(Object.keys(hints).sort()).toEqual([...reads, ...additive, ...destructive].sort());
     for (const name of reads) expect(hints[name], name).toEqual({ readOnlyHint: true });
@@ -559,7 +563,7 @@ describe("MCP Server", () => {
 
     // Verify server is responsive
     const result = await mcpClient.listTools();
-    expect(result.tools.length).toBe(34);
+    expect(result.tools.length).toBe(36);
 
     // Clean disconnect
     await cleanup();
@@ -573,7 +577,7 @@ describe("MCP Server", () => {
     await client2.connect(ct2);
 
     const result2 = await client2.listTools();
-    expect(result2.tools.length).toBe(34);
+    expect(result2.tools.length).toBe(36);
 
     await client2.close();
     await server2.close();
@@ -1000,6 +1004,26 @@ describe("MCP Server", () => {
       expect(postFn.mock.calls[0]?.[0]).toBe("/api/queue/qitem-1/claim");
       expect(postFn.mock.calls[1]?.[0]).toBe("/api/queue/qitem-1/update");
       expect(postFn.mock.calls[1]?.[1]).toMatchObject({ state: "done", closureReason: "no-follow-on", transitionNote: "the answer" });
+      await cleanup();
+    });
+    it("rig_queue_handoff and rig_queue_unclaim post to the item's routes, naming the next seat and the reason", async () => {
+      const postFn = vi.fn(async () => ({ status: 201, data: { ok: true } }));
+      await setup({ post: postFn });
+      await mcpClient.callTool({ name: "rig_queue_handoff", arguments: { qitemId: "qitem-1", to: "qa@team", note: "needs a check" } });
+      await mcpClient.callTool({ name: "rig_queue_unclaim", arguments: { qitemId: "qitem-2", reason: "no capacity" } });
+      expect(postFn.mock.calls[0]?.[0]).toBe("/api/queue/qitem-1/handoff");
+      expect(postFn.mock.calls[0]?.[1]).toMatchObject({ toSession: "qa@team", transitionNote: "needs a check" });
+      expect(postFn.mock.calls[1]?.[0]).toBe("/api/queue/qitem-2/unclaim");
+      expect(postFn.mock.calls[1]?.[1]).toEqual({ reason: "no capacity" });
+      await cleanup();
+    });
+    it("rig_queue_handoff that times out says the outcome is unknown and how to check it before retrying", async () => {
+      const postFn = vi.fn(async () => { throw new Error("Request timed out"); });
+      await setup({ post: postFn });
+      const result = await mcpClient.callTool({ name: "rig_queue_handoff", arguments: { qitemId: "qitem-1", to: "qa@team" } });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({ ok: false, qitemId: "qitem-1", outcome: "unknown" });
+      expect((result.content as Array<{ text: string }>)[0]!.text).toContain("check rig_queue_show with qitemId qitem-1 before retrying");
       await cleanup();
     });
     it("rig_queue_update passes the outcome as resolution and a deliberate reopen", async () => {

@@ -246,6 +246,24 @@ export function skillCommand(depsOverride?: StatusDeps): Command {
     .command("audit")
     .description("Read-only skill provenance and freshness audit")
     .option("--json", "JSON output")
+    .addHelpText("after", `
+What it reports: each copy's declared provenance (owner, source_ref or version), whether its verified date is within
+90 days and names an evidence source (stale_verified, bare_verified; state "stale" in --json), its content hash, and
+whether it is a byte-identical copy of a bundled plugin skill. "stale" is a date finding. Two copies of one skill with
+different hashes have different bytes; that alone doesn't say which is newer or that either was edited on purpose.
+
+What it doesn't say: whether a copy is safe to refresh or overwrite. For a managed copy in a working folder, run the
+read-only loadout check first (no --apply):
+  rig skill loadout --runtime <claude-code|codex> --cwd <target> --project-root <project> --json
+It reports each copy as current; stale, still OpenRig's last projection, so --apply can refresh it; conflicting;
+shadowed; or missing. Read the detail of conflicting and shadowed: conflicting can mean the bytes differ or that the
+target couldn't be inspected, which leaves any difference unknown, and a confirmed difference doesn't prove a
+deliberate local edit. A seat's own skills, kept outside the project (0.7.1 and later), are listed with where they're
+stored by rig skill loadout --seat <session|self> --json; that read doesn't classify them.
+
+A global or untracked copy has no install record, so its origin stays unknown: ask the skill's owner before replacing
+it. Don't move global skills into a project just to get a record.
+`)
     .action(async (opts: { json?: boolean }) => {
       const deps = getDeps();
       const status = await getDaemonStatus(deps.lifecycleDeps);
@@ -313,6 +331,9 @@ export function skillCommand(depsOverride?: StatusDeps): Command {
       } else {
         console.log("PASS: all active skills have provenance and verified freshness");
       }
+      console.log("Refreshing a copy? This audit doesn't say whether that's safe. For a managed copy, run the read-only "
+        + "rig skill loadout --runtime <claude-code|codex> --cwd <target> --project-root <project> --json first; "
+        + "rig skill audit --help says what its answers mean.");
     });
 
   return cmd;

@@ -550,6 +550,24 @@ function applicableVerdict(
   return verdict;
 }
 
+/** Is this node's current session confirmed missing? The inventory's own rule (an identity
+ *  verdict for the current session and binding that confirms session_missing), for readers
+ *  outside the inventory projection. No verdict, a stale one or an unreadable store: false. */
+export function nodeSessionConfirmedMissing(db: Database.Database, nodeId: string): boolean {
+  try {
+    const row = db.prepare(`
+      SELECT n.handover_at, s.id AS session_id, s.session_name, s.created_at AS session_created_at, b.tmux_pane AS binding_tmux_pane
+        FROM nodes n
+        LEFT JOIN sessions s ON s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
+        LEFT JOIN bindings b ON b.node_id = n.id
+       WHERE n.id = ?
+    `).get(nodeId) as Pick<InventoryRow, "session_id" | "session_name" | "session_created_at" | "binding_tmux_pane" | "handover_at"> | undefined;
+    return !!row && identityVerdictConfirmsSessionMissing(applicableVerdict(new SeatIdentityStore(db).getForNode(nodeId), row));
+  } catch {
+    return false;
+  }
+}
+
 // -- Public API --
 
 /**
@@ -1164,10 +1182,11 @@ const NEEDS_INPUT_RUNGS: readonly EvidenceRungId[] = ["needs-input-chrome", "lif
  *     startupStatus; `latestError` may legitimately be null here
  *   - `needs_input`: the ARBITRATED seat state is the first answer when it has one
  *     (`arbitratedNeedsInput` — the same oracle the per-seat row renders, pane chrome
- *     included), and the hook store's live `needs_input` is the fallback when the
- *     arbitrated signal is `null` (stale hooks arrive as `unknown` and contribute
- *     nothing — never guessed). The rig total and the seat row must not disagree
- *     about the same seat.
+ *     included), and the served activity's `needs_input` is the fallback when the
+ *     arbitrated signal is `null`: a live hook, else the cached pane reading
+ *     (`hookOrPaneActivity`), which sees a prompt no hook reported. Stale hooks
+ *     arrive as `unknown` and contribute nothing — never guessed. The rig total
+ *     and the seat row must not disagree about the same seat.
  *   - a held seat (`heldReason` present)
  *   - a recorded startup error (`latestError` present)
  */
@@ -1270,7 +1289,9 @@ export function attachTerminalActivityAndWork(
       terminalActive,
       lastActivityAt,
       activityState,
-      needsAttention: seatNeedsAttention(entry, hook, arbitratedNeedsInput),
+      // The activity this row serves (a live hook, else the cached pane reading) when it was attached, so a prompt
+      // only the pane shows counts; the hook store alone where it wasn't.
+      needsAttention: seatNeedsAttention(entry, entry.agentActivity ?? hook, arbitratedNeedsInput),
       arbitratedNeedsInput,
       needsInputEvidence: arb?.needsInputEvidence ?? null,
       hasAssignedWork: work.assignedWorkCount > 0,
@@ -1384,6 +1405,59 @@ export function readAssignedWorkBySession(db: Database.Database): Map<string, As
     });
   }
   return out;
+}
+
+/**
+ * The capture-free answer from a seat's newest hook and its cached pane reading, before motion is applied, or `null`
+ * when neither answers. The per-seat activity below and the rig attention count both read it, so a prompt that only
+ * the pane shows counts in both.
+ */
+export function hookOrPaneActivity(
+  hookActivity: AgentActivity | null | undefined,
+  structural: StructuralObservation | null,
+  /** A positive idle hook gives way to a current complete idle frame (D2). */
+  idleYieldsToFrame = false,
+): { source: "hook" | "limit" | "pane"; activity: AgentActivity } | null {
+  // Running/needs_input hooks keep their meaning.
+  if (hookActivity && hookActivity.state !== "unknown" && !(hookActivity.state === "idle" && idleYieldsToFrame)) {
+    return { source: "hook", activity: hookActivity };
+  }
+
+  // #763: a typed provider-interruption row (at_limit) is positive evidence
+  // even though its state is unknown by construction (it must never count
+  // as waiting-on-a-person). Deliver it instead of the cached pane reading
+  // so a limited seat shows the limit, not idle — but only while current.
+  // Terminal redraws are not recovery evidence and must not erase the limit.
+  // Only a strictly newer, current attention observation outranks it.
+  // A demoted row (aged out or generation-mismatched) falls through to the
+  // structural reading like any other stale hook.
+  if (hookActivity?.rawEvent === "at_limit" && hookActivity.stale !== true && !(
+    structural?.state === "attention" &&
+    Date.parse(structural.observedAt) > Date.parse(hookActivity.eventAt ?? "")
+  )) {
+    return { source: "limit", activity: hookActivity };
+  }
+
+  // Hook ABSENT or unknown/stale → consult the CACHED structural observation. This read is
+  // capture-FREE: the pane capture already happened on the background SeatStructuralActivityService
+  // tick, never here (the healthz-wedge no-per-request-capture invariant is preserved). A structural
+  // motion verdict is a LIVENESS signal that OVERRIDES an absent/stale hook (constraint 2 — liveness
+  // beats hook-arrival age) and makes ACTIVITY real on the DEFAULT path for hook-less / Codex /
+  // just-finished-a-turn seats: the exact fleet-blindness this fix targets. Structural discrimination
+  // is STRUCTURAL (spinner shapes / esc-to-interrupt / idle prompt), never a verb allowlist.
+  if (structural && structural.state !== "unknown") {
+    return {
+      source: "pane",
+      activity: {
+        state: mapPaneState(structural.state),
+        reason: structural.reason,
+        evidenceSource: "pane_heuristic",
+        sampledAt: structural.observedAt,
+        evidence: structural.evidence,
+      },
+    };
+  }
+  return null;
 }
 
 export async function attachAgentActivity(
@@ -1541,53 +1615,12 @@ export async function attachAgentActivity(
       && (!motionRunning || (Number.isFinite(motionMs)
         && Math.floor(capturedMs / 1000) > Math.floor(motionMs / 1000)));
 
-    // Running/needs_input hooks keep their meaning. An idle hook alone still yields to motion
-    // (D2); when a current complete idle frame exists, report that frame's provenance instead.
-    if (hookActivity && hookActivity.state !== "unknown"
-      && !(hookActivity.state === "idle" && motionRunning && currentIdleFrame)) {
-      return {
-        ...entry,
-        agentActivity: withMotion(hookActivity),
-      };
-    }
-
-    // #763: a typed provider-interruption row (at_limit) is positive evidence
-    // even though its state is unknown by construction (it must never count
-    // as waiting-on-a-person). Deliver it instead of the cached pane reading
-    // so a limited seat shows the limit, not idle — but only while current.
-    // Terminal redraws are not recovery evidence and must not erase the limit.
-    // Only a strictly newer, current attention observation outranks it.
-    // A demoted row (aged out or generation-mismatched) falls through to the
-    // structural reading like any other stale hook.
-    if (hookActivity?.rawEvent === "at_limit" && hookActivity.stale !== true && !(
-      structural?.state === "attention" &&
-      Date.parse(structural.observedAt) > Date.parse(hookActivity.eventAt ?? "")
-    )) {
-      return {
-        ...entry,
-        agentActivity: hookActivity,
-      };
-    }
-
-    // Hook ABSENT or unknown/stale → consult the CACHED structural observation. This read is
-    // capture-FREE: the pane capture already happened on the background SeatStructuralActivityService
-    // tick, never here (the healthz-wedge no-per-request-capture invariant is preserved). A structural
-    // motion verdict is a LIVENESS signal that OVERRIDES an absent/stale hook (constraint 2 — liveness
-    // beats hook-arrival age) and makes ACTIVITY real on the DEFAULT path for hook-less / Codex /
-    // just-finished-a-turn seats: the exact fleet-blindness this fix targets. Structural discrimination
-    // is STRUCTURAL (spinner shapes / esc-to-interrupt / idle prompt), never a verb allowlist.
-    if (structural && structural.state !== "unknown") {
-      return {
-        ...entry,
-        agentActivity: withMotion({
-          state: mapPaneState(structural.state),
-          reason: structural.reason,
-          evidenceSource: "pane_heuristic",
-          sampledAt: structural.observedAt,
-          evidence: structural.evidence,
-        }, currentIdleFrame),
-      };
-    }
+    // An idle hook alone still yields to motion (D2); when a current complete idle frame exists, report
+    // that frame's provenance instead.
+    const resolved = hookOrPaneActivity(hookActivity, structural, motionRunning && currentIdleFrame);
+    if (resolved?.source === "hook") return { ...entry, agentActivity: withMotion(resolved.activity) };
+    if (resolved?.source === "limit") return { ...entry, agentActivity: resolved.activity };
+    if (resolved?.source === "pane") return { ...entry, agentActivity: withMotion(resolved.activity, currentIdleFrame) };
 
     // No positive hook and no structural verdict. A stale/unknown hook, if one exists, is delivered
     // HONESTLY as-is (unknown/stale) — never upgraded to a quiet-seat verdict on arrival age alone.

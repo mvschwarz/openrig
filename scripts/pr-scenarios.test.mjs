@@ -16,6 +16,27 @@ const mcp = {
   instructions: 'OPENRIG_SESSION_NAME\nrig_queue_create\nnot idle\nreserved for a person',
 };
 
+// Pure result-admission fixture; not a pane/daemon execution claim.
+function promptStateProof() {
+  const codex = 'dev-codex@prompt-state';
+  const seen = attention => ({
+    node: { needsAttention: attention, agentActivity: { state: attention ? 'needs_input' : 'running' } },
+    compact: { needsAttention: attention, agentActivity: { state: attention ? 'needs_input' : 'running' } },
+    rig: { attentionCount: attention ? 1 : 0 },
+    table: 'SESSION ATTN REASON\n' + codex + (attention ? ' yes selection_prompt' : ' no working'),
+  });
+  return { stage: 'complete', hookEvents: 0, runtimes: ['codex', 'claude-code'], paneHeight: 45, codex, claude: 'dev-claude@prompt-state',
+    attention: seen(true), clear: seen(false),
+    working: ['quoted-selector', 'quoted-permission'].map(kind => ({ kind, marker: kind, before: ['Frame', '❯ ', '⏵⏵ accept edits on (shift+tab to cycle) · ← for agents', ...Array(42).fill('')].join('\n') + '\n',
+      send: { code: 0 }, pane: kind, wake: { id: 'wake-' + kind, pane: 'wake-' + kind } })),
+    waiting: { marker: 'must-not-type', send: { code: 1, stdout: 'target_needs_input', stderr: '' },
+      pane: 'real prompt', wake: { id: 'must-not-wake', fired: true, delivery: 'failed', pane: 'real prompt', jobId: 'watchdog-waiting',
+        attempt: { historyId: 'attempt-waiting', jobId: 'watchdog-waiting', deliveryTargetSession: 'dev-claude@prompt-state',
+          outcome: 'refused', deliveryStatus: 'failed', deliveryMessage: 'Wake must-not-wake',
+          evaluationNotes: { deliveryReason: "Refused: 'dev-claude@prompt-state' is at an interactive prompt (selection_prompt). No text was sent." } } } },
+  };
+}
+
 // Pure admission controls, not E2E evidence. No process, socket, native addon or DB.
 function report(mode, result, fault = null) {
   return { mode, result, records: [result], fault };
@@ -95,6 +116,7 @@ test('a passing-only case admits only a clean PASS of its own scenario', () => {
     const text = (PASSING_CASES[caseName].includes ?? []).join('\n');
     const hook = { rawOutput: JSON.stringify({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: text } }), additionalContext: text };
     const pass = { ...(PASSING_CASES[caseName].kind === 'hook' ? { hook } : {}), mode: 'healthy', caseName, scenarioSha256: 'a'.repeat(64), result, records: [result], fault: null };
+    if (caseName === 'prompt-state') pass.promptState = promptStateProof();
     if (caseName === 'daemon-restart') {
       pass.mcp = mcp;
       const snapshot = { nodes: [{ id: 'worker' }, { id: 'peer' }], bindings: [{ id: 'b1', node_id: 'worker', tmux_pane: '%1' }, { id: 'b2', node_id: 'peer', tmux_pane: '%2' }],
@@ -327,3 +349,43 @@ for (const failure of [null, 'after-restart', 'before-private-panes', 'after-pri
     }
   });
 }
+
+
+test('prompt-state result rejects every escaped regression and missing control', () => {
+  const result = { scenario: 'prompt-state', verdict: 'PASS' };
+  const pass = { mode: 'healthy', caseName: 'prompt-state', scenarioSha256: 'a'.repeat(64),
+    result, records: [result], fault: null, promptState: promptStateProof() };
+  verifyPassingRun(0, pass, 'prompt-state');
+  const mutations = [
+    p => { p.stage = 'setup'; },
+    p => { p.hookEvents = 1; },
+    p => { p.runtimes[1] = 'stub'; },
+    p => { p.paneHeight = 24; },
+    p => { p.working[0].before = p.working[0].before.trimEnd(); },
+    p => { p.working[0].before = '\n'.repeat(45); },
+    p => { p.attention.node.agentActivity.state = 'working'; },
+    p => { p.attention.compact.needsAttention = false; },
+    p => { p.attention.rig.attentionCount = 0; },
+    p => { p.attention.table = 'ATTN no working'; },
+    p => { p.clear.node.needsAttention = true; },
+    p => { p.working[0].send.code = 1; },
+    p => { p.working[1].pane = ''; },
+    p => { p.working[0].wake.pane = ''; },
+    p => { p.waiting.send.code = 0; },
+    p => { p.waiting.pane += p.waiting.marker; },
+    p => { p.waiting.wake.fired = false; },
+    p => { p.waiting.wake.delivery = 'ok'; },
+    p => { p.waiting.wake.attempt = null; },
+    p => { p.waiting.wake.attempt.outcome = 'failed'; p.waiting.wake.attempt.evaluationNotes.deliveryReason = 'transport unavailable'; },
+    p => { p.waiting.wake.delivery = 'retained'; p.waiting.wake.attempt.outcome = 'skipped'; },
+    p => { p.waiting.wake.attempt.evaluationNotes = null; },
+    p => { p.waiting.wake.attempt.jobId = 'another-job'; },
+    p => { p.waiting.wake.attempt.deliveryTargetSession = 'another-seat'; },
+    p => { p.waiting.wake.attempt.deliveryMessage = 'another-queue-row'; },
+    p => { p.waiting.wake.pane += p.waiting.wake.id; },
+  ];
+  for (const mutate of mutations) {
+    const proof = promptStateProof(); mutate(proof);
+    assert.throws(() => verifyPassingRun(0, { ...pass, promptState: proof }, 'prompt-state'));
+  }
+});

@@ -58,3 +58,26 @@ test('ordinary invocation and ambiguous remote selection refuse before any build
     assert.match(run.stderr, message);
   }
 });
+
+test('settlement uses the recorded ID, TERM and stopped-state removal; unknown effects stay retained', async () => {
+  const { settleContainer } = await import('./scenario-executor.mjs');
+  assert.equal(typeof settleContainer, 'function');
+  const id='a'.repeat(64), image='sha256:'+'b'.repeat(64), name='testbed-owned';
+  function fixture({running=false,mismatch=false,waitUnknown=false,stillRunning=false}={}) {
+    const calls=[];let inspected=0;
+    const invoke=args=>{
+      calls.push(args);
+      if(args[0]==='inspect')return JSON.stringify([{Id:mismatch?'c'.repeat(64):id,Name:'/'+name,Image:image,State:{Running:inspected++===0?running:stillRunning,Status:(inspected===1?running:stillRunning)?'running':'exited'}}]);
+      if(args[0]==='wait'&&waitUnknown)throw Error('wait timed out; engine state unknown');
+      return '';
+    };
+    return {calls,invoke};
+  }
+  const owned={id,name,image};
+  const stopped=fixture();settleContainer(owned,stopped.invoke);assert.deepEqual(stopped.calls,[['inspect',id],['rm',id]]);
+  const live=fixture({running:true});settleContainer(owned,live.invoke);assert.deepEqual(live.calls,[['inspect',id],['kill','--signal','TERM',id],['wait',id],['inspect',id],['rm',id]]);
+  for(const opts of [{mismatch:true},{running:true,waitUnknown:true},{running:true,stillRunning:true}]){
+    const f=fixture(opts);assert.throws(()=>settleContainer(owned,f.invoke));assert.ok(!f.calls.some(x=>x[0]==='rm'));
+  }
+  const f=fixture();assert.throws(()=>settleContainer({...owned,id:'not-an-id'},f.invoke));assert.equal(f.calls.length,0);
+});

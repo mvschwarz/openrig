@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { verifyPromptState } from './prompt-state.mjs';
 import { verifyMcpStdio } from './mcp-stdio.mjs';
 import { verifyReducedEnvRestart, verifyGoneProcess } from './reduced-env-restart.mjs';
 
@@ -12,6 +13,7 @@ export const CASES = {
 // Stub-script scenarios run in their passing form only. Their planted failures are
 // product-code mutations, so they stay per-PR evidence outside CI.
 export const PASSING_CASES = {
+  'prompt-state': { file: 'library/prompt-state.json', scenario: 'prompt-state', kind: 'prompt-state' },
   'refocus-active': { file: 'library/refocus-active-baton.yaml', scenario: 'refocus-active-baton', kind: 'hook',
     includes: ['Trace the exact held work'], excludes: ['FALLBACK'] },
   // The parked case with the work packet switched off: today's labelled root fallback, never the slice as work.
@@ -38,6 +40,7 @@ export function verifyPassingRun(exitCode, report, caseName) {
   assert.deepEqual(report.records[0], report.result);
   assert.equal(exitCode, 0);
   assert.equal(report.result.verdict, 'PASS');
+  if (caseName === 'prompt-state') verifyPromptState(report.promptState);
   if (caseName === 'daemon-restart') {
     verifyMcpStdio(report.mcp);
     verifyReducedEnvRestart(report.reducedEnv);

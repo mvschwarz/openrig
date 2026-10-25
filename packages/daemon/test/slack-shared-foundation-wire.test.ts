@@ -116,7 +116,7 @@ describe("one shared Slack app across two machines", () => {
     expect(row).toMatchObject({ sourceSession: human, destinationSession: "operator-agent@kernel" });
     const first = await answer(vps, "operator-agent@kernel", row.qitemId, "On it");
     expect(first).toMatchObject({ channel: "C0VPS04", thread_ts: "700.1" });
-    expect(String(first.text)).toContain("from operator-agent@kernel on vps04");
+    expect(String(first.text)).toContain("From operator-agent@kernel on vps04");
     const second = await answer(vps, "operator-agent@kernel", row.qitemId, "Done");
     expect(second).toMatchObject({ channel: "C0VPS04", thread_ts: "700.1" });
     expect(hub.posts).toEqual([]);

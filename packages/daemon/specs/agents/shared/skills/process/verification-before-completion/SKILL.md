@@ -5,7 +5,11 @@ metadata:
   openrig:
     vendored_from: "Obra Superpowers (https://github.com/obra/superpowers)"
     vendoring_pattern: modify-the-file
-    last_upstream_check: "2026-05-13 (diff against plugin source pulled 2026-05-11 = identical)"
+    last_upstream_check: "2026-10-25 (SKILL.md and license compared at 2ce8aa15d05bd57213e6f746f953aafb7ded7a8b; no content sync)"
+    divergence_notes: |
+      Retained local copy; SKILL.md differs from the checked upstream revision.
+      This comparison did not refresh the skill body or companion files.
+      Upstream license terms are included in LICENSE.txt.
 ---
 
 # Verification Before Completion

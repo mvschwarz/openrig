@@ -13,14 +13,17 @@
 // to restore a running kernel (so no second kernel/advisor/operator is spawned).
 
 import { useState } from "react";
-import { RigStatusCard } from "./RigStatusCard.js";
+import { RigStatusCard, type RigStatusCardStatus } from "./RigStatusCard.js";
 import { LaunchRecoveryModal } from "./LaunchRecoveryModal.js";
 import { useKernelStatus, isKernelUnavailable, type KernelState } from "../hooks/useKernelStatus.js";
 import { useRigSummary } from "../hooks/useRigSummary.js";
-import type { RigAggStatus } from "../hooks/useRigStatus.js";
 
-function kernelToAggregate(state: KernelState | undefined): RigAggStatus {
+function kernelToCardStatus(state: KernelState | undefined): RigStatusCardStatus {
   switch (state) {
+    // An existing kernel and an explicit auto-boot opt-out both skip the
+    // tracker. Neither supplies a boot readiness verdict.
+    case "skipped":
+      return "untracked";
     case "ready":
       return "up";
     case "booting":
@@ -83,7 +86,9 @@ export function KernelStatusCard() {
 
   // Defensive: a malformed envelope (missing kernel_state / agents) reads as
   // `unknown` — never a crash, never a false green.
-  const status = kernelToAggregate(kernel.kernel_state);
+  const status = Array.isArray(kernel.agents)
+    ? kernelToCardStatus(kernel.kernel_state)
+    : "unknown";
   const agents = Array.isArray(kernel.agents) ? kernel.agents : [];
   const readyAgents = agents.filter((a) => a.startup_status === "ready").length;
   const src = [

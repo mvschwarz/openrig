@@ -24,6 +24,22 @@ seats run with an operational default: Codex with `-s danger-full-access -a neve
 tools, web fetches and operational commands, including reads under the home folder, allowed without asking. Say so
 before you start OpenRig ([the full list](https://github.com/mvschwarz/openrig#what-openrig-changes-on-your-machine)).
 
+**If they want changes kept inside their project:** before setup or the first daemon/kernel start, name the selected
+Codex config path (`CODEX_HOME/config.toml`, default `~/.codex/config.toml`) and explain the independent writes.
+Setup adds `~/.tmux.conf`; Codex seat startup adds workspace trust and any declared config fragments, including MCP,
+even when setup was skipped or `runtime.codex.hooks_enabled` is false. That setting controls hooks, not all config
+writes. These settings can reach their other sessions using the same Codex home. Reuse a yes that already covered
+these writes; an explicit project-only request doesn't cover them. If they decline, don't launch that same path or
+remove the writes afterwards as a substitute for consent. Explain that setup has no project-only mode. A git worktree
+or project `.codex/config.toml` doesn't redirect these writes. An existing separate `CODEX_HOME` isolates Codex's
+config, login and session state together; it needs its own working sign-in and doesn't relocate `~/.tmux.conf`.
+Carry the person's scope constraint to the operator.
+
+**Codex individual approvals:** explain before installation that even reads may ask repeatedly during setup and
+follow-up, separately from the team's permissions. Use plain, separate commands so each request is readable.
+The one optional six-command approval offer below still applies; don't enable general network access or broaden
+other permission settings to avoid prompts.
+
 When you give the person a file or a command to run in their own terminal, use a path that exists on their side. A
 file a sandboxed agent writes under `/tmp` may not exist in the person's terminal (seen with Codex), so put files the
 person needs in their project or home folder and name that path.
@@ -59,12 +75,14 @@ person needs in their project or home folder and name that path.
   itself, using herdr when installed or plain tmux otherwise:
   - **Inside Herdr** (you run in a Herdr pane): it switches the person's Herdr to an `openrig kernel` space, reusing a live
     one. No new window and no macOS prompt; their own spaces stay in the sidebar.
+  - **Inside Rex** (you run in a Rex block, or in a tmux started in one): it opens an `openrig kernel` session on the same Rex server and asks the
+    Rex app to switch to it. No new window and no macOS prompt. Opening it again adds a numbered session.
   - **In Terminal or Ghostty:** a new tab or window the size of theirs.
   - **From Claude Desktop, iTerm or VS Code on a Mac:** a new Ghostty window when supported, otherwise Terminal. Only
     here, tell the person before running it that **Allow is fine** if macOS asks to control that app.
-    `echo $TERM_PROGRAM $__CFBundleIdentifier` tells you where you run. `herdr`, `Apple_Terminal` or `ghostty`, or
-    `tmux` with `com.apple.Terminal` or `com.mitchellh.ghostty`, mean no macOS prompt, so don't mention one. `tmux`
-    with anything else (iTerm, VS Code) can prompt, so say Allow is fine first.
+    `echo $TERM_PROGRAM $__CFBundleIdentifier $REX_BLOCK` tells you where you run. `herdr`, `rex`, `Apple_Terminal` or
+    `ghostty`, or `tmux` with `com.apple.Terminal`, `com.mitchellh.ghostty` or a `REX_BLOCK` value, mean no macOS
+    prompt, so don't mention one. `tmux` with anything else (iTerm, VS Code) can prompt, so say Allow is fine first.
   - **Layout:** under 120 columns the operator fills the first page; from 120, the dashboard and operator share it. The
     advisor has its own tab or tmux window.
 
@@ -74,7 +92,7 @@ person needs in their project or home folder and name that path.
   open, point them to it rather than opening another. Only if the window cannot open, `rig tui --shared` is the
   dashboard-only fallback; explain the failure and help with the chosen fallback. Herdr is visible only in a terminal
   the person can see; switching the shared TUI to `:terminals` does not open one. No and headless/SSH use are valid
-  background outcomes. Provider-only `--provider herdr` or `--provider cmux` is for an existing provider workspace,
+  background outcomes. Provider-only `--provider herdr`, `--provider cmux` or `--provider rex` is for an existing provider workspace,
   not the first desktop window.
 - **If the window can't open, or over headless SSH:** say plainly that no visible terminal was opened, and ask the
   person to open a new terminal window or tab on the daemon's host. Over SSH, that's a new SSH session to it with the
@@ -121,11 +139,13 @@ person needs in their project or home folder and name that path.
   said. Find the `operator.agent` row in `rig ps --nodes --rig kernel --json`, take its `canonicalSessionName`
   (never the logical ID or a guessed name) and send:
   `rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>. Branch: <branch>.'`
+  If the person stays here, replace "The person will answer in your pane" with "The person stays with me; send me your questions and
+  results to relay." Carry their constraints and any declined permission choices in either handoff.
   Or the person types the goal and folder in the operator's pane. If they give you a goal later, forward it the same
   way. The operator helps them pick a team that fits their logins, starts it (`rig up`) only on their yes to the plan it
   shows, and gives the goal to the team's lead. Before that yes, it says what launching into their folder changes for their own agent there; relay
   that with the question. Show them where the operator answers, and don't build the project yourself.
-- **Relay the operator's questions:** the operator asks in its own pane, and the person may not be looking there.
+- **Relay the operator's questions** unless the person declined the Codex offer below and explicitly chose the operator route: the operator asks in its own pane, and the person may not be looking there.
   After each step you hand it, read its screen with `rig capture <canonicalSessionName>`. When it asks the person
   something (start this team? which folder? which option?), ask them here in the operator's words and send their
   answer back with `rig send`, or tell them to answer in the operator's pane. Unlike a prompt or a menu, a question
@@ -160,9 +180,18 @@ offer, so the person sees the real file, not a placeholder:
 > `rig queue`, `rig status` and `rig whoami`, each with whatever follows it? They would run outside Codex's sandbox, in every Codex
 > project and session you run on this computer, and `rig send` and `rig queue` can message your agents and change their task records, not
 > only read them. I'd add one file, `/home/you/.codex/rules/openrig.rules` (the resolved path). Codex reads it when it starts, so it
-> applies from your next Codex session. To undo, ask me to remove the OpenRig rules this added and keep your other rules.
+> applies from your next Codex session; it won't remove prompts in this one. Keeping individual approvals means even status checks
+> and reading an agent's screen may ask each time. You can also talk directly to the operator once it is ready,
+> without changing this Codex session's permissions. To undo the rules, ask me to remove the OpenRig rules this added and keep your other rules.
 
-- **No, or no answer:** nothing is written, and Codex behaves as before.
+- **No, or no answer:** write nothing and keep their sandbox, network and approval settings. If they decline, honor that choice;
+  don't keep offering remembered approval or turn on general network access to avoid the prompts. Offer to continue directly with
+  the ready operator, or stay here with individual approvals. If they already chose either route, don't ask again.
+- **If they choose the operator:** use the handoff above once, carrying their goal, folder, branch and declined permission choices,
+  then point them to its ready conversation. Over headless SSH, use the exact connection/attachment command above. Once they are
+  talking to the operator, it follows the team's work and reports the result there; stop this installer's repeated capture/status/queue
+  polling. Don't stop, restart or reconfigure either session. If they prefer to stay here, continue relaying with the approvals they chose;
+  don't claim those prompts are gone. The rules offer is optional, not a condition of using OpenRig.
 - **Yes:** the agent applies it the way OpenRig's existing permission steps already describe (`applying-a-permission-policy`, in the
   installed OpenRig skills): read the existing rules first, keep any stricter rule, change no sandbox or approval setting, and record what
   it added. The file is created only if it doesn't exist; if it does, the agent changes nothing and says what's there. A new file holds
@@ -176,6 +205,8 @@ offer, so the person sees the real file, not a placeholder:
   It applies from the next Codex session.
 
 ## 3. Follow the work to its result
+
+Follow these steps by default. Only when the person declined the Codex offer above and explicitly chose the operator route does the operator own this follow-through.
 
 - **Find the team's task:** the operator gives the goal to the team's lead as a queue task: `dev-build@starter`, or
   `orch-lead` in `workshop` and `factory` (for starter and factory, `rig specs preview <name> --kind rig` says what

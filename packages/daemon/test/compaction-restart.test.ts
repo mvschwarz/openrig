@@ -38,8 +38,8 @@ function fixture(){
  (transport as any).capture=async()=>({ok:true,sessionName:seat,content:'',inputBox:{status:hooks.box??'empty'}});
  const settings={resolveClaudeCompactionPolicy:()=>policy};
  // A daemon process: a new one shares the instance home, the seat and the clock, and nothing held in memory.
- const daemon=(instance=randomUUID())=>new ClaudeCompactionEnforcer(settings as any,transport,{openrigHome:home,daemonInstance:instance,now:()=>clock,sleep:async(ms)=>{clock+=ms;},resolveOccupantGeneration:()=>generation});
- return{daemon,writes,policy,hooks,transport,home,advance:(ms:number)=>{clock+=ms;},generation:(g:string)=>{generation=g;}};
+ const daemon=(instance=randomUUID(),options:NonNullable<ConstructorParameters<typeof ClaudeCompactionEnforcer>[2]>={})=>new ClaudeCompactionEnforcer(settings as any,transport,{openrigHome:home,daemonInstance:instance,now:()=>clock,sleep:async(ms)=>{clock+=ms;},resolveOccupantGeneration:()=>generation,...options});
+ return{daemon,writes,policy,hooks,transport,home,now:()=>clock,advance:(ms:number)=>{clock+=ms;},generation:(g:string)=>{generation=g;}};
 }
 type F=ReturnType<typeof fixture>;
 const compacts=(f:F)=>f.writes.filter(t=>t.startsWith('/compact'));
@@ -275,4 +275,69 @@ it("an enforcer in the same daemon process never treats that process's own recor
  expect(compacts(f)).toHaveLength(1);
  const second=f.daemon('one-process');await staleTick(second);
  expect(boundaries(f)).toHaveLength(0);
+});
+
+
+it('shows the exact restore refusal, retries it, and clears the failure when the owed stage advances',async()=>{
+ const f=fixture(),notice=vi.fn();
+ const e=f.daemon(undefined,{onRestoreDeliveryFailure:notice});
+ await e.maybeAutoCompact(high);completeMap(e);await e.maybeAutoCompact(high);
+ const send=vi.spyOn(f.transport,'send');
+ send.mockResolvedValue({ok:false,sessionName:seat,sent:false,reason:'target_activity_unknown',activity:{state:'unknown',reason:'no_activity_signal',evidenceSource:'pane_heuristic',sampledAt:new Date().toISOString(),evidence:'PRIVATE PANE TEXT'}});
+ for(let i=0;i<3;i++){f.advance(30000);await staleTick(e);}
+ const state=await stateOf(e);
+ expect(state.owedRestore).toMatchObject({stage:'turn_boundary',lastDelivery:{ok:false,reason:'target_activity_unknown',activity:{state:'unknown',reason:'no_activity_signal',evidenceSource:'pane_heuristic'},failures:3}});
+ expect(state.owedRestore.lastDelivery.at).toBe(new Date(f.now()).toISOString());
+ expect(JSON.stringify(state)).not.toContain('PRIVATE PANE TEXT');
+ expect(e.observedCompaction(seat)?.detail).toContain('target_activity_unknown');
+ expect(notice).toHaveBeenCalledWith(expect.objectContaining({sessionName:seat,attemptId:state.preparation.attemptId}));
+ // The diagnostic survives a restart; the existing poll still owns its retry.
+ const restarted=f.daemon();expect(restarted.hasPendingPostCompactStage(seat,{runtime:'claude-code'})).toBe(true);
+ expect((await stateOf(restarted)).owedRestore.lastDelivery.reason).toBe('target_activity_unknown');
+ send.mockRestore();await staleTick(restarted);
+ expect((await stateOf(restarted)).owedRestore).toMatchObject({stage:'restore_prompt'});
+ expect((await stateOf(restarted)).owedRestore.lastDelivery).toBeUndefined();
+ expect(compacts(f)).toHaveLength(1);
+});
+
+it('shows a thrown restore error by class without exposing its message or ending the pending stage',async()=>{
+ const f=fixture(),e=await compactedBy(f);
+ vi.spyOn(f.transport,'send').mockRejectedValue(new TypeError('PRIVATE ERROR MESSAGE'));
+ await expect(staleTick(e)).rejects.toThrow(TypeError);
+ const state=await stateOf(e);
+ expect(state.owedRestore).toMatchObject({stage:'turn_boundary',lastDelivery:{ok:false,errorClass:'TypeError'}});
+ expect(JSON.stringify(state)).not.toContain('PRIVATE ERROR MESSAGE');
+ e.cancelPreparation(seat);expect(e.getOwedRestore(seat)).toBeNull();
+});
+
+
+it('a busy restore waits without holding the stage or notifying its owner',async()=>{
+ const f=fixture(),notice=vi.fn(async()=>{});
+ const e=f.daemon(undefined,{onRestoreDeliveryFailure:notice});
+ await e.maybeAutoCompact(high);completeMap(e);await e.maybeAutoCompact(high);
+ await staleTick(e);await staleTick(e);
+ expect(e.getOwedRestore(seat)?.stage).toBe('compliance_prompt');
+ vi.spyOn(Date,'now').mockImplementation(f.now);f.hooks.busy=true;
+ for(let i=0;i<3;i++){await staleTick(e);f.advance(20000);}
+ expect(e.getOwedRestore(seat)).toMatchObject({stage:'compliance_prompt',held:false,lastDelivery:{reason:'wait_for_idle_timeout',activity:{state:'running'},failures:0}});
+ expect(e.getOwedRestore(seat)?.detail).toContain('waiting: seat busy');
+ expect(notice).not.toHaveBeenCalled();
+ f.hooks.busy=false;await staleTick(e);
+ expect(e.getOwedRestore(seat)).toBeNull();expect(compacts(f)).toHaveLength(1);
+});
+
+it.each(['unresolved','rejected'])('owner notice starts after the lifecycle lease ends and a notice left %s does not hold the drain',async(mode)=>{
+ const f=fixture(),held:boolean[]=[];
+ const e=f.daemon(undefined,{onRestoreDeliveryFailure:async()=>{
+  held.push(f.transport.deliveryGuard!.ownsLifecycle('node-one'));
+  if(mode==='rejected')throw new RangeError('PRIVATE NOTICE ERROR');
+  await new Promise<void>(()=>{});
+ }});
+ await e.maybeAutoCompact(high);completeMap(e);await e.maybeAutoCompact(high);
+ vi.spyOn(f.transport,'send').mockResolvedValue({ok:false,sessionName:seat,sent:false,reason:'target_activity_unknown'});
+ await staleTick(e);await staleTick(e);
+ for(let i=0;i<10;i++)await Promise.resolve();
+ expect(held).toEqual([false]);
+ if(mode==='rejected')expect(e.getOwedRestore(seat)?.lastDelivery?.noticeErrorClass).toBe('RangeError');
+ expect(readFileSync(recordFile(e),'utf8')).not.toContain('PRIVATE NOTICE ERROR');
 });

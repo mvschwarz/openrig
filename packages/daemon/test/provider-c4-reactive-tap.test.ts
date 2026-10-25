@@ -292,6 +292,13 @@ describe("Slice-04 C4 — production reactive activity tap", () => {
     expect(model.signals[0]?.usedPercent).toBeUndefined();
   });
 
+  it("doesn't attribute a Codex seat with its own CODEX_HOME to the daemon home's registry account", async () => {
+    const fx = fixture();
+    fx.db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?").run(JSON.stringify({ CODEX_HOME: "/homes/impl" }), fx.nodeId);
+    recordToken(fx, "rate_limit");
+    expect((await fx.service.getReadModel()).signals).toEqual([]);
+  });
+
   it("binds classification to the event class only — a rawSubtype/reason token is not a producer", async () => {
     const fx = fixture();
     // The interruption token sits only in the (relay tool_name) rawSubtype and the derived

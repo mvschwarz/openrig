@@ -38,7 +38,7 @@ export function failureText(f: Row): string {
 
 /** Codex: account, else the workspace account/read reported; Claude: the organisation; else unresolved. */
 export function identityLabel(id: Row): string {
-  return id["accountId"] ? `account ${id["accountId"]}`
+  return id["source"] === "configured credential label" ? `credential ${str(id["credentialLabel"])} (operator label)` : id["accountId"] ? `account ${id["accountId"]}`
     : id["workspaceId"] ? `workspace ${id["workspaceId"]} (from account/read; no usage account id)`
       : id["source"] !== "unresolved" && id["orgId"] ? `organisation ${id["orgName"] ? `${id["orgName"]} (${id["orgId"]})` : id["orgId"]}`
         : "identity unresolved";
@@ -84,6 +84,7 @@ export function allowanceLines(r: Row): ContentLine[] {
     : id["source"] === "unresolved" ? "  [from an earlier read; possibly this same login]"
       : "  [from an earlier read; the latest read didn't match this row]";
   lines.push({ text: `  ${str(r["provider"])}  ${labels.join(" · ")}${earlier}` });
+  if (r["probe"]) lines.push({ text: `    token probe: ${JSON.stringify(r["probe"])}` });
   if (r["identityNote"]) lines.push({ text: `    ${r["identityNote"]}` });
   const unresolved = r["unresolved"] as Row | undefined;
   if (unresolved) {
@@ -97,7 +98,7 @@ export function allowanceLines(r: Row): ContentLine[] {
     const fresh = w["freshnessReason"] ? `${str(w["freshness"])}: ${w["freshnessReason"]}` : str(w["freshness"]);
     const seat = w["seatSession"] ? ` · by seat ${w["seatSession"]}` : "";
     lines.push({ text: `    ${windowName(w)}  ${left}` },
-      { text: `      level: ${level}` },
+      { text: `      level: ${level}${w["status"] ? ` · provider ${str(w["status"])}` : ""}` },
       { text: `      freshness: ${fresh}` },
       { text: `      resets ${str(w["resetsAt"])} · observed ${str(w["observedAt"])}${seat}` });
     for (const d of (w["disagreeingSeats"] as Row[] | undefined) ?? []) {
@@ -112,7 +113,7 @@ export function allowanceLines(r: Row): ContentLine[] {
   if (r["limitEvidence"]) lines.push({ text: `    limit evidence: ${r["limitEvidence"]}` });
   const last = r["lastRefresh"] as Row | null | undefined;
   if (last?.["outcome"] === "failed") {
-    lines.push({ text: r["provider"] === "claude"
+    lines.push({ text: r["provider"] === "claude" && (r["source"] as Row | undefined)?.["kind"] !== "claude_token_probe"
       ? `    identity refresh failed at ${str(last["at"])}: ${failureText(last)}; the identity shown is from the last refresh that worked, if any`
       : `    refresh failed at ${str(last["at"])}: ${failureText(last)}; last reading kept, marked old` });
   }

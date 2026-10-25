@@ -70,10 +70,15 @@ export function resolveDaemonDbPath(explicitDb: string | undefined | null, openr
 }
 
 const execFileAsync = promisify(execFile);
-async function lsof(args: string[]): Promise<string> {
+/** lsof's answer, or why there wasn't one. Exit status 1 is an answer: nothing asked about is open. */
+async function lsof(args: string[]): Promise<{ stdout: string } | { failure: string }> {
   try {
-    return (await execFileAsync("lsof", args, { timeout: 1000, maxBuffer: 64 * 1024 })).stdout;
-  } catch { return ""; }
+    return { stdout: (await execFileAsync("lsof", args, { timeout: 1000, maxBuffer: 64 * 1024 })).stdout };
+  } catch (error) {
+    const err = error as { code?: unknown; killed?: boolean };
+    if (err.code === 1) return { stdout: "" };
+    return { failure: err.code === "ENOENT" ? "lsof isn't installed" : err.killed && err.code == null ? "lsof timed out" : "lsof failed" };
+  }
 }
 
 /** Boot-time diagnostics, with an optional stop on confirmed live-daemon conflicts.
@@ -93,13 +98,17 @@ export async function daemonDatabaseWarnings(dbPath: string, home: string, selec
   }
   // The OS supplies actual open-file holders; daemon.json and the listener must
   // independently agree on the PID before a holder is described as a daemon.
+  // A check that couldn't run leaves ownership unknown, which is said, never read as no conflict.
+  const unverified: string[] = [];
   const holders = await lsof(["-t", "--", db]);
-  const pids = [...new Set(holders.trim().split(/\s+/).map(Number))]
-    .filter(pid => Number.isSafeInteger(pid) && pid > 0 && pid !== process.pid).slice(0, 4);
-  const conflicts = await Promise.all(pids.map(async (pid) => {
+  if ("failure" in holders) unverified.push(holders.failure);
+  const pids = "stdout" in holders ? [...new Set(holders.stdout.trim().split(/\s+/).map(Number))]
+    .filter(pid => Number.isSafeInteger(pid) && pid > 0 && pid !== process.pid).slice(0, 4) : [];
+  const conflicts = await Promise.all(pids.map(async (pid): Promise<{ confirmed: string } | { unknown: string } | undefined> => {
     const files = await lsof(["-a", "-p", String(pid), "-d", "1,2", "-Fn"]);
+    let unknown = "failure" in files ? `${files.failure} for pid ${pid}` : undefined;
     const homes = new Set([dirname(db)]);
-    for (const line of files.split("\n")) {
+    for (const line of "stdout" in files ? files.stdout.split("\n") : []) {
       if (line.startsWith("n") && basename(line.slice(1)) === "daemon.log") homes.add(dirname(line.slice(1)));
     }
     for (const candidate of homes) {
@@ -109,16 +118,37 @@ export async function daemonDatabaseWarnings(dbPath: string, home: string, selec
         const modifiedAt = statSync(recordPath).mtime.toISOString();
         if (record.pid !== pid || typeof record.db !== "string" || resolveForContainment(record.db) !== db
           || !Number.isInteger(record.port) || record.port < 1 || record.port > 65535) continue;
-        const response = await fetch(`http://127.0.0.1:${record.port}/healthz`, { signal: AbortSignal.timeout(500) });
-        if (!response.ok || (await response.json() as { pid?: unknown }).pid !== pid) continue;
-        return `At startup: Another live daemon (pid ${pid}) had database ${db} open. Matching record ${recordPath}, modified ${modifiedAt}: recorded home ${resolveForContainment(candidate)} (current home unconfirmed). This daemon's OPENRIG_HOME is ${resolvedHome}.`;
-      } catch { /* A stale/unreadable record or failed probe is not a live-daemon claim. */ }
+        // A matching record whose listener gives no answer, or an answer that can't be read, is unknown, not a
+        // stale record. Only an answer that parses and names another pid is a definite non-match.
+        const listener = `the listener recorded for pid ${pid} on port ${record.port}`;
+        let response: Response;
+        try {
+          response = await fetch(`http://127.0.0.1:${record.port}/healthz`, { signal: AbortSignal.timeout(500) });
+        } catch (error) {
+          unknown = `${listener} ${(error as { name?: unknown }).name === "TimeoutError" ? "didn't answer within 500 ms" : "didn't answer"}`;
+          continue;
+        }
+        if (!response.ok) continue;
+        let health: { pid?: unknown };
+        try {
+          health = await response.json() as { pid?: unknown };
+        } catch (error) {
+          unknown = `${listener} ${(error as { name?: unknown }).name === "TimeoutError" ? "didn't finish answering within 500 ms" : "gave an answer that couldn't be read"}`;
+          continue;
+        }
+        if (health?.pid !== pid) continue;
+        return { confirmed: `At startup: Another live daemon (pid ${pid}) had database ${db} open. Matching record ${recordPath}, modified ${modifiedAt}: recorded home ${resolveForContainment(candidate)} (current home unconfirmed). This daemon's OPENRIG_HOME is ${resolvedHome}.` };
+      } catch { /* A stale or unreadable record is not a live-daemon claim. */ }
     }
-    return undefined;
+    return unknown === undefined ? undefined : { unknown };
   }));
-  const confirmed = conflicts.filter((message): message is string => message !== undefined);
+  const confirmed = conflicts.flatMap(result => result && "confirmed" in result ? [result.confirmed] : []);
   if (confirmed.length && opts?.conflictPolicy === "stop" && !opts.allowConflict) {
     throw new Error(`OPENRIG_DB_CONFLICT: ${confirmed.join(" ")} Daemon startup stopped before opening the database (daemon.db_conflict=stop). Use separate database paths for independent instances. To proceed once deliberately, run rig daemon start --allow-db-conflict with the same options.`);
+  }
+  unverified.push(...conflicts.flatMap(result => result && "unknown" in result ? [result.unknown] : []));
+  if (unverified.length) {
+    warnings.push(`At startup: Couldn't verify whether another daemon has database ${db} open (${unverified.join("; ")}): ownership is unknown, not confirmed clear. Startup and database writes continue${opts?.conflictPolicy === "stop" ? "; daemon.db_conflict=stop stops only on a confirmed conflict" : ""}.`);
   }
   return [...warnings, ...confirmed.map(message => `${message} Startup and database writes continue; use separate database paths for independent instances.`)];
 }

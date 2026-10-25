@@ -69,9 +69,22 @@ human channel; a terminal attachment is not a person's address.
 
 ## Helping someone start a team
 
+A project-change request addressed to you, including a queue task from an installer, is intake for a project team.
+Use its goal, folder, branch and constraints to start or select that team, then put the work on its lead's queue.
+Don't implement or commit the project change yourself, even when it looks small. A row addressed to the operator
+doesn't change that role. If no team is ready, explain what is missing; don't report your own patch as the team's result.
+
 After install, the person usually talks to you first. When they are talking to
 you in this pane, their answers here are their decisions; don't send a launch
 question through the human channel instead.
+
+An installing Codex agent may hand the person to this conversation because
+they declined remembered command approvals. Keep that choice: don't offer it
+again or change their permissions. Take the supplied goal and constraints,
+follow the team's work through its lead's queue task and handoffs to the result,
+and report here. The installer need not
+poll and relay each step through its own approval prompts. If the person
+chooses to stay with that installer instead, keep the existing relay route.
 
 For a team's `/rigs` listing page, use `WebFetch` when available. It returns
 page text and is already allowed by the kernel's Claude defaults, avoiding
@@ -206,7 +219,11 @@ configurations, as below; do not take the pin from a cached page summary.
    plus `.mcp.json` and `.openrig/`, and its `.claude/settings.local.json`
    gives their own Claude Code in that folder the `exa` and `context7` MCP
    servers, OpenRig's activity hooks and its status line; what a given team
-   writes depends on its configuration. `rig setup` lists these writes. If they'd rather keep
+   writes depends on its configuration. Codex config fragments and workspace trust can also write the selected
+   `CODEX_HOME/config.toml` (default `~/.codex/config.toml`), affecting other sessions using that home. Skipping setup
+   or turning hooks off doesn't suppress those independent writes. Keep any project-only constraint the installer
+   handed you: explain these writes before launch and don't proceed on a path the person declined. A worktree
+   separates project files, not that Codex home. `rig setup` lists these writes. If they'd rather keep
    their folder as it is, offer a separate copy, such as a git worktree.
    If the plan declares non-interruptive or broad access, say so plainly before asking for their yes.
    If they keep permission prompts on, say what that will be like before

@@ -56,8 +56,19 @@ function shellWord(value: string): string {
   return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : "'" + value.replace(/'/g, "'\"'\"'") + "'";
 }
 
+/** `tmux`, with the daemon's server flags when it isn't on the default server. */
+function tmuxOnDaemonServer(): string {
+  const server = daemonServerArgs.map((arg, i) => (i % 2 === 0 ? arg : shellWord(arg))).join(" ");
+  return `tmux${server ? ` ${server}` : ""}`;
+}
+
 /** `tmux attach -t <session>`, with the daemon's server flags when it isn't on the default server. */
 export function tmuxAttachCommand(session: string): string {
-  const server = daemonServerArgs.map((arg, i) => (i % 2 === 0 ? arg : shellWord(arg))).join(" ");
-  return `tmux${server ? ` ${server}` : ""} attach -t ${session}`;
+  return `${tmuxOnDaemonServer()} attach -t ${session}`;
+}
+
+/** Resize a seat's window so a person or peer can read it, on the daemon's server. `=<session>:` is that session's
+ *  current window; a bare `=<session>` can resolve to a same-named window in another session. */
+export function tmuxResizeWindowCommand(session: string, width: number, height: number): string {
+  return `${tmuxOnDaemonServer()} resize-window -t ${shellWord(`=${session}:`)} -x ${width} -y ${height}`;
 }

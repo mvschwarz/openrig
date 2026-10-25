@@ -15,6 +15,8 @@ export interface NativeResumeProbeInput {
   claudeAutoIdentityVerified?: boolean;
   /** Only an exact --resume process-lineage proof may use the visible composer as readiness. */
   claudeResumeIdentityVerified?: boolean;
+  /** Only a verified foreground Codex process may corroborate a non-gpt status footer. */
+  codexProcessVerified?: boolean;
 }
 
 export interface NativeResumeProbeResult {
@@ -30,6 +32,16 @@ export interface ProbeShellReadyInput {
 }
 
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
+// Provider model identifiers are not limited to the default gpt-* family.
+// Keep the fallback structural so ordinary status prose cannot prove readiness.
+const CODEX_MODEL_FIELD = /^[A-Za-z][A-Za-z0-9._:/@-]*[._:/@-]\d[A-Za-z0-9._:/@-]*(?: [A-Za-z][\w-]*)?(?:\s+⚠ \d+ warnings?)?$/i;
+// Codex renders the model field as "{model_display_name} {effort_label}{ service_tier_name}" (codex-rs/tui
+// chatwidget/status_surfaces.rs): an optional capitalized display word after the id, one of its effort labels
+// (status_controls.rs; ReasoningEffort::as_str), then an optional tier, as in "GPT-6.1 Sol medium fast". Only that
+// shape takes more than one word, so short prose after a model id ("GPT-6.1 is not ready") is not a footer.
+const CODEX_RENDERED_SUFFIX = "(?: [A-Z][A-Za-z0-9]*)? (?:default|none|minimal|low|medium|high|xhigh|max|ultra|persistent)(?: [A-Za-z][\\w-]*)?";
+const CODEX_RENDERED_GPT_FIELD = new RegExp(`^[Gg][Pp][Tt]-\\d[\\w.-]*${CODEX_RENDERED_SUFFIX}$`);
+const CODEX_RENDERED_MODEL_FIELD = new RegExp(`^[A-Za-z][A-Za-z0-9._:/@-]*[._:/@-]\\d[A-Za-z0-9._:/@-]*${CODEX_RENDERED_SUFFIX}(?:\\s+⚠ \\d+ warnings?)?$`);
 
 export function buildNativeResumeCommand(
   runtime: string | null,
@@ -179,6 +191,24 @@ export function assessNativeResumeProbe(
   }
 
   if (runtime === "codex") {
+    if (looksLikeCodexLoginPrompt(paneContent)) {
+      // A wrapper must be verified and resampled before old chrome can prove readiness or drive a menu.
+      if (paneCommand !== "codex" && input.codexProcessVerified !== true) {
+        const shell = SHELL_COMMANDS.has(paneCommand);
+        return {
+          status: shell ? "failed" : "inconclusive",
+          code: shell ? "returned_to_shell" : "awaiting_runtime",
+          detail: shell
+            ? "The probe pane returned to a shell instead of staying inside the runtime."
+            : "Codex did not report an explicit failure, but an interactive conversation has not been observed.",
+        };
+      }
+      return {
+        status: "attention_required",
+        code: "login_required",
+        detail: "Codex is waiting for you to sign in or configure provider credentials before the session can become interactive.",
+      };
+    }
     if (/requires a newer version of Codex/i.test(paneContent.replace(/\s+/g, " "))) {
       return {
         status: "attention_required", code: "codex_client_incompatible",
@@ -218,14 +248,18 @@ export function assessNativeResumeProbe(
     // Only the current-format panel can override TUI evidence. Legacy text
     // retains its existing position after the TUI check, including scrollback.
     const currentTrustPrompt = looksLikeCurrentCodexTrustPrompt(paneContent);
-    if (!currentTrustPrompt && looksLikeCodexTui(paneContent)) {
+    const legacyTrustPrompt = looksLikeCodexTrustPrompt(paneContent);
+    const dismissedLegacyTrustPrompt = paneContent.includes("OpenAI Codex (v")
+      || input.codexProcessVerified === true && hasCodexCustomModelFooterAfterComposer(paneContent);
+    if (!currentTrustPrompt && (!legacyTrustPrompt || dismissedLegacyTrustPrompt)
+      && looksLikeCodexTui(paneContent, input.codexProcessVerified === true)) {
       return {
         status: "resumed",
         code: "active_runtime",
         detail: "Codex is running with an active interactive TUI in the probe pane.",
       };
     }
-    if (currentTrustPrompt || looksLikeCodexTrustPrompt(paneContent)) {
+    if (currentTrustPrompt || (legacyTrustPrompt && !dismissedLegacyTrustPrompt)) {
       return {
         status: "inconclusive",
         code: "trust_gate",
@@ -397,20 +431,23 @@ function hasCodexComposer(paneContent: string): boolean {
   });
 }
 
-function looksLikeCodexTui(paneContent: string): boolean {
+function looksLikeCodexTui(paneContent: string, codexProcessVerified: boolean): boolean {
   const current = paneContent.slice(Math.max(0, paneContent.lastIndexOf("OpenAI Codex (v")));
   if (/model:\s*loading\b/i.test(current)) return false;
   const recentLines = current.trimEnd().split("\n").slice(-20).join("\n");
   const hasPromptLine = hasCodexComposer(recentLines);
-  const hasModelFooter = /(^|\n)\s{2,}gpt-[^\n]+ · [^\n]+(?:\n|$)/.test(recentLines);
+  const hasDefaultModelFooter = /(^|\n)\s{2,}gpt-[^\n]+ · [^\n]+(?:\n|$)/.test(recentLines);
+  const hasDelimitedModelFooter = recentLines.split("\n").some(isCodexGptModelFooterLine);
   // Custom status lines can put the model's display name in any field. Keep
   // corroboration structural: an indented status row and a whole model field,
   // not a model mentioned somewhere in conversation prose.
   // A custom row must not make an unresolved trust/update panel disappear.
-  const hasCustomModelFooter = !looksLikeCodexTrustPrompt(current)
-    && !hasCodexUpdateHeader(current) && !current.includes("Updating Codex")
-    && recentLines.split("\n").some(isCodexModelFooterLine);
-  return hasPromptLine && (current.includes("OpenAI Codex (v") || hasModelFooter || hasCustomModelFooter);
+  const verifiedCustomModelFooter = codexProcessVerified && hasCodexCustomModelFooterAfterComposer(recentLines);
+  const activeLegacyTrustPrompt = looksLikeCodexTrustPrompt(current) && !verifiedCustomModelFooter;
+  const hasCustomModelFooter = (hasDelimitedModelFooter || verifiedCustomModelFooter)
+    && !activeLegacyTrustPrompt
+    && !hasCodexUpdateHeader(current) && !current.includes("Updating Codex");
+  return hasPromptLine && (current.includes("OpenAI Codex (v") || hasDefaultModelFooter || hasCustomModelFooter);
 }
 
 // Codex prints these messages when its stored OAuth access token can no
@@ -434,6 +471,50 @@ function looksLikeCodexAuthRefusal(paneContent: string): boolean {
   );
 }
 
+function looksLikeCodexLoginPrompt(paneContent: string): boolean {
+  const lines = paneContent.trimEnd().split(/\r?\n/);
+  let welcome = -1;
+  let fence = "";
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]!;
+    const marker = /^[ \t]*(`{3,}|~{3,})(.*)$/.exec(line);
+    if (marker) {
+      if (!fence) fence = marker[1]!;
+      else if (marker[1]![0] === fence[0] && marker[1]!.length >= fence.length && !marker[2]!.trim()) fence = "";
+      welcome = -1;
+    } else if (!fence && line === "  Welcome to Codex, OpenAI's command-line coding agent") {
+      welcome = index;
+    }
+  }
+  if (welcome < 0) return false;
+  const current = lines.slice(welcome + 1);
+  if (hasCodexComposer(current.join("\n"))) return false;
+  const panel = current.map(line => line.trim()).filter(Boolean);
+
+  // Read the current complete panel only: a later prompt or menu must not lend an old login picker its footer.
+  const legacyChooser = panel[0] === "Sign in with ChatGPT to use Codex as part of your paid plan"
+    && panel[1] === "or connect an API key for usage-based billing";
+  if ((panel[0] === "Choose how you want to use Codex." || legacyChooser)
+    && panel.indexOf("Press enter to continue") === panel.length - 1) {
+    const choices = panel.flatMap(line => {
+      const choice = /^(> )?(\d+)\. (.+)$/.exec(line);
+      return choice ? [{ selected: !!choice[1], number: Number(choice[2]), label: choice[3] }] : [];
+    });
+    const labels = legacyChooser
+      ? ["Sign in with ChatGPT", "Sign in with Device Code", "Provide your own API key"]
+      : ["Sign in with ChatGPT", "Sign in with Device Code", "Use an OpenAI API key", "Use Amazon Bedrock"];
+    return choices.length >= 2 && (!legacyChooser || choices.length === labels.length)
+      && choices.filter(choice => choice.selected).length === 1
+      && choices.every((choice, index) => choice.number === index + 1
+        && (legacyChooser ? choice.label === labels[index] : labels.includes(choice.label!)));
+  }
+  return panel[0] === "> Use your own OpenAI API key for usage-based billing"
+    && panel.includes("Paste or type your API key below.")
+    && panel.some(line => /^╭API key─+╮$/.test(line))
+    && panel.indexOf("Press enter to save") === panel.length - 2
+    && panel.at(-1) === "Press esc to go back";
+}
+
 function looksLikeCodexTrustPrompt(paneContent: string): boolean {
   // Preserve legacy wording semantics, including scrollback matching.
   return paneContent.includes("Do you trust the contents of this directory?")
@@ -445,7 +526,29 @@ function isCodexModelFooterLine(line: string): boolean {
   if (/^\s{2,}gpt-[^\n]+ · [^\n]+$/.test(line)) return true;
   const fields = line.trim().split(" · ");
   return /^[ \t]{2,}\S/.test(line) && fields.length > 1
-    && fields.some((field) => /^gpt-\d[\w.-]*(?: [\w-]+)?$/i.test(field));
+    && fields.some((field) => CODEX_MODEL_FIELD.test(field) || CODEX_RENDERED_MODEL_FIELD.test(field));
+}
+
+function isCodexGptModelFooterLine(line: string): boolean {
+  if (/^\s{2,}gpt-[^\n]+ · [^\n]+$/.test(line)) return true;
+  const fields = line.trim().split(" · ");
+  return /^[ \t]{2,}\S/.test(line) && fields.length > 1
+    && fields.some((field) => /^gpt-\d[\w.-]*(?: [\w-]+)?$/i.test(field) || CODEX_RENDERED_GPT_FIELD.test(field));
+}
+
+function hasCodexGptModelFooter(paneContent: string): boolean {
+  return /(^|\n)\s{2,}gpt-[^\n]+ · [^\n]+(?:\n|$)/i.test(paneContent)
+    || paneContent.split("\n").some(isCodexGptModelFooterLine);
+}
+
+function hasCodexCustomModelFooterAfterComposer(paneContent: string): boolean {
+  const lines = paneContent.split("\n");
+  let lastComposer = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    if (hasCodexComposer(lines[index]!)) lastComposer = index;
+  }
+  return lastComposer >= 0 && lines.slice(lastComposer + 1).some((line) =>
+    isCodexModelFooterLine(line) && !isCodexGptModelFooterLine(line));
 }
 
 function looksLikeCurrentCodexTrustPrompt(paneContent: string): boolean {
@@ -459,8 +562,7 @@ function looksLikeCurrentCodexTrustPrompt(paneContent: string): boolean {
     if (!choice) continue;
     const afterChoice = paneContent.slice(start + choice.index + choice[0].length);
     return !hasCodexComposer(afterChoice)
-      && !/(^|\n)\s{2,}gpt-[^\n]+ · [^\n]+(?:\n|$)/.test(afterChoice)
-      && !afterChoice.split("\n").some(isCodexModelFooterLine);
+      && !hasCodexGptModelFooter(afterChoice);
   }
   return false;
 }

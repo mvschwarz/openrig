@@ -57,7 +57,8 @@ export class SnapshotCapture {
     this.checkpointStore = deps.checkpointStore;
   }
 
-  captureSnapshot(rigId: string, kind: string, opts?: { intendedNodeIds?: string[] }): Snapshot {
+  captureSnapshot(rigId: string, kind: string, opts?: { intendedNodeIds?: string[]; /** Slice 16: notify after the caller's own
+    transaction commits, not from inside it. */ deferNotify?: (event: PersistedEvent) => void }): Snapshot {
     // 1. Get rig with nodes, edges, bindings
     const rig = this.rigRepo.getRig(rigId);
     if (!rig) {
@@ -161,7 +162,8 @@ export class SnapshotCapture {
     const { snapshot, persistedEvent } = txn();
 
     // 6. Notify subscribers after commit (best-effort)
-    this.eventBus.notifySubscribers(persistedEvent);
+    if (opts?.deferNotify) opts.deferNotify(persistedEvent);
+    else this.eventBus.notifySubscribers(persistedEvent);
 
     return snapshot;
   }

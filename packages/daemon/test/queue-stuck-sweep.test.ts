@@ -26,6 +26,8 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 import { archiveAgedTerminalTransitions } from "../src/domain/queue-retention.js";
 import type { HumanFragment } from "../src/domain/gateway/human-registry.js";
+import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
+import { nodeSessionConfirmedMissing } from "../src/domain/node-inventory.js";
 
 const sweepMod = () => import("../src/domain/queue-stuck-sweep.js");
 
@@ -89,6 +91,8 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
       // Hermetic default: no registered hosts. Tests that exercise the
       // proof-at-write trust arm inject their own registry view.
       isRegisteredHost: () => false,
+      // Hermetic default: no operator agent configured, whatever this machine's settings say.
+      resolveRecoveryAgentSeat: () => null,
       ...overrides,
     });
     return { mod, status, result };
@@ -294,6 +298,155 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
       state: "done",
       closureReason: "no-follow-on",
     });
+  });
+
+  // A dead owner with no delegates_to edge: the orchestrator resolves to nobody and the owner's session is gone. The
+  // ladder covers handed-off batons only, so a finding addressed to the dead seat would reach nobody.
+  function seedMissingSession(session: string): void {
+    db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-dead', 'r')").run();
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd) VALUES ('node-dead', 'rig-dead', 'worker', 'claude-code', '/tmp')").run();
+    db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES ('sess-dead', 'node-dead', ?, 'running', '2026-07-02 12:00:00')").run(session);
+    db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session, tmux_pane) VALUES ('bind-dead', 'node-dead', 'tmux', ?, '%1')").run(session);
+    // The reconciler found the tmux session gone, against this session and binding.
+    new SeatIdentityStore(db).upsert({
+      nodeId: "node-dead", verdict: "pane_missing", evidenceSource: "tmux_session", reason: "session_missing",
+      evidence: { registeredPane: "%1", observedPid: null, observedCommand: null, matchedLayer: null },
+      sessionName: session, observedAt: "2026-07-02T12:00:00.000Z",
+    });
+  }
+
+  it("a stalled claim whose claimant's session is confirmed missing goes to the row's creator, and says why", async () => {
+    seedMissingSession("worker@r");
+    expect(nodeSessionConfirmedMissing(db, "node-dead")).toBe(true);
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    ageClaim(row.qitemId, 60);
+    await runSweep({ resolveOperatorSeat: () => null });
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding!.destinationSession).toBe("sender@r");
+    expect(finding!.body).toContain("worker@r is confirmed missing (session_missing), so this finding goes to sender@r");
+  });
+
+  it("with an operator seat set, a dead claimant's finding goes there, as the ladder's floor does", async () => {
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    ageClaim(row.qitemId, 60);
+    await runSweep({ sessionConfirmedMissing: (s: string) => s === "worker@r", resolveOperatorSeat: () => "operator-admin@kernel" });
+    expect((await findingsFor(row.qitemId))[0]!.destinationSession).toBe("operator-admin@kernel");
+  });
+
+  // workspace.operator_seat_name is the person approvals reach; agents.operator_session is the operator agent. Recovery
+  // reaches the agent when one is configured, without repointing the setting approvals use.
+  it("an operator agent, when configured, takes a dead claimant's finding before the operator seat", async () => {
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    ageClaim(row.qitemId, 60);
+    await runSweep({ sessionConfirmedMissing: (s: string) => s === "worker@r",
+      resolveRecoveryAgentSeat: () => "operator-admin@kernel", resolveOperatorSeat: () => "approver@r" });
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding!.destinationSession).toBe("operator-admin@kernel");
+    expect(finding!.body).toContain("so this finding goes to operator-admin@kernel");
+  });
+
+  it("an operator agent whose own session is confirmed missing is passed over for the operator seat", async () => {
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    ageClaim(row.qitemId, 60);
+    await runSweep({ sessionConfirmedMissing: (s: string) => s === "worker@r" || s === "operator-admin@kernel",
+      resolveRecoveryAgentSeat: () => "operator-admin@kernel", resolveOperatorSeat: () => "approver@r" });
+    expect((await findingsFor(row.qitemId))[0]!.destinationSession).toBe("approver@r");
+  });
+
+  it.each([
+    ["operator-admin@kernel", "operator-admin@kernel"],
+    ["  operator-admin@kernel  ", "operator-admin@kernel"],
+    ["", null],
+    ["human-founder@external", null],
+    ["human@kernel", null],
+    ["not a session", null],
+  ])("the operator agent setting %j resolves to %j", async (value, expected) => {
+    const prior = process.env.OPENRIG_AGENTS_OPERATOR_SESSION;
+    process.env.OPENRIG_AGENTS_OPERATOR_SESSION = value;
+    try {
+      const { resolveRecoveryAgentSeat } = await import("../src/domain/queue-owner.js");
+      expect(resolveRecoveryAgentSeat()).toBe(expected);
+    } finally {
+      if (prior === undefined) delete process.env.OPENRIG_AGENTS_OPERATOR_SESSION;
+      else process.env.OPENRIG_AGENTS_OPERATOR_SESSION = prior;
+    }
+  });
+
+  it("an undelivered wake to a dead destination with no orchestrator goes to the row's creator", async () => {
+    const row = await mkRow();
+    failNudge(row.qitemId);
+    await runSweep({ sessionConfirmedMissing: (s: string) => s === "worker@r", resolveOperatorSeat: () => null });
+    expect((await findingsFor(row.qitemId))[0]!.destinationSession).toBe("sender@r");
+  });
+
+  // With no live recovery seat, the finding is still created (it's owed work) to the missing session, and says so.
+  it("a dead seat's own row with no operator agent or seat stays with it, and its why says no live recovery seat is available", async () => {
+    const row = await repo.create({ sourceSession: "worker@r", destinationSession: "worker@r", body: "work" });
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    ageClaim(row.qitemId, 60);
+    await runSweep({ sessionConfirmedMissing: (s: string) => s === "worker@r", resolveOperatorSeat: () => null });
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding!.destinationSession).toBe("worker@r");
+    expect(finding!.body).toContain("worker@r is confirmed missing (session_missing) and no live recovery seat is available");
+    expect(finding!.body).toContain("so this finding stays addressed to it");
+  });
+
+  it("when the operator agent, the operator seat and the creator are all confirmed missing, the finding stays and says so", async () => {
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    ageClaim(row.qitemId, 60);
+    const dead = new Set(["worker@r", "operator-admin@kernel", "approver@r", "sender@r"]);
+    await runSweep({ sessionConfirmedMissing: (s: string) => dead.has(s),
+      resolveRecoveryAgentSeat: () => "operator-admin@kernel", resolveOperatorSeat: () => "approver@r" });
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding!.destinationSession).toBe("worker@r");
+    expect(finding!.body).toContain("no live recovery seat is available");
+  });
+
+  it("a verdict from before the seat's relaunch, or no verdict, doesn't count as missing", () => {
+    expect(nodeSessionConfirmedMissing(db, "node-dead")).toBe(false);
+    seedMissingSession("worker@r");
+    db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES ('sess-new', 'node-dead', 'worker@r', 'running', '2026-07-02 13:00:00')").run();
+    expect(nodeSessionConfirmedMissing(db, "node-dead")).toBe(false);
+  });
+
+  // A stalled claim's age is the stall's own: minutes since the latest meaningful change, floored as the "why" counts
+  // them. The claim time alone would count time spent parked, and rounding would drift a minute from the "why".
+  function ageTransitions(qitemId: string, minutesAgo: number[]): void {
+    const ids = db.prepare("SELECT transition_id FROM queue_transitions WHERE qitem_id = ? ORDER BY transition_id").all(qitemId) as Array<{ transition_id: number }>;
+    expect(ids).toHaveLength(minutesAgo.length);
+    ids.forEach(({ transition_id }, i) => db.prepare("UPDATE queue_transitions SET ts = ? WHERE transition_id = ?")
+      .run(new Date(Date.now() - minutesAgo[i]! * 60_000).toISOString(), transition_id));
+  }
+
+  it("claimed, parked, resumed, then quiet: the finding's headline and body count minutes since the resume, not since the claim", async () => {
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    await repo.update({ qitemId: row.qitemId, actorSession: "worker@r", state: "blocked", blockedOn: "external:vendor" } as never);
+    await repo.update({ qitemId: row.qitemId, actorSession: "worker@r", state: "in-progress" } as never);
+    ageClaim(row.qitemId, 77);
+    ageTransitions(row.qitemId, [78, 77, 76, 20]); // created, claimed, parked, resumed
+    expect(repo.getById(row.qitemId)!.pickup?.state).toBe("stalled-after-claim");
+    await runSweep();
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding!.summary).toBe(`Stuck sweep: stalled-after-claim on ${row.qitemId} (20 min)`);
+    expect(finding!.body).toContain("\nage: 20 min\n");
+    expect(finding!.body).toContain("no meaningful queue change for 20 min");
+  });
+
+  it("a stall of 30 min 40 s reads 30 min in the headline, the body and the why alike", async () => {
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    ageClaim(row.qitemId, 30 + 40 / 60);
+    await runSweep();
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding!.summary).toBe(`Stuck sweep: stalled-after-claim on ${row.qitemId} (30 min)`);
+    expect(finding!.body).toContain("\nage: 30 min\n");
+    expect(finding!.body).toMatch(/why: (claimed|no meaningful queue change for) 30 min/);
   });
 
   it("UNDELIVERED HALF: a pending row whose nudge failed yields exactly one finding routed to the destination's orchestrator", async () => {
@@ -553,11 +706,18 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(await findingsFor(row.qitemId)).toHaveLength(1);
   });
 
-  it("RESOLUTION CLOSES: when the underlying row resolves, the next sweep closes the finding with its reason", async () => {
+  it.each(["pending", "in-progress"] as const)("#1419 RESOLUTION ACTOR: closes a %s finding as the sweep while preserving its ownership", async (findingState) => {
     const row = await mkRow();
     repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
     makeOverdue(row.qitemId);
     await runSweep();
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding).toBeDefined();
+    if (findingState === "in-progress") {
+      repo.claim({ qitemId: finding!.qitemId, destinationSession: "worker@r" });
+    }
+    const before = repo.getById(finding!.qitemId)!;
+    expect(before).toMatchObject({ state: findingState, sourceSession: "sender@r", destinationSession: "worker@r" });
     repo.update({
       qitemId: row.qitemId,
       actorSession: "worker@r",
@@ -565,11 +725,30 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
       closureReason: "no-follow-on",
       transitionNote: "finished the work",
     });
-    await runSweep();
+    const sourceAfterWork = repo.getById(row.qitemId);
+    const { result } = await runSweep();
+    expect(result.findings).toContainEqual({ kind: "overdue-claim", qitemId: row.qitemId, findingQitemId: before.qitemId, action: "closed" });
     const findings = await findingsFor(row.qitemId);
     expect(findings).toHaveLength(1);
-    expect(findings[0]!.state).toBe("done");
-    expect(findings[0]!.closureReason).toBeTruthy();
+    expect(findings[0]).toMatchObject({
+      state: "done", closureReason: "no-follow-on",
+      sourceSession: before.sourceSession, destinationSession: before.destinationSession,
+      claimedAt: before.claimedAt, evidenceRef: before.evidenceRef,
+    });
+    expect(repo.getById(row.qitemId)).toEqual(sourceAfterWork);
+    expect(repo.transitionLog.listForQitem(before.qitemId).at(-1)).toMatchObject({
+      state: "done", actorSession: "stuck-sweep@system", closureReason: "no-follow-on",
+      transitionNote: `stuck-sweep resolved: overdue-claim on ${row.qitemId} no longer detected`,
+    });
+    const closingEvents = () => (db.prepare(
+      "SELECT payload FROM events WHERE type = 'queue.updated' AND json_extract(payload, '$.qitemId') = ? AND json_extract(payload, '$.toState') = 'done'",
+    ).all(before.qitemId) as Array<{ payload: string }>).map((event) => JSON.parse(event.payload));
+    expect(closingEvents()).toEqual([expect.objectContaining({
+      qitemId: before.qitemId, fromState: findingState, toState: "done", actorSession: "stuck-sweep@system",
+    })]);
+    await runSweep();
+    expect(repo.transitionLog.listForQitem(before.qitemId).filter((t) => t.state === "done")).toHaveLength(1);
+    expect(closingEvents()).toHaveLength(1);
   });
 
   it("QUIET IS CHEAP: a clean sweep creates zero rows and records one observable heartbeat", async () => {
@@ -1759,6 +1938,9 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
     expect(second.findings).toContainEqual(expect.objectContaining({ findingQitemId: finding!.qitemId, action: "closed" }));
     expect(repo.getById(finding!.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
     expect(repo.getById(row.qitemId)).toMatchObject({ state: "pending", destinationSession: "human-owner@external" });
+    expect(repo.transitionLog.listForQitem(finding!.qitemId).at(-1)).toMatchObject({
+      state: "done", actorSession: "stuck-sweep@system", closureReason: "no-follow-on",
+    });
   });
 
   const unclaimedFinding = async (qitemId: string) => (await findingsFor(qitemId))

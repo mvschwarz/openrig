@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { prepareHermeticEnv, type HermeticScaffold } from "./helpers/hermetic-env.js";
@@ -64,7 +64,7 @@ describe("a community harness from a data preset", () => {
   }, 120_000);
 
   afterAll(async () => {
-    try { if (daemon) for (const r of ["community-harness-rig", "free-rig"]) await rig(["down", r, "--json", "--force"]); }
+    try { if (daemon) for (const r of ["community-harness-rig", "free-rig", "first-input-rig"]) await rig(["down", r, "--json", "--force"]); }
     finally { await daemon?.stop(); }
   }, 60_000);
 
@@ -92,6 +92,23 @@ describe("a community harness from a data preset", () => {
       limits: ["resume unsupported", "fork unsupported", "no approval-prompt detection"] });
     expect(byName["codex"]).toMatchObject({ usable: false, problem: '"codex" is a built-in runtime; a community harness preset can\'t use that name' });
   });
+
+  it("hands the composed first turn to a real launcher without typing it into its pane", async () => {
+    writePreset("synth-first.yaml", `format: 1\nname: synth-first\ncommand: node ${appScript}\nmaintainer: Example\nfirst_input: true\n`);
+    const up = await rig(["up", specFor("first-input-rig", "synth-first"), "--cwd", rigRoot, "--json", "--yes"], 120_000);
+    expect(up.code, JSON.stringify(up)).toBe(0);
+    const inputDir = join(scaffold.env.OPENRIG_HOME!, "state", "first-input", "work-worker%40first-input-rig");
+    const file = readdirSync(inputDir).find(name => name.endsWith(".txt"))!;
+    const input = join(inputDir, file);
+    await until(async () => {
+      try { return readFileSync(`${input}.received`, "utf8"); } catch { return ""; }
+    }, text => text.includes("OpenRig-generated identity context"));
+    expect(readFileSync(`${input}.received`, "utf8")).toBe(readFileSync(input, "utf8"));
+    const pane = execFileSync("tmux", ["-S", scaffold.tmuxSocketPath, "capture-pane", "-p", "-t", "=work-worker@first-input-rig:"],
+      { env: scaffold.env as NodeJS.ProcessEnv }).toString();
+    expect(pane).toContain("first input received at launch");
+    expect(pane).not.toContain("got: OpenRig-generated identity context");
+  }, 120_000);
 
   it("starts from the preset, labelled as a community app with identity not confirmed", async () => {
     const up = await rig(["up", specFor("community-harness-rig", "synth-harness"), "--cwd", rigRoot, "--json", "--yes"], 120_000);

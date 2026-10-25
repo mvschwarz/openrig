@@ -42,13 +42,13 @@ describe("P2 probe capture uses its entry context", () => {
       }
       release(true);
       const value = await pending;
-      expect(calls).toEqual([["hasSession", "original@rig"], ["originalCapture", "original@rig", 20]]);
+      expect(calls).toEqual([["hasSession", "original@rig"], ["originalCapture", "%7", 20]]);
       expect(value).toMatchObject({ sampledAt: new Date(0).toISOString(), reason: "idle_prompt" });
       expect(successor).toHaveLength(0);
       expect(observations).toHaveLength(enabled ? 1 : 0);
       if (enabled) expect(observations[0]).toMatchObject({
         binding: { sessionName: "original@rig", nodeId: "n-original", occupant: "o-original", pane: "%7" },
-        runtime: "codex", pre: { content: "bytes from original@rig\n❯ " },
+        runtime: "codex", pre: { content: "bytes from %7\n❯ " },
       });
     });
   }

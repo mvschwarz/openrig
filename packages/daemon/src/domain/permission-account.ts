@@ -3,7 +3,7 @@
 // harness, probes Codex or reads native settings files, so what only a launch or the harness knows is listed as unknown.
 import type Database from "better-sqlite3";
 import { NativePermissionStore, type StoredNativePermissionSelection } from "./native-permission-store.js";
-import { claudePostureFlag, codexPostureArg } from "../adapters/yolo-mode.js";
+import { claudePostureFlag, codexPostureArg, planModelAliasNotice } from "../adapters/yolo-mode.js";
 import { KERNEL_CLAUDE_ALLOW, TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK } from "../adapters/kernel-authority.js";
 import { RigRepository } from "./rig-repository.js";
 import type { NodeBinding } from "./runtime-adapter.js";
@@ -28,6 +28,8 @@ export interface PermissionAccount {
   unknown: string[];
   /** The existing controls that change it, for future launches only. */
   controls: string[];
+  /** What the harness does with this pairing that the launch arguments don't show (Claude plan mode on the bare `haiku` alias). */
+  advisories: string[];
 }
 
 const NOT_READ = "Native settings OpenRig doesn't manage still apply and aren't read here: your user, project and managed Claude settings, or your Codex configuration, profiles and requirements.";
@@ -56,7 +58,7 @@ export function planPermissionAccount(db: Database.Database, nodeId: string, sea
   ];
   const none = { claudeAllow: [], claudeAsk: [], notes: [] };
   if (runtime !== "claude-code" && runtime !== "codex") {
-    return { basis: "planned", runtime, source: null, nativeArgument: null, overrides: [], openRigAdds: none, unknown: [], controls: [],
+    return { basis: "planned", runtime, source: null, nativeArgument: null, overrides: [], openRigAdds: none, unknown: [], controls: [], advisories: [],
       summary: runtime === "pi" ? "Pi has no native permission policy; its resource trust is set at launch."
         : runtime === "terminal" ? "A terminal shell; no agent permission argument." : "OpenRig sets no native permission argument for this runtime." };
   }
@@ -80,6 +82,11 @@ export function planPermissionAccount(db: Database.Database, nodeId: string, sea
   const planned = store.apply({ nodeId, launchPosture: bindingPosture } as NodeBinding, runtime);
   const posture = planned.launchPosture;
   const mode = planned.permissionMode;
+  let model: string | null = null;
+  try {
+    model = (db.prepare("SELECT model FROM nodes WHERE id = ?").get(nodeId) as { model: string | null } | undefined)?.model ?? null;
+  } catch { /* the column predates this database */ }
+  const planNote = planModelAliasNotice(runtime, { model, permissionMode: mode }, seat);
 
   const profile = runtime === "codex" ? refs.profile : null;
   const nativeArgument = runtime === "claude-code" ? claudePostureFlag(env, posture, mode)
@@ -125,7 +132,7 @@ export function planPermissionAccount(db: Database.Database, nodeId: string, sea
     ? `; OpenRig adds ${openRigAdds.claudeAllow.length} allowances${openRigAdds.claudeAsk.length ? ` and asks before ${openRigAdds.claudeAsk.length} lifecycle commands` : ""}`
     : "";
   return {
-    basis: "planned", runtime, source, nativeArgument, overrides, openRigAdds, unknown, controls,
+    basis: "planned", runtime, source, nativeArgument, overrides, openRigAdds, unknown, controls, advisories: planNote ? [planNote] : [],
     ...(explicit ? { explicit: { mode: explicit.mode, actor: explicit.actor, reason: explicit.reason, updatedAt: explicit.updatedAt } } : {}),
     summary: `Next launch: ${nativeArgument}, from ${where[source]}${notes}${adds}.`,
   };

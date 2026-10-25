@@ -1,6 +1,8 @@
 // OPR.0.7.0.5 — in-place restart of one Codex seat: every gate and every outcome, driven through the
 // public SeatLifecycleService surface against a fake tmux, process table, Codex launcher and OS reads.
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import fs from "node:fs";
 import { defaultTmuxFileOps, isStagedSendScriptPath } from "../src/adapters/tmux.js";
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import type Database from "better-sqlite3";
@@ -14,7 +16,7 @@ import type { NativeProcessRow } from "../src/domain/native-process-lineage.js";
 import type { HarnessLaunchResult, NodeBinding } from "../src/domain/runtime-adapter.js";
 import type { ArbitratedSeatState } from "../src/domain/activity-taxonomy.js";
 import type { InPlaceRestartIo, ProcessFacts } from "../src/domain/seat-restart-in-place.js";
-import { accountLineNames, accountTextMark, linesAfterAnchor, parseEffectiveSettings, shellWords } from "../src/domain/seat-restart-in-place.js";
+import { accountLineNames, accountTextMark, defaultInPlaceRestartIo, linesAfterAnchor, parseEffectiveSettings, procCmdlineArgv, shellWords } from "../src/domain/seat-restart-in-place.js";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { CodexThreadIdResolver, type CodexThreadEvidence } from "../src/domain/codex-thread-id.js";
 
@@ -182,6 +184,8 @@ function world(options: WorldOptions = {}) {
   } as unknown as TmuxAdapter;
 
   const launches: Array<{ command: string; resumeToken: string }> = [];
+  /** The Codex home each resume proof was asked to read. */
+  const proofHomes: Array<string | undefined> = [];
   const builds: Array<{ running?: unknown }> = [];
   const codex = {
     runtime: "codex",
@@ -194,15 +198,17 @@ function world(options: WorldOptions = {}) {
         + `${(running?.addDirs ?? []).map((dir) => ` --add-dir '${dir}'`).join("")} '${opts.resumeToken}'`;
       return { ok: true as const, core, command: `env CODEX_HOME='${HOME}' ${core}` };
     },
-    async sendResumeCommand(_session: string, command: string, resumeToken: string): Promise<HarnessLaunchResult> {
+    async sendResumeCommand(_session: string, command: string, resumeToken: string, _nodeId?: string, home?: string): Promise<HarnessLaunchResult> {
       launches.push({ command, resumeToken });
+      proofHomes.push(home);
       maybeThrow("sendResumeCommand");
       const result = options.launch ?? { ok: true, resumeToken, resumeType: "codex_id" };
       if (result.ok && !options.identityFails) relaunch();
       return result;
     },
-    async verifyResumeInPane(): Promise<HarnessLaunchResult> {
+    async verifyResumeInPane(_session?: string, _token?: string, _nodeId?: string, home?: string): Promise<HarnessLaunchResult> {
       calls.push("verifyResumeInPane");
+      proofHomes.push(home);
       maybeThrow("verifyResumeInPane");
       return options.launch ?? { ok: true };
     },
@@ -249,7 +255,7 @@ function world(options: WorldOptions = {}) {
   });
   const events = () => (db.prepare("SELECT type, payload FROM events WHERE type LIKE 'seat.restart_in_place%' ORDER BY seq").all() as Array<{ type: string; payload: string }>)
     .map((row) => ({ type: row.type, ...JSON.parse(row.payload) }));
-  return { db, service, node, session, calls, launches, builds, events, sessionRegistry, tmux,
+  return { db, service, node, session, calls, launches, proofHomes, builds, events, sessionRegistry, tmux,
     replacementYields, get replacementReads() { return replacementReads; }, get relaunched() { return relaunched; },
     setRows: (next: NativeProcessRow[]) => { rows = next; },
     print: (text: string) => { paneLines.push(...text.split("\n").filter(Boolean)); },
@@ -564,6 +570,26 @@ describe("rig seat restart --keep-conversation: outcomes", () => {
     expect(r.remainingStep).not.toContain("didn't prove the conversation in time");
   });
 
+  // An in-place restart did restart the pane, so its result never repeats the adapter's "nothing was restarted",
+  // which stays true for a caller that restarted nothing.
+  const ready = "OpenAI Codex (v0.120.0)\n› Ask Codex to do anything";
+  const readyTmux = () => ({ getPanePid: async () => 901, getPaneCommand: async () => "codex", capturePaneScreen: async () => ready, capturePaneContent: async () => ready } as unknown as TmuxAdapter);
+  it.each([
+    ["unproven: no Codex process tied to the conversation", "codex", () => ({ threadId: "tok" })],
+    ["disproved: the records name another conversation", "codex resume tok", () => ({ threadId: "another-thread" })],
+  ] as const)("through the adapter, %s: the in-place result says the pane restarted and to check it", async (_case, command, evidence) => {
+    const adapter = new CodexRuntimeAdapter({ tmux: readyTmux(), fsOps: {} as never, sleep: async () => {}, resumeProofWindowMs: 40,
+      listProcesses: () => [{ pid: 901, ppid: 1, pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000", command }],
+      readResumeEvidence: evidence });
+    const launch = await adapter.verifyResumeInPane("impl", "tok");
+    // What every other caller shows is unchanged: the adapter's own result still says nothing was restarted.
+    expect(launch).toMatchObject({ ok: false, error: expect.stringContaining("The session was preserved; nothing was restarted.") });
+    const r = await report(launch);
+    expect(r.message).toMatch(/^The pane restarted: the original Codex exited and the resume started in the same pane, but /);
+    expect(r.message).toContain(`Check the pane with rig capture ${SEAT}.`);
+    expect(JSON.stringify(r)).not.toContain("nothing was restarted");
+  });
+
   // Round 4: the report's message, startupGate and step all describe the newest moment, through the real adapter.
   const UPDATING = ["✨ Update available! 0.120.0 -> 0.121.0", "Updating Codex..."].join("\n");
   const SKIPPABLE = ["✨ Update available! 0.120.0 -> 0.121.0", "› 1. Update now (runs `npm install -g @openai/codex`)", "  2. Skip", "  3. Skip until next version", "Press enter to continue"].join("\n");
@@ -694,6 +720,16 @@ describe("rig seat restart --keep-conversation: outcomes", () => {
     const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
     expect(result).toMatchObject({ outcome: "incomplete", remainingStep: expect.stringContaining("no fresh session was started") });
     expect(w.launches).toHaveLength(1);
+  });
+
+  it("proves the resume in the home the running Codex uses, in both pane shapes, though the seat declares none", async () => {
+    // The seat has no env: home, so the adapter would fall back to the daemon's; the restart already read the real one.
+    for (const shape of ["shell_backed", "direct_native"] as const) {
+      const w = world({ shape, ...(shape === "direct_native" ? { remainOnExit: null } : {}) });
+      const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+      expect(result).toMatchObject({ ok: true, outcome: "restarted_account_unverified", paneShape: shape });
+      expect(w.proofHomes).toEqual([HOME]);
+    }
   });
 
   it("native_unknown when the resumed process cannot be proven to be the conversation", async () => {
@@ -832,6 +868,35 @@ describe("#1196 round 1: launch choices come from the running Codex (LOW-1); ver
     const w = world({ runningArgs: `--no-daemon -m gpt-5.5 -s workspace-write -c sandbox_workspace_write.network_access=true resume --add-dir /shared/state ${TOKEN}` });
     await w.service.restartInPlace({ seatRef: SEAT, plan: true });
     expect(w.builds).toEqual([{ running: { networkOverride: true, daemonOptOut: true, addDirs: ["/shared/state"] } }]);
+  });
+
+  it("an --add-dir holding a space survives whole: the relaunch reads the exact argv, not ps's whitespace split", async () => {
+    // ps shows this Codex's argv joined by spaces, so its cwd's .git ("/home/u/my repo/.git") reads as "/home/u/my" + "repo/.git".
+    const argv = ["/usr/local/bin/codex", "-m", "gpt-5.5", "-s", "workspace-write", "resume", TOKEN, "--add-dir", "/home/u/my repo/.git"];
+    const w = world({ runningArgs: argv.slice(1).join(" "), facts: { 200: facts({ argv }) } });
+    await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect(w.builds).toEqual([{ running: { networkOverride: false, daemonOptOut: false, addDirs: ["/home/u/my repo/.git"] } }]);
+  });
+
+  it("a /proc cmdline read keeps every argv word exactly: spaces and empty words included", () => {
+    expect(procCmdlineArgv(Buffer.from("/usr/local/bin/codex\0resume\0tok\0--add-dir\0/home/u/my repo/.git\0"))).toEqual(
+      ["/usr/local/bin/codex", "resume", "tok", "--add-dir", "/home/u/my repo/.git"]);
+    expect(procCmdlineArgv("codex\0-c\0\0")).toEqual(["codex", "-c", ""]);
+    expect(procCmdlineArgv("")).toBeNull();
+  });
+
+  it.skipIf(!fs.existsSync("/proc/self/cmdline"))("the default reader takes a process's exact argv from /proc, a word with a space included", async () => {
+    const args = ["-e", "setTimeout(() => {}, 30000)", "my repo/.git"];
+    const child = spawn(process.execPath, args, { stdio: "ignore" });
+    try {
+      // Until exec completes, /proc shows the parent's argv; wait for the child's own.
+      for (let tries = 0; tries < 200 && !fs.readFileSync(`/proc/${child.pid}/cmdline`, "utf8").includes("my repo"); tries++) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect((await defaultInPlaceRestartIo().readProcess(child.pid!))?.argv).toEqual([process.execPath, ...args]);
+    } finally {
+      child.kill();
+    }
   });
 
   it("the production adapter builds from the running choices without starting any probe", async () => {
