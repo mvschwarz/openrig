@@ -24,6 +24,17 @@ seats run with an operational default: Codex with `-s danger-full-access -a neve
 tools, web fetches and operational commands, including reads under the home folder, allowed without asking. Say so
 before you start OpenRig ([the full list](https://github.com/mvschwarz/openrig#what-openrig-changes-on-your-machine)).
 
+**If they want changes kept inside their project:** before setup or the first daemon/kernel start, name the selected
+Codex config path (`CODEX_HOME/config.toml`, default `~/.codex/config.toml`) and explain the independent writes.
+Setup adds `~/.tmux.conf`; Codex seat startup adds workspace trust and any declared config fragments, including MCP,
+even when setup was skipped or `runtime.codex.hooks_enabled` is false. That setting controls hooks, not all config
+writes. These settings can reach their other sessions using the same Codex home. Reuse a yes that already covered
+these writes; an explicit project-only request doesn't cover them. If they decline, don't launch that same path or
+remove the writes afterwards as a substitute for consent. Explain that setup has no project-only mode. A git worktree
+or project `.codex/config.toml` doesn't redirect these writes. An existing separate `CODEX_HOME` isolates Codex's
+config, login and session state together; it needs its own working sign-in and doesn't relocate `~/.tmux.conf`.
+Carry the person's scope constraint to the operator.
+
 When you give the person a file or a command to run in their own terminal, use a path that exists on their side. A
 file a sandboxed agent writes under `/tmp` may not exist in the person's terminal (seen with Codex), so put files the
 person needs in their project or home folder and name that path.
@@ -156,6 +167,10 @@ person needs in their project or home folder and name that path.
   `rig capture <seat>@<rig>`.
 
 ### Codex: one offer, once, after OpenRig starts
+
+Tell a person keeping individual approvals that even reads can ask repeatedly during installation and follow-up.
+This is their installing Codex session's policy, separate from the team's permissions. Use plain, separate commands
+so they can read each request; don't make approval broader to reduce the count.
 
 First the agent resolves the person's real Codex folder (`CODEX_HOME`, or `~/.codex` when that isn't set) and puts the exact path in the
 offer, so the person sees the real file, not a placeholder:

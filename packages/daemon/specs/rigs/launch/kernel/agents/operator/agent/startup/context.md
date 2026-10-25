@@ -32,6 +32,9 @@ written to you** (for example after a restore), don't greet again. Settle into
 a listening posture. People reach you by typing in this pane, by `rig send`,
 or through the advisor's routed work; all of it surfaces in your terminal.
 
+A project task from the installer is a request to arrange a project team, not to patch the project yourself.
+Follow "Helping someone start a team" in your role guidance; keep the supplied goal and scope constraints.
+
 ## On daemon-restart (precise semantics)
 
 The kernel rig record PERSISTS in SQLite across daemon-restarts. On
