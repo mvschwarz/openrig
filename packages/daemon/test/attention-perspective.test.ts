@@ -15,6 +15,7 @@ import { QueueRepository } from "../src/domain/queue-repository.js";
 import { addHumanFragment } from "../src/domain/gateway/human-registry.js";
 import { setDefaultPerson } from "../src/domain/gateway/participants.js";
 import { attentionRoutes } from "../src/routes/attention.js";
+import { queueRoutes } from "../src/routes/queue.js";
 import type { AttentionRead } from "../src/attention-surface.js";
 
 describe("the Feed shows one person's queue, or everyone's, and acts with the primary user's authority whichever it shows", () => {
@@ -40,12 +41,14 @@ describe("the Feed shows one person's queue, or everyone's, and acts with the pr
   };
   const askTo = (destinationSession: string, summary: string) =>
     repo.create({ sourceSession: "orch-lead@r", destinationSession, body: `${summary} body`, summary, evidenceRef: "/fixture/ask", nudge: false });
-  async function read(query = ""): Promise<AttentionRead> {
+  async function get(path: string): Promise<unknown> {
     const app = new Hono();
     app.use("*", async (c, next) => { c.set("queueRepo" as never, repo as never); await next(); });
     app.route("/api/attention", attentionRoutes());
-    return await (await app.request(`/api/attention${query}`)).json() as AttentionRead;
+    app.route("/api/queue", queueRoutes());
+    return await (await app.request(path)).json();
   }
+  const read = async (query = ""): Promise<AttentionRead> => await get(`/api/attention${query}`) as AttentionRead;
   const asked = (r: AttentionRead) => r.items.filter((i) => i.id.startsWith("queue:")).map((i) => i.summary).sort();
 
   it("with no view it shows every person's asks, as before, and says who acts", async () => {
@@ -123,6 +126,20 @@ describe("the Feed shows one person's queue, or everyone's, and acts with the pr
     await repo.update({ qitemId: work.qitemId, actorSession: "designer@rig", state: "blocked", blockedOn: "sarah@external" } as never);
     const item = (await read("?view=sarah")).items.find((i) => i.id === `queue:${work.qitemId}`);
     expect(item).toMatchObject({ recipient: "sarah@external", answer: { verb: "resolve", actorSession: "sarah@external" } });
+  });
+
+  it("delivered updates follow the same view", async () => {
+    register("mike", "sarah");
+    for (const person of ["mike", "sarah"]) {
+      db.prepare("INSERT INTO queue_items(qitem_id,ts_created,ts_updated,source_session,destination_session,state,priority,body,summary,human_intent) VALUES(?,?,?,?,?,?,?,?,?,?)")
+        .run(`${person}-update`, "2026-10-25T10:00:00Z", "2026-10-25T10:00:00Z", "worker@rig", `${person}@external`, "done", "routine", "Done", `${person}'s update`, "update");
+      repo.transitionLog.append({ qitemId: `${person}-update`, state: "done", actorSession: "worker@rig", transitionNote: "slack-owner-notification-posted 1000.0001" });
+    }
+    const updates = async (query: string) => ((await get(`/api/queue/human-updates?limit=20${query}`)) as { items: Array<{ qitemId: string }> }).items.map((i) => i.qitemId).sort();
+    expect(await updates("")).toEqual(["mike-update", "sarah-update"]);
+    expect(await updates("&view=sarah")).toEqual(["sarah-update"]);
+    expect(await updates("&view=all")).toEqual(["mike-update", "sarah-update"]);
+    expect(await updates("&view=ana")).toEqual([]);
   });
 
   it("with no registered person there is no perspective, and the Feed is as before", async () => {

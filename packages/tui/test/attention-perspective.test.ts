@@ -1,4 +1,7 @@
 import { expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import ts from "typescript";
+import { StartupController } from "../src/startup.js";
 import { DaemonClient } from "../src/daemon-client.js";
 import { hydrateSnapshot } from "../src/hydrate.js";
 import { createViewState, emptySnapshot } from "../src/state.js";
@@ -33,13 +36,13 @@ it("the whose command chooses whose queue the Feed reads, and the Feed says who 
 
   view.dispatch(parseCommand("attention")); await refresh();
   expect(views.at(-1)).toBe("default");
-  expect(title()).toBe("FEED · Viewing mike@external · you act as mike@external");
+  expect(title()).toBe("FEED · Viewing mike@external · you act as mike@external · whose all shows everyone");
 
   view.dispatch(parseCommand("whose sarah")); await refresh();
   expect(view.get()).toMatchObject({ section: "needs", attentionView: "sarah" });
   expect(views.at(-1)).toBe("sarah");
   // Viewing Sarah is not acting as Sarah.
-  expect(title()).toBe("FEED · Viewing sarah@external · you act as mike@external");
+  expect(title()).toBe("FEED · Viewing sarah@external · you act as mike@external · whose all shows everyone");
 
   // Leaving the Feed and coming back keeps the chosen view.
   view.dispatch(parseCommand(":topology")); view.dispatch(parseCommand("attention")); await refresh();
@@ -105,4 +108,72 @@ it("a row parked on someone is resolved with reply, in words, as the primary use
   const act = replyAct(snap.attentionRead, item.id, "Use the wide layout");
   expect(act).toEqual({ type: "act", act: "answer", qitemId: "parked", verb: "resolve", actorSession: "sarah@external", decision: "Use the wide layout" });
   expect(answerRequest(act as Extract<Action, { type: "act"; act: "answer" }>)).toMatchObject({ verb: "resolve", decision: "Use the wide layout", authority: "primary-user" });
+});
+
+// The startup paths, through the real StartupController and main.ts's own enable and opening functions and callbacks,
+// taken verbatim from the source (main.ts is the terminal entry, so it isn't imported).
+function startupHarness(rigsSummary: () => Promise<unknown[]>) {
+  const source = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+  const start = source.indexOf("  function enableLive(): boolean");
+  const funcs = source.slice(start, source.indexOf("  function commandContext()", start));
+  const wiring = source.slice(source.indexOf("  if (client) startup = new StartupController"));
+  const changeStart = wiring.indexOf("    onChange: () => {") + "    onChange: () => {".length;
+  const change = wiring.slice(changeStart, wiring.indexOf("\n    },\n    onHelp:", changeStart));
+  const workStart = wiring.indexOf("    onWork: async (rig, seat) => {") + "    onWork: async (rig, seat) => {".length;
+  const work = wiring.slice(workStart, wiring.indexOf("\n    },\n  });", workStart));
+  if (start < 0 || !funcs.includes("openChosenDefaultFeed();") || !work.includes("enableLive")) throw new Error("main.ts no longer matches this harness");
+  let attentionReads = 0;
+  const client = { baseUrl: "http://fixture", rigsSummary, humanAttention: async () => { attentionReads++; return read(perspective("mike@external", "default")); } };
+  const view = createViewState({ instanceId: "startup" });
+  const body = `let startup; let liveEnabled = false, inputRevision = 0, buildMismatch = false, eventsDropped = false;
+    let activityEvents = null, crashCartOpts = {}; const snapshot = emptySnapshot();
+    const live = { refresh: async () => {}, snapshot: () => snapshot, pushed() {}, connectionStatus() {} };
+    const reviewCache = { clear() {} }; const draw = () => {}; const checkDaemonBuild = () => {};
+    const subscribeActivityEvents = () => ({ close() {} });
+    ${funcs}
+    startup = new StartupController({ client, home: "fixture", probe: async () => { throw new Error("no native probe"); },
+      startDaemon: async () => { throw new Error("no daemon start"); }, onChange: () => {${change}}, onWork: async (rig, seat) => {${work}} });
+    return { startup, view, touch() { inputRevision++; startup.interacted(); } };`;
+  const js = ts.transpileModule(body, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText;
+  const harness = new Function("StartupController", "client", "view", "emptySnapshot", "opensOnDefaultFeed", js)(StartupController, client, view, emptySnapshot, opensOnDefaultFeed);
+  return { ...harness, attentionReads: () => attentionReads };
+}
+const settle = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
+
+it("a normal start opens on the chosen default's Feed", async () => {
+  const h = startupHarness(async () => []);
+  await h.startup.refresh(); await settle();
+  expect(h.attentionReads()).toBe(1);
+  expect(h.view.get().section).toBe("needs");
+});
+
+it("a person who pressed a key while the TUI was still connecting stays where they are", async () => {
+  let resolve!: (rigs: unknown[]) => void;
+  const h = startupHarness(() => new Promise<unknown[]>((r) => { resolve = r; }));
+  const refresh = h.startup.refresh();
+  h.touch(); await h.startup.key("escape"); resolve([]); await refresh; await settle();
+  expect(h.attentionReads()).toBe(0);
+  expect(h.view.get().section).toBe("topology");
+});
+
+it("whose sarah reads delivered updates in Sarah's view too", async () => {
+  const updateViews: Array<string | null> = [];
+  const client = new DaemonClient({ baseUrl: "http://fixture", fetchImpl: (async (url) => {
+    const u = new URL(String(url));
+    if (u.pathname === "/api/attention") return Response.json(read(perspective("sarah@external", "chosen-here")));
+    if (u.pathname === "/api/queue/human-updates") {
+      const view = u.searchParams.get("view"); updateViews.push(view);
+      // The daemon filters by the view (its route test pins that); this fixture does the same.
+      return Response.json({ limit: 20, truncated: false, items: ["mike", "sarah"].filter((p) => view !== "sarah" || p === "sarah").map((p) => ({
+        qitemId: `${p}-update`, summary: `${p} delivery`, body: `${p} delivery`, humanDetail: null, destinationSession: `${p}@external`,
+        sourceSession: "worker@rig", tags: null, evidenceRef: null, deliveredAt: "2026-10-25T10:00:00Z", deliveryReceipt: "fixture" })) });
+    }
+    if (u.pathname === "/api/files/roots") return Response.json({ roots: [] });
+    throw new Error(`Unexpected request: ${u}`);
+  }) as typeof fetch });
+  let snap = emptySnapshot();
+  const view = createViewState({ instanceId: "updates", getSnapshot: () => snap });
+  view.dispatch(parseCommand("whose sarah")); snap = await hydrateSnapshot(client, undefined, null, null, null, view.get());
+  expect(updateViews).toEqual(["sarah"]);
+  expect(snap.attentionRead?.items.map((i) => i.recipient)).toEqual(["sarah@external"]);
 });

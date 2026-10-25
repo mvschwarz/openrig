@@ -113,6 +113,15 @@ describe("the primary user acts on anyone's ask, recorded as themselves on that 
       transition_note: "Wide; by mike@external, the primary user at the terminal, on sarah@external's ask" });
   });
 
+  it("approves a row parked on Sarah as the primary user, recorded on her ask", async () => {
+    register("mike", "sarah"); expect(setDefaultPerson("mike", home).ok).toBe(true);
+    const work = await repo.create({ sourceSession: ASKER, destinationSession: "designer@rig", body: "Layout", summary: "Layout", evidenceRef: "/fixture/layout", nudge: false });
+    await repo.update({ qitemId: work.qitemId, actorSession: "designer@rig", state: "blocked", blockedOn: "sarah@external" } as never);
+    expect((await act({ verb: "approve", qitemId: work.qitemId, actorSession: "mike@external", authority: "primary-user" })).status).toBe(200);
+    expect(audit(work.qitemId)).toEqual({ verb: "approve", actor: "mike@external", notes: { authority: "primary-user", asked: "sarah@external" } });
+    expect(lastTransition(work.qitemId).transition_note).toBe("mission-control:approve; by mike@external, the primary user at the terminal, on sarah@external's ask");
+  });
+
   it("with several people and no default, the primary user is unnamed and recorded as the generic human seat", async () => {
     register("mike", "sarah");
     const sarahs = await ask("sarah@external");
@@ -130,10 +139,17 @@ describe("the primary user acts on anyone's ask, recorded as themselves on that 
     }
     expect(repo.getById(pending.qitemId)?.state).toBe("pending");
 
-    const work = await repo.create({ sourceSession: ASKER, destinationSession: "designer@rig", body: "Layout", summary: "Layout", evidenceRef: "/fixture/layout", nudge: false });
-    await repo.update({ qitemId: work.qitemId, actorSession: "designer@rig", state: "blocked", blockedOn: "human-ana@host" } as never);
-    expect(await act({ verb: "resolve", qitemId: work.qitemId, actorSession: "mike@external", decision: "Wide" })).toMatchObject({ status: 400, body: { error: "answer_not_recorded" } });
-    expect(repo.getById(work.qitemId)?.state).toBe("blocked");
+    // A row parked on a person, whoever owns it: resolve, approve and deny are all refused.
+    // The refusal names the person by their registered address, however the park spells it.
+    for (const [parkedOn, person] of [["human-ana@host", "human-ana@external"], ["sarah@external", "sarah@external"]]) {
+      const work = await repo.create({ sourceSession: ASKER, destinationSession: "designer@rig", body: "Layout", summary: "Layout", evidenceRef: "/fixture/layout", nudge: false });
+      await repo.update({ qitemId: work.qitemId, actorSession: "designer@rig", state: "blocked", blockedOn: parkedOn } as never);
+      for (const body of [{ verb: "resolve", decision: "Wide" }, { verb: "approve" }, { verb: "deny", reason: "no" }]) {
+        expect(await act({ qitemId: work.qitemId, actorSession: "mike@external", ...body }), `${body.verb} on a park on ${parkedOn}`)
+          .toMatchObject({ status: 400, body: { error: "answer_not_recorded", asked: person } });
+      }
+      expect(repo.getById(work.qitemId)).toMatchObject({ state: "blocked", blockedOn: parkedOn });
+    }
     // Sarah settles her own.
     expect((await act({ verb: "approve", qitemId: pending.qitemId, actorSession: "sarah@external" })).status).toBe(200);
     expect(audit(pending.qitemId)).toEqual({ verb: "approve", actor: "sarah@external", notes: null });
