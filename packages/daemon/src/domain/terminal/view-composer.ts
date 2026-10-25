@@ -5,11 +5,11 @@
 // partition rules live here, in one testable pure function, so no provider
 // re-implements them:
 //
-//   local live       → `tmux attach -t <session>` (tmux = the daemon-resolved
-//                      absolute path when the context carries one)
+//   local live       → bounded, identity-pinned tmux reattach command
+//                      (tmux = the daemon-resolved absolute executable)
 //   view-only / cross-rig (read-only)
-//                    → `tmux attach -r -t <session>`
-//   ssh host         → `ssh <dest> tmux attach [-r] -t <session>`
+//                    → the same reattach command with read-only `-r`
+//   ssh host         → `ssh <dest> <reattach command>`
 //   http host        → NO pane; honest-degrade { seat, host, reason }
 //   dead / no session → absent[] (named, never silently dropped)
 //
@@ -18,6 +18,7 @@
 // (ssh vs http vs unknown) is resolved through the operator's read-only hosts
 // registry via the injected `resolveHost`.
 
+import { tileAttachArgv } from "./tile-attach.js";
 import type { HostEntry } from "../hosts/hosts-registry-reader.js";
 import type {
   AbsentSeat,
@@ -166,12 +167,13 @@ export function composeView(
         });
         continue;
       }
-      const remoteCommand = `tmux attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`;
+      const remoteCommand = tileAttachArgv("tmux", [], m.tmuxSession, m.readOnly).map(shellQuote).join(" ");
       opened.push({
         seat: m.seat,
         ...(m.runtime ? { runtime: m.runtime } : {}),
         label: m.label,
         paneCommand: `ssh ${shellQuote(dest)} ${shellQuote(remoteCommand)}`,
+        recoveryCommand: `ssh ${shellQuote(dest)} ${shellQuote(`tmux attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`)}`,
         readOnly: m.readOnly,
       });
       continue;
@@ -194,12 +196,14 @@ export function composeView(
       });
       continue;
     }
+    const attachArgv = tileAttachArgv(ctx.localTmux ?? "tmux", ctx.localTmuxServer ?? [], m.tmuxSession, m.readOnly);
     opened.push({
       seat: m.seat,
       ...(m.runtime ? { runtime: m.runtime } : {}),
       label: m.label,
-      paneCommand: `${localTmux} attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`,
-      attachArgv: [ctx.localTmux ?? "tmux", ...(ctx.localTmuxServer ?? []), "attach", ...(m.readOnly ? ["-r"] : []), "-t", m.tmuxSession],
+      paneCommand: attachArgv.map(shellQuote).join(" "),
+      recoveryCommand: `${localTmux} attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`,
+      attachArgv,
       readOnly: m.readOnly,
     });
   }

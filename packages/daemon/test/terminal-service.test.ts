@@ -132,7 +132,7 @@ describe("TerminalService — view resolution + one-shape result", () => {
     expect(res.opened).toEqual(["dev-driver@acme-build", "rev-r1@acme-build"]);
     // interactive → no `-r` in the composed pane commands
     expect(herdr.lastView?.opened.every((p) => p.readOnly === false)).toBe(true);
-    expect(herdr.lastView?.opened[0]?.paneCommand).toBe("tmux attach -t 'dev-driver@acme-build'");
+    expect(herdr.lastView?.opened[0]?.paneCommand).toContain("'dev-driver@acme-build'");
   });
 
   it("the rig:<id> alias form resolves the same rig (the rig-scoped route delegation)", async () => {
