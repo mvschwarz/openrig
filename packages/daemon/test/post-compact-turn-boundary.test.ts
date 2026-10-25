@@ -41,6 +41,11 @@ const BOX = [
   "",
 ];
 const AFTER_COMPACT = [...ABOVE, ...BOX].join("\n");
+// A working seat whose task list is taller than the classifier's window: its live status row is out of view, and the box
+// below still looks complete and empty. Claude marks tasks with figures' squares (◻ ◼, or □ ■ without them).
+const LIVE = "✻ Compacting conversation… (3s · ↓ 242 tokens)";
+const HIDDEN_WORK = [LIVE, ...Array.from({ length: 21 }, (_, i) => `  □ Pending task ${i + 1}`), ...BOX].join("\n");
+const HIDDEN_WORK_GLYPHS = [LIVE, "  ⎿  ◼ Running the migration", ...Array.from({ length: 20 }, (_, i) => `     ◻ Pending task ${i + 1}`), ...BOX].join("\n");
 const CLAUDE = { runtime: "claude-code" } as const;
 const BOUNDARY = { runtime: "claude-code", postCompactTurnBoundary: true } as const;
 
@@ -62,11 +67,19 @@ describe("the managed compaction's post-compaction turn boundary reads a just-co
       " Read file", " Read(/home/user/project/notes.txt)", " Do you want to proceed?", " ❯ 1. Yes", "   2. No", " Esc to cancel · Tab to amend", ""].join("\n");
     expect(classifyPaneActivity(dialog, BOUNDARY).state).toBe("attention");
   });
+
+  it("a working seat whose task list hides its live status stays unknown for the turn boundary", () => {
+    for (const pane of [HIDDEN_WORK, HIDDEN_WORK_GLYPHS]) {
+      expect(classifyPaneActivity(pane, CLAUDE)).toMatchObject({ state: "unknown", reason: "no_activity_signal" });
+      expect(classifyPaneActivity(pane, BOUNDARY)).toMatchObject({ state: "unknown", reason: "no_activity_signal" });
+    }
+  });
 });
 
 describe("through the real send: the turn boundary reaches a just-compacted seat that has no hook evidence", () => {
   let db: Database.Database;
   let transport: SessionTransport;
+  let pane = AFTER_COMPACT;
   const sendText = vi.fn(async () => ({ ok: true as const }));
   const sendKeys = vi.fn(async () => ({ ok: true as const }));
 
@@ -79,12 +92,13 @@ describe("through the real send: the turn boundary reaches a just-compacted seat
     sessionRegistry.updateBinding(node.id, { tmuxSession: "worker@my-rig" });
     const tmux = {
       hasSession: async () => true, probeSession: async () => ({ state: "present" as const }),
-      capturePaneContent: async () => AFTER_COMPACT, getPaneCommand: async () => null, getPanePid: async () => null,
+      capturePaneContent: async () => pane, getPaneCommand: async () => null, getPanePid: async () => null,
       sendText, sendKeys,
     } as unknown as TmuxAdapter;
     transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, eventBus,
       agentActivityStore: new AgentActivityStore({ db, eventBus }) });
     sendText.mockClear(); sendKeys.mockClear();
+    pane = AFTER_COMPACT;
   });
   afterEach(() => db.close());
 
@@ -98,5 +112,13 @@ describe("through the real send: the turn boundary reaches a just-compacted seat
       { openrigNotice: true, waitForIdleMs: 50, readinessFromPaneOnly: true, postCompactTurnBoundary: true });
     expect(boundary.ok).toBe(true);
     expect(sendText).toHaveBeenCalledTimes(1);
+  });
+
+  it("the turn boundary isn't typed into a working seat whose task list hides its live status", async () => {
+    pane = HIDDEN_WORK;
+    const result = await transport.send("worker@my-rig", "OpenRig post-compaction turn boundary.",
+      { openrigNotice: true, waitForIdleMs: 50, readinessFromPaneOnly: true, postCompactTurnBoundary: true });
+    expect(result).toMatchObject({ ok: false, reason: "target_activity_unknown" });
+    expect(sendText).not.toHaveBeenCalled();
   });
 });
