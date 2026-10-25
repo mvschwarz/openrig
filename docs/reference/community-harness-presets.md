@@ -147,8 +147,9 @@ OpenClaw's CLI.
 - **The conversation:** both examples use only agent `main`, mapping OpenRig's name to the full native key `agent:main:<OpenRig name>`. Each seat has its own client state folder.
 - **Its resume check:** local mode checks `sessions --agent main --json --limit all`; Gateway mode calls the selected Gateway's `sessions.describe`. Both require the exact canonical key. An unavailable lookup stops the launch; a confirmed missing key is never recreated. A client's local cache cannot authorize Gateway resume.
 - **Stopping:** a Gateway client's pane closing detaches it. The Gateway and an accepted turn can keep running; stopping that service is separate. Local mode runs its embedded agent in the pane.
+- **Local interruption:** Finish the current local turn before stopping; an interrupted local turn may retain native recovery work and refuse the next request. This launcher does not repair or retry it.
 - **Resets must stay off:** automatic session resets can create a new conversation under the same key. Typing `/new` also moves to a fresh key while the seat keeps the name OpenRig gave it.
-- **The presets:** both declare `names_conversation` and `resume`. On OpenClaw 2026.10.6, native CLI checks preserved the key, session id and stored reply on reopen; local missing-key refusal and Gateway present/missing lookup were checked. OpenRig still labels the saved name as passed, not observed by its adapter.
+- **The presets:** both declare `names_conversation`, `resume` and `first_input`. The launcher passes the generated first startup text through OpenClaw's `--message` option. OpenRig labels the saved name as passed, not observed by its adapter.
 
 Copy the launcher and the preset for your mode, and maintain them as your own.
 
