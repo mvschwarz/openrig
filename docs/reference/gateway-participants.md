@@ -57,6 +57,38 @@ go to:
 `rig gateway default` shows the current default; `rig gateway default --clear` clears the choice. Choosing a default
 never changes `workspace.operator_seat_name`, which keeps its own meaning.
 
+## Shared-channel conversations
+
+A registered shared channel lets people who aren't registered, such as a customer, talk to a seat, without registering
+each of them.
+
+**Setup:**
+1. Invite the OpenRig Slack app to the channel.
+2. Register the channel: `rig gateway channel add acme-customers --display-name "Acme customers" --binding
+   "slack:main:file:/etc/openrig/slack.env:C0ACME" --organization acme --policy-file ./acme-customers.md`.
+3. Send its new messages to the support seat: `rig slack channel-map set support-rig C0ACME --inbound
+   support@support-rig`. Without a map, they go to the inbound destination.
+
+**What the seat sees:** each message lands as a row from the channel (`acme-customers@external`). Its body ends with a
+labelled block: the channel, its organization and groups, who wrote (the Slack user, marked as not a registered person),
+and the channel's effective policy. The row is tagged `participant:acme-customers`, `shared-channel` and
+`slack-sender:<user id>`. A registered person writing in the channel stays themselves; the block only says where they
+wrote.
+
+**Answering:** reply into the customer's thread with an update to the channel:
+
+```bash
+rig queue create --destination acme-customers@external --human-intent update --reply-to <their row's id> \
+  --summary "Your invoice" --body "It's on your account page."
+```
+
+A later update with the same `--reply-to` lands in the same thread. An update without `--reply-to` posts to the channel
+on its own. Posts to a channel mention nobody.
+
+**What a channel can't do:** its messages are correspondence. They never answer, approve, close or resume anyone's ask,
+and a button click there records nothing. You can still send an ask to the channel; the queue accepts it with a warning
+that nothing there will settle it, so read the replies and close it yourself.
+
 ## Where it's stored
 
 - **People** stay exactly as before: one file per person under `$OPENRIG_HOME/gateway/humans/`, plus the generated
@@ -77,16 +109,17 @@ their addresses, and no new file is written until you use one of the commands ab
 default with `rig gateway default <id>` after upgrading. Until you do, escalations report
 `undeliverable:no-default-person` instead of reaching whoever's id sorted first, and the notice digest waits.
 
-## Rolling back to 0.7.1 or 0.7.0
+## Rolling back to 0.7.2 or earlier
 
 Older versions don't read `participants.yaml`, and the person files carry nothing they don't understand, so:
 - **every registered person still loads**, and each can still answer their own asks from Slack;
-- **another person's reply is guarded less:** on an older version, a different person's Slack reply in the thread of a
-  question parked on someone else can resume that question, and 0.7.0 can record such a reply to a pending ask as an
-  answer row (it still can't close the ask). Those protections are newer than 0.7.1;
+- **another person's reply is guarded less on 0.7.1 and 0.7.0:** there, a different person's Slack reply in the thread
+  of a question parked on someone else can resume that question, and 0.7.0 can record such a reply to a pending ask as
+  an answer row (it still can't close the ask);
 - **there's no default:** escalations and the notice digest go to the first person by id, Mission Control's my-queue
   has no default person, and pairing needs `--human`;
-- **shared channels are unknown:** rows addressed to one become undeliverable on the older version;
+- **shared channels are unknown:** their customers' messages are refused again, as from any unregistered sender, and
+  rows addressed to a channel become undeliverable on the older version;
 - **organizations, groups and policy aren't shown.**
 
 Upgrading again restores all of it, because the older version never changes `participants.yaml`.

@@ -7,6 +7,7 @@
 
 import type { QueueRepository, QueueItem as RepoQueueItem } from "../../queue-repository.js";
 import { loadHumanRegistry, resolveRegisteredHumanAddress, type LoadResult, type HumanFragment } from "../human-registry.js";
+import { sharedChannelAddresses } from "../participants.js";
 import type { HumanQuestion } from "../../human-questions.js";
 import { ownerNotificationLevelAtLeast, type OwnerNotificationLevel, type QueueTransition } from "../../queue-transition-log.js";
 
@@ -75,7 +76,7 @@ export interface OutboundQueuePort {
   listHumanAlerts(filter: AlertFilterOpts): Promise<QueueItem[]>;
 }
 
-function project(q: RepoQueueItem, transition: QueueTransition, entities: readonly HumanFragment[]): QueueItem | null {
+function project(q: RepoQueueItem, transition: QueueTransition, entities: readonly HumanFragment[], channels: ReadonlyArray<{ address: string }> = []): QueueItem | null {
   const r = q as unknown as Record<string, unknown>;
   let destinationSession: string | null = null;
   let sourceSession: string | null = null;
@@ -86,7 +87,9 @@ function project(q: RepoQueueItem, transition: QueueTransition, entities: readon
     destinationSession = resolveRegisteredHumanAddress(q.blockedOn, entities);
     sourceSession = q.destinationSession;
   } else {
-    destinationSession = resolveRegisteredHumanAddress(q.destinationSession, entities);
+    // A row addressed to a person, or to a registered shared channel (posted into that channel; 0.7.3).
+    destinationSession = resolveRegisteredHumanAddress(q.destinationSession, entities)
+      ?? channels.find((channel) => channel.address === q.destinationSession)?.address ?? null;
     sourceSession = q.sourceSession;
   }
   if (!destinationSession) return null;
@@ -139,7 +142,7 @@ export async function seedBacklogAsHistory(opts: {
  *  no `-A` scope trap (list() here is repository-wide), no bounded-body N+1 (rows carry bodies). */
 export function makeQueuePorts(
   queueRepo: QueueRepository,
-  opts: { loadHumanRegistry?: () => LoadResult } = {},
+  opts: { loadHumanRegistry?: () => LoadResult; sharedChannels?: () => ReadonlyArray<{ address: string }> } = {},
 ): InboundQueuePort & OutboundQueuePort {
   return {
     getQitem: (qitemId) => queueRepo.getById(qitemId),
@@ -166,6 +169,7 @@ export function makeQueuePorts(
     async listHumanAlerts(filter: AlertFilterOpts): Promise<QueueItem[]> {
       const registry = (opts.loadHumanRegistry ?? (() => loadHumanRegistry()))();
       if (!registry.ok) return [];
+      const channels = (opts.sharedChannels ?? (() => sharedChannelAddresses()))();
       // Avoid building waiting/recovery views for rows with no unposted owner notification.
       // Keep list(activeOnly)'s selection, ordering and cap; this remains an O(N) ID scan.
       const ids = queueRepo.db.prepare(
@@ -181,7 +185,7 @@ export function makeQueuePorts(
         if (queueRepo.transitionLog.hasOwnerNotificationReceipt(qitemId, notificationKey)) return [];
         const row = queueRepo.getById(qitemId);
         if (!row) return [];
-        const item = project(row, transition, registry.entities);
+        const item = project(row, transition, registry.entities, channels);
         return item ? [item] : [];
       });
       return filterHumanAlerts(projected, filter);

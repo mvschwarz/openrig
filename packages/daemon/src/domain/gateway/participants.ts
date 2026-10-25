@@ -424,3 +424,26 @@ export function setGroup(id: string, input: { organization?: string; name?: stri
     return file;
   }, home);
 }
+
+// ── Shared channels as addresses (0.7.3 channel conversations): a registered shared channel is a valid `<id>@external`
+// destination, and outbound posts to its Slack channel. People keep their own paths.
+
+export interface SharedChannelAddress { entityId: string; address: string; channelId: string; connectorRef: string }
+
+/** Every registered shared channel, as an address. An unreadable participant file lists none (outbound to a channel
+ *  then waits, and the queue refuses a new row to it, as for any unknown address). */
+export function sharedChannelAddresses(home: string = getOpenRigHome()): SharedChannelAddress[] {
+  const side = readParticipantsFile(home);
+  if (!side.ok) return [];
+  return Object.entries(side.file.participants).flatMap(([id, entry]) => entry.kind === "shared-channel"
+    ? [{ entityId: id, address: `${id}@${ADDRESS_DOMAIN}`, channelId: entry.channel.channelId, connectorRef: entry.channel.connectorRef }]
+    : []);
+}
+
+/** The registered shared channel a session ref names (`<id>@external`), or null. */
+export function sharedChannelFor(sessionRef: string | null | undefined, home: string = getOpenRigHome()): SharedChannelAddress | null {
+  if (!sessionRef) return null;
+  const local = sessionRef.endsWith(`@${ADDRESS_DOMAIN}`) ? sessionRef.slice(0, -(ADDRESS_DOMAIN.length + 1)) : null;
+  if (!local) return null;
+  return sharedChannelAddresses(home).find((channel) => channel.entityId === local) ?? null;
+}

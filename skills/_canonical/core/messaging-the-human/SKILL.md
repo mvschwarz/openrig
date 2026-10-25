@@ -45,6 +45,11 @@ labelled with where it came from. Read the policy of whoever you contact and
 apply it; it's context for your judgment, not a permission system, and a name
 is never a reason to assume a policy.
 
+A row from a shared channel carries that channel's policy and who actually
+wrote. Answer into their thread with an update to the channel (`--destination
+<id>@external --human-intent update --reply-to <their row>`). A channel's
+messages are correspondence: they never answer, approve or close an ask.
+
 Use the returned `address` (`<entityId>@external`), not a username, remembered
 seat, connector handle, or guessed kernel address. Where several people exist,
 use the decision ownership in Project World; the default person (`rig gateway

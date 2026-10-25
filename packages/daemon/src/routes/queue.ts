@@ -32,6 +32,7 @@ import type { WhoamiService } from "../domain/whoami-service.js";
 import type Database from "better-sqlite3";
 import { HumanModeService } from "../domain/gateway/human-operating-modes.js";
 import type { HumanQuestion } from "../domain/human-questions.js";
+import { sharedChannelFor } from "../domain/gateway/participants.js";
 import { queryLimit, SQL_LIMIT_BOUND } from "./query-limit.js";
 
 /**
@@ -110,6 +111,20 @@ export function queueRoutes(): Hono {
     // must neither fail that write nor misreport membership as unmatched.
     try { return getRepo(c).destinationAdvisory(sessionRef); }
     catch { return null; }
+  }
+  /** An ask (anything but an update) to a shared channel is accepted, with a word to the agent: the channel's replies
+   *  come back as correspondence, never as an answer, so nothing there will settle it. Context, not a refusal. */
+  function sharedChannelAskAdvisory(sessionRef: string, humanIntent: unknown) {
+    if (humanIntent === "update") return null;
+    try {
+      const channel = sharedChannelFor(sessionRef);
+      if (!channel) return null;
+      return {
+        code: "shared_channel_correspondence",
+        destinationSession: sessionRef,
+        message: `${sessionRef} is a shared channel: its replies come back to you as correspondence from the channel, never as an answer, so nothing there will answer or close this. Read the replies and close it yourself; to answer someone or post a notice, send an update (--human-intent update, with --reply-to to stay in their thread).`,
+      };
+    } catch { return null; }
   }
   function getInbox(c: { get: (key: string) => unknown }): InboxHandler {
     return c.get("inboxHandler" as never) as InboxHandler;
@@ -616,8 +631,8 @@ export function queueRoutes(): Hono {
         nudge: (body as { nudge?: boolean }).nudge,
         identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header named the actor here, else claimed:v1 (resolveRecordedProvenance degrades)
       });
-      const advisory = destinationAdvisory(c, item.destinationSession);
-      return c.json({ ...item, ...(advisory ? { advisories: [advisory] } : {}) }, 201);
+      const advisories = [destinationAdvisory(c, item.destinationSession), sharedChannelAskAdvisory(item.destinationSession, body.humanIntent)].filter(Boolean);
+      return c.json({ ...item, ...(advisories.length ? { advisories } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
     }

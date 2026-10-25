@@ -5,6 +5,7 @@ import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import type { EventBus } from "./event-bus.js";
 import { loadHumanRegistry, resolveRegisteredHumanAddress, slackSubscriptionFor, withHumanAlertTag, type LoadResult } from "./gateway/human-registry.js";
+import { sharedChannelAddresses } from "./gateway/participants.js";
 import { resolveExternal } from "./gateway/external-admission.js";
 import type { AgentActivity, PersistedEvent } from "./types.js";
 import { QueueTransitionLog, type OwnerNotificationLevel, type QueueTransition, type RecentQueueTransitionScope } from "./queue-transition-log.js";
@@ -898,6 +899,8 @@ export class QueueRepository {
   private readonly hasTransitionProvenanceColumn: boolean;
   private readonly hasOwnerNotificationColumns: boolean;
   private readonly loadHumanRegistryFn: () => LoadResult;
+  /** Registered shared channels (0.7.3): `<id>@external` participants whose rows post to their Slack channel. */
+  private readonly sharedChannelsFn: () => ReadonlyArray<{ address: string }>;
   /** OPR.0.4.6.WF3 FR-6 — injected by startup (never imported): the
    *  workflow domain's is-live-frontier-packet predicate. */
   private readonly workflowFrontierPredicate:
@@ -938,6 +941,7 @@ export class QueueRepository {
       resolveOccupantGeneration?: (sessionName: string) => string | null;
       resolveSessionAddresses?: (name: string) => string[];
       loadHumanRegistry?: () => LoadResult;
+      sharedChannels?: () => ReadonlyArray<{ address: string }>;
     }
   ) {
     this.db = db;
@@ -951,6 +955,7 @@ export class QueueRepository {
     this.resolveOccupantGeneration = opts?.resolveOccupantGeneration;
     this.resolveSessionAddresses = opts?.resolveSessionAddresses ?? ((name) => [name]);
     this.loadHumanRegistryFn = opts?.loadHumanRegistry ?? (() => loadHumanRegistry());
+    this.sharedChannelsFn = opts?.sharedChannels ?? (() => sharedChannelAddresses());
     this.hasTargetRepoColumn = detectQueueColumn(db, "target_repo");
     this.hasSummaryColumn = detectQueueColumn(db, "summary");
     this.hasHumanIntentColumn = detectQueueColumn(db, "human_intent");
@@ -1116,6 +1121,11 @@ export class QueueRepository {
       return input.humanIntent === "update"
         ? { kind: "human-update", level: "NOTICE" }
         : { kind: "human-required", level: posts ? "ALERT" : "RECORD" };
+    }
+    // A row to a registered shared channel posts there as a notice, whatever its intent: a channel takes correspondence,
+    // so nothing it says can answer, approve or escalate (0.7.3).
+    if (input.action === "create" && input.destinationSession?.endsWith("@external") && this.sharedChannelsFn().some((channel) => channel.address === input.destinationSession)) {
+      return { kind: "human-update", level: "NOTICE" };
     }
     return null;
   }

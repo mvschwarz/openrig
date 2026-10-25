@@ -163,8 +163,20 @@ export function shouldIngest(ev: SlackEvent): boolean {
  *  `source` is that human's canonical ref (never a raw platform id). An unregistered sender — or a
  *  registry that itself failed to load — is REFUSED with LOUD teaching, never a fabricated seat. */
 export type InboundSenderResolution =
-  | { admitted: true; source: string }
+  | { admitted: true; source: string; sharedChannel?: SharedChannelContext }
   | { admitted: false; teaching: string };
+
+/** A message in a registered shared channel (0.7.3). `asChannel`: the sender isn't a registered person, so the row's
+ *  source is the channel participant and the message is correspondence by construction: it never answers, closes or
+ *  resumes an ask. A registered person writing there stays themselves; the envelope only says where they wrote. */
+export interface SharedChannelContext {
+  participant: string;
+  address: string;
+  asChannel: boolean;
+  /** The labelled block an agent reads: the channel, its organization and groups, who wrote, and its readable policy. */
+  envelope: string;
+  tags: string[];
+}
 
 export interface InboundDeps {
   queue: InboundQueuePort;
@@ -173,7 +185,7 @@ export interface InboundDeps {
   destination: string; // first-class config; default operator-agent@kernel
   /** A6 v3 registration gate. Resolves ev.user -> a registered human (or refuses). Injected so
    *  this core stays pure/testable; the subsystem wires it via the daemon human-registry resolver. */
-  resolveSender: (slackUserId: string) => InboundSenderResolution;
+  resolveSender: (slackUserId: string, channel?: string) => InboundSenderResolution;
   /** S10 thread routing (deterministic, zero inference): resolve the destination + tags for an
    *  admitted event. Absent → every event lands on the static `destination` (the pre-routing
    *  shape, and the fallback the tests pin). */
@@ -225,7 +237,7 @@ export class InboundRouter {
   }
 
   /** The row's summary names the person who actually wrote (their registered address); its tags stay as they were. */
-  private summaryOf(ev: SlackEvent, sender: string, transfer?: InboundFileResult | null, correlationQitemId?: string): { summary: string; body: string } {
+  private summaryOf(ev: SlackEvent, sender: string, transfer?: InboundFileResult | null, correlationQitemId?: string, envelope?: string): { summary: string; body: string } {
     const text = String(ev.text ?? "");
     const meta = `slack channel=${ev.channel} user=${ev.user} ts=${ev.ts}`;
     // OPR.0.5.6.2 — attachments ride the row BODY by LOCAL path (Slack owns
@@ -251,6 +263,8 @@ export class InboundRouter {
       }
       sections.push(lines.join("\n"));
     }
+    // A shared channel's message carries who wrote and the channel's readable policy, for the agent answering it.
+    if (envelope) sections.push(envelope);
     const firstFileName = transfer?.stored[0]?.name ?? transfer?.failed[0]?.name;
     const headline = text.trim() ? text : firstFileName ? `[file] ${firstFileName}` : text;
     return {
@@ -289,11 +303,13 @@ export class InboundRouter {
     // A6 v3 registration gate: admit-iff-registered. An unregistered sender is REFUSED here —
     // never landed as a fabricated human-<slackid>@kernel seat. This is a POLICY refusal, not a
     // transient failure, so it is NOT dead-lettered (retrying can't help until the human registers).
-    const who = this.deps.resolveSender(ev.user ?? "");
+    const who = this.deps.resolveSender(ev.user ?? "", ev.channel);
     if (!who.admitted) {
       this.deps.log?.(`inbound REFUSED — unregistered sender ${ev.user} (ts=${ts}): ${who.teaching}`);
       return { landed: false, reason: "unregistered" };
     }
+    // Admitted as a shared channel (an unregistered customer): correspondence by construction, never an answer.
+    const asChannel = who.sharedChannel?.asChannel === true;
     this.inflight.add(eventId);
     try {
       // OPR.0.5.6.2 — transfer the human's files BEFORE composing the row so the
@@ -327,13 +343,13 @@ export class InboundRouter {
       if (!isCurrent()) return { landed: false, reason: "inactive" };
       // S10 — deterministic route (thread map) when wired; static destination otherwise.
       const route = this.deps.resolveRoute?.(ev) ?? { destination: this.deps.destination };
-      const { summary, body } = this.summaryOf(ev, who.source, transfer, route.correlationQitemId);
+      const { summary, body } = this.summaryOf(ev, who.source, transfer, route.correlationQitemId, who.sharedChannel?.envelope);
       // A person's top-level message (not a reply in a thread) becomes the root its answer lands under.
       const mintsRoot = Boolean(this.deps.mintThread && ev.channel && (!ev.thread_ts || ev.thread_ts === ev.ts));
       const correlated = route.correlationQitemId ? this.deps.queue.getQitem?.(route.correlationQitemId) : null;
       const askPending = correlated?.state === "pending";
       const closed = correlated?.state === "done" || correlated?.state === "handed-off";
-      const committedAnswer = (askPending || closed) && !ev.recoveredThreadReply && route.correlationQitemId
+      const committedAnswer = (askPending || closed) && !ev.recoveredThreadReply && !asChannel && route.correlationQitemId
         ? this.deps.queue.getHumanAnswer?.(route.correlationQitemId, who.source) : null;
       // An absorbed event has its own identity even when the first answer came from a button or Steering.
       const absorbedEventKey = committedAnswer ? `answer-event:${JSON.stringify([eventId, route.correlationQitemId, who.source, committedAnswer.qitemId])}` : null;
@@ -351,18 +367,18 @@ export class InboundRouter {
           source: who.source, // the REGISTERED human's canonical ref (human-class), never a raw platform id
           destination: route.destination,
           priority: "routine",
-          tags: [...(route.tags ?? ["founder-slack", "inbound"]), ...(mintsRoot ? [SLACK_THREAD_ROOT_TAG] : [])],
+          tags: [...(route.tags ?? ["founder-slack", "inbound"]), ...(mintsRoot ? [SLACK_THREAD_ROOT_TAG] : []), ...(who.sharedChannel?.tags ?? [])],
           summary,
           body,
           ...(route.correlationQitemId ? { inReplyTo: route.correlationQitemId } : {}),
-          ...(askPending && !ev.recoveredThreadReply ? { humanAnswer: true } : {}),
+          ...(askPending && !ev.recoveredThreadReply && !asChannel ? { humanAnswer: true } : {}),
         });
       } catch (e) {
         this.deps.log?.(`qitem create failed ts=${ts}: ${(e as Error).message}`);
         return { landed: false, reason: "create_failed" };
       }
       let replyResolution: "resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable" | undefined;
-      if (!closed && route.correlationQitemId && this.deps.resolveHumanReply && !ev.recoveredThreadReply) {
+      if (!closed && route.correlationQitemId && this.deps.resolveHumanReply && !ev.recoveredThreadReply && !asChannel) {
         try {
           // Reusing the durable answer consumed this event's words. Record that before close, but
           // keep the raw event unmarked until completion so an interrupted close can still retry.
@@ -484,9 +500,11 @@ export class InboundRouter {
         if (key) this.replyingTo.delete(key);
       }
     };
-    const who = this.deps.resolveSender(payload.user?.id ?? "");
-    if (!who.admitted) {
-      this.deps.log?.(`click REFUSED — unregistered sender ${payload.user?.id}: ${who.teaching}`);
+    const who = this.deps.resolveSender(payload.user?.id ?? "", channel);
+    // A shared channel's customer is admitted to write, never to answer: their click records nothing, like any
+    // unregistered sender's.
+    if (!who.admitted || who.sharedChannel?.asChannel) {
+      this.deps.log?.(`click REFUSED — unregistered sender ${payload.user?.id}${who.admitted ? " in a shared channel" : `: ${who.teaching}`}`);
       if (live) await acknowledge(CLICK_REPLIES.unregistered);
       return { status: "refused", reason: "unregistered" };
     }

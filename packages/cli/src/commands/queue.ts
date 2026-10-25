@@ -1056,6 +1056,11 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           if (status < 400 && createWarning?.code === "qitem_body_not_saved" && typeof createWarning.message === "string") {
             console.error(`Warning: ${createWarning.message}`);
           }
+          // An ask to a shared channel was accepted; nothing there will answer it (0.7.3).
+          const advisories = Array.isArray(created?.advisories) ? created.advisories as Array<{ code?: unknown; message?: unknown }> : [];
+          for (const advisory of advisories) {
+            if (status < 400 && advisory.code === "shared_channel_correspondence" && typeof advisory.message === "string") console.error(`Warning: ${advisory.message}`);
+          }
           if (opts.verify && status < 400) {
             const createdId = typeof created.qitemId === "string" ? created.qitemId : null;
             const delivery = createdId
