@@ -383,14 +383,28 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect((await findingsFor(row.qitemId))[0]!.destinationSession).toBe("sender@r");
   });
 
-  it("a dead seat's own row with no operator seat has nowhere better to go, so it stays", async () => {
+  // With no live recovery seat, the finding is still created (it's owed work) to the missing session, and says so.
+  it("a dead seat's own row with no operator agent or seat stays with it, and its why says no live recovery seat is available", async () => {
     const row = await repo.create({ sourceSession: "worker@r", destinationSession: "worker@r", body: "work" });
     repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
     ageClaim(row.qitemId, 60);
     await runSweep({ sessionConfirmedMissing: (s: string) => s === "worker@r", resolveOperatorSeat: () => null });
     const [finding] = await findingsFor(row.qitemId);
     expect(finding!.destinationSession).toBe("worker@r");
-    expect(finding!.body).not.toContain("confirmed missing");
+    expect(finding!.body).toContain("worker@r is confirmed missing (session_missing) and no live recovery seat is available");
+    expect(finding!.body).toContain("so this finding stays addressed to it");
+  });
+
+  it("when the operator agent, the operator seat and the creator are all confirmed missing, the finding stays and says so", async () => {
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    ageClaim(row.qitemId, 60);
+    const dead = new Set(["worker@r", "operator-admin@kernel", "approver@r", "sender@r"]);
+    await runSweep({ sessionConfirmedMissing: (s: string) => dead.has(s),
+      resolveRecoveryAgentSeat: () => "operator-admin@kernel", resolveOperatorSeat: () => "approver@r" });
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding!.destinationSession).toBe("worker@r");
+    expect(finding!.body).toContain("no live recovery seat is available");
   });
 
   it("a verdict from before the seat's relaunch, or no verdict, doesn't count as missing", () => {

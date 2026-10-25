@@ -158,8 +158,8 @@ export interface StuckSweepDeps {
    *  Injectable for tests; default derives from topology. */
   resolveOrchestrator?: (session: string) => string | null;
   /** Is this session's current binding confirmed missing (node inventory's session_missing
-   *  rule)? A finding is never addressed to such a session. Injectable for tests; default
-   *  reads the seat identity verdicts. */
+   *  rule)? Such a session's finding goes to a live recovery seat when one is available.
+   *  Injectable for tests; default reads the seat identity verdicts. */
   sessionConfirmedMissing?: (session: string) => boolean;
   /** The agent a confirmed-missing session's finding goes to first. Injectable for tests;
    *  default reads agents.operator_session. */
@@ -719,19 +719,26 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       });
     }
 
-    // Never address a finding INTO a confirmed-missing session: nothing would ever wake it,
-    // since the ladder covers handed-off batons only. Route it to the operator agent, else the
-    // operator seat (the ladder's own floor, the person approvals use), else the stuck row's
-    // creator, skipping any that is itself confirmed missing. A live seat keeps its own.
+    // A finding for a confirmed-missing session goes to a live recovery seat when one is available,
+    // since nothing would ever wake the missing one (the ladder covers handed-off batons only): the
+    // operator agent, else the operator seat (the ladder's own floor, the person approvals use), else
+    // the stuck row's creator, skipping any that is unset, confirmed missing or this seat. When none
+    // qualifies, the finding stays addressed to the missing session and says so; it's never dropped.
+    // A live seat keeps its own.
     const sessionMissing = deps.sessionConfirmedMissing ?? ((session: string) => {
       const nodeId = resolveSessionNodeId(deps.db, session);
       return nodeId !== null && nodeSessionConfirmedMissing(deps.db, nodeId);
     });
+    let recoverySeats: Array<string | null> | undefined;
     for (const c of candidates) {
       if (!sessionMissing(c.route)) continue;
-      const floor = [(deps.resolveRecoveryAgentSeat ?? resolveRecoveryAgentSeat)(), (deps.resolveOperatorSeat ?? resolveOperatorSeat)(), c.row.sourceSession]
+      recoverySeats ??= [(deps.resolveRecoveryAgentSeat ?? resolveRecoveryAgentSeat)(), (deps.resolveOperatorSeat ?? resolveOperatorSeat)()];
+      const floor = [...recoverySeats, c.row.sourceSession]
         .find((seat): seat is string => !!seat && seat !== c.route && !sessionMissing(seat));
-      if (!floor) continue;
+      if (!floor) {
+        c.why += `; ${c.route} is confirmed missing (session_missing) and no live recovery seat is available (operator agent, operator seat and creator are each unset, missing or this seat), so this finding stays addressed to it`;
+        continue;
+      }
       c.why += `; ${c.route} is confirmed missing (session_missing), so this finding goes to ${floor}`;
       c.route = floor;
     }
