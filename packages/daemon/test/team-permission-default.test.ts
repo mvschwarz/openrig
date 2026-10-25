@@ -12,6 +12,7 @@ import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import { operationalLaunchArgs } from "../src/adapters/kernel-authority.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
+import { codexCommandResumeToken } from "../src/domain/native-process-lineage.js";
 import type { NodeBinding, RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
@@ -111,6 +112,13 @@ describe("team launch permission defaults", () => {
       await (RestoreOrchestrator.prototype as any).attemptResume.call(ctx, f.node.id, f.session.sessionName,
         runtime === "codex" ? "codex_id" : "claude_id", "original", "/inert", null, "model", "floor");
       assertDefault(t.send.mock.calls[0]![1], runtime);
+      if (runtime === "codex") {
+        const command = t.send.mock.calls[0]![1];
+        // A spaced team workspace must not hide the conversation in an unquoted process line.
+        expect(codexCommandResumeToken(command.replace(/'/g, ""))).toBe("original");
+        expect(command).toContain("resume 'original' --add-dir '/configured/work space' --add-dir '/configured/shared/rigs/workshop/state/dev'");
+        expect(t.prepareTeamWorkspace).toHaveBeenCalledExactlyOnceWith(f.session.sessionName);
+      }
     });
   }
   it("named Codex profiles, kernel, Pi and terminal keep their previous path", () => {

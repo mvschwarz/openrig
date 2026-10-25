@@ -91,10 +91,11 @@ export function buildCodexResumeCore(
   // resume subcommand.
   const modelArg = model ? ` -m ${shellQuote(model)}` : "";
   const effortArg = effort ? ` -c ${shellQuote(`model_reasoning_effort="${effort}"`)}` : "";
-  const middle = extraArgs ? `${extraArgs} ` : "";
+  // Keep the identity before paths: process listings join argv without shell quoting.
+  const suffix = extraArgs ? ` ${extraArgs}` : "";
   const tokenArg = useLast ? "--last" : shellQuote(resumeToken);
   const daemonArg = daemonOptOut ? " --no-daemon" : "";
-  return `codex${daemonArg}${profileOrPosture}${modelArg}${effortArg} resume ${middle}${tokenArg}`;
+  return `codex${daemonArg}${profileOrPosture}${modelArg}${effortArg} resume ${tokenArg}${suffix}`;
 }
 
 export function assessNativeResumeProbe(

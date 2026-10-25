@@ -13,6 +13,7 @@ import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { seedCodexThreads } from "./helpers/codex-state.js";
 import { execFileSync } from "node:child_process";
 import { provenCodexResume } from "./helpers/codex-resume-proof.js";
+import { codexCommandResumeToken } from "../src/domain/native-process-lineage.js";
 
 // Verbatim 250-byte Codex 0.160.0 menu capture, SHA-256
 // 45c70fc01c7d33f4652c9d42523f631734c62aac76f449ff0f2c15e99680ac9b.
@@ -110,10 +111,10 @@ function gitDirOption(gitCwd: string | null): string {
 }
 
 function expectedResumeCommand(token = "sess-456", queueRoot: string | null = testQueueRoot(), model?: string, effort?: string, gitCwd: string | null = "/project"): string {
-  const queueDirArg = queueRoot === null ? "" : `--add-dir ${quote(queueRoot)} `;
+  const queueDirArg = queueRoot === null ? "" : ` --add-dir ${quote(queueRoot)}`;
   const modelArg = model ? ` -m ${quote(model)}` : "";
   const effortArg = effort ? ` -c ${quote(`model_reasoning_effort="${effort}"`)}` : "";
-  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false'${modelArg}${effortArg} resume ${queueDirArg}${quote(token)}${gitDirOption(gitCwd)}`;
+  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false'${modelArg}${effortArg} resume ${quote(token)}${queueDirArg}${gitDirOption(gitCwd)}`;
 }
 
 function expectedForkCommand(parentId = "parent-thread-id", options: { model?: string; effort?: string; queueRoot?: string | null; gitCwd?: string | null } = {}): string {
@@ -132,8 +133,8 @@ function expectedProfileFreshLaunchCommand(profile: string, options: { cwd?: str
 }
 
 function expectedProfileResumeCommand(profile: string, token = "sess-456", queueRoot: string | null = testQueueRoot(), gitCwd: string | null = "/project"): string {
-  const queueDirArg = queueRoot === null ? "" : `--add-dir ${quote(queueRoot)} `;
-  return `codex -p ${quote(profile)} '-c' 'check_for_update_on_startup=false' resume ${queueDirArg}${quote(token)}${gitDirOption(gitCwd)}`;
+  const queueDirArg = queueRoot === null ? "" : ` --add-dir ${quote(queueRoot)}`;
+  return `codex -p ${quote(profile)} '-c' 'check_for_update_on_startup=false' resume ${quote(token)}${queueDirArg}${gitDirOption(gitCwd)}`;
 }
 
 beforeEach(() => {
@@ -1444,6 +1445,22 @@ describe("Codex runtime adapter", () => {
       resumeType: "codex_id",
       appliedLaunch: CODEX_FLOOR_EFFECT,
     });
+  });
+
+  it("keeps the resume identity readable with a spaced shared-docs root", async () => {
+    const sharedDocsRoot = "/configured/shared docs";
+    vi.stubEnv("OPENRIG_SHARED_DOCS_ROOT", sharedDocsRoot);
+    const proof = provenCodexResume("sess-456");
+    const tmux = mockTmux({ getPanePid: proof.getPanePid });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), listProcesses: proof.listProcesses as never, readResumeEvidence: proof.readResumeEvidence });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig", resumeToken: "sess-456" });
+
+    expect(result.ok).toBe(true);
+    const command = vi.mocked(tmux.sendText).mock.calls[0]![1];
+    // ps joins argv with spaces; it does not retain the shell's quotes around each path.
+    expect(codexCommandResumeToken(command.replace(/'/g, ""))).toBe("sess-456");
+    expect(command).toContain(`resume 'sess-456' --add-dir '${testQueueRoot(sharedDocsRoot)}' --add-dir '/project/.git'`);
   });
 
   it("launchHarness sends correct resume command", async () => {
