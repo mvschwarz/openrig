@@ -736,7 +736,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       const floor = [...recoverySeats, c.row.sourceSession]
         .find((seat): seat is string => !!seat && seat !== c.route && !sessionMissing(seat));
       if (!floor) {
-        c.why += `; ${c.route} is confirmed missing (session_missing) and no live recovery seat is available (operator agent, operator seat and creator are each unset, missing or this seat), so this finding stays addressed to it`;
+        c.why += `; ${c.route} is confirmed missing (session_missing) and no live recovery seat is available (operator agent, operator seat and creator are each unset, missing or this seat; an operator agent setting that's unreadable or isn't an agent's session counts as unset), so this finding stays addressed to it`;
         continue;
       }
       c.why += `; ${c.route} is confirmed missing (session_missing), so this finding goes to ${floor}`;
