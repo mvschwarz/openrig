@@ -175,6 +175,18 @@ describe("Codex activity hooks with a hooks.json keep the person's own state (#1
     expect(m.store[CONFIG]).toContain('model = "gpt"');
   });
 
+  it("the same move finds trust tables Codex saved with literal-quoted keys (#2029)", () => {
+    const later = { hooks: [{ type: "command", command: "echo later", timeout: 7 }] };
+    const config = `model = "gpt"\n\n[hooks.state.'${HOOKS}:stop:1:0']\ntrusted_hash = 'openrig-old'\n\n`
+      + `[hooks.state.'${HOOKS}:stop:2:0']\ntrusted_hash = 'person-hash'\nenabled = false\n`;
+    const m = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: config, [HOOKS]: JSON.stringify({ hooks: { Stop: [USER_GROUP, ours(), later] } }) });
+    adapter(m.fs).removeCodexActivityHooks();
+    expect(JSON.parse(m.store[HOOKS]!).hooks.Stop).toEqual([USER_GROUP, later]);
+    const after = state(m.store[CONFIG]!);
+    expect(after[`${HOOKS}:stop:1:0`]).toEqual({ trusted_hash: "person-hash", enabled: false });
+    expect(after[`${HOOKS}:stop:2:0`]).toBeUndefined();
+  });
+
   it("a config the trust write would make invalid leaves both files untouched (F3)", () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     // Valid TOML: a quoted field name the line writer doesn't recognise, on the key OpenRig would write.

@@ -152,6 +152,19 @@ describe("OPR.0.4.3.33 — upsertCodexHookTrust (idempotent, non-clobbering, sec
     // the OTHER state entry's hash was NOT touched
     expect(out.match(/sha256:other/g)?.length).toBe(1);
   });
+
+  // #2029: Codex saves its tables with literal-quoted keys. A second table for the same key is a duplicate key, and
+  // Codex then refuses to start, so the writer finds the table by key.
+  it("updates a literal-quoted table Codex saved, in place, without adding a duplicate", () => {
+    const out = upsertCodexHookTrust(`[hooks.state.'${KEY}']\ntrusted_hash = 'sha256:old'\n`, KEY, HASH);
+    expect(out.match(/^\[hooks\.state\./gm)?.length).toBe(1);
+    expect((parseToml(out) as { hooks: { state: Record<string, { trusted_hash: string }> } }).hooks.state[KEY]!.trusted_hash).toBe(HASH);
+  });
+
+  it("leaves a key defined another way (an inline table) as it is rather than add a duplicate", () => {
+    const existing = `[hooks.state]\n'${KEY}' = { trusted_hash = 'sha256:old' }\n`;
+    expect(upsertCodexHookTrust(existing, KEY, HASH)).toBe(existing);
+  });
 });
 
 describe("OPR.0.4.3.33 — provisioning-seam coupling (ensureCodexActivityHooks pre-trusts our 4 hooks)", () => {
@@ -177,6 +190,18 @@ describe("OPR.0.4.3.33 — provisioning-seam coupling (ensureCodexActivityHooks 
     // scope: exactly 4 hooks.state tables, no more, no wildcard/blanket entry
     expect(cfg.match(/^\[hooks\.state\./gm)?.length).toBe(4);
     expect(cfg).not.toContain('[hooks.state."*"]');
+  });
+
+  // #2029: after "Trust all", Codex saves hook state with literal-quoted keys. The next launch updates those tables;
+  // a second table for each key is a duplicate key, and Codex then refuses to start.
+  it("finds the literal-quoted trust tables Codex saved and adds no duplicate", () => {
+    const saved = EVENTS.map(ev => `[hooks.state.'${PROVISIONAL_FIXTURE[ev].key}']\ntrusted_hash = 'sha256:old'\n`).join("\n");
+    const fs = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: saved });
+    makeAdapter(fs).ensureCodexActivityHooks();
+    const cfg = fs._store[CONFIG]!;
+    const parsed = parseToml(cfg) as { hooks: { state: Record<string, { trusted_hash: string }> } };
+    for (const ev of EVENTS) expect(parsed.hooks.state[PROVISIONAL_FIXTURE[ev].key]!.trusted_hash).toBe(PROVISIONAL_FIXTURE[ev].hash);
+    expect(cfg.match(/^\[hooks\.state\./gm)?.length).toBe(4);
   });
 
   it.each(EVENTS)("trusts the authored %s group at its real position without changing a person's trust", (event) => {
