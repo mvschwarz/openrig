@@ -468,8 +468,8 @@ async function settleReceiptHost(client: DaemonClient, receipt: ReceiptContext):
 const CREATE_READ_BACK_TIMEOUT_MS = 10_000;
 
 /** What a create sent, for telling its row from another with the same ID. `claimedSource` is the body's source, which the
- *  daemon records only when the request carries no sender. */
-interface SentCreate { destinationSession: string; claimedSource: string | undefined; body: string; crossHost: boolean }
+ *  daemon records only when the request carries no sender; `remoteHost` is the host it was sent to with `--host`. */
+interface SentCreate { destinationSession: string; claimedSource: string | undefined; body: string; remoteHost: string | undefined }
 
 /** The daemon's host id: null when it reports none, undefined when it can't be read. */
 async function daemonSelfHostId(client: DaemonClient): Promise<string | null | undefined> {
@@ -492,12 +492,14 @@ async function storedSourceOf(client: DaemonClient, sent: SentCreate): Promise<s
   if (!source) return undefined;
   const parts = source.split("@");
   const canonicalizes = session !== undefined && parts.length === 3 && parts.every(Boolean);
-  const stamps = sent.crossHost && !originUnknown;
+  const stamps = sent.remoteHost !== undefined && !originUnknown;
   if (!canonicalizes && !(stamps && parts.length === 2)) return source;
   const selfId = await daemonSelfHostId(client);
   if (selfId === undefined) return undefined;
   const canonical = canonicalizes && parts[2] === selfId ? `${parts[0]}@${parts[1]}` : source;
-  return stamps && selfId && canonical.split("@").length === 2 ? `${canonical}@${selfId}` : canonical;
+  // The daemon forwards only to another host (resolvesToLocalHost): a target naming its own id is a local create, unstamped.
+  const forwarded = stamps && sent.remoteHost !== selfId;
+  return forwarded && selfId && canonical.split("@").length === 2 ? `${canonical}@${selfId}` : canonical;
 }
 
 /** Which field shows a stored row isn't this create, by the rule the daemon applies to a create whose ID already exists
@@ -1047,7 +1049,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
         }, crossHostWriteOptions(hostResolved.hostId)).catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
         const sent: SentCreate = { destinationSession: hostResolved.destination, claimedSource: managedSource === undefined ? source : undefined, body: resolvedBody,
-          crossHost: remoteHostOf(hostResolved.hostId) !== undefined };
+          remoteHost: remoteHostOf(hostResolved.hostId) };
         // Every create that's answered with a row ends here: its warning, --verify's delivery, and the output.
         const finish = async (created: Record<string, unknown>, status: number) => {
           const createWarning = created?.createWarning as { code?: unknown; message?: unknown } | undefined;
