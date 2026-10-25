@@ -162,6 +162,20 @@ Slack for asks marked `--alert`, which stand out with a mention.
   [#1882](https://github.com/mvschwarz/openrig/pull/1882),
   [#1894](https://github.com/mvschwarz/openrig/pull/1894))
 
+- Off by default since 0.6.12: with `bundle.services_enabled` on (`rig
+  config set bundle.services_enabled true`), a bundle carries its Compose
+  file, `rig bundle inspect` shows each service before anything runs, and
+  `rig bundle install <bundle> --target <folder>` starts its services, then
+  its seats, in that folder. In 0.7.1, `--plan --target` previews the
+  services an install would run, the before-install view also names a Claude
+  member's own agent, prompt and plugin folders, and the example
+  secrets-manager team publishes Vault's port on the host's loopback only.
+  Proven on Linux; not run on macOS.
+  ([#1474](https://github.com/mvschwarz/openrig/pull/1474),
+  [#1848](https://github.com/mvschwarz/openrig/pull/1848),
+  [#1745](https://github.com/mvschwarz/openrig/pull/1745),
+  [#1845](https://github.com/mvschwarz/openrig/pull/1845))
+
 **Reliability**
 - `rig daemon start` waits for a slow daemon instead of stopping it, and warns
   rather than fails when only a secondary listener, such as Tailscale's, can't
