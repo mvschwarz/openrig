@@ -253,14 +253,28 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     "↑3.6k ↓1.6k R24k CH95.0% $0.026 (sub) 0.8%/500k (auto)    gpt-6.1-sol • low",
   ].join("\n");
 
-  it.each([null, "unknown", "pi"])("plain send refuses the adopted Pi confirmation with runtime %s", async (runtime) => {
+  // Pi v1.4.0 extension-selector.ts draws this chrome independently of footer metadata.
+  const piSelectors = [
+    ["named session", piConfirmation],
+    ["unnamed in git", piConfirmation.replace("~/project • tui", "~/project (main)")],
+    ["unnamed outside git", piConfirmation.replace("~/project • tui", "~/project")],
+    ["extension status", `${piConfirmation}\nplan: on`],
+    ["widget below selector", piConfirmation.replace("~/project • tui", "Widget below editor\n~/project")],
+    ["absent usage counters", piConfirmation.replace(/↑3\.6k ↓1\.6k R24k CH95\.0% /, "")],
+    ["Allow/Deny choices", piConfirmation.replace("→ Yes\n   No", "→ Allow\n   Deny")],
+    ["three choices", piConfirmation.replace("   No", "   No\n   Always")],
+    ["described choice", piConfirmation.replace("→ Yes", "→ Yes — this operation only")],
+    ["rebound keys", piConfirmation.replace("enter select  escape/ctrl+c cancel", "ctrl+y select  ctrl+n cancel")],
+  ] as const;
+  it.each(piSelectors.flatMap(([layout, pane]) => [null, "unknown", "pi"].map(runtime => [layout, runtime, pane] as const)))(
+    "plain send refuses the adopted Pi selector (%s) with runtime %s", async (_layout, runtime, pane) => {
     const node = rigRepo.addNode(rigId, "adopted.worker", { role: "worker" });
     db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(runtime, node.id);
     const seat = "adopted-tui";
     sessionRegistry.registerClaimedSession(node.id, seat);
     sessionRegistry.updateBinding(node.id, { tmuxSession: seat, tmuxPane: "%42" });
     const { sendText, sendKeys } = spies();
-    const capturePaneContent = vi.fn(async () => piConfirmation);
+    const capturePaneContent = vi.fn(async () => pane);
     const result = await makeTransport(mockTmux({ capturePaneContent, sendText, sendKeys })).send(seat, "hello?");
     expect(result.ok).toBe(false);
     expect(result.reason).toBe("target_needs_input");

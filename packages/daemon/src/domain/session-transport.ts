@@ -163,16 +163,25 @@ function findPatternEvidence(lines: string[], patterns: RegExp[]): string | null
   return null;
 }
 
-/** Pi's direct TUI has no runner hooks when adopted. Match its current Yes/No
- * select widget plus the trailing native footer, not a question in chat history. */
-function findCurrentPiConfirmation(lines: string[]): string | null {
-  const footer = lines.length - 4;
-  if (footer < 2 || !/^↑↓ navigate\s+enter select\s+escape\/ctrl\+c cancel$/.test(lines[footer]!)) return null;
-  if (!/^─{3,}$/.test(lines[footer + 1]!) || !/\S.* • \S/.test(lines[footer + 2]!) ||
-      !/^↑[\d.]+[kM]?\s+↓[\d.]+[kM]?\b/.test(lines[footer + 3]!)) return null;
-  const choices = lines.slice(footer - 2, footer);
-  return choices.join("\n") === "→ Yes\nNo" || choices.join("\n") === "Yes\n→ No"
-    ? choices.find(line => line.startsWith("→ "))! : null;
+/** Adopted Pi TUIs have no runner hooks. Anchor on the selector's chrome:
+ * footer metadata is optional, and an extension can add rows below the dialog. */
+function findCurrentPiSelector(paneContent: string): string | null {
+  const lines = paneContent.split("\n").map(line => line.trimEnd());
+  const visible = lines.flatMap((line, at) => line.trim() ? [{ text: line.trim(), at }] : []);
+  const border = (text: string) => /^─{3,}$/.test(text);
+  // At most six nonblank footer/widget rows may follow the selector's border.
+  for (let help = visible.length - 2; help >= Math.max(1, visible.length - 8); help--) {
+    if (!/^↑↓ navigate\s+\S.* select\s+\S.* cancel$/.test(visible[help]!.text) || !border(visible[help + 1]!.text)) continue;
+    // A later editor or closing Markdown fence makes the selector historical/quoted.
+    if (visible.slice(help + 2).some(row => border(row.text) || /^(?:`{3,}|~{3,})/.test(row.text))) continue;
+    const end = visible[help - 1]!.at;
+    let start = end;
+    // The native spacer before the options separates arbitrary title/description text.
+    while (start > Math.max(0, end - PROMPT_SCAN_LINES) && lines[start - 1]!.trim() && !border(lines[start - 1]!.trim())) start--;
+    const selected = lines.slice(start, end + 1).map(line => line.trim()).filter(line => /^→ \S/.test(line));
+    if (selected.length === 1) return truncateEvidence(selected[0]!);
+  }
+  return null;
 }
 
 function findCurrentClaudeQuestion(paneContent: string): string | null {
@@ -538,7 +547,7 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
     return { state: "unknown", reason: "empty_capture", evidence: null };
   }
 
-  const piConfirmation = findCurrentPiConfirmation(lastNonBlank);
+  const piConfirmation = findCurrentPiSelector(paneContent);
   if (piConfirmation) return { state: "attention", reason: "selection_prompt", evidence: piConfirmation };
 
   const recentLines = lastNonBlank.slice(-8);
