@@ -150,6 +150,14 @@ describe("OPR.0.4.3.33 — upsertCodexHookTrust (idempotent, non-clobbering, sec
     // the OTHER state entry's hash was NOT touched
     expect(out.match(/sha256:other/g)?.length).toBe(1);
   });
+
+  it("updates a table Codex saved with a literal (single-quoted) key instead of adding a duplicate", () => {
+    const existing = `[hooks.state.'${KEY}']\ntrusted_hash = 'sha256:old'\n`;
+    const out = upsertCodexHookTrust(existing, KEY, HASH);
+    expect(out.match(/\[hooks\.state\./g)?.length).toBe(1);
+    expect(out).toContain(`trusted_hash = ${JSON.stringify(HASH)}`);
+    expect(out).not.toContain("sha256:old");
+  });
 });
 
 describe("OPR.0.4.3.33 — provisioning-seam coupling (ensureCodexActivityHooks pre-trusts our 4 hooks)", () => {

@@ -1982,6 +1982,20 @@ describe("Codex runtime adapter", () => {
     expect(content).not.toContain('[mcp_servers.context7]');
   });
 
+  it("deliverStartup keeps a project trust table Codex saved with a literal key, so the config still parses", async () => {
+    const fs = mockFs({
+      "/home/tester/.codex/config.toml": "[projects.'/tmp/workspace']\ntrust_level = 'trusted'\n",
+    });
+    const fsWithHome = { ...fs, homedir: "/home/tester" };
+    const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fsWithHome });
+
+    await adapter.deliverStartup([], makeBinding("/tmp/workspace"));
+
+    const store = (fsWithHome as unknown as { _store: Record<string, string> })._store;
+    const parsed = parseToml(store["/home/tester/.codex/config.toml"]!) as { projects: Record<string, { trust_level: string }> };
+    expect(parsed.projects["/tmp/workspace"]!.trust_level).toBe("trusted");
+  });
+
   it("applies codex_config_fragment runtime resources to the global Codex config idempotently", async () => {
     const fs = mockFs({
       "/agents/base/runtime/codex-config.toml": [

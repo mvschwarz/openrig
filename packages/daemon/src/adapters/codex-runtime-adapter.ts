@@ -1843,10 +1843,16 @@ function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
+/** Index of the `[<table>.<key>]` header, with the key double-quoted or single-quoted (Codex saves literal keys). */
+function findTomlTableHeader(lines: string[], table: string, key: string): number {
+  const headers = new Set([`[${table}.${JSON.stringify(key)}]`, `[${table}.'${key}']`]);
+  return lines.findIndex((line) => headers.has(line.trim()));
+}
+
 function upsertCodexProjectTrust(content: string, projectPath: string): string {
   const header = `[projects.${JSON.stringify(projectPath)}]`;
   const lines = content.length > 0 ? content.split("\n") : [];
-  const headerIndex = lines.findIndex((line) => line.trim() === header);
+  const headerIndex = findTomlTableHeader(lines, "projects", projectPath);
 
   if (headerIndex === -1) {
     const trimmed = content.trimEnd();
@@ -1973,7 +1979,7 @@ export function upsertCodexHookTrust(content: string, key: string, hash: string,
   const header = `[hooks.state.${JSON.stringify(key)}]`;
   const trustLine = `${field} = ${JSON.stringify(hash)}`;
   const lines = content.length > 0 ? content.split("\n") : [];
-  const headerIndex = lines.findIndex((line) => line.trim() === header);
+  const headerIndex = findTomlTableHeader(lines, "hooks.state", key);
 
   if (headerIndex === -1) {
     const trimmed = content.trimEnd();
@@ -2179,7 +2185,7 @@ function openRigInlineGroupIndex(document: unknown, event: string): number {
 function upsertCodexHookDisabled(content: string, key: string): string {
   const header = `[hooks.state.${JSON.stringify(key)}]`;
   const lines = content.split("\n");
-  const at = lines.findIndex((line) => line.trim() === header);
+  const at = findTomlTableHeader(lines, "hooks.state", key);
   if (at < 0) return `${content.replace(/\n*$/, "")}\n\n${header}\nenabled = false\n`;
   let end = lines.length;
   for (let i = at + 1; i < lines.length; i++) if (lines[i]!.trim().startsWith("[")) { end = i; break; }
