@@ -887,10 +887,11 @@ export class ClaudeCompactionEnforcer {
       if (!INPUT_BOX_CLEAR.has(box)) return { triggered: false, reason: "input_box_not_empty" };
     }
     if (pendingStage === "turn_boundary") {
+      // Only this first step after /compact reads past the compaction output that fills the screen above the input box.
       const boundary = await this.sendRestoreStage(
         input.sessionName,
         buildPostCompactTurnBoundaryPrompt(),
-        sendOpts,
+        { ...sendOpts, postCompactTurnBoundary: true },
       );
       if (!isCurrent()) return { triggered: false, reason: "preparation_stopped" };
       if (!boundary.ok || boundary.outcome === "retained") {
