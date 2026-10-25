@@ -68,6 +68,7 @@ it.each([
       `Read(/${home}/plugins/openrig-core/skills/refocusing/SKILL.md)`,
       `Read(/${home}/plugins/openrig-core/skills/claude-compaction-restore/SKILL.md)`,
       `Read(/${home}/compaction/post-compact-extra/owner@rig.md)`,
+      `Read(/${home}/compaction/post-compact-extra.md)`,
       `Read(/${home}/compaction/preparation/owner@rig/*/RESTORE-MAP.md)`,
     ]),
     ...spellings(f.cwd).map(cwd => `Read(/${cwd}/.openrig/compaction/preparation/owner@rig/*/RESTORE-MAP.md)`),
@@ -134,4 +135,38 @@ it("grants each restore file both where it's named and where it resolves, when a
   expect(allow).toContain(`Read(/${root}/real-packets/not-yet/${CHILD}-*/restore-instructions.md)`);
   // Every grant stays inside the fixture at either spelling.
   expect(allow.every(rule => rule.startsWith(`Read(/${root}/`))).toBe(true);
+});
+
+it("grants the generic post-compact-extra.md and the configured extra file and preparation root the restore reads", async () => {
+  // With no per-seat file, the restore request names the global extra (policies.claude_compaction.message_file_path,
+  // by default <home>/compaction/post-compact-extra.md), even before it exists; with policies.claude_compaction.preparation_root
+  // set, the restore map lives under that root. Reading either must not stop at an approval.
+  const { withManagedRestoreReads } = await import("../src/domain/managed-restore-read-access.js");
+  const f = fixture();
+  const allowOf = (policy: { extraInstructionFile?: string; preparationRoot?: string } = {}) => JSON.parse(withManagedRestoreReads([],
+    { openrigHome: f.home, session: "owner@rig", cwd: f.cwd, nativeSessionId: CHILD, ...policy })[1]!).permissions.allow as string[];
+  for (const home of spellings(f.home)) expect(allowOf()).toContain(`Read(/${home}/compaction/post-compact-extra.md)`);
+  const custom = path.join(f.root, "elsewhere", "team-restore.md");
+  const prep = path.join(f.root, "maps");
+  const allow = allowOf({ extraInstructionFile: custom, preparationRoot: prep });
+  for (const dir of spellings(path.dirname(custom))) expect(allow).toContain(`Read(/${dir}/team-restore.md)`);
+  for (const dir of spellings(prep)) expect(allow).toContain(`Read(/${dir}/owner@rig/*/RESTORE-MAP.md)`);
+  // Exact files only: nothing else in that directory, and no other seat's maps.
+  expect(allow.some(rule => rule.includes("/elsewhere/") && !rule.endsWith("/team-restore.md)"))).toBe(false);
+  expect(allow.some(rule => rule.includes("/maps/") && !rule.includes("/maps/owner@rig/"))).toBe(false);
+});
+
+it("both Claude launch paths grant the configured extra file the restore will name", async () => {
+  const f = fixture();
+  const custom = path.join(f.root, "elsewhere", "team-restore.md");
+  const restoreReadPolicy = () => ({ extraInstructionFile: custom, preparationRoot: null });
+  const adapter = new ClaudeCodeAdapter({ tmux: f.tmux, stateDir: f.home, sessionIdFactory: () => CHILD, restoreReadPolicy,
+    fsOps: { readFile: () => "", writeFile: () => {}, exists: () => false, mkdirp: () => {}, copyFile: () => {} } });
+  vi.spyOn(adapter as any, "verifyResumeLaunch").mockResolvedValue({ ok: true });
+  expect((await adapter.launchHarness(f.binding, { name: "owner@rig" })).ok).toBe(true);
+  expect(settings(f.commands.at(-1)!).permissions.allow).toContain(`Read(/${spellings(path.dirname(custom))[0]}/team-restore.md)`);
+  const resume = new ClaudeResumeAdapter(f.tmux, { openrigHome: f.home, restoreReadPolicy });
+  vi.spyOn(resume as any, "verifyResume").mockResolvedValue({ ok: true });
+  await resume.resume("owner@rig", "claude_id", CHILD, f.cwd, "floor", undefined, undefined, "node", undefined, undefined, false, true);
+  expect(settings(f.commands.at(-1)!).permissions.allow).toContain(`Read(/${spellings(path.dirname(custom))[0]}/team-restore.md)`);
 });
