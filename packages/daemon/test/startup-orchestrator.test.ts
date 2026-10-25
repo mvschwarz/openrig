@@ -153,10 +153,10 @@ describe("StartupOrchestrator", () => {
     };
   }
 
-  it("persists a first-login gate as attention and withholds startup context", async () => {
+  it.each(["codex-first-login.txt", "codex-first-login-0.162.1.txt"])("persists %s as attention and withholds startup context", async (fixture) => {
     const seed = seedSession();
     db.prepare("UPDATE nodes SET runtime = 'codex' WHERE id = ?").run(seed.nodeId);
-    const firstLoginPrompt = nodeFs.readFileSync(new URL("./fixtures/codex-first-login.txt", import.meta.url), "utf8");
+    const firstLoginPrompt = nodeFs.readFileSync(new URL(`./fixtures/${fixture}`, import.meta.url), "utf8");
     const nativeTmux = mockTmux({
       getPaneCommand: vi.fn(async () => "codex"),
       getPanePid: vi.fn(async () => null),

@@ -211,7 +211,8 @@ describe("Codex runtime adapter", () => {
     expect(result.ready).toBe(true);
   });
 
-  it("checkReady reports a first-login gate instead of waiting for the runtime", async () => {
+  it.each(["codex-first-login.txt", "codex-first-login-0.162.1.txt"])("checkReady reports %s as a first-login gate instead of waiting for the runtime", async (fixture) => {
+    const firstLoginPrompt = fs.readFileSync(new URL(`./fixtures/${fixture}`, import.meta.url), "utf8");
     const tmux = mockTmux({ capturePaneContent: vi.fn(async () => firstLoginPrompt) });
     const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), listProcesses: () => [] });
     expect(await adapter.checkReady(makeBinding())).toMatchObject({ ready: false, code: "login_required" });
@@ -220,7 +221,7 @@ describe("Codex runtime adapter", () => {
   });
 
   it.each(["bash", "node"])("checkReady rechecks a %s wrapper before reporting its first-login gate", async (paneCommand) => {
-    for (const fixture of ["codex-first-login-no-daemon.txt", "codex-first-login-no-daemon-80x24.txt", "codex-api-key-login-no-daemon.txt"]) {
+    for (const fixture of ["codex-first-login-no-daemon.txt", "codex-first-login-no-daemon-80x24.txt", "codex-api-key-login-no-daemon.txt", "codex-first-login-0.162.1.txt"]) {
       const paneContent = fs.readFileSync(new URL(`./fixtures/${fixture}`, import.meta.url), "utf8");
       const tmux = mockTmux({
         getPaneCommand: vi.fn(async () => paneCommand),

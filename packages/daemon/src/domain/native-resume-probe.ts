@@ -492,14 +492,21 @@ function looksLikeCodexLoginPrompt(paneContent: string): boolean {
   const panel = current.map(line => line.trim()).filter(Boolean);
 
   // Read the current complete panel only: a later prompt or menu must not lend an old login picker its footer.
-  if (panel[0] === "Choose how you want to use Codex." && panel.indexOf("Press enter to continue") === panel.length - 1) {
+  const legacyChooser = panel[0] === "Sign in with ChatGPT to use Codex as part of your paid plan"
+    && panel[1] === "or connect an API key for usage-based billing";
+  if ((panel[0] === "Choose how you want to use Codex." || legacyChooser)
+    && panel.indexOf("Press enter to continue") === panel.length - 1) {
     const choices = panel.flatMap(line => {
       const choice = /^(> )?(\d+)\. (.+)$/.exec(line);
       return choice ? [{ selected: !!choice[1], number: Number(choice[2]), label: choice[3] }] : [];
     });
-    const labels = ["Sign in with ChatGPT", "Sign in with Device Code", "Use an OpenAI API key", "Use Amazon Bedrock"];
-    return choices.length >= 2 && choices.filter(choice => choice.selected).length === 1
-      && choices.every((choice, index) => choice.number === index + 1 && labels.includes(choice.label!));
+    const labels = legacyChooser
+      ? ["Sign in with ChatGPT", "Sign in with Device Code", "Provide your own API key"]
+      : ["Sign in with ChatGPT", "Sign in with Device Code", "Use an OpenAI API key", "Use Amazon Bedrock"];
+    return choices.length >= 2 && (!legacyChooser || choices.length === labels.length)
+      && choices.filter(choice => choice.selected).length === 1
+      && choices.every((choice, index) => choice.number === index + 1
+        && (legacyChooser ? choice.label === labels[index] : labels.includes(choice.label!)));
   }
   return panel[0] === "> Use your own OpenAI API key for usage-based billing"
     && panel.includes("Paste or type your API key below.")

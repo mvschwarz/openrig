@@ -14,6 +14,7 @@ const currentUpdatePrompt = fs.readFileSync(new URL("./fixtures/codex-update-0.1
 // https://github.com/openai/codex/blob/b412ff32c417f855c2b2d1581b77058eed87c84b/codex-rs/tui/src/onboarding/snapshots/codex_tui__onboarding__trust_directory__tests__renders_snapshot_for_git_repo.snap
 const currentTrustPrompt = fs.readFileSync(new URL("./fixtures/codex-trust-0.156.1.txt", import.meta.url), "utf8");
 const firstLoginPrompt = fs.readFileSync(new URL("./fixtures/codex-first-login.txt", import.meta.url), "utf8");
+const legacyFirstLoginPrompt = fs.readFileSync(new URL("./fixtures/codex-first-login-0.162.1.txt", import.meta.url), "utf8");
 const apiKeyLoginPrompt = fs.readFileSync(new URL("./fixtures/codex-api-key-login.txt", import.meta.url), "utf8");
 const narrowFirstLoginPrompt = fs.readFileSync(new URL("./fixtures/codex-first-login-80x24.txt", import.meta.url), "utf8");
 const managedFirstLoginPrompts = ["codex-first-login-no-daemon.txt", "codex-first-login-no-daemon-80x24.txt", "codex-api-key-login-no-daemon.txt"]
@@ -22,6 +23,9 @@ const managedFirstLoginPrompts = ["codex-first-login-no-daemon.txt", "codex-firs
 describe("Codex first-login readiness", () => {
   it.each([
     firstLoginPrompt,
+    legacyFirstLoginPrompt,
+    legacyFirstLoginPrompt.replace("> 1.", "  1.").replace("  2.", "> 2."),
+    legacyFirstLoginPrompt.replace("> 1.", "  1.").replace("  3.", "> 3."),
     firstLoginPrompt.replace("> 1.", "  1.").replace("  2.", "> 2."),
     firstLoginPrompt.replace("> 1.", "  1.").replace("  3.", "> 3."),
     firstLoginPrompt.replace("> 1.", "  1.").replace("  4.", "> 4."),
@@ -33,14 +37,14 @@ describe("Codex first-login readiness", () => {
       .toMatchObject({ status: "attention_required", code: "login_required" });
   });
 
-  it("identifies a first-login picker under a verified native process wrapper", () => {
-    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "bash", paneContent: firstLoginPrompt,
+  it.each([firstLoginPrompt, legacyFirstLoginPrompt])("identifies a first-login picker under a verified native process wrapper", (paneContent) => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "bash", paneContent,
       codexProcessVerified: true }))
       .toMatchObject({ status: "attention_required", code: "login_required" });
   });
 
   it.each(["bash", "zsh", "node"])("does not infer a live login from an unverified %s pane", (paneCommand) => {
-    for (const paneContent of [firstLoginPrompt, ...managedFirstLoginPrompts]) {
+    for (const paneContent of [firstLoginPrompt, legacyFirstLoginPrompt, ...managedFirstLoginPrompts]) {
       const probe = assessNativeResumeProbe({ runtime: "codex", paneCommand, paneContent });
       expect(probe.code).not.toBe("login_required");
       expect(probe.status).not.toBe("resumed");
@@ -49,17 +53,22 @@ describe("Codex first-login readiness", () => {
 
   it.each([
     "The guide says Sign in with ChatGPT or Provide your own API key.",
-    firstLoginPrompt.replace("> 1.", "  1."),
-    firstLoginPrompt.replace("  Press enter to continue", ""),
+    ...[firstLoginPrompt, legacyFirstLoginPrompt].flatMap(prompt => [
+      prompt.replace("> 1.", "  1."),
+      prompt.replace("  Press enter to continue", ""),
+      prompt.split("\n").map(line => `> ${line}`).join("\n"),
+      prompt.split("\n").map(line => `    ${line}`).join("\n"),
+      `\`\`\`text\n${prompt}\`\`\``,
+      `\`\`\`text\n${prompt}`,
+      `${prompt}\n› Explain this sign-in screen\n  gpt-5.4 default · /project`,
+      `${prompt}\nOpenAI Codex (v0.164.0)\n› Ask Codex to do anything`,
+      `${prompt}\n› New task\nPress enter to continue`,
+      `${prompt.replace("  Press enter to continue", "")}\n› New task\nPress enter to continue`,
+    ]),
+    legacyFirstLoginPrompt.replace("  or connect an API key for usage-based billing\n", ""),
+    legacyFirstLoginPrompt.replace("  3. Provide your own API key\n", ""),
+    legacyFirstLoginPrompt.replace("  3. Provide your own API key", "  3. Sign in with ChatGPT"),
     apiKeyLoginPrompt.replace("  Press enter to save", ""),
-    firstLoginPrompt.split("\n").map(line => `> ${line}`).join("\n"),
-    firstLoginPrompt.split("\n").map(line => `    ${line}`).join("\n"),
-    `\`\`\`text\n${firstLoginPrompt}\`\`\``,
-    `\`\`\`text\n${firstLoginPrompt}`,
-    `${firstLoginPrompt}\n› Explain this sign-in screen\n  gpt-5.4 default · /project`,
-    `${firstLoginPrompt}\nOpenAI Codex (v0.164.0)\n› Ask Codex to do anything`,
-    `${firstLoginPrompt}\n› New task\nPress enter to continue`,
-    `${firstLoginPrompt.replace("  Press enter to continue", "")}\n› New task\nPress enter to continue`,
     `${apiKeyLoginPrompt}\n› New task\nPress enter to save\nPress esc to go back`,
   ])("does not turn prose, an incomplete panel or dismissed history into a login gate", (paneContent) => {
     expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "codex", paneContent }).code)
