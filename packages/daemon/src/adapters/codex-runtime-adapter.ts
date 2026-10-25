@@ -68,7 +68,7 @@ const codexHookTrust = createRequire(import.meta.url)("../../assets/plugins/open
 import { listNativeProcesses, observeCodexPaneProcess, observeCodexForkProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type NativeProcessRow } from "../domain/native-process-lineage.js";
 import { recordSeatSkillWrite, seatPluginSkillsLossNote, seatProjectionComplete, seatSkillWriteRefusal } from "../domain/seat-skill-storage.js";
 import { codexPluginContentHash, planOwnedCodexContentApproval, recordOwnedCodexApproval } from "../domain/codex-owned-plugin-trust.js";
-import { findTomlTable, opensTomlTable, tomlDefines, tomlTableHeaderPath } from "../domain/toml-tables.js";
+import { findTomlTable, opensTomlTable, parseTomlRoot, tomlDefines, tomlTableHeaderPath } from "../domain/toml-tables.js";
 
 // Shared by all probes of ONE launch, never reset by a delayed screen or an
 // ambiguous transport result. A separately requested launch gets a new attempt.
@@ -2281,12 +2281,13 @@ function rekeyCodexHookStateText(content: string, prefix: string, newIndexOf: (i
   const out: string[] = [];
   let dropping = false;
   const lines = content.split("\n");
+  const root = parseTomlRoot(lines);
   for (const [at, line] of lines.entries()) {
     const trimmed = line.trim();
     if (trimmed.startsWith("[")) {
       dropping = false;
       const path = tomlTableHeaderPath(trimmed);
-      const key = path?.length === 3 && path[0] === "hooks" && path[1] === "state" && opensTomlTable(lines, at) ? path[2] : undefined;
+      const key = path?.length === 3 && path[0] === "hooks" && path[1] === "state" && opensTomlTable(lines, at, root) ? path[2] : undefined;
       const tail = key?.startsWith(prefix) ? /^(\d+):(\d+)$/.exec(key.slice(prefix.length)) : null;
       if (tail) {
         const index = newIndexOf(Number(tail[1]));

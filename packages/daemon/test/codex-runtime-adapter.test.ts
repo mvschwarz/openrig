@@ -2011,6 +2011,19 @@ describe("Codex runtime adapter", () => {
     expect(parsed.projects["/tmp/workspace"].trust_level).toBe("trusted");
   });
 
+  // An earlier OpenRig's double-quoted table beside Codex's own is a duplicate Codex won't start with. Each launch leaves it
+  // exactly as it is, so removing the extra table once is the whole repair.
+  it("deliverStartup leaves a config that doesn't parse (#2029's duplicate project table) byte-identical, launch after launch", async () => {
+    const existing = "[projects.'/tmp/workspace']\ntrust_level = 'trusted'\n\n[projects.\"/tmp/workspace\"]\ntrust_level = \"trusted\"\n";
+    expect(() => parseToml(existing)).toThrow();
+    const fs = mockFs({ "/home/tester/.codex/config.toml": existing });
+    const fsWithHome = { ...fs, homedir: "/home/tester" };
+    const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fsWithHome });
+    await adapter.deliverStartup([], makeBinding("/tmp/workspace"));
+    await adapter.deliverStartup([], makeBinding("/tmp/workspace"));
+    expect((fsWithHome as unknown as { _store: Record<string, string> })._store["/home/tester/.codex/config.toml"]).toBe(existing);
+  });
+
   it("applies codex_config_fragment runtime resources to the global Codex config idempotently", async () => {
     const fs = mockFs({
       "/agents/base/runtime/codex-config.toml": [
