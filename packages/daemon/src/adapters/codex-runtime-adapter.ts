@@ -68,6 +68,7 @@ const codexHookTrust = createRequire(import.meta.url)("../../assets/plugins/open
 import { listNativeProcesses, observeCodexPaneProcess, observeCodexForkProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type NativeProcessRow } from "../domain/native-process-lineage.js";
 import { recordSeatSkillWrite, seatPluginSkillsLossNote, seatProjectionComplete, seatSkillWriteRefusal } from "../domain/seat-skill-storage.js";
 import { codexPluginContentHash, planOwnedCodexContentApproval, recordOwnedCodexApproval } from "../domain/codex-owned-plugin-trust.js";
+import { findTomlTable, opensTomlTable, tomlDefines, tomlTableHeaderPath } from "../domain/toml-tables.js";
 
 // Shared by all probes of ONE launch, never reset by a delayed screen or an
 // ambiguous transport result. A separately requested launch gets a new attempt.
@@ -1863,41 +1864,6 @@ function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
-/** The key path a TOML table header line opens (`[projects.'/p']`, `[projects."/p"]`, `[ a . b ]`, with a comment…),
- *  read by the TOML parser; null for any other line. Codex saves its own tables with literal-quoted keys, so the
- *  trust writers find a table by its key, not its text. */
-function tomlTableHeaderPath(line: string): string[] | null {
-  const trimmed = line.trim();
-  if (!trimmed.startsWith("[") || trimmed.startsWith("[[")) return null;
-  let node: unknown;
-  try { node = parseToml(trimmed); } catch { return null; }
-  const path: string[] = [];
-  while (node !== null && typeof node === "object" && !Array.isArray(node)) {
-    const keys = Object.keys(node);
-    if (keys.length !== 1) return keys.length === 0 && path.length > 0 ? path : null;
-    path.push(keys[0]!);
-    node = (node as Record<string, unknown>)[keys[0]!];
-  }
-  return null;
-}
-
-/** The line that opens table `path`, in any key spelling, or -1. */
-function findTomlTable(lines: string[], path: string[]): number {
-  return lines.findIndex((line) => isDeepStrictEqual(tomlTableHeaderPath(line), path));
-}
-
-/** Whether a readable document already defines `path` another way (an inline table, dotted keys). Appending a
- *  table for it would then be a duplicate key, and Codex refuses to start. */
-function tomlDefines(content: string, path: string[]): boolean {
-  let node: unknown;
-  try { node = parseToml(content); } catch { return false; }
-  for (const key of path) {
-    if (node === null || typeof node !== "object" || !Object.hasOwn(node, key)) return false;
-    node = (node as Record<string, unknown>)[key];
-  }
-  return true;
-}
-
 function upsertCodexProjectTrust(content: string, projectPath: string): string {
   const path = ["projects", projectPath];
   const header = `[projects.${JSON.stringify(projectPath)}]`;
@@ -2266,12 +2232,13 @@ function rekeyCodexHookState(state: CodexHookState, prefix: string, newIndexOf: 
 function rekeyCodexHookStateText(content: string, prefix: string, newIndexOf: (index: number) => number | null): string {
   const out: string[] = [];
   let dropping = false;
-  for (const line of content.split("\n")) {
+  const lines = content.split("\n");
+  for (const [at, line] of lines.entries()) {
     const trimmed = line.trim();
     if (trimmed.startsWith("[")) {
       dropping = false;
       const path = tomlTableHeaderPath(trimmed);
-      const key = path?.length === 3 && path[0] === "hooks" && path[1] === "state" ? path[2] : undefined;
+      const key = path?.length === 3 && path[0] === "hooks" && path[1] === "state" && opensTomlTable(lines, at) ? path[2] : undefined;
       const tail = key?.startsWith(prefix) ? /^(\d+):(\d+)$/.exec(key.slice(prefix.length)) : null;
       if (tail) {
         const index = newIndexOf(Number(tail[1]));
