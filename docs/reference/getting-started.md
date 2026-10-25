@@ -691,9 +691,13 @@ Herdr, use `rig terminal open starter --provider herdr`; for the shared
 dashboard together with the kernel conversations, use the
 [saved first view](#open-the-kernel-conversations). The equivalent
 cmux provider is also available. Read the opened/absent/degraded result: a
-partial terminal view is not a healthy team. Repeated terminal-open calls can
-create another provider workspace; return to the one already open when you
-want to preserve it. This is terminal integration, not native plugin enrollment.
+partial terminal view is not a healthy team. Each `--provider herdr` open adds
+a new workspace, numbered when the name is taken; return to the one already open
+when you want to preserve it. From inside Herdr, `rig terminal open <view> --window`
+focuses a matching space instead of adding one. Herdr's own status for a seat can
+read idle or unknown while OpenRig shows it waiting (`needs-input`); use OpenRig's
+view or the Feed to find waiting seats. This is terminal integration, not native
+plugin enrollment.
 
 For team views with interactive panes, the open result distinguishes the dashboard
 overview from the team's lead conversation and asks whether you can see the team.
