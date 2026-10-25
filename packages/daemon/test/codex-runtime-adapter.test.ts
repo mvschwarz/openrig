@@ -2001,6 +2001,16 @@ describe("Codex runtime adapter", () => {
     expect(content.match(/^\[projects\.['"]\/tmp\/workspace['"]\]/gm)?.length ?? 0).toBe(tables);
   });
 
+  it("deliverStartup leaves a project-table example in a person's multi-line instructions exact and writes the real trust", async () => {
+    const existing = `developer_instructions = """\n[projects.'/tmp/workspace']\ntrust_level = 'example only'\n"""\n`;
+    const fs = mockFs({ "/home/tester/.codex/config.toml": existing });
+    const fsWithHome = { ...fs, homedir: "/home/tester" };
+    await new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fsWithHome }).deliverStartup([], makeBinding("/tmp/workspace"));
+    const parsed = parseToml((fsWithHome as unknown as { _store: Record<string, string> })._store["/home/tester/.codex/config.toml"]!) as Record<string, any>;
+    expect(parsed.developer_instructions).toBe((parseToml(existing) as Record<string, any>).developer_instructions);
+    expect(parsed.projects["/tmp/workspace"].trust_level).toBe("trusted");
+  });
+
   it("applies codex_config_fragment runtime resources to the global Codex config idempotently", async () => {
     const fs = mockFs({
       "/agents/base/runtime/codex-config.toml": [

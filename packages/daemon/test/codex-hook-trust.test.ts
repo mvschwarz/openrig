@@ -165,6 +165,15 @@ describe("OPR.0.4.3.33 — upsertCodexHookTrust (idempotent, non-clobbering, sec
     const existing = `[hooks.state]\n'${KEY}' = { trusted_hash = 'sha256:old' }\n`;
     expect(upsertCodexHookTrust(existing, KEY, HASH)).toBe(existing);
   });
+
+  // A table example inside a person's multi-line instructions isn't a table: it stays exact, and the real one is written.
+  it("leaves a single-quoted table example inside a multi-line string alone and writes the real table", () => {
+    const existing = `developer_instructions = """\n[hooks.state.'${KEY}']\ntrusted_hash = 'example only'\n"""\n`;
+    const out = upsertCodexHookTrust(existing, KEY, HASH);
+    const parsed = parseToml(out) as { developer_instructions: string; hooks: { state: Record<string, { trusted_hash: string }> } };
+    expect(parsed.developer_instructions).toBe((parseToml(existing) as { developer_instructions: string }).developer_instructions);
+    expect(parsed.hooks.state[KEY]!.trusted_hash).toBe(HASH);
+  });
 });
 
 describe("OPR.0.4.3.33 — provisioning-seam coupling (ensureCodexActivityHooks pre-trusts our 4 hooks)", () => {
