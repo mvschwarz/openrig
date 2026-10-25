@@ -33,11 +33,15 @@ first_input: true                # optional: launcher takes the first turn from 
 
 ### Assisted startup
 
-Set `startup_assisted: true` when the harness doesn't reliably submit OpenRig's startup text. OpenRig still pastes the
-text and presses Enter once. If it sends startup text, the running seat then shows **attention required**, rather than
-ready: check its pane and submit any text still in the composer. Don't resend the identity prompt. After the seat responds,
-use the reported `rig seat clear-attention <session> --reason "Startup submission checked; seat responded"` command to
-acknowledge the check. A launch with no startup text needs no such check. Other presets keep their existing behavior.
+Set `startup_assisted: true` when startup submission needs a person's check. The seat may start its first turn
+automatically, including from input passed at launch with `first_input: true`. This declaration requires a check after
+the submission attempt; it does not hold the agent back. Without `first_input`, OpenRig pastes the startup text and
+presses Enter once.
+
+After attempting startup input, OpenRig reports **attention required**: check the pane and submit any text still in the
+composer. OpenRig does not resend the identity prompt. Once the seat responds, use the reported
+`rig seat clear-attention <session> --reason "Startup submission checked; seat responded"` command to acknowledge the
+check. A launch with no startup text needs no such check. Other presets keep their existing behavior.
 
 ## Reporting the conversation a launch created (`launch_result: true`)
 
@@ -168,8 +172,9 @@ CLI.
 - **The preset:** it declares `launch_result` and `resume`. Cursor's `--resume` with an id it doesn't hold starts a new,
   empty chat without saying so, so on a resume the launcher first checks that the chat's store exists. When it doesn't, the
   launcher reports `error: "missing"` and starts nothing.
-- **Startup is assisted:** identity text has remained in Cursor's composer after the initial Enter. The preset declares
-  `startup_assisted: true`; check and submit it in the pane as above. Unattended startup submission is not confirmed.
+- **First input at launch:** the preset declares `first_input: true` and `startup_assisted: false`. The launcher passes
+  the generated startup text as Cursor's positional first prompt. This route and same-chat resume were checked with
+  Cursor Agent 2026.10.22-27dcf5f. Later tool approvals use Cursor's native prompts; startup submission does not answer them.
 - **Sender names come from the sending session.** A command run from an unattached operator shell can arrive as
   `<unknown sender>`; that doesn't mean the receiving Cursor seat lost its identity.
 
