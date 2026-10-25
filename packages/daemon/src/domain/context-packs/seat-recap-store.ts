@@ -57,6 +57,25 @@ export function writeSeatRecap(opts: { seatDir: string; content: string; now?: (
         `Fix the structure (duplicate header paths / unterminated fences); prose shape is never gated.`,
     );
   }
+  // No link is followed inside the seat folder: a seat may write its own folder (a Codex writable root), and the daemon
+  // writes here for it through the recap route, so a link at RECAP.md or recap-superseded/ could carry that write out of
+  // the folder. Checked before anything is touched (dangling links included); a change between this check and the write
+  // isn't covered.
+  for (const [name, kind] of [[RECAP_FILENAME, "file"], [CHAIN_DIRNAME, "directory"]] as const) {
+    let stat: ReturnType<typeof lstatSync>;
+    try {
+      stat = lstatSync(join(opts.seatDir, name));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw err;
+    }
+    if (kind === "file" ? !stat.isFile() : !stat.isDirectory()) {
+      throw new RecapWriteError(
+        `${join(opts.seatDir, name)} is ${stat.isSymbolicLink() ? "a link" : `not a ${kind}`}, so the recap write would ` +
+          `follow it out of the seat folder. Nothing was written; replace it with a real ${kind} and retry.`,
+      );
+    }
+  }
   const now = opts.now ?? Date.now;
   const current = join(opts.seatDir, RECAP_FILENAME);
   // Write complete replacement bytes before touching current continuity.
@@ -124,9 +143,8 @@ const SEAT_ADDRESS_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 /** Write a seat's recap by its topology address (`rigs/<rig>/seats/<seat>`), the one path the CLI and the daemon share:
  *  each name is one bounded segment, the rig already exists, none of the rig, `seats` or seat folders is a symlink or a
- *  file, and a missing seat folder is created. Inside the seat folder the store works as it always has: a link already at
- *  RECAP.md or recap-superseded/ is followed (planting one takes write access to the seat folder). Returns where the
- *  recap landed and how many predecessors the chain retains. */
+ *  file, and a missing seat folder is created. Inside the seat folder, a link at RECAP.md or recap-superseded/ is refused
+ *  (`writeSeatRecap`). Returns where the recap landed and how many predecessors the chain retains. */
 export function writeSeatRecapAt(opts: { topologyRoot: string; rig: string; seat: string; content: string; now?: () => number }): { path: string; superseded: number } {
   for (const [kind, value] of [["rig", opts.rig], ["seat", opts.seat]] as const) {
     if (value === "." || value === ".." || !SEAT_ADDRESS_SEGMENT.test(value)) {

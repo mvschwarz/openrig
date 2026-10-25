@@ -79,8 +79,8 @@ export function contextPacksRoutes(): Hono {
 
   // POST /seat-recap — `rig context recap-write` sends the recap here when its own write is refused: a sandboxed seat
   // (a default Codex seat) can't write the topology tree, which the daemon owns. Same checks and store as the CLI's
-  // write (`writeSeatRecapAt`: the rig, `seats` and seat folder names and links; a link already at RECAP.md or its
-  // archive folder is followed, as the CLI's write always did); the recap is seat-homed, never in the library.
+  // write (`writeSeatRecapAt`: the rig, `seats` and seat folder names and links, and no link followed at RECAP.md or its
+  // archive folder); the recap is seat-homed, never in the library.
   router.post("/seat-recap", async (c) => {
     const body = await c.req.json().catch(() => null) as { rig?: unknown; seat?: unknown; content?: unknown } | null;
     if (!body || typeof body.rig !== "string" || typeof body.seat !== "string" || typeof body.content !== "string") {

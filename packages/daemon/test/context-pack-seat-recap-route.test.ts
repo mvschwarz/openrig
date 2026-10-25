@@ -3,7 +3,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Hono } from "hono";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { contextPacksRoutes } from "../src/routes/context-packs.js";
@@ -63,6 +63,35 @@ describe("POST /api/context-packs/seat-recap", () => {
     expect(unaddressable.status).toBe(400);
     expect((await unaddressable.json()).error).toBe("recap_write_refused");
     expect(existsSync(join(tmp, "topology", "rigs", "r1", "seats", "s1", "RECAP.md"))).toBe(false);
+  });
+
+  // A seat may write its own folder (a Codex writable root), and the daemon writes here for it, so a link the seat plants
+  // at RECAP.md or recap-superseded/ must not carry the daemon's write out of the folder. The write is refused, and the
+  // current recap, the chain and the link's private target keep their bytes.
+  it.each([
+    ["recap-superseded/ as a link to a private folder", "recap-superseded", "folder"],
+    ["recap-superseded/ as a dangling link", "recap-superseded", "dangling"],
+    ["RECAP.md as a link to a private file", "RECAP.md", "file"],
+  ] as const)("refuses %s, and moves nothing", async (_name, entry, target) => {
+    const seatDir = join(tmp, "topology", "rigs", "r1", "seats", "s1");
+    expect((await write({ rig: "r1", seat: "s1", content: "## Recent Decisions\nfirst" })).status).toBe(200);
+    const privateDir = join(tmp, "private");
+    mkdirSync(privateDir);
+    const sentinel = join(privateDir, "sentinel.md");
+    writeFileSync(sentinel, "private bytes\n");
+    const gone = join(tmp, "gone");
+    if (entry === "RECAP.md") rmSync(join(seatDir, "RECAP.md"));
+    symlinkSync(target === "folder" ? privateDir : target === "dangling" ? gone : sentinel, join(seatDir, entry));
+    const before = entry === "RECAP.md" ? null : readFileSync(join(seatDir, "RECAP.md"), "utf-8");
+
+    const refused = await write({ rig: "r1", seat: "s1", content: "## Recent Decisions\nsecond" });
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toMatchObject({ error: "recap_write_refused", message: expect.stringMatching(/is a link.*Nothing was written/) });
+    expect(readdirSync(privateDir)).toEqual(["sentinel.md"]);
+    expect(readFileSync(sentinel, "utf-8")).toBe("private bytes\n");
+    expect(existsSync(gone)).toBe(false);
+    if (before !== null) expect(readFileSync(join(seatDir, "RECAP.md"), "utf-8")).toBe(before);
+    expect(readdirSync(seatDir).filter((name) => name.startsWith(".RECAP-"))).toEqual([]);
   });
 
   it("answers a recap with a long whitespace run in a heading line promptly: the heading scan is linear", async () => {
