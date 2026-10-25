@@ -332,6 +332,27 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     },
   );
 
+  it.each([
+    ["80-column wrapped help", "─".repeat(80), " enter submit  shift+enter/ctrl+j newline  escape/ctrl+c cancel  ctrl+g\n external editor"],
+    ["100-column single-line help", piDialogBorder, " enter submit  shift+enter/ctrl+j newline  escape/ctrl+c cancel  ctrl+g external editor"],
+  ].flatMap(([layout, border, draft]) => [null, "unknown", "pi"].map(runtime =>
+    [layout, runtime, [border, draft, border, "~/project"].join("\n")] as const)))(
+    "ordinary send does not treat a main-editor help draft as a dialog (%s), runtime %s", async (_layout, runtime, pane) => {
+      const node = rigRepo.addNode(rigId, "adopted.worker", { role: "worker" });
+      db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(runtime, node.id);
+      const seat = "adopted-tui";
+      sessionRegistry.registerClaimedSession(node.id, seat);
+      sessionRegistry.updateBinding(node.id, { tmuxSession: seat, tmuxPane: "%42" });
+      const { sendText, sendKeys } = spies();
+      const result = await makeTransport(mockTmux({ capturePaneContent: async () => pane, sendText, sendKeys })).send(seat, "a peer message");
+      expect(result.ok).toBe(true);
+      expect(classifyPaneActivity(pane, { runtime }).state).not.toBe("attention");
+      expect(sendText).toHaveBeenCalledTimes(1);
+      expect(sendKeys).toHaveBeenCalledWith(seat, ["Enter"]);
+      expect(overrideEvents()).toHaveLength(0);
+    },
+  );
+
   it.each([piInput, piEditor])("keeps deliberate, audited input available for a Pi text dialog (%#)", async (pane) => {
     const node = rigRepo.addNode(rigId, "adopted.worker", { role: "worker" });
     const seat = "adopted-tui";
@@ -355,6 +376,8 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
   });
 
   it.each([
+    ["editor missing spacer before help", piEditor80.replace("\n\n enter submit", "\n enter submit")],
+    ["editor missing spacer after help", piEditor80.replace(`external editor\n\n${"─".repeat(80)}`, `external editor\n${"─".repeat(80)}`)],
     ["editor missing bottom rule", piEditor.replace(`${piDialogBorder}\n\n enter submit`, "\n enter submit")],
     ["editor hint exceeds three rows", piEditor.replaceAll(piDialogBorder, "─".repeat(30))
       .replace("submit  shift+enter", "submit\n shift+enter").replace("newline  escape", "newline\n escape")

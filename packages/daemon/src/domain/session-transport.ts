@@ -190,11 +190,14 @@ function findCurrentPiDialog(paneContent: string): string | null {
     // A later editor or closing Markdown fence makes the selector historical/quoted.
     if (visible.slice(help + 2).some(row => border(row.text) || /^(?:`{3,}|~{3,})/.test(row.text))) continue;
     const end = visible[help - span]!.at;
-    // Input needs its field and nearby opening rule. Editor's unique four-action hint and bottom
-    // rule remain visible even when its tall body/top rule is outside the 20-line capture.
+    // Input needs its field and nearby opening rule. Editor's bottom rule and spaced four-action
+    // hint remain visible even when its tall body/top rule is outside the 20-line capture.
     if (input && /^>(?:\s|$)/.test(lines[end]!.trim()) && !lines[end - 1]?.trim()
       && lines.slice(Math.max(0, end - PROMPT_SCAN_LINES), end).some(line => border(line.trim()))) return truncateEvidence(hint);
-    if (editor && /^(?:─{3,}|─+ [↑↓] \d+ more ─*)$/.test(lines[end]!.trim())) return truncateEvidence(hint);
+    // ExtensionEditor puts one spacer on either side of the hint; a main-editor draft doesn't.
+    if (editor && /^(?:─{3,}|─+ [↑↓] \d+ more ─*)$/.test(lines[end]!.trim())
+      && visible[help - span + 1]!.at === end + 2
+      && visible[help + 1]!.at === visible[help]!.at + 2) return truncateEvidence(hint);
     if (!selector) continue;
     let start = end;
     // The native spacer before the options separates arbitrary title/description text.
