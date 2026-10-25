@@ -156,6 +156,45 @@ it("grants the generic post-compact-extra.md and the configured extra file and p
   expect(allow.some(rule => rule.includes("/maps/") && !rule.includes("/maps/owner@rig/"))).toBe(false);
 });
 
+// A Read(//abs) rule as a whole-path pattern: `*` is one path segment, `\x` is a literal x.
+const ruleRegex = (rule: string) => new RegExp(`^${rule.slice("Read(/".length, -1).replace(/\\(.)|\*|([.+?^${}()|[\]])/g,
+  (_m, lit, meta) => lit !== undefined ? lit.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : meta !== undefined ? `\\${meta}` : "[^/]*")}$`);
+
+it.each([
+  { name: "default settings" },
+  { name: "a configured extra file and preparation root", configured: true },
+  { name: "a configured extra file that is a symlink to a file elsewhere", configured: true, link: true },
+  { name: "a configured extra file set with outer whitespace", configured: true, padded: true },
+])("$name: every file the restore request names is granted where it's named and where it resolves", async ({ configured, link, padded }) => {
+  // Parity with the enforcer's own restore request, so a resolver fallback added without a grant fails here rather than at a
+  // native approval. The JSONL fallback is left out: the request names it only when the marker and the map are both missing.
+  const { withManagedRestoreReads } = await import("../src/domain/managed-restore-read-access.js");
+  const { buildPostCompactRestorePrompt } = await import("../src/domain/claude-compaction-enforcer.js");
+  vi.stubEnv("OPENRIG_COMPACTION_OUT_ROOT", "/tmp/claude-compaction-restore");
+  const root = realpathSync(mkdtempSync(path.join(tmpdir(), "restore-parity-"))); roots.push(root);
+  const home = path.join(root, "home"), cwd = path.join(root, "project"), prep = configured ? path.join(root, "maps") : null;
+  const extra = configured ? path.join(root, "elsewhere", "team-restore.md") : path.join(home, "compaction", "post-compact-extra.md");
+  if (link) {
+    mkdirSync(path.join(root, "shared")); writeFileSync(path.join(root, "shared", "context.md"), "");
+    mkdirSync(path.dirname(extra)); symlinkSync(path.join(root, "shared", "context.md"), extra);
+  }
+  const setting = configured ? (padded ? `  ${extra}\n` : extra) : null;
+  const map = path.join(prep ?? path.join(home, "compaction", "preparation"), "owner@rig", "att-1", "RESTORE-MAP.md");
+  // The request names the setting trimmed.
+  const prompt = buildPostCompactRestorePrompt({ sessionName: "owner@rig", openrigHome: home, attemptMapPath: map, sessionId: CHILD,
+    postCompactInstructionFilePath: setting ?? extra });
+  const named = [...prompt.matchAll(/(\/[^\s;,]+?)(?=[.;,]?(?:\s|$))/g)].map(m => m[1]!).filter(p => p.startsWith(root));
+  const allow = (JSON.parse(withManagedRestoreReads([], { openrigHome: home, session: "owner@rig", cwd, nativeSessionId: CHILD,
+    extraInstructionFile: setting, preparationRoot: prep })[1]!).permissions.allow as string[]).filter(rule => rule.startsWith("Read(/"));
+  expect(named).toContain(extra);
+  expect(named.length).toBeGreaterThanOrEqual(4);
+  // Claude Code needs both the path read and the file it resolves to.
+  expect(named.flatMap(spellings).filter(p => !allow.some(rule => ruleRegex(rule).test(p)))).toEqual([]);
+  // Exact files only: the link's target and nothing beside it, and nothing outside the fixture but the packet root.
+  expect(allow.filter(rule => rule.startsWith(`Read(/${root}/shared/`))).toEqual(link ? [`Read(/${root}/shared/context.md)`] : []);
+  expect(allow.filter(rule => !rule.startsWith(`Read(/${root}/`) && !rule.includes("/claude-compaction-restore/"))).toEqual([]);
+});
+
 it("both Claude launch paths grant the configured extra file the restore will name", async () => {
   const f = fixture();
   const custom = path.join(f.root, "elsewhere", "team-restore.md");
