@@ -532,63 +532,18 @@ describe("Send CLI", () => {
   });
 
   // Node's fetch gives up on a response that hasn't started within 300 s, and a waiting send answers only when its wait
-  // ends. So a longer wait is made as consecutive waits of up to 240 s, each its own request.
-  const stillBusy = (waitedMs: number) => ({ status: 409, data: { ok: false, sessionName: "dev-impl@my-rig", reason: "wait_for_idle_timeout", sent: false,
-    waitedMs, error: `Target was still busy (running) when the ${waitedMs}ms wait ended (8 checks). No text was sent.` } });
-
-  it("send --wait-for-idle longer than one request waits in steps of up to 240 s, and sends once the seat is idle", async () => {
-    const postFn = vi.fn()
-      .mockResolvedValueOnce(stillBusy(240000))
-      .mockResolvedValueOnce({ status: 200, data: { ok: true, sessionName: "dev-impl@my-rig", waitedMs: 5000 } });
-    const deps = runningDeps(port, () => ({ post: postFn } as unknown as DaemonClient));
-    const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd(deps).parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello", "--wait-for-idle", "600", "--json"]);
-    });
-    expect(postFn.mock.calls.map((call) => [(call[1] as { waitForIdleMs: number }).waitForIdleMs, call[2]])).toEqual([
-      [240000, { timeoutMs: 245000 }],
-      [240000, { timeoutMs: 245000 }],
-    ]);
-    expect(JSON.parse(logs.join("\n"))).toMatchObject({ ok: true, waitedMs: 245000, waits: 2 });
-    expect(exitCode).toBeUndefined();
-  });
-
-  it("send --wait-for-idle on a seat busy for the whole wait says so, naming the whole wait, and sends nothing", async () => {
-    const postFn = vi.fn()
-      .mockResolvedValueOnce(stillBusy(240000))
-      .mockResolvedValueOnce(stillBusy(240000))
-      .mockResolvedValueOnce(stillBusy(120000));
+  // ends. A longer wait is still one request, so the daemon keeps one deadline and one binding to the seat's occupant.
+  it("send --wait-for-idle longer than 300 s is one request carrying the whole wait, and the daemon's answer as it came", async () => {
+    const postFn = vi.fn().mockResolvedValueOnce({ status: 409, data: { ok: false, sessionName: "dev-impl@my-rig", reason: "wait_for_idle_timeout",
+      sent: false, waitedMs: 600000, error: "Target was still busy (running) when the 600000ms wait ended (8 checks). No text was sent." } });
     const deps = runningDeps(port, () => ({ post: postFn } as unknown as DaemonClient));
     const { logs, exitCode } = await captureLogs(async () => {
       await makeCmd(deps).parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello", "--wait-for-idle", "600"]);
     });
-    expect(postFn.mock.calls.map((call) => (call[1] as { waitForIdleMs: number }).waitForIdleMs)).toEqual([240000, 240000, 120000]);
-    expect(logs.join("\n")).toContain("No text was sent. That was the last of 3 consecutive waits, 600000ms in all.");
-    expect(logs.join("\n")).not.toMatch(/did not respond/i);
+    expect(postFn.mock.calls.map((call) => [(call[1] as { waitForIdleMs: number }).waitForIdleMs, call[2]])).toEqual([[600000, { timeoutMs: 605000 }]]);
+    expect(logs.join("\n")).toContain("when the 600000ms wait ended (8 checks). No text was sent.");
+    expect(logs.join("\n")).not.toMatch(/did not respond|consecutive/i);
     expect(exitCode).toBe(1);
-  });
-
-  it("send --wait-for-idle that ends unsent for another reason after several waits names the whole wait too", async () => {
-    const postFn = vi.fn()
-      .mockResolvedValueOnce(stillBusy(240000))
-      .mockResolvedValueOnce({ status: 409, data: { ok: false, reason: "target_activity_unknown", sent: false,
-        error: "Target activity could not be determined (unsupported_runtime) when the 160000ms wait ended (315 observations). No text was sent." } });
-    const deps = runningDeps(port, () => ({ post: postFn } as unknown as DaemonClient));
-    const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd(deps).parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello", "--wait-for-idle", "400"]);
-    });
-    expect(postFn).toHaveBeenCalledTimes(2);
-    expect(logs.join("\n")).toContain("No text was sent. That was the last of 2 consecutive waits, 400000ms in all.");
-    expect(exitCode).toBe(1);
-  });
-
-  it("send --wait-for-idle stops at any answer other than still-busy, as it came", async () => {
-    const postFn = vi.fn().mockResolvedValueOnce({ status: 409, data: { ok: false, reason: "target_needs_input", sent: false, error: "The seat is waiting on a prompt. No text was sent." } });
-    const deps = runningDeps(port, () => ({ post: postFn } as unknown as DaemonClient));
-    const { logs } = await captureLogs(async () => {
-      await makeCmd(deps).parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello", "--wait-for-idle", "600"]);
-    });
-    expect(postFn).toHaveBeenCalledTimes(1);
-    expect(logs.join("\n")).toContain("The seat is waiting on a prompt. No text was sent.");
   });
 
   it("send without wait-for-idle uses default client timeout path", async () => {
