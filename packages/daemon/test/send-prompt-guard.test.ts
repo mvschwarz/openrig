@@ -384,6 +384,7 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
   it.each([
     ["the native 100×80 frame", resumePicker],
     ["the native frame in a 100×24 pane", `${pickerRows}\n${Array<string>(11).fill("").join("\n")}`],
+    ["a card titled exactly like Claude's header", resumePicker.replace("probe-claude@q2010-native", "Claude Code v2.1.309")],
   ].flatMap(([layout, pane]) => [null, "claude-code"].map(runtime => [layout, runtime, pane] as const)))(
     "plain send refuses Claude's Resume session picker (%s) with runtime %s", async (_layout, runtime, pane) => {
       const node = rigRepo.addNode(rigId, "adopted.worker", { role: "worker" });
@@ -399,6 +400,9 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
       expect(sendKeys).not.toHaveBeenCalled();
     },
   );
+  it.each(["codex", "pi"])("doesn't read a picker printed in a %s pane as Claude's dialog", (runtime) => {
+    expect(classifyPaneActivity(resumePicker, { runtime }).reason).not.toBe("selection_prompt");
+  });
   it("doesn't read an old Resume session picker above Claude's live composer as a dialog", () => {
     const rule = "─".repeat(100);
     const pane = `${pickerRows}\n\nClaude Code v2.1.309\n\n● Picked up where we left off.\n\n${rule}\n❯ \n${rule}\n  ⏵⏵ accept edits on (shift+tab to cycle)\n`;

@@ -625,8 +625,9 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   const currentComposerSelection = currentComposerText
     ? findPatternEvidence(currentComposerText.split("\n").map(line => line.trimStart()), [COMPOSER_SELECTION_SCAN_PATTERN])
     : null;
-  // Claude's resume picker types a paste into its search and resumes a card on Enter.
-  const selectionPromptEvidence = currentClaudeResumePicker(paneContent) ?? currentClaudeMcpMenu(paneContent) ?? findCurrentClaudeQuestion(paneContent) ??
+  // Claude's resume picker types a paste into its search and resumes a card on Enter. A Codex or Pi pane printing one is output.
+  const claudePicker = options.runtime === "codex" || options.runtime === "pi" ? null : currentClaudeResumePicker(paneContent);
+  const selectionPromptEvidence = claudePicker ?? currentClaudeMcpMenu(paneContent) ?? findCurrentClaudeQuestion(paneContent) ??
     currentComposerSelection ?? (options.currentClaudeDialogueOnly ? null
       : findPatternEvidence(selectionLines, [COMPOSER_SELECTION_SCAN_PATTERN]));
   if (selectionPromptEvidence) {

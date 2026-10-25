@@ -1386,6 +1386,9 @@ describe("Claude's Resume session picker", () => {
     ["a long query wrapped inside the box", replaced(searchRow, searchRow + 1, boxRow(`⌕ ${"q".repeat(rows[searchRow]!.length - 7)}`), boxRow("  the rest of it"))],
     ["a heading with its count", replaced(searchRow - 2, searchRow - 1, "  Resume session (2 of 9)")],
     ["a project with no conversations", replaced(cards, cards + 2, "    No conversations found in this project.")],
+    // A card's title is the person's own text, and can read like Claude's header (dev50-qa's two probes).
+    ["a card titled with Claude's header words", native.replace("probe-claude@q2010-native", "Investigate Claude Code v2.1.309 startup")],
+    ["a card titled exactly like Claude's header", native.replace("probe-claude@q2010-native", "Claude Code v2.1.309")],
   ];
   it.each(shapes)("reads %s as waiting for a person", (_shape, paneContent) => {
     expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent }))

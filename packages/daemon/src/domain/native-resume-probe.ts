@@ -377,15 +377,17 @@ function looksLikeClaudeResumeSelectionPrompt(paneContent: string): boolean {
  *  " (2 of 9)"), then its search box directly under it: `╭─…─╮`, a `│ ⌕` row, any rows a long query wraps to, `╰─…─╯`.
  *  The cards, the query and the hint row vary with the mode (a list, a search with no match, rename), so none of them
  *  is required. A paste or typed text goes into its search, and Enter resumes the focused card. The last picker drawn
- *  counts while nothing of Claude's own follows its box; a later input frame, header or reply makes it history.
- *  Returns the heading row, or null. */
+ *  counts until Claude's framed input box or a reply (a column-0 ● or ⏺ row) follows its box, which makes it history.
+ *  Claude's header text doesn't count here: a card's title can say "Claude Code v2.1.309" too, and a resumed session
+ *  draws its input box. Returns the heading row, or null. */
 export function currentClaudeResumePicker(paneContent: string): string | null {
   const rows = paneContent.trimEnd().split(/\r?\n/);
   for (let at = rows.length - 1; at >= 0; at--) {
     if (!/^\s*Resume session\b/.test(rows[at]!)) continue;
     const boxEnd = claudeSearchBoxEnd(rows, at + 1);
     if (boxEnd < 0) continue;
-    return claudeDrawnAfter(rows.slice(boxEnd + 1)) ? null : rows[at]!.trim();
+    const later = rows.slice(boxEnd + 1);
+    return hasClaudeInputFrame(later) || later.some((line) => /^[●⏺]/.test(line)) ? null : rows[at]!.trim();
   }
   return null;
 }
