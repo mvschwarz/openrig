@@ -210,6 +210,27 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     expect(process.exitCode).toBe(2);
   });
 
+  // The daemon forwards only to another host: a --host naming its own id is a local create, stored without a host suffix.
+  it.each([
+    ["the bare seat, a local create's source, reads back as created", "lead@rig-a", true],
+    ["the source a forward would stamp isn't this create", "lead@rig-a@host-a", false],
+  ])("with --host naming the daemon's own id, %s", async (_case, stored, created) => {
+    fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: host-a\n    transport: http\n    url: ${LOCAL}\n`);
+    const { calls } = await run("dev@rig-b", [new DaemonTimeoutError(`Request to ${LOCAL}/api/queue/create timed out after 5000ms`)],
+      { [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: { ...ROW, sourceSession: stored } }, [`${LOCAL}/healthz`]: { status: 200, data: { selfHostId: "host-a" } } },
+      ["--host", "host-a"]);
+    expect(posts(calls)).toHaveLength(1);
+    expect(readBacks(calls)).toHaveLength(1);
+    const all = stderr.join("\n");
+    if (created) {
+      expect(all).toContain(`committed after all: row ${ID}`);
+      expect(process.exitCode ?? 0).toBe(0);
+    } else {
+      expect(all).not.toContain("committed after all");
+      expect(all).toContain("isn't this create (its source differs)");
+    }
+  });
+
   describe("with the real client's sender", () => {
     type Request = { method: string; path: string; sender: string | null };
     async function runReal(reply: (method: string, url: URL) => Response): Promise<{ requests: Request[]; error: unknown }> {
