@@ -86,6 +86,45 @@ describe("activity pushes refresh at most once per 15 seconds", () => {
 });
 
 describe("the quiet fallback", () => {
+  it("keeps the connected cadence when navigating to a new page", async () => {
+    vi.useFakeTimers();
+    let scope = "topology";
+    const hydrate = vi.fn(async () => emptySnapshot());
+    const live = createLiveRefresh({ hydrate, scopeKey: () => scope, onFrame: () => {}, now: () => Date.now() });
+    try {
+      live.connectionStatus("connected");
+      await vi.advanceTimersByTimeAsync(0);
+      scope = "attention";
+      await live.refresh();
+      expect(live.load().connection).toBe("connected");
+      await vi.advanceTimersByTimeAsync(CONNECTED_QUIET_REFRESH_MS - 1);
+      expect(hydrate).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(hydrate).toHaveBeenCalledTimes(3);
+    } finally { live.close(); }
+  });
+
+  it("does not restore a cached page's connection after the stream drops", async () => {
+    vi.useFakeTimers();
+    let scope = "topology";
+    const hydrate = vi.fn(async () => emptySnapshot());
+    const live = createLiveRefresh({ hydrate, scopeKey: () => scope, onFrame: () => {}, now: () => Date.now() });
+    try {
+      live.connectionStatus("connected");
+      await vi.advanceTimersByTimeAsync(0);
+      scope = "attention";
+      await live.refresh();
+      live.connectionStatus("dropped");
+      scope = "topology";
+      await live.refresh();
+      expect(live.load().connection).toBe("dropped");
+      await vi.advanceTimersByTimeAsync(QUIET_REFRESH_MS - 1);
+      expect(hydrate).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(hydrate).toHaveBeenCalledTimes(4);
+    } finally { live.close(); }
+  });
+
   it("waits 5 minutes while the activity stream is connected", async () => {
     const { hydrate, live, at } = setup();
     live.connectionStatus("connected");

@@ -26,6 +26,8 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 import { archiveAgedTerminalTransitions } from "../src/domain/queue-retention.js";
 import type { HumanFragment } from "../src/domain/gateway/human-registry.js";
+import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
+import { nodeSessionConfirmedMissing } from "../src/domain/node-inventory.js";
 
 const sweepMod = () => import("../src/domain/queue-stuck-sweep.js");
 
@@ -294,6 +296,65 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
       state: "done",
       closureReason: "no-follow-on",
     });
+  });
+
+  // A dead owner with no delegates_to edge: the orchestrator resolves to nobody and the owner's session is gone. The
+  // ladder covers handed-off batons only, so a finding addressed to the dead seat would reach nobody.
+  function seedMissingSession(session: string): void {
+    db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-dead', 'r')").run();
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd) VALUES ('node-dead', 'rig-dead', 'worker', 'claude-code', '/tmp')").run();
+    db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES ('sess-dead', 'node-dead', ?, 'running', '2026-07-02 12:00:00')").run(session);
+    db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session, tmux_pane) VALUES ('bind-dead', 'node-dead', 'tmux', ?, '%1')").run(session);
+    // The reconciler found the tmux session gone, against this session and binding.
+    new SeatIdentityStore(db).upsert({
+      nodeId: "node-dead", verdict: "pane_missing", evidenceSource: "tmux_session", reason: "session_missing",
+      evidence: { registeredPane: "%1", observedPid: null, observedCommand: null, matchedLayer: null },
+      sessionName: session, observedAt: "2026-07-02T12:00:00.000Z",
+    });
+  }
+
+  it("a stalled claim whose claimant's session is confirmed missing goes to the row's creator, and says why", async () => {
+    seedMissingSession("worker@r");
+    expect(nodeSessionConfirmedMissing(db, "node-dead")).toBe(true);
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    ageClaim(row.qitemId, 60);
+    await runSweep({ resolveOperatorSeat: () => null });
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding!.destinationSession).toBe("sender@r");
+    expect(finding!.body).toContain("worker@r is confirmed missing (session_missing), so this finding goes to sender@r");
+  });
+
+  it("with an operator seat set, a dead claimant's finding goes there, as the ladder's floor does", async () => {
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    ageClaim(row.qitemId, 60);
+    await runSweep({ sessionConfirmedMissing: (s: string) => s === "worker@r", resolveOperatorSeat: () => "operator-admin@kernel" });
+    expect((await findingsFor(row.qitemId))[0]!.destinationSession).toBe("operator-admin@kernel");
+  });
+
+  it("an undelivered wake to a dead destination with no orchestrator goes to the row's creator", async () => {
+    const row = await mkRow();
+    failNudge(row.qitemId);
+    await runSweep({ sessionConfirmedMissing: (s: string) => s === "worker@r", resolveOperatorSeat: () => null });
+    expect((await findingsFor(row.qitemId))[0]!.destinationSession).toBe("sender@r");
+  });
+
+  it("a dead seat's own row with no operator seat has nowhere better to go, so it stays", async () => {
+    const row = await repo.create({ sourceSession: "worker@r", destinationSession: "worker@r", body: "work" });
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    ageClaim(row.qitemId, 60);
+    await runSweep({ sessionConfirmedMissing: (s: string) => s === "worker@r", resolveOperatorSeat: () => null });
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding!.destinationSession).toBe("worker@r");
+    expect(finding!.body).not.toContain("confirmed missing");
+  });
+
+  it("a verdict from before the seat's relaunch, or no verdict, doesn't count as missing", () => {
+    expect(nodeSessionConfirmedMissing(db, "node-dead")).toBe(false);
+    seedMissingSession("worker@r");
+    db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES ('sess-new', 'node-dead', 'worker@r', 'running', '2026-07-02 13:00:00')").run();
+    expect(nodeSessionConfirmedMissing(db, "node-dead")).toBe(false);
   });
 
   // A stalled claim's age is the stall's own: minutes since the latest meaningful change, floored as the "why" counts

@@ -45,7 +45,7 @@ describe("TmuxAdapter.capturePanesContent (#308)", () => {
       const calls: string[][] = [];
       const run = (argv: string[]) => {
         calls.push(argv);
-        if (opts.noServer) throw new Error("no server running");
+        if (opts.noServer) throw new Error("no server running on /tmp/tmux-501/default");
         return runTmux(argv, panes, opts.vanished, opts.maxBuffer);
       };
       const exec = async (cmd: string) => run(shellToArgv(cmd));
