@@ -34,7 +34,7 @@ export const nodeHttpFetch = ((input: string | URL, init?: RequestInit): Promise
       const status = res.statusCode ?? 0;
       const noBody = [204, 205, 304].includes(status);
       if (noBody) res.on("error", () => {}).resume();
-      resolve(new Response(noBody ? null : Readable.toWeb(res) as unknown as BodyInit, { status, statusText: res.statusMessage, headers }));
+      resolve(new Response(noBody ? null : Readable.toWeb(res) as unknown as ConstructorParameters<typeof Response>[0], { status, statusText: res.statusMessage, headers }));
     } catch (err) {
       res.destroy();
       reject(err);
