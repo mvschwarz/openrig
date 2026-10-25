@@ -705,15 +705,16 @@ export class ClaudeCompactionEnforcer {
     const stage = this.pendingPostCompactRestore.get(sessionName);
     if (!stage) return null;
     const lastDelivery = this.records.get(sessionName)?.record.lastDelivery;
+    const failed = !!lastDelivery && lastDelivery.failures > 0;
     const last = lastDelivery ? { lastDelivery } : {};
-    const failure = lastDelivery ? ` Last delivery at ${lastDelivery.at}: ${[lastDelivery.reason, lastDelivery.activity?.reason, lastDelivery.errorClass, lastDelivery.noticeErrorClass && `owner notice failed (${lastDelivery.noticeErrorClass})`].filter(Boolean).join("; ")}. OpenRig will retry on its existing polls.` : "";
+    const failure = lastDelivery ? ` ${failed ? "Last delivery" : "waiting: seat busy"} at ${lastDelivery.at}: ${[lastDelivery.reason, lastDelivery.activity?.reason, lastDelivery.errorClass, lastDelivery.noticeErrorClass && `owner notice failed (${lastDelivery.noticeErrorClass})`].filter(Boolean).join("; ")}. OpenRig will retry on its existing polls.` : "";
     const step = { turn_boundary: "post-compaction turn boundary", restore_prompt: "restore request", compliance_prompt: "post-restore audit" }[stage];
     if (!this.afterUncertainCompact.has(sessionName)) {
-      return { stage, held: !!lastDelivery, ...last, detail: `OpenRig owes this seat its ${step} next, sent on a poll once the pane is idle.${failure}` };
+      return { stage, held: failed, ...last, detail: `OpenRig owes this seat its ${step} next, sent on a poll once the pane is idle.${failure}` };
     }
     const inputBox = this.lastInputBox.get(sessionName) ?? "not_checked";
     const held = inputBox !== "not_checked" && !INPUT_BOX_CLEAR.has(inputBox);
-    return { stage, held: held || !!lastDelivery, inputBox, ...last, detail: (held
+    return { stage, held: held || failed, inputBox, ...last, detail: (held
       ? `held: OpenRig owes this seat its restore steps after a /compact whose result was lost, and waits while its input box isn't empty (it reads ${inputBox}). The seat may have /compact text waiting, which any Enter would submit, so check the pane. A seat whose own status line keeps the box unreadable stays held.`
       : `OpenRig owes this seat its ${step} next, after a /compact whose result was lost. Each step goes only into an empty input box, sent on a poll once the pane is idle (the box last read ${inputBox}).`) + failure };
   }
@@ -784,6 +785,20 @@ export class ClaudeCompactionEnforcer {
       }, error instanceof Error ? error.name : typeof error);
       if (error instanceof DeliveryGuardError) return { triggered: false, reason: error.code === "typing_guard_enabled" ? "typing_guard_enabled" : "guard_target_unknown" };
       throw error;
+    } finally {
+      // The awaited lifecycle has settled: notice work must not inherit its active lease.
+      const lastDelivery = record?.record.lastDelivery;
+      if (record && lastDelivery && lastDelivery !== previous && lastDelivery.failures >= 2 && this.onRestoreDeliveryFailure) {
+        void Promise.resolve().then(() => {
+          if (this.records.get(input.sessionName) !== record || record.record.lastDelivery !== lastDelivery || this.pendingPostCompactRestore.get(input.sessionName) !== stage) return;
+          return this.onRestoreDeliveryFailure!({ sessionName: input.sessionName, attemptId: record.record.attemptId, mapPath: record.record.mapPath, lastDelivery });
+        }).catch(error => {
+          if (this.records.get(input.sessionName) === record && record.record.lastDelivery === lastDelivery && this.pendingPostCompactRestore.get(input.sessionName) === stage) {
+            lastDelivery.noticeErrorClass = error instanceof Error ? error.name : typeof error;
+            this.persist(input.sessionName, record.record.attemptId, { lastDelivery });
+          }
+        });
+      }
     }
   }
 
@@ -794,26 +809,15 @@ export class ClaudeCompactionEnforcer {
   ): void {
     if (!stage || !record || this.records.get(session) !== record || this.pendingPostCompactRestore.get(session) !== stage) return;
     const prior = record.record.lastDelivery;
+    // Active work is the expected wait between restore steps, not an undeliverable stage.
+    const waiting = result.reason === "wait_for_idle_timeout" && result.activity?.state === "running";
     const lastDelivery: RestoreDeliveryAttempt = {
       stage, at: new Date(this.now()).toISOString(), ok: result.ok, reason: result.reason ?? "send_failed",
       ...(result.outcome ? { outcome: result.outcome } : {}),
       ...(result.activity ? { activity: { state: result.activity.state, reason: result.activity.reason, evidenceSource: result.activity.evidenceSource } } : {}),
-      ...(errorClass ? { errorClass } : {}), failures: (prior?.failures ?? 0) + 1,
+      ...(errorClass ? { errorClass } : {}), failures: waiting ? 0 : (prior?.failures ?? 0) + 1,
     };
     this.persist(session, record.record.attemptId, { lastDelivery });
-    // Two failed polls warrant one diagnostic notice, not a conclusion that native compaction finished.
-    // Queue delivery must not hold the compacting seat's lifecycle lease or stall the telemetry poll.
-    if (lastDelivery.failures >= 2 && this.onRestoreDeliveryFailure) {
-      void Promise.resolve().then(() => {
-        if (this.records.get(session) !== record || record.record.lastDelivery !== lastDelivery) return;
-        return this.onRestoreDeliveryFailure!({ sessionName: session, attemptId: record.record.attemptId, mapPath: record.record.mapPath, lastDelivery });
-      }).catch(error => {
-        if (this.records.get(session) === record && record.record.lastDelivery === lastDelivery) {
-          lastDelivery.noticeErrorClass = error instanceof Error ? error.name : typeof error;
-          this.persist(session, record.record.attemptId, { lastDelivery });
-        }
-      });
-    }
   }
 
   private async sendRestoreStage(session: string, text: string, options: Parameters<SessionTransport["send"]>[2]): Promise<SendResult> {

@@ -182,7 +182,7 @@ it('without a restart, the restore steps after a lost /compact result wait while
  // An empty box with the seat still busy: nothing is sent, and the step still reads as owed, not idle.
  f.hooks.box='empty';f.hooks.busy=true;await staleTick(e);f.hooks.busy=false;
  expect(boundaries(f)).toHaveLength(0);
- expect((await stateOf(e)).owedRestore).toMatchObject({stage:'turn_boundary',held:true,inputBox:'empty'});
+ expect((await stateOf(e)).owedRestore).toMatchObject({stage:'turn_boundary',held:false,inputBox:'empty'});
  for(let i=0;i<3;i++)await staleTick(e);
  expect(boundaries(f)).toHaveLength(1);expect(restores(f)).toHaveLength(1);expect(e.getOwedRestore(seat)).toBeNull();
 });
@@ -308,4 +308,36 @@ it('shows a thrown restore error by class without exposing its message or ending
  expect(state.owedRestore).toMatchObject({stage:'turn_boundary',lastDelivery:{ok:false,errorClass:'TypeError'}});
  expect(JSON.stringify(state)).not.toContain('PRIVATE ERROR MESSAGE');
  e.cancelPreparation(seat);expect(e.getOwedRestore(seat)).toBeNull();
+});
+
+
+it('a busy restore waits without holding the stage or notifying its owner',async()=>{
+ const f=fixture(),notice=vi.fn(async()=>{});
+ const e=f.daemon(undefined,{onRestoreDeliveryFailure:notice});
+ await e.maybeAutoCompact(high);completeMap(e);await e.maybeAutoCompact(high);
+ await staleTick(e);await staleTick(e);
+ expect(e.getOwedRestore(seat)?.stage).toBe('compliance_prompt');
+ vi.spyOn(Date,'now').mockImplementation(f.now);f.hooks.busy=true;
+ for(let i=0;i<3;i++){await staleTick(e);f.advance(20000);}
+ expect(e.getOwedRestore(seat)).toMatchObject({stage:'compliance_prompt',held:false,lastDelivery:{reason:'wait_for_idle_timeout',activity:{state:'running'},failures:0}});
+ expect(e.getOwedRestore(seat)?.detail).toContain('waiting: seat busy');
+ expect(notice).not.toHaveBeenCalled();
+ f.hooks.busy=false;await staleTick(e);
+ expect(e.getOwedRestore(seat)).toBeNull();expect(compacts(f)).toHaveLength(1);
+});
+
+it.each(['unresolved','rejected'])('owner notice starts after the lifecycle lease ends and a notice left %s does not hold the drain',async(mode)=>{
+ const f=fixture(),held:boolean[]=[];
+ const e=f.daemon(undefined,{onRestoreDeliveryFailure:async()=>{
+  held.push(f.transport.deliveryGuard!.ownsLifecycle('node-one'));
+  if(mode==='rejected')throw new RangeError('PRIVATE NOTICE ERROR');
+  await new Promise<void>(()=>{});
+ }});
+ await e.maybeAutoCompact(high);completeMap(e);await e.maybeAutoCompact(high);
+ vi.spyOn(f.transport,'send').mockResolvedValue({ok:false,sessionName:seat,sent:false,reason:'target_activity_unknown'});
+ await staleTick(e);await staleTick(e);
+ for(let i=0;i<10;i++)await Promise.resolve();
+ expect(held).toEqual([false]);
+ if(mode==='rejected')expect(e.getOwedRestore(seat)?.lastDelivery?.noticeErrorClass).toBe('RangeError');
+ expect(readFileSync(recordFile(e),'utf8')).not.toContain('PRIVATE NOTICE ERROR');
 });
