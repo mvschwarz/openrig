@@ -21,6 +21,7 @@ import type Database from "better-sqlite3";
 import type { ArgvExecFn, ExecFn } from "./adapters/tmux.js";
 import type { CmuxTransportFactory } from "./adapters/cmux.js";
 import { createDb } from "./db/connection.js";
+import { createWakeRecovery, type WakeRecovery } from "./domain/wake-recovery.js";
 import { migrate } from "./db/migrate.js";
 // P8: apply the CANONICAL migration list — the single source of truth (db/all-migrations.ts),
 // never an inline copy that can drift out of sync with the daemon's schema.
@@ -243,6 +244,8 @@ interface DaemonResult {
   contextMonitor: import("./domain/context-monitor.js").ContextMonitor;
   // OPR.0.4.3.21 — returned so index.ts can stop() it on graceful shutdown.
   eventLoopMonitor: import("./domain/event-loop-monitor.js").EventLoopMonitor;
+  /** Started by index.ts once the daemon listens; stopped first on shutdown. */
+  wakeRecovery: WakeRecovery;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   injectWebSocket: (server: any) => void;
 }
@@ -2187,6 +2190,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   void loadHumanRegistryForDelivery; // consumed inside the sessionTransport block below
 
   const sessionTransport = deps.sessionTransport;
+  let wakeRecovery: WakeRecovery = { start() {}, stop: async () => {} };
   if (sessionTransport) {
     queueRepoInstance.attachActivityReader((session) => {
       session = physicalSessionName(db, session);
@@ -2506,24 +2510,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // W1 (transactional closure) FR — the wake-intent RECOVERY SWEEP. Deliver
     // any wake intents a crash left committed-but-undelivered (the terminal txn
     // committed, so the intent is durable, but the process died before the
-    // post-commit deliver). Runs after transport is wired so the re-deliveries
-    // actually land. Non-fatal — a sweep failure must not bring the daemon down.
+    // post-commit deliver). Non-fatal — a sweep failure must not bring the daemon down.
     // No periodic timer (ruled out of scope): a transient failure lands the row
-    // in a VISIBLE state and is retried on the next start.
-    try {
-      // Prior-process claims were reconciled before current-process producers started.
-      const reconciled = reconciledWakeIntents;
-      const drained = await queueRepoInstance.drainPendingWakeIntents();
-      if (drained.delivered || drained.indeterminate || drained.failed || reconciled) {
-        console.log(
-          `wake-intent recovery sweep: delivered=${drained.delivered} indeterminate=${drained.indeterminate} failed=${drained.failed} reconciled=${reconciled}`,
-        );
-      }
-    } catch (err) {
-      console.warn(
-        `wake-intent recovery sweep: failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
+    // in a VISIBLE state and is retried on the next start. Prior-process claims were
+    // reconciled before current-process producers started. Each recovered notification
+    // is a real seat delivery, so the sweep is not awaited here: index.ts starts it once
+    // the daemon listens, and stops it first on shutdown.
+    wakeRecovery = createWakeRecovery(queueRepoInstance, reconciledWakeIntents);
   }
 
   // Context monitor — constructed before createApp so routes can access pollOnce for refresh.
@@ -2673,5 +2666,5 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   deps.selfNameDiscovery = () => discoverTailscaleSelfNames({ timeoutMs: 1500 });
   const { app, injectWebSocket } = createAppWithWebSocket(deps);
 
-  return { app, db, deps, contextMonitor, eventLoopMonitor, injectWebSocket };
+  return { app, db, deps, contextMonitor, eventLoopMonitor, injectWebSocket, wakeRecovery };
 }
