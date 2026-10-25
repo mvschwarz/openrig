@@ -715,7 +715,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           if (kept.length > 0) document.hooks[event] = kept.map((index) => groups[index]!);
           else delete document.hooks[event];
         }
-        if (!isDeepStrictEqual(parseToml(config), expected)) throw new Error("its hooks' trust records couldn't be moved exactly");
+        if (!isDeepStrictEqual(withoutEmptyHookTables(parseToml(config)), withoutEmptyHookTables(expected))) {
+          throw new Error("its hooks' trust records couldn't be moved exactly");
+        }
         const json = `${JSON.stringify(document, null, 2)}\n`;
         if (json !== original) this.fs.writeFile(hooksPath, json);
         if (updated !== null) updated = config;
@@ -2139,6 +2141,16 @@ type CodexHookState = Record<string, Record<string, unknown>>;
 
 function codexHookStateOf(document: unknown): CodexHookState {
   return (document as { hooks?: { state?: CodexHookState } } | null)?.hooks?.state ?? {};
+}
+
+/** A parsed config without an empty `hooks.state`, or then an empty `hooks`: the text drops a table with its last
+ *  entry, and an empty table means the same as none. */
+function withoutEmptyHookTables(document: unknown): unknown {
+  const { hooks, ...rest } = document as { hooks?: Record<string, unknown> };
+  if (hooks === undefined) return document;
+  const { state, ...otherHooks } = hooks;
+  const kept = state !== undefined && Object.keys(state as object).length > 0 ? hooks : otherHooks;
+  return Object.keys(kept).length > 0 ? { ...rest, hooks: kept } : rest;
 }
 
 /** The index of OpenRig's inline group for `event` among a parsed config.toml's inline groups, or -1. */
