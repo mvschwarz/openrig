@@ -649,6 +649,7 @@ describe("Codex runtime adapter", () => {
     const codexHome = "/private/codex";
     const fsOps = mockFs({ [`${codexHome}/locked.config.toml`]: 'sandbox_mode = "read-only"\napproval_policy = "never"\n' });
     const resolveGitAddDirs = vi.fn(async () => ["/project/.git"]);
+    const prepareSeatFolder = vi.fn(() => "/topology/rigs/test-rig/seats/dev-qa");
     const options = [
       { name: "dev-qa@test-rig" },
       { name: "dev-qa@test-rig", resumeToken: "sess-456" },
@@ -658,7 +659,7 @@ describe("Codex runtime adapter", () => {
       const proof = provenCodexResume("sess-456");
       const tmux = mockTmux({ getPanePid: proof.getPanePid });
       const adapter = new CodexRuntimeAdapter({
-        tmux, fsOps, codexHome, resolveGitAddDirs,
+        tmux, fsOps, codexHome, resolveGitAddDirs, prepareSeatFolder,
         listProcesses: proof.listProcesses as never, readResumeEvidence: proof.readResumeEvidence,
         sleep: async () => {},
         verifyProfilePreflight: async (profile) => ({ ok: true, profile }),
@@ -676,6 +677,7 @@ describe("Codex runtime adapter", () => {
       expect(command).not.toContain("danger-full-access");
     }
     expect(resolveGitAddDirs).not.toHaveBeenCalled();
+    expect(prepareSeatFolder).not.toHaveBeenCalled();
   });
 
   it.each(['sandbox_mode = "workspace-write"\n', 'sandbox_mode = [\n'])(
@@ -2527,8 +2529,9 @@ describe("rebuild permission continuity", () => {
     const readNetworkDefault = vi.fn(async () => ({ apply: true, elapsedMs: 0 }));
     const resolveGitAddDirs = vi.fn(async () => ["/repo/.git"]);
     const prepareTeamWorkspace = vi.fn(() => ["/workspace", "/shared-docs"]);
+    const prepareSeatFolder = vi.fn(() => "/topology/rigs/test-rig/seats/dev-review");
     const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {},
-      readNetworkDefault, resolveGitAddDirs, prepareTeamWorkspace });
+      readNetworkDefault, resolveGitAddDirs, prepareTeamWorkspace, prepareSeatFolder });
     const envelope = { approvalPolicy: "on-request", sandboxPolicy: { type: "workspace-write",
       network_access: false, exclude_tmpdir_env_var: true, exclude_slash_tmp: false,
       writable_roots: ["/kept dir", "/kept'quote"] } } satisfies CodexPermissionEnvelope;
@@ -2545,5 +2548,6 @@ describe("rebuild permission continuity", () => {
     expect(readNetworkDefault).not.toHaveBeenCalled();
     expect(resolveGitAddDirs).not.toHaveBeenCalled();
     expect(prepareTeamWorkspace).not.toHaveBeenCalled();
+    expect(prepareSeatFolder).not.toHaveBeenCalled();
   });
 });

@@ -7,6 +7,7 @@ import { CodexRuntimeAdapter, type CodexAdapterFsOps } from "../src/adapters/cod
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 import { codexCommandResumeToken, observeCodexForkProcess, observeCodexPaneProcess } from "../src/domain/native-process-lineage.js";
+import { prepareCodexSeatFolder } from "../src/domain/codex-team-workspace.js";
 
 // Issue #121: in a linked git worktree `<cwd>/.git` is a FILE ("gitdir: ..."), so passing it to Codex as
 // `--add-dir` breaks the Linux sandbox for every command. These tests use real temporary Git repositories
@@ -185,6 +186,96 @@ describe("Codex resume and fork git add-dirs (a restored seat keeps .git writabl
     if (!built.ok) return;
     expect(addDirs(built.core)).toEqual([nodePath.join(root, ".git")]);
     expect(resolveGitAddDirs).not.toHaveBeenCalled();
+  });
+});
+
+// A seat's own topology folder holds its LEARNED.md and recap. A default workspace-write Codex seat can write there only
+// when its launch names the folder, so fresh, resume and fork add it, after the git dirs and after any conversation id.
+describe("Codex seat folder add-dir (a seat keeps its LEARNED.md and recap writable)", () => {
+  const seatFolderFor = () => nodePath.join(root, "topology root", "rigs", "issue121-rig", "seats", "dev");
+  async function launchCommand(cwd: string, opts: { resumeToken?: string; fork?: true } = {}): Promise<string> {
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({
+      tmux, fsOps, sleep: async () => {}, listProcesses: () => [], readThreadIdByPid: () => undefined, resumeProofWindowMs: 0,
+      prepareSeatFolder: (session) => session === "dev@issue121-rig" ? seatFolderFor() : undefined,
+    });
+    await adapter.launchHarness(binding(cwd), {
+      name: "dev@issue121-rig",
+      ...(opts.resumeToken ? { resumeToken: opts.resumeToken } : {}),
+      ...(opts.fork ? { forkSource: { kind: "native_id" as const, value: "parent-thread", pendingIdAllowed: true } } : {}),
+    });
+    return vi.mocked(tmux.sendText).mock.calls[0]![1] as string;
+  }
+
+  it("fresh, resume and fork each add the seat's own folder after the git dirs", async () => {
+    const repo = ordinaryRepo();
+    const expected = [nodePath.join(repo, ".git"), seatFolderFor()];
+    expect(addDirs(await launchCommand(repo))).toEqual(expected);
+    const resume = await launchCommand(repo, { resumeToken: "thread-1" });
+    expect(addDirs(resume)).toEqual(expected);
+    expect(resume).toMatch(/ resume 'thread-1' --add-dir '[^']*\/\.git' --add-dir '[^']*\/seats\/dev'$/);
+    const fork = await launchCommand(repo, { fork: true });
+    expect(addDirs(fork)).toEqual(expected);
+    expect(fork).toMatch(/ fork 'parent-thread' --add-dir '[^']*\/\.git' --add-dir '[^']*\/seats\/dev'$/);
+  });
+
+  it("the resume and fork proofs still find the process when the seat folder's path has a space", async () => {
+    const repo = ordinaryRepo();
+    expect(seatFolderFor()).toContain(" ");
+    const asPs = (command: string) => command.slice(command.indexOf("codex ")).replace(/'/g, "");
+    const pane = { getPanePid: async () => 4100 };
+    const row = (command: string) => [{ pid: 4100, ppid: 1, pgid: 4100, tpgid: 4100, executableName: "codex",
+      startedAt: "Sat Jan  1 12:00:00 2000", command: asPs(command) }];
+    const resume = await launchCommand(repo, { resumeToken: "thread-1" });
+    expect(codexCommandResumeToken(asPs(resume))).toBe("thread-1");
+    expect(await observeCodexPaneProcess({ target: "r01-qa", tmux: pane, listProcesses: () => row(resume),
+      expectedToken: "thread-1", requireResume: true })).not.toBeNull();
+    const fork = await launchCommand(repo, { fork: true });
+    expect(await observeCodexForkProcess({ target: "r01-qa", tmux: pane, listProcesses: () => row(fork),
+      parentToken: "parent-thread" })).not.toBeNull();
+  });
+});
+
+describe("prepareCodexSeatFolder", () => {
+  it("creates and returns exactly <topology root>/rigs/<rig>/seats/<seat>, and reuses it", () => {
+    const topology = nodePath.join(root, "topology");
+    const folder = nodePath.join(topology, "rigs", "my-rig", "seats", "dev-qa");
+    expect(prepareCodexSeatFolder("dev-qa@my-rig", topology)).toBe(folder);
+    expect(fs.statSync(folder).isDirectory()).toBe(true);
+    fs.writeFileSync(nodePath.join(folder, "LEARNED.md"), "kept\n");
+    expect(prepareCodexSeatFolder("dev-qa@my-rig", topology)).toBe(folder);
+    expect(fs.readFileSync(nodePath.join(folder, "LEARNED.md"), "utf8")).toBe("kept\n");
+  });
+
+  it.each(["dev-qa", "../escape@my-rig", ".hidden@my-rig", "dev qa@my-rig"])("gives none for %j and creates nothing", (name) => {
+    const topology = nodePath.join(root, "topology");
+    expect(prepareCodexSeatFolder(name, topology)).toBeUndefined();
+    expect(fs.existsSync(topology)).toBe(false);
+  });
+
+  it("refuses a symlinked segment and creates nothing at its target", () => {
+    const topology = nodePath.join(root, "topology");
+    const elsewhere = nodePath.join(root, "elsewhere");
+    fs.mkdirSync(elsewhere);
+    fs.mkdirSync(nodePath.join(topology, "rigs", "my-rig"), { recursive: true });
+    fs.symlinkSync(elsewhere, nodePath.join(topology, "rigs", "my-rig", "seats"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(prepareCodexSeatFolder("dev-qa@my-rig", topology)).toBeUndefined();
+      expect(fs.readdirSync(elsewhere)).toEqual([]);
+      expect(warn).toHaveBeenCalledOnce();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("gives none for a relative topology root", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(prepareCodexSeatFolder("dev-qa@my-rig", "relative/topology")).toBeUndefined();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 

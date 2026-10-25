@@ -36,7 +36,7 @@ import { CODEX_NETWORK_DEFAULT_OVERRIDE, codexNetworkDefaultArg, type CodexNetwo
 import { resolveCodexGitAddDirs, type CodexGitAddDirResolver } from "../domain/codex-git-add-dirs.js";
 import { isPerSeatRoleGuidance, mergeManagedBlock, perSeatRoleSkipWarning } from "../domain/managed-blocks.js";
 import { excludeNewGeneratedFiles } from "../domain/generated-file-hygiene.js";
-import { codexQueueStateRoot, codexTeamWorkspaceArg, type PrepareCodexTeamWorkspace } from "../domain/codex-team-workspace.js";
+import { codexQueueStateRoot, codexTeamWorkspaceArg, type PrepareCodexSeatFolder, type PrepareCodexTeamWorkspace } from "../domain/codex-team-workspace.js";
 import { shellQuote } from "./shell-quote.js";
 import { execRuntimeProbe } from "./runtime-probe-exec.js";
 import { resolveReadinessTimeoutMs } from "../domain/readiness-timeout.js";
@@ -105,6 +105,8 @@ interface PreparedCodexLaunch {
   queueStateDirArg: string;
   /** The git metadata `--add-dir`s, the same for fresh, resume and fork; empty for a rebuild or a provably read-only profile. */
   gitDirArg: string;
+  /** The seat's own topology folder (its LEARNED.md and recap) as an `--add-dir`, under the same rules as the git dirs. */
+  seatFolderArg: string;
   daemonOptOut: boolean;
   daemonArg: string;
   networkArg: string;
@@ -171,6 +173,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   // Issue #121: git metadata dirs for the `--add-dir`s of fresh, resume and fork (a linked worktree's `.git` is a file).
   // Default = the real resolver; tests may inject a controlled one.
   private resolveGitAddDirs: CodexGitAddDirResolver;
+  // The seat's own topology folder for the `--add-dir`s of fresh, resume and fork. Absent: none is added.
+  private prepareSeatFolder?: PrepareCodexSeatFolder;
   private prepareTeamWorkspace?: PrepareCodexTeamWorkspace;
   private resolveManagedConfigSettings?: () => Promise<{ enabled: boolean; codexVersion?: string }>;
   private resolveHooksEnabled?: () => Promise<boolean>;
@@ -215,6 +219,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     detectDaemonSupport?: CodexDaemonSupportDetector;
     readNetworkDefault?: CodexNetworkDefaultReader;
     resolveGitAddDirs?: CodexGitAddDirResolver;
+    /** The seat's own topology folder, ready to write (its LEARNED.md and recap). Absent: no seat folder is added. */
+    prepareSeatFolder?: PrepareCodexSeatFolder;
     prepareTeamWorkspace?: PrepareCodexTeamWorkspace;
     /** Resolves the hooks setting and Codex version that ensureManagedConfig applies. Absent: no managed config write. */
     resolveManagedConfigSettings?: () => Promise<{ enabled: boolean; codexVersion?: string }>;
@@ -236,6 +242,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.resolveManagedConfigSettings = deps.resolveManagedConfigSettings;
     this.resolveHooksEnabled = deps.resolveHooksEnabled;
     this.prepareTeamWorkspace = deps.prepareTeamWorkspace;
+    this.prepareSeatFolder = deps.prepareSeatFolder;
     this.seatLaunchEnvironment = deps.seatLaunchEnvironment;
     this.fs = deps.fsOps;
     this.codexHome = deps.codexHome;
@@ -839,7 +846,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // Only a launch that starts a conversation may install the core plugin; a resume never does.
     const prepared = await this.prepareLaunch(binding, opts.name, undefined, { installCorePlugin: !opts.resumeToken });
     if (!prepared.ok) return prepared;
-    const { modelArg, effortArg, appliedLaunch, postureArg, queueStateDirArg, gitDirArg, daemonArg, networkArg } = prepared;
+    const { modelArg, effortArg, appliedLaunch, postureArg, queueStateDirArg, gitDirArg, seatFolderArg, daemonArg, networkArg } = prepared;
 
     // Fork branch: `codex fork <parent_thread_id>`. Captures the NEW thread id
     // post-fork. Parent thread id is NOT persisted onto the new seat record
@@ -859,9 +866,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // -s danger-full-access on every seat; otherwise the named profile, or OpenRig's explicit
       // -s workspace-write floor flag.
       // 0.5.2-07 A2-3: the FORK path threads the SPEC model too (fork-instantiate reverted it before).
-      // The git dirs follow the parent id: ps flattens argv, so a git dir with a space placed before the id would be
-      // read as the id when the fork is verified.
-      const cmd = `codex${daemonArg}${postureArg}${networkArg}${modelArg}${effortArg} fork${queueStateDirArg} ${shellQuote(parentId)}${gitDirArg}`;
+      // The git dirs and the seat folder follow the parent id: ps flattens argv, so a path with a space placed before the
+      // id would be read as the id when the fork is verified.
+      const cmd = `codex${daemonArg}${postureArg}${networkArg}${modelArg}${effortArg} fork${queueStateDirArg} ${shellQuote(parentId)}${gitDirArg}${seatFolderArg}`;
       const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, await this.seatCommand(binding, cmd));
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
@@ -898,7 +905,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // 0.5.2-07 A2-3: the pod-aware RESUME path threads the SPEC model too (reverted before — the
       // grounding map assumed codex parity with the claude adapter, but only fresh emitted -m).
       ? this.resumeCore(prepared, opts.resumeToken, binding)
-      : `codex${daemonArg}${postureArg}${networkArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}${effortArg}`;
+      : `codex${daemonArg}${postureArg}${networkArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${seatFolderArg}${queueStateDirArg}${modelArg}${effortArg}`;
 
     const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, await this.seatCommand(binding, cmd));
     if (!textResult.ok) {
@@ -994,6 +1001,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       return { ok: true, model, modelArg, effort, effortArg, profile, appliedLaunch, postureArg,
         queueStateDirArg: running.addDirs.map((dir) => ` --add-dir ${shellQuote(dir)}`).join(""),
         gitDirArg: "",
+        seatFolderArg: "",
         daemonOptOut: running.daemonOptOut, daemonArg: running.daemonOptOut ? " --no-daemon" : "",
         networkArg: running.networkOverride ? ` -c ${shellQuote(CODEX_NETWORK_DEFAULT_OVERRIDE)}` : "" };
     }
@@ -1019,6 +1027,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // A rebuild keeps the writable roots its observed envelope names instead.
     const gitDirArg = binding.codexRebuildPermissions || suppressAutoAddDirs
       ? "" : (await this.resolveGitAddDirs(binding.cwd)).map((dir) => ` --add-dir ${shellQuote(dir)}`).join("");
+    // The seat's own topology folder, so it can keep its LEARNED.md and recap: the same launches and the same suppression.
+    const seatFolder = binding.codexRebuildPermissions || suppressAutoAddDirs ? undefined : this.prepareSeatFolder?.(name);
+    const seatFolderArg = seatFolder ? ` --add-dir ${shellQuote(seatFolder)}` : "";
     const teamWorkspaceArg = !binding.codexRebuildPermissions && binding.teamPermissionDefault && !profile
       && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write"
       ? codexTeamWorkspaceArg(this.prepareTeamWorkspace, name) : "";
@@ -1038,14 +1049,15 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
     // The launch facts keep the probed daemon choice, so a printed recovery command can repeat it; no probe, no fact.
     const launchFacts = daemonSupport ? { ...appliedLaunch, daemonOptOut } : appliedLaunch;
-    return { ok: true, model, modelArg, effort, effortArg, profile, appliedLaunch: launchFacts, postureArg, queueStateDirArg, gitDirArg, daemonOptOut, daemonArg, networkArg };
+    return { ok: true, model, modelArg, effort, effortArg, profile, appliedLaunch: launchFacts, postureArg, queueStateDirArg, gitDirArg, seatFolderArg, daemonOptOut, daemonArg, networkArg };
   }
 
   private resumeCore(prepared: PreparedCodexLaunch, resumeToken: string, binding: NodeBinding): string {
-    const { profile, queueStateDirArg, gitDirArg, model, postureArg, networkArg, daemonOptOut, effort } = prepared;
-    // The git dirs follow the conversation id, as on a fork, so the resume proof reads the id even from a cwd with a space.
+    const { profile, queueStateDirArg, gitDirArg, seatFolderArg, model, postureArg, networkArg, daemonOptOut, effort } = prepared;
+    // The git dirs and the seat folder follow the conversation id, as on a fork, so the resume proof reads the id even
+    // from a path with a space.
     return buildCodexResumeCore(resumeToken, profile, false, queueStateDirArg.trim() || undefined, binding.launchPosture, model, `${postureArg}${networkArg}`, daemonOptOut, effort)
-      + gitDirArg;
+      + gitDirArg + seatFolderArg;
   }
 
   private async seatCommand(binding: NodeBinding, cmd: string): Promise<string> {

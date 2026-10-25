@@ -158,6 +158,24 @@ describe("CodexResumeAdapter", () => {
       expect(sendText.mock.calls[0]![1]).toBe("codex -p 'my-profile' '-c' 'check_for_update_on_startup=false' resume 'uuid-123'");
     });
 
+    // A restored seat keeps its own topology folder (its LEARNED.md and recap) writable on the plain floor. A named
+    // profile isn't checked for read-only here, and Codex refuses a writable root under one, so it gets none.
+    it("a restore on the plain floor adds the seat's own folder after the conversation id; a named profile adds none", async () => {
+      const prepareSeatFolder = vi.fn(() => "/topology/rigs/demo/seats/r99-demo1-impl");
+      const sendText = vi.fn(async () => ({ ok: true as const }));
+      await new CodexResumeAdapter(mockTmux({ sendText }), { prepareSeatFolder })
+        .resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo");
+      expect(prepareSeatFolder).toHaveBeenCalledWith("r99-demo1-impl");
+      expect(sendText.mock.calls[0]![1]).toBe("codex -s workspace-write '-c' 'check_for_update_on_startup=false' resume 'uuid-123' --add-dir '/topology/rigs/demo/seats/r99-demo1-impl'");
+
+      const profileText = vi.fn(async () => ({ ok: true as const }));
+      const profileFolder = vi.fn(() => "/topology/rigs/demo/seats/r99-demo1-impl");
+      await new CodexResumeAdapter(mockTmux({ sendText: profileText }), { prepareSeatFolder: profileFolder, exec: vi.fn(async () => "[my-profile]\n") })
+        .resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo", "my-profile");
+      expect(profileText.mock.calls[0]![1]).not.toContain("--add-dir");
+      expect(profileFolder).not.toHaveBeenCalled();
+    });
+
     it("profile preflight failure blocks resume before sendText", async () => {
       const sendText = vi.fn(async () => ({ ok: true as const }));
       const sendKeys = vi.fn(async () => ({ ok: true as const }));

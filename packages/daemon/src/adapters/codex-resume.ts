@@ -1,4 +1,4 @@
-import { codexTeamWorkspaceArg, type PrepareCodexTeamWorkspace } from "../domain/codex-team-workspace.js";
+import { codexTeamWorkspaceArg, type PrepareCodexSeatFolder, type PrepareCodexTeamWorkspace } from "../domain/codex-team-workspace.js";
 import { operationalLaunchArg } from "./kernel-authority.js";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { TmuxAdapter } from "./tmux.js";
@@ -20,6 +20,8 @@ export { type ResumeResult };
 
 interface CodexResumeOptions {
   prepareTeamWorkspace?: PrepareCodexTeamWorkspace;
+  /** The seat's own topology folder, ready to write (its LEARNED.md and recap). Absent: no seat folder is added. */
+  prepareSeatFolder?: PrepareCodexSeatFolder;
   seatLaunchEnvironment?: SeatLaunchEnvironment;
   launchPath?: string;
   codexHome?: string;
@@ -112,6 +114,11 @@ export class CodexResumeAdapter {
     const workspaceArg = teamPermissionDefault && !codexConfigProfile?.trim()
       && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write"
       ? codexTeamWorkspaceArg(this.options.prepareTeamWorkspace, tmuxSessionName) : "";
+    // The seat's own topology folder (its LEARNED.md and recap) on the plain workspace-write floor; a named profile here
+    // isn't checked for read-only, and Codex refuses a writable root under one, so it gets none. After the conversation
+    // id, so the resume proof reads the id even from a path with a space.
+    const seatFolder = !codexConfigProfile?.trim() && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write"
+      ? this.options.prepareSeatFolder?.(tmuxSessionName) : undefined;
     const cmd = buildCodexResumeCore(
       resumeToken ?? "",
       codexConfigProfile,
@@ -122,7 +129,7 @@ export class CodexResumeAdapter {
       `${postureArg}${networkArg}`,
       daemonSupport?.kind === "supported",
       effort,
-    );
+    ) + (seatFolder ? ` --add-dir ${shellQuote(seatFolder)}` : "");
 
     const launchEnv = [this.options.launchPath ? `PATH=${shellQuote(this.options.launchPath)}` : "", codexHome ? `CODEX_HOME=${shellQuote(codexHome)}` : ""].filter(Boolean);
     const textResult = await this.tmux.sendShellCommand(tmuxSessionName, this.options.seatLaunchEnvironment
