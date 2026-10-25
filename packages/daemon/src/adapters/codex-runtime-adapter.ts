@@ -687,12 +687,15 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // group's position among this event's groups, not its position inside our block.
     // Count only the groups before the marker: a person's groups after it do not
     // move ours, and their trust/disable records must not be written as ours.
-    const prefix = parseToml(content.slice(0, content.indexOf(OPENRIG_ACTIVITY_HOOKS_BEGIN))) as {
+    // Without a marker (Codex's save left our groups where they sit), each group's own position.
+    const begin = content.indexOf(OPENRIG_ACTIVITY_HOOKS_BEGIN);
+    const parsed = parseToml(begin >= 0 ? content.slice(0, begin) : content) as {
       hooks?: Partial<Record<(typeof OPENRIG_ACTIVITY_HOOK_EVENTS)[number], unknown[]>>;
     };
     let next = content;
     for (const event of OPENRIG_ACTIVITY_HOOK_EVENTS) {
-      const groupIndex = prefix.hooks?.[event]?.length ?? 0;
+      const groupIndex = begin >= 0 ? parsed.hooks?.[event]?.length ?? 0 : openRigInlineGroupIndex(parsed, event);
+      if (groupIndex < 0) continue;
       const { key, hash } = computeCodexHookTrust(event, { keySource, command, timeoutSec: 5, groupIndex });
       next = upsertCodexHookTrust(next, key, hash);
     }
@@ -2151,14 +2154,59 @@ function upsertCodexActivityHooks(content: string, relayPath: string): string {
   let next = upsertCodexFeaturesHooksEnabled(content);
 
   const pattern = new RegExp(
-    `${escapeRegExp(OPENRIG_ACTIVITY_HOOKS_BEGIN)}[\\s\\S]*?${escapeRegExp(OPENRIG_ACTIVITY_HOOKS_END)}\\n?`,
+    `${escapeRegExp(OPENRIG_ACTIVITY_HOOKS_BEGIN)}([\\s\\S]*?)${escapeRegExp(OPENRIG_ACTIVITY_HOOKS_END)}\\n?`,
     "m"
   );
   if (pattern.test(next)) {
-    return next.replace(pattern, () => block); // literal: a string would expand `$` patterns in the path
+    // literal: a string would expand `$` patterns in the path
+    return next.replace(pattern, (_span, inner: string) => {
+      const kept = keptInActivityBlock(inner);
+      return kept ? `${block}\n${kept}\n` : block;
+    });
   }
+  // Codex's own saves can leave our markers apart from our groups. Groups that already run OpenRig's relay are ours
+  // where they sit: point them at this relay rather than append a second set, which Codex would run twice.
+  const relayGroups = retargetOpenRigRelayGroups(next, command);
+  if (relayGroups !== null) return relayGroups;
   const prefix = next.replace(/\n*$/, "");
   return prefix.length > 0 ? `${prefix}\n\n${block}` : block;
+}
+
+/**
+ * What else sits between OpenRig's activity-hook markers. When Codex saves config.toml (its "Trust all", say), a
+ * table it rewrites loses its file position and is printed after the last hook group, which can be inside our
+ * block: Codex 0.164.0 rewrites all of `[hooks.state]` this way. Everything but OpenRig's own
+ * `[[hooks.<event>]]` stanzas is kept, each section with the comments just above it.
+ */
+function keptInActivityBlock(inner: string): string {
+  const kept: string[] = [];
+  let pending: string[] = [];
+  let keep = false;
+  for (const line of inner.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed === "" || trimmed.startsWith("#")) { pending.push(line); continue; }
+    if (trimmed.startsWith("[")) {
+      const stanza = /^\[\[\s*hooks\s*\.\s*(\w+)\s*(?:\.\s*hooks\s*)?\]\]/.exec(trimmed)?.[1];
+      keep = !(stanza && (OPENRIG_ACTIVITY_HOOK_EVENTS as readonly string[]).includes(stanza));
+    }
+    if (keep) kept.push(...pending, line);
+    pending = [];
+  }
+  return kept.join("\n").trim();
+}
+
+/** Point every inline group that runs OpenRig's relay (from any install) at `command`, in place; null when there's
+ *  none, or the file can't be read as TOML. A person's own groups and every position stay as they are. */
+function retargetOpenRigRelayGroups(content: string, command: string): string | null {
+  let document: unknown;
+  try { document = parseToml(content); } catch { return null; }
+  if (!OPENRIG_ACTIVITY_HOOK_EVENTS.some((event) => openRigInlineGroupIndex(document, event) >= 0)) return null;
+  return content.split("\n").map((line) => {
+    if (!/^\s*command\s*=/.test(line)) return line;
+    let value: unknown;
+    try { value = (parseToml(line.trim()) as { command?: unknown }).command; } catch { return line; }
+    return isOpenRigRelayCommand(value) ? `command = ${command}` : line;
+  }).join("\n");
 }
 
 function canonicalCodexHookSource(path: string): string {
@@ -2293,11 +2341,15 @@ function rekeyCodexHookStateText(content: string, prefix: string, newIndexOf: (i
  */
 function stripCodexActivityHooks(content: string): string {
   const pattern = new RegExp(
-    `\\n*${escapeRegExp(OPENRIG_ACTIVITY_HOOKS_BEGIN)}[\\s\\S]*?${escapeRegExp(OPENRIG_ACTIVITY_HOOKS_END)}[ \\t]*\\n?`,
+    `\\n*${escapeRegExp(OPENRIG_ACTIVITY_HOOKS_BEGIN)}([\\s\\S]*?)${escapeRegExp(OPENRIG_ACTIVITY_HOOKS_END)}[ \\t]*\\n?`,
     "m"
   );
   if (!pattern.test(content)) return content;
-  return content.replace(pattern, "\n");
+  // Tables Codex printed inside the block (its rewritten `[hooks.state]`) aren't ours to remove.
+  return content.replace(pattern, (_span, inner: string) => {
+    const kept = keptInActivityBlock(inner);
+    return kept ? `\n\n${kept}\n` : "\n";
+  });
 }
 
 /** Ensure `[features].hooks = true` (canonical key; not the deprecated codex_hooks alias). */

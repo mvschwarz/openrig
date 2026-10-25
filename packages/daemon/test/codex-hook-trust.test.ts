@@ -273,3 +273,86 @@ describe("OPR.0.4.3.33 — provisioning-seam coupling (ensureCodexActivityHooks 
     expect(cfg.match(/^\[hooks\.state\./gm)?.length).toBe(4);
   });
 });
+
+// #17 (reported by @borfast): a config.toml Codex saved after "Trust all". Codex 0.164.0 persists hook trust as
+// ConfigEdit::SetPath(["hooks", "state"], <the whole table>) (codex-rs app-server config_manager_service.rs, core
+// config/edit.rs). toml_edit 0.24.0 keeps each replaced table's comments but not its file position, so it prints
+// `[hooks.state]` and every entry, sorted by key with literal-quoted keys and values, after the last hook group:
+// inside OpenRig's block, ahead of the `# END` comment that was the first OpenRig trust table's prefix
+// (encode.rs, `Display for DocumentMut`). Build's own ~/.codex/config.toml shows the same for another marked block.
+describe("#17 — a config.toml Codex saved after \"Trust all\"", () => {
+  type State = Record<string, { trusted_hash?: string }>;
+  type Hooks = Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+  const PERSON = [
+    "[features]", "hooks = true", "",
+    "[[hooks.SessionStart]]", "[[hooks.SessionStart.hooks]]", 'type = "command"', 'command = "gortex hook session-start"', "",
+    "[[hooks.PreToolUse]]", "[[hooks.PreToolUse.hooks]]", 'type = "command"', 'command = "gortex hook pre-tool-use"', "",
+  ].join("\n");
+  const PERSON_TRUST = { [`${CONFIG}:session_start:0:0`]: "sha256:person-session-start", [`${CONFIG}:pre_tool_use:0:0`]: "sha256:person-pre-tool-use" };
+  const ours = (event: (typeof EVENTS)[number]) =>
+    computeCodexHookTrust(event, { keySource: CONFIG, command: COMMAND, timeoutSec: 5, groupIndex: event === "SessionStart" ? 1 : 0 });
+  const makeAdapter = (fs: CodexAdapterFsOps) => new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fs, activityRelayPath: RELAY });
+  const launch = (config: string) => {
+    const fs = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: config });
+    makeAdapter(fs).ensureCodexActivityHooks();
+    return fs._store[CONFIG]!;
+  };
+  /** What Codex writes back after "Trust all" on OpenRig's launch of PERSON. */
+  function codexSaved(): string {
+    const launched = launch(PERSON);
+    const groups = launched.slice(0, launched.indexOf("# END OPENRIG MANAGED ACTIVITY HOOKS")).trimEnd();
+    const hashes: Record<string, string> = { ...PERSON_TRUST };
+    for (const [key, value] of Object.entries((parseToml(launched) as { hooks: { state: State } }).hooks.state)) hashes[key] = value.trusted_hash!;
+    const firstOurs = ours("SessionStart").key;
+    const tables = Object.keys(hashes).sort().map((key) =>
+      `${key === firstOurs ? "# END OPENRIG MANAGED ACTIVITY HOOKS\n\n" : ""}[hooks.state.'${key}']\ntrusted_hash = '${hashes[key]}'\n`);
+    return `${groups}\n[hooks.state]\n${tables.join("\n")}`;
+  }
+  const relayGroups = (hooks: Hooks, event: string) => (hooks[event] ?? []).filter((group) => group.hooks[0]!.command === COMMAND).length;
+
+  it("the fixture has the person's trust inside OpenRig's markers, as Codex leaves it", () => {
+    const saved = codexSaved();
+    const inside = saved.slice(saved.indexOf("# BEGIN OPENRIG MANAGED ACTIVITY HOOKS"), saved.indexOf("# END OPENRIG MANAGED ACTIVITY HOOKS"));
+    expect(inside).toContain(`[hooks.state.'${CONFIG}:pre_tool_use:0:0']`);
+    expect(() => parseToml(saved)).not.toThrow();
+  });
+
+  it("the next launch keeps the person's trust, their groups and order, and one set of OpenRig's groups", () => {
+    const next = launch(codexSaved());
+    const parsed = parseToml(next) as { hooks: Hooks & { state: State } };
+    for (const [key, hash] of Object.entries(PERSON_TRUST)) expect(parsed.hooks.state[key]?.trusted_hash).toBe(hash);
+    for (const event of EVENTS) {
+      expect(relayGroups(parsed.hooks, event)).toBe(1);
+      expect(parsed.hooks.state[ours(event).key]?.trusted_hash).toBe(ours(event).hash);
+    }
+    expect(parsed.hooks.SessionStart![0]!.hooks[0]!.command).toBe("gortex hook session-start");
+    expect(parsed.hooks.PreToolUse!.map((group) => group.hooks[0]!.command)).toEqual(["gortex hook pre-tool-use"]);
+    expect(launch(next)).toBe(next);
+  });
+
+  it("turning hooks off keeps the person's trust that Codex left inside the block", () => {
+    const fs = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: codexSaved() });
+    makeAdapter(fs).removeCodexActivityHooks();
+    const parsed = parseToml(fs._store[CONFIG]!) as { hooks: Hooks & { state: State } };
+    for (const [key, hash] of Object.entries(PERSON_TRUST)) expect(parsed.hooks.state[key]?.trusted_hash).toBe(hash);
+    for (const event of EVENTS) expect(relayGroups(parsed.hooks, event)).toBe(0);
+  });
+
+  // Codex's saves can also leave a marker apart from the groups it named; Build's own config has an orphaned
+  // `# END … CODEX CONFIG FRAGMENT` this way. Groups already running OpenRig's relay are then ours where they sit.
+  it.each([
+    ["the markers are gone", RELAY],
+    ["the markers are gone and the groups run an earlier install's relay", "/old/openrig/assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"],
+  ])("when %s, the next launch adds no second set of OpenRig's groups", (_name, relay) => {
+    const unmarked = launch(PERSON).split("\n").filter((line) => !line.includes("OPENRIG MANAGED ACTIVITY HOOKS")).join("\n")
+      .replaceAll(RELAY, relay);
+    const next = launch(unmarked);
+    const parsed = parseToml(next) as { hooks: Hooks & { state: State } };
+    for (const event of EVENTS) {
+      expect(relayGroups(parsed.hooks, event)).toBe(1);
+      expect(parsed.hooks.state[ours(event).key]?.trusted_hash).toBe(ours(event).hash);
+    }
+    expect(next).not.toContain(relay === RELAY ? "# BEGIN OPENRIG" : "/old/openrig/");
+    expect(launch(next)).toBe(next);
+  });
+});
