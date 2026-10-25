@@ -467,10 +467,27 @@ async function settleReceiptHost(client: DaemonClient, receipt: ReceiptContext):
 /** How long the one read-back of a create with an unknown outcome waits for its answer. */
 const CREATE_READ_BACK_TIMEOUT_MS = 10_000;
 
-/** A create whose answer didn't arrive in time may still commit. Read the row back once by the ID it was sent with, from
- *  the daemon that holds it: this one for a local row, the destination's registered daemon for a cross-host one. A found
- *  row is the create committed; anything else leaves the outcome unknown. It never sends the create again. */
-async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: string | undefined, qitemId: string): Promise<{ row: Record<string, unknown> | null; note: string }> {
+/** What a create sent, for telling its row from another with the same ID. */
+interface SentCreate { destinationSession: string; sourceSession: string | undefined; body: string; crossHost: boolean }
+
+/** Which field shows a stored row isn't this create, by the rule the daemon applies to a create whose ID already exists
+ *  (the same destination and source), plus the body, which that rule reports as not saved. A forwarded row's source
+ *  carries the forwarding daemon's host id. Null when the row is this create. */
+function notThisCreate(row: Record<string, unknown>, sent: SentCreate): "destination" | "source" | "body" | null {
+  if (row.destinationSession !== sent.destinationSession) return "destination";
+  const source = row.sourceSession;
+  const stamped = sent.crossHost && typeof source === "string" && sent.sourceSession !== undefined
+    && sent.sourceSession.split("@").length === 2 && source.split("@").length === 3 && source.startsWith(`${sent.sourceSession}@`);
+  if (sent.sourceSession !== undefined && source !== sent.sourceSession && !stamped) return "source";
+  if (row.body !== sent.body) return "body";
+  return null;
+}
+
+/** A create whose answer didn't arrive, or arrived unreadable, may still have committed. Read the row back once by the ID it
+ *  was sent with, from the daemon that holds it: this one for a local row, the destination's registered daemon for a
+ *  cross-host one. Only a row that is this create counts as committed; anything else leaves the outcome unknown. It never
+ *  sends the create again. */
+async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: string | undefined, qitemId: string, sent: SentCreate): Promise<{ row: Record<string, unknown> | null; note: string }> {
   const remote = remoteHostOf(hostId);
   const where = remote ? ` on host '${remote}'` : "";
   let reader = client;
@@ -489,7 +506,13 @@ async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: str
   }
   try {
     const res = await reader.get<Record<string, unknown>>(`/api/queue/${encodeURIComponent(qitemId)}`, options);
-    if (res.status === 200 && res.data?.qitemId === qitemId) return { row: res.data, note: `The create committed after all: row ${qitemId}${where} (read back by its ID).` };
+    if (res.status === 200 && res.data?.qitemId === qitemId) {
+      const differs = notThisCreate(res.data, sent);
+      if (differs) {
+        return { row: null, note: `Row ${qitemId}${where} exists but isn't this create (its ${differs} differs), so the outcome is still unknown. Don't reuse this ID for other work.` };
+      }
+      return { row: res.data, note: `The create committed after all: row ${qitemId}${where} (read back by its ID).` };
+    }
     if (res.status === 404) return { row: null, note: `No row ${qitemId}${where} yet (read back once by its ID); it may still commit.` };
     return { row: null, note: `Reading row ${qitemId}${where} back answered ${res.status}, so the outcome is still unknown.` };
   } catch (err) {
@@ -992,16 +1015,35 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           // plain local writes — the local path stays byte-identical).
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
         }, crossHostWriteOptions(hostResolved.hostId)).catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
+        const sent: SentCreate = { destinationSession: hostResolved.destination, sourceSession: managedSource ?? source, body: resolvedBody,
+          crossHost: remoteHostOf(hostResolved.hostId) !== undefined };
+        // Every create that's answered with a row ends here: its warning, --verify's delivery, and the output.
+        const finish = async (created: Record<string, unknown>, status: number) => {
+          const createWarning = created?.createWarning as { code?: unknown; message?: unknown } | undefined;
+          if (status < 400 && createWarning?.code === "qitem_body_not_saved" && typeof createWarning.message === "string") {
+            console.error(`Warning: ${createWarning.message}`);
+          }
+          if (opts.verify && status < 400) {
+            const createdId = typeof created.qitemId === "string" ? created.qitemId : null;
+            const delivery = createdId
+              ? await waitForDeliveryOutcome(client, createdId, deps.deliveryVerify, { destinationSession: hostResolved.destination, nudge: opts.nudge })
+              : unreadableDeliveryResult(null, hostResolved.destination, {}, "create response did not include a qitem id; delivery cannot be correlated");
+            await printWriteResult(client, opts.json ?? false, { ...created, qitemId: createdId, persisted: true, delivery }, status, receipt);
+            return;
+          }
+          await printWriteResult(client, opts.json ?? false, created, status, receipt);
+        };
         if (res instanceof Error) {
           // A pre-header disconnect can follow a committed create. Preserve the
           // typed error, but do not let the shared renderer assert nondelivery.
           if (res instanceof DaemonConnectionError) res.writeOutcome = "unknown";
-          // No answer in time, or a lost connection: the create may have committed, so read it back once by its ID.
-          if (res instanceof DaemonTimeoutError || res instanceof DaemonConnectionError) {
-            const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId);
+          // No answer in time, a lost connection, or a response lost or unreadable after its headers: the create may have
+          // committed, so read it back once by its ID.
+          if (res instanceof DaemonTimeoutError || res instanceof DaemonConnectionError || res instanceof DaemonResponseError) {
+            const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId, sent);
             console.error(late.note);
             if (late.row) {
-              await printWriteResult(client, opts.json ?? false, late.row, 200, receipt);
+              await finish(late.row, 200);
               return;
             }
           }
@@ -1015,10 +1057,10 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         if (res.status >= 400 && res.data?.outcome === "indeterminate") {
           // Forwarded writes may return a structured unknown outcome rather
           // than throw: read the row back once from the destination before reporting it.
-          const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId);
+          const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId, sent);
           console.error(late.note);
           if (late.row) {
-            await printWriteResult(client, opts.json ?? false, late.row, 200, receipt);
+            await finish(late.row, 200);
             return;
           }
           // Preserve that failure and expose the same recovery ID.
@@ -1029,20 +1071,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         if (refusal) console.error(`No row was created: ${refusal}`);
         const hint = hostSubstitutionHint(res.status, res.data, opts.destination, opts.host, hostResolved, `, keeping --id ${shellQuote(qitemId)}`);
         if (hint) console.error(hint);
-        const createWarning = res.data?.createWarning as { code?: unknown; message?: unknown } | undefined;
-        if (res.status < 400 && createWarning?.code === "qitem_body_not_saved" && typeof createWarning.message === "string") {
-          console.error(`Warning: ${createWarning.message}`);
-        }
-        if (opts.verify && res.status < 400) {
-          const created = res.data;
-          const qitemId = typeof created.qitemId === "string" ? created.qitemId : null;
-          const delivery = qitemId
-            ? await waitForDeliveryOutcome(client, qitemId, deps.deliveryVerify, { destinationSession: hostResolved.destination, nudge: opts.nudge })
-            : unreadableDeliveryResult(null, hostResolved.destination, {}, "create response did not include a qitem id; delivery cannot be correlated");
-          await printWriteResult(client, opts.json ?? false, { ...created, qitemId, persisted: true, delivery }, res.status, receipt);
-          return;
-        }
-        await printWriteResult(client, opts.json ?? false, res.data, res.status, receipt);
+        await finish(res.data, res.status);
       }, hostResolved.hostId !== undefined, hostResolved.hostId);
     });
 
