@@ -9,6 +9,7 @@ import { describe, it, expect, vi } from "vitest";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { SeatLaunchEnvironment } from "../src/domain/seat-launch-environment.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
+import { NO_SESSION_BUS } from "../src/domain/seat-runtime-dir.js";
 const exec = promisify(execFile);
 const waitFile = async (file: string) => {
   // Redirection creates the file before printf writes it; the final newline marks completion.
@@ -162,6 +163,43 @@ describe.skipIf(process.platform === "win32")("#1178 initial-shell environment p
       expect(await waitFile(observed)).toEqual([selected.OPENRIG_DB, selected.TMUX_TMPDIR]);
       expect(await tmux(["show-environment", "-g", "OPENRIG_DB"])).toBe("OPENRIG_DB=/stale.sqlite");
     } finally { warn.mockRestore(); await tmux(["kill-server"]).catch(() => {}); rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }); }
+  });
+
+  // #2030: a seat gets the runtime directory with the bus address that can't connect, unless it has its own value.
+  it.each([
+    ["the runtime directory and the bus address", "create", {}, undefined, false, "/run/daemon-dir", ["/run/daemon-dir", NO_SESSION_BUS]],
+    ["the same for a handover successor's pane", "respawn", {}, undefined, false, "/run/daemon-dir", ["/run/daemon-dir", NO_SESSION_BUS]],
+    ["its own runtime directory, and no bus address", "create", { XDG_RUNTIME_DIR: "/seat/dir" }, undefined, false, "/run/daemon-dir", ["/seat/dir", "absent"]],
+    ["its own bus address beside the runtime directory", "create", { DBUS_SESSION_BUS_ADDRESS: "unix:path=/seat/bus" }, undefined, false, "/run/daemon-dir", ["/run/daemon-dir", "unix:path=/seat/bus"]],
+    ["a runtime directory from update-environment, and no bus address", "create", {}, "/updated/dir", false, "/run/daemon-dir", ["/updated/dir", "absent"]],
+    ["the tmux environment unchanged when it is inherited", "create", {}, undefined, true, "/run/daemon-dir", ["/server/dir", "unix:path=/server/bus"]],
+    ["neither name when the daemon has no runtime directory", "create", {}, undefined, false, undefined, ["absent", "absent"]],
+  ] as const)("gives a seat %s", async (_label, mode, seatEnv, updated, inherited, runtimeDir, expected) => {
+    const home=mkdtempSync(path.join(tmpdir(),"tmux-runtime-dir-")),socket=path.join(home,"owned.sock"),observed=path.join(home,"observed");
+    vi.stubEnv("XDG_RUNTIME_DIR",updated);vi.stubEnv("DBUS_SESSION_BUS_ADDRESS",undefined);
+    const env={...process.env,HOME:home};delete env.TMUX;delete env.TMUX_TMPDIR;
+    const tmux=async(args:string[])=>(await exec("tmux",["-S",socket,...args],{env})).stdout.trim();
+    const adapter=new TmuxAdapter(async()=>"",undefined,args=>tmux(args.slice(1)));
+    adapter.launchEnvironment=()=>({inheritTmuxEnvironment:inherited,env:{HOME:home,PATH:process.env.PATH!},runtimeDir});
+    try {
+      await tmux(["-f","/dev/null","new-session","-d","-s","anchor","sleep 60"]);
+      await tmux(["set-environment","-g","XDG_RUNTIME_DIR","/server/dir"]);
+      await tmux(["set-environment","-g","DBUS_SESSION_BUS_ADDRESS","unix:path=/server/bus"]);
+      if (updated) await tmux(["set-option","-g","update-environment","XDG_RUNTIME_DIR"]);
+      await tmux(["set-option","-g","default-shell","/bin/bash"]);
+      const script=path.join(home,"observe.sh");
+      writeFileSync(script,`export HISTFILE=/dev/null\nprintf '%s|%s\\n' "\${XDG_RUNTIME_DIR-absent}" "\${DBUS_SESSION_BUS_ADDRESS-absent}" > ${shellQuote(observed)}\nexec /bin/bash --noprofile --norc\n`);
+      await tmux(["set-option","-g","default-command",`exec /bin/bash ${shellQuote(script)}`]);
+      const selected={OPENRIG_NODE_ID:"owned-node",...seatEnv};
+      if (mode==="respawn") {
+        await tmux(["new-session","-d","-s","seat","sleep 60"]);
+        await tmux(["set-window-option","-t","=seat:","remain-on-exit","on"]);
+        await tmux(["respawn-pane","-k","-t","=seat:","/bin/sh","-c","exit"]);
+        for(let i=0;i<100 && await tmux(["display-message","-p","-t","=seat:","#{pane_dead}"])!=="1";i++) await new Promise(r=>setTimeout(r,25));
+        expect((await adapter.respawnPane(await tmux(["display-message","-p","-t","=seat:","#{pane_id}"]),undefined,{cwd:home,env:selected})).ok).toBe(true);
+      } else expect((await adapter.createSession("seat",home,selected)).ok).toBe(true);
+      expect(await waitFile(observed)).toEqual(expected);
+    } finally {await tmux(["kill-server"]).catch(()=>{});vi.unstubAllEnvs();rmSync(home,{recursive:true,force:true,maxRetries:5,retryDelay:20});}
   });
 
   it.each(["create","respawn"])("returns the scoped-environment fallback warning to %s callers",async mode=>{

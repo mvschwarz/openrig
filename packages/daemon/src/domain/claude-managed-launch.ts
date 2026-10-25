@@ -12,6 +12,7 @@ import { claudeClassicRendererEnvPrefix } from "../adapters/yolo-mode.js";
 import { parseClaudePermissionModes } from "./permission-drift.js";
 import { validateNativePermissionSelection } from "./native-permission-selection.js";
 import { seatLaunchAdditionsForLaunch } from "./seat-launch-additions.js";
+import { NO_SESSION_BUS } from "./seat-runtime-dir.js";
 import { effectiveRuntimeHome } from "./seat-runtime-home.js";
 import { claudeSeatTokenFallbackNotice, claudeSeatTokenFileProblem, claudeSeatTokenStep, readClaudeSeatTokenRef, type ClaudeSeatTokenRef } from "./claude-seat-token.js";
 import { OUTRANKING_TOKEN_ENV, projectRootForLocalSettings, settingsFileConflicts, type CredentialConflict, type CredentialPrecedence } from "./claude-credential-precedence.js";
@@ -59,10 +60,10 @@ const PANE_TERMINAL_KEYS = ["TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_V
 /** The person's editor and display session, so a managed seat behaves like a plain one for Claude's external-editor
  *  action (EDITOR, VISUAL; Claude falls back to VS Code without them) and for image paste, which runs
  *  `xclip || wl-paste` (DISPLAY with XAUTHORITY reach X11; WAYLAND_DISPLAY reaches the compositor, see below). Names only:
- *  the pane supplies the values. Left out: XDG_RUNTIME_DIR, because sd-bus, GDBus and libdbus fall back to
- *  $XDG_RUNTIME_DIR/bus when DBUS_SESSION_BUS_ADDRESS is unset, so it would hand the seat the session bus (keyring,
- *  `systemctl --user`) that the cleared environment keeps out; and DBUS_SESSION_BUS_ADDRESS, XDG_SESSION_TYPE and
- *  XDG_CURRENT_DESKTOP, which neither path reads. */
+ *  the pane supplies the values. Left out: XDG_SESSION_TYPE and XDG_CURRENT_DESKTOP, which neither path reads. A pane's
+ *  XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS are forwarded only as OpenRig's own pair (seat-runtime-dir.ts, below):
+ *  sd-bus, GDBus and libdbus fall back to $XDG_RUNTIME_DIR/bus when the address is unset, so a runtime directory alone
+ *  would hand the seat the session bus (the keyring, notifications) that the cleared environment keeps out. */
 const PANE_SESSION_KEYS = ["EDITOR", "VISUAL", "DISPLAY", "XAUTHORITY"];
 
 /** WAYLAND_DISPLAY without XDG_RUNTIME_DIR: a client resolves a relative socket name against XDG_RUNTIME_DIR, but an
@@ -319,6 +320,16 @@ export class ClaudeManagedLaunch {
     const otherwise = (key: string) => selectedKeys.includes(key) ? "" : ` else unset ${key};`;
     const terminal = terminalKeys.map(key => `if [ -n "\${${key}-}" ]; then export ${key};${otherwise(key)} fi`);
     terminal.push(`if [ -n "$${WAYLAND_DISPLAY_VAR}" ]; then export WAYLAND_DISPLAY="$${WAYLAND_DISPLAY_VAR}";${otherwise("WAYLAND_DISPLAY")} fi`);
+    // The runtime directory reaches Claude when the pane has OpenRig's pair (the directory and the bus address that can't
+    // connect), or beside the seat's own declared bus address. A pane's own runtime directory or bus address, from a shell
+    // profile or tmux's update-environment, stays out as before. Declared names are forwarded above as they are.
+    const ownBus = selectedKeys.includes("DBUS_SESSION_BUS_ADDRESS");
+    const openRigBus = `[ "\${DBUS_SESSION_BUS_ADDRESS-}" = ${shellQuote(NO_SESSION_BUS)} ]`;
+    const runtimeDir = [
+      ...(selectedKeys.includes("XDG_RUNTIME_DIR") ? [] : [`if [ -n "\${XDG_RUNTIME_DIR-}" ] && `
+        + `${ownBus ? '[ -n "${DBUS_SESSION_BUS_ADDRESS-}" ]' : openRigBus}; then export XDG_RUNTIME_DIR; else unset XDG_RUNTIME_DIR; fi`]),
+      ...(ownBus ? [] : [`if ${openRigBus}; then export DBUS_SESSION_BUS_ADDRESS; else unset DBUS_SESSION_BUS_ADDRESS; fi`]),
+    ];
     // A seat's own subscription token (rig provider switch --seat) is read from its file as Claude starts, after the
     // removals are worked out, so the value never passes through OpenRig. The reduction keeps the name the step sets; when the
     // file can't be read, Claude still starts, and a token the reduction would have removed is removed by the step instead.
@@ -329,7 +340,8 @@ export class ClaudeManagedLaunch {
     return Object.freeze({ assertCurrent, warnings, configDir: context.configDir, executable: context.executable, executableIsScript: context.executableIsScript, command: (args: readonly string[], launchEnv: Readonly<Record<string, string>> = {}) => {
       assertCurrent();
       const launch = Object.entries(launchEnv).map(([key, value]) => `export ${shellQuote(`${key}=${value}`)}`);
-      const keep = [...selectedKeys, ...terminalKeys, "WAYLAND_DISPLAY", ...Object.keys(launchEnv), ...(token ? ["CLAUDE_CODE_OAUTH_TOKEN"] : [])];
+      const keep = [...selectedKeys, ...terminalKeys, "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
+        ...Object.keys(launchEnv), ...(token ? ["CLAUDE_CODE_OAUTH_TOKEN"] : [])];
       // env -0 keeps multiline values out of the name parser. The existing daemon's Node reads
       // that pipe with an empty environment (no pane NODE_OPTIONS); only removal names reach argv.
       const removalArgs = `const data=require("node:fs").readFileSync(0,"utf8"); if(!data.endsWith("\\0"))process.exit(1); `
@@ -337,7 +349,7 @@ export class ClaudeManagedLaunch {
         + `process.stdout.write("set -- "+data.split("\\0").filter(s=>s.includes("=")).map(s=>s.slice(0,s.indexOf("="))).filter(k=>!keep.has(k)).flatMap(k=>["-u",quote(k)]).join(" "));`;
       const clear = `__openrig_remove=$(/usr/bin/env -0 | /usr/bin/env -i ${shellQuote(process.execPath)} -e ${shellQuote(removalArgs)}) && eval "$__openrig_remove"`;
       return `${WAYLAND_DISPLAY_ASSIGNMENT}; cd ${shellQuote(cwd)} && {
-${[...assignments, ...forwarded, ...seatForwarded, ...projectForwarded, ...terminal, ...launch].join("\n")}
+${[...assignments, ...forwarded, ...seatForwarded, ...projectForwarded, ...terminal, ...runtimeDir, ...launch].join("\n")}
 ${clear} && ${tokenStep}exec /usr/bin/env "$@" ${[shellQuote(context.executable), ...args.map(shellQuote)].join(" ")}
 }`;
     } });

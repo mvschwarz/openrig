@@ -256,6 +256,7 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
   // Pi v1.4.0 extension-selector.ts draws this chrome independently of footer metadata.
   const piSelectors = [
     ["named session", piConfirmation],
+    ["48-column selector with wrapped hints", piConfirmation.replaceAll("─".repeat(36), "─".repeat(48)).replace("escape/ctrl+c cancel", "escape/ctrl+c\n cancel")],
     ["unnamed in git", piConfirmation.replace("~/project • tui", "~/project (main)")],
     ["unnamed outside git", piConfirmation.replace("~/project • tui", "~/project")],
     ["extension status", `${piConfirmation}\nplan: on`],
@@ -283,6 +284,110 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(sendText).not.toHaveBeenCalled();
     expect(sendKeys).not.toHaveBeenCalled();
     expect(capturePaneContent).toHaveBeenCalledWith("%42", 20);
+  });
+
+  // Reconstructed from Pi v1.4.0 extension-input/editor source, not a native capture.
+  const piDialogBorder = "─".repeat(100);
+  const piInput = [piDialogBorder, "", " Your response", "", "> ", "", " enter submit  escape/ctrl+c cancel", "", piDialogBorder, "~/project"].join("\n");
+  const piEditor = [piDialogBorder, "", " Edit response", "", piDialogBorder, "draft line", "", piDialogBorder, "", " enter submit  shift+enter/ctrl+j newline  escape/ctrl+c cancel  ctrl+g external editor", "", piDialogBorder, "~/project"].join("\n");
+  // Text(paddingX=1) wraps default hints at width-2; Editor renders 30% of terminal rows.
+  const piEditor80 = piEditor.replaceAll(piDialogBorder, "─".repeat(80)).replace(
+    "ctrl+g external editor", "ctrl+g\n external editor");
+  const piEditor67 = piEditor.replaceAll(piDialogBorder, "─".repeat(67)).replace(
+    "ctrl+g external editor", "\n ctrl+g external editor");
+  const piTallEditor = piEditor.replace("draft line\n\n", Array.from({ length: 15 }, (_, i) => `line ${i}\n`).join(""));
+  const piScrolledTail = piTallEditor.replace(`\n${piDialogBorder}\n\n enter submit`,
+    `\n${"─".repeat(45)} ↓ 3 more ${"─".repeat(45)}\n\n enter submit`).split("\n").slice(-20).join("\n");
+  const piTextDialogs = [
+    ["empty input", piInput],
+    ["input with text and description", piInput.replace("Your response", "Your response (10s)\n\n Description").replace("> ", "> existing answer")],
+    ["input rebound keys", piInput.replace("enter submit  escape/ctrl+c cancel", "ctrl+y submit  ctrl+n cancel")],
+    ["editor with blank line", piEditor],
+    ["empty editor", piEditor.replace("draft line", "")],
+    ["editor rebound keys", piEditor.replace("enter submit  shift+enter/ctrl+j newline  escape/ctrl+c cancel  ctrl+g external editor", "ctrl+y submit  alt+n newline  ctrl+n cancel  ctrl+e external editor")],
+    ["scrolling editor", piEditor.replace(`draft line\n\n${piDialogBorder}`, `draft line\nrow 2\nrow 3\nrow 4\n\n${"─".repeat(45)} ↓ 3 more ${"─".repeat(45)}`)],
+    ["80x24 editor with wrapped default hints", piEditor80],
+    ["67x17 editor with wrapped default hints", piEditor67],
+    ["40-column editor with three hint rows", piEditor.replaceAll(piDialogBorder, "─".repeat(40))
+      .replace("ctrl+j newline", "ctrl+j\n newline").replace("ctrl+g external editor", "ctrl+g\n external editor")],
+    ["100x50 editor with 15-row body", piTallEditor],
+    ["100x50 scrolled editor from 20-line capture", piScrolledTail],
+    ["editor opening clipped", piEditor.slice(piEditor.indexOf("draft line"))],
+    ["30-column input with wrapped hints", piInput.replaceAll(piDialogBorder, "─".repeat(30)).replace("escape/ctrl+c cancel", "escape/ctrl+c\n cancel")],
+    ["widget and named footer", `${piInput} • named\ncustom status\nwidget below editor`],
+  ] as const;
+  it.each(piTextDialogs.flatMap(([layout, pane]) => [null, "unknown", "pi"].map(runtime => [layout, runtime, pane] as const)))(
+    "plain send refuses the current Pi text dialog (%s) with runtime %s", async (_layout, runtime, pane) => {
+      const node = rigRepo.addNode(rigId, "adopted.worker", { role: "worker" });
+      db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(runtime, node.id);
+      const seat = "adopted-tui";
+      sessionRegistry.registerClaimedSession(node.id, seat);
+      sessionRegistry.updateBinding(node.id, { tmuxSession: seat, tmuxPane: "%42" });
+      const { sendText, sendKeys } = spies();
+      const result = await makeTransport(mockTmux({ capturePaneContent: async () => pane, sendText, sendKeys })).send(seat, "a peer message");
+      expect(result.reason).toBe("target_needs_input");
+      expect(result.activity?.state).toBe("needs_input");
+      expect(sendText).not.toHaveBeenCalled();
+      expect(sendKeys).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["80-column wrapped help", "─".repeat(80), " enter submit  shift+enter/ctrl+j newline  escape/ctrl+c cancel  ctrl+g\n external editor"],
+    ["100-column single-line help", piDialogBorder, " enter submit  shift+enter/ctrl+j newline  escape/ctrl+c cancel  ctrl+g external editor"],
+  ].flatMap(([layout, border, draft]) => [null, "unknown", "pi"].map(runtime =>
+    [layout, runtime, [border, draft, border, "~/project"].join("\n")] as const)))(
+    "ordinary send does not treat a main-editor help draft as a dialog (%s), runtime %s", async (_layout, runtime, pane) => {
+      const node = rigRepo.addNode(rigId, "adopted.worker", { role: "worker" });
+      db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(runtime, node.id);
+      const seat = "adopted-tui";
+      sessionRegistry.registerClaimedSession(node.id, seat);
+      sessionRegistry.updateBinding(node.id, { tmuxSession: seat, tmuxPane: "%42" });
+      const { sendText, sendKeys } = spies();
+      const result = await makeTransport(mockTmux({ capturePaneContent: async () => pane, sendText, sendKeys })).send(seat, "a peer message");
+      expect(result.ok).toBe(true);
+      expect(classifyPaneActivity(pane, { runtime }).state).not.toBe("attention");
+      expect(sendText).toHaveBeenCalledTimes(1);
+      expect(sendKeys).toHaveBeenCalledWith(seat, ["Enter"]);
+      expect(overrideEvents()).toHaveLength(0);
+    },
+  );
+
+  it.each([piInput, piEditor])("keeps deliberate, audited input available for a Pi text dialog (%#)", async (pane) => {
+    const node = rigRepo.addNode(rigId, "adopted.worker", { role: "worker" });
+    const seat = "adopted-tui";
+    sessionRegistry.registerClaimedSession(node.id, seat);
+    sessionRegistry.updateBinding(node.id, { tmuxSession: seat, tmuxPane: "%42" });
+    const { sendText, sendKeys } = spies();
+    const result = await makeTransport(mockTmux({ capturePaneContent: async () => pane, sendText, sendKeys }))
+      .send(seat, "intentional answer", { dangerouslyInteract: true, reason: "operator answers this dialog" });
+    expect(result.ok).toBe(true);
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(overrideEvents()).toHaveLength(1);
+  });
+
+  it.each(piTextDialogs.flatMap(([kind, pane]) => [
+    [`${kind} followed by a later composer`, `${pane}\n────────────────────────────────────\nordinary draft\n────────────────────────────────────\n~/project`],
+    [`${kind} in fenced output`, `\`\`\`text\n${pane}\n\`\`\``],
+    [`${kind} in a blockquote`, pane.split("\n").map(line => `> ${line}`).join("\n")],
+    [`${kind} beyond the footer bound`, `${pane}\n${Array.from({ length: 8 }, (_, i) => `later output ${i}`).join("\n")}`],
+  ]))("keeps %s out of current Pi dialog recognition", (_name, pane) => {
+    expect(classifyPaneActivity(pane, { runtime: "unknown" }).state).not.toBe("attention");
+  });
+
+  it.each([
+    ["editor missing spacer before help", piEditor80.replace("\n\n enter submit", "\n enter submit")],
+    ["editor missing spacer after help", piEditor80.replace(`external editor\n\n${"─".repeat(80)}`, `external editor\n${"─".repeat(80)}`)],
+    ["editor missing bottom rule", piEditor.replace(`${piDialogBorder}\n\n enter submit`, "\n enter submit")],
+    ["editor hint exceeds three rows", piEditor.replaceAll(piDialogBorder, "─".repeat(30))
+      .replace("submit  shift+enter", "submit\n shift+enter").replace("newline  escape", "newline\n escape")
+      .replace("ctrl+g external editor", "ctrl+g\n external editor")],
+    ["editor partial hint", piEditor.replace("ctrl+g external editor", "external editor")],
+    ["editor hint split by blank row", piEditor80.replace("ctrl+g\n external editor", "ctrl+g\n\n external editor")],
+    ["input opening clipped", piInput.slice(piInput.indexOf(" Your response"))],
+    ["input opening past scan bound", piInput.replace("Your response", Array.from({ length: 14 }, () => "description").join("\n"))],
+  ])("does not infer a Pi dialog from incomplete or oversized bodies: %s", (_name, pane) => {
+    expect(classifyPaneActivity(pane, { runtime: "unknown" }).state).not.toBe("attention");
   });
 
   it("recognizes the Pi confirmation when No is selected", () => {

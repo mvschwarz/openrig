@@ -236,6 +236,60 @@ future managed launches of that stable seat; it does not rewrite this spec or
 its inherited policy provenance. `inherit` removes that override. See
 [per-seat permission mode](getting-started.md#per-seat-permission-mode).
 
+### Per-member Claude tool rules
+
+Claude members can record tool rules independently, even when they share a project folder:
+
+```yaml
+claude_permissions:
+  allow: ["Bash(node lane-reader.mjs *)"]
+  deny: ["Read(./private/**)"]
+```
+
+This field accepts only `allow` and `deny` lists of native Claude rule strings. It is
+also supported on legacy flat Claude nodes. Other runtimes, `ask`, mode settings,
+arbitrary settings and parenthesized MCP rules are rejected. Shape validation does
+not establish support by every Claude version.
+
+The initial spec records the rules on the stable seat. For an existing seat, put the
+complete replacement in a JSON file and use the existing audited permission command:
+
+```sh
+rig seat set-permissions dev-reader@team --rules member-rules.json --reason "Select the reader lane"
+rig seat status dev-reader@team --json
+```
+
+Choose either `--rules` or `--mode`, never both. Empty allow and deny lists clear the
+seat's rules. Updating rules leaves the permission mode, running process and history
+unchanged; they apply at the next separately authorized managed launch or resume.
+Restore and same-seat handover read that same record. A fork copies the source's
+currently recorded rules independently, including retained-seat updates. Export
+contains the current record. An invalid or unreadable record refuses that seat's
+launch, fork or export with a repair message rather than silently omitting its denies.
+
+OpenRig composes these rules into its one operational `--settings` value, preserving
+team/kernel defaults, hooks and managed-compaction settings. It never writes them
+into the shared project's Claude settings. Without the field or a recorded update,
+launch arguments are unchanged. Status reports the next-launch plan and lists the
+added rules; it does not verify native enforcement.
+
+Rules add to inherited native permissions; an allow list cannot withdraw broader
+user or project grants. In bypass mode, allows do not constrain access. Managed
+policy and installed mods can change rule behavior; see [Claude's permission
+precedence](https://code.claude.com/docs/en/permissions#precedence-among-rules-hooks-and-mods).
+These are native tool rules, not OS-user or credential isolation. Native acceptance
+and effects must be checked on the Claude version and configuration being used.
+
+**Downgrade:** a file-backed SQLite and launch-composition check against the
+pre-feature reader at `75c1f045` found that it can open the upgraded database but
+omits the recorded rules from launch arguments. This pair is not
+restriction-preserving. The stored bytes survive and the supporting reader recovers
+them; a process already launched by older code is unchanged. Keep a copy of the
+intended rules and establish equivalent native restrictions before using an older
+managed-launch path. Other version pairs and native enforcement need their own checks.
+The launch still uses inline JSON, subject to the operating system's argument-size
+limits.
+
 ### Team launch defaults
 
 A non-kernel Claude or Codex seat with no authored permission policy, explicit
@@ -374,13 +428,19 @@ pods:
 - A seat gets the rig's `env` with its own `env` laid over it, name by name.
 - The same environment is applied on first launch, on `rig up <rig-name>` restore, and to the successor of a seat handover.
 - `rig up <spec> --env KEY=VALUE` (repeatable) adds or overrides a value for one launch, except `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, which the CLI leaves out with a note (see "A seat's own account" below). A one-off value belongs to the terminal that launch creates: it stays in that terminal's environment for as long as the terminal lives, and OpenRig removes it from the tmux session's environment as soon as the terminal has started, so a terminal started later in that session does not get it. If OpenRig can't take it out, the seat keeps running and the launch warns, naming the variable and the tmux command to put it back or remove it. Until then, a terminal started later in that session would get it. A restore, a handover successor or any later launch starts from the spec's `env:` alone, so the value is not saved and does not carry forward. To keep a value, put it in `env:`. One exception to "does not carry forward", for a managed Claude seat (see below): a one-off name that the seat's spec does not declare stays on the session's list of names, `OPENRIG_SEAT_ENV_KEYS` (names only, no values), because the first launch and an in-place restart of the same terminal read that list. So if a later pane in that session gets a value for that name from the tmux server's own environment, its managed Claude launch can forward that value, where a launch without `--env` would leave it out. The first launch's one-off value itself is not passed on to that pane. This comes from reading the code and has not been measured. `--env` does not apply to `rig up <rig-name>` (a restore) or to a topology (several rigs from their own specs); the CLI refuses both. For a topology, put `env:` in each rig's spec.
+- **The runtime directory, on Linux.** When the daemon runs with an absolute `XDG_RUNTIME_DIR` (usually `/run/user/<uid>`), a seat gets the same `XDG_RUNTIME_DIR`, so a tool that keeps its socket there, such as an MCP server's daemon or `gpg-agent`, works inside the seat without per-tool setup. It comes with `DBUS_SESSION_BUS_ADDRESS=disabled:`, an address that D-Bus clients refuse. sd-bus, GDBus and libdbus look for your session bus at `$XDG_RUNTIME_DIR/bus`, or start one, only when that variable is unset, so a seat doesn't find your session bus (the keyring, notifications) on its own. This is a default, not isolation: `systemctl --user` reaches your service manager through its own socket in the runtime directory, as any tool there can.
+  - A seat's own value wins. Set `DBUS_SESSION_BUS_ADDRESS` in `env:` to give a seat a bus. Set `XDG_RUNTIME_DIR` there to choose the directory yourself; the seat then gets no bus address, as before, so its D-Bus clients find the bus in that directory. A name listed in tmux's `update-environment` counts as the seat's own too.
+  - A shell startup file that runs in the seat's terminal can still change either name. One that sets only `XDG_RUNTIME_DIR` now leaves the seat with `disabled:`, where before its clients found your bus; set the bus address in `env:` or in that file to keep it.
+  - With `terminal.inherit_tmux_environment` on, a seat gets tmux's environment as before, and OpenRig adds neither name. On macOS, and for a daemon started without `XDG_RUNTIME_DIR`, nothing changes.
+  - Codex passes only a fixed list of variables to the MCP servers it starts, so a Codex seat's MCP server gets the runtime directory only when its entry in `config.toml` names it: `env_vars = ["XDG_RUNTIME_DIR"]`. Codex's hooks and shell commands get it without that, and so do Claude Code's MCP servers and hooks. Pi and OMP agent processes don't get it (see below).
+  - It applies at a seat's next launch, restore or handover; a seat that is up keeps the environment it started with.
 - Names starting `OPENRIG_` are reserved for OpenRig and refused. Empty values are refused, because the launch omits empty variables.
 - `rig export` writes the rig and member `env:` back out.
 
 **Where the declared names reach, by runtime.** Declared values are handed to the seat's terminal as tmux environment, so most seats take them as given:
 
 - Plain Claude Code (no permission mode selected), Codex and terminal seats take a spec `HOME`, `PATH` or `CLAUDE_CONFIG_DIR` as given.
-- The cleared environment (`env -i`) belongs only to a managed Claude launch, which is the one used when a permission mode is selected for the seat (for example `permission_policy: builtin:auto`). It forwards the declared names through the cleared environment, except `PATH`, `HOME` and `CLAUDE_CONFIG_DIR`, which OpenRig sets for that launch itself, and `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN`, for which it sets its own renderer setting. A spec value for any of those four is not forwarded as such; an absolute `CLAUDE_CONFIG_DIR` becomes the config dir OpenRig sets (see "A seat's own account" below). A seat that selected the shipped `openrig-core` plugin also has `CLAUDE_CODE_PLUGIN_DIRS` (the vendored plugin, added after a list the seat declares itself) among its declared names, so it is forwarded like the others and the plugin's hooks load in a seat with a permission mode as in one without; a seat that didn't select the plugin has no such name added. Beyond the declared names, the launch also forwards, by name and only when the seat's terminal has them set, the terminal and locale variables (`TERM`, `COLORTERM`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `LANG` and the `LC_*` names) and the person's editor and display session: `EDITOR`, `VISUAL`, `DISPLAY`, `XAUTHORITY` and `WAYLAND_DISPLAY`. They let Claude's external-editor action open the person's editor and let image paste reach the clipboard, without a value in a spec. `WAYLAND_DISPLAY` is passed as an absolute path: an absolute value is kept, and a relative one is joined to the terminal's `XDG_RUNTIME_DIR`; if the terminal has no `XDG_RUNTIME_DIR` for it, the name is left out. `XDG_RUNTIME_DIR` itself is not forwarded, because D-Bus clients look for the session bus at `$XDG_RUNTIME_DIR/bus` and would reach the keyring and `systemctl --user`. `DBUS_SESSION_BUS_ADDRESS`, `XDG_SESSION_TYPE`, `XDG_CURRENT_DESKTOP` and `SSH_AUTH_SOCK` are not forwarded either. A running seat picks the names up at its next managed Claude launch, not before: `rig seat launch <seat> --fresh --stop --reason "<why>"` for that seat alone (a new conversation), or a restore of the whole rig (`rig down <rig>`, then `rig up <rig> --existing`, which resumes each conversation but restarts every seat in the rig), or a handover. A seat that is up keeps the environment it started with.
+- The cleared environment (`env -i`) belongs only to a managed Claude launch, which is the one used when a permission mode is selected for the seat (for example `permission_policy: builtin:auto`). It forwards the declared names through the cleared environment, except `PATH`, `HOME` and `CLAUDE_CONFIG_DIR`, which OpenRig sets for that launch itself, and `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN`, for which it sets its own renderer setting. A spec value for any of those four is not forwarded as such; an absolute `CLAUDE_CONFIG_DIR` becomes the config dir OpenRig sets (see "A seat's own account" below). A seat that selected the shipped `openrig-core` plugin also has `CLAUDE_CODE_PLUGIN_DIRS` (the vendored plugin, added after a list the seat declares itself) among its declared names, so it is forwarded like the others and the plugin's hooks load in a seat with a permission mode as in one without; a seat that didn't select the plugin has no such name added. Beyond the declared names, the launch also forwards, by name and only when the seat's terminal has them set, the terminal and locale variables (`TERM`, `COLORTERM`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `LANG` and the `LC_*` names) and the person's editor and display session: `EDITOR`, `VISUAL`, `DISPLAY`, `XAUTHORITY` and `WAYLAND_DISPLAY`. They let Claude's external-editor action open the person's editor and let image paste reach the clipboard, without a value in a spec. `WAYLAND_DISPLAY` is passed as an absolute path: an absolute value is kept, and a relative one is joined to the terminal's `XDG_RUNTIME_DIR`; if the terminal has no `XDG_RUNTIME_DIR` for it, the name is left out. The runtime directory and its `disabled:` bus address (see "The runtime directory, on Linux" above) are forwarded together, and the runtime directory is also forwarded beside a declared `DBUS_SESSION_BUS_ADDRESS`. A terminal's own `XDG_RUNTIME_DIR` or `DBUS_SESSION_BUS_ADDRESS`, from a shell startup file or tmux's `update-environment`, is not, because D-Bus clients look for the session bus at `$XDG_RUNTIME_DIR/bus` when no address is set; declare it in `env:` to forward it. `XDG_SESSION_TYPE`, `XDG_CURRENT_DESKTOP` and `SSH_AUTH_SOCK` are not forwarded. A running seat picks the names up at its next managed Claude launch, not before: `rig seat launch <seat> --fresh --stop --reason "<why>"` for that seat alone (a new conversation), or a restore of the whole rig (`rig down <rig>`, then `rig up <rig> --existing`, which resumes each conversation but restarts every seat in the rig), or a handover. A seat that is up keeps the environment it started with.
 - Codex seats run OpenRig's own Codex executable whatever a spec `PATH` says. They use the seat's own `CODEX_HOME` when its `env:` declares an absolute one, else the daemon's when the daemon has one.
 - On Pi and OMP seats the values reach the terminal. The agent process gets only what the runner passes on, so a spec or one-off value reaches it only for the names the runner always passes: `PATH`, `HOME`, `USER`, `LOGNAME`, `TERM`, `LANG`, `LC_ALL`, `SHELL` and `TMPDIR`. Pi's agent process receives the runner's `HOME`, so a spec or one-off `HOME` value that reaches the runner is passed to Pi; OMP's agent process gets its seat state directory (`$OPENRIG_HOME/state/omp/<seat>`, see Oh My Pi below) as `HOME`, so a `HOME` value does not reach it. The selected provider's variables are passed separately, as described under each runtime.
 

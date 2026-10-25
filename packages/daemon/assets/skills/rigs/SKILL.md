@@ -92,8 +92,8 @@ person needs in their project or home folder and name that path.
   open, point them to it rather than opening another. Only if the window cannot open, `rig tui --shared` is the
   dashboard-only fallback; explain the failure and help with the chosen fallback. Herdr is visible only in a terminal
   the person can see; switching the shared TUI to `:terminals` does not open one. No and headless/SSH use are valid
-  background outcomes. Provider-only `--provider herdr`, `--provider cmux` or `--provider rex` is for an existing provider workspace,
-  not the first desktop window.
+  background outcomes. Provider-only `--provider herdr`, `--provider cmux` or `--provider rex` is for a provider that's
+  already running, not the first desktop window, and each such open adds a new workspace.
 - **If the window can't open, or over headless SSH:** say plainly that no visible terminal was opened, and ask the
   person to open a new terminal window or tab on the daemon's host. Over SSH, that's a new SSH session to it with the
   known account. If you only know an HTTP daemon address, ask for the SSH details rather than inventing them. Then

@@ -372,10 +372,11 @@ seatRoutes.post("/set-permissions/:seatRef", async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
   const actor = transportSenderSession(c) ?? (typeof body?.operator === "string" ? body.operator.trim() : undefined);
   if (!actor) return c.json({ error: "Sender identity is required; pass --operator <address> when running outside a managed seat." }, 400);
-  if (!body || Array.isArray(body) || typeof body.mode !== "string") return c.json({ error: "mode is required" }, 400);
+  if (!body || Array.isArray(body) || (body.rules === undefined && typeof body.mode !== "string")) return c.json({ error: "mode is required" }, 400);
+  if (body.rules !== undefined && body.mode !== undefined) return c.json({ error: "Choose exactly one of mode or rules" }, 400);
   if (typeof body.reason !== "string") return c.json({ error: "reason is required" }, 400);
   const result = await seatLifecycleService(c).setPermissions({
-    seatRef: c.req.param("seatRef"), mode: body.mode, reason: body.reason, actor,
+    seatRef: c.req.param("seatRef"), ...(typeof body.mode === "string" ? { mode: body.mode } : { rules: body.rules }), reason: body.reason, actor,
   });
   return c.json(result, result.ok ? 200 : seatLifecycleStatus(result.code));
 });

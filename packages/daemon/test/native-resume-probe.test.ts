@@ -909,6 +909,107 @@ describe("native resume probe", () => {
     ).toBe("model_selection_gate");
   });
 
+  it.each([
+    ["banner", [
+      "╭───────────────────────────────────────╮",
+      "│ >_ OpenAI Codex (v0.124.0)            │",
+      "╰───────────────────────────────────────╯",
+      "",
+      "› 1. Switch to gpt-5.1-codex-mini Optimized for codex. Cheaper,",
+      "  2. Switch to gpt-5.4-codex Stronger for complex tasks.",
+      "  3. Keep current model",
+      "",
+      "  gpt-5.4 default · ~/code/openrig",
+    ]],
+    ["structural", ["› 1. gpt-5.1-codex-mini", "  2. gpt-5.4-codex", "", "  gpt-5.4 default · ~/code/openrig"]],
+    ["» header", ["OpenAI Codex (v0.153.4)", "» 1. gpt-6-astra", "  2. gpt-6-sol", "  gpt-6-astra ultra · ~/Documents/openrig"]],
+  ])("keeps the %s Codex model chooser drawn high in a tall pane a gate", (_shape, rows) => {
+    const paneContent = `${rows.join("\n")}\n${Array<string>(45).fill("").join("\n")}`;
+
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "codex", paneContent }))
+      .toMatchObject({ status: "inconclusive", code: "model_selection_gate" });
+  });
+
+  // A chooser counts only while it's the last thing drawn. Chooser rows (or text quoting one) above a later composer
+  // are history, whether the pane reaches its bottom (the capture's final newline is its only blank) or is drawn high.
+  describe("a chooser above a later composer is history", () => {
+    const claudeResumed = ["Claude Code v2.1.310", "", "● Picked up where we left off.", "", "─".repeat(40), "❯ ", "─".repeat(40),
+      "  ⏵⏵ accept edits on (shift+tab to cycle)"].join("\n");
+    const codexResumed = ["╭────────────────────────────╮", "│ >_ OpenAI Codex (v0.164.0) │", "╰────────────────────────────╯", "",
+      "› Ask Codex to do anything", "", "  gpt-6-astra ultra · ~/code/openrig"].join("\n");
+    const shapes = { bottom: (pane: string) => `${pane}\n`, tall: (pane: string) => `${pane}\n${Array<string>(45).fill("").join("\n")}` };
+    const cases: Array<[string, "claude-code" | "codex", string]> = [
+      ["an old numbered Claude chooser", "claude-code", "Choose a conversation to resume:\n\n  1. project-foo (modified 2h ago)\n  2. project-bar (modified yesterday)\n\nEnter a number, or press q to cancel."],
+      ["an old › arrow Claude chooser", "claude-code", "Choose the conversation to resume:\n\n› 1. recent project\n  2. older project"],
+      ["an old two-choice Claude chooser", "claude-code", "How would you like to resume?\n\n❯ Resume from summary\n  Resume full session as-is"],
+      ["a reply quoting the whole Claude chooser", "claude-code", "● The chooser read:\nHow would you like to resume?\n❯ Resume from summary\n  Resume full session as-is"],
+      ["a reply naming the Claude chooser and ending in a list", "claude-code", "● Choose a conversation to resume only if asked. Next:\n  1. run the tests\n  2. push the branch"],
+      ["an old Codex model chooser", "codex", "› 1. gpt-5.1-codex-mini\n  2. gpt-5.4-codex\n\n  gpt-5.4 default · ~/code/openrig"],
+      ["a Codex answer listing two models", "codex", "• Two options:\n  1. gpt-6-astra for depth\n  2. gpt-6-sol for speed"],
+    ];
+    for (const [shape, wrap] of Object.entries(shapes)) {
+      it.each(cases)(`reads ${shape}: %s, then a resumed session, as resumed`, (_name, runtime, earlier) => {
+        const paneContent = wrap(`${earlier}\n\n${runtime === "codex" ? codexResumed : claudeResumed}`);
+        expect(assessNativeResumeProbe({ runtime, paneCommand: runtime === "codex" ? "codex" : "claude", paneContent }))
+          .toMatchObject({ status: "resumed", code: "active_runtime" });
+      });
+    }
+
+    it("reads an old heading far above a later numbered list and Claude's composer as resumed", () => {
+      const conversation = Array.from({ length: 35 }, (_, at) => `  line ${at} of the conversation`).join("\n");
+      const paneContent = `Choose a conversation to resume:\n${conversation}\n  1. run the tests\n  2. push the branch\n\n${claudeResumed}\n`;
+      expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent }))
+        .toMatchObject({ status: "resumed", code: "active_runtime" });
+    });
+
+    // A composer whose draft starts with "1." looks like a numbered option row; Claude's input frame (a rule above the
+    // ❯ row and another below) tells them apart. On a named session (OpenRig's seats) Claude 2.1.309 labels the top
+    // rule; these are its recorded 80-column rule rows (dev50-qa's #1955 native frame `b-question-cancel-observe`).
+    const plainRule = "─".repeat(80);
+    const labelledRule = `${"─".repeat(57)} probe-claude@r1955-b ─`;
+    const choosers = {
+      numbered: "Choose a conversation to resume:\n\n  1. project-foo (modified 2h ago)\n  2. project-bar (modified yesterday)",
+      "two-choice": "How would you like to resume?\n\n❯ Resume from summary\n  Resume full session as-is",
+    };
+    it.each(Object.entries(choosers).flatMap(([shape, earlier]) => [[shape, "plain", plainRule, earlier], [shape, "labelled", labelledRule, earlier]]))(
+      "reads an old %s chooser above a %s-frame composer holding a numbered draft as resumed", (_shape, _frame, topRule, earlier) => {
+        const draft = [topRule, "❯ 1. inspect the source", "  2. then fix it", plainRule, "  ⏵⏵ accept edits on (shift+tab to cycle)"].join("\n");
+        expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent: `${earlier}\n\n${draft}\n` }))
+          .toMatchObject({ status: "resumed", code: "active_runtime" });
+      });
+  });
+
+  // A live conversation list can outgrow the window, pushing its heading above the last 30 drawn rows.
+  describe("a live conversation list longer than the window", () => {
+    const list = (rows: number) => ["Choose a conversation to resume:", "",
+      ...Array.from({ length: rows }, (_, at) => `  ${at + 1}. project-${at + 1} (modified ${at + 1}h ago)`), "",
+      "Enter a number, or press q to cancel."].join("\n");
+    it.each([
+      ["bottom-reaching", `${list(40)}\n`],
+      ["drawn high", `${list(40)}\n${Array<string>(20).fill("").join("\n")}`],
+    ])("still reads as attention_required, %s", (_shape, paneContent) => {
+      expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent }))
+        .toMatchObject({ status: "attention_required", code: "claude_resume_selection_prompt" });
+    });
+
+    // A bare ❯ row and a mode footer under a live chooser (restore-orchestrator's headerless chooser screen) aren't Claude's
+    // framed input box, so the chooser stands.
+    it.each([
+      ["conversation list", "Choose a conversation to resume:\n  1. example"],
+      ["two-choice", "How would you like to resume?\n\n❯ Resume from summary\n  Resume full session as-is"],
+    ])("keeps a live %s with a bare ❯ row and a mode footer under it a chooser", (_shape, chooser) => {
+      const paneContent = `${chooser}\n❯ \n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n`;
+      expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent }))
+        .toMatchObject({ status: "attention_required", code: "claude_resume_selection_prompt" });
+    });
+
+    it("keeps a ❯ row that isn't inside Claude's input frame an option, not a composer", () => {
+      const paneContent = "Choose a conversation to resume:\n\n  1. project-foo\n  2. project-bar\n❯ 3. project-baz\n\nEnter a number, or press q to cancel.\n";
+      expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent }))
+        .toMatchObject({ status: "attention_required", code: "claude_resume_selection_prompt" });
+    });
+  });
+
   it("classifies Codex as resumed when an old update banner remains in scrollback but the live TUI is present", () => {
     expect(
       assessNativeResumeProbe({
@@ -1093,6 +1194,18 @@ describe("native resume probe", () => {
       const result = assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent });
 
       expect(result).toMatchObject({ status: "attention_required", code: "claude_resume_selection_prompt" });
+    });
+
+    // A fresh `claude --resume` draws its chooser at the top of the pane; in a tall pane, blank rows fill the rest.
+    it.each([
+      ["numbered", "Claude Code v2.1.89\n\nChoose a conversation to resume:\n\n  1. project-foo (modified 2h ago)\n  2. project-bar (modified yesterday)\n\nEnter a number, or press q to cancel."],
+      ["› arrow", "Choose the conversation to resume:\n\n› 1. recent project\n  2. older project"],
+      ["two-choice resume-mode", "How would you like to resume?\n\n❯ Resume from summary\n  Resume full session as-is"],
+    ])("classifies the %s chooser drawn high in a tall pane as attention_required", (_shape, chooser) => {
+      const paneContent = `${chooser}\n${Array<string>(45).fill("").join("\n")}`;
+
+      expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent }))
+        .toMatchObject({ status: "attention_required", code: "claude_resume_selection_prompt" });
     });
 
     it("does not classify a prose mention of only one current chooser option", () => {

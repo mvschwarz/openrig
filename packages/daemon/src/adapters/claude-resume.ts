@@ -1,3 +1,4 @@
+import type { ClaudePermissionRules } from "../domain/claude-permission-rules.js";
 import { withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
 import { operationalLaunchArgs } from "./kernel-authority.js";
 import { claudeSeatTokenFallbackNotice } from "../domain/claude-seat-token.js";
@@ -76,6 +77,7 @@ export class ClaudeResumeAdapter {
     advisor?: string | null,
     // OPR.0.7.0.9: the seat's own launch additions (copies in its seat storage); absent → byte-identical.
     launchAdditions?: SeatLaunchAdditions,
+    claudePermissions?: ClaudePermissionRules,
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: "Claude resume not available" };
@@ -100,7 +102,7 @@ export class ClaudeResumeAdapter {
     // A seat's own subscription token, as on a fresh launch (claude-code-adapter.ts).
     const seatToken = managed || !nodeId ? null : this.options.claudeManagedLaunch?.seatTokenLaunch?.(nodeId) ?? null;
     const tokenWarnings: string[] = [...(managed?.warnings ?? seatToken?.warnings ?? [])];
-    const choice = { kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture, permissionMode: selectedPermissionMode };
+    const choice = { claudePermissions, kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture, permissionMode: selectedPermissionMode };
     const posture = claudePostureFlag(process.env, resolvedPosture, selectedPermissionMode);
     const appliedLaunch = observeClaudePermission(posture);
     const launchArgs = withManagedRestoreReads(operationalLaunchArgs("claude-code", choice), {

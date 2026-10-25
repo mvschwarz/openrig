@@ -339,33 +339,53 @@ function looksLikeClaudeTrustPrompt(paneContent: string): boolean {
 // when the operator reaches a usable state.
 function looksLikeClaudeResumeSelectionPrompt(paneContent: string): boolean {
   // Current Claude chooser (observed 2026-09-04) asks which fidelity to
-  // resume with. Require the heading, both option rows, and a selection cursor;
-  // prose containing the labels is intentionally insufficient.
-  const recentLines = paneContent.split("\n").slice(-30);
-  const currentChooserHeading = recentLines.some((line) => line.trim() === "How would you like to resume?");
-  const currentChooserOptions = recentLines.filter((line) =>
-    /^\s*(?:[❯›]\s+)?(?:Resume from summary|Resume full session as-is)\s*$/.test(line)
-  );
-  const currentChooserSelection = currentChooserOptions.some((line) => /^\s*[❯›]\s+/.test(line));
-  if (
-    currentChooserHeading
-    && currentChooserSelection
-    && currentChooserOptions.some((line) => line.includes("Resume from summary"))
-    && currentChooserOptions.some((line) => line.includes("Resume full session as-is"))
-  ) return true;
+  // resume with. Require the heading, both option rows after it, and a selection cursor;
+  // prose containing the labels is intentionally insufficient. A chooser drawn
+  // at the top of a tall pane sits above blank rows, so count from the last drawn row.
+  // A chooser counts only while it is the last thing drawn: a composer, header or reply
+  // after its options means it is history above a session that resumed.
+  const drawn = paneContent.trimEnd().split("\n");
+  const recentLines = drawn.slice(-30);
+  const heading = recentLines.map((line) => line.trim() === "How would you like to resume?").lastIndexOf(true);
+  if (heading >= 0) {
+    const after = recentLines.slice(heading + 1);
+    const options = after.map((line) => /^\s*(?:[❯›]\s+)?(?:Resume from summary|Resume full session as-is)\s*$/.test(line));
+    const chosen = (test: (line: string) => boolean) => after.some((line, at) => options[at] && test(line));
+    if (
+      chosen((line) => /^\s*[❯›]\s+/.test(line))
+      && chosen((line) => line.includes("Resume from summary"))
+      && chosen((line) => line.includes("Resume full session as-is"))
+      && !claudeDrawnAfter(after.slice(options.lastIndexOf(true) + 1))
+    ) return true;
+  }
 
   // Stable substring is the explicit "Choose ... conversation" verb plus the
-  // numbered/arrow option marker that Claude prints. Both must be present so
-  // we don't false-positive on similar TUI strings.
-  const hasChooseVerb =
-    paneContent.includes("Choose a conversation")
-    || paneContent.includes("Choose the conversation")
-    || paneContent.includes("Select a conversation");
-  if (!hasChooseVerb) return false;
+  // numbered/arrow option marker that Claude prints after it. A long list can push the
+  // heading above the window, so it's read from the whole capture; the last option must be
+  // in the window, and nothing of Claude's own may be drawn after it.
+  const verb = drawn.map((line) => /Choose (?:a|the) conversation|Select a conversation/.test(line)).lastIndexOf(true);
+  if (verb < 0) return false;
+  const recentStart = Math.max(verb + 1, drawn.length - 30);
+  const lastOption = drawn.map((line, at) => at >= recentStart && /^\s*(?:[›»]\s*)?\d+\.\s+\S/.test(line)).lastIndexOf(true);
+  // A draft's own numbered rows can read as the last options, so the input frame counts anywhere after the heading.
+  return lastOption >= 0 && !claudeDrawnAfter(drawn.slice(lastOption + 1)) && !hasClaudeInputFrame(drawn.slice(verb + 1));
+}
 
-  // Look for the numbered/arrow option marker in recent lines.
-  const numberedOption = recentLines.some((line) => /^\s*(?:[›»]\s*)?\d+\.\s+\S/.test(line));
-  return numberedOption;
+/** Claude's own UI drawn after a chooser's options: its framed input box, its version header or a reply. A bare ❯ row
+ *  doesn't count: it can sit under a live chooser, and a missed chooser reads resumed. Hint rows and blank rows under the
+ *  options belong to the chooser. */
+function claudeDrawnAfter(rows: string[]): boolean {
+  return hasClaudeInputFrame(rows) || rows.some((line) => line.includes("Claude Code v") || /^[●⏺]/.test(line));
+}
+
+// On a named session Claude labels the frame's top rule (`─────…── probe-claude@rig ─`), so a rule may carry text after a space.
+const CLAUDE_INPUT_RULE = /^\s*─{3,}(?:\s.*)?$/;
+
+/** Claude's input frame: a rule, the ❯ row directly under it, and another rule below. A composer holding a draft that
+ *  starts with "1." looks like a numbered option row; the frame is what tells them apart. */
+function hasClaudeInputFrame(rows: string[]): boolean {
+  return rows.some((line, at) => CLAUDE_INPUT_RULE.test(line) && /^\s*❯/.test(rows[at + 1] ?? "")
+    && rows.slice(at + 2).some((row) => CLAUDE_INPUT_RULE.test(row)));
 }
 
 // Claude's interactive refusals of a request for a missing, expired or revoked login (code.claude.com/docs/en/errors).
@@ -580,11 +600,12 @@ function looksLikeCodexHookReviewPrompt(paneContent: string): boolean {
 }
 
 function looksLikeCodexModelSelectionPrompt(paneContent: string): boolean {
-  const recentLines = paneContent.split("\n").slice(-20);
-  const numberedModelOptions = recentLines.filter((line) => (
-    /^\s*(?:[›»]\s*)?\d+\.\s+/.test(line)
-    && /\bgpt-[\w.-]+\b/i.test(line)
-  ));
-
-  return numberedModelOptions.length >= 2;
+  // A chooser drawn at the top of a tall pane sits above blank rows, so count from the last drawn row.
+  const recentLines = paneContent.trimEnd().split("\n").slice(-20);
+  const options = recentLines.map((line) => /^\s*(?:[›»]\s*)?\d+\.\s+/.test(line) && /\bgpt-[\w.-]+\b/i.test(line));
+  if (options.filter(Boolean).length < 2) return false;
+  // The options count only while they are the last thing drawn: a composer or a Codex header after
+  // them means they are history above a session that resumed. The status footer belongs to the chooser.
+  return !recentLines.slice(options.lastIndexOf(true) + 1)
+    .some((line) => line.includes("OpenAI Codex (v") || hasCodexComposer(line));
 }

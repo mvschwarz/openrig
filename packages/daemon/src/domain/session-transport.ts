@@ -3,7 +3,7 @@ import { currentClaudeMcpMenu } from "./claude-mcp-menu.js";
 import stringWidth from "string-width";
 import { CODEX_TURN_STATUS_PATTERN } from "./codex-pane-patterns.js";
 import { randomUUID } from "node:crypto";
-import { COLLAPSED_PASTE, composerRegion, isComposerFooter, inspectStartupStagedText, QUEUED_PLACEHOLDER, startupSubmissionEvidence, type StartupSubmissionEvidence } from "./startup-submission-evidence.js";
+import { COLLAPSED_PASTE, composerRegion, isComposerFooter, isClaudePasteHint, inspectStartupStagedText, QUEUED_PLACEHOLDER, startupSubmissionEvidence, type StartupSubmissionEvidence } from "./startup-submission-evidence.js";
 import {
   composerContainsOwnedText,
   composerNumberedChoicePattern,
@@ -163,18 +163,42 @@ function findPatternEvidence(lines: string[], patterns: RegExp[]): string | null
   return null;
 }
 
-/** Adopted Pi TUIs have no runner hooks. Anchor on the selector's chrome:
+const PI_DIALOG_HINTS = [
+  /^↑↓ navigate\s+\S.* select\s+\S.* cancel$/,
+  /^\S+ submit\s+\S+ cancel$/,
+  /^\S+ submit\s+\S+ newline\s+\S+ cancel\s+\S+ external editor$/,
+] as const;
+
+/** Adopted Pi TUIs have no runner hooks. Anchor on the selector/input/editor chrome:
  * footer metadata is optional, and an extension can add rows below the dialog. */
-function findCurrentPiSelector(paneContent: string): string | null {
+function findCurrentPiDialog(paneContent: string): string | null {
   const lines = paneContent.split("\n").map(line => line.trimEnd());
   const visible = lines.flatMap((line, at) => line.trim() ? [{ text: line.trim(), at }] : []);
   const border = (text: string) => /^─{3,}$/.test(text);
   // At most six nonblank footer/widget rows may follow the selector's border.
   for (let help = visible.length - 2; help >= Math.max(1, visible.length - 8); help--) {
-    if (!/^↑↓ navigate\s+\S.* select\s+\S.* cancel$/.test(visible[help]!.text) || !border(visible[help + 1]!.text)) continue;
+    // Text word-wraps the hints. Join at most three adjacent physical rows, not separated prose.
+    const rows = (n: number) => visible.slice(help - n + 1, help + 1).map(row => row.text).join(" ");
+    const span = [1, 2, 3].find(n => help - n >= 0
+      && visible[help]!.at - visible[help - n + 1]!.at === n - 1
+      && PI_DIALOG_HINTS.some(pattern => pattern.test(rows(n)))) ?? 1;
+    const hint = rows(span);
+    const selector = PI_DIALOG_HINTS[0].test(hint);
+    const input = PI_DIALOG_HINTS[1].test(hint);
+    const editor = PI_DIALOG_HINTS[2].test(hint);
+    if (!(selector || input || editor) || !border(visible[help + 1]!.text)) continue;
     // A later editor or closing Markdown fence makes the selector historical/quoted.
     if (visible.slice(help + 2).some(row => border(row.text) || /^(?:`{3,}|~{3,})/.test(row.text))) continue;
-    const end = visible[help - 1]!.at;
+    const end = visible[help - span]!.at;
+    // Input needs its field and nearby opening rule. Editor's bottom rule and spaced four-action
+    // hint remain visible even when its tall body/top rule is outside the 20-line capture.
+    if (input && /^>(?:\s|$)/.test(lines[end]!.trim()) && !lines[end - 1]?.trim()
+      && lines.slice(Math.max(0, end - PROMPT_SCAN_LINES), end).some(line => border(line.trim()))) return truncateEvidence(hint);
+    // ExtensionEditor puts one spacer on either side of the hint; a main-editor draft doesn't.
+    if (editor && /^(?:─{3,}|─+ [↑↓] \d+ more ─*)$/.test(lines[end]!.trim())
+      && visible[help - span + 1]!.at === end + 2
+      && visible[help + 1]!.at === visible[help]!.at + 2) return truncateEvidence(hint);
+    if (!selector) continue;
     let start = end;
     // The native spacer before the options separates arbitrary title/description text.
     while (start > Math.max(0, end - PROMPT_SCAN_LINES) && lines[start - 1]!.trim() && !border(lines[start - 1]!.trim())) start--;
@@ -420,7 +444,9 @@ export function inspectComposerInput(snapshot: ComposerSnapshot | null, runtime:
     const last = visible.length - 1;
     const cursorAtEnd = y === start + last && x === prefix + stringWidth(visible[last] ?? "");
     const label = visible.length === 1 && COMPOSER_COLLAPSED_PASTE_PATTERN.test(visible[0]!) ? visible[0]! : null;
-    const frame = JSON.stringify([prompt.glyph, prefix, width, footer]);
+    // Claude replaces its mode hint after our paste; that noninteractive hint is not a new composer.
+    const stableFooter = prompt.glyph === "❯" && (CLAUDE_MODE_FOOTER.test(footer) || isClaudePasteHint(footer)) ? "claude-composer" : footer;
+    const frame = JSON.stringify([prompt.glyph, prefix, width, stableFooter]);
     const input: ComposerInput = { state: empty ? "empty" : "text", cursor: { ...snapshot.cursor }, suggestionRows, rows: visible, columns: width - prefix, cursorAtEnd, collapsedPaste: label, frame,
       ...(ghost ? { ghost } : {}) };
     // A numbered body is allowed only as this operation's exact text in its
@@ -552,7 +578,7 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
     return { state: "unknown", reason: "empty_capture", evidence: null };
   }
 
-  const piConfirmation = findCurrentPiSelector(paneContent);
+  const piConfirmation = findCurrentPiDialog(paneContent);
   if (piConfirmation) return { state: "attention", reason: "selection_prompt", evidence: piConfirmation };
 
   const recentLines = lastNonBlank.slice(-8);

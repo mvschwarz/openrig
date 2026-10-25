@@ -1018,10 +1018,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
     if (running) {
       // The running Codex already loaded its profile; drift in -p is the caller's to compare.
-      // Its own --add-dirs, git dirs included, carry over as they ran; none are resolved again.
+      // Its own --add-dirs, git dirs included, carry over as they ran; none are resolved again. They follow the
+      // conversation id, as on every resume, so the resume proof reads the id even when a dir has a space.
       return { ok: true, model, modelArg, effort, effortArg, profile, appliedLaunch, postureArg,
-        queueStateDirArg: running.addDirs.map((dir) => ` --add-dir ${shellQuote(dir)}`).join(""),
-        gitDirArg: "",
+        queueStateDirArg: "",
+        gitDirArg: running.addDirs.map((dir) => ` --add-dir ${shellQuote(dir)}`).join(""),
         seatFolderArg: "",
         daemonOptOut: running.daemonOptOut, daemonArg: running.daemonOptOut ? " --no-daemon" : "",
         networkArg: running.networkOverride ? ` -c ${shellQuote(CODEX_NETWORK_DEFAULT_OVERRIDE)}` : "" };
