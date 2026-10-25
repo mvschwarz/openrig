@@ -515,10 +515,12 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
 
   const recentLines = lastNonBlank.slice(-8);
   const claudeComposer = findClaudeComposer(paneContent, options);
-  // Claude's own timer row above its complete, empty input box means the turn is running, not waiting at a dialogue:
-  // a real dialogue replaces the input box, and a prompt drawn above the box shows no timer row. So for a Claude read,
-  // prompt-looking text above that box is quoted output or history. Only the timer row counts, never a selector-shaped
-  // "mid-work" line.
+  // Claude's own timer row above its complete, empty input box means the turn is running, not waiting at a dialogue,
+  // so for a Claude read, prompt-looking text above that box is quoted output or history. Only the timer row counts,
+  // never a selector-shaped "mid-work" line. A prompt drawn above the box shows no timer row, so it's still caught.
+  // This rests on where Claude draws a dialogue. A native check on Claude Code 2.1.309 saw the MCP menu, a Read
+  // permission and AskUserQuestion each replace the input box, including with two Read calls issued in parallel, and
+  // never drawn beside a timer row. That covers the layouts exercised, not every Claude version.
   const historyAboveInput = options.runtime === "claude-code" && claudeComposer?.framed === true &&
     CLAUDE_ANCHORED_MODE_FOOTER.test(claudeComposer.bar) && IDLE_PROMPT_PATTERNS.some(pattern => pattern.test(claudeComposer.text)) &&
     !!claudeComposer.liveStatus && CLAUDE_LIVE_STATUS_PATTERN.test(claudeComposer.liveStatus);

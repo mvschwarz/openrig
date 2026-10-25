@@ -10,8 +10,12 @@ import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
 // A working Claude seat quotes approval-prompt text in its own output: a send or queue wake to it must not read that
 // text as the dialogue it waits on. Claude's own timer row above its empty input box shows the turn running, so no
-// dialogue is open. A real dialogue replaces the input box (the native captures here), and a prompt drawn above the
-// input box with no timer row (send-prompt-guard's FORWARD-FIX layout) stays protected. Quoted lines are constructed.
+// dialogue is open. A prompt drawn above the input box with no timer row (send-prompt-guard's FORWARD-FIX layout) stays
+// protected. Where a real dialogue sits: a native check on Claude Code 2.1.309 saw the MCP menu, a Read permission and
+// AskUserQuestion each replace the input box, including with two Read calls issued in parallel, and never beside a
+// timer row; that covers the layouts exercised. Of the fixtures here, the 2.1.289 picker is a native screen showing
+// the same; the 2.1.300 permission menus are transcribed excerpts, not full screens, so they test the menu text only.
+// Quoted lines are constructed.
 const permission = JSON.parse(readFileSync(new URL("./fixtures/claude-permission-2.1.300.json", import.meta.url), "utf8")) as Record<string, string>;
 const question = JSON.parse(readFileSync(new URL("./fixtures/claude-question-picker-2.1.289.json", import.meta.url), "utf8")) as Record<string, string>;
 const border = "────────────────────────────────────────────";
