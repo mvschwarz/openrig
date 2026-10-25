@@ -216,6 +216,11 @@ function findClaudeFooterIndex(lines: string[]): number {
   return bar;
 }
 
+// Claude's task-list rows, the only rows it draws between a live status row and the input box. Its renderer marks pending,
+// in-progress and completed tasks with figures' small squares and tick (◻ ◼ ✔, or □ ■ √ where the terminal lacks them);
+// an older checkbox list used ☐ ☒.
+const CLAUDE_TASK_ROW = /^\s*(?:⎿\s+)?[◻◼✔□■√☐☒]\s/;
+
 function findClaudeComposer(paneContent: string, options: ClassifyPaneOptions = {}) {
   // Preserve columns: a multiline draft may contain indented border/prompt text.
   // This classifier scans at most 20 physical lines; captures can be taller.
@@ -246,6 +251,7 @@ function findClaudeComposer(paneContent: string, options: ClassifyPaneOptions = 
 
   let liveStatus: string | null = null;
   let headSeen = false;
+  let taskRows = false;
   for (let i = statusStart; i >= 0; i--) {
     if (!lines[i]!.startsWith(indent)) break;
     const line = lines[i]!.slice(indent.length);
@@ -260,8 +266,9 @@ function findClaudeComposer(paneContent: string, options: ClassifyPaneOptions = 
     // Indented task rows can follow the live status. A newer unindented output
     // or completed status ends this block; do not revive an older work row.
     if (!/^\s/.test(line)) { headSeen = true; break; }
+    if (CLAUDE_TASK_ROW.test(line)) taskRows = true;
   }
-  return { text: prompt.slice(indent.length), bar: lines[bar]!.trim(), framed, hasWarnings: bar < lines.length - 1, supportedWarningFooter, modeFooter, headSeen, liveStatus };
+  return { text: prompt.slice(indent.length), bar: lines[bar]!.trim(), framed, hasWarnings: bar < lines.length - 1, supportedWarningFooter, modeFooter, headSeen, liveStatus, taskRows };
 }
 
 const unknown = (unknownReason: string, cursor?: ComposerSnapshot["cursor"]): ComposerInput => ({ state: "unknown", rows: [], columns: 0, cursorAtEnd: false, collapsedPaste: null, unknownReason, ...(cursor ? { cursor } : {}) });
@@ -586,9 +593,10 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   }
   // Right after a managed compaction the rows above the input box are indented compaction and hook output, so the status
   // head is out of this window and the read stays unknown until the screen changes. For that one send, a complete framed
-  // empty box with its mode footer, and no live status in view, is idle.
+  // empty box with its mode footer, and no live status in view, is idle. Not when task rows are in view: a tall task list
+  // can push a live status out of the window the same way, and that seat is working.
   const postCompactEmptyBox = options.postCompactTurnBoundary === true && claudeComposer?.framed === true &&
-    claudeComposer.modeFooter && IDLE_PROMPT_PATTERNS.some((pattern) => pattern.test(claudeComposer.text));
+    claudeComposer.modeFooter && !claudeComposer.taskRows && IDLE_PROMPT_PATTERNS.some((pattern) => pattern.test(claudeComposer.text));
   // Unframed status evidence can veto idle, but warnings require a complete input frame to prove it.
   if (claudeComposer && !postCompactEmptyBox && (!claudeComposer.headSeen || (claudeComposer.hasWarnings && !claudeComposer.framed))) {
     return { state: "unknown", reason: "no_activity_signal", evidence: truncateEvidence(lastLine) };
