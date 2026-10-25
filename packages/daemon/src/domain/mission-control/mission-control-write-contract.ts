@@ -48,7 +48,6 @@ import {
   MissionControlActionLogError,
   type MissionControlVerb,
 } from "./mission-control-action-log.js";
-import { isHumanSeatSession } from "../human-route-enforcer.js";
 import { humanAnswerText, formatHumanAnswers, unansweredQuestions, type HumanAnswers } from "../human-questions.js";
 
 export class MissionControlWriteContractError extends Error {
@@ -392,7 +391,7 @@ export class MissionControlWriteContract {
         { qitemId: input.qitemId },
       );
     }
-    const humanPark = isHumanSeatSession(source.blockedOn);
+    const humanPark = source.blockedOn !== null && this.queueRepo.isPersonAddress(source.blockedOn);
     if (source.state !== "blocked" || (!humanPark && !isTypedGateBlocker(source.blockedOn))) {
       throw new MissionControlWriteContractError(
         "qitem_not_leg1_parked",
@@ -403,6 +402,13 @@ export class MissionControlWriteContract {
       );
     }
 
+    const someoneElse = humanPark ? this.queueRepo.askedSomeoneElse(input.actorSession, source.blockedOn) : null;
+    if (someoneElse) {
+      throw new MissionControlWriteContractError("answer_not_recorded",
+        `qitem ${input.qitemId} was asked of ${someoneElse}, not ${input.actorSession}, so ${input.actorSession} can't settle it.`,
+        { qitemId: input.qitemId, asked: someoneElse });
+    }
+
     const evaluatedAt = this.now().toISOString();
     const beforeSnapshot = snapshotQitem(source);
     let actionEntry: ReturnType<MissionControlActionLog["record"]> | null = null;
@@ -411,10 +417,8 @@ export class MissionControlWriteContract {
         // Rail 2+3: blocked → in-progress; decision text = transition_note;
         // actor_session = the resolving session. Only a human park records a
         // human-decision ceremony; typed gates record satisfaction evidence. Emits
-        // queue.updated (the P2 refresh-after-action contract). blocked_on is
-        // deliberately retained as provenance of whom it was parked on — the
-        // attention query keys on state='blocked', so the resolved item drops
-        // out of attention regardless.
+        // queue.updated (the P2 refresh-after-action contract). The repository
+        // clears blocked_on on exit; the audit's beforeState retains the park.
         const updateResult = this.queueRepo.updateWithinTransaction({
           qitemId: input.qitemId,
           actorSession: input.actorSession,
