@@ -8,6 +8,7 @@ import { deriveComposeProjectName } from "./compose-project-name.js";
 import type { ClaudeManagedBlockFile } from "./managed-blocks.js";
 import { mergeSeatEnv, parseStoredSeatEnv, type SeatEnv } from "./seat-env.js";
 import { withoutIgnoredRuntimeHomes } from "./seat-runtime-home.js";
+import { parseClaudeSeatTokenRef, type ClaudeSeatTokenRef } from "./claude-seat-token.js";
 import type {
   Rig,
   Node,
@@ -790,6 +791,13 @@ export class RigRepository {
     return result.changes > 0;
   }
 
+  /** A Claude seat's own subscription credential, by reference only; null clears it. */
+  setNodeClaudeTokenRef(nodeId: string, ref: ClaudeSeatTokenRef | null): boolean {
+    if (!this.hasNodeColumn("claude_token_ref")) return false;
+    return this.db.prepare("UPDATE nodes SET claude_token_ref = ? WHERE id = ?")
+      .run(ref ? JSON.stringify({ label: ref.label, tokenFile: ref.tokenFile }) : null, nodeId).changes > 0;
+  }
+
   /** Persist the resolved Advisor; null removes a previous spec's selection. */
   setNodeAdvisor(nodeId: string, advisor: string | null): boolean {
     if (!this.hasNodeColumn("advisor")) return false;
@@ -1047,6 +1055,7 @@ export class RigRepository {
       advisor: row.advisor ?? null,
       effortChoice: row.effort_choice ?? null,
       codexConfigProfile: row.codex_config_profile ?? null,
+      claudeTokenRef: parseClaudeSeatTokenRef(row.claude_token_ref),
       permissionPolicy: row.permission_policy ?? null,
       env: parseStoredSeatEnv(row.env_json),
       cwd: row.cwd,
@@ -1139,6 +1148,7 @@ interface NodeRow {
   advisor?: string | null;
   effort_choice?: string | null;
   codex_config_profile?: string | null;
+  claude_token_ref?: string | null;
   permission_policy?: string | null;
   env_json?: string | null;
   cwd: string | null;

@@ -130,6 +130,16 @@ export type SessionProbe =
   | { state: "absent" }
   | { state: "transport_unavailable"; cause: string };
 
+/** Positive server absence in this adapter's namespace; match the diagnostic line, never a path or command fragment. */
+export function probeShowsNoServer(probe: { state: string; cause?: string }): boolean {
+  return probe.state === "transport_unavailable" && /^no server running on /.test(tmuxDiagnosticStart(probe.cause ?? ""));
+}
+
+/** Injected executors may retain exec's one-line command wrapper instead of stderr. */
+function tmuxDiagnosticStart(message: string): string {
+  return message.replace(/^Command failed:[^\r\n]*\r?\n/, "");
+}
+
 const TMUX_FIELD_SEPARATOR = "|";
 const SESSION_FORMAT = [
   "#{session_name}",
@@ -167,7 +177,8 @@ const CURSOR_FORMAT = [
 ].join(TMUX_FIELD_SEPARATOR);
 
 function isNoServerError(err: unknown): boolean {
-  return err instanceof Error && err.message.includes("no server running");
+  const error = tmuxReportedError(err);
+  return error instanceof Error && probeShowsNoServer({ state: "transport_unavailable", cause: error.message });
 }
 
 /** The error tmux reported, without the stdout an exec error carries: in a chain that stdout is the earlier panes'
@@ -179,11 +190,8 @@ function tmuxReportedError(err: unknown): unknown {
 
 function isSessionAbsenceError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
-  const msg = err.message.toLowerCase();
-  return msg.includes("session not found") ||
-    msg.includes("can't find session") ||
-    msg.includes("no current target") ||
-    msg.includes("no session");
+  const msg = tmuxDiagnosticStart(err.message).toLowerCase();
+  return /^(?:session not found|can't find session|no current target|no sessions?)\b/.test(msg);
 }
 
 function isPaneAbsenceError(err: unknown): boolean {
@@ -352,6 +360,13 @@ function parseLines<T>(output: string, parser: (line: string) => T | null): T[] 
     .filter((result): result is T => result !== null);
 }
 
+/** A session-environment listing line gives `name` a usable value: an exact `NAME=` line whose value is not blank
+ *  (any such line counts). A removed (`-NAME`), empty or whitespace-only entry does not. */
+function usableEnvLine(lines: readonly string[], name: string): boolean {
+  const prefix = `${name}=`;
+  return lines.some((line) => line.startsWith(prefix) && line.slice(prefix.length).trim().length > 0);
+}
+
 export class TmuxAdapter {
   /** Read for each new agent/successor. Unconfigured adapters retain legacy behavior. */
   launchEnvironment?: () => { inheritTmuxEnvironment: boolean; env: Readonly<Record<string, string | undefined>> };
@@ -499,7 +514,10 @@ export class TmuxAdapter {
           throw error;
         }
         const pane = fresh ? created.pane : bound.pane;
-        if (!pane || panes.length !== 1 || panes[0]!.id !== pane) throw new Error("Managed pane identity unavailable or changed; no input written. If the seat's pane was never recorded, rig reconcile-session <seat> --repair-missing-pane --no-launch fills it (with typing protection off).");
+        const delivery = inputKind === "text" || inputKind === "keys";
+        if (!pane || (delivery ? !panes.some(candidate => candidate.id === pane) : panes.length !== 1 || panes[0]!.id !== pane)) {
+          throw new Error("Managed pane identity unavailable or changed; no input written. If the seat's pane was never recorded, rig reconcile-session <seat> --repair-missing-pane --no-launch fills it (with typing protection off).");
+        }
         if (inputKind === "control" && guard.needsInputCheck(identity)) await guard.beforeInput(identity);
         if (inputKind === "respawn" && guard.needsInputCheck(identity)) {
           if (!guard.ownsLifecycle(bound.nodeId) || !await this.isPaneDead(pane)) {
@@ -643,11 +661,12 @@ export class TmuxAdapter {
         `tmux has-session -t ${shellQuote(target)}`);
       return { state: "present" }; // exit 0 = session exists
     } catch (err) {
-      if (isSessionAbsenceError(err)) {
+      const error = tmuxReportedError(err);
+      if (isSessionAbsenceError(error)) {
         return { state: "absent" };
       }
-      if (isNoServerError(err) || isTmuxTransportAbsentError(err)) {
-        return { state: "transport_unavailable", cause: (err as Error).message };
+      if (isNoServerError(error) || isTmuxTransportAbsentError(error)) {
+        return { state: "transport_unavailable", cause: (error as Error).message };
       }
       throw err;
     }
@@ -1348,7 +1367,7 @@ export class TmuxAdapter {
 
   /** Leave the pane's current mode (copy mode) with `send-keys -X cancel`, through the same input guard as sendKeys. */
   async cancelPaneMode(target: string): Promise<TmuxResult> {
-    return this.guardedInput(target, (pane, beforeWrite) => { beforeWrite(); return this.sendKeysUnchecked(pane, ["-X", "cancel"]); });
+    return this.guardedInput(target, (pane, beforeWrite) => { beforeWrite(); return this.sendKeysUnchecked(pane, ["-X", "cancel"]); }, false, "keys");
   }
 
   /** A launch metadata read. Callers must never put credential values in terminal input. */
@@ -1404,14 +1423,24 @@ export class TmuxAdapter {
    *  distinguishes a genuinely absent var from `tmux show-environment <var>`'s
    *  nonzero lookup exit. */
   async hasSessionEnv(sessionName: string, varName: string): Promise<boolean | null> {
+    const lines = await this.sessionEnvLines(sessionName);
+    return lines === null ? null : usableEnvLine(lines, varName);
+  }
+
+  /** The same usable-presence reading for several variables from ONE fresh listing of the session environment.
+   *  Each requested name maps to true/false; every one maps to null when the environment cannot be inspected. Only
+   *  the requested names are returned, and no value, listing or error text leaves this method. */
+  async hasSessionEnvBatch(sessionName: string, varNames: readonly string[]): Promise<Record<string, boolean | null>> {
+    const lines = await this.sessionEnvLines(sessionName);
+    return Object.fromEntries(varNames.map((name) => [name, lines === null ? null : usableEnvLine(lines, name)]));
+  }
+
+  private async sessionEnvLines(sessionName: string): Promise<string[] | null> {
     const target = exactTarget(sessionName, "session");
     try {
       const output = await this.run(["tmux", "show-environment", "-t", target],
         `tmux show-environment -t ${shellQuote(target)}`);
-      const prefix = `${varName}=`;
-      return output.split(/\r?\n/).some(
-        (line) => line.startsWith(prefix) && line.slice(prefix.length).trim().length > 0,
-      );
+      return output.split(/\r?\n/);
     } catch {
       return null;
     }

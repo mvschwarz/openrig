@@ -137,30 +137,45 @@ const p=spawnSync(${JSON.stringify(process.execPath)},args,{stdio:'inherit'});pr
 `, { mode: 0o755 });
     writeFileSync(join(root, "bin/docker"), `#!${process.execPath}
 import fs from 'node:fs';const args=process.argv.slice(2);const marker=process.env.FAKE_CONTAINER;
+const id='a'.repeat(64),image='sha256:'+'b'.repeat(64);
 if(args[0]==='version')console.log(JSON.stringify({Os:'linux',Arch:'amd64'}));
+else if(args[0]==='image')console.log(image);
 else if(args[0]==='build'){}
 else if(args[0]==='run'){
-  const at=args.indexOf('--name');if(at<0)process.exit(9);
-  fs.writeFileSync(marker,args[at+1]);
+  const at=args.indexOf('--name'),cid=args.indexOf('--cidfile');if(at<0||cid<0)process.exit(9);
+  fs.writeFileSync(args[cid+1],id);fs.writeFileSync(marker,JSON.stringify({Id:id,Name:'/'+args[at+1],Image:image,State:{Running:process.env.LOAD_CASE==='timeout',Status:process.env.LOAD_CASE==='timeout'?'running':'exited'}}));
   if(process.env.LOAD_CASE==='timeout')setInterval(()=>{},1000);
   else process.exit(process.env.LOAD_CASE==='failure'?7:0);
-}else if(args[0]==='inspect')console.log('[]');
+}else if(args[0]==='inspect')console.log(JSON.stringify([JSON.parse(fs.readFileSync(marker))]));
+else if(args[0]==='kill'){
+  if(args.join(' ')!=='kill --signal TERM '+id)process.exit(8);
+  const state=JSON.parse(fs.readFileSync(marker));state.State={Running:false,Status:'exited'};fs.writeFileSync(marker,JSON.stringify(state));
+}else if(args[0]==='wait'){if(JSON.parse(fs.readFileSync(marker)).State.Running)process.exit(8);console.log('0');}
 else if(args[0]==='rm'){
-  if(fs.readFileSync(marker,'utf8')!==args.at(-1))process.exit(8);
+  if(process.env.LOAD_CASE==='retain')process.exit(8);
+  if(args.length!==2||args[1]!==id||JSON.parse(fs.readFileSync(marker)).State.Running)process.exit(8);
   fs.unlinkSync(marker);
 }else process.exit(8);
 `, { mode: 0o755 });
-    for (const [mode, status] of [["success", 0], ["failure", 7], ["timeout", 124]]) {
+    for (const [mode, status] of [["success", 0], ["success", 0], ["failure", 7], ["timeout", 124], ["retain", 2]]) {
       const out = join(root, mode), marker = join(root, "container");
       const run = spawnSync("/bin/bash", [join(root, "scripts/build-testbed-image.sh"), out], {
         env: { PATH: `${join(root, "bin")}:/usr/bin:/bin`, HOME: root, TMPDIR: root, LOAD_CASE: mode, FAKE_CONTAINER: marker },
         encoding: "utf8", timeout: 8000,
       });
       assert.equal(run.status, status, `${mode}: ${run.stderr}`);
-      assert.equal(Number(readFileSync(join(out, "image-load.exit-code.txt"), "utf8")), status);
+      assert.equal(Number(readFileSync(join(out, "image-load.exit-code.txt"), "utf8")), mode === "retain" ? 0 : status);
       assert.match(readFileSync(join(out, "image-load.container-name.txt"), "utf8"), /^openrig-testbed-load-/);
-      assert.equal(existsSync(marker), false, `${mode}: container must be removed even after timeout`);
+      assert.equal(existsSync(marker), mode === "retain", `${mode}: only confirmed removal clears the container`);
+      assert.equal(existsSync(join(out, "image-load.cid")), mode === "retain", `${mode}: cidfile follows confirmed removal`);
       assert.equal(existsSync(join(out, "manifest.json")), status === 0);
+      if (mode === "retain") {
+        const retry = spawnSync("/bin/bash", [join(root, "scripts/build-testbed-image.sh"), out], {
+          env: { PATH: `${join(root, "bin")}:/usr/bin:/bin`, HOME: root, TMPDIR: root, LOAD_CASE: mode, FAKE_CONTAINER: marker },
+          encoding: "utf8", timeout: 3000,
+        });
+        assert.equal(retry.status, 2); assert.match(retry.stderr, /Retained cidfile/);
+      }
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

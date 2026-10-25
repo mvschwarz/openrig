@@ -68,6 +68,7 @@ interface SeatStatusResponse {
     source: "member" | "rig" | "daemon" | "native_default";
     ignored?: { source: string; value: string };
   };
+  claude_token?: { label: string; token_file: string; file: "readable" | "unusable"; problem?: string; notice?: string };
   session_reason?: string | null;
   startup_status: string | null;
   occupant_lifecycle: string;
@@ -202,6 +203,11 @@ function printHuman(status: SeatStatusResponse): void {
       : h.source === "daemon" ? "the daemon's" : "the native default";
     console.log(`Runtime home (${h.variable}) for launches: ${display(h.home)} (${from}; configured, not proof of the login a running session uses)`);
     if (h.ignored) console.log(`  Ignored: its ${h.ignored.source} env sets ${h.variable}=${h.ignored.value}, which isn't an absolute path`);
+  }
+  if (status.claude_token) {
+    const t = status.claude_token;
+    console.log(`Claude subscription token: ${t.label}, read from ${t.token_file} at each launch (${t.file === "readable" ? "readable now" : "won't apply at the next launch"})`);
+    if (t.notice) console.log(`  ${t.notice}`);
   }
   if (status.typingGuard) {
     const g = status.typingGuard;

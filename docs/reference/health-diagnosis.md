@@ -390,6 +390,19 @@ ID reads retain them while the source can still project them. A recurrence after
 clear receives a new episode ID. This is an on-demand projection, not a history
 store; a detail 404 does not prove resolution.
 
+In the TUI, the instance Table and the rig/pod Table and Overview load canonical
+findings for their health summaries. These summaries previously could show `Not assessed`
+even when the daemon served findings because they did not request the projection.
+Once the topology drill is resolved, these pages use the existing bounded
+`GET /api/health?limit=200` read; pod summaries continue to cover their rig.
+Other topology views using focused reads keep this projection lazy; the Health
+tab requests it explicitly.
+This findings read is separate from the control-plane `GET /healthz` read.
+
+If `GET /api/health?limit=200` fails, including HTTP 503, the summary shows
+`Unknown · Unavailable`. A projection that was not requested remains
+`Unknown · Not assessed`, and a loaded empty result is not a healthy verdict.
+
 Lists default to 100 and cap at 200, with `total` and `truncated` explicit.
 Ceremony findings take precedence before the cap so context pressure cannot
 hide the primary signal. Narrow a truncated query; do not certify the unseen

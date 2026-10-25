@@ -229,7 +229,12 @@ function findClaudeComposer(paneContent: string, options: ClassifyPaneOptions = 
   // Preserve columns: a multiline draft may contain indented border/prompt text.
   // This classifier scans at most 20 physical lines; captures can be taller.
   // Exhausting the scan without reaching the status head is unknown, not idle.
-  const lines = paneContent.split("\n").slice(-20)
+  // The 20 end at the last drawn row: Claude draws inline, so a short screen in a tall pane leaves its input box above
+  // blank rows that the capture keeps.
+  const physical = paneContent.split("\n");
+  let end = physical.length;
+  while (end > 0 && physical[end - 1]!.trim().length === 0) end--;
+  const lines = physical.slice(Math.max(0, end - 20), end)
     .map((line) => line.trimEnd()).filter((line) => line.trim().length > 0);
   const bar = findClaudeFooterIndex(lines);
   const supportedWarningFooter = lines[bar]?.trim() === "⏵⏵ accept edits on (shift+tab to cycle) · ← for agents";
@@ -739,6 +744,7 @@ export async function probeSessionActivity(input: {
       evidence: null,
     };
   }
+  const readTarget = binding?.pane ?? sessionName;
   if (attachmentType === "external_cli") {
     return {
       state: "unknown",
@@ -750,7 +756,7 @@ export async function probeSessionActivity(input: {
   }
   if (runtime === "terminal") {
     try {
-      const paneCommand = await tmuxAdapter.getPaneCommand(sessionName);
+      const paneCommand = await tmuxAdapter.getPaneCommand(readTarget);
       if (paneCommand && !IDLE_TERMINAL_COMMANDS.has(paneCommand)) {
         return {
           state: "running",
@@ -822,8 +828,8 @@ export async function probeSessionActivity(input: {
   const captureSeq = observed ? nextCaptureSeq++ : 0;
   try {
     const capture = (opts?: { escapeSequences?: boolean }) => visibleScreenOnly
-      ? opts ? tmuxAdapter.capturePaneScreen(sessionName, opts) : tmuxAdapter.capturePaneScreen(sessionName)
-      : opts ? tmuxAdapter.capturePaneContent(sessionName, 20, opts) : tmuxAdapter.capturePaneContent(sessionName, 20);
+      ? opts ? tmuxAdapter.capturePaneScreen(readTarget, opts) : tmuxAdapter.capturePaneScreen(readTarget)
+      : opts ? tmuxAdapter.capturePaneContent(readTarget, 20, opts) : tmuxAdapter.capturePaneContent(readTarget, 20);
     const snapshot = input.composerSnapshot ? await input.composerSnapshot().catch(() => null) : null;
     const paneContent = snapshot?.screen ?? await capture();
     const capturedAt = new Date().toISOString();
@@ -2577,6 +2583,7 @@ export class SessionTransport {
     let preVerifyContent: string | null = null;
     const sessionMeta = this.getSessionMeta(sessionName);
     const runtime = sessionMeta.runtime;
+    const readTarget = sessionMeta.pane ?? sessionName;
     let runtimeAdvisory: string | undefined;
     const bindingChanged = () => JSON.stringify(this.getSessionMeta(sessionName)) !== JSON.stringify(sessionMeta);
     const changedRecipient = (sent = false): SendResult => ({ ok: false, sessionName, sent, reason: "target_runtime_conflict",
@@ -2599,13 +2606,13 @@ export class SessionTransport {
     // typing anything only if the pane still reads as in a mode. An unknown answer keeps today's path.
     const readPaneInMode = async (): Promise<boolean | null> => {
       try {
-        return typeof this.tmuxAdapter.isPaneInMode === "function" ? await this.tmuxAdapter.isPaneInMode(sessionName) : null;
+        return typeof this.tmuxAdapter.isPaneInMode === "function" ? await this.tmuxAdapter.isPaneInMode(readTarget) : null;
       } catch { return null; }
     };
     const leavePaneMode = async (outcome: string): Promise<SendResult | null> => {
       if (await readPaneInMode() !== true) return null;
       try {
-        if (typeof this.tmuxAdapter.cancelPaneMode === "function") await this.tmuxAdapter.cancelPaneMode(sessionName);
+        if (typeof this.tmuxAdapter.cancelPaneMode === "function") await this.tmuxAdapter.cancelPaneMode(readTarget);
       } catch { /* the re-read below decides */ }
       if (await readPaneInMode() !== true) return null;
       return { ok: false, sessionName, sent: false, reason: "pane_in_mode",
@@ -2743,7 +2750,7 @@ export class SessionTransport {
       try {
         pane = await this.runStage(
           "session_transport.submit_only_precheck",
-          () => this.tmuxAdapter.capturePaneContent(sessionName, opts.submitOnlyCaptureLines ?? 50),
+          () => this.tmuxAdapter.capturePaneContent(readTarget, opts.submitOnlyCaptureLines ?? 50),
         );
       } catch (error) {
         recordMismatch(null);
@@ -3026,6 +3033,7 @@ export class SessionTransport {
         // no-op here (the option is kept for back-compat). needs_input (positive picker) remains the
         // ONLY hard refuse; unknown/stale/missing already proceed-with-advisory above.
         sendAdvisory = [sendAdvisory, "target pane appears mid-task; sent anyway (busy is advisory, not a block)."].filter(Boolean).join(" ");
+        if (runtime === "codex") sendAdvisory += " This message joins its running turn and may redirect it; for separate work, use --wait-for-idle <seconds>.";
         // fall through to the send below.
       }
       // idle (or running/unknown — now advisory-and-proceed) → proceed to send.
@@ -3041,8 +3049,8 @@ export class SessionTransport {
       try {
         preVerifyContent = await this.runStage(
           "session_transport.pre_capture",
-          () => runtime === "terminal" || !verificationSnippet(text).envelope ? this.tmuxAdapter.capturePaneContent(sessionName, 30)
-            : this.tmuxAdapter.capturePaneContent(sessionName, 30, { joinWrappedLines: true }),
+          () => runtime === "terminal" || !verificationSnippet(text).envelope ? this.tmuxAdapter.capturePaneContent(readTarget, 30)
+            : this.tmuxAdapter.capturePaneContent(readTarget, 30, { joinWrappedLines: true }),
         );
         if (observed) observed.pre = captureSlot(preVerifyContent, this.now().toISOString(), captureSeq);
       } catch {
@@ -3124,8 +3132,8 @@ export class SessionTransport {
       // The seat is read from the existing --verify capture taken before the paste (the whole screen); no new read.
       if (inputBoxRuntime && !promptOverride) {
         const read = await this.readWithinDeadline("session_transport.input_box_capture", () => Promise.all([
-          this.tmuxAdapter.getPanePid(sessionName).catch(() => null),
-          this.tmuxAdapter.capturePaneContent(sessionName, 30).catch(() => null),
+          this.tmuxAdapter.getPanePid(readTarget).catch(() => null),
+          this.tmuxAdapter.capturePaneContent(readTarget, 30).catch(() => null),
         ]));
         boxBefore = { seat: readSeatBeforePaste(preVerifyContent, inputBoxRuntime, sessionName),
           reading: readInputBox(read?.[1] ?? null, inputBoxRuntime, text), pid: read?.[0] ?? null, pane: read?.[1] ?? null };
@@ -3135,7 +3143,7 @@ export class SessionTransport {
 
       if (promptOverride) {
         const pane = await this.runStage("session_transport.prompt_override_pre_submit_capture",
-          () => this.tmuxAdapter.capturePaneContent(sessionName, 50)).catch(() => null);
+          () => this.tmuxAdapter.capturePaneContent(readTarget, 50)).catch(() => null);
         if (runtime === "claude-code" && bindingChanged()) return observe(changedRecipient(true));
         if (!promptAnswerStaged(pane, text, runtime)) {
           return observe({ ok: true, sessionName, sent: true, verified: false, outcome: "rendered-unconfirmed", promptInteraction: "unverified",
@@ -3182,8 +3190,8 @@ export class SessionTransport {
       try {
         const content = await this.runStage(
           "session_transport.post_capture",
-          () => runtime === "terminal" || !verificationSnippet(text).envelope ? this.tmuxAdapter.capturePaneContent(sessionName, 30)
-            : this.tmuxAdapter.capturePaneContent(sessionName, 30, { joinWrappedLines: true }),
+          () => runtime === "terminal" || !verificationSnippet(text).envelope ? this.tmuxAdapter.capturePaneContent(readTarget, 30)
+            : this.tmuxAdapter.capturePaneContent(readTarget, 30, { joinWrappedLines: true }),
         );
         if (observed) observed.post = captureSlot(content, this.now().toISOString(), captureSeq);
         // A terminal prompt is command history, not an agent composer. Preserve
@@ -3201,7 +3209,7 @@ export class SessionTransport {
         // An audited prompt answer reads no box (no extra read is added for it), so it reads unconfirmed; it never
         // falls back to the count below.
         const inputBox = boxBefore && inputBoxRuntime
-          ? await this.inputBoxEvidence(sessionName, sessionMeta, boxBefore, readInputBox(content, inputBoxRuntime, text, boxBefore.pane))
+          ? await this.inputBoxEvidence(sessionName, readTarget, sessionMeta, boxBefore, readInputBox(content, inputBoxRuntime, text, boxBefore.pane))
           : undefined;
         // With the setting on, only a seat proven idle before the paste and input-box evidence verify: exact before
         // Enter, empty after, same process. A not-idle or unknown seat always reads unconfirmed.
@@ -3245,11 +3253,12 @@ export class SessionTransport {
   /** After the post-Enter capture: the same pane process (pid read before Enter and now) and the same binding. */
   private async inputBoxEvidence(
     sessionName: string,
+    paneTarget: string,
     meta: { nodeId: string | null; pane: string | null; occupant: string | null },
     before: { seat: SeatReading; reading: InputBoxReading; pid: number | null },
     after: InputBoxReading,
   ): Promise<InputBoxEvidence> {
-    const pid = await this.readWithinDeadline("session_transport.input_box_pane_pid", () => this.tmuxAdapter.getPanePid(sessionName));
+    const pid = await this.readWithinDeadline("session_transport.input_box_pane_pid", () => this.tmuxAdapter.getPanePid(paneTarget));
     let sameBinding = false;
     try {
       const now = this.getSessionMeta(sessionName);
@@ -3404,20 +3413,32 @@ export class SessionTransport {
     const unknown = { state: "unknown" as const, detail: "Claude runtime observation or older launch binding is unavailable" };
     try {
       const panes = await this.tmuxAdapter.listPanes(sessionName);
-      if (panes.length > 1 || (pane && panes.length === 1 && panes[0]!.id !== pane)) {
-        return { state: "conflict", detail: "The session does not have the single expected bound pane" };
+      if (!pane && panes.length > 1) {
+        return { state: "conflict", detail: "The session has several panes but no recorded bound pane" };
+      }
+      if (panes.length > 0 && pane && !panes.some(candidate => candidate.id === pane)) {
+        return { state: "conflict", detail: "The session does not have the expected bound pane" };
       }
       if (!pane || panes.length === 0) return unknown;
-      const [sessionPid, panePid] = await Promise.all([this.tmuxAdapter.getPanePid(sessionName), this.tmuxAdapter.getPanePid(pane)]);
-      if (sessionPid && panePid && sessionPid !== panePid) return { state: "conflict", detail: "The session and bound pane name different processes" };
+      let panePid: number | null;
+      if (panes.length === 1) {
+        const [sessionPid, observedPanePid] = await Promise.all([this.tmuxAdapter.getPanePid(sessionName), this.tmuxAdapter.getPanePid(pane)]);
+        if (sessionPid && observedPanePid && sessionPid !== observedPanePid) return { state: "conflict", detail: "The session and bound pane name different processes" };
+        panePid = observedPanePid;
+      } else {
+        // A session target resolves to its current pane, which may be a sibling
+        // panel. With more than one pane, the immutable bound pane is the only
+        // process identity that can be compared safely.
+        panePid = await this.tmuxAdapter.getPanePid(pane);
+      }
       const observation = await observeClaudeDelivery({ target: pane, tmux: this.tmuxAdapter, listProcesses: this.listProcesses, expectedToken: resumeToken, rotation });
       // Refusal already has positive evidence; a later failed read cannot erase it.
       if (observation.state === "conflict" || observation.state === "idle_shell") return observation;
       const after = await this.tmuxAdapter.listPanes(sessionName);
-      if (after.length > 1 || (after.length === 1 && after[0]!.id !== pane)) return { state: "conflict", detail: "The bound pane changed during delivery verification" };
+      if (after.length > 0 && !after.some(candidate => candidate.id === pane)) return { state: "conflict", detail: "The bound pane changed during delivery verification" };
       const currentPid = await this.tmuxAdapter.getPanePid(pane);
       if (panePid && currentPid && panePid !== currentPid) return { state: "conflict", detail: "The bound pane process changed during delivery verification" };
-      return after.length === 0 || !sessionPid || !panePid || !currentPid ? unknown : observation;
+      return after.length === 0 || !panePid || !currentPid ? unknown : observation;
     } catch { return unknown; }
   }
 
@@ -3425,8 +3446,9 @@ export class SessionTransport {
    * Null when no shell label is observed, or the expected native process is verified. */
   private async unverifiedShellForeground(sessionName: string, runtime: string, pane: string | null, resumeToken: string | null): Promise<string | null> {
     let paneCommand: string | null;
+    const readTarget = pane ?? sessionName;
     try {
-      paneCommand = await this.tmuxAdapter.getPaneCommand(sessionName);
+      paneCommand = await this.tmuxAdapter.getPaneCommand(readTarget);
     } catch {
       return null;
     }
@@ -3435,7 +3457,7 @@ export class SessionTransport {
       // Reuse stable, foreground, pane-descendant Codex proof. A resumed process
       // must name this session's token. Stale UI, a Node
       // launcher alone, missing observations or a native process elsewhere cannot clear it.
-      const native = await verifyCodexPaneProcess({ target: sessionName, tmux: this.tmuxAdapter,
+      const native = await verifyCodexPaneProcess({ target: readTarget, tmux: this.tmuxAdapter,
         listProcesses: this.listProcesses, expectedToken: resumeToken });
       if (native && await this.tmuxAdapter.getPanePid(pane).catch(() => null) === native.panePid) return null;
     }
@@ -3451,8 +3473,18 @@ export class SessionTransport {
     postCompactTurnBoundary?: boolean;
   }, privateInput = false): Promise<AgentActivity> {
     const now = this.now();
+    let binding = input.binding;
+    try {
+      const stored = this.getSessionMeta(input.sessionName);
+      binding = {
+        sessionName: input.sessionName,
+        nodeId: binding?.nodeId ?? stored.nodeId,
+        occupant: binding?.occupant ?? stored.occupant,
+        pane: binding?.pane ?? stored.pane,
+      };
+    } catch { /* An unavailable binding keeps the existing session-name fallback. */ }
     const composerSnapshot = this.tmuxAdapter.deliveryGuard?.needsInputCheck(input.sessionName)
-      ? () => this.tmuxAdapter.captureComposerSnapshot(input.binding?.pane ?? input.sessionName) : undefined;
+      ? () => this.tmuxAdapter.captureComposerSnapshot(binding?.pane ?? input.sessionName) : undefined;
     const hookActivity = this.agentActivityStore?.getLatestForNode({
       sessionName: input.sessionName,
       now,
@@ -3496,7 +3528,7 @@ export class SessionTransport {
             tmuxAdapter: this.tmuxAdapter,
             now,
             captureObserver: privateInput ? undefined : this.captureObserver,
-            binding: input.binding,
+            binding,
           });
           if (paneVeto.state === "needs_input") return paneVeto;
         }
@@ -3524,7 +3556,7 @@ export class SessionTransport {
           tmuxAdapter: this.tmuxAdapter,
           now,
           captureObserver: privateInput ? undefined : this.captureObserver,
-          binding: input.binding,
+          binding,
         });
         if (paneVeto.state === "needs_input") {
           return paneVeto;
@@ -3541,7 +3573,7 @@ export class SessionTransport {
       tmuxAdapter: this.tmuxAdapter,
       now,
       captureObserver: privateInput ? undefined : this.captureObserver,
-      binding: input.binding,
+      binding,
       // Pane-only readiness must not send into a status row whose timer hasn't appeared yet.
       timerlessStatusIsLive: input.readinessFromPaneOnly === true,
       postCompactTurnBoundary: input.postCompactTurnBoundary === true,
@@ -3602,7 +3634,30 @@ export class SessionTransport {
     let hasUrl: boolean | null = null;
     let hasToken: boolean | null = null;
     let hasRuntime: boolean | null = null;
-    if (typeof this.tmuxAdapter?.hasSessionEnv === "function") {
+    const urlNames = ["OPENRIG_URL", "RIGGED_URL", "OPENRIG_PORT", "RIGGED_PORT"];
+    const tokenNames = ["OPENRIG_ACTIVITY_HOOK_TOKEN", "RIGGED_ACTIVITY_HOOK_TOKEN"];
+    const runtimeNames = ["OPENRIG_RUNTIME", "RIGGED_RUNTIME"];
+    const inspected = typeof this.tmuxAdapter?.hasSessionEnvBatch === "function" || typeof this.tmuxAdapter?.hasSessionEnv === "function";
+    if (typeof this.tmuxAdapter?.hasSessionEnvBatch === "function") {
+      // One fresh listing for every name, read once per diagnosis: all aliases see the same moment. A failed listing
+      // leaves every name unknown (never absent) and is not retried name by name.
+      let presence: Record<string, boolean | null> = {};
+      try {
+        presence = await this.tmuxAdapter.hasSessionEnvBatch(sessionName, [...urlNames, ...tokenNames, ...runtimeNames]);
+      } catch { /* every name stays unknown */ }
+      const anyPresent = (names: string[]): boolean | null => {
+        let unknown = false;
+        for (const name of names) {
+          const present = presence[name];
+          if (present === true) return true;
+          if (present !== false) unknown = true;
+        }
+        return unknown ? null : false;
+      };
+      hasUrl = anyPresent(urlNames);
+      hasToken = anyPresent(tokenNames);
+      hasRuntime = anyPresent(runtimeNames);
+    } else if (typeof this.tmuxAdapter?.hasSessionEnv === "function") {
       const anyPresent = async (names: string[]): Promise<boolean | null> => {
         let unknown = false;
         for (const name of names) {
@@ -3616,9 +3671,9 @@ export class SessionTransport {
         }
         return unknown ? null : false;
       };
-      hasUrl = await anyPresent(["OPENRIG_URL", "RIGGED_URL", "OPENRIG_PORT", "RIGGED_PORT"]);
-      hasToken = await anyPresent(["OPENRIG_ACTIVITY_HOOK_TOKEN", "RIGGED_ACTIVITY_HOOK_TOKEN"]);
-      hasRuntime = await anyPresent(["OPENRIG_RUNTIME", "RIGGED_RUNTIME"]);
+      hasUrl = await anyPresent(urlNames);
+      hasToken = await anyPresent(tokenNames);
+      hasRuntime = await anyPresent(runtimeNames);
     }
     let fileEndpoint: { baseUrl: string; token: string } | null = null;
     try {
@@ -3631,8 +3686,7 @@ export class SessionTransport {
       { label: "OPENRIG_RUNTIME", present: hasRuntime },
     ];
     const absent = prerequisites.filter((p) => p.present === false).map((p) => p.label);
-    const unread = typeof this.tmuxAdapter?.hasSessionEnv === "function"
-      ? prerequisites.filter((p) => p.present === null).map((p) => p.label) : [];
+    const unread = inspected ? prerequisites.filter((p) => p.present === null).map((p) => p.label) : [];
     const envNote = absent.length > 0 || unread.length > 0
       ? `seat-env UNKNOWN — ${[
         absent.length > 0 ? `${absent.join(", ")} absent from the tmux session environment` : null,

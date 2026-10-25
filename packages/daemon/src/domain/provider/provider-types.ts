@@ -127,11 +127,46 @@ export type PrecheckReason =
   | "target_needs_reauth" // target authState === "needs_reauth"
   | "target_auth_unknown" // target authState === "unknown" — fails closed, NOT relabeled as re-auth
   | "signal_unknown_or_stale"
-  | "rebind_unsupported_for_runtime";
+  | "rebind_unsupported_for_runtime"
+  | "seat_restart_refused" // the seat's in-place restart plan refused, so nothing would change
+  | "target_not_in_seat_home" // no login by that name is saved in the Codex home the seat runs on
+  | "token_file_required" // a Claude seat moves to a token file (--token-file), or back to its stored login (--stored-login)
+  | "invalid_token_reference" // the label or the token file's path can't be a seat's reference
+  | "token_file_unusable" // the token file wouldn't give Claude a token: missing, empty, not a file or unreadable
+  | "credential_outranks_token" // a cloud provider, API key, auth token or apiKeyHelper would win over the seat's token
+  | "seat_not_running"; // nothing to relaunch: launch the seat first
 
-export type PrecheckResult = { safe: true } | { safe: false; reasons: PrecheckReason[] };
+/** A seat on the same Codex home, as the in-place restart reports it (its `PeerReport`). Declared here rather than
+ *  imported, so the provider types don't import the restart module and its tmux dependencies. */
+export interface SeatPeer {
+  logicalId: string;
+  sessionName: string | null;
+  home: "same" | "different" | "unknown";
+  effect: string;
+}
 
-export type SwitchOutcome = "succeeded" | "rebind_in_progress" | "failed_safely";
+/** What a seat-aware precheck saw: the Codex home the seat runs on, what the seat is doing, and its peers on that home. */
+export interface SeatSwitchView {
+  home: string;
+  activity: string;
+  peers: SeatPeer[];
+}
+
+/** What a Claude seat's precheck saw: the reference it would get, and what the precedence check read and couldn't read. */
+export interface ClaudeSwitchView {
+  label: string;
+  tokenFile: string | null;
+  checked: string[];
+  notChecked: string[];
+  /** A move back to the stored login: the token the seat would still use instead, and where it comes from. */
+  instead?: string;
+}
+
+export type PrecheckResult =
+  | { safe: true; seat?: SeatSwitchView; claude?: ClaudeSwitchView }
+  | { safe: false; reasons: PrecheckReason[]; message?: string; seat?: SeatSwitchView; claude?: ClaudeSwitchView };
+
+export type SwitchOutcome = "succeeded" | "rebind_in_progress" | "failed_safely" | "unknown";
 
 /** The whole four-block read model, emitted by `rig provider status --json`. */
 export interface FourBlockReadModel {

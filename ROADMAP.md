@@ -6,15 +6,22 @@ This isn't a schedule or a promise: we release often, and an item ships when a g
 To see what's being worked on, by release and theme, open the [OpenRig roadmap board](https://github.com/users/mvschwarz/projects/1).
 Issues labelled `good first issue` are also listed on the [contribute page](https://github.com/mvschwarz/openrig/contribute).
 
-## Planned for 0.7.1
+## Planned for 0.7.2
 
-- **Team skills:** Team skills load through one router and stay out of your project.
-- **Interruption levels:** Per-seat interruption levels, plus presets for managed compaction and model or effort changes.
-- **Permissions:** See each existing seat's planned and current permissions.
-- **Bundles:** Preview and install bundles that run services; the feature remains off by default.
+- **Outside assistants over MCP (if ready):** Assistants such as ChatGPT and Claude Desktop find your team, delegate
+  work, follow it and get the results through a maintained MCP server, locally or over an authenticated network
+  connection.
+- **More harnesses as seats (if ready):** One plug-in point for other coding-agent CLIs, with Hermes, OpenClaw and
+  Cursor running as normal seats.
+- **Accounts (if ready):** Each seat can use its own provider account, and an agent can move one seat to another account
+  and keep its conversation.
 - **Subscriptions (if ready):** One Fleet agent manages two registered Codex subscriptions across two Linux machines, following
   your standing preferences.
-- **Community:** Community contributions to launch, lifecycle, runtimes, observation and delivery.
+- **Member permissions (if ready):** Each seat gets its own permission rules, even when seats share a project folder.
+- **Stream decisions (if ready):** Opt in, and observations on a rig's stream reach the work they belong to, with
+  visible results and effects you can recover.
+- **Named people in Slack (if ready):** Agents can address several named people in one Slack workspace, and each person
+  sees and answers their own requests.
 
 ## How to help
 

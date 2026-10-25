@@ -210,6 +210,14 @@ export class DaemonClient {
     return senderIdentityHeaders(origin, this.sessionName);
   }
 
+  /** The sender this client stamps on its requests (the X-OpenRig-Session value, absent without a seat), and whether it marked
+   *  the origin unknown. */
+  async senderIdentity(): Promise<{ session: string | undefined; originUnknown: boolean }> {
+    this.identity ??= this.identityHeaders();
+    const headers = await this.identity;
+    return { session: headers[SENDER_IDENTITY_HEADER], originUnknown: headers["X-OpenRig-Origin-Unknown"] === "true" };
+  }
+
   constructor(baseUrl?: string, options?: DaemonClientOptions) {
     if (baseUrl) {
       this.baseUrl = baseUrl;

@@ -76,6 +76,8 @@ export function createLiveRefresh(deps: LiveRefreshDeps): LiveRefresh {
   let lastConfirmedAt: number | null = null;
   let snapshot = emptySnapshot();
   let load: LoadState = { inFlight: false, settled: false };
+  // One activity stream serves every page; its state must not travel with cached reads.
+  let connection: LoadState["connection"];
   let flashes: RowFlash[] = [];
   let scope = deps.scopeKey?.() ?? "";
   let generation = 0;
@@ -129,7 +131,7 @@ export function createLiveRefresh(deps: LiveRefreshDeps): LiveRefresh {
     quietTimer = scheduleTimeout(() => {
       quietTimer = null;
       void refresh();
-    }, load.connection === "connected" ? CONNECTED_QUIET_REFRESH_MS : QUIET_REFRESH_MS);
+    }, connection === "connected" ? CONNECTED_QUIET_REFRESH_MS : QUIET_REFRESH_MS);
     quietTimer.unref?.();
   }
 
@@ -201,7 +203,7 @@ export function createLiveRefresh(deps: LiveRefreshDeps): LiveRefresh {
       pushTimer.unref?.();
     },
     connectionStatus: (status) => {
-      load.connection = status;
+      connection = status;
       if (status !== "connected") {
         load.stale = true;
         // Without the stream, the quiet window goes back to 30 s.
@@ -214,8 +216,8 @@ export function createLiveRefresh(deps: LiveRefreshDeps): LiveRefresh {
     // while it's connected, so an idle page isn't called stale between its 5-minute reads. A drop marks it stale at once.
     load: () => {
       syncScope();
-      const overdueAfter = (load.connection === "connected" ? CONNECTED_QUIET_REFRESH_MS : QUIET_REFRESH_MS) + 30_000;
-      return { ...load, ...(skew !== undefined ? { skew } : {}), ...(lastConfirmedAt !== null && deps.now() - lastConfirmedAt > overdueAfter ? { stale: true } : {}) };
+      const overdueAfter = (connection === "connected" ? CONNECTED_QUIET_REFRESH_MS : QUIET_REFRESH_MS) + 30_000;
+      return { ...load, ...(connection !== undefined ? { connection } : {}), ...(skew !== undefined ? { skew } : {}), ...(lastConfirmedAt !== null && deps.now() - lastConfirmedAt > overdueAfter ? { stale: true } : {}) };
     },
     flashes: () => [...flashes],
     close: () => {

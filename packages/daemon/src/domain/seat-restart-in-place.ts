@@ -56,6 +56,9 @@ export interface ProcessFacts {
   cwd: string | null;
   exe: string | null;
   env: { CODEX_HOME?: string; HOME?: string };
+  /** The process's exact argv, null or absent when it couldn't be read. `ps` joins argv with spaces, so a value
+   *  holding one (a cwd's `.git` add-dir) is split there; this one keeps every boundary. */
+  argv?: string[] | null;
 }
 
 export interface InPlaceRestartIo {
@@ -465,7 +468,8 @@ export class CodexInPlaceRestart {
     const relaunchBinding: NodeBinding = { ...binding, cwd };
     // The probed and prepared launch choices come from the running Codex, so the relaunch keeps them and no
     // Codex process is started to decide them again.
-    const runningArgv = processArgv(process.command);
+    // The exact argv when /proc gives it: a --add-dir with a space (a cwd's .git) must not be cut at the space.
+    const runningArgv = facts.argv?.length ? facts.argv : processArgv(process.command);
     const running = runningLaunch(runningArgv);
     const relaunch = await this.deps.codex.buildResumeCommand(relaunchBinding, { name: sessionName, resumeToken: token, running });
     if (!relaunch.ok) return { ok: false, code: "relaunch_unavailable", message: `The resume command could not be built: ${relaunch.error}. Nothing was stopped.` };
@@ -755,7 +759,7 @@ export class CodexInPlaceRestart {
       }
       reports.push({ logicalId: row.logical_id, sessionName: row.tmux_session, home,
         effect: home === "same"
-          ? `Not restarted; account unverified. Shares home ${codexHome}, so it may take the new account at its next start or token refresh.`
+          ? `Not restarted; account unverified. Shares home ${codexHome}: if the home's login changed, it keeps its current login only until its next token refresh, when Codex stops it with "signed in to another account" until it's restarted. Signing in again there would replace the home's login.`
           : home === "different" ? "Not restarted; uses a different Codex home." : "Not restarted; account unverified; its Codex home could not be observed." });
     }
     return reports;
@@ -1098,6 +1102,13 @@ export function accountLineNames(line: string, expected: string): boolean {
   return new RegExp(`(^|[^A-Za-z0-9._%+@-])${escaped}($|[^A-Za-z0-9._%+@-])`, "i").test(line.replace(/^Account:\s*/i, " "));
 }
 
+/** argv from a /proc/<pid>/cmdline read: NUL-terminated words, each kept exactly (spaces and empty words included). */
+export function procCmdlineArgv(raw: Buffer | string): string[] | null {
+  const words = raw.toString("utf8").split("\0");
+  if (words.at(-1) === "") words.pop();
+  return words.length > 0 ? words : null;
+}
+
 export function defaultInPlaceRestartIo(): InPlaceRestartIo {
   return {
     async readProcess(pid) {
@@ -1111,7 +1122,10 @@ export function defaultInPlaceRestartIo(): InPlaceRestartIo {
           if (key === "CODEX_HOME" || key === "HOME") env[key] = entry.slice(eq + 1);
         }
         const read = (link: string) => { try { return fs.readlinkSync(`/proc/${pid}/${link}`); } catch { return null; } };
-        return { cwd: read("cwd"), exe: read("exe"), env };
+        let argv: string[] | null = null;
+        try { argv = procCmdlineArgv(fs.readFileSync(`/proc/${pid}/cmdline`)); }
+        catch { /* unreadable: the restart falls back to the ps command line */ }
+        return { cwd: read("cwd"), exe: read("exe"), env, argv };
       } catch {
         return null;
       }

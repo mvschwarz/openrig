@@ -1,7 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { Hono } from "hono";
 import { providerRoutes } from "../src/routes/provider.js";
-import type { ProviderService } from "../src/domain/provider/provider-service.js";
+import type { ClaudeSeatRelaunch, ProviderService } from "../src/domain/provider/provider-service.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
+import { createFullTestDb } from "./helpers/test-app.js";
 import type { FourBlockReadModel } from "../src/domain/provider/provider-types.js";
 
 // Slice-04 (OPR.0.5.0.4) seam B — the daemon provider routes (packet 3ffa3c22 §3). Thin handlers
@@ -98,6 +101,89 @@ describe("provider routes", () => {
   it("precheck requires seat and toAccount (400 when missing)", async () => {
     const res = await appWith(stubService).request("/api/provider/precheck?seat=s1");
     expect(res.status).toBe(400);
+  });
+
+  it("precheck and switch lend the service the seat's in-place restart, so both act on the home the seat runs on", async () => {
+    const lent: unknown[] = [];
+    const app = appWith({
+      ...stubService,
+      precheck: async (_input, seatRestart) => { lent.push(seatRestart); return { safe: true }; },
+      switchAccount: async (_input, seatRestart) => { lent.push(seatRestart); return { outcome: "rebind_in_progress" }; },
+    });
+    expect((await app.request("/api/provider/precheck?seat=s1&toAccount=work")).status).toBe(200);
+    expect((await app.request("/api/provider/switch", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ seat: "s1", toAccount: "work" }),
+    })).status).toBe(200);
+    expect(lent).toHaveLength(2);
+    for (const seatRestart of lent) expect(seatRestart).toMatchObject({ plan: expect.any(Function), run: expect.any(Function) });
+  });
+
+  it("precheck and switch also lend a Claude seat's relaunch, and pass its token file or the stored login through", async () => {
+    const seen: Array<{ input: unknown; claudeSeat: unknown }> = [];
+    const app = appWith({
+      ...stubService,
+      precheck: async (input, _seatRestart, claudeSeat) => { seen.push({ input, claudeSeat }); return { safe: true }; },
+      switchAccount: async (input, _seatRestart, claudeSeat) => { seen.push({ input, claudeSeat }); return { outcome: "rebind_in_progress" }; },
+    });
+    expect((await app.request("/api/provider/precheck?seat=s1&toAccount=work&tokenFile=%2Ftokens%2Fwork")).status).toBe(200);
+    expect((await app.request("/api/provider/precheck?seat=s1&toAccount=stored-login&storedLogin=1")).status).toBe(200);
+    expect((await app.request("/api/provider/switch", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ seat: "s1", toAccount: "work", tokenFile: "/tokens/work" }),
+    })).status).toBe(200);
+    expect(seen.map((s) => s.input)).toEqual([
+      { seat: "s1", toAccount: "work", tokenFile: "/tokens/work" },
+      { seat: "s1", toAccount: "stored-login", tokenFile: null },
+      { seat: "s1", toAccount: "work", forceUnsafe: false, tokenFile: "/tokens/work" },
+    ]);
+    for (const { claudeSeat } of seen) {
+      expect(claudeSeat).toMatchObject({ seat: expect.any(Function), snapshot: expect.any(Function), exclusive: expect.any(Function), relaunchInPane: expect.any(Function) });
+      expect(claudeSeat).not.toHaveProperty("stop");
+    }
+    const bad = await app.request("/api/provider/switch", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ seat: "s1", toAccount: "work", tokenFile: 7 }),
+    });
+    expect(bad.status).toBe(400);
+  });
+
+  it("a Claude seat's relaunch keeps its pane: restore launches only that seat from the snapshot in it, under the seat's lease, and its warnings come back", async () => {
+    const db = createFullTestDb();
+    try {
+      const repo = new RigRepository(db), registry = new SessionRegistry(db);
+      const rig = repo.createRig("fixture-rig");
+      const node = repo.addNode(rig.id, "dev.a", { runtime: "claude-code" });
+      const session = registry.registerSession(node.id, "dev-a@fixture-rig");
+      registry.updateStatus(session.id, "running");
+      registry.updateBinding(node.id, { attachmentType: "tmux", tmuxSession: "dev-a@fixture-rig", tmuxPane: "%101" });
+      let launched: { ok: boolean; launched?: Array<{ logicalId: string; status: string; error?: string }>; warnings?: string[]; code?: string; message?: string }
+        = { ok: true, launched: [{ logicalId: "dev.a", status: "resumed" }], warnings: ["dev-a@fixture-rig: a launch warning"] };
+      const launchSingleNode = vi.fn(async () => launched);
+      const leased: string[][] = [];
+      const tmux = { killSession: vi.fn(), deliveryGuard: { lifecycle: async (ids: string[], fn: () => Promise<unknown>) => { leased.push(ids); return fn(); } } };
+      let lent!: ClaudeSeatRelaunch;
+      const app = new Hono();
+      app.use("*", async (c, next) => {
+        for (const [key, value] of Object.entries({ rigRepo: repo, tmuxAdapter: tmux, restoreOrchestrator: { launchSingleNode }, runtimeAdapters: {},
+          providerService: { ...stubService, precheck: async (_i: unknown, _r: unknown, claudeSeat: ClaudeSeatRelaunch) => { lent = claudeSeat; return { safe: true }; } } })) {
+          c.set(key as never, value as never);
+        }
+        await next();
+      });
+      app.route("/api/provider", providerRoutes());
+      await app.request("/api/provider/precheck?seat=dev-a@fixture-rig&toAccount=work&tokenFile=%2Ftokens%2Fwork");
+      expect(lent.seat("dev-a@fixture-rig")).toMatchObject({ nodeId: node.id, logicalId: "dev.a", running: true, pane: "%101" });
+      expect(await lent.exclusive(node.id, async () => "held")).toBe("held");
+      expect(leased).toEqual([[node.id]]);
+      expect(await lent.relaunchInPane(rig.id, "dev.a", "snap-1")).toEqual({ ok: true, status: "resumed", warnings: ["dev-a@fixture-rig: a launch warning"] });
+      expect(launchSingleNode).toHaveBeenCalledWith(rig.id, "dev.a", expect.objectContaining({ snapshotId: "snap-1", keepPane: true }));
+      expect(tmux.killSession).not.toHaveBeenCalled();
+      // Restore's stops before it touches the seat leave it unchanged; anything else after the launch began is unknown.
+      launched = { ok: true, launched: [{ logicalId: "dev.a", status: "awaiting-decision", error: "decide first" }] };
+      expect(await lent.relaunchInPane(rig.id, "dev.a", "snap-1")).toMatchObject({ ok: false, effect: "none", code: "awaiting-decision" });
+      launched = { ok: true, launched: [{ logicalId: "dev.a", status: "failed", error: "the pane couldn't be respawned" }] };
+      expect(await lent.relaunchInPane(rig.id, "dev.a", "snap-1")).toMatchObject({ ok: false, effect: "unknown", code: "failed" });
+      launched = { ok: false, code: "snapshot_not_found", message: "no such snapshot" };
+      expect(await lent.relaunchInPane(rig.id, "dev.a", "snap-1")).toMatchObject({ ok: false, effect: "none", code: "snapshot_not_found" });
+    } finally { db.close(); }
   });
 
   it("switch business outcomes are 200 payloads, not transport errors (failed_safely = 200)", async () => {

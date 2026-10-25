@@ -1,20 +1,28 @@
 # Per-seat terminal delivery
 
-The existing typing guard supports three modes. Before draft-aware mode,
-automatic input either used the ordinary delivery path or was held unconditionally.
-Draft-aware adds an opt-in check for unfinished input without a second control or
-daemon-owned retry scheduler. Sibling seats keep their own mode.
+The typing guard has six modes. `off` and `hold` are the two ends. Draft-aware adds an
+opt-in check for unfinished input without a second control or daemon-owned retry
+scheduler. Between off and hold, three interruption levels choose which automatic messages may
+type: `openrig-urgent`, `urgent-only` and `sends-only`. Sibling seats keep their own mode.
 
 | Mode | Terminal input | When input is unavailable |
 |---|---|---|
 | `off` (default) | Existing delivery and prompt checks | Existing send result |
 | `draft-aware` | Paste into a recognized empty composer; check ownership again before Enter | Hold input and retain this attempt for inspection when bookkeeping is available |
+| `openrig-urgent` | OpenRig's own messages (watchdogs, scheduled wakes, notices) and anything marked urgent type, never over a draft | Other agents' messages are held, the sender is told, and held messages stay readable |
+| `urgent-only` | Only messages marked urgent type (`rig send --urgent`, or a queue item at priority urgent or critical), never over a draft | Everything else is held, the sender is told, and held messages stay readable |
+| `sends-only` | Deliberate sends from people and agents type, as with `off`; a terminal member's typing isn't protected, because its shell input can't be read | OpenRig's own notices are held. A terminal member defaults to this level |
 | `hold` | No automatic terminal input, even at an empty prompt | Retain for inspection outside the pane |
+
+Lifecycle work is refused at `openrig-urgent` and `urgent-only`, as at `hold`.
 
 Runtime permissions are separate. Recipient and interactive-prompt checks still
 apply. `--raw` and `--force` do not bypass the typing guard. A deliberate
 `--dangerously-interact --reason` remains available at every interruption level
 and uses the existing-input check below. Direct human input remains available.
+
+A message sent to a busy Codex seat joins its running turn and may redirect it.
+For separate work, use `rig send <seat> "<message>" --wait-for-idle <seconds>`.
 
 ## Configure and inspect
 
@@ -100,7 +108,7 @@ rig seat held-messages dev-impl@my-rig --id <outbox-id> --json
 rig seat retire-held-message dev-impl@my-rig <outbox-id> --reason "read outside the pane"
 ~~~
 
-Use exactly one of `--mode off|draft-aware|hold` or the compatible
+Use exactly one of `--mode off|draft-aware|openrig-urgent|urgent-only|sends-only|hold` or the compatible
 `--enabled true|false`: true selects hold, false selects off. There are no
 retry settings or deadlines. Activation waits for an already-started seat operation
 to finish. The API may return HTTP 202 with `pending: true`; wait for

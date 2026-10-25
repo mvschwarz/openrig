@@ -21,6 +21,7 @@ import type Database from "better-sqlite3";
 import type { ArgvExecFn, ExecFn } from "./adapters/tmux.js";
 import type { CmuxTransportFactory } from "./adapters/cmux.js";
 import { createDb } from "./db/connection.js";
+import { createWakeRecovery, type WakeRecovery } from "./domain/wake-recovery.js";
 import { migrate } from "./db/migrate.js";
 // P8: apply the CANONICAL migration list — the single source of truth (db/all-migrations.ts),
 // never an inline copy that can drift out of sync with the daemon's schema.
@@ -110,7 +111,7 @@ import { TranscriptStore } from "./domain/transcript-store.js";
 import { resumeRunningTranscriptCaptures, wireTranscriptCaptureStops } from "./domain/transcript-capture.js";
 import { probeSessionActivity, SessionTransport } from "./domain/session-transport.js";
 import { AgentActivityStore } from "./domain/agent-activity-store.js";
-import { hookOrPaneActivity } from "./domain/node-inventory.js";
+import { hookOrPaneActivity, nodeSessionConfirmedMissing } from "./domain/node-inventory.js";
 import { HistoryQuery } from "./domain/history-query.js";
 import { AskService } from "./domain/ask-service.js";
 import { WakeResolveService, WAKE_SESSIONS_SQL } from "./domain/wake-resolve-service.js";
@@ -243,6 +244,8 @@ interface DaemonResult {
   contextMonitor: import("./domain/context-monitor.js").ContextMonitor;
   // OPR.0.4.3.21 — returned so index.ts can stop() it on graceful shutdown.
   eventLoopMonitor: import("./domain/event-loop-monitor.js").EventLoopMonitor;
+  /** Started by index.ts once the daemon listens; stopped first on shutdown. */
+  wakeRecovery: WakeRecovery;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   injectWebSocket: (server: any) => void;
 }
@@ -698,6 +701,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const claudeManagedLaunch = new ClaudeManagedLaunch(db, { ...launchSessionEnv, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR }, {
     OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN: process.env.OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN,
   }, (session, key) => tmuxAdapter.getSessionEnv(session, key));
+  claudeManagedLaunch.onTokenNotApplied = (event) => { eventBus.emit(event); };
   // The compaction settings a managed restore reads, at each launch, so the launch grants those files too (#1940).
   const restoreReadPolicy = () => {
     try {
@@ -1414,6 +1418,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         legacyProviderUsageDirectory(OPENRIG_HOME),
       ),
       agentActivityStore,
+      // A Claude seat switch checks what would outrank the seat's own token before it stops anything.
+      claudePrecedence: (nodeId: string, opts?: { storedLogin?: boolean }) => claudeManagedLaunch.credentialPrecedence(nodeId, opts),
       // Slice 01: Codex and Claude usage windows, off unless provider.usage_windows is on (read per call). The native
       // readers (Codex's app-server; Claude's auth status, for identity) run only on an explicit refresh, with the
       // PATH, HOME, CODEX_HOME and CLAUDE_CONFIG_DIR a seat session gets. Claude's windows are the seats' status-line
@@ -2187,11 +2193,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   void loadHumanRegistryForDelivery; // consumed inside the sessionTransport block below
 
   const sessionTransport = deps.sessionTransport;
+  let wakeRecovery: WakeRecovery = { start() {}, stop: async () => {} };
   if (sessionTransport) {
     queueRepoInstance.attachActivityReader((session) => {
       session = physicalSessionName(db, session);
       const node = db.prepare("SELECT node_id FROM sessions WHERE session_name = ? ORDER BY id DESC LIMIT 1").get(session) as { node_id: string } | undefined;
-      return node ? seatActivityService.getSeatState(node.node_id) : null;
+      // A confirmed-missing session reads unknown, as in the node inventory: its last Stop
+      // or pane sample can't stand for a seat that no longer exists.
+      return node && !nodeSessionConfirmedMissing(db, node.node_id) ? seatActivityService.getSeatState(node.node_id) : null;
     });
     const watchdogPolicyEngine = new WatchdogPolicyEngine({
       jobsRepo: watchdogJobsRepoInstance,
@@ -2506,24 +2515,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // W1 (transactional closure) FR — the wake-intent RECOVERY SWEEP. Deliver
     // any wake intents a crash left committed-but-undelivered (the terminal txn
     // committed, so the intent is durable, but the process died before the
-    // post-commit deliver). Runs after transport is wired so the re-deliveries
-    // actually land. Non-fatal — a sweep failure must not bring the daemon down.
+    // post-commit deliver). Non-fatal — a sweep failure must not bring the daemon down.
     // No periodic timer (ruled out of scope): a transient failure lands the row
-    // in a VISIBLE state and is retried on the next start.
-    try {
-      // Prior-process claims were reconciled before current-process producers started.
-      const reconciled = reconciledWakeIntents;
-      const drained = await queueRepoInstance.drainPendingWakeIntents();
-      if (drained.delivered || drained.indeterminate || drained.failed || reconciled) {
-        console.log(
-          `wake-intent recovery sweep: delivered=${drained.delivered} indeterminate=${drained.indeterminate} failed=${drained.failed} reconciled=${reconciled}`,
-        );
-      }
-    } catch (err) {
-      console.warn(
-        `wake-intent recovery sweep: failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
+    // in a VISIBLE state and is retried on the next start. Prior-process claims were
+    // reconciled before current-process producers started. Each recovered notification
+    // is a real seat delivery, so the sweep is not awaited here: index.ts starts it once
+    // the daemon listens, and stops it first on shutdown.
+    wakeRecovery = createWakeRecovery(queueRepoInstance, reconciledWakeIntents);
   }
 
   // Context monitor — constructed before createApp so routes can access pollOnce for refresh.
@@ -2673,5 +2671,5 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   deps.selfNameDiscovery = () => discoverTailscaleSelfNames({ timeoutMs: 1500 });
   const { app, injectWebSocket } = createAppWithWebSocket(deps);
 
-  return { app, db, deps, contextMonitor, eventLoopMonitor, injectWebSocket };
+  return { app, db, deps, contextMonitor, eventLoopMonitor, injectWebSocket, wakeRecovery };
 }

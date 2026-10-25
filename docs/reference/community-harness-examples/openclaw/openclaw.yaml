@@ -11,3 +11,4 @@ limits:
   - no guidance, skills or startup files are placed
   - needs-input and approval prompts are read from the screen only
 names_conversation: true
+first_input: true

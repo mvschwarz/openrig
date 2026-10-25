@@ -15,7 +15,7 @@ const modes = [
   "npm-name", "versioned", "versioned-argv-only", "versioned-comm-only", "wrong-token",
   "missing-token", "wrong-pane", "bare-shell", "unavailable", "pane-command-unavailable",
   "background", "other-semver", "unknown-both", "versioned-direct-pane", "missing-metadata",
-  "ambiguous-pane", "changed-binding", "onboarding", "changed-process", "ambiguous-process",
+  "ambiguous-pane", "ambiguous-unrecorded-pane", "changed-binding", "onboarding", "changed-process", "ambiguous-process",
   "changed-after-paste", "bare-shell-helper", "bare-shell-job",
   "wrong-token-post-read-error", "wrong-token-post-read-empty",
   "bare-shell-post-read-error", "bare-shell-post-read-empty",
@@ -44,7 +44,7 @@ it.each(modes)("selector and ordinary transport: %s", async (mode) => {
     const name = "test-c@native-test", session = sessionRegistry.registerSession(node.id, name);
     sessionRegistry.updateStatus(session.id, "running");
     if (mode !== "missing-metadata") sessionRegistry.updateResumeToken(session.id, "claude_id", token, "scrape");
-    sessionRegistry.updateBinding(node.id, { tmuxSession: name, tmuxPane: "%1" });
+    if (mode !== "ambiguous-unrecorded-pane") sessionRegistry.updateBinding(node.id, { tmuxSession: name, tmuxPane: "%1" });
     const executable = ["versioned", "versioned-argv-only", "versioned-direct-pane"].includes(mode)
       ? "/fixture/.local/share/claude/versions/2.1.285"
       : mode === "other-semver" ? "/unrelated/2.1.285" : "/opt/claude";
@@ -92,12 +92,17 @@ it.each(modes)("selector and ordinary transport: %s", async (mode) => {
         ? rows.map(row => row.pid === 102 ? { ...row, startedAt: "replacement" } : row) : rows;
     };
     const calls: string[] = [];
+    const paneTargets: string[] = [];
     let paneReads = 0;
     const tmux = {
       hasSession: async () => true,
       probeSession: async () => ({ state: "present" }),
-      getPanePid: async (target: string) => mode === "wrong-pane" && target === "%1" ? 999 : 100,
-      getPaneCommand: async () => {
+      getPanePid: async (target: string) => {
+        if (mode === "ambiguous-pane") paneTargets.push(`pid:${target}`);
+        return mode === "wrong-pane" && target === "%1" ? 999 : 100;
+      },
+      getPaneCommand: async (target: string) => {
+        if (mode === "ambiguous-pane") paneTargets.push(`command:${target}`);
         if (["pane-command-unavailable", "unknown-both"].includes(mode)) throw new Error("fixture command unavailable");
         return mode === "versioned-direct-pane" ? "2.1.285" : "sh";
       },
@@ -105,12 +110,17 @@ it.each(modes)("selector and ordinary transport: %s", async (mode) => {
         paneReads++;
         if (paneReads > 1 && mode.endsWith("post-read-error")) throw new Error("later pane observation unavailable");
         if (paneReads > 1 && mode.endsWith("post-read-empty")) return [];
-        return mode === "ambiguous-pane" ? [{ id: "%1" }, { id: "%2" }] : [{ id: "%1" }];
+        return ["ambiguous-pane", "ambiguous-unrecorded-pane"].includes(mode) ? [{ id: "%1" }, { id: "%2" }] : [{ id: "%1" }];
       },
-      capturePaneContent: async () => {
+      capturePaneContent: async (target: string) => {
+        if (mode === "ambiguous-pane") paneTargets.push(`capture:${target}`);
         if (mode === "changed-binding") sessionRegistry.updateBinding(node.id, { tmuxSession: name, tmuxPane: "%2" });
         return mode === "onboarding" ? "Do you trust the files in this folder?\n❯ 1. Yes, I trust this folder\n  2. No, exit"
           : bare ? "admin@fixture ~ % " : autoScreen;
+      },
+      isPaneInMode: async (target: string) => {
+        if (mode === "ambiguous-pane") paneTargets.push(`mode:${target}`);
+        return false;
       },
       sendText: async () => {
         calls.push("text");
@@ -123,9 +133,15 @@ it.each(modes)("selector and ordinary transport: %s", async (mode) => {
     reads = 0; // Each consumer starts its own observation sequence.
     const transport = new SessionTransport({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux, listProcesses, sleep: async () => {} });
     const sent = await transport.send(name, "harmless fixture message");
+    if (mode === "ambiguous-pane") {
+      expect(paneTargets).toContain("pid:%1");
+      expect(paneTargets.length).toBeGreaterThan(0);
+      expect(paneTargets.every(target => target.endsWith("%1"))).toBe(true);
+    }
     const expectedSend = [
       "npm-name", "versioned", "pane-command-unavailable", "unknown-both", "versioned-direct-pane",
       "missing-token", "unavailable", "background", "other-semver", "missing-metadata",
+      "ambiguous-pane",
       "versioned-argv-only", "versioned-comm-only", "launcher-shim",
       "launcher-shim-match", "launcher-shim-match-after", "launcher-shim-child-unparsed",
       "launcher-shim-child-two-sessions", "settings-single",
@@ -138,7 +154,7 @@ it.each(modes)("selector and ordinary transport: %s", async (mode) => {
     // A strict process selector proves only the supplied process/token, not the DB/pane binding.
     expect(observation !== null).toBe([
       "npm-name", "versioned", "pane-command-unavailable", "versioned-direct-pane", "missing-metadata",
-      "ambiguous-pane", "changed-binding", "onboarding", "changed-after-paste",
+      "ambiguous-pane", "ambiguous-unrecorded-pane", "changed-binding", "onboarding", "changed-after-paste",
       "effort-separated", "effort-equals", "settings-single",
     ].includes(mode));
     if (expectedSend && ["unavailable", "unknown-both", "missing-token", "missing-metadata", "background", "other-semver", "versioned-argv-only", "versioned-comm-only", "launcher-shim", "launcher-shim-child-unparsed", "launcher-shim-child-two-sessions", "unknown-value-flag"].includes(mode)) {

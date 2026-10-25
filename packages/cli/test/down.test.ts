@@ -239,7 +239,7 @@ describe("Down CLI", () => {
     const { logs, exitCode } = await captureLogs(async () => {
       await makeCmd().parseAsync(["down", "rig-1"], { from: "user" });
     }, line => { if (line.startsWith("Before stopping")) events.push("notice"); });
-    expect(logs[0]).toBe("Before stopping rig-1: recorded agent sessions: busy@team (activity: working), idle@team (activity: idle), uncertain@team (activity: unknown), waiting@team (activity: needs-input).");
+    expect(logs[0]).toBe("Before stopping rig-1: recorded agent sessions: busy@team (activity: working), idle@team (activity: idle), uncertain@team (activity: unknown), waiting@team (activity: needs-input); terminal sessions: tool@team.");
     expect(events).toEqual(["inventory", "notice", "down"]);
     expect(downCallCount).toBe(1);
     expect(exitCode).toBeUndefined();
@@ -279,6 +279,13 @@ describe("Down CLI", () => {
     inventory = { status: 200, data: [node("gone", { sessionStatus: "exited" })] };
     const { logs } = await captureLogs(() => makeCmd().parseAsync(["down", "rig-1"], { from: "user" }).then(() => {}));
     expect(logs[0]).toBe("Before stopping rig-1: no agent sessions reported live.");
+    expect(downCallCount).toBe(1);
+  });
+
+  it("names a live terminal session it will stop, since a terminal isn't an agent", async () => {
+    inventory = { status: 200, data: [node("fixture.terminal", { nodeKind: "infrastructure", canonicalSessionName: "fixture-terminal@team" })] };
+    const { logs } = await captureLogs(() => makeCmd().parseAsync(["down", "rig-1"], { from: "user" }).then(() => {}));
+    expect(logs[0]).toBe("Before stopping rig-1: no agent sessions reported live; terminal sessions: fixture-terminal@team.");
     expect(downCallCount).toBe(1);
   });
 

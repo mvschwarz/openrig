@@ -13,6 +13,26 @@ export interface ExportDeps extends StatusDeps {
   exists?: (path: string) => boolean;
 }
 
+/** Copy only the declared local culture, preserving any recipient file. */
+function copyCulture(file: string, root: string, outDir: string): void {
+  if (nodePath.isAbsolute(file) || file.split(/[\\/]/).includes("..")) throw new Error("culture path must stay inside the rig folder");
+  const sourceRoot = fs.realpathSync(root), source = fs.realpathSync(nodePath.resolve(root, file));
+  const inside = (base: string, target: string) => target.startsWith(base.endsWith(nodePath.sep) ? base : base + nodePath.sep);
+  if (!inside(sourceRoot, source) || !fs.statSync(source).isFile()) throw new Error("culture source is not a file inside the rig folder");
+  const target = nodePath.resolve(outDir, file);
+  if (fs.lstatSync(target, { throwIfNoEntry: false })) {
+    console.warn(`Warning: kept existing culture '${target}'; check it matches the team before sharing.`);
+    return;
+  }
+  let parent = nodePath.dirname(target);
+  while (!fs.existsSync(parent)) parent = nodePath.dirname(parent);
+  const outputRoot = fs.realpathSync(outDir), realParent = fs.realpathSync(parent);
+  if (realParent !== outputRoot && !inside(outputRoot, realParent)) throw new Error("culture destination resolves outside the export folder");
+  fs.mkdirSync(nodePath.dirname(target), { recursive: true });
+  fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
+  console.log(`Copied culture to ${target}`);
+}
+
 export function exportCommand(depsOverride?: ExportDeps): Command {
   const cmd = new Command("export").description("Export a rig spec as YAML");
   const getDeps = (): ExportDeps => depsOverride ?? {
@@ -64,6 +84,28 @@ export function exportCommand(depsOverride?: ExportDeps): Command {
           const { parse } = await import("yaml");
           const parsed = parse(res.data) as Record<string, unknown> | null;
           if (parsed && typeof parsed === "object") {
+            if (parsed["name"] === "starter") {
+              console.warn("Warning: this export still installs as 'starter'. Before sharing, rename the team's name in rig.yaml; changing the bundle name alone does not rename the installed rig.");
+            }
+            const pods = parsed["pods"] as Array<{ id?: string; members?: Array<{ id?: string; agent_ref?: string }> }> | undefined;
+            for (const pod of Array.isArray(pods) ? pods : []) {
+              for (const member of Array.isArray(pod.members) ? pod.members : []) {
+                const local = typeof member.agent_ref === "string" && member.agent_ref.startsWith("local:") ? nodePath.normalize(member.agent_ref.slice(6)) : null;
+                if (typeof member.agent_ref === "string" && (member.agent_ref.startsWith("path:") || nodePath.isAbsolute(member.agent_ref.replace(/^local:/, ""))
+                    || (local !== null && (local === ".." || local.startsWith(".." + nodePath.sep))))) {
+                  console.warn(`Warning: ${pod.id}.${member.id} has an agent_ref outside this folder and is not portable. Copy that agent and its imports into this folder and use local: refs before sharing, or use rig bundle create with the original --rig-root to vendor them into an archive.`);
+                }
+              }
+            }
+            const culture = parsed["culture_file"] ?? parsed["cultureFile"];
+            if (typeof culture === "string" && recordedRoot) {
+              try {
+                if (!["localhost", "127.0.0.1", "[::1]"].includes(new URL(client.baseUrl).hostname)) throw new Error("the daemon is remote; copy it from the recorded rig root on that host");
+                copyCulture(culture, recordedRoot, outDir);
+              } catch (error) {
+                console.warn(`Warning: could not copy culture '${culture}' from '${recordedRoot}': ${(error as Error).message}`);
+              }
+            }
             const filesToCheck: string[] = [];
             if (typeof parsed["cultureFile"] === "string") {
               filesToCheck.push(parsed["cultureFile"]);

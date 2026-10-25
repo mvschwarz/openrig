@@ -39,6 +39,8 @@ export interface Node {
   /** OPR.0.7.0.7: the seat's explicit effort choice (rig seat set-effort); null = none. */
   effortChoice?: string | null;
   codexConfigProfile?: string | null;
+  /** A Claude seat's own subscription credential, as a reference (operator label and token-file path); null = none. */
+  claudeTokenRef?: { label: string; tokenFile: string } | null;
   /** OPR.0.4.8.3 Seam B: attached permission_policy REF (builtin:<name> or spec-relative custom
    *  path), or null when none is attached (= the floor). */
   permissionPolicy?: string | null;
@@ -194,6 +196,9 @@ export type RigEvent =
   // secret-boundary control — resume tokens are not treated as secret per the
   // 2026-07-02 founder ruling).
   | { type: "session.resume_token_captured"; rigId: string; nodeId: string; sessionName: string; sessionId: string; runtime: string; outcome: "captured" | "preserved" | "skipped"; resumeType?: string; provenance?: "adoption"; reason?: "missing_sidecar" | "parse_error" | "probe_timeout" | "process_unreadable" | "invalid_token" | "stale_sidecar" | "higher_rank_present"; redacted: true }
+  // A Claude launch that didn't give the seat its own subscription token: Claude started on its config dir's stored
+  // login. The reference (label and file path) only; the token value never enters OpenRig.
+  | { type: "seat.claude_token_not_applied"; rigId: string; nodeId: string; label: string; tokenFile: string; reason: string }
   | { type: "seat.attention_cleared"; rigId: string; nodeId: string; sessionName: string; from: string; to: "ready"; clearedBy: "evidence" | "operator_attestation"; evidence?: { kind: string; state?: string; reason?: string }; reason?: string; previousError: string | null }
   | { type: "seat.attention_clear_refused"; rigId: string; nodeId: string; sessionId: string; sessionName: string; attentionClass: "restore_outcome"; code: string; attemptId?: number; probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence }
   | { type: "rig.imported"; rigId: string; specName: string; specVersion: string }
@@ -240,6 +245,7 @@ export type RigEvent =
   | { type: "pod.created"; rigId: string; podId: string; namespace: string; label: string }
   | { type: "pod.deleted"; rigId: string; podId: string }
   | { type: "node.startup_pending"; rigId: string; nodeId: string; startupProof?: StartupProofSelection }
+  | { type: "node.startup_first_input_passed"; rigId: string; nodeId: string; sessionId: string; path: string; submission: "unconfirmed" }
   | { type: "node.startup_ready"; rigId: string; nodeId: string; previousStatus?: "failed" | "attention_required"; submission?: { status: "unverified" | "staged"; reasons: string[]; warning?: string; diagnostics?: StartupSubmissionDiagnostic[] } }
   | { type: "node.startup_failed"; rigId: string; nodeId: string; error: string; sessionId?: string; freshContextPending?: boolean; forkContextPending?: { parentToken: string; isRestore: boolean }; submissionDiagnostics?: StartupSubmissionDiagnostic[]; stage?: StartupFailureStage; hasPendingWork?: boolean; requestedResumeToken?: string | null; requestedResumeType?: string | null; probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence }
   // OPR.0.4.3.06 — startup proof (challenge-verified orientation). Append-only.
@@ -506,6 +512,9 @@ export interface RestoreNodeResult {
   /** Managed guidance block ids the seat's guidance file still lacks after restore. The seat keeps
    *  its own status (a resumed session is still running); this only discloses the gap. */
   guidanceGaps?: string[];
+  /** An ordinary terminal seat (`isOrdinaryTerminalSeat`) has no conversation, so its fresh launch is its whole restore
+   *  and doesn't leave the rig partially restored. */
+  noConversation?: true;
 }
 
 export type RestoreOutcome =

@@ -11,3 +11,4 @@ limits:
 launch_result: true
 resume: true
 startup_assisted: true
+first_input: true

@@ -103,18 +103,24 @@ function expectedFreshLaunchCommand(options: { cwd?: string; model?: string; eff
   return `codex -s workspace-write '-c' 'check_for_update_on_startup=false' -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg}${effortArg}`;
 }
 
-function expectedResumeCommand(token = "sess-456", queueRoot: string | null = testQueueRoot(), model?: string, effort?: string): string {
+// A resume and a fork add the same git metadata dir as the fresh launch, after the conversation id (`gitCwd` null: none,
+// as for a read-only profile).
+function gitDirOption(gitCwd: string | null): string {
+  return gitCwd === null ? "" : ` --add-dir ${quote(nodePath.join(gitCwd, ".git"))}`;
+}
+
+function expectedResumeCommand(token = "sess-456", queueRoot: string | null = testQueueRoot(), model?: string, effort?: string, gitCwd: string | null = "/project"): string {
   const queueDirArg = queueRoot === null ? "" : `--add-dir ${quote(queueRoot)} `;
   const modelArg = model ? ` -m ${quote(model)}` : "";
   const effortArg = effort ? ` -c ${quote(`model_reasoning_effort="${effort}"`)}` : "";
-  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false'${modelArg}${effortArg} resume ${queueDirArg}${quote(token)}`;
+  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false'${modelArg}${effortArg} resume ${queueDirArg}${quote(token)}${gitDirOption(gitCwd)}`;
 }
 
-function expectedForkCommand(parentId = "parent-thread-id", options: { model?: string; effort?: string; queueRoot?: string | null } = {}): string {
+function expectedForkCommand(parentId = "parent-thread-id", options: { model?: string; effort?: string; queueRoot?: string | null; gitCwd?: string | null } = {}): string {
   const queueDirArg = options.queueRoot === null ? "" : ` --add-dir ${quote(options.queueRoot ?? testQueueRoot())}`;
   const modelArg = options.model ? ` -m ${quote(options.model)}` : "";
   const effortArg = options.effort ? ` -c ${quote(`model_reasoning_effort="${options.effort}"`)}` : "";
-  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false'${modelArg}${effortArg} fork${queueDirArg} ${quote(parentId)}`;
+  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false'${modelArg}${effortArg} fork${queueDirArg} ${quote(parentId)}${gitDirOption(options.gitCwd === undefined ? "/project" : options.gitCwd)}`;
 }
 
 function expectedProfileFreshLaunchCommand(profile: string, options: { cwd?: string; model?: string; queueRoot?: string | null } = {}): string {
@@ -125,9 +131,9 @@ function expectedProfileFreshLaunchCommand(profile: string, options: { cwd?: str
   return `codex -p ${quote(profile)} '-c' 'check_for_update_on_startup=false' -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg}`;
 }
 
-function expectedProfileResumeCommand(profile: string, token = "sess-456", queueRoot: string | null = testQueueRoot()): string {
+function expectedProfileResumeCommand(profile: string, token = "sess-456", queueRoot: string | null = testQueueRoot(), gitCwd: string | null = "/project"): string {
   const queueDirArg = queueRoot === null ? "" : `--add-dir ${quote(queueRoot)} `;
-  return `codex -p ${quote(profile)} '-c' 'check_for_update_on_startup=false' resume ${queueDirArg}${quote(token)}`;
+  return `codex -p ${quote(profile)} '-c' 'check_for_update_on_startup=false' resume ${queueDirArg}${quote(token)}${gitDirOption(gitCwd)}`;
 }
 
 beforeEach(() => {
@@ -211,7 +217,8 @@ describe("Codex runtime adapter", () => {
     expect(result.ready).toBe(true);
   });
 
-  it("checkReady reports a first-login gate instead of waiting for the runtime", async () => {
+  it.each(["codex-first-login.txt", "codex-first-login-0.162.1.txt"])("checkReady reports %s as a first-login gate instead of waiting for the runtime", async (fixture) => {
+    const firstLoginPrompt = fs.readFileSync(new URL(`./fixtures/${fixture}`, import.meta.url), "utf8");
     const tmux = mockTmux({ capturePaneContent: vi.fn(async () => firstLoginPrompt) });
     const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), listProcesses: () => [] });
     expect(await adapter.checkReady(makeBinding())).toMatchObject({ ready: false, code: "login_required" });
@@ -220,7 +227,7 @@ describe("Codex runtime adapter", () => {
   });
 
   it.each(["bash", "node"])("checkReady rechecks a %s wrapper before reporting its first-login gate", async (paneCommand) => {
-    for (const fixture of ["codex-first-login-no-daemon.txt", "codex-first-login-no-daemon-80x24.txt", "codex-api-key-login-no-daemon.txt"]) {
+    for (const fixture of ["codex-first-login-no-daemon.txt", "codex-first-login-no-daemon-80x24.txt", "codex-api-key-login-no-daemon.txt", "codex-first-login-0.162.1.txt"]) {
       const paneContent = fs.readFileSync(new URL(`./fixtures/${fixture}`, import.meta.url), "utf8");
       const tmux = mockTmux({
         getPaneCommand: vi.fn(async () => paneCommand),
@@ -828,7 +835,7 @@ describe("Codex runtime adapter", () => {
       expect(result, JSON.stringify(opts)).toMatchObject({ ok: true });
       const command = vi.mocked(tmux.sendText).mock.calls[0]?.[1];
       expect(command).toContain("-p 'locked'");
-      if (!opts.resumeToken && !opts.forkSource) expect(command).toContain("--add-dir '/project/.git'");
+      expect(command).toContain("--add-dir '/project/.git'");
       expect(command).toContain(`--add-dir '${testQueueRoot()}'`);
     }
     expect(fsOps.readFile(projectPath)).toBe(projectContent);

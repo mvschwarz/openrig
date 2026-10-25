@@ -7,3 +7,5 @@ Binary: [codex-x86_64-unknown-linux-musl.tar.gz](https://github.com/openai/codex
 The three `*-no-daemon*.txt` captures also pass `--no-daemon --no-alt-screen`. They retain Codex's earlier banner and empty composer above the newer sign-in panel. A current login panel must win over that older composer, while a newer usable composer below a dismissed panel must not be blocked.
 
 The regression exercises these captured screens through the shared readiness probe, the Codex adapter, and startup persistence/inventory. Modified copies cover another highlighted choice, quoted or incomplete panels, and a newer conversation or native menu. Those variations are synthetic, not additional native captures.
+
+`codex-first-login-0.162.1.txt` is the verbatim chooser text retained from a signed-out Codex CLI 0.162.1 Linux run. Its older two-line introduction and “Provide your own API key” choice differ from 0.164.0. Only the chooser was captured; this fixture does not establish the 0.162.1 API-key entry screen. Modified copies test changed selections, missing footers, quoted panels and newer composers.

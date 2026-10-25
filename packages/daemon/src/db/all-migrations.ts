@@ -13,6 +13,7 @@ import { streamRetentionFloorSchema } from "./migrations/131_stream_retention_fl
 import { seatRuntimeSwitchesSchema } from "./migrations/132_seat_runtime_switches.js";
 import { streamReaderActionsSchema } from "./migrations/133_stream_reader_actions.js";
 import { seatIdentityProcessEvidenceSchema } from "./migrations/135_seat_identity_process_evidence.js";
+import { nodeClaudeTokenRefSchema } from "./migrations/138_node_claude_token_ref.js";
 import { bindingsSessionsSchema } from "./migrations/002_bindings_sessions.js";
 import { eventsSchema } from "./migrations/003_events.js";
 import { snapshotsSchema } from "./migrations/004_snapshots.js";
@@ -272,5 +273,6 @@ export const ALL_MIGRATIONS: Migration[] = [
   claudeTokenReadingsSchema,
   seatIdentityProcessEvidenceSchema,
   nodeLaunchRecipeSchema,
+  nodeClaudeTokenRefSchema,
   nodeClaudePermissionsSchema,
 ];

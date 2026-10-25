@@ -20,6 +20,7 @@ launch_result: true             # optional: the launcher reports the conversatio
 # names_conversation: true      # optional, instead of launch_result: OpenRig names the conversation (below)
 resume: true                    # optional, needs one of those two; declare it only once your harness's resume is checked
 startup_assisted: true           # optional: startup submission needs a person's check (below)
+first_input: true                # optional: launcher takes the first turn from OPENRIG_FIRST_INPUT (below)
 ```
 
 - **`command`** is a single program and its arguments. Shell syntax such as `|`, `&&`, `;`, redirections or `$(…)`
@@ -175,5 +176,15 @@ CLI.
 Copy both and maintain them as your own.
 
 The launcher is the contributor's code, in the contributor's package. OpenRig runs no code from a preset and loads no
-module into its daemon. A preset that sets `launch_result`, `names_conversation` or `startup_assisted` is refused by an older
+module into its daemon. A preset that sets `launch_result`, `names_conversation`, `startup_assisted` or `first_input` is refused by an older
 OpenRig that doesn't know the field.
+
+## Pass the first startup input at launch
+
+A format-1 preset may set `first_input: true` (a boolean, default false). OpenRig composes the same initial identity turn it would otherwise paste, including the first merged text file, durable-obligation guidance and any selected orientation challenge. Before launch it writes that text to a per-attempt 0600 file under its own `state/first-input/` folder and passes the path as `OPENRIG_FIRST_INPUT`. The typed launch command carries the path, not the text; an argument-based launcher still puts the text in the native harness’s argv.
+
+The contributor-owned launcher reads the file and uses its harness’s supported initial-prompt route: the Cursor example passes one positional prompt; OpenClaw uses `--message`. Core knows neither flag. If no initial identity turn is due (an ordinary resume, for example), the variable is absent and the launcher starts without a first message. Later startup files and actions use their existing delivery paths; they are not folded into the launch file.
+
+OpenRig records `node.startup_first_input_passed` with the path and `submission: unconfirmed`. This says the input was passed at launch, not that the native harness submitted or read it. An uncertain launch is not permission to replay it. Readiness remains process-only. `startup_assisted` is independent: when declared, startup still requires a person’s acknowledgement, including when the first input was passed at launch.
+
+Presets without `first_input` and built-in runtimes keep their existing behavior. Older OpenRig versions reject this new field as unknown. The private input file remains for diagnostics; it can contain private startup context. A launcher that turns its contents into one argument is subject to the platform’s argument-size limit; the launcher must report a launch error rather than silently truncate the turn. The examples’ argument transport is covered with stand-ins; native unattended startup still requires qualification with the installed harness.

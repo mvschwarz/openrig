@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CodexRuntimeAdapter, type CodexAdapterFsOps } from "../src/adapters/codex-runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
+import { codexCommandResumeToken, observeCodexForkProcess, observeCodexPaneProcess } from "../src/domain/native-process-lineage.js";
 
 // Issue #121: in a linked git worktree `<cwd>/.git` is a FILE ("gitdir: ..."), so passing it to Codex as
 // `--add-dir` breaks the Linux sandbox for every command. These tests use real temporary Git repositories
@@ -112,15 +113,78 @@ describe("Codex fresh launch git add-dirs (issue #121)", () => {
     for (const dir of dirs) expect(fs.statSync(dir).isDirectory()).toBe(true);
   });
 
-  it("resume does not resolve or add git dirs (unchanged)", async () => {
+});
+
+// A restored seat resumes its conversation (`codex resume`), and a forked one starts from its parent's
+// (`codex fork`). Each must get the git metadata dirs its fresh launch gets, or it can't commit after a restore.
+describe("Codex resume and fork git add-dirs (a restored seat keeps .git writable)", () => {
+  async function launchCommand(cwd: string, opts: { resumeToken?: string; fork?: true }): Promise<string> {
     const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({
+      tmux, fsOps, sleep: async () => {}, listProcesses: () => [], readThreadIdByPid: () => undefined, resumeProofWindowMs: 0,
+    });
+    await adapter.launchHarness(binding(cwd), {
+      name: "dev@issue121-rig",
+      ...(opts.resumeToken ? { resumeToken: opts.resumeToken } : {}),
+      ...(opts.fork ? { forkSource: { kind: "native_id" as const, value: "parent-thread", pendingIdAllowed: true } } : {}),
+    });
+    return vi.mocked(tmux.sendText).mock.calls[0]![1] as string;
+  }
+
+  it("an ordinary repository's resume and fork add <cwd>/.git, as its fresh launch does", async () => {
+    const repo = ordinaryRepo();
+    const fresh = addDirs(await freshLaunchCommand(repo));
+    expect(fresh).toEqual([nodePath.join(repo, ".git")]);
+    const resume = await launchCommand(repo, { resumeToken: "thread-1" });
+    expect(addDirs(resume)).toEqual(fresh);
+    // The dirs are resume's own options, after the conversation id.
+    expect(resume).toMatch(/ resume 'thread-1' --add-dir '[^']*\/\.git'$/);
+    const fork = await launchCommand(repo, { fork: true });
+    expect(addDirs(fork)).toEqual(fresh);
+    expect(fork).toMatch(/ fork 'parent-thread' --add-dir '[^']*\/\.git'$/);
+  });
+
+  it("the resume and fork proofs still find the process when the cwd has a space, which ps does not quote", async () => {
+    const repo = ordinaryRepo();
+    expect(repo).toContain(" ");
+    // ps shows argv joined by spaces with no quoting; this models that line for the launched Codex.
+    const asPs = (command: string) => command.slice(command.indexOf("codex ")).replace(/'/g, "");
+    const pane = { getPanePid: async () => 4100 };
+    const row = (command: string) => [{ pid: 4100, ppid: 1, pgid: 4100, tpgid: 4100, executableName: "codex",
+      startedAt: "Sat Jan  1 12:00:00 2000", command: asPs(command) }];
+    const resume = await launchCommand(repo, { resumeToken: "thread-1" });
+    expect(codexCommandResumeToken(asPs(resume))).toBe("thread-1");
+    expect(await observeCodexPaneProcess({ target: "r01-qa", tmux: pane, listProcesses: () => row(resume),
+      expectedToken: "thread-1", requireResume: true })).not.toBeNull();
+    const fork = await launchCommand(repo, { fork: true });
+    expect(await observeCodexForkProcess({ target: "r01-qa", tmux: pane, listProcesses: () => row(fork),
+      parentToken: "parent-thread" })).not.toBeNull();
+  });
+
+  it("a linked worktree's resume and fork add its worktree and common git dirs, never the .git file", async () => {
+    const { repo, worktree, worktreeGitDir } = linkedWorktree();
+    for (const command of [await launchCommand(worktree, { resumeToken: "thread-1" }), await launchCommand(worktree, { fork: true })]) {
+      const dirs = addDirs(command);
+      expect(dirs).toEqual(addDirs(await freshLaunchCommand(worktree)));
+      expect(dirs).toContain(worktreeGitDir);
+      expect(dirs).toContain(nodePath.join(repo, ".git"));
+      expect(dirs).not.toContain(nodePath.join(worktree, ".git"));
+    }
+  });
+
+  it("an in-place restart keeps the running Codex's own --add-dirs and resolves none again", async () => {
     const resolveGitAddDirs = vi.fn(async () => ["/should/not/appear"]);
     const adapter = new CodexRuntimeAdapter({
-      tmux, fsOps, sleep: async () => {}, listProcesses: () => [], readThreadIdByPid: () => undefined, resolveGitAddDirs,
+      tmux: mockTmux(), fsOps, sleep: async () => {}, listProcesses: () => [], readThreadIdByPid: () => undefined, resolveGitAddDirs,
     });
-    await adapter.launchHarness(binding(root), { name: "dev@issue121-rig", resumeToken: "thread-1" });
+    const built = await adapter.buildResumeCommand(binding(root), {
+      name: "dev@issue121-rig", resumeToken: "thread-1",
+      running: { networkOverride: false, daemonOptOut: false, addDirs: [nodePath.join(root, ".git")] },
+    });
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    expect(addDirs(built.core)).toEqual([nodePath.join(root, ".git")]);
     expect(resolveGitAddDirs).not.toHaveBeenCalled();
-    expect(vi.mocked(tmux.sendText).mock.calls[0]![1]).not.toContain("/should/not/appear");
   });
 });
 
