@@ -7,7 +7,8 @@ import os from "node:os";
 import path from "node:path";
 import type { QueueDeps } from "../src/commands/queue.js";
 import { createProgram } from "../src/index.js";
-import { DaemonResponseError, DaemonTimeoutError } from "../src/client.js";
+import { DaemonClient, DaemonResponseError, DaemonTimeoutError, SENDER_IDENTITY_HEADER, senderIdentityHeaders } from "../src/client.js";
+import { getDaemonUrl } from "../src/daemon-lifecycle.js";
 
 vi.mock("../src/daemon-lifecycle.js", async () => {
   const actual = await vi.importActual<Record<string, unknown>>("../src/daemon-lifecycle.js");
@@ -17,6 +18,8 @@ vi.mock("../src/daemon-lifecycle.js", async () => {
     getDaemonUrl: vi.fn(() => "http://localhost:7433"),
   };
 });
+// This instance's host id, which a request to a daemon not proven local carries in its sender.
+vi.mock("../src/local-origin.js", () => ({ readLocalOrigin: () => "host-a" }));
 
 const LOCAL = "http://localhost:7433";
 const REMOTE = "http://vps-b.example:7433";
@@ -47,6 +50,8 @@ function makeDeps(posts: Reply[], gets: Record<string, Reply>): { deps: QueueDep
       lifecycleDeps: {} as QueueDeps["lifecycleDeps"],
       clientFactory: (base: string) => ({
         baseUrl: base,
+        // A client for the local daemon, proven local: its requests carry the seat's own name.
+        senderIdentity: async () => ({ session: senderIdentityHeaders()[SENDER_IDENTITY_HEADER], originUnknown: false }),
         get: vi.fn(async (p: string, options?: Call["options"]) => {
           calls.push({ base, method: "get", path: p, options });
           return answer(gets[`${base}${p}`], { status: 404, data: { error: "not_found" } });
@@ -123,7 +128,8 @@ describe("a queue create that got no answer is read back once by its ID", () => 
   it("a cross-host create the destination committed late reads back from that host, with its bearer, never printed", async () => {
     fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${REMOTE}\n    bearer_env: XH_AUTH\n`);
     vi.stubEnv("XH_AUTH", AUTH_VALUE);
-    const { calls, error } = await run("dev@rig-b@vps-b", [FORWARD_UNKNOWN], { [`${REMOTE}/api/queue/${ID}`]: { status: 200, data: REMOTE_ROW } });
+    const { calls, error } = await run("dev@rig-b@vps-b", [FORWARD_UNKNOWN],
+      { [`${REMOTE}/api/queue/${ID}`]: { status: 200, data: REMOTE_ROW }, [`${LOCAL}/healthz`]: { status: 200, data: { selfHostId: "host-a" } } });
     expect(error).toBeNull();
     expect(posts(calls)).toHaveLength(1);
     expect(readBacks(calls)).toEqual([expect.objectContaining({ base: REMOTE, options: expect.objectContaining({ headers: { Authorization: `Bearer ${AUTH_VALUE}` } }) })]);
@@ -177,5 +183,92 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     expect(readBacks(calls)).toHaveLength(1);
     expect(stderr.join("\n")).toContain(`committed after all: row ${ID}`);
     expect(process.exitCode ?? 0).toBe(0);
+  });
+
+  // The source a row must carry is the one the daemon stores for this create: the sender this client sent, as that daemon
+  // canonicalizes it, and on a forwarded create stamped with the forwarding daemon's own host id.
+  it("a forwarded create whose stored source names another origin host isn't this create", async () => {
+    fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${REMOTE}\n`);
+    const { calls, error } = await run("dev@rig-b@vps-b", [FORWARD_UNKNOWN],
+      { [`${REMOTE}/api/queue/${ID}`]: { status: 200, data: { ...ROW, sourceSession: "lead@rig-a@host-c" } }, [`${LOCAL}/healthz`]: { status: 200, data: { selfHostId: "host-a" } } });
+    expect(error).toBeNull();
+    expect(posts(calls)).toHaveLength(1);
+    expect(readBacks(calls)).toHaveLength(1);
+    const all = stderr.join("\n");
+    expect(all).not.toContain("committed after all");
+    expect(all).toContain(`Row ${ID} on host 'vps-b' exists but isn't this create (its source differs)`);
+    expect(process.exitCode).toBe(2);
+  });
+
+  it("a forwarded create whose forwarding daemon's host id can't be read stays unknown", async () => {
+    fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${REMOTE}\n`);
+    const { calls } = await run("dev@rig-b@vps-b", [FORWARD_UNKNOWN], { [`${REMOTE}/api/queue/${ID}`]: { status: 200, data: REMOTE_ROW } });
+    expect(posts(calls)).toHaveLength(1);
+    const all = stderr.join("\n");
+    expect(all).not.toContain("committed after all");
+    expect(all).toContain("couldn't read this daemon's host id");
+    expect(process.exitCode).toBe(2);
+  });
+
+  describe("with the real client's sender", () => {
+    type Request = { method: string; path: string; sender: string | null };
+    async function runReal(reply: (method: string, url: URL) => Response): Promise<{ requests: Request[]; error: unknown }> {
+      const requests: Request[] = [];
+      const fetchImpl: typeof fetch = async (input, init) => {
+        const url = new URL(String(input));
+        const method = init?.method ?? "GET";
+        requests.push({ method, path: url.pathname, sender: new Headers(init?.headers).get(SENDER_IDENTITY_HEADER) });
+        return reply(method, url);
+      };
+      const deps = {
+        lifecycleDeps: {} as QueueDeps["lifecycleDeps"],
+        clientFactory: (base: string) => new DaemonClient(base, { fetchImpl, ownerProbe: async () => ({ state: "unverified" }) as never }),
+      } as unknown as QueueDeps;
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      let error: unknown = null;
+      try {
+        await program.parseAsync(["node", "rig", "queue", "create", "--destination", "dev@rig-b", "--body", "b", "--summary", "s", "--id", ID, "--json"]);
+      } catch (err) { error = err; }
+      return { requests, error };
+    }
+    const lostCreate = (selfHostId: string, stored: string) => (method: string, url: URL): Response => {
+      if (url.pathname === "/healthz") return Response.json({ selfHostId });
+      if (method === "POST") throw new TypeError("connection lost");
+      return Response.json({ ...ROW, sourceSession: stored });
+    };
+
+    describe("sent straight to another host's daemon (OPENRIG_URL)", () => {
+      beforeEach(() => {
+        vi.stubEnv("OPENRIG_URL", REMOTE);
+        vi.mocked(getDaemonUrl).mockReturnValue(REMOTE);
+      });
+      afterEach(() => { vi.mocked(getDaemonUrl).mockReturnValue(LOCAL); });
+
+      it("reads back as created when that daemon stored the sender with this host's id", async () => {
+        const { requests, error } = await runReal(lostCreate("host-b", "lead@rig-a@host-a"));
+        expect(requests.filter((r) => r.method === "POST")).toEqual([expect.objectContaining({ sender: "lead@rig-a@host-a" })]);
+        expect(error).toBeNull();
+        expect(stderr.join("\n")).toContain(`committed after all: row ${ID}`);
+      });
+
+      it("isn't this create when the stored source names another origin host", async () => {
+        const { requests, error } = await runReal(lostCreate("host-b", "lead@rig-a@host-c"));
+        expect(requests.filter((r) => r.method === "POST")).toHaveLength(1);
+        expect(error).not.toBeNull();
+        expect(stderr.join("\n")).toContain(`Row ${ID} exists but isn't this create (its source differs)`);
+      });
+    });
+
+    it.each([
+      ["names its own host", "lead@rig-a@host-a"],
+      ["has stray spaces", " lead@rig-a "],
+    ])("a local create from a seat whose session name %s reads back as created: the daemon stores the bare seat", async (_case, session) => {
+      vi.stubEnv("OPENRIG_SESSION_NAME", session);
+      const { requests, error } = await runReal(lostCreate("host-a", "lead@rig-a"));
+      expect(requests.filter((r) => r.method === "POST")).toHaveLength(1);
+      expect(error).toBeNull();
+      expect(stderr.join("\n")).toContain(`committed after all: row ${ID}`);
+    });
   });
 });
