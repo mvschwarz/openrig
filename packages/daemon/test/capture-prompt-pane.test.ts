@@ -1,10 +1,17 @@
 // A seat sat at a native approval in an 18x12 pane, and `rig capture` showed only the bottom of the menu, so nobody could
 // see what it was asking. A capture that shows a prompt in a pane smaller than 80x24 now says the prompt may be cut off,
 // and how to resize the seat's window to read it.
+import { execFile } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
 import { Hono } from "hono";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { setDaemonTmuxServer, tmuxResizeWindowCommand } from "../src/adapters/tmux-server.js";
 import { createDb } from "../src/db/connection.js";
 import { transportRoutes } from "../src/routes/transport.js";
+const exec = promisify(execFile);
 
 // What an 18-column pane shows of a Claude Code approval: the question wraps, and only the bottom of the menu fits.
 const NARROW_APPROVAL = ["Do you want to", "proceed?", "❯ 1. Yes", "  2. No", "", "Esc to cancel"].join("\n") + "\n";
@@ -36,7 +43,26 @@ describe("rig capture says when a pane is too small to show the prompt the seat 
     const result = await transport.capture("review@rig", { promptPane: true });
     expect(result).toMatchObject({ ok: true, content: NARROW_APPROVAL, promptPane: { width: 18, height: 12 } });
     expect(result.promptPane?.hint).toBe(
-      "pane 18x12 is smaller than 80x24, so the prompt may be cut off; resize it (tmux resize-window -t =review@rig -x 120 -y 40) and capture again");
+      "pane 18x12 is smaller than 80x24, so the prompt may be cut off; resize it (tmux resize-window -t =review@rig: -x 120 -y 40) and capture again");
+  });
+
+  // Real private tmux server: a window in another session that has the seat's name must not be the one resized.
+  it.skipIf(process.platform === "win32")("the resize command resizes the seat's own window, never a same-named window in another session", async () => {
+    const root = mkdtempSync(join(tmpdir(), "resize-target-")), socket = join(root, "s");
+    const env = { ...process.env }; delete env.TMUX;
+    const tmux = async (args: string[]) => (await exec("tmux", ["-S", socket, ...args], { env })).stdout.trim();
+    try {
+      await tmux(["-f", "/dev/null", "new-session", "-d", "-s", "review@rig", "-x", "18", "-y", "12", "sleep 60"]);
+      await tmux(["new-session", "-d", "-s", "other", "-n", "review@rig", "-x", "90", "-y", "30", "sleep 60"]);
+      setDaemonTmuxServer(["-S", socket]);
+      await exec("/bin/sh", ["-c", tmuxResizeWindowCommand("review@rig", 120, 40)], { env });
+      const sizes = (await tmux(["list-windows", "-a", "-F", "#{session_name} #{window_width}x#{window_height}"])).split("\n").sort();
+      expect(sizes).toEqual(["other 90x30", "review@rig 120x40"]);
+    } finally {
+      setDaemonTmuxServer([]);
+      await tmux(["kill-server"]).catch(() => {});
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("the same approval in a normal pane, and a shell in a small pane, add nothing; only a prompt costs the size read", async () => {

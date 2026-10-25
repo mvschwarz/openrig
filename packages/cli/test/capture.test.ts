@@ -28,7 +28,7 @@ const SHORT = ["$ for i in 1 2 3 4 5", "line1", "line2", "line3", "line4", "line
 const BUSY_CLAUDE = ["● Reading the queue row", "", "✻ Waddling… (12s · ↓ 1.2k tokens · esc to interrupt)", "", "╭──────────────────╮", "│ >                │", "╰──────────────────╯", "  ? for shortcuts"].join("\n") + "\n";
 const PANES: Record<string, string> = { "tall@my-rig": TALL, "short@my-rig": SHORT, "busy@my-rig": BUSY_CLAUDE, "ghost@my-rig": "pane text\n", "empty@my-rig": "pane text\n", "small@my-rig": "Do you want to\n" };
 // What the daemon adds when the captured screen is at a prompt in a pane smaller than 80x24.
-const SMALL_PANE_HINT = "pane 18x12 is smaller than 80x24, so the prompt may be cut off; resize it (tmux resize-window -t =small@my-rig -x 120 -y 40) and capture again";
+const SMALL_PANE_HINT = "pane 18x12 is smaller than 80x24, so the prompt may be cut off; resize it (tmux resize-window -t =small@my-rig: -x 120 -y 40) and capture again";
 const PROMPT_PANES: Record<string, unknown> = { "small@my-rig": { width: 18, height: 12, hint: SMALL_PANE_HINT } };
 // What the daemon adds for a Claude Code or Codex seat: the input box as the cursor and styling read it.
 const GHOST_HINT = "The input box shows \"/compact\", likely a Claude Code suggestion (cursor at the input's start; text drawn faint), not something the person typed: it isn't their intent, a draft or a staged command.";
