@@ -8,6 +8,7 @@ import { readOpenRigEnv } from "./openrig-compat.js";
 import { resolveRigHandle } from "./rig-handle.js";
 import { formatSeatActivity, type SeatActivityFields } from "./lib/seat-activity.js";
 import { CLI_VERSION } from "./version.js";
+import { sendWaitingForIdle, daemonSendBody } from "./wait-for-idle.js";
 
 const LONG_RUNNING_UP_TIMEOUT_MS = 120_000;
 const WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS = 5_000;
@@ -718,13 +719,13 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         }
         if (scope && !scope.session(session)) return outOfScope(`Session ${session}`);
         const waitForIdleMs = waitForIdleSeconds === undefined ? undefined : Math.ceil(waitForIdleSeconds * 1000);
-        const res = await client.post("/api/transport/send", {
+        const res = await sendWaitingForIdle(waitForIdleMs, (waitMs) => client.post<Record<string, unknown>>("/api/transport/send", {
           session,
           text,
           verify,
           force,
-          waitForIdleMs,
-        }, transportRequestOptions(waitForIdleRequestOptions(waitForIdleMs)));
+          waitForIdleMs: waitMs,
+        }, transportRequestOptions(waitForIdleRequestOptions(waitMs))), daemonSendBody);
         return mapResult(res);
       } catch (err) {
         return caught(err);
