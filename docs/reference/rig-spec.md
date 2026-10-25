@@ -201,7 +201,8 @@ rig launch <rig-id> dev.lead --json
 
 This starts only that seat, preserving the rig's node IDs and the other seats. The daemon retains
 the materialized declaration and resolves its agent and startup files from the original source
-root at launch time; keep those files available. A prior snapshot isn't required. Seats with
+root at launch time; keep those files available. Current saved model, effort and permission
+choices take precedence over the retained declaration; launch reports the differences. A prior snapshot isn't required. Seats with
 session history continue through restore. Explicit `--snapshot-id` and `--seats` use restore too.
 `--plan` previews restore selection; it requires a snapshot and does not preflight this first start.
 Rigs materialized by older daemons lack the retained declaration; this path doesn't retrofit them.

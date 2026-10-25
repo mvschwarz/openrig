@@ -221,6 +221,7 @@ export function createFullTestDb(): Database.Database {
 
 export function mockTmuxAdapter(): TmuxAdapter {
   return mockShellCommand({
+    startServer: vi.fn(async () => {}),
     createSession: vi.fn(async () => ({ ok: true as const })),
     killSession: vi.fn(async () => ({ ok: true as const })),
     listSessions: vi.fn(async () => []),
