@@ -385,7 +385,10 @@ export class TmuxAdapter {
       const policy = this.launchEnvironment();
       if (policy.inheritTmuxEnvironment) return null;
       if (process.platform === "win32") throw new Error("POSIX launch boundary unavailable");
-      const shell = await this.getDefaultShell();
+      let shell = await this.getDefaultShell();
+      // tmux reads these options from a running server. The first seat on a new server starts the empty server here,
+      // as a first start does, so it gets the same scoped environment as every later seat (#2041).
+      if (!shell && (await this.startServer()).ok) shell = await this.getDefaultShell();
       if (!shell) throw new Error("Default shell unavailable");
       if (command === undefined) command = (await this.run(["tmux", "show-options", "-gv", "default-command"])).replace(/\r?\n$/, "");
       // tmux normally copies these client values from the daemon on new-session.

@@ -215,4 +215,34 @@ describe.skipIf(process.platform === "win32")("#1178 initial-shell environment p
     } finally {vi.restoreAllMocks();}
   });
 
+  // #2041 (reported by @AdamWhitehurst): with no tmux server running yet, the options couldn't be read, so the first
+  // seat on a new server was launched with the daemon's inherited environment and every later seat with the scoped one.
+  it("the first seat on a new tmux server gets the scoped environment, with the person's tmux config", async () => {
+    const home=mkdtempSync(path.join(tmpdir(),"tmux-first-")), socket=path.join(home,"first.sock"), observed=path.join(home,"observed");
+    vi.stubEnv("Q2041_DAEMON_ONLY","daemon");
+    const env={...process.env, HOME:home}; delete env.TMUX; delete env.TMUX_TMPDIR;
+    // tmux's own message, as the adapter's exec reports it, so "no server" reads as no server.
+    const tmux=async(args:string[]) => (await exec("tmux",["-S",socket,...args],{env}).catch((error:{stderr?:string}) => {
+      throw Object.assign(new Error(error.stderr ?? String(error)), {execStderr:error.stderr});
+    })).stdout.trim();
+    // The person's config, which any start of this server loads.
+    const script=path.join(home,"observe.sh");
+    writeFileSync(script,`export HISTFILE=/dev/null\nprintf '%s|%s\\n' "\${Q2041_DAEMON_ONLY-absent}" "\${Q2041_SELECTED-absent}" > ${shellQuote(observed)}\nexec /bin/bash --noprofile --norc\n`);
+    writeFileSync(path.join(home,".tmux.conf"),`set -g default-shell /bin/bash\nset -g default-command ${shellQuote(`exec /bin/bash ${shellQuote(script)}`)}\n`);
+    const adapter=new TmuxAdapter(async command=>{
+      // startServer's empty server, on this test's socket.
+      if (command.startsWith("tmux -D")) execFile("tmux",["-S",socket,"-D"],{env},()=>{});
+      return "";
+    },undefined,args=>tmux(args.slice(1)));
+    adapter.launchEnvironment=()=>({inheritTmuxEnvironment:false,env:{HOME:home,PATH:process.env.PATH!,Q2041_SELECTED:"selected"}});
+    const warn=vi.spyOn(console,"warn").mockImplementation(()=>{});
+    try {
+      await expect(tmux(["list-sessions"])).rejects.toThrow();
+      const result=await adapter.createSession("seat",home,{OPENRIG_NODE_ID:"first-node"});
+      expect(result.ok).toBe(true);
+      expect(await waitFile(observed)).toEqual(["absent","selected"]);
+      expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("Scoped tmux environment unavailable"));
+    } finally {await tmux(["kill-server"]).catch(()=>{});vi.restoreAllMocks();vi.unstubAllEnvs();rmSync(home,{recursive:true,force:true,maxRetries:5,retryDelay:20});}
+  });
+
 });
