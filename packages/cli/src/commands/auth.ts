@@ -105,7 +105,7 @@ export function authCommand(depsOverride?: AuthCommandDeps): Command {
     });
 
   withHome(withRuntime(auth.command("switch <profile>")))
-    .description("Activate a saved profile.")
+    .description("Restore saved credential bytes (sign-in is unverified).")
     .addHelpText("after", `
 With --host, the switch runs on that machine, over its SSH entry, and copies a profile already saved there; name the
 home with --codex-home (rig auth status --host <id> shows the home it would use). Only the command and its output
@@ -121,6 +121,7 @@ cross the connection.`)
       console.log(`activated_profile: ${r.name}`);
       console.log(`active_auth: ${r.activePath}`);
       console.log(`active_mode: ${r.mode}`);
+      console.log("note: Restored saved credential bytes only; sign-in is unverified. Saved credentials may expire, be revoked, or be superseded by refresh elsewhere. Restart the affected seat and use the existing account verification; fresh sign-in may be required.");
       console.log(`note: ${r.note}`);
     });
 

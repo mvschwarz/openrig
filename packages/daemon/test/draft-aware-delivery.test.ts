@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { migrate } from "../src/db/migrate.js";
+import nativePaste from "./fixtures/claude-paste-footer.json";
 import type { ComposerSnapshot } from "../src/domain/composer-prompts.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
@@ -127,6 +128,38 @@ describe("current draft-aware delivery through the real transport", () => {
     expect(f.writes.filter(write => write.startsWith("keys:"))).toHaveLength(2);
     expect(f.bodies.a).toBe("");
     expect(f.outbox.getById("wake-intent-" + item.qitemId)!.deliveryState).toBe("delivered");
+  });
+
+  it.each(Array.from({ length: nativePaste.afterSamples }, (_, i) => i + 1))("submits its retained native paste across the footer change (sample %i)", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    const text = Array.from({ length: 71 }, (_, i) => `delivery line ${i}`).join("\n");
+    let readsAfterPaste = 0;
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () =>
+      f.bodies.a === text && readsAfterPaste++ > 0 ? nativePaste.after : nativePaste.before);
+    expect(await f.send("native-footer", text, { verify: false })).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([text]);
+    expect(f.writes).toHaveLength(2); // One paste, one Enter; no retry.
+  });
+
+  it.each(["person's draft", "menu", "changed occupant", "changed target"])("keeps %s protected during a paste-hint transition", async condition => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    const text = Array(71).fill("delivery").join("\n");
+    let readsAfterPaste = 0;
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () => {
+      if (condition === "person's draft") return frame("unfinished note");
+      if (f.bodies.a !== text || readsAfterPaste++ === 0) return nativePaste.before;
+      return condition === "menu" ? frame("1. Yes") : nativePaste.after;
+    });
+    f.hooks.sleep = ms => {
+      if (ms !== 200) return;
+      if (condition === "changed occupant") f.db.exec("INSERT INTO occupant_tenures(id,node_id,generation_ordinal,generation_uuid,kind) VALUES ('next','a',2,'replacement','fresh')");
+      if (condition === "changed target") f.db.exec("UPDATE bindings SET tmux_pane='%3' WHERE node_id='a'");
+    };
+    const result = await f.send("native-footer-control", text, { verify: false });
+    expect(result).toMatchObject(condition === "person's draft" ? { outcome: "retained", sent: false } : { ok: false });
+    expect(f.submissions).toEqual([]);
+    expect(f.writes.filter(write => write.startsWith("keys:"))).toEqual([]);
+    if (condition === "person's draft") expect(f.writes).toEqual([]);
   });
 
   it("does not submit a person's replacement paste after recording its own label", async () => {

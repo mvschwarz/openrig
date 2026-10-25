@@ -5,6 +5,7 @@
 // freshness fallback). Detector covered on BOTH the fresh-runtime-hook path and the capture-pane
 // fallback (Codex's sole prompt guard — exact render from qa-codex-approval-render-research-20260627).
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import type Database from "better-sqlite3";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
@@ -241,6 +242,229 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
       expect(sendKeys).not.toHaveBeenCalled();
     }
     expect(mirror).toContain("[omp-runner] ERROR 529 overloaded");
+  });
+
+  // Reconstructed from a filtered Pi 1.4 capture (blank lines removed, columns cut).
+  // The help footer is followed by one divider, cwd/session and token/model status.
+  const piConfirmation = [
+    " Allow?", " → Yes", "   No",
+    " ↑↓ navigate  enter select  escape/ctrl+c cancel",
+    "────────────────────────────────────",
+    "~/project • tui",
+    "↑3.6k ↓1.6k R24k CH95.0% $0.026 (sub) 0.8%/500k (auto)    gpt-6.1-sol • low",
+  ].join("\n");
+
+  // Pi v1.4.0 extension-selector.ts draws this chrome independently of footer metadata.
+  const piSelectors = [
+    ["named session", piConfirmation],
+    ["48-column selector with wrapped hints", piConfirmation.replaceAll("─".repeat(36), "─".repeat(48)).replace("escape/ctrl+c cancel", "escape/ctrl+c\n cancel")],
+    ["unnamed in git", piConfirmation.replace("~/project • tui", "~/project (main)")],
+    ["unnamed outside git", piConfirmation.replace("~/project • tui", "~/project")],
+    ["extension status", `${piConfirmation}\nplan: on`],
+    ["widget below selector", piConfirmation.replace("~/project • tui", "Widget below editor\n~/project")],
+    ["absent usage counters", piConfirmation.replace(/↑3\.6k ↓1\.6k R24k CH95\.0% /, "")],
+    ["Allow/Deny choices", piConfirmation.replace("→ Yes\n   No", "→ Allow\n   Deny")],
+    ["three choices", piConfirmation.replace("   No", "   No\n   Always")],
+    ["described choice", piConfirmation.replace("→ Yes", "→ Yes — this operation only")],
+    ["rebound keys", piConfirmation.replace("enter select  escape/ctrl+c cancel", "ctrl+y select  ctrl+n cancel")],
+  ] as const;
+  it.each(piSelectors.flatMap(([layout, pane]) => [null, "unknown", "pi"].map(runtime => [layout, runtime, pane] as const)))(
+    "plain send refuses the adopted Pi selector (%s) with runtime %s", async (_layout, runtime, pane) => {
+    const node = rigRepo.addNode(rigId, "adopted.worker", { role: "worker" });
+    db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(runtime, node.id);
+    const seat = "adopted-tui";
+    sessionRegistry.registerClaimedSession(node.id, seat);
+    sessionRegistry.updateBinding(node.id, { tmuxSession: seat, tmuxPane: "%42" });
+    const { sendText, sendKeys } = spies();
+    const capturePaneContent = vi.fn(async () => pane);
+    const result = await makeTransport(mockTmux({ capturePaneContent, sendText, sendKeys })).send(seat, "hello?");
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("target_needs_input");
+    expect(result.error).toContain("A message must not select or approve it");
+    expect(result.activity?.state).toBe("needs_input");
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+    expect(capturePaneContent).toHaveBeenCalledWith("%42", 20);
+  });
+
+  // Reconstructed from Pi v1.4.0 extension-input/editor source, not a native capture.
+  const piDialogBorder = "─".repeat(100);
+  const piInput = [piDialogBorder, "", " Your response", "", "> ", "", " enter submit  escape/ctrl+c cancel", "", piDialogBorder, "~/project"].join("\n");
+  const piEditor = [piDialogBorder, "", " Edit response", "", piDialogBorder, "draft line", "", piDialogBorder, "", " enter submit  shift+enter/ctrl+j newline  escape/ctrl+c cancel  ctrl+g external editor", "", piDialogBorder, "~/project"].join("\n");
+  // Text(paddingX=1) wraps default hints at width-2; Editor renders 30% of terminal rows.
+  const piEditor80 = piEditor.replaceAll(piDialogBorder, "─".repeat(80)).replace(
+    "ctrl+g external editor", "ctrl+g\n external editor");
+  const piEditor67 = piEditor.replaceAll(piDialogBorder, "─".repeat(67)).replace(
+    "ctrl+g external editor", "\n ctrl+g external editor");
+  const piTallEditor = piEditor.replace("draft line\n\n", Array.from({ length: 15 }, (_, i) => `line ${i}\n`).join(""));
+  const piScrolledTail = piTallEditor.replace(`\n${piDialogBorder}\n\n enter submit`,
+    `\n${"─".repeat(45)} ↓ 3 more ${"─".repeat(45)}\n\n enter submit`).split("\n").slice(-20).join("\n");
+  const piTextDialogs = [
+    ["empty input", piInput],
+    ["input with text and description", piInput.replace("Your response", "Your response (10s)\n\n Description").replace("> ", "> existing answer")],
+    ["input rebound keys", piInput.replace("enter submit  escape/ctrl+c cancel", "ctrl+y submit  ctrl+n cancel")],
+    ["editor with blank line", piEditor],
+    ["empty editor", piEditor.replace("draft line", "")],
+    ["editor rebound keys", piEditor.replace("enter submit  shift+enter/ctrl+j newline  escape/ctrl+c cancel  ctrl+g external editor", "ctrl+y submit  alt+n newline  ctrl+n cancel  ctrl+e external editor")],
+    ["scrolling editor", piEditor.replace(`draft line\n\n${piDialogBorder}`, `draft line\nrow 2\nrow 3\nrow 4\n\n${"─".repeat(45)} ↓ 3 more ${"─".repeat(45)}`)],
+    ["80x24 editor with wrapped default hints", piEditor80],
+    ["67x17 editor with wrapped default hints", piEditor67],
+    ["40-column editor with three hint rows", piEditor.replaceAll(piDialogBorder, "─".repeat(40))
+      .replace("ctrl+j newline", "ctrl+j\n newline").replace("ctrl+g external editor", "ctrl+g\n external editor")],
+    ["100x50 editor with 15-row body", piTallEditor],
+    ["100x50 scrolled editor from 20-line capture", piScrolledTail],
+    ["editor opening clipped", piEditor.slice(piEditor.indexOf("draft line"))],
+    ["30-column input with wrapped hints", piInput.replaceAll(piDialogBorder, "─".repeat(30)).replace("escape/ctrl+c cancel", "escape/ctrl+c\n cancel")],
+    ["widget and named footer", `${piInput} • named\ncustom status\nwidget below editor`],
+  ] as const;
+  it.each(piTextDialogs.flatMap(([layout, pane]) => [null, "unknown", "pi"].map(runtime => [layout, runtime, pane] as const)))(
+    "plain send refuses the current Pi text dialog (%s) with runtime %s", async (_layout, runtime, pane) => {
+      const node = rigRepo.addNode(rigId, "adopted.worker", { role: "worker" });
+      db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(runtime, node.id);
+      const seat = "adopted-tui";
+      sessionRegistry.registerClaimedSession(node.id, seat);
+      sessionRegistry.updateBinding(node.id, { tmuxSession: seat, tmuxPane: "%42" });
+      const { sendText, sendKeys } = spies();
+      const result = await makeTransport(mockTmux({ capturePaneContent: async () => pane, sendText, sendKeys })).send(seat, "a peer message");
+      expect(result.reason).toBe("target_needs_input");
+      expect(result.activity?.state).toBe("needs_input");
+      expect(sendText).not.toHaveBeenCalled();
+      expect(sendKeys).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["80-column wrapped help", "─".repeat(80), " enter submit  shift+enter/ctrl+j newline  escape/ctrl+c cancel  ctrl+g\n external editor"],
+    ["100-column single-line help", piDialogBorder, " enter submit  shift+enter/ctrl+j newline  escape/ctrl+c cancel  ctrl+g external editor"],
+  ].flatMap(([layout, border, draft]) => [null, "unknown", "pi"].map(runtime =>
+    [layout, runtime, [border, draft, border, "~/project"].join("\n")] as const)))(
+    "ordinary send does not treat a main-editor help draft as a dialog (%s), runtime %s", async (_layout, runtime, pane) => {
+      const node = rigRepo.addNode(rigId, "adopted.worker", { role: "worker" });
+      db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(runtime, node.id);
+      const seat = "adopted-tui";
+      sessionRegistry.registerClaimedSession(node.id, seat);
+      sessionRegistry.updateBinding(node.id, { tmuxSession: seat, tmuxPane: "%42" });
+      const { sendText, sendKeys } = spies();
+      const result = await makeTransport(mockTmux({ capturePaneContent: async () => pane, sendText, sendKeys })).send(seat, "a peer message");
+      expect(result.ok).toBe(true);
+      expect(classifyPaneActivity(pane, { runtime }).state).not.toBe("attention");
+      expect(sendText).toHaveBeenCalledTimes(1);
+      expect(sendKeys).toHaveBeenCalledWith(seat, ["Enter"]);
+      expect(overrideEvents()).toHaveLength(0);
+    },
+  );
+
+  it.each([piInput, piEditor])("keeps deliberate, audited input available for a Pi text dialog (%#)", async (pane) => {
+    const node = rigRepo.addNode(rigId, "adopted.worker", { role: "worker" });
+    const seat = "adopted-tui";
+    sessionRegistry.registerClaimedSession(node.id, seat);
+    sessionRegistry.updateBinding(node.id, { tmuxSession: seat, tmuxPane: "%42" });
+    const { sendText, sendKeys } = spies();
+    const result = await makeTransport(mockTmux({ capturePaneContent: async () => pane, sendText, sendKeys }))
+      .send(seat, "intentional answer", { dangerouslyInteract: true, reason: "operator answers this dialog" });
+    expect(result.ok).toBe(true);
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(overrideEvents()).toHaveLength(1);
+  });
+
+  it.each(piTextDialogs.flatMap(([kind, pane]) => [
+    [`${kind} followed by a later composer`, `${pane}\n────────────────────────────────────\nordinary draft\n────────────────────────────────────\n~/project`],
+    [`${kind} in fenced output`, `\`\`\`text\n${pane}\n\`\`\``],
+    [`${kind} in a blockquote`, pane.split("\n").map(line => `> ${line}`).join("\n")],
+    [`${kind} beyond the footer bound`, `${pane}\n${Array.from({ length: 8 }, (_, i) => `later output ${i}`).join("\n")}`],
+  ]))("keeps %s out of current Pi dialog recognition", (_name, pane) => {
+    expect(classifyPaneActivity(pane, { runtime: "unknown" }).state).not.toBe("attention");
+  });
+
+  // Claude Code 2.1.309's Resume session picker (dev50-qa's native 100×80 capture): a paste goes into its search and
+  // Enter resumes the focused card, so a plain send refuses and types nothing.
+  const resumePicker = (JSON.parse(readFileSync(new URL("./fixtures/claude-resume-picker-2.1.309.json", import.meta.url), "utf8")) as
+    Record<string, string>).first100x80!;
+  const pickerRows = resumePicker.trimEnd();
+  it.each([
+    ["the native 100×80 frame", resumePicker],
+    ["the native frame in a 100×24 pane", `${pickerRows}\n${Array<string>(11).fill("").join("\n")}`],
+    ["a card titled exactly like Claude's header", resumePicker.replace("probe-claude@q2010-native", "Claude Code v2.1.309")],
+  ].flatMap(([layout, pane]) => [null, "claude-code"].map(runtime => [layout, runtime, pane] as const)))(
+    "plain send refuses Claude's Resume session picker (%s) with runtime %s", async (_layout, runtime, pane) => {
+      const node = rigRepo.addNode(rigId, "adopted.worker", { role: "worker" });
+      db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(runtime, node.id);
+      const seat = "adopted-tui";
+      sessionRegistry.registerClaimedSession(node.id, seat);
+      sessionRegistry.updateBinding(node.id, { tmuxSession: seat, tmuxPane: "%42" });
+      const { sendText, sendKeys } = spies();
+      const result = await makeTransport(mockTmux({ capturePaneContent: async () => pane, sendText, sendKeys })).send(seat, "a peer message");
+      expect(result.reason).toBe("target_needs_input");
+      expect(result.activity?.state).toBe("needs_input");
+      expect(sendText).not.toHaveBeenCalled();
+      expect(sendKeys).not.toHaveBeenCalled();
+    },
+  );
+  it.each(["codex", "pi"])("doesn't read a picker printed in a %s pane as Claude's dialog", (runtime) => {
+    expect(classifyPaneActivity(resumePicker, { runtime }).reason).not.toBe("selection_prompt");
+  });
+  it("doesn't read an old Resume session picker above Claude's live composer as a dialog", () => {
+    const rule = "─".repeat(100);
+    const pane = `${pickerRows}\n\nClaude Code v2.1.309\n\n● Picked up where we left off.\n\n${rule}\n❯ \n${rule}\n  ⏵⏵ accept edits on (shift+tab to cycle)\n`;
+    expect(classifyPaneActivity(pane, { runtime: "claude-code" }).reason).not.toBe("selection_prompt");
+  });
+
+  it.each([
+    ["editor missing spacer before help", piEditor80.replace("\n\n enter submit", "\n enter submit")],
+    ["editor missing spacer after help", piEditor80.replace(`external editor\n\n${"─".repeat(80)}`, `external editor\n${"─".repeat(80)}`)],
+    ["editor missing bottom rule", piEditor.replace(`${piDialogBorder}\n\n enter submit`, "\n enter submit")],
+    ["editor hint exceeds three rows", piEditor.replaceAll(piDialogBorder, "─".repeat(30))
+      .replace("submit  shift+enter", "submit\n shift+enter").replace("newline  escape", "newline\n escape")
+      .replace("ctrl+g external editor", "ctrl+g\n external editor")],
+    ["editor partial hint", piEditor.replace("ctrl+g external editor", "external editor")],
+    ["editor hint split by blank row", piEditor80.replace("ctrl+g\n external editor", "ctrl+g\n\n external editor")],
+    ["input opening clipped", piInput.slice(piInput.indexOf(" Your response"))],
+    ["input opening past scan bound", piInput.replace("Your response", Array.from({ length: 14 }, () => "description").join("\n"))],
+  ])("does not infer a Pi dialog from incomplete or oversized bodies: %s", (_name, pane) => {
+    expect(classifyPaneActivity(pane, { runtime: "unknown" }).state).not.toBe("attention");
+  });
+
+  it("recognizes the Pi confirmation when No is selected", () => {
+    expect(classifyPaneActivity(piConfirmation.replace(" → Yes\n   No", "   Yes\n → No")))
+      .toMatchObject({ state: "attention", reason: "selection_prompt", evidence: "→ No" });
+  });
+
+  it("keeps the audited deliberate-input path for an adopted Pi dialog", async () => {
+    const node = rigRepo.addNode(rigId, "adopted.worker", { role: "worker" });
+    const seat = "adopted-tui";
+    sessionRegistry.registerClaimedSession(node.id, seat);
+    sessionRegistry.updateBinding(node.id, { tmuxSession: seat, tmuxPane: "%42" });
+    const { sendText, sendKeys } = spies();
+    const result = await makeTransport(mockTmux({ capturePaneContent: async () => piConfirmation, sendText, sendKeys }))
+      .send(seat, "n", { dangerouslyInteract: true, reason: "operator deliberately declines" });
+    expect(result.ok).toBe(true);
+    expect(sendText).toHaveBeenCalledWith(seat, "n", undefined, { bracketed: false });
+    expect(sendKeys).not.toHaveBeenCalled();
+    expect(overrideEvents()).toHaveLength(1);
+  });
+
+  it.each([
+    ["historical dialog above a later input", `${piConfirmation}\n────────────────────────────────────\nhello\n────────────────────────────────────\n~/project • tui\n↑3.6k ↓1.6k R24k CH95.0% $0.026 (sub) 0.8%/500k (auto)    gpt-6.1-sol • low`],
+    ["footer quoted in output", "The hint is: ↑↓ navigate  enter select  escape/ctrl+c cancel"],
+    ["question without the select UI", "Allow?\nYes or No\nReady for messages"],
+  ])("does not treat %s as a current Pi confirmation", (_name, pane) => {
+    expect(classifyPaneActivity(pane, { runtime: "unknown" }).state).not.toBe("attention");
+  });
+
+  // Adopted TUI seats have no managed runner hooks and may retain an unknown runtime.
+  it.each([null, "unknown", "pi"])("ordinary send still reaches a quiet adopted seat with runtime %s", async (runtime) => {
+    const node = rigRepo.addNode(rigId, "adopted.worker", { role: "worker" });
+    db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(runtime, node.id);
+    const seat = "adopted-tui";
+    sessionRegistry.registerClaimedSession(node.id, seat);
+    sessionRegistry.updateBinding(node.id, { tmuxSession: seat, tmuxPane: "%42" });
+    const { sendText, sendKeys } = spies();
+    const capturePaneContent = vi.fn(async () => "Ready for another message.");
+    const result = await makeTransport(mockTmux({ capturePaneContent, sendText, sendKeys })).send(seat, "hello");
+    expect(result.ok).toBe(true);
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendKeys).toHaveBeenCalledWith(seat, ["Enter"]);
+    expect(capturePaneContent).toHaveBeenCalledWith("%42", 20);
   });
 
   // K-1: default send to a pane at an interactive prompt → refused, nothing typed/submitted.
@@ -858,6 +1082,74 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(r.warning).toContain("seat-env UNKNOWN — OPENRIG_RUNTIME absent from the tmux session environment");
     expect(r.warning).not.toContain("relay URL,");
     expect(sendText).toHaveBeenCalled();
+  });
+
+  describe("one session-environment listing per producer diagnosis", () => {
+    const names = ["OPENRIG_URL", "RIGGED_URL", "OPENRIG_PORT", "RIGGED_PORT", "OPENRIG_ACTIVITY_HOOK_TOKEN", "RIGGED_ACTIVITY_HOOK_TOKEN", "OPENRIG_RUNTIME", "RIGGED_RUNTIME"];
+    const all = (value: boolean | null) => Object.fromEntries(names.map((n) => [n, value]));
+    function withBatch(batch: (session: string, wanted: readonly string[]) => Promise<Record<string, boolean | null>>, overrides?: Parameters<typeof mockTmux>[0]) {
+      const { sendText } = spies();
+      const hasSessionEnvBatch = vi.fn(batch), hasSessionEnv = vi.fn(async () => true);
+      const tmux = Object.assign({}, mockTmux({ capturePaneContent: async () => "xyzzy no prompt here", sendText, ...overrides }), { hasSessionEnvBatch, hasSessionEnv }) as unknown as TmuxAdapter;
+      return { sendText, hasSessionEnvBatch, hasSessionEnv, tmux };
+    }
+
+    it("reads all eight names in one listing per send, freshly for each send, for an unknown Claude seat", async () => {
+      const b = withBatch(vi.fn().mockResolvedValueOnce(all(false)).mockResolvedValueOnce(all(true)));
+      const t = makeTransport(b.tmux);
+      const first = await t.send("dev-impl@my-rig", "hi");
+      expect(first.ok).toBe(true);
+      expect(first.warning).toContain("seat-env UNKNOWN — relay URL, activity token, OPENRIG_RUNTIME absent from the tmux session environment");
+      const second = await t.send("dev-impl@my-rig", "hi");
+      expect(second.ok).toBe(true);
+      expect(second.warning).toContain("no activity hook is stored for this seat");
+      expect(second.warning).not.toContain("seat-env");
+      expect(b.hasSessionEnvBatch).toHaveBeenCalledTimes(2);
+      expect(b.hasSessionEnvBatch).toHaveBeenNthCalledWith(1, "dev-impl@my-rig", names);
+      expect(b.hasSessionEnv).not.toHaveBeenCalled();
+      expect(b.sendText).toHaveBeenCalledTimes(2);
+    });
+
+    it("keeps a failed listing unknown, once, with no name-by-name retry and no error text", async () => {
+      const b = withBatch(async () => { throw new Error("lookup failed: token=sk-private-value"); });
+      const r = await makeTransport(b.tmux).send("dev-impl@my-rig", "hi");
+      expect(r.ok).toBe(true);
+      expect(r.warning).toContain("session-environment lookup failed for relay URL, activity token, OPENRIG_RUNTIME");
+      expect(r.warning).not.toContain("absent from the tmux session environment");
+      expect(r.warning).not.toContain("sk-private");
+      expect(b.hasSessionEnvBatch).toHaveBeenCalledTimes(1);
+      expect(b.hasSessionEnv).not.toHaveBeenCalled();
+    });
+
+    it("lets any present alias win, and keeps a missing or unknown entry unknown rather than absent", async () => {
+      const b = withBatch(async () => ({ OPENRIG_URL: null, RIGGED_URL: false, OPENRIG_PORT: false, RIGGED_PORT: true,
+        OPENRIG_ACTIVITY_HOOK_TOKEN: null, RIGGED_ACTIVITY_HOOK_TOKEN: false, OPENRIG_RUNTIME: false }));
+      const r = await makeTransport(b.tmux).send("dev-impl@my-rig", "hi");
+      // The URL is covered by a present alias: only the token and runtime are unread, and nothing is called absent.
+      expect(r.warning).toContain("seat-env UNKNOWN — session-environment lookup failed for activity token, OPENRIG_RUNTIME;");
+      expect(r.warning).not.toContain("absent from the tmux session environment");
+    });
+
+    it("keeps the endpoint file's cover for the URL and token, and gives an unknown Codex seat the same one read", async () => {
+      const seat = seedCodexSeat();
+      const b = withBatch(async () => all(false));
+      const r = await makeTransport(b.tmux, { activityEndpointFile: () => ({ baseUrl: "http://127.0.0.1:1", token: "file-token-value" }) }).send(seat, "hi");
+      expect(r.ok).toBe(true);
+      // The endpoint file covers the URL and token, never the runtime.
+      expect(r.warning).toContain("seat-env UNKNOWN — OPENRIG_RUNTIME absent from the tmux session environment;");
+      expect(r.warning).not.toContain("file-token-value");
+      expect(b.hasSessionEnvBatch).toHaveBeenCalledTimes(1);
+    });
+
+    it("does no environment read when a fresh hook shows a prompt: refused before any input", async () => {
+      agentActivityStore.recordHookEvent({ runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "Notification", subtype: "permission_prompt" });
+      const b = withBatch(async () => all(true), { capturePaneContent: async () => "❯ \n  ⏵⏵ accept edits on" });
+      const r = await makeTransport(b.tmux).send("dev-impl@my-rig", "hi");
+      expect(r.ok).toBe(false);
+      expect(r.reason).toBe("target_needs_input");
+      expect(b.hasSessionEnvBatch).not.toHaveBeenCalled();
+      expect(b.sendText).not.toHaveBeenCalled();
+    });
   });
 
   describe("B1: a hook's age is checked before it is called recent; its generation verdict is kept", () => {

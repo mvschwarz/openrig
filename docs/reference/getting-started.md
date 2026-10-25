@@ -39,6 +39,12 @@ The `rigs` skill is the procedure: follow it in order. This page is what it look
 
 ## Before you start
 
+Setup and launch are separate: declining `rig setup` avoids its `~/.tmux.conf` change, but starting Codex seats can
+still write workspace trust and selected MCP/config fragments. `runtime.codex.hooks_enabled=false` controls hooks;
+it isn't a no-global-config option. Setup has no project-only mode. Trusted project `.codex/config.toml` settings
+don't redirect OpenRig's home-config writes. A separate selected `CODEX_HOME` keeps Codex config, login and sessions
+together in that home; it needs its own working sign-in and doesn't relocate `~/.tmux.conf`.
+
 > **What OpenRig changes on your machine**
 > - **Install:** `@openrig/cli` goes in globally with npm.
 > - **Setup:** `rig setup` adds an OpenRig block to `~/.tmux.conf`. It can install tmux (with Homebrew on macOS), and
@@ -46,7 +52,8 @@ The `rigs` skill is the procedure: follow it in order. This page is what it look
 >   Claude Code and Codex and may install a missing one; `rig setup --providers claude` (or `codex`) limits it to
 >   yours.
 > - **Starting OpenRig, for the coding agent you use** (paths are the usual defaults):
->   - Codex: hooks and trust in `~/.codex/config.toml`.
+>   - Codex: hooks, workspace trust and team-selected config fragments (including MCP) in the selected
+>     `CODEX_HOME/config.toml`, default `~/.codex/config.toml`. These affect other Codex sessions using that home.
 >   - Claude Code: workspace trust in `~/.claude.json`, and activity hooks in the project's
 >     `.claude/settings.local.json`, plus a status line unless you already have your own.
 >   - Discovery skills go in `~/.claude/skills` and `~/.agents/skills`.
@@ -255,6 +262,9 @@ applies to future launches and successors, not running agents or your personal t
 If the scoped environment cannot be prepared, launch keeps its previous environment and
 reports a warning in fresh launch results and the daemon log. For handovers, check
 that log for this warning. This is not a promise that shell startup cannot add or override values.
+On Linux, a seat also gets the daemon's `XDG_RUNTIME_DIR`, so tools whose sockets live there work in seats,
+with `DBUS_SESSION_BUS_ADDRESS=disabled:` so its D-Bus clients don't find your session bus on their own. A seat's
+own `env:` value for either name wins. See "The runtime directory, on Linux" in the rig spec reference.
 
 
 ## Start the kernel and check its state
@@ -684,9 +694,13 @@ Herdr, use `rig terminal open starter --provider herdr`; for the shared
 dashboard together with the kernel conversations, use the
 [saved first view](#open-the-kernel-conversations). The equivalent
 cmux provider is also available. Read the opened/absent/degraded result: a
-partial terminal view is not a healthy team. Repeated terminal-open calls can
-create another provider workspace; return to the one already open when you
-want to preserve it. This is terminal integration, not native plugin enrollment.
+partial terminal view is not a healthy team. Each `--provider herdr` open adds
+a new workspace, numbered when the name is taken; return to the one already open
+when you want to preserve it. From inside Herdr, `rig terminal open <view> --window`
+focuses a matching space instead of adding one. Herdr's own status for a seat can
+read idle or unknown while OpenRig shows it waiting (`needs-input`); use OpenRig's
+view or the Feed to find waiting seats. This is terminal integration, not native
+plugin enrollment.
 
 For team views with interactive panes, the open result distinguishes the dashboard
 overview from the team's lead conversation and asks whether you can see the team.

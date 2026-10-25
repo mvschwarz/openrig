@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 // S5 (OPR.0.5.4.7) — CLI surface for rig seat set-model / stop / clean: required
 // options, route paths + bodies posted, human output, refusal printing, --json
 // pass-through with non-zero exit.
@@ -166,6 +169,25 @@ describe("default-path rig seat continue", () => {
 });
 
 describe("rig seat set-permissions", () => {
+  it("posts a rules file as an audited future-launch update, keeping mode separate", async () => {
+    const root = mkdtempSync(join(tmpdir(), "seat-rules-")), file = join(root, "rules.json");
+    const rules = { allow: ["Bash(node lane.mjs *)"], deny: ["Read(./private/**)"] };
+    writeFileSync(file, JSON.stringify(rules));
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const deps = makeDeps({ status: 200, data: { ok: true, changed: true, to: rules, effect: "Next managed launch only." } }, calls);
+    try {
+      const result = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "set-permissions", "dev-impl@seat-rig",
+        "--rules", file, "--reason", "Select lane", "--operator", "human@example.test"]).then(() => {}));
+      expect(result.exitCode).toBeUndefined();
+      expect(calls).toEqual([{ path: "/api/seat/set-permissions/dev-impl%40seat-rig", body: { rules, reason: "Select lane", operator: "human@example.test" } }]);
+      expect(result.logs.join(" ")).toContain("recorded and audited");
+      calls.splice(0);
+      const ambiguous = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "set-permissions", "dev-impl@seat-rig",
+        "--rules", file, "--mode", "full_bypass", "--reason", "No mixed update"]).then(() => {}));
+      expect(ambiguous.exitCode).toBe(1); expect(calls).toEqual([]);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   it("posts the explicit operator with the existing mode and reason", async () => {
     const calls: Array<{ path: string; body: unknown }> = [];
     const deps = makeDeps({ status: 200, data: { ok: true, changed: true, to: { mode: "floor" }, effect: "Future managed launches only." } }, calls);

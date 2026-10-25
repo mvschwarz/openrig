@@ -4,6 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { parse } from "smol-toml";
 import { CODEX_CORE_PLUGIN_KEY, type CodexConfigLayerRead } from "./codex-core-plugin-install.js";
+import { findTomlTable } from "./toml-tables.js";
 
 const { computeCodexHookTrust } = createRequire(import.meta.url)("../../assets/plugins/openrig-core/hooks/scripts/codex-hook-trust.cjs");
 // Published openrig-core0.1.17: Codex0.164's native baseline and the complete shipped tree agree.
@@ -111,7 +112,7 @@ export function planOwnedCodexContentApproval(input: {
       const state = states[key];
       if (!state || (state.enabled !== undefined && state.enabled !== true) || state.trusted_hash !== hash
         || Object.keys(state).some(field => !["enabled", "trusted_hash", "trusted_content_hash"].includes(field))
-        || !input.content.split("\n").some(line => line.trim() === `[hooks.state.${JSON.stringify(key)}]`)
+        || findTomlTable(input.content.split("\n"), ["hooks", "state", key]) < 0
         || docs.some(layer => otherChoice(layer.doc, key, layer.path !== input.configPath))) return;
     }
     const approval: OwnedApproval = { schema: 1, plugin: CODEX_CORE_PLUGIN_KEY, contentHash, declarations };

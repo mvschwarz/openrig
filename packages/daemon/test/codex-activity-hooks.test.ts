@@ -5,11 +5,12 @@
 // shape is discovered + trusted (via the "2 Trust all and continue" launch gate) and
 // the turn-scope hooks (incl. the PermissionRequest keystone) FIRE.
 import { describe, it, expect, vi } from "vitest";
+import nodePath from "node:path";
 import { CodexRuntimeAdapter, type CodexAdapterFsOps } from "../src/adapters/codex-runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
 const RELAY = "/daemon/assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs";
-const CONFIG = "/home/test/.codex/config.toml";
+const CONFIG = nodePath.join("/home/test", ".codex", "config.toml");
 const EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest"] as const;
 
 function mockCodexFs(files?: Record<string, string>): CodexAdapterFsOps & { _store: Record<string, string> } {
@@ -48,7 +49,7 @@ describe("OPR.0.4.1.10 FR-A — Codex config-layer activity hooks", () => {
   });
 
   it("GAP-7 adds hook trust and removes hooks through the injected Codex home", () => {
-    const customConfig = "/custom-codex/config.toml";
+    const customConfig = nodePath.join("/custom-codex", "config.toml");
     const fs = mockCodexFs({ [RELAY]: "// relay" });
     const adapter = new CodexRuntimeAdapter({
       tmux: mockTmux(), fsOps: fs, activityRelayPath: RELAY, codexHome: "/custom-codex",

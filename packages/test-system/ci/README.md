@@ -111,10 +111,10 @@ DOCKER_HOST=ssh://your-test-executor bash scripts/run-pr-scenarios.sh \
 Leave `DOCKER_CONTEXT` unset when selecting `DOCKER_HOST`, so a saved context cannot
 override the explicitly selected executor. This does not change Docker configuration.
 Use a fresh output directory for each retained run. Without `--mode` the selected
-seeded case runs healthy / lost-baton / healthy. Without `--case` all eight cases run,
-fourteen container runs by default: the `fixture` and `library` seeded pairs (healthy /
+seeded case runs healthy / lost-baton / healthy. Without `--case` all nine cases run,
+fifteen container runs by default: the `fixture` and `library` seeded pairs (healthy /
 lost-baton / healthy each), the `refocus-parked` seeded pair (healthy / seeded /
-healthy), and the five passing-only cases (healthy once each). A single healthy run
+healthy), and the six passing-only cases (healthy once each). A single healthy run
 establishes only that leg; it is not the paired seeded-regression proof.
 
 The client can be macOS/arm64 while Docker is Linux/amd64: the build reads the
@@ -167,3 +167,31 @@ pane and poll observation, and any failed stage, remains in the report; an
 unreadable socket is never an empty census. **Kernel duplication and native
 runtime behavior are not exercised.** The same helper is applied to the release
 cut and the published comparator archive, preserving each one's actual outcome.
+
+
+## Pane attention and quoted prompt text
+
+`prompt-state` runs one private scenario daemon with two adopted, scripted panes
+whose declared runtimes are Codex and Claude. The pane is 45 rows tall; the first
+quoted working frame must leave at least 20 blank rows below its composer, with
+the full pre-send screen retained. This covers inline redraws in tall panes.
+No native provider runs and neither
+fixture emits an activity hook. Adoption/runtime/readiness must succeed before
+assertions; the scratch event store is read-only when counting hook events.
+
+The selector-only pane must report needs-input consistently in the node API,
+rig attention count, human table and compact JSON. A subsequent working frame
+must clear attention. The Claude fixture then draws quoted selector/permission
+history above its current empty composer and running timer: unique sends and
+actual parked-row timer wakes must reach its pane. A real waiting dialog must
+refuse a send and an attempted wake without either marker being typed.
+
+The report retains each served value, delivered nonce, wake transition, matching
+watchdog refusal attempt and current pane, including the stage if incomplete. Product state is never set through a DB
+write or a mocked observation. These are controlled pane layouts and OpenRig's
+coordination path, not native prompt-layout or model behavior evidence. Historical
+fail-before arms are author evidence: #1946 against32633a3d-era installed bytes,
+and #1955 againstdb863940's parent, with named product assertion failures. Setup,
+missing wake attempts, unrelated errors and setup timeouts do not count as RED.
+A labelled product-assertion timeout retaining the served values (the #1946
+attention disagreement) counts as RED after successful adoption/readiness.

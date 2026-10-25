@@ -4,14 +4,14 @@ description: Browser automation CLI for AI agents. Use when the user needs to in
 allowed-tools: Bash(npx agent-browser:*), Bash(agent-browser:*)
 metadata:
   openrig:
-    vendored_from: "Vercel agent-browser (https://github.com/vercel/agent-browser)"
-    vendoring_pattern: add-supplementary-files
-    last_upstream_check: "2026-05-13 (initial vendoring declaration)"
+    vendored_from: "Vercel agent-browser (https://github.com/vercel-labs/agent-browser)"
+    vendoring_pattern: modify-the-file
+    last_upstream_check: "2026-10-25 (SKILL.md and license compared at 372ac5ce20fab885dbf45ee0c9d510ec8c3b6fdb; no content sync)"
     divergence_notes: |
-      Upstream SKILL.md content tracks upstream; a small "Local Dev Insights"
-      pointer section was added near the end of the body to surface the sibling
-      LOCAL-INSIGHTS.md companion file. See OPENRIG.md for the full OpenRig
-      relationship to this skill.
+      Retained, adapted OpenRig copy with a Local Dev Insights pointer, not an
+      upstream-tracking copy. At the checked revision, upstream SKILL.md is a
+      discovery stub for CLI-served content. This check did not refresh the
+      skill body or LOCAL-INSIGHTS.md. See OPENRIG.md and LICENSE.txt.
 ---
 
 # Browser Automation with agent-browser

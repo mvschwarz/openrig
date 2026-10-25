@@ -5,6 +5,7 @@ import path from "node:path";
 import { ConfigStore } from "./config-store.js";
 import { getOpenRigHome, readOpenRigEnv } from "./openrig-compat.js";
 import { fetchWithTimeout, FetchTimeoutError } from "./fetch-with-timeout.js";
+import { FETCH_HEADERS_TIMEOUT_MS, nodeHttpFetch } from "./long-request-fetch.js";
 
 export function terminalAuthHeaders(): Record<string, string> {
   const token = resolveTerminalToken();
@@ -146,6 +147,9 @@ interface DaemonRequestOptions {
 interface DaemonClientOptions {
   ownerProbe?: (baseUrl: string, timeoutMs?: number) => Promise<LocalDaemonOwner>;
   fetchImpl?: typeof fetch;
+  /** For a request allowed FETCH_HEADERS_TIMEOUT_MS or longer, which fetch would cut; default: fetchImpl when given, else
+   *  node:http. */
+  longFetchImpl?: typeof fetch;
   timeoutMs?: number;
   /** The seat this client acts as, for a client built per authenticated caller; default: the process env. */
   sessionName?: string;
@@ -170,6 +174,7 @@ function localDaemonUrl(): string | undefined {
 export class DaemonClient {
   readonly baseUrl: string;
   private fetchImpl: typeof fetch = fetch;
+  private longFetchImpl: typeof fetch = nodeHttpFetch;
   private timeoutMs = 5_000;
   private ownerProbe: (baseUrl: string, timeoutMs?: number) => Promise<LocalDaemonOwner>;
   /** Set by remoteDaemonClient; absent origin is labelled explicitly on remote requests. */
@@ -239,6 +244,7 @@ export class DaemonClient {
     }
 
     this.fetchImpl = options?.fetchImpl ?? fetch;
+    this.longFetchImpl = options?.longFetchImpl ?? options?.fetchImpl ?? nodeHttpFetch;
     this.ownerProbe = options?.ownerProbe ?? ((url, timeoutMs) => assessLocalDaemonOwner(url, { fetchImpl: this.fetchImpl, timeoutMs }));
     this.timeoutMs = options?.timeoutMs ?? 5_000;
     this.sessionName = options?.sessionName;
@@ -326,7 +332,7 @@ export class DaemonClient {
     let responseStatus: number | undefined;
     try {
       const response = await fetchWithTimeout(
-        this.fetchImpl,
+        timeoutMs >= FETCH_HEADERS_TIMEOUT_MS ? this.longFetchImpl : this.fetchImpl,
         `${this.baseUrl}${path}`,
         init,
         {

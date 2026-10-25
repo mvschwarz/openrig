@@ -102,7 +102,10 @@ export class SeatLaunchEnvironment {
 
   async command(session: string, command: string, target: { codexCwd?: string; nodeId?: string; generation?: string; runtime?: string;
     /** The seat's own CODEX_HOME when it declares one; it wins over the daemon's. */
-    codexHome?: string } = {}): Promise<string> {
+    codexHome?: string;
+    /** A Claude seat's own token step (claude-seat-token.ts), run before Claude in the staged subshell. A POSIX pane only:
+     *  a caller whose command comes back without it knows the token wasn't applied. */
+    claudeTokenStep?: string } = {}): Promise<string> {
     const codexHome = target.codexHome ?? this.codexHome;
     const searchPath = this.sessionEnv.PATH;
     const codexEnv = target.codexCwd !== undefined
@@ -146,9 +149,11 @@ export class SeatLaunchEnvironment {
       if (target.runtime === "claude-code") {
         const assignments = Object.entries(env).map(([key, value]) => `${key}=${shellQuote(value)}`);
         const launch = `${assignments.join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${command}`;
+        // The token step is POSIX shell; another shell (fish, tcsh) gets the command without it.
+        const token = target.claudeTokenStep && ["bash", "zsh", "sh", "dash", "ksh", "mksh"].includes(shell) ? [target.claudeTokenStep] : [];
         // ksh calls a function without exporting a leading assignment that isn't already
         // exported, so it keeps the form above, where every assignment reaches Claude.
-        if (!["bash", "zsh", "sh", "dash"].includes(shell)) return launch;
+        if (!["bash", "zsh", "sh", "dash"].includes(shell)) return [...token, launch].join("\n");
         // A file command must replace the staging subshell so tmux observes
         // Claude as the foreground process. Keep aliases/functions intact and
         // pass the original leading assignments through a subshell-local function.
@@ -159,6 +164,7 @@ export class SeatLaunchEnvironment {
           "    */*) eval 'claude() { exec \"$_openrig_claude_executable\" \"$@\"; }' ;;",
           '  esac',
           'fi',
+          ...token,
           launch,
         ].join("\n");
       }

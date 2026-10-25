@@ -23,9 +23,15 @@
 // guard (setup's instance) close over one allowlist while a test's allowFetchTarget
 // writes another — the guard would then refuse every registered fixture. One
 // globalThis-backed allowlist keeps the setup install and every test in agreement.
+// The CLI daemon client's one other path: a request allowed 300 s or more goes over node:http or https (fetch would cut it
+// at 300 s), so the CLI suite also guards http.request and https.request (installHttpRequestGuard).
+import http from "node:http";
+import https from "node:https";
+
 interface FetchGuardState {
   allow: Set<string>;
   originalFetch: typeof globalThis.fetch | undefined;
+  originalRequests?: Array<[typeof http | typeof https, typeof http.request]>;
 }
 const g = globalThis as unknown as { __openrigFetchGuard?: FetchGuardState };
 g.__openrigFetchGuard ??= { allow: new Set<string>(), originalFetch: undefined };
@@ -80,20 +86,44 @@ export function installFetchGuard(): void {
     if (!t || !/^https?:/i.test(t.origin)) return orig(input as never, init);
     // PERMIT by shape (loopback-ephemeral fixture) or by explicit registration (the
     // fixed-low-port escape hatch). REFUSE everything else — fail-closed by default.
-    if (isPermittedByShape(t.host, t.port) || allowedOrigins.has(t.origin)) return orig(input as never, init);
-    const nonLoopback = !LOOPBACK_HOSTS.has(t.host);
-    const isDaemon = t.port === 7433;
-    return Promise.reject(
-      new Error(
-        `FETCH GUARD (P37): refused an outbound request to ${t.origin}` +
-          (isDaemon ? " (the canonical OpenRig daemon port)" : nonLoopback ? " (a NON-LOOPBACK / cross-machine target)" : "") +
-          " — a cli test made a REAL request to a target that is neither a loopback-ephemeral fixture nor registered. " +
-          (nonLoopback
-            ? "Non-loopback is refused unconditionally (a test must not cross a machine boundary — hosts.yaml names a real remote at 100.95.124.51)."
-            : "Loopback on a well-known/canonical port is a request-layer leak to the daemon (a hardcoded :7433 literal, a mocked URL getter + un-mocked client, or a production default constant). Inject a mock client, use an in-process fixture (server.listen(0) → ephemeral, permitted), or register a fixed-low-port fixture with allowFetchTarget(url)."),
-      ),
-    );
+    if (isPermitted(t)) return orig(input as never, init);
+    return Promise.reject(refusal(t));
   }) as typeof globalThis.fetch;
+}
+
+/** Install the same rule on http.request and https.request (idempotent): the CLI's long-request path (node:http) goes through
+ *  them. CLI tests only, from the CLI's own setup: daemon tests make raw requests to their own fixtures by design. */
+export function installHttpRequestGuard(): void {
+  if (state.originalRequests) return;
+  state.originalRequests = [];
+  for (const mod of [http, https]) {
+    const original = mod.request;
+    state.originalRequests.push([mod, original]);
+    const scheme = mod === https ? "https:" : "http:";
+    (mod as { request: typeof http.request }).request = ((first: string | URL | http.RequestOptions, ...rest: unknown[]) => {
+      const t = parseTarget(typeof first === "string" || first instanceof URL ? String(first)
+        : `${first.protocol ?? scheme}//${first.hostname ?? first.host ?? "localhost"}:${first.port ?? (scheme === "https:" ? 443 : 80)}`);
+      if (t && !isPermitted(t)) throw refusal(t);
+      return (original as (...args: unknown[]) => http.ClientRequest)(first, ...rest);
+    }) as typeof http.request;
+  }
+}
+
+function isPermitted(t: Target): boolean {
+  return isPermittedByShape(t.host, t.port) || allowedOrigins.has(t.origin);
+}
+
+function refusal(t: Target): Error {
+  const nonLoopback = !LOOPBACK_HOSTS.has(t.host);
+  const isDaemon = t.port === 7433;
+  return new Error(
+    `FETCH GUARD (P37): refused an outbound request to ${t.origin}` +
+      (isDaemon ? " (the canonical OpenRig daemon port)" : nonLoopback ? " (a NON-LOOPBACK / cross-machine target)" : "") +
+      " — a cli test made a REAL request to a target that is neither a loopback-ephemeral fixture nor registered. " +
+      (nonLoopback
+        ? "Non-loopback is refused unconditionally (a test must not cross a machine boundary — hosts.yaml names a real remote at 100.95.124.51)."
+        : "Loopback on a well-known/canonical port is a request-layer leak to the daemon (a hardcoded :7433 literal, a mocked URL getter + un-mocked client, or a production default constant). Inject a mock client, use an in-process fixture (server.listen(0) → ephemeral, permitted), or register a fixed-low-port fixture with allowFetchTarget(url)."),
+  );
 }
 
 /** Clear the fixture allowlist without uninstalling the guard (per-test cleanup so
@@ -109,5 +139,7 @@ export function uninstallFetchGuard(): void {
     globalThis.fetch = state.originalFetch;
     state.originalFetch = undefined;
   }
+  for (const [mod, original] of state.originalRequests ?? []) (mod as { request: typeof http.request }).request = original;
+  state.originalRequests = undefined;
   allowedOrigins.clear();
 }

@@ -148,6 +148,26 @@ describe("PodRigInstantiator", () => {
     db.close();
   });
 
+  it("launches members in one project with their own recorded Claude rules", async () => {
+    const { db, inst, adapter } = setup();
+    try {
+      const spec = makeRigSpec();
+      const member = spec.pods[0]!.members[0]!;
+      spec.pods[0]!.members = [
+        { ...member, id: "reader", claudePermissions: { allow: ["Read"], deny: ["Write"] } },
+        { ...member, id: "writer", claudePermissions: { allow: ["Write"], deny: ["Read(./private/**)"] } },
+      ];
+      const result = await inst.instantiate(RigSpecCodec.serialize(spec), RIG_ROOT);
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      const calls = vi.mocked(adapter.launchHarness!).mock.calls;
+      expect(calls).toHaveLength(2);
+      expect(calls[0]![0].cwd).toBe(calls[1]![0].cwd);
+      for (let i = 0; i < 2; i++) expect(calls[i]![0]).toMatchObject({
+        claudePermissions: spec.pods[0]!.members[i]!.claudePermissions, teamPermissionDefault: true,
+      });
+    } finally { db.close(); }
+  });
+
   // Slice 51-01 stub-runtime — TEST-ONLY RED (undisputed mechanical FACT 2): the NORMAL-SEAT
   // preflight→materialize→instantiate path DISPATCHES to the runtime: stub adapter that is injected into
   // the instantiator — proven by the injected adapter's REAL lifecycle methods being invoked. RED now

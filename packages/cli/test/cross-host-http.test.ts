@@ -355,6 +355,13 @@ describe("send --host (http branch)", () => {
     expect((h.calls[0]!.body as Record<string, unknown>).waitForIdleMs).toBe(30_000);
   });
 
+  it("--wait-for-idle longer than 300 s is one request to the remote carrying the whole wait", async () => {
+    const h = mockClient(() => ({ status: 200, data: { ok: true } }));
+    const cmd = sendCommand(httpDeps(h));
+    await cmd.parseAsync(["--host", "vps-b", "dev-impl@my-rig", "hello", "--wait-for-idle", "400"], { from: "user" });
+    expect(h.calls.map((c) => [(c.body as Record<string, unknown>).waitForIdleMs, c.options?.timeoutMs])).toEqual([[400_000, 400_000 + 30_000]]);
+  });
+
   it("a cross-host send waits 30 s for the remote to deliver, not the 5 s read default", async () => {
     const h = mockClient(() => ({ status: 200, data: {} }));
     const cmd = sendCommand(httpDeps(h));

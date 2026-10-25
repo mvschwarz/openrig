@@ -338,6 +338,36 @@ describe("resolve verb (OPR.0.4.4.19 FR-7)", () => {
     expect(result.createdQitemId).toBeNull(); // never a new potato
   });
 
+  it.each(["external:qa-pass", "fold:review-complete", "auth:access-granted"])("resolves typed wait %s with evidence, audit and an owner nudge, not a human decision", async (blockedOn) => {
+    const created = await queueRepo.create({ sourceSession: "orch@rig", destinationSession: "driver@rig", body: "work", nudge: false });
+    queueRepo.update({ qitemId: created.qitemId, actorSession: "driver@rig", state: "blocked", blockedOn });
+    const decision = "Verified the recorded condition against the result";
+    const result = await writeContract.act({ verb: "resolve", qitemId: created.qitemId, actorSession: "orch@rig", decision });
+    expect(queueRepo.getById(created.qitemId)).toMatchObject({ state: "in-progress", destinationSession: "driver@rig", closureReason: null });
+    const transition = queueRepo.transitionLog.listForQitem(created.qitemId).find((t) => t.transitionNote?.includes(decision));
+    expect(transition).toMatchObject({ actorSession: "orch@rig", transitionNote: `Blocker ${blockedOn} resolved: ${decision}` });
+    expect(transition!.ownerNotificationKind).not.toBe("human-decision-resolved");
+    expect(actionLog.listForQitem(created.qitemId).some((a) => a.actionVerb === "resolve" && a.reason === decision)).toBe(true);
+    expect(sentNudges).toHaveLength(1);
+    expect(sentNudges[0]).toMatchObject({ session: "driver@rig" });
+    expect(sentNudges[0]!.text).toContain(`Blocker resolved on ${created.qitemId}`);
+    expect(result.createdQitemId).toBeNull();
+  });
+
+  it.each(["external:", "fold:   ", "auth:", "unknown:gate"])("refuses malformed or unknown persisted blocker %s without effects", async (blockedOn) => {
+    const qitemId = await parkedQitem();
+    db.prepare("UPDATE queue_items SET blocked_on = ? WHERE qitem_id = ?").run(blockedOn, qitemId);
+    const before = queueRepo.getById(qitemId);
+    const transitions = queueRepo.transitionLog.listForQitem(qitemId);
+    const audits = actionLog.listForQitem(qitemId);
+    await expect(writeContract.act({ verb: "resolve", qitemId, actorSession: "orch@rig", decision: "evidence" }))
+      .rejects.toMatchObject({ code: "qitem_not_leg1_parked" });
+    expect(queueRepo.getById(qitemId)).toEqual(before);
+    expect(queueRepo.transitionLog.listForQitem(qitemId)).toEqual(transitions);
+    expect(actionLog.listForQitem(qitemId)).toEqual(audits);
+    expect(sentNudges).toHaveLength(0);
+  });
+
   it("empty/whitespace decision text is rejected (enforcement symmetry)", async () => {
     const qitemId = await parkedQitem();
     await expect(

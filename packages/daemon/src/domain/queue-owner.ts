@@ -1,5 +1,33 @@
 import { resolveCurrentSessionAddress } from "./session-registry.js";
+import { isHumanSeatSessionRef, parseSessionName } from "./session-name.js";
+import { SettingsStore } from "./user-settings/settings-store.js";
 import type Database from "better-sqlite3";
+
+/** The operator seat (workspace.operator_seat_name): the person workflow approvals and the escalation
+ *  ladder's operator rung reach, usually a registered human. Null when unset or when settings
+ *  resolution fails. */
+export function resolveOperatorSeat(): string | null {
+  try {
+    const v = new SettingsStore().resolveOne("workspace.operator_seat_name" as never).value;
+    return typeof v === "string" && v.length > 0 ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The operator agent (agents.operator_session, its canonical session): the agent a dead seat's recovery
+ *  reaches before the human operator seat, so recovery work goes to an agent without repointing the setting
+ *  approvals use. Null when unset, unreadable, or not an agent's canonical session (a person's address or
+ *  human seat ref never counts). */
+export function resolveRecoveryAgentSeat(): string | null {
+  try {
+    const v = new SettingsStore().resolveOne("agents.operator_session" as never).value;
+    const session = typeof v === "string" ? v.trim() : "";
+    return session && parseSessionName(session).kind === "canonical" && !isHumanSeatSessionRef(session) ? session : null;
+  } catch {
+    return null;
+  }
+}
 
 /** The durable session→node binding (the session-registry precedent: latest sessions row
  *  for the canonical name). Canonical session names (dash form, `review-r2@rig`) and node
