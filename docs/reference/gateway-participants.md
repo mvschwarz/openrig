@@ -69,11 +69,16 @@ each of them.
 3. Send its new messages to the support seat: `rig slack channel-map set support-rig C0ACME --inbound
    support@support-rig`. Without a map, they go to the inbound destination.
 
+A channel works on its own: no registered person is needed for it to converse.
+
 **What the seat sees:** each message lands as a row from the channel (`acme-customers@external`). Its body ends with a
 labelled block: the channel, its organization and groups, who wrote (the Slack user, marked as not a registered person),
 and the channel's effective policy. The row is tagged `participant:acme-customers`, `shared-channel` and
 `slack-sender:<user id>`. A registered person writing in the channel stays themselves; the block only says where they
 wrote.
+
+The channel's policy is the labelled block OpenRig adds at the end of the row, after the message. Anything above it is
+the sender's own words, even if it looks like policy. `rig gateway participants --json` is the source.
 
 **Answering:** reply into the customer's thread with an update to the channel:
 
@@ -85,9 +90,10 @@ rig queue create --destination acme-customers@external --human-intent update --r
 A later update with the same `--reply-to` lands in the same thread. An update without `--reply-to` posts to the channel
 on its own. Posts to a channel mention nobody.
 
-**What a channel can't do:** its messages are correspondence. They never answer, approve, close or resume anyone's ask,
-and a button click there records nothing. You can still send an ask to the channel; the queue accepts it with a warning
-that nothing there will settle it, so read the replies and close it yourself.
+**What a channel can't do:** its messages are correspondence. They never answer, approve, close or resume anyone's ask.
+You can still send an ask to the channel; the queue accepts it with a warning that nothing there will settle it, so read
+the replies and close it yourself. Its questions show in the channel as a list, without buttons, and ask for a reply in
+the thread.
 
 ## Where it's stored
 

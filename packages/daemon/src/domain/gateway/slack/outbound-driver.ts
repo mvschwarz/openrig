@@ -33,6 +33,8 @@ export interface OutboundPostPayload {
   /** #96: an update posted into this earlier qitem's thread (subsystem-resolved). */
   replyTo?: string | null;
   humanQuestions?: import("../../human-questions.js").HumanQuestion[] | null;
+  /** Posted into a registered shared channel (0.7.3): its questions render as text, never buttons. */
+  sharedChannel?: boolean;
   summary?: string | null;
   body?: string | null;
   destinationSession?: string | null;
@@ -173,6 +175,7 @@ export function toPayload(q: QueueItem): OutboundPostPayload {
     humanDetail: q.humanDetail,
     replyTo: q.replyTo,
     humanQuestions: q.humanQuestions,
+    ...(q.sharedChannel ? { sharedChannel: true } : {}),
     summary: q.summary,
     body: q.body,
     destinationSession: q.destinationSession,

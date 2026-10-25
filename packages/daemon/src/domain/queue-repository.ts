@@ -4,7 +4,7 @@ import { quietCustodyBackstop, quietHoldCustody } from "./quiet-hold-custody.js"
 import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import type { EventBus } from "./event-bus.js";
-import { loadHumanRegistry, resolveRegisteredHumanAddress, slackSubscriptionFor, withHumanAlertTag, type LoadResult } from "./gateway/human-registry.js";
+import { loadHumanRegistry, registeredPeople, resolveRegisteredHumanAddress, slackSubscriptionFor, withHumanAlertTag, type LoadResult } from "./gateway/human-registry.js";
 import { sharedChannelAddresses } from "./gateway/participants.js";
 import { resolveExternal } from "./gateway/external-admission.js";
 import type { AgentActivity, PersistedEvent } from "./types.js";
@@ -1104,19 +1104,20 @@ export class QueueRepository {
     if (input.explicitKind === "human-decision-resolved") {
       return { kind: input.explicitKind, level: "NOTICE" };
     }
-    const registry = this.loadHumanRegistryFn();
-    if (!registry.ok) return null;
-    const blockedHuman = resolveRegisteredHumanAddress(input.nextBlockedOn, registry.entities);
-    const previousBlockedHuman = resolveRegisteredHumanAddress(input.previousBlockedOn, registry.entities);
+    // Nobody registered yet isn't a broken registry: a row to a registered shared channel still posts (0.7.3).
+    const people = registeredPeople(this.loadHumanRegistryFn());
+    if (!people) return null;
+    const blockedHuman = resolveRegisteredHumanAddress(input.nextBlockedOn, people);
+    const previousBlockedHuman = resolveRegisteredHumanAddress(input.previousBlockedOn, people);
     const enteredHumanPark = input.nextState === "blocked" && blockedHuman !== null &&
       (input.previousState !== "blocked" || previousBlockedHuman !== blockedHuman);
     if (enteredHumanPark) return { kind: "human-required", level: "ALERT" };
 
-    const destinationHuman = resolveRegisteredHumanAddress(input.destinationSession, registry.entities);
+    const destinationHuman = resolveRegisteredHumanAddress(input.destinationSession, people);
     if (input.action === "create" && destinationHuman !== null) {
       // The person's Slack subscription decides: `every-ask` (the default) posts every ask (ALERT); `urgent-only` posts only
       // one marked --alert, and a plain ask lands on Steering and the TUI (RECORD: below the posting dial, so no post is owed).
-      const person = registry.entities.find((entity) => entity.address === destinationHuman);
+      const person = people.find((entity) => entity.address === destinationHuman);
       const posts = input.humanAlert === true || slackSubscriptionFor(person).preset === "every-ask";
       return input.humanIntent === "update"
         ? { kind: "human-update", level: "NOTICE" }

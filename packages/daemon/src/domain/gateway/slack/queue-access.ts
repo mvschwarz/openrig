@@ -6,7 +6,7 @@
 //   - reads are unbounded (the B5 lesson: a default limit silently truncates a large backlog).
 
 import type { QueueRepository, QueueItem as RepoQueueItem } from "../../queue-repository.js";
-import { loadHumanRegistry, resolveRegisteredHumanAddress, type LoadResult, type HumanFragment } from "../human-registry.js";
+import { loadHumanRegistry, registeredPeople, resolveRegisteredHumanAddress, type LoadResult, type HumanFragment } from "../human-registry.js";
 import { sharedChannelAddresses } from "../participants.js";
 import type { HumanQuestion } from "../../human-questions.js";
 import { ownerNotificationLevelAtLeast, type OwnerNotificationLevel, type QueueTransition } from "../../queue-transition-log.js";
@@ -24,6 +24,8 @@ export interface QueueItem {
   humanDetail?: string | null;
   replyTo?: string | null;
   humanQuestions?: HumanQuestion[] | null;
+  /** Posted into a registered shared channel (0.7.3): nobody there can answer, so its questions show as text. */
+  sharedChannel?: boolean;
   summary?: string | null;
   body?: string | null;
   evidenceRef?: string | null;
@@ -80,6 +82,7 @@ function project(q: RepoQueueItem, transition: QueueTransition, entities: readon
   const r = q as unknown as Record<string, unknown>;
   let destinationSession: string | null = null;
   let sourceSession: string | null = null;
+  let sharedChannel = false;
   if (transition.ownerNotificationKind === "human-decision-resolved") {
     destinationSession = resolveRegisteredHumanAddress(transition.actorSession, entities);
     sourceSession = q.destinationSession;
@@ -88,8 +91,11 @@ function project(q: RepoQueueItem, transition: QueueTransition, entities: readon
     sourceSession = q.destinationSession;
   } else {
     // A row addressed to a person, or to a registered shared channel (posted into that channel; 0.7.3).
-    destinationSession = resolveRegisteredHumanAddress(q.destinationSession, entities)
-      ?? channels.find((channel) => channel.address === q.destinationSession)?.address ?? null;
+    destinationSession = resolveRegisteredHumanAddress(q.destinationSession, entities);
+    if (!destinationSession) {
+      destinationSession = channels.find((channel) => channel.address === q.destinationSession)?.address ?? null;
+      sharedChannel = destinationSession !== null;
+    }
     sourceSession = q.sourceSession;
   }
   if (!destinationSession) return null;
@@ -104,6 +110,7 @@ function project(q: RepoQueueItem, transition: QueueTransition, entities: readon
     humanDetail: q.humanDetail,
     replyTo: q.replyTo ?? null,
     humanQuestions: q.humanQuestions ?? null,
+    ...(sharedChannel ? { sharedChannel } : {}),
     summary: (r.summary as string | null) ?? null,
     body: (r.body as string | null) ?? null,
     evidenceRef: (r.evidenceRef as string | null) ?? null,
@@ -167,8 +174,9 @@ export function makeQueuePorts(
       return (created as unknown as { qitemId: string }).qitemId;
     },
     async listHumanAlerts(filter: AlertFilterOpts): Promise<QueueItem[]> {
-      const registry = (opts.loadHumanRegistry ?? (() => loadHumanRegistry()))();
-      if (!registry.ok) return [];
+      // Nobody registered yet isn't a broken registry: rows to a registered shared channel still post (0.7.3).
+      const people = registeredPeople((opts.loadHumanRegistry ?? (() => loadHumanRegistry()))());
+      if (!people) return [];
       const channels = (opts.sharedChannels ?? (() => sharedChannelAddresses()))();
       // Avoid building waiting/recovery views for rows with no unposted owner notification.
       // Keep list(activeOnly)'s selection, ordering and cap; this remains an O(N) ID scan.
@@ -185,7 +193,7 @@ export function makeQueuePorts(
         if (queueRepo.transitionLog.hasOwnerNotificationReceipt(qitemId, notificationKey)) return [];
         const row = queueRepo.getById(qitemId);
         if (!row) return [];
-        const item = project(row, transition, registry.entities, channels);
+        const item = project(row, transition, people, channels);
         return item ? [item] : [];
       });
       return filterHumanAlerts(projected, filter);

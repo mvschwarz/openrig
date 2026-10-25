@@ -20,6 +20,8 @@ export interface QitemLike {
   destinationSession?: string | null;
   /** #193 — structured questions, rendered as one button row per question. */
   humanQuestions?: readonly HumanQuestion[] | null;
+  /** Posted into a registered shared channel (0.7.3): nobody there can answer, so questions show as text, not buttons. */
+  sharedChannel?: boolean | null;
   /** #1013 — row state + tags, so a workflow gate PARKED on a human seat can be
    *  re-rendered for the person instead of posting the seat's agent packet. */
   state?: string | null;
@@ -131,6 +133,7 @@ export function buildImageBlocks(mediaRefs: readonly SlackMediaRef[] | undefined
 export const QUESTION_BLOCK_PREFIX = "or-q:";
 export const OPTION_ACTION_PREFIX = "or-opt:";
 const TYPED_REPLY_HINT = "Or reply in this thread with your own answer.";
+const CHANNEL_REPLY_HINT = "Reply in this thread with your answer.";
 
 /** Parse a clicked button back into its question and option ids; null if it is not ours. */
 export function parseQuestionAction(blockId: unknown, actionId: unknown): { questionId: string; optionId: string } | null {
@@ -142,13 +145,20 @@ export function parseQuestionAction(blockId: unknown, actionId: unknown): { ques
 }
 
 /** #193 — the questions as blocks (a section, then a button row, per question) plus the
- *  complete text they must also appear as in the accessible fallback. */
-function buildQuestionBlocks(questions: readonly HumanQuestion[]): { blocks: unknown[]; text: string } {
+ *  complete text they must also appear as in the accessible fallback. Without buttons (a shared channel, where a click
+ *  records nothing), each question's options are a list and the reader is asked to reply in the thread. */
+function buildQuestionBlocks(questions: readonly HumanQuestion[], buttons = true): { blocks: unknown[]; text: string } {
   const blocks: unknown[] = [];
   const lines: string[] = [];
   for (const q of questions) {
     const question = bounded(`*${inert(q.question)}*`, SLACK_SECTION_CAP, "question");
+    const options = q.options.map((o) => `• ${inert(o.label)}${o.recommended ? " (recommended)" : ""}`);
     blocks.push({ type: "section", text: { type: "mrkdwn", text: question } });
+    lines.push(question, ...options);
+    if (!buttons) {
+      blocks.push({ type: "section", text: { type: "mrkdwn", text: bounded(options.join("\n"), SLACK_SECTION_CAP, "options") } });
+      continue;
+    }
     blocks.push({
       type: "actions",
       block_id: `${QUESTION_BLOCK_PREFIX}${q.id}`,
@@ -160,10 +170,10 @@ function buildQuestionBlocks(questions: readonly HumanQuestion[]): { blocks: unk
         text: { type: "plain_text", text: bounded(inert(o.label), MAX_OPTION_LABEL, "option label") },
       })),
     });
-    lines.push(question, ...q.options.map((o) => `• ${inert(o.label)}${o.recommended ? " (recommended)" : ""}`));
   }
-  blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: TYPED_REPLY_HINT }] });
-  lines.push(TYPED_REPLY_HINT);
+  const hint = buttons ? TYPED_REPLY_HINT : CHANNEL_REPLY_HINT;
+  blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: hint }] });
+  lines.push(hint);
   return { blocks, text: lines.join("\n") };
 }
 
@@ -387,7 +397,7 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
   const imageBlocks = buildImageBlocks(opts.mediaRefs);
   const attachmentText = imageBlocks.map((b) => `Image: ${(b as { alt_text: string }).alt_text}`).join("\n");
   const evidence = buildEvidenceLink(opts.evidenceLink);
-  const questionParts = q.humanQuestions?.length ? buildQuestionBlocks(q.humanQuestions) : null;
+  const questionParts = q.humanQuestions?.length ? buildQuestionBlocks(q.humanQuestions, !q.sharedChannel) : null;
   if (opts.extraBlocks?.length) {
     throw new HumanMessageShapeError("Extra blocks have no complete accessible fallback. Use mediaRefs for images or author supplemental human detail.");
   }

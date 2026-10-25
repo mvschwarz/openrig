@@ -102,6 +102,18 @@ describe("a shared channel's conversation, there and back", () => {
     expect(posted.thread_ts).toBeUndefined();
   });
 
+  it("an ask's questions show in the channel as a list without buttons, asking for a reply in the thread", async () => {
+    const ask = await repo.create({ sourceSession: SUPPORT, destinationSession: CHANNEL, humanIntent: "decision", summary: "Which plan?",
+      body: "Which plan are you on?", evidenceRef: "/fixture/plan", nudge: false,
+      humanQuestions: [{ id: "plan", question: "Which plan?", options: [{ id: "basic", label: "Basic" }, { id: "pro", label: "Pro", recommended: true }] }] });
+    const posted = await deliverVia(ask.qitemId);
+    const blocks = posted.blocks as Array<{ type: string; text?: { text?: string } }>;
+    expect(blocks.some((block) => block.type === "actions")).toBe(false);
+    expect(blocks.map((block) => block.text?.text ?? "").join("\n")).toContain("• Basic\n• Pro (recommended)");
+    expect(String(posted.text)).toContain("Reply in this thread with your answer.");
+    expect(String(posted.text)).not.toContain("Or reply in this thread with your own answer.");
+  });
+
   it("the queue accepts a registered shared channel as a destination and refuses an unknown one", async () => {
     await expect(repo.create({ sourceSession: SUPPORT, destinationSession: "nobody-here@external", humanIntent: "update",
       summary: "x", body: "x", nudge: false })).rejects.toBeTruthy();

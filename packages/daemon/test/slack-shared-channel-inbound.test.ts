@@ -2,7 +2,7 @@
 // SQLite, with a real gateway home (person fragments plus the participant file). Slack itself isn't involved.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { migrate } from "../src/db/migrate.js";
@@ -16,7 +16,7 @@ import { makeInboundSenderResolver } from "../src/domain/gateway/slack/inbound-a
 import { makeQueuePorts } from "../src/domain/gateway/slack/queue-access.js";
 import { makeHumanReplyResolver } from "../src/domain/gateway/slack/slack-subsystem.js";
 import { SeenStore, DeadLetterStore } from "../src/domain/gateway/slack/state-store.js";
-import { addHumanFragment, loadHumanRegistry, resolveSlackHandle } from "../src/domain/gateway/human-registry.js";
+import { addHumanFragment, loadHumanRegistry, projectionPath, resolveSlackHandle } from "../src/domain/gateway/human-registry.js";
 import { participantsPath, setGroup, setOrganization, setSharedChannel, sharedChannelAddresses } from "../src/domain/gateway/participants.js";
 
 // A vetted shared channel is one participant. A customer who isn't registered can write in it: their message reaches the
@@ -27,9 +27,9 @@ const SUPPORT = "support@test-rig", ANA = "ana@external", CHANNEL = "acme-custom
 const closes: Array<() => void> = [];
 afterEach(() => { for (const close of closes.splice(0).reverse()) close(); });
 
-async function fixture() {
+async function fixture({ person = true } = {}) {
   const home = mkdtempSync(join(tmpdir(), "shared-channel-"));
-  expect(addHumanFragment({ entityId: "ana", class: "human", displayName: "Ana", address: ANA,
+  if (person) expect(addHumanFragment({ entityId: "ana", class: "human", displayName: "Ana", address: ANA,
     connectorBindings: [{ kind: "slack", connectorRef: "primary", secretsRef: "vault://slack/ana", role: "primary", handle: "UANA" }],
     prefs: { deliveryClass: "B" } }, home)).toMatchObject({ ok: true });
   expect(setOrganization("acme", { name: "Acme", policy: "Be courteous. Never promise a delivery date." }, home).ok).toBe(true);
@@ -54,7 +54,8 @@ async function fixture() {
   const message = (user: string, channel: string, ts: string, text: string, threadTs?: string) =>
     router.route({ type: "message", user, channel, ts, text, ...(threadTs ? { thread_ts: threadTs } : {}) });
   const rows = () => repo.list({ limit: 100 }).filter((row) => row.destinationSession === SUPPORT);
-  return { home, repo, router, message, rows, resolveHumanReply, recordHumanAnswer, correlate: (id: string) => { correlation = id; } };
+  const alerts = () => makeQueuePorts(repo, { loadHumanRegistry: registry, sharedChannels: () => sharedChannelAddresses(home) }).listHumanAlerts({});
+  return { home, repo, router, message, rows, alerts, resolveHumanReply, recordHumanAnswer, correlate: (id: string) => { correlation = id; } };
 }
 
 describe("an unregistered sender in a registered shared channel", () => {
@@ -80,6 +81,30 @@ describe("an unregistered sender in a registered shared channel", () => {
     // People are admitted from their own fragments, whatever the participant file says.
     expect(await f.message("UANA", "CACME", "1.3", "I'm here")).toMatchObject({ disposition: "accepted" });
     expect(f.rows().map((row) => row.sourceSession)).toEqual([ANA]);
+  });
+});
+
+describe("an empty person registry isn't a broken one: a channel-only setup converses", () => {
+  it("still admits the channel's customers; anyone else is still told to register a person", async () => {
+    const f = await fixture({ person: false });
+    expect(await f.message("UCUSTOMER", "CACME", "1.1", "Where is my invoice?")).toMatchObject({ disposition: "accepted" });
+    expect(f.rows().map((row) => row.sourceSession)).toEqual([CHANNEL]);
+    expect(await f.message("UCUSTOMER", "COTHER", "1.2", "hello")).toMatchObject({ disposition: "refused", reason: "unregistered" });
+  });
+
+  it("still posts an update to the channel: it's a notice selected for delivery", async () => {
+    const f = await fixture({ person: false });
+    const notice = await f.repo.create({ sourceSession: SUPPORT, destinationSession: CHANNEL, humanIntent: "update",
+      summary: "Maintenance tonight", body: "Billing is offline 22:00-23:00.", nudge: false });
+    expect(f.repo.listTransitions(notice.qitemId).at(-1)).toMatchObject({ ownerNotificationKind: "human-update", ownerNotificationLevel: "NOTICE" });
+    expect((await f.alerts()).map((item) => item.qitemId)).toEqual([notice.qitemId]);
+  });
+
+  it("a broken person registry still refuses everyone, the shared channel included (fail-closed)", async () => {
+    const f = await fixture();
+    writeFileSync(projectionPath(f.home), `${readFileSync(projectionPath(f.home), "utf8")}# hand edit\n`);
+    expect(await f.message("UCUSTOMER", "CACME", "1.1", "hello")).toMatchObject({ disposition: "refused" });
+    expect(f.rows()).toEqual([]);
   });
 });
 
