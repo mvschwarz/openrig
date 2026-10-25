@@ -94,6 +94,13 @@ const STATUS = {
 };
 
 describe("seat typing guard commands", () => {
+  it("prints the daemon's managed restore delivery failure", async () => {
+    const detail = "OpenRig owes its turn boundary. Last delivery: target_activity_unknown; no_activity_signal.";
+    const deps = makeDeps({ status: 200, data: { ...STATUS, compaction: { stage: "compacting", detail } } }, []);
+    const result = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
+    expect(result.logs).toContain(`Managed compaction (compacting): ${detail}`);
+  });
+
   it("keeps the legacy on prefix when status reports hold", async () => {
     const paths: string[] = [];
     const deps = makeDeps({ status: 200, data: { ...STATUS, typingGuard: { desired: true, effective: true, effectiveMode: "hold", pending: false, heldCount: 0 } } }, paths);

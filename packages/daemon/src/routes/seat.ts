@@ -1,3 +1,4 @@
+import type { ClaudeCompactionEnforcer } from "../domain/claude-compaction-enforcer.js";
 import { OutboxHandler } from "../domain/outbox-handler.js";
 import { Hono, type Context } from "hono";
 import type { RigRepository } from "../domain/rig-repository.js";
@@ -99,7 +100,7 @@ seatRoutes.post("/retire-held-message/:seatRef/:id", async c => {
 
 seatRoutes.get("/status/:seatRef", (c) => {
   const rigRepo = c.get("rigRepo" as never) as RigRepository;
-  const service = new SeatStatusService({ rigRepo });
+  const service = new SeatStatusService({ rigRepo, compactionEnforcer: c.get("compactionEnforcer" as never) as ClaudeCompactionEnforcer | undefined });
   const result = service.getStatus(c.req.param("seatRef")!);
 
   if (result.ok) {

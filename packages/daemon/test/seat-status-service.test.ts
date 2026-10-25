@@ -24,6 +24,17 @@ describe("SeatStatusService", () => {
     db.close();
   });
 
+  it("shows an owed restore's delivery failure on the same seat status the operator reads", () => {
+    const rig = rigRepo.createRig("restore-status");
+    const node = rigRepo.addNode(rig.id, "writer", { runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "writer@restore-status");
+    sessionRegistry.updateStatus(session.id, "running");
+    const owedRestore = { stage: "turn_boundary" as const, held: true, detail: "OpenRig owes the turn boundary. Last delivery: target_activity_unknown." };
+    const observer = { recoverSeat: () => {}, observedCompaction: () => ({ stage: "compacting" as const, detail: owedRestore.detail }), getOwedRestore: () => owedRestore };
+    const status = new SeatStatusService({ rigRepo, compactionEnforcer: observer }).getStatus(session.sessionName);
+    expect(status.ok && status.status.compaction).toEqual({ stage: "compacting", detail: owedRestore.detail, owedRestore });
+  });
+
   it("reports a confirmed missing current session as detached while preserving its registration", async () => {
     const { app, rigRepo: repo, sessionRegistry: registry } = createTestApp(db);
     const rig = repo.createRig("missing-seat");

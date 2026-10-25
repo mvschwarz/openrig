@@ -415,6 +415,25 @@ export function buildPostCompactTurnBoundaryPrompt(): string {
 
 type PendingPostCompactStage = "turn_boundary" | "restore_prompt" | "compliance_prompt";
 
+/** Safe delivery diagnostics: never retain pane contents or an exception message. */
+export interface RestoreDeliveryAttempt {
+  stage: PendingPostCompactStage;
+  at: string;
+  ok: boolean;
+  reason: string;
+  outcome?: SendResult["outcome"];
+  activity?: Pick<NonNullable<SendResult["activity"]>, "state" | "reason" | "evidenceSource">;
+  errorClass?: string;
+  failures: number;
+  noticeErrorClass?: string;
+}
+export interface RestoreDeliveryFailure {
+  sessionName: string;
+  attemptId: string;
+  mapPath: string;
+  lastDelivery: RestoreDeliveryAttempt;
+}
+
 /** A managed compaction the enforcer has recorded for a seat: the stage, and a phrase that says only what was observed. */
 export interface ObservedCompaction {
   stage: "preparing" | "compacting" | "compacted" | "restoring";
@@ -493,6 +512,7 @@ interface CompactionRecord {
   compactSending?: true;
   /** The owed restore steps follow a /compact whose outcome is unknown, so each goes only into an empty input box. */
   uncertainCompact?: true;
+  lastDelivery?: RestoreDeliveryAttempt;
   updatedAt: number;
 }
 
@@ -575,12 +595,14 @@ export class ClaudeCompactionEnforcer {
     saturationBoundPercentage: number;
   }) => Promise<void> | void;
 
+  private readonly onRestoreDeliveryFailure?: (failure: RestoreDeliveryFailure) => Promise<void>;
   private readonly terminalPolicies?: TerminalPolicyStore;
 
   constructor(
     settingsStore: SettingsStore,
     sessionTransport: SessionTransport,
     opts?: {
+      onRestoreDeliveryFailure?: (failure: RestoreDeliveryFailure) => Promise<void>;
       terminalPolicies?: TerminalPolicyStore;
       dedupWindowMs?: number;
       openrigHome?: string;
@@ -603,6 +625,7 @@ export class ClaudeCompactionEnforcer {
       }) => Promise<void> | void;
     },
   ) {
+    this.onRestoreDeliveryFailure = opts?.onRestoreDeliveryFailure;
     this.terminalPolicies = opts?.terminalPolicies;
     this.settingsStore = settingsStore;
     this.sessionTransport = sessionTransport;
@@ -678,18 +701,21 @@ export class ClaudeCompactionEnforcer {
   /** The restore step OpenRig owes this seat next, or null. After a /compact whose outcome is unknown (see
    *  `afterUncertainCompact`) it also gives what the input box last read (`not_checked` before the first check) and
    *  whether the step is held for it. */
-  getOwedRestore(sessionName: string): { stage: PendingPostCompactStage; held: boolean; inputBox?: string; detail: string } | null {
+  getOwedRestore(sessionName: string): { stage: PendingPostCompactStage; held: boolean; inputBox?: string; detail: string; lastDelivery?: RestoreDeliveryAttempt } | null {
     const stage = this.pendingPostCompactRestore.get(sessionName);
     if (!stage) return null;
+    const lastDelivery = this.records.get(sessionName)?.record.lastDelivery;
+    const last = lastDelivery ? { lastDelivery } : {};
+    const failure = lastDelivery ? ` Last delivery at ${lastDelivery.at}: ${[lastDelivery.reason, lastDelivery.activity?.reason, lastDelivery.errorClass, lastDelivery.noticeErrorClass && `owner notice failed (${lastDelivery.noticeErrorClass})`].filter(Boolean).join("; ")}. OpenRig will retry on its existing polls.` : "";
     const step = { turn_boundary: "post-compaction turn boundary", restore_prompt: "restore request", compliance_prompt: "post-restore audit" }[stage];
     if (!this.afterUncertainCompact.has(sessionName)) {
-      return { stage, held: false, detail: `OpenRig owes this seat its ${step} next, sent on a poll once the pane is idle.` };
+      return { stage, held: !!lastDelivery, ...last, detail: `OpenRig owes this seat its ${step} next, sent on a poll once the pane is idle.${failure}` };
     }
     const inputBox = this.lastInputBox.get(sessionName) ?? "not_checked";
     const held = inputBox !== "not_checked" && !INPUT_BOX_CLEAR.has(inputBox);
-    return { stage, held, inputBox, detail: held
+    return { stage, held: held || !!lastDelivery, inputBox, ...last, detail: (held
       ? `held: OpenRig owes this seat its restore steps after a /compact whose result was lost, and waits while its input box isn't empty (it reads ${inputBox}). The seat may have /compact text waiting, which any Enter would submit, so check the pane. A seat whose own status line keeps the box unreadable stays held.`
-      : `OpenRig owes this seat its ${step} next, after a /compact whose result was lost. Each step goes only into an empty input box, sent on a poll once the pane is idle (the box last read ${inputBox}).` };
+      : `OpenRig owes this seat its ${step} next, after a /compact whose result was lost. Each step goes only into an empty input box, sent on a poll once the pane is idle (the box last read ${inputBox}).`) + failure };
   }
 
   /** An open record from before a restart that was too old to resume, while no later attempt has replaced it. */
@@ -738,17 +764,63 @@ export class ClaudeCompactionEnforcer {
     input: EnforcerInput,
     run: () => Promise<EnforcerOutcome>,
   ): Promise<EnforcerOutcome> {
+    const stage = this.pendingPostCompactRestore.get(input.sessionName);
+    const record = this.records.get(input.sessionName);
+    const previous = record?.record.lastDelivery;
     const runIfCurrent = (): Promise<EnforcerOutcome> => input.isObservationCurrent && !input.isObservationCurrent()
       ? Promise.resolve({ triggered: false, reason: "stale_observation" }) : run();
     const guard = this.sessionTransport.deliveryGuard;
-    if (guard && input.runtime === "claude-code") {
-      try { return await guard.lifecycle([guard.target(input.sessionName).nodeId], runIfCurrent); }
-      catch (error) {
-        if (error instanceof DeliveryGuardError) return { triggered: false, reason: error.code === "typing_guard_enabled" ? "typing_guard_enabled" : "guard_target_unknown" };
-        throw error;
+    try {
+      const outcome = guard && input.runtime === "claude-code"
+        ? await guard.lifecycle([guard.target(input.sessionName).nodeId], runIfCurrent) : await runIfCurrent();
+      // Refusals before send (policy, guard, observation) must be visible too. A send has already recorded its full result.
+      if (!outcome.triggered && record?.record.lastDelivery === previous) {
+        this.recordRestoreFailure(input.sessionName, stage, record, { ok: false, reason: outcome.reason });
       }
+      return outcome;
+    } catch (error) {
+      this.recordRestoreFailure(input.sessionName, stage, record, {
+        ok: false, reason: error instanceof DeliveryGuardError ? error.code : "send_failed",
+      }, error instanceof Error ? error.name : typeof error);
+      if (error instanceof DeliveryGuardError) return { triggered: false, reason: error.code === "typing_guard_enabled" ? "typing_guard_enabled" : "guard_target_unknown" };
+      throw error;
     }
-    return runIfCurrent();
+  }
+
+  private recordRestoreFailure(
+    session: string, stage: PendingPostCompactStage | undefined,
+    record: { file: string; record: CompactionRecord } | undefined,
+    result: Pick<SendResult, "ok" | "reason" | "outcome" | "activity">, errorClass?: string,
+  ): void {
+    if (!stage || !record || this.records.get(session) !== record || this.pendingPostCompactRestore.get(session) !== stage) return;
+    const prior = record.record.lastDelivery;
+    const lastDelivery: RestoreDeliveryAttempt = {
+      stage, at: new Date(this.now()).toISOString(), ok: result.ok, reason: result.reason ?? "send_failed",
+      ...(result.outcome ? { outcome: result.outcome } : {}),
+      ...(result.activity ? { activity: { state: result.activity.state, reason: result.activity.reason, evidenceSource: result.activity.evidenceSource } } : {}),
+      ...(errorClass ? { errorClass } : {}), failures: (prior?.failures ?? 0) + 1,
+    };
+    this.persist(session, record.record.attemptId, { lastDelivery });
+    // Two failed polls warrant one diagnostic notice, not a conclusion that native compaction finished.
+    // Queue delivery must not hold the compacting seat's lifecycle lease or stall the telemetry poll.
+    if (lastDelivery.failures >= 2 && this.onRestoreDeliveryFailure) {
+      void Promise.resolve().then(() => {
+        if (this.records.get(session) !== record || record.record.lastDelivery !== lastDelivery) return;
+        return this.onRestoreDeliveryFailure!({ sessionName: session, attemptId: record.record.attemptId, mapPath: record.record.mapPath, lastDelivery });
+      }).catch(error => {
+        if (this.records.get(session) === record && record.record.lastDelivery === lastDelivery) {
+          lastDelivery.noticeErrorClass = error instanceof Error ? error.name : typeof error;
+          this.persist(session, record.record.attemptId, { lastDelivery });
+        }
+      });
+    }
+  }
+
+  private async sendRestoreStage(session: string, text: string, options: Parameters<SessionTransport["send"]>[2]): Promise<SendResult> {
+    const stage = this.pendingPostCompactRestore.get(session), record = this.records.get(session);
+    const result = await this.sessionTransport.send(session, text, options);
+    if (!result.ok || result.outcome === "retained") this.recordRestoreFailure(session, stage, record, result);
+    return result;
   }
 
   /**
@@ -810,7 +882,7 @@ export class ClaudeCompactionEnforcer {
       if (!INPUT_BOX_CLEAR.has(box)) return { triggered: false, reason: "input_box_not_empty" };
     }
     if (pendingStage === "turn_boundary") {
-      const boundary = await this.sessionTransport.send(
+      const boundary = await this.sendRestoreStage(
         input.sessionName,
         buildPostCompactTurnBoundaryPrompt(),
         sendOpts,
@@ -828,7 +900,7 @@ export class ClaudeCompactionEnforcer {
       // OPR.0.4.1.09: resolve the extra FOR THIS SEAT (per-seat preferred; the legacy
       // global is refused if it declares a different seat) - never inject wrong-seat state.
       const extra = resolvePostCompactExtra(input.sessionName, this.openrigHome, policy.messageFilePath);
-      const restore = await this.sessionTransport.send(
+      const restore = await this.sendRestoreStage(
         input.sessionName,
         buildPostCompactRestorePrompt({
           sessionName: input.sessionName,
@@ -858,7 +930,7 @@ export class ClaudeCompactionEnforcer {
       return { triggered: true };
     }
     if (pendingStage === "compliance_prompt") {
-      const compliance = await this.sessionTransport.send(
+      const compliance = await this.sendRestoreStage(
         input.sessionName,
         buildPostCompactCompliancePrompt(policy.postRestoreAuditInstruction),
         sendOpts,
@@ -1396,7 +1468,7 @@ export class ClaudeCompactionEnforcer {
 
   private persistStage(sessionName: string, phase: CompactionRecord["phase"]): void {
     const current = this.records.get(sessionName);
-    if (current) this.persist(sessionName, current.record.attemptId, { phase });
+    if (current) this.persist(sessionName, current.record.attemptId, { phase, lastDelivery: undefined });
   }
 
   /**
