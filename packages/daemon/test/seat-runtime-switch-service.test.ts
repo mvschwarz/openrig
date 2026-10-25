@@ -441,4 +441,90 @@ describe("live seat runtime switch", () => {
       expect(nodeRow().model).toBe("operator-choice");
     });
   });
+
+  // The handover is a fresh Claude's first input, so it gets startup's protections: Claude's input box is drawn before
+  // the paste, and an Enter Claude didn't take is followed by a guarded Enter onto exactly the staged handover.
+  describe("a Claude successor's handover", () => {
+    const RULE = "────────────────────";
+    const drawn = (body = "") => `${RULE}\n❯ ${body}\n${RULE}\n⏵⏵ accept edits on (shift+tab to cycle)\n`;
+    const starting = "Claude Code v2.1.309\n";
+    const handover = () => typed.find((t) => t.target.startsWith("openrig-switch-"))?.text ?? "";
+    let enters: number;
+    let order: string[];
+    let successorScreens: string[];
+    let composer: () => string;
+    beforeEach(() => {
+      enters = 0;
+      order = [];
+      successorScreens = [];
+      composer = () => drawn();
+      fakeTmux.capturePaneScreen = vi.fn(async (pane: string) => {
+        if (pane !== "%5") return "predecessor screen tail";
+        order.push("look");
+        return successorScreens.shift() ?? drawn();
+      });
+      fakeTmux.sendText = vi.fn(async (target: string, text: string) => {
+        typed.push({ target, text });
+        if (target.startsWith("openrig-switch-")) order.push("paste");
+        return { ok: true };
+      });
+      fakeTmux.sendKeys = vi.fn(async (target: string) => {
+        if (target.startsWith("openrig-switch-")) { enters++; order.push("enter"); }
+        return { ok: true };
+      });
+      Object.assign(fakeTmux, { capturePaneContent: vi.fn(async () => composer()) });
+    });
+    /** The successor confirms only once its handover was submitted, by the given Enter. */
+    const confirmsAfterEnter = (svc: SeatRuntimeSwitchService, enter: number) => {
+      onSleep = () => {
+        const row = openSwitch();
+        if (row?.phase !== "preparing" || enters < enter) return;
+        svc.confirm({ seatRef: SEAT, switchId: row.id, note: "carrying on", actorSession: SEAT, generation: row.successor_generation });
+      };
+    };
+
+    it("waits for Claude to draw its input box before typing the handover, and adds no Enter once it's taken", async () => {
+      successorScreens = [starting, starting, drawn()];
+      const svc = service();
+      confirmsAfterEnter(svc, 1);
+      expect(await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "limit" })).toMatchObject({ ok: true, changed: true });
+      expect(order.slice(0, order.indexOf("paste"))).toEqual(["look", "look", "look"]);
+      expect(enters).toBe(1);
+    });
+
+    it("presses a guarded Enter when the handover is still in Claude's input after the first, and types it only once", async () => {
+      composer = () => enters < 2 ? drawn(handover()) : drawn();
+      const svc = service();
+      confirmsAfterEnter(svc, 2);
+      expect(await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "limit" })).toMatchObject({ ok: true, changed: true });
+      expect(enters).toBe(2);
+      expect(typed.filter((t) => t.target.startsWith("openrig-switch-"))).toHaveLength(1);
+    });
+
+    it("presses no further Enter onto an input that holds anything else", async () => {
+      composer = () => drawn("a person's draft");
+      const svc = service();
+      confirmsAfterEnter(svc, 1);
+      await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "limit" });
+      expect(enters).toBe(1);
+    });
+
+    it("stops after startup's two guarded Enters, and says the handover was never sent when no confirmation comes", async () => {
+      composer = () => drawn(handover());
+      const result = await service().setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "limit", confirmTimeoutMs: 10_000 });
+      expect(result).toMatchObject({ ok: false, committed: false });
+      expect((result as { message: string }).message).toMatch(/within 10 s, so it isn't shown able to carry on\. The handover was still in its input, unsent\./);
+      expect(enters).toBe(3);
+      expect(typed.filter((t) => t.target.startsWith("openrig-switch-"))).toHaveLength(1);
+    });
+
+    it("leaves a Codex successor's handover as it was: no look and one Enter", async () => {
+      db.prepare("UPDATE nodes SET runtime = 'claude-code', codex_config_profile = NULL WHERE id = ?").run(nodeId);
+      const svc = service();
+      confirmsAfterEnter(svc, 1);
+      expect(await svc.setRuntime({ seatRef: SEAT, runtime: "codex", reason: "limit" })).toMatchObject({ ok: true, changed: true });
+      expect(order).toEqual(["paste", "enter"]);
+      expect((fakeTmux as unknown as { capturePaneContent: ReturnType<typeof vi.fn> }).capturePaneContent).not.toHaveBeenCalled();
+    });
+  });
 });

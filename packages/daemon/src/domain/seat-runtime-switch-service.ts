@@ -26,6 +26,7 @@ import { DeliveryGuardError } from "./seat-delivery-guard.js";
 import { seatCodexCorePluginDir, seatCorePluginDir, withPluginDirs } from "./claude-core-plugin-env.js";
 import { planRuntimeSwitchMaterials, type RuntimeSwitchMaterials, type RuntimeSwitchMaterialsInput, type SwitchRuntime } from "./runtime-switch-materials.js";
 import { terminatePaneInPlace } from "./pane-cutover.js";
+import { inspectStartupStagedText, settleOwnStartupPaste, STARTUP_SUBMIT_CAPTURE_LINES, STARTUP_SUBMIT_RETRIES, waitForClaudeInputBox } from "./startup-submission-evidence.js";
 
 /**
  * Slice 16: switch one live seat between Codex and Claude Code, successor first (founder
@@ -373,11 +374,17 @@ export class SeatRuntimeSwitchService {
         "Then wait for OpenRig's activation message. If you can't carry on (an unusable model, a login or permission problem), don't confirm; the switch then stops and the current occupant keeps the seat.",
       ].join("\n"),
     ].filter(Boolean).join("\n\n");
+    // The handover is a fresh Claude's first input, so it gets startup's protections: wait for Claude's input box before
+    // the paste, and after the Enter, a guarded Enter while the composer still holds exactly the handover.
+    const claudeSuccessor = target === "claude-code";
+    const drawnPane = successorPane;
+    if (claudeSuccessor && drawnPane) await waitForClaudeInputBox(() => tmux.capturePaneScreen(drawnPane), this.sleep);
     const typed = await tmux.sendText(row.staging_session, packet);
     if (!typed.ok) return abandon(`The handover couldn't be typed to the successor: ${typed.message}.`);
     await this.sleep(200);
     const entered = await tmux.sendKeys(row.staging_session, ["Enter"]);
     if (!entered.ok) return abandon(`The handover couldn't be submitted to the successor: ${entered.message}.`);
+    if (claudeSuccessor) await this.submitStagedHandover(row.staging_session, packet);
 
     // 3. Wait for the confirmation (P2's evidence), bounded.
     const timeoutMs = confirmTimeoutMs;
@@ -389,7 +396,8 @@ export class SeatRuntimeSwitchService {
       if (current.phase === "confirmed" && current.confirmation_note && current.confirmed_at) { confirmation = { note: current.confirmation_note, at: current.confirmed_at }; break; }
       if (this.now().getTime() >= deadline) {
         const tail = successorPane ? (await tmux.capturePaneScreen(successorPane).catch(() => null))?.trim().split("\n").slice(-6).join("\n") : null;
-        return abandon(`The ${target} successor didn't confirm the handover within ${Math.round(timeoutMs / 1000)} s, so it isn't shown able to carry on.${tail ? ` Its screen ended with:\n${tail}` : ""}`);
+        const staged = claudeSuccessor && inspectStartupStagedText(await this.readComposer(row.staging_session), packet, target) === "staged";
+        return abandon(`The ${target} successor didn't confirm the handover within ${Math.round(timeoutMs / 1000)} s, so it isn't shown able to carry on.${staged ? " The handover was still in its input, unsent." : ""}${tail ? ` Its screen ended with:\n${tail}` : ""}`);
       }
       const probe = await tmux.probeSession(row.staging_session).catch(() => ({ state: "unknown" as const }));
       if (probe.state === "absent") return abandon(`The ${target} successor's session ended before it confirmed the handover.`);
@@ -495,6 +503,28 @@ export class SeatRuntimeSwitchService {
         settings: { ...materials.settings }, dropped: ctx.plan.dropped, permissionSelection: ctx.selection ? ctx.selection.mode : "inherit", claimsMoved });
     })();
     return { event, notifications, claimsMoved, afterCommit };
+  }
+
+  /** The successor's composer, as startup reads it; null when it can't be read. */
+  private async readComposer(session: string): Promise<string | null> {
+    try { return await this.deps.tmuxAdapter.capturePaneContent(session, STARTUP_SUBMIT_CAPTURE_LINES); } catch { return null; }
+  }
+
+  /** Startup's check after its Enter: tmux accepting Enter doesn't prove Claude submitted a large paste. While the
+   *  composer still holds exactly the handover, read again just before each key, a bare Enter goes in, at most
+   *  STARTUP_SUBMIT_RETRIES times. Nothing is pasted again, and any other screen is left alone. Observation only: the
+   *  successor's confirmation stays the evidence. */
+  private async submitStagedHandover(session: string, handover: string): Promise<void> {
+    await this.sleep(200);
+    const first = await this.readComposer(session);
+    if (!first?.trim()) return;
+    let { state } = await settleOwnStartupPaste(() => this.readComposer(session), first, handover, "claude-code", this.sleep);
+    for (let retries = 0; state === "staged" && retries < STARTUP_SUBMIT_RETRIES; retries++) {
+      if (inspectStartupStagedText(await this.readComposer(session), handover, "claude-code") !== "staged") return;
+      if (!(await this.deps.tmuxAdapter.sendKeys(session, ["Enter"])).ok) return;
+      await this.sleep(200);
+      state = inspectStartupStagedText(await this.readComposer(session), handover, "claude-code");
+    }
   }
 
   /** After the commit: retire the predecessor (in the staging session), carry the successor's runtime on the seat's
