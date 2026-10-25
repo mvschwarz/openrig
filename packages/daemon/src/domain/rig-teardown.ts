@@ -188,7 +188,10 @@ export class RigTeardownOrchestrator {
       if (!absent && this.deps.tmuxAdapter.probeSession) {
         try {
           const probe = await this.deps.tmuxAdapter.probeSession(session.sessionName);
-          absent = probe.state === "absent";
+          // This is the daemon's own tmux namespace, as in the import guard; a missing socket file is not enough.
+          absent = probe.state === "absent" || (probe.state === "transport_unavailable" &&
+            /no server running/i.test(probe.cause) &&
+            !/permission denied|operation not permitted|EACCES|EPERM/i.test(probe.cause));
           if (probe.state !== "present" && !absent) {
             result.errors.push(`Could not confirm session '${session.sessionName}' is absent: ${probe.state === "transport_unavailable" ? probe.cause : probe.state}`);
             killFailures++;

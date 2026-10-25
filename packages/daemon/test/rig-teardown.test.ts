@@ -15,6 +15,7 @@ import { ResumeMetadataRefresher } from "../src/domain/resume-metadata-refresher
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { checkRunningNameGuard, makeRunningSessionCounter } from "../src/domain/running-name-guard.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { managedBlockText, mergeManagedBlock } from "../src/domain/managed-blocks.js";
 import { SEAT_SKILLS_BOOTSTRAP_LINE } from "../src/domain/seat-skill-storage.js";
@@ -740,11 +741,40 @@ describe("RigTeardownOrchestrator", () => {
     expect(rigRepo.getRig(rigId)).not.toBeNull();
   });
 
-  it("retains the binding when the tmux server is unreachable", async () => {
+  it.each(["/tmp/tmux-501/default", "/team/tmux/tmux-501/default"])("stops a rig after its own server reports absence on %s", async (socket) => {
+    const { rigId, nodeId, sessionId } = seedRig();
+    sessionRegistry.updateBinding(nodeId, { tmuxSession: "r01-dev" });
+    const terminal = noServerTerminal(`Command failed: tmux has-session -t =r01-dev\nno server running on ${socket}`);
+    const tmux = mockTmux();
+    tmux.probeSession = terminal.probeSession;
+
+    const result = await buildTeardown(tmux).teardown(rigId);
+
+    expect(result.errors).toEqual([]);
+    expect(result.sessionsKilled).toBe(0);
+    expect(tmux.killSession).not.toHaveBeenCalled();
+    expect(sessionRegistry.getBindingForNode(nodeId)).toBeNull();
+    expect(sessionRegistry.getSessionsForRig(rigId).find((session) => session.id === sessionId))
+      .toMatchObject({ status: "exited" });
+    expect(db.prepare("SELECT intentionally_stopped FROM sessions WHERE id = ?").get(sessionId))
+      .toEqual({ intentionally_stopped: 1 });
+    expect(checkRunningNameGuard({ findRigsByName: (name) => rigRepo.findRigsByName(name),
+      countRunningSessions: makeRunningSessionCounter(db) }, "test-rig")).toEqual({ ok: true });
+    expect(terminal.commands).toEqual(["tmux has-session -t '=r01-dev'"]);
+    rigRepo.archiveRig(rigId);
+    expect(db.prepare("SELECT archived_at FROM rigs WHERE id = ?").get(rigId))
+      .toEqual({ archived_at: expect.any(String) });
+  });
+
+  it.each([
+    "error connecting to /other-caller/tmux-501/default (No such file or directory)",
+    "error connecting to /tmp/tmux-501/default (Connection refused)",
+    "permission denied: no server running on /tmp/tmux-501/default",
+  ])("retains the binding when the server probe is uncertain: %s", async (cause) => {
     const { rigId, nodeId, sessionId } = seedRig();
     sessionRegistry.updateBinding(nodeId, { tmuxSession: "r01-dev" });
     const tmux = mockTmux();
-    tmux.probeSession = vi.fn(async () => ({ state: "transport_unavailable", cause: "no server running on /tmp/tmux-501/default" }));
+    tmux.probeSession = vi.fn(async () => ({ state: "transport_unavailable", cause }));
 
     const result = await buildTeardown(tmux).teardown(rigId, { delete: true });
 
