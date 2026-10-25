@@ -285,6 +285,66 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(capturePaneContent).toHaveBeenCalledWith("%42", 20);
   });
 
+  // Reconstructed from Pi v1.4.0 extension-input/editor source, not a native capture.
+  const piInput = ["────────────────────────────────────", "", " Your response", "", "> ", "", " enter submit  escape/ctrl+c cancel", "", "────────────────────────────────────", "~/project"].join("\n");
+  const piEditor = ["────────────────────────────────────", "", " Edit response", "", "────────────────────────────────────", "draft line", "", "────────────────────────────────────", "", " enter submit  shift+enter newline  escape/ctrl+c cancel  ctrl+g external editor", "", "────────────────────────────────────", "~/project"].join("\n");
+  const piTextDialogs = [
+    ["empty input", piInput],
+    ["input with text and description", piInput.replace("Your response", "Your response (10s)\n\n Description").replace("> ", "> existing answer")],
+    ["input rebound keys", piInput.replace("enter submit  escape/ctrl+c cancel", "ctrl+y submit  ctrl+n cancel")],
+    ["editor with blank line", piEditor],
+    ["empty editor", piEditor.replace("draft line", "")],
+    ["editor rebound keys", piEditor.replace("enter submit  shift+enter newline  escape/ctrl+c cancel  ctrl+g external editor", "ctrl+y submit  alt+n newline  ctrl+n cancel  ctrl+e external editor")],
+    ["scrolling editor", piEditor.replace("draft line\n\n────────────────────────────────────", "draft line\n\n──── ↓ 3 more ────")],
+    ["widget and named footer", `${piInput} • named\ncustom status\nwidget below editor`],
+  ] as const;
+  it.each(piTextDialogs.flatMap(([layout, pane]) => [null, "unknown", "pi"].map(runtime => [layout, runtime, pane] as const)))(
+    "plain send refuses the current Pi text dialog (%s) with runtime %s", async (_layout, runtime, pane) => {
+      const node = rigRepo.addNode(rigId, "adopted.worker", { role: "worker" });
+      db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(runtime, node.id);
+      const seat = "adopted-tui";
+      sessionRegistry.registerClaimedSession(node.id, seat);
+      sessionRegistry.updateBinding(node.id, { tmuxSession: seat, tmuxPane: "%42" });
+      const { sendText, sendKeys } = spies();
+      const result = await makeTransport(mockTmux({ capturePaneContent: async () => pane, sendText, sendKeys })).send(seat, "a peer message");
+      expect(result.reason).toBe("target_needs_input");
+      expect(result.activity?.state).toBe("needs_input");
+      expect(sendText).not.toHaveBeenCalled();
+      expect(sendKeys).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([piInput, piEditor])("keeps deliberate, audited input available for a Pi text dialog (%#)", async (pane) => {
+    const node = rigRepo.addNode(rigId, "adopted.worker", { role: "worker" });
+    const seat = "adopted-tui";
+    sessionRegistry.registerClaimedSession(node.id, seat);
+    sessionRegistry.updateBinding(node.id, { tmuxSession: seat, tmuxPane: "%42" });
+    const { sendText, sendKeys } = spies();
+    const result = await makeTransport(mockTmux({ capturePaneContent: async () => pane, sendText, sendKeys }))
+      .send(seat, "intentional answer", { dangerouslyInteract: true, reason: "operator answers this dialog" });
+    expect(result.ok).toBe(true);
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(overrideEvents()).toHaveLength(1);
+  });
+
+  it.each(piTextDialogs.flatMap(([kind, pane]) => [
+    [`${kind} followed by a later composer`, `${pane}\n────────────────────────────────────\nordinary draft\n────────────────────────────────────\n~/project`],
+    [`${kind} in fenced output`, `\`\`\`text\n${pane}\n\`\`\``],
+    [`${kind} in a blockquote`, pane.split("\n").map(line => `> ${line}`).join("\n")],
+    [`${kind} beyond the footer bound`, `${pane}\n${Array.from({ length: 8 }, (_, i) => `later output ${i}`).join("\n")}`],
+  ]))("keeps %s out of current Pi dialog recognition", (_name, pane) => {
+    expect(classifyPaneActivity(pane, { runtime: "unknown" }).state).not.toBe("attention");
+  });
+
+  it.each([
+    ["input opening clipped", piInput.slice(piInput.indexOf(" Your response"))],
+    ["input opening past scan bound", piInput.replace("Your response", Array.from({ length: 14 }, () => "description").join("\n"))],
+    ["editor opening clipped", piEditor.slice(piEditor.indexOf("draft line"))],
+    ["editor body past scan bound", piEditor.replace("draft line", Array.from({ length: 14 }, () => "body").join("\n"))],
+  ])("does not infer a Pi dialog from incomplete or oversized bodies: %s", (_name, pane) => {
+    expect(classifyPaneActivity(pane, { runtime: "unknown" }).state).not.toBe("attention");
+  });
+
   it("recognizes the Pi confirmation when No is selected", () => {
     expect(classifyPaneActivity(piConfirmation.replace(" → Yes\n   No", "   Yes\n → No")))
       .toMatchObject({ state: "attention", reason: "selection_prompt", evidence: "→ No" });

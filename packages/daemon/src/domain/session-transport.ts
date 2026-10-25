@@ -163,18 +163,29 @@ function findPatternEvidence(lines: string[], patterns: RegExp[]): string | null
   return null;
 }
 
-/** Adopted Pi TUIs have no runner hooks. Anchor on the selector's chrome:
+/** Adopted Pi TUIs have no runner hooks. Anchor on the selector/input/editor chrome:
  * footer metadata is optional, and an extension can add rows below the dialog. */
-function findCurrentPiSelector(paneContent: string): string | null {
+function findCurrentPiDialog(paneContent: string): string | null {
   const lines = paneContent.split("\n").map(line => line.trimEnd());
   const visible = lines.flatMap((line, at) => line.trim() ? [{ text: line.trim(), at }] : []);
   const border = (text: string) => /^─{3,}$/.test(text);
   // At most six nonblank footer/widget rows may follow the selector's border.
   for (let help = visible.length - 2; help >= Math.max(1, visible.length - 8); help--) {
-    if (!/^↑↓ navigate\s+\S.* select\s+\S.* cancel$/.test(visible[help]!.text) || !border(visible[help + 1]!.text)) continue;
+    const hint = visible[help]!.text;
+    const selector = /^↑↓ navigate\s+\S.* select\s+\S.* cancel$/.test(hint);
+    const input = /^\S+ submit\s+\S+ cancel$/.test(hint);
+    const editor = /^\S+ submit\s+\S+ newline\s+\S+ cancel\s+\S+ external editor$/.test(hint);
+    if (!(selector || input || editor) || !border(visible[help + 1]!.text)) continue;
     // A later editor or closing Markdown fence makes the selector historical/quoted.
     if (visible.slice(help + 2).some(row => border(row.text) || /^(?:`{3,}|~{3,})/.test(row.text))) continue;
     const end = visible[help - 1]!.at;
+    // Input's own `> ` field, or Editor's closing rule, must precede the hint. Keep the scan bounded:
+    // a clipped/tall component without its opening rule is not an inferred dialog.
+    if (input && /^>(?:\s|$)/.test(lines[end]!.trim()) && !lines[end - 1]?.trim()
+      && lines.slice(Math.max(0, end - PROMPT_SCAN_LINES), end).some(line => border(line.trim()))) return truncateEvidence(hint);
+    if (editor && /^(?:─{3,}|─+ [↑↓] \d+ more ─*)$/.test(lines[end]!.trim())
+      && lines.slice(Math.max(0, end - PROMPT_SCAN_LINES), end - 1).some(line => /^(?:─{3,}|─+ [↑↓] \d+ more ─*)$/.test(line.trim()))) return truncateEvidence(hint);
+    if (!selector) continue;
     let start = end;
     // The native spacer before the options separates arbitrary title/description text.
     while (start > Math.max(0, end - PROMPT_SCAN_LINES) && lines[start - 1]!.trim() && !border(lines[start - 1]!.trim())) start--;
@@ -547,7 +558,7 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
     return { state: "unknown", reason: "empty_capture", evidence: null };
   }
 
-  const piConfirmation = findCurrentPiSelector(paneContent);
+  const piConfirmation = findCurrentPiDialog(paneContent);
   if (piConfirmation) return { state: "attention", reason: "selection_prompt", evidence: piConfirmation };
 
   const recentLines = lastNonBlank.slice(-8);
