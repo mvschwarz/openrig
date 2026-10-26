@@ -23,8 +23,9 @@ import type { HumanFragment } from "../src/domain/gateway/human-registry.js";
 
 // An agent asks a person, then parks the ask on that same person. A colleague who writes in the ask's thread reaches the
 // agent that asked, as themselves, exactly as on a pending ask; the park stays on the person asked until they answer;
-// and the park's own post goes into the ask's thread rather than opening a second root. A person's Slack message is
-// never posted back to Slack as an ask, so its internal routing lines and a shared channel's policy stay in OpenRig.
+// and the park's own post goes into the ask's thread rather than opening a second root. A person's Slack message, as it
+// arrived, is never posted back to Slack as an ask, so its internal routing lines and a shared channel's policy stay in
+// OpenRig; an agent that later parks that message on a person makes a new ask, which posts.
 
 const person = (entityId: string, handle: string): HumanFragment => ({
   entityId, class: "human", displayName: entityId, address: `${entityId}@external`,
@@ -81,7 +82,8 @@ async function fixture() {
   const repliesFrom = (source: string) => repo.list({ limit: 100 })
     .filter((item) => item.sourceSession === source && (item.tags ?? []).includes("inbound"))
     .map((item) => ({ qitemId: item.qitemId, destination: item.destinationSession, humanAnswer: (item.tags ?? []).includes("human-answer") }));
-  return { repo, ask, threadMap, alertFor, alerts, post, typed, state, repliesFrom };
+  const openAsks = () => ports.listOpenAsks({ minimumLevel: "NOTICE" });
+  return { repo, ask, threadMap, alertFor, alerts, openAsks, post, typed, state, repliesFrom };
 }
 
 describe("an ask its asker parked on the person asked", () => {
@@ -91,8 +93,7 @@ describe("an ask its asker parked on the person asked", () => {
     expect(first).toEqual({ threadTs: "1.1", newRoot: true });
 
     // The asker parks its own ask on the person it asked.
-    f.repo.update({ qitemId: f.ask.qitemId, actorSession: ASKER, state: "blocked", blockedOn: ANA, summary: "Which day?",
-      evidenceRef: "/proof/parked.md", transitionNote: "parked on Ana" });
+    f.repo.update({ qitemId: f.ask.qitemId, actorSession: ASKER, state: "blocked", blockedOn: ANA, transitionNote: "parked on Ana" });
     const park = (await f.alertFor(f.ask.qitemId))!;
     expect(park).toMatchObject({ destinationSession: ANA, sourceSession: ASKER, ownerNotificationKind: "human-required" });
     // Same row, same person and seat: the park's post goes into the ask's thread, not a second top-level root.
@@ -133,5 +134,20 @@ describe("an ask its asker parked on the person asked", () => {
     expect(await f.alertFor(reply!.qitemId)).toBeNull();
     expect(f.repo.listAttention({ limit: 100 }).map((item) => item.qitemId)).toContain(reply!.qitemId);
     expect(f.state()).toMatchObject({ state: "pending", answers: null, resolvedBy: [] });
+  });
+
+  it("control: an agent that later parks a Slack message on a person asks that person, and the park is posted", async () => {
+    const f = await fixture();
+    f.post((await f.alertFor(f.ask.qitemId))!);
+    await f.typed("UMIKE", "can Ana confirm the date?", "1.1", "3.3");
+    const [message] = f.repliesFrom(MIKE);
+    expect(message).toMatchObject({ destination: ASKER });
+    // Only the message as it arrived isn't re-posted: the agent's own park of it on Ana is a new ask, and posts.
+    f.repo.update({ qitemId: message!.qitemId, actorSession: ASKER, state: "blocked", blockedOn: ANA, transitionNote: "asking Ana" });
+    expect(await f.alertFor(message!.qitemId)).toMatchObject({
+      destinationSession: ANA, sourceSession: ASKER, ownerNotificationKind: "human-required", ownerNotificationLevel: "ALERT",
+    });
+    const open = (await f.openAsks()).find((episode) => episode.item.qitemId === message!.qitemId);
+    expect(open).toMatchObject({ posted: false, eligible: true });
   });
 });
