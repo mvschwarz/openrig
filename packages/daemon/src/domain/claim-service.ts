@@ -10,7 +10,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import { startTmuxTranscriptCapture } from "./transcript-capture.js";
 import { deriveResumeToken, type ResumeTokenCaptureDeps } from "./resume-token-capture.js";
-import { verifyClaudePaneRuntime, verifyCodexPaneProcess, witnessedClaudeVersionLabel, type NativeProcessLister } from "./native-process-lineage.js";
+import { verifyClaudePaneRuntime, verifyCodexPaneProcess, type NativeProcessLister } from "./native-process-lineage.js";
 import {
   observeSolePane,
   paneObservationVerdict,
@@ -113,7 +113,7 @@ interface ClaimServiceDeps {
   };
   /** #421 — start time of the pane's current Claude process; a sidecar sampled earlier is skipped. */
   claudeProcessStartedAt?: ResumeTokenCaptureDeps["claudeProcessStartedAt"];
-  /** Process census for the runtime proof in `reconcileSession` and #86's native version-label witness; defaults to the live process table. */
+  /** Process census for the runtime proof in `reconcileSession`; defaults to the live process table. */
   listProcesses?: NativeProcessLister;
   resumeTokenCapturer?: {
     captureCodexThreadId(sessionName: string): Promise<string | undefined>;
@@ -575,10 +575,11 @@ export class ClaimService {
     const projectionDrift: string[] = [];
     const paneObservation = await this.observeBindingPane(sessionName);
     if (!paneObservation.ok) projectionDrift.push(paneObservation.detail);
-    const paneTarget = paneObservation.ok ? paneObservation.pane : sessionName;
     let paneCommand: string | null = null;
     try {
-      paneCommand = await this.tmuxAdapter.getPaneCommand(paneTarget);
+      paneCommand = await this.tmuxAdapter.getPaneCommand(
+        paneObservation.ok ? paneObservation.pane : sessionName,
+      );
     } catch { paneCommand = null; }
     if (nodeRow.runtime) {
       const expectation: Record<string, string[]> = {
@@ -590,10 +591,7 @@ export class ClaimService {
       if (!paneCommand) {
         projectionDrift.push(`runtime unverified: pane command unreadable; node declares runtime "${nodeRow.runtime}"`);
       } else if (expected && expected.length > 0 && !expected.includes(paneCommand)
-        // #86: a native install's version label confirms claude-code only with its OS executable witness.
-        && !(nodeRow.runtime === "claude-code" && await witnessedClaudeVersionLabel(paneCommand,
-          { target: paneTarget, tmux: this.tmuxAdapter, listProcesses: this.listProcesses }))
-        && !await this.runtimeProvenInPane(nodeRow.runtime, paneTarget)) {
+        && !await this.runtimeProvenInPane(nodeRow.runtime, paneObservation.ok ? paneObservation.pane : sessionName)) {
         // A script-launched runtime reads as its launcher (`sh`); only a pane whose process tree shows no such runtime is drift.
         projectionDrift.push(`runtime unverified: pane command "${paneCommand}" does not confirm runtime "${nodeRow.runtime}"`);
       }

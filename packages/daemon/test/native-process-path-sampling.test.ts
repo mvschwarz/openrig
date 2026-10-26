@@ -53,12 +53,4 @@ describe.each(Object.entries(SOURCES))("from %s", (source, serve) => {
     expect(paths).toHaveBeenCalledExactlyOnceWith([20, 21]);
     expect(rows.find(r => r.pid === 20)?.executablePath).toBe("/nix/store/x-claude-code-2.1.280/bin/.claude-unwrapped");
   });
-  it("forwards a caller's path-read timeout listener only when one is given (#86)", async () => {
-    serve([row(15, "2.1.289", "claude --resume token")]);
-    const onPathReadTimeout = vi.fn();
-    paths.mockImplementation(async (_pids: number[], opts?: { onTimeout?: () => void }) => { opts?.onTimeout?.(); return new Map(); });
-    await listNativeProcesses({ onPathReadTimeout });
-    expect(paths).toHaveBeenCalledExactlyOnceWith([15], { onTimeout: onPathReadTimeout });
-    expect(onPathReadTimeout).toHaveBeenCalledOnce();
-  });
 });
