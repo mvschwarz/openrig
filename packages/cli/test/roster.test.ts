@@ -20,6 +20,12 @@ it("reads v1 extensions without importing authored live facts", () => {
   expect(value.members).toEqual([member]);
   expect(() => parseRoster({ ...authored, version: 2 })).toThrow("version 1");
 });
+it("keeps an authored hosted flag, refuses one that isn't a boolean, and says a hosted member has no pane", () => {
+  const hosted = { ...member, seat: "grok@studio", hosted: true };
+  expect(parseRoster({ ...authored, members: [hosted, { ...member, hosted: false }] }).members).toEqual([hosted, member]);
+  expect(() => parseRoster({ ...authored, members: [{ ...member, hosted: "yes" }] })).toThrow("hosted: true or false");
+  expect(enrichRosterMember(hosted, inventory()).live).toMatchObject({ status: "unknown", reason: expect.stringContaining("hosted member: it has no pane") });
+});
 it("joins exact host self-id and seat, never the caller alias", () => {
   expect(enrichRosterMember(member, inventory()).live).toMatchObject({ status: "reported", runtime: "claude-code", configuredModel: "configured-a", observedModel: null, agentActivity: { sampledAt: node.agentActivity.sampledAt } });
   expect(enrichRosterMember(member, inventory([{ ...node, hostSelfId: "different", hostId: member.host } as typeof node])).live).toMatchObject({ status: "unknown", runtime: null, configuredModel: null });

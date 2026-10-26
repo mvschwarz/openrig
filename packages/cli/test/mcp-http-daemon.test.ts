@@ -211,7 +211,7 @@ describe("rig mcp serve --http on the daemon's routes", () => {
       fs.writeFileSync(path.join(workspace, "rosters", "team.json"), JSON.stringify({
         version: 1, id: "team", name: "Team", purpose: "Ship the release", curator: { seat: "lead@team", host: "host-a" }, updated_at: "2026-10-26",
         members: [{ seat: "grok@team", host: "host-a", capabilities: ["web research"], engagement: ["delegate"],
-          use_when: "A question needs current web sources", why: "Searches the web and cites it", caveat: "No terminal or files: answers in text only" }],
+          use_when: "A question needs current web sources", why: "Searches the web and cites it", caveat: "No terminal or files: answers in text only", hosted: true }],
       }));
       const token = await addGrant(tokenFile, { name: "grok", seat: "grok@team", rigs: ["team"], roots: [], workspace: false, owner: false });
       const served = await listen();

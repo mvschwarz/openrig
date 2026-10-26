@@ -7,7 +7,8 @@ address work to it like any seat. It reaches the team through OpenRig's MCP serv
 
 1. **Pick its address** on an existing rig: `<member>@<rig>`, for example `grok@research`. No node is added; the queue takes rows for it.
 2. **Say what it's good at, and its limits,** in a roster: an entry in `<workspace.root>/rosters/<file>.json` with its seat, this machine's host id
-   (`hostSelfId` from `rig ps --nodes -A --json`), `capabilities`, `use_when`, `why`, and a `caveat` for its limits (see [Rosters](rosters.md)).
+   (`hostSelfId` from `rig ps --nodes -A --json`), `capabilities`, `use_when`, `why`, a `caveat` for its limits, and `"hosted": true` (see
+   [Rosters](rosters.md)).
 3. **Issue its grant:**
 
    ```sh
@@ -39,7 +40,7 @@ These facts stay separate on the row:
 - **Result:** the closing transition and its resolution, or the handoff.
 - **Notification:** where a person asked, Slack's posted receipt. A posted notice isn't the person's acknowledgment.
 
-**On the team:** `rig_team` lists the rig's hosted members from its rosters, with their capabilities and caveat, no pane, and activity `unknown`.
+**On the team:** `rig_team` lists the rig's hosted members (roster entries marked hosted that aren't one of its nodes), with their capabilities and caveat, no pane, and activity `unknown`.
 OpenRig doesn't observe a hosted member between its calls, so it never reads idle. `rig roster find` shows it the same way.
 
 ## Revoke

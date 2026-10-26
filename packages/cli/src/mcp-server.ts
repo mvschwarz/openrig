@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { randomBytes } from "node:crypto";
-import { existsSync } from "node:fs";
+import { statSync } from "node:fs";
 import nodePath from "node:path";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { DaemonConnectionError, DaemonTimeoutError, terminalAuthHeaders, type DaemonClient, type DaemonResponse } from "./client.js";
@@ -131,15 +131,26 @@ function teamView(detail: RigDetail, inventory: unknown): Record<string, unknown
  *  observe it between calls, so its activity is unknown, never idle. */
 type HostedMember = { session: string; roster: string; capabilities: string[]; useWhen: string; caveat: string | null; pane: null; activity: "unknown" };
 
-/** The roster members on this host whose seat is in this rig and that have no node. A missing roster folder means none; a
- *  roster that can't be read, or a host id that isn't known yet, is said, never read as none. */
-async function hostedMembersOf(folder: string, rigName: string, nodeSessions: ReadonlySet<string>,
+const ROSTERS_INCOMPLETE = "Some rosters couldn't be read, so hosted members may be missing.";
+
+/** The roster members marked hosted, on this host, whose seat is in this rig and isn't one of its nodes. A roster folder that
+ *  doesn't exist means none. One that can't be inspected or read, or a host id that isn't known yet, is said, never read as
+ *  none. The note stays generic (a scoped caller doesn't see other rosters' names or errors); the detail goes to this
+ *  server's log. */
+async function hostedMembersOf(folder: string, rigName: string, nodeSeats: ReadonlySet<string>,
   selfHostId: () => Promise<string | null>): Promise<{ members: HostedMember[]; note?: string }> {
-  if (!existsSync(folder)) return { members: [] };
+  try {
+    statSync(folder);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { members: [] };
+    console.error(`rig_team: the roster folder ${folder} can't be inspected: ${(error as Error).message}`);
+    return { members: [], note: ROSTERS_INCOMPLETE };
+  }
   const { rosters, warnings } = readRosters(folder);
-  const unread = warnings.length > 0 ? { note: `Some rosters couldn't be read, so hosted members may be missing: ${warnings.join("; ")}` } : {};
+  if (warnings.length > 0) console.error(`rig_team: ${warnings.join("; ")}`);
+  const unread = warnings.length > 0 ? { note: ROSTERS_INCOMPLETE } : {};
   const candidates = rosters.flatMap((roster) => roster.members
-    .filter((member) => member.seat.endsWith(`@${rigName}`) && !nodeSessions.has(member.seat))
+    .filter((member) => member.hosted === true && member.seat.endsWith(`@${rigName}`) && !nodeSeats.has(member.seat))
     .map((member) => ({ roster: roster.id, member })));
   if (candidates.length === 0) return { members: [], ...unread };
   const host = await selfHostId();
@@ -329,9 +340,9 @@ export const MCP_OPERATIONS: ReadonlyArray<{ tool: string; routes: readonly stri
 const INSTRUCTIONS = [
   "This server reaches an OpenRig team as one seat: the one named by OPENRIG_SESSION_NAME where the server was configured, or, over authenticated HTTP, the seat of the caller's grant (rig_whoami shows which, and whether the caller is authenticated; rig_team shows a rig's seats and its lead). The daemon attributes this server's writes to that seat.",
   "To hand work to a seat, use rig_queue_create and keep its qitemId; read the answer later with rig_queue_show, which names the next item when the work was handed on. To pass on work this seat holds, use rig_queue_handoff rather than closing it and creating another, so the work stays one chain. Queue items are durable: they outlive this conversation and this server.",
-  "Work addressed to this seat is listed by rig_queue_list with owned set. Claim an item with rig_queue_claim before working it, then answer it: close it done with a resolution (rig_queue_update), or hand it on with rig_queue_handoff. Listing or reading an item doesn't take it.",
   "Tools marked read-only change nothing. A seat whose activity is unknown is not idle, and an accepted request (a restore's attemptId) is not a finished one.",
   "A question reserved for a person is theirs to answer: don't answer it on their behalf. rig_queue_decide records a decision only inside the decision room of the mode they have on, beside their answers and never as one.",
+  "Work addressed to this seat is listed by rig_queue_list with owned set. Claim an item with rig_queue_claim before working it, then answer it: close it done with a resolution (rig_queue_update), or hand it on with rig_queue_handoff. Listing or reading an item doesn't take it.",
 ].join("\n");
 
 /**
@@ -1145,7 +1156,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   // 27. rig_team — a rig's seats and its lead
   if (offered("rig_team")) server.tool(
     "rig_team",
-    "Show a rig's team: its lead, the rig's one delegates_to root (the seat that delegates to others and that nothing delegates to: the seat to delegate to), and each seat's pod, role, runtime, delegation (reportsTo, delegatesTo) and activity as the daemon reports it. Activity the daemon doesn't know reads unknown, never idle. hostedMembers are the rig's members that live outside a terminal (from its rosters): their authored capabilities and limits, with no pane and activity unknown.",
+    "Show a rig's team: its lead, the rig's one delegates_to root (the seat that delegates to others and that nothing delegates to: the seat to delegate to), and each seat's pod, role, runtime, delegation (reportsTo, delegatesTo) and activity as the daemon reports it. Activity the daemon doesn't know reads unknown, never idle. hostedMembers are the rig's members that live outside a terminal (roster entries marked hosted): their authored capabilities and limits, with no pane and activity unknown.",
     {
       rigId: z.string().describe("Rig name or identifier"),
     },
@@ -1161,9 +1172,12 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const nodes = await client.get(`/api/rigs/${id}/nodes`);
         if (nodes.status >= 400) return mapResult(nodes);
         const view = teamView((detail.data ?? {}) as RigDetail, nodes.data);
-        const inventory = Array.isArray(nodes.data) ? nodes.data as Array<{ canonicalSessionName?: string | null; hostSelfId?: string | null }> : [];
-        const hosted = await hostedMembersOf(rostersFolder(), ((detail.data ?? {}) as RigDetail).rig?.name ?? "",
-          new Set(inventory.map((seat) => seat.canonicalSessionName).filter((name): name is string => typeof name === "string")),
+        const rigName = ((detail.data ?? {}) as RigDetail).rig?.name ?? "";
+        const inventory = Array.isArray(nodes.data) ? nodes.data as Array<{ logicalId?: string; canonicalSessionName?: string | null; hostSelfId?: string | null }> : [];
+        // A node is a seat whether or not it has a session yet: its address derives from its logical id (pod.member).
+        const nodeSeats = new Set(inventory.flatMap((seat) => [seat.canonicalSessionName,
+          typeof seat.logicalId === "string" ? `${seat.logicalId.replace(".", "-")}@${rigName}` : null]).filter((name): name is string => typeof name === "string"));
+        const hosted = await hostedMembersOf(rostersFolder(), rigName, nodeSeats,
           async () => inventory.find((seat) => typeof seat.hostSelfId === "string")?.hostSelfId
             ?? await client.get("/healthz").then((res) => (res.status < 400 ? ((res.data ?? {}) as { selfHostId?: string }).selfHostId ?? null : null), () => null));
         return mapResult({ status: 200, data: { ...view, hostedMembers: hosted.members, ...(hosted.note ? { hostedMembersNote: hosted.note } : {}) } }, undefined, { structured: true });

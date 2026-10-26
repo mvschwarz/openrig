@@ -14,6 +14,8 @@ export interface RosterMember extends Reference {
   use_when: string;
   why: string;
   caveat?: string;
+  /** A member outside any terminal (an assistant or bot reaching the team over MCP): it has no node or pane. */
+  hosted?: boolean;
 }
 export interface Roster {
   version: 1;
@@ -42,11 +44,13 @@ export function parseRoster(value: unknown): Roster {
   }
   const members = value.members.map((m): RosterMember => {
     if (!reference(m) || !object(m) || !strings(m.capabilities) || !strings(m.engagement) ||
-        text(m.use_when) === null || text(m.why) === null || (m.caveat !== undefined && typeof m.caveat !== "string")) {
-      throw new Error("Each member needs seat, host, capabilities, engagement, use_when and why (optional caveat)");
+        text(m.use_when) === null || text(m.why) === null || (m.caveat !== undefined && typeof m.caveat !== "string")
+        || (m.hosted !== undefined && typeof m.hosted !== "boolean")) {
+      throw new Error("Each member needs seat, host, capabilities, engagement, use_when and why (optional caveat, and hosted: true or false)");
     }
     return { seat: m.seat, host: m.host, capabilities: m.capabilities, engagement: m.engagement,
-      use_when: m.use_when as string, why: m.why as string, ...(m.caveat === undefined ? {} : { caveat: m.caveat as string }) };
+      use_when: m.use_when as string, why: m.why as string, ...(m.caveat === undefined ? {} : { caveat: m.caveat as string }),
+      ...(m.hosted === true ? { hosted: true } : {}) };
   });
   return { version: 1, id: value.id as string, name: value.name as string, purpose: value.purpose as string,
     curator: { seat: value.curator.seat, host: value.curator.host }, updated_at: value.updated_at as string, members };
@@ -114,7 +118,9 @@ export function enrichRosterMember(member: RosterMember, inventory: RosterInvent
     : unknownModelObservation(matches.length ? "conflicting-observations" : "host-or-seat-unavailable");
   return { ...member, live: {
     status: !node ? "unknown" : current ? "reported" : "stale",
-    reason: !node ? (matches.length ? "Conflicting node observations" : "No exact hostSelfId and seat match; check observation gaps")
+    reason: !node ? (matches.length ? "Conflicting node observations"
+      : member.hosted ? "A hosted member: it has no pane, and OpenRig doesn't observe it between calls"
+        : "No exact hostSelfId and seat match; check observation gaps")
       : current ? "Registry, activity and labelled last model observation; not a promise about the next turn" : "Seat is not reported running; current runtime and model are unknown",
     runtime: current ? text(node?.runtime) : null,
     configuredModel: current ? text(node?.model) : null,
