@@ -12,6 +12,7 @@ metadata:
     - queue create
     - queue transitions
     - queue block
+    - workflow project
     - send
   openrig:
     stage: provisional
@@ -200,6 +201,20 @@ not a human decision.
 For a decision, a correlated reply binds to that exact human and qitem and records the resolution
 that resumes the owner. Check the recorded result before claiming the decision
 arrived; a delivery receipt alone is not acceptance.
+
+## A response is not consent
+
+A resumed packet or successful resolve records who answered, not consent or
+authority. Read the decision and its evidence before continuing. A denial stays
+a denial; answer a question, satisfy a condition, and reconcile a changed decision
+or authorized override with the earlier instruction. Do not turn any of these
+into an approval merely because the packet is now in progress.
+
+Leave an unanswered workflow human gate parked. To record continued waiting,
+use the packet's continuation with `--exit waiting --blocked-on <same-person>`.
+Bare `--exit waiting` replaces the human blocker with an external gate. The
+`done` and `handoff` exits still proceed, but warn and record when they advance
+past an unanswered declared human gate; that warning grants no authority.
 
 ## Existing blockers and other channels
 

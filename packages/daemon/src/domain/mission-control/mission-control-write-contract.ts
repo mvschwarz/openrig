@@ -484,7 +484,7 @@ export class MissionControlWriteContract {
           source.destinationSession,
           input.notify,
           input.actorSession,
-          `${humanPark ? "Decision" : "Blocker"} resolved on ${input.qitemId}: ${decision} — unparked (blocked → in-progress); you still own it. Check your queue.`,
+          `${humanPark ? "Decision" : "Blocker"} resolved on ${input.qitemId}: ${decision} — unparked (blocked → in-progress); you still own it.${humanPark ? " Read the recorded decision before continuing: a response is not approval. Resolve records attribution, not consent or authority; a denial, question, condition, changed decision or authorized override keeps its meaning." : ""} Check your queue.`,
         );
         notifyAttempted = true;
         notifyResult = "attempted-best-effort";

@@ -42,6 +42,7 @@ import {
   type GateCompileResult,
   type ProjectStepInput,
   type ProjectStepResult,
+  workflowHumanGateGuidance,
 } from "./workflow-projector.js";
 import { loadHostRegistry } from "./hosts/hosts-registry-reader.js";
 import type { HostRegistryLookupFn } from "./workflow-validator.js";
@@ -1886,6 +1887,7 @@ function workflowInstantiateBody(input: {
       "",
       `Gate: ${input.gate.kind === "human" ? "human sign-off" : "handler-role check"} — the workflow is PARKED (waiting) until this item is resolved/closed; the flow then continues from this step.`,
     );
+    if (input.gate.kind === "human") lines.push(...workflowHumanGateGuidance(input.gate.parkOn!));
     if (input.gate.summary) lines.push(`Ask: ${input.gate.summary}`);
     if (input.gate.evidenceRef) lines.push(`Evidence: ${input.gate.evidenceRef}`);
   }
