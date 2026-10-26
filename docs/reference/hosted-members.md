@@ -30,6 +30,22 @@ address work to it like any seat. It reaches the team through OpenRig's MCP serv
   - `rig_queue_update` closes it done with the answer in `resolution`, or `rig_queue_handoff` hands it on to a seat in its rig.
 - **It can send work too:** `rig_queue_create` to its rig's seats.
 - **Its rows outlive the conversation.** A new conversation with the same grant reaches the same work.
+- **`rig_whoami`** answers the seat its grant names, though the member has no node or session.
+
+## Asking a person while keeping the work
+
+When a row needs a person's approval before the member can finish it, the member keeps the row and asks:
+- **The row came from a person:** the member sets it `blocked` with `blockedOn` that person. They're asked, and their answer returns
+  the row to the member in progress.
+- **The row came from a seat:** the member hands that seat its question as a new row, then sets its own row `blocked` on the new
+  row's id. When the question closes, the member's row returns to pending.
+
+Either way the row reads blocked, not done, while it waits, and the member finishes that same row. Nothing promises to wake the
+member, so it checks its rows again.
+
+The server tells the member this in its MCP instructions. The text is versioned, so you can check which version a tool received:
+
+> Member workflow (member-workflow/v1). Your inbox is the items addressed to your seat: rig_queue_list with owned set. It's yours, not the team's queue. A wake, a ring or a message only points at it: list your inbox, then act. For each item: claim it (rig_queue_claim), do it, then close it done with the answer in resolution (rig_queue_update), or hand it on (rig_queue_handoff). Listing or reading an item doesn't take it. If the person connected you, that's basically authorized: claim the items in your inbox and do them without asking whether you may. When an item needs a person's approval before you can finish it, don't close it and don't take the action: keep the item and ask. If it came from a person (its source ends in @external), set it blocked with blockedOn that person, the question as its summary and your draft in note: their answer returns it to you in progress. Otherwise create an item to its source with your question and draft, then set yours blocked with blockedOn that new qitemId: when that item closes, yours returns to pending, to claim again. Nothing promises to wake you, so check your inbox again. Then finish the same item; don't open a new one.
 
 ## Ring it when work lands
 

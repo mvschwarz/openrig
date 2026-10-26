@@ -19,6 +19,9 @@ import { ALL_MIGRATIONS } from "../../daemon/src/db/all-migrations.js";
 import { EventBus } from "../../daemon/src/domain/event-bus.js";
 import { QueueRepository } from "../../daemon/src/domain/queue-repository.js";
 import { OutboxHandler } from "../../daemon/src/domain/outbox-handler.js";
+import { MissionControlWriteContract } from "../../daemon/src/domain/mission-control/mission-control-write-contract.js";
+import { MissionControlActionLog } from "../../daemon/src/domain/mission-control/mission-control-action-log.js";
+import { loadHumanRegistry, type HumanFragment } from "../../daemon/src/domain/gateway/human-registry.js";
 import { mcpCommand } from "../src/commands/mcp.js";
 import { addGrant, McpHttpConfigError, revokeGrant, startMcpHttpServer, withGrantsLock } from "../src/mcp-http.js";
 import { setSelfHostId } from "../../daemon/src/domain/hosts/fanout-contract.js";
@@ -30,6 +33,9 @@ describe("rig mcp serve --http on the daemon's routes", () => {
   let home: string;
   let shared: string;
   let repo: QueueRepository;
+  let bus: EventBus;
+  /** Registered people a test sets; null reads the instance's registry, as the daemon does. */
+  let people: HumanFragment[] | null;
   let daemon: ServerType;
   let daemonUrl: string;
   let tokenFile: string;
@@ -48,7 +54,10 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     // The env seat a local caller is declared as; an authenticated caller must never act as it.
     process.env.OPENRIG_SESSION_NAME = "env-seat@elsewhere";
     tokenFile = path.join(home, "mcp-http-tokens.json");
-    repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    bus = new EventBus(db);
+    people = null;
+    repo = new QueueRepository(db, bus, { validateRig: () => true,
+      loadHumanRegistry: () => (people ? { ok: true as const, entities: people } : loadHumanRegistry()) });
     // The wake store attached, as the daemon attaches it at startup: a handoff makes its successor's wake durable there.
     repo.attachOutbox(new OutboxHandler(db));
     const inert = async () => ({ ok: false, error: "inert fixture" });
@@ -286,6 +295,53 @@ describe("rig mcp serve --http on the daemon's routes", () => {
       if (savedWorkspace === undefined) delete process.env.OPENRIG_WORKSPACE_ROOT; else process.env.OPENRIG_WORKSPACE_ROOT = savedWorkspace;
       fs.rmSync(workspace, { recursive: true, force: true });
     }
+  });
+
+  it("a hosted member learns its seat, asks a person or its requester while keeping the item, and finishes the same item", async () => {
+    // The member has a grant and no node. Ana is a registered person; the lead is a team seat.
+    const ANA = "human-ana@external";
+    people = [{ entityId: "human-ana", class: "human", displayName: "Ana", address: ANA,
+      connectorBindings: [{ kind: "slack", connectorRef: "primary", secretsRef: "unused", role: "primary", handle: "UANA" }], prefs: { deliveryClass: "A" } }];
+    const token = await addGrant(tokenFile, { name: "grok", seat: "grok@team", rigs: ["team"], roots: [], workspace: false, owner: false });
+    const asGrok = await connect((await listen()).url, token);
+    const contract = new MissionControlWriteContract({ db, eventBus: bus, queueRepo: repo, actionLog: new MissionControlActionLog(db) });
+
+    // whoami has no node or session for it, and the member still learns the seat it acts as.
+    const me = await asGrok("rig_whoami");
+    expect(me.isError).toBe(false);
+    expect(me.structured).toMatchObject({ ok: true, seat: "grok@team", rig: "team", session: null, caller: { authenticated: true, principal: "grok" } });
+
+    // From a person: the member parks the item on her, she's asked, and her answer returns it in progress.
+    const fromAna = await repo.create({ sourceSession: ANA, destinationSession: "grok@team", summary: "Announce the release", body: "Post the 0.7.3 note publicly.", nudge: false } as never);
+    expect((await asGrok("rig_queue_claim", { qitemId: fromAna.qitemId })).isError).toBe(false);
+    const asked = await asGrok("rig_queue_update", { qitemId: fromAna.qitemId, state: "blocked", blockedOn: ANA, summary: "May I post this note publicly?", note: "Draft: 0.7.3 is out." });
+    expect(asked.isError).toBe(false);
+    expect(repo.getById(fromAna.qitemId)).toMatchObject({ state: "blocked", blockedOn: ANA });
+    expect(repo.listTransitions(fromAna.qitemId).at(-1)).toMatchObject({ state: "blocked", ownerNotificationKind: "human-required" });
+    await contract.act({ verb: "resolve", qitemId: fromAna.qitemId, actorSession: ANA, decision: "Yes, post it.", notify: true } as never);
+    expect(repo.getById(fromAna.qitemId)).toMatchObject({ state: "in-progress", blockedOn: null, destinationSession: "grok@team" });
+    expect((await asGrok("rig_queue_show", { qitemId: fromAna.qitemId })).text).toContain("Yes, post it.");
+    expect((await asGrok("rig_queue_update", { qitemId: fromAna.qitemId, state: "done", closureReason: "no-follow-on", resolution: "Posted the 0.7.3 note." })).isError).toBe(false);
+    expect(repo.getById(fromAna.qitemId)).toMatchObject({ state: "done", resolution: "Posted the 0.7.3 note." });
+
+    // From a seat: the member asks the lead as a new item and parks its own on it; the lead's answer returns it pending.
+    const fromLead = await repo.create({ sourceSession: "lead@team", destinationSession: "grok@team", summary: "Draft the changelog", body: "Draft the 0.7.3 changelog.", nudge: false } as never);
+    expect((await asGrok("rig_queue_claim", { qitemId: fromLead.qitemId })).isError).toBe(false);
+    const question = await asGrok("rig_queue_create", { destination: "lead@team", summary: "Which date format?", body: "ISO or long-form dates in the changelog? Draft attached below." });
+    expect(question.isError).toBe(false);
+    const questionId = question.structured.qitemId as string;
+    expect(repo.getById(questionId)).toMatchObject({ sourceSession: "grok@team", destinationSession: "lead@team" });
+    expect((await asGrok("rig_queue_update", { qitemId: fromLead.qitemId, state: "blocked", blockedOn: questionId })).isError).toBe(false);
+    expect(repo.getById(fromLead.qitemId)).toMatchObject({ state: "blocked", blockedOn: questionId });
+    repo.update({ qitemId: questionId, actorSession: "lead@team", state: "done", closureReason: "no-follow-on", resolution: "ISO dates." } as never);
+    expect(repo.getById(fromLead.qitemId)).toMatchObject({ state: "pending", blockedOn: null });
+    expect((await asGrok("rig_queue_list", { owned: true })).structured.items.map((row: { qitemId: string }) => row.qitemId)).toContain(fromLead.qitemId);
+    expect((await asGrok("rig_queue_show", { qitemId: questionId })).text).toContain("ISO dates.");
+    expect((await asGrok("rig_queue_claim", { qitemId: fromLead.qitemId })).isError).toBe(false);
+    expect((await asGrok("rig_queue_update", { qitemId: fromLead.qitemId, state: "done", closureReason: "no-follow-on", resolution: "Changelog drafted with ISO dates." })).isError).toBe(false);
+    expect(repo.getById(fromLead.qitemId)).toMatchObject({ state: "done", resolution: "Changelog drafted with ISO dates." });
+    // The same two tasks, one question: nothing was reopened as a new task.
+    expect(rows()).toBe(3);
   });
 
   it("stops a revoked grant at its next request and keeps its records", async () => {

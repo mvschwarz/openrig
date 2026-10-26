@@ -518,13 +518,28 @@ export const MCP_OPERATIONS: ReadonlyArray<{ tool: string; routes: readonly stri
   { tool: "rig_queue_unclaim", routes: ["POST /api/queue/:qitemId/unclaim"], effect: "destructive", access: "work" },
 ];
 
+/** How a member works its inbox, and asks a person while keeping the work: one versioned text, carried in this server's
+ *  instructions and quoted in docs/reference/hosted-members.md. Change it here, bump the version, and update the quote. */
+export const MEMBER_WORKFLOW_VERSION = "member-workflow/v1";
+/** What the connection itself authorizes. */
+const MEMBER_AUTHORITY = "If the person connected you, that's basically authorized: claim the items in your inbox and do them without asking whether you may.";
+export const MEMBER_WORKFLOW = [
+  `Member workflow (${MEMBER_WORKFLOW_VERSION}). Your inbox is the items addressed to your seat: rig_queue_list with owned set. It's yours, not the team's queue. A wake, a ring or a message only points at it: list your inbox, then act.`,
+  "For each item: claim it (rig_queue_claim), do it, then close it done with the answer in resolution (rig_queue_update), or hand it on (rig_queue_handoff). Listing or reading an item doesn't take it.",
+  MEMBER_AUTHORITY,
+  "When an item needs a person's approval before you can finish it, don't close it and don't take the action: keep the item and ask.",
+  "If it came from a person (its source ends in @external), set it blocked with blockedOn that person, the question as its summary and your draft in note: their answer returns it to you in progress.",
+  "Otherwise create an item to its source with your question and draft, then set yours blocked with blockedOn that new qitemId: when that item closes, yours returns to pending, to claim again.",
+  "Nothing promises to wake you, so check your inbox again. Then finish the same item; don't open a new one.",
+].join(" ");
+
 // Short guidance a client may show the model (the server's MCP instructions).
 const INSTRUCTIONS = [
   "This server reaches an OpenRig team as one seat: the one named by OPENRIG_SESSION_NAME where the server was configured, or, over authenticated HTTP, the seat of the caller's grant (rig_whoami shows which, and whether the caller is authenticated; rig_team shows a rig's seats and its lead). The daemon attributes this server's writes to that seat.",
   "To hand work to a seat, use rig_queue_create and keep its qitemId; read the answer later with rig_queue_show, which names the next item when the work was handed on. To pass on work this seat holds, use rig_queue_handoff rather than closing it and creating another, so the work stays one chain. Queue items are durable: they outlive this conversation and this server.",
   "Tools marked read-only change nothing. A seat whose activity is unknown is not idle, and an accepted request (a restore's attemptId) is not a finished one.",
   "A question reserved for a person is theirs to answer: don't answer it on their behalf. rig_queue_decide records a decision only inside the decision room of the mode they have on, beside their answers and never as one.",
-  "Work addressed to this seat is listed by rig_queue_list with owned set. Claim an item with rig_queue_claim before working it, then answer it: close it done with a resolution (rig_queue_update), or hand it on with rig_queue_handoff. Listing or reading an item doesn't take it.",
+  MEMBER_WORKFLOW,
 ].join("\n");
 
 /**
@@ -1233,7 +1248,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     {
       description: "List queue items. owned: assigned to this seat. mine: this seat is the source or the destination. Without a scope, this seat's rig. Without state, open items only (all adds closed ones); a state filter returns exactly those states, closed ones included. since finds work updated after a time; handedOffFrom finds where a handed-off item went.",
       inputSchema: z.object({
-        owned: z.boolean().optional().describe("Only items assigned to this seat (overrides destination)"),
+        owned: z.boolean().optional().describe("Only items assigned to this seat: its whole inbox (overrides destination)"),
         mine: z.boolean().optional().describe("Items this seat sent or owns"),
         destination: z.string().optional().describe("Filter by destination seat"),
         source: z.string().optional().describe("Filter by source seat"),
@@ -1326,7 +1341,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         reopen: z.boolean().optional().describe("Reopen a closed item: give an active state (pending, in-progress or blocked) and a note (as rig queue update --reopen)"),
         summary: z.string().optional().describe("Replace the one-line summary"),
         evidenceRef: z.string().optional().describe("Pointer to the durable artifact, stored on the item when closing with state done or parking on a human seat; other updates refuse it"),
-        blockedOn: z.string().optional().describe("What it waits on, when blocking"),
+        blockedOn: z.string().optional().describe("What it waits on, when blocking: another qitemId (this item returns to pending when that one closes), or the address of the person this item came from (they're asked, and their answer returns it to you in progress)"),
         wakeAfterSeconds: z.number().int().positive().optional().describe("Wake this seat after this many seconds, when blocking. Delivered only to a seat with a terminal: an attached app can't receive it today, so the item just waits until it is checked."),
       }),
       annotations: DESTRUCTIVE,
@@ -1400,6 +1415,13 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const targetRepo = readOpenRigEnv("OPENRIG_TARGET_REPO", "RIGGED_TARGET_REPO")?.trim();
         if (targetRepo) params.set("targetRepo", targetRepo);
         const res = await client.get(`/api/whoami?${params.toString()}`);
+        // whoami knows a seat by its node or session. A hosted member (a tool outside any terminal) has neither: the seat
+        // is its grant's, so the authenticated caller is answered with that seat. Read only.
+        if (res.status === 404 && access && !access.customer && options.seat === seat) {
+          const member = { ok: true, seat, rig: seat.slice(seat.indexOf("@") + 1), session: null, caller,
+            message: "This seat has no node or session on this instance: it's the seat this connection's grant names, such as a hosted member's. rig_team shows its rig and hosted members, and rig_queue_list with owned set lists its work." };
+          return { content: [{ type: "text" as const, text: JSON.stringify(member) }], structuredContent: member };
+        }
         if (res.status >= 400) return mapResult(res);
         return mapResult({ ...res, data: { ...(res.data as Record<string, unknown>), caller } }, undefined, { structured: true });
       } catch (err) {

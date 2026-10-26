@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createMcpServer } from "../src/mcp-server.js";
+import { createMcpServer, MEMBER_WORKFLOW, MEMBER_WORKFLOW_VERSION } from "../src/mcp-server.js";
 import { DaemonClient, DaemonConnectionError, type DaemonResponse } from "../src/client.js";
 
 function mockClient(overrides?: {
@@ -527,6 +527,18 @@ describe("MCP Server", () => {
     expect(instructions).toContain("not idle");
     expect(instructions).toContain("reserved for a person");
     expect(instructions).toContain("beside their answers and never as one");
+    await cleanup();
+  });
+
+  it("carries the member workflow as one versioned text, quoted word for word in the hosted-members doc", async () => {
+    await setup();
+    const instructions = mcpClient.getInstructions() ?? "";
+    expect(MEMBER_WORKFLOW).toContain(`(${MEMBER_WORKFLOW_VERSION})`);
+    expect(instructions).toContain(MEMBER_WORKFLOW);
+    // The inbox, the claim before work, and keeping an item blocked while a person is asked.
+    for (const part of ["rig_queue_list with owned set", "rig_queue_claim", "blockedOn that person", "blockedOn that new qitemId"]) expect(MEMBER_WORKFLOW).toContain(part);
+    const doc = fs.readFileSync(new URL("../../../docs/reference/hosted-members.md", import.meta.url), "utf8");
+    expect(doc).toContain(`> ${MEMBER_WORKFLOW}`);
     await cleanup();
   });
 
