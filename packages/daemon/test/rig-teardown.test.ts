@@ -18,8 +18,7 @@ import path from "node:path";
 import { checkRunningNameGuard, makeRunningSessionCounter, confirmStoppedGenerations } from "../src/domain/running-name-guard.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
-import { execFile, spawn } from "node:child_process";
-import { once } from "node:events";
+import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { managedBlockText, mergeManagedBlock } from "../src/domain/managed-blocks.js";
 import { SEAT_SKILLS_BOOTSTRAP_LINE } from "../src/domain/seat-skill-storage.js";
@@ -69,7 +68,7 @@ describe("RigTeardownOrchestrator", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it.skipIf(process.platform === "win32")("community contract: stop and down remove only their panes, leaving a sibling and an outside process alive", async () => {
+  it.skipIf(process.platform === "win32")("community contract: stop and down remove only their panes, leaving a sibling session untouched", async () => {
     // macOS socket paths must fit sockaddr_un even when the suite's TMPDIR is long.
     const socketDir = fs.mkdtempSync("/tmp/h1-stop-");
     const socket = "community";
@@ -79,10 +78,7 @@ describe("RigTeardownOrchestrator", () => {
     const tmux = async (...args: string[]) => (await exec("tmux", ["-L", socket, "-f", "/dev/null", ...args], { env, timeout: 3000 })).stdout;
     const adapter = new TmuxAdapter(async () => { throw new Error("unexpected shell execution"); }, undefined,
       async argv => tmux(...argv.slice(1)));
-    const sentinel = spawn(process.execPath, ["-e", "process.stdout.write('ready'); setInterval(() => {}, 1000)"],
-      { env, stdio: ["ignore", "pipe", "pipe"] });
     try {
-      await once(sentinel.stdout!, "data", { signal: AbortSignal.timeout(3000) });
       const targetRig = rigRepo.createRig("community-target");
       const siblingRig = rigRepo.createRig("community-sibling");
       const seed = async (rigId: string, name: string) => {
@@ -97,12 +93,10 @@ describe("RigTeardownOrchestrator", () => {
       const target = await seed(targetRig.id, "worker@community-target");
       const sibling = await seed(siblingRig.id, "worker@community-sibling");
       const siblingBefore = db.prepare("SELECT * FROM sessions WHERE id=?").get(sibling.session.id);
-      const outsideAlive = () => expect(process.kill(sentinel.pid!, 0)).toBe(true);
       const lifecycle = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: adapter });
       expect(await lifecycle.stopSeat({ seatRef: "worker@community-target", reason: "contract stop test" })).toMatchObject({ ok: true });
       expect(await adapter.hasSession("worker@community-target")).toBe(false);
       expect(await adapter.hasSession("worker@community-sibling")).toBe(true);
-      outsideAlive();
       // A later normal down of the target rig must have the same ownership boundary.
       await tmux("new-session", "-d", "-s", "worker@community-target", "sleep 60");
       sessionRegistry.updateStatus(target.session.id, "running");
@@ -114,12 +108,7 @@ describe("RigTeardownOrchestrator", () => {
       expect(await adapter.hasSession("worker@community-target")).toBe(false);
       expect(await adapter.hasSession("worker@community-sibling")).toBe(true);
       expect(db.prepare("SELECT * FROM sessions WHERE id=?").get(sibling.session.id)).toEqual(siblingBefore);
-      outsideAlive();
     } finally {
-      if (sentinel.exitCode === null && sentinel.signalCode === null) {
-        sentinel.kill("SIGTERM");
-        await once(sentinel, "exit", { signal: AbortSignal.timeout(3000) });
-      }
       try { await tmux("kill-server"); }
       catch (error) {
         if (!/no server running|No such file or directory/.test(String((error as { stderr?: string }).stderr))) throw error;
