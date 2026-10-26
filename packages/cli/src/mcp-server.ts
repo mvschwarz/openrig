@@ -180,13 +180,14 @@ function scopeFor(access: McpAccess, seatOf: () => string | undefined): Scope {
 }
 
 /** Cloud names a customer's caller seat cus-<id>-caller@<rig>. v1 marks no seat as a caller, so an item from a seat of
- *  this shape is never the team's question to a customer. The shape never grants anything. */
+ *  this shape is never the team's question to a customer, and a customer can't hand a task to one. The shape never
+ *  grants anything. */
 const CALLER_SHAPED = /^cus-.+-caller@[^@]+$/;
 
 /** A Cloud customer grant (openrig.cloud.grant/v1): a requester, narrower than a work grant. The grant's own seat is the
- *  only caller. It may hand tasks to its rigs' seats (never a person or another host's seat), read the items it sent and
- *  the team's questions to it (never team-internal or another caller's items), follow a handed-on item only where it
- *  came back to it, and read the artifacts of its own items under its named roots. */
+ *  only caller. It may hand tasks to its rigs' team seats (never a caller-shaped seat, a person or another host's
+ *  seat), read the items it sent and the team's questions to it (never team-internal or another caller's items), follow
+ *  a handed-on item only where it came back to it, and read the artifacts of its own items under its named roots. */
 function customerScope(access: McpAccess, seatOf: () => string | undefined): Scope {
   const rigs = new Set(access.rigs);
   const caller = (value: unknown): boolean => typeof value === "string" && value !== "" && value === seatOf();
@@ -206,7 +207,8 @@ function customerScope(access: McpAccess, seatOf: () => string | undefined): Sco
     owner: () => false,
     rig: (name) => typeof name === "string" && rigs.has(name),
     root: (name) => typeof name === "string" && access.roots.includes(name),
-    destination: member,
+    // A task goes to the team: never to the caller itself or to another caller-shaped seat, which v1 can't tell apart.
+    destination: team,
     successor: caller,
     artifact: (row) => caller(field(row, "sourceSession")),
     paths: false,

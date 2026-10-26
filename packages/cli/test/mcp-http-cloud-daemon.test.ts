@@ -199,7 +199,7 @@ describe("rig mcp serve --http --cloud-grants on the daemon's routes", () => {
     const served = await listen();
     const asCustomer = await connect(served.url);
     const before = rows();
-    for (const destination of ["lead@team-b", "alex@external", "lead@team-a@elsewhere"]) {
+    for (const destination of ["cus-otherone01-caller@team-a", CALLER, "lead@team-b", "alex@external", "lead@team-a@elsewhere"]) {
       expect((await asCustomer("rig_queue_create", { destination, body: "not allowed" })).structured).toMatchObject({ ok: false, code: "out_of_scope" });
     }
     expect(rows()).toBe(before);
