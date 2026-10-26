@@ -25,6 +25,38 @@ export function buildTmuxControlFailure(message: string): { message: string; rea
   };
 }
 
+export type TmuxCaptureResult = { status: "pass" } | { status: "fail"; detail: string } | { status: "skipped"; detail: string };
+
+/**
+ * Whether this tmux can serve `capture-pane -p`, which OpenRig uses to read every agent's screen. A tmux whose server exits
+ * on it fails every seat at launch (#980: Oracle Linux 10's packaged `next-3.4`, also outside OpenRig). It runs the
+ * getting-started guide's check on a throwaway socket with no config, so the person's own sessions are never touched,
+ * and always removes that server. A throwaway server that won't start is reported as not checked, not as a failure.
+ */
+export function probeTmuxCapture(exec: (cmd: string) => string, socket = `openrig-check-${process.pid}`): TmuxCaptureResult {
+  const tmux = `tmux -L ${socket} -f /dev/null`;
+  try { exec(`${tmux} new-session -d -s check`); }
+  catch (err) { return { status: "skipped", detail: errorMessage(err).trim() }; }
+  try {
+    exec(`${tmux} capture-pane -p -t check`);
+    return { status: "pass" };
+  } catch (err) {
+    return { status: "fail", detail: errorMessage(err).trim() };
+  } finally {
+    try { exec(`${tmux} kill-server`); } catch { /* the throwaway server already exited */ }
+  }
+}
+
+export function buildTmuxCaptureFailure(version: string | null, detail: string): { message: string; reason: string; fix: string } {
+  return {
+    message: `This tmux (${version ?? "unknown version"}) can't capture a pane: \`capture-pane -p\` failed on a throwaway server (${detail}).`,
+    reason: "OpenRig reads each agent's screen with `capture-pane -p`. A tmux whose server exits on it makes every seat fail at launch. " +
+      "Oracle Linux 10's packaged tmux (`tmux -V` shows `next-3.4`) does this, also outside OpenRig (issue #980).",
+    fix: "Put a tmux that passes this check first on your PATH (one report built tmux 3.5a into /usr/local/bin), then restart the daemon " +
+      "from a shell where `tmux -V` shows it. The getting-started guide's \"When the kernel's seats all fail at the first start\" has the steps.",
+  };
+}
+
 export function probeTmuxControl(exec: (cmd: string) => string): TmuxProbeResult {
   let version: string;
   try {
