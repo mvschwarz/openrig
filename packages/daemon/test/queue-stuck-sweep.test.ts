@@ -447,6 +447,19 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(finding!.body).toContain("This finding goes to lead@r, the row's creator");
   });
 
+  it("a seat launched after its wake found no route keeps its own finding, and its wake", async () => {
+    const row = await mkUnroutableRow();
+    // The member was added before it launched; now it has a terminal.
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd) VALUES ('node-grok', 'rig-r', 'grok', 'claude-code', '/tmp')").run();
+    db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES ('sess-grok', 'node-grok', 'grok@r', 'running', '2026-07-02 12:05:00')").run();
+    db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session, tmux_pane) VALUES ('bind-grok', 'node-grok', 'tmux', 'grok@r', '%2')").run();
+    expect(repo.classifyDestinationOf("grok@r").class).toBe("pane-bound");
+    await runSweep({ resolveOperatorSeat: () => "person@external" });
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding!.destinationSession).toBe("grok@r");
+    expect(finding!.body).not.toContain("has no wake route");
+  });
+
   it("a verdict from before the seat's relaunch, or no verdict, doesn't count as missing", () => {
     expect(nodeSessionConfirmedMissing(db, "node-dead")).toBe(false);
     seedMissingSession("worker@r");

@@ -759,13 +759,15 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       c.route = floor;
     }
 
-    // A destination its own wake found unroutable (no terminal, not a person: a hosted member, or a mistyped
-    // address) can't hear its finding either. Only a person can make a hosted member check its work, so the
-    // person goes first: the operator seat when it's a person's address, else the row's creator, else the
-    // operator agent, skipping any that is unset, this seat, confirmed missing or unroutable itself.
+    // A destination its own wake found unroutable, and still is (no terminal, not a person: a hosted member, or a
+    // mistyped address), can't hear its finding either; a seat launched since its wake keeps its own. Only a person
+    // can make a hosted member check its work, so the person goes first: the operator seat when it's a person's
+    // address, else the row's creator, else the operator agent, skipping any that is unset, this seat, confirmed
+    // missing or unroutable itself.
     const classOf = (seat: string) => deps.queueRepo.classifyDestinationOf(seat).class;
     for (const c of candidates) {
-      if (c.route !== c.row.destinationSession || !c.row.lastNudgeResult?.startsWith("unroutable:")) continue;
+      if (c.route !== c.row.destinationSession || !c.row.lastNudgeResult?.startsWith("unroutable:")
+        || classOf(c.row.destinationSession) !== "unroutable") continue;
       const operatorSeat = (deps.resolveOperatorSeat ?? resolveOperatorSeat)();
       const person = operatorSeat && classOf(operatorSeat) === "gateway-routable" ? operatorSeat : null;
       const choices = [person, c.row.sourceSession, (deps.resolveRecoveryAgentSeat ?? resolveRecoveryAgentSeat)()];
