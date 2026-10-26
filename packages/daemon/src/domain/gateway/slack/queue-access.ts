@@ -91,12 +91,17 @@ function project(q: RepoQueueItem, transition: QueueTransition, entities: readon
   let destinationSession: string | null = null;
   let sourceSession: string | null = null;
   let sharedChannel = false;
+  // The row's agent side, the seat its Slack thread routes to: for a row addressed to a person or a shared channel (an
+  // ask, including one its asker parked on the person asked), the agent that sent it; otherwise the agent that owns it.
+  const addressedToParticipant = resolveRegisteredHumanAddress(q.destinationSession, entities) !== null
+    || channels.some((channel) => channel.address === q.destinationSession);
+  const agentSide = addressedToParticipant ? q.sourceSession : q.destinationSession;
   if (transition.ownerNotificationKind === "human-decision-resolved") {
     destinationSession = resolveRegisteredHumanAddress(transition.actorSession, entities);
-    sourceSession = q.destinationSession;
+    sourceSession = agentSide;
   } else if (q.state === "blocked") {
     destinationSession = resolveRegisteredHumanAddress(q.blockedOn, entities);
-    sourceSession = q.destinationSession;
+    sourceSession = agentSide;
   } else {
     // A row addressed to a person, or to a registered shared channel (posted into that channel; 0.7.3).
     destinationSession = resolveRegisteredHumanAddress(q.destinationSession, entities);
@@ -202,6 +207,7 @@ export function makeQueuePorts(
         priority: (input.priority ?? "routine") as never,
         tags: input.tags ?? ["founder-slack", "inbound"],
         inboundReplyTo: input.inReplyTo ?? null,
+        gatewayInbound: true,
       };
       const created = directAnswer && input.inReplyTo
         ? await queueRepo.createHumanAnswer({ ...createInput, inboundReplyTo: input.inReplyTo })
