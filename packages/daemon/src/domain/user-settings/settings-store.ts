@@ -486,14 +486,13 @@ function assertNoRemovedContextSetting(fileConfig: Record<string, unknown>): voi
 // CLOSED to {enabled}). The closed-set discipline applies to the store's key
 // GRAMMAR: only this pattern is accepted beyond SETTINGS_VALID_KEYS; every
 // other unknown key keeps the existing reject-loud behavior byte-for-byte.
-// hostId segment: [A-Za-z0-9_-]+ (a dotted host id is inexpressible in
-// dotted keys — the write gate rejects it as unknown; readers warn-and-
-// ignore); RESERVED segments (the flat toggle tails + 'enabled') never parse
+// The fixed prefix/suffix delimit the literal host id, including dots.
+// RESERVED segments (the flat toggle tails + 'enabled') never parse
 // as host ids, so the flat keys and the dynamic class cannot collide.
 // No env-var mapping for the dynamic class in v1 — file/API only.
 // Twin: packages/cli/src/config-store.ts carries the same class (parity test
 // pins them — the host-registry twin discipline).
-const FEED_HOST_KEY_RE = /^feed\.subscriptions\.([A-Za-z0-9_-]+)\.enabled$/;
+const FEED_HOST_KEY_RE = /^feed\.subscriptions\.([A-Za-z0-9_.-]+)\.enabled$/;
 // Reserved in BOTH spellings: the key-level snake_case toggle tails AND the
 // camelCase FILE-level leaf names (KEY_TO_PATH maps audit_log→auditLog etc.),
 // so no host id can ever shadow a flat toggle at either layer.
@@ -1334,9 +1333,9 @@ export class SettingsStore {
     const out: Array<{ hostId: string; enabled: boolean }> = [];
     for (const [segment, node] of Object.entries(subs as Record<string, unknown>)) {
       if (node === null || typeof node !== "object" || Array.isArray(node)) continue; // flat toggle leaves — not host nodes
-      if (FEED_HOST_RESERVED_SEGMENTS.has(segment) || !/^[A-Za-z0-9_-]+$/.test(segment)) {
+      if (FEED_HOST_RESERVED_SEGMENTS.has(segment) || !/^[A-Za-z0-9_.-]+$/.test(segment)) {
         process.stderr.write(
-          `[openrig-settings] feed.subscriptions.${segment} ignored as a host subscription: segment is ${FEED_HOST_RESERVED_SEGMENTS.has(segment) ? "a reserved toggle name" : "not a valid host id segment ([A-Za-z0-9_-]+)"}\n`,
+          `[openrig-settings] feed.subscriptions.${segment} ignored as a host subscription: segment is ${FEED_HOST_RESERVED_SEGMENTS.has(segment) ? "a reserved toggle name" : "not a valid host id segment ([A-Za-z0-9_.-]+)"}\n`,
         );
         continue;
       }
