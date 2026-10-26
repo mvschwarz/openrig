@@ -205,25 +205,47 @@ export function configuredMissionsRoot(configPath?: string): string | null {
   return null;
 }
 
-/** The missions root a workspace's project.yaml declares (`missions.root`),
- * resolved inside the workspace; null when there is no project.yaml, it does
- * not parse, or the declared path is absolute or escapes the workspace. */
-function declaredMissionsRoot(workspace: string): string | null {
-  const manifestPath = path.join(workspace, "project.yaml");
-  if (!fs.existsSync(manifestPath)) return null;
-  let manifest: unknown;
-  try {
-    manifest = YAML.parse(fs.readFileSync(manifestPath, "utf-8"));
-  } catch {
-    return null;
+/**
+ * The project's missions root: project.yaml's optional `missions.root` when it is a relative path inside the
+ * project, else the conventional `missions`. Null when it resolves outside the project. Work positions and
+ * mission creation both use it, so they agree on where a project's missions live.
+ */
+export function projectMissionsRoot(
+  projectRoot: string,
+  projectManifest: Record<string, unknown> | null,
+  warnings: string[],
+): string | null {
+  let missionsRel = "missions";
+  const missions = projectManifest?.["missions"];
+  const root = missions !== null && typeof missions === "object" && !Array.isArray(missions)
+    ? (missions as Record<string, unknown>)["root"]
+    : undefined;
+  if (root !== undefined) {
+    if (typeof root === "string" && !path.isAbsolute(root) && !root.split(/[\\/]/).includes("..")) {
+      missionsRel = root;
+    } else {
+      warnings.push("project.yaml: optional missions.root must be a relative path inside the project; kept the conventional missions root");
+    }
   }
-  if (!manifest || typeof manifest !== "object") return null;
-  const missions = (manifest as Record<string, unknown>)["missions"];
-  if (!missions || typeof missions !== "object") return null;
-  const root = (missions as Record<string, unknown>)["root"];
-  if (typeof root !== "string" || !root.trim() || path.isAbsolute(root) || root.split(/[\\/]/).includes("..")) return null;
-  const resolved = path.resolve(workspace, root);
-  return resolved === path.resolve(workspace) ? null : resolved;
+  const missionsRoot = path.resolve(projectRoot, missionsRel);
+  const rel = path.relative(projectRoot, missionsRoot);
+  return rel === "" || (!path.isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${path.sep}`)) ? missionsRoot : null;
+}
+
+/** {@link projectMissionsRoot} for the project.yaml at `projectRoot`, when there is one. */
+export function readProjectMissionsRoot(projectRoot: string, warnings: string[]): string | null {
+  const projectManifestPath = path.join(projectRoot, "project.yaml");
+  let projectManifest: Record<string, unknown> | null = null;
+  if (fs.existsSync(projectManifestPath)) {
+    try {
+      const value = YAML.parse(fs.readFileSync(projectManifestPath, "utf8")) as unknown;
+      if (value !== null && typeof value === "object" && !Array.isArray(value)) projectManifest = value as Record<string, unknown>;
+      else warnings.push(`${projectManifestPath} must contain a YAML object; kept the conventional missions root`);
+    } catch (err) {
+      warnings.push(`${projectManifestPath} is not valid YAML: ${(err as Error).message}; kept the conventional missions root`);
+    }
+  }
+  return projectMissionsRoot(projectRoot, projectManifest, warnings);
 }
 
 /** Locate the missions root from an explicit workspace override or the typed
@@ -240,13 +262,6 @@ export function resolveMissionsRoot(opts: {
    * fallback would operate on a tree the caller never named (#995).
    */
   strictOverride?: boolean;
-  /**
-   * For a command that creates the first mission: an explicit override that
-   * names an existing workspace is authoritative, so its missions directory
-   * (project.yaml `missions.root`, else `missions/`) is created when missing
-   * instead of falling back to the configured root (#70).
-   */
-  createMissing?: boolean;
 } = {}): string {
   const cwd = opts.cwd ?? process.cwd();
   // Which one named it matters for the refusal below: dropping --workspace does
@@ -255,22 +270,16 @@ export function resolveMissionsRoot(opts: {
   const fromOverride = fromFlag ?? process.env.OPENRIG_WORK_ROOT;
   if (fromOverride) {
     const candidate = path.isAbsolute(fromOverride) ? fromOverride : path.resolve(cwd, fromOverride);
-    const declared = declaredMissionsRoot(candidate);
-    if (declared && fs.existsSync(declared) && fs.statSync(declared).isDirectory()) return declared;
-    const workspaceExists = fs.existsSync(candidate) && fs.statSync(candidate).isDirectory();
-    // A root project.yaml declares wins for a create even before it exists,
-    // not a missions/ directory that happens to be there.
-    if (opts.createMissing && declared && workspaceExists) {
-      fs.mkdirSync(declared, { recursive: true });
-      return declared;
-    }
     const missions = path.join(candidate, "missions");
-    if (fs.existsSync(missions) && fs.statSync(missions).isDirectory()) return missions;
-    if (path.basename(candidate) === "missions" && fs.existsSync(candidate)) return candidate;
-    if (opts.createMissing && workspaceExists) {
-      fs.mkdirSync(missions, { recursive: true });
-      return missions;
+    const hasMissionsChild = fs.existsSync(missions) && fs.statSync(missions).isDirectory();
+    // A named workspace reads the missions.root its project.yaml declares, where mission creation writes;
+    // a named missions folder is read as is.
+    if (hasMissionsChild || path.basename(candidate) !== "missions") {
+      const declared = readProjectMissionsRoot(candidate, []);
+      if (declared && fs.existsSync(declared) && fs.statSync(declared).isDirectory()) return declared;
     }
+    if (hasMissionsChild) return missions;
+    if (path.basename(candidate) === "missions" && fs.existsSync(candidate)) return candidate;
     if (opts.strictOverride) {
       const source = fromFlag === null ? "OPENRIG_WORK_ROOT" : "--workspace";
       throw new ScopeCliError({

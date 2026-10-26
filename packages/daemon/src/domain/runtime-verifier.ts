@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 import { ulid } from "ulid";
 import type { ExecFn } from "../adapters/tmux.js";
-import { ProbeTimeoutError } from "../adapters/bounded-probe-exec.js";
+import { ProbeStoppedError, ProbeTimeoutError } from "../adapters/bounded-probe-exec.js";
 import type { RuntimeVerification, RuntimeStatus } from "./bootstrap-types.js";
 
 interface RuntimeVerifierDeps {
@@ -166,6 +166,8 @@ export class RuntimeVerifier {
       const version = this.parseVersion(output);
       return this.buildVerification(canonicalName, "verified", version ?? null, null, null);
     } catch (err) {
+      // The daemon is stopping: this probe says nothing about the runtime, so no --help and no row.
+      if (err instanceof ProbeStoppedError) throw err;
       if (err instanceof ProbeTimeoutError) {
         const outcome = probeTimeoutOutcome(binary, "version", err);
         if (!("fallBackToHelp" in outcome)) return this.buildVerification(canonicalName, outcome.status, null, null, outcome.error);
@@ -175,6 +177,7 @@ export class RuntimeVerifier {
         await this.probeExec(`${binary} --help`);
         return this.buildVerification(canonicalName, "verified", null, null, null);
       } catch (helpErr) {
+        if (helpErr instanceof ProbeStoppedError) throw helpErr;
         if (helpErr instanceof ProbeTimeoutError) {
           const outcome = probeTimeoutOutcome(binary, "help", helpErr);
           if (!("fallBackToHelp" in outcome)) return this.buildVerification(canonicalName, outcome.status, null, null, outcome.error);

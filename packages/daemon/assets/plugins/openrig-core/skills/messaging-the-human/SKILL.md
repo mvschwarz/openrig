@@ -4,7 +4,11 @@ description: "Use when project policy calls for a human decision or update, a hu
 metadata:
   cli_surfaces_referenced:
     - gateway human list
+    - gateway participants
+    - gateway default
     - gateway human show
+    - gateway human mode room
+    - gateway human mode decide
     - queue create
     - queue transitions
     - queue block
@@ -30,13 +34,22 @@ Discover the registered participants and inspect the chosen human:
 
 ```bash
 rig gateway human list --json
+rig gateway participants --json
 rig gateway human show <entityId> --json
 ```
 
+`participants` lists people and shared channels (one vetted channel is one
+participant), each with its organization, groups, whether it's the default, and
+its readable policy: the organization's, each group's and its own text, each
+labelled with where it came from. Read the policy of whoever you contact and
+apply it; it's context for your judgment, not a permission system, and a name
+is never a reason to assume a policy.
+
 Use the returned `address` (`<entityId>@external`), not a username, remembered
-seat, connector handle, or guessed kernel address. Where several humans exist,
-use the decision ownership in Project World. An absent or ambiguous registration
-needs a named registration correction, not a fallback address.
+seat, connector handle, or guessed kernel address. Where several people exist,
+use the decision ownership in Project World; the default person (`rig gateway
+default`) is only for needs that name nobody. An absent or ambiguous
+registration needs a named registration correction, not a fallback address.
 
 Check readiness: configured, enabled, active, ready, reason, and next action.
 `indeterminate` is not ready. Follow the reported next inspection; do not enable
@@ -68,6 +81,42 @@ rig queue create --destination <entityId>@external \
   --human-intent decision --summary "<short subject>" --body-file <brief-file> \
   --evidence-ref <durable-evidence> --verify --json
 ```
+
+An ask is on Steering and the TUI, where the person can answer it, choosing an
+option or typing a reply; it comes back to you exactly as a Slack answer does.
+Whether it also posts to Slack is the person's Slack subscription (`rig gateway
+human show <id>`, `slack-subscription`): by default (`every-ask`) every ask
+posts, and with `urgent-only` only an ask marked `--alert` does. So forgetting
+`--alert` never hides an ask from someone who reads Slack.
+
+Add `--alert` when the ask is urgent: something only they can do, or an approval
+whose wait costs now. A sign-in, a credential or an approval that expires needs
+it; a question that can wait for their next look doesn't. An alerted ask stands
+out in Slack (an interrupt with a mention, within their quiet hours and
+availability), and it's the only kind that reaches someone on `urgent-only`.
+An update (`--human-intent update`) posts as before and takes no `--alert`.
+
+Before asking a **decision**, check whether the person has a mode on with a
+decision room: what they said the team may decide for them meanwhile.
+
+```bash
+rig gateway human mode room <entityId>
+```
+
+If it names a room and your decision is plainly inside their words (and none of
+their exclusions), decide instead of waiting. Create the ask as above, then
+record your choice on it straight away:
+
+```bash
+rig gateway human mode decide <qitem-id> --application <applicationId> \
+  --choose <question>=<option> --reason "<why>" --reversible   # or --irreversible
+```
+
+It's recorded as decided on their behalf, never as their answer, the ask
+closes, and it's in their account when they're back. Say honestly whether it
+can be undone. A permission prompt or an approval is never decided this way.
+With no room, a room that doesn't plainly cover it, or any doubt, ask and wait;
+a recommended option is not a decision.
 
 An optional `--human-detail-file <path>` supplies one coherent supplemental
 reply in the same thread. Announce its purpose in the brief; the product also
@@ -101,8 +150,8 @@ posts as a new message.
 A **decision** with a few clear choices can carry `--human-questions-file <path>`:
 a JSON array of 1–4 questions, each
 `{"id", "question", "options": [{"id", "label", "recommended"?}]}` with 2–4
-options (labels up to 75 characters, at most one recommended). Slack shows each
-question as a row of buttons. Each click records that answer on the item, and
+options (labels up to 75 characters, at most one recommended). The TUI lists
+each question with its options, and Slack (when alerted) shows each as a row of buttons. Each click records that answer on the item, and
 the decision resolves once every question has one. You then receive one reply
 row listing the answers. In `humanAnswers`, clicked answers are option-id strings.
 A whole typed reply is an object:
@@ -124,8 +173,9 @@ well would issue another notification for the same decision.
 
 The row persists before bounded delivery verification. Read its qitem ID and
 verification result; `posted` proves connector posting, **not human readership**.
-`transport-failed`, `never-posted`, or a pending/indeterminate result leaves the
-row intact. Inspect that same row and its next action; never create a second row
+`not-alerted` means the person's Slack subscription is `urgent-only`, so the ask is
+on Steering and the TUI without a Slack post, as they chose; it isn't a failure. `transport-failed`, `never-posted`, or a pending/indeterminate result
+leaves the row intact. Inspect that same row and its next action; never create a second row
 or blindly resend because verification timed out.
 
 ```bash

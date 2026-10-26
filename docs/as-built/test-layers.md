@@ -39,10 +39,10 @@ to `main`. In the PR description, say which layers you ran and which you could n
 |---|---|---|---|---|
 | Typecheck | `npm run lint` | Builds the daemon, then `tsc --noEmit` passes for daemon, ui, cli and tui | Any runtime behaviour. Formatting. | Every change |
 | Build | `npm run build` | All four workspaces compile (the UI also runs `vite build`) | That the *published* package is complete (see Packaging) | Every change |
-| Repo checks | `npm run test:repo` | Builds the daemon, then runs `node --test --test-concurrency=1 scripts/*.test.mjs`, `scripts/check-first-run-references.mjs`, `scripts/check-docs-guard.mjs`, `mirror-skills --check` and `generate-context-packs --check` | Package behaviour | Every change. It matters most when you touch `scripts/`, `docs/` or skills. |
+| Repo checks | `npm run test:repo` | Builds the daemon, then runs `node --test --test-concurrency=1 scripts/*.test.mjs`, `scripts/check-first-run-references.mjs`, `scripts/check-docs-guard.mjs`, `mirror-skills --check` (skill homes, generated copies, layout and digests) and `generate-context-packs --check` | Package behaviour | Every change. It matters most when you touch `scripts/`, `docs/` or skills. |
 | Package suites | `npm run test:workspaces`. One package: `npm run test -w packages/cli`. One file, from the repo root: `npx vitest run packages/cli/test/<file>.test.ts` | Vitest unit and integration tests for daemon, cli and tui. Some of them start real scenario daemons, tmux sessions and stub runners. | The installed package. Real Claude Code or Codex. CI's sandbox conditions (see CI). | Every change (`npm test` covers it) |
 | Web UI suite | `npm run test:ui` | jsdom unit tests for `packages/ui` | Real browser rendering | When you touch `packages/ui`, or a daemon API the UI reads. The web UI is in maintenance mode, so this suite is advisory locally and is not part of `npm test`. |
-| Generated files | `npm run mirror-skills:check`, `npm run generate-context-packs:check` (both part of `npm test`) | Every copy of each shipped skill matches its recorded hash, and every static context pack passes the daemon's own manifest parser and the leak scan | Whether the skill content is any good | After you edit a shipped skill: edit the same file in every copy that carries it, run `node scripts/regen-edge-digests.mjs`, then the check. The full `npm run mirror-skills` apply needs maintainer-only inputs. See "A shipped skill" in [ARCHITECTURE.md](../../ARCHITECTURE.md#a-shipped-skill). |
+| Generated files | `npm run mirror-skills:check`, `npm run generate-context-packs:check` (both part of `npm test`) | Shipped skill homes are publishable, generated copies match their homes, all edges match their recorded hashes, and every static context pack passes the daemon's own manifest parser and the leak scan | Whether the skill content is any good | Edit a shipped skill's one in-repo home, run `npm run mirror-skills` to regenerate its other copies and refresh digests, then run the checks and commit the result. The apply reads nothing outside the repository. See "A shipped skill" in [ARCHITECTURE.md](../../ARCHITECTURE.md#a-shipped-skill). |
 | Local gate | `npm run gate` | Lint plus `npm test` on a clean tree, tied to `HEAD`, one run per machine at a time, with a JSON receipt | Anything that lint and `npm test` don't already prove | Optional. Useful when several agents share one machine, or when you want a receipt tied to a commit. |
 | Packaging | `npm run build:package`, `npm run test:tui-package`, `bash scripts/smoke-fresh-install.sh` | The publishable `@openrig/cli` assembles, the packed TUI launches, and a fresh install starts a daemon | Behaviour beyond startup | When you touch dependencies, bin entries, build scripts, or files a package ships |
 | Stub scenarios, host mode | `node --import tsx packages/daemon/scripts/run-scenarios.mjs [scenario.yaml …]` | A scenario's steps and assertions pass against a scratch daemon, real tmux and `runtime: stub` seats | The installed package. Seeded-regression pairing. Everything under [What a stub can and cannot prove](#what-a-stub-can-and-cannot-prove). | While you write or debug a scenario |
@@ -71,8 +71,13 @@ are not yet runnable checks.
   database, workspace and topology roots, seat identity, bearer tokens), forces a fixture
   `OPENRIG_HOME` and fails if the home is not fixture-scoped. It also wraps `fetch`, so a real
   request to anything other than a loopback ephemeral-port fixture or a registered target fails.
-  Unless `OPENRIG_E2E_REAL_CODEX=1`, it points `HOME` and the XDG directories at a fixture user
-  home and clears `CODEX_HOME`; that opt-in keeps the real homes. A test can still set its own
+  It points `HOME` and the XDG directories at a fixture user home and clears `CODEX_HOME` and
+  `CLAUDE_CONFIG_DIR`. `OPENRIG_E2E_REAL_CODEX=1` keeps native homes and binaries only for
+  `seat-handover-model-fidelity-e2e.test.ts` and `seat-lifecycle-set-model-resume-e2e.test.ts`;
+  all other files remain isolated. The scenario scaffold always uses fixture homes and runtime stubs.
+  The two native files rely on Vitest's default per-file isolation; runs without it are unsupported.
+  Scenario scaffolds scrub inherited provider roots but preserve those passed in an explicit `baseEnv`.
+  A test can still set its own
   overrides after setup. The UI suite (jsdom) uses its own `packages/ui/test/setup.ts`.
 
 - **Stale vendored daemon.** `npm run build:package` leaves an assembled copy of the daemon at
@@ -139,7 +144,7 @@ Exit codes: 0 pass, 1 a leg failed, 2 lane busy, 3 the runner itself errored.
 |---|---|
 | `runtime: stub` adapter | `packages/daemon/src/adapters/stub-runtime-adapter.ts`, with `stub-runner.ts` (the process that runs in the pane), `stub-script.ts` (the launch-script format) and `stub-compaction.ts` / `stub-restore.ts` |
 | Scenario format and runner | `packages/daemon/test/helpers/scenario-*.ts`. Step verbs: `up`, `down`, `send`, `restart`, `daemon`, `seed_regression` are bound. `restore`, `emit`, `mutate`, `policy` parse but are unbound. Assertion surfaces: `ps`, `queue`, `stream`, `scope`, `pane`, `transcript`, `tui_socket`, `policy_provenance`. |
-| Scenario library | `packages/test-system/scenarios/`: 16 scenarios, 7 stub topologies, `agents/`, `culture.md`, per-seat stub scripts in `scripts/` |
+| Scenario library | `packages/test-system/scenarios/`: 20 scenarios, 7 stub topologies, `agents/`, `culture.md`, per-seat stub scripts in `scripts/` |
 | Runner fixtures | `packages/daemon/test/fixtures/scenarios/` (`scenario-01-per-seat-scripts`, `scenario-02-baton`, `scenario-10-one-view-state`) |
 | Host runner | `packages/daemon/scripts/run-scenarios.mjs` |
 | In-container entry and result check | `packages/test-system/ci/run.mjs`, `packages/test-system/ci/result.mjs` |
@@ -254,7 +259,7 @@ means:
 | Reboot / tmux reset | `daemon: {op: restart}` restarts only the scenario daemon, and the tmux server keeps running. No step resets tmux. | Recycled pane IDs and stale bindings after a real reboot (the class behind #141) are not covered by a daemon restart. |
 | Multi-rig and same-name identities | The `up` step always uses the scenario's top-level `topology` and ignores a per-step override. No step archives or removes a rig. | Cross-rig scope, same-name generations and archive/remove routing (the class behind #174) need runner work before they can be tested. |
 | Step-time restore, compaction, mutation, policy | `restore`, `emit`, `mutate` and `policy` parse, but the runner throws `UnboundActionError` when it reaches them. Behaviours run only from a per-seat launch script (`env.stub_scripts`). A seat `restart` step maps to `rig launch`, which is not native resume or fork. | Step-time compaction and restore, and native resume and fork, are not covered. |
-| Skill projection | The stub projects skills into `<cwd>/.openrig/stub/skills/`. Claude Code projects into `<cwd>/.claude/skills/`. | A stub green says nothing about provider-specific projection (the class behind #159). |
+| Skill projection | The stub projects skills into `<cwd>/.openrig/stub/skills/`. Claude Code projects a team seat's skills into the seat's generated plugin in OpenRig's state, and into `<cwd>/.claude/skills/` only for a seat without one. | A stub green says nothing about provider-specific projection (the class behind #159). |
 | Model and provider | No model, no tokens. Stub scripts refuse `usage_limit` because it only exists on real runtimes. | Model behaviour, provider usage limits and real context usage need live evals or a real runtime. |
 | Platform | CI's scenario job runs in a Linux container. | macOS process behaviour is covered by the macOS `package-tests` jobs, not by scenarios. |
 
@@ -264,20 +269,27 @@ The most useful next pieces of harness work, roughly in dependency order:
 2. A model-free test entry point shaped like a provider, that goes through the real native
    adapter and managed launch. Package tests such as `claude-interactive-launch.test.ts` and
    the `*-native.test.ts` files already drive the real adapters through tmux against an
-   offline recorder; they prove command resolution and arguments, not readiness, history or
-   answers.
+   offline recorder; they prove command resolution and arguments.
+   `claude-executable-foreground.test.ts` holds that recorder open in private Bash, zsh, dash and ksh panes
+   to check parent PID, process-group ownership, tmux's pane command and parent-shell
+   restoration for unmanaged fresh, fork and resume launches. These fixtures do not prove
+   native readiness, history or answers.
 3. Lifecycle and identity steps (tmux reset, archive/remove).
 4. Then pickup, wake and restore scenarios.
 
 ### Library status
 
-Three scenarios run in CI: `queue-baton-survives-restart` (since #243) with its seeded pair,
-and `transcript-reads-addressed-seat` and `capture-returns-addressed-seat` in passing form
-only. Three more, `down-stops-every-seat`, `send-renders-in-addressed-pane` and
-`up-relaunch-restores-a-two-seat-team`, run with the local runner but not in CI. Those five
-later scenarios are not in this table; see "Status
-today" under [Help wanted](#help-wanted-command-families-without-a-behavioural-scenario). The
-other ten scenarios are authored but not yet runnable as meaningful checks:
+Seven library scenarios run in CI: `queue-baton-survives-restart` (since #243) and
+`refocus-parked-baton` with their seeded pairs, and `transcript-reads-addressed-seat`,
+`capture-returns-addressed-seat`, `daemon-restart-preserves-team-identity`,
+`refocus-active-baton` and `refocus-parked-baton-packet-off` in passing form only. The
+`fixture` case runs the `scenario-02-baton` test fixture through the same seeded pair.
+Three more, `down-stops-every-seat`, `send-renders-in-addressed-pane` and
+`up-relaunch-restores-a-two-seat-team`, run with the local runner but not in CI, and
+`compaction-restore-resumes-role` runs the compaction round-trip's success path the same
+way. Those ten later scenarios are not in this table; "Status today" under
+[Help wanted](#help-wanted-command-families-without-a-behavioural-scenario) covers seven
+of them. The other nine scenarios are authored but not yet runnable as meaningful checks:
 
 | Scenario | Why it doesn't run as a check yet | Smallest useful next step |
 |---|---|---|
@@ -286,7 +298,6 @@ other ten scenarios are authored but not yet runnable as meaningful checks:
 | `ps-scope-honesty` | The second `up` reuses the first topology, and the expected match tolerates the other rig | Make `up` honour the per-step topology, then assert the exclusion |
 | `send-verify-means-rendered` | The `send` step drops `verify`, and the stub has no input loop | Build the input-consuming stub and assert a response derived from the nonce |
 | `home-divergence-preseed-visible` | The pipeline ignores `env.pre_existing_tmux`, and the default script never prints the expected `trust reached` | Recreate the real HOME split and whatever consumes it |
-| `compaction-restore-resumes-role` | Step-time `emit` is unbound | Input-triggered hooks plus evidence specific to one seat |
 | `stream-emit-durable-replay-live` | Step-time `emit` is unbound | Assert the actual stream contract |
 | `policy-posture-survives-structural-edit` | `policy` and `mutate` are unbound | Rewrite around current per-seat permission selection and an observed launch |
 | `locked-restore-never-permissive` | `policy` and `restore` are unbound | Keep the invariant (the selection survives a restore) and use current modes |
@@ -315,6 +326,19 @@ contracts without extending the YAML grammar. The corresponding library scenario
 above remain pending: pane rendering does not prove input consumption, durable
 stream replay does not prove live subscription, and this test does not exercise
 native providers, restore or policy changes.
+
+`packages/daemon/test/rig-edge-cli.integration.test.ts` uses the same private
+scenario daemon and tmux helpers for edge repair. It removes a stub seat, re-adds
+its logical ID with the terminal runtime, then restores its cross-pod edges with one
+`rig edge add` per edge. It checks repeat IDs and edge counts, refusal without a
+write, unchanged sibling node/binding identities and pane PIDs, export,
+snapshot capture and exact rollback. It models the cross-runtime replacement
+workaround without invoking Claude Code or Codex. The YAML runner has no bound
+edge/remove/add verbs, so this journey drives the real CLI directly:
+
+```sh
+npm test -w @openrig/daemon -- test/rig-edge-cli.integration.test.ts
+```
 
 ## If your change touches an artery, add or extend a scenario (or say why not)
 
@@ -403,18 +427,29 @@ that seat's `rig transcript --tail 200 --json`. `capture` has partial coverage i
 pane. The scenario catches a capture that resolves the seat by a prefix match on its member
 name (so `dev-impl` also matches `dev-impl2`) and takes the first hit, or any resolver that
 returns the same pane for both seats; it does not exercise a prefix match on the full seat
-name. All five run with the local runner (`run-scenarios.mjs`). The transcript and capture
+name. All six run with the local runner (`run-scenarios.mjs`). The transcript, capture and daemon
 scenarios also run in the CI job, in passing form only; the down, send and up scenarios don't.
 They do not prove that panes are gone or that a seat consumed a message. The transcript
 case does not establish ordering, uniqueness, sibling-token absence, tail limits or restart
 persistence. `up` has partial coverage in `up-relaunch-restores-a-two-seat-team.yaml`: a
 two-seat stub team comes up, goes down, and the same spec starts a new team in place of the
-stopped one with the same name, exactly two seats, both running and not archived, so a
+stopped one with the same name, exactly two seats, both running, not archived, so a
 relaunch that re-records the old seats into the team's row fails on the final `ps` counts.
 It does not prove that conversations survive the round trip (that is the `--existing`
 restore path), that a seat consumed a message, or that the panes are gone after `down`.
-`daemon` is used by the existing scenarios but has no scenario of its own. Everything else
-has none.
+`daemon` has partial coverage in `daemon-restart-preserves-team-identity.yaml`: a two-seat
+stub team is up, the runner restarts the scratch daemon, and `rig ps --json` must report the
+same name still running with exactly two seats, both running, not archived, so a restart
+that loses the team's row, or changes its seat counts or status, fails on the post-restart `ps`;
+`rig down` then records it stopped, so the restart left a governable team. It does not prove
+that queue items survive the restart (that is `queue-baton-survives-restart.yaml`), that a
+kill inside a handoff window is reconciled (that is `kill-daemon-mid-handoff.yaml`), the
+port-and-process half of the row, or that the panes are gone after `down`.
+`compaction-restore-resumes-role` covers the compaction round-trip's success path: the
+seat's launch script (delivered through `env.stub_scripts`) fires the real precompact and
+restore seams in order, and impl's own pane carries the injected directive. It runs with
+the local runner, not in CI (container mode refuses `env.stub_scripts` loud and named), and
+its seeded wrong-seat-restore negative case is not armed yet.
 
 Before you start, two honest constraints:
 
@@ -436,7 +471,7 @@ Before you start, two honest constraints:
 | Group | Family | Proposed first check (observable result) |
 |---|---|---|
 | lifecycle | `start` | Restore two stopped stub seats. Both answer distinct fresh nonces, and no second daemon starts. |
-| lifecycle | `daemon` | start/status/stop/restart. Port, process and persisted queue identity agree through public commands. |
+| lifecycle | `daemon` (partial) | Restart-preserving-the-persisted-team-row is covered by `daemon-restart-preserves-team-identity.yaml`. Next: port and process agreement through public commands, and `stop`, which needs a runner binding. |
 | lifecycle | `bootstrap` | Bootstrap a minimal stub spec. Seats come up ready and the selected spec is the one used. |
 | lifecycle | `up` (partial) | Relaunch-not-duplicating-identities is covered by `up-relaunch-restores-a-two-seat-team.yaml`. Next: each seat consumes its own send, which needs the input-consuming stub. |
 | lifecycle | `down` | (partial) Next: its panes are gone, a sibling rig still answers, retained data follows the docs. |
@@ -537,9 +572,6 @@ How to make a case useful:
 
 Read these with care. This page notes them and proposes no changes.
 
-- `packages/test-system/ci/README.md` describes the CI scenario job, except its
-  "Run one case" section, which still says both cases and six runs; the script runs four cases
-  and eight containers by default.
 - The headers of `transcript-reads-addressed-seat.yaml` and `capture-returns-addressed-seat.yaml`
   say "host mode only". Both run in the CI container job, which executes the host-mode pipeline
   inside the image.

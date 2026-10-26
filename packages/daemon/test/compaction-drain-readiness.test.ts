@@ -1,4 +1,4 @@
-// A post-compact stage that drains without a usage sample must not trust the hook that came before
+// A post-compact stage without a completion-indicating sample must not trust the hook that came before
 // /compact. Managed /compact relays no hook of its own, so until compaction ends the newest hook
 // is the preparation turn's Stop (idle). These tests compose the real monitor, usage store,
 // enforcer, activity store and SessionTransport over an inert tmux adapter.
@@ -46,7 +46,7 @@ const COMPACTED_PANE = [
   "  ⏵⏵ accept edits on (shift+tab to cycle)",
 ].join("\n");
 
-describe("post-compact drain readiness without a usage sample", () => {
+describe("post-compact drain readiness", () => {
   let db: Database.Database;
   let home: string;
   let monitor: ContextMonitor;
@@ -186,6 +186,39 @@ describe("post-compact drain readiness without a usage sample", () => {
     await monitor.pollOnce();
     expect(boundaryWrites()).toHaveLength(1);
   });
+
+  it.each(Object.entries({ busy: COMPACTING_PANE, timerless: COMPACTION_START_PANE, unreadable: "" })
+    .flatMap(([name, screen]) => [1_000, 30_000].map(age => ({ name, screen, age }))))(
+    "fresh high usage with a $age-ms old Stop and $name pane holds each owed stage until live idle",
+    async ({ screen, age }) => {
+      await compact(); // Retain the trigger's known, fresh 80% sample at the 80% policy.
+      hook("Stop", age);
+      const stages = ["compacting", "compacted", "restoring"];
+      const messages = ["OpenRig post-compaction turn boundary.", "restoring this Claude session after compaction",
+        "Now audit your compaction restore"];
+      for (let index = 0; index < stages.length; index++) {
+        pane = screen;
+        const before = enforcer.observedCompaction(sessionName);
+        expect(before?.stage).toBe(stages[index]);
+        await monitor.pollOnce();
+        expect(tmux.sendText).toHaveBeenCalledTimes(index);
+        expect(tmux.sendKeys).toHaveBeenCalledTimes(index);
+        expect(enforcer.observedCompaction(sessionName)?.stage).toBe(before?.stage);
+
+        // No new hook/sample authorizes this advance: the actual pane becomes idle.
+        pane = COMPACTED_PANE;
+        await monitor.pollOnce();
+        expect(tmux.sendText).toHaveBeenCalledTimes(index + 1);
+        expect(tmux.sendKeys).toHaveBeenCalledTimes(index + 1);
+        expect(tmux.sendText.mock.calls[index]?.[1]).toContain(messages[index]);
+      }
+      expect(boundaryWrites()).toHaveLength(1);
+      expect(enforcer.hasPendingPostCompactStage(sessionName)).toBe(false);
+      await monitor.pollOnce();
+      expect(tmux.sendText).toHaveBeenCalledTimes(3);
+      expect(tmux.sendKeys).toHaveBeenCalledTimes(3);
+    },
+  );
 
   it("Claude's timer-less compaction row reads as work only for pane-only readiness", () => {
     expect(classifyPaneActivity(COMPACTION_START_PANE).state).toBe("agent_idle");

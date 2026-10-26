@@ -108,6 +108,24 @@ ownership receipt. A later seat start with no project-world input preserves it;
 an explicit install whose `install.skills` is empty clears it. This keeps
 "project not supplied" distinct from "project deliberately selects no skills."
 
+Before refreshing a skill copy, don't take `rig skill audit` as the answer. The
+audit reports declared provenance, date freshness (its `stale` is a verified date
+past 90 days or one with no evidence source) and copy hashes. It doesn't say
+whether a copy is safe to refresh, and two copies with different hashes aren't
+evidence of a deliberate fork. For a managed copy in a working folder, the
+read-only check is `rig skill loadout --runtime <claude-code|codex> --cwd
+<target> --project-root <project> --json`, without `--apply`. It reports
+`current`; `stale`, still OpenRig's last projection, so `--apply` can refresh it;
+`conflicting`; `shadowed`; or `missing`. Read the detail of `conflicting` and
+`shadowed`: `conflicting` can mean the bytes differ or that the target couldn't
+be inspected, which leaves any difference unknown, and a confirmed difference
+doesn't prove a deliberate local edit. A seat's own skills, kept outside the
+project (0.7.1 and later), are listed with where they're stored by
+`rig skill loadout --seat <session|self> --json`; that read doesn't classify
+them. A global or untracked copy has no install
+record, so its origin stays unknown: ask the skill's owner, and don't move global
+skills into a project just to get one.
+
 ## Work-install project selection
 
 `rig context work-install` picks one project from the catalog at
@@ -168,6 +186,12 @@ The read API adds `GET /api/scopes/projects` and optional `project` and
 detail also requires the selected mission directory. Existing reads without a
 project parameter keep their legacy contract.
 
+`GET /api/scopes?counts=1` is the light list: each mission's slices with only
+their `dirName`, `id`, `displayName`, `status`, `stage` and `locks` (and
+`sourcePath` for a selected project), read from each slice's node file alone. It
+leaves out readiness and proof pairing, which are most of the work and bytes of
+the default list. `detail=1` takes precedence when both are given.
+
 ## UI Mapping
 
 - `workspace.root` maps to the Project workspace.
@@ -189,7 +213,11 @@ ambiguity.
 ## Queue Mapping
 
 A `slice:<id>` tag is the authoritative way to attach a queue item to a slice;
-with a project selected, typed rows also need the `project:<id>` tag. As a
+with a project selected, typed rows also need the `project:<id>` tag. The tag
+value is either the slice's frontmatter `id` (a dot-ID such as `CUS.9775.1.1`)
+or its directory name (`01-custody-funds`); both resolve to the same slice on
+the Queue tab, the ownership lanes and the agents band. A row that carries both
+forms counts once. As a
 fallback, for slices with no typed rows, items attach when their body or tags
 mention one of:
 
@@ -209,6 +237,71 @@ Slice: capture-product-ideas
 
 This makes Story, Queue, Tests, and Topology tabs line up with the filesystem
 slice without adding a separate project database schema.
+
+### Workflow packets
+
+Packets that `rig workflow` projects carry the scope of their instance. Pass the
+scope when the instance is created and every packet it creates (the entry, each
+hand-off and gate, exception items, and resume packets) is tagged, so they show
+on the slice's Queue tab:
+
+```bash
+rig workflow instantiate ./spec.workflow.md \
+  --root-objective "Build the capture flow" --created-by orch@my-rig \
+  --project my-project --mission idea-ledger --slice capture-product-ideas \
+  --tags ticket-7
+```
+
+- `--project` should name a project in the workspace catalog. `--mission` and
+  `--slice` take the same ids as the slice routes. `rig workflow run` takes the
+  same flags. The CLI refuses what it can check itself (an id of the wrong shape,
+  a reserved tag, a tag that contradicts a flag) as a usage error, before
+  anything is sent. Only the daemon knows the catalog, so a mistyped `--project`
+  is **not refused**: the daemon creates the instance unscoped, its packets carry
+  no scope tags, and the CLI prints a warning on stderr (also with `--json`)
+  that names the instance and says the scope was not applied. The CLI does not
+  retry; instantiating again creates a second instance.
+- Packets carry `project:<id>`, `mission:<id>` and `slice:<id>` for the parts
+  you set, then your `--tags`, after the tags the workflow system writes. Tags
+  compose as in `rig queue create`: duplicates collapse, so `--slice S --tags
+  slice:S` is one tag.
+- `--tags` is refused locally when it carries what the workflow runtime reads
+  back to route packets: `workflow`, `handoff`, `gate`, `entry`, `resume`,
+  `re-route`, `workflow-exception`, and the `workflow:`, `instance:`, `step:`,
+  `exception:`, `occurrence:` and `recovery-for:` prefixes, a `project:`,
+  `mission:` or `slice:` tag that contradicts its flag, or a second value of
+  the same key.
+- `rig workflow instantiate-lifecycle` needs no flags: it takes the project and
+  mission from the lifecycle identity it compiles. A compiled step's packets
+  carry the `slice:<directory>` of the slice that step was compiled from, even
+  when another slice's directory has the same name as its `metadata.id`. A step
+  an authored graph names carries `slice:<directory>` when it names an active
+  slice: by its exact directory name, else by a `metadata.id` that exactly one
+  active slice claims (an id two slices claim maps to nothing, with a compile
+  advisory). A step that names no slice, such as an authored closing step,
+  carries only `project:` and `mission:`, so it appears on no slice's Queue tab.
+  A project id or mission name the compiler reads from the manifests that cannot
+  be a tag (a space, a `:`, a leading `.`, `_` or `-`, or too long) is left off
+  the packets with a compile advisory; the lifecycle still instantiates. Slice
+  metadata the lifecycle does not run is read only leniently, for step names, and
+  never fails compile or instantiate.
+- Over HTTP, `POST /api/workflow/instantiate` reads the scope from a `scope`
+  object (`{ project, mission, slice, tags }`). A scope that is valid and names
+  a catalogued project is applied as above. A scope the route cannot apply (a
+  project the catalog does not declare, a conflicting, reserved or malformed tag
+  or id, or a `scope` that is not an object) is ignored: the route does what it
+  did before the field existed and creates one unscoped instance, records
+  nothing the scope named, and never lets a rejected tag reach a packet. The
+  response `advisories` then carry a `Scope not applied (...)` note that names
+  the instance (`scopeIgnored` repeats it); `rig workflow run` prints
+  `advisories`. Bare `project`, `mission`, `slice` or `tags` fields in the body
+  are ignored the same way, with a note. A failure unrelated to the scope still
+  fails the request.
+- A Projects view scoped to a project lists a slice's packets only when they
+  carry `project:<id>` as well as `slice:<id>`, so pass `--project` with
+  `--slice`.
+- The scope is stored on the instance when it is created and does not change.
+  Instances created without it behave as before.
 
 ## Compatibility
 

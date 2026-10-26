@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { findExactNativeResumeProcess, observeClaudePaneStartedAt, observeClaudeDelivery, verifyClaudePaneProcess, verifyCodexPaneProcess, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
+import { codexCommandResumeToken, findExactNativeResumeProcess, observeClaudePaneStartedAt, observeClaudeDelivery, observeCodexForkProcess, verifyClaudePaneProcess, verifyCodexPaneProcess, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
 
 import { operationalLaunchArgs } from "../src/adapters/kernel-authority.js";
 
@@ -16,6 +16,150 @@ function rows(): NativeProcessRow[] {
 }
 const check = (listProcesses: () => NativeProcessRow[] | Promise<NativeProcessRow[]>, overrides = {}) => verifyCodexPaneProcess({
   target: "%1", tmux: { getPanePid: async () => 10 }, listProcesses, expectedToken: token, requireResume: true, ...overrides,
+});
+
+describe("Codex resume options (#1400)", () => {
+  const options = [
+    "-m gpt-5", "--model gpt-5", "-c model_reasoning_effort=high", "--config model_reasoning_effort=high",
+    "-p work", "--profile work", "-C /project", "--cd /project", "--add-dir /extra",
+    "-a on-request", "--ask-for-approval on-request", "-s workspace-write", "--sandbox workspace-write",
+    "--enable feature", "--disable feature", "--local-provider ollama",
+    "--remote ws://localhost:9000", "--remote-auth-token-env CODEX_REMOTE_TOKEN",
+  ];
+  it.each(options)("skips option values on either side of resume: %s", option => {
+    expect(codexCommandResumeToken(`codex ${option} resume ${token}`)).toBe(token);
+    expect(codexCommandResumeToken(`codex resume ${option} ${token}`)).toBe(token);
+    expect(codexCommandResumeToken(`codex ${option}`)).toBeUndefined();
+    expect(codexCommandResumeToken(`codex resume ${option}`)).toBeNull();
+  });
+  it.each([
+    `-C /project resume -m gpt-5 -c model_reasoning_effort=high ${token}`,
+    `--profile=work resume --cd=/project --model=gpt-5 ${token}`,
+    `-C/project resume -mgpt-5 ${token} continue`,
+    `--profile resume resume --add-dir resume ${token}`,
+    `--search resume --no-alt-screen ${token}`,
+    `resume -- ${token}`,
+  ])("proves the named conversation through both lineage paths: %s", args => {
+    const command = `/opt/native/codex ${args}`;
+    const process = { ...rows()[3]!, pid: 10, ppid: 1, command };
+    expect(codexCommandResumeToken(command)).toBe(token);
+    expect(findExactNativeResumeProcess([process], 10, "codex", token)?.pid).toBe(10);
+    expect(findExactNativeResumeProcess([process], 10, "codex", "gpt-5")).toBeNull();
+  });
+  it.each(["resume", "resume --last", "resume --all", "resume -m", "resume --cd"])("keeps unnamed resumes distinct from fresh launches: %s", args => {
+    expect(codexCommandResumeToken(`codex ${args}`)).toBeNull();
+  });
+  it.each(["-C /project", "--cd /project", "-m resume", "--profile resume", "exec resume", "-- resume"])("does not invent a resume from an option value or prompt: %s", args => {
+    expect(codexCommandResumeToken(`codex ${args}`)).toBeUndefined();
+  });
+  it("does not mistake an option value for the stored conversation", async () => {
+    const list = () => rows().map(row => row.pid === 13
+      ? { ...row, command: `/opt/native/codex resume -m ${token} other` } : row);
+    expect(await check(list)).toBeNull();
+    expect(findExactNativeResumeProcess(list(), 10, "codex", token)).toBeNull();
+  });
+  it("accepts matching wrapper and native resumes with options on different sides", async () => {
+    const list = () => rows().map(row => row.pid === 12
+      ? { ...row, command: `node /opt/bin/codex --cd /project resume ${token}` }
+      : row.pid === 13 ? { ...row, command: `/opt/native/codex resume -m gpt-5 -C /project ${token}` } : row);
+    expect((await check(list))?.process.pid).toBe(13);
+    expect(await check(list, { expectedToken: "gpt-5" })).toBeNull();
+  });
+  it.each([`-C /project fork ${token}`, `fork -m gpt-5 ${token}`, `--profile work fork --cd /project ${token}`])("keeps the shared fork reader aligned: %s", async args => {
+    const input = {
+      target: "%1", tmux: { getPanePid: async () => 10 }, parentToken: token,
+      listProcesses: () => [{ ...rows()[3]!, pid: 10, ppid: 1, command: `codex ${args}` }],
+    };
+    expect((await observeCodexForkProcess(input))?.process.pid).toBe(10);
+    expect(await observeCodexForkProcess({ ...input, parentToken: "gpt-5" })).toBeNull();
+    expect(codexCommandResumeToken(`codex ${args}`)).toBeUndefined();
+  });
+
+  // Codex rust-v0.162.1: SharedCliOptions.images has num_args = 1..;
+  // finalize_{resume,fork}_interactive reinterprets --last's positional as a prompt.
+  // These expectations come from that grammar, independently of our option table.
+  const imageCases: [string, string | null][] = [
+    [`-i a.png ${token} -- ${parent}`, parent],
+    [`-i ${token} a.png -- ${token}`, token],
+    [`-i a.png b.png c.png -- ${token}`, token],
+    [`--image a.png ${token} b.png -- ${parent}`, parent],
+    [`-i a.png -- ${token}`, token],
+    [`-i image.png ${token}`, null],
+    [`--image ${token} a.png`, null],
+    [`-i a.png b.png -m model ${token}`, token],
+    [`-i a.png -i b.png ${parent} -- ${token}`, token],
+    [`${token} -i a.png b.png`, token],
+    [`--image=a.png,b.png ${token}`, token],
+    [`-ia.png ${token}`, token],
+    [`-i=a.png ${token}`, token],
+  ];
+  it.each(imageCases)("keeps every image separate from the resumed conversation: %s", async (args, expected) => {
+    const command = `codex resume ${args}`;
+    const list = () => [{ ...rows()[3]!, pid: 10, ppid: 1, command }];
+    expect(codexCommandResumeToken(command)).toBe(expected);
+    expect(Boolean(await check(list))).toBe(expected === token);
+    expect(Boolean(findExactNativeResumeProcess(list(), 10, "codex", token))).toBe(expected === token);
+  });
+  it.each(imageCases)("keeps every image separate from a fork's parent: %s", async (args, expected) => {
+    const input = {
+      target: "%1", tmux: { getPanePid: async () => 10 }, parentToken: token,
+      listProcesses: () => [{ ...rows()[3]!, pid: 10, ppid: 1, command: `codex fork ${args}` }],
+    };
+    expect(Boolean(await observeCodexForkProcess(input))).toBe(expected === token);
+  });
+  it.each(["-i", "--image"])("consumes root-level image values before looking for a command: %s", option => {
+    expect(codexCommandResumeToken(`codex ${option} a.png resume ${token}`)).toBeUndefined();
+    expect(codexCommandResumeToken(`codex ${option} a.png b.png -m model resume ${token}`)).toBe(token);
+    expect(codexCommandResumeToken(`codex ${option} ${token} b.png -- resume ${token}`)).toBeUndefined();
+  });
+  const lastCases = [
+    `--last ${token}`, `-m model --last ${token}`, `--last -C /project ${token}`,
+    `--last -- ${token}`, `${token} --last`, `${token} -m model --last`,
+  ];
+  it.each(lastCases)("never proves a --last prompt as a resumed conversation: %s", async args => {
+    const command = `codex -p work resume ${args}`;
+    const list = () => [{ ...rows()[3]!, pid: 10, ppid: 1, command }];
+    expect(codexCommandResumeToken(command)).toBeNull();
+    expect(await check(list)).toBeNull();
+    expect(findExactNativeResumeProcess(list(), 10, "codex", token)).toBeNull();
+  });
+  it.each(lastCases)("never proves a --last prompt as a fork's parent: %s", async args => {
+    expect(await observeCodexForkProcess({
+      target: "%1", tmux: { getPanePid: async () => 10 }, parentToken: token,
+      listProcesses: () => [{ ...rows()[3]!, pid: 10, ppid: 1, command: `codex -C /project fork ${args}` }],
+    })).toBeNull();
+  });
+  it.each([`resume ${token}`, `resume -- ${token}`, `resume ${token} -- --last`])("still proves explicit resumes with a positional or escaped --last: %s", async args => {
+    const command = `codex ${args}`;
+    expect(codexCommandResumeToken(command)).toBe(token);
+    expect(await check(() => [{ ...rows()[3]!, pid: 10, ppid: 1, command }])).not.toBeNull();
+  });
+  it.each([
+    [`codex resume ${token}`, true],
+    [`codex resume ${token} explain --last selection`, true],
+    [`codex resume ${token} --last`, false],
+  ] as const)("requires an exact resume even with a late --last: %s", async (command, expected) => {
+    const list = () => [{ ...rows()[3]!, pid: 10, ppid: 1, command }];
+    expect(Boolean(await check(list))).toBe(expected);
+  });
+  const promptCases = [
+    `${token}`, `${token} explain --last selection`, `${token} explain --last`,
+    `${token} -m model explain --last selection`, `-m model ${token} explain --last selection`,
+    `${token} -- explain --last selection`,
+  ];
+  it.each(promptCases)("keeps prompt words from turning an explicit resume into --last: %s", async args => {
+    const command = `codex -C /project resume ${args}`;
+    const list = () => [{ ...rows()[3]!, pid: 10, ppid: 1, command }];
+    expect(codexCommandResumeToken(command)).toBe(token);
+    expect((await check(list))?.process.pid).toBe(10);
+    expect(findExactNativeResumeProcess(list(), 10, "codex", token)?.pid).toBe(10);
+  });
+  it.each(promptCases)("keeps prompt words from turning an explicit fork into --last: %s", async args => {
+    expect((await observeCodexForkProcess({
+      target: "%1", tmux: { getPanePid: async () => 10 }, parentToken: token,
+      listProcesses: () => [{ ...rows()[3]!, pid: 10, ppid: 1, command: `codex -C /project fork ${args}` }],
+    }))?.process.pid).toBe(10);
+  });
 });
 
 describe("joined native Codex identity", () => {
@@ -209,6 +353,29 @@ describe("Claude identity with inline settings in ps output", () => {
     expect(await verifyClaudePaneProcess({ ...actual, expectedToken: "different" })).toBeNull();
     expect((await observeClaudeDelivery({ ...actual, expectedToken: "different" })).state).toBe("unknown");
   });
+  it.each([
+    `--advisor opus --session-id ${token}`,
+    `--resume ${token} --advisor claude-opus-5-5`,
+    `--advisor=opus --session-id=${token}`,
+    `--resume=${token} --advisor=opus`,
+    `--advisor opus --agent openrig:reviewer --append-system-prompt-file /home/u/.openrig/state/seats/r/dev.impl/claude-code/additions/system-prompt.md --resume ${token}`,
+  ])("Advisor leaves the exact primary conversation verifiable: %s", async args => {
+    const actual = input(args);
+    expect((await verifyClaudePaneProcess(actual))?.process.pid).toBe(21);
+    expect((await observeClaudeDelivery(actual)).state).toBe("verified");
+    expect(await verifyClaudePaneProcess({ ...actual, expectedToken: "different" })).toBeNull();
+    expect((await observeClaudeDelivery({ ...actual, expectedToken: "different" })).state).toBe("unknown");
+  });
+  it.each([
+    `--session-id ${token} --advisor`,
+    `--advisor --session-id ${token}`,
+    `--session-id ${token} --advisor=`,
+    `--session-id ${token} --advisor=--resume`,
+    `--advisor opus --resume ${token} --fork-session`,
+  ])("malformed Advisor or a fork's parent cannot prove the current identity: %s", async args => {
+    expect(await verifyClaudePaneProcess(input(args))).toBeNull();
+    expect((await observeClaudeDelivery(input(args))).state).not.toBe("verified");
+  });
   it("preserves an apostrophe in the native Claude executable path", async () => {
     const actual = input(`--settings ${settings[0]![1]} --session-id ${token}`);
     const list = (await actual.listProcesses()).map(r => r.pid === 21 ? { ...r,
@@ -258,6 +425,37 @@ describe("Claude identity with inline settings in ps output", () => {
     expect((await verifyClaudePaneProcess(actualIdentity))?.process.pid).toBe(21);
     expect((await observeClaudeDelivery(actualIdentity)).state).toBe("verified");
     expect(await verifyClaudePaneProcess({ ...actualIdentity, expectedToken: "different" })).toBeNull();
+  });
+  // OPR.0.7.0.9: a seat's own launch additions are value-taking flags; identity proof must still hold. `ps` joins argv
+  // with spaces, so a prompt file path with ordinary spaces runs to the next `--` option. OpenRig launches only a path
+  // that reads back that way (its launch-time check), so a path holding a `--` or `{` token proves nothing here.
+  const spaced = "/home/u/Library/Application Support/openrig/state/seats/r/dev.impl/claude-code/additions/system-prompt.md";
+  it.each([
+    `--agent openrig:reviewer --session-id ${token}`,
+    `--append-system-prompt-file /home/u/.openrig/state/seats/r/dev.impl/claude-code/additions/system-prompt.md --resume ${token}`,
+    `--append-system-prompt-file ${spaced} --session-id ${token}`,
+    `--append-system-prompt-file ${spaced} --resume ${token}`,
+    `--agent openrig:a --append-system-prompt-file ${spaced} --resume parent-1 --fork-session --session-id ${token}`,
+    `--model opus --append-system-prompt-file /seat/additions/system-prompt.md --agent openrig:a --effort high --session-id ${token}`,
+    `--agent=openrig:reviewer --append-system-prompt-file=/fixture/prompt.md --session-id=${token}`,
+  ])("proves identity with a seat's launch additions: %s", async args => {
+    const actual = input(args);
+    expect((await verifyClaudePaneProcess(actual))?.process.pid).toBe(21);
+    expect((await observeClaudeDelivery(actual)).state).toBe("verified");
+    expect(await verifyClaudePaneProcess({ ...actual, expectedToken: "different" })).toBeNull();
+  });
+  it.each([
+    `--agent --session-id ${token}`,
+    `--append-system-prompt-file --session-id ${token}`,
+    `--plugin-dir /fixture/plugin --session-id ${token}`,
+    `--append-system-prompt-file /tmp/Backup -- 2026/additions/system-prompt.md --session-id ${token}`,
+    `--append-system-prompt-file /tmp/team --unexpected part/additions/system-prompt.md --session-id ${token}`,
+    `--append-system-prompt-file /tmp/a {b}/additions/system-prompt.md --session-id ${token}`,
+    `--agent openrig:two words --session-id ${token}`,
+    `--agent -openrig --session-id ${token}`,
+  ])("proves nothing for a missing, unbounded or malformed value, or a flag OpenRig doesn't emit: %s", async args => {
+    expect(await verifyClaudePaneProcess(input(args))).toBeNull();
+    expect((await observeClaudeDelivery(input(args))).state).not.toBe("verified");
   });
 });
 

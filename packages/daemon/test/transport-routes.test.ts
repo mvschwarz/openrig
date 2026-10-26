@@ -160,6 +160,40 @@ describe("transport routes", () => {
     expect(rows[0]!["identity_provenance"]).toBe("transport:v1"); // era-stamp from the run, not hardcoded-lying
   });
 
+  // #1813: a single send that landed left its audit row pending for ever, while broadcast marks each recipient's row. The
+  // case is review-r2's.
+  it("A3 — a DERIVED send that landed marks its outbox row delivered, as broadcast's rows are", async () => {
+    seedRig();
+    const res = await sendApp().request("/api/transport/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@my-rig" },
+      body: JSON.stringify({ session: "dev-impl@my-rig", text: "hello" }),
+    });
+    expect(res.status).toBe(200);
+    const rows = outboxRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!["delivery_state"]).toBe("delivered");
+    expect(rows[0]!["delivered_at"]).toEqual(expect.any(String));
+  });
+
+  it("an urgent send names who marked it, from the sender's identity, never the body; a send to the sender's own seat says so", async () => {
+    seedRig();
+    const res = await sendApp().request("/api/transport/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@my-rig" },
+      body: JSON.stringify({ session: "dev-impl@my-rig", text: "the build is red", urgent: true, actorSession: "someone-else@my-rig" }),
+    });
+    expect(await res.json()).toMatchObject({ ok: true, urgent: { by: "orch@my-rig" } });
+    const self = await sendApp().request("/api/transport/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "dev-impl@my-rig" },
+      body: JSON.stringify({ session: "dev-impl@my-rig", text: "note to self" }),
+    });
+    const selfBody = await self.json() as Record<string, unknown>;
+    expect(selfBody).toMatchObject({ fromDestinationSeat: true });
+    expect(selfBody.urgent).toBeUndefined();
+  });
+
   it("A3 — a cross-host send records the ORIGIN triple (the derived header), never the relay's seat", async () => {
     seedRig();
     const res = await sendApp().request("/api/transport/send", {
@@ -506,7 +540,8 @@ describe("transport routes", () => {
     expect(body.sent).toBe(true);
     expect(body.attempts).toBe(2);
     expect(body.activity.state).toBe("idle");
-    expect(sendTextSpy).toHaveBeenCalledWith("dev-impl@my-rig", "hello");
+    // The route passes the caller's cancellation check, run by the adapter just before the paste.
+    expect(sendTextSpy).toHaveBeenCalledWith("dev-impl@my-rig", "hello", expect.any(Function));
   });
 
   it("POST /send rejects force with waitForIdleMs before sending", async () => {
@@ -531,33 +566,49 @@ describe("transport routes", () => {
     expect(sendTextSpy).not.toHaveBeenCalled();
   });
 
-  it("POST /send maps wait timeout to 409 without sending text", async () => {
+  it.each([0, 5])("POST /send maps wait timeout to 409 without sending text (capture cost %ims)", async (captureCostMs) => {
     seedRig();
-    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
-    const tmux = mockTmux({
-      capturePaneContent: async () => "Working on task...\n⠋ Processing\nesc to interrupt",
-      sendText: sendTextSpy,
-    });
-    const transport = new SessionTransport({
-      db,
-      rigRepo,
-      sessionRegistry,
-      tmuxAdapter: tmux,
-      waitForIdlePollMs: 1,
-    });
-    const app = createApp({ sessionTransport: transport });
+    // Test expiry after a completed busy observation, independently of runner speed.
+    // Match the one-millisecond domain tests: advance the deadline and race timer only at the poll.
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    try {
+      const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+      const tmux = mockTmux({
+        capturePaneContent: async () => {
+          const end = performance.now() + captureCostMs;
+          while (performance.now() < end) { /* controlled classification CPU cost */ }
+          return "Working on task...\n⠋ Processing\nesc to interrupt";
+        },
+        sendText: sendTextSpy,
+      });
+      const sleep = vi.fn(async (ms: number) => { await vi.advanceTimersByTimeAsync(ms); });
+      const transport = new SessionTransport({
+        db,
+        rigRepo,
+        sessionRegistry,
+        tmuxAdapter: tmux,
+        sleep,
+        waitForIdlePollMs: 1,
+      });
+      const app = createApp({ sessionTransport: transport });
 
-    const res = await app.request("/api/transport/send", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session: "dev-impl@my-rig", text: "hello", waitForIdleMs: 1 }),
-    });
-    expect(res.status).toBe(409);
-    const body = await res.json();
-    expect(body.ok).toBe(false);
-    expect(body.reason).toBe("wait_for_idle_timeout");
-    expect(body.sent).toBe(false);
-    expect(sendTextSpy).not.toHaveBeenCalled();
+      const res = await app.request("/api/transport/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session: "dev-impl@my-rig", text: "hello", waitForIdleMs: 1 }),
+      });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.ok).toBe(false);
+      expect(body.reason).toBe("wait_for_idle_timeout");
+      expect(body.sent).toBe(false);
+      expect(body.activity?.state).toBe("running");
+      expect(body.waitedMs).toBe(1);
+      expect(sleep).toHaveBeenCalledExactlyOnceWith(1);
+      expect(sendTextSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("POST /send with ambiguous session returns 409", async () => {
@@ -928,21 +979,42 @@ describe("transport routes", () => {
     expect(delivered.every((t) => !t.includes("anyone@my-rig"))).toBe(true);
   });
 
-  it("P21 I4 → S2: --dangerously-interact with NO identity delivers; a non-needs_input target writes NO override audit row", async () => {
+  it("P21 I4 → S2: --dangerously-interact with NO identity delivers and audits its actual idle state", async () => {
     seedRig();
     const eventBus = new EventBus(db);
-    const app = createApp({ sessionTransport: new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux(), eventBus, agentActivityStore: new AgentActivityStore({ db, eventBus }) }) });
+    const agentActivityStore = new AgentActivityStore({ db, eventBus });
+    agentActivityStore.recordHookEvent({ runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "Stop" });
+    const app = createApp({ sessionTransport: new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux(), eventBus, agentActivityStore }) });
     const res = await app.request("/api/transport/send", {
       method: "POST",
       headers: { "Content-Type": "application/json" }, // NO X-OpenRig-Session
       body: JSON.stringify({ session: "dev-impl@my-rig", text: "drive it", dangerouslyInteract: true, reason: "why" }),
     });
-    // S2 (OPR.0.5.4.3): the 401 is retired. The idle target takes the normal
-    // send path; the override audit exists only on the needs_input branch, so
-    // no row is written here — unchanged posture, now unattributed-tolerant.
+    // Unknown-sender delivery stays accepted. Explicit interaction now audits
+    // every readiness state without inventing an actor or a positive prompt.
     expect(res.status).toBe(200);
-    const rows = db.prepare("SELECT * FROM events WHERE type = 'transport.prompt_override'").all();
-    expect(rows).toHaveLength(0);
+    const rows = db.prepare("SELECT payload FROM events WHERE type = 'transport.prompt_override'").all() as Array<{ payload: string }>;
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0]!.payload)).toMatchObject({ actorSession: null,
+      overrideReason: "why", detectedState: "idle", evidenceSource: "runtime_hook" });
+  });
+
+  it("an urgent prompt answer types exactly its own bytes: the urgent label stays in the result, never in the keys", async () => {
+    seedRig();
+    const eventBus = new EventBus(db);
+    const agentActivityStore = new AgentActivityStore({ db, eventBus });
+    agentActivityStore.recordHookEvent({ runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "Stop" });
+    const typed: string[] = [];
+    const tmux = mockTmux({ sendText: async (_target, text) => { typed.push(text); return { ok: true }; } });
+    const app = createApp({ sessionTransport: new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, eventBus, agentActivityStore }) });
+    const res = await app.request("/api/transport/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@my-rig" },
+      body: JSON.stringify({ session: "dev-impl@my-rig", text: "1", dangerouslyInteract: true, reason: "pick option 1", urgent: true }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ urgent: { by: "orch@my-rig" } });
+    expect(typed).toEqual(["1"]);
   });
 
   it("P21 I4: a body actorSession that DIFFERS from the header is SUPERSEDED (no identity_mismatch refusal)", async () => {

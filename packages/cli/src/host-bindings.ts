@@ -23,6 +23,10 @@ export interface HostBinding {
   hostId: string;
   firstObservedAt: string;
   lastObservedAt: string;
+  /** The entry URL `hostId` was observed at. Recorded only with that identity: a contradicting
+   *  observation never attaches its URL here. Absent on bindings learned before it was recorded.
+   *  The daemon's queue forwards use a binding only while this equals the entry's current URL. */
+  observedUrl?: string;
   /** A later observation that CONTRADICTED the stored binding — kept visible, never adopted. */
   conflict?: { hostId: string; observedAt: string };
 }
@@ -61,6 +65,7 @@ export function loadHostBindings(path: string = defaultHostBindingsPath()): Host
         hostId: bb["hostId"],
         firstObservedAt: typeof bb["firstObservedAt"] === "string" ? bb["firstObservedAt"] : "",
         lastObservedAt: typeof bb["lastObservedAt"] === "string" ? bb["lastObservedAt"] : "",
+        ...(typeof bb["observedUrl"] === "string" && bb["observedUrl"].length > 0 ? { observedUrl: bb["observedUrl"] } : {}),
         ...(bb["conflict"] && typeof bb["conflict"] === "object"
           && typeof (bb["conflict"] as Record<string, unknown>)["hostId"] === "string"
           ? {
@@ -84,10 +89,12 @@ export function loadHostBindings(path: string = defaultHostBindingsPath()): Host
 // send/capture/doctor concurrently, and an interleaved write could erase a sibling's binding —
 // benign for a BINDING (TOFU re-learns) but not for a CONFLICT record, whose loss is the exact
 // silence the known_hosts lesson forbids. Guard: an mkdir-based advisory lock (atomic on every
-// platform) held across load→mutate→rename, with bounded busy-wait retries and a stale-lock
-// takeover. If the lock cannot be won inside the budget the write proceeds UNGUARDED (fail-open —
-// availability over the rare loss; the conflict re-records on the next contradicting observation).
-const LOCK_RETRIES = 40;
+// platform) held across load→mutate→rename, with sleeping retries and a stale-lock takeover. A
+// waiter sleeps rather than spins, so it never starves the holder of CPU, and it waits past the
+// stale threshold, so a slow holder is waited out or taken over instead of written over. The write
+// proceeds UNGUARDED (fail-open — availability over the rare loss; the conflict re-records on the
+// next contradicting observation) only when the lock can't be created at all, or isn't won by the
+// wait's end.
 const LOCK_RETRY_MS = 5;
 // NAMED TAIL (r1 F2 review, not built for): after a stale takeover the ORIGINAL holder still
 // believes it holds the lock, so its release rmdirs the NEW holder's lock — in principle that
@@ -96,23 +103,26 @@ const LOCK_RETRY_MS = 5;
 // multi-minute stalls, so the tail is not zero. The token-verified-release fix is more machinery
 // than a fail-open advisory lock over a self-healing cache justifies.
 const LOCK_STALE_MS = 2_000;
+const LOCK_WAIT_MS = LOCK_STALE_MS + 1_000;
+const sleepCell = new Int32Array(new SharedArrayBuffer(4));
 
 function acquireLock(lockDir: string): boolean {
-  for (let i = 0; i < LOCK_RETRIES; i++) {
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
     try {
       mkdirSync(lockDir);
       return true;
-    } catch {
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") return false;
       try {
         if (Date.now() - statSync(lockDir).mtimeMs > LOCK_STALE_MS) rmdirSync(lockDir);
       } catch {
         /* raced away — retry */
       }
-      const until = Date.now() + LOCK_RETRY_MS;
-      while (Date.now() < until) { /* bounded busy-wait: sync API, sub-ms slices */ }
+      if (Date.now() >= deadline) return false;
+      Atomics.wait(sleepCell, 0, 0, LOCK_RETRY_MS); // a real sleep in a sync API
     }
   }
-  return false;
 }
 
 function releaseLock(lockDir: string): void {
@@ -132,6 +142,8 @@ export type HostObservationOutcome =
 export function recordHostObservation(args: {
   alias: string;
   observedHostId: string;
+  /** The entry URL the id was read from; stored only with a matching, unconflicted identity. */
+  observedUrl?: string;
   now?: () => Date;
   path?: string;
 }): HostObservationOutcome {
@@ -141,23 +153,25 @@ export function recordHostObservation(args: {
   const lockDir = `${path}.lock`;
   const locked = acquireLock(lockDir);
   try {
-    return recordUnderLock(args.alias, args.observedHostId, at, path);
+    return recordUnderLock(args.alias, args.observedHostId, args.observedUrl, at, path);
   } finally {
     if (locked) releaseLock(lockDir);
   }
 }
 
-function recordUnderLock(alias: string, observedHostId: string, at: string, path: string): HostObservationOutcome {
+function recordUnderLock(alias: string, observedHostId: string, observedUrl: string | undefined, at: string, path: string): HostObservationOutcome {
   const file = loadHostBindings(path);
   const existing = file.bindings[alias];
 
   let result: HostObservationOutcome;
   if (!existing) {
-    const binding: HostBinding = { hostId: observedHostId, firstObservedAt: at, lastObservedAt: at };
+    const binding: HostBinding = { hostId: observedHostId, firstObservedAt: at, lastObservedAt: at, ...(observedUrl ? { observedUrl } : {}) };
     file.bindings[alias] = binding;
     result = { outcome: "bound", binding };
   } else if (existing.hostId === observedHostId) {
-    const binding: HostBinding = { ...existing, lastObservedAt: at };
+    // The same identity seen again: record (or backfill) where it was seen. Not while a conflict is
+    // recorded, so a flapping identity never gains a fresh URL for the stored id.
+    const binding: HostBinding = { ...existing, lastObservedAt: at, ...(observedUrl && !existing.conflict ? { observedUrl } : {}) };
     // A re-observation of the ORIGINAL id after a recorded conflict does not clear the conflict —
     // a flapping identity is more alarming than a stable contradiction, not less.
     file.bindings[alias] = binding;

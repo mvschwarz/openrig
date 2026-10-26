@@ -12,9 +12,15 @@ import { restoreRuntimeCompatibilityError } from "./restore-runtime-compatibilit
 // only reported as would-happen), no projection writes.
 
 import type Database from "better-sqlite3";
-import { resolveActiveOccupantRow, resolveActiveSnapshotSession, deriveRehydrateSessionIdByNode, activeOccupantAmbiguityError, absentSeatResumeHistory, absentSeatResumeHistoryError, type ActiveOccupantResolution } from "./active-occupant.js";
+import { resolveActiveSnapshotSession, deriveRehydrateOccupantsByNode, deriveRehydrateSessionIdByNode, activeOccupantAmbiguityError, absentSeatResumeHistory, absentSeatResumeHistoryError, type ActiveOccupantResolution } from "./active-occupant.js";
 import type { RigWithRelations, Snapshot } from "./types.js";
+import { readFreshOccupantRelations } from "./fresh-occupant-relation.js";
 import { parseSqliteUtcMs } from "./sqlite-time.js";
+import { communityLaunchOnlyRestoreReason, effectiveRestorePolicy, isOrdinaryTerminalSeat, type RestoreSeatFacts } from "./restore-policy.js";
+import { communityHarnessOf } from "./built-in-runtimes.js";
+import { communityHarnessStopsRestore } from "./community-harness-presets.js";
+import { sessionCommunityHarnessSelect } from "./session-registry.js";
+import { assessSnapshotCurrentOccupants, stoppedSnapshotReason } from "./rehydrate-eligibility.js";
 
 /** OPR.0.4.3.20 FR-6 — a present token whose last verification is older than this
  *  is surfaced as `stale` (age-based staleness — the "stale while running" signal
@@ -29,8 +35,9 @@ export interface RestorePlanPreviewNode {
   /** Consent version, not a guessed native conversation id. */
   occupantSessionId?: string | null;
   hasHistory?: boolean;
-  /** The slice-02 vocabulary, as a forecast: what apply mode WOULD do. */
-  intendedAction: "resume-original" | "fresh-primed" | "awaiting-decision";
+  /** The slice-02 vocabulary, as a forecast: what apply mode WOULD do. `leave-attached`: a seat joined with `rig attach` as
+   *  an external CLI, which restore leaves as it is (its result is `left_attached`). */
+  intendedAction: "resume-original" | "fresh-primed" | "awaiting-decision" | "leave-attached";
   reason?: string;
   // OPR.0.4.3.20 FR-6 — per-seat token state + freshness (read-only forecast).
   /** present = verified + fresh; missing = no token; stale = probe failed OR
@@ -67,10 +74,14 @@ export interface RestorePlanPreview {
 }
 
 export interface PreviewSessionRow {
+  /** Current stop proved against this snapshot; never persisted as new history. */
+  stoppedCurrent?: boolean;
   nodeId: string;
   restorePolicy: string | null;
   resumeType: string | null;
   resumeToken: string | null;
+  /** The community harness the session was launched for, if any (its preset is launch-only at restore). */
+  communityHarness?: string | null;
   // OPR.0.4.3.20 FR-6 — provenance + verification freshness (nullable/degrading
   // for pre-45 rows and old snapshots → rendered as unverified, never a crash).
   resumeProvenance?: string | null;
@@ -124,6 +135,12 @@ function runtimePromptFor(runtime: string | null, tokenState: ResumeTokenState):
   return undefined;
 }
 
+/** Why restore leaves a seat joined with `rig attach` as an external CLI as it is: said by its result and by this forecast. */
+export function leftAttachedReason(name: string): string {
+  return `${name} is joined with rig attach as an external CLI, so restore leaves it attached: nothing is launched in its place, and OpenRig `
+    + `can't see whether that app is still running. To run this seat under OpenRig instead, release it with: rig unclaim ${name}, then launch it.`;
+}
+
 /** Forecast one seat's restore action — mirrors the orchestrator's pre-launch
  *  classification (OPR.0.3.4.2) without touching anything. A fresh-listed
  *  seat (operation B, `--fresh <seat>`) forecasts `fresh-primed` BEFORE any
@@ -131,7 +148,8 @@ function runtimePromptFor(runtime: string | null, tokenState: ResumeTokenState):
 function intendedActionFor(
   resolution: ActiveOccupantResolution<PreviewSessionRow>,
   freshRequested: boolean,
-  absentHistory: { logicalId: string; rigName: string; row: PreviewSessionRow | null },
+  seat: RestoreSeatFacts,
+  absentHistory: { logicalId: string; rigName: string; row: PreviewSessionRow | null; stoppedCurrent: boolean },
 ): { intendedAction: RestorePlanPreviewNode["intendedAction"]; reason?: string } {
   // OPR.0.5.7.1 — a broken authoritative relation beats --fresh, exactly as
   // execution fails loudly before its fresh check: --fresh cannot override
@@ -148,6 +166,9 @@ function intendedActionFor(
       reason: "listed in --fresh — apply would deliberately skip the resume (operation B)",
     };
   }
+  if (resolution.kind === "none" && absentHistory.stoppedCurrent) {
+    return { intendedAction: "awaiting-decision", reason: stoppedSnapshotReason(absentHistory.logicalId, absentHistory.rigName) };
+  }
   // No occupant, but an earlier one left a resume token: apply stops for the same decision.
   if (resolution.kind === "none" && absentHistory.row) {
     return {
@@ -156,7 +177,14 @@ function intendedActionFor(
     };
   }
   const occupant = resolution.kind === "resolved" ? resolution.session : null;
-  const policy = occupant?.restorePolicy ?? "resume_if_possible";
+  const policy = effectiveRestorePolicy(seat, occupant?.restorePolicy);
+  // As apply: a launch-only community harness (its preset declares no resume) forecasts a decision, not a resume.
+  // The snapshot's saved runtime, as apply reads it.
+  const savedRuntime = seat.savedRuntime ?? seat.currentRuntime;
+  if (policy === "resume_if_possible" && occupant && communityHarnessOf(occupant.communityHarness, savedRuntime)
+    && communityHarnessStopsRestore(savedRuntime, occupant.resumeType, occupant.resumeToken)) {
+    return { intendedAction: "awaiting-decision", reason: communityLaunchOnlyRestoreReason(savedRuntime, absentHistory.logicalId, absentHistory.rigName) };
+  }
   const sourceRecorded = !!occupant?.resumeType && occupant.resumeType !== "none";
   if (policy === "resume_if_possible" && sourceRecorded && occupant?.resumeToken) {
     return { intendedAction: "resume-original" };
@@ -178,13 +206,17 @@ export function collectPreviewSessionRows(
   db: Database.Database,
   rig: RigWithRelations,
   snapshot: Snapshot | null,
+  preserveStoppedInitial = false,
 ): PreviewSessionRow[] {
   if (snapshot) {
+    const { stoppedNodeIds } = assessSnapshotCurrentOccupants(db, rig, snapshot, preserveStoppedInitial);
     return (snapshot.data.sessions ?? []).map((s) => ({
+      stoppedCurrent: stoppedNodeIds.has(s.nodeId),
       nodeId: s.nodeId,
       restorePolicy: s.restorePolicy ?? null,
       resumeType: s.resumeType ?? null,
       resumeToken: s.resumeToken ?? null,
+      communityHarness: s.communityHarness ?? null,
       // OPR.0.4.3.20 FR-6 — degrade to null for snapshots serialized pre-45.
       resumeProvenance: s.resumeProvenance ?? null,
       resumeLastVerified: s.resumeLastVerified ?? null,
@@ -197,19 +229,30 @@ export function collectPreviewSessionRows(
   if (nodeIds.length === 0) return [];
   const placeholders = nodeIds.map(() => "?").join(",");
   const rows = db.prepare(
-    `SELECT id, node_id, restore_policy, resume_type, resume_token, resume_provenance, resume_last_verified, resume_last_probe_status, status FROM sessions WHERE node_id IN (${placeholders})`
-  ).all(...nodeIds) as Array<{ id: string; node_id: string; restore_policy: string | null; resume_type: string | null; resume_token: string | null; resume_provenance: string | null; resume_last_verified: string | null; resume_last_probe_status: string | null; status: string | null }>;
-  return rows.map((r) => ({
+    `SELECT s.id, s.node_id, s.restore_policy, s.resume_type, s.resume_token, s.resume_provenance, s.resume_last_verified, s.resume_last_probe_status, s.status, ${sessionCommunityHarnessSelect(db)} AS community_harness FROM sessions s WHERE s.node_id IN (${placeholders})`
+  ).all(...nodeIds) as Array<{ id: string; node_id: string; restore_policy: string | null; resume_type: string | null; resume_token: string | null; resume_provenance: string | null; resume_last_verified: string | null; resume_last_probe_status: string | null; status: string | null; community_harness: string | null }>;
+  const sessions = rows.map((r) => ({
     nodeId: r.node_id,
     restorePolicy: r.restore_policy,
     resumeType: r.resume_type,
     resumeToken: r.resume_token,
+    communityHarness: r.community_harness,
     resumeProvenance: r.resume_provenance,
     resumeLastVerified: r.resume_last_verified,
     resumeLastProbeStatus: r.resume_last_probe_status,
     id: r.id,
     status: r.status,
   }));
+  // Forecast the exact occupancy auto-rehydrate capture would write, without
+  // persisting a snapshot or changing any session/tenure state.
+  const recorded = readFreshOccupantRelations(db, rig.rig.id);
+  const data = {
+    sessions,
+    activeSessionIdByNode: deriveRehydrateSessionIdByNode(sessions, nodeIds, recorded),
+    activeOccupantsByNode: deriveRehydrateOccupantsByNode(sessions, nodeIds, recorded),
+  };
+  const { stoppedNodeIds } = assessSnapshotCurrentOccupants(db, rig, { data }, preserveStoppedInitial);
+  return sessions.map(session => ({ ...session, stoppedCurrent: stoppedNodeIds.has(session.nodeId) }));
 }
 
 /**
@@ -228,29 +271,39 @@ export function buildRestorePlanPreview(
   // when previewing a snapshot; for the live no-snapshot case, the SAME
   // would-capture derivation SnapshotCapture uses (shared helper — the
   // sibling paths cannot drift).
-  const relationMap = snapshot
-    ? snapshot.data.activeSessionIdByNode
-    : deriveRehydrateSessionIdByNode(sessionRows, rig.nodes.map((n) => n.id), recorded);
+  const nodeIds = rig.nodes.map(node => node.id);
+  const occupancy = snapshot?.data ?? {
+    sessions: sessionRows,
+    activeSessionIdByNode: deriveRehydrateSessionIdByNode(sessionRows, nodeIds, recorded),
+    activeOccupantsByNode: deriveRehydrateOccupantsByNode(sessionRows, nodeIds, recorded),
+  };
   const nodes: RestorePlanPreviewNode[] = rig.nodes.map((node) => {
     const freshRequested = freshLogicalIds?.includes(node.logicalId) ?? false;
     const savedNodeId = snapshot?.data.nodes?.find(saved => saved.logicalId === node.logicalId)?.id ?? node.id;
-    const resolution = snapshot
-      ? resolveActiveSnapshotSession(snapshot.data, savedNodeId)
-      : sessionRows.some((row) => row.nodeId === node.id)
-        ? resolveActiveOccupantRow(sessionRows, relationMap, node.id)
-        : { kind: "none" as const };
+    const resolution = resolveActiveSnapshotSession<PreviewSessionRow>(occupancy, savedNodeId);
     const runtimeError = resolution.kind !== "ambiguous"
       ? restoreRuntimeCompatibilityError(node.runtime, snapshot?.data.nodeStartupContext?.[savedNodeId]?.runtime)
       : null;
-    const { intendedAction, reason } = runtimeError
+    // The runtimes and recorded sessions restore reads the seat's policy through: the snapshot's own node, else the live one.
+    const seat: RestoreSeatFacts = {
+      savedRuntime: snapshot?.data.nodes?.find(saved => saved.logicalId === node.logicalId)?.runtime ?? node.runtime,
+      currentRuntime: node.runtime,
+      recordedSessions: sessionRows.filter((row) => row.nodeId === savedNodeId),
+    };
+    const stoppedCurrent = sessionRows.some(row => row.nodeId === savedNodeId && row.stoppedCurrent);
+    // Restore checks the live binding before anything else (restoreNodeWithCompensation), and so does its forecast.
+    const attached = node.binding?.attachmentType === "external_cli";
+    const { intendedAction, reason } = attached
+      ? { intendedAction: "leave-attached" as const, reason: leftAttachedReason(node.binding?.externalSessionName ?? node.logicalId) }
+      : runtimeError
       ? { intendedAction: "awaiting-decision" as const, reason: runtimeError }
-      : intendedActionFor(resolution, freshRequested,
-        { logicalId: node.logicalId, rigName: rig.rig.name, row: absentSeatResumeHistory(sessionRows, savedNodeId) });
+      : intendedActionFor(resolution, freshRequested, seat,
+        { logicalId: node.logicalId, rigName: rig.rig.name, row: absentSeatResumeHistory(sessionRows, savedNodeId), stoppedCurrent });
     // OPR.0.4.3.20 FR-6 — per-seat token state (read-only), derived from the
     // RESOLVED occupant only — never from a historical row.
     const occupant = resolution.kind === "resolved" ? resolution.session : null;
     const { tokenState, provenance, lastVerified } = tokenStateFor(occupant, nowMs);
-    const runtimePrompt = runtimePromptFor(node.runtime, tokenState);
+    const runtimePrompt = attached ? undefined : runtimePromptFor(node.runtime, tokenState);
     return {
       logicalId: node.logicalId,
       occupantSessionId: occupant?.id ?? null,
@@ -263,7 +316,8 @@ export function buildRestorePlanPreview(
       // no resumable token → restore needs an explicit --fresh (never
       // silent); runtime mismatches and broken relations cannot be resolved
       // by a fresh request, so --fresh must not be suggested as their remedy.
-      freshRequired: runtimeError || resolution.kind === "ambiguous" ? false : tokenState === "missing",
+      // A terminal has no token to find and relaunches fresh on its own.
+      freshRequired: attached || stoppedCurrent || runtimeError || resolution.kind === "ambiguous" ? false : tokenState === "missing" && !isOrdinaryTerminalSeat(seat),
       ...(runtimePrompt ? { runtimePrompt } : {}),
     };
   });

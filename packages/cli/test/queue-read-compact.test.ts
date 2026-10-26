@@ -127,11 +127,12 @@ describe("queue show and transitions (output.compact, P2/P3)", () => {
       expect(errors.join("\n")).toContain(`rig queue show '${ID}' --full --json`);
     });
 
-    it("switch on, plain: the body marker line stays and the empty-field notice follows it", async () => {
+    it("switch on, plain: stdout parses as JSON; the body marker line and the empty-field notice follow on stderr", async () => {
       vi.stubEnv("OPENRIG_OUTPUT_COMPACT", "1");
       const text = await run(["show", ID], showRoute());
-      expect(text).toContain("bounded preview — complete body is");
-      expect(text).toMatch(/empty fields not shown/);
+      expect(JSON.parse(text)).toHaveProperty("qitemId", ID);
+      expect(errors.join("\n")).toContain("bounded preview — complete body is");
+      expect(errors.join("\n")).toMatch(/bounded preview[\s\S]*empty fields not shown/);
     });
 
     it("switch on, --full: byte-identical to the switch-off --full read", async () => {

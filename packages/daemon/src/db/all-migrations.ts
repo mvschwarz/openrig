@@ -1,9 +1,20 @@
+import { claudeTokenReadingsSchema } from "./migrations/134_claude_token_readings.js";
 // The canonical ordered migration list. SINGLE SOURCE: the daemon boot path
 // (startup.ts) and any test/tool that needs a schema-faithful DB both migrate from THIS array,
 // so a reader DB is never seeded from a stale hand-copied subset (the perf-fixture-migration-parity
 // trap). Append new migrations to the END, in order.
 
+import { nodeClaudePermissionsSchema } from "./migrations/139_node_claude_permissions.js";
+import { nodeCodexPermissionsSchema } from "./migrations/137_node_codex_permissions.js";
 import { coreSchema } from "./migrations/001_core_schema.js";
+import { terminalPolicySchema } from "./migrations/128_terminal_policy.js";
+import { streamDispositionsSchema } from "./migrations/129_stream_dispositions.js";
+import { streamSubscriptionsSchema } from "./migrations/130_stream_subscriptions.js";
+import { streamRetentionFloorSchema } from "./migrations/131_stream_retention_floor.js";
+import { seatRuntimeSwitchesSchema } from "./migrations/132_seat_runtime_switches.js";
+import { streamReaderActionsSchema } from "./migrations/133_stream_reader_actions.js";
+import { seatIdentityProcessEvidenceSchema } from "./migrations/135_seat_identity_process_evidence.js";
+import { nodeClaudeTokenRefSchema } from "./migrations/138_node_claude_token_ref.js";
 import { bindingsSessionsSchema } from "./migrations/002_bindings_sessions.js";
 import { eventsSchema } from "./migrations/003_events.js";
 import { snapshotsSchema } from "./migrations/004_snapshots.js";
@@ -57,6 +68,7 @@ import { workflowResumeSchema } from "./migrations/051_workflow_resume.js";
 import { workflowInstanceBoundRigSchema } from "./migrations/052_workflow_instance_bound_rig.js";
 import { sessionsNodeIdIndexSchema } from "./migrations/053_sessions_node_id_index.js";
 import { queueTransitionsArchiveSchema } from "./migrations/054_queue_transitions_archive.js";
+import { seatEnvSchema } from "./migrations/111_seat_env.js";
 import { nodePermissionPolicySchema } from "./migrations/055_node_permission_policy.js";
 import { rigPermissionPolicySchema } from "./migrations/056_rig_permission_policy.js";
 import { nodePolicyProvenanceSchema } from "./migrations/057_node_policy_provenance.js";
@@ -104,12 +116,29 @@ import { rigInstallRootSchema } from "./migrations/096_rig_install_root.js";
 import { threadPartMapSchema } from "./migrations/097_thread_part_map.js";
 import { queueTransitionsQitemIdOrderSchema } from "./migrations/098_queue_transitions_qitem_id_order.js";
 import { queueItemsRecoveryTagsSchema } from "./migrations/099_queue_items_recovery_tags.js";
+import { typingGuardModesSchema } from "./migrations/100_typing_guard_modes.js";
 import { resumeRotationSchema } from "./migrations/101_claude_resume_rotation.js";
 import { sessionStopIntentSchema } from "./migrations/103_session_stop_intent.js";
 import { usageSamplesClientCostSchema } from "./migrations/105_usage_samples_client_cost.js";
 import { piUsageEntriesSchema } from "./migrations/107_pi_usage_entries.js";
 import { piUsageChargesSchema } from "./migrations/108_pi_usage_charges.js";
 import { modePostureCoexistSchema } from "./migrations/109_mode_posture_coexist.js";
+import { workflowInstanceScopeSchema } from "./migrations/110_workflow_instance_scope.js";
+import { queueTransitionsTsQitemSchema } from "./migrations/112_queue_transitions_ts_qitem.js";
+import { appliedLaunchDaemonOptOutSchema } from "./migrations/113_applied_launch_daemon_opt_out.js";
+import { sessionAgentAppSchema as sessionCommunityHarnessSchema } from "./migrations/114_session_agent_app.js";
+import { threadSeatMapChannelKeySchema } from "./migrations/115_thread_seat_map_channel_key.js";
+import { nodeLaunchRecipeSchema } from "./migrations/136_node_launch_recipe.js";
+import { queueItemWakeInputBoxSchema } from "./migrations/116_queue_item_wake_input_box.js";
+import { providerAccountReadingsSchema } from "./migrations/117_provider_account_readings.js";
+import { humanQuietWindowsSchema } from "./migrations/118_human_quiet_windows.js";
+import { seatIdentityPanePidSchema } from "./migrations/119_seat_identity_pane_pid.js";
+import { rigStartupLayersSchema } from "./migrations/121_rig_startup_layers.js";
+import { humanOperatingModesSchema } from "./migrations/122_human_operating_modes.js";
+import { queueDelegatedDecisionSchema } from "./migrations/123_queue_delegated_decision.js";
+import { contextUsageWatchdogUnitsSchema } from "./migrations/124_context_usage_watchdog_units.js";
+import { nodeAdvisorSchema } from "./migrations/125_node_advisor.js";
+import { operationCorrelationSchema } from "./migrations/127_operation_correlation.js";
 
 /** Ordered migrations; numbers may be reserved by independent changes. */
 
@@ -212,6 +241,7 @@ export const ALL_MIGRATIONS: Migration[] = [
   threadPartMapSchema,
   queueTransitionsQitemIdOrderSchema,
   queueItemsRecoveryTagsSchema,
+  typingGuardModesSchema,
   resumeRotationSchema,
   sessionStopIntentSchema,
   nodeEffortChoiceSchema,
@@ -219,4 +249,32 @@ export const ALL_MIGRATIONS: Migration[] = [
   piUsageEntriesSchema,
   piUsageChargesSchema,
   modePostureCoexistSchema,
+  workflowInstanceScopeSchema,
+  seatEnvSchema,
+  queueTransitionsTsQitemSchema,
+  appliedLaunchDaemonOptOutSchema,
+  sessionCommunityHarnessSchema,
+  threadSeatMapChannelKeySchema,
+  queueItemWakeInputBoxSchema,
+  providerAccountReadingsSchema,
+  humanQuietWindowsSchema,
+  seatIdentityPanePidSchema,
+  rigStartupLayersSchema,
+  humanOperatingModesSchema,
+  queueDelegatedDecisionSchema,
+  contextUsageWatchdogUnitsSchema,
+  nodeAdvisorSchema,
+  operationCorrelationSchema,
+  terminalPolicySchema,
+  streamDispositionsSchema,
+  streamSubscriptionsSchema,
+  streamRetentionFloorSchema,
+  seatRuntimeSwitchesSchema,
+  streamReaderActionsSchema,
+  claudeTokenReadingsSchema,
+  seatIdentityProcessEvidenceSchema,
+  nodeLaunchRecipeSchema,
+  nodeClaudeTokenRefSchema,
+  nodeClaudePermissionsSchema,
+  nodeCodexPermissionsSchema,
 ];

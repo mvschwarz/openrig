@@ -18,6 +18,11 @@ import { RigRepository as RigRepoClass } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { createApp } from "../src/server.js";
 import type { ExecFn } from "../src/adapters/tmux.js";
+import fs from "node:fs";
+import nodePath from "node:path";
+import os from "node:os";
+import { seatSkillPaths } from "../src/domain/seat-skill-storage.js";
+import { prepareSeatLaunchAdditions } from "../src/domain/seat-launch-additions.js";
 
 const VALID_YAML = `
 schema_version: 1
@@ -102,6 +107,51 @@ describe("Rigspec export routes", () => {
     const parsed = PodRigSpecCodec.parse(await res.text());
     expect(PodRigSpecSchema.validate(parsed).valid).toBe(true);
     expect(PodRigSpecSchema.normalize(parsed as Record<string, unknown>).workspace).toEqual(workspace);
+  });
+
+  it("names each seat whose launch additions the export doesn't carry (OPR.0.7.0.9)", async () => {
+    const home = fs.mkdtempSync(nodePath.join(os.tmpdir(), "export-additions-"));
+    const saved = process.env["OPENRIG_HOME"];
+    try {
+      process.env["OPENRIG_HOME"] = home;
+      const rig = rigRepo.createRig("r99");
+      rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+      rigRepo.addNode(rig.id, "dev.plain", { runtime: "claude-code" });
+      const prompt = nodePath.join(home, "house.md");
+      fs.writeFileSync(prompt, "House rules.\n");
+      expect(prepareSeatLaunchAdditions(seatSkillPaths({ rigId: rig.id, logicalId: "dev.impl", runtime: "claude-code" }), { appendSystemPromptFile: prompt }).ok).toBe(true);
+      const text = await (await app.request(`/api/rigs/${rig.id}/spec`)).text();
+      expect(text).toContain("# Not carried: dev.impl's launch additions");
+      expect(text).not.toContain("dev.plain's launch additions");
+    } finally {
+      if (saved === undefined) delete process.env["OPENRIG_HOME"]; else process.env["OPENRIG_HOME"] = saved;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("GET /api/rigs/:rigId/spec encodes non-ASCII X-Rig-Root header safely", async () => {
+    const rig = rigRepo.createRig("non-ascii-rig");
+    const pod = new PodRepository(db).createPod(rig.id, "dev", "Dev");
+    rigRepo.addNode(rig.id, "dev.worker", {
+      runtime: "claude-code",
+      podId: pod.id,
+      agentRef: "local:agents/worker",
+      profile: "default",
+      cwd: "/workspace/app",
+    });
+    rigRepo.setRigStartupLayers(rig.id, {
+      root: "/fixtures/项目/team",
+      cultureFile: "culture.md",
+      startup: {
+        files: [{ kind: "file", path: "start.md", orientation: "role", deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start"] }],
+        actions: [],
+      },
+    });
+
+    const res = await app.request(`/api/rigs/${rig.id}/spec`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-rig-root")).toBe(encodeURIComponent("/fixtures/项目/team"));
+    expect(decodeURIComponent(res.headers.get("x-rig-root")!)).toBe("/fixtures/项目/team");
   });
 
   it("GET nonexistent rig -> 404", async () => {

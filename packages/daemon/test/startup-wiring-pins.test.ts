@@ -13,14 +13,18 @@
 // its todo graduates to a real pin.
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import fs from "node:fs";
+import { execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { createDaemon } from "../src/startup.js";
+import { seatRuntimeDir } from "../src/domain/seat-runtime-dir.js";
 import type { AppDeps } from "../src/server.js";
 import type { CmuxTransportFactory } from "../src/terminal/cmux-transport.js";
 import type { ExecFn } from "../src/domain/tmux-adapter.js";
 import type Database from "better-sqlite3";
 import type { ContextMonitor } from "../src/domain/context-monitor.js";
+import type { TmuxAdapter } from "../src/adapters/tmux.js";
+import { getActiveRotationCount, startTranscriptRotation, stopTranscriptRotation } from "../src/domain/transcript-rotation.js";
 
 let db: Database.Database;
 let deps: AppDeps;
@@ -31,11 +35,12 @@ const savedEnv: Record<string, string | undefined> = {};
 beforeAll(async () => {
   // D15 isolation: the composition writes real state — anchor it in scratch.
   scratch = fs.mkdtempSync(path.join(os.tmpdir(), "p16-wiring-"));
-  for (const k of ["OPENRIG_HOME", "OPENRIG_DB", "OPENRIG_URL", "OPENRIG_PORT", "OPENRIG_NO_KERNEL"]) {
+  for (const k of ["OPENRIG_HOME", "OPENRIG_DB", "OPENRIG_URL", "OPENRIG_PORT", "OPENRIG_NO_KERNEL", "TMUX_TMPDIR"]) {
     savedEnv[k] = process.env[k];
   }
   process.env.OPENRIG_HOME = path.join(scratch, "home");
-  process.env.OPENRIG_DB = path.join(scratch, "wiring.sqlite");
+  process.env.OPENRIG_DB = path.join(scratch, "stale.sqlite");
+  process.env.TMUX_TMPDIR = path.join(scratch, "tmux");
   delete process.env.OPENRIG_URL;
   delete process.env.OPENRIG_PORT;
   process.env.OPENRIG_NO_KERNEL = "1";
@@ -43,10 +48,9 @@ beforeAll(async () => {
     throw Object.assign(new Error("no socket"), { code: "ENOENT" });
   };
   const tmuxExec: ExecFn = async () => "";
-  // production passes the RESOLVED file dbPath (index.ts) — :memory: is the
-  // test-friendly default that deliberately skips the slow-op recorder; the
-  // wiring pin must compose like production.
-  const result = await createDaemon({ cmuxFactory, tmuxExec, dbPath: process.env.OPENRIG_DB! });
+  // A file DB composes the slow-op recorder that :memory: deliberately skips.
+  // A relative selection must still reach seats whose cwd differs from the daemon.
+  const result = await createDaemon({ cmuxFactory, tmuxExec, dbPath: path.relative(process.cwd(), path.join(scratch, "selected.sqlite")) });
   db = result.db;
   deps = result.deps;
   contextMonitor = result.contextMonitor;
@@ -86,6 +90,24 @@ describe("P16 — AppDeps members with safety semantics are composed (definednes
 });
 
 describe("P16 — domain-internal safety injections (the recurred class, pinned at the wire)", () => {
+  it("new seats receive the daemon's runtime directory default (#2030)", () => {
+    expect(deps.tmuxAdapter.launchEnvironment!()).toHaveProperty("runtimeDir", seatRuntimeDir(process.env));
+  });
+  it("new seats receive the selected database and configured tmux directory, not a stale DB override", () => {
+    const env = deps.tmuxAdapter.launchEnvironment!().env;
+    expect(env.OPENRIG_DB).toBe(path.resolve(db.name));
+    expect(env.OPENRIG_DB).not.toBe(process.env.OPENRIG_DB);
+    expect(env.TMUX_TMPDIR).toBe(process.env.TMUX_TMPDIR);
+    const selected = priv<Record<string, string>>(deps.nodeLauncher, "sessionEnv");
+    expect(selected.OPENRIG_DB).toBe(path.resolve(db.name));
+    expect(selected.TMUX_TMPDIR).toBe(process.env.TMUX_TMPDIR);
+    const seatCwd = path.join(scratch, "seat"); fs.mkdirSync(seatCwd);
+    const fromSeat = execFileSync(process.execPath, ["-e", "process.stdout.write(require('node:fs').realpathSync(process.env.OPENRIG_DB))"], {
+      cwd: seatCwd, env: { ...process.env, ...selected }, encoding: "utf8",
+    });
+    expect(fromSeat).toBe(fs.realpathSync(db.name));
+  });
+
   it("QueueRepository.validateRig is the topology gate, not the permissive default (recurrence #1)", async () => {
     // behavioral probe through the composed object: an unknown-rig destination must refuse.
     await expect(
@@ -121,6 +143,22 @@ describe("P16 — domain-internal safety injections (the recurred class, pinned 
 
   it("QueueRepository transport is attached post-construction (the wake path)", () => {
     expect(priv(deps.queueRepo, "transport")).toBeTruthy();
+  });
+
+  it("a session's end stops its transcript capture (the rotation is subscribed to session events)", () => {
+    const capture = { capturePaneContent: async () => "" } as unknown as TmuxAdapter;
+    const names = ["stopped@wiring-pin", "removed@wiring-pin", "cleaned@wiring-pin"];
+    try {
+      for (const name of names) startTranscriptRotation(capture, name, path.join(scratch, `${name}.log`), { lines: 1, pollIntervalMs: 60_000 });
+      const before = getActiveRotationCount();
+      deps.eventBus.emit({ type: "session.stopped", rigId: "r", nodeId: "n1", sessionName: names[0]!, reason: "pin", operator: null });
+      deps.eventBus.emit({ type: "session.detached", rigId: "r", nodeId: "n2", sessionName: names[1]! });
+      deps.eventBus.emit({ type: "session.cleaned", rigId: "r", nodeId: "n3", sessionName: names[2]!, reason: "pin", operator: null,
+        actions: { sessionsExited: [names[2]!], bindingCleared: true } });
+      expect(getActiveRotationCount()).toBe(before - names.length);
+    } finally {
+      for (const name of names) stopTranscriptRotation(name);
+    }
   });
 });
 

@@ -13,7 +13,7 @@ interface Check {
 
 /** Advisory filesystem reads only. No daemon, bundler, preflight, provider or launch. */
 export async function checkBundleFolder(folder: string) {
-  const { validateRigSpecImport, validateAgentSpecFromYaml, isSensitivePath } = await import("@openrig/daemon/spec-validation");
+  const { validateRigSpecImport, validateAgentSpecFromYaml, isSensitivePath, isHarnessLoginPath, harnessLoginMessage } = await import("@openrig/daemon/spec-validation");
   const checks: Check[] = [];
   const add = (ruleId: string, status: Check["status"], reason: string, file?: string) => checks.push({ ruleId, status, reason, ...(file ? { path: file } : {}) });
   const result = { standardVersion: "openrig.bundle-standard/v1", checks };
@@ -42,10 +42,17 @@ export async function checkBundleFolder(folder: string) {
     const rel = path.relative(root, file);
     return rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
   };
-  const fileRead = (relative: string, base = root): string | null => {
+  const fileRead = (relative: string, base = root, expected: "file" | "directory" | "either" = "file"): string | null => {
     try {
       const full = fs.realpathSync(path.resolve(base, relative));
       if (!within(full)) throw new Error();
+      const kind = fs.statSync(full);
+      if (expected === "directory" ? !kind.isDirectory() : expected === "file" ? !kind.isFile() : !kind.isFile() && !kind.isDirectory()) {
+        const actual = kind.isDirectory() ? "a directory" : kind.isFile() ? "a file" : "a special file";
+        const wanted = expected === "either" ? "a file or directory" : `a ${expected}`;
+        add("referenced_files", "finding", `Declared file is ${actual}, expected ${wanted}.`, path.relative(root, path.resolve(base, relative)));
+        return null;
+      }
       fs.accessSync(full, fs.constants.R_OK);
       return full;
     } catch { add("referenced_files", "finding", "Declared file is missing, unreadable or outside the bundle folder.", path.relative(root, path.resolve(base, relative))); return null; }
@@ -78,7 +85,7 @@ export async function checkBundleFolder(folder: string) {
     if (typeof ref !== "string" || !ref.startsWith("local:") || path.isAbsolute(ref.slice(6))) {
       agentFindings++; add("portable_agents", "finding", "Agent refs and imports must be local paths inside this bundle folder."); return;
     }
-    const dir = fileRead(ref.slice(6), from);
+    const dir = fileRead(ref.slice(6), from, "directory");
     if (!dir) { agentFindings++; return; }
     if (visited.has(dir)) return;
     visited.add(dir);
@@ -94,8 +101,9 @@ export async function checkBundleFolder(folder: string) {
       for (const entries of Object.values(a.resources ?? {})) {
         if (!Array.isArray(entries)) continue;
         for (const entry of entries as Array<{ path?: string; source?: { kind?: string; path?: string } }>) {
-          if (typeof entry.path === "string") fileRead(entry.path, dir);
-          else if (entry.source?.kind === "local" && typeof entry.source.path === "string") fileRead(entry.source.path, dir);
+          if (typeof entry.path === "string") fileRead(entry.path, dir, "either");
+          // openrig-home: resolves under the installing daemon's OpenRig home (agent-spec "Plugin paths"), not in this folder.
+          else if (entry.source?.kind === "local" && typeof entry.source.path === "string" && !entry.source.path.startsWith("openrig-home:")) fileRead(entry.source.path, dir, "either");
           else if (entry.source) add("host_resources", "not_checked", "Host-resolved plugin/resource availability is checked at launch, not by this author check.", path.relative(root, dir));
         }
       }
@@ -126,7 +134,7 @@ export async function checkBundleFolder(folder: string) {
         const file = path.join(dir, entry.name);
         if (entry.isSymbolicLink()) { add("credential_paths", "not_checked", "Symlink content was not scanned.", path.relative(root, file)); continue; }
         if (entry.isDirectory()) walk(file);
-        else if (isSensitivePath(path.relative(root, file))) { sensitive++; add("credential_paths", "finding", "Known sensitive filename; exclude credentials from the published folder.", path.relative(root, file)); }
+        else if (isSensitivePath(path.relative(root, file))) { sensitive++; add("credential_paths", "finding", isHarnessLoginPath(path.relative(root, file)) ? harnessLoginMessage(path.relative(root, file)) : "Known sensitive filename; exclude credentials from the published folder.", path.relative(root, file)); }
       }
     };
     walk(root);

@@ -119,6 +119,15 @@ describe("C1 header parsing", () => {
     expect(invalid.artifactType).toBeNull();
   });
 
+  it("reads a CRLF header like its LF twin (a Windows-saved proof drop keeps its verdict)", () => {
+    const lf = "---\nslice: s-20\ncandidate_sha: abc123\nartifact_type: qa\nverdict: PASS\nevidences:\n  - 1\n---\n\n![shot](drawer-right.png)\n";
+    const crlf = parseC1Header(lf.replace(/\n/g, "\r\n"), "proof/qa.md", NOW);
+    expect(crlf).toEqual(parseC1Header(lf, "proof/qa.md", NOW));
+    expect(crlf.verdict).toBe("PASS");
+    expect(crlf.evidences).toEqual(["1"]);
+    expect(crlf.mediaRefs).toEqual(["drawer-right.png"]);
+  });
+
   it("captures body media refs (markdown images + video tags), excluding http", () => {
     const a = parseC1Header(
       '---\nartifact_type: qa\nverdict: PASS\n---\n\n![shot](drawer-right.png)\n<video src="playing.webm"></video>\n![ext](https://x/y.png)\n',

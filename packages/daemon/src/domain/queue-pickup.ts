@@ -12,6 +12,9 @@
 // derived separately. A CLOSED row is terminal: the stall timer answers "is a
 // claimant holding this obligation", and no obligation survives closure — a
 // done item must never contradict its own waiting.state with stalled-after-claim.
+// A claimed row whose owner reports outstanding input reads needs-input, with the reason, but the
+// input signal can outlive its prompt, so the stall that would otherwise be read rides along as
+// `stall` and recovery acts on it exactly as on stalled-after-claim.
 // Legacy callers without timestamps retain count semantics.
 // Queue-row last_heartbeat is formally superseded (2026-08-30, S24 F-14); readers remain
 // null-tolerant. Wiring reopens only for the 0.5.7 mechanized-pull turn-end hook that knows the in-flight row,
@@ -23,9 +26,11 @@ export const PICKUP_STALL_THRESHOLD_KEY = "queue.pickup_stall_threshold_minutes"
 export const DEFAULT_PICKUP_STALL_THRESHOLD_MINUTES = 3;
 
 export interface PickupReceipt {
-  state: "unclaimed" | "working" | "stalled-after-claim" | "parked" | "terminal";
-  /** Present iff stalled or terminal: the named evidence replacing the manual cross-surface join. */
+  state: "unclaimed" | "working" | "needs-input" | "stalled-after-claim" | "parked" | "terminal";
+  /** Present when waiting for input, stalled or terminal: the named evidence replacing the manual cross-surface join. */
   evidence?: string;
+  /** needs-input only: the stall evidence this claim would read without the input wait. */
+  stall?: string;
 }
 
 /** The closed states. The waiting view already reports every state outside
@@ -55,6 +60,7 @@ export interface PickupFacts {
   lastMeaningfulAt?: string;
   activity?: string;
   needsInput?: number;
+  needsInputReason?: string | null;
   now?: Date;
   thresholdMinutes?: number;
 }
@@ -62,6 +68,18 @@ export interface PickupFacts {
 /** The ONE derivation rule — every projection surface (rowToItem, the pickup view lens, the
  *  S02 finding input) calls this same function, so the rule cannot drift between surfaces. */
 export function derivePickup(facts: PickupFacts): PickupReceipt {
+  const receipt = deriveClaimPickup(facts);
+  if (!facts.claimedAt || (facts.needsInput ?? 0) <= 0 || !["working", "stalled-after-claim"].includes(receipt.state)) return receipt;
+  return {
+    state: "needs-input",
+    evidence: facts.needsInputReason === "permission_request_unverified"
+      ? "owner may need input (not verified: permission_request_unverified)"
+      : facts.needsInputReason ? `owner needs input: ${facts.needsInputReason}` : "owner needs input",
+    ...(receipt.state === "stalled-after-claim" ? { stall: receipt.evidence } : {}),
+  };
+}
+
+function deriveClaimPickup(facts: PickupFacts): PickupReceipt {
   if (facts.state === "blocked") return { state: "parked" };
   if ((CLOSED_PICKUP_STATES as readonly string[]).includes(facts.state)) {
     return { state: "terminal", evidence: `closed (${facts.state})` };
@@ -105,11 +123,13 @@ export function stalledPickupFinding(item: {
   destinationSession?: string | null;
   pickup?: PickupReceipt;
 }): StalledPickupFinding | null {
-  if (item.pickup?.state !== "stalled-after-claim") return null;
+  const pickup = item.pickup;
+  const stall = pickup?.state === "stalled-after-claim" ? pickup.evidence ?? "" : pickup?.state === "needs-input" ? pickup.stall : undefined;
+  if (stall === undefined) return null;
   return {
     kind: "stalled-after-claim",
     target: item.destinationSession ?? "",
     qitemId: item.qitemId,
-    evidence: item.pickup.evidence ?? "",
+    evidence: pickup!.state === "needs-input" ? `${stall}; ${pickup!.evidence}` : stall,
   };
 }

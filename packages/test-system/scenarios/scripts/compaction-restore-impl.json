@@ -1,0 +1,8 @@
+{
+  "steps": [
+    { "kind": "say", "text": "[impl] marathon turn under way — work, then a compaction round-trip" },
+    { "kind": "emit", "behavior": "compaction" },
+    { "kind": "emit", "behavior": "restore" },
+    { "kind": "say", "text": "[impl] restored — the conveyor role rides the injected directive" }
+  ]
+}

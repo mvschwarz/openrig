@@ -85,14 +85,16 @@ function readFrontmatter(filePath: string): {
   frontmatter_parse_error: string | null;
 } {
   const raw = readFileSync(filePath, "utf-8");
-  if (!raw.startsWith(FRONTMATTER_OPEN)) {
+  // Accept CRLF files and a closing `---` at end of file, like frontmatter-validator.
+  const text = raw.replace(/\r\n/g, "\n");
+  if (!text.startsWith(FRONTMATTER_OPEN)) {
     return { raw, frontmatter: {}, frontmatter_parse_error: null };
   }
-  const endIdx = raw.indexOf("\n---\n", FRONTMATTER_OPEN.length);
-  if (endIdx === -1) {
+  const close = /\n---(?:\n|$)/.exec(text.slice(FRONTMATTER_OPEN.length - 1));
+  if (!close) {
     return { raw, frontmatter: {}, frontmatter_parse_error: null };
   }
-  const block = raw.slice(FRONTMATTER_OPEN.length, endIdx);
+  const block = text.slice(FRONTMATTER_OPEN.length, FRONTMATTER_OPEN.length - 1 + close.index);
   let parsed: unknown;
   try {
     parsed = parseYaml(block);
@@ -178,10 +180,9 @@ function statusFromFrontmatter(fm: Record<string, unknown>): string | null {
 export async function scanArtifactPools(
   pools: ArtifactPoolSpec | ArtifactPoolSpec[] | undefined,
 ): Promise<ScannedArtifact[]> {
+  const problem = artifactPoolListProblem(pools);
+  if (problem) throw new Error(problem);
   const expanded = expandPools(pools);
-  if (expanded.length === 0) {
-    throw new Error("artifact pool policy: context pool list is required");
-  }
   const out: ScannedArtifact[] = [];
   for (const pool of expanded) {
     if (!pool.path) {
@@ -221,11 +222,16 @@ export async function scanArtifactPools(
   return out.sort((a, b) => a.path.localeCompare(b.path));
 }
 
+/** Why `scanArtifactPools` refuses these pools before scanning any, or null. A job update checks a new spec with this too. */
+export function artifactPoolListProblem(pools: ArtifactPoolSpec | ArtifactPoolSpec[] | undefined): string | null {
+  return expandPools(pools).length === 0 ? "artifact pool policy: context pool list is required" : null;
+}
+
 /**
  * Expand the convenience input shape (single object, array of objects,
  * or `paths: [...]` shorthand) into a flat array of single-path pools.
  */
-function expandPools(
+export function expandPools(
   pools: ArtifactPoolSpec | ArtifactPoolSpec[] | undefined,
 ): ArtifactPoolSpec[] {
   if (!pools) return [];

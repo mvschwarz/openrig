@@ -13,6 +13,8 @@ import { Command } from "commander";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
+import { renderCaughtTransportError } from "../cli-error.js";
+import { resolveRigHandle } from "../rig-handle.js";
 import type { StatusDeps } from "./status.js";
 
 interface ForkResponse {
@@ -27,13 +29,16 @@ interface ForkResponse {
     warnings?: string[];
   };
   image?: { id: string; name: string; version: string; pinned: boolean };
+  /** OPR.0.7.0.9: whether the source seat's launch additions were carried into the fork, and why not if they weren't. */
+  launchAdditions?: "carried" | "partial" | "not_carried";
+  launchAdditionsNote?: string;
 }
 
 export function forkCommand(depsOverride?: StatusDeps): Command {
   const cmd = new Command("fork")
     .description("Fork a live seat's context into a new seat (composes the shipped agent-image fork path)")
     .argument("<source-session>", "Source session canonical name (e.g., dev-impl@openrig-delivery)")
-    .requiredOption("--rig <rig-id>", "Target rig id")
+    .requiredOption("--rig <rig>", "Target rig name or id")
     .requiredOption("--pod <pod-namespace>", "Target existing pod namespace")
     .requiredOption("--member <member-id>", "New member id for the forked successor")
     .option("--keep-image", "Also capture a durable, pinned agent image (default forks one-shot with no library growth)")
@@ -64,10 +69,18 @@ Examples:
         const status = await getDaemonStatus(deps.lifecycleDeps);
         if (!daemonStatusGuard(status)) return;
         const client = deps.clientFactory(getDaemonUrl(status));
+        const resolution = await resolveRigHandle(client, opts.rig);
+        if (resolution.kind === "ambiguous") {
+          const msg = `'${opts.rig}' matches ${resolution.ids.length} rigs. Refusing to fork: an ambiguous name could act on the wrong rig. Re-run with the specific id: ${resolution.ids.join(", ")}`;
+          if (opts.json) console.log(JSON.stringify({ ok: false, code: "rig_ambiguous", message: msg, candidates: resolution.ids }, null, 2));
+          else console.error(msg);
+          process.exitCode = 1;
+          return;
+        }
 
         const body: Record<string, unknown> = {
           sourceSession,
-          rigId: opts.rig,
+          rigId: resolution.kind === "resolved" ? resolution.id : opts.rig,
           pod: opts.pod,
           member: opts.member,
         };
@@ -103,6 +116,9 @@ Examples:
         console.log(`Forked ${sourceSession} into rig ${opts.rig}`);
         console.log(`  Pod: ${data.result?.podNamespace ?? opts.pod}`);
         console.log(`  New seat: [${icon}] ${node?.logicalId ?? opts.member}${session}${error}`);
+        if (data.launchAdditions === "carried") console.log("  Launch additions: carried from the source seat");
+        if (data.launchAdditions === "partial") console.log("  Launch additions: partly carried from the source seat");
+        if (data.launchAdditionsNote) console.log(`  Warning: ${data.launchAdditionsNote}`);
         if (data.image) {
           console.log(`  Kept image: ${data.image.name} v${data.image.version} (pinned, protected from prune)`);
         } else {
@@ -112,7 +128,7 @@ Examples:
 
         if (node && node.status !== "launched") process.exitCode = 1;
       } catch (err) {
-        console.error((err as Error).message);
+        if (!renderCaughtTransportError(err, opts.json ?? false)) console.error((err as Error).message);
         process.exitCode = 1;
       }
     });

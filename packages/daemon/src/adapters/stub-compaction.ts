@@ -28,6 +28,7 @@ export interface FireCompactionOpts {
   /** An explicit JSONL transcript for deterministic packet generation (optional; absent
    *  falls back to the hook's own latest-transcript discovery). */
   transcriptPath?: string;
+  customInstructions?: string;
   /** Deterministic clock injection (an ISO instant) forwarded to the seam's stamps. */
   injectClockNow?: string;
 }
@@ -61,6 +62,7 @@ export function fireCompaction(opts: FireCompactionOpts): CompactionResult {
 
   const hookInput: Record<string, unknown> = { cwd: opts.cwd };
   if (opts.transcriptPath) hookInput.transcript_path = opts.transcriptPath;
+  if (opts.customInstructions) hookInput.custom_instructions = opts.customInstructions;
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,

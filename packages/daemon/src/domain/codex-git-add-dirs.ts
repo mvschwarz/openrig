@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs";
 import nodePath from "node:path";
 
-/** The git metadata directories a Codex workspace-write seat may write, for its fresh-launch `--add-dir`s. */
+/** The git metadata directories a Codex workspace-write seat may write, for the `--add-dir`s of its fresh, resume and fork launches. */
 export type CodexGitAddDirResolver = (cwd: string) => Promise<string[]>;
 
 const GIT_TIMEOUT_MS = 5000;

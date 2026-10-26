@@ -2,9 +2,9 @@
 // the operator's terminal-provider-ride entry). Three subcommands, all hitting
 // the ONE canonical daemon composer (`/api/terminal/...`):
 //
-//   rig terminal open <view> [--provider herdr|cmux] [--json]
+//   rig terminal open <view> [--provider herdr|cmux|rex] [--json]
 //   rig terminal views [--json]
-//   rig terminal status [--provider herdr|cmux] [--json]
+//   rig terminal status [--provider herdr|cmux|rex] [--json]
 //
 // `<view>` resolves daemon-side: a rig name (per-rig derived) | `mission:<id>` |
 // `slice:<id>` (derived) | a saved-view id. The result is the ONE shared
@@ -28,6 +28,7 @@ export interface TerminalDeps extends StatusDeps { windowDeps?: WindowDeps }
 /** The one shared open-result shape (mirrors the daemon `OpenViewResult`). */
 export interface OpenViewResult {
   provider: string;
+  session?: string;
   ok: boolean;
   opened: string[];
   absent: { seat: string; host: string | null; reason: string }[];
@@ -37,6 +38,7 @@ export interface OpenViewResult {
   code?: string;
   notes?: string[];
   window?: { app: string; surface: string };
+  space?: { id: string; label: string };
   reusedWorkspace?: { id: string; tabId: string; view: string };
   /** On window failures, false means no desktop launch was attempted. */
   windowAttempted?: boolean;
@@ -66,16 +68,18 @@ function printResult(json: boolean, body: unknown, status: number): void {
 function humanOpen(r: OpenViewResult): string {
   const lines: string[] = [];
   const tiled = r.opened.length;
+  const target = r.session === undefined ? r.provider : `${r.provider} session ${JSON.stringify(r.session)}`;
   lines.push(
     r.code === "terminal_window_failed" && r.error
       ? r.error
       : r.ok && r.reusedWorkspace
-        ? `Terminal window requested. Reused herdr workspace ${r.reusedWorkspace.id} for view ${JSON.stringify(r.reusedWorkspace.view)}.`
+        ? `Terminal window requested. Reused ${target} workspace ${r.reusedWorkspace.id} for view ${JSON.stringify(r.reusedWorkspace.view)}.`
         : tiled > 0
-          ? `${r.window ? "Terminal window requested. " : ""}Prepared ${tiled} tile(s) in ${r.provider}${r.pages > 1 ? ` across ${r.pages} page(s)` : ""}.`
-          : `No tiles opened in ${r.provider}.`,
+          ? `${r.window ? "Terminal window requested. " : ""}Prepared ${tiled} tile(s) in ${target}${r.pages > 1 ? ` across ${r.pages} page(s)` : ""}.`
+          : `No tiles opened in ${target}.`,
   );
   if (r.window) lines.push(`  Terminal: ${r.window.app} (${r.window.surface}).`);
+  if (r.space) lines.push(`  ${r.provider} session: ${JSON.stringify(r.space.label)} (${r.space.id}).`);
   if (r.error && r.code !== "terminal_window_failed") lines.push(`  provider: ${r.error}${r.code ? ` (${r.code})` : ""}`);
   for (const seat of r.opened) lines.push(`  ● ${seat}`);
   for (const a of r.absent) lines.push(`  ○ ${a.seat} — absent: ${a.reason}`);
@@ -99,7 +103,7 @@ function printOpen(json: boolean, r: OpenViewResult, status: number): void {
 export function terminalCommand(depsOverride?: TerminalDeps): Command {
   const cmd = new Command("terminal").description(
     "Open the OpenRig view and agent conversations in terminal tiles",
-  ).addHelpText("after", "\nThe OpenRig TUI and operator (after install, and whenever the person wants their agents):\n  rig terminal open saved:kernel --window\n  Opens the window itself on the daemon's desktop; an agent can run it from its shell.\n  Uses herdr when installed, otherwise the same layout in plain tmux.\n  Herdr needs a terminal the person can see; TUI navigation does not open one.\n  Over headless SSH, give the exact connection/attach command for a new terminal/tab.\n  Only if the window cannot open: rig tui --shared is the dashboard-only fallback.\n  On a desktop, the agent opens the view; it does not finish by printing a command to copy.\n");
+  ).addHelpText("after", "\nThe OpenRig TUI and operator (after install, and whenever the person wants their agents):\n  rig terminal open saved:kernel --window\n  Opens the window itself on the daemon's desktop; an agent can run it from its shell.\n  Inside Rex it opens a Rex session and shows it in the Rex app; otherwise it uses herdr when installed, else the same layout in plain tmux.\n  Herdr needs a terminal the person can see; TUI navigation does not open one.\n  Over headless SSH, give the exact connection/attach command for a new terminal/tab.\n  Only if the window cannot open: rig tui --shared is the dashboard-only fallback.\n  On a desktop, the agent opens the view; it does not finish by printing a command to copy.\n");
 
   const getDeps = (): TerminalDeps =>
     depsOverride ?? {
@@ -111,22 +115,39 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
     .command("open")
     .argument("<view>", "a rig name, mission:<id>, slice:<id>, or a saved-view id")
     .description("Open a desktop terminal showing the view's live agents as interactive tiles")
-    .option("--provider <name>", "herdr or cmux: use an existing workspace without opening a window; tmux requires --window")
+    .option("--provider <name>", "herdr, cmux or rex: open in the running provider without a desktop window; each open adds a new workspace (inside Herdr, --window reuses a matching one); tmux requires --window. Inside Rex, the default opens in Rex")
+    .option("--session <name>", "Herdr session on the daemon's host; --session default selects Herdr's default session")
     .option("--window", "Open a new desktop terminal tab/window (the default when --provider is omitted)")
     .option("--expected-plan <id>", "Open only if the view still matches this preview")
     .option("--json", "JSON output for agents")
-    .action(async (view: string, opts: { provider?: string; json?: boolean; window?: boolean; expectedPlan?: string }) => {
+    .action(async (view: string, opts: { provider?: string; session?: string; json?: boolean; window?: boolean; expectedPlan?: string }) => {
       const deps = getDeps();
+      const session = opts.session?.trim();
       await withClient(deps, async (client) => {
         // Herdr's control socket can answer with no desktop client attached.
         // The default requests a desktop; an explicit provider reuses its workspace.
         if (opts.window || !opts.provider) {
-          const result = await openTerminalWindow(client, view, opts.provider, deps.windowDeps, opts.expectedPlan);
+          const result = await openTerminalWindow(client, view, opts.provider, deps.windowDeps, opts.expectedPlan, session);
           printOpen(opts.json ?? false, result, 200);
           return;
         }
-        const body = { view, ...(opts.provider ? { provider: opts.provider } : {}), ...(opts.expectedPlan !== undefined ? { expectedPlan: opts.expectedPlan } : {}) };
+        let expectedPlan = opts.expectedPlan;
+        if (session !== undefined) {
+          const preview = await client.get<{ session?: string; planId?: string; error?: string }>(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=${encodeURIComponent(opts.provider)}&session=${encodeURIComponent(session)}`);
+          if (preview.status >= 400 || preview.data.session !== session || typeof preview.data.planId !== "string") {
+            printResult(opts.json ?? false, { error: preview.data.error ?? "The daemon did not confirm the requested Herdr session. Update the daemon before opening a named session.", code: "terminal_session_unconfirmed" }, preview.status >= 400 ? preview.status : 409); return;
+          }
+          if (expectedPlan !== undefined && expectedPlan !== preview.data.planId) {
+            printResult(opts.json ?? false, { error: "The view or provider session changed since preview. Refresh the preview before opening.", code: "preview_changed" }, 409); return;
+          }
+          expectedPlan = preview.data.planId;
+        }
+        const body = { view, ...(opts.provider ? { provider: opts.provider } : {}), ...(session !== undefined ? { session } : {}), ...(expectedPlan !== undefined ? { expectedPlan } : {}) };
         const res = await client.post<OpenViewResult>("/api/terminal/open", body, { timeoutMs: TERMINAL_OPEN_TIMEOUT_MS });
+        if (session !== undefined && res.status < 400 && res.data?.session !== session) {
+          printResult(opts.json ?? false, { ...res.data, ok: false, code: "terminal_session_unconfirmed",
+            error: "The open response did not confirm the requested Herdr session. Its outcome is unknown; inspect that session before retrying." }, 409); return;
+        }
         if (!Array.isArray(res.data?.opened)) {
           printResult(opts.json ?? false, res.data, res.status);
           return;
@@ -150,15 +171,21 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
   cmd
     .command("status")
     .description("Show terminal provider availability + liveness (doctor)")
-    .option("--provider <name>", "restrict to one provider (herdr / cmux)")
+    .option("--provider <name>", "restrict to one provider (herdr / cmux / rex)")
+    .option("--session <name>", "Inspect a named Herdr session on the daemon's host")
     .option("--json", "JSON output for agents")
-    .action(async (opts: { provider?: string; json?: boolean }) => {
+    .action(async (opts: { provider?: string; session?: string; json?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
-        const path = opts.provider
+        let path = opts.provider
           ? `/api/terminal/status?provider=${encodeURIComponent(opts.provider)}`
           : "/api/terminal/status";
-        const res = await client.get<unknown>(path);
+        const session = opts.session?.trim();
+        if (session !== undefined) path += `${opts.provider ? "&" : "?"}session=${encodeURIComponent(session)}`;
+        const res = await client.get<{ session?: string; error?: string }>(path);
+        if (session !== undefined && res.status < 400 && res.data.session !== session) {
+          printResult(opts.json ?? false, { error: "The daemon did not confirm the requested Herdr session. Update the daemon before inspecting a named session.", code: "terminal_session_unconfirmed" }, 409); return;
+        }
         printResult(opts.json ?? false, res.data, res.status);
       });
     });

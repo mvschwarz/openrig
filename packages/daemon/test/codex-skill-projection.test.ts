@@ -24,7 +24,7 @@ if (start < 0 || end < start) throw new Error("Production projection planning bl
 const buildPlan = new Function(
   "planProjection", "claudeConflictTargetPath", "projectionConflictWarnings", "nodePath",
   "input", "configResult", "resolveResult", "projectionManifest", "launchResult", "canonicalSessionName", "adapter",
-  "keptSkillWarnings",
+  "keptSkillWarnings", "claudeSkillTargetRoot", "codexSkillTargetRoot",
   instantiator.slice(start, end) + "\nreturn planResult.plan;",
 );
 
@@ -64,7 +64,8 @@ function fixture(target: "absent" | "identical" | "edited", runtime = "codex", f
     claudeConflictTargetPath, projectionConflictWarnings, nodePath,
     { member: { runtime }, rigId: "fixture", force }, { config }, { collisions: [] },
     { lastHash: (path: string) => path === codexFile ? hashContent(sourceText) : null },
-    { warnings: [] }, "dev-check@fixture", {}, [],
+    // A seat without its own skill storage (OPR.0.7.0.13): its targets stay in the project, as before.
+    { warnings: [] }, "dev-check@fixture", {}, [], undefined, undefined,
   );
   const adapter = new CodexRuntimeAdapter({
     fsOps,

@@ -288,6 +288,33 @@ describe("stream routes", () => {
     await vi.waitFor(() => expect(bus.subscriberCount).toBe(0));
   });
 
+  it.each(["sse", "watch"])("GET /api/stream/%s drains replay arrivals before newer live items", async (route) => {
+    store.emit({ sourceSession: "alice@rig", body: "history" });
+    const list = store.list.bind(store);
+    const duringReplay = vi.spyOn(store, "list").mockImplementationOnce((opts) => {
+      const initial = list(opts);
+      for (let i = 0; i < 20; i++) store.emit({ sourceSession: "alice@rig", body: `pending-${i}` });
+      return initial;
+    });
+    const res = await app.request(`/api/stream/${route}`);
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    const bodies: string[] = [];
+    try {
+      for (let i = 0; i < 22; i++) {
+        const frame = decoder.decode((await reader.read()).value);
+        const data = frame.split("\n").find((line) => line.startsWith("data: "))!;
+        bodies.push((JSON.parse(data.slice(6)) as { body: string }).body);
+        if (i === 1) store.emit({ sourceSession: "alice@rig", body: "new live item" });
+      }
+      expect(bodies).toEqual(["history", ...Array.from({ length: 20 }, (_, i) => `pending-${i}`), "new live item"]);
+    } finally {
+      duringReplay.mockRestore();
+      await reader.cancel();
+    }
+    await vi.waitFor(() => expect(bus.subscriberCount).toBe(0));
+  });
+
   it.each(["sse", "watch"])("GET /api/stream/%s releases its subscription when cancelled during backfill", async (route) => {
     store.emit({ sourceSession: "alice@rig", body: "existing history" });
     const res = await app.request(`/api/stream/${route}`);

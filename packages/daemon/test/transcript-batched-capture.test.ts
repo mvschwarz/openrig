@@ -30,7 +30,10 @@ function fakeTmux() {
       if (fail.serverAfterListing) fail.server = true;
       return [...sessions.keys()].join("\n") + "\n";
     }
-    if (argv[1] === "list-windows") return [...sessions].map(([n, s]) => `1|${s.activity}|${n}`).join("\n") + "\n";
+    if (argv[1] === "list-windows") {
+      const sized = argv[argv.indexOf("-F") + 1]!.includes("window_width");
+      return [...sessions].map(([n, s]) => sized ? `1|${s.activity}|80x24|${n}` : `1|${s.activity}|${n}`).join("\n") + "\n";
+    }
     const cmds: string[][] = [[]];
     for (const a of argv.slice(1)) {
       if (a === ";") cmds.push([]);
@@ -157,9 +160,8 @@ describe("batched transcript capture (#161)", () => {
       }
     }
     for (const n of busy) expect(captureTimes.get(n)).toEqual([2000, 4000, 6000, 8000, 10_000, 12_000, 14_000, 16_000]);
-    // Unchanged output backs the idle seats off to the 3s ceiling (the per-session schedule); the busy rounds in between
-    // do not capture them.
-    for (const n of idle) expect(captureTimes.get(n)).toEqual([2000, 5000, 8000, 11_000, 14_000]);
+    // The idle seats had no output since their first capture: only the full read every 10 s captures them.
+    for (const n of idle) expect(captureTimes.get(n)).toEqual([11_000]);
     expect(getTranscriptCaptureStats().idleSeats).toBe(3);
   });
 

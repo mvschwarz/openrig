@@ -1,9 +1,11 @@
 import fs from "node:fs";
+import { assessLocalDaemonOwner, ForeignLocalDaemonError, type LocalDaemonOwner } from "./local-daemon-owner.js";
+export { ForeignLocalDaemonError } from "./local-daemon-owner.js";
 import path from "node:path";
 import { ConfigStore } from "./config-store.js";
 import { getOpenRigHome, readOpenRigEnv } from "./openrig-compat.js";
 import { fetchWithTimeout, FetchTimeoutError } from "./fetch-with-timeout.js";
-import { readLocalOrigin } from "./local-origin.js";
+import { FETCH_HEADERS_TIMEOUT_MS, nodeHttpFetch } from "./long-request-fetch.js";
 
 export function terminalAuthHeaders(): Record<string, string> {
   const token = resolveTerminalToken();
@@ -13,23 +15,33 @@ export function terminalAuthHeaders(): Record<string, string> {
 /** The header carrying the caller's seat identity, derived ONCE at the transport chokepoint. */
 export const SENDER_IDENTITY_HEADER = "X-OpenRig-Session";
 
+/** The caller's occupant generation (its seat env), read only by a runtime switch's own checks. */
+export const OCCUPANT_GENERATION_HEADER = "X-OpenRig-Occupant-Generation";
+
 /**
  * P18 sender-provenance — derive the caller's identity from the seat ENV (never a request-body
  * claim). Routes that record authorship into the channel of record read ONLY this header, so a
  * buggy/stale caller cannot write false history by fat-fingering or stale-copying a body field.
  * Absent env ⇒ no header ⇒ the daemon DELIVERS and labels the write `claimed:v1` (P18 deliver-and-label;
  * a write with no actor at all is 400 actor_required — parameter completeness, not a refusal). One
- * chokepoint: `DaemonClient.fetch` stamps this on every request; callers never set it by hand.
+ * chokepoint: `DaemonClient.fetch` stamps this on every request; callers never set it by hand. A client built for one
+ * authenticated caller (`sessionName`) carries that caller's seat instead of the process env.
  */
-export function senderIdentityHeaders(originSelfHostId?: string): Record<string, string> {
-  const session = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
+export function senderIdentityHeaders(originSelfHostId?: string, sessionName?: string): Record<string, string> {
+  const session = (sessionName ?? readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME"))?.trim();
   if (!session) return {};
   // Preserve qualified senders; append only a locally derived instance id.
   const value =
     originSelfHostId && originSelfHostId.length > 0 && session.split("@").length < 3
       ? `${session}@${originSelfHostId}`
       : session;
-  return { [SENDER_IDENTITY_HEADER]: value };
+  // Slice 16: the caller's own occupant generation from its seat env, so the two processes of one seat during a
+  // runtime switch can be told apart. Only a client acting for its own process carries it.
+  const generation = sessionName === undefined ? process.env.OPENRIG_OCCUPANT_GENERATION?.trim() : undefined;
+  return {
+    [SENDER_IDENTITY_HEADER]: value,
+    ...(generation && /^[0-9A-Za-z-]{1,64}$/.test(generation) ? { [OCCUPANT_GENERATION_HEADER]: generation } : {}),
+  };
 }
 
 /** Construct registered remote clients with the origin derived from this instance's durable store. */
@@ -48,7 +60,7 @@ function resolveTerminalToken(): string | null {
   const env = process.env.OPENRIG_TERMINAL_BEARER_TOKEN?.trim();
   if (env) return env;
   try {
-    const homeDir = process.env.OPENRIG_HOME ?? path.join(process.env.HOME ?? "", ".openrig");
+    const homeDir = getOpenRigHome();
     const tokenPath = path.join(homeDir, "terminal-token");
     const token = fs.readFileSync(tokenPath, "utf-8").trim();
     return token || null;
@@ -110,6 +122,7 @@ export class DaemonResponseError extends Error {
 export interface DaemonResponse<T = unknown> {
   status: number;
   data: T;
+  headers?: Headers;
 }
 
 /**
@@ -132,8 +145,14 @@ interface DaemonRequestOptions {
 }
 
 interface DaemonClientOptions {
+  ownerProbe?: (baseUrl: string, timeoutMs?: number) => Promise<LocalDaemonOwner>;
   fetchImpl?: typeof fetch;
+  /** For a request allowed FETCH_HEADERS_TIMEOUT_MS or longer, which fetch would cut; default: fetchImpl when given, else
+   *  node:http. */
+  longFetchImpl?: typeof fetch;
   timeoutMs?: number;
+  /** The seat this client acts as, for a client built per authenticated caller; default: the process env. */
+  sessionName?: string;
 }
 
 /** Routing state published by daemon start, not a health check or sibling-home discovery. */
@@ -155,20 +174,24 @@ function localDaemonUrl(): string | undefined {
 export class DaemonClient {
   readonly baseUrl: string;
   private fetchImpl: typeof fetch = fetch;
+  private longFetchImpl: typeof fetch = nodeHttpFetch;
   private timeoutMs = 5_000;
+  private ownerProbe: (baseUrl: string, timeoutMs?: number) => Promise<LocalDaemonOwner>;
   /** Set by remoteDaemonClient; absent origin is labelled explicitly on remote requests. */
   originSelfHostId?: string;
   remoteTarget = false;
   private identity?: Promise<Record<string, string>>;
   private originUnknown = false;
+  private readonly sessionName?: string;
 
   private async identityHeaders(): Promise<Record<string, string>> {
-    const localHeaders = senderIdentityHeaders();
+    const localHeaders = senderIdentityHeaders(undefined, this.sessionName);
     const session = localHeaders[SENDER_IDENTITY_HEADER];
     if (!session || session.split("@").length >= 3) return localHeaders;
     const directTarget = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
     if (!this.remoteTarget && !directTarget) return localHeaders;
-    const origin = this.originSelfHostId ?? readLocalOrigin();
+    // Imported here, not at the top: it loads better-sqlite3 and yaml, which only a seat on a direct endpoint needs.
+    const origin = this.originSelfHostId ?? (await import("./local-origin.js")).readLocalOrigin();
     if (!origin) {
       this.originUnknown = true;
       return { ...localHeaders, "X-OpenRig-Origin-Unknown": "true" };
@@ -189,7 +212,15 @@ export class DaemonClient {
       } catch { /* Unproved locality: carry the known origin, never the endpoint's identity. */ }
       finally { clearTimeout(timer); controller.abort(); }
     }
-    return senderIdentityHeaders(origin);
+    return senderIdentityHeaders(origin, this.sessionName);
+  }
+
+  /** The sender this client stamps on its requests (the X-OpenRig-Session value, absent without a seat), and whether it marked
+   *  the origin unknown. */
+  async senderIdentity(): Promise<{ session: string | undefined; originUnknown: boolean }> {
+    this.identity ??= this.identityHeaders();
+    const headers = await this.identity;
+    return { session: headers[SENDER_IDENTITY_HEADER], originUnknown: headers["X-OpenRig-Origin-Unknown"] === "true" };
   }
 
   constructor(baseUrl?: string, options?: DaemonClientOptions) {
@@ -213,7 +244,27 @@ export class DaemonClient {
     }
 
     this.fetchImpl = options?.fetchImpl ?? fetch;
+    this.longFetchImpl = options?.longFetchImpl ?? options?.fetchImpl ?? nodeHttpFetch;
+    this.ownerProbe = options?.ownerProbe ?? ((url, timeoutMs) => assessLocalDaemonOwner(url, { fetchImpl: this.fetchImpl, timeoutMs }));
     this.timeoutMs = options?.timeoutMs ?? 5_000;
+    this.sessionName = options?.sessionName;
+  }
+
+  /** Shared with raw CLI data readers. Constructor URLs alone do not establish explicit intent. */
+  localOwnerCheckEnabled(): boolean {
+    if (this.remoteTarget) return false;
+    const explicit = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
+    if (explicit && explicit.replace(/\/+$/, "") === this.baseUrl.replace(/\/+$/, "")) return false;
+    let enabled = false;
+    try { enabled = new ConfigStore().resolveWithSource("transport.local_user_guard").value === true; }
+    catch { /* Unreadable owner evidence/config is not a new default-on refusal. */ }
+    return enabled;
+  }
+
+  async assertLocalOwner(timeoutMs = 1000): Promise<void> {
+    if (!this.localOwnerCheckEnabled()) return;
+    const owner = await this.ownerProbe(this.baseUrl, timeoutMs);
+    if (owner.state === "foreign") throw new ForeignLocalDaemonError(this.baseUrl, owner);
   }
 
   async get<T = unknown>(path: string, options?: DaemonRequestOptions): Promise<DaemonResponse<T>> {
@@ -266,6 +317,8 @@ export class DaemonClient {
   }
 
   private async fetch(path: string, init: RequestInit, options?: DaemonRequestOptions, consumeResponse?: (response: Response) => Promise<void>): Promise<Response> {
+    // Diagnostic health/status remains reachable even for a known foreign listener.
+    if (path.split("?")[0] !== "/healthz") await this.assertLocalOwner();
     const timeoutMs = options?.timeoutMs ?? this.timeoutMs;
     if (options?.signal) init = { ...init, signal: options.signal };
     if (options?.headers) {
@@ -279,7 +332,7 @@ export class DaemonClient {
     let responseStatus: number | undefined;
     try {
       const response = await fetchWithTimeout(
-        this.fetchImpl,
+        timeoutMs >= FETCH_HEADERS_TIMEOUT_MS ? this.longFetchImpl : this.fetchImpl,
         `${this.baseUrl}${path}`,
         init,
         {
@@ -333,7 +386,11 @@ export class DaemonClient {
 
   private async requestText(path: string, init: RequestInit, options?: DaemonRequestOptions): Promise<DaemonResponse<string>> {
     let data = "";
-    const res = await this.fetch(path, init, options, async (response) => { data = await response.text(); });
-    return { status: res.status, data };
+    let headers: Headers | undefined;
+    const res = await this.fetch(path, init, options, async (response) => {
+      headers = response.headers;
+      data = await response.text();
+    });
+    return { status: res.status, data, headers };
   }
 }

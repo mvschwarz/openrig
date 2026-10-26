@@ -13,8 +13,9 @@ import { EventBus } from "../src/domain/event-bus.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { NativeProcessRow } from "../src/domain/native-process-lineage.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
+import { getNodeInventory } from "../src/domain/node-inventory.js";
 import {
-  LATEST_WINS_EFFORT_PRECEDENCE, UNDECIDED_EFFORT_PRECEDENCE, effortPrecedence, emittedEffortFromArgv, readNativeEffort, readSeatEffort, resolveSeatEffort,
+  LATEST_WINS_EFFORT_PRECEDENCE, UNDECIDED_EFFORT_PRECEDENCE, effortPrecedence, emittedEffortFromArgv, KNOWN_EFFORT_LEVELS, unknownLevelWarning, readNativeEffort, readSeatEffort, resolveSeatEffort,
 } from "../src/domain/seat-effort.js";
 
 const LSTART = "Tue Oct 13 05:49:17 2026";
@@ -52,6 +53,36 @@ describe("resolveSeatEffort: the one resolver for managed continuations", () => 
   });
 });
 
+describe("node inventory: the configured effort and its provenance", () => {
+  it("serves the seat choice first, then the authored value, and runtime_default when neither exists", () => {
+    const db = createFullTestDb();
+    const repo = new RigRepository(db);
+    const rig = repo.createRig("eff-inventory");
+    const chosen = repo.addNode(rig.id, "dev.choice", { runtime: "codex", effort: "low" });
+    repo.setNodeEffortChoice(chosen.id, "high");
+    repo.addNode(rig.id, "dev.authored", { runtime: "codex", effort: "medium" });
+    repo.addNode(rig.id, "dev.default", { runtime: "codex" });
+
+    const byId = Object.fromEntries(getNodeInventory(db, rig.id).map((entry) => [entry.logicalId, entry]));
+    expect(byId["dev.choice"]).toMatchObject({ effort: "high", effortSource: "seat_choice" });
+    expect(byId["dev.authored"]).toMatchObject({ effort: "medium", effortSource: "authored" });
+    expect(byId["dev.default"]).toMatchObject({ effort: null, effortSource: "runtime_default" });
+    db.close();
+  });
+
+  it("resolves an older database without the choice column from the authored value", () => {
+    const db = createFullTestDb();
+    const repo = new RigRepository(db);
+    const rig = repo.createRig("eff-inventory-old");
+    repo.addNode(rig.id, "dev.a", { runtime: "codex", effort: "low" });
+    db.exec("ALTER TABLE nodes DROP COLUMN effort_choice");
+
+    const [entry] = getNodeInventory(db, rig.id);
+    expect(entry).toMatchObject({ effort: "low", effortSource: "authored" });
+    db.close();
+  });
+});
+
 describe("emittedEffortFromArgv: what the launch command line sent", () => {
   it("reads Claude's --effort in both spellings, and its absence", () => {
     expect(emittedEffortFromArgv("claude-code", ["claude", "--permission-mode", "auto", "--effort", "high", "--resume", "x"])).toEqual({ flag: "present", value: "high" });
@@ -63,6 +94,36 @@ describe("emittedEffortFromArgv: what the launch command line sent", () => {
     expect(emittedEffortFromArgv("codex", ["codex", "-m", "gpt-5.5", "-c", 'model_reasoning_effort="high"', "resume", "t"])).toEqual({ flag: "present", value: "high" });
     expect(emittedEffortFromArgv("codex", ["codex", "--config=model_reasoning_effort=minimal"])).toEqual({ flag: "present", value: "minimal" });
     expect(emittedEffortFromArgv("codex", ["codex", "-c", "sandbox_workspace_write.network_access=true", "resume", "t"])).toEqual({ flag: "none" });
+  });
+});
+
+describe("Pi effort: levels, warning, and launch argv", () => {
+  it("knows Pi's own thinking levels, with no Codex none", () => {
+    expect(KNOWN_EFFORT_LEVELS.pi).toEqual(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+  });
+
+  it("warns on an unknown Pi level in Pi's terms, and keeps Claude/Codex wording", () => {
+    const pi = unknownLevelWarning("pi", "none")!;
+    expect(pi).toContain('"none" isn\'t a level Pi is known to accept');
+    expect(pi).toContain("ignores a level it doesn't know");
+    expect(pi).not.toContain("reject every turn");
+    expect(pi).toContain("the next managed continuation sends it anyway");
+    for (const level of ["--cwd", "very high"]) {
+      const left = unknownLevelWarning("pi", level)!;
+      expect(left).toContain(`"${level}" isn't a level Pi is known to accept`);
+      expect(left).toContain("a managed launch leaves it out, since it doesn't pass the check set-effort uses");
+      expect(left).not.toContain("sends it anyway");
+    }
+    expect(unknownLevelWarning("pi", "high")).toBeUndefined();
+    expect(unknownLevelWarning("claude-code", "bogus")).toBe(`"bogus" isn't a level Claude Code is known to accept (low, medium, high, xhigh, max); the next managed continuation sends it anyway, and the runtime may reject every turn until it is changed.`);
+    expect(unknownLevelWarning("codex", "bogus")).toBe(`"bogus" isn't a level Codex is known to accept (none, minimal, low, medium, high, xhigh, max); the next managed continuation sends it anyway, and the runtime may reject every turn until it is changed.`);
+  });
+
+  it("reads --thinking from the runner argv, last one wins", () => {
+    expect(emittedEffortFromArgv("pi", ["node", "/r/pi-runner.js", "--session-name", "s", "--thinking", "high"])).toEqual({ flag: "present", value: "high" });
+    expect(emittedEffortFromArgv("pi", ["node", "/r/pi-runner.js", "--thinking=low"])).toEqual({ flag: "present", value: "low" });
+    expect(emittedEffortFromArgv("pi", ["node", "/r/pi-runner.js", "--thinking", "low", "--thinking=max"])).toEqual({ flag: "present", value: "max" });
+    expect(emittedEffortFromArgv("pi", ["node", "/r/pi-runner.js", "--session-name", "s"])).toEqual({ flag: "none" });
   });
 });
 
@@ -202,7 +263,7 @@ describe("SeatLifecycleService.effortReport: four values, each from its own sour
         readCodexTranscriptPath: () => transcript,
       },
       inPlaceRestartIo: {
-        readProcess: async () => ({ cwd: "/w", exe: "/usr/local/bin/codex", env: { CODEX_HOME: "/scratch/.codex" }, apiKeyEnvNames: [] }),
+        readProcess: async () => ({ cwd: "/w", exe: "/usr/local/bin/codex", env: { CODEX_HOME: "/scratch/.codex" } }),
         readThreadId: async () => logsThread,
       },
     });
@@ -306,7 +367,7 @@ describe("SeatLifecycleService.effortReport: four values, each from its own sour
     expect(await service.effortReport("dev-codex@eff")).toMatchObject({
       ok: true, requested: null, saved: { source: "runtime_default" }, emitted: { state: "unknown" }, observed: { state: "not_verified" },
     });
-    rigRepo.addNode(rigRepo.createRig("pi").id, "dev.pi", { runtime: "pi" });
-    expect(await service.effortReport("dev.pi")).toMatchObject({ ok: false, code: "effort_unsupported_runtime" });
+    rigRepo.addNode(rigRepo.createRig("omp").id, "dev.omp", { runtime: "omp" });
+    expect(await service.effortReport("dev.omp")).toMatchObject({ ok: false, code: "effort_unsupported_runtime" });
   });
 });

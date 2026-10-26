@@ -1,0 +1,34 @@
+#!/bin/sh
+# A reference launcher for Hermes Agent's CLI as an OpenRig community harness. Copy it, own it, and change it: OpenRig
+# doesn't ship or run it. It follows docs/reference/community-harness-presets.md (`names_conversation`):
+#   - a new launch (OPENRIG_CONVERSATION set): Hermes creates the session titled with that name;
+#   - a resume (OPENRIG_RESUME_REF set): Hermes reopens that session, and never creates one. A name that matches nothing
+#     ends with Hermes's own "No session found" error, so a gone conversation isn't replaced by a new one.
+# Put the model, provider and max turns in the seat's Hermes config.yaml, not on the command line. Hermes v0.22.4's CLI
+# creates a `-c <name> --create-if-missing` session with no launch flags, then reopens it and refuses any creation flag
+# that differs, so such flags fail even on a new name. Other arguments go only to a new session, never to a resume.
+set -eu
+
+hermes="${OPENRIG_HERMES:-hermes}"
+
+# Each seat gets its own Hermes home, so seats don't share sessions or a gateway, and a seat's stop concerns only its own.
+# Its settings (model, provider, agent.max_turns) come from that home's config.yaml, and its key from the environment
+# (an OpenRouter key, say), not from the person's ~/.hermes.
+HERMES_HOME="${OPENRIG_HOME:-$HOME/.openrig}/state/hermes/${OPENRIG_NODE_ID:-${OPENRIG_SESSION_NAME:-default}}"
+export HERMES_HOME
+mkdir -p "$HERMES_HOME"
+
+# Hermes's tools see its shared gateway's environment except for the names a profile passes through, so a seat whose
+# config.yaml doesn't pass OPENRIG_SESSION_NAME would run `rig` as another seat, or as none (see config.yaml.example).
+if ! grep -qs OPENRIG_SESSION_NAME "$HERMES_HOME/config.yaml"; then
+  echo "openrig-hermes-launch: $HERMES_HOME/config.yaml doesn't pass OPENRIG_SESSION_NAME to Hermes's tools, so rig run from Hermes won't act as this seat; see config.yaml.example" >&2
+fi
+
+if [ -n "${OPENRIG_RESUME_REF:-}" ]; then
+  exec "$hermes" chat -c "$OPENRIG_RESUME_REF"
+fi
+if [ -n "${OPENRIG_CONVERSATION:-}" ]; then
+  exec "$hermes" chat -c "$OPENRIG_CONVERSATION" --create-if-missing "$@"
+fi
+echo "openrig-hermes-launch: OpenRig passed no conversation name; is names_conversation set in the preset?" >&2
+exit 2

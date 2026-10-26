@@ -3,9 +3,31 @@
 These are things we'd welcome help with. Most came from the community, and most are small enough for one pull request.
 This isn't a schedule or a promise: we release often, and an item ships when a good change for it lands.
 
+To see what's being worked on, by release and theme, open the [OpenRig roadmap board](https://github.com/users/mvschwarz/projects/1).
+Issues labelled `good first issue` are also listed on the [contribute page](https://github.com/mvschwarz/openrig/contribute).
+
+## Released in 0.7.2
+
+[0.7.2 is published](https://github.com/mvschwarz/openrig/releases/tag/v0.7.2).
+See its release notes for what shipped, upgrade instructions, contributor credits and the remaining testing gaps.
+
+Hermes and Cursor through the shared plug-in point were not included. The Codex counterpart to per-member Claude
+permission rules was not included either; that work has since merged on main in
+[#2048](https://github.com/mvschwarz/openrig/pull/2048). These follow-ups have no release promise here.
+
+## Active: 0.7.3 — people and agent teams through one gateway
+
+- **Participant foundation:** people and vetted shared channels, an explicit default, organization and groups, and readable policy.
+- **Attributed shared-channel conversations:** reach a support seat with who spoke, the configured role and policy, and the thread;
+  send answers back to that thread.
+- **Actions and perspective for the primary user:** see whose work needs attention and preserve who actually spoke or acted.
+
+These are the active themes, not claims that the changes have shipped or a release-date promise.
+
 ## How to help
 
-1. Pick an item and comment on its issue to say you're working on it. If it has no issue yet, open one first.
+1. Pick an item and comment on its issue to say you're working on it and coordinate with others. A maintainer can assign
+   you to make that work visible. If it has no issue yet, open one first.
 2. Read `CONTRIBUTING.md`, and ask your agent to use the `developing-openrig` skill. It's a map of how OpenRig is
    built, tested and changed.
 3. Open a pull request that says what a user gets and how you verified it.
@@ -21,28 +43,20 @@ tie. Feel free to coordinate on the issue first.
 
 ## Agents and runtimes
 
-- **Codex seats that can reach the local daemon by default** (#275), with an easy opt-out.
-- **Custom Codex providers such as Bedrock** (#194): accept providers that authenticate with an environment key, and
-  forward their token.
 - **Operator recovery for Pi and Oh My Pi seats** (#41).
-- **New agent types:** OpenCode (#87, #227, #517), the Cursor CLI (#352), the Grok CLI (#522) and Devin (#44) are
-  planned on a shared adapter.
-  Design discussion: #43. Adapter pull requests are welcome once that adapter lands.
+- **More harnesses:** we're working out one way for any coding-agent CLI to plug into OpenRig. More on this soon
+  (design discussion: #43).
 
 ## Slack
 
 - **A DM or private channel for single-user setups** (#313).
-- **A channel map** (#192): one channel per seat, keyed by channel ID.
 
 ## Reliability and everyday use
 
-- **A configurable readiness window for fresh launches** (#182), so seats under load don't time out at a fixed 30
-  seconds.
 - **Draft-aware delivery** (#48): automated sends wait while someone is typing in a seat, or a seat can be set to
   inbox-only.
 - **A host-aware resource budget for seats** (#80).
 - **Predictable `rig up` over a stopped rig with the same name.**
-- **A "merged" stage in the project view** for teams that integrate on a branch other than main (#402).
 - **Codex seats that leave a repository's tracked `AGENTS.md` alone** (related: #64).
 - **Install and run on Node 26.**
 

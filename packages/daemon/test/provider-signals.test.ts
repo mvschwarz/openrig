@@ -132,6 +132,25 @@ describe("S16 usage-limit pool derivation", () => {
     ]);
   });
 
+  it("keeps a Claude seat with its own config dir out of another home's exhausted pool, and pools it by its own home", () => {
+    const claude = (seatSession: string, usedPercent: number) => ({
+      provider: "claude" as const, seatSession, sourceClass: "provider_statusline" as const, authority: "account_cross_device" as const,
+      window: "five_hour", usedPercent, resetsAt: "2026-08-28T13:00:00.000Z", asOf: "2026-08-28T11:59:00.000Z",
+      staleAfter: "2026-08-28T12:10:00.000Z", supportsNotification: false, automationUse: "allow_switch_decision" as const,
+    });
+    const claudeHomeOf = (seat: string) => seat === "dev-b@rig" ? "/homes/b" : undefined;
+    // The daemon home's login is exhausted; dev-b runs on its own home and isn't parked with it.
+    expect(deriveUsageLimitPools({ now: NOW, fallbackSeconds: 300, bindings: [], claudeHomeOf,
+      signals: [claude("dev-a@rig", 100), claude("dev-b@rig", 72)] })).toEqual([
+      { poolKey: "claude:local", provider: "claude", seatSessions: ["dev-a@rig"], expiresAt: "2026-08-28T13:00:00.000Z", source: "provider-reset" },
+    ]);
+    // dev-b's own home is exhausted; the daemon home's seat isn't parked with it.
+    expect(deriveUsageLimitPools({ now: NOW, fallbackSeconds: 300, bindings: [], claudeHomeOf,
+      signals: [claude("dev-a@rig", 72), claude("dev-b@rig", 100)] })).toEqual([
+      { poolKey: "claude:home:/homes/b", provider: "claude", seatSessions: ["dev-b@rig"], expiresAt: "2026-08-28T13:00:00.000Z", source: "provider-reset" },
+    ]);
+  });
+
   it("uses the signal as-of plus the config fallback for a fresh Codex at-limit event with no reset", () => {
     const pools = deriveUsageLimitPools({
       now: NOW,

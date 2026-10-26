@@ -4,7 +4,7 @@ import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
-import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
+import { AgentActivityStore, hookEventState, hookMeansNeedsInput, latestHookMovedOn, latestHookPermissionPending, latestHookWaitsOnPerson } from "../src/domain/agent-activity-store.js";
 
 const NOW = new Date("2026-04-24T12:00:00.000Z");
 
@@ -35,6 +35,35 @@ describe("AgentActivityStore", () => {
     return { rig, node, session, sessionName };
   }
 
+  it.each([
+    ["codex", "PermissionRequest", null, "unknown"],
+    ["claude-code", "PermissionRequest", null, "needs_input"],
+    ["codex", "PermissionPromptConfirmed", null, "needs_input"],
+    ["codex", "PermissionPromptCleared", null, "unknown"],
+    ["codex", "Notification", "permission_prompt", "needs_input"],
+    ["codex", "at_limit", null, "unknown"],
+  ] as const)("shared hook mapping retains %s/%s with fresh and clock-stale evidence", (runtime, hookEvent, subtype, state) => {
+    const { node, sessionName } = seedSession(runtime);
+    const store = new AgentActivityStore({ db, eventBus, now: () => NOW });
+    store.recordHookEvent({ runtime, sessionName, hookEvent, subtype });
+    expect(hookEventState(hookEvent, subtype, runtime)).toBe(state);
+    expect(hookMeansNeedsInput(hookEvent, subtype, runtime)).toBe(state === "needs_input");
+    for (const referenceTime of [NOW, new Date(NOW.getTime() + 600_000)]) {
+      const latest = store.getLatestForNode({ nodeId: node.id, sessionName, now: referenceTime });
+      expect(latestHookWaitsOnPerson(latest, runtime)).toBe(state === "needs_input");
+      expect(latestHookPermissionPending(latest, runtime)).toBe(runtime === "codex" && hookEvent === "PermissionRequest");
+      expect(latestHookMovedOn(latest, "2026-04-24T11:59:00.000Z", runtime)).toBe(false);
+    }
+  });
+
+  it.each(["generation_mismatch", "generation_unresolvable", "generation_unverifiable", "generation_resolver_error"])("a pending permission with %s does not hold the current occupant", reason => {
+    const { sessionName } = seedSession("codex");
+    const store = new AgentActivityStore({ db, eventBus, now: () => NOW });
+    store.recordHookEvent({ runtime: "codex", sessionName, hookEvent: "PermissionRequest" });
+    const latest = store.getLatestForNode({ sessionName, now: NOW })!;
+    expect(latestHookPermissionPending({ ...latest, state: "unknown", reason, stale: true }, "codex")).toBe(false);
+  });
+
   it("normalizes Claude prompt/tool hooks to running", () => {
     const { node, sessionName } = seedSession("claude-code");
     const store = new AgentActivityStore({ db, eventBus, now: () => NOW });
@@ -60,6 +89,32 @@ describe("AgentActivityStore", () => {
       rawEvent: "UserPromptSubmit",
       stale: false,
     });
+  });
+
+  it("orders by the emitter's sequence among the newest records only, so a long heartbeat history stays cheap to read", () => {
+    const { node, sessionName } = seedSession("codex");
+    const store = new AgentActivityStore({ db, eventBus, now: () => NOW });
+    const post = (hookEvent: string, sequence: number, occurredAt: string) =>
+      store.recordHookEvent({ runtime: "codex", sessionName, hookEvent, sourceSequence: sequence, occurredAt });
+    const latest = () => store.getLatestForNode({ nodeId: node.id, sessionName, now: NOW, order: "source" });
+    // A newer boundary that lands first, then an older one that arrives late: the newer still wins.
+    post("Stop", 2, "2026-04-24T11:59:30.000Z");
+    post("UserPromptSubmit", 1, "2026-04-24T11:59:00.000Z");
+    expect(latest()).toMatchObject({ rawEvent: "Stop" });
+    // Once 200 later records have arrived, that boundary is out of the window and no longer consulted.
+    for (let i = 0; i < 200; i++) post("UserPromptSubmit", 3 + i, "2026-04-24T11:58:00.000Z");
+    expect(latest()).toMatchObject({ rawEvent: "UserPromptSubmit" });
+  });
+
+  it("windows the node's newest records before choosing the session, so a new session never walks the older history", () => {
+    const { node, sessionName } = seedSession("codex");
+    const store = new AgentActivityStore({ db, eventBus, now: () => NOW });
+    store.recordHookEvent({ runtime: "codex", sessionName, hookEvent: "Stop", sourceSequence: 1, occurredAt: "2026-04-24T11:59:00.000Z" });
+    const firstSeq = (db.prepare("SELECT MAX(seq) AS s FROM events WHERE node_id = ?").get(node.id) as { s: number }).s;
+    for (let i = 0; i < 200; i++) store.recordHookEvent({ runtime: "codex", sessionName, hookEvent: "UserPromptSubmit", sourceSequence: 2 + i, occurredAt: "2026-04-24T11:59:30.000Z" });
+    db.prepare("UPDATE events SET payload = json_set(payload, '$.sessionName', 'earlier-session') WHERE node_id = ? AND seq > ?").run(node.id, firstSeq);
+    // The session's own record is older than the node's newest 200, which all belong to another session.
+    expect(store.getLatestForNode({ nodeId: node.id, sessionName, now: NOW, order: "source" })).toBeNull();
   });
 
   it("does not let a hook claiming OMP escalate runtime_error on another runtime's seat", () => {
@@ -168,7 +223,7 @@ describe("AgentActivityStore", () => {
     });
   });
 
-  it("normalizes a Codex PermissionRequest hook to needs_input (OPR.0.4.1.10 hook-primary producer)", () => {
+  it("records a Codex PermissionRequest as pending", () => {
     const { node, sessionName } = seedSession("codex");
     const store = new AgentActivityStore({ db, eventBus, now: () => NOW });
 
@@ -184,8 +239,8 @@ describe("AgentActivityStore", () => {
 
     const latest = store.getLatestForNode({ nodeId: node.id, sessionName, now: NOW });
     expect(latest).toMatchObject({
-      state: "needs_input",
-      reason: "permission_request",
+      state: "unknown",
+      reason: "permission_request_pending",
       evidenceSource: "runtime_hook",
       rawEvent: "PermissionRequest",
       evidence: "Bash", // names the tool being approved

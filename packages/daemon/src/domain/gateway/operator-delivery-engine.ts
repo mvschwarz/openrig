@@ -10,7 +10,9 @@ import { DispatchBuffer } from "./dispatch-buffer.js";
 import type { DispatchResult } from "./dispatcher.js";
 import type { LoadResult } from "./human-registry.js";
 import { loadHumanRegistry } from "./human-registry.js";
+import { resolveDefaultPerson } from "./participants.js";
 import { loadConfig } from "./slack/config.js";
+import { quietHoldFor } from "./human-quiet-windows.js";
 import { OUTBOUND_OP } from "./slack/outbound-driver.js";
 import {
   decideDelivery,
@@ -80,9 +82,11 @@ export function makeOperatorDeliveryEngine(deps: {
         return { decision: "unavailable:human-registry", resolved: false, dispatched: false };
       }
       if (!reg.ok) return { decision: "unavailable:human-registry", resolved: false, dispatched: false };
-      const human = reg.entities[0];
+      // The escalation goes to the default person, never simply the first file: with several people and none chosen,
+      // it's undeliverable and says so.
+      const human = resolveDefaultPerson(reg.entities, deps.home).person;
       if (!human) {
-        return { decision: "undeliverable:no-registered-human", resolved: false, dispatched: false };
+        return { decision: reg.entities.length ? "undeliverable:no-default-person" : "undeliverable:no-registered-human", resolved: false, dispatched: false };
       }
       const cfg = loadConfig(deps.home);
       const decision = decideDelivery({
@@ -97,12 +101,17 @@ export function makeOperatorDeliveryEngine(deps: {
           minimumLevelThatPosts: cfg.minimumLevelThatPosts,
           minimumLevelThatInterrupts: cfg.minimumLevelThatInterrupts,
         },
+        // An escalation is never held, so quiet can't change this rung's decision: a failed quiet read is ignored here
+        // rather than blocking the escalation.
+        quiet: (() => { try { return quietHoldFor(deps.queueRepo.db, human.entityId, new Date()); } catch { return null; } })(),
       });
 
       const payload = {
         qitemId: row.qitemId,
         notificationKey,
-        summary: row.summary ?? `wake-ladder escalation: ${row.qitemId}`,
+        // The person sees which seat the work is waiting on. The sender stays the row's own, so a reply in the thread
+        // still goes where the row's posts go.
+        summary: `Waiting on ${row.destinationSession}: ${row.summary ?? `wake-ladder escalation: ${row.qitemId}`}`,
         body: row.body ?? null,
         destinationSession: human.address,
         sourceSession: row.sourceSession ?? null,

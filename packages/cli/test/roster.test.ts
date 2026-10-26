@@ -53,7 +53,7 @@ it("preserves fan-out gaps in JSON and text, without claiming availability", asy
   await new Command().addCommand(rosterCommand({ folder: () => p, inventory: async () => unavailable })).parseAsync(["roster", "show", "production", "--json"], { from: "user" });
   const result = JSON.parse(logs.mock.calls[0]![0]); expect(result.roster.members[0].live.status).toBe("unknown"); expect(result.observations.sources).toEqual(unavailable.sources);
   await new Command().addCommand(rosterCommand({ folder: () => p, inventory: async () => unavailable })).parseAsync(["roster", "find", "colour"], { from: "user" });
-  expect(logs.mock.calls.flat().join("\n")).toContain("observed model unknown"); expect(errors.mock.calls.flat().join("\n")).toContain("one host unavailable");
+  expect(logs.mock.calls.flat().join("\n")).toContain("last observed model UNKNOWN"); expect(errors.mock.calls.flat().join("\n")).toContain("one host unavailable");
 });
 
 it.skipIf(process.platform === "win32")("skips a FIFO without blocking or losing regular rosters", async () => {
@@ -66,4 +66,26 @@ it.skipIf(process.platform === "win32")("skips a FIFO without blocking or losing
   const result = JSON.parse(stdout);
   expect(result.rosters.map((r: { id: string }) => r.id)).toEqual(["production"]);
   expect(result.warnings).toEqual(["waiting.json: Not a regular file; skipped"]);
+});
+
+it("reports the occupant's observed model separately from its configured model, retaining host gaps", () => {
+  const observation = { status: "observed", model: "claude-opus-example", source: "claude-assistant-response", observedAt: "2026-10-18T23:00:00.000Z", generation: "current", reason: null };
+  const sample: RosterInventory = { readAt: "2026-10-18T23:01:00Z", nodes: [{ ...node, modelObservation: observation }], sources: [{ scope: "registered-hosts", status: "partial", error: "offline peer" }] };
+  const live = enrichRosterMember(member, sample).live;
+  expect(live.configuredModel).toBe("configured-a");
+  expect(live.observedModel).toBe("claude-opus-example");
+  expect(live).toMatchObject({ modelObservation: observation });
+  expect(sample.sources[0]?.status).toBe("partial");
+});
+
+it.each(["model", "time", "unknown", "generation"])("r2: preserves registry fields when duplicate routes disagree only on observation %s", kind => {
+  const observation = { status: "observed", model: "model-a", source: "codex-turn-context", observedAt: "2026-10-18T23:00:00.000Z", generation: "current", reason: null };
+  const other = kind === "model" ? { ...observation, model: "model-b" }
+    : kind === "time" ? { ...observation, observedAt: "2026-10-18T23:00:01.000Z" }
+    : kind === "generation" ? { ...observation, generation: "replacement" }
+    : { status: "unknown", model: null, source: null, observedAt: null, generation: "current", reason: "model-record-unavailable" };
+  const sample: RosterInventory = { readAt: "2026-10-18T23:01:00Z", nodes: [{ ...node, modelObservation: observation }, { ...node, modelObservation: other }], sources: [] };
+  expect(enrichRosterMember(member, sample).live).toMatchObject({ status: "reported", configuredModel: "configured-a", runtime: "claude-code", sessionStatus: "running", agentActivity: node.agentActivity });
+  expect(enrichRosterMember(member, sample).live.observedModel).toBeNull();
+  expect(enrichRosterMember(member, sample).live).toMatchObject({ modelObservation: { status: "unknown", reason: "conflicting-observations" } });
 });

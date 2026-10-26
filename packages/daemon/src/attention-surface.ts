@@ -1,3 +1,5 @@
+import type { HumanAnswers, HumanQuestion } from "./domain/human-questions.js";
+
 /** Passive projection over queue, native proof judgments and canonical health. */
 export interface AttentionItem {
   id: string;
@@ -10,6 +12,16 @@ export interface AttentionItem {
   project: { id: string; root: string } | null;
   source: string;
   recipient?: string | null;
+  /** How the person answers this request where they read it, through mission control as themselves: `approve` (Steering's
+   *  one-tap Approve), or `answer` for an ask with questions, which Approve would close without returning their answers.
+   *  `answer` takes a choice or their own words, or sends a complete set's recorded answers back, and the answer goes back
+   *  to the asker as Slack's answers do. */
+  answer?: { verb: "approve" | "answer"; actorSession: string };
+  /** The seat that asked, which the person can open to answer in their own words (the Feed card's Chat). */
+  asker?: string;
+  /** The row's questions and the answers recorded so far, as the queue row holds them. */
+  humanQuestions?: HumanQuestion[];
+  humanAnswers?: HumanAnswers;
 }
 export interface AttentionDetail {
   item: AttentionItem;

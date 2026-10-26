@@ -1,6 +1,7 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import type Database from "better-sqlite3";
 import { lstartToMinTs } from "./codex-thread-id.js";
+import { piThinkingValue } from "../adapters/pi-runner-protocol.js";
 
 /**
  * OPR.0.7.0.7 — one seat's reasoning effort, from the saved choice to what the native session runs.
@@ -111,20 +112,29 @@ export const LATEST_WINS_EFFORT_PRECEDENCE: EffortPrecedenceRule = {
 
 export const effortPrecedence: EffortPrecedenceRule = LATEST_WINS_EFFORT_PRECEDENCE;
 
-export type EffortRuntime = "claude-code" | "codex";
+export type EffortRuntime = "claude-code" | "codex" | "pi";
 
 /** Levels each runtime is known to accept (Codex 0.153.4's service lists these when it rejects one;
- *  Claude Code's --effort levels). A level outside the list is saved with a warning, never refused:
+ *  Claude Code's --effort levels; Pi's `--thinking` levels from `pi --help`, the same at the tested
+ *  0.87.1 baseline and 1.3.0). A level outside the list is saved with a warning, never refused:
  *  versions and models move, and the runtime's own answer is what the report shows. */
 export const KNOWN_EFFORT_LEVELS: Record<EffortRuntime, readonly string[]> = {
   codex: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
   "claude-code": ["low", "medium", "high", "xhigh", "max"],
+  pi: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
 };
 
 export function unknownLevelWarning(runtime: EffortRuntime, level: string | null): string | undefined {
   if (level === null || KNOWN_EFFORT_LEVELS[runtime].includes(level)) return undefined;
-  const name = runtime === "codex" ? "Codex" : "Claude Code";
-  return `"${level}" isn't a level ${name} is known to accept (${KNOWN_EFFORT_LEVELS[runtime].join(", ")}); the next managed continuation sends it anyway, and the runtime may reject every turn until it is changed.`;
+  const name = runtime === "codex" ? "Codex" : runtime === "pi" ? "Pi" : "Claude Code";
+  const consequence = runtime === "pi"
+    ? "Pi doesn't reject the turn: it ignores a level it doesn't know (printing a warning) and keeps the level it would use without the flag (a model suffix, the resumed session's level, or its default)"
+    : "the runtime may reject every turn until it is changed";
+  // A Pi launch leaves out a value without set-effort's shape (only a spec can carry one).
+  const sent = runtime === "pi" && !piThinkingValue(level)
+    ? "a managed launch leaves it out, since it doesn't pass the check set-effort uses (a letter, then up to 31 letters, digits, - or _), so Pi keeps the level it would use without the flag (a model suffix, the resumed session's level, or its default)"
+    : `the next managed continuation sends it anyway, and ${consequence}`;
+  return `"${level}" isn't a level ${name} is known to accept (${KNOWN_EFFORT_LEVELS[runtime].join(", ")}); ${sent}.`;
 }
 
 /** The effort a launch command line carries. "none": parsed, and it sends no effort flag. */
@@ -135,6 +145,9 @@ export function emittedEffortFromArgv(runtime: EffortRuntime, argv: string[]): {
     if (runtime === "claude-code") {
       if (arg === "--effort") { found = argv[index + 1] ?? null; index += 1; }
       else if (arg.startsWith("--effort=")) found = arg.slice("--effort=".length);
+    } else if (runtime === "pi") {
+      if (arg === "--thinking") { found = argv[index + 1] ?? null; index += 1; }
+      else if (arg.startsWith("--thinking=")) found = arg.slice("--thinking=".length);
     } else {
       let config: string | undefined;
       if (arg === "-c" || arg === "--config") { config = argv[index + 1]; index += 1; }
@@ -170,7 +183,7 @@ const TAIL_BYTES = 4_000_000;
  * rollout. A turn before the process started belongs to an earlier launch of the same conversation,
  * so it is never reported as this launch's effort.
  */
-export function readNativeEffort(runtime: EffortRuntime, transcriptPath: string | null, processStartedAt: string | null): NativeEffortObservation {
+export function readNativeEffort(runtime: Exclude<EffortRuntime, "pi">, transcriptPath: string | null, processStartedAt: string | null): NativeEffortObservation {
   if (!transcriptPath) return { state: "not_verified", detail: "The native transcript for this session isn't known to OpenRig." };
   const since = lstartToMinTs(processStartedAt ?? undefined);
   if (since === undefined) return { state: "not_verified", detail: "The running process's start time could not be read, so a turn can't be tied to this launch." };

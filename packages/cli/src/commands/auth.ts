@@ -17,6 +17,8 @@ import {
   SEAT_REGISTRY_DISCLAIMER,
   type CodexAuthPaths,
 } from "../lib/codex-auth.js";
+import { localSelfHostId, originFor, runOnSshHost, type RunOnHostDeps } from "../lib/run-on-host.js";
+import { realDeps } from "./daemon.js";
 
 export interface AuthCommandDeps {
   /** env source (default process.env) — tests point CODEX_HOME at a fixture. */
@@ -25,6 +27,8 @@ export interface AuthCommandDeps {
   loginStatus?: (codexHome: string) => "logged_in" | "not_logged_in" | "unavailable";
   /** clock for seats set updated_ts (default new Date().toISOString()). */
   now?: () => string;
+  /** `--host`: the host registry and the SSH runner (tests inject both). */
+  host?: RunOnHostDeps;
 }
 
 function fail(reason: string): void {
@@ -44,18 +48,34 @@ function ensureRuntime(runtime: string): boolean {
 
 export function authCommand(depsOverride?: AuthCommandDeps): Command {
   const env = depsOverride?.env ?? process.env;
-  const paths = (): CodexAuthPaths => resolveCodexHome(env);
+  const paths = (codexHome?: string): CodexAuthPaths => resolveCodexHome(codexHome ? { ...env, CODEX_HOME: codexHome } : env);
   const withRuntime = (c: Command): Command => c.option("--runtime <runtime>", "Runtime axis (MVP: codex)", "codex");
+  // Slice 18: the commands that move a Codex home act on a named home, here or on another registered machine.
+  const withHome = (c: Command): Command => c
+    .option("--codex-home <dir>", "The Codex home to act on (default: CODEX_HOME, else ~/.codex)")
+    .option("--host <id>", "Run it on this registered machine instead, over its SSH entry, as this seat");
+  type HomeOpts = { runtime: string; codexHome?: string; host?: string };
+  const onHost = async (verb: string, args: string[], opts: HomeOpts) => {
+    const seat = (env.OPENRIG_SESSION_NAME ?? env.RIGGED_SESSION_NAME)?.trim() || undefined;
+    const origin = await originFor(seat, depsOverride?.host?.selfHostId ?? (() => localSelfHostId(realDeps())));
+    const home = opts.codexHome ? ["--codex-home", opts.codexHome] : [];
+    await runOnSshHost(opts.host!, `auth ${verb}`, ["auth", verb, ...args, "--runtime", opts.runtime, ...home], {
+      origin,
+      // A switch changes that home; status and list only read.
+      ...(verb === "switch" ? { changes: { check: `rig auth status --host ${opts.host} --codex-home ${opts.codexHome} (a switch copies the same saved profile again if repeated)` } } : {}),
+    }, depsOverride?.host);
+  };
 
   const auth = new Command("auth").description(
     "Manage agent auth profiles (CLI-local; runtime via --runtime). Tokens are never printed, logged, or stored.",
   );
 
-  withRuntime(auth.command("status"))
+  withHome(withRuntime(auth.command("status")))
     .description("Auth-file presence + login state (no secrets).")
-    .action((opts: { runtime: string }) => {
+    .action(async (opts: HomeOpts) => {
       if (!ensureRuntime(opts.runtime)) return;
-      const r = authStatus(paths(), { loginStatus: depsOverride?.loginStatus });
+      if (opts.host) return onHost("status", [], opts);
+      const r = authStatus(paths(opts.codexHome), { loginStatus: depsOverride?.loginStatus });
       console.log(`codex_home: ${r.codexHome}`);
       console.log(`codex_home_present: ${r.codexHomePresent ? "yes" : "no"}`);
       console.log(`active_auth_present: ${r.activeAuthPresent ? "yes" : "no"}`);
@@ -65,11 +85,12 @@ export function authCommand(depsOverride?: AuthCommandDeps): Command {
       console.log(`login_status: ${r.loginStatus}`);
     });
 
-  withRuntime(auth.command("list"))
+  withHome(withRuntime(auth.command("list")))
     .description("List saved profiles by name.")
-    .action((opts: { runtime: string }) => {
+    .action(async (opts: HomeOpts) => {
       if (!ensureRuntime(opts.runtime)) return;
-      for (const name of authList(paths())) console.log(name);
+      if (opts.host) return onHost("list", [], opts);
+      for (const name of authList(paths(opts.codexHome))) console.log(name);
     });
 
   withRuntime(auth.command("save <profile>"))
@@ -83,15 +104,24 @@ export function authCommand(depsOverride?: AuthCommandDeps): Command {
       console.log(`profile_mode: ${r.mode}`);
     });
 
-  withRuntime(auth.command("switch <profile>"))
-    .description("Activate a saved profile.")
-    .action((profile: string, opts: { runtime: string }) => {
+  withHome(withRuntime(auth.command("switch <profile>")))
+    .description("Restore saved credential bytes (sign-in is unverified).")
+    .addHelpText("after", `
+With --host, the switch runs on that machine, over its SSH entry, and copies a profile already saved there; name the
+home with --codex-home (rig auth status --host <id> shows the home it would use). Only the command and its output
+cross the connection.`)
+    .action(async (profile: string, opts: HomeOpts) => {
       if (!ensureRuntime(opts.runtime)) return;
-      const r = authSwitch(paths(), profile);
+      if (opts.host && !opts.codexHome) {
+        return fail(`switch --host needs --codex-home: name the home on ${opts.host} (rig auth status --host ${opts.host} shows the home it would use)`);
+      }
+      if (opts.host) return onHost("switch", [profile], opts);
+      const r = authSwitch(paths(opts.codexHome), profile);
       if (!r.ok) return fail(r.reason);
       console.log(`activated_profile: ${r.name}`);
       console.log(`active_auth: ${r.activePath}`);
       console.log(`active_mode: ${r.mode}`);
+      console.log("note: Restored saved credential bytes only; sign-in is unverified. Saved credentials may expire, be revoked, or be superseded by refresh elsewhere. Restart the affected seat and use the existing account verification; fresh sign-in may be required.");
       console.log(`note: ${r.note}`);
     });
 

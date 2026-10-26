@@ -55,6 +55,14 @@ function fakeIo(): StubRunnerIO & { lines: string[]; fireCount: number; restoreC
 }
 
 describe("executeStubScript (R1 dispatch over the StubRunnerIO seam)", () => {
+  it("mirrors the actual refocus seam context and rejects unbound refocus IO", () => {
+    const io = fakeIo();
+    const script: StubScript = { steps: [{ kind: "emit", behavior: "refocus" }] };
+    expect(() => executeStubScript(script, io, IDENTITY)).toThrow("refocus IO is not bound");
+    io.fireRefocus = () => ({ rawOutput: '{"actual":"hook"}', additionalContext: "actual hook context" });
+    executeStubScript(script, io, IDENTITY);
+    expect(io.lines).toEqual(["actual hook context"]);
+  });
   it("mirrors a `say` step's text verbatim to the pane", () => {
     const io = fakeIo();
     executeStubScript({ steps: [{ kind: "say", text: "hello from the stub" }] }, io, IDENTITY);

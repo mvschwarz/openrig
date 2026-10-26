@@ -25,6 +25,65 @@ describe("malformed request bodies", () => {
   }
 });
 
+describe("a request body of JSON null", () => {
+  let db: Database.Database;
+  beforeEach(() => { db = createFullTestDb(); });
+  afterEach(() => { db.close(); });
+
+  // Routes that read the body with a bare `await c.req.json()` then read a field
+  // off the result, so `null` used to die as `null.field`: a 500.
+  for (const path of ["/api/ask", "/api/transport/send", "/api/transport/capture", "/api/transport/broadcast", "/api/specs/review/rig", "/api/specs/review/agent"]) {
+    it(`${path} answers 400, not 500`, async () => {
+      const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const { app } = createTestApp(db);
+        const res = await app.request(path, post("null"));
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({ error: "invalid_json", message: "Request body must be a JSON object, not null." });
+      } finally {
+        errorLog.mockRestore();
+      }
+    });
+  }
+});
+
+describe("a JSON null body on routes that catch a bad body themselves", () => {
+  let db: Database.Database;
+  beforeEach(() => { db = createFullTestDb(); });
+  afterEach(() => { db.close(); });
+
+  for (const path of ["/api/stream/emit", "/api/scope/approve"]) {
+    it(`${path} keeps its own 400 refusal`, async () => {
+      const { app } = createTestApp(db);
+      expect((await app.request(path, post("null"))).status).toBe(400);
+    });
+  }
+});
+
+describe("JSON null bodies on operation-correlated rig routes without an operation ID", () => {
+  let db: Database.Database;
+  beforeEach(() => { db = createFullTestDb(); });
+  afterEach(() => { db.close(); });
+
+  it("keeps POST /api/rigs on its required-name 400 response", async () => {
+    const { app } = createTestApp(db);
+    const res = await app.request("/api/rigs", post("null"));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "name is required" });
+  });
+
+  it("keeps POST /api/rigs/:rigId/pods/:podNamespace/members on its required-member 400 response", async () => {
+    const { app, rigRepo } = createTestApp(db);
+    const rig = rigRepo.createRig("null-member-body");
+    db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, ?, ?)")
+      .run("null-member-pod", rig.id, "dev", "Development");
+
+    const res = await app.request(`/api/rigs/${rig.id}/pods/dev/members`, post("null"));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "member is required (a member fragment with id, runtime, agent_ref)" });
+  });
+});
+
 describe("jsonBodyErrorHandler", () => {
   function app(route: (c: Context) => Promise<Response> | Response): Hono {
     const app = new Hono();

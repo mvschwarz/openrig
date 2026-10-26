@@ -1,3 +1,6 @@
+import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
+import { EventBus } from "../src/domain/event-bus.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
 // OPR.0.4.3.05 seat-forking closeout — the narrow daemon fork composer route
 // (POST /api/agent-images/fork). Proves the three driver-note invariants:
 //   1. resume-token discovery runs server-side (resume-token-discovery.ts).
@@ -7,7 +10,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Hono } from "hono";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type Database from "better-sqlite3";
@@ -21,6 +24,8 @@ import { agentImagesRoutes } from "../src/routes/agent-images.js";
 import type { SnapshotCapturer } from "../src/domain/agent-images/snapshot-capturer.js";
 import type { PodRigInstantiator, AddMemberOutcome } from "../src/domain/rigspec-instantiator.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { prepareSeatLaunchAdditions, seatLaunchAdditions } from "../src/domain/seat-launch-additions.js";
+import { seatSkillPaths } from "../src/domain/seat-skill-storage.js";
 
 
 const NATIVE_SECRET = "NATIVE-RESUME-ID-MUST-STAY-DAEMON-LOCAL";
@@ -135,6 +140,99 @@ describe("agent-images fork composer route (OPR.0.4.3.05)", () => {
       mode: "fork",
       ref: { kind: "native_id", value: NATIVE_SECRET },
     });
+  });
+
+  it("names malformed source rules before a fork or image effect", async () => {
+    seedClaudeSource("dev-impl@src-rig", NATIVE_SECRET);
+    const source = rigRepo.getRig(rigRepo.findRigsByName("src-rig")[0]!.id)!.nodes[0]!;
+    db.prepare("UPDATE nodes SET claude_permissions_json='broken' WHERE id=?").run(source.id);
+    const addMember = vi.fn();
+    const response = await post(buildApp({ addMember }), { sourceSession: "dev-impl@src-rig", rigId: "dst-rig", pod: "dev", member: "child" });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: "permission_rules_unavailable", message: expect.stringContaining("Repair the rules") });
+    expect(addMember).not.toHaveBeenCalled();
+  });
+
+  it("forks a Codex source's current envelope as an independent copy, and names an unreadable one", async () => {
+    seedClaudeSource("dev-impl@src-rig", NATIVE_SECRET);
+    const source = rigRepo.getRig(rigRepo.findRigsByName("src-rig")[0]!.id)!.nodes[0]!;
+    db.prepare("UPDATE nodes SET runtime = 'codex' WHERE id = ?").run(source.id);
+    db.prepare("UPDATE sessions SET resume_type = 'codex_id' WHERE node_id = ?").run(source.id);
+    const envelope = { sandbox: "read-only", approval: "on-request" };
+    db.prepare("UPDATE nodes SET codex_permissions_json = 'broken' WHERE id = ?").run(source.id);
+    const refused = vi.fn();
+    const blocked = await post(buildApp({ addMember: refused }), { sourceSession: "dev-impl@src-rig", rigId: "dst-rig", pod: "dev", member: "child" });
+    expect(blocked.status).toBe(409);
+    expect(await blocked.json()).toMatchObject({ error: "permission_envelope_unavailable" });
+    expect(refused).not.toHaveBeenCalled();
+
+    db.prepare("UPDATE nodes SET codex_permissions_json = ? WHERE id = ?").run(JSON.stringify(envelope), source.id);
+    const destination = rigRepo.createRig("copy");
+    let childId: string | undefined;
+    const addMember = vi.fn(async (_rig: string, _pod: string, member: Record<string, unknown>) => {
+      const child = rigRepo.addNode(destination.id, "dev.child", { runtime: "codex", cwd: source.cwd!,
+        codexPermissions: member.codex_permissions as never });
+      childId = child.id;
+      return { ok: true, result: { podId: "p1", podNamespace: "dev", node: { logicalId: "dev.child", nodeId: child.id, status: "launched" } } } as AddMemberOutcome;
+    });
+    const response = await post(buildApp({ addMember }), { sourceSession: "dev-impl@src-rig", rigId: destination.id, pod: "dev", member: "child" });
+    expect(response.status).toBe(201);
+    expect(addMember.mock.calls[0]![2].codex_permissions).toEqual(envelope);
+    db.prepare("UPDATE nodes SET codex_permissions_json = NULL WHERE id = ?").run(source.id);
+    expect(JSON.parse((db.prepare("SELECT codex_permissions_json v FROM nodes WHERE id = ?").get(childId) as { v: string }).v)).toEqual(envelope);
+  });
+
+  it("forks the source's current recorded rules as an independent copy", async () => {
+    seedClaudeSource("dev-impl@src-rig", NATIVE_SECRET);
+    const source = rigRepo.getRig(rigRepo.findRigsByName("src-rig")[0]!.id)!.nodes[0]!;
+    const rules = { allow: ["Bash(node source-lane.mjs *)"], deny: ["Read(./private/**)"] };
+    const writer = new SeatLifecycleService({ db, rigRepo, sessionRegistry: new SessionRegistry(db), eventBus: new EventBus(db), tmuxAdapter: {} as never });
+    const update = { seatRef: "dev-impl@src-rig", rules, actor: "operator@src-rig", reason: "Select source rules before fork" };
+    expect(await writer.setPermissions(update)).toMatchObject({ ok: true });
+    const destination = rigRepo.createRig("copy");
+    let childId: string | undefined;
+    const addMember = vi.fn(async (_rig: string, _pod: string, member: Record<string, unknown>) => {
+      const child = rigRepo.addNode(destination.id, "dev.child", { runtime: "claude-code", cwd: source.cwd!,
+        claudePermissions: member.claude_permissions as typeof rules });
+      childId = child.id;
+      return { ok: true, result: { podId: "p1", podNamespace: "dev", node: { logicalId: "dev.child", nodeId: child.id, status: "launched" } } } as AddMemberOutcome;
+    });
+    const response = await post(buildApp({ addMember }), { sourceSession: "dev-impl@src-rig", rigId: destination.id, pod: "dev", member: "child" });
+    expect(response.status).toBe(201);
+    expect(addMember.mock.calls[0]![2].claude_permissions).toEqual(rules);
+    expect(await writer.setPermissions({ ...update, rules: { allow: [], deny: [] } })).toMatchObject({ ok: true });
+    expect(JSON.parse((db.prepare("SELECT claude_permissions_json v FROM nodes WHERE id=?").get(childId) as { v: string }).v)).toEqual(rules);
+  });
+
+  it("a fork's additions are copied only by add_member into a validated seat: a refused fork writes nothing, a partial carry says so (OPR.0.7.0.9)", async () => {
+    const saved = process.env["OPENRIG_HOME"];
+    try {
+      process.env["OPENRIG_HOME"] = join(tmp, "home");
+      seedClaudeSource("dev-impl@src-rig", NATIVE_SECRET);
+      writeFileSync(join(tmp, "prompt.md"), "Source prompt.\n");
+      writeFileSync(join(tmp, "own.md"), "The existing seat's own prompt.\n");
+      const source = seatSkillPaths({ rigId: rigRepo.findRigsByName("src-rig")[0]!.id, logicalId: "dev.impl", runtime: "claude-code" });
+      expect(prepareSeatLaunchAdditions(source, { appendSystemPromptFile: join(tmp, "prompt.md") }).ok).toBe(true);
+      const existing = seatSkillPaths({ rigId: "dst-rig", logicalId: "dev.a_b", runtime: "claude-code" });
+      expect(prepareSeatLaunchAdditions(existing, { appendSystemPromptFile: join(tmp, "own.md") }).ok).toBe(true);
+      const before = readFileSync(join(existing.root, "launch-additions.json"), "utf8");
+      const refused = vi.fn(async () => ({ ok: false, code: "preflight_failed", errors: ["dev.a/b: member name contains \"/\""], warnings: [] } as AddMemberOutcome));
+      const res = await post(buildApp({ addMember: refused }), { sourceSession: "dev-impl@src-rig", rigId: "dst-rig", pod: "dev", member: "a/b" });
+      expect(res.status).toBe(400);
+      expect(readFileSync(seatLaunchAdditions(existing)!.appendSystemPromptFile!, "utf8")).toBe("The existing seat's own prompt.\n");
+      expect(readFileSync(join(existing.root, "launch-additions.json"), "utf8")).toBe(before);
+      expect(refused.mock.calls[0]![4]).toEqual({ launchAdditionsFrom: source });
+      const omitted = "seat_launch_addition_refused: the agent \"reviewer\" needs the seat's generated plugin";
+      const partial = vi.fn(async () => ({ ok: true, result: { podId: "p1", podNamespace: "dev", edges: [],
+        node: { logicalId: "dev.forked", nodeId: "n2", status: "launched", sessionName: "forked@dst" },
+        launchAdditions: { status: "partial", kept: true, omitted: [omitted] } } } as AddMemberOutcome));
+      const ok = await post(buildApp({ addMember: partial }), { sourceSession: "dev-impl@src-rig", rigId: "dst-rig", pod: "dev", member: "forked" });
+      const json = await ok.json() as Record<string, unknown> & { result: Record<string, unknown> };
+      expect(json).toMatchObject({ launchAdditions: "partial", launchAdditionsNote: expect.stringContaining(omitted) });
+      expect(json.result.launchAdditions).toBeUndefined();
+    } finally {
+      if (saved === undefined) delete process.env["OPENRIG_HOME"]; else process.env["OPENRIG_HOME"] = saved;
+    }
   });
 
   it("unknown source session → 404 session_not_found", async () => {

@@ -18,6 +18,7 @@
 // display from the count+reason fields via `deriveDisplayActivity` — the one bridge —
 // so no store or transition ever holds "needs-input" as a state. That reconciliation
 // is documented in the reference doc's addendum-mapping section.
+import { communityHarnessOf } from "./built-in-runtimes.js";
 
 /** Activity axis — what a present agent is doing. */
 export type ActivityValue = "working" | "idle-at-prompt" | "unknown";
@@ -88,8 +89,9 @@ export const EVIDENCE_RUNG_RANK: readonly EvidenceRungId[] = [
 /** AM-2 symmetric admission: a rung EARNS authority the way lower rungs retire.
  *  authoritative — consulted for state; trial — admitted by fixture pass, measured for
  *  agreement, NOT consulted; identity-only — usable for identity/resume refs only
- *  (partial-coverage honesty, and the AM-1 degradation target); absent — not staffed. */
-export type RungTrust = "authoritative" | "trial" | "identity-only" | "absent";
+ *  (partial-coverage honesty, and the AM-1 degradation target); positive-only — consulted
+ *  only when it reports working, so its silence is unknown, never idle; absent — not staffed. */
+export type RungTrust = "authoritative" | "trial" | "identity-only" | "positive-only" | "absent";
 
 export interface RungDeclaration {
   rung: EvidenceRungId;
@@ -97,6 +99,11 @@ export interface RungDeclaration {
   lifecycleCoverage: "full" | "partial" | "none";
   /** The trust the rung STARTS with on this adapter (promotion may raise trial). */
   initialTrust: RungTrust;
+  /** Hooks only: the source sees every turn boundary in order, so its last idle or attention boundary holds until the
+   *  next instead of expiring with the hook window. A working boundary still expires: a turn whose end was lost must not
+   *  read working forever. Its posts are taken in the source's own order. Only a runner that reads its child's whole
+   *  event stream declares it. */
+  durableBoundaries?: true;
 }
 
 /** What an adapter declares about itself — arbitration ranks what each source can
@@ -104,7 +111,7 @@ export interface RungDeclaration {
  *  never inherits its predecessor's rung authority. */
 export interface AdapterRungInventory {
   adapterId: string;
-  runtime: "claude-code" | "codex" | "tmux-generic";
+  runtime: "claude-code" | "codex" | "pi" | "omp" | "tmux-generic" | "community-harness";
   rungs: RungDeclaration[];
 }
 
@@ -120,9 +127,22 @@ export interface ActivityEvidence {
   /** Monotonic per source — stale or reordered reports are dropped. */
   seq: number;
   observedAt: string;
+  /** The emitter's own order (a runner's per-post sequence), which orders posts that share an observedAt. */
+  sourceSequence?: number;
+  /** How often the source promises to report while idle. A durable idle boundary holds for two of these, then lapses to
+   *  unknown: a runner that died without saying so stops reading idle. Absent: the boundary holds until the next. */
+  livenessSeconds?: number;
   activity?: ActivityValue;
   needsInput?: NeedsInput;
+  permissionRequest?: { id: string };
+  permissionResolved?: boolean;
+  /** Which relay route posted hook evidence, when it said. One event can arrive by more than one route (a Codex seat's
+   *  plugin hook and its managed hook), so promotion counts agreements per route. Absent for an untagged post. */
+  route?: EvidenceRoute;
 }
+
+/** The bounded set of relay routes. "unrecognised" stands for any other label, so a post can never add a new key. */
+export type EvidenceRoute = "plugin" | "managed" | "unrecognised";
 
 /** A visible rung-health transition (AM-1): arbitration can never make a silently-dead
  *  source authoritative, and the degradation itself must be observable. */
@@ -180,6 +200,7 @@ export const CODEX_ACTIVITY_RUNG_INVENTORY: AdapterRungInventory = {
   runtime: "codex",
   rungs: [
     { rung: "lifecycle-hooks", lifecycleCoverage: "full", initialTrust: "trial" },
+    { rung: "needs-input-chrome", lifecycleCoverage: "full", initialTrust: "authoritative" },
     { rung: "window-sampling", lifecycleCoverage: "full", initialTrust: "authoritative" },
   ],
 };
@@ -191,10 +212,42 @@ export const TMUX_GENERIC_RUNG_INVENTORY: AdapterRungInventory = {
   rungs: [{ rung: "window-sampling", lifecycleCoverage: "full", initialTrust: "authoritative" }],
 };
 
+/** A community harness declares no activity signal. A changing screen reads working, decided by window
+ *  sampling; a quiet screen reads unknown, never idle, since an app can sit quietly at a prompt or an approval. */
+export const COMMUNITY_HARNESS_RUNG_INVENTORY: AdapterRungInventory = {
+  adapterId: "community-harness",
+  runtime: "community-harness",
+  rungs: [{ rung: "window-sampling", lifecycleCoverage: "partial", initialTrust: "positive-only" }],
+};
+
+/** pi and omp run under OpenRig's runner, which reads the child's RPC event stream and posts each turn boundary as a
+ *  hook (agent_start, turn_start, tool calls, agent_end; attention; process exit). Those hooks decide, and a boundary
+ *  holds until the next one. A quiet pane can be mid-turn, so window sampling stays positive-only. */
+const RUNNER_ACTIVITY_RUNGS: RungDeclaration[] = [
+  { rung: "lifecycle-hooks", lifecycleCoverage: "full", initialTrust: "authoritative", durableBoundaries: true },
+  { rung: "window-sampling", lifecycleCoverage: "partial", initialTrust: "positive-only" },
+];
+
+export const PI_ACTIVITY_RUNG_INVENTORY: AdapterRungInventory = {
+  adapterId: "pi-runtime-adapter",
+  runtime: "pi",
+  rungs: RUNNER_ACTIVITY_RUNGS,
+};
+
+export const OMP_ACTIVITY_RUNG_INVENTORY: AdapterRungInventory = {
+  adapterId: "omp-runtime-adapter",
+  runtime: "omp",
+  rungs: RUNNER_ACTIVITY_RUNGS,
+};
+
 /** Resolve a runtime string to its rung inventory (the ingest auto-declaration path).
- *  Unknown runtimes get the generic floor — partial-coverage honesty by default. */
-export function runtimeRungInventory(runtime: string | null): AdapterRungInventory {
+ *  Unknown runtimes get the generic floor — partial-coverage honesty by default. A seat launched for a community
+ *  community harness (its session's recorded selection, still the node's runtime) gets that app's inventory. */
+export function runtimeRungInventory(runtime: string | null, communityHarness?: string | null): AdapterRungInventory {
   if (runtime === "claude-code") return CLAUDE_ACTIVITY_RUNG_INVENTORY;
   if (runtime === "codex") return CODEX_ACTIVITY_RUNG_INVENTORY;
+  if (runtime === "pi") return PI_ACTIVITY_RUNG_INVENTORY;
+  if (runtime === "omp") return OMP_ACTIVITY_RUNG_INVENTORY;
+  if (communityHarnessOf(communityHarness, runtime)) return COMMUNITY_HARNESS_RUNG_INVENTORY;
   return TMUX_GENERIC_RUNG_INVENTORY;
 }

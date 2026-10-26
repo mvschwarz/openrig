@@ -8,6 +8,7 @@ import {
   WatchdogJobsError,
 } from "../domain/watchdog-jobs-repository.js";
 import { parseWatchdogSpec } from "../domain/watchdog-policy-engine.js";
+import { updateWatchdogJob } from "../domain/watchdog-job-update.js";
 
 /**
  * Watchdog HTTP routes (PL-004 Phase C). Backs `rig watchdog` CLI verb.
@@ -23,6 +24,7 @@ import { parseWatchdogSpec } from "../domain/watchdog-policy-engine.js";
  *   GET  /:job_id           show one job
  *   GET  /:job_id/status    job + recent history (compact summary)
  *   POST /:job_id/stop      operator stop
+ *   POST /:job_id/update    change an active job's interval, spec or message in place
  */
 export function watchdogRoutes(): Hono {
   const app = new Hono();
@@ -54,6 +56,13 @@ export function watchdogRoutes(): Hono {
         : err.code === "watched_file_unresolved" ? 400
         : err.code === "requires_job_not_found" ? 400
         : err.code === "job_terminal" ? 409
+        : err.code === "job_stopped" ? 409
+        : err.code === "nothing_to_update" ? 400
+        : err.code === "field_not_updatable" ? 400
+        : err.code === "interval_not_effective" ? 409
+        : err.code === "policy_not_updatable" ? 409
+        : err.code === "spec_not_updatable" ? 409
+        : err.code === "target_not_updatable" ? 409
         : 500;
       return c.json(
         { error: err.code, message: err.message, ...(err.details ?? {}) },
@@ -76,6 +85,8 @@ export function watchdogRoutes(): Hono {
         registeredBySession?: string;
         watchedFilePath?: string;
         thresholdBytes?: number;
+        thresholdTokens?: number;
+        thresholdPercent?: number;
         requiresJobId?: string;
       }>()
       .catch(() => ({} as never));
@@ -96,13 +107,28 @@ export function watchdogRoutes(): Hono {
       const specThresholdBytes = typeof context.threshold_bytes === "number"
         ? context.threshold_bytes
         : null;
+      // Issue #1180 — token / percent-of-window units from the spec context block.
+      const specThresholdTokens = typeof context.threshold_tokens === "number"
+        ? context.threshold_tokens
+        : null;
+      const specThresholdPercent = typeof context.threshold_percent === "number"
+        ? context.threshold_percent
+        : null;
+      const thresholdTokens = isContextUsageThreshold
+        ? (body.thresholdTokens ?? specThresholdTokens)
+        : null;
+      const thresholdPercent = isContextUsageThreshold
+        ? (body.thresholdPercent ?? specThresholdPercent)
+        : null;
+      const byteGated = isContextUsageThreshold &&
+        (body.thresholdBytes ?? specThresholdBytes) != null && thresholdTokens == null && thresholdPercent == null;
       const specRequiresJobId = typeof context.requires === "string"
         ? context.requires
         : null;
       const watchedFilePath = isContextUsageThreshold
         ? (body.watchedFilePath ?? specWatchedFile ?? jobsRepo.findTranscriptPath(body.targetSession))
         : null;
-      if (isContextUsageThreshold) {
+      if (isContextUsageThreshold && byteGated) {
         try {
           if (!watchedFilePath || !statSync(watchedFilePath).isFile()) throw new Error("not a file");
         } catch {
@@ -125,6 +151,8 @@ export function watchdogRoutes(): Hono {
         thresholdBytes: isContextUsageThreshold
           ? (body.thresholdBytes ?? specThresholdBytes)
           : null,
+        thresholdTokens,
+        thresholdPercent,
         requiresJobId: isContextUsageThreshold
           ? (body.requiresJobId ?? specRequiresJobId)
           : null,
@@ -160,7 +188,8 @@ export function watchdogRoutes(): Hono {
           event.type !== "watchdog.evaluation_skipped" &&
           event.type !== "watchdog.evaluation_terminal" &&
           event.type !== "watchdog.job_registered" &&
-          event.type !== "watchdog.job_stopped"
+          event.type !== "watchdog.job_stopped" &&
+          event.type !== "watchdog.job_updated"
         ) return;
         const sse = { id: String(event.seq), data: JSON.stringify(event) };
         stream.writeSSE(sse).catch(() => {});
@@ -197,6 +226,32 @@ export function watchdogRoutes(): Hono {
         reason: body.reason ?? "operator_stopped",
       });
       return c.json(job);
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  // Only these three can change; naming anything else is refused rather than quietly ignored.
+  app.post("/:job_id/update", async (c) => {
+    const jobId = c.req.param("job_id");
+    const body = await c.req.json<unknown>().catch(() => ({}));
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      return c.json({ error: "body must be a JSON object" }, 400);
+    }
+    try {
+      const fixed = Object.keys(body).filter((key) => !["intervalSeconds", "message", "specYaml"].includes(key));
+      if (fixed.length > 0) {
+        throw new WatchdogJobsError(
+          "field_not_updatable",
+          `${fixed.join(", ")} cannot be changed on an existing watchdog job; only intervalSeconds, message and specYaml can`,
+          { fields: fixed },
+        );
+      }
+      const result = updateWatchdogJob(getJobsRepo(c), jobId, body as Record<string, unknown>);
+      if (result.changed.length > 0) {
+        getEventBus(c).emit({ type: "watchdog.job_updated", jobId, changed: result.changed });
+      }
+      return c.json(result);
     } catch (err) {
       return errorResponse(c, err);
     }

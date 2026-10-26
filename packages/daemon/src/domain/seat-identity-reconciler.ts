@@ -7,6 +7,8 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { SeatIdentityVerdict } from "./types.js";
 import { SeatIdentityStore, SelfHostIdentityStore } from "./seat-identity-store.js";
 import { RESERVED_HOST_IDS, validateHostRegistry } from "./hosts/hosts-registry-reader.js";
+import { communityHarnessOf } from "./built-in-runtimes.js";
+import { sessionCommunityHarnessSelect } from "./session-registry.js";
 
 /** Default identity-reconcile cadence: 5s. Process identity changes rarely
  *  (a seat's pane/process is stable for its whole life), and the check is
@@ -47,7 +49,11 @@ export function classifyPaneRuntimeMatch(
 ): "match" | "mismatch" {
   if (!command) return "match"; // no signal — never false-mismatch a present pane
   const cmd = command.trim().toLowerCase();
-  const expectsAgent = expectedRuntime === "claude-code" || expectedRuntime === "codex";
+  // Pi and OMP run their agent behind the OpenRig runner (`node`). Their supported launch shapes normally reach `node`
+  // by the time readiness succeeds, but any check can still see a shell: before the launch, or after the agent exits.
+  // Terminal seats deliberately run a shell and are not included.
+  const expectsAgent = expectedRuntime === "claude-code" || expectedRuntime === "codex"
+    || expectedRuntime === "pi" || expectedRuntime === "omp";
 
   // Positive same-runtime signal.
   if (expectedRuntime === "claude-code" && cmd.includes("claude")) return "match";
@@ -75,6 +81,7 @@ interface RunningSeatRow {
   resume_rotated_from?: string | null;
   resume_rotated_process?: string | null;
   resume_launch_process?: string | null;
+  community_harness?: string | null;
 }
 
 type PaneObservation = { pid: number | null; command: string | null };
@@ -122,7 +129,8 @@ export class SeatIdentityReconciler {
              s.resume_provenance as resume_provenance,
              s.resume_rotated_from as resume_rotated_from,
              s.resume_rotated_process as resume_rotated_process,
-             s.resume_launch_process as resume_launch_process
+             s.resume_launch_process as resume_launch_process,
+             ${sessionCommunityHarnessSelect(this.db)} as community_harness
       FROM nodes n
       JOIN sessions s ON s.node_id = n.id
         AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
@@ -336,7 +344,7 @@ export class SeatIdentityReconciler {
       return {
         ...base, verdict: verified ? "verified" : "mismatch",
         evidenceSource: "pane_process", reason: verified ? null : "process_identity_ambiguous",
-        evidence: { registeredPane: seat.tmux_pane, observedPid: native?.process.pid ?? pid,
+        evidence: { registeredPane: seat.tmux_pane, observedPanePid: pid, observedPid: native?.process.pid ?? pid,
           observedCommand: native?.process.command ?? command, matchedLayer: verified ? 1 : null },
       };
     }
@@ -348,6 +356,17 @@ export class SeatIdentityReconciler {
         evidenceSource: "pane_process",
         reason: "process_identity_mismatch",
         evidence: { registeredPane: seat.tmux_pane, observedPid: pid, observedCommand: command, matchedLayer: 1 },
+      };
+    }
+
+    // A community harness's process doesn't prove which session it is: the pane is live, its identity unconfirmed.
+    if (communityHarnessOf(seat.community_harness, seat.runtime)) {
+      return {
+        ...base,
+        verdict: "unconfirmed",
+        evidenceSource: "pane_process",
+        reason: "process_identity_unconfirmed",
+        evidence: { registeredPane: seat.tmux_pane, observedPid: pid, observedCommand: command, matchedLayer: null },
       };
     }
 

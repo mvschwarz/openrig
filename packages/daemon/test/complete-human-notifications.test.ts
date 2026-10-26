@@ -64,11 +64,14 @@ describe("complete human notifications", () => {
 
   it("preserves legacy decisions and classifies explicit updates without prose/tag inference", async () => {
     const legacy = await repo.create({ ...request, body: "FYI no action needed", tags: ["informational"] });
+    const alerted = await repo.create({ ...request, humanAlert: true });
     const update = await repo.create({ ...request, humanIntent: "update", tags: ["escalation"], humanDetail: "Retained supplemental context." });
     const rows = await makeQueuePorts(repo, { loadHumanRegistry: () => registry }).listHumanAlerts({});
+    // An omitted intent is a decision: by default (the Slack subscription's every-ask preset) it posts, as an alerted one does.
     expect(rows.find((q) => q.qitemId === legacy.qitemId)).toMatchObject({ ownerNotificationKind: "human-required", ownerNotificationLevel: "ALERT" });
+    expect(rows.find((q) => q.qitemId === alerted.qitemId)).toMatchObject({ ownerNotificationKind: "human-required", ownerNotificationLevel: "ALERT" });
     expect(rows.find((q) => q.qitemId === update.qitemId)).toMatchObject({ humanIntent: "update", humanDetail: "Retained supplemental context.", ownerNotificationKind: "human-update", ownerNotificationLevel: "NOTICE" });
-    expect(repo.listAttention().map((q) => q.qitemId)).toEqual([legacy.qitemId]);
+    expect(repo.listAttention().map((q) => q.qitemId).sort()).toEqual([legacy.qitemId, alerted.qitemId].sort());
     expect(repo.list({ compact: true }).find((q) => q.qitemId === update.qitemId)?.humanIntent).toBe("update");
     const work = await repo.create({ ...request, destinationSession: "worker@rig" });
     expect(() => repo.update({ qitemId: work.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: update.qitemId, transitionNote: "await update" })).toThrow(/not an approval dependency/);
@@ -194,7 +197,7 @@ describe("complete human notifications", () => {
 
   it("keeps digest timing but dispatches each human request/update completely with stable identity", async () => {
     for (const humanIntent of ["decision", "update"] as const) {
-      const item = await repo.create({ ...request, humanIntent, humanDetail: "Supplemental detail." });
+      const item = await repo.create({ ...request, humanIntent, ...(humanIntent === "decision" ? { humanAlert: true } : {}), humanDetail: "Supplemental detail." });
       const key = `${item.qitemId}:${repo.transitionLog.latestOwnerNotificationForQitem(item.qitemId)!.transitionId}`;
       repo.update({ qitemId: item.qitemId, actorSession: "daemon@kernel", transitionNote: `delivery-decision: digest window=4h notification_key=${key}` });
     }

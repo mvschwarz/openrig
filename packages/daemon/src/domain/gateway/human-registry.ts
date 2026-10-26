@@ -14,8 +14,8 @@
 // validateHumanFragment runs on `add` and on load, so a present-but-invalid fragment
 // is a loud error, never silently projected.
 
-import { createHash } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { getOpenRigHome } from "../../openrig-compat.js";
@@ -36,13 +36,68 @@ export const ENTITY_ID_PATTERN = /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/;
 export const ADDRESS_DOMAIN = "external";
 
 // Closed key sets — a typo'd field must fail LOUD, never silently degrade behavior.
-const ALLOWED_FRAGMENT_KEYS = new Set(["entityId", "class", "displayName", "address", "connectorBindings", "prefs"]);
+const ALLOWED_FRAGMENT_KEYS = new Set(["entityId", "class", "displayName", "address", "connectorBindings", "prefs", "subscriptions"]);
 const ALLOWED_BINDING_KEYS = new Set(["kind", "connectorRef", "secretsRef", "role", "handle"]);
 // A connector handle (M1 A6 v3 schema 9e468b2f): the platform-native id of the human ON that
 // connector (e.g. a Slack user id). Constrained so it can never forge a session ref (no ':' / '@'
 // / whitespace) — it is compared to an inbound sender id and spliced into teaching text.
 export const HANDLE_PATTERN = /^[A-Za-z0-9._-]+$/;
 const ALLOWED_PREFS_KEYS = new Set(["deliveryClass", "away", "availability"]);
+
+/** Attention subscriptions: where a person's items go besides Steering and the TUI, each a saved filter plus a
+ *  destination. The first is Slack's, with two preset filters. Field filters and channel destinations extend these
+ *  objects later without a migration. */
+export const SUBSCRIPTION_PRESETS = ["every-ask", "urgent-only"] as const;
+export type SubscriptionPreset = (typeof SUBSCRIPTION_PRESETS)[number];
+/** With no Slack subscription authored, every ask posts, as before subscriptions existed, so nothing changes on upgrade. */
+export const DEFAULT_SLACK_PRESET: SubscriptionPreset = "every-ask";
+export interface AttentionSubscription {
+  /** Where matching items go: the person's Slack binding. */
+  destination: { connector: "slack" };
+  /** Which items: `every-ask` (every ask to them) or `urgent-only` (asks marked --alert, which carry HUMAN_ALERT_TAG). */
+  filter: { preset: SubscriptionPreset };
+}
+const ALLOWED_SUBSCRIPTION_KEYS = new Set(["destination", "filter"]);
+
+/** The person's Slack subscription preset, and whether they authored it. */
+export function slackSubscriptionFor(human: Pick<HumanFragment, "subscriptions"> | undefined): { preset: SubscriptionPreset; source: "authored" | "default" } {
+  const authored = human?.subscriptions?.find((sub) => sub.destination.connector === "slack");
+  return authored ? { preset: authored.filter.preset, source: "authored" } : { preset: DEFAULT_SLACK_PRESET, source: "default" };
+}
+
+function validateSubscriptions(value: unknown): { ok: true; subscriptions: AttentionSubscription[] } | { ok: false; error: string } {
+  if (!Array.isArray(value)) return { ok: false, error: "subscriptions must be a list of { destination, filter }" };
+  const subscriptions: AttentionSubscription[] = [];
+  for (const [i, sub] of value.entries()) {
+    const where = `subscriptions[${i}]`;
+    if (!isObj(sub)) return { ok: false, error: `${where} must be a mapping { destination, filter }` };
+    const uk = unknownKey(sub, ALLOWED_SUBSCRIPTION_KEYS);
+    if (uk) return { ok: false, error: `${where} has unknown key "${uk}" — allowed: destination, filter` };
+    const { destination, filter } = sub;
+    if (!isObj(destination) || unknownKey(destination, new Set(["connector"])) || destination.connector !== "slack") {
+      return { ok: false, error: `${where}.destination must be { connector: slack } (the person's Slack binding)` };
+    }
+    if (!isObj(filter) || unknownKey(filter, new Set(["preset"])) || typeof filter.preset !== "string"
+      || !(SUBSCRIPTION_PRESETS as readonly string[]).includes(filter.preset)) {
+      return { ok: false, error: `${where}.filter must be { preset: ${SUBSCRIPTION_PRESETS.join("|")} }` };
+    }
+    if (subscriptions.some((s) => s.destination.connector === "slack")) return { ok: false, error: `${where}: one Slack subscription per person` };
+    subscriptions.push({ destination: { connector: "slack" }, filter: { preset: filter.preset as SubscriptionPreset } });
+  }
+  return { ok: true, subscriptions };
+}
+
+/** The tag an ask created or handed off with humanAlert (`--alert`) carries: it stands out in Slack, as an interrupt,
+ *  under every setting. */
+export const HUMAN_ALERT_TAG = "human-alert";
+
+/** The ask's tags, with HUMAN_ALERT_TAG exactly when this create or handoff is marked alert-worthy: an inherited one is
+ *  dropped, so `--alert` decides per item. */
+export function withHumanAlertTag(tags: string[] | null | undefined, humanAlert: boolean | undefined): string[] | null {
+  const rest = (tags ?? []).filter((tag) => tag !== HUMAN_ALERT_TAG);
+  if (humanAlert === true) return [...rest, HUMAN_ALERT_TAG];
+  return tags ? rest : null;
+}
 // OPR.0.5.6.1 — the availability enum the delivery rules engine consumes.
 // Legacy `away: true` reads as availability=away ONLY when availability is
 // whole-field-absent (the D1 convention); a present-but-conflicting pair is
@@ -88,6 +143,8 @@ export interface HumanFragment {
   address: string;
   connectorBindings: HumanConnectorBinding[];
   prefs: HumanPrefs;
+  /** Attention subscriptions (one per connector for now); none means the default Slack subscription. */
+  subscriptions?: AttentionSubscription[];
 }
 
 export type ValidateResult =
@@ -105,7 +162,7 @@ export function validateHumanFragment(raw: unknown): ValidateResult {
   if (!isObj(raw)) return { ok: false, error: "human fragment must be a mapping" };
   const uk = unknownKey(raw, ALLOWED_FRAGMENT_KEYS);
   if (uk) return { ok: false, error: `unknown fragment key "${uk}" — allowed: ${[...ALLOWED_FRAGMENT_KEYS].join(", ")} (a typo must not silently degrade)` };
-  const { entityId, class: cls, displayName, address, connectorBindings, prefs } = raw;
+  const { entityId, class: cls, displayName, address, connectorBindings, prefs, subscriptions: rawSubscriptions } = raw;
 
   if (typeof entityId !== "string" || !ENTITY_ID_PATTERN.test(entityId)) {
     return { ok: false, error: `entityId "${String(entityId)}" must be a lowercase slug (a-z0-9._- , no leading/trailing separator)` };
@@ -196,10 +253,16 @@ export function validateHumanFragment(raw: unknown): ValidateResult {
   const validatedPrefs: HumanPrefs = { deliveryClass: prefs.deliveryClass as HumanPrefs["deliveryClass"] };
   if (prefs.away !== undefined) validatedPrefs.away = prefs.away;
   if (prefs.availability !== undefined) validatedPrefs.availability = prefs.availability as HumanPrefs["availability"];
+  let subscriptions: AttentionSubscription[] | undefined;
+  if (rawSubscriptions !== undefined) {
+    const v = validateSubscriptions(rawSubscriptions);
+    if (!v.ok) return v;
+    subscriptions = v.subscriptions;
+  }
 
   return {
     ok: true,
-    fragment: { entityId, class: "human", displayName, address, connectorBindings: bindings, prefs: validatedPrefs },
+    fragment: { entityId, class: "human", displayName, address, connectorBindings: bindings, prefs: validatedPrefs, ...(subscriptions ? { subscriptions } : {}) },
   };
 }
 
@@ -209,6 +272,23 @@ export function humansDir(home: string = getOpenRigHome()): string {
 }
 export function projectionPath(home: string = getOpenRigHome()): string {
   return join(home, "gateway", "humans.generated.yaml");
+}
+/** The participant side file (participants.ts owns its contents). Older daemons never read it. */
+export function participantsPath(home: string = getOpenRigHome()): string {
+  return join(home, "gateway", "participants.yaml");
+}
+
+/** People and shared channels share one address space (<id>@external): the shared channel registered under `entityId`,
+ *  if the participant file names one. A file that doesn't parse names none here — it never blocks registering a person,
+ *  and its own error is reported where it's read. */
+function sharedChannelWithId(entityId: string, home: string): string | null {
+  const path = participantsPath(home);
+  if (!existsSync(path)) return null;
+  let raw: unknown;
+  try { raw = parseYaml(readFileSync(path, "utf8")); } catch { return null; }
+  const entry = isObj(raw) && isObj(raw.participants) ? raw.participants[entityId] : undefined;
+  if (!isObj(entry) || entry.kind !== "shared-channel") return null;
+  return typeof entry.displayName === "string" ? entry.displayName : entityId;
 }
 
 /** @deprecated Historical spelling retained for readers of old records only.
@@ -321,7 +401,7 @@ export function resolveSlackHandle(
   };
 }
 
-function atomicWrite(path: string, body: string): { ok: true } | { ok: false; error: string } {
+export function atomicWrite(path: string, body: string): { ok: true } | { ok: false; error: string } {
   try {
     mkdirSync(dirname(path), { recursive: true });
     const tmp = `${path}.tmp-${process.pid}`;
@@ -362,6 +442,11 @@ export function addHumanFragment(
   if (!opts.replace && existsSync(file)) {
     return { ok: false, error: `human "${v.fragment.entityId}" already exists at ${file} — pass an explicit replace to update it (no silent overwrite)` };
   }
+  // A person can't take a shared channel's id: they'd share <id>@external, and the participant file would stop reading.
+  const channel = sharedChannelWithId(v.fragment.entityId, home);
+  if (channel !== null) {
+    return { ok: false, error: `"${v.fragment.entityId}" is already the shared channel "${channel}" (${v.fragment.entityId}@${ADDRESS_DOMAIN}); choose another id for the person, or remove the channel first with rig gateway channel remove ${v.fragment.entityId}` };
+  }
   // A6 v3 pin-1: reject a handle already claimed by a DIFFERENT human BEFORE writing (never leave a
   // conflicting fragment on disk with a failed re-projection). projectHumans is the load-time backstop.
   const existing = projectHumans(home);
@@ -380,6 +465,9 @@ export function addHumanFragment(
   }
   const w = atomicWrite(file, stringifyYaml(v.fragment));
   if (!w.ok) return { ok: false, error: w.error };
+  // A new or replaced record may author any availability: it's a change of its own.
+  const change = recordAvailabilityChange(v.fragment.entityId, home);
+  if (!change.ok) return { ok: false, error: `fragment written but ${change.error}` };
   const proj = writeProjection(home);
   if (!proj.ok) return { ok: false, error: `fragment written but re-projection failed: ${proj.error}` };
   return { ok: true, path: file, fragment: v.fragment };
@@ -413,18 +501,16 @@ export interface HumanSummary {
   deliveryClass: HumanPrefs["deliveryClass"];
   /** EFFECTIVE availability preset (default false when unauthored). */
   away: boolean;
+  /** The availability delivery acts on: the authored value, else legacy `away`, else available (the engine's
+   *  resolveAvailability rule). */
+  availability: NonNullable<HumanPrefs["availability"]>;
   bindings: HumanBindingsSummary;
   fragmentPath: string;
 }
 
 export type ListHumansResult =
-  | { ok: true; humans: HumanSummary[]; advisory?: string }
+  | { ok: true; humans: HumanSummary[] }
   | { ok: false; error: string };
-
-/** Amendment A1 (founder R5): the human surface is SINGLE-HUMAN. Several fragments render
- *  honestly, but enumeration is display, never management — the advisory names the boundary. */
-export const MULTI_HUMAN_ADVISORY =
-  "several human fragments exist; OpenRig supports one configured human, so they are displayed as found and no command manages several";
 
 /** A field value with its provenance: authored in the fragment, or filled by a default. */
 export interface ProvenancedValue<T> {
@@ -441,6 +527,8 @@ export interface EffectiveHumanRecord {
     deliveryClass: ProvenancedValue<HumanPrefs["deliveryClass"]>;
     away: ProvenancedValue<boolean>;
   };
+  /** The Slack subscription's preset filter (`every-ask` unless authored). */
+  slackSubscription: ProvenancedValue<SubscriptionPreset>;
   connectorBindings: Array<HumanConnectorBinding & { inboundResolvable: boolean }>;
 }
 
@@ -449,8 +537,10 @@ export type ShowHumanResult =
   | { ok: false; error: string };
 
 export type SetHumanFieldResult =
-  | { ok: true; path: string; fragment: HumanFragment }
-  | { ok: false; error: string };
+  /** changeId: the availability change record this write left, when it left one. */
+  | { ok: true; path: string; fragment: HumanFragment; changeId?: string }
+  /** changeId: set when the fragment and its change record were written but something after them failed. */
+  | { ok: false; error: string; changeId?: string };
 
 export type RemoveHumanResult =
   | { ok: true; removed: string; archivedPath: string; orphanRecordPath?: string }
@@ -509,6 +599,7 @@ export function listHumans(home: string = getOpenRigHome()): ListHumansResult {
       address: e.address,
       deliveryClass: e.prefs.deliveryClass,
       away: e.prefs.away === true,
+      availability: e.prefs.availability ?? (e.prefs.away === true ? "away" : "available"),
       bindings: {
         count: e.connectorBindings.length,
         primary: { kind: primary.kind, connectorRef: primary.connectorRef },
@@ -517,7 +608,8 @@ export function listHumans(home: string = getOpenRigHome()): ListHumansResult {
       fragmentPath: fragmentPathFor(e.entityId, home),
     };
   });
-  return humans.length > 1 ? { ok: true, humans, advisory: MULTI_HUMAN_ADVISORY } : { ok: true, humans };
+  // Several people are a supported registry (0.7.3): the default and their placement live in gateway/participants.yaml.
+  return { ok: true, humans };
 }
 
 /** Read one fragment RAW (for authored-vs-default provenance) + validated. */
@@ -555,13 +647,14 @@ export function showHuman(entityId: string, home: string = getOpenRigHome()): Sh
           source: rawPrefs.away !== undefined ? "authored" : "default",
         },
       },
+      slackSubscription: (({ preset, source }) => ({ value: preset, source }))(slackSubscriptionFor(f.fragment)),
       connectorBindings: f.fragment.connectorBindings.map((b) => ({ ...b, inboundResolvable: b.handle !== undefined })),
     },
   };
 }
 
 const SETTABLE_FIELDS_TEACHING =
-  "settable fields: display-name, delivery-class, away, binding.<n> (binding.<n> takes a full kind:connectorRef:secretsRef:role[:handle=<id>] spec)";
+  "settable fields: display-name, delivery-class, away, availability (available|focus|away|off, or unset), slack-subscription (every-ask|urgent-only, or unset for every-ask), binding.<n> (binding.<n> takes a full kind:connectorRef:secretsRef:role[:handle=<id>] spec)";
 
 /** Cross-fragment handle-uniqueness: the same pre-write check add runs (one platform id =
  *  one human), extracted so set enforces it identically. */
@@ -581,6 +674,42 @@ function handleConflict(fragment: HumanFragment, home: string): string | undefin
     }
   }
   return undefined;
+}
+
+// A person's availability change record: a sidecar beside the fragments (gateway/humans/.availability/<id>.json),
+// rewritten with a fresh change id by every write through these writers that can change availability (set availability
+// or away, add or replace). It lets a mode tell its own change from a later one that happens to have the same value. It
+// lives outside the fragment because the fragment's keys are a closed set every reader validates, and the fragment
+// loaders skip dot-entries, so older readers never see it.
+function availabilityChangePath(entityId: string, home: string): string {
+  return join(humansDir(home), ".availability", `${entityId}.json`);
+}
+function recordAvailabilityChange(entityId: string, home: string): { ok: true; changeId: string } | { ok: false; error: string } {
+  const changeId = randomUUID();
+  const w = atomicWrite(availabilityChangePath(entityId, home), JSON.stringify({ changeId, at: new Date().toISOString() }));
+  return w.ok ? { ok: true, changeId } : { ok: false, error: `availability change record not written: ${w.error}` };
+}
+
+/** The availability a person's fragment authors (undefined when it authors none), and the id of the latest change
+ *  recorded through the writers (null when none has been): what a mode records as the prior value and checks is still
+ *  its own. */
+export function readHumanAvailability(entityId: string, home: string = getOpenRigHome()):
+  { ok: true; availability: string | undefined; changeId: string | null; away: boolean } | { ok: false; error: string } {
+  const f = readFragment(entityId, home);
+  if (!f.ok) return f;
+  const prefs = isObj(f.raw.prefs) ? (f.raw.prefs as Record<string, unknown>) : {};
+  let changeId: string | null = null;
+  const path = availabilityChangePath(entityId, home);
+  if (existsSync(path)) {
+    try {
+      const record = JSON.parse(readFileSync(path, "utf8")) as { changeId?: unknown };
+      if (typeof record.changeId !== "string") throw new Error("it has no change id");
+      changeId = record.changeId;
+    } catch (err) {
+      return { ok: false, error: `availability change record for ${entityId} is unreadable: ${(err as Error).message}` };
+    }
+  }
+  return { ok: true, availability: typeof prefs.availability === "string" ? prefs.availability : undefined, changeId, away: prefs.away === true };
 }
 
 export function setHumanField(
@@ -608,6 +737,20 @@ export function setHumanField(
     }
     rawPrefs.away = value === "true";
     raw.prefs = rawPrefs;
+  } else if (field === "availability") {
+    // `unset` removes the authored field, so it reads as never authored (what restoring an absent value needs). Any
+    // other value goes through the add-time validator below: the closed enum, and agreement with legacy `away`.
+    if (value === "unset") delete rawPrefs.availability;
+    else rawPrefs.availability = value;
+    raw.prefs = rawPrefs;
+  } else if (field === "slack-subscription") {
+    // The preset of the person's Slack subscription. `unset` removes it, so the default (DEFAULT_SLACK_PRESET) applies;
+    // the add-time validator checks any other value.
+    const others = (Array.isArray(raw.subscriptions) ? raw.subscriptions : [])
+      .filter((sub) => !(isObj(sub) && isObj(sub.destination) && sub.destination.connector === "slack"));
+    const next = value === "unset" ? others : [...others, { destination: { connector: "slack" }, filter: { preset: value } }];
+    if (next.length) raw.subscriptions = next;
+    else delete raw.subscriptions;
   } else if (field.startsWith("binding.")) {
     const idxRaw = field.slice("binding.".length);
     const idx = /^\d+$/.test(idxRaw) ? Number.parseInt(idxRaw, 10) : NaN;
@@ -636,9 +779,18 @@ export function setHumanField(
 
   const w = atomicWrite(f.path, stringifyYaml(raw));
   if (!w.ok) return { ok: false, error: w.error };
+  // A change to availability rotates the change record. Legacy `away` changes availability only while the fragment
+  // authors none: with availability authored, `away` must agree with it (true only when it's already away) or it's
+  // false, and either way availability is unchanged, so the record stays the latest real change's.
+  let changeId: string | undefined;
+  if (field === "availability" || (field === "away" && rawPrefs.availability === undefined)) {
+    const change = recordAvailabilityChange(entityId, home);
+    if (!change.ok) return { ok: false, error: `fragment written but ${change.error}` };
+    changeId = change.changeId;
+  }
   const proj = writeProjection(home);
-  if (!proj.ok) return { ok: false, error: `fragment written but re-projection failed: ${proj.error}` };
-  return { ok: true, path: f.path, fragment: v.fragment };
+  if (!proj.ok) return { ok: false, error: `fragment written but re-projection failed: ${proj.error}`, ...(changeId ? { changeId } : {}) };
+  return { ok: true, path: f.path, fragment: v.fragment, ...(changeId ? { changeId } : {}) };
 }
 
 export function removeHumanFragment(
@@ -672,6 +824,8 @@ export function removeHumanFragment(
   for (let n = 1; existsSync(archivedPath); n++) archivedPath = join(archiveDir, `${entityId}.${stamp}-${n}.yaml`);
   try {
     renameSync(path, archivedPath);
+    // A later re-add of the same id starts a fresh change record, never inheriting this one.
+    rmSync(availabilityChangePath(entityId, home), { force: true });
   } catch (err) {
     return { ok: false, error: `failed to archive ${path}: ${(err as Error).message}` };
   }

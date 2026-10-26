@@ -5,7 +5,7 @@
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from "vitest";
 import http from "node:http";
 import { Command } from "commander";
-import { startCommand } from "../src/commands/start.js";
+import { startCommand, lastStopState } from "../src/commands/start.js";
 import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
 
@@ -45,7 +45,9 @@ describe("rig start (OPR.0.3.4.1)", () => {
   let server: http.Server;
   let port: number;
   let upBodies: Array<Record<string, unknown>> = [];
+  let nodesReads = 0;
   let routes: Record<string, (req: http.IncomingMessage, body: Record<string, unknown>) => Record<string, unknown>>;
+  let launches: Array<{ seat: string; body: Record<string, unknown> }> = [];
 
   beforeAll(async () => {
     server = http.createServer((req, res) => {
@@ -75,6 +77,15 @@ describe("rig start (OPR.0.3.4.1)", () => {
           res.end(JSON.stringify(data));
           return;
         }
+        const nodesMatch = method === "GET" && url.match(/^\/api\/rigs\/([^/]+)\/nodes$/);
+        if (nodesMatch) nodesReads++;
+        if (nodesMatch && routes["/api/rigs/:id/nodes"]) {
+          const data = routes["/api/rigs/:id/nodes"]!(req, { _rigId: nodesMatch[1] });
+          const httpStatus = (data as Record<string, unknown> | null)?._httpStatus as number | undefined;
+          res.writeHead(httpStatus ?? 200, { "Content-Type": "application/json" });
+          res.end(httpStatus ? "{}" : JSON.stringify(data));
+          return;
+        }
         if (method === "GET" && url.match(/^\/api\/rigs\/[^/]+$/)) {
           const handler = routes["/api/rigs/:id"];
           const data = handler ? handler(req, body) : { sessions: [] };
@@ -102,6 +113,16 @@ describe("rig start (OPR.0.3.4.1)", () => {
           res.end(JSON.stringify(httpStatus ? cleanData : data));
           return;
         }
+        const launchMatch = method === "POST" && url.match(/^\/api\/seat\/launch\/(.+)$/);
+        if (launchMatch) {
+          launches.push({ seat: decodeURIComponent(launchMatch[1]!), body });
+          const data = routes["/api/seat/launch/:seat"]?.(req, body) ?? { ok: true };
+          const httpStatus = (data as Record<string, unknown>)._httpStatus as number | undefined;
+          const { _httpStatus: _, ...cleanData } = data as Record<string, unknown>;
+          res.writeHead(httpStatus ?? 200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(cleanData));
+          return;
+        }
         res.writeHead(404).end();
       });
     });
@@ -113,6 +134,8 @@ describe("rig start (OPR.0.3.4.1)", () => {
 
   beforeEach(() => {
     upBodies = [];
+    launches = [];
+    nodesReads = 0;
     routes = {};
   });
 
@@ -145,6 +168,11 @@ describe("rig start (OPR.0.3.4.1)", () => {
       { id: "rig-1", name, nodeCount: 2, lifecycleState },
     ];
     routes["/api/rigs/:id"] = () => ({ sessions: [{ lastSeenAt: "2026-06-14T12:00:00Z" }] });
+    // When tmux is lost, the boot reconciler marks each session detached: no recorded stop
+    // intent, so --last restores the rig.
+    routes["/api/rigs/:id/nodes"] = () => ["dev.impl", "dev.qa"].map((logicalId) => ({
+      logicalId, sessionStatus: "detached", storedSessionStatus: "detached", intentionallyStopped: false,
+    })) as unknown as Record<string, unknown>;
     // Both plan preview AND apply go through the id-based route.
     routes["/api/rigs/:id/up"] = (_req, body) => {
       if (body.plan === true) {
@@ -185,6 +213,271 @@ describe("rig start (OPR.0.3.4.1)", () => {
     expect(applyBodies[0]!._rigIdRoute).toBe("rig-1");
     const output = logs.join("\n");
     expect(output).toContain("my-rig");
+  });
+
+  // ---- --last respects `rig down` (S4-start-last-respects-down) ----
+
+  // Stopped rigs with restore-usable snapshots. Each seat's /nodes entry carries what #1254
+  // exposes: sessionStatus (null when never launched), storedSessionStatus and
+  // intentionallyStopped (set by `rig down` and `rig seat stop`). An all-flagged rig's summary
+  // reads lifecycleState "stopped"; restoreLifecycleState stays "recoverable", so it is a candidate.
+  type SeatFixture = { logicalId?: string; sessionStatus?: unknown; storedSessionStatus?: unknown; intentionallyStopped?: unknown };
+  type RigFixture = {
+    id: string;
+    name: string;
+    seats: SeatFixture[];
+    // Replaces the /nodes body for this rig; `{ _httpStatus: 404 }` answers 404.
+    nodes?: () => unknown;
+    // Answers the apply call instead of a clean restore.
+    apply?: () => Record<string, unknown>;
+  };
+  const S = (status: string | null, flag: boolean): SeatFixture => ({ sessionStatus: status, storedSessionStatus: status, intentionallyStopped: flag });
+  const allFlagged = (seats: SeatFixture[]) => seats.some((s) => s.sessionStatus !== null) && seats.every((s) => s.sessionStatus === null || s.intentionallyStopped === true);
+
+  function setupStoppedRigs(rigs: RigFixture[]) {
+    routes["/api/rigs/summary"] = () => rigs.map((r) => ({
+      id: r.id, name: r.name, nodeCount: r.seats.length,
+      lifecycleState: allFlagged(r.seats) ? "stopped" : "recoverable",
+      restoreLifecycleState: "recoverable",
+    })) as unknown as Record<string, unknown>;
+    routes["/api/rigs/:id"] = () => ({ sessions: [] });
+    routes["/api/rigs/:id/nodes"] = (_req, body) => {
+      const rig = rigs.find((r) => r.id === body._rigId)!;
+      if (rig.nodes) return rig.nodes() as Record<string, unknown>;
+      return rig.seats.map((seat, i) => ({ logicalId: `dev.seat${i}`, ...seat })) as unknown as Record<string, unknown>;
+    };
+    routes["/api/rigs/:id/up"] = (_req, body) => {
+      const rig = rigs.find((r) => r.id === body._rigId)!;
+      if (body.plan === true) {
+        return {
+          status: "plan", mode: "restore", rigId: rig.id, rigName: rig.name,
+          snapshot: { id: `snap-${rig.id}`, kind: "auto-pre-down", createdAt: "2026-06-14T11:00:00Z" },
+          wouldCaptureCurrentState: false,
+          nodes: [{ logicalId: "dev.seat0", intendedAction: "resume-original" }],
+          mutated: false,
+        };
+      }
+      if (rig.apply) return rig.apply();
+      return { status: "restored", rigId: rig.id, rigName: rig.name, rigResult: "fully_restored", nodes: [{ logicalId: "dev.seat0", status: "resumed" }], warnings: [] };
+    };
+  }
+  const rigFixture = (name: string, seats: SeatFixture[], extra?: Partial<RigFixture>): RigFixture => ({ id: `rig-${name}`, name, seats, ...extra });
+
+  // A full `rig down`: every seat killed and flagged.
+  const DOWNED = rigFixture("downed", [S("exited", true), S("exited", true)]);
+  // `rig down` on a rig with one seat that was never launched.
+  const DOWNED_UNLAUNCHED = rigFixture("downed-unlaunched", [S("exited", true), S(null, false)]);
+  // tmux was lost; the boot reconciler marked each session detached.
+  const CRASHED = rigFixture("crashed", [S("detached", false), S("detached", false)]);
+  // Detached, then `rig down` with tmux absence confirmed: flagged and exited on the wire.
+  const DETACHED_DOWN_OK = rigFixture("detached-down-ok", [S("exited", true), S("exited", true)]);
+  // Detached, then `rig down` with the tmux probe unavailable: one seat left detached, unflagged.
+  const DETACHED_DOWN_UNC = rigFixture("detached-down-unc", [S("exited", true), S("detached", false)]);
+  // One seat flagged, one ordinary exit.
+  const PARTIAL_EXIT = rigFixture("partial-exit", [S("exited", true), S("exited", false)]);
+  // `rig down` whose kill failed for one seat: that seat stays live and unflagged.
+  const PARTIAL_LIVE = rigFixture("partial-live", [S("exited", true), S("running", false)], {
+    apply: () => ({ _httpStatus: 409, code: "rig_not_stopped", error: "Rig still has live sessions" }),
+  });
+  // A crash, a failed launch's cleanup, or `rig seat clean`: exited without the flag.
+  const PLAIN_EXITED = rigFixture("plain-exited", [S("exited", false), S("exited", false)]);
+  // A daemon before #1254: no intentionallyStopped key.
+  const OLD_DAEMON = rigFixture("old-daemon", [{ sessionStatus: "exited" }, { sessionStatus: "exited" }]);
+
+  const appliedRigIds = () => upBodies.filter((b) => b.plan !== true && b._rigIdRoute).map((b) => b._rigIdRoute);
+  const jsonResult = (logs: string[]) => JSON.parse(logs.find((l) => l.trim().startsWith("{"))!);
+  const runStart = (...args: string[]) => captureLogs(async () => {
+    await makeCmd().parseAsync(["node", "rig", "start", ...args]);
+  });
+
+  // T1 unreadable-status
+  it.each([
+    ["an error object instead of the seat list", () => ({ error: "inventory unavailable" })],
+    ["an entry with no sessionStatus key", () => [{ logicalId: "dev.seat0", storedSessionStatus: "exited", intentionallyStopped: true }, { logicalId: "dev.seat1", ...S("exited", true) }]],
+    ["no inventory route (404)", () => ({ _httpStatus: 404 })],
+    ["a non-boolean intentionallyStopped", () => [{ logicalId: "dev.seat0", ...S("exited", true), intentionallyStopped: "yes" }]],
+  ])("--last restores a rig whose seat statuses are unreadable (%s) and warns about it, exit 0", async (_label, nodes) => {
+    const unreadable = rigFixture("unreadable", [S("exited", true), S("exited", true)], { nodes });
+    setupStoppedRigs([unreadable, CRASHED]);
+    const { logs, exitCode } = await runStart("--last", "--json");
+    expect(appliedRigIds().sort()).toEqual(["rig-crashed", "rig-unreadable"]);
+    expect(exitCode).toBeUndefined();
+    const parsed = jsonResult(logs);
+    expect(parsed.status).toBe("started");
+    expect(parsed.previewErrors).toBeUndefined();
+    expect(parsed.warnings).toEqual([{
+      rigId: "rig-unreadable", rigName: "unreadable", code: "seat_status_unreadable",
+      message: "selected for restore because its seat statuses could not be read",
+    }]);
+    expect(parsed.keptDown).toEqual([]);
+
+    upBodies = [];
+    const human = await runStart("--last");
+    expect(human.exitCode).toBeUndefined();
+    expect(appliedRigIds().sort()).toEqual(["rig-crashed", "rig-unreadable"]);
+    const output = human.logs.join("\n");
+    expect(output).toContain("  unreadable: selected for restore because its seat statuses could not be read");
+    expect(output).not.toContain("crashed: could not read");
+  });
+
+  it("--all still restores a rig whose seat statuses are unreadable, without reading them", async () => {
+    setupStoppedRigs([rigFixture("unreadable", [S("exited", true)], { nodes: () => ({ error: "inventory unavailable" }) })]);
+    const { logs, exitCode } = await runStart("--all", "--json");
+    expect(appliedRigIds()).toEqual(["rig-unreadable"]);
+    expect(exitCode).toBeUndefined();
+    expect(jsonResult(logs).warnings).toBeUndefined();
+    expect(nodesReads).toBe(0);
+  });
+
+  // T2 confirmed-deliberate-stop
+  it.each([DOWNED, DOWNED_UNLAUNCHED])("--last keeps $name down and names the command that brings it back", async (rig) => {
+    setupStoppedRigs([rig, CRASHED]);
+    const { logs, exitCode } = await runStart("--last");
+    expect(appliedRigIds()).toEqual(["rig-crashed"]);
+    expect(exitCode).toBeUndefined();
+    expect(logs.join("\n")).toContain(`  ${rig.name}: stopped on purpose (with rig down or rig seat stop), so --last leaves it down. Bring it back: rig start --rigs ${rig.name}`);
+
+    upBodies = [];
+    const json = await runStart("--last", "--json");
+    expect(appliedRigIds()).toEqual(["rig-crashed"]);
+    expect(json.exitCode).toBeUndefined();
+    const parsed = jsonResult(json.logs);
+    expect(parsed.status).toBe("started");
+    expect(parsed.keptDown).toEqual([{ rigName: rig.name, restoreCommand: `rig start --rigs ${rig.name}` }]);
+    expect(parsed.restoredRigs.map((r: { rigName: string }) => r.rigName)).toEqual(["crashed"]);
+  });
+
+  it("--last with only a downed rig restores nothing, says so, and exits 0", async () => {
+    setupStoppedRigs([DOWNED]);
+    const { logs, exitCode } = await runStart("--last");
+    expect(appliedRigIds()).toEqual([]);
+    expect(exitCode).toBeUndefined();
+    const output = logs.join("\n");
+    expect(output).toContain("  downed: stopped on purpose (with rig down or rig seat stop), so --last leaves it down. Bring it back: rig start --rigs downed");
+    expect(output).toContain("No rigs selected for restore.");
+    expect(output.indexOf("downed: stopped on purpose")).toBeLessThan(output.indexOf("No rigs selected"));
+
+    const json = await runStart("--last", "--json");
+    expect(json.exitCode).toBeUndefined();
+    const parsed = jsonResult(json.logs);
+    expect(parsed.status).toBe("started");
+    expect(parsed.keptDown).toEqual([{ rigName: "downed", restoreCommand: "rig start --rigs downed" }]);
+    expect(parsed.restoredRigs).toEqual([]);
+  });
+
+  // T3 detached-then-down
+  it("--last keeps a detached rig down once rig down confirmed its sessions are gone", async () => {
+    setupStoppedRigs([DETACHED_DOWN_OK]);
+    const { logs } = await runStart("--last", "--json");
+    expect(appliedRigIds()).toEqual([]);
+    expect(jsonResult(logs).keptDown).toEqual([{ rigName: "detached-down-ok", restoreCommand: "rig start --rigs detached-down-ok" }]);
+  });
+
+  it("--last restores a rig with one seat stopped on purpose and one still detached", async () => {
+    setupStoppedRigs([DETACHED_DOWN_UNC]);
+    const { logs, exitCode } = await runStart("--last", "--json");
+    expect(appliedRigIds()).toEqual(["rig-detached-down-unc"]);
+    expect(exitCode).toBeUndefined();
+    expect(jsonResult(logs).keptDown).toEqual([]);
+  });
+
+  // T4 failed-or-partial-stop
+  it("--last restores a rig with one seat stopped on purpose and one ordinary exit", async () => {
+    setupStoppedRigs([PARTIAL_EXIT]);
+    const { logs, exitCode } = await runStart("--last", "--json");
+    expect(appliedRigIds()).toEqual(["rig-partial-exit"]);
+    expect(exitCode).toBeUndefined();
+    expect(jsonResult(logs).keptDown).toEqual([]);
+  });
+
+  it("--last selects a rig whose rig down failed to kill a seat, and reports rig_not_stopped", async () => {
+    setupStoppedRigs([PARTIAL_LIVE]);
+    const { logs, exitCode } = await runStart("--last", "--json");
+    expect(appliedRigIds()).toEqual(["rig-partial-live"]);
+    expect(exitCode).toBe(1);
+    const parsed = jsonResult(logs);
+    expect(parsed.keptDown).toEqual([]);
+    expect(parsed.restoredRigs).toEqual([{ rigName: "partial-live", status: "rig_not_stopped", nodes: [] }]);
+  });
+
+  // T5 no-CLI-memory
+  it("--last decides from the seats on each run: a rig kept down once is restored once its seats are detached", async () => {
+    const rig = rigFixture("flip", DOWNED.seats);
+    setupStoppedRigs([rig]);
+    const first = await runStart("--last", "--json");
+    expect(appliedRigIds()).toEqual([]);
+    expect(jsonResult(first.logs).keptDown).toEqual([{ rigName: "flip", restoreCommand: "rig start --rigs flip" }]);
+
+    rig.seats = CRASHED.seats;
+    const second = await runStart("--last", "--json");
+    expect(appliedRigIds()).toEqual(["rig-flip"]);
+    expect(jsonResult(second.logs).keptDown).toEqual([]);
+  });
+
+  // T6 all-and-rigs-still-restore
+  it("--all, --rigs and --all --last still restore a rig that was taken down", async () => {
+    setupStoppedRigs([DOWNED, CRASHED]);
+    const all = await runStart("--all", "--json");
+    expect(appliedRigIds().sort()).toEqual(["rig-crashed", "rig-downed"]);
+    expect(jsonResult(all.logs).keptDown).toBeUndefined();
+
+    upBodies = [];
+    await runStart("--rigs", "downed");
+    expect(appliedRigIds()).toEqual(["rig-downed"]);
+
+    upBodies = [];
+    const allLast = await runStart("--all", "--last", "--json");
+    expect(appliedRigIds().sort()).toEqual(["rig-crashed", "rig-downed"]);
+    expect(jsonResult(allLast.logs).keptDown).toBeUndefined();
+  });
+
+  // T7 last-only-fetch
+  it("reads /nodes only under --last: never for --all, --rigs or the interactive path", async () => {
+    setupStoppedRigs([DOWNED, CRASHED]);
+    await runStart("--all");
+    expect(nodesReads).toBe(0);
+    await runStart("--rigs", "downed");
+    expect(nodesReads).toBe(0);
+    await captureLogs(async () => {
+      await makeCmd(async () => false).parseAsync(["node", "rig", "start"]);
+    });
+    expect(nodesReads).toBe(0);
+    await runStart("--last");
+    expect(nodesReads).toBe(2);
+  });
+
+  // T8 pure-exited-restores
+  it.each([PLAIN_EXITED, OLD_DAEMON])("--last restores $name (exited without a recorded stop intent), with no warning", async (rig) => {
+    setupStoppedRigs([rig]);
+    const { logs, exitCode } = await runStart("--last", "--json");
+    expect(appliedRigIds()).toEqual([rig.id]);
+    expect(exitCode).toBeUndefined();
+    const parsed = jsonResult(logs);
+    expect(parsed.status).toBe("started");
+    expect(parsed.warnings).toBeUndefined();
+    expect(parsed.keptDown).toEqual([]);
+  });
+
+  it("lastStopState: down only when every launched seat carries the recorded stop intent", () => {
+    const table: Array<[string, unknown, string]> = [
+      ["DOWNED", DOWNED.seats, "down"],
+      ["DOWNED_UNLAUNCHED", DOWNED_UNLAUNCHED.seats, "down"],
+      ["CRASHED", CRASHED.seats, "was_running"],
+      ["DETACHED_DOWN_OK", DETACHED_DOWN_OK.seats, "down"],
+      ["DETACHED_DOWN_UNC", DETACHED_DOWN_UNC.seats, "was_running"],
+      ["PARTIAL_EXIT", PARTIAL_EXIT.seats, "was_running"],
+      ["PARTIAL_LIVE", PARTIAL_LIVE.seats, "was_running"],
+      ["PLAIN_EXITED", PLAIN_EXITED.seats, "was_running"],
+      ["OLD_DAEMON", OLD_DAEMON.seats, "was_running"],
+      ["never launched", [S(null, false), S(null, false)], "was_running"],
+      ["no seats", [], "was_running"],
+      ["error object", { error: "inventory unavailable" }, "unknown"],
+      ["undefined", undefined, "unknown"],
+      ["null entry", [null], "unknown"],
+      ["entry without sessionStatus", [{ intentionallyStopped: true }], "unknown"],
+      ["non-boolean intentionallyStopped", [{ sessionStatus: "exited", intentionallyStopped: "yes" }], "unknown"],
+    ];
+    expect(table.map(([label, nodes]) => [label, lastStopState(nodes)])).toEqual(table.map(([label, , want]) => [label, want]));
   });
 
   it("--all restores all candidates with ZERO prompts", async () => {
@@ -249,6 +542,61 @@ describe("rig start (OPR.0.3.4.1)", () => {
     expect(output).toContain("awaiting-decision");
     const applyBodies = upBodies.filter((b) => b.plan !== true);
     expect(applyBodies.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("#1332 each seat left awaiting a decision gets a one-seat command for exactly that seat, dotted legacy ids included", async () => {
+    setupCandidateRig("legacy-rig");
+    const plan = routes["/api/rigs/:id/up"]!;
+    // A partial restore: a sibling runs, so `rig up --existing ... --fresh` would be refused for these seats.
+    routes["/api/rigs/:id/up"] = (req, body) => body.plan === true ? plan(req, body) : {
+      status: "restored", rigId: "rig-1", rigName: "legacy-rig", rigResult: "partially_restored",
+      nodes: [
+        { logicalId: "orch.lead", status: "resumed" },
+        { logicalId: "dev.ops.impl", status: "awaiting-decision" },
+        { logicalId: "dev.ops-impl", status: "awaiting-decision" },
+      ],
+      warnings: [],
+    };
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "start", "--last"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain(`dev.ops.impl: awaiting-decision -- to fresh-prime: rig seat launch dev.ops.impl@legacy-rig --fresh --reason "fresh-prime after restore"`);
+    expect(output).toContain(`dev.ops-impl: awaiting-decision -- to fresh-prime: rig seat launch dev.ops-impl@legacy-rig --fresh --reason "fresh-prime after restore"`);
+    expect(output).not.toContain("rig up --existing");
+  });
+
+  it("#1332 answering y after a partial restore starts that one seat fresh, not a second whole-rig restore", async () => {
+    setupCandidateRig("legacy-rig");
+    const plan = routes["/api/rigs/:id/up"]!;
+    routes["/api/rigs/:id/up"] = (req, body) => body.plan === true ? plan(req, body) : {
+      status: "restored", rigId: "rig-1", rigName: "legacy-rig", rigResult: "partially_restored",
+      nodes: [{ logicalId: "orch.lead", status: "resumed" }, { logicalId: "dev.ops.impl", status: "awaiting-decision", error: "no token available" }],
+      warnings: [],
+    };
+    routes["/api/seat/launch/:seat"] = () => ({ ok: true, sessionName: "dev-ops.impl@legacy-rig" });
+    const { logs } = await captureLogs(async () => {
+      await makeCmd(vi.fn(async () => true)).parseAsync(["node", "rig", "start", "--last"]);
+    });
+    expect(launches).toEqual([{ seat: "dev.ops.impl@legacy-rig", body: { fresh: true, reason: "fresh-prime after restore" } }]);
+    expect(upBodies.filter((b) => b.plan !== true && Array.isArray(b.freshLogicalIds))).toEqual([]);
+    expect(logs.join("\n")).toContain("dev.ops.impl: fresh-primed (dev-ops.impl@legacy-rig)");
+  });
+
+  it("with --json, a refused one-seat launch after y still reaches stderr", async () => {
+    setupCandidateRig("legacy-rig");
+    const plan = routes["/api/rigs/:id/up"]!;
+    routes["/api/rigs/:id/up"] = (req, body) => body.plan === true ? plan(req, body) : {
+      status: "restored", rigId: "rig-1", rigName: "legacy-rig", rigResult: "partially_restored",
+      nodes: [{ logicalId: "orch.lead", status: "resumed" }, { logicalId: "dev.ops.impl", status: "awaiting-decision", error: "no token available" }],
+      warnings: [],
+    };
+    routes["/api/seat/launch/:seat"] = () => ({ _httpStatus: 409, ok: false, code: "seat_live", message: "The seat's pane is still running." });
+    const { logs } = await captureLogs(async () => {
+      await makeCmd(vi.fn(async () => true)).parseAsync(["node", "rig", "start", "--last", "--json"]);
+    });
+    expect(launches).toHaveLength(1);
+    expect(logs.join("\n")).toContain("dev.ops.impl: not started -- The seat's pane is still running.");
   });
 
   // ---- KERNEL INVARIANT ----
@@ -562,6 +910,8 @@ describe("rig start (OPR.0.3.4.1)", () => {
         if (method === "GET" && url === "/healthz") { res.writeHead(200).end(JSON.stringify({ ok: true })); return; }
         if (method === "GET" && url === "/api/kernel/status") { res.writeHead(200).end(JSON.stringify({ kernel_state: "ready" })); return; }
         if (method === "GET" && url === "/api/rigs/summary") { res.writeHead(200).end(JSON.stringify(routes["/api/rigs/summary"]!(req, body))); return; }
+        // The seat is detached (what the summary above reports), so --last attempts the restore.
+        if (method === "GET" && url.match(/^\/api\/rigs\/[^/]+\/nodes$/)) { res.writeHead(200).end(JSON.stringify([{ logicalId: "w", sessionStatus: "detached" }])); return; }
         if (method === "GET" && url.match(/^\/api\/rigs\/[^/]+$/)) { res.writeHead(200).end(JSON.stringify({ sessions: [] })); return; }
         const rigUpMatch2 = method === "POST" && url.match(/^\/api\/rigs\/([^/]+)\/up$/);
         if (rigUpMatch2) {
@@ -606,6 +956,8 @@ describe("rig start (OPR.0.3.4.1)", () => {
         if (method === "GET" && url === "/healthz") { res.writeHead(200).end(JSON.stringify({ ok: true })); return; }
         if (method === "GET" && url === "/api/kernel/status") { const h = routes["/api/kernel/status"]; res.writeHead(200).end(JSON.stringify(h ? h(req, body) : { kernel_state: "ready" })); return; }
         if (method === "GET" && url === "/api/rigs/summary") { const h = routes["/api/rigs/summary"]; res.writeHead(200).end(JSON.stringify(h ? h(req, body) : [])); return; }
+        const nodesMatch3 = method === "GET" && url.match(/^\/api\/rigs\/([^/]+)\/nodes$/);
+        if (nodesMatch3 && routes["/api/rigs/:id/nodes"]) { res.writeHead(200).end(JSON.stringify(routes["/api/rigs/:id/nodes"]!(req, { _rigId: nodesMatch3[1] }))); return; }
         if (method === "GET" && url.match(/^\/api\/rigs\/[^/]+$/)) { const h = routes["/api/rigs/:id"]; res.writeHead(200).end(JSON.stringify(h ? h(req, body) : { sessions: [] })); return; }
         if (method === "POST" && url === "/api/up") { upBodies.push(body); const h = routes["/api/up"]; const d = h ? h(req, body) : {}; res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(d)); return; }
         const rigUpRestore = method === "POST" && url.match(/^\/api\/rigs\/([^/]+)\/up$/);

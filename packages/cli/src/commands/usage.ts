@@ -189,14 +189,15 @@ export function usageCommand(depsOverride?: StatusDeps): Command {
 Claude seats show the statusline's cost.total_cost_usd: a client-side estimate, cumulative for one
 native session since its last reset (not an invoice). Codex seats show tokens and that the inspected
 method reports no cost. A missing figure reads as missing and an old one as stale, never as $0; no
-subscription window is shown in dollars. Earlier values stay in rig usage series --lane context.
+subscription window is shown in dollars. Earlier cost values stay in rig usage series --lane context --json.
 With usage.pi_cost_facts on (default off), Pi seats show Pi's model-priced estimate summed over
 their own persisted session entries, each counted once; entries a fork copied in are shown apart and
 not counted, and an entry without a cost is named, not counted as zero.
 With usage.pi_openrouter_charge on as well (default off), OpenRouter's actual charge for those requests
 is shown beside the estimate (never added to it), when the seat's OpenRouter key is the one OpenRig
-forwarded; requests it can't charge are counted with the reason. Turning it off stops new lookups;
-outcomes recorded while it was on stay visible.`)
+forwarded; requests it can't charge are counted with the reason. Changes to either Pi switch take
+effect when the seat next launches or resumes; a running seat keeps its launch selection. Outcomes
+recorded while the switches were on stay visible.`)
     .action(async (opts: { seat?: string; json?: boolean }) => {
       const deps = getDeps();
       const client = await getClient(deps);
@@ -238,7 +239,7 @@ outcomes recorded while it was on stay visible.`)
       if (opts.until) params.set("until", opts.until);
       if (opts.limit) params.set("limit", opts.limit);
       const qs = params.toString();
-      const res = await client.get<{ rows: Array<Record<string, unknown>> }>(
+      const res = await client.get<{ rows: Array<Record<string, unknown>>; advisories?: string[] }>(
         `/api/telemetry/usage/series${qs ? `?${qs}` : ""}`,
       );
       if (handleHttpError(res, "usage series", opts.json)) return;
@@ -246,6 +247,8 @@ outcomes recorded while it was on stay visible.`)
         console.log(JSON.stringify(res.data, null, 2));
         return;
       }
+      // An advisory (e.g. a bound that isn't a date or time) goes to stderr, so stdout stays the series.
+      for (const advisory of res.data.advisories ?? []) console.error(`note: ${advisory}`);
       const rows = res.data.rows;
       if (rows.length === 0) {
         console.log("no samples match — the series is empty for this filter");

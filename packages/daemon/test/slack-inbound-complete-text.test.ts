@@ -29,7 +29,7 @@ it("keeps complete short and long human briefs durable while bounding summaries 
       expect(result.disposition).toBe("accepted");
       const row = repo.getById(result.qitemId!)!;
       expect(row.body).toBe(`${text}\n\n---\nSource: slack channel=C-FIXTURE user=U-FIXTURE ts=${event.ts}\nRouted by openrig slack-inbound. Default destination per config; re-route via queue as needed.`);
-      expect(row.summary).toBe(`Founder via Slack: ${text.slice(0, 90)}`);
+      expect(row.summary).toBe(`human-fixture@external via Slack: ${text.slice(0, 90)}`);
       expect(seen.load().has(`${event.channel}:${event.ts}`)).toBe(true);
       expect((await router.route(event)).disposition).toBe("ignored");
     }

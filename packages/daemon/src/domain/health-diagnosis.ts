@@ -83,9 +83,14 @@ export class HealthDiagnosisService {
   }
   list(refresh = true) {
     // Refuse a truncated ownership census rather than treating a hidden occurrence as absent.
-    const rows = this.deps.queue.list({ tag: "health-diagnosis", limit: 10000 });
-    if (rows.length === 10000) throw new Error("health_diagnosis_census_truncated");
-    const occurrences = rows.filter((r) => this.owns(r)).map((r) => this.show(r.qitemId, false));
+    // The same selection as queue.list({ tag, limit }) (exact tag membership, newest created first), reading only
+    // ids: a full row of every topical match would be built and discarded. show re-reads each owned row fresh.
+    const ids = (this.deps.queue.db.prepare(`SELECT qitem_id FROM queue_items
+      WHERE EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = ?) ORDER BY ts_created DESC LIMIT ?`)
+      .all("health-diagnosis", 10000) as Array<{ qitem_id: string }>).map((r) => r.qitem_id);
+    if (ids.length === 10000) throw new Error("health_diagnosis_census_truncated");
+    // The tag is proven by the query; the id namespace marks an occurrence (show checks both on the fresh row).
+    const occurrences = ids.filter((id) => id.startsWith(this.id(""))).map((id) => this.show(id, false));
     if (!refresh) return occurrences;
     const current = new Map(this.deps.projection.records().map((finding) => [finding.id, finding]));
     return occurrences.map((o) => {
@@ -157,11 +162,12 @@ export class HealthDiagnosisService {
       if (old) {
         // Reserve before awaiting transport: restart or another evaluation cannot re-send blindly.
         this.receipt(qitemId, actor, { action: "presented", finding, authority: this.deps.authority(finding) });
-        await this.deps.queue.maybeNudge(qitemId, old.row.destinationSession, true, actor);
+        // Re-presenting a finding is OpenRig's own scheduling.
+        await this.deps.queue.maybeNudge(qitemId, old.row.destinationSession, true, actor, undefined, "openrig");
       } else {
         const packet: Packet = { schema: "openrig.health-diagnosis/v0alpha1", finding, policyVersion: effective.version,
           authority: this.deps.authority(finding), presentedAt: this.now(), instructions: `${instructions} ${correctionGuidance}${finding.ceremony ? " This is provisional suspicion, not a confirmed warning. Resolve product progress from normal scope/proof/workflow evidence and the selected SDLC boundary; do not count approvals, C1 pairing, proof files, commits, tests or generic closures as outcomes. In the existing disposition, optionally include progress: {basis, conclusion: established|false-positive|indeterminate, outcomes: [{id, observedAt, evidenceRefs}], boundedAuthority: boolean|null, boundary, evidenceRefs, missingFacts}. Bind basis to the CURRENT finding.ceremony.basis from diagnosis show; establish a complete outcome census for the exact transition window or return indeterminate with the missing fact. This census assesses that window, not whether a specific challenged rule remains useful; it is not a prerequisite to recording a correction. Outcome and bounded-authority semantics are your attributed judgment. An empty outcomes list means you affirm no outcomes, never that you could not find them. No separate checkpoint is needed." : ""} Read current context and disposition with rig health diagnosis show ${qitemId} --full --json (complete retained evidence; may be large).` };
-        await this.deps.queue.create({ qitemId, sourceSession: actor, destinationSession: policy.owner, body: JSON.stringify(packet, null, 2),
+        await this.deps.queue.create({ qitemId, sourceSession: actor, destinationSession: policy.owner, wakeTrigger: "openrig", body: JSON.stringify(packet, null, 2),
           tags: ["health-diagnosis", finding.id, `policy:${effective.version}`, ...(finding.ceremony ? [`health-lineage:${finding.ceremony.lineageId}`] : [])], summary: `System Health: inspect ${finding.detector}`, evidenceRef: finding.id });
       }
     }
@@ -256,7 +262,9 @@ export class HealthDiagnosisService {
     if (automatic && current.row.destinationSession !== this.deps.policy.read().policy.diagnosis.owner) throw new Error("health_diagnosis_owner_required");
     if (current.finding.ceremony && (current.finding.status !== "active" || current.finding.ceremony.stage !== "confirmed")) throw new Error("health_human_requires_confirmed_active_episode");
     if (healthHash(this.deps.policy.read().policy.human) !== healthHash(human)) throw new Error("health_human_policy_changed");
-    const row = this.deps.queue.getById(id) ?? await this.deps.queue.create({ qitemId: id, sourceSession: actor, destinationSession: human.address, identityProvenance,
+    const row = this.deps.queue.getById(id) ?? await this.deps.queue.create({ qitemId: id, sourceSession: actor, destinationSession: human.address, identityProvenance, wakeTrigger: "openrig",
+      // Already selected by the health policy as something the person must hear about: an alert.
+      humanAlert: true,
       body: JSON.stringify({ diagnosis: qitemId, finding: diagnosis.finding, disposition: diagnosis.disposition }, null, 2),
       summary: `System Health: ${diagnosis.finding.summary}`, evidenceRef: qitemId, tags: ["health-human", diagnosis.finding.id] });
     return { qitemId: row.qitemId, deliveryOutcome: row.deliveryOutcome ?? "pending", nextInspection: `rig queue transitions ${row.qitemId}` };

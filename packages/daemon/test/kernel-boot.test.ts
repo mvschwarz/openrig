@@ -18,6 +18,7 @@ import {
   selectVariant,
   kernelAlreadyManaged,
   authBlockMessage,
+  chosenRuntimes,
   probeCodexReadiness,
   selectCodexProviderAuth,
   type KernelBootDeps,
@@ -249,6 +250,56 @@ describe("bootKernelIfNeeded — fire-and-forget bootstrap", () => {
     }, tmpSpecsDir));
     expect(tracker.getStatus().variant).toBe("rig-codex-only.yaml");
     tracker.stop();
+  });
+});
+
+// The providers the person chose at rig setup --providers (provider.selected).
+describe("bootKernelIfNeeded — only the providers chosen at setup count", () => {
+  it("boots the Codex-only kernel when Codex was chosen, even with Claude signed in", async () => {
+    const tracker = await bootKernelIfNeeded(makeBaseDeps({ selectedProviders: () => "codex" }, tmpSpecsDir));
+    expect(tracker.getStatus().variant).toBe("rig-codex-only.yaml");
+    tracker.stop();
+  });
+
+  it("keeps today's choice when no providers were recorded", async () => {
+    const tracker = await bootKernelIfNeeded(makeBaseDeps({ selectedProviders: () => "" }, tmpSpecsDir));
+    expect(tracker.getStatus().variant).toBe("rig.yaml");
+    tracker.stop();
+  });
+
+  it("reads the choice from the provider.selected setting by default", async () => {
+    process.env["OPENRIG_PROVIDER_SELECTED"] = "claude";
+    try {
+      const tracker = await bootKernelIfNeeded(makeBaseDeps({}, tmpSpecsDir));
+      expect(tracker.getStatus().variant).toBe("rig-claude-only.yaml");
+      tracker.stop();
+    } finally {
+      delete process.env["OPENRIG_PROVIDER_SELECTED"];
+    }
+  });
+
+  it("names the chosen provider and its login when it isn't signed in, instead of falling back to another", async () => {
+    const bootstrap = makeBootstrapMock();
+    const tracker = await bootKernelIfNeeded(makeBaseDeps({
+      bootstrapOrchestrator: bootstrap,
+      selectedProviders: () => "codex",
+      probeRuntimes: async () => ({ claudeCode: "ok", codex: "unavailable" }),
+    }, tmpSpecsDir));
+    const status = tracker.getStatus();
+    expect(status.kernelState).toBe("auth_blocked");
+    expect(status.detail).toMatch(/^Error: .*\(codex\)/m);
+    expect(status.detail).toMatch(/^Reason: .*provider\.selected/m);
+    expect(status.detail).toMatch(/^Fix: Run `codex login`, or change the choice with rig setup --providers/m);
+    expect(status.detail).not.toContain("claude auth login");
+    expect((bootstrap as unknown as { bootstrap: ReturnType<typeof vi.fn> }).bootstrap).not.toHaveBeenCalled();
+  });
+
+  it("marks only unchosen providers unavailable", () => {
+    const both = { claudeCode: "ok", codex: "ok" } as const;
+    expect(chosenRuntimes(both, "")).toEqual(both);
+    expect(chosenRuntimes(both, "claude,codex")).toEqual(both);
+    expect(chosenRuntimes(both, "claude")).toEqual({ claudeCode: "ok", codex: "unavailable" });
+    expect(chosenRuntimes({ claudeCode: "unavailable", codex: "ok" }, "codex")).toEqual({ claudeCode: "unavailable", codex: "ok" });
   });
 });
 

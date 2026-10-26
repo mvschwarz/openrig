@@ -1,3 +1,4 @@
+import { physicalSessionName } from "./session-registry.js";
 import type Database from "better-sqlite3";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity, PersistedEvent } from "./types.js";
@@ -5,6 +6,8 @@ import type { AgentActivity, PersistedEvent } from "./types.js";
 export const AGENT_ACTIVITY_FRESHNESS_MS = 5 * 60 * 1000;
 
 export interface HookActivityInput {
+  turnId?: string | null;
+
   runtime: string | null;
   sessionName?: string | null;
   nodeId?: string | null;
@@ -16,6 +19,10 @@ export interface HookActivityInput {
    *  inference mis-attributes a delayed prior-occupant hook to the live occupant. Absent on a legacy,
    *  excluded, or no-tenure emitting path ⇒ stamped null ⇒ unresolved at read (never false-fresh). */
   generation?: string | null;
+  /** The emitter's own order for its posts (OpenRig's pi/omp runner), when it sends one. */
+  sourceSequence?: number | null;
+  /** How often the emitter promises to report while it stays idle (OpenRig's pi runner). */
+  livenessSeconds?: number | null;
 }
 
 export type RecordHookActivityResult =
@@ -49,6 +56,9 @@ interface SessionLookupRow {
 interface EventPayloadRow {
   payload: string;
 }
+
+/** How many of a node's newest hook records a restart-restore orders by the emitter's own sequence. */
+const SOURCE_ORDER_WINDOW = 200;
 
 export class AgentActivityStore {
   readonly db: Database.Database;
@@ -108,6 +118,9 @@ export class AgentActivityStore {
       eventAt,
       generation,
     });
+    activity.turnId = input.turnId ?? null;
+    if (input.sourceSequence) activity.sourceSequence = input.sourceSequence;
+    if (input.livenessSeconds) activity.livenessSeconds = input.livenessSeconds;
 
     const event = this.eventBus.emit({
       type: "agent.activity",
@@ -125,16 +138,20 @@ export class AgentActivityStore {
     nodeId?: string | null;
     sessionName?: string | null;
     now?: Date;
+    /** "source": the newest by the emitter's own order (time, then its sequence) among recent records, not by
+     *  arrival. A runner's posts aren't awaited, so an older boundary can arrive after a newer one. */
+    order?: "arrival" | "source";
   }): AgentActivity | null {
+    if (input.sessionName) input = { ...input, sessionName: physicalSessionName(this.db, input.sessionName) };
     const nodeId = input.nodeId ?? (input.sessionName ? this._resolveSession({ sessionName: input.sessionName })?.node_id : null);
     if (!nodeId) return null;
 
-    const row = this.db.prepare(
-      "SELECT payload FROM events WHERE node_id = ? AND type = 'agent.activity' ORDER BY seq DESC LIMIT 1"
-    ).get(nodeId) as EventPayloadRow | undefined;
-    if (!row) return null;
-
-    const payload = parseActivityPayload(row.payload);
+    const payload = input.order === "source" ? this.latestBySourceOrder(nodeId, input.sessionName ?? null) : (() => {
+      const row = this.db.prepare(
+        "SELECT payload FROM events WHERE node_id = ? AND type = 'agent.activity' ORDER BY seq DESC LIMIT 1"
+      ).get(nodeId) as EventPayloadRow | undefined;
+      return row ? parseActivityPayload(row.payload) : null;
+    })();
     if (!payload?.activity) return null;
 
     const activity = payload.activity;
@@ -217,6 +234,24 @@ export class AgentActivityStore {
       stale: false,
       generationProvenance,
     };
+  }
+
+  /** The newest of a node's hook records by the emitter's order (time, then its sequence), for one session when named.
+   *  Not by arrival: a runner's posts aren't awaited, so older ones can land after a newer one. Only the node's newest
+   *  SOURCE_ORDER_WINDOW records to arrive are ordered, and the session is chosen from those: a runner's heartbeat grows
+   *  the history without bound, and a late post can't be behind more than the few still in flight. Filtering the session
+   *  before the window would make SQLite walk a new session's whole earlier history. Read once per seat on a restart. */
+  private latestBySourceOrder(nodeId: string, sessionName: string | null): ReturnType<typeof parseActivityPayload> {
+    const row = this.db.prepare(`
+      SELECT payload FROM (
+        SELECT payload, seq FROM events
+        WHERE node_id = ? AND type = 'agent.activity'
+        ORDER BY seq DESC LIMIT ${SOURCE_ORDER_WINDOW})
+      WHERE (? IS NULL OR json_extract(payload, '$.sessionName') = ?)
+      ORDER BY json_extract(payload, '$.activity.eventAt') DESC,
+        COALESCE(json_extract(payload, '$.activity.sourceSequence'), 0) DESC, seq DESC
+      LIMIT 1`).get(nodeId, sessionName, sessionName) as EventPayloadRow | undefined;
+    return row ? parseActivityPayload(row.payload) : null;
   }
 
   /** W2a-1 — the dead-tenure verdict: the claim's occupant generation is REGISTERED FOR THIS NODE and
@@ -307,6 +342,7 @@ export class AgentActivityStore {
     }
 
     if (!input.sessionName) return null;
+    const sessionName = physicalSessionName(this.db, input.sessionName);
     const row = this.db.prepare(`
       SELECT n.rig_id, n.id AS node_id, s.session_name, n.runtime
       FROM sessions s
@@ -314,7 +350,7 @@ export class AgentActivityStore {
       WHERE s.session_name = ?
       ORDER BY s.id DESC
       LIMIT 1
-    `).get(input.sessionName) as SessionLookupRow | undefined;
+    `).get(sessionName) as SessionLookupRow | undefined;
     return row ?? null;
   }
 }
@@ -324,20 +360,31 @@ export class AgentActivityStore {
  *  an OMP runner signal, and a hook claiming OMP on another runtime's seat must not escalate it. */
 export function hookEventState(rawEvent: string | null | undefined, rawSubtype: string | null | undefined, seatRuntime: string | null): AgentActivity["state"] {
   if (rawEvent === "UserPromptSubmit" || rawEvent === "PreToolUse" || rawEvent === "active") return "running";
-  // OPR.0.4.1.10 — Codex's official approval hook (openai/codex PR #17563). A PermissionRequest
-  // means the agent is BLOCKED waiting on a command / patch / network approval = needs_input. This is
-  // the HOOK-PRIMARY signal for Codex, which emits no Claude-style Notification; classifySendReadiness
-  // already prefers a fresh runtime_hook needs_input runtime-agnostically, so wiring this event makes
-  // the Codex rig-send guard hook-primary by construction (capture-pane scan stays as the fallback).
-  // The official payload carries session_id/turn_id/cwd/model/permission_mode/tool_name/tool_input;
-  // the relay forwards tool_name as the subtype, so `evidence` names the tool being approved.
-  if (rawEvent === "PermissionRequest") return "needs_input";
+  if (rawEvent === "PermissionRequest") return seatRuntime === "codex" ? "unknown" : "needs_input";
+  if (rawEvent === "PermissionPromptConfirmed") return "needs_input";
   if (rawEvent === "Notification") {
     if (rawSubtype === "permission_prompt" || rawSubtype === "elicitation_dialog" || (seatRuntime === "omp" && rawSubtype === "runtime_error")) return "needs_input";
     return rawSubtype === "idle_prompt" ? "idle" : "unknown";
   }
+  // The runner posts Stop when its child process exits: nothing is at a prompt, so it isn't idle.
+  if (rawEvent === "Stop" && isRunnerExit(rawSubtype, seatRuntime)) return "unknown";
   if (rawEvent === "Stop" || rawEvent === "SessionEnd" || rawEvent === "stop" || rawEvent === "idle") return "idle";
   return "unknown";
+}
+
+/** Whether hook `a` comes before hook `b` in the emitter's own order: event time, then the emitter's sequence. Records
+ *  without a sequence are ordered by time alone; equal times without both sequences aren't ordered. */
+export function hookPrecedes(a: { eventAt?: string | null; sourceSequence?: number | null }, b: { eventAt?: string | null; sourceSequence?: number | null }): boolean {
+  const at = a.eventAt ? Date.parse(a.eventAt) : NaN;
+  const bt = b.eventAt ? Date.parse(b.eventAt) : NaN;
+  if (!Number.isFinite(at) || !Number.isFinite(bt)) return false;
+  if (at !== bt) return at < bt;
+  return !!a.sourceSequence && !!b.sourceSequence && a.sourceSequence < b.sourceSequence;
+}
+
+/** The runner's Stop for its child's process exit (`pi_exited`, `omp_exited`), on that runtime's seat. */
+export function isRunnerExit(rawSubtype: string | null | undefined, seatRuntime: string | null): boolean {
+  return (seatRuntime === "pi" || seatRuntime === "omp") && rawSubtype === `${seatRuntime}_exited`;
 }
 
 /** A runtime hook that leaves the agent waiting on a person: an approval, a picker or an elicitation. */
@@ -357,6 +404,13 @@ function latestHookState(activity: AgentActivity | null | undefined, seatRuntime
  *  answered it. Shared by the send gate and the wake ladder. */
 export function latestHookWaitsOnPerson(activity: AgentActivity | null | undefined, seatRuntime: string | null): boolean {
   return latestHookState(activity, seatRuntime) === "needs_input";
+}
+
+export function latestHookPermissionPending(activity: AgentActivity | null | undefined, seatRuntime: string | null): boolean {
+  return seatRuntime === "codex" && activity?.evidenceSource === "runtime_hook" && (
+    (activity.reason === "permission_request_pending" && activity.stale !== true) ||
+    (activity.reason === "stale_runtime_hook" && activity.rawEvent === "PermissionRequest")
+  );
 }
 
 /** The store's latest hook shows the seat moved on after `since`: observed after it, generation-valid, and
@@ -385,7 +439,11 @@ function normalizeHookActivity(input: {
   const state = hookEventState(rawEvent, rawSubtype, input.seatRuntime);
   let normalizedReason = reason;
   if (rawEvent === "PermissionRequest") {
-    normalizedReason = "permission_request";
+    normalizedReason = input.seatRuntime === "codex" ? "permission_request_pending" : "permission_request";
+  } else if (rawEvent === "PermissionPromptConfirmed") {
+    normalizedReason = "permission_prompt";
+  } else if (rawEvent === "PermissionPromptCleared") {
+    normalizedReason = "permission_prompt_cleared";
   } else if (rawEvent === "at_limit") {
     normalizedReason = "usage_limit";
   } else if (rawEvent === "Notification") {

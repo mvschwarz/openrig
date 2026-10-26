@@ -26,7 +26,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { realRuntimesRequested, writeRuntimeStubs } from "../../../../test/stub-runtimes.js";
+import { writeRuntimeStubs } from "../../../../test/stub-runtimes.js";
 
 /**
  * Inherited environment variables that redirect the CLI/daemon client at a
@@ -280,7 +280,7 @@ export interface HermeticScaffold {
 }
 
 export interface PrepareHermeticEnvOptions {
-  /** Base environment to derive the clean child env from. Defaults to process.env. */
+  /** Base environment to derive the clean child env from. Explicit provider roots are preserved; defaults to process.env. */
   baseEnv?: EnvLike;
   /**
    * The A3-R3 injected clock. When set, the scaffold's child env carries
@@ -331,8 +331,8 @@ export function prepareHermeticEnv(opts: PrepareHermeticEnvOptions = {}): Hermet
     mkdirSync(dir, { recursive: true });
   }
   // codex and claude resolve to stubs inside the scaffold, so a scenario daemon never runs the host's
-  // real binaries (they can hang under a scratch HOME). Tests that opt into real runtimes keep them.
-  const runtimeStubDir = realRuntimesRequested(baseEnv) ? undefined : writeRuntimeStubs(root);
+  // real binaries (they can hang under a scratch HOME). Native Codex e2e tests use their own harness.
+  const runtimeStubDir = writeRuntimeStubs(root);
 
   // Test-only command seam: every child `tmux` call gets one explicit private
   // socket. TMUX_TMPDIR remains for compatibility, but is never the selector.
@@ -358,6 +358,11 @@ process.exit(result.status ?? 1);
   const env: Record<string, string | undefined> = { ...baseEnv };
   for (const name of DAEMON_TARGET_ENV_VARS) delete env[name];
   for (const name of CREDENTIAL_ENV_VARS) delete env[name];
+  // Inherited provider roots belong to the runner; explicit ones are test inputs.
+  if (opts.baseEnv === undefined) {
+    for (const name of ["CODEX_HOME", "CLAUDE_CONFIG_DIR"]) delete env[name];
+  }
+  delete env.OPENRIG_E2E_REAL_CODEX;
   // Scrub any injected-clock var (defense in depth behind the fail-closed guard) so
   // only an explicit injectClockNow can set it below — never an inherited value.
   for (const name of TEST_CLOCK_ENV_VARS) delete env[name];

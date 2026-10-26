@@ -22,7 +22,7 @@ import type {
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
 import { validateResumeToken } from "../domain/resume-token-validation.js";
-import { mergeManagedBlock } from "../domain/managed-blocks.js";
+import { isPerSeatRoleGuidance, mergeManagedBlock, perSeatRoleSkipWarning } from "../domain/managed-blocks.js";
 import { observePiResourceTrust, observeOmpApprovalMode } from "../domain/permission-drift.js";
 import {
   piSeatPaths, parsePiRunnerState, buildPiRunnerCommand, buildPendingRunnerState,
@@ -108,6 +108,18 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     return { ok: true, sessionFile: state.sessionFile };
   }
 
+  /** The seat's runner sidecar (null = absent or unparseable) and its sessions folder, with the
+   *  runner entry path and state root this adapter launches with, for a reader that must tie the
+   *  sidecar to the pane's live runner before trusting it. */
+  readRunnerSidecar(sessionName: string): { state: PiRunnerState | null; sessionsDir: string; entryPath: string; stateRoot: string } {
+    return {
+      state: this.readRunnerState(sessionName),
+      sessionsDir: piSeatPaths(this.stateRoot, sessionName).sessionsDir,
+      entryPath: this.runnerEntryPath,
+      stateRoot: this.stateRoot,
+    };
+  }
+
   async listInstalled(binding: NodeBinding): Promise<InstalledResource[]> {
     const results: InstalledResource[] = [];
     const sessionName = binding.tmuxSession;
@@ -165,7 +177,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     for (const file of files) {
       try {
         const content = this.fs.readFile(file.absolutePath);
-        const hint = file.deliveryHint === "auto" ? resolveConcreteHint(file.path, content) : file.deliveryHint;
+        const hint = file.deliveryHint === "auto" ? resolveConcreteHint(file.path, content, file.orientation) : file.deliveryHint;
 
         switch (hint) {
           case "guidance_merge": {
@@ -276,6 +288,8 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       stateRoot: this.stateRoot,
       cwd: binding.cwd,
       model: binding.model,
+      // The seat's resolved effort, sent as Pi's --thinking; OMP unchanged.
+      thinking: this.runtime === "pi" ? binding.effort : undefined,
       // OPR.0.4.8.2: Pi RESOURCE TRUST (not a permission policy). YOLO forces `approve` on every
       // seat; otherwise the configured posture. Same decision used on the restore path (pi-resume).
       trust,
@@ -430,7 +444,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     if (entry.category === "guidance" && entry.mergeStrategy === "managed_block") {
       const targetPath = nodePath.join(binding.cwd, "AGENTS.md");
       const content = this.fs.readFile(entry.absolutePath);
-      return this.mergeGuidance(targetPath, entry.effectiveId, content, warnings);
+      return this.mergeGuidance(targetPath, entry.effectiveId, content, warnings, entry.absolutePath);
     }
 
     if (entry.category === "skill") {
@@ -474,14 +488,16 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     if (this.fs.statMode && this.fs.chmod) this.fs.chmod(target, this.fs.statMode(source) & 0o777);
   }
 
-  private mergeGuidance(targetPath: string, blockId: string, content: string, warnings: string[]): boolean {
+  private mergeGuidance(targetPath: string, blockId: string, content: string, warnings: string[], sourcePath?: string): boolean {
     // Mirrors the Claude/Codex adapters: per-seat `rig-role` content collides
     // across pod-mates when merged into a shared cwd file; it is delivered via
     // send_text instead. See ADR-0006.
-    if (blockId === "rig-role") {
+    if (isPerSeatRoleGuidance(blockId, sourcePath)) {
       console.log(
-        `[openrig] skip: effectiveId is rig-role, per-seat delivery via send_text path required (target=${targetPath})`
+        `[openrig] skip: effectiveId is ${blockId}, a seat's own role; per-seat delivery via send_text path required (target=${targetPath})`
       );
+      const warning = perSeatRoleSkipWarning(blockId, targetPath);
+      if (warning) warnings.push(warning);
       return false;
     }
     mergeManagedBlock(this.fs, targetPath, blockId, content, {

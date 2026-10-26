@@ -19,7 +19,7 @@ describe("explicit prompt answer delivery", () => {
   beforeEach(() => { db = createFullTestDb(); });
   afterEach(() => { db.close(); });
 
-  function fixture(mode: "choice" | "text" | "ordinary" = "choice", runtime: "claude-code" | "codex" = "claude-code") {
+  function fixture(mode: "choice" | "text" | "ordinary" | "overview" = "choice", runtime: "claude-code" | "codex" = "claude-code", withBus = true) {
     const marker = runtime === "codex" ? "›" : "❯";
     const rigRepo = new RigRepository(db);
     const registry = new SessionRegistry(db);
@@ -31,10 +31,10 @@ describe("explicit prompt answer delivery", () => {
     registry.updateBinding(node.id, { tmuxSession: name });
     const eventBus = new EventBus(db);
     const activity = new AgentActivityStore({ db, eventBus });
-    if (mode !== "ordinary") activity.recordHookEvent({ runtime, sessionName: name,
+    if (mode === "choice" || mode === "text") activity.recordHookEvent({ runtime, sessionName: name,
       hookEvent: "PermissionRequest", subtype: "Bash" });
     const state = { selected: [] as number[], submitted: [] as string[], input: "", stored: "",
-      received: [] as string[], commands: [] as string[][], capture: undefined as string | null | undefined };
+      received: [] as string[], effects: [] as string[], commands: [] as string[][], capture: undefined as string | null | undefined };
     const tmux = new TmuxAdapter(async () => { throw new Error("argv executor expected"); }, {
       tmpName: () => "/tmp/answer-fixture", bufferName: () => "answer-fixture",
       writeFile: async (_path, text) => { state.stored = text; }, unlink: async () => {},
@@ -42,12 +42,19 @@ describe("explicit prompt answer delivery", () => {
       state.commands.push(argv);
       if (argv[1] === "paste-buffer") {
         state.received.push(state.stored);
-        if (mode === "choice") {
-          if (!argv.includes("-p")) state.selected.push(Number(state.stored));
+        if (mode === "choice" || mode === "overview") {
+          if (!argv.includes("-p")) {
+            if (state.stored === "\r") { state.selected.push(1); state.effects.push("choose-focused"); }
+            else if (state.stored === "\x1b") state.effects.push("close");
+            else if (state.stored === "\t") state.effects.push("focus-next");
+            else if (state.stored === " ") state.effects.push("toggle");
+            else if (mode === "overview" && state.stored === "t") state.effects.push("shortcut:t");
+            else state.selected.push(Number(state.stored));
+          }
         } else state.input += state.stored;
       }
       if (argv[1] === "send-keys" && argv.includes("Enter")) {
-        if (mode === "choice") state.selected.push(1);
+        if (mode === "choice" || mode === "overview") state.selected.push(1);
         else { state.submitted.push(state.input); state.input = ""; }
       }
       return "";
@@ -55,14 +62,16 @@ describe("explicit prompt answer delivery", () => {
     tmux.getPaneCommand = async () => null;
     tmux.getPanePid = async () => null;
     tmux.capturePaneContent = async () => state.capture !== undefined ? state.capture
+      : mode === "overview" ? ["Hooks", "4 hooks need review", "SessionStart 3/1/2", "UserPromptSubmit 2/1/1",
+        "❯ Stop 2/1/1", "t trust all · enter review · esc close"].join("\n")
       : mode === "choice" ? `Choose a harmless colour (${state.selected.length + 1})\n${marker} 1. Blue\n  2. Green\n  3. No`
       // Composer/footer shapes from retained idle captures; answers are inserted
       // synthetically. This proves parsing, not native typed-answer consumption.
       : runtime === "codex" ? `› ${state.input}\n\n  test-model · ~/example`
       : `────────────────────\n❯\u00a0${state.input}\n────────────────────\n\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents`;
-    const transport = new SessionTransport({ db, rigRepo, sessionRegistry: registry, eventBus,
+    const transport = new SessionTransport({ db, rigRepo, sessionRegistry: registry, ...(withBus ? { eventBus } : {}),
       agentActivityStore: activity, tmuxAdapter: tmux, sleep: async () => {} });
-    return { name, state, tmux, transport, eventBus };
+    return { name, state, tmux, transport, eventBus, activity };
   }
 
   it("delivers the intended choice instead of the focused choice, with no Enter into the next prompt", async () => {
@@ -77,8 +86,11 @@ describe("explicit prompt answer delivery", () => {
     expect(db.prepare("SELECT count(*) AS n FROM events WHERE type = 'transport.prompt_override'").get()).toEqual({ n: 1 });
   });
 
-  it.each(["claude-code", "codex"] as const)("submits a complete still-staged text answer for %s", async runtime => {
+  it.each(["claude-code", "codex"] as const)("uses a pending permission to deliver an explicit still-staged text answer for %s", async runtime => {
     const f = fixture("text", runtime);
+    if (runtime === "codex") {
+      expect(f.activity.getLatestForNode({ sessionName: f.name })).toMatchObject({ state: "unknown", reason: "permission_request_pending" });
+    }
     const result = await f.transport.send(f.name, "green please", { dangerouslyInteract: true, reason: "answer the text field" });
     expect(result.ok).toBe(true);
     expect(f.state.submitted).toEqual(["green please"]);
@@ -139,9 +151,9 @@ describe("explicit prompt answer delivery", () => {
     expect(f.state.commands.some(a => a[1] === "send-keys")).toBe(false);
   });
 
-  it.each([undefined, { dangerouslyInteract: true, reason: "no prompt to override" }])("keeps ordinary bracketed delivery and its Enter unchanged (%#)", async opts => {
+  it("keeps ordinary bracketed delivery and its Enter unchanged", async () => {
     const f = fixture("ordinary");
-    const result = await f.transport.send(f.name, "ordinary message", opts);
+    const result = await f.transport.send(f.name, "ordinary message");
     expect(result.ok).toBe(true);
     expect(f.state.submitted).toEqual(["ordinary message"]);
     expect(result.promptInteraction).toBeUndefined();
@@ -159,6 +171,7 @@ describe("explicit prompt answer delivery", () => {
     const previousExit = process.exitCode;
     process.exitCode = undefined;
     vi.stubEnv("OPENRIG_URL", "http://127.0.0.1:1");
+    vi.stubEnv("OPENRIG_SESSION_NAME", "operator@answer-test");
     const client = { baseUrl: "http://127.0.0.1:1", post: async (path: string, body: Record<string, unknown>) => {
       calls.push({ path, body });
       if (path.endsWith("/capture")) return { status: 200, data: { content: await f.tmux.capturePaneContent(f.name) } };
@@ -233,14 +246,14 @@ describe("explicit prompt answer delivery", () => {
       expect(r.logs.join("\n")).not.toContain("staged-not-consumed");
     });
 
-    it("round2: own intent skips repair even if no prompt override occurred", async () => {
+    it("round2: explicit intent uses the staged-answer path even without a detected prompt", async () => {
       const f = fixture("ordinary"); f.state.capture = "❯ green please\n────────────────────";
       const r = await viaCli(f, "green please", fanout);
       expect(f.state.submitted).toEqual(["green please"]);
       expect(r.calls.filter(c => c.body.submitOnly)).toHaveLength(0);
       expect(r.exit).toBe(0);
-      expect(r.logs.join("\n")).toContain("not reported by the daemon");
-      expect(db.prepare("SELECT count(*) AS n FROM events WHERE type = 'transport.prompt_override'").get()).toEqual({ n: 0 });
+      expect(r.logs.join("\n")).toContain("enter-sent");
+      expect(db.prepare("SELECT count(*) AS n FROM events WHERE type = 'transport.prompt_override'").get()).toEqual({ n: 1 });
     });
 
     it("round2: ordinary sends retain their one guarded repair", async () => {
@@ -278,6 +291,73 @@ describe("explicit prompt answer delivery", () => {
       expect(result.promptInteraction).toBe("unverified");
     }
     expect(f.state.submitted).toEqual([]);
+  });
+
+
+  describe.each([false, true])("explicit byte input through Commander (fanout=%s)", fanout => {
+    it.each([["\r", "choose-focused"], ["\x1b", "close"], ["\t", "focus-next"], [" ", "toggle"]])(
+      "delivers control payload %# exactly once with no extra Enter", async (answer, effect) => {
+        const f = fixture("overview");
+        const r = await viaCli(f, answer!, fanout);
+        expect(r.exit).toBe(0);
+        expect(f.state.received).toEqual([answer]);
+        expect(f.state.effects).toEqual([effect]);
+        expect(f.state.selected).toEqual(answer === "\r" ? [1] : []);
+        expect(f.state.commands.find(a => a[1] === "paste-buffer")).toEqual([
+          "tmux", "paste-buffer", "-t", f.name, "-b", "answer-fixture", "-d", "-r",
+        ]);
+        expect(f.state.commands.some(a => a[1] === "send-keys")).toBe(false);
+        expect(r.calls.some(c => c.body.submitOnly)).toBe(false);
+        const audits = db.prepare("SELECT payload FROM events WHERE type = 'transport.prompt_override'").all() as Array<{ payload: string }>;
+        expect(audits).toHaveLength(1);
+        expect(JSON.parse(audits[0]!.payload)).toMatchObject({ actorSession: "operator@answer-test",
+          overrideReason: "harmless answer control", detectedState: "unknown" });
+        expect(r.logs.join("\n")).toContain("activity could not be determined");
+      });
+    it("still refuses zero bytes before transport", async () => {
+      const f = fixture("overview");
+      const r = await viaCli(f, "", fanout);
+      expect(r.exit).toBe(1);
+      expect(r.calls).toEqual([]);
+      expect(f.state.commands).toEqual([]);
+    });
+  });
+
+  it.each(["unknown", "running", "idle"] as const)("uses key semantics on %s without changing readiness", async readiness => {
+    const f = fixture("overview");
+    if (readiness !== "unknown") f.activity.recordHookEvent({ runtime: "claude-code", sessionName: f.name,
+      hookEvent: readiness === "running" ? "UserPromptSubmit" : "Stop" });
+    const result = await f.transport.send(f.name, "t", { dangerouslyInteract: true,
+      reason: "harmless overview shortcut", actorSession: "operator@answer-test", verify: true });
+    expect(f.state.effects).toEqual(["shortcut:t"]);
+    expect(f.state.selected).toEqual([]);
+    expect(result).toMatchObject({ ok: true, sent: true, verified: false, promptInteraction: "unverified" });
+    expect(f.state.commands.some(a => a[1] === "send-keys")).toBe(false);
+    const audits = db.prepare("SELECT payload FROM events WHERE type = 'transport.prompt_override'").all() as Array<{ payload: string }>;
+    expect(audits).toHaveLength(1);
+    expect(JSON.parse(audits[0]!.payload)).toMatchObject({ detectedState: readiness,
+      actorSession: "operator@answer-test", overrideReason: "harmless overview shortcut" });
+    if (readiness === "unknown") expect(result.warning).toContain("activity could not be determined");
+    if (readiness === "running") expect(result.warning).toContain("busy is advisory");
+  });
+
+  it.each(["unknown", "running", "idle"] as const)("keeps an accepted %s interaction accepted when audit is unavailable", async readiness => {
+    const f = fixture("overview", "claude-code", false);
+    if (readiness !== "unknown") f.activity.recordHookEvent({ runtime: "claude-code", sessionName: f.name,
+      hookEvent: readiness === "running" ? "UserPromptSubmit" : "Stop" });
+    const result = await f.transport.send(f.name, "t", { dangerouslyInteract: true, reason: "harmless unaudited control" });
+    expect(f.state.effects).toEqual(["shortcut:t"]);
+    expect(result).toMatchObject({ ok: true, sent: true, promptInteraction: "unverified" });
+    expect(result.warning).toContain("audit_unconfigured");
+    expect(f.state.selected).toEqual([]);
+  });
+
+  it("keeps the positive-picker audit prerequisite and ordinary picker refusal", async () => {
+    const f = fixture("choice", "claude-code", false);
+    expect(await f.transport.send(f.name, "3")).toMatchObject({ ok: false, reason: "target_needs_input" });
+    expect(await f.transport.send(f.name, "3", { dangerouslyInteract: true, reason: "harmless choice" }))
+      .toMatchObject({ ok: false, reason: "prompt_override_audit_unavailable" });
+    expect(f.state.commands.filter(a => a[1] === "paste-buffer" || a[1] === "send-keys")).toEqual([]);
   });
 
 });

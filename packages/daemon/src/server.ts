@@ -33,6 +33,7 @@ import type { DiscoveryRepository } from "./domain/discovery-repository.js";
 import type { ClaimService } from "./domain/claim-service.js";
 import type { SelfAttachService } from "./domain/self-attach-service.js";
 import { rigsRoutes } from "./routes/rigs.js";
+import { OPERATION_CONTRACT, OPERATION_KINDS } from "./domain/operation-correlation.js";
 import { sessionsRoutes, nodesRoutes, sessionAdminRoutes } from "./routes/sessions.js";
 import { adaptersRoutes } from "./routes/adapters.js";
 import { eventsRoute } from "./routes/events.js";
@@ -84,6 +85,7 @@ import { jsonBodyErrorHandler, trackJsonBodyParseErrors } from "./middleware/jso
 import { getSelfHostId, getSelfHostIdSource } from "./domain/hosts/fanout-contract.js";
 import { contextPacksRoutes } from "./routes/context-packs.js";
 import { agentImagesRoutes } from "./routes/agent-images.js";
+import { communityHarnessesRoutes } from "./routes/community-harnesses.js";
 import type { SpecReviewService } from "./domain/spec-review-service.js";
 import type { SpecLibraryService } from "./domain/spec-library-service.js";
 import type { ChatRepository } from "./domain/chat-repository.js";
@@ -144,6 +146,8 @@ import { createRouteTimingMiddleware } from "./domain/route-timing-recorder.js";
 import { browserBoundary, type BrowserBoundaryOptions } from "./middleware/browser-boundary.js";
 
 export interface AppDeps {
+  /** Boot-time DB context observations, not a live exclusion guarantee. */
+  databaseWarnings?: string[];
   proofSourceWatch?: import("./domain/proof/source-watch.js").ProofSourceWatch;
   /** S20 — effective bind plan for the health surface (absent = legacy body). */
   bindPlan?: { mode: "explicit" | "default"; hosts: string[]; tailscaleDetected: boolean; ignoredRoutingHost?: string };
@@ -157,6 +161,8 @@ export interface AppDeps {
   /** Seat-scoped explicit fresh launch composes the same startup owner as rig launch. */
   startupOrchestrator?: import("./domain/startup-orchestrator.js").StartupOrchestrator;
   tmuxAdapter: TmuxAdapter;
+  /** Shared process census used by startup observations and native lineage checks. */
+  listProcesses?: import("./domain/native-process-lineage.js").NativeProcessLister;
   /** OPR.0.4.6.02 S1 — the shared tmux option-defaults applier, exposed to
    *  the seat-handover route so a fresh successor gets launch-only defaults. */
   tmuxOptionDefaults?: TmuxOptionDefaultsApplier;
@@ -330,6 +336,7 @@ export interface AppDeps {
   whoamiService?: WhoamiService;
   /** W3 single-seat, read-only runtime-policy observer. */
   permissionDriftObserver?: PermissionDriftReader;
+  currentModelReader?: import("./domain/model-divergence/current-model-reader.js").CurrentModelReader;
   contextUsageStore?: import("./domain/context-usage-store.js").ContextUsageStore;
   /** 0.5.10 S04 — one on-demand, read-only health projection shared by consumers. */
   healthProjection?: import("./domain/health-detectors.js").HealthProjectionService;
@@ -509,6 +516,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("nodeLauncher" as never, deps.nodeLauncher);
     c.set("startupOrchestrator" as never, deps.startupOrchestrator);
     c.set("tmuxAdapter" as never, deps.tmuxAdapter);
+    c.set("listProcesses" as never, deps.listProcesses);
     c.set("tmuxOptionDefaults" as never, deps.tmuxOptionDefaults);
     c.set("sessionEnv" as never, deps.sessionEnv);
     c.set("runtimeSessionEnv" as never, deps.runtimeSessionEnv);
@@ -601,6 +609,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("whoamiService" as never, deps.whoamiService);
     c.set("permissionDriftObserver" as never, permissionDriftObserver);
     c.set("contextUsageStore" as never, deps.contextUsageStore);
+    c.set("currentModelReader" as never, deps.currentModelReader);
     c.set("healthProjection" as never, deps.healthProjection);
     c.set("healthDiagnosis" as never, deps.healthDiagnosis);
     c.set("healthPolicy" as never, deps.healthPolicy);
@@ -663,12 +672,15 @@ export function createApp(deps: AppDeps): Hono {
 
   app.get("/healthz", (c) => {
     // OPR.0.4.3.21 — enrich the health surface with event-loop wedge evidence
-    // when the monitor is wired. Absent monitor keeps the exact legacy body so
-    // existing probes / tests that assert `{ status: "ok" }` are unchanged.
+    // when the monitor is wired. Process identity is additive with or without the monitor.
     // OPR.0.4.4.11 FR-7 — a STAMPED build additionally carries
     // {semver, commit, dirty, builtAt}; dev runs add NOTHING (stampFields is
     // {} without a stamp — no invented identity, legacy bodies preserved).
     const stamp = stampFields();
+    // Self-report for the optional CLI effective-user check, not authentication.
+    const euid = process.geteuid?.();
+    const databaseContext = deps.databaseWarnings?.length ? { databaseWarnings: deps.databaseWarnings } : {};
+    const processIdentity = { ...databaseContext, pid: process.pid, ...(euid === undefined ? {} : { euid }) };
     // 51-09 increment 3 (arch ruling 2e1b737f; local always-suffix rendering since
     // superseded by the 2026-08-27 root invariant) — expose the daemon's boot-reconciled
     // self-host id so the CLI edge can detect cross-host targets, self-resolve a
@@ -703,12 +715,12 @@ export function createApp(deps: AppDeps): Hono {
     // floor (escalation view + daemon-health); same additive contract.
     const wakeLadder = deps.wakeLadderStatus ? { wakeLadder: deps.wakeLadderStatus.snapshot() } : {};
     if (!monitor) {
-      return c.json({ status: "ok", pid: process.pid, ...stamp, ...selfHost, ...slowOperations, ...bind, ...stuckSweep, ...wakeLadder });
+      return c.json({ status: "ok", ...processIdentity, ...stamp, ...selfHost, ...slowOperations, ...bind, ...stuckSweep, ...wakeLadder });
     }
     const eventLoop = monitor.snapshot();
     return c.json({
       status: "ok",
-      pid: process.pid,
+      ...processIdentity,
       ...stamp,
       ...selfHost,
       eventLoop,
@@ -721,6 +733,7 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   app.route("/api/rigs", rigsRoutes);
+  app.get("/api/operations/capabilities", (c) => c.json({ contract: OPERATION_CONTRACT, kinds: OPERATION_KINDS }));
   app.route("/api/rigs/:rigId/sessions", sessionsRoutes);
   // Slice 24 — per-rig CMUX workspace launcher.
   app.route("/api/rigs/:rigId/cmux", rigCmuxRoutes);
@@ -774,6 +787,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/agent-images", agentImagesRoutes({
     specRoots: deps.agentImageSpecRoots ?? (() => []),
   }));
+  app.route("/api/community-harnesses", communityHarnessesRoutes());
   app.route("/api/whoami", whoamiRoutes());
   // Slice-04 OPR.0.5.0.4: registered so the endpoints exist and 503 honestly; the providerService
   // is not set in context until the collection/service seam (C) wires it (until then -> 503).
@@ -831,7 +845,8 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/attention", attentionRoutes());
   app.route("/api/health-diagnosis", healthDiagnosisRoutes());
   // S10 — gateway subsystem admin (slack enable/disable with the seeding rule preserved).
-  app.route("/api/gateway", gatewayRoutes());
+  // A shared Slack app's relay carries the token `rig host pair` issued: this daemon's auth bearer.
+  app.route("/api/gateway", gatewayRoutes({ relayBearerToken: deps.missionControlBearerToken ?? null }));
   app.route("/api/rigs/:rigId/env", envRoutes());
   app.route("/api/restore-check", restoreCheckRoutes);
   // Slice 09 (OPR.0.3.2.9) — rig-policy bindings (operator context mode).

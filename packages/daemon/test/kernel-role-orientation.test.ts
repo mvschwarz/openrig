@@ -64,6 +64,7 @@ async function project(id: string, sharedRole: boolean, m: ReturnType<typeof mem
   const result = await adapter.project({ ...c.plan, entries: c.plan.entries.filter(e => e.category === "guidance") },
     { nodeId: id, cwd, claudeManagedBlockFile: claudeFile });
   expect(result.failed).toEqual([]);
+  return result;
 }
 
 describe("kernel per-seat role orientation", () => {
@@ -80,13 +81,17 @@ describe("kernel per-seat role orientation", () => {
     expect(current.config.startup.actions).toEqual(old.config.startup.actions);
     expect(fs.existsSync(path.join(current.source, "guidance/role.md"))).toBe(true);
   });
-  it("reproduces the historical Codex last-writer collision in both orders", async () => {
+  // Before #1840, a saved shared `role` was merged last-writer-wins: AGENTS.md held whichever seat projected last.
+  it("merges neither seat's saved shared role into AGENTS.md, in either order, and says so", async () => {
     for (const order of [["operator.agent", "queue.worker"], ["queue.worker", "operator.agent"]]) {
       const m = memory();
-      for (const id of order) await project(id, true, m);
-      const text = m.files.get(path.join(cwd, "AGENTS.md"))!;
-      expect(text).toContain(readFile(path.join(configFor(order[1]).source, "guidance/role.md")));
-      expect(text).not.toContain(readFile(path.join(configFor(order[0]).source, "guidance/role.md")));
+      for (const id of order) {
+        const result = await project(id, true, m);
+        expect(result.skipped).toContain("role");
+        expect(result.warnings).toEqual([expect.stringContaining("starts without its role")]);
+      }
+      const text = m.files.get(path.join(cwd, "AGENTS.md")) ?? "";
+      for (const id of order) expect(text).not.toContain(readFile(path.join(configFor(id).source, "guidance/role.md")));
     }
   });
   it.each(["OpenRig", "RIGGED", "user-only"])("preserves %s files byte-for-byte in both adapters, with no cleanup", async marker => {

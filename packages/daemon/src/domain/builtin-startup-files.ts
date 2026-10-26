@@ -18,6 +18,8 @@ import nodePath from "node:path";
 const BUILTIN_STARTUP_FILES: ReadonlyMap<string, string> = new Map([
   ["CULTURE-default.md", "guidance/CULTURE-default.md"],
   ["openrig-start.md", "guidance/openrig-start.md"],
+  // OPR.0.7.0.13: the constant pointer a managed Codex seat follows to its own skills (the same text for every seat).
+  ["openrig-seat-skills.md", "guidance/openrig-seat-skills.md"],
   ["openrig-onboarding-01.md", "onboarding/01-world-and-purpose.md"],
   ["openrig-onboarding-02.md", "onboarding/02-self-and-competent-action.md"],
 ]);

@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, readlinkSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readlinkSync, readdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { execFile } from "node:child_process";
@@ -74,7 +74,8 @@ it.each(["claude", "codex"])("D: nushell retains the previous literal %s command
   expect(command).not.toContain('"$PATH"'); expect(f.warn).toHaveBeenCalledTimes(1);
 });
 it.each(["fresh", "resume", "fork"] as const)("C: %s uses the probe's separate Node interpreter while preserving user PATH", async kind => {
-  const f = fixture(), nodeBin = path.dirname(process.execPath);
+  const f = fixture(), nodeBin = path.join(f.root, "node interpreter");
+  mkdirSync(nodeBin); symlinkSync(process.execPath, path.join(nodeBin, "node"));
   expect(["/usr/bin", "/bin", f.shared, f.runtime]).not.toContain(nodeBin);
   f.exe(path.join(f.runtime, "codex"), `#!/usr/bin/env node\nif(process.argv.includes('--help'))console.log('Usage: codex [OPTIONS]\\n  --no-daemon');else console.log(JSON.stringify({started:true,node:process.execPath,path:process.env.PATH}));\n`);
   // There is no Node in the pane PATH. The capability query really executes this npm-style entry.
@@ -86,6 +87,7 @@ it.each(["fresh", "resume", "fork"] as const)("C: %s uses the probe's separate N
   vi.spyOn(adapter as any, "dismissSkippableCodexUpdatePrompt").mockResolvedValue(undefined);
   vi.spyOn(adapter as any, "verifyResumeLaunch").mockResolvedValue({ ok: true });
   vi.spyOn(adapter as any, "captureFreshThreadId").mockResolvedValue("new-thread");
+  vi.spyOn(adapter as any, "captureVerifiedForkId").mockResolvedValue("new-thread");
   const binding: any = { id: "b", nodeId: "node", tmuxSession: "seat@rig", tmuxPane: "%1", cwd: f.cwd };
   const result = await adapter.launchHarness(binding, { name: "seat", ...(kind === "resume" ? { resumeToken: "old" } : kind === "fork" ? { forkSource: { kind: "native_id", value: "parent" } } : {}) });
   expect(result.ok).toBe(true);

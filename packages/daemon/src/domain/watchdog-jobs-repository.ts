@@ -41,6 +41,10 @@ export const PHASE_D_POLICIES = [
   // additionalPolicies like parked-owner-consumer.
   "delivery-deferral",
   "delivery-digest-flush",
+  // Quiet hours: one release job per quiet window, posting what was held once quiet is off.
+  "quiet-release",
+  // A person's mode ends at its scheduled end: one job per application.
+  "mode-scheduled-end",
 ] as const;
 
 /** @deprecated since Phase D — use PHASE_D_POLICIES. */
@@ -49,6 +53,11 @@ export const PHASE_C_POLICIES = PHASE_D_POLICIES;
 export type WatchdogPolicyName = (typeof PHASE_D_POLICIES)[number];
 
 export type WatchdogJobState = "active" | "stopped" | "terminal";
+
+/** Issue #1180 — watchdog context samples share the compact-display freshness
+ *  window (ContextUsageStore.FRESHNESS_THRESHOLD_MS): a seat only samples on a
+ *  turn, so a reading older than this is a frozen estimate, not a trigger. */
+export const CONTEXT_SAMPLE_FRESHNESS_MS = 600_000;
 
 export interface WatchdogJob {
   jobId: string;
@@ -78,9 +87,15 @@ export interface WatchdogJob {
   /** Visible lifecycle of the generated transcript binding. */
   bindingState: "pending-binding" | "bound" | null;
   thresholdBytes: number | null;
+  /** Issue #1180 — per-watchdog token threshold; null = not token-gated. */
+  thresholdTokens: number | null;
+  /** Issue #1180 — per-watchdog percent-of-seat-window threshold; null = not percent-gated. */
+  thresholdPercent: number | null;
   requiresJobId: string | null;
   /** The latest occupant generation for which this threshold fired. */
   lastFiredGeneration: string | null;
+  /** The condition this job last told its target about; null when none. */
+  lastFiredCondition: string | null;
 }
 
 export interface RegisterWatchdogJobInput {
@@ -96,6 +111,8 @@ export interface RegisterWatchdogJobInput {
   targetGenerationUuid?: string | null;
   watchedFilePath?: string | null;
   thresholdBytes?: number | null;
+  thresholdTokens?: number | null;
+  thresholdPercent?: number | null;
   requiresJobId?: string | null;
 }
 
@@ -122,8 +139,11 @@ interface JobRow {
   watched_file_path?: string | null;
   watched_file_generation_uuid?: string | null;
   threshold_bytes?: number | null;
+  threshold_tokens?: number | null;
+  threshold_percent?: number | null;
   requires_job_id?: string | null;
   last_fired_generation_uuid?: string | null;
+  last_fired_condition?: string | null;
 }
 
 export class WatchdogJobsError extends Error {
@@ -138,7 +158,7 @@ export class WatchdogJobsError extends Error {
 }
 
 /** Preserve optional cadence conversion while rejecting an uncomputable scan. */
-function validateCadences(input: RegisterWatchdogJobInput): void {
+export function validateCadences(input: Pick<RegisterWatchdogJobInput, "intervalSeconds" | "scanIntervalSeconds">): void {
   if (!Number.isInteger(input.intervalSeconds) || input.intervalSeconds <= 0) {
     throw new WatchdogJobsError("interval_invalid", `interval_seconds must be a positive integer (got ${String(input.intervalSeconds)})`,
       { field: "interval_seconds", intervalSeconds: input.intervalSeconds });
@@ -173,6 +193,11 @@ export class WatchdogJobsRepository {
   private readonly hasTargetGenColumn: boolean;
   private readonly hasContextUsageColumns: boolean;
   private readonly hasWatchedFileGenerationColumn: boolean;
+  private readonly hasThresholdUnitsColumns: boolean;
+  /** Per job, the spec and interval a caller's update replaced, for a delivery still in flight (see updateInPlace). */
+  private readonly updatedFrom = new Map<string, Array<{ specYaml: string; intervalSeconds: number }>>();
+  /** Per job, the schedule its delivery in flight started under (see deliverySchedule). */
+  private readonly inFlight = new Map<string, { specYaml: string; intervalSeconds: number }>();
   constructor(
     private readonly db: Database.Database,
     private readonly now: () => Date = () => new Date(),
@@ -185,6 +210,115 @@ export class WatchdogJobsRepository {
     this.hasTargetGenColumn = detectWatchdogColumn(db, "target_generation_uuid");
     this.hasContextUsageColumns = detectWatchdogColumn(db, "last_fired_generation_uuid");
     this.hasWatchedFileGenerationColumn = detectWatchdogColumn(db, "watched_file_generation_uuid");
+    this.hasThresholdUnitsColumns = detectWatchdogColumn(db, "threshold_tokens");
+  }
+
+  /**
+   * Issue #1180 — exactly one threshold unit per context-usage-threshold job:
+   * transcript bytes (legacy), sampled tokens, or percent of the seat's window.
+   */
+  private validateThresholdUnits(input: RegisterWatchdogJobInput): void {
+    const hasBytes = input.thresholdBytes != null;
+    const hasTokens = input.thresholdTokens != null;
+    const hasPercent = input.thresholdPercent != null;
+    if (Number(hasBytes) + Number(hasTokens) + Number(hasPercent) !== 1) {
+      throw new WatchdogJobsError(
+        "threshold_invalid",
+        "context-usage-threshold requires exactly one of threshold_bytes, threshold_tokens, or threshold_percent",
+        {
+          thresholdBytes: input.thresholdBytes ?? null,
+          thresholdTokens: input.thresholdTokens ?? null,
+          thresholdPercent: input.thresholdPercent ?? null,
+        },
+      );
+    }
+    if (hasBytes && (!Number.isInteger(input.thresholdBytes) || (input.thresholdBytes ?? 0) <= 0)) {
+      throw new WatchdogJobsError(
+        "threshold_invalid",
+        `threshold_bytes must be a positive integer (got ${String(input.thresholdBytes)})`,
+      );
+    }
+    if (hasTokens && (!Number.isInteger(input.thresholdTokens) || (input.thresholdTokens ?? 0) <= 0)) {
+      throw new WatchdogJobsError(
+        "threshold_invalid",
+        `threshold_tokens must be a positive integer (got ${String(input.thresholdTokens)})`,
+      );
+    }
+    if (
+      hasPercent &&
+      (!Number.isFinite(input.thresholdPercent) ||
+        (input.thresholdPercent ?? 0) <= 0 ||
+        (input.thresholdPercent ?? 0) > 100)
+    ) {
+      throw new WatchdogJobsError(
+        "threshold_invalid",
+        `threshold_percent must be a number from 0 (exclusive) to 100 (got ${String(input.thresholdPercent)})`,
+      );
+    }
+  }
+
+  /**
+   * Issue #1180 — the latest context-usage sample recorded for a seat under its
+   * CURRENT occupant generation (sampled after the live tenure's boot, mirroring
+   * the GHOST-STAGE generation guard in ContextUsageStore). Null = no usable
+   * sample; the caller decides between skip and terminal.
+   */
+  findContextUsageForSession(
+    targetSession: string,
+    occupantGeneration: string | null,
+  ): {
+    usedPercentage: number | null;
+    contextWindowSize: number | null;
+    usedTokens: number | null;
+    sampledAt: string | null;
+    fresh: boolean;
+  } | null {
+    if (!occupantGeneration) return null;
+    const row = this.db
+      .prepare(
+        `SELECT usage.used_percentage, usage.context_window_size,
+                usage.total_input_tokens, usage.total_output_tokens,
+                usage.sampled_at
+           FROM sessions AS session
+           JOIN occupant_tenures AS tenure
+             ON tenure.node_id = session.node_id
+            AND tenure.generation_uuid = ?
+           JOIN context_usage AS usage
+             ON usage.node_id = session.node_id
+          WHERE session.session_name = ?
+            AND usage.session_name = ?
+            AND usage.availability = 'known'
+            AND usage.sampled_at IS NOT NULL
+            AND julianday(usage.sampled_at) >= julianday(tenure.boot_at)
+          ORDER BY session.id DESC
+          LIMIT 1`,
+      )
+      .get(occupantGeneration, targetSession, targetSession) as {
+      used_percentage: number | null;
+      context_window_size: number | null;
+      total_input_tokens: number | null;
+      total_output_tokens: number | null;
+      sampled_at: string | null;
+    } | undefined;
+    if (!row) return null;
+    const contextWindowSize = row.context_window_size ?? null;
+    const usedPercentage = row.used_percentage ?? null;
+    // Token estimate: seat-reported totals when present (Codex token_count),
+    // otherwise the reported percentage of the reported window (Claude statusline).
+    const sampledTotal = row.total_input_tokens != null && row.total_output_tokens != null
+      ? row.total_input_tokens + row.total_output_tokens
+      : null;
+    const usedTokens = sampledTotal != null
+      ? sampledTotal
+      : usedPercentage != null && contextWindowSize != null && contextWindowSize > 0
+        ? Math.round((usedPercentage / 100) * contextWindowSize)
+        : null;
+    const sampledAt = row.sampled_at ?? null;
+    const sampledMs = sampledAt ? Date.parse(sampledAt) : NaN;
+    const fresh = Number.isFinite(sampledMs)
+      && Date.now() - sampledMs >= 0
+      && Date.now() - sampledMs < CONTEXT_SAMPLE_FRESHNESS_MS;
+    return { usedPercentage, contextWindowSize, usedTokens, sampledAt, fresh };
   }
 
   register(input: RegisterWatchdogJobInput): WatchdogJob {
@@ -210,20 +344,26 @@ export class WatchdogJobsRepository {
         "context-usage-threshold requires migration 074_context_usage_watchdog",
       );
     }
-    if (
-      isContextUsageThreshold &&
-      (!Number.isInteger(input.thresholdBytes) || (input.thresholdBytes ?? 0) <= 0)
-    ) {
-      throw new WatchdogJobsError(
-        "threshold_invalid",
-        `threshold_bytes must be a positive integer (got ${String(input.thresholdBytes)})`,
-      );
+    if (isContextUsageThreshold) {
+      if (
+        (input.thresholdTokens != null || input.thresholdPercent != null) &&
+        !this.hasThresholdUnitsColumns
+      ) {
+        throw new WatchdogJobsError(
+          "context_usage_schema_missing",
+          "context-usage-threshold token/percent units require migration 124_context_usage_watchdog_units",
+        );
+      }
+      this.validateThresholdUnits(input);
     }
     const generatedContinuityJob =
       input.registeredBySession === "daemon@kernel" &&
       input.specYaml.includes("generated_by: continuity-policy-materializer") &&
       /continuity_mode: (managed-compaction|apprentice-handover)/.test(input.specYaml);
-    if (isContextUsageThreshold && !input.watchedFilePath && !generatedContinuityJob) {
+    // Issue #1180: token/percent jobs measure the seat's sampled context use,
+    // not a transcript file — only byte-gated jobs need a watched file.
+    const byteGated = isContextUsageThreshold && input.thresholdBytes != null;
+    if (byteGated && !input.watchedFilePath && !generatedContinuityJob) {
       throw new WatchdogJobsError(
         "watched_file_unresolved",
         `no transcript file could be resolved for ${input.targetSession}`,
@@ -280,6 +420,13 @@ export class WatchdogJobsRepository {
         isContextUsageThreshold ? input.thresholdBytes : null,
         isContextUsageThreshold ? (input.requiresJobId ?? null) : null,
         null,
+      );
+    }
+    if (this.hasThresholdUnitsColumns) {
+      columns.push("threshold_tokens", "threshold_percent");
+      values.push(
+        isContextUsageThreshold ? (input.thresholdTokens ?? null) : null,
+        isContextUsageThreshold ? (input.thresholdPercent ?? null) : null,
       );
     }
     if (this.hasWatchedFileGenerationColumn) {
@@ -512,14 +659,29 @@ export class WatchdogJobsRepository {
     return rows.map(rowToJob);
   }
 
-  recordEvaluation(jobId: string, evaluatedAt: string, fired: boolean): void {
+  /** Record the evaluation and attempted fire. A delivery's schedule snapshot
+   * advances the due boundary only while the active schedule still matches. */
+  recordEvaluation(jobId: string, evaluatedAt: string, fired: boolean,
+    schedule?: Pick<WatchdogJob, "specYaml" | "intervalSeconds" | "lastEvaluationAt">): void {
     if (fired) {
+      if (schedule) {
+        // A delivery may yield while its owner reschedules the next wake. The
+        // fire still happened, but must not replace that newer due boundary.
+        // A caller's update of the job in place is not such a reschedule.
+        const current = this.getById(jobId);
+        const unchanged = current?.state === "active" && current.lastEvaluationAt === schedule.lastEvaluationAt
+          && this.scheduleUnchanged(current, schedule);
+        this.db.prepare(`UPDATE watchdog_jobs SET last_fire_at = ?${unchanged ? ", last_evaluation_at = ?" : ""} WHERE job_id = ?`)
+          .run(...(unchanged ? [evaluatedAt, evaluatedAt, jobId] : [evaluatedAt, jobId]));
+        return;
+      }
       this.db
         .prepare(
           `UPDATE watchdog_jobs SET last_evaluation_at = ?, last_fire_at = ? WHERE job_id = ?`,
         )
         .run(evaluatedAt, evaluatedAt, jobId);
     } else {
+      this.updatedFrom.delete(jobId);
       this.db
         .prepare(`UPDATE watchdog_jobs SET last_evaluation_at = ? WHERE job_id = ?`)
         .run(evaluatedAt, jobId);
@@ -528,6 +690,64 @@ export class WatchdogJobsRepository {
 
   /** Preserve job identity while its owner adjusts a durable reminder schedule. */
   updateSchedule(jobId: string, specYaml: string, intervalSeconds: number, lastEvaluationAt: string | null): void {
+    // A rewrite that stores what is already there reschedules nothing, so it keeps what an update replaced.
+    const current = this.getById(jobId);
+    if (!current || current.specYaml !== specYaml || current.intervalSeconds !== intervalSeconds
+      || current.lastEvaluationAt !== lastEvaluationAt) this.updatedFrom.delete(jobId);
+    this.writeSchedule(jobId, specYaml, intervalSeconds, lastEvaluationAt);
+  }
+
+  /**
+   * A caller's update of an active job in place (`rig watchdog update`). It writes through the same schedule
+   * writer, and remembers the spec and interval it replaced: a delivery that began under them and finishes after
+   * the update is the same wake, not a rescheduled one, so its receipt still counts (see `scheduleUnchanged`).
+   * Any other reschedule of the job that changes something forgets them.
+   */
+  updateInPlace(jobId: string, specYaml: string, intervalSeconds: number, lastEvaluationAt: string | null): void {
+    const before = this.getByIdOrThrow(jobId);
+    this.writeSchedule(jobId, specYaml, intervalSeconds, lastEvaluationAt);
+    // Bounded: only deliveries in flight at the time of an update can match, and a job's next evaluation clears it.
+    const replaced = [...(this.updatedFrom.get(jobId) ?? []), { specYaml: before.specYaml, intervalSeconds: before.intervalSeconds }];
+    const kept = replaced.slice(-8);
+    // However many updates land, the schedule the delivery in flight started under stays until that delivery is
+    // accounted for. A real reschedule still forgets it, because it clears this record.
+    const started = this.inFlight.get(jobId);
+    const isStarted = (s: { specYaml: string; intervalSeconds: number }) =>
+      s.specYaml === started?.specYaml && s.intervalSeconds === started.intervalSeconds;
+    if (started && replaced.some(isStarted) && !kept.some(isStarted)) kept.unshift(started);
+    this.updatedFrom.set(jobId, kept);
+  }
+
+  /** A job's schedule read as its delivery starts; scheduleUnchanged keeps matching it until deliveryAccounted. */
+  deliverySchedule(jobId: string): WatchdogJob {
+    const job = this.getByIdOrThrow(jobId);
+    this.inFlight.set(jobId, { specYaml: job.specYaml, intervalSeconds: job.intervalSeconds });
+    return job;
+  }
+
+  deliveryAccounted(jobId: string): void {
+    this.inFlight.delete(jobId);
+    // Its schedule matches are done, and the next delivery starts under the job's current schedule.
+    this.updatedFrom.delete(jobId);
+  }
+
+  /** A job that stopped running keeps no replaced schedules, unless a delivery in flight still needs them
+   *  (its deliveryAccounted releases them). */
+  private releaseStoppedSchedules(jobIds: readonly string[]): void {
+    for (const jobId of jobIds) if (!this.inFlight.has(jobId)) this.updatedFrom.delete(jobId);
+  }
+
+  /** True when `snapshot`, read before a delivery, is still the job's schedule or one only an update replaced. */
+  scheduleUnchanged(
+    current: Pick<WatchdogJob, "jobId" | "specYaml" | "intervalSeconds">,
+    snapshot: Pick<WatchdogJob, "specYaml" | "intervalSeconds">,
+  ): boolean {
+    if (current.specYaml === snapshot.specYaml && current.intervalSeconds === snapshot.intervalSeconds) return true;
+    return (this.updatedFrom.get(current.jobId) ?? []).some((replaced) =>
+      replaced.specYaml === snapshot.specYaml && replaced.intervalSeconds === snapshot.intervalSeconds);
+  }
+
+  private writeSchedule(jobId: string, specYaml: string, intervalSeconds: number, lastEvaluationAt: string | null): void {
     this.db.prepare(`UPDATE watchdog_jobs SET spec_yaml = ?, interval_seconds = ?, last_evaluation_at = ?
       WHERE job_id = ? AND state = 'active'`).run(specYaml, intervalSeconds, lastEvaluationAt, jobId);
   }
@@ -584,6 +804,7 @@ export class WatchdogJobsRepository {
         `UPDATE watchdog_jobs SET state = 'terminal', terminal_reason = ? WHERE job_id = ?`,
       )
       .run(reason, jobId);
+    this.releaseStoppedSchedules([jobId]);
   }
 
   stop(jobId: string, reason = "operator_stopped"): WatchdogJob {
@@ -599,27 +820,44 @@ export class WatchdogJobsRepository {
     this.db
       .prepare(`UPDATE watchdog_jobs SET state = 'stopped', terminal_reason = ? WHERE job_id = ?`)
       .run(reason, jobId);
-    return this.getByIdOrThrow(jobId);
+    const stopped = this.getByIdOrThrow(jobId);
+    this.releaseStoppedSchedules([jobId]);
+    return stopped;
   }
 
   /**
    * GHOST-STAGE (e/Class-B): at a seat swap, stop every ARMED (state='active') job registered by the
-   * RETIRING generation — a stale wake firing into the successor's context is the specimen; the
-   * successor re-arms its own. Gen-scoped, NEVER name-scoped (the successor shares the seat name, so a
-   * name-scoped stop would kill the successor's own jobs). A NULL/empty generation never matches
-   * (UNKNOWN ≠ retired — note-2). Returns the count stopped. Auditable (terminal_reason), not a hard
-   * delete — the row stays for forensics. Pre-063 dbs no-op. `keepJobIds` are left running: the queue's
-   * current park timers wake the seat that owns a still-blocked row, which the successor inherits.
+   * RETIRING generation that wakes the retiring seat itself (`wakesRetiringSeat`, which the caller
+   * decides from the job's delivery target) — a stale wake firing into the successor's context is the
+   * specimen; the successor re-arms its own. A job it registered for another seat wakes that seat, never
+   * the successor, so it keeps running (#1775). Gen-scoped, NEVER name-scoped alone (the successor shares
+   * the seat name, so a name-scoped stop would kill the successor's own jobs). A NULL/empty generation
+   * never matches (UNKNOWN ≠ retired — note-2). Returns the count stopped. Auditable (terminal_reason),
+   * not a hard delete — the row stays for forensics. Pre-063 dbs no-op. `keepJobIds` are left running:
+   * the queue's current park timers wake the seat that owns a still-blocked row, which the successor
+   * inherits.
    */
-  dropArmedByRegisteringGeneration(generationUuid: string, keepJobIds: readonly string[] = []): number {
+  dropArmedByRegisteringGeneration(
+    generationUuid: string,
+    wakesRetiringSeat: (job: WatchdogJob) => boolean,
+    keepJobIds: readonly string[] = [],
+  ): number {
     if (!this.hasGenColumn || !generationUuid) return 0;
-    const keep = keepJobIds.length > 0 ? ` AND job_id NOT IN (${keepJobIds.map(() => "?").join(", ")})` : "";
+    const keep = new Set(keepJobIds);
+    const ids = (this.db
+      .prepare(`SELECT * FROM watchdog_jobs WHERE state = 'active' AND registered_by_generation_uuid = ?`)
+      .all(generationUuid) as JobRow[])
+      .map(rowToJob)
+      .filter((job) => !keep.has(job.jobId) && wakesRetiringSeat(job))
+      .map((job) => job.jobId);
+    if (ids.length === 0) return 0;
     const res = this.db
       .prepare(
         `UPDATE watchdog_jobs SET state = 'stopped', terminal_reason = 'registering generation retired (seat handover)'
-         WHERE state = 'active' AND registered_by_generation_uuid = ?${keep}`,
+         WHERE state = 'active' AND job_id IN (${ids.map(() => "?").join(", ")})`,
       )
-      .run(generationUuid, ...keepJobIds);
+      .run(...ids);
+    if (res.changes > 0) this.releaseStoppedSchedules(ids);
     return res.changes;
   }
 }
@@ -649,7 +887,10 @@ function rowToJob(row: JobRow): WatchdogJob {
       ? (row.watched_file_path && row.watched_file_generation_uuid ? "bound" : "pending-binding")
       : null,
     thresholdBytes: row.threshold_bytes ?? null,
+    thresholdTokens: row.threshold_tokens ?? null,
+    thresholdPercent: row.threshold_percent ?? null,
     requiresJobId: row.requires_job_id ?? null,
     lastFiredGeneration: row.last_fired_generation_uuid ?? null,
+    lastFiredCondition: row.last_fired_condition ?? null,
   };
 }

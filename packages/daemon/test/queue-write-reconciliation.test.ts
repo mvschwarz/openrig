@@ -214,17 +214,16 @@ describe("queue unknown-write reconciliation", () => {
     }
   });
 
-  it("keeps the ID in an unreadable-response JSON error and reconciles the full stored body", async () => {
+  it("reads a create back by its ID when its response is unreadable, and reports the full stored body", async () => {
     h.corruptNext();
     const first = await h.run([...createArgs, "--no-nudge"]);
-    expect(first.code).not.toBe(0);
+    expect(first.code).toBe(0);
     const id = h.rows()[0]!.qitem_id;
-    expect(JSON.stringify(first.data)).toContain("unreadable response");
+    expect(first.stderr.join("\n")).toContain(`The create committed after all: row ${id}`);
     expect(JSON.stringify(first.data)).toContain(id);
-    const retry = await h.run([...createArgs, "--id", id, "--no-nudge"]);
-    expect(retry.code).toBe(0);
-    expect(retry.data.body).toBe(BODY);
+    expect(first.data.body).toBe(BODY);
     expect(h.rows()).toHaveLength(1);
+    expect(h.requests.filter((r) => r.path === "/api/queue/create")).toHaveLength(1);
   });
 
   it("does not conflate intentional new creates with equal content; retry must reuse --id", async () => {
@@ -297,16 +296,20 @@ describe("queue unknown-write reconciliation", () => {
 
   // Review-R2's #410 pre-header-loss discriminator, retained as a real HTTP
   // control: the server commits the row, then closes without response headers.
-  it.each([true, false])("reports unknown after committed create loses headers (json=%s)", async (json) => {
+  // The CLI reads the row back once by its ID: found, the create committed; a
+  // read-back that's lost too leaves it unknown, with the --id retry.
+  it.each([
+    [true, "answers"], [false, "answers"], [true, "is lost too"], [false, "is lost too"],
+  ] as const)("a committed create that loses headers is read back once (json=%s; the read-back %s)", async (json, readBack) => {
     let received = 0;
     const server = createServer(async (req, res) => {
       received++;
       let body = "";
       for await (const chunk of req) body += chunk;
       const response = await h.app.request(`http://queue.invalid${req.url}`, {
-        method: req.method, headers: req.headers as Record<string, string>, body,
+        method: req.method, headers: req.headers as Record<string, string>, ...(body ? { body } : {}),
       });
-      if (received === 1) res.destroy();
+      if (received === 1 || (received === 2 && readBack === "is lost too")) res.destroy();
       else { res.writeHead(response.status, { "content-type": "application/json" }); res.end(await response.text()); }
     });
     try {
@@ -316,17 +319,23 @@ describe("queue unknown-write reconciliation", () => {
       if (!address || typeof address === "string") throw new Error("missing fixture address");
       h.networkEndpoint(`http://127.0.0.1:${address.port}`);
       const first = await h.run([...createArgs, "--no-nudge"], json);
-      expect(first.code).toBe(1);
-      expect(received).toBe(1);
+      expect(received).toBe(2);
       expect(h.rows()).toHaveLength(1);
       const id = h.rows()[0]!.qitem_id;
       expect(h.rows()[0]!.body).toBe(BODY);
+      expect(first.stderr.join("\n")).toContain(id);
+      if (readBack === "answers") {
+        expect(first.code).toBe(0);
+        expect(first.stderr.join("\n")).toContain("The create committed after all");
+        if (json) expect(JSON.stringify(first.data)).toContain(id);
+        return;
+      }
+      expect(first.code).toBe(1);
       const rendered = json ? JSON.stringify(first.data) : first.stderr.join("\n");
-      expect(rendered).toContain(id);
       expect(rendered).toContain("--id");
       const retry = await h.run([...createArgs, "--id", id, "--no-nudge"]);
       expect(retry.code).toBe(0);
-      expect(received).toBe(2);
+      expect(received).toBe(3);
       expect(h.rows()).toHaveLength(1);
       expect(rendered).not.toContain("The command was not delivered.");
       if (json) expect(first.data.error.consequence).toContain("UNKNOWN");

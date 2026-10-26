@@ -117,9 +117,9 @@ read only the pieces a task needs.
 
 The session-name format `{pod}-{member}@{rig}` is your address. When you
 run `rig whoami --json`, you get back your full topology context: rig name,
-pod, member, peers, edges, transcript path. On a large rig the peer list can be
-a bounded, edge-first selection: `peersNote` then says how many are not shown,
-and `rig whoami --json --all-peers` lists them all.
+pod, member, peers, edges, transcript path. With `output.compact` enabled,
+a large rig's peer list can be a bounded, edge-first selection: `peersNote`
+then says how many are not shown; `rig whoami --json --all-peers` lists them all.
 
 ---
 
@@ -163,9 +163,12 @@ cost when you reach for one.
 ### Where skills come from in OpenRig
 
 - **Per-agent loadout:** your AgentSpec's `profile.uses.skills: [...]`
-  determines what skills get projected into your runtime skill folder
-  (`.claude/skills/` or `.agents/skills/`) before your harness boots. This
-  is the **structural composition** layer.
+  determines what skills get projected into your seat's own skill storage
+  before your harness boots. A Claude seat gets them through OpenRig's
+  generated plugin, named `openrig:<id>`; a Codex seat through its skill
+  catalog. A seat without that storage gets them in the project's
+  `.claude/skills/` or `.agents/skills/`. This is the **structural
+  composition** layer.
 - **Cross-pod sharing:** AgentSpecs can `imports: [shared]` to access a
   shared skill pool. Built-in agents commonly do this.
 - **Belt-and-suspenders:** the spec projects skill files; startup guidance
@@ -176,7 +179,8 @@ cost when you reach for one.
 
 | Home | Purpose |
 |---|---|
-| `<rig-cwd>/.claude/skills/`, `<rig-cwd>/.agents/skills/` | Where the harness actually loads from. Populated by `rig up`. |
+| `<OpenRig home>/state/seats/<rig id>/<logical seat>/<runtime>/` | A team seat's own skills, outside the project. Claude loads them through the generated plugin (`plugin/skills/`); Codex reads them by path from the seat's `catalog.md` (`skills/`). Populated at launch. |
+| `<rig-cwd>/.claude/skills/`, `<rig-cwd>/.agents/skills/` | The project's own skills, which the harness also loads. A seat without its own storage gets its skills here. |
 | `~/.claude/skills/`, `~/.agents/skills/` | User-level harness skill directories. Inspect the current projection and harness configuration to determine which skills are installed and where they came from. |
 | `packages/daemon/{specs/agents/shared/skills,assets/plugins/*/skills}/` (source checkout) | Product skills that ship with OpenRig — the spec pool + the bundled plugin assets (openrig-user, openrig-architect, forming-an-openrig-mental-model, queue-handoff, claude-compaction-restore, …). |
 | the skills authoring workspace | Skill authoring source (not runtime-loaded). |
@@ -239,11 +243,13 @@ If you're booting into a new seat in an OpenRig rig:
    `guidance/role.md` for your specific seat.
 3. **Read the rig's `CULTURE.md`** if it has one — the team operating
    manual.
-4. **Check what skills you have** — list `.claude/skills/` or
-   `.agents/skills/` in your cwd. Each skill has a frontmatter description
-   that tells you when to reach for it.
-5. **Check your peers** — `rig capture <peer-session>` to see what they're
-   doing.
+4. **Check what skills you have** — `rig skill loadout --seat self` shows
+   your seat's own skills; `.claude/skills/` or `.agents/skills/` in your
+   cwd hold the project's. Each skill has a frontmatter description that
+   tells you when to reach for it.
+5. **Check your peers** — `rig ps --nodes` and the queue first (who is up,
+   who holds what). Capture a peer (`rig capture <peer-session>`) only when
+   you actually need to see its screen.
 6. **Check the transcripts** if you're returning to an in-flight workstream
    — `rig transcript <session> --tail 100` for recent context.
 7. **Ask `rig ask <rig> "<question>"`** if you need cross-cutting evidence
@@ -301,7 +307,7 @@ that fit your actual work.
 | "I should manage Codex's compaction the way I manage Claude's" | No. Codex auto-compacts cleanly; Claude doesn't. Different runtimes, different lifecycles. |
 | "MEMORY.md auto-loads, so I don't need to read it" | Maybe. Sometimes MEMORY.md auto-loads via system reminders; sometimes not. Don't assume. If your work touches the topics it covers, read it explicitly. |
 | "Skills inherit from a parent or compose like classes" | No. Skills are flat artifacts; composition happens via AgentSpec `profile.uses.skills` (structural) or soft cross-references in skill bodies (advisory). Not via OO-style inheritance. |
-| "The substrate `shared-docs/skills/` folder is the canonical runtime path" | No. The harness doesn't read there. It's an authoring workspace. Runtime loads from `.claude/skills/`, `.agents/skills/`, and product built-in. |
+| "The substrate `shared-docs/skills/` folder is the canonical runtime path" | No. The harness doesn't read there. It's an authoring workspace. Runtime loads from the seat's own skill storage, `.claude/skills/`, `.agents/skills/`, and product built-in. |
 
 ---
 

@@ -127,11 +127,46 @@ export type PrecheckReason =
   | "target_needs_reauth" // target authState === "needs_reauth"
   | "target_auth_unknown" // target authState === "unknown" — fails closed, NOT relabeled as re-auth
   | "signal_unknown_or_stale"
-  | "rebind_unsupported_for_runtime";
+  | "rebind_unsupported_for_runtime"
+  | "seat_restart_refused" // the seat's in-place restart plan refused, so nothing would change
+  | "target_not_in_seat_home" // no login by that name is saved in the Codex home the seat runs on
+  | "token_file_required" // a Claude seat moves to a token file (--token-file), or back to its stored login (--stored-login)
+  | "invalid_token_reference" // the label or the token file's path can't be a seat's reference
+  | "token_file_unusable" // the token file wouldn't give Claude a token: missing, empty, not a file or unreadable
+  | "credential_outranks_token" // a cloud provider, API key, auth token or apiKeyHelper would win over the seat's token
+  | "seat_not_running"; // nothing to relaunch: launch the seat first
 
-export type PrecheckResult = { safe: true } | { safe: false; reasons: PrecheckReason[] };
+/** A seat on the same Codex home, as the in-place restart reports it (its `PeerReport`). Declared here rather than
+ *  imported, so the provider types don't import the restart module and its tmux dependencies. */
+export interface SeatPeer {
+  logicalId: string;
+  sessionName: string | null;
+  home: "same" | "different" | "unknown";
+  effect: string;
+}
 
-export type SwitchOutcome = "succeeded" | "rebind_in_progress" | "failed_safely";
+/** What a seat-aware precheck saw: the Codex home the seat runs on, what the seat is doing, and its peers on that home. */
+export interface SeatSwitchView {
+  home: string;
+  activity: string;
+  peers: SeatPeer[];
+}
+
+/** What a Claude seat's precheck saw: the reference it would get, and what the precedence check read and couldn't read. */
+export interface ClaudeSwitchView {
+  label: string;
+  tokenFile: string | null;
+  checked: string[];
+  notChecked: string[];
+  /** A move back to the stored login: the token the seat would still use instead, and where it comes from. */
+  instead?: string;
+}
+
+export type PrecheckResult =
+  | { safe: true; seat?: SeatSwitchView; claude?: ClaudeSwitchView }
+  | { safe: false; reasons: PrecheckReason[]; message?: string; seat?: SeatSwitchView; claude?: ClaudeSwitchView };
+
+export type SwitchOutcome = "succeeded" | "rebind_in_progress" | "failed_safely" | "unknown";
 
 /** The whole four-block read model, emitted by `rig provider status --json`. */
 export interface FourBlockReadModel {
@@ -152,10 +187,12 @@ export interface FourBlockReadModel {
 }
 
 /** Slice 01 — where a seat's account configuration comes from. A registry row is metadata: it doesn't prove
- *  which login a running session uses. A default login is whatever the daemon's home held at the seat's launch. */
+ *  which login a running session uses. A default login is whatever the seat's home held at its launch: the seat's
+ *  own home when its `env:` declares one (`homeFrom` names where; optional, so older readers keep accepting the
+ *  record), else the daemon's. */
 export type SeatAccountConfiguration =
   | { source: "registry"; profileRef: string; recordedAt: string; profileSaved: boolean | null }
-  | { source: "default_login"; home: string | null; homeNote: string }
+  | { source: "default_login"; home: string | null; homeNote: string; homeFrom?: "member" | "rig" }
   | { source: "unknown"; reason: string };
 
 export interface SeatConfiguredAccount {
@@ -166,6 +203,9 @@ export interface SeatConfiguredAccount {
   /** A registry row that exists but isn't applied or doesn't match (stale after a runtime change, another
    *  runtime in its column, or a profile not saved on this host). */
   registryNotes?: string[];
+  /** A home the seat's `env:` declares that isn't an absolute path, so it isn't used: the seat resolves as if
+   *  it declared none. Reported, never refused. */
+  ignoredHome?: { from: "member" | "rig"; variable: string; value: string };
   /** Always unlinked: nothing supported links a configured account to an observed allowance. */
   allowance: { linked: false; reason: string };
   /** What this seat itself was observed reporting. Claude: its own status-line samples, and the seats whose
@@ -198,7 +238,25 @@ export interface ClaudeUsageIdentity {
   source: "claude auth status orgId and email" | "unresolved";
 }
 
+export interface ClaudeTokenIdentity {
+  source: "configured credential label";
+  credentialLabel: string;
+  credentialRef: string;
+  limitId: string;
+}
+export interface ClaudeTokenProbe {
+  warnings?: string[];
+  exitCode: number | null;
+  requestOutcome: "completed" | "failed" | "unknown";
+  cliVersion: string | null;
+  status: string | null;
+  overageStatus: string | null;
+  overageDisabledReason: string | null;
+  isUsingOverage: boolean | null;
+}
+
 export interface UsageWindowRow {
+  status?: string;
   /** The provider-native window name (Codex: primary / secondary). */
   window: string;
   durationMins: number | null;
@@ -217,6 +275,19 @@ export interface UsageWindowRow {
   levelReason?: string;
   freshness: "fresh" | "stale" | "unavailable";
   freshnessReason?: string;
+  /** Present when this window's reset has passed since its reading: planning, never a reading. It changes nothing
+   *  measured (used %, level, freshness, availability), and a newer reading replaces it. */
+  expectation?: { expectedFullSince: string; note: string };
+}
+
+/** Slice 01: whether an account's sign-in is usable, read only from the evidence a refresh already holds, apart
+ *  from usage. `unknown` is neither usable nor unusable, and nothing decides on it. Ages from `at`; a daemon restart
+ *  forgets it, as it forgets the refresh outcome. */
+export interface SignInFact {
+  state: "usable" | "needs_sign_in" | "unknown";
+  evidence: string;
+  /** The refresh the evidence comes from; null when there is none. */
+  at: string | null;
 }
 
 export interface UsageRefreshOutcome {
@@ -227,10 +298,11 @@ export interface UsageRefreshOutcome {
 }
 
 export interface ProviderUsageAllowance {
+  probe?: ClaudeTokenProbe;
   provider: ProviderKind;
   /** Null only for the explicit row of a source never read since the daemon started. */
-  identity: UsageAllowanceIdentity | ClaudeUsageIdentity | null;
-  source: { kind: "codex_app_server" | "claude_statusline_samples"; host: "local" };
+  identity: UsageAllowanceIdentity | ClaudeUsageIdentity | ClaudeTokenIdentity | null;
+  source: { kind: "codex_app_server" | "claude_statusline_samples" | "claude_token_probe"; host: "local" };
   observedAt: string | null;
   /** Seat links are not observed by this read. */
   seats: "unknown";
@@ -243,6 +315,16 @@ export interface ProviderUsageAllowance {
   lastRefresh: UsageRefreshOutcome | null;
   currentAvailability: "known" | "unknown";
   unavailableReason?: string;
+  /** Present on a row kept from before the daemon restarted: historical, never current. */
+  retained?: "before_restart";
+  /** Whether this row's readings are linked to an account: a resolved provider identity, or unknown. */
+  accountHistory?: "linked" | "unknown";
+  /** The most recent time this allowance was observed exhausted (stored, so it survives a restart), or null. */
+  lastObservedExhausted?: { at: string; window: string | null; evidence: string } | null;
+  /** On an inactive account's row: OpenRig doesn't record which saved profile was active at its read. */
+  savedProfile?: "not linked";
+  /** The sign-in fact for this row's login. Optional: an older daemon's rows don't carry it. */
+  signIn?: SignInFact;
   /** Claude: how the identity and the windows were joined (identity as of a refresh; windows from seats' samples at
    *  their own times; not proven to be the same login). */
   identityNote?: string;

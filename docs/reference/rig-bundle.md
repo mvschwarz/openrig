@@ -191,6 +191,7 @@ integrity:
 | `rig_spec` | string | yes | Relative path to the rig spec within the archive. Safe relative path. |
 | `agents` | AgentEntry[] | yes | Array of vendored agent entries. |
 | `culture_file` | string | no | Relative path to the culture file if present. |
+| `included_login_files` | string[] | no | Exact archive-relative harness login files deliberately included by the producer. Only these paths are exempt from the login-file refusal; this unsigned declaration is not authentication or receiver approval. |
 | `integrity` | Integrity | no | Per-file SHA-256 checksums for content verification. Validation doesn't require it, but install refuses an archive without it and inspect reports integrity FAIL. |
 | `provenance` | object | no | Stated, not verified: `created_at`, `daemon_version`, `cli_version`, `source_host`, `author_session`, `source_rig_id`, `source_rig_name`, `notes`, and `source` for a GitHub link build. |
 | `assembler` | object | no | `openrigVersion` of the OpenRig that built the archive. |
@@ -220,6 +221,28 @@ integrity:
 | `path` | string | yes | Relative path to the vendored import within the archive. |
 | `original_ref` | string | yes | The original import ref before rewriting. |
 | `hash` | string | yes | SHA-256 hash of the imported agent.yaml. |
+
+### Harness login files
+
+By default, create refuses `.claude/.credentials.json`, `.codex/auth.json` and `.pi/agent/auth.json`
+at the root or nested anywhere in selected bundle content, including agents and an explicitly carried project.
+The author check reports them too. Messages name paths, never contents, and explain both remedies:
+remove the file from the agent folder or carried project and build again; or, only if recipients should have this
+login (for example, your own internal test bundle) and its owner agrees, recreate with
+`rig bundle create <spec> -o <archive.rigbundle> --include-login-files`.
+Anyone with that archive could read the included login files.
+
+The flag applies to this create only. The generated `included_login_files` manifest list names only the actual,
+exact archive-relative login files included. Inspect, unpack, install and bootstrap honour those paths without
+another flag and show a credential-bearing notice. An additional unrecorded login file still fails, as do malformed
+records, directory or wildcard exemptions, and unrelated sensitive files. There is no machine setting or `--force`
+bypass. The unsigned record states the producer's choice; it does not authenticate the producer, establish trust,
+or constitute a fresh recipient approval. Review the source and files before using a bundle.
+
+Compatibility change: previously accepted bundles containing these files now fail default creation and downstream
+verification/install unless deliberately rebuilt with the record. Inspection remains diagnostic: it reports failed
+integrity. Ordinary `auth.json` elsewhere and non-login harness files are unchanged. Filename checks do not scan
+arbitrary contents for secrets.
 
 ### Integrity Section
 
@@ -272,7 +295,7 @@ where the daemon runs.
 ### Create a bundle
 
 ```bash
-rig bundle create <spec-path-or-github-link> -o <output.rigbundle> [--rig-root <dir>] [--preset <name>] [--seat <pod.member=runtime>]... [--context-pack <dir>]... [--project-dir <dir>] [--name <name>] [--bundle-version <ver>] [--min-cli-version <ver>] [--min-daemon-version <ver>] [--notes <text>] [--include-packages <refs...>] [--allow-drift] [--json]
+rig bundle create <spec-path-or-github-link> -o <output.rigbundle> [--rig-root <dir>] [--preset <name>] [--seat <pod.member=runtime>]... [--context-pack <dir>]... [--project-dir <dir>] [--name <name>] [--bundle-version <ver>] [--min-cli-version <ver>] [--min-daemon-version <ver>] [--notes <text>] [--include-packages <refs...>] [--allow-drift] [--include-login-files] [--json]
 ```
 
 | Flag | Required | Default | Description |
@@ -289,6 +312,7 @@ rig bundle create <spec-path-or-github-link> -o <output.rigbundle> [--rig-root <
 | `--min-cli-version`, `--min-daemon-version` | no | — | The oldest OpenRig CLI or daemon that may install the bundle, checked on install. For a link they override the author's `bundle.yaml` minimums. |
 | `--notes <text>` | no | — | Notes stored in the manifest's provenance. |
 | `--include-packages <refs...>` | no | all from the spec | Legacy (schema 1) specs only: the package refs to include. |
+| `--include-login-files` | no | off | Only if recipients should have these logins and their owner agrees (for example, an internal test bundle), include them and record their exact archive-relative paths. Create and consumers show a credential-bearing notice. Does not exempt other sensitive files. |
 | `--allow-drift` | no | off | Build a spec that differs from the running rig of the same name. Without it, create refuses; with it, the difference is written into the manifest's provenance notes. |
 | `--json` | no | off | Machine-readable output. |
 
@@ -537,7 +561,7 @@ When an agent spec has `imports`, each import is resolved, vendored into the bun
 7. Each agent must have `name`, `path` (safe relative), and `hash`
 8. Optional blocks, when present, must be well formed: `provenance`, `compatibility`, `skills`, `plugins`,
    `workflow_specs`, `context_packs`, `agent_images`, and `project` (an `id` made of letters, digits, `.`, `_` and `-`,
-   and a safe relative `path`)
+   and a safe relative `path`), plus `included_login_files` (unique safe relative paths)
 
 The manifest validator doesn't check `integrity`; unpack does (below).
 

@@ -13,6 +13,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Hono } from "hono";
 import http from "node:http";
+import net from "node:net";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -124,6 +125,25 @@ describe("POST /api/hosts/add — the narrow named add seam", () => {
   });
 
   const auth = { Authorization: `Bearer ${BEARER}`, "Content-Type": "application/json" };
+
+  it("GET /api/hosts probes a bracketed IPv6 http host at its address", async () => {
+    const server = net.createServer((sock) => sock.destroy());
+    const listening = await new Promise<boolean>((resolve) => {
+      server.once("error", () => resolve(false));
+      server.listen(0, "::1", () => resolve(true));
+    });
+    if (!listening) return; // no IPv6 loopback on this machine
+    try {
+      const { port } = server.address() as net.AddressInfo;
+      writeFileSync(join(home, "hosts.yaml"), `hosts:\n  - id: v6\n    transport: http\n    url: http://[::1]:${port}\n`);
+      const res = await app.request("/api/hosts", { headers: auth });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { hosts: Array<{ id: string; status: string }> };
+      expect(body.hosts.map((h) => [h.id, h.status])).toEqual([["v6", "reachable"]]);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
 
   it("writes a valid entry through the writer twin and the CLI-visible registry file", async () => {
     const res = await app.request("/api/hosts/add", {
@@ -240,7 +260,10 @@ describe("pair-request — the target-side issuance handshake (FR-6)", () => {
   });
 
   it("issuance mints the ONE human approval moment: a human-routed qitem with code + summary + evidence_ref", async () => {
+    const create = vi.spyOn(repo, "create");
     const { code, approvalQitemId } = await issue();
+    // An approval that expires is alert-worthy: it isn't left only on Steering.
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ humanAlert: true }));
     const item = repo.getById(approvalQitemId)!;
     expect(item.destinationSession).toBe("alex@external");
     expect(item.tier).toBe("human-gate");

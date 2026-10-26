@@ -4,9 +4,13 @@ description: Systematically explore and test a web application to find bugs, UX 
 allowed-tools: Bash(agent-browser:*), Bash(npx agent-browser:*)
 metadata:
   openrig:
-    vendored_from: "Vercel agent-browser ecosystem (https://github.com/vercel/agent-browser)"
+    vendored_from: "Vercel agent-browser ecosystem (https://github.com/vercel-labs/agent-browser)"
     vendoring_pattern: vendored-as-is
-    last_upstream_check: "2026-05-13 (diff against ~/.agents/skills/dogfood = identical)"
+    last_upstream_check: "2026-10-25 (SKILL.md and license compared at 372ac5ce20fab885dbf45ee0c9d510ec8c3b6fdb; no content sync)"
+    divergence_notes: |
+      Retained local copy; SKILL.md differs from the checked upstream revision.
+      This comparison did not refresh the skill body or companion files.
+      Upstream license terms are included in LICENSE.txt.
 ---
 
 # Dogfood

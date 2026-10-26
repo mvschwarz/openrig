@@ -144,7 +144,8 @@ export function createDaemonShutdown(options: {
         log(`[shutdown] outcome receipt unavailable: ${String(error)}`);
         code = 1;
       }
-      log(`[shutdown] ${outcome}; phase=${receipt.phase}; budget=${timeoutMs}ms; exit=${code}`);
+      // The log keeps this run's timing after a later shutdown replaces the single receipt.
+      log(`[shutdown] ${outcome}; phase=${receipt.phase}; budget=${timeoutMs}ms; exit=${code}; pid=${receipt.pid}; started=${startedAt}; completed=${receipt.completedAt}`);
       exit(code);
     };
     // Referenced deliberately: this must also enforce the bound with no servers.
@@ -152,7 +153,8 @@ export function createDaemonShutdown(options: {
       fail(`whole-shutdown budget exhausted (${timeoutMs}ms); pending effects are unverified`);
       finish("timed-out");
     }, timeoutMs);
-    log(`OpenRig daemon received ${signal}; shutting down (budget ${timeoutMs}ms)`);
+    // startedAt is when this callback ran, not when the kernel delivered the signal.
+    log(`OpenRig daemon received ${signal}; shutting down (budget ${timeoutMs}ms); pid=${process.pid}; callback started ${startedAt}`);
     void (async () => {
       for (const [name, run] of options.phases) {
         if (finished) return;

@@ -28,7 +28,7 @@ describe.skipIf(process.platform === "win32")("native transcript seat environmen
       const adapter = new TmuxAdapter(async (cmd) => (await run(`tmux -S ${shellQuote(socket)} ${cmd.slice(5)}`, { env })).stdout,
         undefined, argv ? async (args) => (await runFile(args[0]!, ["-S", socket, ...args.slice(1)], { env })).stdout : undefined);
       expect(await adapter.createSession("fixture", temp)).toEqual({ ok: true });
-      await runFile("tmux", ["-S", socket, "respawn-pane", "-k", "-t", "=fixture:", `/usr/bin/env > ${shellQuote(captured)}; sleep 60`], { env });
+      await runFile("tmux", ["-S", socket, "respawn-pane", "-k", "-t", "=fixture:", `/usr/bin/env > ${shellQuote(captured + ".part")} && mv ${shellQuote(captured + ".part")} ${shellQuote(captured)}; sleep 60`], { env });
       const deadline = Date.now() + 2000;
       while (!fs.existsSync(captured) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
       const seatEnv = Object.fromEntries(fs.readFileSync(captured, "utf8").split("\n").filter((line) => line.includes("=")).map((line) => {
@@ -53,8 +53,8 @@ describe.skipIf(process.platform === "win32")("native transcript seat environmen
         if (prior[index] === undefined) delete process.env[key]; else process.env[key] = prior[index];
       }
       await runFile("tmux", ["-S", socket, "kill-server"], { env }).catch(() => {});
-      fs.rmSync(temp, { recursive: true, force: true });
-      fs.rmSync(socketDir, { recursive: true, force: true });
+      await fs.promises.rm(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+      await fs.promises.rm(socketDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
     }
   });
 });

@@ -20,6 +20,7 @@ interface RFNodeData {
   role: string | null;
   runtime: string | null;
   model: string | null;
+  advisor?: string | null;
   status: string | null;
   binding: Binding | null;
   nodeKind: "agent" | "infrastructure";
@@ -38,6 +39,7 @@ interface RFNodeData {
   contextAvailability: string;
   contextTotalInputTokens: number | null;
   contextTotalOutputTokens: number | null;
+  needsAttention?: boolean;
   agentActivity?: AgentActivity | null;
   currentQitems?: CurrentQitemSummary[];
   terminalActive?: boolean | null;
@@ -85,6 +87,7 @@ export interface InventoryOverlay {
   contextAvailability?: string;
   contextTotalInputTokens?: number | null;
   contextTotalOutputTokens?: number | null;
+  needsAttention?: boolean;
   agentActivity?: AgentActivity | null;
   currentQitems?: CurrentQitemSummary[];
   terminalActive?: boolean | null;
@@ -151,6 +154,7 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
         runtime: node.runtime,
         model: node.model,
         effort: node.effort ?? null,
+        advisor: node.advisor ?? null,
         status: latestSession ? latestSession.status : null,
         binding: node.binding,
         nodeKind: node.runtime === "terminal" ? "infrastructure" : "agent",
@@ -168,6 +172,7 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
         contextAvailability: overlay?.contextAvailability ?? "unknown",
         contextTotalInputTokens: overlay?.contextTotalInputTokens ?? null,
         contextTotalOutputTokens: overlay?.contextTotalOutputTokens ?? null,
+        needsAttention: overlay?.needsAttention,
         agentActivity: overlay?.agentActivity ?? null,
         currentQitems: overlay?.currentQitems ?? [],
         terminalActive: overlay?.terminalActive,

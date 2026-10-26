@@ -111,7 +111,7 @@ export interface UsageAcrossHosts extends AggregatedPayload<UsageAllowanceGroup>
 
 /** The key a host keyed this row by (the same functions the hosts use); null when unresolved or never read. */
 export function allowanceKey(row: ProviderUsageAllowance): string | null {
-  if (!row.identity) return null;
+  if (!row.identity || row.source.kind === "claude_token_probe") return null;
   return row.provider === "codex"
     ? codexUsageIdentityKey(row.identity as UsageAllowanceIdentity)
     : claudeUsageIdentityKey(row.identity as ClaudeUsageIdentity);
@@ -290,6 +290,7 @@ const usageWindow = record({
   levelReason: optional(str),
   freshness: oneOf(...FRESHNESS),
   freshnessReason: optional(str),
+  expectation: optional(record({ expectedFullSince: str, note: str })),
 });
 const codexIdentity = record({
   accountId: nullable(str), workspaceId: nullable(str), limitId: str, email: nullable(str), planType: nullable(str), source: str,
@@ -322,6 +323,11 @@ const usageRowFields = {
   identityNote: optional(str),
   unresolved: optional(record({ note: str, keptReads: num, droppedReads: num })),
   savedProfiles: optional(record({ names: listOf(str), note: str })),
+  // The reading-history fields are optional, so a host from before them stays valid.
+  retained: optional(oneOf("before_restart")),
+  accountHistory: optional(oneOf("linked", "unknown")),
+  lastObservedExhausted: optional(nullable(record({ at: str, window: nullable(str), evidence: str }))),
+  savedProfile: optional(oneOf("not linked")),
 };
 
 /** A served row with every field the grouping and the views read, typed as provider-types.ts says. */
@@ -333,7 +339,12 @@ export function isUsageRow(v: unknown): v is ProviderUsageAllowance {
 
 const seatConfiguration: Check = (v) =>
   record({ source: oneOf("registry"), profileRef: str, recordedAt: str, profileSaved: nullable(bool) })(v)
-  || record({ source: oneOf("default_login"), home: nullable(str), homeNote: str })(v)
+  || record({
+    source: oneOf("default_login"),
+    home: nullable(str),
+    homeNote: str,
+    homeFrom: optional(oneOf("member", "rig")),
+  })(v)
   || record({ source: oneOf("unknown"), reason: str })(v);
 
 /** A served seat account with every field the views read, typed as provider-types.ts says. */
@@ -343,6 +354,7 @@ export const isSeat = record({
   runtime: str,
   configured: seatConfiguration,
   registryNotes: optional(listOf(str)),
+  ignoredHome: optional(record({ from: oneOf("member", "rig"), variable: str, value: str })),
   allowance: record({ linked: oneOf(false), reason: str }),
   observed: optional(record({
     windowsSampled: optional(bool),

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { DaemonClient } from "../src/client.js";
 import { openTerminalWindow, type WindowDeps } from "../src/terminal-window.js";
 import { shellQuote } from "../src/cross-host-executor.js";
+import { composeView } from "../../daemon/src/domain/terminal/view-composer.js";
 
 function fixture(options: { herdr?: boolean; ghostty?: string; refusal?: number; empty?: boolean; alive?: boolean } = {}) {
   const panes = ["tui", "advisor", "operator"].map(seat => ({ seat, label: seat, paneCommand: `tmux attach-session -t '=fixture-${seat}'` }));
@@ -182,7 +183,10 @@ describe("desktop terminal view", () => {
     const f = fixture({ herdr });
     f.deps.env = {};
     Object.assign(f.preview, { status: {} });
-    f.preview.composed.opened[0]!.paneCommand = "ssh 'user@remote-host' 'tmux attach-session -t =operator'";
+    Object.assign(f.preview.composed.opened[0]!, {
+      paneCommand: "ssh 'user@remote-host' 'long reconnect loop'",
+      recoveryCommand: "ssh 'user@remote-host' 'tmux attach-session -t =operator'",
+    });
     const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
     expect(result).toMatchObject({ ok: false, windowAttempted: false });
     expect(result.error).toContain("run: env -u TMUX ssh -t 'user@remote-host' 'tmux attach-session -t =operator'");
@@ -233,8 +237,11 @@ describe("desktop terminal view", () => {
 
   it("opens the previewed tmux layout when the expected plan still matches", async () => {
     const f = fixture({ herdr: false });
+    const tile = composeView("kernel", [{ seat: "tui", label: "tui", tmuxSession: "fixture-tui", host: null, readOnly: false, alive: true }], { resolveHost: () => null }).opened[0]!;
+    Object.assign(f.preview.composed.opened[0]!, tile);
     const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps, "bound-plan");
     expect(result).toMatchObject({ ok: true, provider: "tmux", opened: ["tui", "advisor", "operator"] });
+    expect(f.exec.mock.calls.some(([file, args]) => file === "/fixture/bin/tmux" && args.includes(`env -u TMUX ${tile.paneCommand}`))).toBe(true);
   });
 
   it("opens a new Ghostty tab and applies the same daemon plan and Herdr endpoint", async () => {
@@ -594,7 +601,7 @@ describe("welcome launcher for desktop apps and an existing Herdr client", () =>
     expect(f.post).not.toHaveBeenCalled();
   });
 
-  it.each([{}, { HERDR_SESSION: "personal" }, { HERDR_SOCKET_PATH: "/personal/herdr.sock" }])("opens a fresh space in the current Herdr endpoint without a window: %j", async extra => {
+  it.each([{}, { HERDR_SESSION: "personal" }, { HERDR_SOCKET_PATH: "/personal/herdr.sock" }, { SSH_TTY: "/dev/pts/1" }])("opens a fresh space in the current Herdr endpoint without a window: %j", async extra => {
     const f = fixture();
     f.deps.env = { HOME: "/fixture", TERM_PROGRAM: "herdr", __CFBundleIdentifier: "com.apple.Terminal", ...extra };
     f.preview.status.launch.socketPath = extra.HERDR_SOCKET_PATH ?? (extra.HERDR_SESSION ? "/fixture/.config/herdr/sessions/personal/herdr.sock" : "/fixture/.config/herdr/herdr.sock");
@@ -610,7 +617,7 @@ describe("welcome launcher for desktop apps and an existing Herdr client", () =>
     expect(result.notes?.at(-1)).toBe("Herdr did not confirm the view's space is focused; ask the person whether they see it.");
   });
 
-  it.each([{ TERM_PROGRAM: "tmux", TMUX: "/tmp/tmux-1000/default,1,0" }, { TERM_PROGRAM: "ghostty" }])("recognises a Herdr pane by its pane markers when TERM_PROGRAM is not herdr, on Linux: %j", async extra => {
+  it.each([{ TERM_PROGRAM: "tmux", TMUX: "/tmp/tmux-1000/default,1,0" }, { TERM_PROGRAM: "ghostty" }, { TERM_PROGRAM: "tmux", SSH_TTY: "/dev/pts/1" }])("recognises a Herdr pane by its pane markers when TERM_PROGRAM is not herdr, on Linux: %j", async extra => {
     const f = fixture();
     f.deps.platform = "linux";
     f.deps.env = { HOME: "/fixture", WAYLAND_DISPLAY: "wayland-1", HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1", HERDR_SOCKET_PATH: f.preview.status.launch.socketPath, ...extra };
@@ -618,6 +625,7 @@ describe("welcome launcher for desktop apps and an existing Herdr client", () =>
     expect(result).toMatchObject({ ok: true }); expect(result.window).toBeUndefined();
     expect(f.post).toHaveBeenCalledWith("/api/terminal/open", expect.objectContaining({ view: "saved:kernel", provider: "herdr" }), expect.anything());
     expect(f.deps.launch).not.toHaveBeenCalled();
+    expect(f.exec.mock.calls.some(([file]) => file === "/usr/bin/osascript" || file === "/bin/launchctl")).toBe(false);
   });
 
   it("does not treat a partial Herdr marker as a Herdr pane", async () => {
@@ -666,10 +674,12 @@ describe("welcome launcher for desktop apps and an existing Herdr client", () =>
     expect(f.deps.launch).not.toHaveBeenCalled();
   });
 
-  it.each([{ CI: "true" }, { SSH_CONNECTION: "remote" }, { SSH_CLIENT: "remote" }, { SSH_TTY: "/dev/ttys1" }])("keeps current-Herdr opens behind the CI/SSH boundary: %j", async extra => {
-    const f = fixture(); f.deps.env = { HOME: "/fixture", TERM_PROGRAM: "herdr", ...extra };
+  it("keeps current-Herdr opens behind the CI boundary even over SSH", async () => {
+    const f = fixture(); f.deps.env = { HOME: "/fixture", TERM_PROGRAM: "herdr", HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1", HERDR_SOCKET_PATH: f.preview.status.launch.socketPath, SSH_TTY: "/dev/pts/1", CI: "true" };
     const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
     expect(result).toMatchObject({ ok: false, windowAttempted: false });
     expect(f.post).not.toHaveBeenCalled();
+    expect(result.error).toContain("CI run");
+    expect(f.deps.launch).not.toHaveBeenCalled();
   });
 });

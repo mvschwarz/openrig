@@ -100,19 +100,18 @@ describe("gateway human lifecycle (S12, amended A1: single-human surface): list 
     }
   });
 
-  it("A1 advisory receipt: several fragments render HONESTLY plus the one-human advisory (display, never management)", () => {
-    seedAna(home); // hand-authored second human — the amendment's multi-fragment case
+  it("several people list as a supported registry, sorted, with no single-person advisory (0.7.3 participants)", () => {
+    seedAna(home);
     const res = listHumans(home);
     expect(res.ok).toBe(true);
     if (!res.ok) return;
-    expect(res.humans.map((h) => h.entityId)).toEqual(["ana", "mike"]); // honest, sorted display
+    expect(res.humans.map((h) => h.entityId)).toEqual(["ana", "mike"]);
     const ana = res.humans[0]!;
     expect(ana.deliveryClass).toBe("A");
     expect(ana.away).toBe(true);
     expect(ana.bindings.count).toBe(2);
     expect(ana.bindings.inboundResolvable).toBe(true);
-    expect(res.advisory).toContain("one configured human");
-    expect(res.advisory).not.toMatch(/\d+\.\d+\.\d+/); // no promise of a release that manages several
+    expect(res).not.toHaveProperty("advisory");
   });
 
   it("list is a READ: it does not touch the projection file (byte receipt)", () => {
@@ -172,6 +171,29 @@ describe("gateway human lifecycle (S12, amended A1: single-human surface): list 
     const bad = setHumanField("mike", "away", "maybe", home);
     expect(bad.ok).toBe(false);
     if (!bad.ok) expect(bad.error).toContain("true|false");
+  });
+
+  it("set slack-subscription: the default is every-ask, urgent-only is authored, unset returns to the default, and anything else is refused", () => {
+    expect(showHuman("mike", home)).toMatchObject({ ok: true, record: { slackSubscription: { value: "every-ask", source: "default" } } });
+    expect(setHumanField("mike", "slack-subscription", "urgent-only", home).ok).toBe(true);
+    expect(showHuman("mike", home)).toMatchObject({ ok: true, record: { slackSubscription: { value: "urgent-only", source: "authored" } } });
+    const loaded = loadHumanRegistry(home);
+    expect(loaded.ok && loaded.entities.find((e) => e.entityId === "mike")!.subscriptions)
+      .toEqual([{ destination: { connector: "slack" }, filter: { preset: "urgent-only" } }]);
+    const bad = setHumanField("mike", "slack-subscription", "some", home);
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.error).toContain("every-ask|urgent-only");
+    expect(setHumanField("mike", "slack-subscription", "unset", home).ok).toBe(true);
+    expect(showHuman("mike", home)).toMatchObject({ ok: true, record: { slackSubscription: { value: "every-ask", source: "default" } } });
+  });
+
+  it("a hand-written preset that isn't a plain string is refused, never projected as a quiet subscription", () => {
+    // Hand-edit the fragment, then any set re-validates and re-projects it.
+    const fragment = join(humansDir(home), "mike.yaml");
+    writeFileSync(fragment, `${readFileSync(fragment, "utf8")}subscriptions:\n  - destination: { connector: slack }\n    filter: { preset: [every-ask] }\n`);
+    const res = setHumanField("mike", "display-name", "Mike M", home);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error).toContain("must be { preset: every-ask|urgent-only }");
   });
 
   it("set with a bad enum fails loud NAMING the allowed set and leaves fragment AND projection byte-unchanged", () => {

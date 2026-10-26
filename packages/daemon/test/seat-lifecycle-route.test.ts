@@ -51,9 +51,40 @@ describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
     });
   }
 
+  it("set-cwd forwards the requested directory, prefers the transport actor and returns preparation warnings", async () => {
+    const result = { ok: true as const, seat: {} as never, from: "/workspace", to: "/workspace/planner",
+      changed: true, effect: "next_launch" as const, warnings: ["Existing local guidance was retained"] };
+    const setCwd = vi.spyOn(SeatLifecycleService.prototype, "setCwd").mockResolvedValue(result);
+    const res = await setup.app.request("/api/seat/set-cwd/planner%40project", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "operator@project" },
+      body: JSON.stringify({ cwd: "/workspace/planner", reason: "isolate planning", operator: "body-actor" }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(result);
+    expect(setCwd).toHaveBeenCalledExactlyOnceWith({ seatRef: "planner@project", cwd: "/workspace/planner",
+      reason: "isolate planning", operator: "operator@project" });
+  });
+
+  it.each(["null", "[]", "{broken", '{"cwd": 42, "reason": "isolate"}'])("set-cwd rejects malformed input %s without an internal error", async body => {
+    const res = await setup.app.request("/api/seat/set-cwd/planner%40project", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body,
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ ok: false });
+  });
+
+  it.each([["cwd_configuration_changed", 409], ["cwd_destination_conflict", 409], ["cwd_check_failed", 500], ["cwd_persistence_failed", 500]] as const)("set-cwd exposes %s with its recovery details", async (code, status) => {
+    const result = { ok: false as const, code, message: "The working directory was not changed",
+      guidance: "Inspect the reported files and seat status", warnings: ["Protected destination file: /work/seat/.claude/agents/reviewer.md"] };
+    vi.spyOn(SeatLifecycleService.prototype, "setCwd").mockResolvedValue(result);
+    const res = await post("set-cwd", "planner@project", { cwd: "/work/seat", reason: "isolate" });
+    expect(res.status).toBe(status);
+    expect(await res.json()).toEqual(result);
+  });
+
   it.each([true, false])("default-path continue delegates the existing occupant operation (ok=%s)", async ok => {
     const result = { ok, code: "fixture", message: "Existing continuation result", warnings: ["Submission unverified"] };
-    const spy = vi.spyOn(SeatLifecycleService.prototype, "continueFreshStartup").mockResolvedValue(result as never);
+    const spy = vi.spyOn(SeatLifecycleService.prototype, "continueStartup").mockResolvedValue(result as never);
     const res = await post("continue", "dev@fixture");
     expect(res.status).toBe(ok ? 200 : 409);
     expect(await res.json()).toEqual(result);

@@ -82,6 +82,38 @@ describe("shared restore preconditions", () => {
   it("preserves the absent-service and default-existence behavior", () => {
     expect(validatePreRestore(data(), {})).toEqual({ blockers: [], warnings: [] });
   });
+
+  // A terminal seat saved with resume_if_possible and no token relaunches fresh and replays its startup files, so a
+  // missing required file blocks. That holds only while the saved and current runtime are both terminal and the
+  // seat's sessions carry no resume token; otherwise main's reading stands (the seat waits, so nothing is replayed).
+  describe("replay validation for a terminal seat", () => {
+    function terminalSeat(token?: string): SnapshotData {
+      const snapshot = data();
+      (snapshot.nodes[0] as { runtime?: string }).runtime = "terminal";
+      snapshot.nodeStartupContext!["node-1"]!.runtime = "terminal";
+      snapshot.sessions = [{
+        id: "session-1", nodeId: "node-1", status: "exited", restorePolicy: "resume_if_possible",
+        ...(token ? { resumeToken: token, resumeType: "claude_id" } : { resumeToken: null, resumeType: null }),
+      }] as SnapshotData["sessions"];
+      snapshot.activeSessionIdByNode = { "node-1": "session-1" };
+      return snapshot;
+    }
+    const opts = { fsOps: { exists: () => false }, servicesRecord: null };
+
+    it("blocks on a missing required file when the seat is a terminal now too", () => {
+      const result = validatePreRestore(terminalSeat(), { ...opts, currentRuntimes: { seat: "terminal" } });
+      expect(result.blockers.map((b) => b.code)).toEqual(["startup_owner_root_missing", "required_startup_file_missing"]);
+    });
+
+    it.each(["claude-code", "codex"])("does not validate replay files when the seat is now %s", (current) => {
+      expect(validatePreRestore(terminalSeat(), { ...opts, currentRuntimes: { seat: current } })).toEqual({ blockers: [], warnings: [] });
+    });
+
+    it("does not validate replay files when the saved sessions carry a resume token", () => {
+      expect(validatePreRestore(terminalSeat("claude-thread"), { ...opts, currentRuntimes: { seat: "terminal" } }))
+        .toEqual({ blockers: [], warnings: [] });
+    });
+  });
 });
 
 describe("restore-check consumes the shared snapshot validation", () => {

@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { createProgram } from "../src/index.js";
 import http from "node:http";
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
 import { Command } from "commander";
 import { exportCommand, type ExportDeps } from "../src/commands/export.js";
 import { importCommand, type ImportDeps } from "../src/commands/import.js";
@@ -81,12 +84,18 @@ let capturedImportPath = "";
 
 // Mock daemon for export/import
 function createMockDaemon() {
+  const exports = new Map<string, { yaml: string; root: string }>();
   const server = http.createServer((req, res) => {
     const url = new URL(req.url!, "http://localhost");
 
     // GET /api/rigs/:rigId/spec -> YAML
     if (req.method === "GET" && url.pathname.match(/^\/api\/rigs\/[^/]+\/spec$/)) {
       const rigId = url.pathname.split("/")[3]!;
+      const exported = exports.get(rigId);
+      if (exported) {
+        res.writeHead(200, { "Content-Type": "text/yaml", "X-Rig-Root": encodeURIComponent(exported.root) });
+        res.end(exported.yaml); return;
+      }
       if (rigId === "missing") {
         res.writeHead(404, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "rig not found" }));
@@ -95,6 +104,11 @@ function createMockDaemon() {
       if (rigId === "broken") {
         res.writeHead(500, { "Content-Type": "text/plain" });
         res.end("internal server error");
+        return;
+      }
+      if (rigId === "rig-with-startup") {
+        res.writeHead(200, { "Content-Type": "text/yaml", "X-Rig-Root": encodeURIComponent("/installed/项目/kernel") });
+        res.end("version: '0.2'\nname: rig-with-startup\nculture_file: missing-culture.md\nstartup:\n  files:\n    - path: missing-start.md\n      required: true\n    - path: optional-start.md\n      required: false\n");
         return;
       }
       res.writeHead(200, { "Content-Type": "text/yaml" });
@@ -188,7 +202,7 @@ function createMockDaemon() {
   });
 
   return {
-    server,
+    server, exports,
     close: () => new Promise<void>((r) => server.close(() => r())),
     listen: () => new Promise<number>((r) => {
       server.listen(0, () => {
@@ -246,6 +260,55 @@ describe("rig export + import", () => {
     program.addCommand(exportCommand(deps));
     await captureLogs(() => program.parseAsync(["node", "rig", "export", "rig-1"]));
     expect(writeFile).toHaveBeenCalledWith("rig.yaml", expect.any(String));
+  });
+
+  it("export: warns when culture_file or startup files do not resolve relative to output directory", async () => {
+    const writeFile = vi.fn();
+    const exists = vi.fn((p: string) => !p.includes("missing-culture.md") && !p.includes("missing-start.md") && !p.includes("optional-start.md"));
+    const deps = exportDeps({ writeFile, exists });
+    const program = new Command();
+    program.addCommand(exportCommand(deps));
+
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "export", "rig-with-startup", "-o", "specs/exported.yaml"]));
+    expect(writeFile).toHaveBeenCalled();
+    const output = logs.join("\n");
+    expect(output).toContain("Referenced file 'missing-culture.md' (came from /installed/项目/kernel) does not exist relative to");
+    expect(output).toContain("Referenced file 'missing-start.md' (came from /installed/项目/kernel) does not exist relative to");
+    expect(output).toContain("fails its startup until the file is copied next to it (or the export is imported with --rig-root /installed/项目/kernel)");
+    expect(output).not.toContain("optional-start.md");
+  });
+
+  it.each(["copy", "existing", "symlink", "missing", "remote", "relative"].filter(mode => mode !== "symlink" || process.platform !== "win32"))("export: shares culture and explains nonportable refs/name (%s)", async mode => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "export-share-"));
+    const source = path.join(root, "source"), out = path.join(root, "out"), outside = path.join(root, "outside");
+    for (const dir of [source, out, outside]) fs.mkdirSync(dir);
+    fs.mkdirSync(path.join(source, "culture"));
+    const bytes = Buffer.from("# Team culture\r\nKeep authored bytes.\r\n");
+    if (mode !== "missing") fs.writeFileSync(path.join(source, "culture", "CULTURE.md"), bytes);
+    if (mode === "existing") { fs.mkdirSync(path.join(out, "culture")); fs.writeFileSync(path.join(out, "culture", "CULTURE.md"), "recipient's file"); }
+    if (mode === "symlink") fs.symlinkSync(outside, path.join(out, "culture"), "dir");
+    srv.exports.set("shared", { root: source, yaml: "version: '0.2'\nname: starter\nculture_file: culture/CULTURE.md\npods:\n  - id: main\n    members:\n      - id: lead\n        agent_ref: path:/author/agents/lead\n        runtime: codex\n        profile: default\n        cwd: .\n    edges: []\nedges: []\n".replace("path:/author/agents/lead", mode === "relative" ? "local:../../agents/x" : "path:/author/agents/lead") });
+    try {
+      const output = path.join(out, "rig.yaml");
+      const client = new DaemonClient(`http://127.0.0.1:${port}`);
+      const deps = exportDeps({ writeFile: (p, text) => fs.writeFileSync(p, text), clientFactory: () => mode === "remote"
+        ? { baseUrl: "http://remote.example", get: client.get.bind(client), getText: client.getText.bind(client) } as DaemonClient : client });
+      const logs = await captureLogs(() => new Command().addCommand(exportCommand(deps))
+        .parseAsync(["node", "rig", "export", "shared", "-o", output]));
+      expect(fs.readFileSync(output, "utf8")).toContain("name: starter");
+      if (mode === "copy") expect(fs.readFileSync(path.join(out, "culture", "CULTURE.md"))).toEqual(bytes);
+      if (mode === "existing") {
+        expect(fs.readFileSync(path.join(out, "culture", "CULTURE.md"), "utf8")).toBe("recipient's file");
+        expect(logs.join("\n")).toContain("kept existing culture");
+      }
+      if (mode === "symlink") expect(fs.existsSync(path.join(outside, "CULTURE.md"))).toBe(false);
+      if (mode === "remote") expect(fs.existsSync(path.join(out, "culture", "CULTURE.md"))).toBe(false);
+      if (mode === "missing" || mode === "symlink" || mode === "remote") expect(logs.join("\n")).toContain("could not copy culture");
+      expect(logs.join("\n")).toContain("not portable");
+      expect(logs.join("\n")).toContain("main.lead");
+      expect(logs.join("\n")).toContain("starter");
+      expect(logs.join("\n")).toContain("rename");
+    } finally { srv.exports.delete("shared"); fs.rmSync(root, { recursive: true, force: true }); }
   });
 
   // Test 3: export rig not found (404)
@@ -413,9 +476,11 @@ describe("rig export + import", () => {
     expect(logs2.join("\n").length).toBeGreaterThan(0);
   });
 
-  // Test 12: export unhealthy daemon -> error, no HTTP
-  it("export: unhealthy daemon -> error, no HTTP", async () => {
-    const clientFactory = vi.fn();
+  // Test 12: export with a busy daemon (process alive, health check failing) -> the real request runs.
+  // Changed: this used to refuse with no HTTP. A busy daemon is not refused; its answer decides.
+  it("export: busy daemon -> the real request is made", async () => {
+    const getText = vi.fn(async () => ({ status: 404, data: "" }));
+    const clientFactory = vi.fn(() => ({ getText }));
     const deps: ExportDeps = {
       lifecycleDeps: unhealthyLifecycleDeps(),
       clientFactory: clientFactory as unknown as ExportDeps["clientFactory"],
@@ -424,8 +489,8 @@ describe("rig export + import", () => {
     const program = new Command();
     program.addCommand(exportCommand(deps));
     const logs = await captureLogs(() => program.parseAsync(["node", "rig", "export", "rig-1"]));
-    expect(logs.join("\n")).toMatch(/did not respond|busy or stopped|unhealthy/i) // B8 supersession: epistemic guard language;
-    expect(clientFactory).not.toHaveBeenCalled();
+    expect(getText).toHaveBeenCalledTimes(1);
+    expect(logs.join("\n")).toContain("Rig 'rig-1' not found");
   });
 
   // Test 13: import daemon stopped -> no HTTP

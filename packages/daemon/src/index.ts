@@ -1,6 +1,7 @@
 import { serve, type ServerType } from "@hono/node-server";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { endProbeGroupsOnStartupSignal, stopRuntimeProbes } from "./adapters/bounded-probe-exec.js";
 import { closeHttpServer, createDaemonShutdown, DAEMON_SHUTDOWN_RECEIPT, trackHttpServerResponses } from "./daemon-shutdown.js";
 import { readOpenRigEnv, OPENRIG_HOME } from "./openrig-compat.js";
 import { makeOperatorDeliveryEngine } from "./domain/gateway/operator-delivery-engine.js";
@@ -137,6 +138,8 @@ export function startQueueRetentionScheduler(deps: {
       watchdogRetentionDays: num("retention.watchdog_days", RETENTION_DEFAULTS.watchdogRetentionDays),
       watchdogKeepPerJob: num("retention.watchdog_keep_per_job", RETENTION_DEFAULTS.watchdogKeepPerJob),
       usageSamplesRetentionDays: num("retention.usage_samples_days", RETENTION_DEFAULTS.usageSamplesRetentionDays),
+      streamRetentionDays: num("retention.stream_days", RETENTION_DEFAULTS.streamRetentionDays),
+      streamMaxItems: num("retention.stream_max_items", RETENTION_DEFAULTS.streamMaxItems),
       batchSize: num("retention.batch_size", RETENTION_DEFAULTS.batchSize),
     }).catch((err: unknown) => {
       console.error(`[queue-retention] sweep error: ${err instanceof Error ? err.message : String(err)}`);
@@ -304,7 +307,9 @@ export async function startServer(port?: number) {
     bindHosts = bindPlan.hosts;
   }
 
-  const { app, contextMonitor, deps, eventLoopMonitor, injectWebSocket } = await createDaemon({
+  // The fresh-DB Codex probe runs inside createDaemon, before the shutdown handlers below exist.
+  const disarmStartupSignals = endProbeGroupsOnStartupSignal();
+  const { app, contextMonitor, deps, eventLoopMonitor, injectWebSocket, wakeRecovery } = await createDaemon({
     dbPath,
     bearerToken,
     terminalBearerToken,
@@ -330,10 +335,13 @@ export async function startServer(port?: number) {
       if (!monitorsStarted) {
         monitorsStarted = true;
         contextMonitor.start();
+        // Recovered queue notifications are seat deliveries: they run once listening, never before readiness.
+        wakeRecovery.start();
         // PL-004 Phase C: start watchdog scheduler. Joins the supervision
         // tree post-bind so the HTTP surface is ready before the first
         // tick (matches contextMonitor pattern).
         deps.watchdogScheduler?.start();
+        deps.sessionTransport?.guardedDelivery?.recover();
         // S10 — start the gateway subsystem's NETWORK services (replay, outbound poll,
         // Socket Mode inbound) post-bind, contextMonitor pattern: the composed wire is
         // already active; only its dial-out half waits for the supervision tree.
@@ -382,14 +390,19 @@ export async function startServer(port?: number) {
   const shutdown = createDaemonShutdown({
     receiptPath: path.join(OPENRIG_HOME, DAEMON_SHUTDOWN_RECEIPT),
     phases: [
+      // First, while transport still works: let the delivery in flight finish; the rest wait for the next start.
+      ["wake-recovery", () => wakeRecovery.stop()],
       ["timers", () => {
+        deps.resumeMetadataRefresher?.stop();
         if (heartbeatTimer) clearInterval(heartbeatTimer);
         if (retentionTimer) clearInterval(retentionTimer);
         if (stuckSweepTimer) clearInterval(stuckSweepTimer);
       }],
+      ["runtime-probes", () => stopRuntimeProbes()],
       ["proof-source-watch", () => deps.proofSourceWatch?.close()],
       ["health-diagnosis", () => deps.healthDiagnosis?.stop()],
       ["watchdog", () => deps.watchdogScheduler?.stop()],
+      ["draft-delivery", () => deps.sessionTransport?.guardedDelivery?.stop()],
       ["seat-activity", () => deps.seatActivityService?.stop()],
       ["seat-structural-activity", () => deps.seatStructuralActivityService?.stop()],
       ["seat-identity", () => deps.seatIdentityReconciler?.stop()],
@@ -398,6 +411,8 @@ export async function startServer(port?: number) {
       ["wake-ladder", () => wakeLadderScheduler?.stop()],
       ["event-loop-monitor", () => eventLoopMonitor.stop()],
       ["connections", () => Promise.all(servers.map((srv) => closeHttpServer(srv)))],
+      // After the last request: the tmux control client ends and its session goes with it.
+      ["tmux-control", () => deps.tmuxAdapter.closeControlClient()],
       ["recorder", async () => {
         deps.requestPhaseObserver?.close();
         if (await drainSlowOpRecorderOnShutdown(deps.slowOpRecorder) !== 0) {
@@ -409,6 +424,7 @@ export async function startServer(port?: number) {
     markClean: () => deps.daemonLifecycleStore.recordStop(deps.daemonBootEpoch, new Date().toISOString()),
   });
   // Repeated signals join the first shutdown instead of bypassing its evidence.
+  disarmStartupSignals();
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 

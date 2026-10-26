@@ -103,6 +103,37 @@ describe("ClaudeResumeAdapter", () => {
         "OPENRIG_RESUME_LAUNCH='my-session' CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 claude --permission-mode acceptEdits --model 'gpt-5.4-cheap' --effort 'high' --resume 'my-session'"
       );
     });
+    it("OPR.0.7.0.9: a seat's launch additions reach the restore resume command after its Advisor, before --resume", async () => {
+      const sendText = vi.fn(async () => ({ ok: true as const }));
+      const tmux = mockTmux({ sendText });
+      const adapter = new ClaudeResumeAdapter(tmux);
+
+      await adapter.resume("r99-demo1-lead", "claude_name", "my-session", "/repo", undefined, undefined, undefined, undefined, undefined,
+        undefined, undefined, undefined, "opus", { agent: "openrig:reviewer", appendSystemPromptFile: "/seat root/additions/system-prompt.md", pluginDirs: [] });
+
+      expect(sendText.mock.calls[0]![1]).toBe(
+        "OPENRIG_RESUME_LAUNCH='my-session' CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 claude --permission-mode acceptEdits --advisor 'opus' --agent 'openrig:reviewer' --append-system-prompt-file '/seat root/additions/system-prompt.md' --resume 'my-session'"
+      );
+    });
+
+    it("keeps member rules when a classic resume applies the seat's own subscription token", async () => {
+      const step = "fixture-seat-token-step";
+      const sendShellCommand = vi.fn(async (_target: string, _command: string) => ({ ok: true as const }));
+      const command = vi.fn(async (_target: string, text: string, options: { claudeTokenStep?: string }) => `${options.claudeTokenStep}; ${text}`);
+      const adapter = new ClaudeResumeAdapter({ ...mockTmux(), sendShellCommand }, {
+        claudeManagedLaunch: { seatTokenLaunch: () => ({ step, ref: { label: "work", tokenFile: "/fixture/work.token" }, warnings: ["fixture token warning"] }) } as never,
+        seatLaunchEnvironment: { command } as never,
+      });
+      const result = await adapter.resume("seat@rig", "claude_id", "conversation", "/repo", undefined, undefined, undefined, "node",
+        undefined, undefined, undefined, undefined, undefined, undefined, { deny: ["Read(../peer/**)"] });
+      expect(result).toMatchObject({ ok: true, warnings: ["fixture token warning"] });
+      expect(command.mock.calls[0]![2].claudeTokenStep).toBe(step);
+      expect(sendShellCommand).toHaveBeenCalledTimes(1);
+      const launch = sendShellCommand.mock.calls[0]![1];
+      expect(launch).toContain(step);
+      expect(launch).toContain('"deny":["Read(../peer/**)"]');
+      expect(launch).toContain("--resume 'conversation'");
+    });
 
     it("returns { ok: true } on success", async () => {
       const adapter = new ClaudeResumeAdapter(mockTmux());
@@ -221,9 +252,12 @@ describe("ClaudeResumeAdapter", () => {
     });
 
     it("retains positive returned-to-shell refusal", async () => {
+      // Positive: the pane's own shell owns the foreground, alone in its group, in both samples.
       const adapter = new ClaudeResumeAdapter(mockTmux({
-        getPaneCommand: async () => "zsh", capturePaneContent: async () => "$ ",
-      }), { pollMs: 0, maxWaitMs: 0 });
+        getPaneCommand: async () => "zsh", capturePaneContent: async () => "$ ", getPanePid: async () => 4321,
+      }), { pollMs: 0, maxWaitMs: 0, listProcesses: async () => [
+        { pid: 4321, ppid: 1, pgid: 4321, tpgid: 4321, command: "-zsh", executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000" },
+      ] });
       expect(await adapter.resume("worker", "claude_id", "retained-history", "/repo"))
         .toMatchObject({ ok: false, code: "retry_fresh" });
     });
@@ -419,7 +453,8 @@ describe("ClaudeResumeAdapter", () => {
 
     it.each([
       ["2.1.283", "attention_required"],
-      ["sh", "retry_fresh"],
+      // The shell label isn't a proven idle shell: another Claude holds the foreground, so the launch is kept.
+      ["sh", "attention_required"],
     ] as const)("does not accept the prompt behind %s when the native process carries another resume token", async (paneCommand, expectedCode) => {
       const tmux = mockTmux({
         getPanePid: vi.fn(async () => 1234),

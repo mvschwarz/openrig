@@ -91,7 +91,6 @@ for (const [variable, code, step, command] of [
   ["ROOT_EXIT", 45, 2, "npm root -g"],
   ["ABI_EXIT", 44, 2, "check-abi.mjs"],
   ["PREVIEW_EXIT", 39, 3, "setup --dry-run"],
-  ["SETUP_EXIT", 40, 4, "setup"],
 ]) test(`${command} failure preserves status and native output`, t => {
   const f = fixture(t, { [variable]: String(code) });
   const r = f.run();
@@ -170,6 +169,45 @@ test("the actual HTTP download piped to sh preserves setup failure", async t => 
   assert.equal(status, 43, stderr);
   assert.match(stdout, /setup native output/);
   assert.match(stderr, /setup native error/);
-  assert.match(stderr, /FAILED \[4\/4\].*exit 43/);
+  assert.match(stderr, /INSTALLED, SETUP NOT COMPLETE \(exit 43\)/);
+  assert.ok(!stderr.includes("FAILED [4/4]"), stderr);
   assert.ok(!f.calls().includes("STALE"));
+});
+
+// Step 4 is the one failure after which OpenRig itself is installed. The summary says so and that
+// setup is not complete, keeps setup's own status, and names nothing setup's result doesn't establish:
+// every incomplete setup (a sign-in still needed, a real failure beside it, an uncertain provider
+// probe, a crash) reaches the wrapper only as a non-zero status, so it is never called a sign-in here.
+for (const code of [1, 40]) test(`a rig setup exit ${code} reports the CLI installed and setup not complete, with status ${code}`, t => {
+  const f = fixture(t, { SETUP_EXIT: String(code) });
+  const r = f.run();
+  assert.equal(r.status, code, r.stderr);
+  assert.ok(f.calls().includes("installed:setup"));
+  assert.match(r.stdout, /setup native output/);
+  assert.match(r.stderr, /setup native error/);
+  assert.ok(!r.stderr.includes("FAILED"), r.stderr);
+  assert.ok(r.stderr.includes(`INSTALLED, SETUP NOT COMPLETE (exit ${code})`), r.stderr);
+  assert.ok(r.stderr.includes(`The OpenRig CLI is installed: ${path.join(f.prefix, "bin", "rig")}`), r.stderr);
+  assert.match(r.stderr, /Node\/SQLite compatibility check: passed\./);
+  assert.match(r.stderr, /"Some steps need attention", with a Fix where setup gives one, or shows the error that stopped it/);
+  assert.match(r.stderr, /run rig setup again; the CLI does not need reinstalling/);
+  assert.ok(!/sign[ -]?in|login/i.test(r.stderr.slice(r.stderr.indexOf("INSTALLED, SETUP NOT COMPLETE"))), "the summary claims no sign-in");
+  assert.ok(!r.stdout.includes("Follow the next steps"));
+});
+
+test("an incomplete setup after a skipped compatibility check says the check was skipped, not passed", t => {
+  const f = fixture(t, { SETUP_EXIT: "1" });
+  fs.unlinkSync(f.checker);
+  const r = f.run();
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /Node\/SQLite compatibility check: SKIPPED \(not checked; see above\)\./);
+  assert.ok(!r.stderr.includes("compatibility check: passed"), r.stderr);
+});
+
+test("a setup that finishes ready keeps today's closing line and no summary", t => {
+  const f = fixture(t);
+  const r = f.run();
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /Follow the next steps printed by rig setup/);
+  assert.ok(!r.stderr.includes("SETUP NOT COMPLETE"), r.stderr);
 });

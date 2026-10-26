@@ -16,7 +16,11 @@ import { makeQueuePorts } from "../gateway/slack/queue-access.js";
 import type { OwnerNotificationLevel } from "../queue-transition-log.js";
 import { OUTBOUND_OP } from "../gateway/slack/outbound-driver.js";
 import { DispatchBuffer } from "../gateway/dispatch-buffer.js";
+import { resolveDefaultPerson } from "../gateway/participants.js";
 import type { Policy, PolicyJob, PolicyEvaluation } from "./types.js";
+import { quietHoldFor } from "../gateway/human-quiet-windows.js";
+import { WatchdogJobsRepository } from "../watchdog-jobs-repository.js";
+import { holdForQuiet } from "./quiet-release.js";
 
 export const DELIVERY_DIGEST_FLUSH_POLICY = "delivery-digest-flush";
 
@@ -34,12 +38,14 @@ export interface RunDeliveryDigestFlushInput {
   dispatch: (op: string, entityBindingRef: string, payload: unknown, opts?: { decisionId?: string }) => { ok: boolean; error?: string };
   window: "4h" | "daily";
   minimumLevel?: OwnerNotificationLevel;
+  now?: Date;
 }
 
 export async function runDeliveryDigestFlush(input: RunDeliveryDigestFlushInput): Promise<{ dispatched: number; members: number }> {
   const reg = input.registry.loadHumanRegistry(input.home);
   if (!reg.ok || !reg.entities || reg.entities.length === 0) return { dispatched: 0, members: 0 };
-  const human = reg.entities[0]!;
+  // Asks and updates below go to their own recipients; the digest of notices goes to the default person.
+  const human = resolveDefaultPerson(reg.entities, input.home).person;
 
   const ports = makeQueuePorts(input.queueRepo, {
     loadHumanRegistry: () => reg,
@@ -66,13 +72,29 @@ export async function runDeliveryDigestFlush(input: RunDeliveryDigestFlushInput)
     }
   } catch { /* unreadable buffer: fail open to selection; the dispatcher's stable-id idempotence still guards the same-set case */ }
 
-  const selected = alerts.filter((alert) => {
+  const candidates = alerts.filter((alert) => {
     const key = alert.notificationKey ?? alert.qitemId;
     if (inFlight.has(key)) return false;
-    return input.queueRepo.listTransitions(alert.qitemId).some((t) =>
-      t.transitionNote?.startsWith("delivery-decision: digest")
-        && t.transitionNote.includes(`notification_key=${key}`)
-        && t.transitionNote.includes(`window=${input.window}`));
+    const notes = input.queueRepo.listTransitions(alert.qitemId).map((t) => t.transitionNote ?? "");
+    // An ask held for quiet hours belongs to its window's release job, which posts it individually.
+    if (notes.some((n) => n.startsWith("delivery-decision: quiet-hold") && n.split(/\s+/).includes(`notification_key=${key}`))) return false;
+    return notes.some((n) =>
+      n.startsWith("delivery-decision: digest")
+        && n.includes(`notification_key=${key}`)
+        && n.includes(`window=${input.window}`));
+  });
+  // Quiet hours re-checked at flush time, per ask, for its actual recipient: an ask put in the digest before its
+  // recipient's quiet began is held under that recipient's window, not posted. Everything else flushes as before.
+  const now = input.now ?? new Date();
+  let jobsRepo: WatchdogJobsRepository | undefined;
+  const selected = candidates.filter((item) => {
+    const recipient = (item.destinationSession ?? "").split("@")[0] ?? "";
+    const quiet = recipient ? quietHoldFor(input.queueRepo.db, recipient, now) : null;
+    if (!quiet) return true;
+    jobsRepo ??= new WatchdogJobsRepository(input.queueRepo.db);
+    holdForQuiet({ queueRepo: input.queueRepo, jobsRepo, qitemId: item.qitemId, entityId: recipient,
+      hold: { ...quiet, notificationKey: item.notificationKey ?? item.qitemId } });
+    return false;
   });
   if (selected.length === 0) return { dispatched: 0, members: 0 };
   // The selected timing remains the existing digest policy. At that time a
@@ -90,6 +112,8 @@ export async function runDeliveryDigestFlush(input: RunDeliveryDigestFlushInput)
     if (result.ok) completeDispatched++;
   }
   if (!members.length) return { dispatched: completeDispatched, members: selected.length };
+  // Several people and none chosen: the notices wait (they stay selectable) rather than going to whoever sorts first.
+  if (!human) return { dispatched: completeDispatched, members: selected.length };
 
   const memberReceipts = members.map((m) => ({
     qitemId: m.qitemId,

@@ -93,6 +93,79 @@ const STATUS = {
   restore_outcome: "n-a",
 };
 
+describe("seat typing guard commands", () => {
+  it("prints the daemon's managed restore delivery failure", async () => {
+    const detail = "OpenRig owes its turn boundary. Last delivery: target_activity_unknown; no_activity_signal.";
+    const deps = makeDeps({ status: 200, data: { ...STATUS, compaction: { stage: "compacting", detail } } }, []);
+    const result = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
+    expect(result.logs).toContain(`Managed compaction (compacting): ${detail}`);
+  });
+
+  it("keeps the legacy on prefix when status reports hold", async () => {
+    const paths: string[] = [];
+    const deps = makeDeps({ status: 200, data: { ...STATUS, typingGuard: { desired: true, effective: true, effectiveMode: "hold", pending: false, heldCount: 0 } } }, paths);
+    const status = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
+    expect(status.logs.join("\n")).toContain("Typing guard: on (hold)");
+  });
+
+  it("sets a level through the same control, and status names it with what types and what's held", async () => {
+    const paths: string[] = [], bodies: unknown[] = [];
+    const set = makeDeps({ status: 200, data: { effectiveMode: "hold", effectiveLevel: "urgent-only", pending: false } }, paths, bodies);
+    await captureLogs(() => makeCommand(set).parseAsync(["node", "rig", "seat", "set-typing-guard", "worker@test",
+      "--mode", "urgent-only", "--reason", "reviewing by hand", "--json"]).then(() => undefined));
+    expect(bodies).toEqual([{ mode: "urgent-only", reason: "reviewing by hand" }]);
+    const deps = makeDeps({ status: 200, data: { ...STATUS, typingGuard: { desired: true, effective: true, effectiveMode: "hold", effectiveLevel: "urgent-only", pending: false, heldCount: 2 } } }, []);
+    const status = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
+    expect(status.logs.join("\n")).toContain("Typing guard: urgent-only; 2 retained\nOnly messages marked urgent type. Other automatic input is held, readable with rig seat held-messages dev-impl@seat-rig.");
+  });
+
+  it("sends draft-aware mode through the existing control", async () => {
+    const paths: string[] = [], bodies: unknown[] = [];
+    const deps = makeDeps({ status: 200, data: { effectiveMode: "draft-aware", pending: false } }, paths, bodies);
+    const result = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "set-typing-guard", "worker@test",
+      "--mode", "draft-aware", "--reason", "keep my draft", "--json"]).then(() => undefined));
+    expect(result.exitCode).toBeUndefined();
+    expect(paths).toEqual(["/api/seat/set-typing-guard/worker%40test"]);
+    expect(bodies).toEqual([{ mode: "draft-aware", reason: "keep my draft" }]);
+    expect(JSON.parse(result.logs.join(""))).toMatchObject({ effectiveMode: "draft-aware" });
+  });
+
+  it.each([["--mode", "typo"]])("rejects invalid %s %s before requesting a change", async (flag, value) => {
+    const paths: string[] = [];
+    const deps = makeDeps({ status: 200, data: {} }, paths);
+    const result = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "set-typing-guard", "worker@test",
+      "--mode", "draft-aware", "--reason", "draft", flag, value]).then(() => undefined));
+    expect(result.exitCode).toBe(1); expect(paths).toEqual([]);
+  });
+
+  it.each(["true", "false"])("keeps --enabled %s compatible with the existing endpoint", async enabled => {
+    const paths: string[] = [], bodies: unknown[] = [];
+    const deps = makeDeps({ status: 200, data: {} }, paths, bodies);
+    await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "set-typing-guard", "worker@test",
+      "--enabled", enabled, "--reason", "existing workflow"]).then(() => undefined));
+    expect(paths).toEqual(["/api/seat/set-typing-guard/worker%40test"]);
+    expect(bodies).toEqual([{ enabled: enabled === "true", reason: "existing workflow" }]);
+  });
+
+  it.each([{ selectors: [] }, { selectors: ["--mode", "hold", "--enabled", "true"] }])("requires exactly one selector: $selectors", async ({ selectors }) => {
+    const paths: string[] = [];
+    const deps = makeDeps({ status: 200, data: {} }, paths);
+    const result = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "set-typing-guard", "worker@test",
+      "--reason", "draft", ...selectors]).then(() => undefined));
+    expect(result.exitCode).toBe(1); expect(paths).toEqual([]);
+  });
+
+  it("prints requested/effective activation and immediate send behavior in seat status", async () => {
+    const paths: string[] = [];
+    const typingGuard = { desired: true, effective: false, desiredMode: "hold", effectiveMode: "draft-aware", pending: true, heldCount: 1 };
+    const deps = makeDeps({ status: 200, data: { ...STATUS, typingGuard } }, paths);
+    const status = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
+    expect(status.logs.join("\n")).toContain("Typing guard: draft-aware (activation pending; requested hold)");
+    expect(status.logs.join("\n")).toContain("Draft-aware sends return immediately");
+    expect(paths.at(-1)).toBe("/api/seat/status/worker%40test");
+  });
+});
+
 const HANDOVER_PLAN = {
   ok: true,
   dryRun: true,
@@ -248,6 +321,46 @@ describe("rig seat status", () => {
     expect(output).toContain("Continuity outcome: unverified");
     expect(output).toContain("Handover result: none");
     expect(output).toContain("Previous occupant: none");
+  });
+
+  it("prints the planned permission account as planned, with its unknowns and the controls, in place of the old mode line", async () => {
+    const account = {
+      summary: "Next launch: --permission-mode acceptEdits, from OpenRig's team default (no policy or seat choice is recorded); OpenRig adds 2 allowances and asks before 1 lifecycle commands.",
+      overrides: [], unknown: ["Whether the harness applies this is unverified until a launch."],
+      openRigAdds: { claudeAllow: ["Read(./**)", "Bash(rig:*)"], claudeAsk: ["Bash(rig up:*)"], notes: ["A hook asks before the listed lifecycle commands."] },
+      controls: ['rig seat set-permissions dev-impl@seat-rig --mode <mode> --reason "<why>"'],
+    };
+    const deps = makeDeps({ status: 200, data: { ...STATUS, permissions: { selectionState: "inherit", desired: null, lastLaunchArguments: { value: "--permission-mode acceptEdits" }, nativeEffect: "unverified", account } } }, []);
+
+    const { logs } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
+    });
+
+    const output = logs.join("\n");
+    expect(output).toContain("Permissions, planned for the next fresh managed launch (not observed):");
+    expect(output).toContain(`  ${account.summary}`);
+    expect(output).toContain("  The exact allowance and ask lists are in --json, under permissions.account.openRigAdds.");
+    expect(output).toContain("  Last launch arguments (observed): --permission-mode acceptEdits");
+    expect(output).toContain("  Unknown: Whether the harness applies this is unverified until a launch.");
+    expect(output).toContain('    rig seat set-permissions dev-impl@seat-rig --mode <mode> --reason "<why>"');
+    expect(output).not.toContain("Permission mode for future launches");
+  });
+
+  it("prints each advisory the account carries, after the summary", async () => {
+    const advisory = 'Claude Code answers plan-mode turns with Sonnet when the model is the alias "haiku". To keep Haiku, set a full Haiku model id: '
+      + 'rig seat set-model dev-impl@seat-rig --model <full Haiku id> --reason "<why>".';
+    const account = { summary: "Next launch: --permission-mode plan, from this seat's own choice (person@host: careful review).",
+      overrides: [], unknown: [], openRigAdds: { claudeAllow: [], claudeAsk: [], notes: [] }, controls: [], advisories: [advisory] };
+    const deps = makeDeps({ status: 200, data: { ...STATUS, permissions: { selectionState: "explicit", desired: null, lastLaunchArguments: null, nativeEffect: "unverified", account } } }, []);
+
+    const { logs } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
+    });
+
+    const lines = logs.join("\n").split("\n");
+    const summaryAt = lines.indexOf(`  ${account.summary}`);
+    expect(summaryAt).toBeGreaterThan(-1);
+    expect(lines[summaryAt + 1]).toBe(`  ${advisory}`);
   });
 
   it("explains a confirmed missing tmux session", async () => {
@@ -559,6 +672,20 @@ describe("rig seat status", () => {
         provenanceRecordWritten: false,
       },
     });
+  });
+
+  it.each([false, true])("shows an unverified rebuild permission fallback (json=%s)", async json => {
+    const permissions = { state: "unverified", detail: "No complete native policy was observed; existing launch behaviour was used. Permissions were not verified or carried." };
+    const response = { ...HANDOVER_RESULT, source: { mode: "rebuild", raw: "rebuild" },
+      sourceOutcome: { mode: "rebuild", primedArtifacts: [], gaps: [], permissions } };
+    const deps = makeDeps({ status: 200, data: response }, []);
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "dev-impl@seat-rig",
+        "--source", "rebuild", "--reason", "rebuild", ...(json ? ["--json"] : [])]);
+    });
+    expect(exitCode).toBeUndefined();
+    if (json) expect(JSON.parse(logs.join("\n")).sourceOutcome.permissions).toEqual(permissions);
+    else expect(logs.join("\n")).toContain(`Codex rebuild permissions: unverified. ${permissions.detail}`);
   });
 
   it("handover non-dry-run human output avoids continuity claims (discovered, no context delivery)", async () => {

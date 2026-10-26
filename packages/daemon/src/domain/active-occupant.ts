@@ -69,9 +69,12 @@ export function resolveActiveOccupantRow<T extends OccupantCandidateRow>(
   return { kind: "resolved", session: hit };
 }
 
-/** The snapshot-shaped entry point (the original public signature; a thin
- *  wrapper so execution call sites are unchanged). */
-export function resolveActiveSnapshotSession(data: SnapshotData, nodeId: string): ActiveSnapshotSessionResolution {
+/** The captured-occupancy reader, also used by the read-only would-capture
+ *  forecast. Full snapshots and narrower preview rows use the same ladder. */
+export function resolveActiveSnapshotSession<T extends OccupantCandidateRow>(
+  data: Pick<SnapshotData, "activeOccupantsByNode" | "activeSessionIdByNode"> & { sessions: T[] },
+  nodeId: string,
+): ActiveOccupantResolution<T> {
   const explicit = data.activeOccupantsByNode;
   if (explicit !== undefined) {
     const state = explicit[nodeId];
@@ -107,10 +110,15 @@ export function absentSeatResumeHistory<T extends { id: string; nodeId: string; 
   return rows.find((session) => !!session.resumeToken?.trim() && !!session.resumeType && session.resumeType !== "none") ?? null;
 }
 
+/** The one-seat command that starts a seat fresh, quoted for a shell. Restore reasons name it rather than a whole-rig
+ *  `rig up --existing --fresh`, which is refused while sibling seats run, the state a partial restore leaves. */
+export function freshSeatLaunchCommand(logicalId: string, rigName: string): string {
+  return `rig seat launch '${`${logicalId}@${rigName}`.replace(/'/g, `'"'"'`)}' --fresh --reason "<why>"`;
+}
+
 /** The stop-for-decision explanation for such a seat, worded once for apply and preview. */
 export function absentSeatResumeHistoryError(logicalId: string, resumeType: string | null, rigName: string): string {
-  const seat = `'${`${logicalId}@${rigName}`.replace(/'/g, `'"'"'`)}'`;
-  return `Original session not resumed: the seat had no running occupant when this snapshot was taken, but an earlier occupant left a '${resumeType}' resume token. No session was started. The recorded token has not been verified and may be stale or belong to another runtime. To deliberately start only this seat fresh, run: rig seat launch ${seat} --fresh --reason "<why>".`;
+  return `Original session not resumed: the seat had no running occupant when this snapshot was taken, but an earlier occupant left a '${resumeType}' resume token. No session was started. The recorded token has not been verified and may be stale or belong to another runtime. To deliberately start only this seat fresh, run: ${freshSeatLaunchCommand(logicalId, rigName)}.`;
 }
 
 /** One wording for the loud failure everywhere — divergent phrasings would be

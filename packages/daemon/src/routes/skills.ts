@@ -29,6 +29,14 @@ import {
 } from "../domain/files/path-safety.js";
 import { sha256Hex } from "../domain/files/file-write-service.js";
 import { FILE_READ_TRUNCATION_BYTES } from "./files.js";
+import type { Context } from "hono";
+import type Database from "better-sqlite3";
+import type { SessionRegistry } from "../domain/session-registry.js";
+import type { SessionTransport } from "../domain/session-transport.js";
+import type { SettingsStore } from "../domain/user-settings/settings-store.js";
+import { applySeatSkills, bootstrapLineChoice, inspectSeatSkills, resolveSeat } from "../domain/seat-skill-apply.js";
+import { transportSenderSession } from "./require-sender-identity.js";
+import { getDefaultOpenRigPath } from "../openrig-compat.js";
 
 type ContextGetter = (key: string) => unknown;
 
@@ -148,6 +156,47 @@ export function skillsRoutes(): Hono {
     }
   });
 
+  // OPR.0.7.0.13 (B): one seat's own skills. GET reads what it has on disk and what its current occupant was last sent;
+  // POST /seat/apply reconciles its stored selection and, for a Codex seat whose occupant hasn't been sent this list,
+  // sends it once through the transport and reports exactly what the transport saw.
+  const seatContext = (c: Context, session: string | undefined) => {
+    if (!session) return { error: "a seat session is required (the CLI sends this seat's own with --seat self)" } as const;
+    const db = c.get("db" as never) as Database.Database | undefined;
+    if (!db) return { error: "the daemon database is unavailable" } as const;
+    const resolved = resolveSeat(db, session);
+    if (!resolved.ok) return { error: resolved.error, notFound: true } as const;
+    const registry = c.get("sessionRegistry" as never) as SessionRegistry | undefined;
+    const occupant = registry?.currentOccupantTenure(resolved.seat.nodeId)?.generationUuid ?? null;
+    return { seat: resolved.seat, occupant } as const;
+  };
+
+  router.get("/seat", (c) => {
+    const ctx = seatContext(c, c.req.query("session"));
+    if ("error" in ctx) return c.json({ error: ctx.error }, "notFound" in ctx ? 404 : 400);
+    const store = c.get("settingsStore" as never) as SettingsStore | undefined;
+    const line = store ? bootstrapLineChoice(store) : null;
+    return c.json(inspectSeatSkills(ctx.seat, ctx.occupant, c.get("db" as never) as Database.Database, line));
+  });
+
+  router.post("/seat/apply", async (c) => {
+    let body: { session?: string; waitForIdleMs?: number; resend?: boolean } = {};
+    try { body = await c.req.json(); } catch { return c.json({ error: "invalid JSON body" }, 400); }
+    const ctx = seatContext(c, body.session);
+    if ("error" in ctx) return c.json({ error: ctx.error }, "notFound" in ctx ? 404 : 400);
+    const store = c.get("settingsStore" as never) as SettingsStore | undefined;
+    const catalogRoot = String(store?.resolveOne("skills.root").value ?? getDefaultOpenRigPath("skills"));
+    const transport = c.get("sessionTransport" as never) as SessionTransport | undefined;
+    const actor = transportSenderSession(c) ?? null;
+    const db = c.get("db" as never) as Database.Database;
+    const result = await applySeatSkills({
+      db, seat: ctx.seat, occupant: ctx.occupant, catalogRoot, resend: body.resend === true, ...(actor ? { actorSession: actor } : {}),
+      bootstrapLine: store ? bootstrapLineChoice(store) : null,
+      ...(typeof body.waitForIdleMs === "number" && body.waitForIdleMs > 0 ? { waitForIdleMs: body.waitForIdleMs } : {}),
+      ...(transport ? { sender: { send: (session, text, opts) => transport.send(session, text, { ...opts, reason: "seat skill list", actorSession: actor ?? undefined }) } } : {}),
+    });
+    return c.json(result, result.disk.ok ? 200 : 409);
+  });
+
   router.get("/audit", async (c) => {
     const service = getService(c);
     if (!service) return c.json({ ok: false, error: "skill_library_unavailable" }, 503);
@@ -162,8 +211,10 @@ export function skillsRoutes(): Hono {
     const pluginsDir = c.get("pluginsDir" as never) as string | undefined ?? getDefaultOpenRigPath("plugins");
     const mirrorRepoRoot = c.get("mirrorRepoRoot" as never) as string | undefined;
 
-    const claudeResult = discoverSkillsWithProvenance({ runtime: "claude-code", homedir, cwd });
-    const codexResult = discoverSkillsWithProvenance({ runtime: "codex", homedir, cwd });
+    // OPR.0.7.0.13: each Claude seat's own skills, audited per seat (seat output, never a source).
+    const { listSeatSkillRoots } = await import("../domain/seat-skill-storage.js");
+    const claudeResult = await discoverSkillsWithProvenance({ runtime: "claude-code", homedir, cwd, seatSkillRoots: listSeatSkillRoots() });
+    const codexResult = await discoverSkillsWithProvenance({ runtime: "codex", homedir, cwd });
 
     const seenPaths = new Set<string>();
     const allSkills: typeof claudeResult.skills = [];

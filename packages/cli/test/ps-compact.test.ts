@@ -65,6 +65,7 @@ function runningDeps(port: number): StatusDeps {
 // This is the minimum to prove the compact-default token regression.
 
 function makeFatNode(rigId: string, rigName: string, logicalId: string, opts?: {
+  needsAttention?: boolean;
   lifecycleState?: string;
   sessionStatus?: string;
   startupStatus?: string;
@@ -82,6 +83,9 @@ function makeFatNode(rigId: string, rigName: string, logicalId: string, opts?: {
   return {
     rigId,
     rigName,
+    needsAttention: opts?.needsAttention ?? false,
+    arbitratedNeedsInput: null,
+    needsInputEvidence: null,
     logicalId,
     podId: `pod-${logicalId.split(".")[0]}`,
     podNamespace: logicalId.split(".")[0],
@@ -93,6 +97,13 @@ function makeFatNode(rigId: string, rigName: string, logicalId: string, opts?: {
     nodeKind: "agent" as const,
     runtime: "claude-code",
     sessionStatus: opts?.sessionStatus ?? "running",
+    modelObservation: opts?.sessionStatus && opts.sessionStatus !== "running" ? {
+      status: "unknown", model: null, source: null, observedAt: null,
+      generation: "11111111-1111-4111-8111-111111111111", reason: "seat-not-running",
+    } : {
+      status: "observed", model: "claude-opus-4-20250514", source: "claude-assistant-response",
+      observedAt: "2026-06-19T12:00:00.000Z", generation: "11111111-1111-4111-8111-111111111111", reason: null,
+    },
     startupStatus: opts?.startupStatus ?? "ready",
     restoreOutcome: "n-a",
     lifecycleState: opts?.lifecycleState ?? "running",
@@ -137,6 +148,7 @@ const RIG_A_NODES = [
   makeFatNode("rig-a", "openrig-build", "rev1.r2"),
   // One attention node — reason must appear in compact
   makeFatNode("rig-a", "openrig-build", "dev1.design", {
+    needsAttention: true,
     lifecycleState: "attention_required",
     startupStatus: "attention_required",
     activityState: "needs_input",
@@ -229,7 +241,13 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
   }
 
   // -- AC-1: token-safe default (the regression) --
-  it("AC-1: default --nodes --json is an order of magnitude smaller than --full", async () => {
+  it.each(["observed", "unknown"])("r2: AC-1 compact stays below full /2.8 with real %s observations on every row", async status => {
+    const originals = ALL_NODES.map(n => n.modelObservation);
+    if (status === "unknown") for (const n of ALL_NODES) n.modelObservation = {
+      status: "unknown", model: null, source: null, observedAt: null,
+      generation: "11111111-1111-4111-8111-111111111111", reason: n.sessionStatus === "running" ? "record-identity-missing-or-ambiguous" : "seat-not-running",
+    } as unknown as typeof n.modelObservation;
+    try {
     const { logs: defaultLogs } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json"]);
     });
@@ -249,6 +267,7 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     expect(defaultOutput.length).toBeLessThan(fullOutput.length / 2.8);
     // Sanity: full output exists and is nontrivial
     expect(fullOutput.length).toBeGreaterThan(1000);
+    } finally { ALL_NODES.forEach((n, i) => n.modelObservation = originals[i]!); }
   });
 
   // -- AC-2: same breadth (no node dropped) --
@@ -364,14 +383,32 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     expect(healthyNode.latestError).toBeUndefined();
   });
 
+  it.each([false, true])("keeps old-daemon diagnostics with unknown attention (failed: %s)", async (failed) => {
+    const node = RIG_B_NODES[0]!;
+    const original = { ...node };
+    Reflect.deleteProperty(node, "needsAttention");
+    Object.assign(node, { startupStatus: failed ? "failed" : "ready", latestError: failed ? "startup failure" : null,
+      agentActivity: { ...node.agentActivity, state: "needs_input", reason: "approval_pending" } });
+    try {
+      const json = await captureLogs(() => makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--rig", "openrig-comms", "--json"]).then(() => {}));
+      const entry = JSON.parse(json.logs.join(""))[0];
+      expect(entry).not.toHaveProperty("needsAttention");
+      expect(entry.agentActivity.reason).toBe("approval_pending");
+      if (failed) expect(entry.latestError).toBe("startup failure");
+      const text = await captureLogs(() => makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--rig", "openrig-comms"]).then(() => {}));
+      expect(text.logs.join("\n")).toContain(failed ? "startup failure" : "approval_pending");
+      expect(text.logs.find((line) => line.includes(node.canonicalSessionName))).toMatch(/\?\s+(startup failure|approval_pending)/);
+    } finally { Object.assign(node, original); }
+  });
+
   it.each([[false, false], [true, false], [false, true]])("shows current limits without hiding startup failures (stale: %s, failed: %s)", async (stale, failed) => {
     const node = RIG_B_NODES[0]!;
-    const original = { agentActivity: node.agentActivity, startupStatus: node.startupStatus, latestError: node.latestError };
+    const original = { agentActivity: node.agentActivity, startupStatus: node.startupStatus, latestError: node.latestError, needsAttention: node.needsAttention };
     node.agentActivity = {
       ...original.agentActivity, state: "unknown", reason: "usage_limit", evidenceSource: "runtime_hook",
       rawEvent: "at_limit", stale, fallback: false,
     } as typeof original.agentActivity;
-    if (failed) Object.assign(node, { startupStatus: "failed", latestError: "startup failure" });
+    if (failed) Object.assign(node, { startupStatus: "failed", latestError: "startup failure", needsAttention: true });
     try {
       const json = await captureLogs(() => makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--rig", "openrig-comms", "--json"]).then(() => {}));
       const activity = JSON.parse(json.logs.join(""))[0].agentActivity;
@@ -593,9 +630,37 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     expect(output).toContain("dev1-driver@openrig-velocity");
     const assignedLine = output.split("\n").find((line) => line.includes("dev1-design@openrig-build"));
     expect(assignedLine).toBeDefined();
-    // WORK begins after the fixed RIG/SESSION/LIFECYCLE/ACTIVITY columns.
+    // WORK begins after the fixed RIG/SESSION/LIFECYCLE/ACTIVITY columns, each followed by a one-space separator.
     // It renders the total active assignment count (6), never the pending-only count (3).
-    expect(assignedLine!.slice(22 + 38 + 11 + 14, 22 + 38 + 11 + 14 + 6).trim()).toBe("6");
+    expect(assignedLine!.slice(22 + 38 + 11 + 17 + 4, 22 + 38 + 11 + 17 + 4 + 6).trim()).toBe("6");
+  });
+
+  it("compact human table allows for count suffix in ACTIVITY without overflowing into WORK", async () => {
+    const node = RIG_A_NODES.find((n) => n.logicalId === "dev1.impl")!;
+    const previousActivityState = (node as unknown as Record<string, unknown>).activityState;
+    const previousHasWork = node.hasAssignedWork;
+    (node as unknown as Record<string, unknown>).activityState = {
+      activity: "needs_input",
+      display: "needs-input",
+      needsInput: { count: 1, reason: null },
+      decidedBy: null,
+    };
+    node.hasAssignedWork = true;
+    try {
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A"]);
+      });
+      const output = logs.join("\n");
+      const line = output.split("\n").find((l) => l.includes("dev1-impl@openrig-build"));
+      expect(line).toBeDefined();
+      expect(line).not.toContain("needs-input x1yes");
+      expect(line).toMatch(/needs-input x1\s+yes/);
+      expect(line!.slice(22 + 38 + 11 + 3, 22 + 38 + 11 + 3 + 17)).toBe("needs-input x1   ");
+      expect(line!.slice(22 + 38 + 11 + 17 + 4, 22 + 38 + 11 + 17 + 4 + 6)).toBe("yes   ");
+    } finally {
+      (node as unknown as Record<string, unknown>).activityState = previousActivityState;
+      node.hasAssignedWork = previousHasWork;
+    }
   });
 
   it("human node views explain a missing tmux session and the recovery path", async () => {
@@ -604,6 +669,50 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
         await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--session", "ops-missing@openrig-build", ...extra]);
       });
       expect(logs.join("\n")).toContain("tmux session missing; restore or relaunch the seat");
+    }
+  });
+
+  it("discloses recorded running with tmux unavailable as liveness unconfirmed, and leaves other states alone", async () => {
+    const at = "2026-06-19T11:58:00.000Z";
+    const seat = (logicalId: string, verdict: Record<string, unknown>, opts?: Parameters<typeof makeFatNode>[3]) => ({
+      ...makeFatNode("rig-a", "openrig-build", logicalId, opts), storedSessionStatus: opts?.sessionStatus ?? "running", identityVerdict: verdict,
+    });
+    const unavailable = { verdict: "tmux_unavailable", reason: "tmux_unavailable", evidenceSource: "tmux_session", evidence: { command: "tmux list-sessions", pid: 4242 } };
+    const extra = [
+      seat("ops.unavail", { ...unavailable, observedAt: at }),
+      seat("ops.untimed", unavailable),
+      seat("ops.verified", { verdict: "verified", reason: null, observedAt: at }),
+      { ...seat("ops.stopped", { ...unavailable, observedAt: at }, { sessionStatus: "exited" }), intentionallyStopped: true },
+      seat("ops.codex", { verdict: "mismatch", reason: "tmux_unavailable", observedAt: at }, { needsAttention: true, lifecycleState: "attention_required", latestError: "codex identity mismatch" }),
+    ];
+    RIG_A_NODES.push(...(extra as unknown as typeof RIG_A_NODES));
+    try {
+      const run = async (...args: string[]) => (await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--rig", "openrig-build", ...args]);
+      })).logs.join("\n");
+      const row = (rows: Array<Record<string, any>>, id: string) => rows.find((r) => r.logicalId === id)!;
+
+      const compact = JSON.parse(await run("--json"));
+      expect(row(compact, "ops.unavail")).toMatchObject({
+        sessionStatus: "running", storedSessionStatus: "running",
+        identityVerdict: { verdict: "tmux_unavailable", reason: "tmux_unavailable", observedAt: at },
+      });
+      expect(row(compact, "ops.unavail").identityVerdict).not.toHaveProperty("evidence");
+      expect(row(compact, "ops.untimed").identityVerdict).toEqual({ verdict: "tmux_unavailable", reason: "tmux_unavailable" });
+      expect(row(compact, "ops.codex")).toMatchObject({ needsAttention: true, lifecycleState: "attention_required", latestError: "codex identity mismatch" });
+      const selected = JSON.parse(await run("--json", "--fields", "logicalId,storedSessionStatus,identityVerdict")).entries;
+      expect(row(selected, "ops.unavail")).toMatchObject({ storedSessionStatus: "running", identityVerdict: { reason: "tmux_unavailable", observedAt: at } });
+
+      for (const view of [[], ["--full"]]) {
+        const out = await run(...view);
+        expect(out).toContain(`Liveness (ops-unavail@openrig-build): recorded running, not confirmed: tmux was unavailable at the last observation (${at}).`);
+        expect(out).toContain("Liveness (ops-untimed@openrig-build): recorded running, not confirmed: tmux was unavailable at the last observation (time unknown).");
+        for (const other of ["ops-verified", "ops-stopped", "ops-codex", "orch1-lead"]) expect(out).not.toContain(`Liveness (${other}@`);
+        expect(out.split("\n").filter((line) => line.includes("ops-unavail@")).join("\n")).not.toMatch(/detached|restore|relaunch/);
+        expect(out).toContain("tmux session missing; restore or relaunch the seat");
+      }
+    } finally {
+      RIG_A_NODES.splice(RIG_A_NODES.length - extra.length);
     }
   });
 
@@ -622,8 +731,8 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     expect(output).toContain("MEMBER");
     const assignedLine = output.split("\n").find((line) => line.includes("dev1-design@openrig-build"));
     expect(assignedLine).toBeDefined();
-    // WORK begins after the fixed columns through TERMINAL in the full table.
-    expect(assignedLine!.slice(30 + 10 + 14 + 34 + 12 + 17 + 10 + 10 + 9 + 11 + 9,
-      30 + 10 + 14 + 34 + 12 + 17 + 10 + 10 + 9 + 11 + 9 + 6).trim()).toBe("6");
+    // WORK begins after the fixed columns through TERMINAL in the full table, each followed by a one-space separator.
+    expect(assignedLine!.slice(30 + 10 + 14 + 34 + 12 + 17 + 10 + 10 + 9 + 11 + 9 + 11,
+      30 + 10 + 14 + 34 + 12 + 17 + 10 + 10 + 9 + 11 + 9 + 11 + 6).trim()).toBe("6");
   });
 });

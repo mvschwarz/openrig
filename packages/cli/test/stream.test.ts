@@ -317,4 +317,48 @@ describe("rig stream CLI", () => {
       "Watch error: socket closed",
     ]);
   });
+  it("hub readers: subscribe, subscriptions, unsubscribe and read send the reader, filter and page size", async () => {
+    const { deps, calls } = makeDeps();
+    const run = async (...args: string[]) => {
+      const program = createProgram({ streamDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "stream", ...args, "--json"]);
+    };
+    await run("subscribe", "dev-lead@rig", "--tags", "ci, pr", "--type", "incident");
+    await run("subscriptions");
+    await run("unsubscribe", "dev-lead@rig");
+    await run("read", "--limit", "5");
+    expect(calls).toEqual([
+      { method: "POST", path: "/api/stream/subscriptions", body: { readerSession: "dev-lead@rig", hintTags: ["ci", "pr"], hintType: "incident" } },
+      { method: "GET", path: "/api/stream/subscriptions" },
+      { method: "DELETE", path: "/api/stream/subscriptions/dev-lead%40rig" },
+      { method: "POST", path: "/api/stream/read", body: { limit: 5 } },
+    ]);
+    await run("read", "--limit", "0");
+    expect(calls).toHaveLength(4);
+    expect(errors).toContain("--limit must be a positive integer");
+    expect(process.exitCode).toBe(1);
+    process.exitCode = undefined;
+  });
+  it("act sends exactly one action: linked work, a decline with its reason, or a duplicate", async () => {
+    const { deps, calls } = makeDeps();
+    const run = async (...args: string[]) => {
+      const program = createProgram({ streamDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "stream", "act", "S1", ...args, "--json"]);
+    };
+    await run("--work", "q-7");
+    await run("--decline", "not mine");
+    await run("--duplicate", "q-2", "--reader", "qa@rig");
+    expect(calls).toEqual([
+      { method: "POST", path: "/api/stream/S1/act", body: { action: "act", workQitemId: "q-7" } },
+      { method: "POST", path: "/api/stream/S1/act", body: { action: "decline", reason: "not mine" } },
+      { method: "POST", path: "/api/stream/S1/act", body: { action: "duplicate", duplicateOf: "q-2", reader: "qa@rig" } },
+    ]);
+    await run("--work", "q-7", "--decline", "x");
+    await run();
+    expect(calls).toHaveLength(3);
+    expect(errors.filter((e) => e === "Give exactly one of --work, --decline or --duplicate")).toHaveLength(2);
+    process.exitCode = undefined;
+  });
 });

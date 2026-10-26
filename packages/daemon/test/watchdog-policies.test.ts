@@ -83,6 +83,13 @@ describe("artifactPoolReadyPolicy (POC contract)", () => {
     expect(out).toEqual({ action: "skip", reason: "no_actionable_artifacts" });
   });
 
+  it.each([
+    ["no pools", {}, /context pool list is required/],
+    ["a pool with an empty path", { pools: { paths: [""] } }, /every pool requires a path/],
+  ])("refuses %s", async (_name, context, error) => {
+    await expect(artifactPoolReadyPolicy.evaluate(makeJob({ context }))).rejects.toThrow(error);
+  });
+
   it("send with formatted message when pool has actionable artifacts", async () => {
     writeFileSync(join(tmp, "a.md"), "---\nstatus: ready\n---\nbody-a\n");
     writeFileSync(join(tmp, "b.md"), "---\nstatus: ready\n---\nbody-b\n");
@@ -118,6 +125,23 @@ describe("artifactPoolReadyPolicy (POC contract)", () => {
     expect(out.message).toMatch(/has 1 actionable/);
     expect(out.message).toContain("a.md");
     expect(out.message).not.toContain("b.md");
+  });
+
+  it("reads frontmatter from CRLF files and files ending at the closing ---", async () => {
+    writeFileSync(join(tmp, "a.md"), "---\nstatus: ready\n---");
+    writeFileSync(join(tmp, "b.md"), "---\r\nstatus: ready\r\n---\r\nbody-b\r\n");
+    writeFileSync(join(tmp, "c.md"), "---\r\nstatus: draft\r\n---\r\n");
+    const out = await artifactPoolReadyPolicy.evaluate(
+      makeJob({
+        context: { pools: [{ path: tmp, include_statuses: ["ready"] }] },
+      }),
+    );
+    expect(out.action).toBe("send");
+    if (out.action !== "send") return;
+    expect(out.message).toMatch(/has 2 actionable/);
+    expect(out.message).toContain("a.md");
+    expect(out.message).toContain("b.md");
+    expect(out.message).not.toContain("c.md");
   });
 
   it("respects max_items cap (formatted bullet list capped)", async () => {

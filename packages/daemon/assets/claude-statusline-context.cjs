@@ -7,6 +7,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { randomUUID } = require("node:crypto");
 
 const outputTarget = process.argv[2];
 const providerUsageTarget = process.argv[3];
@@ -114,11 +115,20 @@ function unixSecondsToIso(value) {
 }
 
 function writeJsonAtomic(outputPath, value) {
-  const tmpPath = outputPath + ".tmp";
+  const tmpPath = outputPath + ".tmp-" + randomUUID();
   const dir = path.dirname(outputPath);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
-  fs.writeFileSync(tmpPath, JSON.stringify(value), "utf-8");
-  fs.renameSync(tmpPath, outputPath);
+  try {
+    fs.writeFileSync(tmpPath, JSON.stringify(value), "utf-8");
+    fs.renameSync(tmpPath, outputPath);
+  } catch (error) {
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch {
+      // Keep the original write or rename error.
+    }
+    throw error;
+  }
 }

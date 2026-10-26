@@ -38,6 +38,8 @@ const shapes: Record<string, { content: string; state: string }> = {
   history_idle: { content: picker13 + "\n" + framed("❯ "), state: "agent_idle" },
   // Existing ordinary-send behavior for this draft is not changed by picker recognition.
   history_draft: { content: picker13 + "\n" + framed("❯ unfinished message"), state: "agent_idle" },
+  history_working: { content: picker13 + "\n" + ["✻ Thinking… (23s)", border, "❯ ", border,
+    "⏵⏵ accept edits on (shift+tab to cycle) · ← for agents"].join("\n"), state: "agent_active" },
   historical_short_picker: { content: ["Which region?", "❯ 1. us-east", "  2. us-west", footer, framed("❯ ")].join("\n"), state: "agent_idle" },
   unvalidated_history_frame: { content: ["Which region?", "❯ 1. us-east", "  2. us-west", footer,
     framed("❯ ").replace("⏵⏵ accept edits on (shift+tab to cycle) · ← for agents", "Not an input mode bar")].join("\n"), state: "attention" },
@@ -156,13 +158,16 @@ describe("ordinary transport under current and historical questions", () => {
         // A latest person-waiting hook keeps an UNREADABLE pane held past the send window (a watchdog
         // wake answered an unrecognized question menu, 2026-10-08); recognized idle or work still sends.
         const staleWaiting = hook.name === "send_stale_permission" || hook.name === "display_stale_permission";
-        const sent = hook.name === "fresh_permission" ? false
+        const currentQuestion = ["picker160", "picker100", "picker12", "picker13"].includes(shape)
+          || shape === "footer_in_multiline_draft";
+        const freshRunningNeedsInput = hook.name === "fresh_running" && currentQuestion;
+        const sent = hook.name === "fresh_permission" || freshRunningNeedsInput ? false
           : hook.name.startsWith("fresh_") ? true : state !== "attention" && !(staleWaiting && state === "unknown");
         expect(result.ok).toBe(sent);
         expect(paste).toHaveBeenCalledTimes(sent ? 1 : 0);
         expect(enter).toHaveBeenCalledTimes(sent ? 1 : 0);
         if (!sent) expect(result.reason).toBe("target_needs_input");
-        expect(capture).toHaveBeenCalledTimes(hook.name.startsWith("fresh_") ? 0 : 1);
+        expect(capture).toHaveBeenCalledTimes(hook.name === "fresh_running" ? 1 : hook.name.startsWith("fresh_") ? 0 : 1);
       } finally { db.close(); }
     });
   }

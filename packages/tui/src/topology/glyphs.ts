@@ -33,7 +33,7 @@ export function statusGlyph(data: GraphNodeData): StatusGlyph {
   const activity = data.agentActivity?.state;
   if (data.startupStatus === "failed" || data.status === "failed" || data.status === "stopped")
     return { glyph: "✕", token: "error", overlay: null };
-  if (data.startupStatus === "attention_required" || data.heldReason != null || activity === "needs_input")
+  if (data.needsAttention ?? (data.startupStatus === "attention_required" || data.heldReason != null || activity === "needs_input"))
     return {
       glyph: "◐",
       token: "actAttention",

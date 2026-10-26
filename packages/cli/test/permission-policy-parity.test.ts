@@ -10,6 +10,7 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const PAIRS: Array<[string, string]> = [
+  ["../src/lib/frontmatter.ts", "../../daemon/src/domain/frontmatter.ts"],
   ["../src/lib/permission-policy/policy-ref.ts", "../../daemon/src/domain/permission-policy/policy-ref.ts"],
   ["../src/lib/permission-policy/policy-spec.ts", "../../daemon/src/domain/permission-policy/policy-spec.ts"],
   ["../src/lib/path-safety.ts", "../../daemon/src/domain/path-safety.ts"],

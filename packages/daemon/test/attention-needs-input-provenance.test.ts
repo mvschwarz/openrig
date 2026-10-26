@@ -26,6 +26,7 @@ describe("attention total: a declared needs-input rung is not an observed clear"
   let rigId: string;
   let nodeId: string;
   let health: RungHealthEvent[];
+  let permissionReader: ReturnType<typeof vi.fn<() => Promise<boolean | null>>>;
   let seq = 0;
 
   beforeEach(() => {
@@ -40,7 +41,9 @@ describe("attention total: a declared needs-input rung is not an observed clear"
       .run("s-attn-provenance", nodeId, SESSION, "running", "ready");
     const eventBus = new EventBus(db);
     store = new AgentActivityStore({ db, eventBus });
-    svc = new SeatActivityService({ tmux: { readPaneLastActivity: async () => null }, defaultWindowSeconds: 3, now: () => new Date() });
+    permissionReader = vi.fn(async (): Promise<boolean | null> => null);
+    svc = new SeatActivityService({ tmux: { readPaneLastActivity: async () => null }, defaultWindowSeconds: 3,
+      now: () => new Date(), permissionPromptReader: permissionReader });
     health = [];
     svc.onRungHealth((e) => health.push(e));
     // Production auto-declares the runtime's inventory on the first sampler tick or hook.
@@ -121,10 +124,15 @@ describe("attention total: a declared needs-input rung is not an observed clear"
     expect(o.attention).toBe(1);
   });
 
-  it("an observed clear on an authoritative needs-input rung still supersedes an older prompt hook", () => {
+  it("a correlated permission clear on the authoritative rung supersedes an older prompt hook", async () => {
+    permissionReader.mockResolvedValue(true);
     hook("Notification", "permission_prompt");
+    await svc.pollSeat(SESSION);
     advance(2_000);
     evidence({ rung: "needs-input-chrome", sourceId: "claude:chrome", needsInput: { count: 0, reason: null } });
+    expect(observe().attention).toBe(1);
+    permissionReader.mockResolvedValue(false);
+    await svc.pollSeat(SESSION);
     const o = observe();
     expect(o.hookStore).toBe("needs_input");
     expect(o.signal).toBe(false);

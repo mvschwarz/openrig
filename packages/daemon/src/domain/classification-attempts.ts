@@ -271,7 +271,9 @@ export class ClassificationAttemptLedger {
    * One bounded page of items the occupant may attempt now for the given
    * versions and epoch, in stream order. Derived by anti-join every call, so a
    * later-due retry reappears on the next pass without any stored cursor
-   * skipping it. `afterSortKey` pages within a single pass only.
+   * skipping it. `afterSortKey` pages within a single pass only. `excludeAbstainedElsewhere` (slice 22, the automatic
+   * path) also leaves out items abstained under any other classifier version: intake deliberately left those, so the
+   * automatic path doesn't ask about them again. An experiment's abstentions (`+experiment`) don't count.
    */
   eligible(opts: {
     classifierVersion: string;
@@ -279,6 +281,7 @@ export class ClassificationAttemptLedger {
     evidenceEpoch: string;
     limit?: number;
     afterSortKey?: string;
+    excludeAbstainedElsewhere?: boolean;
   }): EligiblePage {
     requireIdentity({ streamItemId: "-", ...opts });
     const limit = Math.max(1, Math.min(opts.limit ?? MAX_ELIGIBLE_PAGE, MAX_ELIGIBLE_PAGE));
@@ -298,6 +301,12 @@ export class ClassificationAttemptLedger {
       cursorClause = "AND (s.ts_emitted, s.stream_sort_key) > (?, ?)";
       params.push(cursor.ts_emitted, cursor.stream_sort_key);
     }
+    let elsewhereClause = "";
+    if (opts.excludeAbstainedElsewhere) {
+      elsewhereClause = `AND NOT EXISTS (SELECT 1 FROM classification_attempts x WHERE x.stream_item_id = s.stream_item_id
+        AND x.status = 'abstained' AND x.classifier_version <> ? AND x.classifier_version NOT LIKE '%+experiment')`;
+      params.push(opts.classifierVersion);
+    }
     params.push(limit + 1);
     const rows = this.db
       .prepare(
@@ -315,6 +324,7 @@ export class ClassificationAttemptLedger {
               OR (a.status = 'in_flight' AND a.updated_at <= ?)
             )
             ${cursorClause}
+            ${elsewhereClause}
           ORDER BY s.ts_emitted, s.stream_sort_key
           LIMIT ?`,
       )

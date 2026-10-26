@@ -122,6 +122,44 @@ describe("RigSpec schema (pod-aware)", () => {
     expect(normalized.pods[0]!.members[0]!.effort).toBeUndefined();
   });
 
+  it("advises on an unknown effort for a Pi member only; known levels and model suffixes stay quiet", () => {
+    const withPi = (extra: Record<string, unknown>) => {
+      const rig = structuredClone(VALID_RIG);
+      rig.pods[0]!.members.push({ id: "pi1", agent_ref: "local:agents/pi", profile: "default", runtime: "pi", cwd: ".", ...extra } as never);
+      return RigSpecSchema.validate(rig);
+    };
+    const quiet = withPi({ effort: "high" });
+    expect(quiet.valid).toBe(true);
+    expect((quiet.advisories ?? []).join(" ")).not.toMatch(/effort/);
+    const suffix = withPi({ model: "x/y:low", effort: "high" });
+    expect(suffix.valid).toBe(true);
+    expect((suffix.advisories ?? []).join(" ")).not.toMatch(/effort/);
+    const bad = withPi({ effort: "none" });
+    expect(bad.valid).toBe(true);
+    expect((bad.advisories ?? []).join(" ")).toMatch(/pods\[0\]\.members\[2\]\.effort: "none" isn't a level Pi is known to accept/);
+    expect((bad.advisories ?? []).join(" ")).toContain("the next managed continuation sends it anyway");
+    const flag = withPi({ effort: "--cwd" });
+    expect(flag.valid).toBe(true);
+    expect((flag.advisories ?? []).join(" ")).toMatch(/pods\[0\]\.members\[2\]\.effort: "--cwd" isn't a level Pi is known to accept \([^)]*\); a managed launch leaves it out/);
+    expect((flag.advisories ?? []).join(" ")).not.toContain("sends it anyway");
+    const codex = structuredClone(VALID_RIG);
+    (codex.pods[0]!.members[1] as Record<string, unknown>)["effort"] = "none";
+    expect(RigSpecSchema.validate(codex).advisories ?? []).toEqual([]);
+  });
+
+  it("advises on an unknown effort for a legacy Pi node only", () => {
+    const spec = (runtime: string, effort: string) => ({
+      schema_version: 1, name: "test", version: "1.0",
+      nodes: [{ id: "n", runtime, effort }], edges: [],
+    });
+    expect(LegacyRigSpecSchema.validate(spec("pi", "high")).advisories ?? []).toEqual([]);
+    const bad = LegacyRigSpecSchema.validate(spec("pi", "none"));
+    expect(bad.valid).toBe(true);
+    expect((bad.advisories ?? []).join(" ")).toMatch(/effort: "none" isn't a level Pi is known to accept/);
+    expect((LegacyRigSpecSchema.validate(spec("pi", "high --cwd")).advisories ?? []).join(" ")).toContain("a managed launch leaves it out");
+    expect(LegacyRigSpecSchema.validate(spec("codex", "none")).advisories ?? []).toEqual([]);
+  });
+
   it("rejects codex_config_profile on non-Codex members", () => {
     const rig = structuredClone(VALID_RIG);
     (rig.pods[0]!.members[0] as Record<string, unknown>)["codex_config_profile"] = "sysadmin";
@@ -193,6 +231,23 @@ describe("RigSpec schema (pod-aware)", () => {
     const result = RigSpecSchema.validate(rig);
     expect(result.valid).toBe(false);
     expect(result.errors[0]).toMatch(/duplicate member id "impl"/);
+  });
+
+  it("members in different pods that derive the same session name get a warning", () => {
+    const rig = structuredClone(VALID_RIG);
+    rig.pods[0]!.id = "dev-impl";
+    rig.pods[0]!.members[0]!.id = "main";
+    rig.pods[0]!.edges[0]!.to = "main";
+    rig.edges[0]!.from = "dev-impl.main";
+    rig.pods[1]!.id = "dev";
+    rig.pods[1]!.members[0]!.id = "impl-main";
+    rig.edges[0]!.to = "dev.impl-main";
+    const result = RigSpecSchema.validate(rig);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
+    expect(result.advisories).toEqual([
+      'pods[1].members[0].id: session name "dev-impl-main@dev-rig" is already used by member "dev-impl.main"',
+    ]);
   });
 
   // T9: dot in pod id or member id fails
@@ -588,5 +643,34 @@ describe("malformed topology stays a validation result", () => {
     const result = RigSpecSchema.validate({ ...VALID_RIG, pods: [null, VALID_RIG.pods[1]], edges: [{kind:"escalates_to",from:"absent.worker",to:"arch.reviewer"}] });
     expect(result.errors).toContain("pods[0]: must be an object");
     expect(result.errors).toContain('edges[0].from: "absent.worker" does not resolve to a pod member');
+  });
+});
+
+describe("a Claude member's own agent, prompt file and plugin folders (OPR.0.7.0.9)", () => {
+  const withFields = (index: number, fields: Record<string, unknown>) => {
+    const rig = structuredClone(VALID_RIG);
+    Object.assign(rig.pods[0]!.members[index] as Record<string, unknown>, fields);
+    return rig;
+  };
+
+  it("reads the three named settings on a Claude member, as paths beside the spec", () => {
+    const rig = withFields(0, { agent_file: "agents/reviewer.md", append_system_prompt_file: "prompts/house.md", plugin_dirs: ["plugins/review"] });
+    expect(RigSpecSchema.validate(rig).valid).toBe(true);
+    expect(RigSpecSchema.normalize(rig).pods[0]!.members[0]).toMatchObject({
+      agentFile: "agents/reviewer.md", appendSystemPromptFile: "prompts/house.md", pluginDirs: ["plugins/review"] });
+  });
+
+  it("takes an empty plugin_dirs as none", () => {
+    expect(RigSpecSchema.validate(withFields(0, { plugin_dirs: [] })).valid).toBe(true);
+  });
+
+  it("says why it can't take them: another runtime, a path outside the spec's folder, or a malformed list", () => {
+    const errors = (rig: unknown) => RigSpecSchema.validate(rig).errors.join(" | ");
+    expect(errors(withFields(1, { agent_file: "agents/reviewer.md" }))).toMatch(/members\[1\]\.agent_file: only for Claude members/);
+    expect(errors(withFields(0, { append_system_prompt_file: "/etc/prompt.md" }))).toMatch(/append_system_prompt_file: absolute paths are not allowed/);
+    expect(errors(withFields(0, { plugin_dirs: ["../outside"] }))).toMatch(/plugin_dirs\[0\]: path traversal/);
+    expect(errors(withFields(0, { plugin_dirs: "plugins/review" }))).toMatch(/plugin_dirs: must be a list/);
+    expect(errors(withFields(0, { plugin_dirs: ["a", "./a"] }))).toMatch(/plugin_dirs\[1\]: listed twice/);
+    expect(errors(withFields(0, { plugin_dirs: ["x/review", "y/review"] }))).toMatch(/plugin_dirs\[1\]: would be copied where plugin_dirs\[0\] is/);
   });
 });

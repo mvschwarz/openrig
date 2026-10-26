@@ -68,9 +68,10 @@ system-level invariants.
 14. Restore outcome states are a fixed set (`RestoreNodeResult.status`,
     `types.ts:475`): `resumed`, `rebuilt`, `fresh-primed`,
     `awaiting-decision`, `attention_required`, `failed`, plus
-    `operator_recovered` (set only by later reconciliation) and `fresh`
-    (retained only for the legacy continuity-restoring skip path). `rebuilt` =
-    new process assembled from artifacts.
+    `operator_recovered` (set only by later reconciliation), `fresh`
+    (retained only for the legacy continuity-restoring skip path) and
+    `left_attached` (a seat joined with `rig attach` as an external CLI, which
+    restore leaves as it is). `rebuilt` = new process assembled from artifacts.
 15. Restore honesty: a failed resume stops loudly as `awaiting-decision`, with
     the blank session rolled back and no session running
     (`restore-orchestrator.ts:1055`). No automatic fresh fallback. Fresh launch
@@ -221,7 +222,18 @@ SSE delivery surfaces include the following. The daemon has **11**
 `git grep -l 'streamSSE(' -- packages/daemon/src/routes | wc -l`).
 
 - `GET /api/events` — global stream of all events (`server.ts:730`
-  `app.route("/api/events", eventsRoute)`).
+  `app.route("/api/events", eventsRoute)`); `?rigId=` keeps one rig's. Each
+  event's SSE `id` is its `seq`. Before going live, a connection replays
+  stored events, read and written 500 at a time (`routes/events.ts`):
+  - with a `Last-Event-ID` header (an `EventSource` sends it when it
+    reconnects), every event after that `seq`, whatever `replay` says;
+  - otherwise `?replay=<n>`: the newest `n` events (of the rig, with
+    `rigId`); `replay=0` starts from now; `replay=all`, no `replay`, a
+    count past the log's size, or any other value, replays the whole log.
+
+  Either way the replay ends at the newest event stored as the connection
+  subscribes; the events stored meanwhile were buffered and follow it, each
+  once and in order, before the stream goes live.
 - `GET /api/stream/watch` — new stream items (`routes/stream.ts:194`).
 - `GET /api/queue/watch` — queue/inbox coordination events
   (`routes/queue.ts:1054`, with a `/sse` alias at `:1055`).

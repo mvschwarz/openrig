@@ -1,0 +1,8 @@
+{
+  "selector": "Frame: pane-only-selector\nWould you like to run the following command?\n\n› 1. Yes, proceed (y)\n  2. No, and tell Codex what to do differently (esc)\n",
+  "codexWorking": "Frame: pane-working\n• Working (2s • esc to interrupt)\n\n› \n\n? for shortcuts\n",
+  "workingPlain": "Frame: plain-working\n✶ Churning… (12s · ↓ 300 tokens)\n────────────────────────────────────────────\n❯ \n────────────────────────────────────────────\n⏵⏵ accept edits on (shift+tab to cycle) · ← for agents",
+  "workingSelector": "Frame: quoted-selector\n● I answered a peer; its prompt read:\n  › 1. Yes, proceed (y)\n  2. No, and tell Codex what to do differently (esc)\n✶ Churning… (12s · ↓ 300 tokens)\n────────────────────────────────────────────\n❯ \n────────────────────────────────────────────\n⏵⏵ accept edits on (shift+tab to cycle) · ← for agents",
+  "workingPermission": "Frame: quoted-permission\n● Quoting a permission prompt: Do you want to proceed?\n● It is historical output, above the current composer.\n✶ Churning… (12s · ↓ 300 tokens)\n────────────────────────────────────────────\n❯ \n────────────────────────────────────────────\n⏵⏵ accept edits on (shift+tab to cycle) · ← for agents",
+  "waiting": "Frame: real-waiting\nDo you want to make this edit to the example file?\n\n❯ 1. Yes\n  2. Yes, allow all edits this session\n  3. No, and tell Claude what to do differently\n\n  Use ↑↓ to choose, enter to confirm\n\n────────────────────────────────────────────\n❯ \n────────────────────────────────────────────\n⏵⏵ accept edits on (shift+tab to cycle) · ← for agents"
+}

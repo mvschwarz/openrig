@@ -109,6 +109,24 @@ describe("queue wake nudge carries the stored summary", () => {
     } finally { await settle(); h.db.close(); }
   });
 
+  it("a person's message reaches the seat with a reply hint that answers in its own Slack thread", async () => {
+    const h = makeHarness();
+    try {
+      const row = await h.repo.create({ sourceSession: "alex@external", destinationSession: "dev@rig", body: "can you check the build?" });
+      await vi.waitFor(() => expect(h.calls).toHaveLength(1));
+      expect(h.calls[0]!.text.split("\n").at(-1)).toBe(`↩ Reply if needed: rig queue create --destination alex@external --human-intent update --reply-to ${row.qitemId} --summary "<one line>" --body "..." --verify`);
+    } finally { await settle(); h.db.close(); }
+  });
+
+  it("a seat's message keeps the ordinary reply hint", async () => {
+    const h = makeHarness();
+    try {
+      await h.repo.create({ sourceSession: "lead@rig", destinationSession: "dev@rig", body: "work" });
+      await vi.waitFor(() => expect(h.calls).toHaveLength(1));
+      expect(h.calls[0]!.text.split("\n").at(-1)).toBe('↩ Reply: rig send lead@rig "..."');
+    } finally { await settle(); h.db.close(); }
+  });
+
   it("create without a summary keeps the generic nudge", async () => {
     const h = makeHarness();
     try {

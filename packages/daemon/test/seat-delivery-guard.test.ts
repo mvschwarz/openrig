@@ -130,18 +130,36 @@ function transportFixture() {
 }
 
 describe("real adapter/transport guard boundaries with no external effects", () => {
-  it("retains raw/force/verify/danger sends without even capturing or writing; submit-only refuses", async () => {
+  it("retains ordinary/force/verify/wait sends without capturing or writing; submit-only refuses", async () => {
     const f = transportFixture(); await f.guard.set("a", true, "person", "draft");
-    for (const options of [{}, {force:true}, {verify:true}, {dangerouslyInteract:true,reason:"explicit"}, {waitForIdleMs:10}]) {
+    for (const options of [{}, {force:true}, {verify:true}, {waitForIdleMs:10}]) {
       const result = await f.transport.send("a", "message", options);
       expect(result).toMatchObject({ok:true,outcome:"retained",sent:false,verified:false});
       expect(result.outboxIds).toHaveLength(1);
     }
     expect(await f.transport.send("a", "", {submitOnly:true,expectedStagedText:"message"})).toMatchObject({ok:false,reason:"typing_guard_enabled",sent:false});
     expect(f.commands).toEqual([]);expect(f.files).toEqual([]);expect(f.tmux.listPanes).not.toHaveBeenCalled();
-    expect(f.outbox.heldForNode("a").total).toBe(5);f.db.close();
+    expect(f.outbox.heldForNode("a").total).toBe(4);f.db.close();
   });
-  it("one retained ID stays not-delivered after disable/retirement, and preserves committed coalesced IDs", async () => {
+  it("an explicit override under hold reads the composer and stops on unreadable input without typing or retaining", async () => {
+    // This send reaches session metadata; use the existing migrated fixture, not the hold-only schema.
+    const f = queueFixture(); await f.guard.set("a", true, "person", "draft");
+    f.db.prepare("UPDATE nodes SET runtime = 'terminal' WHERE id = 'a'").run();
+    const observer = { record: vi.fn() };
+    const transport = new SessionTransport({ db: f.db, tmuxAdapter: f.tmux, rigRepo: f.rigRepo, sessionRegistry: f.sessionRegistry,
+      sleep: async () => {}, captureObserver: observer });
+    const capture = vi.spyOn(f.tmux, "captureComposerSnapshot").mockResolvedValue(null);
+    const result = await transport.send("worker@test", "message", { dangerouslyInteract: true, reason: "explicit" });
+    expect(result).toMatchObject({ ok: false, reason: "override_input_unknown", sent: false,
+      existingInput: { classification: "unreadable", reason: expect.any(String) } });
+    expect(capture).toHaveBeenCalledTimes(1);
+    // Preparing the inert buffer precedes inspection; no pane input occurs.
+    expect(f.writes.some(command => /paste-buffer|send-keys/.test(command))).toBe(false);
+    expect(f.outbox.heldForNode("a").total).toBe(0);
+    expect(f.db.prepare("SELECT count(*) AS n FROM outbox_entries").get()).toEqual({ n: 0 });
+    expect(observer.record).not.toHaveBeenCalled(); f.db.close();
+  });
+  it("manual hold preserves coalesced bodies; changing preference or retiring history does not type", async () => {
     const f = transportFixture();await f.guard.set("a",true,"person","draft");
     const opts={deliveryId:"exact",actorSession:"sender"};
     await f.transport.send("a","body",opts);await f.transport.send("a","body",opts);
@@ -151,7 +169,7 @@ describe("real adapter/transport guard boundaries with no external effects", () 
     expect(await f.transport.send("a","combined",{committedOutboxIds:["wake1","wake2"]})).toMatchObject({outcome:"retained",outboxIds:["wake1","wake2"]});
     expect(f.outbox.getById("wake2")!.body).toBe("original wake2");
     await f.guard.set("a",false,"person","new sends only");f.outbox.retire("exact","person","acknowledge");
-    expect(await f.transport.send("a","body",opts)).toMatchObject({outcome:"retained",sent:false});
+    expect(f.outbox.getById("exact")!.deliveryState).toBe("retired");
     expect(f.commands).toEqual([]);expect(f.db.prepare("SELECT count(*) AS n FROM outbox_entries").get()).toEqual({n:3});f.db.close();
   });
   it("automatic low-level keys/text/shell and lifecycle creation refuse, human broker path and sibling write", async () => {
@@ -173,6 +191,14 @@ describe("real adapter/transport guard boundaries with no external effects", () 
     vi.mocked(f.tmux.listPanes).mockImplementation(async () => { f.targets.a={...f.targets.a!,occupant:"other"};return [{id:"%1"} as never]; });
     expect(await f.tmux.sendKeys("a",["Enter"])).toMatchObject({ok:false,code:"guard_target_changed"});
     expect(f.commands).toEqual([]);expect(f.files).toEqual([]);f.db.close();
+  });
+  it("allows a sibling pane while writing only to the recorded bound pane", async () => {
+    const f = transportFixture();
+    vi.mocked(f.tmux.listPanes).mockResolvedValue([{ id: "%1" } as never, { id: "%sibling" } as never]);
+    expect(await f.tmux.sendText("a", "bound pane only")).toMatchObject({ ok: true });
+    expect(f.commands.some(command => command.includes("%1"))).toBe(true);
+    expect(f.commands.some(command => command.includes("%sibling"))).toBe(false);
+    f.db.close();
   });
   it("whole multi-node lifecycle keeps activation pending through rebind and final submit", async () => {
     const f=transportFixture();const started=signal(),finish=signal();

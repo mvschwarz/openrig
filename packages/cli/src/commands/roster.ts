@@ -1,3 +1,4 @@
+import { modelObservation, unknownModelObservation, formatModelObservation } from "../lib/model-observation.js";
 import { Command } from "commander";
 import { closeSync, constants, fstatSync, openSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -72,7 +73,7 @@ export function readRosters(folder: string): { rosters: Roster[]; warnings: stri
 
 // Reuse ps's local routing and observation-only HTTP fan-out, including its partial failures.
 // Explicit fields keep native transcripts, resume tokens and fresh pane captures out of this read.
-const fields = "rigId,logicalId,canonicalSessionName,hostSelfId,runtime,model,sessionStatus,agentActivity";
+const fields = "rigId,logicalId,canonicalSessionName,hostSelfId,runtime,model,modelObservation,sessionStatus,agentActivity";
 export async function readRosterInventory(): Promise<RosterInventory> {
   const nodes: Row[] = [], sources: Row[] = [];
   for (const remote of [false, true]) {
@@ -108,13 +109,17 @@ export function enrichRosterMember(member: RosterMember, inventory: RosterInvent
   const sessionStatus = node ? text(node.sessionStatus) : null;
   const current = sessionStatus === "running";
   const activity = current && object(node?.agentActivity) ? node.agentActivity : null;
+  const observations = matches.map(n => modelObservation(n.modelObservation, current));
+  const observation = node && new Set(observations.map(o => JSON.stringify(o))).size === 1 ? observations[0]!
+    : unknownModelObservation(matches.length ? "conflicting-observations" : "host-or-seat-unavailable");
   return { ...member, live: {
     status: !node ? "unknown" : current ? "reported" : "stale",
     reason: !node ? (matches.length ? "Conflicting node observations" : "No exact hostSelfId and seat match; check observation gaps")
-      : current ? "Registry and activity report; not native model verification" : "Seat is not reported running; current runtime and model are unknown",
+      : current ? "Registry, activity and labelled last model observation; not a promise about the next turn" : "Seat is not reported running; current runtime and model are unknown",
     runtime: current ? text(node?.runtime) : null,
     configuredModel: current ? text(node?.model) : null,
-    observedModel: null,
+    observedModel: observation.model,
+    modelObservation: observation,
     sessionStatus,
     agentActivity: { state: text(activity?.state) ?? "unknown", reason: text(activity?.reason), sampledAt: text(activity?.sampledAt) },
   } };
@@ -123,7 +128,7 @@ export function enrichRosterMember(member: RosterMember, inventory: RosterInvent
 type Deps = { folder?: () => string; inventory?: () => Promise<RosterInventory> };
 export function rosterCommand(deps: Deps = {}): Command {
   const cmd = new Command("roster").description("Find recommended specialists across rigs and hosts (read-only)");
-  cmd.addHelpText("after", "\nRosters are recommendations, not assignments or authority. Contact members through rig send or rig queue.\nFiles: <workspace.root>/rosters/*.json; --folder reads another folder without installing it.\nConfigured model is registry data; observed native model remains unknown.\n");
+  cmd.addHelpText("after", "\nRosters are recommendations, not assignments or authority. Contact members through rig send or rig queue.\nFiles: <workspace.root>/rosters/*.json; --folder reads another folder without installing it.\nConfigured model is registry data; last observed model includes its native evidence kind and record time, or UNKNOWN. It does not promise the next turn model.\n");
   for (const verb of ["list", "show", "find"] as const) {
     const sub = cmd.command(verb === "list" ? "list" : `${verb} <${verb === "show" ? "id" : "query"}>`)
       .description(verb === "list" ? "List authored purposes and curators" : verb === "show" ? "Read a roster with current node observations" : "Find a capability or seat across all rosters")
@@ -158,7 +163,7 @@ export function rosterCommand(deps: Deps = {}): Command {
         else {
           const members = (verb === "show" ? (result.roster as Row).members : result.matches) as Array<ReturnType<typeof enrichRosterMember> & { roster?: { id: string } }>;
           if (verb === "show") { const r = result.roster as Roster; console.log(`${r.name} — ${r.purpose}\nCurator: ${r.curator.seat} (${r.curator.host})`); }
-          for (const m of members) console.log(`${m.seat} (${m.host})${m.roster ? ` [${m.roster.id}]` : ""}\n  ${m.engagement.join(", ")}: ${m.capabilities.join(", ")}\n  When: ${m.use_when}\n  Why: ${m.why}${m.caveat ? `\n  Caveat: ${m.caveat}` : ""}\n  ${m.live.status}: runtime ${m.live.runtime ?? "unknown"}; configured model ${m.live.configuredModel ?? "unknown"}; observed model unknown\n  Activity: ${m.live.agentActivity.state}; sampled ${m.live.agentActivity.sampledAt ?? "unknown"}\n  ${m.live.reason}`);
+          for (const m of members) console.log(`${m.seat} (${m.host})${m.roster ? ` [${m.roster.id}]` : ""}\n  ${m.engagement.join(", ")}: ${m.capabilities.join(", ")}\n  When: ${m.use_when}\n  Why: ${m.why}${m.caveat ? `\n  Caveat: ${m.caveat}` : ""}\n  ${m.live.status}: runtime ${m.live.runtime ?? "unknown"}; configured model ${m.live.configuredModel ?? "unknown"}; last observed model ${formatModelObservation(m.live.modelObservation)}\n  Activity: ${m.live.agentActivity.state}; sampled ${m.live.agentActivity.sampledAt ?? "unknown"}\n  ${m.live.reason}`);
           if (!members.length) console.log("No matching members.");
           const obs = result.observations as { sources: Row[] };
           for (const source of obs.sources) if (source.status !== "ok") console.error(`Observation gap (${source.scope}): ${source.warning ?? source.error ?? source.status}`);

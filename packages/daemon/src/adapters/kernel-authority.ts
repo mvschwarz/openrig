@@ -1,3 +1,4 @@
+import { validateClaudePermissionRules } from "../domain/claude-permission-rules.js";
 import type { NodeBinding } from "../domain/runtime-adapter.js";
 import { nonInterruptiveArgs } from "./non-interruptive.js";
 import { isValidThresholdPercent } from "../domain/claude-compaction-enforcer.js";
@@ -24,6 +25,12 @@ export const KERNEL_CLAUDE_ALLOW = [
 // Team defaults are command allowances, not containment. A project's test runner can run code.
 // Native deny/ask rules remain in force. The session hook owns generated lifecycle
 // asks so that a help invocation is not caught by an unconditional ask prefix.
+// Team agents run most rig commands without a prompt. The commands that start, stop or remove teams or
+// agents ask, and so do six kept for a person: import (its --instantiate mode launches nodes, and a
+// prefix can't tell its modes apart), seat set-permissions and policy apply under both spellings (an
+// explicit permission choice stays with a person), setup (its --policy option records one, and a prefix
+// can't tell that from ordinary setup), and compact (it replaces a peer's working context). Other rig
+// commands (archive, attach, config set, seat set-model and the like) fall under the Bash(rig:*) allowance.
 export const TEAM_CLAUDE_ALLOW = [
   "Skill", "Read(./**)", "Glob", "Grep", "Bash(rig:*)",
   ...["pwd", "ls", "cat", "head", "tail", "rg", "grep", "find"].map(command => `Bash(${command}:*)`),
@@ -33,14 +40,12 @@ export const TEAM_CLAUDE_ALLOW = [
 ];
 export const TEAM_CLAUDE_ASK = [
   "up", "down", "start", "launch", "restore", "fork", "bootstrap", "create", "add", "remove",
-  "grow", "shrink", "expand", "archive", "unarchive", "destroy", "compact", "setup", "import", "adopt",
-  "attach", "bind", "handover", "unclaim", "release", "reconcile-session", "env down",
-  "policy apply", "config set", "config reset",
-  "daemon start", "daemon stop", "bundle install", "seat launch", "seat continue", "seat stop",
-  "seat clean", "seat handover", "seat switch-client", "seat set-permissions", "seat set-model", "seat set-effort",
+  "grow", "shrink", "expand", "destroy", "handover", "env down",
+  "daemon start", "daemon stop", "bundle install", "seat launch", "seat stop", "seat handover", "seat restart",
+  "import", "seat set-permissions", "policy apply", "policy permissions apply", "setup", "compact",
 ].map(command => `Bash(rig ${command}:*)`);
 
-type LaunchChoice = Pick<NodeBinding, "kernelAuthority" | "teamPermissionDefault" | "nonInterruptive" | "launchPosture" | "permissionMode"> & {
+type LaunchChoice = Pick<NodeBinding, "kernelAuthority" | "teamPermissionDefault" | "nonInterruptive" | "launchPosture" | "permissionMode" | "claudePermissions"> & {
   /** Whether OpenRig's managed compaction acts on this Claude launch; read from the policy when absent. */
   managedCompaction?: boolean;
 };
@@ -87,7 +92,17 @@ export function operationalLaunchArgs(runtime: string, choice: LaunchChoice): st
     return ["-c", "check_for_update_on_startup=false", ...nonInterruptiveArgs(runtime,
       choice.kernelAuthority ? { launchPosture: "full_bypass", nonInterruptive: true } : choice)];
   }
-  if (runtime === "claude-code") return withIdleCompactionOff(claudeOperationalArgs(choice), choice.managedCompaction ?? managedCompactionActive());
+  if (runtime === "claude-code") {
+    const args = withIdleCompactionOff(claudeOperationalArgs(choice), choice.managedCompaction ?? managedCompactionActive());
+    if (choice.claudePermissions === undefined) return args;
+    const rules = validateClaudePermissionRules(choice.claudePermissions);
+    const at = args.indexOf("--settings");
+    const settings = at < 0 ? {} : JSON.parse(args[at + 1]!) as Record<string, unknown>;
+    const permissions = (settings.permissions ?? {}) as { allow?: string[]; deny?: string[] };
+    const value = JSON.stringify({ ...settings, permissions: { ...permissions,
+      allow: [...(permissions.allow ?? []), ...rules.allow], deny: [...(permissions.deny ?? []), ...rules.deny] } });
+    return at < 0 ? [...args, "--settings", value] : [...args.slice(0, at + 1), value, ...args.slice(at + 2)];
+  }
   return choice.kernelAuthority ? [] : nonInterruptiveArgs(runtime, choice);
 }
 

@@ -20,17 +20,18 @@ import {
   mergeManagedBlock,
   stripManagedBlocks,
   type ManagedBlockMergeFsOps,
+  isPerSeatRoleGuidance,
+  isPerSeatRoleStartupFile,
 } from "./managed-blocks.js";
 import { resolveConcreteHint } from "./runtime-adapter.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import type { NodeStartupSnapshot } from "./types.js";
+import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID } from "./seat-skill-storage.js";
+import { guidanceFileIsLink } from "./footprint-choice.js";
 
 const LEGACY_BLOCK_START = (id: string) => `<!-- BEGIN RIGGED MANAGED BLOCK: ${id} -->`;
 const LEGACY_BLOCK_END = (id: string) => `<!-- END RIGGED MANAGED BLOCK: ${id} -->`;
 
-/** The per-seat role block is delivered through send_text, never merged into a shared file
- *  (ADR-0006); the adapters skip it, and so does this. */
-const NEVER_MERGED = new Set(["rig-role"]);
 
 export interface GuidanceItem {
   blockId: string;
@@ -45,6 +46,30 @@ export interface SeatGuidance {
   items: GuidanceItem[];
 }
 
+/** The file a seat's runtime merges its managed guidance blocks into, whatever a spec's `target` declares: the rig's
+ *  Claude file for Claude, `AGENTS.md` for Codex, or null for a runtime this doesn't know. */
+export function seatGuidanceFile(
+  runtime: string | null | undefined,
+  cwd: string,
+  claudeManagedBlockFile: string | null | undefined,
+): string | null {
+  const fileName = runtime === "claude-code"
+    ? (claudeManagedBlockFile ?? DEFAULT_CLAUDE_MANAGED_BLOCK_FILE)
+    : runtime === "codex" ? "AGENTS.md" : null;
+  return fileName ? nodePath.join(cwd, fileName) : null;
+}
+
+/** Whether guidance text holds this id's block as it is written: a BEGIN marker followed later by its END, in the
+ *  current or legacy form. For reporting an installed file; restore's own `blockState` is unchanged. */
+export function hasCompleteGuidanceBlock(content: string, blockId: string): boolean {
+  const ordered = (start: string, end: string): boolean => {
+    const begin = content.indexOf(start);
+    return begin >= 0 && content.indexOf(end, begin + start.length) >= 0;
+  };
+  return ordered(MANAGED_BLOCK_START(blockId), MANAGED_BLOCK_END(blockId))
+    || ordered(LEGACY_BLOCK_START(blockId), LEGACY_BLOCK_END(blockId));
+}
+
 /** The guidance file a seat's managed blocks live in, and the blocks it should hold on restore. */
 export function seatGuidance(
   startupCtx: NodeStartupSnapshot | null,
@@ -54,10 +79,8 @@ export function seatGuidance(
   readFile: (path: string) => string,
 ): SeatGuidance | null {
   if (!startupCtx || !cwd) return null;
-  const fileName = startupCtx.runtime === "claude-code"
-    ? (claudeManagedBlockFile ?? DEFAULT_CLAUDE_MANAGED_BLOCK_FILE)
-    : startupCtx.runtime === "codex" ? "AGENTS.md" : null;
-  if (!fileName) return null;
+  const targetPath = seatGuidanceFile(startupCtx.runtime, cwd, claudeManagedBlockFile);
+  if (!targetPath) return null;
   const items = new Map<string, GuidanceItem>();
   for (const saved of startupCtx.projectionEntries) {
     if (saved.category !== "guidance" || saved.mergeStrategy !== "managed_block") continue;
@@ -74,9 +97,9 @@ export function seatGuidance(
     let hint: string = f.deliveryHint;
     if (hint === "auto") {
       try {
-        hint = resolveConcreteHint(f.path, readFile(f.absolutePath));
+        hint = resolveConcreteHint(f.path, readFile(f.absolutePath), f.orientation);
       } catch {
-        if (f.path.endsWith(".md") && !f.path.endsWith("SKILL.md")) {
+        if (f.path.endsWith(".md") && !f.path.endsWith("SKILL.md") && !isPerSeatRoleStartupFile(f.path, f.orientation)) {
           items.set(f.path, { blockId: f.path, sourcePath: f.absolutePath, unresolved: true });
         }
         continue;
@@ -85,8 +108,19 @@ export function seatGuidance(
     if (hint !== "guidance_merge") continue;
     items.set(f.path, { blockId: f.path, sourcePath: f.absolutePath });
   }
-  for (const id of NEVER_MERGED) items.delete(id);
-  return { targetPath: nodePath.join(cwd, fileName), items: [...items.values()] };
+  // A seat's own role goes through send_text, never into a shared file (ADR-0006); the adapters skip it too.
+  for (const [id, item] of items) if (isPerSeatRoleGuidance(item.blockId, item.sourcePath)) items.delete(id);
+  return { targetPath, items: [...items.values()] };
+}
+
+/** The seat-skills line's own rule, as at a start: its block belongs in the guidance only with the person's yes, and never
+ *  through a linked file. Without it, the block is left out (so it's neither put back nor reported missing), and
+ *  `excluded` says why. */
+export function applySeatSkillsLineRule(guidance: SeatGuidance, answeredYes: boolean): { guidance: SeatGuidance; excluded?: "not_yes" | "linked" } {
+  if (!guidance.items.some((item) => item.blockId === SEAT_SKILLS_BOOTSTRAP_BLOCK_ID)) return { guidance };
+  const excluded = !answeredYes ? "not_yes" : guidanceFileIsLink(guidance.targetPath) ? "linked" : undefined;
+  if (!excluded) return { guidance };
+  return { guidance: { ...guidance, items: guidance.items.filter((item) => item.blockId !== SEAT_SKILLS_BOOTSTRAP_BLOCK_ID) }, excluded };
 }
 
 type BlockState = "complete" | "absent" | "incomplete";

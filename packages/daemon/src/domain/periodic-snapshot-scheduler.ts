@@ -92,15 +92,35 @@ export class PeriodicSnapshotScheduler {
           // try/catch so a refresh throw NEVER skips the snapshot (guard caveat:
           // do not wrap refresh + capture in a single try/catch).
           if (this.deps.resumeMetadataRefresher && this.deps.sessionRegistry) {
+            const sessions = this.deps.sessionRegistry.getLatestLiveSessions(rigId);
             try {
               // fillNullOnly: a routine snapshot refresh fills null tokens but NEVER
               // clears a present one (rev1-r2 fix — keep stale-present for FR-6).
               await this.deps.resumeMetadataRefresher.refresh(
-                this.deps.sessionRegistry.getLatestLiveSessions(rigId),
+                sessions,
                 { fillNullOnly: true, ...(tickListProcesses ? { listProcesses: tickListProcesses } : {}) },
               );
             } catch { /* best-effort — the snapshot still writes below */ }
+            const runningIds = new Set(this.deps.sessionRegistry.getLatestLiveSessions(rigId)
+              .filter((session) => session.status === "running").map((session) => session.sessionId));
+            // Teardown stops seats one at a time; do not publish a partial
+            // occupant set if any refreshed running seat stopped or was replaced.
+            // Read after refresh: teardown may have written the pre-down source
+            // while refresh was awaiting. A lookup failure is best-effort and
+            // must not suppress the periodic capture. The lookup reads every
+            // snapshot of the rig, so it runs only when a seat did change.
+            if (sessions.some((session) => session.status === "running" && !runningIds.has(session.sessionId))) {
+              let hasEarlierUsableSnapshot = false;
+              try {
+                hasEarlierUsableSnapshot = this.deps.snapshotRepo.findLatestRestoreUsable(rigId) !== null;
+              } catch { /* treat an unavailable lookup as no earlier snapshot */ }
+              if (hasEarlierUsableSnapshot) continue;
+            }
           }
+          // Refresh yields to teardown/archive. Recheck immediately before the
+          // synchronous capture so a stopped rig cannot replace its pre-down
+          // recovery source with a newer snapshot of absent occupants.
+          if (this.getRunningNonArchivedRigs(rigId).length === 0) continue;
           this.deps.snapshotCapture.captureSnapshot(rigId, "auto-periodic");
           this.deps.snapshotRepo.pruneSnapshotsByKind(rigId, "auto-periodic", this.retentionKeep);
         } catch {
@@ -112,7 +132,7 @@ export class PeriodicSnapshotScheduler {
     }
   }
 
-  private getRunningNonArchivedRigs(): string[] {
+  private getRunningNonArchivedRigs(rigId?: string): string[] {
     // Latest-session-per-node semantics: a node is running only when its
     // NEWEST session (by created_at DESC, id DESC) has status='running'.
     // Mirrors ps-projection.ts:116-118. An older running + newer exited
@@ -121,9 +141,10 @@ export class PeriodicSnapshotScheduler {
       `SELECT DISTINCT r.id FROM rigs r
        JOIN nodes n ON n.rig_id = r.id
        WHERE r.archived_at IS NULL
+         ${rigId ? "AND r.id = ?" : ""}
          AND (SELECT s.status FROM sessions s WHERE s.node_id = n.id
               ORDER BY s.created_at DESC, s.id DESC LIMIT 1) = 'running'`
-    ).all() as Array<{ id: string }>;
+    ).all(...(rigId ? [rigId] : [])) as Array<{ id: string }>;
     return rows.map((r) => r.id);
   }
 }

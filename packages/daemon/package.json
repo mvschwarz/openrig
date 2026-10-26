@@ -1,11 +1,12 @@
 {
   "name": "@openrig/daemon",
-  "version": "0.6.10",
+  "version": "0.7.1",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
     "./bundle-behaviour": { "types": "./dist/bundle-behaviour-surface.d.ts", "import": "./dist/bundle-behaviour-surface.js" },
+    "./router-line": { "types": "./dist/router-line-surface.d.ts", "import": "./dist/router-line-surface.js" },
     "./spec-validation": {
       "types": "./dist/spec-validation-surface.d.ts",
       "import": "./dist/spec-validation-surface.js"
@@ -74,9 +75,17 @@
       "types": "./dist/health-detectors-surface.d.ts",
       "import": "./dist/health-detectors-surface.js"
     },
+    "./workflow-scope": {
+      "types": "./dist/workflow-scope-surface.d.ts",
+      "import": "./dist/workflow-scope-surface.js"
+    },
     "./local-reading": {
       "types": "./dist/local-reading-surface.d.ts",
       "import": "./dist/local-reading-surface.js"
+    },
+    "./codex-auth": {
+      "types": "./dist/codex-auth-surface.d.ts",
+      "import": "./dist/codex-auth-surface.js"
     }
   },
   "scripts": {
@@ -93,6 +102,7 @@
     "better-sqlite3": "^13.0.3",
     "hono": "^4.7.0",
     "smol-toml": "^1.8.0",
+    "string-width": "^8.3.0",
     "tar": "^7.5.13",
     "ulid": "^2.3.0",
     "yaml": "^2.8.3"

@@ -530,3 +530,70 @@ describe("rig mode: a saved mode and a posture kept side by side (04-A2)", () =>
     expect(logs.join("\n")).toContain("  also kept: focus (mode, rig:r1, set_at=2026-10-14T18:00:00.000Z)");
   });
 });
+
+// Slice 04 (OPR.0.7.0.4) 04-A3 — eight legacy record fields are stored and shown, but nothing in OpenRig acts on them
+// yet. Every human surface that prints them says so, on exactly those eight, with one legend line; `scope` (the
+// binding's key) and `evidence_citation` (read by the operating-posture consumer) aren't marked. JSON is unchanged.
+describe("rig mode: legacy record fields marked stored, not applied (04-A3)", () => {
+  const MARKED = ["autonomy_scope", "heartbeat_cadence", "inspection_depth", "update_detail", "escalation_threshold", "concurrency_limit",
+    "permission_prompt_posture", "expiry_or_stale_rule"];
+  const UNMARKED = ["scope", "evidence_citation"];
+  const MARK = "(stored; not applied)";
+  const LEGEND = "fields marked (stored; not applied) are saved and shown, but nothing in OpenRig acts on them yet";
+  const record = {
+    autonomy_scope: "bounded_continuation", heartbeat_cadence: "fast", inspection_depth: "forensic", update_detail: "verbose",
+    escalation_threshold: "low", concurrency_limit: "serial", permission_prompt_posture: "normal",
+    scope: "rig", expiry_or_stale_rule: "re_confirm_on_long_gap", evidence_citation: "operator confirmed debug",
+  };
+  /** Each printed record line, keyed by its field. */
+  const fieldLines = (out: string[]) => Object.fromEntries(out.map((l) => l.match(/^\s+([a-z_]+): /)).filter(Boolean).map((m) => [m![1]!, m!.input!]));
+  const expectMarked = (out: string[]) => {
+    const lines = fieldLines(out);
+    for (const f of MARKED) expect(lines[f], f).toMatch(new RegExp(`: \\S+  \\(stored; not applied\\)$`));
+    for (const f of UNMARKED) expect(lines[f], f).not.toContain(MARK);
+    expect(out.filter((l) => l.trim() === LEGEND)).toHaveLength(1);
+  };
+
+  it("effective marks exactly the eight fields, with one legend line; --json is unchanged", async () => {
+    const effectiveResponse = { status: 200, data: { posture: "known", effective: { binding: { id: "rig:r1", mode: "debug", record, qualifier: "r1", setAt: "t", setBy: "operator" }, resolvedScope: "rig" } } };
+    await rigModeCommand(deps(fakeClient({ effectiveResponse }).client)).parseAsync(["node", "rig", "effective", "--rig", "r1"]);
+    expectMarked(logs);
+    logs.length = 0;
+    await rigModeCommand(deps(fakeClient({ effectiveResponse }).client)).parseAsync(["node", "rig", "effective", "--rig", "r1", "--json"]);
+    expect(logs.join("\n")).toBe(JSON.stringify(effectiveResponse.data, null, 2));
+  });
+
+  it("defaults marks the seven fields of every mode, says the served default stale rule isn't applied, and has one legend line; --json is unchanged", async () => {
+    // The daemon serves all eight modes (the six legacy names and both postures).
+    const seven = { autonomy_scope: "a", heartbeat_cadence: "b", inspection_depth: "c", update_detail: "d", escalation_threshold: "e", concurrency_limit: "f", permission_prompt_posture: "g" };
+    const modes = ["sleep", "desk", "mobile", "away", "focus", "debug", "human-led", "delegated"];
+    const defaultsResponse = { status: 200, data: { recommendedModeDefaults: Object.fromEntries(modes.map((m) => [m, seven])),
+      recommendedDefaultScope: Object.fromEntries(modes.map((m) => [m, "rig"])), defaultStaleRule: "re_confirm_on_long_gap" } };
+    await rigModeCommand(deps(fakeClient({ defaultsResponse }).client)).parseAsync(["node", "rig", "defaults"]);
+    const marked = logs.filter((l) => l.endsWith(`  ${MARK}`));
+    expect(marked).toHaveLength(8 * 7); // seven fields for each of the eight modes
+    for (const l of marked) expect(MARKED.some((f) => l.trimStart().startsWith(`${f}: `))).toBe(true);
+    // The served default isn't a stored field, so it reads "(not applied)" without "stored".
+    expect(logs).toContain("\ndefault stale rule: re_confirm_on_long_gap  (not applied)");
+    expect(logs.filter((l) => l.trim() === LEGEND)).toHaveLength(1);
+    logs.length = 0;
+    await rigModeCommand(deps(fakeClient({ defaultsResponse }).client)).parseAsync(["node", "rig", "defaults", "--json"]);
+    expect(logs.join("\n")).toBe(JSON.stringify(defaultsResponse.data, null, 2));
+  });
+
+  it("the set preview marks the eight fields of the proposed record, with one legend line; exit 2; --json is unchanged", async () => {
+    await rigModeCommand(deps(fakeClient({}).client)).parseAsync(["node", "rig", "set", "debug", "--qualifier", "q-1"]);
+    expect(process.exitCode).toBe(2);
+    expectMarked(logs);
+    logs.length = 0;
+    await rigModeCommand(deps(fakeClient({}).client)).parseAsync(["node", "rig", "set", "debug", "--qualifier", "q-1", "--json"]);
+    expect(process.exitCode).toBe(2);
+    expect(logs.join("\n")).not.toContain("not applied");
+  });
+
+  it("set's help says the same on each of the eight options, and not on the others", () => {
+    const set = rigModeCommand(deps(fakeClient({}).client)).commands.find((c) => c.name() === "set")!;
+    const marked = set.options.filter((o) => (o.description ?? "").includes(`${MARK}: nothing in OpenRig acts on it yet`)).map((o) => o.long!.slice(2).replace(/-/g, "_"));
+    expect(marked.sort()).toEqual([...MARKED].sort());
+  });
+});

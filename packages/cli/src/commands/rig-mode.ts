@@ -143,11 +143,21 @@ async function writeTargetState(client: DaemonClient, scope: string, qualifier: 
   }
 }
 
-function emitRecord(label: string, record: Record<string, string>): void {
+/** Record fields OpenRig stores, validates and shows, but that nothing in OpenRig acts on yet. (`scope` is the
+ *  binding's key, and the operating-posture reader uses `evidence_citation`.) */
+const NOT_APPLIED_FIELDS = new Set([
+  "autonomy_scope", "heartbeat_cadence", "inspection_depth", "update_detail",
+  "escalation_threshold", "concurrency_limit", "permission_prompt_posture", "expiry_or_stale_rule",
+]);
+const NOT_APPLIED = "(stored; not applied)";
+const NOT_APPLIED_LEGEND = "fields marked (stored; not applied) are saved and shown, but nothing in OpenRig acts on them yet";
+
+function emitRecord(label: string, record: Record<string, string>, legend = true): void {
   console.log(label);
   for (const [k, v] of Object.entries(record)) {
-    console.log(`  ${k}: ${v}`);
+    console.log(`  ${k}: ${v}${NOT_APPLIED_FIELDS.has(k) ? `  ${NOT_APPLIED}` : ""}`);
   }
+  if (legend && Object.keys(record).some((k) => NOT_APPLIED_FIELDS.has(k))) console.log(`  ${NOT_APPLIED_LEGEND}`);
 }
 
 function emitOperatingPosture(value: OperatingPosture | undefined): void {
@@ -221,14 +231,14 @@ export function rigModeCommand(depsOverride?: RigModeDeps): Command {
     )
     .option("--scope <scope>", `Scope: ${SCOPES.join(" | ")} (default: per-mode recommendation)`)
     .option("--qualifier <id>", "Rig/project/qitem ID; mission: project/mission; workstream: project/mission/slice-id; omit for global_host")
-    .option("--autonomy-scope <v>")
-    .option("--heartbeat-cadence <v>")
-    .option("--inspection-depth <v>")
-    .option("--update-detail <v>")
-    .option("--escalation-threshold <v>")
-    .option("--concurrency-limit <v>")
-    .option("--permission-prompt-posture <v>", "One of: normal | batch_for_human | do_not_prompt_unless_blocked (auto_accept is FORBIDDEN by convention).")
-    .option("--expiry-or-stale-rule <v>")
+    .option("--autonomy-scope <v>", `Saved with the mode ${NOT_APPLIED}: nothing in OpenRig acts on it yet.`)
+    .option("--heartbeat-cadence <v>", `Saved with the mode ${NOT_APPLIED}: nothing in OpenRig acts on it yet.`)
+    .option("--inspection-depth <v>", `Saved with the mode ${NOT_APPLIED}: nothing in OpenRig acts on it yet.`)
+    .option("--update-detail <v>", `Saved with the mode ${NOT_APPLIED}: nothing in OpenRig acts on it yet.`)
+    .option("--escalation-threshold <v>", `Saved with the mode ${NOT_APPLIED}: nothing in OpenRig acts on it yet.`)
+    .option("--concurrency-limit <v>", `Saved with the mode ${NOT_APPLIED}: nothing in OpenRig acts on it yet.`)
+    .option("--permission-prompt-posture <v>", `One of: normal | batch_for_human | do_not_prompt_unless_blocked (auto_accept is FORBIDDEN by convention). Saved with the mode ${NOT_APPLIED}: nothing in OpenRig acts on it yet, and it doesn't change any native permission prompt.`)
+    .option("--expiry-or-stale-rule <v>", `Saved with the mode ${NOT_APPLIED}: nothing in OpenRig acts on it yet.`)
     .option("--evidence <citation>", "Free-text citation (operator message id, file pointer, chatroom topic, etc.).")
     .option("--confirm", "Confirm the proposed binding and apply it. Without this flag, set is restate-only.")
     .option("--bearer <token>", "Operator bearer token (or set OPENRIG_AUTH_BEARER_TOKEN env).")
@@ -609,9 +619,11 @@ export function rigModeCommand(depsOverride?: RigModeDeps): Command {
         }
         for (const mode of MODES) {
           console.log(`${mode}  (default scope: ${res.data.recommendedDefaultScope[mode]})`);
-          emitRecord("  ", res.data.recommendedModeDefaults[mode] as unknown as Record<string, string>);
+          emitRecord("  ", res.data.recommendedModeDefaults[mode] as unknown as Record<string, string>, false);
         }
-        console.log(`\ndefault stale rule: ${res.data.defaultStaleRule}`);
+        // The served default, not a stored field: nothing applies it, but it isn't stored either.
+        console.log(`\ndefault stale rule: ${res.data.defaultStaleRule}  (not applied)`);
+        console.log(NOT_APPLIED_LEGEND);
       });
     });
 

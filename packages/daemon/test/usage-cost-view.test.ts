@@ -116,6 +116,29 @@ describe("computeCostView", () => {
     expect(queryUsageSeries(db, { lane: "context" }).map((r) => r.clientCostEstimateUsd)).toEqual([3.0, 0.2]);
   });
 
+  it("keeps a long seat history in order and separate from other seats", () => {
+    const insert = db.prepare(`INSERT INTO usage_samples
+      (lane, seat_session, node_id, source, sampled_at, captured_at,
+       native_session_id, client_cost_estimate_usd, total_input_tokens, total_output_tokens)
+      VALUES ('context', ?, 'n1', 'claude_statusline_json', ?, ?, 's1', ?, ?, 10)`);
+    db.transaction(() => {
+      for (let i = 0; i < 20_000; i++) {
+        const at = new Date(Date.parse("2026-10-01T00:00:00.000Z") + i * 30_000).toISOString();
+        insert.run("dev-claude@r", at, at, i / 100, i * 100);
+        if (i % 1000 === 0) insert.run("other@r", at, at, 0.5, 42);
+      }
+    })();
+    const result = computeCostView(db, { nowIso: NOW });
+    expect(result.seats).toHaveLength(2);
+    expect(result.seats[0]).toMatchObject({
+      seatSession: "dev-claude@r", costUsd: 199.99, resets: 0,
+      window: { since: "2026-10-01T00:00:00.000Z", asOf: "2026-10-07T22:39:30.000Z" },
+      tokens: { input: 1_999_900, output: 10 },
+    });
+    expect(result.seats[1]).toMatchObject({ seatSession: "other@r", costUsd: 0.5, tokens: { input: 42, output: 10 } });
+    expect(computeCostView(db, { nowIso: NOW, seatSession: "other@r" }).seats).toEqual([result.seats[1]]);
+  });
+
   it("an old estimate reads stale and is still shown, never expired to zero", () => {
     claude(samples, "2026-10-13T08:00:00.000Z", "s1", 1.5);
     expect(computeCostView(db, { nowIso: NOW }).seats[0]).toMatchObject({ status: "reported", costUsd: 1.5, stale: true, ageSeconds: 7500 });

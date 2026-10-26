@@ -1,5 +1,6 @@
+import fs from "node:fs";
 import { Command } from "commander";
-import { DaemonClient } from "../client.js";
+import { DaemonClient, DaemonTimeoutError } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -19,9 +20,44 @@ export const USAGE_ACROSS_HOSTS_READ_TIMEOUT_MS = 20_000;
 // deadline: 50 s + 15 s + a 10 s margin = 75 s.
 export const USAGE_ACROSS_HOSTS_REFRESH_TIMEOUT_MS = 75_000;
 
+type Peer = { logicalId: string; sessionName: string | null; home?: "same" | "different" | "unknown"; effect: string; step?: string };
+type SeatView = { home?: string; activity?: string; peers: Peer[] };
+type SwitchReport = { home?: string; account: string; tokenFile?: string; conversation?: string | null; loginChanged: boolean; undo: string | null; peers: Peer[];
+  restart?: { recoveryCommand?: string; remainingStep?: string }; next?: string; warnings?: string[]; tokenApplied?: boolean };
+
+// A switch waits as long as `rig seat restart` does: the seat's in-place restart runs inside it.
+const SWITCH_TIMEOUT_MS = 120_000;
+
+function printSeat(seat: SeatView): void {
+  if (seat.home) console.log(`home: ${seat.home}`);
+  if (seat.activity) console.log(`seat activity: ${seat.activity}`);
+  for (const peer of seat.peers) {
+    const where = peer.home === "same" ? "peer on this home" : peer.home === "different" ? "seat on another home" : "seat, home unknown";
+    console.log(`${where}: ${peer.sessionName ?? peer.logicalId}: ${peer.effect}`);
+    if (peer.step) console.log(`  then: ${peer.step}`);
+  }
+}
+
+type AccountOpts = { toAccount?: string; tokenFile?: string; storedLogin?: boolean };
+
+/** The account a switch names: a Codex login's saved name, a Claude token's label with its file, or a Claude seat's stored
+ *  login. Null when neither --to-account nor --stored-login was given. */
+function targetAccount(opts: AccountOpts): { toAccount: string; tokenFile?: string | null } | null {
+  if (opts.storedLogin) return { toAccount: "stored-login", tokenFile: null };
+  if (!opts.toAccount) return null;
+  return { toAccount: opts.toAccount, ...(opts.tokenFile !== undefined ? { tokenFile: opts.tokenFile } : {}) };
+}
+
+function printClaude(claude: { label: string; tokenFile: string | null; checked: string[]; notChecked: string[]; instead?: string }): void {
+  console.log(`Claude token: ${claude.tokenFile ? `"${claude.label}", read from ${claude.tokenFile} when Claude starts` : "none (the config dir's stored login)"}`);
+  if (claude.instead) console.log(`instead of the stored login, the seat would use ${claude.instead}`);
+  if (claude.checked.length) console.log(`checked for anything that outranks it: ${claude.checked.join("; ")}`);
+  if (claude.notChecked.length) console.log(`not checked (the seat's /status shows what it uses): ${claude.notChecked.join("; ")}`);
+}
+
 export function providerCommand(depsOverride?: StatusDeps): Command {
   const cmd = new Command("provider").description(
-    "Provider accounts, usage signals, and interruption-safe account switching",
+    "Provider accounts and usage signals, and moving one Codex seat to another login saved in its Codex home",
   );
   const getDeps = (): StatusDeps =>
     depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
@@ -36,8 +72,10 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
   // A 4xx (e.g. 404 unknown provider / 400 invalid target) is an ERROR, never a success.
   function handleHttpError(res: { status: number; data: unknown }, label: string): boolean {
     if (res.status < 400) return false;
-    const p = (res.data ?? {}) as { error?: unknown; errors?: unknown };
-    console.error(p.errors ?? p.error ?? `${label} failed (HTTP ${res.status})`);
+    const p = (res.data ?? {}) as { error?: unknown; errors?: unknown; message?: unknown };
+    // Preserve the daemon's actionable explanation instead of showing only its error code.
+    if (typeof p.message === "string" && p.message.trim()) console.error(p.message);
+    else console.error(p.errors ?? p.error ?? `${label} failed (HTTP ${res.status})`);
     process.exitCode = res.status >= 500 ? 2 : 1;
     return true;
   }
@@ -136,12 +174,16 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       const c = (r["configured"] ?? {}) as Record<string, unknown>;
       const configured = c["source"] === "registry"
         ? `configured: profile ${c["profileRef"]} (registry, recorded ${c["recordedAt"]}${c["profileSaved"] === false ? "; profile not saved on this host" : c["profileSaved"] === null ? "; whether the profile is saved: unknown" : ""})`
+        : c["source"] === "default_login" && c["homeFrom"]
+          ? `configured: the seat's own home (${c["home"]}, from its ${c["homeFrom"]} env)`
         : c["source"] === "default_login"
           ? `configured: default login${c["home"] ? ` (${c["home"]})` : ""}`
           : `configured: unknown (${c["reason"]})`;
       const allowance = (r["allowance"] ?? {}) as Record<string, unknown>;
       console.log(`  ${r["seatSession"]}  ${r["runtime"]}  ${configured} · allowance not linked`);
       if (c["source"] === "default_login" && c["homeNote"]) console.log(`    ${c["homeNote"]}`);
+      const ignored = r["ignoredHome"] as Record<string, unknown> | undefined;
+      if (ignored) console.log(`    ignored: its ${ignored["from"]} env sets ${ignored["variable"]}=${ignored["value"]}, which isn't an absolute path, so it isn't used as this seat's home`);
       for (const note of (r["registryNotes"] as string[] | undefined) ?? []) console.log(`    ${note}`);
       const observed = r["observed"] as Record<string, unknown> | undefined;
       const differs = (observed?.["differsFrom"] as string[] | undefined) ?? [];
@@ -162,7 +204,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
   function identityLabel(id: Record<string, unknown>): string {
     // Codex: account, else the workspace account/read reported; Claude: the organisation and email auth status
     // reported at the last refresh; else unresolved. For Codex the email is a label.
-    return id["accountId"] ? `account ${id["accountId"]}`
+    return id["source"] === "configured credential label" ? `credential ${id["credentialLabel"]} (operator label)` : id["accountId"] ? `account ${id["accountId"]}`
       : id["workspaceId"] ? `workspace ${id["workspaceId"]} (from account/read; no usage account id)`
         : id["source"] !== "unresolved" && id["orgId"] ? `organisation ${id["orgName"] ? `${id["orgName"]} (${id["orgId"]})` : id["orgId"]}`
           : "identity unresolved";
@@ -175,10 +217,33 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     if (saved) console.log(`  ${saved["note"]}: ${((saved["names"] as string[]) ?? []).join(", ")}`);
   }
 
+  /** The row's retained history: last observed exhaustion, the account link, and an inactive account's profile. */
+  function historyLines(r: Record<string, unknown>): string[] {
+    const out: string[] = [];
+    const ex = r["lastObservedExhausted"] as Record<string, unknown> | null | undefined;
+    if (ex) out.push(`last observed exhausted at ${ex["at"]} (${ex["window"] ?? "account-level"}: ${ex["evidence"]})`);
+    if (r["accountHistory"] === "unknown") out.push("account history unknown");
+    if (r["savedProfile"] === "not linked") out.push("saved profile: not linked (OpenRig doesn't record which saved profile was active at this read)");
+    return out;
+  }
+
+  /** The row's sign-in fact, as served; nothing when an older daemon doesn't serve it. */
+  function signInLine(r: Record<string, unknown>): string | null {
+    const s = r["signIn"] as Record<string, unknown> | undefined;
+    if (!s) return null;
+    const state = s["state"] === "needs_sign_in" ? "needs sign-in" : String(s["state"]);
+    return `sign-in: ${state} (${s["evidence"]}${s["at"] ? `; as of ${s["at"]}` : ""})`;
+  }
+
   function renderUsageRow(r: Record<string, unknown>, pad = "  "): void {
     const id = r["identity"] as Record<string, unknown> | null;
     if (!id) {
       console.log(`${pad}${r["provider"]}  unavailable: ${r["unavailableReason"] ?? "no reading"}`);
+      // A row with no identity yet can still carry history (Claude's before its first identity refresh): before sign-in,
+      // as on an identified row.
+      for (const line of historyLines(r)) console.log(`${pad}  ${line}`);
+      const signIn = signInLine(r);
+      if (signIn) console.log(`${pad}  ${signIn}`);
       return;
     }
     // Identity first; for Codex the email is a label.
@@ -187,9 +252,11 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     // Not from the latest read: say only that. A later read proves no other account (an unresolved read
     // may be this same login), so the label names the read, not an account.
     const earlier = r["latestFromSource"] ? ""
+      : r["retained"] === "before_restart" ? "  [kept from before the daemon restarted; not a current reading]"
       : id["source"] === "unresolved" ? "  [from an earlier read; possibly this same login]"
         : "  [from an earlier read; the latest read didn't match this row]";
     console.log(`${pad}${r["provider"]}  ${labels.join(" · ")}${earlier}`);
+    if (r["probe"]) console.log(`${pad}  token probe: ${JSON.stringify(r["probe"])}`);
     if (r["identityNote"]) console.log(`${pad}  ${r["identityNote"]}`);
     const unresolved = r["unresolved"] as Record<string, unknown> | undefined;
     if (unresolved) {
@@ -201,21 +268,26 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       const level = w["levelReason"] ? `${w["level"]} (${w["levelReason"]})` : String(w["level"]);
       const fresh = w["freshnessReason"] ? `${w["freshness"]}: ${w["freshnessReason"]}` : String(w["freshness"]);
       const seat = w["seatSession"] ? ` by seat ${w["seatSession"]}` : "";
-      console.log(`${pad}  ${windowName(w)}  ${left}  ${level}  resets ${w["resetsAt"] ?? "unknown"}  observed ${w["observedAt"]}${seat} (${fresh})`);
+      console.log(`${pad}  ${windowName(w)}  ${left}  ${level}  resets ${w["resetsAt"] ?? "unknown"}  observed ${w["observedAt"]}${seat} (${fresh})${w["status"] ? ` · provider ${w["status"]}` : ""}`);
       for (const d of (w["disagreeingSeats"] as Array<Record<string, unknown>> | undefined) ?? []) {
         console.log(`${pad}    seat ${d["seatSession"]} reports ${Math.max(0, 100 - Number(d["usedPercent"]))}% left  resets ${d["resetsAt"] ?? "unknown"}  observed ${d["observedAt"]}`);
       }
+      const expect = w["expectation"] as Record<string, unknown> | undefined;
+      if (expect) console.log(`${pad}    expected full since ${expect["expectedFullSince"]}, not yet observed (${expect["note"]})`);
     }
-    if (((r["windows"] as unknown[]) ?? []).length === 0 && r["unavailableReason"]) console.log(`${pad}  ${r["unavailableReason"]}`);
+    for (const line of historyLines(r)) console.log(`${pad}  ${line}`);
+    if (r["unavailableReason"]) console.log(`${pad}  ${r["unavailableReason"]}`);
     if (r["limitEvidence"]) console.log(`${pad}  limit evidence: ${r["limitEvidence"]}`);
     const last = r["lastRefresh"] as Record<string, unknown> | null;
     if (last?.["outcome"] === "failed") {
       // Claude's refresh reads identity only; its windows keep coming from the seats' samples.
-      console.log(r["provider"] === "claude"
+      console.log(r["provider"] === "claude" && (r["source"] as Record<string, unknown> | undefined)?.["kind"] !== "claude_token_probe"
         ? `${pad}  identity refresh failed at ${last["at"]}: ${failureText(last)}; the identity shown is from the last refresh that worked, if any`
         : `${pad}  refresh failed at ${last["at"]}: ${failureText(last)}; last reading kept, marked old`);
     }
     console.log(`${pad}  current availability: ${r["currentAvailability"]}`);
+    const signIn = signInLine(r);
+    if (signIn) console.log(`${pad}  ${signIn}`);
   }
 
   // Slice 01 — usage across registered hosts, as the daemon serves it: each host's status and whether it serves usage
@@ -335,16 +407,24 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     .command("status")
     .description("The whole four-block provider read model (accounts, bindings, signals)")
     .option("--json", "Output as parseable JSON")
-    .option("--refresh", "First read the Codex login's usage windows and the Claude login's identity natively (up to 35 s; needs provider.usage_windows on)")
+    .option("--refresh", "First read the Codex login's usage windows and the Claude login's identity natively (up to 35 s here, 75 s with --all-hosts/--hosts; provider.usage_windows is off by default: rig config set provider.usage_windows true)")
     .option("--provider <p>", "With --refresh, read only this provider (codex|claude)")
-    .option("--all-hosts", "Usage windows across every registered host, as each host already holds them (needs provider.usage_windows on)")
+    .option("--claude-token-file <path>", "With --refresh --provider claude, probe this absolute token-file reference on the selected daemon (one model turn; no token value in argv)")
+    .option("--credential-label <label>", "Operator label for the selected Claude token file; not provider-observed account identity")
+    .option("--all-hosts", "Usage windows across every registered host, as each host already holds them (off by default: rig config set provider.usage_windows true)")
     .option("--hosts <ids>", "Like --all-hosts, for these registered hosts (comma-separated); this host is always included, so --hosts b --refresh also reads this daemon")
-    .action(async (opts: { json?: boolean; refresh?: boolean; provider?: string; allHosts?: boolean; hosts?: string }) => {
+    .action(async (opts: { json?: boolean; refresh?: boolean; provider?: string; allHosts?: boolean; hosts?: string; claudeTokenFile?: string; credentialLabel?: string }) => {
       if (opts.provider !== undefined && opts.provider !== "codex" && opts.provider !== "claude") {
         console.error(`--provider must be codex or claude (got ${opts.provider})`);
         process.exitCode = 1;
         return;
       }
+      const tokenSelected = opts.claudeTokenFile !== undefined || opts.credentialLabel !== undefined;
+      if (tokenSelected && (!opts.claudeTokenFile || !opts.credentialLabel || !opts.refresh || opts.provider !== "claude" || opts.allHosts || opts.hosts !== undefined)) {
+        console.error("A token probe requires --refresh --provider claude --claude-token-file <absolute path> --credential-label <label>, on one daemon (no --all-hosts/--hosts).");
+        process.exitCode = 1; return;
+      }
+      if (tokenSelected) console.error("Claude token usage refresh spends one model turn; timeout or refusal does not prove no allowance was consumed.");
       const client = await getClient(getDeps());
       if (!client) {
         process.exitCode = 1;
@@ -363,7 +443,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
         const providers = opts.provider ? [opts.provider] : ["codex", "claude"];
         const answered = await Promise.all(providers.map(async (provider) => ({
           provider,
-          answer: await client.post<Record<string, unknown>>("/api/provider/usage/refresh", { provider }, { timeoutMs: 60_000 }),
+          answer: await client.post<Record<string, unknown>>("/api/provider/usage/refresh", { provider, ...(tokenSelected ? { claudeToken: { label: opts.credentialLabel, tokenFile: opts.claudeTokenFile } } : {}) }, { timeoutMs: 60_000 }),
         })));
         // Bare --refresh keeps main's Codex exit: Claude is read too, but where it doesn't apply on this host
         // (no claude, no login, not a subscription login), or the daemon has no Claude refresh (400/404, an
@@ -426,46 +506,230 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
 
   cmd
     .command("precheck")
-    .description("Whether switching a seat to an account is safe (never offers an unsafe switch)")
+    .description("Whether a seat can move to a login: its in-place restart plan (nothing is stopped) and the login saved in the Codex home it runs on")
     .requiredOption("--seat <s>", "The seat session")
-    .requiredOption("--to-account <a>", "The target account ref")
+    .option("--to-account <a>", "Codex: the login's saved name in the seat's Codex home (rig auth list --codex-home <home>). Claude: your label for the token")
+    .option("--token-file <path>", "Claude: the absolute path of a 0600 file holding the seat's own subscription token; it's read only as Claude starts")
+    .option("--stored-login", "Claude: move the seat back to its config dir's stored login")
     .option("--json", "Output as parseable JSON")
-    .action(async (opts: { seat: string; toAccount: string; json?: boolean }) => {
+    .action(async (opts: AccountOpts & { seat: string; json?: boolean }) => {
+      const target = targetAccount(opts);
+      if (!target) {
+        console.error("Name the account: --to-account <name> (with --token-file <path> for a Claude seat), or --stored-login for a Claude seat.");
+        process.exitCode = 1;
+        return;
+      }
       const client = await getClient(getDeps());
       if (!client) {
         process.exitCode = 1;
         return;
       }
-      const qs = new URLSearchParams({ seat: opts.seat, toAccount: opts.toAccount });
-      const res = await client.get<{ safe: boolean; reasons?: string[] }>(`/api/provider/precheck?${qs.toString()}`);
+      const qs = new URLSearchParams({ seat: opts.seat, toAccount: target.toAccount,
+        ...(target.tokenFile === null ? { storedLogin: "1" } : target.tokenFile !== undefined ? { tokenFile: target.tokenFile } : {}) });
+      const res = await client.get<{ safe: boolean; reasons?: string[]; message?: string; seat?: SeatView;
+        claude?: Parameters<typeof printClaude>[0] }>(`/api/provider/precheck?${qs.toString()}`);
       if (handleHttpError(res, "precheck")) return;
       if (opts.json) console.log(JSON.stringify(res.data));
-      else console.log(res.data.safe ? "SAFE" : `UNSAFE: ${(res.data.reasons ?? []).join(", ")}`);
+      else {
+        console.log(res.data.safe ? "SAFE" : `UNSAFE: ${(res.data.reasons ?? []).join(", ")}`);
+        if (res.data.message) console.log(res.data.message);
+        if (res.data.seat) printSeat(res.data.seat);
+        if (res.data.claude) printClaude(res.data.claude);
+      }
       if (!res.data.safe) process.exitCode = 1; // let scripts gate on an unsafe verdict
     });
 
   cmd
     .command("switch")
-    .description("Switch a seat to an account (precheck-gated; the daemon orchestrates the switch)")
+    .description("Move one seat to another subscription login, keeping its conversation: a Codex seat to a login saved in its Codex home (Linux only), a Claude seat to its own token file")
     .requiredOption("--seat <s>", "The seat session")
-    .requiredOption("--to-account <a>", "The target account ref")
-    .option("--force-unsafe", "Override a non-stranding precheck failure (still refuses to strand a live conversation)")
+    .option("--to-account <a>", "Codex: the login's saved name in the seat's Codex home (rig auth list --codex-home <home>). Claude: your label for the token")
+    .option("--token-file <path>", "Claude: the absolute path of a 0600 file holding the seat's own subscription token; it's read only as Claude starts")
+    .option("--stored-login", "Claude: move the seat back to its config dir's stored login")
+    .option("--force-unsafe", "Kept for scripts; a seat's checks can't be overridden, since each means nothing safe to restart or no such login")
     .option("--json", "Output as parseable JSON")
-    .action(async (opts: { seat: string; toAccount: string; forceUnsafe?: boolean; json?: boolean }) => {
+    .addHelpText("after", `
+The daemon plans the seat's in-place restart first (rig seat restart --plan), so a refusal changes nothing. It then saves the
+home's current login as before-switch-<time>, activates the chosen one there (rig auth switch), and restarts the seat in place
+with the same conversation, pane and launch settings. If the current login can't be saved first, nothing changes. Every seat
+on that home shares its login. Peers aren't restarted: each keeps its current login only until its next token refresh, when
+Codex stops it with "signed in to another account" until it's restarted, so the report prints the rig seat restart <peer>
+--keep-conversation --reason "..." to paste for each. Signing in again there would replace the login you just switched to.
+One switch runs at a time per home; a switch that waited checks the seat again before it changes anything. The account
+isn't verified until the seat completes a tool turn: run the printed rig seat restart --keep-conversation --verify
+--expect-account. An uncertain restart is reported, never retried.
+
+Codex limits:
+- Linux only: the in-place restart reads the running process from /proc, so elsewhere it refuses before anything changes.
+- Same home: the login must already be saved in the home the seat runs on; the seat doesn't move to another home.
+
+A Claude seat keeps its config dir and gets its own subscription token: --to-account <your label> --token-file <absolute path
+to a 0600 file holding the token>. Only the path is kept, as the seat's reference; the launch reads the file as Claude starts,
+so the token never passes through OpenRig. First the daemon checks that the file would apply and that nothing Claude Code ranks
+above the token is set (a cloud provider, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, an apiKeyHelper), and refuses with each one
+and its remedy if it is. When the token applies, the launch also unsets those names for Claude's process, so the pane shell's
+own exports can't outrank it. It takes a snapshot and checks that the snapshot resumes the seat's conversation. Then, holding
+the seat so no other stop, launch or switch runs on it in between, it sets the reference and relaunches the seat from that
+snapshot in its own pane: Claude ends there, the pane and its scrollback stay, and restore resumes the same conversation in it.
+Work in flight when it stopped doesn't carry over. Only a refusal before Claude was touched reads as unchanged; a relaunch that
+doesn't report a resumed conversation reads unknown, with the snapshot's recovery command, and isn't retried.
+Seats sharing the config dir keep their own login: Claude Code reads the token from that one process's environment and doesn't
+save it. That environment is Claude's, so the tools, hooks and MCP servers it starts inherit the token, and one that prints its
+environment writes it into the transcript. A token-authenticated seat can make model requests but can't use claude.ai
+connectors or Remote Control; its local MCP servers still work. --stored-login moves it back to the config dir's stored login;
+a CLAUDE_CODE_OAUTH_TOKEN the seat still receives outranks that login, and the report says which token it will use. Claude's
+/status shows token auth with no account email, so the label is yours, not an observed account.`)
+    .action(async (opts: AccountOpts & { seat: string; forceUnsafe?: boolean; json?: boolean }) => {
+      const target = targetAccount(opts);
+      if (!target) {
+        console.error("Name the account: --to-account <name> (with --token-file <path> for a Claude seat), or --stored-login for a Claude seat.");
+        process.exitCode = 1;
+        return;
+      }
       const client = await getClient(getDeps());
       if (!client) {
         process.exitCode = 1;
         return;
       }
-      const res = await client.post<{ outcome?: string; reasons?: string[] }>("/api/provider/switch", {
-        seat: opts.seat,
-        toAccount: opts.toAccount,
-        forceUnsafe: opts.forceUnsafe ?? false,
-      });
+      type SwitchResponse = { status: number; data: { outcome?: string; reasons?: string[]; message?: string; seat?: SwitchReport } };
+      let res: SwitchResponse;
+      const startedAt = new Date().toISOString();
+      try {
+        res = await client.post<SwitchResponse["data"]>("/api/provider/switch", {
+          seat: opts.seat,
+          ...target,
+          forceUnsafe: opts.forceUnsafe ?? false,
+        }, { timeoutMs: SWITCH_TIMEOUT_MS });
+      } catch (err) {
+        if (!(err instanceof DaemonTimeoutError)) throw err;
+        // The daemon may still be switching: a timeout is neither a failure nor a reason to send it again.
+        res = { status: 200, data: { outcome: "unknown", reasons: ["switch_outcome_unknown"],
+          message: `The CLI timed out waiting for the daemon. The switch may still be running, or queued behind another switch on the same Codex home; a queued switch hasn't changed anything yet. `
+            + `For a Codex seat, it has restarted the seat once rig seat restart ${opts.seat} --keep-conversation --plan shows a lastRestart that finished after ${startedAt}. `
+            + `Until then an eligible plan, or an older lastRestart, doesn't mean it ended, so don't run the switch again: a second one would queue behind it. `
+            + `For a Claude seat, rig seat status ${opts.seat} shows its token reference and whether it runs; a second switch would wait for this one.` } };
+      }
       if (handleHttpError(res, "switch")) return;
       if (opts.json) console.log(JSON.stringify(res.data));
-      else console.log(res.data.outcome ?? "unknown");
-      if (res.data.outcome === "failed_safely") process.exitCode = 1;
+      else {
+        const { outcome, reasons, message, seat } = res.data;
+        console.log(reasons?.length ? `${outcome ?? "unknown"}: ${reasons.join(", ")}` : outcome ?? "unknown");
+        if (message) console.log(message);
+        if (seat?.home) {
+          console.log(`home: ${seat.home}${seat.loginChanged ? ` (now "${seat.account}")` : ""}`);
+          if (seat.undo) {
+            console.log(`to restore the home's saved credential bytes: ${seat.undo}`);
+            console.log("undo restores saved credential bytes only; sign-in is unverified. Saved credentials may expire, be revoked, or be superseded by refresh elsewhere. Restart the affected seat and use the existing account verification; fresh sign-in may be required.");
+          }
+        } else if (seat) {
+          console.log(`Claude token: ${seat.tokenFile ? `"${seat.account}", read from ${seat.tokenFile}` : "the config dir's stored login"}${seat.loginChanged
+            ? seat.tokenApplied === false ? " (reference saved; the token didn't take effect)" : " (set)" : ""}`);
+          for (const warning of seat.warnings ?? []) console.log(`warning: ${warning}`);
+          if (seat.conversation) console.log(`conversation: ${seat.conversation}`);
+          if (seat.undo) console.log(`to switch back: ${seat.undo}`);
+        }
+        if (seat) {
+          if (seat.restart?.recoveryCommand) console.log(`recovery: ${seat.restart.recoveryCommand}`);
+          if (!seat.home && seat.restart?.remainingStep) console.log(seat.restart.remainingStep);
+          printSeat({ peers: seat.peers });
+          if (seat.next) console.log(`next: ${seat.next}`);
+        }
+      }
+      if (res.data.outcome !== "rebind_in_progress" && res.data.outcome !== "succeeded") process.exitCode = 1;
+    });
+
+  // Slice 18 — subscription move reports: what the agent that moved a Codex home reports, kept as queue items tagged
+  // subscription-move. Reading them back answers "why did these seats move?"; the Fleet app reads the same route.
+  type MoveEntry = {
+    qitemId: string; reportedAt: string; reportedTo: string; followedBy: string[];
+    report: { host: string; home: string; from: string; to: string; reason: string; follows?: string; seats: Array<{ seat: string; result: string; missing?: string }>; peers?: Array<{ seat: string; note: string }> };
+  };
+  const moves = cmd
+    .command("moves")
+    .description("Recent subscription move reports on this daemon, newest first: from and to, why, and each seat's result")
+    .option("--seat <seat>", "Only reports that restarted or listed this seat, among the reports read")
+    .option("--limit <n>", "How many of the newest reports to read, before --seat filters them (default 50, at most 200)")
+    .option("--json", "Output as parseable JSON")
+    .action(async (opts: { seat?: string; limit?: string; json?: boolean }) => {
+      const client = await getClient(getDeps());
+      if (!client) {
+        process.exitCode = 1;
+        return;
+      }
+      const qs = new URLSearchParams();
+      if (opts.seat) qs.set("seat", opts.seat);
+      if (opts.limit) qs.set("limit", opts.limit);
+      const res = await client.get<{ moves: MoveEntry[]; unreadable: Array<{ qitemId: string; reason: string }>; truncated: boolean }>(
+        `/api/provider/moves${qs.toString() ? `?${qs.toString()}` : ""}`,
+      );
+      if (handleHttpError(res, "moves")) return;
+      if (opts.json) {
+        console.log(JSON.stringify(res.data));
+        return;
+      }
+      const { moves: entries, unreadable, truncated } = res.data;
+      if (entries.length === 0) console.log("No subscription move reports.");
+      for (const { qitemId, reportedAt, reportedTo, followedBy, report } of entries) {
+        console.log(`${reportedAt}  ${qitemId}  ${report.host} ${report.home}: ${report.from} → ${report.to} (to ${reportedTo})`);
+        console.log(`  why: ${report.reason}`);
+        for (const seat of report.seats) console.log(`  ${seat.seat}: ${seat.result}${seat.missing ? `; missing: ${seat.missing}` : ""}`);
+        for (const peer of report.peers ?? []) console.log(`  ${peer.seat}: ${peer.note}`);
+        if (report.follows) console.log(`  follows ${report.follows}`);
+        if (followedBy.length > 0) console.log(`  followed by ${followedBy.join(", ")}`);
+      }
+      for (const item of unreadable) console.log(`unreadable: ${item.qitemId}: ${item.reason}`);
+      if (truncated) console.log(`(only the newest ${opts.limit ?? 50} reports were read; older ones may exist: raise --limit)`);
+    });
+  moves
+    .command("report")
+    .description("File a report of a move you made or attempted, as a queue item to whoever asked (it moves nothing)")
+    .requiredOption("--file <path>", "The report as JSON, or - for stdin")
+    .requiredOption("--to <seat>", "Who gets the report: whoever asked for the move, or the person")
+    .option("--follows <qitemId>", "The earlier report this one follows up (sets the report's follows)")
+    .option("--evidence-ref <ref>", "The evidence a report to a person's seat names, e.g. the saved --verify output")
+    .option("--json", "Output as parseable JSON")
+    .addHelpText("after", `
+The report (version 1):
+  { "version": 1, "host": "<machine>", "home": "<CODEX_HOME>", "from": "<subscription label>", "to": "<subscription label>",
+    "reason": "<why, in your words>",
+    "policy": { "ref": "account-policy", "version": "<manifest version>" }   (or { "none": true })
+    "readings": [{ "subject": "<allowance>", "basis": "observed", "observedAt": "<when observed>", "summary": "<what it said>" },
+                 { "subject": "<allowance>", "basis": "expected", "expectedFullSince": "<the reset>", "summary": "..." }],
+    "seats": [{ "seat": "<seat>", "result": "moved",
+                "accountEvidence": { "state": "matched", "detail": "<Account line>", "at": "<time>" },
+                "toolTurn": { "state": "observed", "at": "<time>" } },
+              { "seat": "<seat>", "result": "unconfirmed", "missing": "<what wasn't seen>" }],
+    "peers": [{ "seat": "<seat>", "note": "not restarted; account unverified" }] }
+moved needs accountEvidence matched and toolTurn observed, as rig seat restart --verify reports them; until both are
+seen, report the seat unconfirmed (or unknown) with what's missing. An expected reading (slice 01's expectation after
+a reset) stays labelled expected. Labels and references only: a value in a recognized credential format is refused.
+A refused report records nothing and changes nothing about the move: correct it and file it again; never repeat the
+switch or restart because a report was refused.`)
+    .action(async (opts: { file: string; to: string; follows?: string; evidenceRef?: string; json?: boolean }, command: Command) => {
+      const json = opts.json || command.parent?.opts().json;
+      let report: unknown;
+      try {
+        report = JSON.parse(opts.file === "-" ? fs.readFileSync(0, "utf8") : fs.readFileSync(opts.file, "utf8"));
+      } catch {
+        console.error(`Could not read a JSON report from ${opts.file}. Nothing was recorded, and the move itself is unchanged.`);
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.follows && report && typeof report === "object" && !Array.isArray(report)) report = { ...report, follows: opts.follows };
+      const client = await getClient(getDeps());
+      if (!client) {
+        process.exitCode = 1;
+        return;
+      }
+      const res = await client.post<{ qitemId?: string; errors?: string[] }>("/api/provider/moves", {
+        to: opts.to, report, ...(opts.evidenceRef ? { evidenceRef: opts.evidenceRef } : {}),
+      });
+      if (res.status < 400 && json) console.log(JSON.stringify(res.data));
+      else if (res.status < 400) console.log(`Filed ${res.data.qitemId} to ${opts.to}`);
+      else {
+        for (const error of res.data.errors ?? []) console.error(`- ${error}`);
+        handleHttpError(res, "move report");
+      }
     });
 
   return cmd;

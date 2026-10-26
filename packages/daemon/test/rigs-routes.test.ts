@@ -78,6 +78,24 @@ describe("Rig CRUD routes", () => {
     expect(body.edges[0].kind).toBe("delegates_to");
   });
 
+  it("GET /api/rigs/:id -> names the representative: the one delegates_to root, at its session", async () => {
+    const rig = repo.createRig("led-rig");
+    const lead = repo.addNode(rig.id, "orch.lead", { role: "orchestrator" });
+    const worker = repo.addNode(rig.id, "dev.impl", { role: "worker" });
+    repo.addEdge(rig.id, lead.id, worker.id, "delegates_to");
+    const representative = async () => ((await (await app.request(`/api/rigs/${rig.id}`)).json()) as { representative: string | null }).representative;
+
+    // A root with no session has no seat to reach.
+    expect(await representative()).toBeNull();
+    sessionRegistry.registerSession(lead.id, "orch-lead@led-rig");
+    expect(await representative()).toBe("orch-lead@led-rig");
+
+    // Two roots is no single representative.
+    const other = repo.addNode(rig.id, "qa.lead", { role: "orchestrator" });
+    repo.addEdge(rig.id, other.id, worker.id, "delegates_to");
+    expect(await representative()).toBeNull();
+  });
+
   it("GET /api/rigs/:id -> unbound nodes have binding: null (not omitted)", async () => {
     const rig = repo.createRig("test-rig");
     repo.addNode(rig.id, "worker", { role: "worker" });

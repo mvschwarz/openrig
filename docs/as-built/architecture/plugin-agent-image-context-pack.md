@@ -123,11 +123,15 @@ is refused; the other content checks are advisory.
 
 `packages/daemon/src/domain/skill-catalog.ts` resolves a seat's skill loadout from the
 catalog at `skills.root` (`catalog.yaml`, schema `openrig.skill-catalog/v1`) and the system,
-topology and project selections. It projects skills into `<cwd>/.claude/skills` or
-`<cwd>/.agents/skills` and tracks what it owns in
-`<cwd>/.openrig/skill-loadouts/<runtime>.json`. Each projection reports `current`, `missing`,
-`shadowed`, `stale` or `conflicting`. `rig skill loadout --runtime <runtime>` inspects the
-composed projection and reconciles it only with `--apply`; `rig skill audit` is a separate
+topology and project selections. For a working directory it projects skills into
+`<cwd>/.claude/skills` or `<cwd>/.agents/skills` and tracks what it owns in
+`<cwd>/.openrig/skill-loadouts/<runtime>.json`. For a Claude or Codex team seat it takes a
+`location` instead: the seat's own storage outside the project, with its `skill-loadout.json`
+there, and for Claude the `openrig:<id>` names its generated plugin gives. Each projection
+reports `current`, `missing`, `shadowed`, `stale` or `conflicting`.
+`rig skill loadout --runtime <runtime>` inspects the composed projection for a working
+directory, `rig skill loadout --seat <session|self>` does the same for one seat's own skills,
+and both reconcile only with `--apply`; `rig skill audit` is a separate
 read-only provenance and freshness audit. Launch applies the selected loadout per seat.
 
 For a Claude Code or Codex seat, the profile resolver also adds each selected plugin's skills to
@@ -280,7 +284,9 @@ with. Claude Code before 2.1.290 ignores the key, Claude's managed settings take
 2. The agent writes `RESTORE-MAP.md.tmp` with its file-edit tool, completion marker last.
    Later ticks return `preparation_pending` until that exact map is complete. The map path is under the seat's working directory
    (`.openrig/compaction/preparation/<session>/<attempt>/`, with a `.gitignore` of `*`) when
-   that is writable, otherwise under `compaction/preparation/` in the OpenRig home.
+   that is writable, otherwise under `compaction/preparation/` in the OpenRig home. An explicit
+   `policies.claude_compaction.preparation_root` instead places maps at `<root>/<session>/<attempt>/`
+   for both manual and automatic attempts; failure to prepare that root stops the attempt without fallback.
 3. The daemon atomically renames the completed temp file to `RESTORE-MAP.md` in its existing
    final send checks, after rechecking the attempt and occupant. An already-complete final map
    remains compatible. Only then is `/compact` sent, with the final map path appended to the
@@ -309,7 +315,7 @@ over the global extra file, and an extra file that declares a different seat is 
 manually through `/api/compaction/trigger`, `cancel` and `state`, which use the terminal
 bearer-token middleware; it passes every request through when no token is configured.
 `--skip-map` skips the map requirement once, `--cancel` ends the preparation, and `--state`
-shows the attempt, its expected map and its deadline. A manual attempt has 120 seconds for
+shows the attempt, its expected map and its deadline. Ordinary approval prompts during preparation can be answered within that same deadline; OpenRig waits without answering them. A manual attempt has 180 seconds for
 preparation and the idle wait.
 
 The below-threshold continuation checks policy enablement too, except for an explicitly

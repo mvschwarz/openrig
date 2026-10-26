@@ -34,6 +34,9 @@ export const MAX_IDLE_CAPTURE_INTERVAL_MS = 6000;
 export const DEFAULT_TRANSCRIPT_STALE_AFTER_MS = 10_000;
 export const CAPTURE_RESULT_DEADLINE_MS = 5000;
 export const ACTIVITY_HINT_DEADLINE_MS = 1000;
+// A pane with no output and no pane change since its last capture is still captured in full this often. It bounds
+// what the pane key cannot see (another client editing history lines) and how long a failing capture goes unnoticed.
+export const IDLE_FULL_CAPTURE_MS = 10_000;
 
 /** A shared live resolver retains a usable policy during partial config writes.
  * Environment overrides keep their existing precedence over file settings. */
@@ -70,17 +73,27 @@ interface CaptureStats {
   idle: boolean; intervalMs: number; lines: number; idleCeilingMs: number;
 }
 const captureStats = new Map<string, CaptureStats>();
-let activitySnapshots = new WeakMap<TmuxAdapter, { at: number; pending: boolean; result: Promise<Map<string, number> | null> }>();
+type WindowHint = { activity: number; size?: string };
+let activitySnapshots = new WeakMap<TmuxAdapter, { at: number; pending: boolean; result: Promise<Map<string, WindowHint> | null> }>();
 
-async function activityHint(adapter: TmuxAdapter, session: string, cadence: number): Promise<number | undefined> {
-  if (typeof adapter.readAllSessionWindowActivity !== "function") return undefined;
+/** One shared window read per cadence: with readAllSessionWindows the size comes along at no extra call. */
+function readWindowHints(adapter: TmuxAdapter): Promise<Map<string, WindowHint> | null> {
+  if (typeof adapter.readAllSessionWindows === "function") return adapter.readAllSessionWindows();
+  return adapter.readAllSessionWindowActivity().then((m) => m && new Map([...m].map(([s, activity]) => [s, { activity }])));
+}
+
+/** The window listing every reader of this adapter shares: one list-windows in flight at a time, reused while under a
+ *  cadence old. `fresh` asks for a listing that starts now; while an older one is still running it gets null instead.
+ *  A reader past the 1 s deadline gets null and captures; the pending listing stays owned until its child exits. */
+export function windowSnapshot(adapter: TmuxAdapter, cadence: number, fresh = false): Promise<Map<string, WindowHint> | null> {
   let snapshot = activitySnapshots.get(adapter);
-  if (!snapshot || (!snapshot.pending && Date.now() - snapshot.at >= Math.min(cadence, 1000))) {
-    const next = { at: Date.now(), pending: true, result: Promise.resolve<Map<string, number> | null>(null) };
+  if (snapshot?.pending && fresh) return Promise.resolve(null);
+  if (!snapshot || (!snapshot.pending && (fresh || Date.now() - snapshot.at >= Math.min(cadence, 1000)))) {
+    const next = { at: Date.now(), pending: true, result: Promise.resolve<Map<string, WindowHint> | null>(null) };
     // Hints are advisory. A stalled tmux metadata call must not block otherwise
     // functioning pane captures. Keep pending tied to the actual child, rather
     // than the deadline, so timeout fallback never starts an accumulating probe.
-    const request = Promise.resolve().then(() => adapter.readAllSessionWindowActivity())
+    const request = Promise.resolve().then(() => readWindowHints(adapter))
       .catch(() => null).finally(() => { next.pending = false; });
     next.result = new Promise((resolve) => {
       const deadline = setTimeout(() => resolve(null), ACTIVITY_HINT_DEADLINE_MS);
@@ -90,7 +103,12 @@ async function activityHint(adapter: TmuxAdapter, session: string, cadence: numb
     snapshot = next;
     activitySnapshots.set(adapter, snapshot);
   }
-  return (await snapshot.result)?.get(session);
+  return snapshot.result;
+}
+
+async function activityHint(adapter: TmuxAdapter, session: string, cadence: number): Promise<WindowHint | undefined> {
+  if (typeof adapter.readAllSessionWindowActivity !== "function") return undefined;
+  return (await windowSnapshot(adapter, cadence))?.get(session);
 }
 
 /** Process-local capture observations, never provider readiness or per-process CPU. */
@@ -117,7 +135,8 @@ const activeSteps = new Map<string, number>();
 
 interface CaptureRequest { sessionName: string; isCurrent: () => boolean; resolve: (content: string | null) => void }
 
-// Sessions a batch's listing lacked: a seat that exited on its own keeps rotating until teardown. They read per target,
+// Sessions a batch's listing lacked: a seat that exited on its own keeps rotating until it is cleaned, relaunched or
+// torn down (a stopped or removed seat stops at once, see wireTranscriptCaptureStops). They read per target,
 // one fork that fails alone, instead of failing their chunk's chain every round. One that captures again rejoins.
 let unlistedSessions = new Set<string>();
 let pendingCaptures = new Map<TmuxAdapter, Map<number, CaptureRequest[]>>();
@@ -188,6 +207,9 @@ const capturingSessions = new Set<string>();
 // advertise freshness over stale on-disk bytes. getIngestHealth reads THIS
 // (with an mtime fallback). Keyed by sessionName (globally unique: {pod}-{member}@{rig}).
 const lastCaptureAtBySession = new Map<string, number>();
+// When a skipped tick last found the pane unchanged since its last capture. It keeps ingest live between captures;
+// the capture time stays the last real capture.
+const lastCheckedAtBySession = new Map<string, number>();
 
 // Per-start generation token. stop() and a replacing start() invalidate the
 // session's entry, so an in-flight tick that resumes after its async capture
@@ -199,8 +221,17 @@ const activeGeneration = new Map<string, number>();
 /** Last successful capture time (epoch ms) for a session, or undefined if no
  *  rotation has captured for it in this process. getIngestHealth reads this so
  *  ingest liveness is decoupled from the (write-suppressed) file mtime. */
+/** The file's size and mtime, or "" when it is missing or unreadable. */
+function fileStamp(filePath: string): string {
+  try { const st = fs.statSync(filePath); return `${st.size}:${st.mtimeMs}`; } catch { return ""; }
+}
+
 export function getLastCaptureAt(sessionName: string): number | undefined {
   return lastCaptureAtBySession.get(sessionName);
+}
+
+export function getLastCheckedAt(sessionName: string): number | undefined {
+  return lastCheckedAtBySession.get(sessionName);
 }
 
 /** Start a per-session capture-pane rotation timer. Idempotent: a
@@ -232,7 +263,14 @@ export function startTranscriptRotation(
   let nextCaptureAt = 0;
   let lastCaptureStartedAt = 0;
   let previousHint: number | undefined;
+  let previousSize: string | undefined;
   let idleIntervalMs = opts.pollIntervalMs;
+  // window_activity (epoch seconds) at the start of the last healthy capture, and that capture's start second.
+  let capturedHint: number | undefined;
+  let capturedSize: string | undefined;
+  let capturedStartSec = 0;
+  let persistedStamp = ""; // the transcript's size and mtime after the last healthy capture
+  let lastFullCaptureAt = 0;
 
   const tick = async (): Promise<void> => {
     if (!isCurrent() || capturingSessions.has(sessionName)) return;
@@ -249,20 +287,27 @@ export function startTranscriptRotation(
         idleIntervalMs = opts.pollIntervalMs;
         nextCaptureAt = 0;
         stats.idle = false;
+        capturedHint = undefined;
       }
       stats.intervalMs = opts.pollIntervalMs;
       stats.lines = opts.lines;
       stats.idleCeilingMs = idleCeiling();
-      const hint = typeof tmuxAdapter.readAllSessionWindowActivity === "function"
+      const window = typeof tmuxAdapter.readAllSessionWindowActivity === "function"
         ? await activityHint(tmuxAdapter, sessionName, opts.pollIntervalMs) : undefined;
+      const hint = window?.activity;
       if (!isCurrent()) return;
-      const activityChanged = hint !== undefined && hint !== previousHint;
+      // A pane change that is not output (respawn, pane switch, zoom, clear-history) moves the window key instead.
+      const activityChanged = hint !== undefined && (hint !== previousHint || window?.size !== previousSize);
       if (activityChanged) {
         idleIntervalMs = opts.pollIntervalMs;
         stats.idle = false;
         nextCaptureAt = Math.min(nextCaptureAt, lastCaptureStartedAt + opts.pollIntervalMs);
       }
       previousHint = hint;
+      previousSize = window?.size;
+      // A transcript deleted or truncated behind rotation's back is rewritten at once.
+      const filePersisted = persistedStamp === "" || fileStamp(outputPath) === persistedStamp;
+      if (!filePersisted) nextCaptureAt = 0;
       // Unknown hints never mean idle; keep the configured full-capture cadence.
       if (hint === undefined) {
         stats.idle = false;
@@ -271,9 +316,23 @@ export function startTranscriptRotation(
       }
       // Due at the nearest shared tick: a session started between ticks keeps its cadence instead of slipping a step.
       if (Date.now() + timerStepMs / 2 < nextCaptureAt) return;
+      // tmux bumps window_activity on every pane write. A hint older than the last capture's start second, and unchanged
+      // since, means the transcript already holds the pane's bytes: the tick skips the capture and records no capture time.
+      if (hint !== undefined && hint === capturedHint && window?.size === capturedSize && hint < capturedStartSec
+        && tickStartedAt - lastFullCaptureAt < IDLE_FULL_CAPTURE_MS && persistedStamp !== "" && filePersisted) {
+        lastCaptureStartedAt = tickStartedAt;
+        lastCheckedAtBySession.set(sessionName, Date.now());
+        stats.idle = true;
+        idleIntervalMs = Math.min(idleCeiling(), idleIntervalMs * 2);
+        nextCaptureAt = Date.now() + idleIntervalMs;
+        return;
+      }
       // Schedule from this tick, not its eventual completion: work inside a
       // fixed-step timer must not shift an active capture past the next tick.
       lastCaptureStartedAt = tickStartedAt;
+      const startHint = hint;
+      const startSize = window?.size;
+      capturedHint = undefined;
       captureStartedAt = performance.now();
       stats.captures += 1;
       captureStillRunning = true;
@@ -296,6 +355,7 @@ export function startTranscriptRotation(
       // so getIngestHealth falls back to a stale mtime for it.
       if (!isCurrent()) return;
       if (content === null) {
+        lastCheckedAtBySession.delete(sessionName);
         stats.failures += 1;
         stats.idle = false;
         nextCaptureAt = tickStartedAt + opts.pollIntervalMs;
@@ -338,6 +398,8 @@ export function startTranscriptRotation(
         // The file already holds exactly these bytes (persisted + current), so
         // this IS a completed healthy tick — record liveness, skip the rewrite.
         lastCaptureAtBySession.set(sessionName, Date.now());
+        capturedHint = startHint; capturedSize = startSize; capturedStartSec = Math.floor(tickStartedAt / 1000); lastFullCaptureAt = tickStartedAt;
+        persistedStamp = fileStamp(outputPath);
         stats.idle = hint !== undefined && !activityChanged;
         idleIntervalMs = stats.idle ? Math.min(idleCeiling(), idleIntervalMs * 2) : opts.pollIntervalMs;
         // Idle work starts after the last healthy completion; the derived
@@ -355,10 +417,13 @@ export function startTranscriptRotation(
       // required write leaves liveness un-advanced and getIngestHealth reads the
       // (correctly stale) file mtime.
       lastCaptureAtBySession.set(sessionName, Date.now());
+      capturedHint = startHint; capturedSize = startSize; capturedStartSec = Math.floor(tickStartedAt / 1000); lastFullCaptureAt = tickStartedAt;
+      persistedStamp = fileStamp(outputPath);
       stats.idle = false;
       idleIntervalMs = opts.pollIntervalMs;
       nextCaptureAt = tickStartedAt + idleIntervalMs;
     } catch {
+      lastCheckedAtBySession.delete(sessionName);
       stats.failures += 1;
       stats.idle = false;
       nextCaptureAt = tickStartedAt + opts.pollIntervalMs;
@@ -398,6 +463,7 @@ export function stopTranscriptRotation(sessionName: string): void {
   // Drop the liveness record: once rotation stops, capture really has stopped,
   // so getIngestHealth should fall back to mtime (which correctly reads stale).
   lastCaptureAtBySession.delete(sessionName);
+  lastCheckedAtBySession.delete(sessionName);
   // Invalidate the generation so any in-flight tick from this start bails out
   // after its async capture instead of resurrecting liveness / writing.
   activeGeneration.delete(sessionName);
@@ -418,6 +484,7 @@ export function clearAllTranscriptRotationsForTest(): void {
   tickers.clear();
   activeSteps.clear();
   lastCaptureAtBySession.clear();
+  lastCheckedAtBySession.clear();
   activeGeneration.clear();
   captureStats.clear();
   settingsReloadError = null;

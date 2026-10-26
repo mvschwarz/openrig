@@ -53,6 +53,7 @@ function fixture(runtime = "codex", file = ":memory:") {
   const store = new NativePermissionStore(db);
   return { db, rigRepo, rig, node, sibling, registry, session, eventBus, service, store };
 }
+const memberRules = { allow: ["Bash(node lane.mjs *)"], deny: ["Read(./private/**)"] };
 const input = (mode: string) => ({ seatRef: "dev-owner@permissions", mode, reason: "deliberate operator choice", actor: "operator@permissions" });
 const lineage = (db: Database.Database) => JSON.stringify(["nodes", "sessions", "occupant_tenures", "node_startup_context"].map(t => db.prepare(`SELECT * FROM ${t}`).all()));
 const binding = (nodeId = "node"): NodeBinding => ({ id: "binding", nodeId, attachmentType: "tmux", tmuxSession: "seat", tmuxWindow: null, tmuxPane: "%1", cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", cwd: "/inert/project" });
@@ -73,18 +74,18 @@ describe("S03 future native permission selections (offline; no native effect cla
     expect(db.prepare("SELECT COUNT(*) n FROM schema_migrations WHERE name LIKE '088_%'").get()).toEqual({ n: 1 });
     expect(db.pragma("foreign_key_check")).toEqual([]);
   });
-  it("audits one seat atomically without changing siblings, sessions or native history", async () => {
-    const f = fixture(); const before = lineage(f.db);
+  it.each(["codex", "claude-code"])("audits %s selections without changing siblings, sessions or native history", async runtime => {
+    const f = fixture(runtime); const before = lineage(f.db);
     expect(await f.service.setPermissions(input("full_bypass"))).toMatchObject({ ok: true, changed: true, to: { mode: "full_bypass" } });
     expect(lineage(f.db)).toBe(before); expect(f.store.read(f.sibling.id)).toBeNull();
     const events = f.db.prepare("SELECT payload FROM events WHERE type='node.permissions_changed'").all() as { payload: string }[];
     expect(events).toHaveLength(1);
     expect(JSON.parse(events[0]!.payload)).toMatchObject({ nodeId: f.node.id, actor: input("").actor, reason: input("").reason, source: "seat_selection", effect: "future_launches_only" });
     expect(await f.service.setPermissions(input("full_bypass"))).toMatchObject({ ok: true, changed: false });
-    expect(f.db.prepare("SELECT COUNT(*) n FROM events WHERE type='node.permissions_changed'").get()).toEqual({ n: 1 });
+    expect(f.db.prepare("SELECT COUNT(*) n FROM events WHERE type='node.permissions_changed'").get()).toEqual({ n: runtime === "codex" ? 2 : 1 });
     expect(await f.service.setPermissions(input("inherit"))).toMatchObject({ ok: true, changed: true, to: null });
     expect(f.store.read(f.node.id)).toBeNull(); expect(lineage(f.db)).toBe(before);
-    expect(f.db.prepare("SELECT COUNT(*) n FROM events WHERE type='node.permissions_changed'").get()).toEqual({ n: 2 });
+    expect(f.db.prepare("SELECT COUNT(*) n FROM events WHERE type='node.permissions_changed'").get()).toEqual({ n: runtime === "codex" ? 3 : 2 });
   });
   it("rolls back the selection if the audit append fails", async () => {
     const f = fixture(); vi.spyOn(f.eventBus, "persistWithinTransaction").mockImplementation(() => { throw new Error("audit unavailable"); });
@@ -165,16 +166,18 @@ describe("S03 future native permission selections (offline; no native effect cla
   });
   it.each(["codex", "claude-code"])("legacy restore resolves current stored selection for %s", async runtime => {
     const f = fixture(runtime); await f.service.setPermissions(input(runtime === "codex" ? "full_bypass" : "auto"));
+    if (runtime === "claude-code") await f.service.setPermissions({ ...input(""), mode: undefined, rules: memberRules });
     const resume = vi.fn(async () => ({ ok: false, code: "offline", message: "stop" }));
     const ctx = { db: f.db, rigRepo: f.rigRepo, sessionRegistry: f.registry, appliedLaunchStore: new AppliedLaunchObservationStore(f.db),
       claudeResume: { canResume: () => runtime === "claude-code", resume }, codexResume: { canResume: () => runtime === "codex", resume } };
     await (RestoreOrchestrator.prototype as any).attemptResume.call(ctx, f.node.id, "seat", runtime === "codex" ? "codex_id" : "claude_id", "original", "/inert", null, "model", "floor");
     expect(resume).toHaveBeenCalledWith(...(runtime === "codex"
       ? ["seat", "codex_id", "original", "/inert", null, "full_bypass", "model"]
-      : ["seat", "claude_id", "original", "/inert", "floor", "model", "auto", f.node.id]));
+      : ["seat", "claude_id", "original", "/inert", "floor", "model", "auto", f.node.id, undefined, undefined, undefined, undefined, undefined, undefined, memberRules]));
   });
   it.each(["fresh", "resume", "fork"])("shared startup applies selected Claude auto on %s and keeps inherited posture separate", async path => {
     const f = fixture("claude-code"); await f.service.setPermissions(input("auto"));
+    await f.service.setPermissions({ ...input(""), mode: undefined, rules: memberRules });
     const launchHarness = vi.fn(async () => ({ ok: false as const, error: "offline stop before native launch" }));
     const adapter = { runtime: "claude-code", project: async () => ({ projected: [], skipped: [], failed: [] }),
       deliverStartup: async () => ({ delivered: [], failed: [] }), launchHarness } as unknown as RuntimeAdapter;
@@ -184,7 +187,7 @@ describe("S03 future native permission selections (offline; no native effect cla
       resolvedStartupFiles: [], startupActions: [], isRestore: path === "resume",
       ...(path === "resume" ? { resumeToken: "retained", resumeType: "claude_id" } : {}),
       ...(path === "fork" ? { forkSource: { kind: "native_id" as const, value: "parent" } } : {}) });
-    expect(launchHarness).toHaveBeenCalledWith(expect.objectContaining({ permissionMode: "auto", launchPosture: "full_bypass" }), expect.anything());
+    expect(launchHarness).toHaveBeenCalledWith(expect.objectContaining({ permissionMode: "auto", launchPosture: "full_bypass", claudePermissions: memberRules }), expect.anything());
   });
 });
 
@@ -228,6 +231,17 @@ describe("S03 selected arguments and unchanged defaults", () => {
     expect(t.send).not.toHaveBeenCalled();
     expect(await new ClaudeResumeAdapter(t.tmux, { claudeManagedLaunch: fakeManaged(modes) }).resume("seat", "claude_id", "original", "/inert", "full_bypass", null, "auto", "node")).toMatchObject({ ok: false, code: "permission_selection_refused" });
     expect(t.send).not.toHaveBeenCalled();
+  });
+  it("Claude legacy resume sends the recorded rules with the same conversation and team hook", async () => {
+    const t = refusedTransport();
+    await new ClaudeResumeAdapter(t.tmux).resume("seat", "claude_id", "original", "/inert", "floor", null,
+      undefined, "node", undefined, false, false, true, undefined, undefined, memberRules);
+    const command = t.send.mock.calls[0]![1];
+    expect(command).toContain("--resume 'original'");
+    expect(command).toContain('Read(./private/**)');
+    expect(command).toContain('Bash(node lane.mjs *)');
+    expect(command).toContain('PreToolUse');
+    expect(command.match(/--settings/g)).toHaveLength(1);
   });
   it("Claude legacy resume carries the supported explicit mode", async () => {
     const t = refusedTransport(); await new ClaudeResumeAdapter(t.tmux, { claudeManagedLaunch: fakeManaged(["auto"]) }).resume("seat", "claude_id", "original", "/inert", "full_bypass", null, "auto", "node");

@@ -14,6 +14,7 @@ import { PodRepository } from "../src/domain/pod-repository.js";
 import { WorkflowRuntime } from "../src/domain/workflow-runtime.js";
 import { resolveWorkflowHumanDestination } from "../src/domain/workflow-human-destination.js";
 import { addHumanFragment, writeProjection, projectionPath, type HumanFragment } from "../src/domain/gateway/human-registry.js";
+import { setDefaultPerson } from "../src/domain/gateway/participants.js";
 import { makeEnsureStuckExceptionItem } from "../src/domain/workflow-exception-escalation.js";
 import { workflowRoutes } from "../src/routes/workflow.js";
 
@@ -96,7 +97,10 @@ describe.each(["serial", "dependency"])("workflow registered-human selection at 
 
   it("an explicit existing setting selects among humans and is re-read for the next episode", () => {
     add("owner-one"); add("owner-two");
-    expect(() => resolveWorkflowHumanDestination()).toThrow(/explicitly select/);
+    expect(() => resolveWorkflowHumanDestination()).toThrow(/choose a default with rig gateway default/);
+    // The default person, chosen in the participant side file, is the fallback; the explicit setting still wins over it.
+    expect(setDefaultPerson("owner-one")).toMatchObject({ ok: true });
+    expect(resolveWorkflowHumanDestination()).toBe("owner-one@external");
     vi.stubEnv("OPENRIG_WORKSPACE_OPERATOR_SEAT_NAME", "owner-two@external");
     expect(resolveWorkflowHumanDestination()).toBe("owner-two@external");
     vi.stubEnv("OPENRIG_WORKSPACE_OPERATOR_SEAT_NAME", "owner-one@external");
@@ -202,7 +206,7 @@ describe.each(["serial", "dependency"])("workflow registered-human selection at 
       let faultHits = 0;
       const readFault = Object.assign(new Error("fixture capability evidence read failed"), { code: "SQLITE_IOERR" });
       const spy = vi.spyOn(db, "prepare").mockImplementation((sql) => {
-        if (((mode === "read-fault" || mode === "preferred") && sql === "SELECT id FROM rigs WHERE name = ? ORDER BY created_at LIMIT 1")
+        if (((mode === "read-fault" || mode === "preferred") && sql === "SELECT id FROM rigs WHERE name = ? ORDER BY archived_at IS NOT NULL, created_at LIMIT 1")
           || (mode === "binding-read-fault" && sql === "SELECT bound_rig FROM workflow_instances WHERE instance_id = ?")) {
           faultHits += 1;
           throw readFault;
@@ -253,7 +257,7 @@ describe.each(["serial", "dependency"])("workflow registered-human selection at 
     expect(runtime.exceptionReadiness(id)?.routes[0]).toMatchObject({ state: "ready", roleResolution: "no-match", position: "fallback", destinationSession: "owner-one@external" });
     const prepare = db.prepare.bind(db);
     vi.spyOn(db, "prepare").mockImplementation(sql => {
-      if (sql === "SELECT id FROM rigs WHERE name = ? ORDER BY created_at LIMIT 1") throw new Error("fixture inventory unavailable");
+      if (sql === "SELECT id FROM rigs WHERE name = ? ORDER BY archived_at IS NOT NULL, created_at LIMIT 1") throw new Error("fixture inventory unavailable");
       return prepare(sql);
     });
     expect(runtime.exceptionReadiness(id)?.routes[0]).toMatchObject({ state: "unavailable", roleResolution: "unavailable", destinationSession: null, message: "fixture inventory unavailable" });

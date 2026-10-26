@@ -1,11 +1,15 @@
 import { Command } from "commander";
+import { ConfigStore } from "../config-store.js";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, type LifecycleDeps } from "../daemon-lifecycle.js";
+import { daemonMayAnswer } from "../daemon-reachability.js";
 import { realDeps } from "./daemon.js";
 
 export interface CompactPlanDeps {
   lifecycleDeps: LifecycleDeps;
   clientFactory: (url: string) => DaemonClient;
+  /** Config file that holds the automatic compaction setting; defaults to the rig config. */
+  configPath?: string;
 }
 
 interface RigEntry {
@@ -50,6 +54,12 @@ interface BasePlanEntry {
 interface CompactPlanThresholds {
   thresholdTokens: number;
   thresholdPercent: number;
+}
+
+interface AutomaticCompactionSetting {
+  enabled: boolean | null;
+  thresholdPercent: number | null;
+  unavailableReason: string | null;
 }
 
 interface CompactPlanSeatPolicy {
@@ -110,8 +120,16 @@ interface CompactPlanResult {
     mode: "read_only_plan";
     defaultThresholdTokens: number;
     defaultThresholdPercent: number;
+    /** The plan's own token threshold; not the automatic compaction setting. */
     thresholdTokens: number;
+    /** The plan's own fallback percentage; not the automatic compaction setting. */
     thresholdPercent: number;
+    /** Whether `policies.claude_compaction.enabled` is on; null when the config could not be read. */
+    automaticCompactionEnabled: boolean | null;
+    /** `policies.claude_compaction.threshold_percent`, shown only for comparison; null when the config could not be read. */
+    automaticCompactionThresholdPercent: number | null;
+    /** Why the automatic compaction setting is unknown; null when it was read. */
+    automaticCompactionUnavailableReason: string | null;
     oneSeatAtATime: true;
     autoCompactAllowed: false;
     explicitAuthorizationRequired: true;
@@ -302,7 +320,12 @@ function analyzeNode(node: NodeEntry, thresholds: CompactPlanThresholds): Candid
   };
 }
 
-function buildPlan(nodes: NodeEntry[], thresholds = defaultThresholds(), incompleteRigs: IncompleteRig[] = []): CompactPlanResult {
+function buildPlan(
+  nodes: NodeEntry[],
+  thresholds: CompactPlanThresholds,
+  incompleteRigs: IncompleteRig[],
+  automaticCompaction: AutomaticCompactionSetting,
+): CompactPlanResult {
   const candidates: CandidateEntry[] = [];
   const blocked: BlockedEntry[] = [];
   const skipped: SkippedEntry[] = [];
@@ -336,6 +359,9 @@ function buildPlan(nodes: NodeEntry[], thresholds = defaultThresholds(), incompl
       defaultThresholdPercent: PERCENT_FALLBACK_THRESHOLD,
       thresholdTokens: thresholds.thresholdTokens,
       thresholdPercent: thresholds.thresholdPercent,
+      automaticCompactionEnabled: automaticCompaction.enabled,
+      automaticCompactionThresholdPercent: automaticCompaction.thresholdPercent,
+      automaticCompactionUnavailableReason: automaticCompaction.unavailableReason,
       oneSeatAtATime: true,
       autoCompactAllowed: false,
       explicitAuthorizationRequired: true,
@@ -349,13 +375,27 @@ function buildPlan(nodes: NodeEntry[], thresholds = defaultThresholds(), incompl
   };
 }
 
+function automaticCompactionSummary(policy: CompactPlanResult["policy"]): string {
+  const enabled = policy.automaticCompactionEnabled;
+  const thresholdPercent = policy.automaticCompactionThresholdPercent;
+  if (enabled == null || thresholdPercent == null) {
+    const reason = policy.automaticCompactionUnavailableReason;
+    return `Automatic compaction: couldn't be read${reason ? `: ${reason}` : ""}; run \`rig config\` to check it.`;
+  }
+  if (enabled) {
+    return `Automatic compaction: on, at ${thresholdPercent}% (policies.claude_compaction.threshold_percent).`;
+  }
+  return `Automatic compaction: off (its threshold setting policies.claude_compaction.threshold_percent is ${thresholdPercent}%).`;
+}
+
 function printHuman(plan: CompactPlanResult): void {
   console.log("READ-ONLY PLAN - does not compact");
   if (plan.incompleteRigs.length > 0) {
     console.error(`Warning: partial plan; incomplete rigs: ${plan.incompleteRigs.map(({ rig, status }) => `${rig} (${typeof status === "number" ? `HTTP ${status}` : status})`).join(", ")}`);
   }
   console.log("Policy: read_only_plan; one-seat-at-a-time marshal triage; autoCompactAllowed=false; explicit authorization required.");
-  console.log(`Thresholds: ${plan.policy.thresholdTokens} estimated tokens; ${plan.policy.thresholdPercent}% when context window size is missing.`);
+  console.log(`Plan thresholds (this plan's own, not the automatic compaction setting): ${plan.policy.thresholdTokens} estimated tokens; ${plan.policy.thresholdPercent}% when context window size is missing.`);
+  console.log(automaticCompactionSummary(plan.policy));
   console.log(`Summary: ${plan.summary.candidateCount} candidates | ${plan.summary.blockedCount} blocked | ${plan.summary.skippedCount} skipped`);
   console.log();
 
@@ -418,8 +458,26 @@ Examples:
         return;
       }
 
+      let automaticCompaction: AutomaticCompactionSetting;
+      try {
+        const config = new ConfigStore(deps.configPath).resolve();
+        automaticCompaction = {
+          enabled: config.policies.claudeCompaction.enabled,
+          thresholdPercent: config.policies.claudeCompaction.thresholdPercent,
+          unavailableReason: null,
+        };
+      } catch (err) {
+        // The plan is still useful without the setting; report it as unknown rather than
+        // showing a default the person may not have configured, and keep the plan.
+        automaticCompaction = {
+          enabled: null,
+          thresholdPercent: null,
+          unavailableReason: err instanceof Error ? err.message : String(err),
+        };
+      }
+
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (status.state !== "running" || status.healthy === false) {
+      if (!daemonMayAnswer(status)) {
         console.error("Daemon is not running. Start it with: rig daemon start");
         console.error("Cannot build compact-plan without current read-only rig inventory.");
         process.exitCode = 1;
@@ -488,7 +546,7 @@ Examples:
           }
         }
 
-        const plan = buildPlan(allNodes, thresholds.value, incompleteRigs);
+        const plan = buildPlan(allNodes, thresholds.value, incompleteRigs, automaticCompaction);
         if (opts.json) {
           console.log(JSON.stringify(plan, null, 2));
         } else {

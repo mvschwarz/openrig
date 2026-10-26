@@ -1,3 +1,4 @@
+import { resolveCurrentSessionAddress } from "./session-registry.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
@@ -18,6 +19,7 @@ export interface WhoamiResult {
     memberId: string;
     memberLabel: string | null;
     sessionName: string | null;
+    senderAddress: string | null;
     runtime: string;
     cwd: string | null;
     agentRef: string | null;
@@ -154,6 +156,12 @@ export class WhoamiService {
     this.contextUsageStore = deps.contextUsageStore ?? null;
   }
 
+  private senderAddress(sessionName: string, nodeId: string): string {
+    const current = resolveCurrentSessionAddress(this.db, sessionName);
+    return current && resolveCurrentSessionAddress(this.db, current.senderAddress)?.nodeId === nodeId
+      ? current.senderAddress : sessionName;
+  }
+
   resolve(query: { nodeId?: string; sessionName?: string; targetRepoOverride?: string; compact?: boolean }): WhoamiResult | null {
     let nodeRow: NodeRow | undefined;
     let resolvedBy: "node_id" | "session_name";
@@ -166,17 +174,27 @@ export class WhoamiService {
       currentSessionName = this.getCurrentSessionName(nodeRow.id, nodeRow.rig_id);
     } else if (query.sessionName) {
       // Find sessions matching this name — check for ambiguity across rigs
-      const sessionRows = this.db
-        .prepare("SELECT * FROM sessions WHERE session_name = ? ORDER BY id DESC")
-        .all(query.sessionName) as SessionRow[];
+      const current = resolveCurrentSessionAddress(this.db, query.sessionName);
+      const sessionRows = current && current.sessionName !== query.sessionName
+        ? this.db.prepare("SELECT * FROM sessions WHERE id=?").all(current.sessionId) as SessionRow[]
+        : this.db.prepare("SELECT * FROM sessions WHERE session_name = ? ORDER BY id DESC").all(query.sessionName) as SessionRow[];
 
       if (sessionRows.length === 0) return null;
 
       // Check distinct rigs
-      const rigIds = new Set<string>();
+      const rigBySession = new Map<string, string>();
       for (const sess of sessionRows) {
         const node = this.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(sess.node_id) as { rig_id: string } | undefined;
-        if (node) rigIds.add(node.rig_id);
+        if (node) rigBySession.set(sess.id, node.rig_id);
+      }
+      let rigIds = new Set(rigBySession.values());
+      if (rigIds.size > 1) {
+        // An archived rig of the same name counts only when no active one has it,
+        // unless its session with this name is still running
+        const runningRigIds = new Set(sessionRows.filter((s) => s.status === "running").map((s) => rigBySession.get(s.id)));
+        const activeRigIds = new Set([...rigIds].filter((rigId) =>
+          this.db.prepare("SELECT 1 FROM rigs WHERE id = ? AND archived_at IS NULL").get(rigId) !== undefined));
+        if (activeRigIds.size > 0) rigIds = new Set([...rigIds].filter((rigId) => activeRigIds.has(rigId) || runningRigIds.has(rigId)));
       }
 
       if (rigIds.size > 1) {
@@ -185,7 +203,7 @@ export class WhoamiService {
         );
       }
 
-      const sess = sessionRows[0]!;
+      const sess = sessionRows.find((s) => rigIds.has(rigBySession.get(s.id) ?? "")) ?? sessionRows[0]!;
       nodeRow = this.db.prepare("SELECT * FROM nodes WHERE id = ?").get(sess.node_id) as NodeRow | undefined;
       if (!nodeRow) return null;
       resolvedBy = "session_name";
@@ -233,6 +251,7 @@ export class WhoamiService {
       memberId,
       memberLabel: nodeRow.label,
       sessionName: currentSessionName,
+      senderAddress: currentSessionName ? this.senderAddress(currentSessionName, nodeRow.id) : null,
       runtime: nodeRow.runtime ?? "unknown",
       cwd: nodeRow.cwd,
       agentRef: nodeRow.agent_ref,

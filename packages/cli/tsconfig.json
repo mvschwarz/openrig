@@ -8,6 +8,7 @@
     "baseUrl": ".",
     "paths": {
       "@openrig/daemon/local-reading": ["../daemon/dist/local-reading-surface.d.ts"],
+      "@openrig/daemon/codex-auth": ["../daemon/dist/codex-auth-surface.d.ts"],
       "@openrig/daemon/crash-cart": ["../daemon/dist/crash-cart-surface.d.ts"],
       "@openrig/daemon/gateway-human-registry": ["../daemon/dist/gateway-human-registry-surface.d.ts"],
       "@openrig/daemon/spec-conformance": [

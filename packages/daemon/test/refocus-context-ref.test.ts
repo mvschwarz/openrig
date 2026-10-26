@@ -41,6 +41,7 @@ function runHook(options: {
   whoamiStdout?: string;
   whoamiStatus?: number;
   capturePython?: boolean;
+  nodeRig?: boolean;
 }) {
   if (root) rmSync(root, { recursive: true, force: true });
   root = mkdtempSync(join(tmpdir(), "refocus-context-ref-"));
@@ -65,7 +66,15 @@ function runHook(options: {
   // The fake answers two verbs. `queue whoami` is dispatched first and returns its own
   // stdout/status, so a whoami failure can be exercised without disturbing the context-get
   // contract below, which stays byte-identical to keep the existing suites unaffected.
-  writeFileSync(rig, `#!/bin/sh
+  writeFileSync(rig, options.nodeRig ? `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.RIG_VERB_LOG, args.join(" ") + "\\n");
+if (args.includes("--work-candidates")) { process.stderr.write("unknown option --work-candidates"); process.exit(1); }
+if (args[0] === "queue") process.stdout.write(process.env.RIG_WHOAMI_STDOUT);
+else if (args[0] === "config") process.stdout.write(JSON.stringify({ workspace: { root: process.env.OPENRIG_HOME } }));
+else process.stdout.write(process.env.RIG_STDOUT);
+` : `#!/bin/sh
 printf '%s %s %s\\n' "$1" "$2" "$3" >> "$RIG_VERB_LOG"
 if [ "$1" = "queue" ] && [ "$2" = "whoami" ]; then
   printf '%s' "$RIG_WHOAMI_STDOUT"
@@ -96,7 +105,7 @@ exit 0
 
   const env = {
     ...process.env,
-    PATH: `${bin}:${process.env.PATH || ""}`,
+    PATH: options.nodeRig ? bin : `${bin}:${process.env.PATH || ""}`,
     OPENRIG_HOME: home,
     OPENRIG_SESSION_NAME: "seat@test",
     OPENRIG_REFOCUS_CONTENT_REF: options.ref,
@@ -141,6 +150,22 @@ exit 0
 }
 
 describe("openrig-core refocus hook — context library refs", () => {
+  it("reads work, legacy CLI fallback, roots and content through an env-node rig with no Node on PATH", () => {
+    const bundle = "# Minimal-PATH context\n";
+    const result = runHook({ nodeRig: true, ref: REF, capturePython: true, rigStdout: bundle,
+      whoamiStdout: JSON.stringify({ currentWorkBasis: "fixture has no current work" }),
+      extraEnv: {
+        // Test budget pin: this case tests the fallback, not the hook's time budget.
+        OPENRIG_REFOCUS_BUDGET_MS: "52000",
+        OPENRIG_REFOCUS_WORK_NODE: undefined, OPENRIG_WORKSPACE_ROOT: undefined, OPENRIG_REFOCUS_WORK_PACKET: "1",
+      } });
+    expect(result.status).toBe(0);
+    expect(result.payload?.hookSpecificOutput.additionalContext.endsWith(bundle)).toBe(true);
+    expect(result.rigVerbs().trim().split("\n")).toEqual([
+      "queue whoami --json --work-candidates", "queue whoami --json", "config --json", `context get ${REF}`,
+    ]);
+  });
+
   it("REF wins over FILE and delivers the exact rig context get bytes", () => {
     const bundle = "# OpenRig Context Pack: proof v1\n\nassembled bytes\n";
     const result = runHook({ ref: REF, fileContent: "FILE MUST NOT WIN", rigStdout: bundle });
@@ -475,9 +500,8 @@ exit 1
     expect(publicText).not.toMatch(/v-openrig-build|release-0\.5\.5|qitem-/i);
   });
 
-  // One fire used to start 7 rig processes on a typed slice: queue whoami, two config gets,
-  // whoami, and one resolver call per level. The hook now reads both roots with one config read
-  // and the script takes a canonical seat from OPENRIG_SESSION_NAME, which leaves 5.
+  // A typed fire uses queue whoami and one config read. Notes resolve locally,
+  // and a canonical OPENRIG_SESSION_NAME avoids a separate identity process.
   describe("rig processes per fire", () => {
     const typed = (workNodePath: string) =>
       JSON.stringify({ currentWork: { workNodePath }, currentWorkBasis: "one typed in-progress work node" });
@@ -524,10 +548,7 @@ exit 1
       return { ...result, context, calls: f.calls() };
     }
 
-    const resolverCalls = (f: ReturnType<typeof fixture>, nodes: string[]) =>
-      nodes.map((node) => `scope resolve-notes ${join(realpathSync(f.workspace), node)} --json`);
-
-    it("spends 5 rig processes on a typed fire and 3 on the no-baton fallback", () => {
+    it("spends 2 rig processes on both typed and no-baton fires", () => {
       const f = fixture();
       const typedFire = hook(f);
       expect(typedFire.status).toBe(0);
@@ -539,15 +560,24 @@ exit 1
       expect(typedFire.calls).toEqual([
         "queue whoami --json",
         "config --json",
-        ...resolverCalls(f, ["", "missions/release", "missions/release/slices/feature"]),
       ]);
 
       const fallback = hook(f, { RIG_QUEUE_WHOAMI_STDOUT: JSON.stringify({ currentWork: null, currentWorkBasis: NO_BATON }) });
       expect(fallback.status).toBe(0);
       expect(fallback.context).toContain(`FALLBACK — no current typed baton (${NO_BATON})`);
       expect(fallback.context).toContain("Builder learned");
-      expect(fallback.calls).toEqual(["queue whoami --json", "config --json", ...resolverCalls(f, [""])]);
+      expect(fallback.calls).toEqual(["queue whoami --json", "config --json"]);
     });
+
+    it("local notes avoid a delayed CLI inside the unchanged default trace cap", () => {
+      const f = fixture();
+      const result = hook(f, { RIG_SLOW_RESOLVE: "3", OPENRIG_REFOCUS_BUDGET_MS: "" });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.context).toContain("Deliver refocus");
+      expect(result.context).toContain("NOTES · NOTES.md");
+      expect(result.context).not.toContain("TRACE GAP");
+      expect(result.calls.filter(call => call.startsWith("scope resolve-notes"))).toEqual([]);
+    }, 15_000);
 
     it("sets no root from a failed or malformed config read, so the script's own lookup runs as before", () => {
       const f = fixture();

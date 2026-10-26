@@ -12,9 +12,67 @@ const DRAIN_MS = 200;
 
 /** A probe that didn't answer within its bound; its process group has been ended. */
 export class ProbeTimeoutError extends Error {
+  /** The code Node gives a command that timed out, so failure classifiers read it like any other timeout. */
+  readonly code = "ETIMEDOUT";
   constructor(readonly command: string, readonly timeoutMs: number) {
     super(`${command} did not answer within ${Math.round(timeoutMs / 1000)} s; the probe was ended`);
     this.name = "ProbeTimeoutError";
+  }
+}
+
+/** Probes running now, so the daemon can end their process groups when it stops: a probe's group is detached,
+ *  and nothing else ends it when the daemon goes away first. */
+const runningProbes = new Set<ReturnType<typeof spawn>>();
+/** Probes `endRunningProbeGroups` ended, so their rejection reads as stopped, not as a failed runtime. */
+const endedByStop = new WeakSet<ReturnType<typeof spawn>>();
+let exitHookInstalled = false;
+/** Set once the daemon is stopping: an ended probe's caller may fall back to another probe (`--version` to
+ *  `--help`), and that one must not start. */
+let stopping = false;
+
+/** Last resort for a process that is already exiting: no waiting, so no TERM first. */
+function killRunningProbeGroupsNow(): void {
+  for (const child of runningProbes) {
+    if (child.pid === undefined) continue;
+    try { process.kill(-child.pid, "SIGKILL"); } catch { /* gone, or no process groups here (Windows) */ }
+  }
+}
+
+/** End every probe still running: its whole process group, TERM then KILL, as the timeout path does. Probes that
+ *  have finished are not in the set, so a normal probe is untouched. */
+export async function endRunningProbeGroups(graceMs = PROBE_GRACE_MS): Promise<void> {
+  await Promise.all([...runningProbes].map((child) => { endedByStop.add(child); return stopGroup(child, graceMs); }));
+}
+
+/** The daemon is stopping: no probe starts from now on, and the ones running are ended. */
+export async function stopRuntimeProbes(graceMs = PROBE_GRACE_MS): Promise<void> {
+  stopping = true;
+  await endRunningProbeGroups(graceMs);
+}
+
+/** While the daemon is still starting (the Codex probe runs before it listens, and the shutdown handlers aren't
+ *  installed yet), end the probes' groups on SIGINT/SIGTERM and then die of the signal as before. Returns the
+ *  disposer to call once the real shutdown handlers take over. */
+export function endProbeGroupsOnStartupSignal(): () => void {
+  const handlers = new Map<NodeJS.Signals, () => void>();
+  const dispose = () => { for (const [signal, handler] of handlers) process.off(signal, handler); handlers.clear(); };
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    const handler = () => {
+      dispose();
+      void stopRuntimeProbes().finally(() => process.kill(process.pid, signal));
+    };
+    handlers.set(signal, handler);
+    process.on(signal, handler);
+  }
+  return dispose;
+}
+
+/** A probe the daemon's stop ended or refused: it has no result, and says nothing about the runtime. */
+export class ProbeStoppedError extends Error {
+  readonly code = "ESTOPPED";
+  constructor(readonly command: string, why: "ended" | "refused") {
+    super(why === "ended" ? `${command} was ended: the daemon is stopping` : `${command} was not started: the daemon is stopping`);
+    this.name = "ProbeStoppedError";
   }
 }
 
@@ -33,16 +91,30 @@ export class ProbeTimeoutError extends Error {
 export function boundedProbeExec(
   timeoutMs = RUNTIME_PROBE_TIMEOUT_MS,
   graceMs = PROBE_GRACE_MS,
-  deps: { stopGroup?: typeof stopGroup } = {},
+  deps: { stopGroup?: typeof stopGroup; cwd?: (cmd: string) => string | undefined } = {},
 ): ExecFn {
   const endGroup = deps.stopGroup ?? stopGroup;
-  return (cmd: string) => new Promise<string>((resolve, reject) => {
+  return (cmd: string) => new Promise<string>((resolveProbe, rejectProbe) => {
     let child: ReturnType<typeof spawn>;
+    let tracked: ReturnType<typeof spawn> | undefined;
+    // A settled probe is no longer running, whatever it left behind (see the exit handler below).
+    const resolve = (output: string) => { if (tracked) runningProbes.delete(tracked); resolveProbe(output); };
+    const reject = (err: unknown) => { if (tracked) runningProbes.delete(tracked); rejectProbe(err); };
+    if (stopping) {
+      reject(new ProbeStoppedError(cmd, "refused"));
+      return;
+    }
     try {
-      child = spawn(cmd, { shell: true, stdio: ["ignore", "pipe", "pipe"], detached: true });
+      child = spawn(cmd, { shell: true, stdio: ["ignore", "pipe", "pipe"], detached: true, cwd: deps.cwd?.(cmd) });
     } catch (err) {
       reject(err);
       return;
+    }
+    tracked = child;
+    runningProbes.add(child);
+    if (!exitHookInstalled) {
+      exitHookInstalled = true;
+      process.on("exit", killRunningProbeGroupsNow);
     }
     let stdout = "";
     let stderr = "";
@@ -103,10 +175,16 @@ export function boundedProbeExec(
       // Yield once to I/O before deciding: if the event loop stalled past the drain timer, the pipes' end events
       // may be queued behind it, and a closed-stdio descendant must not be taken for one holding the output.
       void drained.then(() => new Promise((r) => setImmediate(r))).then(() => (open().length > 0 ? end() : undefined)).then(() => {
-        if (code === 0) resolve(stdout);
+        // The stop first: a probe it ended has no answer, even if it trapped TERM and exited 0 with a version.
+        if (endedByStop.has(child)) reject(new ProbeStoppedError(cmd, "ended"));
+        else if (code === 0) resolve(stdout);
         else {
           const output = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n");
-          reject(new Error(`Command failed: ${cmd} (${signal ? `signal ${signal}` : `exit ${code}`})${output ? `\n${output}` : ""}`));
+          // code, signal and stderr as execAsync's rejection carries them, for the failure classifiers.
+          reject(Object.assign(
+            new Error(`Command failed: ${cmd} (${signal ? `signal ${signal}` : `exit ${code}`})${output ? `\n${output}` : ""}`),
+            { code, signal, stderr },
+          ));
         }
       });
     });

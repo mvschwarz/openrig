@@ -21,6 +21,12 @@
 
 const SENDER_FALLBACK = "<unknown sender>";
 
+/** OpenRig's own sender: the daemon (`daemon@kernel`, the scheduler's existing name) or a subsystem actor (`system:health`).
+ *  No seat answers at these addresses, so their envelope doesn't offer a reply. (`…@system` isn't matched: a rig may be named
+ *  `system`, and its seats are real senders.) */
+export const OPENRIG_SENDER = "daemon@kernel";
+export const isOpenRigSender = (sender: string): boolean => sender === OPENRIG_SENDER || sender.startsWith("system:");
+
 /** Send/broadcast header envelope metadata (ruling 03c35295). The ENVELOPE carries the machine truth;
  *  the rendered header is a PROJECTION of it. Both twins (this + cli wrapSendBody) share this shape. */
 export interface EnvelopeScope {
@@ -43,6 +49,10 @@ export interface EnvelopeMeta {
    *  ABSENT ⇒ UNKNOWN (cross-host --from relay whose sender isn't local, or pre-tenure daemon) —
    *  the render omits it, never forges a generation. Render is a PROJECTION of this machine truth. */
   genUuid?: string;
+  /** The row this message delivers. For a person's message (an @external sender) the reply hint
+   *  names it with --reply-to, so the answer joins the Slack thread the message came from (#822
+   *  records that thread on the row). ABSENT ⇒ the hint stays the plain new-conversation form. */
+  replyToQitem?: string;
 }
 
 /** The To-line projection + anti-storm scale (header-alone distinguishability, ruling pin 2). */
@@ -115,7 +125,9 @@ export function wrapPaneEnvelope(
     header.push(`Sent: ${renderShortStamp(meta.stampISO)}${genSuffix}`);
   }
   const reply = senderLabel.endsWith("@external")
-    ? `↩ Reply if needed: rig queue create --destination ${senderLabel} --body "..." --verify`
-    : `↩ Reply: rig send ${senderLabel} "..."`;
+    ? `↩ Reply if needed: rig queue create --destination ${senderLabel}${meta?.replyToQitem ? ` --human-intent update --reply-to ${meta.replyToQitem}` : ""} --summary "<one line>" --body "..." --verify`
+    : isOpenRigSender(senderLabel)
+      ? "↩ Sent by OpenRig itself, not by a seat. Act on the row it names."
+      : `↩ Reply: rig send ${senderLabel} "..."`;
   return [...header, "---", body, "---", reply].join("\n");
 }

@@ -34,6 +34,12 @@ describe("fetch guard — allowlist by shape, fail-closed, three-sided", () => {
     }
   });
 
+  it("the daemon client's long-request path (node:http) is guarded the same way", async () => {
+    const { nodeHttpFetch } = await import("../src/long-request-fetch.js");
+    await expect(nodeHttpFetch("http://127.0.0.1:7433/api/transport/send", { method: "POST", body: "{}" })).rejects.toThrow(/FETCH GUARD/);
+    await expect(nodeHttpFetch("http://203.0.113.10:7433/api/transport/send", { method: "POST", body: "{}" })).rejects.toThrow(/FETCH GUARD/);
+  });
+
   it("REFUSES a NON-LOOPBACK target (the machine-boundary arm — hosts.yaml's real remote)", async () => {
     await expect(fetch("http://100.95.124.51:7433/api/x")).rejects.toThrow(/FETCH GUARD|non-loopback/i);
   });

@@ -3,6 +3,7 @@ import type Database from "better-sqlite3";
 import { ulid } from "ulid";
 import type { EventBus } from "./event-bus.js";
 import type { ClassifierLeaseManager } from "./classifier-lease-manager.js";
+import { DispositionError, insertDisposition, validateDisposition, type StreamDispositionInput } from "./stream-dispositions.js";
 
 /**
  * Project classifier (PL-004 Phase B; L2 Project / Classifier — write path).
@@ -72,9 +73,16 @@ export interface ProjectClassifyInput {
   classifierVersion?: string;
   taxonomyVersion?: string;
   candidateSetVersion?: string;
+  /**
+   * Slice 22: an accepted routing judgment and its fixed effect, stored beside this write-once
+   * classification in the same transaction (stream_dispositions). Validated here.
+   */
+  disposition?: unknown;
 }
 
 export interface ProjectListOptions {
+  /** Slice 22: the classification of one stream item (at most one exists). */
+  streamItemId?: string;
   classifierSession?: string;
   classificationDestination?: string;
   area?: string;
@@ -146,6 +154,13 @@ export class ProjectClassifier {
    */
   classify(input: ProjectClassifyInput): ProjectClassification {
     validateClassifyInput(input);
+    let disposition: StreamDispositionInput | null = null;
+    if (input.disposition !== undefined) {
+      try { disposition = validateDisposition(input.disposition, input.classificationDestination); } catch (error) {
+        if (error instanceof DispositionError) throw new ProjectClassifierError(error.code, error.message);
+        throw error;
+      }
+    }
     const projectId = ulid();
     const tsProjected = this.now().toISOString();
 
@@ -222,6 +237,12 @@ export class ProjectClassifier {
           tsProjected,
           input.identityProvenance ?? null,
         );
+      if (disposition) {
+        try { insertDisposition(this.db, projectId, input.streamItemId, disposition, tsProjected, input.classifierSession); } catch (error) {
+          if (error instanceof DispositionError) throw new ProjectClassifierError(error.code, error.message);
+          throw error;
+        }
+      }
 
       return this.eventBus.persistWithinTransaction({
         type: "project.classified",
@@ -294,6 +315,10 @@ export class ProjectClassifier {
     const limit = opts?.limit ?? 100;
     const conditions: string[] = [];
     const params: unknown[] = [];
+    if (opts?.streamItemId) {
+      conditions.push("stream_item_id = ?");
+      params.push(opts.streamItemId);
+    }
     if (opts?.classifierSession) {
       conditions.push("classifier_session = ?");
       params.push(opts.classifierSession);

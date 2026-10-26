@@ -10,6 +10,7 @@
 // do. The Codex version is >= 0.130 so startup skips the `codex_hooks` feature-flag write.
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const STUBS = {
   codex: {
@@ -26,9 +27,18 @@ const STUBS = {
 
 const STUB_NAME = ".openrig-test-runtime-stubs";
 
-/** True when a test run opted into the host's real runtimes (the existing E2E opt-in). */
-export function realRuntimesRequested(env: Record<string, string | undefined> = process.env): boolean {
-  return env["OPENRIG_E2E_REAL_CODEX"] === "1";
+const REAL_CODEX_TESTS = [
+  "seat-handover-model-fidelity-e2e.test.ts",
+  "seat-lifecycle-set-model-resume-e2e.test.ts",
+].map(name => fileURLToPath(new URL(`../packages/daemon/test/${name}`, import.meta.url)));
+
+/** The opt-in permits native runtimes only in the two tests that exercise real Codex. */
+export function realRuntimesRequested(
+  env: Record<string, string | undefined> = process.env,
+  testPath?: string,
+): boolean {
+  return env["OPENRIG_E2E_REAL_CODEX"] === "1" && testPath !== undefined
+    && REAL_CODEX_TESTS.includes(path.resolve(testPath));
 }
 
 /**

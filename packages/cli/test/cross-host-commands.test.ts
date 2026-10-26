@@ -388,6 +388,9 @@ function makeFailingLifecycleDeps(): never {
     spawnDetached: () => ({ pid: 0 }),
     isPidAlive: (_p: number) => false,
     fetchHealthDetail: async () => ({ ok: false, code: "unreachable" }),
+    // A refused connection is what makes the probe read "no daemon" (stopped).
+    fetch: async () => { throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }); },
+    sleep: async () => {},
   } as never;
 }
 

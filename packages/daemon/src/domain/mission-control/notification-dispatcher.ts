@@ -23,6 +23,7 @@ import type {
   NotificationAdapter,
   NotificationPayload,
 } from "./notification-adapter-types.js";
+import { sliceWhole } from "../text-cut.js";
 
 export interface NotificationDispatcherDeps {
   db: Database.Database;
@@ -217,7 +218,7 @@ export class MissionControlNotificationDispatcher {
 
 function truncateBody(s: string, max: number): string {
   if (s.length <= max) return s;
-  return s.slice(0, max - 1) + "…";
+  return sliceWhole(s, max - 1) + "…";
 }
 
 function normalizeBaseUrl(raw: string | undefined): string | null {

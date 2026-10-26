@@ -31,7 +31,7 @@ function seat() {
   };
   const adapter = new ClaudeCodeAdapter({ tmux: {} as TmuxAdapter, fsOps, stateDir: state, collectorAssetPath: asset });
   const settings = nodePath.join(cwd, ".claude", "settings.local.json");
-  const command = `node ${shellQuote(nodePath.join(cwd, ".openrig", "context-collector.cjs"))} `
+  const command = `${shellQuote(process.execPath)} ${shellQuote(nodePath.join(cwd, ".openrig", "context-collector.cjs"))} `
     + `${shellQuote(nodePath.join(state, "state", "context-usage"))} ${shellQuote(nodePath.join(state, "state", "provider-usage"))}`;
   const poll = () => adapter.ensureContextCollector({ cwd, tmuxSession: "seat@rig" });
   return { cwd, settings, command, writes, poll };
@@ -79,7 +79,7 @@ describe("the context collector writes the seat's settings only when its status 
       (sl, _f, c) => expect(sl).toEqual({ type: "command", command: c, padding: 2 })],
     ["a stale collector command from another state directory", () => JSON.stringify({ statusLine: { type: "command", command: "node /old/.openrig/context-collector.cjs /old/ctx /old/prov" } }), "written",
       (sl, _f, c) => expect(sl).toEqual({ type: "command", command: c })],
-    ["a JSON value that isn't an object", () => "[]", "written", (sl, f, c) => { expect(sl).toEqual({ type: "command", command: c }); expect(Object.keys(f)).toEqual(["statusLine"]); }],
+    ["a JSON value that isn't an object", () => "[]", "untouched", () => {}],
     ["a user's own status line", () => JSON.stringify(user, null, 2), "untouched", () => {}],
     ["a file that can't be parsed", () => '{ "permissions": { "allow": ["Bash(ls:*)"] }, ', "untouched", () => {}],
   ])("control: %s", (_label, initial, outcome, check) => {

@@ -22,11 +22,13 @@
 //     expected normal-state response until a separate publish authorization.
 
 import nodePath from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 export interface PluginVendorFs {
   readFile(path: string): string;
   writeFile(path: string, content: string): void;
+  /** Copy raw bytes, failing if the recovery path already exists. */
+  copyFileExclusive(source: string, target: string): void;
   exists(path: string): boolean;
   mkdirp(path: string): void;
   listFiles(dir: string): string[];
@@ -168,13 +170,13 @@ export class PluginVendorService {
       }
     }
 
+    const updates: Array<[string, string]> = this.fs.listFiles(sourceDir).map(rel => [rel, this.fs.readFile(nodePath.join(sourceDir, rel))]);
+    if (!this.preserveBeforeRefresh(targetDir, updates)) return;
     this.fs.mkdirp(targetDir);
 
-    const files = this.fs.listFiles(sourceDir);
-    for (const relPath of files) {
+    for (const [relPath, content] of updates) {
       const srcPath = nodePath.join(sourceDir, relPath);
       const destPath = nodePath.join(targetDir, relPath);
-      const content = this.fs.readFile(srcPath);
       // Hash-skip: only write if content differs (idempotent re-runs). Reconcile mode even on
       // skip — a byte-identical copy staged earlier may still carry the wrong (default) mode.
       if (this.fs.exists(destPath) && hashContent(this.fs.readFile(destPath)) === hashContent(content)) {
@@ -184,6 +186,25 @@ export class PluginVendorService {
       this.fs.mkdirp(nodePath.dirname(destPath));
       this.fs.writeFile(destPath, content);
       this.preserveMode(srcPath, destPath);
+    }
+  }
+
+  /** Preserve every replaced file before touching a target, including its version authority. */
+  private preserveBeforeRefresh(targetDir: string, updates: Array<[string, string]>): boolean {
+    const backupDir = nodePath.join(nodePath.dirname(this.userPluginsDir), "backups", "managed-refresh", randomUUID());
+    try {
+      for (const [rel, content] of new Map(updates)) {
+        const dest = nodePath.join(targetDir, rel);
+        if (!this.fs.exists(dest) || hashContent(this.fs.readFile(dest)) === hashContent(content)) continue;
+        const backup = nodePath.join(backupDir, rel);
+        this.fs.mkdirp(nodePath.dirname(backup));
+        this.fs.copyFileExclusive(dest, backup);
+        this.logger(`[plugin-vendor] preserved previous contents of ${dest} at ${backup} before managed refresh`);
+      }
+      return true;
+    } catch (error) {
+      this.logger(`[plugin-vendor] preservation failed for ${targetDir}: ${(error as Error).message}; refresh skipped, existing files kept`);
+      return false;
     }
   }
 
@@ -255,11 +276,12 @@ export class PluginVendorService {
           continue;
         }
       }
+      const updates: Array<[string, string]> = files.map(rel => [rel, this.fs.readFile(nodePath.join(sourceDir, rel))]);
+      if (!this.preserveBeforeRefresh(targetDir, [...updates, [GLOBAL_VENDOR_VERSION, `${sourceVersion}\n`]])) continue;
       this.fs.mkdirp(targetDir);
-      for (const relPath of files) {
+      for (const [relPath, content] of updates) {
         const srcPath = nodePath.join(sourceDir, relPath);
         const destPath = nodePath.join(targetDir, relPath);
-        const content = this.fs.readFile(srcPath);
         if (
           this.fs.exists(destPath) &&
           hashContent(this.fs.readFile(destPath)) === hashContent(content)

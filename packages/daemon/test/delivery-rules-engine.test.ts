@@ -213,6 +213,23 @@ describe("OPR.0.5.6.1 §1 — the full class matrix, one receipt per cell (AM-F2
     });
     expect(decision.outcome).toBe("notify");
   });
+
+  it("ALERTED ASK: interrupts a B-class person who's available, but gives way to focus, away and quiet hours, unlike escalation", async () => {
+    const mod = await engine();
+    const quiet = { windowId: "w", occurrence: "o", revision: 1 };
+    const decide = (alerted: boolean, escalation: boolean, availability: "available" | "focus" | "away", inQuiet = false) => mod!.decideDelivery({
+      level: "ALERT", escalation, alerted,
+      human: { entityId: "human-founder", deliveryClass: "B", availability },
+      dials: { minimumLevelThatPosts: "NOTICE", minimumLevelThatInterrupts: "ALERT" },
+      ...(inQuiet ? { quiet } : {}),
+    });
+    expect(decide(false, false, "available")).toMatchObject({ outcome: "notify", mention: false });
+    expect(decide(true, false, "available")).toMatchObject({ outcome: "interrupt", mention: true });
+    expect(decide(true, false, "focus")).toMatchObject({ outcome: "notify", mention: false });
+    expect(decide(true, false, "away")).toMatchObject({ outcome: "notify", mention: false });
+    expect(decide(true, false, "available", true).outcome).toBe("hold");
+    expect(decide(false, true, "available", true).outcome).not.toBe("hold"); // escalation skips quiet hours; an alerted ask doesn't
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -854,7 +871,8 @@ describe("OPR.0.5.6.1 §7 — one vocabulary, no seen, no third timer engine", (
   it("ONE OUTCOME TUPLE at one definition site; the engine consumes S14 stamps and mints no transport literals (AM-F4)", async () => {
     const mod = await engine();
     expect(mod).not.toBeNull();
-    expect(mod!.DELIVERY_OUTCOMES).toEqual(["interrupt", "notify", "digest", "log"]);
+    // Quiet hours added the one outcome `hold`, still at this one definition site.
+    expect(mod!.DELIVERY_OUTCOMES).toEqual(["interrupt", "notify", "digest", "log", "hold"]);
     const raw = readFileSync(join(SRC_ROOT, "domain", "gateway", "delivery-rules-engine.ts"), "utf8");
     const source = stripComments(raw);
     // consumes, never mints: the S14 receipt literals may be REFERENCED via the

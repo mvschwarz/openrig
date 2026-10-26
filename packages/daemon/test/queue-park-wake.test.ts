@@ -451,7 +451,7 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
       const { row, jobId } = await parkWithTimer(`own-repeat-${last}@rig`);
       const outcomes = await runUntilRetired(jobId);
       expect(deliveries.map((d) => d.status), last).toEqual(["retained", "retained", "retained", last]);
-      expect(outcomes, last).toEqual(["skipped", "skipped", "skipped", "sent"]);
+      expect(outcomes, last).toEqual(["skipped", "skipped", "skipped", last === "ok" ? "sent" : "failed"]);
       expect(jobs.getById(jobId)?.state, last).toBe("terminal");
       // No further one-shot attempt after consumption: later ticks deliver nothing.
       await tick();
@@ -559,7 +559,7 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     const { attached, jobId } = await sharedTimerWithOriginalStopped("shared-repeat@rig");
     const outcomes = await runUntilRetired(jobId);
     expect(deliveries.map((d) => d.status)).toEqual(["retained", "retained", "failed"]);
-    expect(outcomes).toEqual(["skipped", "skipped", "sent"]);
+    expect(outcomes).toEqual(["skipped", "skipped", "failed"]);
     expect(jobs.getById(jobId)?.state).toBe("terminal");
     expect(wakes(attached.qitemId).filter((w) => w.phase === "fired").map((w) => w.delivery_status)).toEqual(["retained", "retained", "failed"]);
   });
@@ -1450,5 +1450,28 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
       summary: "choose the release boundary",
       evidenceRef: "/proof/release.md",
     });
+  });
+});
+
+describe("wake lookup reads afresh on every call", () => {
+  it("a warmed miss, then a recorded wake, then an update are each seen by the next lookup", async () => {
+    const { ALL_MIGRATIONS } = await import("../src/db/all-migrations.js");
+    const { QueueWakeRepository } = await import("../src/domain/queue-wake-repository.js");
+    const db = createDb();
+    try {
+      migrate(db, ALL_MIGRATIONS);
+      db.exec("INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, body) VALUES ('q1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'a@r', 'b@r', 'blocked', 'routine', 'x')");
+      const transitionId = Number(db.prepare("INSERT INTO queue_transitions (qitem_id, ts, state, actor_session) VALUES ('q1', '2026-01-01T00:00:00Z', 'blocked', 'b@r')").run().lastInsertRowid);
+      const wakes = new QueueWakeRepository(db);
+      // Warm the lookup with a miss, and an unknown id.
+      expect(wakes.getForTransition(transitionId)).toBeNull();
+      expect(wakes.getForTransition(transitionId + 999)).toBeNull();
+      wakes.record({ transitionId, qitemId: "q1", phase: "armed", kind: "timer", ref: "30s", deliveryStatus: null });
+      expect(wakes.getForTransition(transitionId)).toMatchObject({ transitionId, qitemId: "q1", phase: "armed", kind: "timer", ref: "30s", deliveryStatus: null });
+      db.prepare("UPDATE queue_transition_wakes SET delivery_status = 'delivered' WHERE transition_id = ?").run(transitionId);
+      expect(wakes.getForTransition(transitionId)?.deliveryStatus).toBe("delivered");
+      db.prepare("DELETE FROM queue_transition_wakes WHERE transition_id = ?").run(transitionId);
+      expect(wakes.getForTransition(transitionId)).toBeNull();
+    } finally { db.close(); }
   });
 });

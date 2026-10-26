@@ -14,6 +14,9 @@ import {
 } from "../src/domain/model-divergence/model-divergence-monitor.js";
 import { SPEC_VALIDATION_CAPABILITIES } from "../src/domain/rigspec-schema.js";
 import { ProcessCensus } from "../src/domain/process-census.js";
+import * as monitorModule from "../src/domain/model-divergence/model-divergence-monitor.js";
+import { createFullTestDb } from "./helpers/test-app.js";
+import { EventBus } from "../src/domain/event-bus.js";
 
 const SEAT: PinnedSeat = {
   nodeId: "n1",
@@ -244,7 +247,7 @@ describe("ModelDivergenceMonitor — the cause-agnostic comparison", () => {
 describe("modelsMatch — pin canonicalized through the ONE shipped map, then EXACT (f7dfca0c)", () => {
   it("exact ids match case-insensitively", () => {
     expect(modelsMatch("gpt-5.6-luna", " GPT-5.6-Luna ")).toBe(true);
-    expect(modelsMatch("claude-fable-5", "claude-fable-5")).toBe(true);
+    expect(modelsMatch("claude-fable-5-1", "claude-fable-5-1")).toBe(true);
   });
 
   it("SINGLE MAPPING HOME: the deleted migration bridge stays deleted; the monitor consults the advisory's map", async () => {
@@ -255,7 +258,7 @@ describe("modelsMatch — pin canonicalized through the ONE shipped map, then EX
     const monitorMod = await import("../src/domain/model-divergence/model-divergence-monitor.js");
     expect("CLAUDE_ALIAS_MIGRATION_BRIDGE" in monitorMod).toBe(false);
     const advisory = await import("../src/domain/spec-validation-advisory.js");
-    expect(advisory.CANONICAL_MODEL_PINS.fable).toBe("claude-fable-5");
+    expect(advisory.CANONICAL_MODEL_PINS.fable).toBe("claude-fable-5-1");
     expect(modelsMatch("fable", advisory.CANONICAL_MODEL_PINS.fable)).toBe(true); // same data drives both
     // r2 BLOCKING-1 structural half: the map must stay null-prototype so arbitrary string pins
     // can never read inherited Object members (behavioral pins cover both consumers).
@@ -285,9 +288,9 @@ describe("f7dfca0c — alias-pin false positives end AT THE DETECTOR via the one
   // The pin canonicalizes through CANONICAL_MODEL_PINS (spec-validation-advisory.ts, the ONE
   // mapping home) and then compares EXACT. No token containment; r2's ambiguity discriminators
   // (one pin blessing multiple models) stay false in the neighbors above.
-  it("RED-1: alias pin canonicalizes — fable matches claude-fable-5, with trim/case retained", () => {
-    expect(modelsMatch("fable", "claude-fable-5")).toBe(true);
-    expect(modelsMatch(" FABLE ", " Claude-Fable-5 ")).toBe(true);
+  it("RED-1: alias pin canonicalizes — fable matches claude-fable-5-1, with trim/case retained", () => {
+    expect(modelsMatch("fable", "claude-fable-5-1")).toBe(true);
+    expect(modelsMatch(" FABLE ", " Claude-Fable-5-1 ")).toBe(true);
   });
 
   it("control: alias pin vs a DIFFERENT canonical model still diverges (unknown aliases too)", () => {
@@ -300,7 +303,7 @@ describe("f7dfca0c — alias-pin false positives end AT THE DETECTOR via the one
     const seat: PinnedSeat = { ...SEAT, runtime: "claude", pinnedModel: "fable" };
     const { monitor, recorded } = makeMonitor({
       listPinnedSeats: () => [seat],
-      readEffectiveModel: () => ({ ok: true as const, model: "claude-fable-5" }),
+      readEffectiveModel: () => ({ ok: true as const, model: "claude-fable-5-1" }),
     });
     expect(await monitor.checkOnce()).toHaveLength(0);
     expect(recorded).toHaveLength(0);
@@ -343,5 +346,213 @@ describe("f7dfca0c — alias-pin false positives end AT THE DETECTOR via the one
     expect(fired).toHaveLength(1);
     expect(fired[0]!.pinnedModel).toBe("fable"); // raw pin, never the canonicalized form
     expect(fired[0]!.effectiveModel).toBe("claude-opus-5");
+  });
+});
+
+
+describe("Claude context-window pins", () => {
+  it.each([
+    ["claude-opus-5-5[1m]", "claude-opus-5-5"],
+    ["  Claude-Opus-5-5[1M] ", " CLAUDE-OPUS-5-5 "],
+    ["fable[1m]", "claude-fable-5-1"],
+    ["claude-opus-5-5", "claude-opus-5-5[1m]"],
+    ["claude-opus-5-5[1m]", "claude-opus-5-5[1m]"],
+  ])("matches %s to %s without proclaiming", async (pinnedModel, model) => {
+    const { monitor, sent, recorded } = makeMonitor({
+      listPinnedSeats: () => [{ ...SEAT, runtime: "claude-code", pinnedModel }],
+      readEffectiveModel: () => ({ ok: true, model }),
+    });
+    expect(await monitor.checkOnce()).toEqual([]);
+    expect(monitor.pendingSeats()).toEqual([]);
+    expect(sent).toEqual([]);
+    expect(recorded).toEqual([]);
+  });
+
+  it.each([
+    ["claude-code", "claude-opus-5-5[1m]", "claude-fable-5-1"],
+    ["claude-code", "claude-opus-5-5[2m]", "claude-opus-5-5"],
+    ["claude-code", "claude-opus-5-5[1m]-extra", "claude-opus-5-5"],
+    ["claude-code", "opus[1m]", "claude-opus-5-5"],
+    ["claude-code", "fable", "claude-fable-5"],
+    ["codex", "claude-opus-5-5[1m]", "claude-opus-5-5"],
+    ["pi", "claude-opus-5-5[1m]", "claude-opus-5-5"],
+    ["omp", "claude-opus-5-5[1m]", "claude-opus-5-5"],
+    [null, "claude-opus-5-5[1m]", "claude-opus-5-5"],
+  ])("keeps real divergence for runtime=%s pin=%s effective=%s", async (runtime, pinnedModel, model) => {
+    const { monitor, sent, recorded } = makeMonitor({
+      listPinnedSeats: () => [{ ...SEAT, runtime, pinnedModel }],
+      readEffectiveModel: () => ({ ok: true, model }),
+    });
+    const fired = await monitor.checkOnce();
+    expect(fired).toHaveLength(1);
+    expect(fired[0]).toMatchObject({ runtime, pinnedModel, effectiveModel: model });
+    expect(recorded).toHaveLength(1);
+    expect(sent).toHaveLength(4);
+    for (const message of sent) {
+      expect(message.message).toContain(`pinned=${pinnedModel}`);
+      expect(message.message).toContain(`effective=${model}`);
+    }
+    expect(await monitor.checkOnce()).toEqual([]);
+  });
+});
+
+// A pinned Claude id answers as its dated snapshot: herdr-researcher@lab, pinned to claude-haiku-4-5, reported
+// claude-haiku-4-5-20251001 and was proclaimed divergent. The snapshot is the same model; a different one still diverges.
+describe("Claude snapshot pins", () => {
+  it.each([
+    ["claude-haiku-4-5", "claude-haiku-4-5-20251001"],
+    ["  Claude-Haiku-4-5 ", " CLAUDE-HAIKU-4-5-20251001 "],
+    ["claude-haiku-4-5-20251001", "claude-haiku-4-5"],
+    ["claude-sonnet-4-5[1m]", "claude-sonnet-4-5-20250929"],
+    ["fable", "claude-fable-5-1-20261001"],
+  ])("matches %s to %s without proclaiming", async (pinnedModel, model) => {
+    const { monitor, sent, recorded } = makeMonitor({
+      listPinnedSeats: () => [{ ...SEAT, runtime: "claude-code", pinnedModel }],
+      readEffectiveModel: () => ({ ok: true, model }),
+    });
+    expect(await monitor.checkOnce()).toEqual([]);
+    expect(sent).toEqual([]);
+    expect(recorded).toEqual([]);
+  });
+
+  it.each([
+    ["claude-code", "claude-haiku-4-5", "claude-sonnet-4-5-20250929"],
+    ["claude-code", "claude-haiku-4-5-20251001", "claude-haiku-4-5-20260101"],
+    ["claude-code", "claude-haiku-4", "claude-haiku-4-5-20251001"],
+    ["claude-code", "claude-haiku-4-5", "claude-haiku-4-5-20251001-extra"],
+    ["claude-code", "haiku", "claude-haiku-4-5-20251001"],
+    ["codex", "claude-haiku-4-5", "claude-haiku-4-5-20251001"],
+    ["pi", "claude-haiku-4-5", "claude-haiku-4-5-20251001"],
+    [null, "claude-haiku-4-5", "claude-haiku-4-5-20251001"],
+  ])("keeps real divergence for runtime=%s pin=%s effective=%s", async (runtime, pinnedModel, model) => {
+    const { monitor, recorded } = makeMonitor({
+      listPinnedSeats: () => [{ ...SEAT, runtime, pinnedModel }],
+      readEffectiveModel: () => ({ ok: true, model }),
+    });
+    const fired = await monitor.checkOnce();
+    expect(fired).toHaveLength(1);
+    expect(fired[0]).toMatchObject({ runtime, pinnedModel, effectiveModel: model });
+    expect(recorded).toHaveLength(1);
+  });
+});
+
+// #1926: a Claude Code seat on Amazon Bedrock is pinned to an inference-profile id (global.anthropic.claude-opus-5-5),
+// which Bedrock needs, and reports the bare model id. Every such seat was proclaimed divergent after a daemon restart.
+describe("Claude Bedrock inference-profile pins", () => {
+  it.each([
+    ["global.anthropic.claude-opus-5-5", "claude-opus-5-5"],
+    ["global.anthropic.claude-sonnet-5-5", "claude-sonnet-5-5"],
+    ["us.anthropic.claude-opus-5-5", "claude-opus-5-5"],
+    ["eu.anthropic.claude-opus-5-5", "claude-opus-5-5"],
+    ["apac.anthropic.claude-opus-5-5", "claude-opus-5-5"],
+    ["jp.anthropic.claude-opus-5-5", "claude-opus-5-5"],
+    ["au.anthropic.claude-opus-5-5", "claude-opus-5-5"],
+    ["us-gov.anthropic.claude-opus-5-5", "claude-opus-5-5"],
+    ["anthropic.claude-opus-5-5", "claude-opus-5-5"],
+    ["  Global.Anthropic.Claude-Opus-5-5 ", " claude-opus-5-5 "],
+    ["global.anthropic.claude-opus-5-5[1m]", "claude-opus-5-5"],
+    ["global.anthropic.claude-haiku-4-5", "claude-haiku-4-5-20251001"],
+    ["us.anthropic.claude-sonnet-4-5-20250929", "claude-sonnet-4-5"],
+  ])("matches %s to %s without proclaiming", async (pinnedModel, model) => {
+    const { monitor, sent, recorded } = makeMonitor({
+      listPinnedSeats: () => [{ ...SEAT, runtime: "claude-code", pinnedModel }],
+      readEffectiveModel: () => ({ ok: true, model }),
+    });
+    expect(await monitor.checkOnce()).toEqual([]);
+    expect(sent).toEqual([]);
+    expect(recorded).toEqual([]);
+  });
+
+  it.each([
+    ["claude-code", "global.anthropic.claude-opus-5-5", "claude-sonnet-5-5"],
+    ["claude-code", "global.anthropic.claude-opus-5", "claude-opus-5-5"],
+    ["claude-code", "global.claude-opus-5-5", "claude-opus-5-5"],
+    ["claude-code", "ca.anthropic.claude-opus-5-5", "claude-opus-5-5"],
+    ["claude-code", "global.anthropic.claude-haiku-4-5-20251001", "claude-haiku-4-5-20260101"],
+    ["codex", "global.anthropic.claude-opus-5-5", "claude-opus-5-5"],
+    ["pi", "global.anthropic.claude-opus-5-5", "claude-opus-5-5"],
+    [null, "global.anthropic.claude-opus-5-5", "claude-opus-5-5"],
+  ])("keeps real divergence for runtime=%s pin=%s effective=%s", async (runtime, pinnedModel, model) => {
+    const { monitor, recorded } = makeMonitor({
+      listPinnedSeats: () => [{ ...SEAT, runtime, pinnedModel }],
+      readEffectiveModel: () => ({ ok: true, model }),
+    });
+    const fired = await monitor.checkOnce();
+    expect(fired).toHaveLength(1);
+    expect(fired[0]).toMatchObject({ runtime, pinnedModel, effectiveModel: model });
+    expect(recorded).toHaveLength(1);
+  });
+});
+
+// The settled set is in memory, so a daemon restart used to alert again on an unchanged divergence (five alerts in eleven
+// minutes for two unchanged seats across one recovery). The occurrence id is content-derived, and the proclamation's own
+// durable record keeps it.
+describe("ModelDivergenceMonitor — a restart doesn't proclaim an unchanged divergence again", () => {
+  it("a restarted monitor stays quiet for the same occurrence and alerts for a changed model or a new generation", async () => {
+    const proclaimed = new Set<string>();
+    const durable = {
+      recordProclamation: (p: { occurrenceId?: string }) => { if (p.occurrenceId) proclaimed.add(p.occurrenceId); },
+      wasProclaimed: (occurrenceId: string) => proclaimed.has(occurrenceId),
+    };
+    const first = makeMonitor(durable);
+    expect(await first.monitor.checkOnce()).toHaveLength(1);
+
+    const restarted = makeMonitor(durable);
+    expect(await restarted.monitor.checkOnce()).toHaveLength(0);
+    expect(restarted.sent).toHaveLength(0);
+    expect(await restarted.monitor.checkOnce()).toHaveLength(0);
+
+    const changed = makeMonitor({ ...durable, readEffectiveModel: () => ({ ok: true as const, model: "gpt-5.5-mini" }) });
+    expect(await changed.monitor.checkOnce()).toHaveLength(1);
+    const newOccupant = makeMonitor({ ...durable, listPinnedSeats: () => [{ ...SEAT, generation: "gen-2" }] });
+    expect(await newOccupant.monitor.checkOnce()).toHaveLength(1);
+  });
+
+  it("an unreadable record still proclaims, and says why", async () => {
+    const warnings: string[] = [];
+    const { monitor } = makeMonitor({ wasProclaimed: () => { throw new Error("db locked"); }, warn: (m) => warnings.push(m) });
+    expect(await monitor.checkOnce()).toHaveLength(1);
+    expect(warnings.join("\n")).toMatch(/could not read earlier proclamations.*db locked/);
+  });
+
+  it("an alert no channel received is proclaimed again after a restart; a received one is not", async () => {
+    const db = createFullTestDb();
+    const bus = new EventBus(db);
+    const proclaimedInEventLog = (monitorModule as { proclaimedInEventLog?: (d: typeof db) => (id: string, nodeId: string) => boolean }).proclaimedInEventLog!;
+    const durable = {
+      recordProclamation: (p: { rigId: string; nodeId: string; sessionName: string; runtime: string | null; pinnedModel: string; effectiveModel: string; diagnosis: string | null; occurrenceId?: string; channels: Array<{ channel: string; target: string | null; status: string; detail?: string }> }) => {
+        bus.emit({ type: "seat.model_divergence", rigId: p.rigId, nodeId: p.nodeId, sessionName: p.sessionName, runtime: p.runtime,
+          pinnedModel: p.pinnedModel, effectiveModel: p.effectiveModel, diagnosis: p.diagnosis, occurrenceId: p.occurrenceId, channels: p.channels });
+      },
+      wasProclaimed: proclaimedInEventLog(db),
+    };
+    const unreachable = { ...durable, sendToSession: async () => ({ ok: false, error: "no route" }) };
+    expect(await makeMonitor(unreachable).monitor.checkOnce()).toHaveLength(1);
+    expect(await makeMonitor(unreachable).monitor.checkOnce()).toHaveLength(1); // nobody received it, so a restart alerts again
+    expect(await makeMonitor(durable).monitor.checkOnce()).toHaveLength(1);     // delivered this time
+    expect(await makeMonitor(durable).monitor.checkOnce()).toHaveLength(0);     // and a restart stays quiet
+    db.close();
+  });
+
+  it("proclaimedInEventLog answers from the persisted seat.model_divergence event, per node", () => {
+    const db = createFullTestDb();
+    const bus = new EventBus(db);
+    const proclaimedInEventLog = (monitorModule as { proclaimedInEventLog?: (d: typeof db) => (id: string, nodeId: string) => boolean }).proclaimedInEventLog;
+    expect(typeof proclaimedInEventLog).toBe("function");
+    bus.emit({ type: "seat.model_divergence", rigId: "rig-1", nodeId: "n1", sessionName: "dev-impl@r", runtime: "codex",
+      pinnedModel: "gpt-5.1-codex-mini", effectiveModel: "gpt-5.4-mini", diagnosis: null, occurrenceId: "occ-1", channels: [] });
+    const was = proclaimedInEventLog!(db);
+    expect(was("occ-1", "n1")).toBe(false); // no channel received it
+    const event = (occurrenceId: string, status: string) => bus.emit({ type: "seat.model_divergence", rigId: "rig-1", nodeId: "n1",
+      sessionName: "dev-impl@r", runtime: "codex", pinnedModel: "gpt-5.1-codex-mini", effectiveModel: "gpt-5.4-mini", diagnosis: null, occurrenceId,
+      channels: [{ channel: "operator", target: "op@k", status: "failed" }, { channel: "slack", target: null, status: "deferred" }, { channel: "orchestrator", target: "orch-lead@r", status }] });
+    event("occ-2", "delivered");
+    event("occ-3", "retained");
+    event("occ-4", "failed");
+    expect(was("occ-2", "n1")).toBe(true);
+    expect(was("occ-3", "n1")).toBe(true);
+    expect(was("occ-4", "n1")).toBe(false);
+    expect(was("occ-2", "n2")).toBe(false);
+    db.close();
   });
 });

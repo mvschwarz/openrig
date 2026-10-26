@@ -11,6 +11,7 @@
 // SC-29 EXCEPTION #7 declared in slice ACK §5.
 
 import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
+import { access, readFile, readdir, stat as statAsync } from "node:fs/promises";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { SkillResource } from "./types.js";
@@ -32,6 +33,9 @@ export interface SkillDiscoveryPaths {
   /** Config-resolved managed catalog root. Defaults to the legacy
    *  <homedir>/.openrig/skills path when omitted for compatibility. */
   skillsRoot?: string;
+  /** #875 — each Claude team seat's own skill folder under the OpenRig home (`listSeatSkillRoots`). Audited only
+   *  (discoverSkillsWithProvenance); they are projection output, never a source. */
+  seatSkillRoots?: string[];
 }
 
 export interface SkillFrontmatter {
@@ -57,7 +61,7 @@ export interface SkillDiscoveryResult {
   rejected: SkillRejection[];
 }
 
-export type SourceKind = "rig_bundled" | "spec_install" | "runtime_user" | "shared_user";
+export type SourceKind = "rig_bundled" | "spec_install" | "runtime_user" | "shared_user" | "seat_material";
 
 export interface SkillProvenanceEntry {
   id: string;
@@ -118,13 +122,47 @@ export function parseSkillFrontmatter(content: string): ParseResult {
   };
 }
 
+/** Raw scan outcomes shared by the members of one preflight (#1653), keyed by everything a scan reads. Only a caller
+ *  that names a scope gets one; every other call scans fresh. Results that depend on a member's selection are never
+ *  stored here. */
+export type ScanCache = Map<string, { value: unknown } | { error: unknown }>;
+
+// One scope at a time: the preflight's worker serves one preflight, and a new scope replaces the old one.
+let scoped: { scope: string; cache: ScanCache } | undefined;
+
+export function scanCacheFor(scope: string | undefined): ScanCache | undefined {
+  if (scope === undefined) return undefined;
+  if (scoped?.scope !== scope) scoped = { scope, cache: new Map() };
+  return scoped.cache;
+}
+
+export function releaseScanCache(scope: string): void {
+  if (scoped?.scope === scope) scoped = undefined;
+}
+
+/** Run `scan` once per key in `cache`, failures included; each caller gets its own copy of the result. */
+export function memoizeScan<T>(cache: ScanCache | undefined, key: string, scan: () => T): T {
+  if (!cache) return scan();
+  let entry = cache.get(key);
+  if (!entry) {
+    try { entry = { value: scan() }; } catch (error) { entry = { error }; }
+    cache.set(key, entry);
+  }
+  if ("error" in entry) throw entry.error;
+  return structuredClone(entry.value) as T;
+}
+
 /** Discover skills for a runtime by scanning the canonical filesystem
  *  paths and structurally validating each candidate. Returns the
  *  accepted skills as SkillResource records (id from frontmatter; path
  *  pointing at the skill directory) plus a list of rejections so the
  *  caller can surface clear errors when validation fails. */
-export function discoverSkillsForRuntime(paths: SkillDiscoveryPaths): SkillDiscoveryResult {
+export function discoverSkillsForRuntime(paths: SkillDiscoveryPaths, cache?: ScanCache): SkillDiscoveryResult {
   const scanRoots = listScanRoots(paths);
+  return memoizeScan(cache, JSON.stringify(["discovery", paths.runtime, scanRoots]), () => scanSkillRoots(scanRoots));
+}
+
+function scanSkillRoots(scanRoots: string[]): SkillDiscoveryResult {
   const skills: SkillResource[] = [];
   const rejected: SkillRejection[] = [];
   const seenIds = new Set<string>();
@@ -183,6 +221,30 @@ export function discoverSkillsForRuntime(paths: SkillDiscoveryPaths): SkillDisco
   return { skills, rejected };
 }
 
+/** Find only the named skills (#1653). A conforming skill's folder is named after it (Agent Skills: `name` must match
+ *  the parent directory), so each id costs one SKILL.md read per scan root, in the full scan's precedence order. Ids
+ *  not found this way are left out; the caller runs the full scan for those, which also reports rejections. */
+export function findNamedSkillsForRuntime(paths: SkillDiscoveryPaths, ids: Iterable<string>): SkillResource[] {
+  const scanRoots = listScanRoots(paths);
+  const found: SkillResource[] = [];
+  for (const id of new Set(ids)) {
+    if (!id || id === "." || id === ".." || id.includes("/") || id.includes("\\")) continue;
+    for (const root of scanRoots) {
+      const skillDir = join(root, id);
+      let content: string;
+      try {
+        if (!statSync(skillDir).isDirectory()) continue;
+        content = readFileSync(join(skillDir, "SKILL.md"), "utf-8");
+      } catch { continue; }
+      const parsed = parseSkillFrontmatter(content);
+      if (!parsed.ok || parsed.frontmatter.name !== id) continue;
+      found.push({ id, path: skillDir });
+      break;
+    }
+  }
+  return found;
+}
+
 /** Build the precedence-ordered list of scan roots for a runtime.
  *  Earlier entries win on collision (most-specific-wins): rig-bundled
  *  at cwd > spec-install-dir > user libraries. Within user libraries,
@@ -227,28 +289,35 @@ function rootToSourceKind(root: string, paths: SkillDiscoveryPaths): SourceKind 
   return "shared_user";
 }
 
-export function discoverSkillsWithProvenance(paths: SkillDiscoveryPaths): SkillProvenanceResult {
-  const scanRoots = listScanRoots(paths);
+/** Every skill in every scan root, with where it came from and whether a more specific root shadows it: the skill
+ *  audit's input. It reads every SKILL.md, so it reads asynchronously and the daemon keeps answering meanwhile. */
+export async function discoverSkillsWithProvenance(paths: SkillDiscoveryPaths): Promise<SkillProvenanceResult> {
+  const scanRoots = [
+    ...listScanRoots(paths).map((root) => ({ root, sourceKind: rootToSourceKind(root, paths), seat: false })),
+    ...(paths.seatSkillRoots ?? []).map((root) => ({ root, sourceKind: "seat_material" as const, seat: true })),
+  ];
   const skills: SkillProvenanceEntry[] = [];
   const rejected: SkillRejection[] = [];
-  const seenIds = new Set<string>();
+  const sharedSeenIds = new Set<string>();
 
-  for (const root of scanRoots) {
-    if (!existsSync(root)) continue;
+  for (const { root, sourceKind, seat } of scanRoots) {
+    // Each seat directory is a separate Claude session's loadout: its skills shadow nothing
+    // and are shadowed by nothing, so a stale copy in one seat is still audited.
+    const seenIds = seat ? new Set<string>() : sharedSeenIds;
     let entries: string[];
-    try { entries = readdirSync(root); } catch { continue; }
+    try { entries = await readdir(root); } catch { continue; }
 
     for (const entry of entries) {
       const skillDir = join(root, entry);
       let stat;
-      try { stat = statSync(skillDir); } catch { continue; }
+      try { stat = await statAsync(skillDir); } catch { continue; }
       if (!stat.isDirectory()) continue;
 
       const skillFile = join(skillDir, "SKILL.md");
-      if (!existsSync(skillFile)) continue;
+      try { await access(skillFile); } catch { continue; }
 
       let content: string;
-      try { content = readFileSync(skillFile, "utf-8"); } catch (err) {
+      try { content = await readFile(skillFile, "utf-8"); } catch (err) {
         rejected.push({ path: skillDir, reason: `SKILL.md read error: ${err instanceof Error ? err.message : String(err)}` });
         continue;
       }
@@ -260,7 +329,6 @@ export function discoverSkillsWithProvenance(paths: SkillDiscoveryPaths): SkillP
       }
 
       const id = parsed.frontmatter.name;
-      const sourceKind = rootToSourceKind(root, paths);
       skills.push({
         id,
         path: skillDir,

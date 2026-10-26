@@ -1,4 +1,11 @@
+import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
+import { NativePermissionStore } from "../src/domain/native-permission-store.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { seatSkillPaths } from "../src/domain/seat-skill-storage.js";
+import { prepareSeatLaunchAdditions, systemPromptPendingNote } from "../src/domain/seat-launch-additions.js";
 import type Database from "better-sqlite3";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -48,6 +55,7 @@ describe("SeatHandoverService", () => {
   let getDefaultShell: ReturnType<typeof vi.fn>;
   let getPaneCommand: ReturnType<typeof vi.fn>;
   let service: SeatHandoverService;
+  let currentCodexPermissions: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     db = createFullTestDb();
@@ -85,6 +93,7 @@ describe("SeatHandoverService", () => {
     // KI-14: healthy default — the respawned pane comes up as a blank shell.
     getDefaultShell = vi.fn(async () => "/bin/zsh");
     getPaneCommand = vi.fn(async () => "zsh");
+    currentCodexPermissions = vi.fn(async () => ({ state: "unverified", reason: "fixture has no native policy" }));
     service = newService();
   });
 
@@ -102,6 +111,7 @@ describe("SeatHandoverService", () => {
 
   function newService(adapter: TmuxAdapter = tmux(), occupantInvalidator: OccupantInvalidator = { invalidateRetiringOccupant }): SeatHandoverService {
     return new SeatHandoverService({
+      codexPermissions: { currentCodexPermissions },
       db,
       rigRepo,
       sessionRegistry,
@@ -122,9 +132,9 @@ describe("SeatHandoverService", () => {
     });
   }
 
-  function seedSeat(opts?: { rigName?: string; runtime?: string; withSession?: boolean; model?: string; codexConfigProfile?: string; effort?: string }) {
+  function seedSeat(opts?: { rigName?: string; runtime?: string; withSession?: boolean; model?: string; codexConfigProfile?: string; effort?: string; advisor?: string }) {
     const rig = rigRepo.createRig(opts?.rigName ?? "seat-rig");
-    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: opts?.runtime ?? "codex", cwd: "/project", model: opts?.model, codexConfigProfile: opts?.codexConfigProfile, effort: opts?.effort });
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: opts?.runtime ?? "codex", cwd: "/project", model: opts?.model, codexConfigProfile: opts?.codexConfigProfile, effort: opts?.effort, advisor: opts?.advisor });
     let sessionId: string | null = null;
     if (opts?.withSession !== false) {
       const session = sessionRegistry.registerSession(node.id, `dev-impl@${rig.name}`);
@@ -792,6 +802,75 @@ describe("SeatHandoverService", () => {
   });
 
   // OPR.0.5.5.5 (05-handover-sources-real) INVERTED the former B3 pin: fork and
+  it.each(["floor", "inherit", "policy", null] as const)("rebuild respects a deliberate same-mode selection (%s), not an old choice alone", async mode => {
+    const { node } = seedSeat();
+    const store = new NativePermissionStore(db);
+    const setter = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux() });
+    if (mode === "policy") {
+      await setter.setPolicy({ seatRef: "dev-impl@seat-rig", ref: "builtin:locked", actor: "old operator", reason: "earlier launch" });
+      db.prepare("UPDATE events SET created_at = '2026-04-19 00:00:00' WHERE type = 'node.policy_changed' AND node_id = ?").run(node.id);
+    } else if (mode !== "inherit") {
+      store.write(node.id, { runtime: "codex", mode: "floor" }, "old operator", "earlier launch");
+      db.prepare("UPDATE node_permission_selections SET updated_at = '2026-04-19 00:00:00' WHERE node_id = ?").run(node.id);
+    }
+    const envelope = { approvalPolicy: "never", sandboxPolicy: { type: "danger-full-access" } };
+    currentCodexPermissions.mockResolvedValue({ state: "observed", envelope, profile: null,
+      processStartedAt: "Mon Apr 20 12:00:00 2026", observedAt: "2026-04-20T12:01:00Z" });
+    if (mode !== null) {
+      const selected = mode === "policy"
+        ? await setter.setPolicy({ seatRef: "dev-impl@seat-rig", ref: "builtin:locked", actor: "person", reason: "choose successor permissions" })
+        : await setter.setPermissions({ seatRef: "dev-impl@seat-rig", mode, actor: "person", reason: "choose successor permissions" });
+      expect(selected).toMatchObject({ ok: true, changed: false });
+      expect(signalPaneProcess).not.toHaveBeenCalled();
+      expect(launchHarness).not.toHaveBeenCalled();
+    }
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", source: "rebuild", reason: "context wall" });
+    expect(result).toMatchObject({ ok: true, result: { sourceOutcome: { permissions: { state: mode === null ? "emitted" : "selection_used" } } } });
+    const binding = launchHarness.mock.calls[0]![0];
+    expect(binding.launchPosture).toBe("floor");
+    expect(binding.codexRebuildPermissions).toEqual(mode === null ? envelope : undefined);
+  });
+
+  it("rebuild uses the seat's own envelope over the observed predecessor policy", async () => {
+    const { node } = seedSeat();
+    const own = { sandbox: "read-only", approval: "on-request" };
+    db.prepare("UPDATE nodes SET codex_permissions_json = ? WHERE id = ?").run(JSON.stringify(own), node.id);
+    currentCodexPermissions.mockResolvedValue({ state: "observed", envelope: { approvalPolicy: "never", sandboxPolicy: { type: "danger-full-access" } },
+      profile: null, processStartedAt: "Mon Apr 20 12:00:00 2026", observedAt: "2026-04-20T12:01:00Z" });
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", source: "rebuild", reason: "context wall" });
+    expect(result).toMatchObject({ ok: true, result: { sourceOutcome: { permissions: { state: "selection_used" } } } });
+    const binding = launchHarness.mock.calls[0]![0];
+    expect(binding.codexRebuildPermissions).toBeUndefined();
+    expect(binding.codexPermissions).toEqual(own);
+  });
+
+  it.each(["observed", "unverified", "changed selection", "cleared selection", "profile change", "older selection"])(
+    "rebuild permission result: %s", async state => {
+      const { node } = seedSeat(state === "profile change" ? { codexConfigProfile: "next-profile" } : undefined);
+      const envelope = { approvalPolicy: "on-request", sandboxPolicy: { type: "workspace-write",
+        network_access: false, exclude_tmpdir_env_var: false, exclude_slash_tmp: false } };
+      if (state !== "unverified") currentCodexPermissions.mockImplementation(async () => {
+        expect(signalPaneProcess).not.toHaveBeenCalled();
+        if (state === "changed selection" || state === "older selection") {
+          new NativePermissionStore(db).write(node.id, { runtime: "codex", mode: "full_bypass" }, "person", "successor choice");
+          if (state === "older selection") db.prepare("UPDATE node_permission_selections SET updated_at = '2026-04-19 00:00:00' WHERE node_id = ?").run(node.id);
+        }
+        if (state === "cleared selection") eventBus.emit({ type: "node.permissions_changed", nodeId: node.id,
+          rigId: node.rig_id, from: { runtime: "codex", mode: "full_bypass" }, to: null, actor: "person", reason: "inherit",
+          source: "seat_selection", effect: "future_launches_only" });
+        return { state: "observed", envelope, processStartedAt: "Mon Apr 20 12:00:00 2026",
+          observedAt: "2026-04-20T12:01:00Z", profile: null };
+      });
+      const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "rebuild", source: "rebuild" });
+      expect(result).toMatchObject({ ok: true, result: { sourceOutcome: { mode: "rebuild",
+        permissions: { state: (state === "changed selection" || state === "cleared selection" || state === "profile change") ? "selection_used" : state === "unverified" ? "unverified" : "emitted" } } } });
+      const binding = launchHarness.mock.calls[0]![0];
+      if (state === "observed" || state === "older selection") expect(binding.codexRebuildPermissions).toEqual(envelope);
+      else expect(binding.codexRebuildPermissions).toBeUndefined();
+      if (state === "changed selection") expect(binding.launchPosture).toBe("full_bypass");
+      expect(respawnPane).toHaveBeenCalledTimes(1);
+    });
+
   // rebuild now EXECUTE (full coverage in seat-handover-sources.test.ts). What
   // survives of B3 is its safety core: a source that cannot proceed refuses
   // HONESTLY and pre-mutation — never a blank successor reported complete.
@@ -837,7 +916,8 @@ describe("SeatHandoverService", () => {
     if (!result.ok || !("result" in result)) throw new Error("expected handover result");
     // The FR-3 derive-helper was reused; the token is persisted with provenance
     // "adoption" on the new claimed session, and never appears in the event log.
-    expect(captureCodexThreadId).toHaveBeenCalledWith("successor-session");
+    // The seat's node goes with it, so a seat with its own CODEX_HOME is searched there.
+    expect(captureCodexThreadId).toHaveBeenCalledWith("successor-session", { nodeId: node.id });
     const newSession = db.prepare(
       "SELECT resume_type, resume_token, resume_provenance FROM sessions WHERE node_id = ? AND session_name = ?"
     ).get(node.id, "successor-session") as Record<string, string | null>;
@@ -1280,6 +1360,23 @@ describe("SeatHandoverService", () => {
     });
   });
 
+  it("carries the current rules, primary model and Advisor through handover to the successor", async () => {
+    const { node } = seedSeat({ runtime: "claude-code", model: "claude-sonnet-5-5", advisor: "opus" });
+    const rules = { allow: [], deny: ["Read(./private/**)"] };
+    const writer = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux() });
+    expect(await writer.setPermissions({ seatRef: "dev-impl@seat-rig", rules, actor: "operator@seat-rig", reason: "Set successor rules" })).toMatchObject({ ok: true });
+    launchHarness.mockResolvedValue({ ok: true, resumeToken: "claude-successor", resumeType: "claude_id" });
+    const claudeService = new SeatHandoverService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus,
+      tmuxAdapter: tmux(), runtimeAdapters: { "claude-code": { runtime: "claude-code", launchHarness, checkReady } as unknown as RuntimeAdapter },
+      predecessorRecapResolver: resolvePredecessorRecap as never, readinessTimeoutMs: 50, sleep: async () => {} });
+    const result = await claudeService.handover({
+      seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh", operator: "orch-lead@seat-rig",
+    });
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
+    expect(launchHarness).toHaveBeenCalledTimes(1);
+    expect(launchHarness.mock.calls[0]![0]).toMatchObject({ nodeId: node.id, model: "claude-sonnet-5-5", advisor: "opus", claudePermissions: rules });
+  });
+
   it("#75: an effort-pinned seat's handover launches the successor with that effort — the REAL lookupNode→createSuccessor→launchHarness path", async () => {
     seedSeat({ runtime: "codex", effort: "high" });
     const result = await service.handover({
@@ -1292,6 +1389,46 @@ describe("SeatHandoverService", () => {
     expect(launchHarness).toHaveBeenCalledTimes(1);
     const successorBinding = launchHarness.mock.calls[0]![0] as { effort?: string };
     expect(successorBinding.effort).toBe("high");
+  });
+
+  it("OPR.0.7.0.9 (K2): a Claude seat's launch additions reach its fresh handover successor's launch, and the new conversation's start is recorded", async () => {
+    const { rig } = seedSeat({ runtime: "claude-code" });
+    const src = fs.mkdtempSync(path.join(os.tmpdir(), "handover-additions-"));
+    try {
+      fs.writeFileSync(path.join(src, "prompt.md"), "Short answers.\n");
+      const paths = seatSkillPaths({ rigId: rig.id, logicalId: "dev.impl", runtime: "claude-code" });
+      const prepared = prepareSeatLaunchAdditions(paths, { appendSystemPromptFile: path.join(src, "prompt.md") });
+      if (!prepared.ok) throw new Error(prepared.message);
+      launchHarness.mockImplementation(async () => ({ ok: true, resumeToken: "claude-successor-tok", resumeType: "claude_id" }));
+      const claude = new SeatHandoverService({
+        db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter: tmux(),
+        now: () => new Date("2026-04-24T18:30:00.000Z"), newSuccessorId: () => "01SUCCID0",
+        runtimeAdapters: { "claude-code": { runtime: "claude-code", launchHarness, checkReady } as unknown as RuntimeAdapter },
+        contextUsageStore: { readSidecar } as never, resumeTokenCapturer: { captureCodexThreadId } as never,
+        claudeProcessStartedAt: async () => "2026-04-24T18:29:59.000Z",
+        occupantInvalidator: { invalidateRetiringOccupant }, activityOracle: { declareOccupantSwap },
+        predecessorRecapResolver: resolvePredecessorRecap as never, readinessTimeoutMs: 50, sleep: async () => {},
+      });
+      await claude.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh", operator: "orch-lead@seat-rig" });
+      expect(launchHarness).toHaveBeenCalledTimes(1);
+      const successorBinding = launchHarness.mock.calls[0]![0] as { launchAdditions?: { appendSystemPromptFile?: string } };
+      expect(successorBinding.launchAdditions?.appendSystemPromptFile).toBe(prepared.additions.appendSystemPromptFile);
+      // The successor's conversation starts with today's prompt: nothing pending for it.
+      expect(systemPromptPendingNote(paths, "claude-successor-tok")).toBeUndefined();
+    } finally {
+      fs.rmSync(src, { recursive: true, force: true });
+    }
+  });
+
+  it("a seat's declared env (its rig's, with the member's over it) reaches the successor's pane — the REAL lookupNode→createSuccessor→respawn path", async () => {
+    const { rig, node } = seedSeat({ runtime: "codex" });
+    rigRepo.setRigEnv(rig.id, { SHARED: "from-rig", RIG_ONLY: "rig" });
+    db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?").run(JSON.stringify({ SHARED: "from-member" }), node.id);
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh", operator: "orch-lead@seat-rig" });
+    expect(result.ok).toBe(true);
+    expect(respawnPane).toHaveBeenCalledTimes(1);
+    const env = respawnPane.mock.calls[0]![2].env as Record<string, string>;
+    expect(env).toMatchObject({ SHARED: "from-member", RIG_ONLY: "rig", OPENRIG_SEAT_ENV_KEYS: "SHARED,RIG_ONLY" });
   });
 
   it("OPR.0.7.0.7: a seat's saved effort choice wins over its authored effort at handover (the shared resolver)", async () => {

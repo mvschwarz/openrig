@@ -6,6 +6,8 @@ import { parseAddress, resolveAddress } from "../markdown-address.js";
 import { extractProofContractSelected, parseLogicalCheckboxes, proofItemIdentity } from "../review/compose.js";
 import { validateMissionComposition } from "../lifecycle-manifest.js";
 import type { ScopeFsDeps } from "../scope/scope-view-projection.js";
+import { resolveNodeFileVia } from "../scope/node-file.js";
+import { parseFrontmatter } from "../slices/slice-indexer.js";
 
 /** Addressed Markdown owns judgments. These views are rebuilt, never written upstream. */
 export type JudgmentVerdict = "accept" | "reject" | "withdraw";
@@ -165,8 +167,9 @@ export function evidenceAt(root: string, dir: string, ref: string): Evidence {
 }
 
 /** `root` (a selected catalog project's root) bounds the policy search and the scope identity; without it they derive
- *  from the nearest project.yaml, as for the selected workspace. */
-export function readSliceReadiness(dir: string, io: ScopeFsDeps = proofFs, readPolicy: ProofPolicyRead = defaultPolicyRead, root?: string): ScopeReadiness {
+ *  from the nearest project.yaml, as for the selected workspace. `observe`, when given, is told each evidence path
+ *  before its containment check (a watcher's dependency metadata); it changes nothing about the evaluation. */
+export function readSliceReadiness(dir: string, io: ScopeFsDeps = proofFs, readPolicy: ProofPolicyRead = defaultPolicyRead, root?: string, observe?: (file: string) => void): ScopeReadiness {
   let policy: ScopeReadiness["policy"] = null, receipts: Judgment[] = [], items: ItemReadiness[] = [];
   const issues: string[] = [];
   let policyRead = false;
@@ -189,6 +192,7 @@ export function readSliceReadiness(dir: string, io: ScopeFsDeps = proofFs, readP
             if (!e || typeof e.ref !== "string" || typeof e.sha256 !== "string") return false;
             try {
               const address = parseAddress(e.ref), file = path.resolve(scopeRoot, address.ref);
+              observe?.(file);
               if (io.readBytes) contained(scopeRoot, file);
               const bytes = io.readBytes ? io.readBytes(file) : io.readFile(file);
               if (bytes === null) return false;
@@ -293,31 +297,46 @@ export function recordJudgment(missionsRoot: string, input: JudgeInput, actor: s
  * @param readPolicy - Reader function for determining applicable proof policy.
  * @returns Evaluated mission readiness, including revision, state, slices, and any issues.
  */
-export function readMissionReadiness(missionDir: string, readPolicy: ProofPolicyRead = defaultPolicyRead, root?: string): MissionReadiness {
+export function readMissionReadiness(missionDir: string, readPolicy: ProofPolicyRead = defaultPolicyRead, root?: string, io: ScopeFsDeps = proofFs, observe?: (file: string) => void): MissionReadiness {
   const issues: string[] = [], slices: MissionReadiness["slices"] = [];
+  // #1280: each member's directory, for reading its declared node identity only when a dependency needs it.
+  const dirs = new Map<MissionReadiness["slices"][number], string>();
   let historicalStatus: string | null = null;
   try {
-    const doc = manifest(proofFs, path.join(missionDir, "mission.yaml"));
+    const doc = manifest(io, path.join(missionDir, "mission.yaml"));
     if (!doc) return { revision: hash("legacy"), state: "legacy", slices, issues, historicalStatus };
     const metadata = doc.metadata != null ? mapping(doc.metadata, "mission metadata") : {};
     historicalStatus = typeof metadata.status === "string" ? metadata.status : null;
     const members = validateMissionComposition(doc, path.join(missionDir, "mission.yaml")).filter(m => m.active);
     for (const member of members) {
-      const dir = path.dirname(member.path), data = manifest(proofFs, member.path);
+      const dir = path.dirname(member.path), data = manifest(io, member.path);
       const execution = data?.execution as { depends_on?: unknown } | undefined;
       const depends = execution?.depends_on ?? [];
       if (!Array.isArray(depends) || depends.some(x => typeof x !== "string")) throw new JudgmentError("dependencies_invalid", `${member.path}: execution.depends_on must be a list`);
       const id = (data?.metadata as { id?: unknown } | undefined)?.id ?? path.basename(dir);
       if (typeof id !== "string" || !id || slices.some(s => s.id === id)) throw new JudgmentError("dependency_identity", `${member.path}: missing or repeated slice identity`);
-      slices.push({ scope: path.basename(dir), id, readiness: readSliceReadiness(dir, proofFs, readPolicy, root), dependsOn: depends as string[], eligible: null });
+      const slice = { scope: path.basename(dir), id, readiness: readSliceReadiness(dir, io, readPolicy, root, observe), dependsOn: depends as string[], eligible: null };
+      slices.push(slice);
+      dirs.set(slice, dir);
     }
+    // A dependency name resolves as it always has. Only a name that matches no member's identity may resolve by the SPEC id a
+    // member declares (read the way the execution view reads it), and only when exactly one active member declares it;
+    // anything else stays an unknown dependency.
+    let declared: Map<MissionReadiness["slices"][number], string | null> | null = null;
+    const resolve = (name: string) => {
+      const exact = slices.find(x => x.id === name);
+      if (exact) return exact;
+      declared ??= new Map(slices.map(x => [x, declaredNodeId(dirs.get(x)!)]));
+      const declaring = slices.filter(x => declared!.get(x) === name);
+      return declaring.length === 1 ? declaring[0] : undefined;
+    };
     const memo = new Map<string, boolean | null>();
     const visit = (s: MissionReadiness["slices"][number], visiting = new Set<string>()): boolean | null => {
       if (visiting.has(s.id)) throw new JudgmentError("dependency_cycle", `Cycle involving ${s.scope}`);
       if (memo.has(s.id)) return memo.get(s.id)!;
       const next = new Set(visiting).add(s.id);
       const dependencies = s.dependsOn.map(name => {
-        const dep = slices.find(x => x.id === name);
+        const dep = resolve(name);
         if (!dep) throw new JudgmentError("dependency_missing", `${s.scope}: unknown dependency ${name}`);
         const upstream = visit(dep, next);
         return upstream === null || ["unknown", "legacy"].includes(dep.readiness.state) ? null : upstream && dep.readiness.state === "ready";
@@ -332,8 +351,21 @@ export function readMissionReadiness(missionDir: string, readPolicy: ProofPolicy
   return { revision: hash([slices, issues, historicalStatus]), state, slices, issues, historicalStatus };
 }
 
-export function readProjectReadiness(missionsRoot: string, readPolicy: ProofPolicyRead = defaultPolicyRead, root?: string) {
-  const missions = fs.readdirSync(missionsRoot).filter(n => fs.statSync(path.join(missionsRoot, n)).isDirectory()).map(name => ({ name, ...readMissionReadiness(contained(missionsRoot, path.join(missionsRoot, name)), readPolicy, root) }));
+/** The `id:` a work node's authored file declares, or null when it declares none or can't be read. */
+function declaredNodeId(dir: string): string | null {
+  try {
+    const node = resolveNodeFileVia(dir, p => proofFs.readFile(p));
+    const id = node ? parseFrontmatter(node.content)["id"] : undefined;
+    return typeof id === "string" && id.length > 0 ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+/** `io` lets a caller observe which files the evaluation reads (the proof source watcher derives its subscriptions
+ *  from them); it defaults to the ordinary filesystem reader and changes nothing about the evaluation. */
+export function readProjectReadiness(missionsRoot: string, readPolicy: ProofPolicyRead = defaultPolicyRead, root?: string, io: ScopeFsDeps = proofFs, observe?: (file: string) => void) {
+  const missions = fs.readdirSync(missionsRoot).filter(n => fs.statSync(path.join(missionsRoot, n)).isDirectory()).map(name => ({ name, ...readMissionReadiness(contained(missionsRoot, path.join(missionsRoot, name)), readPolicy, root, io, observe) }));
   const active = missions.filter(m => ["active", "release-candidate"].includes(m.historicalStatus ?? ""));
   return { revision: hash(active), state: active.length && active.every(m => m.state === "ready") ? "ready" : active.some(m => m.state === "unknown") ? "unknown" : "not-ready", missions, basis: "Active mission readiness; distinct outcome judgment and publication remain separate" };
 }

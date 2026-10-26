@@ -383,7 +383,7 @@ describe("rig launch --seats", () => {
           ok: false,
           launched: [
             { nodeId: "n1", logicalId: "dev.driver", status: "fresh" },
-            { nodeId: "n2", logicalId: "dev.guard", status: "awaiting-decision", error: "Original session unresumable: resume requested but runtime continuity could not be verified. Re-run with --fresh dev.guard ..." },
+            { nodeId: "n2", logicalId: "dev.guard", status: "awaiting-decision", error: "Original session unresumable: resume requested but runtime continuity could not be verified. No session is running. Retry the restore with runtime adapters, or deliberately start only this seat fresh: rig seat launch 'dev.guard@rig-1' --fresh --reason \"<why>\"." },
           ],
           held: [],
           alreadyRunning: [],
@@ -405,13 +405,24 @@ describe("rig launch --seats", () => {
     const deps = makeDeps({
       "dev.driver/launch": {
         status: 409,
-        data: { ok: false, logicalId: "dev.driver", code: "awaiting-decision", status: "awaiting-decision", error: "Original session unresumable: resume requested but no token available. Re-run with --fresh dev.driver ..." },
+        data: { ok: false, logicalId: "dev.driver", code: "awaiting-decision", status: "awaiting-decision", error: "Original session unresumable: resume requested but no token available. No session is running. Restore the original session manually, or deliberately start only this seat fresh: rig seat launch 'dev.driver@rig-1' --fresh --reason \"<why>\"." },
       },
     });
     const cmd = launchCommand(deps);
     await cmd.parseAsync(["node", "rig", "rig-1", "dev.driver"]);
     expect(logs.some((l) => l.includes("Launched node"))).toBe(false);
     expect(errors.some((l) => l.includes("--fresh"))).toBe(true);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("#1524 (b): a Codex resume that couldn't be proven lands attention_required and exits non-zero, not Launched", async () => {
+    const error = "Codex resume could not be proven within the resume window: no_log_row. The session was preserved; nothing was restarted.";
+    const deps = makeDeps({
+      "dev.driver/launch": { status: 409, data: { ok: false, logicalId: "dev.driver", status: "attention_required", error } },
+    });
+    await launchCommand(deps).parseAsync(["node", "rig", "rig-1", "dev.driver"]);
+    expect(logs.some((l) => l.includes("Launched node"))).toBe(false);
+    expect(errors.some((l) => l.includes("could not be proven"))).toBe(true);
     expect(process.exitCode).toBe(1);
   });
 

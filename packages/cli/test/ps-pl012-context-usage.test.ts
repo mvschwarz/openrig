@@ -3,7 +3,7 @@
 // Mirrors the PL-019 mock-daemon harness so this stays independent of
 // any other slice in flight.
 
-import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from "vitest";
 import http from "node:http";
 import { Command } from "commander";
 import { psCommand } from "../src/commands/ps.js";
@@ -84,24 +84,46 @@ function nodeAt(logicalId: string, percent: number | null, fresh = true) {
   };
 }
 
+function rigAt(rigId: string, name: string, status: "running" | "stopped", nodeCount: number, runningCount: number) {
+  return {
+    rigId,
+    name,
+    rigName: name,
+    nodeCount,
+    runningCount,
+    activeCount: status === "running" ? 1 : 0,
+    hasWorkCount: 0,
+    attentionCount: 0,
+    status,
+    lifecycleState: "ready",
+    uptime: "1h",
+    latestSnapshot: null,
+  };
+}
+
+const contextFilterCases = [
+  { filter: "contextUsage.percent>=80", key: "contextUsage.percent", value: "80" },
+  { filter: "contextUsage.state=critical", key: "contextUsage.state", value: "critical" },
+] as const;
+
 describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
   let server: http.Server;
   let port: number;
   let nodesByRig: Record<string, unknown[]>;
+  let rigs: Array<Record<string, unknown>>;
   let savedSessionName: string | undefined;
 
   beforeAll(async () => {
     savedSessionName = process.env.OPENRIG_SESSION_NAME;
     delete process.env.OPENRIG_SESSION_NAME;
-    nodesByRig = {};
     server = http.createServer((req, res) => {
       const m = req.url?.match(/^\/api\/rigs\/([^/]+)\/nodes(?:\?.*)?$/);
       if (m && req.method === "GET") {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(nodesByRig[decodeURIComponent(m[1]!)] ?? []));
-      } else if (req.url === "/api/ps" && req.method === "GET") {
+      } else if (req.url && new URL(req.url, "http://127.0.0.1").pathname === "/api/ps" && req.method === "GET") {
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify([{ rigId: "rig-1", name: "demo", nodeCount: 4, runningCount: 4, status: "running", uptime: "1h", latestSnapshot: null }]));
+        res.end(JSON.stringify(rigs));
       } else {
         res.writeHead(404);
         res.end();
@@ -109,6 +131,10 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
     });
     await new Promise<void>((resolve) => server.listen(0, resolve));
     port = (server.address() as { port: number }).port;
+  });
+  beforeEach(() => {
+    nodesByRig = {};
+    rigs = [rigAt("rig-1", "demo", "running", 4, 4)];
   });
   afterAll(() => {
     server.close();
@@ -182,6 +208,56 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
     const env = JSON.parse(logs.join(""));
     const entries = Array.isArray(env) ? env : env.entries;
     expect(entries.map((e: { canonicalSessionName: string }) => e.canonicalSessionName)).toEqual(["demo-delta"]);
+  });
+
+  it.each(contextFilterCases)("keeps the rig-tier JSON envelope for $filter", async ({ filter, key }) => {
+    const result = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "ps", "--json", "--filter", filter]);
+    });
+    expect(result.exitCode).toBeUndefined();
+    expect(result.logs).toHaveLength(1);
+    expect(JSON.parse(result.logs.join(""))).toEqual({
+      entries: [expect.objectContaining({ rigId: "rig-1", name: "demo" })],
+      totalRigs: 1,
+      truncated: false,
+    });
+    expect(result.errLogs).toHaveLength(1);
+    expect(result.errLogs[0]).toContain(key);
+    expect(result.errLogs[0]).toContain("was not applied");
+    expect(result.errLogs[0]).toContain("--nodes");
+  });
+
+  it.each(contextFilterCases)("keeps stopped rigs in the filtered table for $filter", async ({ filter, key }) => {
+    rigs = [
+      rigAt("rig-1", "demo", "running", 4, 4),
+      rigAt("rig-2", "stopped-demo", "stopped", 2, 0),
+    ];
+    const result = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "ps", "--filter", filter]);
+    });
+    const output = result.logs.join("\n");
+    expect(result.exitCode).toBeUndefined();
+    expect(output).toContain("demo");
+    expect(output).toContain("stopped-demo");
+    expect(output).toContain("stopped");
+    expect(output).not.toContain("not shown: 1 stopped");
+    expect(result.errLogs).toHaveLength(1);
+    expect(result.errLogs[0]).toContain(key);
+    expect(result.errLogs[0]).toContain("was not applied");
+    expect(result.errLogs[0]).toContain("--nodes");
+  });
+
+  it.each(contextFilterCases)("keeps the filtered empty-result message for $filter", async ({ filter, key, value }) => {
+    rigs = [];
+    const result = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "ps", "--filter", filter]);
+    });
+    expect(result.exitCode).toBeUndefined();
+    expect(result.logs).toEqual([`No rigs match --filter ${key}=${value}`]);
+    expect(result.errLogs).toHaveLength(1);
+    expect(result.errLogs[0]).toContain(key);
+    expect(result.errLogs[0]).toContain("was not applied");
+    expect(result.errLogs[0]).toContain("--nodes");
   });
 
   it("--filter contextUsage.percent>=invalid fails fast with three-part error and exit 1", async () => {

@@ -73,7 +73,8 @@ export function describeState(state: ViewState) {
 export function defaultSocketPath(instanceId: string): string {
   const override = process.env["OPENRIG_TUI_SOCKET"];
   if (override) return override;
-  const home = process.env["OPENRIG_HOME"] ?? path.join(os.homedir(), ".openrig");
+  // An empty OPENRIG_HOME is unset, as openrig-compat reads it, not a cwd-relative home.
+  const home = process.env["OPENRIG_HOME"] || path.join(os.homedir(), ".openrig");
   return path.join(home, "run", `tui-${instanceId}.sock`);
 }
 

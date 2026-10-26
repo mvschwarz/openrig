@@ -101,6 +101,7 @@ export function deriveRole(db: Database.Database | undefined, nodeId: string | n
 
 const MISSION_TAG = "mission:";
 const SLICE_TAG = "slice:";
+const PROJECT_TAG = "project:";
 
 type MatchForm = "directory name" | "frontmatter id";
 
@@ -134,13 +135,32 @@ export interface CurrentWorkDerivation {
   currentWorkBasis: string;
 }
 
-interface TaggedRow {
+export interface CurrentWorkRow {
   state?: string | null;
   tags?: string[] | null;
   /** Optional, but the production call site passes full queue items so it is populated
    *  there. A refusal that names the offending ROW is one command from actionable; one
    *  that names only the values leaves the reader to go find which row meant it. */
   qitemId?: string | null;
+}
+
+/**
+ * A workspace may have more than one catalogued missions root. Callers that
+ * still have one authoritative root can keep passing a string; catalog-aware
+ * callers resolve the root from the row's project tag.
+ */
+export interface MissionsRootResolution {
+  root: string | null;
+  reason?: string;
+}
+
+export type MissionsRootResolver = string | null | ((row: CurrentWorkRow) => string | null | MissionsRootResolution);
+
+type TaggedRow = CurrentWorkRow;
+
+function resolveMissionsRoot(resolver: MissionsRootResolver, row: CurrentWorkRow): MissionsRootResolution {
+  const resolved = typeof resolver === "function" ? resolver(row) : resolver;
+  return typeof resolved === "object" && resolved !== null ? resolved : { root: resolved };
 }
 
 /** How a row is referred to in a refusal. Falls back cleanly when no id was supplied. */
@@ -219,10 +239,11 @@ interface Candidate {
 
 /** Resolve one typed row to a work node, or to the reason it could not be resolved. */
 function resolveRow(
-  missionsRoot: string,
+  missionsRoot: string | null,
   mission: string,
   slice: string,
 ): { ok: true; value: Candidate } | { ok: false; reason: string } {
+  if (!missionsRoot) return { ok: false, reason: "no missions root configured" };
   const missionMatches = resolveWorkNodeDirs(missionsRoot, mission);
   if (missionMatches.length !== 1) {
     return {
@@ -254,7 +275,7 @@ function resolveRow(
 
 export function deriveCurrentWork(
   rows: TaggedRow[],
-  missionsRoot: string | null,
+  missionsRoot: MissionsRootResolver,
 ): CurrentWorkDerivation {
   const refuse = (currentWorkBasis: string): CurrentWorkDerivation => ({
     currentWork: null,
@@ -263,7 +284,7 @@ export function deriveCurrentWork(
 
   if (!missionsRoot) return refuse("no missions root configured");
 
-  const typed: { mission: string; slice: string; qitemId?: string | null }[] = [];
+  const typed: { row: TaggedRow; mission: string; slice: string; qitemId?: string | null }[] = [];
   const conflicts: string[] = [];
   for (const r of rows) {
     if (r.state !== "in-progress") continue;
@@ -287,7 +308,7 @@ export function deriveCurrentWork(
       );
       continue;
     }
-    typed.push({ mission: missions[0]!, slice: slices[0]!, qitemId: r.qitemId });
+    typed.push({ row: r, mission: missions[0]!, slice: slices[0]!, qitemId: r.qitemId });
   }
 
   // Conflicts outrank a usable sibling for the same reason an unresolved row does: the
@@ -305,14 +326,16 @@ export function deriveCurrentWork(
   // Resolve first, then count: different tag forms for one node must collapse to one node.
   const byPath = new Map<string, Candidate>();
   const failures: string[] = [];
-  for (const { mission, slice, qitemId } of typed) {
-    const resolved = resolveRow(missionsRoot, mission, slice);
+  for (const { row, mission, slice, qitemId } of typed) {
+    const root = resolveMissionsRoot(missionsRoot, row);
+    const resolved = resolveRow(root.root, mission, slice);
     if (resolved.ok) {
+      if (root.reason) resolved.value.basis += `; ${root.reason}`;
       if (!byPath.has(resolved.value.workNodePath)) {
         byPath.set(resolved.value.workNodePath, resolved.value);
       }
     } else {
-      const reason = `${rowLabel(qitemId)} — ${resolved.reason}`;
+      const reason = `${rowLabel(qitemId)} — ${[root.reason, resolved.reason].filter(Boolean).join("; ")}`;
       if (!failures.includes(reason)) failures.push(reason);
     }
   }
@@ -356,6 +379,8 @@ export function deriveCurrentWork(
 export interface WorkCandidate {
   kind: "tag" | "ancestry";
   qitemId: string | null;
+  /** The `project:` tags on the row the mission came from (the ancestor, for ancestry), sorted. */
+  projects: string[];
   mission: string;
   slice: string | null;
   /** The slice node when the slice resolves, else the mission node; null when the mission does not. */
@@ -403,9 +428,9 @@ const BLOCK_SCALAR = new Set(["|", ">", "|-", ">-", "|+", ">+"]);
  * quotes are removed. parseFrontmatter is line-by-line and would return the indicator itself.
  */
 export function frontmatterIntent(raw: string): string | null {
-  const match = /^---\s*\n([\s\S]*?)\n---(?:\s*\n|$)/.exec(raw);
+  const match = /^---\s*\n([\s\S]*?)\r?\n---(?:\s*\n|$)/.exec(raw);
   if (!match) return null;
-  const lines = match[1]!.split("\n");
+  const lines = match[1]!.split(/\r?\n/);
   for (let index = 0; index < lines.length; index++) {
     const found = /^intent:\s*(.*)$/.exec(lines[index]!);
     if (!found) continue;
@@ -473,8 +498,9 @@ function listMissions(missionsRoot: string | null): { names: string[]; truncated
 
 export function deriveWorkCandidates(
   rows: CandidateRow[],
-  missionsRoot: string | null,
+  missionsRoot: MissionsRootResolver,
   lookups: WorkCandidateLookups,
+  defaultMissionsRoot: string | null = typeof missionsRoot === "string" ? missionsRoot : null,
 ): WorkCandidates {
   const candidates: WorkCandidate[] = [];
   const unknown: WorkCandidates["unknown"] = [];
@@ -482,7 +508,7 @@ export function deriveWorkCandidates(
   const held: WorkCandidates["held"] = [];
   const seen = new Set<string>();
   const add = (candidate: WorkCandidate) => {
-    const key = `${candidate.kind}|${candidate.mission}|${candidate.slice ?? ""}|${candidate.workNodePath ?? ""}`;
+    const key = `${candidate.kind}|${candidate.projects.join(",")}|${candidate.mission}|${candidate.slice ?? ""}|${candidate.workNodePath ?? ""}`;
     if (seen.has(key)) return;
     seen.add(key);
     candidates.push(candidate);
@@ -509,10 +535,13 @@ export function deriveWorkCandidates(
       // One slice tag belongs to its mission; anything else is shown without a slice rather
       // than paired by array position.
       const slice = missions.length === 1 && slices.length === 1 ? slices[0]! : null;
+      const projects = tagValues(tags, PROJECT_TAG).sort();
       for (const mission of [...missions].sort()) {
-        add({ kind: "tag", qitemId, mission, slice,
-          ...resolveTagged(missionsRoot, mission, slice),
-          source: `tag mission:${mission}${slice ? ` + slice:${slice}` : ""} on ${rowLabel(qitemId)}` });
+        const root = resolveMissionsRoot(missionsRoot, row);
+        const resolved = resolveTagged(root.root, mission, slice);
+        add({ kind: "tag", qitemId, projects, mission, slice,
+          ...resolved,
+          source: `tag mission:${mission}${slice ? ` + slice:${slice}` : ""} on ${rowLabel(qitemId)}${root.reason ? `; ${root.reason}` : ""}` });
       }
       continue;
     }
@@ -541,10 +570,13 @@ export function deriveWorkCandidates(
         found = true;
         break;
       }
+      const ancestorProjects = tagValues(ancestor.tags ?? [], PROJECT_TAG).sort();
       for (const mission of [...ancestorMissions].sort()) {
-        add({ kind: "ancestry", qitemId, mission, slice: null,
-          ...resolveTagged(missionsRoot, mission, null),
-          source: `handoff ancestor ${ancestorId} carries mission:${mission}; ${rowLabel(qitemId)} itself is untagged` });
+        const root = resolveMissionsRoot(missionsRoot, ancestor);
+        const resolved = resolveTagged(root.root, mission, null);
+        add({ kind: "ancestry", qitemId, projects: ancestorProjects, mission, slice: null,
+          ...resolved,
+          source: `handoff ancestor ${ancestorId} carries mission:${mission}; ${rowLabel(qitemId)} itself is untagged${root.reason ? `; ${root.reason}` : ""}` });
       }
       found = true;
       break;
@@ -552,7 +584,40 @@ export function deriveWorkCandidates(
     if (!found) unknown.push({ qitemId, summary, reason: "no handoff ancestor carries a mission tag" });
   }
 
-  const listed = listMissions(missionsRoot);
-  return { missionsRoot, candidates, unknown, next, held,
+  const listed = listMissions(defaultMissionsRoot);
+  return { missionsRoot: defaultMissionsRoot, candidates, unknown, next, held,
     missionsOnHost: listed.names, missionsOnHostTruncated: listed.truncated };
+}
+
+/**
+ * What plain `queue whoami` shows when the strict derivation names no current work but the
+ * seat holds in-progress rows: every candidate those rows point at, each with its project,
+ * mission, slice, folder and source row, and an instruction to choose. Nothing here picks one;
+ * the agent does. A count alone ("2 distinct typed work nodes") is not enough to choose from.
+ * Null when there is nothing to choose between: a settled current work node, or no
+ * in-progress rows.
+ */
+export interface CurrentWorkChoice {
+  instruction: string;
+  candidates: WorkCandidate[];
+  /** In-progress rows whose work the queue cannot name. */
+  unknown: WorkCandidates["unknown"];
+}
+
+export const CURRENT_WORK_CHOICE_INSTRUCTION =
+  "OpenRig did not choose your current work. Choose the candidate your actual work belongs to; " +
+  "each names its project, mission, slice, folder and the row it came from (rig queue show <qitemId>).";
+
+export function deriveCurrentWorkChoice(
+  derivation: CurrentWorkDerivation,
+  rows: CandidateRow[],
+  missionsRoot: MissionsRootResolver,
+  lookups: WorkCandidateLookups,
+  defaultMissionsRoot: string | null = typeof missionsRoot === "string" ? missionsRoot : null,
+): CurrentWorkChoice | null {
+  if (derivation.currentWork) return null;
+  const inProgress = rows.filter((row) => row.state === "in-progress");
+  if (inProgress.length === 0) return null;
+  const { candidates, unknown } = deriveWorkCandidates(inProgress, missionsRoot, lookups, defaultMissionsRoot);
+  return { instruction: CURRENT_WORK_CHOICE_INSTRUCTION, candidates, unknown };
 }

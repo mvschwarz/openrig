@@ -8,7 +8,7 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { buildExecutionView } from "../src/domain/execution-view.js";
-import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { OutboxHandler, WAKE_INTENT_PREFIX } from "../src/domain/outbox-handler.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { WorkflowRuntime } from "../src/domain/workflow-runtime.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
@@ -639,6 +639,12 @@ describe("S06 lifecycle productization", () => {
     db.prepare(`UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?`).run(new Date().toISOString(), left.packetId);
 
     for (const job of watchdogRepo.listActive()) watchdogRepo.markTerminal(job.jobId, "simulated restart");
+    // Seed a crash after routing but before either wake was attempted. Clearing
+    // the nudge ledger alone leaves delivered intents, which must not replay.
+    for (const packet of [left, right]) {
+      db.prepare("UPDATE outbox_entries SET delivery_state = 'pending', delivered_at = NULL WHERE outbox_id = ?")
+        .run(`${WAKE_INTENT_PREFIX}${packet.packetId}`);
+    }
     db.prepare(`UPDATE queue_items SET last_nudge_attempt = NULL, last_nudge_result = NULL WHERE qitem_id IN (?, ?)`).run(left.packetId, right.packetId);
     sentNudges = [];
     const swept = await runWorkflowBootSweep({
@@ -647,8 +653,16 @@ describe("S06 lifecycle productization", () => {
       watchdogJobsRepo: watchdogRepo,
     });
     expect(swept.keepalivesArmed).toBe(2);
-    expect(swept.lostNudgesReissued).toBe(2);
+    expect(swept.lostNudgeRecoveryAttempts).toBe(2);
+    await queueRepo.drainPendingWakeIntents(); // production startup drains after the workflow sweep
     expect(sentNudges.sort()).toEqual(["left@rig", "right@rig"]);
+    for (const packet of [left, right]) {
+      expect(new OutboxHandler(db).getById(`${WAKE_INTENT_PREFIX}${packet.packetId}`)?.deliveryState).toBe("delivered");
+    }
+    sentNudges = [];
+    await runWorkflowBootSweep({ instanceStore: runtime.instanceStore, queueRepo, watchdogJobsRepo: watchdogRepo });
+    await queueRepo.drainPendingWakeIntents();
+    expect(sentNudges).toEqual([]);
 
     await runtime.project({ instanceId: created.instance.instanceId, currentPacketId: left.packetId, exit: "done", actorSession: "left@rig" });
     expect(watchdogRepo.listActive()).toHaveLength(1);

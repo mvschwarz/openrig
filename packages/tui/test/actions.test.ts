@@ -103,6 +103,6 @@ describe("ACTIONS column = real drive-structure acts (BR-9)", () => {
     const s = createViewState({ instanceId: "t", getSnapshot: () => snap });
     s.dispatch(parseCommand("rig openrig-build"));
     const fallback = renderScreen(s.get(), snap, { cols: 119, rows: 34 }).lines.join("\n");
-    expect(fallback).toContain("MODEL/NOW/ACTIONS on drill");
+    expect(fallback).toContain("MODEL/EFFORT/NOW/ACTIONS on drill");
   });
 });

@@ -6,6 +6,8 @@ import type { ProviderSignal } from "./provider-types.js";
 interface ReactiveSeat {
   seatSession: string;
   runtime: string;
+  /** The seat's own runtime home, when it declares one (seat-runtime-home.ts). */
+  runtimeHome?: { home?: string };
 }
 
 interface ReactiveActivityReader {
@@ -90,6 +92,8 @@ export function collectReactiveEventSignals(deps: ReactiveTapDeps): ReactiveTapR
 
   for (const seat of deps.seats) {
     if (seat.runtime !== "codex") continue;
+    // The registry belongs to the daemon's CODEX_HOME; a seat with its own home isn't on any of its accounts.
+    if (seat.runtimeHome?.home) continue;
     const accountRef = accountBySeat.get(seat.seatSession);
     if (!accountRef) continue;
 
@@ -179,6 +183,7 @@ function discard(
 // an unproven producer yields no row (fail-visible, never fabricated).
 function eventKind(activity: AgentActivity): ReactiveEventKind | null {
   const eventClass = activity.rawEvent;
+  if (eventClass === "PermissionRequest") return null;
   if (typeof eventClass !== "string") return null;
   return EVENT_KINDS[eventClass] ?? null;
 }

@@ -80,6 +80,94 @@ function writtenState(deps: LifecycleDeps): DaemonState {
 }
 
 describe("Daemon Lifecycle", () => {
+  // A started child whose own endpoint names its PID and reports `hosts`; `probe` scripts each later
+  // request: "ok" answers, any other value throws with that error code.
+  function listenerStart(hosts: string[], probe: (url: string) => string) {
+    const release = vi.fn();
+    let spawned = false;
+    const deps = startableDeps({
+      acquireStartLock: () => ({ recordChild: vi.fn(), release }),
+      fetch: vi.fn(async (url) => {
+        if (!spawned) throw Object.assign(new Error("refused"), { code: "ECONNREFUSED" });
+        const outcome = probe(String(url));
+        if (outcome !== "ok") throw Object.assign(new Error("listener probe failed"), { code: outcome });
+        return { ok: true, json: async () => ({ pid: 12345, bind: { mode: "default", hosts, tailscaleDetected: true } }) };
+      }),
+    });
+    const spawn = deps.spawn;
+    deps.spawn = vi.fn((...args) => { spawned = true; return spawn(...args); });
+    return { deps, release };
+  }
+  const stateWritten = (deps: LifecycleDeps) => (deps.writeFile as ReturnType<typeof vi.fn>).mock.calls.some(([file]) => file === STATE_FILE);
+
+  it("starts and records the daemon, warning by name, when only a secondary listener is uncertain (#1714)", async () => {
+    await import("@openrig/daemon/instance-initialization");
+    vi.useFakeTimers();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { deps, release } = listenerStart(["127.0.0.1", "100.64.0.9"], (url) => url.includes("100.64.0.9") ? "ECONNRESET" : "ok");
+      const result = startDaemon({ port: 7433, db: "openrig.sqlite" }, deps).catch((error: Error) => error);
+      await vi.runAllTimersAsync();
+      const outcome = await result;
+      expect(outcome instanceof Error ? outcome.message : "started").toBe("started");
+      expect(writtenState(deps)).toMatchObject({ pid: 12345, port: 7433 });
+      expect(deps.kill).not.toHaveBeenCalled();
+      expect(release).toHaveBeenCalledWith(false);
+      const warning = errors.mock.calls.map((args) => args.join(" ")).find((line) => line.includes("100.64.0.9"));
+      expect(warning).toMatch(/could not be verified/);
+      expect(warning).not.toMatch(/127\.0\.0\.1/);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it("a missing listener fails the start and cleans up, even while another listener is uncertain", async () => {
+    await import("@openrig/daemon/instance-initialization");
+    vi.useFakeTimers();
+    const { deps, release } = listenerStart(["127.0.0.1", "100.64.0.9", "100.64.0.10"], (url) =>
+      url.includes("100.64.0.9") ? "ECONNRESET" : url.includes("100.64.0.10") ? "ECONNREFUSED" : "ok");
+    const result = startDaemon({ port: 7433, db: "openrig.sqlite" }, deps).catch((error: Error) => error);
+    await vi.runAllTimersAsync();
+    const error = await result;
+    expect(error instanceof Error ? error.message : "started").toContain("FAILED the listener adoption gate");
+    expect((error as Error).message).toContain("100.64.0.10");
+    expect(deps.kill).toHaveBeenCalledWith(12345, "SIGTERM");
+    expect(release).toHaveBeenCalledWith(false);
+    expect(stateWritten(deps)).toBe(false);
+  });
+
+  it("a missing secondary listener alone fails the start and cleans up", async () => {
+    await import("@openrig/daemon/instance-initialization");
+    vi.useFakeTimers();
+    const { deps, release } = listenerStart(["127.0.0.1", "100.64.0.9"], (url) => url.includes("100.64.0.9") ? "ECONNREFUSED" : "ok");
+    const result = startDaemon({ port: 7433, db: "openrig.sqlite" }, deps).catch((error: Error) => error);
+    await vi.runAllTimersAsync();
+    const error = await result;
+    expect(error instanceof Error ? error.message : "started").toContain("FAILED the listener adoption gate");
+    expect((error as Error).message).toContain("100.64.0.9");
+    expect(deps.kill).toHaveBeenCalledWith(12345, "SIGTERM");
+    expect(release).toHaveBeenCalledWith(false);
+    expect(stateWritten(deps)).toBe(false);
+  });
+
+  // An explicit host is trimmed for its probes, so a spelling with spaces is still the primary.
+  it.each([undefined, "127.0.0.1 "])("keeps the child and its reservation, without recording it, when the primary listener's own check is uncertain (host %j)", async (host) => {
+    await import("@openrig/daemon/instance-initialization");
+    vi.useFakeTimers();
+    let primaryRequests = 0;
+    // Each round reads the primary endpoint (answers), then the gate probes it again (uncertain).
+    const { deps, release } = listenerStart(["127.0.0.1", "100.64.0.9"], (url) =>
+      url.includes("127.0.0.1") ? (++primaryRequests % 2 === 1 ? "ok" : "ECONNRESET") : "ok");
+    const result = startDaemon({ port: 7433, db: "openrig.sqlite", ...(host ? { host } : {}) }, deps).catch((error: Error) => error);
+    await vi.runAllTimersAsync();
+    const error = await result;
+    expect(error instanceof Error ? error.message : "started").toContain("startup reservation retained");
+    expect((error as Error).message).toContain("127.0.0.1");
+    expect(deps.kill).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledWith(true);
+    expect(stateWritten(deps)).toBe(false);
+  });
+
   // Test 1: start resolves absolute daemon path (not cwd-relative)
   it("getDaemonPath resolves absolute path ending with daemon", () => {
     const daemonPath = getDaemonPath();
@@ -287,6 +375,25 @@ describe("Daemon Lifecycle", () => {
     expect(error.message).toContain("--port <unused-port>");
     expect(deps.writeFile).not.toHaveBeenCalledWith(STATE_FILE, expect.anything());
     expect(deps.kill).not.toHaveBeenCalled();
+  });
+
+  it("start reports the current child's database-conflict stop and one-start remedy", async () => {
+    await import("@openrig/daemon/instance-initialization");
+    vi.useFakeTimers();
+    const child = Object.assign(new EventEmitter(), { pid: 12345, exitCode: null as number | null, signalCode: null, unref: vi.fn() });
+    const reason = "OPENRIG_DB_CONFLICT: Another live daemon holds /fixture/shared.sqlite. To proceed once, run rig daemon start --allow-db-conflict.";
+    const deps = mockDeps({
+      fetch: vi.fn().mockRejectedValue(new Error("refused")),
+      readFileFrom: vi.fn(() => `Error: ${reason}\n`),
+      spawn: vi.fn(() => {
+        setTimeout(() => { child.exitCode = 1; child.emit("exit", 1, null); }, 1);
+        return child as unknown as ChildProcess;
+      }),
+    });
+    const pending = startDaemon({}, deps).catch(error => error as Error);
+    await vi.runAllTimersAsync();
+    expect((await pending).message).toContain(reason);
+    expect(deps.writeFile).not.toHaveBeenCalledWith(STATE_FILE, expect.anything());
   });
 
   it("start: an old bind error is not attributed to a new child's unrelated exit", async () => {
@@ -896,9 +1003,33 @@ describe("Daemon Lifecycle", () => {
       isProcessAlive: vi.fn(() => true), // never dies
     });
 
-    await expect(stopDaemon(deps)).rejects.toThrow(/did not exit/i);
+    // The report names when SIGTERM was requested: the clock read just before kill.
+    vi.useFakeTimers({ now: new Date("2026-10-22T12:00:00.000Z") });
+    try {
+      const stopped = stopDaemon(deps).catch((e: Error) => e);
+      await vi.runAllTimersAsync();
+      expect((await stopped as Error).message).toMatch(/did not exit.*SIGTERM requested at 2026-10-22T12:00:00\.000Z/i);
+    } finally {
+      vi.useRealTimers();
+    }
     expect(deps.kill).toHaveBeenCalledWith(111, "SIGTERM");
     // daemon.json must NOT be deleted — process is still running
+    expect(deps.removeFile).not.toHaveBeenCalled();
+  });
+
+  it("stop: an already-dead target names no SIGTERM request time", async () => {
+    const state: DaemonState = { pid: 111, port: 7433, db: "x.db", startedAt: "2026-01-01T00:00:00Z" };
+    const deps = mockDeps({
+      exists: vi.fn((p: string) => p === STATE_FILE),
+      readFile: vi.fn((p: string) => (p === STATE_FILE ? JSON.stringify(state) : null)),
+      fetch: vi.fn(async () => { throw Object.assign(new Error("refused"), { code: "ECONNREFUSED" }); }),
+      isProcessAlive: vi.fn(() => false),
+    });
+
+    const error = await stopDaemon(deps).catch((e: Error) => e) as Error;
+    expect(error.message).toMatch(/drain completion unverified/);
+    expect(error.message).not.toMatch(/SIGTERM requested/);
+    expect(deps.kill).not.toHaveBeenCalled();
     expect(deps.removeFile).not.toHaveBeenCalled();
   });
 
@@ -1631,7 +1762,7 @@ describe("buildDaemonEnv", () => {
 });
 
 describe("ensureWorkspaceScaffold", () => {
-  it("does not overwrite existing workspace files", () => {
+  it("does not overwrite existing workspace files", async () => {
     const existing = new Set<string>([
       "/tmp/ws",
       path.join("/tmp/ws", "SPEC.md"),
@@ -1643,7 +1774,7 @@ describe("ensureWorkspaceScaffold", () => {
       writeFile: vi.fn(),
     });
 
-    const result = ensureWorkspaceScaffold("/tmp/ws", deps);
+    const result = await ensureWorkspaceScaffold("/tmp/ws", deps);
 
     expect(result.rootCreated).toBe(false);
     expect(result.files.find((f) => f.relPath === "SPEC.md")?.skipped).toBe("exists");

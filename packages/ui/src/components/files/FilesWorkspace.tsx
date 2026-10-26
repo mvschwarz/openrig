@@ -11,7 +11,7 @@
 // affordance per the PRD's recommendation. Per item 4's recommended
 // landing posture: lightweight `<textarea>` (no CodeMirror).
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   fileAssetUrl,
@@ -439,24 +439,24 @@ function SpecValidationPanel({ kind, yaml }: { kind: "rig" | "agent"; yaml: stri
 }
 
 function FileEditor({ root, path, read }: { root: string; path: string; read: FilesReadResponse }) {
-  const [draft, setDraft] = useState(read.content);
+  const [{ draft, base }, setEditor] = useState({ draft: read.content, base: read });
   const [saveError, setSaveError] = useState<string | null>(null);
   const [conflict, setConflict] = useState<{ currentMtime: string; currentContentHash: string } | null>(null);
   const [savedIndicator, setSavedIndicator] = useState(false);
   const write = useFilesWrite();
+  const writePending = useRef(write.isPending);
+  writePending.current = write.isPending;
   const qc = useQueryClient();
 
-  // When a fresh read comes in (after Refresh on conflict, or after a
-  // successful save), reset the draft to the new content. Note: useFilesWrite
-  // intentionally does NOT invalidate the read query on a 409 conflict,
-  // so a conflict-state read stays stable until the operator clicks
-  // Refresh (which triggers the invalidation explicitly).
+  // A background read may advance while the operator is editing. Keep both
+  // the draft and the revision it was based on until save, cancel or Refresh.
   useEffect(() => {
-    setDraft(read.content);
-    setConflict(null);
+    const pending = writePending.current;
+    setEditor((current) => pending || current.draft !== current.base.content
+      ? current : { draft: read.content, base: read });
   }, [read.contentHash, read.mtime, read.content]);
 
-  const dirty = useMemo(() => draft !== read.content, [draft, read.content]);
+  const dirty = useMemo(() => draft !== base.content, [draft, base.content]);
 
   return (
     <div data-testid="files-editor" className="flex h-full flex-col">
@@ -477,8 +477,8 @@ function FileEditor({ root, path, read }: { root: string; path: string; read: Fi
                 root,
                 path,
                 content: draft,
-                expectedMtime: read.mtime,
-                expectedContentHash: read.contentHash,
+                expectedMtime: base.mtime,
+                expectedContentHash: base.contentHash,
                 actor: "ui-files-edit-mode",
               },
               {
@@ -486,6 +486,9 @@ function FileEditor({ root, path, read }: { root: string; path: string; read: Fi
                   if ("conflict" in result) {
                     setConflict({ currentMtime: result.currentMtime, currentContentHash: result.currentContentHash });
                   } else {
+                    setEditor((current) => ({ ...current, base: {
+                      ...base, content: draft, mtime: result.newMtime, contentHash: result.newContentHash,
+                    } }));
                     setSavedIndicator(true);
                     setTimeout(() => setSavedIndicator(false), 2000);
                   }
@@ -503,7 +506,7 @@ function FileEditor({ root, path, read }: { root: string; path: string; read: Fi
         <button
           type="button"
           data-testid="files-editor-cancel"
-          onClick={() => { setDraft(read.content); setSaveError(null); setConflict(null); }}
+          onClick={() => { setEditor({ draft: read.content, base: read }); setSaveError(null); setConflict(null); }}
           className="border border-outline bg-surface-lowest px-2 py-0.5 uppercase tracking-[0.10em] text-on-surface"
         >
           cancel
@@ -515,13 +518,24 @@ function FileEditor({ root, path, read }: { root: string; path: string; read: Fi
       {conflict && (
         <div data-testid="files-editor-conflict" className="flex items-center gap-2 border-b border-red-200 bg-red-50 px-3 py-2 font-mono text-[10px] text-red-900">
           <span className="flex-1">
-            File changed externally. Local mtime <code>{read.mtime}</code> ≠ server <code>{conflict.currentMtime}</code>. Click Refresh to re-read the file (your draft will be replaced with the new server content; copy it elsewhere first if you need to re-apply).
+            File changed externally. Local mtime <code>{base.mtime}</code> ≠ server <code>{conflict.currentMtime}</code>. Click Refresh to re-read the file (your draft will be replaced with the new server content; copy it elsewhere first if you need to re-apply).
           </span>
           <button
             type="button"
             data-testid="files-editor-refresh"
-            onClick={() => {
-              qc.invalidateQueries({ queryKey: ["files", "read", root, path] });
+            onClick={async () => {
+              const queryKey = ["files", "read", root, path];
+              try {
+                await qc.refetchQueries({ queryKey, exact: true }, { throwOnError: true });
+                const fresh = qc.getQueryData<FilesReadResponse>(queryKey);
+                if (fresh) {
+                  setEditor({ draft: fresh.content, base: fresh });
+                  setConflict(null);
+                  setSaveError(null);
+                }
+              } catch (err) {
+                setSaveError(err instanceof Error ? err.message : String(err));
+              }
             }}
             className="border border-red-500 bg-surface-lowest px-2 py-0.5 uppercase tracking-[0.10em] text-red-900"
           >
@@ -537,7 +551,7 @@ function FileEditor({ root, path, read }: { root: string; path: string; read: Fi
       <textarea
         data-testid="files-editor-textarea"
         value={draft}
-        onChange={(e) => setDraft(e.target.value)}
+        onChange={(e) => { const value = e.target.value; setEditor((current) => ({ ...current, draft: value })); }}
         className="flex-1 min-h-0 resize-none border-0 bg-background p-3 font-mono text-[11px] leading-relaxed text-on-surface outline-none"
         spellCheck={false}
       />

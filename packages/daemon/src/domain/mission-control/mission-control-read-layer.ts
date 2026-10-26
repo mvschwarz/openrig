@@ -22,6 +22,7 @@
 // degradation only.
 
 import { loadHumanRegistry } from "../gateway/human-registry.js";
+import { resolveDefaultPerson } from "../gateway/participants.js";
 import type Database from "better-sqlite3";
 import type { QueueRepository, QueueItem, QueueState } from "../queue-repository.js";
 import type { ViewProjector } from "../view-projector.js";
@@ -136,8 +137,9 @@ export class MissionControlReadLayer {
    *  operator seat even when the kernel rig isn't booted yet. */
   getDefaultOperatorSession(): string {
     if (this.defaultOperatorSession) return this.defaultOperatorSession;
+    // The configured operator wins above; otherwise the default person (chosen, or the only one), never the first of several.
     const registry = loadHumanRegistry();
-    return registry.ok && registry.entities.length === 1 ? registry.entities[0]!.address : "";
+    return registry.ok ? resolveDefaultPerson(registry.entities).person?.address ?? "" : "";
   }
 
   async readView(

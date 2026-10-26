@@ -11,9 +11,10 @@ import { LegacyRigSpecSchema } from "../domain/rigspec-schema.js";
 import { RigSpecSchema } from "../domain/rigspec-schema.js";
 import { rigPreflight } from "../domain/rigspec-preflight.js";
 import { RigNotFoundError } from "../domain/errors.js";
-import { runSyncSite } from "../domain/sync-site-wrap.js";
 import { runtimeVersionProbeCwd } from "../adapters/preflight-exec.js";
+import { execRuntimeProbe } from "../adapters/runtime-probe-exec.js";
 import { RigSpecParseError, validateRigSpecImport } from "../domain/spec-validation-service.js";
+import { reserveOperation, validOperationId } from "../domain/operation-correlation.js";
 
 export const rigspecImportRoutes = new Hono();
 
@@ -30,18 +31,27 @@ function getDeps(c: { get: (key: string) => unknown }) {
 // GET /api/rigs/:rigId/spec -> YAML
 export function handleExportYaml(c: Context): Response {
   const rigId = c.req.param("rigId")!;
-  const { exporter } = getDeps(c);
+  const { exporter, rigRepo } = getDeps(c);
 
   try {
     const spec = exporter.exportRig(rigId);
     // Detect format: pod-aware RigSpec has `pods`, legacy has `schemaVersion`
     const isPodAware = "pods" in spec;
-    const yaml = isPodAware
+    const serialized = isPodAware
       ? RigSpecCodec.serialize(spec as import("../domain/types.js").RigSpec)
       : LegacyRigSpecCodec.serialize(spec as import("../domain/types.js").LegacyRigSpec);
+    // Seats whose launch additions this export doesn't carry are named at the top of the file.
+    const notCarried = exporter.launchAdditionsNotCarried(rigId)
+      .map((seat) => `# Not carried: ${seat}'s launch additions (agent_file, append_system_prompt_file, plugin_dirs); add them back by hand.\n`);
+    const yaml = notCarried.join("") + serialized;
+    const startupLayers = rigRepo.getRigStartupLayers(rigId);
+    const headers: Record<string, string> = { "Content-Type": "text/yaml" };
+    if (startupLayers?.root) {
+      headers["X-Rig-Root"] = encodeURIComponent(startupLayers.root);
+    }
     return new Response(yaml, {
       status: 200,
-      headers: { "Content-Type": "text/yaml" },
+      headers,
     });
   } catch (err) {
     if (err instanceof RigNotFoundError) {
@@ -69,7 +79,9 @@ export function handleExportJson(c: Context): Response {
 
 // POST /api/rigs/import -> instantiate from YAML
 rigspecImportRoutes.post("/", async (c) => {
-  const { instantiator, podInstantiator } = getDeps(c);
+  const header = c.req.header("X-OpenRig-Operation-Id");
+  if (!validOperationId(header)) return c.json({ error: "Invalid X-OpenRig-Operation-Id" }, 400);
+  const { instantiator, podInstantiator, rigRepo } = getDeps(c);
   const body = await c.req.text();
 
   let raw: unknown;
@@ -81,13 +93,19 @@ rigspecImportRoutes.post("/", async (c) => {
   }
 
   const isPodAware = raw && typeof raw === "object" && Array.isArray((raw as Record<string, unknown>).pods);
+  const rigRootHeader = c.req.header("X-Rig-Root") ?? null;
+  const cwdHeader = c.req.header("X-Cwd-Override") ?? null;
 
   if (isPodAware) {
-    const rigRoot = c.req.header("X-Rig-Root");
+    const rigRoot = rigRootHeader;
     if (!rigRoot) return c.json({ error: "X-Rig-Root header required for pod-aware specs", code: "missing_rig_root" }, 400);
-    const cwdOverride = c.req.header("X-Cwd-Override") ?? undefined;
+    const cwdOverride = cwdHeader ?? undefined;
+    const operation = reserveOperation(rigRepo.db, header, "rig.import", [], body, [rigRootHeader, cwdHeader]);
+    if (operation.state === "conflict") return c.json({ code: "operation_id_conflict" }, 409);
+    if (operation.state === "replay") return c.json({ replayed: true, operation: operation.operation }, 200);
 
-    const outcome = await podInstantiator.instantiate(body, rigRoot, { cwdOverride });
+    const outcome = await podInstantiator.instantiate(body, rigRoot, { cwdOverride,
+      ...(operation.state === "fresh" ? { recordCreated: operation.recordCreated } : {}) });
     if (!outcome.ok) {
       const status = outcome.code === "validation_failed" ? 400
         : outcome.code === "preflight_failed" ? 409
@@ -103,9 +121,9 @@ rigspecImportRoutes.post("/", async (c) => {
       const body = outcome.code === "rig_name_running" || outcome.code === "generation_unconfirmed" || outcome.code === "compose_project_conflict"
         ? { ...outcome, error: outcome.message }
         : outcome;
-      return c.json(body, status);
+      return c.json(operation.state === "fresh" ? { ...body, operation: operation.read() } : body, status);
     }
-    return c.json(outcome.result, 201);
+    return c.json(operation.state === "fresh" ? { ...outcome.result, operation: operation.read() } : outcome.result, 201);
   }
 
   // Legacy path
@@ -117,7 +135,12 @@ rigspecImportRoutes.post("/", async (c) => {
     return c.json({ error: message, errors: [message] }, 400);
   }
 
-  const outcome = await instantiator.instantiate(spec);
+  const operation = reserveOperation(rigRepo.db, header, "rig.import", [], body, [rigRootHeader, cwdHeader]);
+  if (operation.state === "conflict") return c.json({ code: "operation_id_conflict" }, 409);
+  if (operation.state === "replay") return c.json({ replayed: true, operation: operation.operation }, 200);
+
+  const outcome = await instantiator.instantiate(spec,
+    operation.state === "fresh" ? { recordCreated: operation.recordCreated } : undefined);
   if (!outcome.ok) {
     const status = outcome.code === "validation_failed" ? 400
       : outcome.code === "preflight_failed" ? 409
@@ -126,9 +149,9 @@ rigspecImportRoutes.post("/", async (c) => {
     const body = outcome.code === "rig_name_running"
       ? { ...outcome, error: outcome.message }
       : outcome;
-    return c.json(body, status);
+    return c.json(operation.state === "fresh" ? { ...body, operation: operation.read() } : body, status);
   }
-  return c.json(outcome.result, 201);
+  return c.json(operation.state === "fresh" ? { ...outcome.result, operation: operation.read() } : outcome.result, 201);
 });
 
 // POST /api/rigs/import/workspace -> apply only a validated workspace declaration
@@ -241,10 +264,7 @@ rigspecImportRoutes.post("/preflight", async (c) => {
     if (!rigRoot) return c.json({ ready: false, errors: ["X-Rig-Root header required for pod-aware specs"], warnings: [] }, 400);
     const cwdOverride = c.req.header("X-Cwd-Override") ?? undefined;
     const fsOps = { readFile: (p: string) => fs.readFileSync(p, "utf-8"), exists: (p: string) => fs.existsSync(p) };
-    const { execSync } = await import("node:child_process");
-    const exec = async (cmd: string) => runSyncSite("rigspec.import.preflight", () =>
-      execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10_000, cwd: runtimeVersionProbeCwd(cmd) })
-    );
+    const exec = (cmd: string) => execRuntimeProbe("rigspec.import.preflight", cmd, { cwd: runtimeVersionProbeCwd(cmd) });
     const result = await rigPreflight({
       rigSpecYaml: body,
       rigRoot,

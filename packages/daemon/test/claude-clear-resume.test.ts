@@ -44,9 +44,11 @@ describe("Claude current conversation at shutdown", () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  function fixture(provenance: "scrape" | "operator" | "hook" = "scrape", configDir = path.join(root, ".claude")) {
+  function fixture(provenance: "scrape" | "operator" | "hook" = "scrape", configDir = path.join(root, ".claude"),
+    opts: { daemonConfigDir?: string; memberEnv?: Record<string, string> } = {}) {
     const rig = rigRepo.createRig("clear-test");
     const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code", cwd: root });
+    if (opts.memberEnv) db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?").run(JSON.stringify(opts.memberEnv), node.id);
     const name = "worker@clear-test";
     const session = registry.registerSession(node.id, name);
     registry.updateStatus(session.id, "running");
@@ -64,7 +66,12 @@ describe("Claude current conversation at shutdown", () => {
     } as unknown as TmuxAdapter;
     const refresher = new ResumeMetadataRefresher({
       sessionRegistry: registry, tmuxAdapter: tmux, homeDir: root,
-      claudeConfigDir: configDir, listClaudeProcesses, probeClaudeResume: probe,
+      claudeConfigDir: opts.daemonConfigDir ?? configDir, listClaudeProcesses, probeClaudeResume: probe,
+      // The seat's own home as its stored env declares it (the production resolver is seat-runtime-home.ts).
+      seatHome: (nodeId: string) => {
+        const row = db.prepare("SELECT env_json FROM nodes WHERE id = ?").get(nodeId) as { env_json: string | null } | undefined;
+        return row?.env_json ? (JSON.parse(row.env_json) as Record<string, string>).CLAUDE_CONFIG_DIR : undefined;
+      },
     });
     const file = path.join(configDir, "sessions", "901.json");
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -93,6 +100,19 @@ describe("Claude current conversation at shutdown", () => {
     const f = fixture("scrape", path.join(root, "custom-config"));
     await f.teardown.teardown(f.rig.id);
     expect(registry.getSessionsForRig(f.rig.id)[0]?.resumeToken).toBe(newId);
+  });
+
+  it("reads the seat's own Claude config dir, not the daemon's, when its env declares one", async () => {
+    const seatDir = path.join(root, "seat-claude");
+    const f = fixture("scrape", seatDir, { daemonConfigDir: path.join(root, "daemon-claude"), memberEnv: { CLAUDE_CONFIG_DIR: seatDir } });
+    await f.teardown.teardown(f.rig.id);
+    expect(registry.getSessionsForRig(f.rig.id)[0]?.resumeToken).toBe(newId);
+  });
+
+  it("doesn't read a seat's Claude conversation from the daemon's config dir once the seat declares another", async () => {
+    const f = fixture("scrape", path.join(root, "daemon-claude"), { memberEnv: { CLAUDE_CONFIG_DIR: path.join(root, "seat-claude") } });
+    await f.teardown.teardown(f.rig.id);
+    expect(registry.getSessionsForRig(f.rig.id)[0]?.resumeToken).toBe(oldId);
   });
 
   it("preserves the same conversation when no clear occurred", async () => {

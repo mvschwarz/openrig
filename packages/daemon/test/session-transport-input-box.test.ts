@@ -547,7 +547,6 @@ describe("SessionTransport with transport.verify_input_box", () => {
       // The verdict first, so a changed verdict is reported as such, then the readings that explain it.
       expect(result.verified).toBe(on);
       expect(result.outcome).toBe(on ? "delivered" : "rendered-unconfirmed");
-      expect(result.inputBox).toEqual(box);
       // One capture and one pid read between paste and Enter, one pid read after the post capture.
       const enter = log.indexOf("sendKeys:Enter");
       expect(log.slice(log.indexOf("sendText") + 1, enter)).toEqual(["pid:afterPaste", "capture:afterPaste:30"]);
@@ -566,7 +565,6 @@ describe("SessionTransport with transport.verify_input_box", () => {
       expect(settingOff.log).toEqual(withoutDep.log);
       expect(settingOff.log.some((call) => call.startsWith("pid:"))).toBe(false);
       expect(settingOff.result).toEqual(withoutDep.result);
-      expect(settingOff.result.inputBox).toBeUndefined();
       expectOnePasteOneEnter(settingOff.result, settingOff.log);
       if (off !== null) expect(settingOff.result.verified).toBe(off);
     });
@@ -584,7 +582,7 @@ describe("SessionTransport with transport.verify_input_box", () => {
       expect((await run({ frames }, texts.short)).result.verified).toBe(true);
       const { result, log } = await run({ frames }, texts.short, true);
       expectOnePasteOneEnter(result, log);
-      expect(result).toMatchObject({ verified: false, outcome: "rendered-unconfirmed", inputBox: { before: "other", after: "empty", sameProcess: true } });
+      expect(result).toMatchObject({ verified: false, outcome: "rendered-unconfirmed" });
     });
 
     it("T15 Codex: the box holds our text plus more", async () => {
@@ -593,7 +591,7 @@ describe("SessionTransport with transport.verify_input_box", () => {
       const frames = { prePaste: codex("idle"), afterPaste: codex("staged-short.J"), afterEnter: codex("after-enter-0.4s.J") };
       const { result, log } = await run({ frames }, expected, true);
       expectOnePasteOneEnter(result, log);
-      expect(result).toMatchObject({ verified: false, inputBox: { before: "other", after: "empty", sameProcess: true } });
+      expect(result).toMatchObject({ verified: false });
     });
 
     it("T17 Claude raw send: the box never held the text and an agent line repeats its first 40 characters", async () => {
@@ -606,7 +604,7 @@ describe("SessionTransport with transport.verify_input_box", () => {
       expect((await run({ frames }, texts.short)).result.verified).toBe(true);
       const { result, log } = await run({ frames }, texts.short, true);
       expectOnePasteOneEnter(result, log);
-      expect(result).toMatchObject({ verified: false, inputBox: { before: "other", after: "empty", sameProcess: true } });
+      expect(result).toMatchObject({ verified: false });
     });
 
     it("T19 Claude envelope collapsed to a label of the right size: hidden, even though the transcript shows the whole envelope", async () => {
@@ -621,7 +619,7 @@ describe("SessionTransport with transport.verify_input_box", () => {
       expect((await run({ frames }, texts.envelope)).result.verified).toBe(true);
       const { result, log } = await run({ frames }, texts.envelope, true);
       expectOnePasteOneEnter(result, log);
-      expect(result).toMatchObject({ verified: false, outcome: "rendered-unconfirmed", inputBox: { before: "hidden", after: "empty", sameProcess: true } });
+      expect(result).toMatchObject({ verified: false, outcome: "rendered-unconfirmed" });
     });
   });
 
@@ -660,7 +658,7 @@ describe("SessionTransport with transport.verify_input_box", () => {
       seedCanonicalRig(runtime);
       const { result, log } = await run({ frames: { prePaste, ...(runtime === "codex" ? codexAfter : claudeAfter) } }, texts.submit, true);
       expectOnePasteOneEnter(result, log);
-      expect(result).toMatchObject({ verified: true, outcome: "delivered", inputBox: { seat: "idle", before: "exact", after: "empty", sameProcess: true } });
+      expect(result).toMatchObject({ verified: true, outcome: "delivered" });
     });
 
     it.each([
@@ -670,7 +668,7 @@ describe("SessionTransport with transport.verify_input_box", () => {
       seedCanonicalRig("claude-code");
       const { result, log } = await run({ frames: { prePaste, ...claudeAfter } }, texts.submit, true);
       expectOnePasteOneEnter(result, log);
-      expect(result).toMatchObject({ verified: false, outcome: "rendered-unconfirmed", inputBox: { seat: "unknown", before: "exact", after: "empty", sameProcess: true } });
+      expect(result).toMatchObject({ verified: false, outcome: "rendered-unconfirmed" });
       // No read is added for the seat: the calls before the paste are those of the setting off.
       const off = await run({ frames: { prePaste, ...claudeAfter } }, texts.submit, false);
       expect(log.slice(0, log.indexOf("sendText"))).toEqual(off.log.slice(0, off.log.indexOf("sendText")));
@@ -718,7 +716,7 @@ describe("SessionTransport with transport.verify_input_box", () => {
       for (const afterEnter of [seat.frame, running(seat)]) {
         db.close(); db = createFullTestDb(); rigRepo = new RigRepository(db); sessionRegistry = new SessionRegistry(db);
         const result = await runSeat(seat.session, { frames: { prePaste: seat.frame, afterPaste: staged(seat, texts.short), afterEnter } }, texts.short);
-        expect(result).toMatchObject({ verified: true, outcome: "delivered", inputBox: { seat: "idle", before: "exact", after: "empty", sameProcess: true } });
+        expect(result).toMatchObject({ verified: true, outcome: "delivered" });
       }
     });
 
@@ -747,14 +745,13 @@ describe("SessionTransport with transport.verify_input_box", () => {
         const result = await runSeat(seat.session, { frames: frames(seat) }, texts.short);
         expect(result.verified, seat.session).toBe(false);
         expect(result.outcome).toBe("rendered-unconfirmed");
-        expect(result.inputBox).toEqual(box);
       }
     });
 
     it("R5-8 a real seat's frame sent to another seat (another name on the box): unconfirmed", async () => {
       const result = await runSeat(seats.acceptEdits.session,
         { frames: { prePaste: seats.bypass.frame, afterPaste: staged(seats.bypass, texts.short), afterEnter: seats.bypass.frame } }, texts.short);
-      expect(result).toMatchObject({ verified: false, inputBox: { seat: "unknown", before: "exact", after: "empty", sameProcess: true } });
+      expect(result).toMatchObject({ verified: false });
     });
   });
 
@@ -771,14 +768,14 @@ describe("SessionTransport with transport.verify_input_box", () => {
       seedCanonicalRig("claude-code");
       const { result, log } = await run({ frames: phases, pids }, texts.submit, true);
       expectOnePasteOneEnter(result, log);
-      expect(result).toMatchObject({ ok: true, verified: false, outcome: "rendered-unconfirmed", inputBox: box });
+      expect(result).toMatchObject({ ok: true, verified: false, outcome: "rendered-unconfirmed" });
     });
 
     it("T27 the post capture throws: the existing catch branch, with the before reading kept", async () => {
       seedCanonicalRig("claude-code");
       const { result, log } = await run({ frames: { ...frames, afterEnter: new Error("capture failed") } }, texts.submit, true);
       expectOnePasteOneEnter(result, log);
-      expect(result).toMatchObject({ verified: false, outcome: "rendered-unconfirmed", inputBox: { before: "exact", after: "unavailable", sameProcess: false } });
+      expect(result).toMatchObject({ verified: false, outcome: "rendered-unconfirmed" });
     });
 
     it.each([
@@ -795,7 +792,7 @@ describe("SessionTransport with transport.verify_input_box", () => {
       await vi.advanceTimersByTimeAsync(1);
       const result = await pending;
       expectOnePasteOneEnter(result, log);
-      expect(result).toMatchObject({ verified: false, outcome: "rendered-unconfirmed", inputBox: { before: "unavailable", after: "empty", sameProcess: false } });
+      expect(result).toMatchObject({ verified: false, outcome: "rendered-unconfirmed" });
     });
 
     it("T28 the post pid read never settles: the result returns after 500 ms, unconfirmed", async () => {
@@ -813,7 +810,7 @@ describe("SessionTransport with transport.verify_input_box", () => {
       await vi.advanceTimersByTimeAsync(1);
       const result = await pending;
       expectOnePasteOneEnter(result, log);
-      expect(result).toMatchObject({ verified: false, inputBox: { before: "exact", after: "empty", sameProcess: false } });
+      expect(result).toMatchObject({ verified: false });
     });
   });
 
@@ -825,7 +822,7 @@ describe("SessionTransport with transport.verify_input_box", () => {
         onEnter: () => sessionRegistry.updateBinding(node.id, { tmuxSession: SESSION, tmuxPane: "%99" }),
       }, texts.submit, true);
       expectOnePasteOneEnter(result, log);
-      expect(result).toMatchObject({ verified: false, inputBox: { before: "exact", after: "empty", sameProcess: false } });
+      expect(result).toMatchObject({ verified: false });
     });
 
     it("T36 Claude: a rebind during the pre-Enter read is refused by the existing recipient check, as today", async () => {
@@ -837,7 +834,6 @@ describe("SessionTransport with transport.verify_input_box", () => {
       const { result, log } = await run(script, texts.submit, true);
       expect(result).toMatchObject({ ok: false, sent: true, reason: "target_runtime_conflict" });
       expect(log).not.toContain("sendKeys:Enter");
-      expect(result.inputBox).toBeUndefined();
     });
   });
 
@@ -858,7 +854,6 @@ describe("SessionTransport with transport.verify_input_box", () => {
       expect(setting).not.toHaveBeenCalled();
       expect(log).toEqual(withoutDep.log);
       expect(result).toEqual(withoutDep.result);
-      expect(result.inputBox).toBeUndefined();
     });
 
     it("T39 without --verify: the setting is never read, no extra calls, no inputBox", async () => {
@@ -869,7 +864,6 @@ describe("SessionTransport with transport.verify_input_box", () => {
       expect(setting).not.toHaveBeenCalled();
       expect(log.some((call) => call.startsWith("pid:") || call.startsWith("capture:afterPaste"))).toBe(false);
       expect(result.ok).toBe(true);
-      expect(result.inputBox).toBeUndefined();
     });
 
     it("T40 submitOnly: unchanged with the setting on", async () => {
@@ -917,11 +911,9 @@ describe("SessionTransport with transport.verify_input_box", () => {
       expect(on.log).toEqual(off.log);
       expect(on.log.some((call) => call.startsWith("pid:"))).toBe(false);
       expect(off.result.promptInteraction).toBe("enter-sent");
-      expect(off.result.inputBox).toBeUndefined();
       expect(off.result.verified).toBe(echoed);
       expect(on.result.promptInteraction).toBe("enter-sent");
       expect(on.result).toMatchObject({ ok: true, verified: false, outcome: "rendered-unconfirmed" });
-      expect(on.result.inputBox).toEqual({ seat: "unchecked", before: "unchecked", after: "unchecked", sameProcess: false });
     });
 
     it.each(["claude-code", "codex"] as const)("T41c an audited prompt answer to %s that is not visibly staged (no Enter): inputBox unchecked", async (runtime) => {
@@ -949,9 +941,7 @@ describe("SessionTransport with transport.verify_input_box", () => {
       expect(on.log).toEqual(off.log);
       expect(on.log.some((call) => call.startsWith("sendKeys"))).toBe(false);
       expect(off.result).toMatchObject({ verified: false, outcome: "rendered-unconfirmed", promptInteraction: "unverified" });
-      expect(off.result.inputBox).toBeUndefined();
       expect(on.result).toMatchObject({ verified: false, outcome: "rendered-unconfirmed", promptInteraction: "unverified" });
-      expect(on.result.inputBox).toEqual({ seat: "unchecked", before: "unchecked", after: "unchecked", sameProcess: false });
     });
 
     it.each(["claude-code", "codex"] as const)("T41d an audited prompt answer to %s whose capture after Enter fails: inputBox unchecked", async (runtime) => {
@@ -977,9 +967,7 @@ describe("SessionTransport with transport.verify_input_box", () => {
       const on = await answer(true);
       expect(on.log).toEqual(off.log);
       expect(off.result).toMatchObject({ verified: false, outcome: "rendered-unconfirmed", promptInteraction: "enter-sent" });
-      expect(off.result.inputBox).toBeUndefined();
       expect(on.result).toMatchObject({ verified: false, outcome: "rendered-unconfirmed", promptInteraction: "enter-sent" });
-      expect(on.result.inputBox).toEqual({ seat: "unchecked", before: "unchecked", after: "unchecked", sameProcess: false });
     });
 
     it("T42 the setting is read fresh per send", async () => {
@@ -995,9 +983,8 @@ describe("SessionTransport with transport.verify_input_box", () => {
       on = true;
       current = second;
       const after = await t.send(SESSION, texts.submit, { verify: true });
-      expect(before.inputBox).toBeUndefined();
       expect(first.log.some((call) => call.startsWith("pid:"))).toBe(false);
-      expect(after.inputBox).toEqual({ seat: "idle", before: "exact", after: "empty", sameProcess: true });
+      expect(second.log.some((call) => call.startsWith("pid:"))).toBe(true);
     });
 
     it("a setting read that throws reads off", async () => {
@@ -1006,7 +993,6 @@ describe("SessionTransport with transport.verify_input_box", () => {
       const { tmux, log } = phasedTmux({ frames });
       const result = await transport(tmux, () => { throw new Error("settings unreadable"); }).send(SESSION, texts.submit, { verify: true });
       expectOnePasteOneEnter(result, log);
-      expect(result.inputBox).toBeUndefined();
     });
   });
 });
@@ -1077,7 +1063,6 @@ describe("transport.verify_input_box production wiring", () => {
       if (setting === "0") {
         // Off: today's transcript verdict, no box read, no pid read, no new stage.
         expect(result).toMatchObject({ verified: true, outcome: "delivered" });
-        expect(result.inputBox).toBeUndefined();
         expect(between.filter((command) => !command.includes("list-panes"))).toEqual([]);
         // After Enter only the existing post capture (the existing Claude recipient check reads the pid before the paste).
         expect(commands.slice(enter + 1).map((command) => command.includes("capture-pane") ? "capture" : command.includes("#{pane_pid}") ? "pid" : "other"))
@@ -1090,7 +1075,7 @@ describe("transport.verify_input_box production wiring", () => {
         ]);
         return;
       }
-      expect(result).toMatchObject({ verified: true, outcome: "delivered", inputBox: { before: "exact", after: "empty", sameProcess: true } });
+      expect(result).toMatchObject({ verified: true, outcome: "delivered" });
       // Besides the two new reads, only the adapter's existing guard runs before Enter (it resolves the pane).
       expect(between.filter((command) => !command.includes("list-panes"))).toHaveLength(2);
       expect(between.findLastIndex((command) => command.includes("list-panes"))).toBe(between.length - 1);

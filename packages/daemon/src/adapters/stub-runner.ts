@@ -25,6 +25,7 @@ import {
 } from "./stub-runner-protocol.js";
 import { parseStubScript, DEFAULT_STUB_SCRIPT, type StubScript } from "./stub-script.js";
 import { fireCompaction, type CompactionResult } from "./stub-compaction.js";
+import { fireRefocus, type StubRefocusResult } from "./stub-refocus.js";
 import { fireRestore, type RestoreResult } from "./stub-restore.js";
 
 export interface StubRunnerArgs {
@@ -77,6 +78,7 @@ export interface StubRunnerIO {
    *  never fabricate — and return the injected restore directive it delivered (or a
    *  delivered=false no-op when there is no pending marker to deliver). */
   fireRestore(): RestoreResult;
+  fireRefocus?(): StubRefocusResult;
   /** Fire-and-forget POST of a canonical activity event to /api/activity/hooks. */
   postActivity(payload: Record<string, unknown>): void;
   /** Kill the seat MID-TURN (mid_turn_death): record the exited sidecar + EXIT marker,
@@ -174,7 +176,12 @@ export function executeStubScript(script: StubScript, io: StubRunnerIO, identity
       }
       continue;
     }
-    // All four seeded behaviors are wired above; step.behavior is `never` here. A value
+    if (step.behavior === "refocus") {
+      if (!io.fireRefocus) throw new Error("stub refocus IO is not bound");
+      io.mirrorLine(io.fireRefocus().additionalContext);
+      continue;
+    }
+    // All declared behaviors are wired above; step.behavior is `never` here. A value
     // outside the closed STUB_BEHAVIORS union can only reach the executor by bypassing
     // parseStubScript — a programming error. Fail LOUDLY, never a silent no-op.
     throw new Error(
@@ -182,6 +189,18 @@ export function executeStubScript(script: StubScript, io: StubRunnerIO, identity
     );
   }
   io.postActivity(stubActivityPayload(identity, "Stop", null, io.now()));
+}
+
+/** Model only the recorded submitted-line distinction, not Claude's editor or a universal threshold. */
+export function submitStubInput(line: string, io: Pick<StubRunnerIO, "mirrorLine"> & {
+  fireCompaction(instruction: string): CompactionResult;
+}, pasteCollapseChars: number): "compaction" | "message" {
+  if (/^\/compact(?:\s|$)/.test(line) && line.length <= pasteCollapseChars) {
+    io.fireCompaction(line.slice("/compact".length).trim());
+    return "compaction";
+  }
+  io.mirrorLine(line.length > pasteCollapseChars ? "[Pasted text #1 +1 lines]" : line);
+  return "message";
 }
 
 /** Resolve the seat's behavior script: the scenario-resolved script at
@@ -278,6 +297,8 @@ export function resolveStubActivityEndpoint(env: NodeJS.ProcessEnv): { baseUrl: 
 export const STUB_CLOCK_ANNOUNCEMENT = "OPENRIG_TEST_CLOCK_NOW active — timestamps are injected";
 
 export async function runStubRunner(args: StubRunnerArgs): Promise<void> {
+  // Discard input after the terminal echoes it, so repeated sends cannot fill its unread input queue.
+  process.stdin.resume();
   // PRD §5 (no wall-clock in the stub's OWN behavior): the runner's own stamps honor
   // the same A3-R3 injectable clock the compaction assets use — OPENRIG_TEST_CLOCK_NOW
   // (an ISO instant) when set, real wall-clock otherwise (absent = production).
@@ -332,6 +353,7 @@ export async function runStubRunner(args: StubRunnerArgs): Promise<void> {
       cwd: args.cwd,
       injectClockNow: process.env.OPENRIG_TEST_CLOCK_NOW,
     }),
+    fireRefocus: () => fireRefocus(nodePath.resolve(import.meta.dirname, "../../assets/plugins/openrig-core/hooks/scripts/refocus.cjs"), args.cwd, process.env, args.launchId),
     postActivity: (payload) => {
       if (!endpoint || typeof fetch !== "function") return;
       const controller = new AbortController();

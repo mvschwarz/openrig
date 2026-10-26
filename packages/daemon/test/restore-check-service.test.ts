@@ -123,6 +123,7 @@ function mockDeps(overrides?: Partial<RestoreCheckDeps & {
     readFile: () => VALID_HOST_INFRA_DECLARATION,
     getStartupContext: () => startupContextProbe(),
     probeQueueStore: () => ({ available: true, evidence: "SQLite queue store is available" }),
+    getDesiredClaudeActivityHooks: () => ({ status: "known", selected: false }),
     getClaudeActivityHookEvents: () => ["SessionStart", "UserPromptSubmit"],
     ...overrides,
   };
@@ -946,13 +947,13 @@ describe("RestoreCheckService", () => {
     expect(hookChecks).toHaveLength(0);
   });
 
-  it.each([undefined, "*", "startup|resume", "startup, resume", "^(startup|resume)$"])("checks usable selected activity-hook matcher %s", (matcher) => {
+  it.each([undefined, "*", "startup|resume", "startup, resume", "^(startup|resume)$"].flatMap(matcher => ["node", "'/runtime/node'"].map(executable => ({ matcher, executable }))))("checks usable selected activity-hook matcher $matcher / $executable", ({ matcher, executable }) => {
     const cwd = path.join(os.tmpdir(), "restore-check-activity-seat");
     const settingsPath = path.join(cwd, ".claude", "settings.local.json");
     const relayPath = RELAY_PATH;
     const events = ["SessionStart", "UserPromptSubmit"];
     const settings = JSON.stringify({ hooks: Object.fromEntries(events.map((event) => [event, [{ matcher, hooks: [
-      { type: "command", command: `node '${relayPath}'` },
+      { type: "command", command: `${executable} '${relayPath}'` },
     ] }]])) });
     const service = new RestoreCheckService(mockDeps({
       getNodeInventory: () => [claudeNode({ cwd })],
@@ -1066,6 +1067,112 @@ describe("RestoreCheckService", () => {
     const hook = new RestoreCheckService(mockDeps()).check({}).checks.find((entry) => entry.check === "seat.dev-impl@test-rig.hooks");
     expect(hook?.status).toBe("green");
     expect(hook?.evidence).toContain("not selected");
+  });
+
+  it.each(["selected", "unknown", "throws"])("keeps absent saved channels with %s desired metadata nonblocking", (kind) => {
+    const desired = () => {
+      if (kind === "throws") throw new Error("unreadable source");
+      return kind === "selected" ? { status: "known" as const, selected: true }
+        : { status: "unknown" as const, evidence: "unreadable source" };
+    };
+    const service = new RestoreCheckService(mockDeps({ getDesiredClaudeActivityHooks: desired }));
+    for (const opts of [{}, { compact: true, includeReady: true }]) {
+      const result = service.check(opts);
+      expect(result.verdict).toBe("restorable_with_caveats");
+      expect(result.readiness.status).toBe("ready_with_caveats");
+      expect(result.rigs[0]?.classCounts.ready_with_caveats).toBe(1);
+      const hook = result.checks.find(c => c.check.endsWith(".hooks"));
+      expect(hook).toMatchObject({ status: "yellow", remediation: "" });
+      expect(hook?.evidence).toContain(kind === "selected" ? "stale selection" : "unknown");
+      expect(result.repairPacket?.some(step => step.rationale === hook?.evidence) ?? false).toBe(false);
+      expect(result.recovery.actions).toEqual([]);
+    }
+  });
+
+  it("does not add desired-profile resolution to omitted ready detail or composed no-hooks polls", () => {
+    let reads = 0;
+    const service = new RestoreCheckService(mockDeps({ getDesiredClaudeActivityHooks: () => {
+      reads++; return { status: "known", selected: true };
+    } }));
+    expect(service.check({ compact: true }).checks.some(c => c.check.endsWith(".hooks"))).toBe(false);
+    service.check({ noHooks: true, recoveryOnly: true });
+    expect(reads).toBe(0);
+    service.check({ compact: true, includeReady: true });
+    expect(reads).toBe(1);
+  });
+
+  it("preserves independent red and unknown causes alongside a stale selection", () => {
+    const overrides = { getDesiredClaudeActivityHooks: () => ({ status: "known" as const, selected: true }) };
+    expect(new RestoreCheckService(mockDeps({ ...overrides, probeQueueStore: () => ({ available: false, evidence: "broken" }),
+      getNodeInventory: () => [claudeNode({ sessionStatus: "exited" })],
+    })).check({}).verdict).toBe("not_restorable");
+    expect(new RestoreCheckService(mockDeps({ ...overrides, getRestoreInputs: () => { throw new Error("unreadable snapshot"); },
+    })).check({}).verdict).toBe("unknown");
+  });
+
+  it.each(["available", "missing-manifest", "malformed-manifest", "unreadable-relay", "disabled", "malformed-settings", "missing-event"])("inspects saved core plugin %s without treating selection as delivery", (kind) => {
+    const dir = "/custom-instance/plugins/openrig-core", cwd = "/fixture-project";
+    const settingsPath = path.join(cwd, ".claude/settings.local.json");
+    const files = new Map([
+      [path.join(dir, ".claude-plugin/plugin.json"), JSON.stringify({ name: "openrig-core", hooks: "./hooks/claude.json" })],
+      [path.join(dir, "hooks/claude.json"), JSON.stringify({ hooks: { Stop: [{ hooks: [{ command: "node activity-relay.cjs" }] }] } })],
+      [path.join(dir, "hooks/scripts/activity-relay.cjs"), "// fixture relay"],
+      [settingsPath, JSON.stringify({ disableAllHooks: kind === "disabled" })],
+    ]);
+    if (kind === "missing-manifest") files.delete(path.join(dir, ".claude-plugin/plugin.json"));
+    if (kind === "malformed-manifest") files.set(path.join(dir, ".claude-plugin/plugin.json"), "{");
+    if (kind === "malformed-settings") files.set(settingsPath, "{");
+    const service = new RestoreCheckService(mockDeps({
+      getNodeInventory: () => [claudeNode({ cwd })],
+      getStartupContext: () => startupContextProbe({ projectionEntries: [{ category: "plugin", absolutePath: dir }] }),
+      getClaudeActivityHookEvents: () => kind === "missing-event" ? ["Stop", "SessionStart"] : ["Stop"],
+      exists: f => files.has(f) || f.endsWith("host-infra.json"),
+      readFile: f => {
+        if (kind === "unreadable-relay" && f.endsWith("activity-relay.cjs")) throw new Error("unreadable");
+        if (files.has(f)) return files.get(f)!;
+        if (f.endsWith("host-infra.json")) return VALID_HOST_INFRA_DECLARATION;
+        throw new Error("missing");
+      },
+    }));
+    const hook = service.check({}).checks.find(c => c.check.endsWith(".hooks"));
+    expect(hook?.status).toBe(kind === "available" ? "green" : "yellow");
+    expect(hook?.evidence).toContain("Saved openrig-core plugin channel is selected");
+    expect(hook?.remediation).toBe("");
+  });
+
+  it("keeps projected activity-resource evidence when a selected core plugin is broken", () => {
+    const cwd = "/fixture-project";
+    const settingsPath = path.join(cwd, ".claude", "settings.local.json");
+    const pluginDir = "/custom-instance/plugins/openrig-core";
+    const events = ["SessionStart", "UserPromptSubmit"];
+    const settings = JSON.stringify({ hooks: Object.fromEntries(events.map(event => [event, [{ hooks: [
+      { type: "command", command: `node '${RELAY_PATH}'` },
+    ] }]])) });
+    const service = new RestoreCheckService(mockDeps({
+      getNodeInventory: () => [claudeNode({ cwd })],
+      getStartupContext: () => startupContextProbe({ projectionEntries: [
+        { absolutePath: "/source/activity-hooks", category: "runtime_resource", resourceType: "claude_activity_hooks" },
+        { absolutePath: pluginDir, category: "plugin" },
+      ] }),
+      getClaudeActivityHookEvents: () => events,
+      exists: () => true,
+      readFile: candidate => {
+        if (candidate === settingsPath) return settings;
+        if (candidate === path.join(pluginDir, ".claude-plugin", "plugin.json")) return "{";
+        return VALID_HOST_INFRA_DECLARATION;
+      },
+    }));
+
+    const result = service.check({});
+    const hook = result.checks.find(entry => entry.check === "seat.dev-impl@test-rig.hooks");
+    expect(hook).toMatchObject({ status: "yellow", remediation: "" });
+    expect(hook?.evidence).toContain(`activity hooks are projected in ${settingsPath}`);
+    expect(hook?.evidence).toContain(`relay present at ${RELAY_PATH}`);
+    expect(hook?.evidence).toContain("hook execution is not verified");
+    expect(hook?.evidence).toContain("Saved openrig-core plugin channel is selected but its assets could not be trusted");
+    expect(result.verdict).toBe("restorable_with_caveats");
+    expect(result.readiness.status).toBe("ready_with_caveats");
+    expect(result.repairPacket?.some(step => step.rationale === hook?.evidence) ?? false).toBe(false);
   });
 
   it("Codex and infrastructure hook checks are green not-applicable without hook repair steps", () => {

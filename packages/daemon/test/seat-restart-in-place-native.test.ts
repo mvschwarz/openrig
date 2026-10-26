@@ -49,13 +49,17 @@ function available(): boolean {
 const STUB_C = `
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <signal.h>
 #include <unistd.h>
 static void bye(int s) { (void)s; _exit(0); }
 int main(int argc, char **argv) {
   signal(SIGTERM, bye);
   if (!getenv("STUB_QUIET")) for (int i = 1; i <= 40; i++) printf("history line %d from pid %d\\n", i, (int)getpid());
-  printf("OpenAI Codex (v0.0.0-stub)\\nstub conversation %s pid %d\\n\\n\\xe2\\x80\\xba \\n", argc > 1 ? argv[argc - 1] : "?", (int)getpid());
+  /* The conversation is the argument after resume, as Codex reads it; options may follow it. */
+  const char *conversation = "?";
+  for (int i = 1; i + 1 < argc; i++) if (strcmp(argv[i], "resume") == 0) { conversation = argv[i + 1]; break; }
+  printf("OpenAI Codex (v0.0.0-stub)\\nstub conversation %s pid %d\\n\\n\\xe2\\x80\\xba \\n", conversation, (int)getpid());
   fflush(stdout);
   for (;;) pause();
 }
@@ -117,6 +121,8 @@ describe.runIf(available())("in-place restart, native (private tmux socket, stub
     const adapter = new CodexRuntimeAdapter({
       tmux: realTmux, launchPath,
       fsOps: { readFile: (p) => fs.readFileSync(p, "utf8"), writeFile: () => {}, exists: (p) => fs.existsSync(p), mkdirp: () => {}, homedir: root },
+      // #1524 (b): the stub keeps no Codex records, so stand in for them: the conversation, for a running stub process only.
+      readResumeEvidence: (pid) => stubPids().includes(pid) ? { threadId: TOKEN } : { reason: "no_log_row" },
     });
     const setupApp = createTestApp(db, { tmux: realTmux, adapters: { codex: adapter },
       appDeps: { seatActivityService: { getSeatState: () => ({ seatNodeId: "", activity: "working", needsInput: { count: 0, reason: null },

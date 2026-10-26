@@ -1,9 +1,20 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { compactPlanCommand, type CompactPlanDeps } from "../src/commands/compact-plan.js";
 import { createProgram } from "../src/index.js";
 
 const freshSample = () => new Date(Date.now() - 60_000).toISOString();
 const staleSample = () => new Date(Date.now() - 3_600_000).toISOString();
+
+// A path that deliberately does not exist: the config store then reports the built-in
+// defaults, independent of the developer's own configuration file.
+const MISSING_CONFIG_PATH = join(tmpdir(), "openrig-compact-plan-missing-config.json");
+const COMPACTION_ENV_KEYS = [
+  "OPENRIG_POLICIES_CLAUDE_COMPACTION_ENABLED",
+  "OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT",
+] as const;
 
 interface TestNode {
   rigId: string;
@@ -101,6 +112,7 @@ function makeDeps(overrides?: {
   nodesByRig?: Record<string, TestNode[]>;
   refreshStatus?: number;
   refreshThrows?: boolean;
+  configPath?: string;
 }): { deps: CompactPlanDeps; requestedPaths: string[]; mutationMethods: Record<string, ReturnType<typeof vi.fn>> } {
   const rigs = (overrides?.rigNames ?? ["test-rig"]).map((name, i) => ({ rigId: `rig-${i}`, name }));
   const nodesByRig = overrides?.nodesByRig ?? { "rig-0": defaultNodes() };
@@ -116,6 +128,7 @@ function makeDeps(overrides?: {
     requestedPaths,
     mutationMethods,
     deps: {
+      configPath: overrides?.configPath ?? MISSING_CONFIG_PATH,
       lifecycleDeps: {} as CompactPlanDeps["lifecycleDeps"],
       clientFactory: () => ({
         get: vi.fn(async (path: string) => {
@@ -152,15 +165,28 @@ vi.mock("../src/daemon-lifecycle.js", async () => {
 describe("rig compact-plan", () => {
   let logs: string[];
   let errors: string[];
+  let savedEnv: Record<string, string | undefined>;
 
   beforeEach(async () => {
     logs = [];
     errors = [];
+    savedEnv = {};
+    for (const key of COMPACTION_ENV_KEYS) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
     vi.spyOn(console, "log").mockImplementation((...args) => logs.push(args.join(" ")));
     vi.spyOn(console, "error").mockImplementation((...args) => errors.push(args.join(" ")));
     const { getDaemonStatus } = await import("../src/daemon-lifecycle.js");
     (getDaemonStatus as ReturnType<typeof vi.fn>).mockResolvedValue({ state: "running", healthy: true, pid: 1234, port: 7433 });
     process.exitCode = undefined;
+  });
+
+  afterEach(() => {
+    for (const key of COMPACTION_ENV_KEYS) {
+      if (savedEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedEnv[key];
+    }
   });
 
   it("is registered on createProgram and runs with injected deps", async () => {
@@ -187,6 +213,9 @@ describe("rig compact-plan", () => {
       defaultThresholdPercent: 80,
       thresholdTokens: 400_000,
       thresholdPercent: 80,
+      automaticCompactionEnabled: false,
+      automaticCompactionThresholdPercent: 80,
+      automaticCompactionUnavailableReason: null,
       oneSeatAtATime: true,
       autoCompactAllowed: false,
       explicitAuthorizationRequired: true,
@@ -304,6 +333,8 @@ describe("rig compact-plan", () => {
     const json = JSON.parse(logs.join(""));
     expect(json.policy.thresholdTokens).toBe(250_000);
     expect(json.policy.thresholdPercent).toBe(70);
+    // The plan's flags stay separate from the automatic compaction setting.
+    expect(json.policy.automaticCompactionThresholdPercent).toBe(80);
     expect(json.candidates.map((entry: { session: string }) => entry.session)).toEqual([
       "lower-token@test-rig",
       "lower-percent@test-rig",
@@ -471,12 +502,65 @@ describe("rig compact-plan", () => {
     const output = logs.join("\n");
     expect(output).toContain("READ-ONLY PLAN");
     expect(output).toContain("does not compact");
-    expect(output).toContain("Thresholds:");
+    expect(output).toContain("Plan thresholds (this plan's own, not the automatic compaction setting):");
+    expect(output).toContain("Automatic compaction: off (its threshold setting policies.claude_compaction.threshold_percent is 80%).");
     expect(output).toContain("one-seat-at-a-time");
     expect(output).toContain("orch-lead@test-rig");
     expect(output).toContain("authorization");
     expect(output).toContain("checkpoint/restore");
     expect(output).toContain("claude-compaction-restore");
     expect(output).toContain("No automatic compaction has been run");
+  });
+
+  it("shows a configured automatic compaction threshold and that compaction is on", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "openrig-compact-plan-config-"));
+    try {
+      const configPath = join(dir, "config.json");
+      writeFileSync(configPath, JSON.stringify({ policies: { claudeCompaction: { enabled: true, thresholdPercent: 60 } } }));
+      const { deps } = makeDeps({ configPath });
+
+      await compactPlanCommand(deps).parseAsync(["node", "rig", "--json"]);
+      const json = JSON.parse(logs.join(""));
+      expect(json.policy.thresholdTokens).toBe(400_000);
+      expect(json.policy.thresholdPercent).toBe(80);
+      expect(json.policy.automaticCompactionEnabled).toBe(true);
+      expect(json.policy.automaticCompactionThresholdPercent).toBe(60);
+      expect(json.policy.automaticCompactionUnavailableReason).toBeNull();
+
+      logs = [];
+      await compactPlanCommand(deps).parseAsync(["node", "rig"]);
+      const output = logs.join("\n");
+      expect(output).toContain("Plan thresholds (this plan's own, not the automatic compaction setting): 400000 estimated tokens; 80%");
+      expect(output).toContain("Automatic compaction: on, at 60% (policies.claude_compaction.threshold_percent).");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still prints the plan when the config can't be read, reporting the automatic setting as unknown", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "openrig-compact-plan-bad-config-"));
+    try {
+      const configPath = join(dir, "config.json");
+      writeFileSync(configPath, "{ not valid json");
+      const { deps } = makeDeps({ configPath });
+
+      await compactPlanCommand(deps).parseAsync(["node", "rig", "--json"]);
+      const json = JSON.parse(logs.join(""));
+      expect(json.policy.automaticCompactionEnabled).toBeNull();
+      expect(json.policy.automaticCompactionThresholdPercent).toBeNull();
+      expect(json.policy.automaticCompactionUnavailableReason).toContain("malformed");
+      expect(json.candidates[0].session).toBe("orch-lead@test-rig");
+      expect(process.exitCode).toBeUndefined();
+
+      logs = [];
+      await compactPlanCommand(deps).parseAsync(["node", "rig"]);
+      const output = logs.join("\n");
+      expect(output).toContain("READ-ONLY PLAN");
+      expect(output).toContain("Automatic compaction: couldn't be read:");
+      expect(output).toContain("malformed");
+      expect(output).toContain("rig config");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

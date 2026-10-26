@@ -38,9 +38,12 @@ NODE_VERSION="$(sed -n 's/^ARG NODE_VERSION=\([0-9][0-9.]*\).*/\1/p' "${TESTBED_
 # --- assemble a clean build context: Dockerfile + entrypoint + the openrig pack + staged stub assets ---
 CONTEXT="$(mktemp -d)"
 LOAD_CONTAINER=""
+LOAD_CID="${OUT_DIR}/image-load.cid"
+IMAGE_ID=""
+test ! -e "${LOAD_CID}" || { echo "Retained cidfile: ${LOAD_CID}" >&2; exit 2; }
 cleanup() {
   if [ -n "${LOAD_CONTAINER}" ]; then
-    node "${REPO_ROOT}/scripts/scenario-executor.mjs" timeout 30 docker rm -f "${LOAD_CONTAINER}" >/dev/null ||
+    node "${REPO_ROOT}/scripts/scenario-executor.mjs" settle "${LOAD_CID}" "${LOAD_CONTAINER}" "${IMAGE_ID}" >/dev/null ||
       echo "[testbed] cleanup incomplete; retained container name: ${LOAD_CONTAINER}" >&2
   fi
   rm -rf "${CONTEXT}"
@@ -98,8 +101,9 @@ echo "[testbed] effect proof: daemon LOAD inside the container (better-sqlite3 m
 # fails `rig daemon start` here → set -e → non-zero → the build verb fails BEFORE the A/B pin.
 LOAD_CONTAINER="openrig-testbed-load-$(node -p 'require("node:crypto").randomUUID()')"
 printf '%s\n' "${LOAD_CONTAINER}" > "${OUT_DIR}/image-load.container-name.txt"
+IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${IMAGE_TAG}")"
 load_status=0
-node "${REPO_ROOT}/scripts/scenario-executor.mjs" timeout 120 docker run --name "${LOAD_CONTAINER}" \
+node "${REPO_ROOT}/scripts/scenario-executor.mjs" timeout 120 docker run --name "${LOAD_CONTAINER}" --cidfile "${LOAD_CID}" \
   --platform "${TARGET_PLATFORM}" --network none --cap-drop ALL --security-opt no-new-privileges \
   --cpus 2 --memory 2g --memory-swap 2g --pids-limit 256 "${IMAGE_TAG}" bash -lc \
   'set -euo pipefail; trap "rig daemon stop >/dev/null 2>&1 || true" EXIT; rig --version; rig daemon start --no-kernel; curl -fsS http://127.0.0.1:7433/healthz; rig daemon status' \
@@ -111,7 +115,7 @@ node "${REPO_ROOT}/scripts/scenario-executor.mjs" timeout 30 docker inspect "${L
   > "${OUT_DIR}/image-load.container.json" || inspect_status=$?
 [ "${load_status}" -eq 0 ] || exit "${load_status}"
 [ "${inspect_status}" -eq 0 ] || exit "${inspect_status}"
-node "${REPO_ROOT}/scripts/scenario-executor.mjs" timeout 30 docker rm -f "${LOAD_CONTAINER}" >/dev/null
+node "${REPO_ROOT}/scripts/scenario-executor.mjs" settle "${LOAD_CID}" "${LOAD_CONTAINER}" "${IMAGE_ID}" >/dev/null || { echo "Cleanup incomplete; retained container name: ${LOAD_CONTAINER}" >&2; LOAD_CONTAINER=""; exit 2; }
 LOAD_CONTAINER=""
 
 # --- emit the reproducible manifest + census receipt via the tested node orchestrator ---

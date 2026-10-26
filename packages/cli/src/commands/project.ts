@@ -5,6 +5,8 @@ import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-life
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { experimentStatus, setExperiment, readBounded, JevRun, streamDecision, classifyCapture } from "./project-jev.js";
+import { DecisionRun, decisionsStatus, readDecisionsSettings, type DecisionsSettings } from "../decisions/decisions.js";
+import { recoverEffects, runDecideWake } from "../decisions/stream-consumer.js";
 import fs from "node:fs";
 
 /**
@@ -21,6 +23,7 @@ export interface ProjectDeps extends StatusDeps {
   workerRead?: (file: string) => string;
   experimentEnv?: NodeJS.ProcessEnv;
   experimentFetch?: typeof fetch;
+  decisionsSettings?: () => DecisionsSettings;
 }
 
 async function withClient<T>(
@@ -52,8 +55,13 @@ export function projectCommand(depsOverride?: ProjectDeps): Command {
   };
 
   const experimental = cmd.command("experimental").description("Optional Jev experiment; advisory, finite foreground runs, disabled by default");
+  const experimentVerbDescriptions = {
+    enable: "Turn the experiment on in its --config file, with any new limits, and print its status",
+    disable: "Turn the experiment off in its --config file and print its status; later runs make no request",
+    status: "Print the experiment's settings from its --config file; changes nothing",
+  } as const;
   for (const verb of ["enable", "disable", "status"] as const) {
-    experimental.command(verb).requiredOption("--config <file>", "Explicit local experiment JSON; contains no credential")
+    experimental.command(verb).description(experimentVerbDescriptions[verb]).requiredOption("--config <file>", "Explicit local experiment JSON; contains no credential")
       .option("--max-requests <n>", "Maximum requests per foreground run, 1..20")
       .option("--timeout-ms <n>", "Per-request deadline, 1000..30000")
       .option("--json", "JSON output")
@@ -96,6 +104,16 @@ export function projectCommand(depsOverride?: ProjectDeps): Command {
       }
     });
 
+  cmd.command("decisions").description("Typed decisions (OpenRouter + Jev) for enabled consumers; off by default")
+    .command("status").description("What a decision run in this process would do; makes no provider call")
+    .option("--json", "JSON output")
+    .action(() => {
+      try {
+        const deps = getDeps();
+        printResult(true, decisionsStatus((deps.decisionsSettings ?? readDecisionsSettings)(), deps.experimentEnv, deps.workerRead), 200);
+      } catch (error) { printResult(true, {error: "decisions_status", message: error instanceof Error ? error.message : "unavailable"}, 400); }
+    });
+
   for (const verb of ["candidates", "wake"] as const) {
     cmd.command(verb)
       .description(verb === "wake" ? "Run one bounded occupant wake with source-bound decisions or explicit Jev experiment; no registration" : "Read current source-bound candidates and eligible item IDs for the occupant")
@@ -105,9 +123,37 @@ export function projectCommand(depsOverride?: ProjectDeps): Command {
       .requiredOption("--evidence-epoch <epoch>", "Owner-authorized evidence epoch; candidate changes do not retry terminal attempts")
       .option("--decisions <file>", "JSON decisions bound to candidateSetVersion and each item's bodyHash")
       .option("--experiment <file>", "Opt-in experimental Jev config; replaces --decisions for one bounded wake")
+      .option("--decide", "Typed decisions for eligible stream items (decisions.enabled with consumer stream): accepted answers become owned work or a recorded disposition; everything else stays with you")
       .option("--limit <count>", "Items per bounded wake (1..100)", "20")
       .option("--json", "JSON output")
-      .action(async (opts: WakeOptions & {experiment?: string}) => {
+      .action(async (opts: WakeOptions & {experiment?: string; decide?: boolean}) => {
+        if (opts.decide) {
+          if (verb !== "wake" || opts.decisions || opts.experiment) {
+            printResult(true, {error: "decide_usage", message: "--decide is for wake only and can't be combined with --decisions or --experiment"}, 400); return;
+          }
+          const deps = getDeps(), limit = Number(opts.limit ?? 20);
+          if (!Number.isInteger(limit) || limit < 1 || limit > 100) { printResult(true, {error: "decide_usage", message: "limit must be an integer in 1..100"}, 400); return; }
+          const decisions = new DecisionRun({ consumer: "stream", settings: deps.decisionsSettings, env: deps.experimentEnv, send: deps.experimentFetch,
+            budget: { maxCalls: limit, deadlineMs: Math.min(600_000, limit * 10_000) } });
+          if (decisions.unavailable) {
+            // Nothing is asked, but already-accepted effects are still applied: a disable never strands committed work.
+            let recovered: unknown = [{ outcome: "skipped", reason: "daemon unavailable; effects wait for a wake" }];
+            try { await withClient(deps, async client => { recovered = await recoverEffects(client, opts.project); }); }
+            catch (error) { recovered = [{ outcome: "skipped", reason: `effects not checked: ${error instanceof Error ? error.message : "daemon unavailable"}; they wait for a wake` }]; }
+            printResult(true, {decisions: decisions.unavailable, status: decisionsStatus((deps.decisionsSettings ?? readDecisionsSettings)(), deps.experimentEnv, deps.workerRead), recovered}, 200); return;
+          }
+          process.once("SIGINT", decisions.stop); process.once("SIGTERM", decisions.stop);
+          try {
+            await withClient(deps, async client => {
+              try {
+                const result = await runDecideWake(client, opts, decisions, deps.workerRead);
+                console.log(JSON.stringify(result));
+                if (["unavailable", "lease_lost"].includes(result.result.state)) process.exitCode = 1;
+              } catch (error) { printResult(true, {error: "worker_unavailable", message: error instanceof Error ? error.message : "unavailable", phase: "prepare", nextWakeAt: new Date(Date.now() + 60_000).toISOString()}, 409); }
+            });
+          } finally { process.removeListener("SIGINT", decisions.stop); process.removeListener("SIGTERM", decisions.stop); }
+          return;
+        }
         let run: JevRun | undefined;
         try {
           if (opts.experiment) {
@@ -120,7 +166,10 @@ export function projectCommand(depsOverride?: ProjectDeps): Command {
           }
         await withClient(getDeps(), async client => {
           try {
-            const result = verb === "wake" ? await runProjectWake(client, opts, getDeps().workerRead, run ? {
+            // The experiment records its own attempt identity: rig stream show labels its classifications, and the automatic
+            // path doesn't treat its abstentions as intake's.
+            const wakeOpts = run ? { ...opts, classifierVersion: `${opts.classifierVersion}+experiment` } : opts;
+            const result = verb === "wake" ? await runProjectWake(client, wakeOpts, getDeps().workerRead, run ? {
               decide: prepared => streamDecision(run!, prepared), signal: run.controller.signal,
               shouldStop: run.stopped, timeoutMs: run.config.timeoutMs,
             } : undefined) : await prepareWorker(client, opts, getDeps().workerRead);

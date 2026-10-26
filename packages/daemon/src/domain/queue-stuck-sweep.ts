@@ -1,4 +1,5 @@
 import { findQueueRecovery, recoveryId, recoveryTag } from "./queue-recovery.js";
+import { quietHoldCustody } from "./quiet-hold-custody.js";
 import { queueWaitNotice } from "./queue-wait-backoff.js";
 import { lastMeaningfulTransition, pendingSince } from "./queue-waiting.js";
 import { resolvePickupThresholdMinutes } from "./queue-pickup.js";
@@ -21,11 +22,12 @@ import { resolvePickupThresholdMinutes } from "./queue-pickup.js";
 // created-with-destination obligations (S01's baton filter excludes them; the unclaimed
 // net below sweeps them). S01 imports the marker vocabulary from HERE so the two slices
 // share one contract instead of two guesses. S03 owns park/wake honesty: state=blocked rows
-// legitimately wait and are never findings.
+// legitimately wait; only an undelivered human notice is a delivery finding.
 
-import { defaultResolveOrchestrator } from "./queue-owner.js";
+import { defaultResolveOrchestrator, resolveOperatorSeat, resolveRecoveryAgentSeat, resolveSessionNodeId } from "./queue-owner.js";
+import { nodeSessionConfirmedMissing } from "./node-inventory.js";
 import type Database from "better-sqlite3";
-import { deriveCrossHostSuccessorId, matchesRecordedHandoffTarget, type QueueItem, type QueueRepository } from "./queue-repository.js";
+import { deriveCrossHostSuccessorId, hasLinkedSuccessor, matchesRecordedHandoffTarget, QueueRepositoryError, type QueueItem, type QueueRepository } from "./queue-repository.js";
 import { stalledPickupFinding } from "./queue-pickup.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { loadHostRegistry } from "./hosts/hosts-registry-reader.js";
@@ -39,6 +41,13 @@ export const STUCK_SWEEP_CUSTODY_WINDOW_HOURS = 24;
 /** Stamp tag on every routed finding row: the sweep's self-exclusion mark. */
 export const STUCK_SWEEP_FINDING_TAG = "stuck-sweep-finding";
 
+/** How a confirmed-missing seat's finding names the rule that chose its recovery seat, in the order tried. */
+const RECOVERY_SEAT_RULES = [
+  "the operator agent (agents.operator_session)",
+  "the operator seat (workspace.operator_seat_name)",
+  "the row's creator",
+] as const;
+
 // S01 ladder marker vocabulary (the seam contract). S01 writes these transition-note
 // prefixes; the sweep derives "live ladder" from the latest marker. An attempt/rung is
 // LIVE, an exhausted marker hands the row back, and a later attempt starts a live cycle
@@ -47,11 +56,37 @@ export const LADDER_ATTEMPT_PREFIX = "wake-attempt:";
 export const LADDER_RUNG_PREFIX = "escalation-rung:";
 export const LADDER_EXHAUSTED_PREFIX = "ladder-exhausted:";
 
+/** Suppression floor: even at the ladder's default cadence, a marker suppresses for half
+ *  an hour. */
+export const LADDER_SUPPRESSION_MINIMUM_MINUTES = 30;
+
+/** The ladder's own retry cadence, read from the setting the ladder itself uses
+ *  (queue.wake_retry_interval_seconds, default 300s). Read by key here rather than
+ *  imported: queue-wake-ladder imports this module for the marker prefixes, so an import
+ *  back would close a cycle. A test pins the key to the ladder's own. */
+const WAKE_RETRY_INTERVAL_SETTING_KEY = "queue.wake_retry_interval_seconds";
+const DEFAULT_WAKE_RETRY_INTERVAL_SECONDS = 300;
+
+/** How long a ladder marker suppresses re-reporting: half an hour, or two of the owning
+ *  ladder's own retry intervals, whichever is longer. A working ladder must not lose its
+ *  marker between its own attempts, or the sweep would report an item the ladder still
+ *  owns. #1419. */
+export function resolveLadderSuppressionMinutes(): number {
+  let intervalSeconds = DEFAULT_WAKE_RETRY_INTERVAL_SECONDS;
+  try {
+    const v = new SettingsStore().resolveOne(WAKE_RETRY_INTERVAL_SETTING_KEY as never).value;
+    const n = typeof v === "number" ? v : Number(v);
+    if (Number.isFinite(n) && n > 0) intervalSeconds = n;
+  } catch { /* a settings error must never shorten the bound */ }
+  return Math.max(LADDER_SUPPRESSION_MINIMUM_MINUTES, (2 * intervalSeconds) / 60);
+}
+
 export type StuckFindingKind =
   | "unconsumed-wait"
   | "overdue-claim"
   | "stalled-after-claim"
   | "undelivered-wake"
+  | "undelivered-human-notice"
   | "unclaimed-obligation"
   | "dangling-closure";
 
@@ -125,9 +160,20 @@ export interface StuckSweepDeps {
   status?: StuckSweepStatus;
   /** Route resolution for obligations nobody holds: the destination seat's orchestrator
    *  (delegates_to parentage). null = no orchestrator known → the finding stays with the
-   *  destination (the row is durable there even if the seat is dead — S01 is the wake
-   *  layer). Injectable for tests; default derives from topology. */
+   *  destination, unless that session is confirmed missing (below): S01's ladder covers
+   *  handed-off batons only, so a finding addressed to a dead seat would reach nobody.
+   *  Injectable for tests; default derives from topology. */
   resolveOrchestrator?: (session: string) => string | null;
+  /** Is this session's current binding confirmed missing (node inventory's session_missing
+   *  rule)? Such a session's finding goes to a live recovery seat when one is available.
+   *  Injectable for tests; default reads the seat identity verdicts. */
+  sessionConfirmedMissing?: (session: string) => boolean;
+  /** The agent a confirmed-missing session's finding goes to first. Injectable for tests;
+   *  default reads agents.operator_session. */
+  resolveRecoveryAgentSeat?: () => string | null;
+  /** Where that finding goes next, before the stuck row's creator: the wake ladder's own
+   *  floor. Injectable for tests; default reads workspace.operator_seat_name. */
+  resolveOperatorSeat?: () => string | null;
   unclaimedAgeMinutes?: number;
   custodyWindowHours?: number;
   now?: Date;
@@ -142,6 +188,10 @@ export interface StuckSweepDeps {
    *  hosts.yaml once per sweep pass, and an unavailable registry degrades honestly to
    *  verification-required (more indeterminate findings, never a false verdict). */
   isRegisteredHost?: (hostId: string) => boolean;
+  /** How long a ladder marker suppresses re-reporting, in minutes. Default: half an hour,
+   *  or two of the owning ladder's own retry intervals, whichever is longer. Injectable for
+   *  tests; the default reads the ladder's existing setting. */
+  ladderSuppressionMinutes?: number;
 }
 
 export interface StuckSweepFindingAction {
@@ -157,7 +207,7 @@ export interface StuckSweepResult {
   error?: string;
 }
 
-export { resolveSessionNodeId, defaultResolveOrchestrator } from "./queue-owner.js";
+export { resolveSessionNodeId, defaultResolveOrchestrator, resolveOperatorSeat } from "./queue-owner.js";
 
 interface TransitionNoteRow {
   transition_note: string | null;
@@ -222,44 +272,69 @@ function defaultIsRegisteredHost(log: (line: string) => void): (hostId: string) 
   };
 }
 
-function hasSeatTargetSuccessor(db: Database.Database, sourceQitemId: string, target: string): boolean {
-  try {
-    const successor = db
-      .prepare(
-        `SELECT 1 FROM queue_items s
-          WHERE (s.destination_session = ? OR s.qitem_id = ?) AND s.qitem_id != ?
-            AND (s.handed_off_from = ? OR (
-              s.chain_of_record IS NOT NULL
-              AND json_valid(s.chain_of_record)
-              AND EXISTS (
-                SELECT 1 FROM json_each(s.chain_of_record) WHERE value = ?
-              )
-            )) LIMIT 1`,
-      )
-      .get(target, target, sourceQitemId, sourceQitemId, sourceQitemId);
-    return Boolean(successor);
-  } catch {
-    return false;
+/** Custody verification for a human destination belongs to its closing agent.
+ *  Use the closing transition, including archived history; later same-state notes
+ *  and delivery receipts do not transfer responsibility. A newer cancellation
+ *  without closure metadata still supersedes an older closing actor. */
+function custodyFindingRoute(db: Database.Database, queueRepo: QueueRepository, row: QueueItem): string {
+  // Unknown identity cannot establish a new owner. The caller retains this row's
+  // established destination if the registry needed for classification is unavailable.
+  if (!queueRepo.isHumanDestination(row.destinationSession)) return row.destinationSession;
+  const closure = db.prepare(
+    `SELECT actor_session FROM (
+       SELECT transition_id, state, actor_session, closure_reason,
+              LAG(state) OVER (ORDER BY transition_id) AS previous_state
+         FROM (
+           SELECT transition_id, state, actor_session, closure_reason FROM queue_transitions WHERE qitem_id = ?
+           UNION ALL
+           SELECT transition_id, state, actor_session, closure_reason FROM queue_transitions_archive WHERE qitem_id = ?
+         )
+     ) WHERE state IN ('done', 'canceled', 'handed-off')
+         AND (state IS NOT previous_state OR closure_reason IS NOT NULL)
+       ORDER BY transition_id DESC LIMIT 1`,
+  ).get(row.qitemId, row.qitemId) as { actor_session: string } | undefined;
+  for (const session of [closure?.actor_session, row.sourceSession]) {
+    if (!session || session === "daemon@kernel" || session.endsWith("@system")) continue;
+    if (!queueRepo.isHumanDestination(session) && queueRepo.acceptsDestination(session)) {
+      return session;
+    }
   }
+  // No admitted agent is attributable: retain the established durable destination
+  // rather than inventing a seat or failing the sweep on an unknown actor's rig.
+  return row.destinationSession;
 }
 
-function hasLiveLadder(db: Database.Database, qitemId: string): boolean {
+function hasLiveLadder(db: Database.Database, qitemId: string, now: Date, suppressionMinutes: number): boolean {
   const notes = db
-    .prepare("SELECT transition_note FROM queue_transitions WHERE qitem_id = ? ORDER BY transition_id DESC")
-    .all(qitemId) as TransitionNoteRow[];
-  for (const { transition_note: note } of notes) {
+    .prepare("SELECT ts, transition_note FROM queue_transitions WHERE qitem_id = ? ORDER BY transition_id DESC")
+    .all(qitemId) as Array<{ ts: string | null; transition_note: string | null }>;
+  for (const { ts, transition_note: note } of notes) {
     if (!note) continue;
     if (note.startsWith(LADDER_EXHAUSTED_PREFIX)) return false;
-    if (note.startsWith(LADDER_ATTEMPT_PREFIX) || note.startsWith(LADDER_RUNG_PREFIX)) return true;
+    if (note.startsWith(LADDER_ATTEMPT_PREFIX) || note.startsWith(LADDER_RUNG_PREFIX)) {
+      // Freshness bounds the suppression (#1419): the marker's time decides, and a missing,
+      // unparsable or future timestamp fails open for reporting instead of suppressing
+      // forever.
+      const tsMs = Date.parse(ts ?? "");
+      const ageMs = now.getTime() - tsMs;
+      return !Number.isNaN(tsMs) && tsMs <= now.getTime() && ageMs <= suppressionMinutes * 60_000;
+    }
   }
   return false;
 }
+
 
 function minutesSince(iso: string | null | undefined, now: Date): number {
   if (!iso) return 0;
   const then = Date.parse(iso);
   if (Number.isNaN(then)) return 0;
   return Math.max(0, Math.round((now.getTime() - then) / 60_000));
+}
+
+/** Whole minutes, floored as the pickup evidence counts them (queue-pickup.ts). */
+function wholeMinutesSince(iso: string, now: Date): number {
+  const then = Date.parse(iso);
+  return Number.isNaN(then) ? 0 : Math.max(0, Math.floor((now.getTime() - then) / 60_000));
 }
 
 function lastTransitionLine(db: Database.Database, qitemId: string): string {
@@ -320,6 +395,15 @@ export function verificationCommand(target: string): string {
   return `OPENRIG_URL=<registered-host> rig queue list --destination ${target}`;
 }
 
+/** The finding's headline says where custody was not checked, so its owner can act from the list. */
+export function custodyHeadline(rowId: string, targets: string[], ageMinutes: number): string {
+  const hosts = [...new Set(targets.flatMap((target) =>
+    target.startsWith("qitem-") && target.includes("@") ? [target.slice(target.indexOf("@") + 1)] : []))];
+  return hosts.length
+    ? `Custody not checked on host ${hosts.join(", ")} for ${rowId} (${ageMinutes} min)`
+    : `Custody not checked: no successor of ${rowId} in this store (${ageMinutes} min)`;
+}
+
 function evidenceBody(db: Database.Database, c: Candidate): string {
   if (c.verificationTargets?.length) {
     const checks = c.verificationTargets
@@ -360,6 +444,12 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
   const status = deps.status;
   try {
     const now = deps.now ?? new Date();
+    const suppressionMinutes = deps.ladderSuppressionMinutes ?? resolveLadderSuppressionMinutes();
+    /** The dedup tags of the candidates the LADDER suppressed in this pass, and only those:
+     *  a row the ladder alone would have stopped. A finding for such a row stays open,
+     *  because the marker only ever stopped the re-report — it never resolved anything.
+     *  Every other finding resolves as soon as the sweep no longer detects its condition. */
+    const suppressedTags = new Set<string>();
     const ageMinutes = deps.unclaimedAgeMinutes ?? resolveStuckSweepUnclaimedAgeMinutes();
     const resolveOrch =
       deps.resolveOrchestrator ?? ((session: string) => defaultResolveOrchestrator(deps.db, session));
@@ -395,14 +485,17 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (!row || isFindingRow(row)) continue;
       const stalled = stalledPickupFinding(row);
       if (!stalled) continue;
+      // Keep this null arm for the 0.5.7 mechanized-pull turn-end hook that knows the in-flight row;
+      // it is the first honest row-scoped writer, and wiring reopens only in that slice.
+      const evidenceAt = latestIso(lastMeaningfulTransition(deps.db, row.qitemId)?.at, row.lastHeartbeat, row.claimedAt);
       candidates.push({
         kind: stalled.kind,
         row,
         route: resolveOrch(stalled.target) ?? stalled.target,
-        ageMinutes: minutesSince(row.claimedAt, now),
-        // Keep this null arm for the 0.5.7 mechanized-pull turn-end hook that knows the in-flight row;
-        // it is the first honest row-scoped writer, and wiring reopens only in that slice.
-        evidenceAt: latestIso(lastMeaningfulTransition(deps.db, row.qitemId)?.at, row.lastHeartbeat, row.claimedAt),
+        // The stall's own age: from the anchor the pickup decision uses, floored as its "why" counts, so a claim
+        // parked and resumed doesn't count its parked time and the headline matches the why to the minute.
+        ageMinutes: wholeMinutesSince(evidenceAt, now),
+        evidenceAt,
         why: stalled.evidence,
       });
     }
@@ -432,14 +525,40 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // here exactly once (the dedup tag keeps it to one finding).
     for (const row of deps.queueRepo.findUndelivered()) {
       if (isFindingRow(row)) continue;
-      if (hasLiveLadder(deps.db, row.qitemId)) continue;
+      const humanNotice = row.deliveryOutcome === "never-posted" || row.deliveryOutcome === "transport-failed";
+      const notification = humanNotice ? deps.queueRepo.transitionLog.latestOwnerNotificationForQitem(row.qitemId) : null;
+      const resolutionNotice = notification?.ownerNotificationKind === "human-decision-resolved";
+      // Match the notification source in slack/queue-access.ts, not the agent wake's escalator.
+      const noticeOwner = row.state === "blocked" || resolutionNotice ? row.destinationSession : row.sourceSession;
+      const noticeRecipient = resolutionNotice ? notification.actorSession : row.state === "blocked" ? row.blockedOn : row.destinationSession;
+      const failure = humanNotice
+        ? `human notice ${row.deliveryOutcome} to ${noticeRecipient}: ${row.deliveryFailureDetail}`
+        : `wake failed (${row.lastNudgeResult ?? "failed"})`;
+      // Quiet hours: a held, turned-back or released ask belongs to its window's release job, so a failed wake, or a post
+      // not yet made, isn't "nothing retried it". A release whose post failed is a failed delivery, and a hold with no
+      // live release job is orphaned: both stay findings, with their own reason.
+      const quiet = quietHoldCustody(deps.db, row.qitemId, now);
+      if (quiet && (quiet.state === "held" || quiet.state === "released")) continue;
+      // The ladder check runs LAST, so only a row the ladder ALONE would have stopped counts
+      // as ladder-suppressed (#1419). Agent wake retries do not own the separate notice to a
+      // person: a human notice is never the ladder's to suppress.
+      if (!humanNotice && hasLiveLadder(deps.db, row.qitemId, now, suppressionMinutes)) {
+        suppressedTags.add(findingDedupTag("undelivered-wake", row.qitemId));
+        continue;
+      }
       candidates.push({
-        kind: "undelivered-wake",
+        kind: humanNotice ? "undelivered-human-notice" : "undelivered-wake",
         row,
-        route: resolveOrch(row.destinationSession) ?? row.destinationSession,
+        route: humanNotice ? noticeOwner : resolveOrch(row.destinationSession) ?? row.destinationSession,
         ageMinutes: minutesSince(row.tsCreated, now),
         evidenceAt: latestIso(row.tsUpdated, row.lastNudgeAttempt),
-        why: `wake failed (${row.lastNudgeResult ?? "failed"}) and nothing retried it`,
+        why: quiet?.state === "orphaned"
+          ? `held for quiet hours (window ${quiet.windowId}), but no release job is live for that window: nothing will release it (${failure})`
+          : quiet?.state === "release-failed"
+            ? `released after quiet hours; its post failed (${quiet.failure}); the release stays queued for redelivery`
+            : humanNotice
+              ? `${failure}; check human-notification delivery rather than retrying the agent wake`
+              : `${failure} and nothing retried it`,
       });
     }
 
@@ -462,18 +581,35 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (!row || isFindingRow(row)) continue;
       const actionableAt = pendingSince(deps.db, row.qitemId) ?? row.tsCreated;
       if (actionableAt > cutoff) continue;
-      if (hasLiveLadder(deps.db, row.qitemId)) continue;
       // #514 — an ask already posted to its registered human in the current delivery episode waits on
       // that human; it is not stuck, and a finding would post the human again. Unposted, failed,
       // legacy and non-human rows keep this net.
       if (deps.queueRepo.humanNotificationPostedThisEpisode(row.qitemId)) continue;
+      // An ask placed on Steering without an alert waits on its person there by design; a finding would alert them.
+      if (deps.queueRepo.humanAskWithoutAlert(row.qitemId)) continue;
+      // Quiet hours: a held ask whose window's release job is live waits on that job, and one already released waits on
+      // its post; neither is stuck. A release whose post failed is reported once, by the undelivered-wake loop above. A
+      // hold with no live release job is stuck: nothing will ever release it.
+      const quiet = quietHoldCustody(deps.db, row.qitemId, now);
+      if (quiet && quiet.state !== "orphaned") continue;
+      // The seat's typing guard or interruption level held its wake on purpose: it's held and readable at the seat, not
+      // stuck. (A handed-off baton's one held notice is the wake ladder's.)
+      if (row.lastNudgeResult === "retained:typing_guard") continue;
+      // The ladder check runs LAST here too: a row the ladder alone would have stopped is
+      // ladder-suppressed, and its finding stays open (#1419).
+      if (hasLiveLadder(deps.db, row.qitemId, now, suppressionMinutes)) {
+        suppressedTags.add(findingDedupTag("unclaimed-obligation", row.qitemId));
+        continue;
+      }
       candidates.push({
         kind: "unclaimed-obligation",
         row,
         route: resolveOrch(row.destinationSession) ?? row.destinationSession,
         ageMinutes: minutesSince(actionableAt, now),
         evidenceAt: actionableAt,
-        why: `actionable with a destination and unclaimed for ${minutesSince(actionableAt, now)} min (threshold ${ageMinutes})`,
+        why: quiet?.state === "orphaned"
+          ? `held for quiet hours (window ${quiet.windowId}) for ${minutesSince(actionableAt, now)} min, but no release job is live for that window: nothing will release it`
+          : `actionable with a destination and unclaimed for ${minutesSince(actionableAt, now)} min (threshold ${ageMinutes})`,
       });
     }
 
@@ -560,15 +696,29 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
               successorId === deriveCrossHostSuccessorId(row.qitemId, row.handedOffTo, hostId)
             );
           }
+          if (target === row.qitemId) return true;
           return !deps.queueRepo.getById(target);
         }
-        return !hasSeatTargetSuccessor(deps.db, row.qitemId, target);
+        try {
+          return !hasLinkedSuccessor(deps.db, row.qitemId, target);
+        } catch {
+          return true;
+        }
       });
       if (verificationTargets.length === 0) continue;
+      let route = row.destinationSession;
+      try {
+        route = custodyFindingRoute(deps.db, deps.queueRepo, row);
+      } catch (err) {
+        if (!(err instanceof QueueRepositoryError) || err.code !== "human_registry_unavailable") throw err;
+        // The registry may not exist before the first human is registered. Losing
+        // owner refinement must not stop unrelated findings or their resolution.
+        log(`[stuck-sweep] keeping custody route for ${row.qitemId} at ${row.destinationSession}: ${err.message}`);
+      }
       candidates.push({
         kind: "dangling-closure",
         row,
-        route: row.destinationSession,
+        route,
         ageMinutes: minutesSince(row.tsUpdated, now),
         evidenceAt: latestIso(row.tsUpdated),
         why: `closed (${row.closureReason ?? "?"}) with successor custody that this local store cannot fully verify`,
@@ -576,10 +726,39 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       });
     }
 
+    // A finding for a confirmed-missing session goes to a live recovery seat when one is available,
+    // since nothing would ever wake the missing one (the ladder covers handed-off batons only): the
+    // operator agent, else the operator seat (the ladder's own floor, the person approvals use), else
+    // the stuck row's creator, skipping any that is unset, confirmed missing or this seat. When none
+    // qualifies, the finding stays addressed to the missing session and says so; it's never dropped.
+    // A live seat keeps its own.
+    const sessionMissing = deps.sessionConfirmedMissing ?? ((session: string) => {
+      const nodeId = resolveSessionNodeId(deps.db, session);
+      return nodeId !== null && nodeSessionConfirmedMissing(deps.db, nodeId);
+    });
+    let recoverySeats: Array<string | null> | undefined;
+    for (const c of candidates) {
+      if (!sessionMissing(c.route)) continue;
+      recoverySeats ??= [(deps.resolveRecoveryAgentSeat ?? resolveRecoveryAgentSeat)(), (deps.resolveOperatorSeat ?? resolveOperatorSeat)()];
+      const choices = [...recoverySeats, c.row.sourceSession];
+      const chosen = choices.findIndex((seat) => !!seat && seat !== c.route && !sessionMissing(seat));
+      const floor = chosen < 0 ? null : choices[chosen]!;
+      if (!floor) {
+        c.why += `; ${c.route} is confirmed missing (session_missing) and no live recovery seat is available (operator agent, operator seat and creator are each unset, missing or this seat; an operator agent setting that's unreadable or isn't an agent's session counts as unset), so this finding stays addressed to it`;
+        continue;
+      }
+      // Name the rule that chose it, so whoever receives the finding knows why, and which setting to change.
+      c.why += `; ${c.route} is confirmed missing (session_missing), so this finding goes to ${floor}, ${RECOVERY_SEAT_RULES[chosen]}`;
+      c.route = floor;
+    }
+
     // Route: idempotent per (row, kind). An existing open finding refreshes its age; a
     // new one is created durable + waking (the create path's default nudge).
     const findings: StuckSweepFindingAction[] = [];
     const liveDedupTags = new Set<string>();
+    // A finding that could not be created (a row whose destination no longer resolves, say) must not
+    // stop the others: it is reported, its row stays detected, and the pass is still a failure.
+    const failedCreates: string[] = [];
     for (const c of [...new Map(candidates.map(c => [c.row.qitemId, c])).values()]) {
       const dedupTag = findingDedupTag(c.kind, c.row.qitemId);
       const shared = findQueueRecovery(deps.db, c.row.qitemId);
@@ -608,18 +787,29 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         // Age is derived at read time; an unchanged scan is not a transition.
         findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: existing.qitem_id, action: "refreshed" });
       } else if (!existing || evidenceIsNewer(c.evidenceAt, existing.ts_updated)) {
-        const created = await deps.queueRepo.create({
+        const input = {
           qitemId: recoveryId(deps.db, c.row.qitemId),
           // The detector is machinery, not a seat: the obligation's own creator is the
           // finding's source (the workflow-exception precedent).
           sourceSession: c.row.sourceSession,
           destinationSession: c.route,
           body: evidenceBody(deps.db, c),
-          summary: `Stuck sweep: ${c.verificationTargets ? "successor-verification-required" : c.kind} on ${c.row.qitemId} (${c.ageMinutes} min)`,
+          summary: c.verificationTargets
+            ? custodyHeadline(c.row.qitemId, c.verificationTargets, c.ageMinutes)
+            : `Stuck sweep: ${c.kind} on ${c.row.qitemId} (${c.ageMinutes} min)`,
           evidenceRef: `rig queue show ${c.row.qitemId}`,
           tags: [STUCK_SWEEP_FINDING_TAG, dedupTag, recoveryTag(c.row.qitemId)],
-        });
-        findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: created.qitemId, action: "created" });
+          // OpenRig's own finding, whoever created the stuck row.
+          wakeTrigger: "openrig" as const,
+        };
+        try {
+          const created = await deps.queueRepo.create(input);
+          findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: created.qitemId, action: "created" });
+        } catch (err) {
+          const message = `${c.kind} finding for ${c.row.qitemId} to ${c.route} not created: ${err instanceof Error ? err.message : String(err)}`;
+          log(`[stuck-sweep] ${message}`);
+          failedCreates.push(message);
+        }
       }
     }
 
@@ -627,11 +817,11 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // with its reason — the sweep cleans up after itself, no human unwind.
     const openFindings = deps.db
       .prepare(
-        `SELECT qitem_id, source_session, tags FROM queue_items
+        `SELECT qitem_id, tags FROM queue_items
           WHERE state IN ('pending', 'in-progress', 'blocked')
             AND tags LIKE ?`,
       )
-      .all(`%"${STUCK_SWEEP_FINDING_TAG}"%`) as Array<{ qitem_id: string; source_session: string; tags: string }>;
+      .all(`%"${STUCK_SWEEP_FINDING_TAG}"%`) as Array<{ qitem_id: string; tags: string }>;
     for (const f of openFindings) {
       let tags: string[] = [];
       try {
@@ -642,9 +832,16 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       const dedupTag = tags.find((t) => t.startsWith("stuck-sweep:"));
       if (!dedupTag || liveDedupTags.has(dedupTag)) continue;
       const [, kind, stuckId] = dedupTag.match(/^stuck-sweep:([a-z-]+):(.+)$/) ?? [];
+      // Suppression is not resolution (#1419), and only the ladder's own suppression counts:
+      // a finding whose row the ladder stopped in THIS pass stays open, because the marker
+      // only ever stopped the re-report. Every other finding resolves as soon as the sweep
+      // no longer detects its condition — a resumed claim, a verified custody disposition, a
+      // notice that has since posted, or a row the ladder never owned.
+      if (suppressedTags.has(dedupTag)) continue;
       await deps.queueRepo.update({
         qitemId: f.qitem_id,
-        actorSession: f.source_session,
+        // The sweep performed this transition; ownership stays on the existing row.
+        actorSession: "stuck-sweep@system",
         state: "done",
         closureReason: "no-follow-on",
         transitionNote: `stuck-sweep resolved: ${kind ?? "finding"} on ${stuckId ?? "row"} no longer detected`,
@@ -659,6 +856,12 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       }
     }
 
+    if (failedCreates.length > 0) {
+      // Not a clean or complete pass: say so, while keeping the findings that were made.
+      const error = failedCreates.join("; ");
+      status?.record("failed", { error, findings: findings.filter((f) => f.action !== "closed").length });
+      return { outcome: "failed", findings, error };
+    }
     const outcome = findings.length > 0 ? "findings" : "clean";
     status?.record(outcome, { findings: findings.filter((f) => f.action !== "closed").length });
     return { outcome, findings };

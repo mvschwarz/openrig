@@ -31,6 +31,7 @@ const SPEC_4A_ROUTES = [
   "/healthz",
   "/api/queue/recent-transitions?scope=rig&rig=openrig-build&limit=20",
   "/api/queue/recent-transitions?scope=instance&limit=20",
+  "/api/seat/effort/dev%40openrig-build",
   "/api/health?limit=200",
   "/api/provider/status",
   "/api/provider/usage/hosts",
@@ -68,6 +69,7 @@ describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)"
     await c.sliceDetail("11-production-tui-composed-system");
     await c.queueRecentTransitions({ kind: "rig", rig: "openrig-build" });
     await c.queueRecentTransitions({ kind: "instance" });
+    await c.seatEffort("dev@openrig-build");
     await (c as unknown as { healthFindings(): Promise<unknown> }).healthFindings();
     await c.providerStatus();
     await c.usageAcrossHosts();
@@ -154,6 +156,27 @@ describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)"
     const c = new DaemonClient({ baseUrl: "http://x", fetchImpl });
     await expect(c.ps()).rejects.toThrow(/GET \/api\/ps → 503/);
   });
+
+  it("keeps a refused seat-effort report as an answer", async () => {
+    const report = { ok: false, code: "effort_unsupported_runtime", message: "runtime does not report effort" };
+    const c = new DaemonClient({
+      baseUrl: "http://x",
+      fetchImpl: (async () => ({ ok: false, status: 409, json: async () => report }) as Response) as typeof fetch,
+    });
+    await expect(c.seatEffort("dev@openrig-build")).resolves.toEqual(report);
+  });
+
+  it("keeps generic reads strict when a refusal body is returned", async () => {
+    const c = new DaemonClient({
+      baseUrl: "http://x",
+      fetchImpl: (async () => ({
+        ok: false,
+        status: 409,
+        json: async () => ({ ok: false, code: "refused", message: "read refused" }),
+      }) as Response) as typeof fetch,
+    });
+    await expect(c.ps()).rejects.toThrow(/GET \/api\/ps → 409/);
+  });
   it("reads the current terminal credential after first daemon start", async () => {
     let headers: Record<string, string> = {};
     const seen: unknown[] = [];
@@ -169,6 +192,17 @@ describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)"
 
 
 describe("terminal preview width", () => {
+  it("previews with the provider the window opener will use", async () => {
+    const requests: string[] = [];
+    const client = new DaemonClient({ baseUrl: "http://fixture", fetchImpl: (async url => {
+      requests.push(String(url));
+      return { ok: true, json: async () => ({}) } as Response;
+    }) as typeof fetch });
+    await client.previewTerminal("saved:kernel");
+    await client.previewTerminal("saved:kernel", "rex");
+    expect(requests.map(url => new URL(url).searchParams.get("provider"))).toEqual(["herdr", "rex"]);
+  });
+
   it.each([undefined, 0, -1, 119.5, Infinity, NaN, 119, 120, 159, 160])("only sends a measured positive integer width: %s", async columns => {
     const descriptor = Object.getOwnPropertyDescriptor(process.stdout, "columns");
     const ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");

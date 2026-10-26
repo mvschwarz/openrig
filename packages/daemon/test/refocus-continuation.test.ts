@@ -9,7 +9,7 @@ const boundary = "OpenRig post-compaction turn boundary. Please acknowledge this
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
-function fixture() {
+function fixture(nodeRig = false) {
   const root = mkdtempSync(join(tmpdir(), "refocus-continuation-"));
   roots.push(root);
   const bin = join(root, "bin");
@@ -19,22 +19,29 @@ function fixture() {
   const calls = join(root, "calls");
   const transcript = join(root, "transcript.jsonl");
   writeFileSync(transcript, "x".repeat(100));
-  writeFileSync(trace, '#!/bin/sh\nprintf "%s" "$TRACE_RESULT"\nexit "${TRACE_STATUS:-0}"\n');
-  writeFileSync(rig, '#!/bin/sh\nif [ "$1 $2" = "stream emit" ]; then\n printf "%s\\n" "$*" >> "$CALLS"\n exit "${STREAM_EXIT:-0}"\nfi\nprintf "{}"\n');
+  writeFileSync(trace, '#!/bin/sh\nprintf "%s" "$TRACE_RESULT"\nprintf "%s" "$TRACE_STDERR" >&2\nexit "${TRACE_STATUS:-0}"\n');
+  writeFileSync(rig, nodeRig ? `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "stream" && args[1] === "emit") {
+  require("node:fs").appendFileSync(process.env.CALLS, args.join(" ") + "\\n");
+  process.exit(Number(process.env.STREAM_EXIT || 0));
+}
+process.stdout.write("{}");
+` : '#!/bin/sh\nif [ "$1 $2" = "stream emit" ]; then\n printf "%s\\n" "$*" >> "$CALLS"\n exit "${STREAM_EXIT:-0}"\nfi\nprintf "{}"\n');
   chmodSync(trace, 0o755);
   chmodSync(rig, 0o755);
-  const run = (event: string, prompt = "continue", good = true, extra: NodeJS.ProcessEnv = {}, identity = "occupant") => {
+  const run = (event: string, prompt = "continue", good = true, extra: NodeJS.ProcessEnv = {}, identity = "occupant", timeout = 10_000) => {
     const result = spawnSync(process.execPath, [hook, "--runtime", "claude"], {
       input: JSON.stringify({ hook_event_name: event, session_id: identity, prompt, transcript_path: transcript }),
-      encoding: "utf8", timeout: 10_000,
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, OPENRIG_HOME: root,
+      encoding: "utf8", timeout, killSignal: "SIGKILL",
+      env: { ...process.env, PATH: nodeRig ? bin : `${bin}:${process.env.PATH}`, OPENRIG_HOME: root,
         OPENRIG_SESSION_NAME: "seat@test", OPENRIG_REFOCUS_ENABLED: "1", OPENRIG_REFOCUS_NOW: "",
         OPENRIG_REFOCUS_CONTENT_REF: "", OPENRIG_REFOCUS_CONTENT_FILE: "", OPENRIG_REFOCUS_TREES: "work",
         OPENRIG_REFOCUS_WORK_NODE: root, OPENRIG_WORKSPACE_ROOT: root,
         PYTHON: trace, TRACE_RESULT: good ? "WORK TRACE: current intent" : "TRACE GAP — fixture resolver unavailable",
         TRACE_STATUS: good ? "0" : "1", CALLS: calls, ...extra },
     });
-    expect(result.status, result.stderr).toBe(0);
+    expect(result.status, result.error?.message || result.stderr).toBe(0);
     return result.stdout;
   };
   return { root, run, transcript, calls: () => existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : [],
@@ -42,6 +49,16 @@ function fixture() {
 }
 
 describe("refocus continuation", () => {
+  it.each(["missing close", "trailing text"])("finishes a long pasted prompt with %s within the parsing bound", (ending) => {
+    const f = fixture();
+    const prompt = `<pasted_content id="fixture">${" ".repeat(64_000)}tail`
+      + (ending === "trailing text" ? '</pasted_content id="fixture"> extra' : "");
+    const started = Date.now();
+    // A separate process deadline stops even a synchronous parser regression.
+    expect(f.run("UserPromptSubmit", prompt, true, {}, "occupant", 2_000)).toBe("");
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(f.state().lastBytes).toBe(100);
+  }, 5_000);
   it("leaves PostCompact due through repeated acknowledgement turns, then delivers once on restore", () => {
     const f = fixture();
     expect(f.run("PostCompact")).toBe("");
@@ -64,8 +81,8 @@ describe("refocus continuation", () => {
     expect(f.state().pendingOn).toBeUndefined();
   });
 
-  it("reports only the third failed attempt, retains due state, and resets on a successful delivery", () => {
-    const f = fixture();
+  it.each([false, true])("reports the third failure and resets after delivery (env-node CLI without Node on PATH=%s)", nodeRig => {
+    const f = fixture(nodeRig);
     f.run("PostCompact");
     for (let i = 0; i < 2; i++) f.run("UserPromptSubmit", "continue", false);
     expect(f.calls()).toEqual([]);
@@ -82,6 +99,36 @@ describe("refocus continuation", () => {
     for (let i = 0; i < 3; i++) f.run("UserPromptSubmit", "continue", false);
     expect(f.calls()).toHaveLength(2);
     expect(f.calls()[0].match(/--id (\S+)/)?.[1]).not.toBe(f.calls()[1].match(/--id (\S+)/)?.[1]);
+  });
+
+  it("labels a retried post-compaction refocus as a retry with the failure, and a new compaction as fresh", () => {
+    const f = fixture();
+    f.run("PostCompact");
+    expect(f.run("UserPromptSubmit", "continue", false)).toContain("REFOCUS (just compacted — your picture is lossy)");
+    expect(f.state().pendingOn).toBe("PostCompact");
+
+    const retry = f.run("UserPromptSubmit");
+    expect(retry).toContain("REFOCUS (retrying the post-compaction refocus; the last attempt failed: trace gap: trace exited 1)");
+    expect(retry).not.toContain("just compacted");
+    expect(f.state().pendingOn).toBeUndefined();
+    expect(f.state().pendingFailure).toBeUndefined();
+
+    f.run("PostCompact");
+    f.run("UserPromptSubmit", "continue", false);
+    f.run("PostCompact");
+    expect(f.state().pendingFailure).toBeUndefined();
+    expect(f.run("UserPromptSubmit")).toContain("REFOCUS (just compacted — your picture is lossy)");
+  });
+
+  it("caps a long failure reason in the retry label; the failed attempt's trace gap keeps it whole", () => {
+    const f = fixture();
+    const stderr = `Traceback: ${"frame ".repeat(200)}end`;
+    f.run("PostCompact");
+    expect(f.run("UserPromptSubmit", "continue", false, { TRACE_STDERR: stderr })).toContain(`TRACE GAP — ${stderr.trim()}`);
+    const saved = f.state().pendingFailure as string;
+    expect(saved).toHaveLength(300);
+    expect(saved).toBe(`${`trace gap: ${stderr}`.slice(0, 299)}…`);
+    expect(f.run("UserPromptSubmit")).toContain(`REFOCUS (retrying the post-compaction refocus; the last attempt failed: ${saved})`);
   });
 
   it("retries an unconfirmed stream write under the same id and isolates occupants", () => {

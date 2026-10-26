@@ -36,22 +36,26 @@ interface RunCall { site: number; argv: string[]; legacy: string }
 const SESSION = "seat'q a";
 const TARGET = { nodeId: "node-1", session: SESSION, occupant: "occupant-1", pane: "%1" };
 
-function respond(cmd: string, failing: string[]): string {
+function respond(cmd: string, failing: string[], composer = false): string {
   const sub = cmd.split(" ")[1] ?? "";
   if (failing.includes(sub)) throw new Error(`Command failed: ${cmd}\ncan't find session: missing`);
+  // #1072's composer snapshot reads a cursor and a screen before its mode check; other calls keep their replies.
+  if (composer && sub === "display-message" && cmd.includes("cursor_x")) return "2|0|80|24\n";
+  if (composer && sub === "capture-pane") return "❯ \n";
+  if (sub === "show-options" && cmd.includes("default-shell")) return "/bin/sh\n";
   switch (sub) {
     case "list-sessions": return `${SESSION}\nalpha\n`;
     case "list-panes": return "%1|0|/w|80|24|1\n";
     case "display-message":
       return cmd.includes("session_id") ? "$7\n" : cmd.includes("pane_pid") ? "4242\n" : "1\n";
     case "show-environment": return "OPENRIG_NODE_ID=n1\nCLAUDECODE=1\nHERDR_PANE_ID=p1\n";
-    case "new-session": return "%1\n";
+    case "new-session": case "source-file": case "start-server": return "%1\n";
     default: return "";
   }
 }
 
 /** A shell-path adapter whose every run() call records its caller line, its argv and the string exec received. */
-function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: boolean } = {}): TmuxAdapter {
+function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: boolean; composer?: boolean } = {}): TmuxAdapter {
   const execs: string[] = [];
   const fileOps: TmuxFileOps = {
     writeFile: async () => {},
@@ -61,7 +65,7 @@ function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: 
   };
   const adapter = new TmuxAdapter(async (cmd) => {
     execs.push(cmd);
-    return respond(cmd, opts.failing ?? []);
+    return respond(cmd, opts.failing ?? [], opts.composer);
   }, fileOps);
   if (opts.guard) {
     adapter.deliveryGuard = {
@@ -72,6 +76,11 @@ function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: 
       input: (_name: string, fn: () => Promise<unknown>) => fn(),
       operation: (_name: string, fn: () => Promise<unknown>) => fn(),
       humanInput: (_name: string, fn: () => Promise<unknown>) => fn(),
+      // The draft-aware hooks (#1072); off here, so input takes the same path as without them.
+      attachInputInspection: () => {},
+      needsInputCheck: () => false,
+      beforeInput: async () => {},
+      notePasted: async () => {},
     } as unknown as SeatDeliveryGuard;
   }
   const self = adapter as unknown as { run: (argv: string[], legacy?: string) => Promise<string> };
@@ -112,14 +121,19 @@ async function driveEveryMethod(): Promise<RunCall[]> {
   await a.restorePaneOption("%1", "remain-on-exit", "on");
   await a.restorePaneOption("%1", "remain-on-exit", null);
   await a.capturePaneHistory("%1");
+  await a.capturePaneHistoryParts("%1");
   await a.setRemainOnExit("%1", true);
   await a.isPaneDead("%1");
+  await a.isPaneInMode("%1");
   await a.signalPaneProcess("%1", "TERM");
   await a.getPanePid(SESSION);
   await a.getDefaultShell();
   await a.getPaneCommand(SESSION);
   await a.getSessionEnv(SESSION, "OPENRIG_NODE_ID");
+  await a.setSessionEnv(SESSION, "SEAT_FLAG", "it's a value");
+  await a.unsetSessionEnv(SESSION, "SEAT_FLAG");
   await a.hasSessionEnv(SESSION, "OPENRIG_NODE_ID");
+  await a.hasSessionEnvBatch(SESSION, ["OPENRIG_NODE_ID", "OPENRIG_RUNTIME"]);
   await a.startPipePane(SESSION, "/tmp/out dir/it's.log");
   await a.stopPipePane(SESSION);
   await a.capturePanesContent([SESSION, "alpha", "missing"], 50);
@@ -132,13 +146,22 @@ async function driveEveryMethod(): Promise<RunCall[]> {
   await a.showServerOption("copy-command");
   await a.getSessionOption(SESSION, "@openrig-x");
   await a.readAllSessionWindowActivity();
+  await a.readAllSessionWindows();
   await a.readAllPaneProcesses();
   await a.readPaneLastActivity(SESSION);
   await a.listClients();
   await a.switchClient("/dev/ttys001", SESSION);
+  // A runtime switch's exchange: two session-id reads, then the guarded if-shell swap (nested quoting); and its env writes.
+  await a.swapRuntimeSwitchPanes({ nodeId: "n1", stagingSession: "staging'q a", canonicalSession: SESSION, canonicalPane: "%1", stagedPane: "%1" });
+  await a.setRuntimeSwitchEnvironment(SESSION, "claude-code", "gen 'q 1");
   // A failed paste deletes the loaded buffer; the guarded kill reads the session id first.
   await recordingAdapter(calls, { failing: ["paste-buffer"] }).sendText(SESSION, "hello");
   await recordingAdapter(calls, { guard: true }).killSession(SESSION);
+  await recordingAdapter(calls, { composer: true }).captureComposerSnapshot("%1");
+  const scoped = recordingAdapter(calls);
+  scoped.launchEnvironment = () => ({ inheritTmuxEnvironment: false, env: { PATH: "/a b:$HOME", PRIVATE_SYNTHETIC: "it's a\nvalue" } });
+  await scoped.createSession(SESSION, "/w x", { OPENRIG_NODE_ID: "n1", Q: "it's" });
+  await scoped.respawnPane("%1", "printf '$HOME'", { env: { OPENRIG_NODE_ID: "n1", A: "b c" } });
   return calls;
 }
 

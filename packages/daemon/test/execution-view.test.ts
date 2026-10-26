@@ -344,6 +344,85 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     expect((doc.q1_lanes as Record<string, unknown>[]).map((lane) => lane.qitem_id)).toContain("qitem-lane-31");
   });
 
+  describe("a slice: tag names the slice by its frontmatter id or its directory name", () => {
+    const working = { activity: "working" as const, needsInput: { count: 0, reason: null }, decidedBy: "window-sampling", changedAt: "2026-08-29T21:59:30.000Z" };
+    const retag = (qitemId: string, tags: string[]) =>
+      db.prepare(`UPDATE queue_items SET tags = ? WHERE qitem_id = ?`).run(JSON.stringify(tags), qitemId);
+    const lane32 = async () => ((await show()).q1_lanes as Record<string, unknown>[]).find((l) => l.qitem_id === "qitem-lane-32")!;
+    const seq32 = async () => ((await show()).q2_sequencing as Record<string, unknown>[]).find((s) => s.slice_id === "OPR.9.9.32")!;
+
+    for (const [form, tag] of [["frontmatter id", "OPR.9.9.32"], ["directory name", "32-beta"], ["both forms", "OPR.9.9.32"]] as const) {
+      it(`gives a row tagged by ${form} an owner lane with working activity and a claimed slice`, async () => {
+        retag("qitem-lane-32", form === "both forms" ? [`mission:${MISSION}`, `slice:${tag}`, "slice:32-beta"] : [`mission:${MISSION}`, `slice:${tag}`]);
+        arbitratedBySession.set(SEAT_B, working);
+        const lane = await lane32();
+        expect(lane.seat).toBe(SEAT_B);
+        expect((lane.activity as Record<string, unknown>).activity).toBe("working");
+        const seq = await seq32();
+        expect((seq.work_rows as Record<string, unknown>[]).map((w) => w.qitem_id)).toEqual(["qitem-lane-32"]);
+        expect(seq.next_up).toBe(false);
+        expect(seq.next_up_basis).toBe("already claimed in-progress");
+      });
+    }
+  });
+
+  describe("a row binds to a mission by its mission: tag first and by a body mention only when it has none", () => {
+    const later = "2026-08-29T21:30:00.000Z";
+    const addRow = (id: string, tags: string[], body: string, state = "in-progress", seat = SEAT_B) =>
+      db.prepare(
+        `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, body, claimed_at)
+         VALUES (?, ?, ?, 'lead@exec-fixture', ?, ?, 'normal', 'light', ?, ?, ?)`,
+      ).run(id, later, later, seat, state, JSON.stringify(tags), body, later);
+    const ladder31 = async () => ((await show()).q4_ladder as Record<string, unknown>[]).find(s => s.slice_id === "OPR.9.9.31")!;
+    const laneIds = async () => ((await show()).q1_lanes as Record<string, unknown>[]).map((l) => l.qitem_id);
+
+    it("ignores a row tagged for another mission whose body mentions this one", async () => {
+      addRow("qitem-other-mission", ["mission:other-mission", "slice:31-alpha", "candidate:feedfacefeedface"], `Mission: other-mission\nSee ${MISSION}.\nworktree_path=${laneWorktree}\n`);
+      expect(await laneIds()).not.toContain("qitem-other-mission");
+      expect(((await ladder31()).built as Record<string, unknown>).resolved_commit).toBe(candidateSha);
+    });
+
+    it("ignores a row tagged for a mission whose name merely contains this one", async () => {
+      addRow("qitem-longer-name", [`mission:${MISSION}-hotfix`, "slice:31-alpha", "candidate:feedfacefeedface"], "Hotfix lane.");
+      expect(await laneIds()).not.toContain("qitem-longer-name");
+      expect(((await ladder31()).built as Record<string, unknown>).candidate_sha).toBe(candidateSha.slice(0, 9));
+    });
+
+    it("keeps binding an untagged row that names this mission in its body, and a correctly tagged row", async () => {
+      addRow("qitem-untagged", [], `Mission: ${MISSION}\nSlice: 33-gamma\n`);
+      addRow("qitem-tagged", [`mission:${MISSION}`, "slice:OPR.9.9.32"], "Tagged lane.", "in-progress", SEAT_A);
+      const ids = await laneIds();
+      expect(ids).toContain("qitem-untagged");
+      expect(ids).toContain("qitem-tagged");
+    });
+
+    it("keeps the id form of the mission as an exact tag match", async () => {
+      addRow("qitem-id-form", ["mission:OPR.9.9", "slice:OPR.9.9.33"], "Legacy id-form tag.");
+      expect(await laneIds()).toContain("qitem-id-form");
+    });
+
+    it("matches the mission tag with ASCII case folded, as the selecting LIKE does", async () => {
+      addRow("qitem-cased", [`mission:${MISSION.toUpperCase()}`, "slice:OPR.9.9.33"], "Tag written in upper case.");
+      expect(await laneIds()).toContain("qitem-cased");
+    });
+
+    it("binds a row tagged with two missions to both, because it names both", async () => {
+      addRow("qitem-two-missions", [`mission:${MISSION}`, "mission:other-mission", "slice:OPR.9.9.33"], "Names two missions.");
+      expect(await laneIds()).toContain("qitem-two-missions");
+      const other = (await projector.show("execution", { mission: "other-mission" })).rows[0] as Record<string, unknown>;
+      expect((other.q1_lanes as Record<string, unknown>[]).map((l) => l.qitem_id)).toContain("qitem-two-missions");
+    });
+
+    it("does not let another mission's wave-map row replace this mission's", async () => {
+      db.prepare(
+        `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, body)
+         VALUES ('qitem-wave-map-longer', ?, ?, 'lead@exec-fixture', 'lead@exec-fixture', 'done', 'normal', 'light', ?, ?)`,
+      ).run(later, later, JSON.stringify([`mission:${MISSION}-hotfix`, "wave-map", "format:wave-map-v1"]),
+        'Other wave map.\n```json\n{"format":"wave-map-v1","waves":[{"id":"WX","slices":["OPR.9.9.31"]}]}\n```\n');
+      expect(((await show()).sources as Record<string, Record<string, unknown>>).wave_map.row).toBe("qitem-wave-map");
+    });
+  });
+
   it("carries planned components separately from current queue ownership, including waiting and handoff", async () => {
     const file = path.join(missionsRoot, MISSION, "slices", "31-alpha", "slice.yaml");
     fs.appendFileSync(file, "sdlc:\n  components:\n    - { id: build.minimal-gap, owner: planned@fixture }\n");
@@ -644,6 +723,261 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     expect(after).toMatchObject({ folded: { value: true }, adopted: { value: false } });
   });
 
+  describe("a row parked on an external gate is a waiting lane", () => {
+    const lanesOf = async (slice: string) =>
+      ((await show()).q1_lanes as Record<string, unknown>[]).filter((l) => l.slice === slice);
+    const park = (id: string, slice: string, seat: string, blockedOn: string) => {
+      const t = "2026-08-29T21:30:00.000Z";
+      db.prepare(
+        `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, body, claimed_at, blocked_on)
+         VALUES (?, ?, ?, 'lead@exec-fixture', ?, 'blocked', 'normal', 'light', ?, 'In review upstream.', ?, ?)`,
+      ).run(id, t, t, seat, JSON.stringify([`mission:${MISSION}`, `slice:${slice}`]), t, blockedOn);
+    };
+
+    it("lists the parked row's seat as the slice's lane, marked waiting and on what, with pickup parked", async () => {
+      park("qitem-pr-32", "OPR.9.9.32", SEAT_B, "external:pr-1293");
+      // lane-32 was in-progress; close it so the slice has only the parked row.
+      db.prepare("UPDATE queue_items SET state = 'done' WHERE qitem_id = 'qitem-lane-32'").run();
+      const lanes = await lanesOf("OPR.9.9.32");
+      expect(lanes).toHaveLength(1);
+      expect(lanes[0]).toMatchObject({
+        qitem_id: "qitem-pr-32",
+        seat: SEAT_B,
+        waiting: { on: "external:pr-1293" },
+        pickup: { state: "parked" },
+      });
+      // A waiting lane is not live work: parallelism health ignores it, so q1_lanes is longer than lanes_live.
+      const q6 = (await show()).q6_parallelism as Record<string, unknown>;
+      expect(q6.lanes_live).toBe(1);
+      expect(((await show()).q1_lanes as unknown[]).length).toBe(2);
+    });
+
+    it("shows a coordination wait with no worktree_path= line as a waiting row, not a builder", async () => {
+      park("qitem-decision-33", "OPR.9.9.33", SEAT_B, "external:capacity-decision");
+      db.prepare("UPDATE queue_items SET state = 'done' WHERE qitem_id = 'qitem-parked-33'").run();
+      expect((db.prepare("SELECT body FROM queue_items WHERE qitem_id = 'qitem-decision-33'").get() as { body: string }).body).not.toContain("worktree_path=");
+      const lanes = await lanesOf("OPR.9.9.33");
+      expect(lanes).toHaveLength(1);
+      expect(lanes[0]).toMatchObject({
+        qitem_id: "qitem-decision-33",
+        seat: SEAT_B,
+        waiting: { on: "external:capacity-decision" },
+        worktree_path: "INDETERMINATE",
+        fragile_join: true,
+      });
+    });
+
+    it("leaves active lanes unmarked and shows only the in-progress lane when the slice also has a parked external row", async () => {
+      park("qitem-pr-31", "OPR.9.9.31", SEAT_B, "external:pr-7");
+      const lanes = await lanesOf("OPR.9.9.31");
+      expect(lanes.map((l) => l.qitem_id)).toEqual(["qitem-lane-31"]);
+      expect(lanes[0]!.waiting).toBeNull();
+    });
+
+    it("does not make a lane of a row parked on a qitem, a human seat, or a fold:/auth: gate", async () => {
+      for (const [i, on] of ["qitem-blocker-x", "human@kernel", "fold:main", "auth:claude", "external:"].entries()) {
+        park(`qitem-other-${i}`, "OPR.9.9.33", SEAT_B, on);
+      }
+      expect(await lanesOf("OPR.9.9.33")).toEqual([]);
+    });
+
+    it("keeps the park honest: the parked lane is in Q5 with its wake still armed, and is not a stall", async () => {
+      park("qitem-pr-32", "OPR.9.9.32", SEAT_B, "external:pr-1293");
+      db.prepare("UPDATE queue_items SET state = 'done' WHERE qitem_id = 'qitem-lane-32'").run();
+      db.prepare(
+        `INSERT INTO queue_transitions (transition_id, qitem_id, ts, state, transition_note, actor_session)
+         VALUES (32001, 'qitem-pr-32', '2026-08-29T21:30:00.000Z', 'blocked', 'parked', ?)`,
+      ).run(SEAT_B);
+      db.prepare(
+        `INSERT INTO queue_transition_wakes (transition_id, qitem_id, phase, wake_kind, wake_ref)
+         VALUES (32001, 'qitem-pr-32', 'armed', 'timer', 'wake-timer-pr-32')`,
+      ).run();
+      const doc = await show();
+      const q5 = (doc.q5_park as Record<string, unknown>[]).find((p) => p.qitem_id === "qitem-pr-32")!;
+      expect(q5.pickup_state).toBe("parked");
+      expect(q5.park_kind).toBe("deliberate-with-wake");
+      expect(String(q5.park_kind_basis)).toContain("wake-timer-pr-32");
+    });
+
+    it("lets an in-progress lane win whichever of the slice's id or dir each row names", async () => {
+      // Both forms name slice 31: lane-31 is tagged by id, the parked row by dir, and the reverse.
+      park("qitem-pr-31-dir", "31-alpha", SEAT_B, "external:pr-7");
+      expect((await lanesOf("OPR.9.9.31")).map((l) => l.qitem_id)).toEqual(["qitem-lane-31"]);
+      expect((await lanesOf("31-alpha"))).toEqual([]);
+      db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = 'qitem-lane-31'")
+        .run(JSON.stringify([`mission:${MISSION}`, "slice:31-alpha", `candidate:${candidateSha.slice(0, 9)}`]));
+      db.prepare("DELETE FROM queue_items WHERE qitem_id = 'qitem-pr-31-dir'").run();
+      park("qitem-pr-31-id", "OPR.9.9.31", SEAT_B, "external:pr-7");
+      expect((await lanesOf("31-alpha")).map((l) => l.qitem_id)).toEqual(["qitem-lane-31"]);
+      expect(await lanesOf("OPR.9.9.31")).toEqual([]);
+    });
+  });
+
+  describe("reported merge (squash merges leave the candidate off the integration ref)", () => {
+    const sliceOf = (list: unknown, id: string) => (list as Record<string, unknown>[]).find(s => s.slice_id === id)!;
+    const ladder31 = async () => sliceOf((await show()).q4_ladder, "OPR.9.9.31");
+    // 31 is next-up when unmerged; 32 depends on 31, so it is ready only once 31 reads merged.
+    const nextUp = async (id: string) => sliceOf((await show()).q2_sequencing, id).next_up;
+    let mergeRows = 0;
+    const insertMergeRow = (tags: string[], ts = "2026-08-30T10:00:00.000Z") =>
+      db.prepare(
+        `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, body)
+         VALUES (?, ?, ?, 'lead@exec-fixture', 'lead@exec-fixture', 'done', 'normal', 'light', ?, 'Merged upstream.')`,
+      ).run(mergeRows++ === 0 ? "qitem-merged-31" : `qitem-merged-31-${mergeRows}`, ts, ts, JSON.stringify(tags));
+    const commitOnLane = (message: string) => {
+      git(laneWorktree, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-qm", message);
+      return git(laneWorktree, "rev-parse", "HEAD");
+    };
+
+    // The candidate is a commit main does not contain, as after a squash merge.
+    // The build rows are finished, so next-up reads the merged answer, not a claim.
+    const squashedCandidate = () => {
+      const sha = commitOnLane("squashed away");
+      db.prepare("UPDATE queue_items SET tags = ?, state = 'done' WHERE qitem_id = 'qitem-lane-31'")
+        .run(JSON.stringify([`mission:${MISSION}`, "slice:OPR.9.9.31", `candidate:${sha}`]));
+      // Slice 32 depends on 31 and has its own unmerged build, so its next-up follows 31's merged answer.
+      db.prepare("UPDATE queue_items SET tags = ?, state = 'done' WHERE qitem_id = 'qitem-lane-32'")
+        .run(JSON.stringify([`mission:${MISSION}`, "slice:OPR.9.9.32", `candidate:${commitOnLane("slice 32 build")}`]));
+      const reviewDir = path.join(rigsRoot, "exec-fixture", "state", "review-fixture");
+      fs.writeFileSync(path.join(reviewDir, "S31-squashed.md"), `---\nslice: 31-alpha\nartifact_type: rev1-r2\nverdict: CLEAR\ncandidate_sha: ${sha}\n---\nCLEAR.\n`);
+      return sha;
+    };
+    const expectAncestryAnswer = async () => {
+      expect(await ladder31()).toMatchObject({ folded: { value: false } });
+      expect(await nextUp("OPR.9.9.31")).toBe(true);
+      expect(await nextUp("OPR.9.9.32")).toBe(false);
+    };
+
+    it("with no merged: tag the merged rung is exactly what ancestry gives, with no report", async () => {
+      squashedCandidate();
+      await expectAncestryAnswer();
+      expect((await ladder31()).folded).not.toHaveProperty("merge_report");
+    });
+
+    it("reads a squash merge as merged when the same row carries merged:<pr> and the built candidate", async () => {
+      const sha = squashedCandidate();
+      const before = await ladder31();
+      insertMergeRow([`mission:${MISSION}`, "slice:OPR.9.9.31", "merged:1291", `candidate:${sha.slice(0, 9)}`]);
+      const after = await ladder31();
+      expect(after.folded).toMatchObject({
+        value: true,
+        basis: expect.stringContaining(`reported merged in #1291 for candidate ${sha.slice(0, 9)}`),
+        merge_report: { pr: "1291", row: "qitem-merged-31", recorded_at: "2026-08-30T10:00:00.000Z", linked: true },
+      });
+      expect(String((after.folded as Record<string, unknown>).basis)).toContain("recorded");
+      expect(String((after.folded as Record<string, unknown>).basis)).toContain("not an ancestor");
+      expect(after.reviewed).toEqual(before.reviewed);
+      expect((after.built as Record<string, unknown>).resolved_commit).toBe(sha);
+      expect(await nextUp("OPR.9.9.31")).toBe(false);
+      expect(await nextUp("OPR.9.9.32")).toBe(true);
+    });
+
+    it("does not let a late tag for an earlier PR merge a newer candidate", async () => {
+      const first = squashedCandidate();
+      insertMergeRow([`mission:${MISSION}`, "slice:OPR.9.9.31", "merged:1291", `candidate:${first}`], "2026-08-29T22:00:00.000Z");
+      expect((await ladder31()).folded).toMatchObject({ value: true });
+      // A follow-up build, then a late record of the earlier PR with no candidate.
+      const next = commitOnLane("follow-up build");
+      db.prepare(
+        `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, body)
+         VALUES ('qitem-followup-31', '2026-08-30T12:00:00.000Z', '2026-08-30T12:00:00.000Z', 'lead@exec-fixture', 'lead@exec-fixture', 'done', 'normal', 'light', ?, 'Follow-up build.')`,
+      ).run(JSON.stringify([`mission:${MISSION}`, "slice:OPR.9.9.31", `candidate:${next}`]));
+      insertMergeRow([`mission:${MISSION}`, "slice:OPR.9.9.31", "merged:1291"], "2026-08-30T13:00:00.000Z");
+      const ladder = await ladder31();
+      expect((ladder.built as Record<string, unknown>).resolved_commit).toBe(next);
+      expect(ladder.folded).toMatchObject({
+        value: false,
+        basis: expect.stringContaining("merged:1291 recorded on row"),
+        // The earlier PR's linked row is for the older commit, so the report is the newest row, unlinked.
+        merge_report: { pr: "1291", recorded_at: "2026-08-30T13:00:00.000Z", linked: false },
+      });
+      expect(String((ladder.folded as Record<string, unknown>).basis)).toContain("does not change this answer");
+      await expectAncestryAnswer();
+    });
+
+    it("never lets a late merge report that names an older candidate re-point built", async () => {
+      const first = squashedCandidate();
+      const next = commitOnLane("candidate B");
+      db.prepare(
+        `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, body)
+         VALUES ('qitem-build-b-31', '2026-08-30T12:00:00.000Z', '2026-08-30T12:00:00.000Z', 'lead@exec-fixture', 'lead@exec-fixture', 'done', 'normal', 'light', ?, 'Build B.')`,
+      ).run(JSON.stringify([`mission:${MISSION}`, "slice:OPR.9.9.31", `candidate:${next}`]));
+      insertMergeRow([`mission:${MISSION}`, "slice:OPR.9.9.31", "merged:1291", `candidate:${first}`], "2026-08-30T13:00:00.000Z");
+      const ladder = await ladder31();
+      expect((ladder.built as Record<string, unknown>).resolved_commit).toBe(next);
+      expect(String((ladder.built as Record<string, unknown>).basis)).toContain("qitem-build-b-31");
+      expect(ladder.folded).toMatchObject({ value: false, merge_report: { pr: "1291", linked: false } });
+      await expectAncestryAnswer();
+    });
+
+    it("turns only a false from ancestry into merged, never an answer ancestry could not give", async () => {
+      const sha = squashedCandidate();
+      const missionYamlPath = path.join(missionsRoot, MISSION, "mission.yaml");
+      // A valid-shaped ref that does not exist: ancestry cannot answer.
+      fs.writeFileSync(missionYamlPath, fs.readFileSync(missionYamlPath, "utf8") + "\n  source:\n    integration_ref: no-such-branch\n");
+      insertMergeRow([`mission:${MISSION}`, "slice:OPR.9.9.31", "merged:1291", `candidate:${sha}`]);
+      const folded = (await ladder31()).folded as Record<string, unknown>;
+      expect(folded).toMatchObject({ value: "INDETERMINATE", merge_report: { pr: "1291", linked: true } });
+      expect(String(folded.basis)).toContain("only a false from ancestry is turned true");
+      expect(await nextUp("OPR.9.9.31")).toBe("INDETERMINATE");
+      expect(await nextUp("OPR.9.9.32")).toBe("INDETERMINATE");
+    });
+
+    it("keeps a row linked to a different commit as a report only", async () => {
+      squashedCandidate();
+      const other = commitOnLane("other work");
+      insertMergeRow([`mission:${MISSION}`, "slice:OPR.9.9.31", "merged:1100", `candidate:${other}`], "2026-08-29T20:00:00.000Z");
+      expect((await ladder31()).folded).toMatchObject({ value: false, merge_report: { pr: "1100", linked: false } });
+      await expectAncestryAnswer();
+    });
+
+    it("keeps ancestry as the basis when the candidate is an ancestor, and still shows the report", async () => {
+      insertMergeRow([`mission:${MISSION}`, "slice:OPR.9.9.31", "merged:7"]);
+      const folded = (await ladder31()).folded as Record<string, unknown>;
+      expect(folded).toMatchObject({ value: true, merge_report: { pr: "7", linked: false } });
+      expect(String(folded.basis)).toMatch(/^.*merge-base --is-ancestor/);
+    });
+
+    it("leaves a slice with no candidate as ancestry gives it and shows the report", async () => {
+      const q4 = async () => sliceOf((await show()).q4_ladder, "OPR.9.9.33");
+      const before = await q4();
+      const nextBefore = await nextUp("OPR.9.9.33");
+      insertMergeRow([`mission:${MISSION}`, "slice:OPR.9.9.33", "merged:55"]);
+      const after = await q4();
+      expect(after.folded).toMatchObject({
+        value: "INDETERMINATE",
+        basis: expect.stringContaining("no candidate sha to test"),
+        merge_report: { pr: "55", linked: false },
+      });
+      expect(String((after.folded as Record<string, unknown>).basis)).toContain("merged:55 recorded on row");
+      expect(after.built).toEqual(before.built);
+      expect(after.reviewed).toEqual(before.reviewed);
+      expect(await nextUp("OPR.9.9.33")).toBe(nextBefore);
+    });
+
+    it("leaves a malformed declared integration ref indeterminate, and still reports a row linked by commit", async () => {
+      const sha = squashedCandidate();
+      const missionYamlPath = path.join(missionsRoot, MISSION, "mission.yaml");
+      fs.writeFileSync(missionYamlPath, fs.readFileSync(missionYamlPath, "utf8") + '\n  source:\n    integration_ref: "-invalid-branch"\n');
+      insertMergeRow([`mission:${MISSION}`, "slice:OPR.9.9.31", "merged:1291"]);
+      insertMergeRow([`mission:${MISSION}`, "slice:OPR.9.9.31", "merged:1292", `candidate:${sha}`], "2026-08-30T11:00:00.000Z");
+      const folded = (await ladder31()).folded as Record<string, unknown>;
+      expect(folded).toMatchObject({ value: "INDETERMINATE", merge_report: { pr: "1292", linked: true } });
+      expect(String(folded.basis)).toContain("-invalid-branch");
+      expect(String(folded.basis)).toContain("merged:1292 recorded on row");
+      expect(await nextUp("OPR.9.9.31")).toBe("INDETERMINATE");
+      expect(await nextUp("OPR.9.9.32")).toBe("INDETERMINATE");
+    });
+
+    it("ignores a merge report on another slice and a merged: tag with no PR number", async () => {
+      squashedCandidate();
+      insertMergeRow([`mission:${MISSION}`, "slice:OPR.9.9.32", "merged:9"]);
+      insertMergeRow([`mission:${MISSION}`, "slice:OPR.9.9.31", "merged:", "merged:soon"], "2026-08-30T11:00:00.000Z");
+      expect((await ladder31()).folded).not.toHaveProperty("merge_report");
+      await expectAncestryAnswer();
+    });
+  });
+
   it.each([
     [{ code: 1 }, false],
     [{ status: 1 }, false],
@@ -771,6 +1105,155 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     expect(doc.view).toBe("execution");
     expect(doc.mission).toBe(MISSION);
     expect((doc.q1_lanes as unknown[]).length).toBe(2);
+  });
+
+  describe("the candidate history count is read only for rows whose pickup can use it", () => {
+    // The pre-guard statement, rebuilt from the guarded one: the same document must come from either.
+    const unguarded = (sql: string) => sql.replace(
+      /CASE WHEN queue_items\.state IN \('pending','in-progress'\) THEN (\(SELECT COUNT\(\*\) FROM queue_transitions t[\s\S]*?IS NOT 'claimed'\)) ELSE 0 END/, "$1");
+    let tid = 34000;
+    const note = (id: string, at: string, actor: string, opts: { firedWake?: boolean } = {}) => {
+      const transitionId = tid++;
+      db.prepare(
+        `INSERT INTO queue_transitions (transition_id, qitem_id, ts, state, transition_note, actor_session)
+         VALUES (?, ?, ?, (SELECT state FROM queue_items WHERE qitem_id = ?), 'progress', ?)`,
+      ).run(transitionId, id, at, id, actor);
+      if (opts.firedWake) {
+        db.prepare(`INSERT INTO queue_transition_wakes (transition_id, qitem_id, phase, wake_kind, wake_ref) VALUES (?, ?, 'fired', 'timer', ?)`)
+          .run(transitionId, id, `wake-${transitionId}`);
+      }
+    };
+    const row = (id: string, state: string, tags: string[], body: string, blockedOn: string | null = null) => {
+      const t = "2026-08-29T21:01:00.000Z";
+      db.prepare(
+        `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, body, claimed_at, blocked_on)
+         VALUES (?, ?, ?, 'lead@exec-fixture', ?, ?, 'normal', 'light', ?, ?, ?, ?)`,
+      ).run(id, t, t, SEAT_B, state, JSON.stringify(tags), body, t, blockedOn);
+    };
+    async function viaRoute(rewrite?: (sql: string) => string): Promise<{ doc: Record<string, unknown>; candidateSql: string[] }> {
+      const candidateSql: string[] = [];
+      const prepare = db.prepare.bind(db);
+      db.prepare = ((sql: string) => {
+        if (sql.includes("AS post_claim_motion")) candidateSql.push(sql);
+        return prepare(rewrite ? rewrite(sql) : sql);
+      }) as typeof db.prepare;
+      try {
+        const app = new Hono();
+        app.use("*", async (c, next) => {
+          c.set("viewProjector" as never, projector);
+          c.set("eventBus" as never, new EventBus(db));
+          await next();
+        });
+        app.route("/api/views", viewsRoutes());
+        const res = await app.request(`/api/views/execution?mission=${MISSION}`);
+        expect(res.status).toBe(200);
+        return { doc: ((await res.json()) as { rows: Record<string, unknown>[] }).rows[0]!, candidateSql };
+      } finally {
+        db.prepare = prepare;
+      }
+    }
+
+    it("returns the same document as the unguarded count across live, parked, closed and other-mission history", async () => {
+      // Live lane whose only post-claim history is bookkeeping (fired wakes): pickup falls back to the count.
+      arbitratedBySession.set(SEAT_A, { activity: "idle-at-prompt", needsInput: { count: 0, reason: null }, decidedBy: "lifecycle-hooks", changedAt: "2026-08-29T21:59:00.000Z" });
+      note("qitem-lane-31", "2026-08-29T21:10:00.000Z", "daemon@system", { firedWake: true });
+      note("qitem-lane-31", "2026-08-29T21:11:00.000Z", "daemon@system", { firedWake: true });
+      // External park with post-claim history, a closed-only EC-3 row with history, and history on the parked/wave-map rows.
+      row("qitem-pr-32", "blocked", [`mission:${MISSION}`, "slice:OPR.9.9.32"], "In review upstream.", "external:pr-1293");
+      db.prepare("UPDATE queue_items SET state = 'done' WHERE qitem_id = 'qitem-lane-32'").run();
+      note("qitem-pr-32", "2026-08-29T21:12:00.000Z", SEAT_B);
+      row("qitem-closed-33", "done", [`mission:${MISSION}`, "slice:OPR.9.9.33"], `Closed 33.\nworktree_path=${laneWorktree}\n`);
+      note("qitem-closed-33", "2026-08-29T21:13:00.000Z", SEAT_B);
+      note("qitem-parked-33", "2026-08-29T21:14:00.000Z", SEAT_B);
+      note("qitem-wave-map", "2026-08-29T21:15:00.000Z", "lead@exec-fixture");
+      // Another mission's row with history: neither statement may let it in.
+      row("qitem-other-mission", "in-progress", ["mission:release-0.1", "slice:OPR.0.1.1"], "Elsewhere.");
+      note("qitem-other-mission", "2026-08-29T21:16:00.000Z", SEAT_B);
+
+      const guarded = await viaRoute();
+      const reference = await viaRoute(unguarded);
+      expect(guarded.candidateSql.length).toBeGreaterThan(0);
+      expect(guarded.candidateSql.every((sql) => sql.includes("CASE WHEN queue_items.state IN ('pending','in-progress')"))).toBe(true);
+      expect(unguarded(guarded.candidateSql[0]!)).not.toBe(guarded.candidateSql[0]);
+      // The free-disk reading is taken live at read time (fs.statfsSync), so two builds can differ there; nothing else may.
+      const withoutLiveDisk = (doc: Record<string, unknown>) => {
+        const copy = structuredClone(doc) as { q6_parallelism?: { df_margin?: { available_kib?: unknown } } };
+        if (copy.q6_parallelism?.df_margin) delete copy.q6_parallelism.df_margin.available_kib;
+        return copy;
+      };
+      expect(withoutLiveDisk(guarded.doc)).toEqual(withoutLiveDisk(reference.doc));
+
+      const lanes = guarded.doc.q1_lanes as Record<string, unknown>[];
+      expect(lanes.find((l) => l.qitem_id === "qitem-lane-31")).toMatchObject({ pickup: { state: "working" } });
+      expect(lanes.find((l) => l.qitem_id === "qitem-pr-32")).toMatchObject({ waiting: { on: "external:pr-1293" }, pickup: { state: "parked" } });
+      expect(lanes.some((l) => l.qitem_id === "qitem-other-mission")).toBe(false);
+      expect(guarded.doc.mission).toBe(MISSION);
+    });
+
+    it("keeps the live count that decides pickup when no meaningful transition follows the claim", async () => {
+      arbitratedBySession.set(SEAT_A, { activity: "idle-at-prompt", needsInput: { count: 0, reason: null }, decidedBy: "lifecycle-hooks", changedAt: "2026-08-29T21:59:00.000Z" });
+      const pickupOf31 = async () => ((await show()).q1_lanes as Record<string, unknown>[]).find((l) => l.qitem_id === "qitem-lane-31")?.pickup;
+      // No post-claim motion: an hour-old claim with an idle seat is stalled.
+      expect(await pickupOf31()).toMatchObject({ state: "stalled-after-claim" });
+      // Bookkeeping-only motion is not a meaningful transition, so only the count can show it.
+      note("qitem-lane-31", "2026-08-29T21:10:00.000Z", "daemon@system", { firedWake: true });
+      expect(await pickupOf31()).toMatchObject({ state: "working" });
+    });
+  });
+
+  describe("a blocked row's pickup history is not read", () => {
+    // Records whose meaningful-history query ran (by qitem), and can make that query fail.
+    function watchHistory(opts: { fail?: boolean } = {}) {
+      const readFor: string[] = [];
+      const prepare = db.prepare.bind(db);
+      db.prepare = ((sql: string) => {
+        const stmt = prepare(sql);
+        if (!sql.includes("LAG(state) OVER")) return stmt;
+        const get = stmt.get.bind(stmt);
+        return Object.assign(stmt, { get: (...binds: unknown[]) => {
+          readFor.push(String(binds[0]));
+          if (opts.fail) throw new Error("history unavailable");
+          return get(...binds);
+        } });
+      }) as typeof db.prepare;
+      return { readFor, restore: () => { db.prepare = prepare; } };
+    }
+    const externalPark = () => {
+      const t = "2026-08-29T21:30:00.000Z";
+      db.prepare(
+        `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, body, claimed_at, blocked_on)
+         VALUES ('qitem-pr-34', ?, ?, 'lead@exec-fixture', ?, 'blocked', 'normal', 'light', ?, 'In review upstream.', ?, 'external:pr-77')`,
+      ).run(t, t, SEAT_B, JSON.stringify([`mission:${MISSION}`, "slice:OPR.9.9.32"]), t);
+      db.prepare("INSERT INTO queue_transitions (qitem_id, ts, state, transition_note, actor_session) VALUES ('qitem-pr-34', ?, 'blocked', 'parked', ?)").run(t, SEAT_B);
+    };
+
+    it("reads history only for live rows, while blocked lanes and parks keep their pickup and armed-wake output", async () => {
+      externalPark();
+      db.prepare("UPDATE queue_items SET state = 'done' WHERE qitem_id = 'qitem-lane-32'").run();
+      const history = watchHistory();
+      let doc: Record<string, unknown>;
+      try { doc = await show(); } finally { history.restore(); }
+      // One live lane (Q1) and its claimed row (Q5); never the external park or the parked row.
+      expect(history.readFor.sort()).toEqual(["qitem-lane-31", "qitem-lane-31"]);
+      const lane = (doc.q1_lanes as Record<string, unknown>[]).find((l) => l.qitem_id === "qitem-pr-34");
+      expect(lane).toMatchObject({ waiting: { on: "external:pr-77" }, pickup: { state: "parked" } });
+      const parks = doc.q5_park as Record<string, unknown>[];
+      expect(parks.find((p) => p.qitem_id === "qitem-parked-33")).toMatchObject({ pickup_state: "parked", park_kind: "deliberate-with-wake", wake_target: "wake-timer-33" });
+      expect(parks.find((p) => p.qitem_id === "qitem-pr-34")).toMatchObject({ pickup_state: "parked" });
+    });
+
+    it("keeps a failure of a live row's history read, and no longer depends on a blocked row's", async () => {
+      db.prepare("UPDATE queue_items SET state = 'done' WHERE qitem_id IN ('qitem-lane-31', 'qitem-lane-32')").run();
+      const quiet = watchHistory({ fail: true });
+      let doc: Record<string, unknown>;
+      try { doc = await show(); } finally { quiet.restore(); }
+      expect(quiet.readFor).toEqual([]); // only blocked rows remain: nothing reads history, so its failure cannot surface
+      expect((doc.q5_park as Record<string, unknown>[]).find((p) => p.qitem_id === "qitem-parked-33")).toMatchObject({ pickup_state: "parked" });
+      db.prepare("UPDATE queue_items SET state = 'in-progress' WHERE qitem_id = 'qitem-lane-31'").run();
+      const loud = watchHistory({ fail: true });
+      try { await expect(projector.show("execution", { mission: MISSION })).rejects.toThrow("history unavailable"); } finally { loud.restore(); }
+      expect(loud.readFor).toContain("qitem-lane-31");
+    });
   });
 
   it("park honesty: armed wake => deliberate-with-wake; removing the wake flips park_kind to INDETERMINATE, never idle/dead", async () => {

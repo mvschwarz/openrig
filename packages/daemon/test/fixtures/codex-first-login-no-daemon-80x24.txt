@@ -1,0 +1,32 @@
+
+  >_ OpenAI Codex (v0.164.0)
+     /tmp/project
+
+
+› Ask Codex to do anything
+
+
+  Welcome to Codex, OpenAI's command-line coding agent
+
+  Choose how you want to use Codex.
+
+> 1. Sign in with ChatGPT
+     Usage included with Plus, Pro, Business, and Enterprise plans
+
+  2. Sign in with Device Code
+     Sign in from another device with a one-time code
+
+  3. Use an OpenAI API key
+     Pay for what you use
+
+  4. Use Amazon Bedrock
+     Connect using your AWS credentials
+
+  Press enter to continue
+
+
+
+
+
+
+

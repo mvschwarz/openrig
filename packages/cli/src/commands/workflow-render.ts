@@ -108,7 +108,7 @@ export interface RenderTrailRow {
 
 /** One command-shaped owner action, including the typed acceptance contract when present. */
 export function renderProjectAction(instanceId: string, packet: RenderFrontierPacket): string {
-  const base = `rig workflow project --instance ${instanceId} --current-packet ${packet.packetId} --exit <handoff|waiting|done|failed> --actor-session ${packet.ownerSession ?? "<owner>"}${packet.receiptRequired ? " --evidence-ref <agent-judged-receipt>" : ""}`;
+  const base = `rig workflow project --instance ${instanceId} --current-packet ${packet.packetId} --exit <handoff|waiting|done|failed>${packet.receiptRequired ? " --evidence-ref <agent-judged-receipt>" : ""}`;
   if (!packet.acceptance) return base;
   const verdict = packet.acceptance.verdicts.length === 1
     ? packet.acceptance.verdicts[0]!
@@ -220,7 +220,7 @@ export function renderTraceTree(
   for (const failure of (instance.failureOccurrences ?? []).filter((item) => item.status === "unresolved")) {
     lines.push(`  ▲ failure ${failure.occurrenceId}  step=${failure.stepId}${failure.failureReason ? `  reason=${failure.failureReason}` : ""}`);
     lines.push(failure.targetedAction === "resume"
-      ? `      action: rig workflow resume ${instance.instanceId} --occurrence ${failure.occurrenceId} --actor-session <you>`
+      ? `      action: rig workflow resume ${instance.instanceId} --occurrence ${failure.occurrenceId}`
       : "      action: none — terminal history");
   }
   for (const unknown of instance.unknowns ?? []) lines.push(`  ? ${unknown}`);
@@ -384,7 +384,7 @@ export function renderInstanceShow(
       const action = packet.targetedAction === "project"
         ? renderProjectAction(instance.instanceId, packet)
         : packet.targetedAction === "route"
-          ? `rig workflow route ${instance.instanceId} --packet ${packet.packetId} --to <seat> --actor-session <you>`
+          ? `rig workflow route ${instance.instanceId} --packet ${packet.packetId} --to <seat>`
           : "disabled — inspect named unknowns";
       lines.push(`      action: ${action}`);
     }
@@ -406,7 +406,7 @@ export function renderInstanceShow(
     for (const failure of unresolved) {
       lines.push(`    ${failure.occurrenceId}  step=${failure.stepId}${failure.failureReason ? `  reason=${failure.failureReason}` : ""}`);
       lines.push(failure.targetedAction === "resume"
-        ? `      action: rig workflow resume ${instance.instanceId} --occurrence ${failure.occurrenceId} --actor-session <you>`
+        ? `      action: rig workflow resume ${instance.instanceId} --occurrence ${failure.occurrenceId}`
         : "      action: none — terminal history");
     }
   }

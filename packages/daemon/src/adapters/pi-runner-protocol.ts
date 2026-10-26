@@ -254,6 +254,8 @@ export interface PiRunnerLaunchOpts {
   model?: string;
   /** Explicit posture; OMP maps it to --approval-mode, Pi to resource trust. */
   trust: "approve" | "no-approve";
+  /** Pi only: the seat's resolved effort, sent as Pi's own `--thinking <level>` (wins over a model `:level` suffix). */
+  thinking?: string;
   /** Exact session file to resume (FR-6). Mutually exclusive with forkRef. */
   sessionFile?: string;
   /** OPR.0.7.0.2: Pi only — the runner reports usage facts from persisted entries (usage.pi_cost_facts). */
@@ -264,6 +266,16 @@ export interface PiRunnerLaunchOpts {
   forkRef?: string;
   /** Launch-attempt scope stamped into every runner sidecar write. */
   launchId: string;
+}
+
+/** The shape `rig seat set-effort` accepts for an effort level. */
+export const EFFORT_SHAPE = /^[A-Za-z][A-Za-z0-9_-]{0,31}$/;
+
+/** The `--thinking` value a Pi launch sends: only one of set-effort's shape, so `ps` never shows it
+ *  as a flag or splits it on whitespace (the Pi identity check reads the runner's command line). */
+export function piThinkingValue(thinking: string | null | undefined): string | undefined {
+  const value = thinking?.trim();
+  return value && EFFORT_SHAPE.test(value) ? value : undefined;
 }
 
 /** The command typed into the seat's tmux pane. The runner owns everything
@@ -282,6 +294,10 @@ export function buildPiRunnerCommand(opts: PiRunnerLaunchOpts): string {
   ];
   if (opts.model?.trim()) {
     parts.push("--model", shellQuote(opts.model.trim()));
+  }
+  const thinking = opts.runtime === "omp" ? undefined : piThinkingValue(opts.thinking);
+  if (thinking) {
+    parts.push("--thinking", shellQuote(thinking));
   }
   if (opts.sessionFile) {
     parts.push("--session", shellQuote(opts.sessionFile));
@@ -303,6 +319,8 @@ export function buildPiChildArgs(opts: {
   sessionsDir: string;
   sessionName: string;
   model?: string;
+  /** Pi only: forwarded as `--thinking` when it has set-effort's shape; Pi warns on a level it does not know. */
+  thinking?: string;
   trust: "approve" | "no-approve";
   sessionFile?: string;
   forkRef?: string;
@@ -317,6 +335,10 @@ export function buildPiChildArgs(opts: {
   ];
   if (opts.model?.trim()) {
     args.push("--model", opts.model.trim());
+  }
+  const thinking = opts.runtime === "omp" ? undefined : piThinkingValue(opts.thinking);
+  if (thinking) {
+    args.push("--thinking", thinking);
   }
   if (opts.sessionFile) {
     // Exact file resume — NEVER --resume (interactive picker; forbidden in

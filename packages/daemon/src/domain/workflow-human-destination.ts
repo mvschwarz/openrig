@@ -1,4 +1,5 @@
 import { loadHumanRegistry, resolveRegisteredHumanAddress, type LoadResult } from "./gateway/human-registry.js";
+import { resolveDefaultPerson } from "./gateway/participants.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 
 export class WorkflowHumanDestinationError extends Error {
@@ -33,9 +34,10 @@ export function resolveWorkflowHumanDestination(
     throw new WorkflowHumanDestinationError({ state: "unregistered", selected, addresses },
       "workspace.operator_seat_name does not select a registered human. Inspect rig gateway human list --json and select the intended registered address.");
   }
-  if (addresses.length === 1) return addresses[0]!;
+  const fallback = resolveDefaultPerson(loaded.entities).person;
+  if (fallback) return fallback.address;
   throw new WorkflowHumanDestinationError({ state: addresses.length ? "ambiguous" : "missing", addresses },
-    "Workflow human fallback needs one registered human. Inspect rig gateway human list --json; when several exist, explicitly select workspace.operator_seat_name. No human destination was invented.");
+    "Workflow human fallback needs one registered human, or a default when several exist. Inspect rig gateway participants --json; choose a default with rig gateway default <id>. No human destination was invented.");
 }
 
 /** Explicit injected destinations remain available to embedders and isolated fixtures. */

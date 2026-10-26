@@ -30,8 +30,10 @@ export type HumanAnswers = Record<string, string | TypedHumanReply>;
 /** The outcome of recording one clicked answer (QueueRepository.recordHumanAnswer). */
 export type RecordHumanAnswerResult =
   | { status: "recorded"; answers: HumanAnswers; complete: boolean; questions: HumanQuestion[] }
-  /** answerOnRecord: the decision is no longer pending, and this asked human's clicked answer is the one it holds. */
-  | { status: "not-applicable"; reason: string; answerOnRecord?: true };
+  /** answerOnRecord: the decision is no longer pending, and this asked human's clicked answer is the one it holds.
+   *  decidedForThem: it was decided on this asked human's behalf, inside their mode's decision room. */
+  | { status: "not-applicable"; reason: string; answerOnRecord?: true;
+    decidedForThem?: { decidedBy: string; modeName: string; chose: string; reversible: boolean } };
 
 export const MAX_HUMAN_QUESTIONS = 4;
 export const MIN_OPTIONS = 2;
@@ -105,4 +107,10 @@ export function formatHumanAnswers(questions: readonly HumanQuestion[], answers:
 /** The questions still waiting for an answer. */
 export function unansweredQuestions(questions: readonly HumanQuestion[], answers: HumanAnswers): HumanQuestion[] {
   return questions.filter((q) => ownAnswer(answers, q.id) == null);
+}
+
+/** Return the person's original answer, without the attribution footer used by both surfaces. */
+export function humanAnswerText(body: string): string {
+  const footer = body.lastIndexOf("\n\n---\n");
+  return (footer < 0 ? body : body.slice(0, footer)).trim();
 }

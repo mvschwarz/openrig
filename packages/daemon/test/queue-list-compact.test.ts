@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import { QueueRepository, type QueueItem } from "../src/domain/queue-repository.js";
+import { migrate } from "../src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { queueItemWakeInputBoxSchema } from "../src/db/migrations/116_queue_item_wake_input_box.js";
+import { migrationsForFullTestDb } from "./helpers/test-app.js";
 
 function createTestDb(): Database.Database {
   const db = new Database(":memory:");
@@ -33,6 +37,7 @@ function createTestDb(): Database.Database {
     resolution TEXT,
     target_repo TEXT
   )`);
+  migrate(db, [queueItemWakeInputBoxSchema]);
   return db;
 }
 
@@ -199,7 +204,7 @@ describe("OPR.0.4.0.28 — queue list compact + scope-default", () => {
     expect(JSON.stringify(compact)).not.toContain("excluded in compact mode");
     expect(item).not.toHaveProperty("chainOfRecord");
     expect(item).not.toHaveProperty("humanQuestions");
-    expect(item.fieldsElided).toEqual(["body", "evidenceRef", "humanDetail", "waiting", "chainOfRecord", "replyTo", "humanQuestions", "humanAnswers"]);
+    expect(item.fieldsElided).toEqual(["body", "evidenceRef", "humanDetail", "waiting", "chainOfRecord", "replyTo", "humanQuestions", "humanAnswers", "delegatedDecision"]);
   });
 
   it("distinguishes a genuinely empty full item from an elided compact item", () => {
@@ -214,7 +219,7 @@ describe("OPR.0.4.0.28 — queue list compact + scope-default", () => {
     const compact = repo.list({ compact: true })[0]!;
     const full = repo.list({})[0]!;
 
-    expect(compact.fieldsElided).toEqual(["body", "evidenceRef", "humanDetail", "waiting", "chainOfRecord", "replyTo", "humanQuestions", "humanAnswers"]);
+    expect(compact.fieldsElided).toEqual(["body", "evidenceRef", "humanDetail", "waiting", "chainOfRecord", "replyTo", "humanQuestions", "humanAnswers", "delegatedDecision"]);
     expect(compact).not.toHaveProperty("body");
     expect(compact.summary).toBeNull(); // a genuinely absent summary stays null
     expect(full.body).toBe("");
@@ -323,8 +328,46 @@ describe("Slice 15 — findOverdue rig-scoped + bounded + compact (finding 2)", 
     expect(compact.summary).toBe("sum");
     expect(compact).not.toHaveProperty("body");
     expect(compact).not.toHaveProperty("evidenceRef");
-    expect(compact.fieldsElided).toEqual(["body", "evidenceRef", "humanDetail", "waiting", "chainOfRecord", "replyTo", "humanQuestions", "humanAnswers"]);
+    expect(compact.fieldsElided).toEqual(["body", "evidenceRef", "humanDetail", "waiting", "chainOfRecord", "replyTo", "humanQuestions", "humanAnswers", "delegatedDecision"]);
     const full = repo.findOverdue({ now: NOW })[0]!;
     expect(full.body).toContain("SECRET-LONG-BODY-CONTENT");
+  });
+});
+
+describe("queue wake reading migration upgrade (#1278)", () => {
+  it.each([
+    ["startup", ALL_MIGRATIONS],
+    ["full test fixture", migrationsForFullTestDb],
+  ] as const)("%s preserves existing rows, adds one nullable column, and skips an applied migration", (_name, migrations) => {
+    const db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    try {
+      expect(migrations).toContain(queueItemWakeInputBoxSchema);
+      migrate(db, migrations.filter((migration) => migration.name !== queueItemWakeInputBoxSchema.name));
+      // The curated fixture intentionally excludes summary/evidence columns.
+      db.prepare(`INSERT INTO queue_items
+        (qitem_id, ts_created, ts_updated, source_session, destination_session, state, body)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+        "q-before-upgrade", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z",
+        "a@rig", "b@rig", "in-progress", "existing work survives the upgrade",
+      );
+      new QueueRepository(db).recordNudgeAttempt("q-before-upgrade", "delivered-ack-pending");
+      const oldRow = db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get("q-before-upgrade") as Record<string, unknown>;
+      const oldColumns = db.pragma("table_info(queue_items)") as Array<{ name: string }>;
+
+      migrate(db, [...migrations]);
+      const columns = db.pragma("table_info(queue_items)") as Array<{ name: string; type: string; notnull: number; dflt_value: string | null }>;
+      expect(columns.filter((column) => !oldColumns.some((old) => old.name === column.name))).toEqual([
+        expect.objectContaining({ name: "last_nudge_input_box", type: "TEXT", notnull: 0, dflt_value: null }),
+      ]);
+      expect(db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get("q-before-upgrade")).toEqual({
+        ...oldRow, last_nudge_input_box: null,
+      });
+
+      migrate(db, [...migrations]);
+      expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE name = ?").get(queueItemWakeInputBoxSchema.name)).toEqual({ count: 1 });
+    } finally {
+      db.close();
+    }
   });
 });

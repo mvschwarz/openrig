@@ -123,6 +123,10 @@ export class ViewProjector {
   setExecutionDeps(deps: ExecutionViewDeps): void {
     this.executionDeps = deps;
   }
+  // Execution builds run one at a time, in arrival order, each reading fresh when it starts: a build holds a full
+  // candidate array through its Git awaits, so two must not overlap. A failed build never blocks the next one.
+  // This queue is the projector's own; other views and other routes do not wait on it.
+  private executionTail: Promise<unknown> = Promise.resolve();
 
   /**
    * Run a view by name. Built-in names (BUILT_IN_VIEW_NAMES) dispatch to
@@ -144,8 +148,16 @@ export class ViewProjector {
           "execution view deps are not wired on this daemon (setExecutionDeps was never called)",
         );
       }
-      return buildExecutionView(opts?.project ? { ...this.executionDeps, slicesRoot: () => opts.project!.missionsRoot } : this.executionDeps, { mission: opts?.mission, rig: opts?.rig, project: opts?.project?.id })
-        .then(doc => ({ viewName: "execution", generatedAt: this.now().toISOString(), rows: [doc], rowCount: 1 }));
+      const build = () => {
+        const deps = this.executionDeps!;
+        return buildExecutionView(opts?.project ? { ...deps, slicesRoot: () => opts.project!.missionsRoot } : deps, { mission: opts?.mission, rig: opts?.rig, project: opts?.project?.id })
+          .then(doc => ({ viewName: "execution" as const, generatedAt: this.now().toISOString(), rows: [doc], rowCount: 1 }));
+      };
+      // A caller inside a transaction keeps its uncommitted visibility: its build starts now, outside the queue.
+      if (this.executionDeps.db.inTransaction) return build();
+      const job = this.executionTail.then(build);
+      this.executionTail = job.catch(() => undefined);
+      return job;
     }
     if ((BUILT_IN_VIEW_NAMES as readonly string[]).includes(viewName)) {
       return this.runBuiltIn(viewName as BuiltInViewName, opts?.rig, limit);
@@ -201,7 +213,7 @@ export class ViewProjector {
         const activity = this.executionDeps?.seatActivity?.getSeatStateBySession(String(r.destination_session));
         const receipt = derivePickup({
           lastMeaningfulAt: lastMeaningfulTransition(this.db, String(r.qitem_id))?.at,
-          activity: activity?.activity, needsInput: activity?.needsInput.count,
+          activity: activity?.activity, needsInput: activity?.needsInput.count, needsInputReason: activity?.needsInput.reason,
           state: String(r.state),
           claimedAt: (r.claimed_at as string | null) ?? null,
           lastHeartbeat: (r.last_heartbeat as string | null) ?? null,
@@ -211,6 +223,7 @@ export class ViewProjector {
           ...r,
           pickup_state: receipt.state,
           ...(receipt.evidence ? { pickup_evidence: receipt.evidence } : {}),
+          ...(receipt.stall ? { pickup_stall: receipt.stall } : {}),
         };
       });
       return { viewName: name, generatedAt: this.now().toISOString(), rows: projected, rowCount: projected.length };

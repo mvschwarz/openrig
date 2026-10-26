@@ -21,6 +21,10 @@ beforeEach(() => {
     request: async (method, params) => {
       effects.push({ method, params });
       if (failPage && method === "layout.apply") throw new Error("fixture layout refused");
+      // Like Herdr, list every workspace created so far; a duplicate label is accepted.
+      if (method === "workspace.list") {
+        return { type: "workspace_list", workspaces: effects.filter(e => e.method === "workspace.create").map(e => ({ label: e.params.label })) };
+      }
       return { type: "fixture", workspace: { workspace_id: "own-fixture" } };
     },
   }) });
@@ -84,7 +88,7 @@ describe("terminal browser → preview → explicit Open", () => {
     const result = await client.openTerminal(open.view, open.expectedPlan);
     expect(result.opened).toEqual(preview.composed.opened.map(m => m.seat));
     expect(result.absent).toHaveLength(1); expect(result.degraded).toHaveLength(1);
-    expect(effects.map(e => e.method)).toEqual(["workspace.create", "layout.apply", "layout.apply"]);
+    expect(effects.map(e => e.method)).toEqual(["workspace.list", "workspace.create", "layout.apply", "layout.apply"]);
     expect(effects.filter(e => e.method === "layout.apply").map(e => e.params.root)).toEqual((preview.grids as any[]).map(g => g.root));
     view.dispatch({ type: "back" }); await refresh();
     expect(view.get().terminalView).toBe(before.terminalView);
@@ -135,7 +139,7 @@ describe("terminal browser → preview → explicit Open", () => {
     expect(text).toContain("saved:remote view");
     expect(text).toContain("selected daemon's desktop");
     expect(text).toContain("Headless or remote");
-    const command = snap.terminals!.preview!.composed.pages[0]![0]!.paneCommand;
+    const command = snap.terminals!.preview!.composed.pages[0]![0]!.recoveryCommand!;
     expect(text).toContain(`env -u TMUX ${command.replace(/^ssh /, "ssh -t ")}`);
     expect(text).toContain("viewer@other.example");
     expect(text).toContain("seat with spaces");

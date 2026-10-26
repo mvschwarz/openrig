@@ -43,7 +43,10 @@ function fixture() {
     heartbeat(id:string,session:string) { return leases.requireActiveHolder(session,id); },
   };
   const db = {prepare(sql:string) {
-    return {all(arg:string) {
+    return {
+      // This fake models canonical sessions only, without an alias schema.
+      get() { if (sql.includes("sqlite_master")) return undefined; throw Error("unexpected SQL"); },
+      all(arg:string) {
       if (sql.includes("o.generation_uuid AS generation")) return arg === "classifier@fixture" ? [{nodeId:"node-1",rigId:"rig-1",session:arg,generation}] : [];
       if (sql.includes("ORDER BY session")) return [{session:"classifier@fixture"}];
       throw Error("unexpected SQL");
@@ -108,7 +111,7 @@ describe("supported occupant wake entry",()=>{
     } else if(choice==="__unknown__") {
       expect(f.writes).toHaveLength(0);expect(out.result.outcomes[0].status).toBe("abstained");
     } else {
-      expect(f.writes).toHaveLength(1);expect(f.writes[0]).toMatchObject({needsHuman:choice==="true",attemptId:"attempt-item-1",executionId:"exec-item-1"});
+      expect(f.writes).toHaveLength(1);expect(f.writes[0]).toMatchObject({needsHuman:choice==="true",attemptId:"attempt-item-1",executionId:"exec-item-1",classifierVersion:expect.stringMatching(/\+experiment$/)});
     }
   });
   it.each(["valid","unknown","invalid","occupant","lease","execution","disabled"])("experimental %s traverses actual command/client/routes/worker/provider with fenced advisory writes",async kind=>{
@@ -182,12 +185,15 @@ describe("supported occupant wake entry",()=>{
   });
   it("current occupant query rejects a historical running row behind a stopped latest session",()=>{
     const db=new Database(":memory:");
-    // Four tiny fixture tables only. No production migration or DB file is opened.
+    // Tiny in-memory tables include the rig metadata used by address resolution.
+    // No production migration or DB file is opened.
     try {
-      db.exec(`CREATE TABLE nodes(id TEXT,rig_id TEXT); CREATE TABLE bindings(node_id TEXT,tmux_session TEXT);
+      db.exec(`CREATE TABLE rigs(id TEXT,name TEXT,archived_at TEXT);
+        CREATE TABLE nodes(id TEXT,rig_id TEXT,logical_id TEXT); CREATE TABLE bindings(node_id TEXT,tmux_session TEXT);
         CREATE TABLE sessions(id TEXT,node_id TEXT,session_name TEXT,status TEXT);
         CREATE TABLE occupant_tenures(node_id TEXT,generation_ordinal INTEGER,generation_uuid TEXT);
-        INSERT INTO nodes VALUES('n','r'); INSERT INTO bindings VALUES('n','seat@rig');
+        INSERT INTO rigs VALUES('r','rig',NULL);
+        INSERT INTO nodes VALUES('n','r','seat'); INSERT INTO bindings VALUES('n','seat@rig');
         INSERT INTO sessions VALUES('01','n','seat@rig','running');
         INSERT INTO occupant_tenures VALUES('n',1,'old'),('n',2,'current');`);
       expect(classifierOccupant(db,"seat@rig")).toEqual({nodeId:"n",rigId:"r",session:"seat@rig",generation:"current"});

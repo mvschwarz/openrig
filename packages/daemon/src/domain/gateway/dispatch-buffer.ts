@@ -69,4 +69,20 @@ export class DispatchBuffer {
   pending(): OutboundDecision[] {
     return readState(this.path).pending;
   }
+
+  /** The same list for a caller that must tell "none" from "can't tell": empty only when the file doesn't exist (ENOENT),
+   *  and a throw for anything else that stops it being read or parsed (where `pending()` fails to empty). No existsSync
+   *  pre-check: it reports "absent" for any stat error, a permission-denied parent directory included. */
+  pendingStrict(): OutboundDecision[] {
+    let text: string;
+    try {
+      text = readFileSync(this.path, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+    const raw = JSON.parse(text) as Partial<BufferState>;
+    if (!Array.isArray(raw.pending)) throw new Error(`dispatch buffer ${this.path} has no pending list`);
+    return raw.pending;
+  }
 }

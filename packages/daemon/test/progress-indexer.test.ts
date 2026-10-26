@@ -167,4 +167,25 @@ describe("UI Enhancement Pack v0 — ProgressIndexer", () => {
     expect(result.aggregate.totalActive).toBe(1);
     expect(result.aggregate.totalBlocked).toBe(1);
   });
+
+  it("parses a CRLF PROGRESS.md exactly like its LF twin", () => {
+    mkdirSync(join(tempDir, "lf"), { recursive: true });
+    mkdirSync(join(tempDir, "crlf"), { recursive: true });
+    const lf = [
+      "---", "slice: foo", "---",
+      "# Title", "## Section A", "- [x] shipped", "- [ ] remaining", "  - [~] blocked child",
+      "```md", "- [x] example only", "```", "- [ ] after fence", "",
+    ].join("\n");
+    writeFileSync(join(tempDir, "lf", "PROGRESS.md"), lf);
+    writeFileSync(join(tempDir, "crlf", "PROGRESS.md"), lf.replace(/\n/g, "\r\n"));
+
+    const read = (name: string) => {
+      const file = new ProgressIndexer({ roots: [{ name, canonicalPath: join(tempDir, name) }] }).scan().files[0]!;
+      return { title: file.title, rows: file.rows, counts: file.counts };
+    };
+
+    const expected = read("lf");
+    expect(expected.rows.length).toBeGreaterThan(0);
+    expect(read("crlf")).toEqual(expected);
+  });
 });

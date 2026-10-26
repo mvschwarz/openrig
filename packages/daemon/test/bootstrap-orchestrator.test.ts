@@ -159,7 +159,7 @@ describe("BootstrapOrchestrator", () => {
     };
   }
 
-  function buildOrchestrator(opts?: { exec?: ExecFn; instantiator?: unknown; podInstantiator?: unknown }) {
+  function buildOrchestrator(opts?: { exec?: ExecFn; instantiator?: unknown; podInstantiator?: unknown; bundleSourceResolver?: unknown }) {
     const exec = opts?.exec ?? createMockExec({
       "tmux -V": "tmux 3.4",
       "claude --version": "claude 1.0.0",
@@ -195,7 +195,7 @@ describe("BootstrapOrchestrator", () => {
       packageInstallService,
       rigInstantiator: instantiator as any,
       fsOps: realFsOps(),
-      bundleSourceResolver: null,
+      bundleSourceResolver: (opts?.bundleSourceResolver ?? null) as any,
       podInstantiator: opts?.podInstantiator as any,
     });
   }
@@ -226,6 +226,223 @@ describe("BootstrapOrchestrator", () => {
     const result = await orch.bootstrap({ mode: "apply", sourceRef: writeSpec(yaml), nonInterruptive: request });
     expect(result.status, JSON.stringify(result)).toBe("completed");
     expect(instantiate).toHaveBeenCalledWith(expect.any(String), expect.any(String), expect.objectContaining({ nonInterruptive: expected }));
+  });
+
+  describe.each(["flat spec", "v1 bundle", "pod agent spec", "pod terminal spec"])("one-off launch environment: %s", (format) => {
+    const podSpec = format.startsWith("pod ");
+    const failedSeat = podSpec ? "team.dev" : "dev";
+    const isDevSession = (session: string) => session.endsWith("-dev") || session.startsWith("team-dev@");
+    async function source(singleSeat = false) {
+      if (podSpec) {
+        fs.mkdirSync(path.join(tmpDir, "agents", "fixture"), { recursive: true });
+        fs.writeFileSync(path.join(tmpDir, "agents", "fixture", "agent.yaml"), 'name: fixture\nversion: "1.0.0"\nresources: {skills: []}\nprofiles: {default: {uses: {skills: []}}}\n');
+        const terminal = format === "pod terminal spec";
+        return { sourceRef: writeSpec(`version: "0.2"\nname: test-rig\npods:\n  - id: team\n    label: Team\n    members:\n${(singleSeat ? ["dev"] : ["dev", "reviewer"]).map(id => `      - {id: ${id}, agent_ref: "${terminal ? "builtin:terminal" : "local:agents/fixture"}", runtime: ${terminal ? "terminal" : "claude-code"}, profile: ${terminal ? "none" : "default"}, cwd: .}`).join("\n")}\n    edges: []\nedges: []\n`) };
+      }
+      const specPath = writeSpec(singleSeat ? SIMPLE_SPEC_YAML : SIMPLE_SPEC_YAML.replace("    runtime: claude-code", "    runtime: claude-code\n  - id: reviewer\n    runtime: codex"));
+      if (format === "flat spec") return { sourceRef: specPath };
+      const { LegacyBundleAssembler } = await import("../src/domain/bundle-assembler.js");
+      const { pack } = await import("../src/domain/bundle-archive.js");
+      const pkgDir = path.join(tmpDir, "package");
+      writePkg(pkgDir, VALID_MANIFEST_YAML, { "skills/helper/SKILL.md": "# Helper" });
+      const staging = path.join(tmpDir, "bundle");
+      new LegacyBundleAssembler({ fsOps: {
+        readFile: (p) => fs.readFileSync(p, "utf-8"), exists: fs.existsSync,
+        mkdirp: (p) => fs.mkdirSync(p, { recursive: true }),
+        writeFile: (p, content) => fs.writeFileSync(p, content),
+        copyDir: (from, to) => fs.cpSync(from, to, { recursive: true }),
+      } }).assemble({
+        specPath, outputDir: staging, bundleName: "env-fixture", bundleVersion: "1.0.0",
+        packages: [{ name: "test-pkg", version: "1.0.0", sourcePath: pkgDir, originalSource: "./package", manifestHash: "fixture" }],
+      });
+      const { computeIntegrity, writeIntegrity } = await import("../src/domain/bundle-integrity.js");
+      const integrityFs = {
+        ...realFsOps(), readFileBuffer: (p: string) => fs.readFileSync(p),
+        writeFile: (p: string, content: string) => fs.writeFileSync(p, content),
+        walkFiles: realFsOps().listFiles,
+      };
+      writeIntegrity(staging, computeIntegrity(staging, integrityFs), integrityFs);
+      const sourceRef = path.join(tmpDir, "env.rigbundle");
+      await pack(staging, sourceRef);
+      return { sourceRef, sourceKind: "rig_bundle" };
+    }
+
+    async function realLaunch(fault?: { removal: "confirmed" | "unconfirmed" | "throw"; createFailure?: boolean; attention?: boolean }) {
+      const { RigRepository } = await import("../src/domain/rig-repository.js");
+      const { SessionRegistry } = await import("../src/domain/session-registry.js");
+      const { EventBus } = await import("../src/domain/event-bus.js");
+      const { NodeLauncher } = await import("../src/domain/node-launcher.js");
+      const { RigInstantiator, PodRigInstantiator } = await import("../src/domain/rigspec-instantiator.js");
+      const { RigSpecPreflight } = await import("../src/domain/rigspec-preflight.js");
+      const { LegacyBundleSourceResolver } = await import("../src/domain/bundle-source-resolver.js");
+      const rigRepo = new RigRepository(db);
+      const sessionRegistry = new SessionRegistry(db);
+      const eventBus = new EventBus(db);
+      // Only the terminal/process boundary is inert; bootstrap, instantiation, launch and SQLite are real.
+      const started: Array<{ session: string; hasProbe: boolean }> = [];
+      const live = new Map<string, Record<string, string>>();
+      const tmux = {
+        createSession: vi.fn(async (session: string, _cwd: string, env: Record<string, string> = {}) => {
+          if (fault?.createFailure && isDevSession(session)) return { ok: false, code: "fixture_create_failed", message: "fixture create failure" };
+          started.push({ session, hasProbe: "DOCSDESK_ENV_PROBE" in env });
+          live.set(session, { ...env });
+          return { ok: true };
+        }),
+        killSession: vi.fn(async (session: string) => {
+          if (fault?.removal === "throw") throw new Error("private removal fault");
+          if (fault?.removal === "unconfirmed") return { ok: false, code: "fixture_kill_failed", message: "private removal fault" };
+          live.delete(session);
+          return { ok: true };
+        }),
+        sendText: vi.fn(async () => ({ ok: true })), sendKeys: vi.fn(async () => ({ ok: true })),
+        hasSession: async () => false, listPanes: async () => [],
+        listSessions: async () => [], listWindows: async () => [],
+        unsetSessionEnv: vi.fn(async (session: string, key: string) => {
+          if (fault && isDevSession(session)) throw new Error("private unset fault");
+          delete live.get(session)?.[key];
+        }),
+      } as unknown as import("../src/adapters/tmux.js").TmuxAdapter;
+      const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
+      const preflight = new RigSpecPreflight({ rigRepo, tmuxAdapter: tmux, exec: async () => "fixture runtime" });
+      const instantiator = new RigInstantiator({ db, rigRepo, sessionRegistry, eventBus, nodeLauncher, preflight });
+      const { PodRepository } = await import("../src/domain/pod-repository.js");
+      const { StartupOrchestrator } = await import("../src/domain/startup-orchestrator.js");
+      const adapter = (runtime: string) => ({ runtime,
+        listInstalled: vi.fn(async () => []), project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+        deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })), checkReady: vi.fn(async () => ({ ready: true })),
+        // A startup gate (such as a first-launch trust prompt) leaves the seat running and waiting for a person.
+        launchHarness: vi.fn(async () => fault?.attention
+          ? { ok: false, error: "fixture startup gate", recovery: "attention_required", evidence: "Do you trust the files in this folder?" }
+          : { ok: true }),
+      });
+      const podInstantiator = new PodRigInstantiator({ db, rigRepo, podRepo: new PodRepository(db), sessionRegistry, eventBus,
+        nodeLauncher, startupOrchestrator: new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux }),
+        tmuxAdapter: tmux, fsOps: realFsOps(), adapters: { "claude-code": adapter("claude-code"), terminal: adapter("terminal") },
+        exec: async () => "fixture runtime", onboardingEnabledResolver: () => false,
+      });
+      const orch = buildOrchestrator({ instantiator, podInstantiator, bundleSourceResolver: new LegacyBundleSourceResolver({ fsOps: realFsOps() }) });
+      return { orch, tmux, rigRepo, started, live };
+    }
+
+    it("delivers the synthetic override to every first pane without saving it for later launches", async () => {
+      const { orch, tmux, rigRepo } = await realLaunch();
+      const envOverride = { DOCSDESK_ENV_PROBE: "synthetic=with spaces" };
+      const result = await orch.bootstrap({ mode: "apply", ...await source(), envOverride });
+      expect(result.status, JSON.stringify(result)).toBe("completed");
+      expect(tmux.createSession).toHaveBeenCalledTimes(2);
+      for (const call of vi.mocked(tmux.createSession).mock.calls) {
+        expect(call[2]).toMatchObject(envOverride);
+        // The one-off key, plus, for a Claude seat, its own skill plugin's directory (OPR.0.7.0.13), which is not saved either.
+        expect(call[2]?.OPENRIG_SEAT_ENV_KEYS?.split(",").filter((key) => key !== "CLAUDE_CODE_PLUGIN_DIRS")).toEqual(["DOCSDESK_ENV_PROBE"]);
+        expect(tmux.unsetSessionEnv).toHaveBeenCalledWith(call[0], "DOCSDESK_ENV_PROBE");
+      }
+      expect(rigRepo.getRig(result.rigId!)!.nodes.every((node) => !node.env)).toBe(true);
+    });
+
+    it("rig up --name: launches under rigName, with every seat session named for it", async () => {
+      const { orch, tmux, rigRepo } = await realLaunch();
+      const result = await orch.bootstrap({ mode: "apply", ...await source(), rigName: "alpha" });
+      expect(result.status, JSON.stringify(result)).toBe("completed");
+      expect(rigRepo.getRig(result.rigId!)!.rig.name).toBe("alpha");
+      const sessions = vi.mocked(tmux.createSession).mock.calls.map(([session]) => session as string);
+      expect(sessions).toHaveLength(2);
+      for (const session of sessions) {
+        expect(session).toContain("alpha");
+        expect(session).not.toContain("test-rig");
+      }
+    });
+
+    describe.each([true, false])("a one-off that stays in the session, single seat=%s", (singleSeat) => {
+      // Only an agent seat can stop at a startup gate; a terminal seat's launch never waits for a person.
+      it.each(format === "pod agent spec" ? ["running", "at a startup gate"] : ["running"])("keeps every launched seat %s and reports the leftover by name with its remedy", async (state) => {
+        const gate = state === "at a startup gate";
+        const { orch, tmux, rigRepo, started, live } = await realLaunch({ removal: "confirmed", attention: gate });
+        const input = await source(singleSeat);
+        const { createTestApp } = await import("./helpers/test-app.js");
+        const { app } = createTestApp(db, { tmux, appDeps: { bootstrapOrchestrator: orch }, upRouterFsOps: {
+          exists: fs.existsSync, readFile: (p) => fs.readFileSync(p, "utf-8"), readHead: (p, n) => fs.readFileSync(p).subarray(0, n),
+        } });
+        const { upCommand } = await import("../../cli/src/commands/up.js");
+        const { STATE_FILE } = await import("../../cli/src/daemon-lifecycle.js");
+        let observed: { status: number; data: Record<string, unknown> } | undefined;
+        let projectOnly = false;
+        const client = {
+          get: async () => ({ status: 200, data: {} }),
+          post: async (route: string, body: unknown) => {
+            if (route !== "/api/up") return { status: 200, data: {} }; // bundle behavior preview has no fixture behavior
+            if (projectOnly) return observed!;
+            const response = await app.request(route, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+            observed = { status: response.status, data: await response.json() };
+            return observed;
+          },
+        };
+        const deps = { clientFactory: () => client, lifecycleDeps: {
+          exists: (p: string) => p === STATE_FILE,
+          readFile: (p: string) => p === STATE_FILE ? JSON.stringify({ pid: 123, port: 7433, db: "fixture", startedAt: "fixture" }) : null,
+          isProcessAlive: () => true, fetch: async () => ({ ok: true }),
+        } } as unknown as import("../../cli/src/commands/status.js").StatusDeps;
+        async function render(json = false) {
+          const lines: string[] = [];
+          const saved = { log: console.log, error: console.error, exit: process.exitCode };
+          process.exitCode = undefined;
+          console.log = console.error = (...args: unknown[]) => { lines.push(args.join(" ")); };
+          let exit = 0;
+          try {
+            await upCommand(deps).parseAsync(["node", "rig", input.sourceRef, "--env", "DOCSDESK_ENV_PROBE=synthetic-private-value", ...(json ? ["--json"] : [])]);
+            exit = Number(process.exitCode ?? 0);
+          } finally { console.log = saved.log; console.error = saved.error; process.exitCode = saved.exit; }
+          return { text: lines.join("\n"), exit };
+        }
+        const human = await render();
+        projectOnly = true; // JSON renders the same retained HTTP response; it does not launch again.
+        const json = await render(true);
+        // Every first pane started with the one-off. Its cleanup failed, and the seats keep running: nothing is killed or
+        // rolled back, and the leftover is reported by name with how to put it back, never by value.
+        expect(started).toHaveLength(singleSeat ? 1 : 2);
+        expect(started.every(s => s.hasProbe)).toBe(true);
+        if (!gate) {
+          expect(observed?.status).toBe(201);
+          expect(observed?.data.status).toBe("completed");
+          expect(observed?.data.code).toBeUndefined();
+          expect([human.exit, json.exit]).toEqual([0, 0]);
+        }
+        expect(tmux.killSession).not.toHaveBeenCalled();
+        expect(live.size).toBe(singleSeat ? 1 : 2);
+        expect(rigRepo.listRigs()).toHaveLength(1);
+        const devSession = started.find(s => isDevSession(s.session))!.session;
+        const warnings = JSON.stringify(observed?.data.warnings);
+        for (const rendered of [human.text, warnings]) {
+          expect(rendered).toContain("DOCSDESK_ENV_PROBE");
+          expect(rendered).toContain(`tmux set-environment -t ${devSession} -u DOCSDESK_ENV_PROBE`);
+          expect(rendered).not.toContain("synthetic-private-value");
+          expect(rendered).not.toContain("private unset fault");
+        }
+      });
+    });
+
+    it("does not normalize an unrelated mixed legacy create failure", async () => {
+      const { orch } = await realLaunch({ removal: "confirmed", createFailure: true });
+      const result = await orch.bootstrap({ mode: "apply", ...await source() });
+      expect(result.status).toBe(podSpec ? "partial" : "completed");
+      if (!podSpec) expect(result.errors).toEqual([]);
+    });
+
+    it("keeps a launch without an override unchanged", async () => {
+      const { orch, tmux } = await realLaunch();
+      const result = await orch.bootstrap({ mode: "apply", ...await source() });
+      expect(result.status, JSON.stringify(result)).toBe("completed");
+      expect(tmux.createSession).toHaveBeenCalledTimes(2);
+      for (const call of vi.mocked(tmux.createSession).mock.calls) expect(call[2]?.DOCSDESK_ENV_PROBE).toBeUndefined();
+      expect(tmux.unsetSessionEnv).not.toHaveBeenCalled();
+    });
+
+    it("does not launch a pane in plan mode even with an override", async () => {
+      const { orch, tmux, rigRepo } = await realLaunch();
+      const result = await orch.bootstrap({ mode: "plan", ...await source(), envOverride: { DOCSDESK_ENV_PROBE: "synthetic" } });
+      expect(result.status, JSON.stringify(result)).toBe("planned");
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(rigRepo.listRigs()).toEqual([]);
+    });
   });
 
   // T1: Plan mode returns plan, 0 bootstrap_actions rows
@@ -304,6 +521,90 @@ edges: []
     expect(result.status, JSON.stringify(result.errors)).toBe("planned");
     expect(result.stages.find((stage) => stage.stage === "preflight")?.status).toBe("ok");
     expect(resolveSkillsRoot).toHaveBeenCalledOnce();
+  });
+
+  it("pod-aware plan warns about members whose session names collide", async () => {
+    const project = path.join(tmpDir, "project");
+    fs.mkdirSync(path.join(tmpDir, "agents", "impl"), { recursive: true });
+    fs.mkdirSync(project, { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, "agents", "impl", "agent.yaml"),
+      "name: impl\nversion: \"1.0.0\"\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: []\n",
+    );
+    const member = (id: string) => `      - id: ${id}
+        agent_ref: local:agents/impl
+        profile: default
+        runtime: codex
+        cwd: ${JSON.stringify(project)}`;
+    const specPath = writeSpec(`version: "0.2"
+name: collide-rig
+pods:
+  - id: dev-impl
+    label: Dev impl
+    members:
+${member("main")}
+    edges: []
+  - id: dev
+    label: Dev
+    members:
+${member("impl-main")}
+    edges: []
+edges: []
+`);
+    const podInstantiator = { db, deps: { fsOps: realFsOps() }, resolveSkillsRoot: vi.fn(), instantiate: vi.fn() };
+    const orch = buildOrchestrator({ podInstantiator });
+
+    const result = await orch.bootstrap({ mode: "plan", sourceRef: specPath, sourceKind: "rig_spec" });
+
+    expect(result.stages.find((stage) => stage.stage === "resolve_spec")?.status).toBe("ok");
+    expect(result.warnings).toContain('pods[1].members[0].id: session name "dev-impl-main@collide-rig" is already used by member "dev-impl.main"');
+    expect(podInstantiator.instantiate).not.toHaveBeenCalled();
+  });
+
+  it("a plan's Codex profile probe leaves the event loop free while it runs", async () => {
+    // `codex -p <profile> mcp list` takes most of a second on a real install; the daemon must keep answering meanwhile.
+    const project = path.join(tmpDir, "project");
+    const bin = path.join(tmpDir, "bin");
+    fs.mkdirSync(path.join(tmpDir, "agents", "impl"), { recursive: true });
+    fs.mkdirSync(project, { recursive: true });
+    fs.mkdirSync(bin, { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, "agents", "impl", "agent.yaml"),
+      "name: impl\nversion: \"1.0.0\"\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: []\n",
+    );
+    fs.writeFileSync(path.join(bin, "codex"), "#!/bin/sh\nsleep 1\necho ok\n", { mode: 0o755 });
+    const specPath = writeSpec(`version: "0.2"
+name: probe-rig
+pods:
+  - id: dev
+    label: Dev
+    members:
+      - id: impl
+        agent_ref: local:agents/impl
+        profile: default
+        runtime: codex
+        codex_config_profile: probeprof
+        cwd: ${JSON.stringify(project)}
+    edges: []
+edges: []
+`);
+    const podInstantiator = { db, deps: { fsOps: realFsOps() }, resolveSkillsRoot: vi.fn(), instantiate: vi.fn() };
+    const orch = buildOrchestrator({ podInstantiator });
+
+    const oldPath = process.env.PATH;
+    process.env.PATH = `${bin}:${oldPath ?? ""}`;
+    const ticks: number[] = [Date.now()];
+    const interval = setInterval(() => ticks.push(Date.now()), 10);
+    try {
+      const result = await orch.bootstrap({ mode: "plan", sourceRef: specPath, sourceKind: "rig_spec" });
+      expect(result.status, JSON.stringify(result.errors)).toBe("planned");
+    } finally {
+      clearInterval(interval);
+      process.env.PATH = oldPath;
+    }
+    ticks.push(Date.now());
+    const longestGap = Math.max(...ticks.slice(1).map((t, i) => t - ticks[i]!));
+    expect(longestGap).toBeLessThan(500);
   });
 
   // T2: Apply --yes executes all stages
@@ -1202,7 +1503,10 @@ exports:
     expect(run.source_kind).toBe("rig_spec");
   });
 
-  it("rejects service-backed pod-bundle launch with honest error before instantiate", async () => {
+  it.each([
+    ["service-backed pod-bundle launch with honest error", undefined, "services_unsupported", "Service-backed rigs cannot be launched from .rigbundle"],
+    ["--name for a pod bundle whose spec sets services.project_name", "alpha", "rig_name_compose_project", "services.project_name"],
+  ] as const)("rejects %s before instantiate, and removes the extracted bundle", async (_label, rigName, code, message) => {
     const { pack } = await import("../src/domain/bundle-archive.js");
     const { computeIntegrity } = await import("../src/domain/bundle-integrity.js");
     const { PodBundleSourceResolver } = await import("../src/domain/bundle-source-resolver.js");
@@ -1218,7 +1522,7 @@ summary: A service-backed rig in a bundle
 services:
   kind: compose
   compose_file: svc.compose.yaml
-  wait_for:
+${rigName ? "  project_name: shared-db\n" : ""}  wait_for:
     - url: http://127.0.0.1:8200/health
 pods:
   - id: dev
@@ -1291,13 +1595,13 @@ ${integrityYaml}
       podInstantiator: mockPodInstantiator as any,
     });
 
-    const result = await orch.bootstrap({ mode: "apply", sourceRef: bundlePath, sourceKind: "rig_bundle" });
+    const result = await orch.bootstrap({ mode: "apply", sourceRef: bundlePath, sourceKind: "rig_bundle", rigName });
 
     expect(result.status).toBe("failed");
-    expect(result.errors.some((e: string) => e.includes("Service-backed rigs cannot be launched from .rigbundle"))).toBe(true);
+    expect(result.errors.some((e: string) => e.includes(message))).toBe(true);
     const resolveStage = result.stages.find((s) => s.stage === "resolve_spec" && s.status === "failed");
     expect(resolveStage).toBeDefined();
-    expect((resolveStage!.detail as Record<string, unknown>)["code"]).toBe("services_unsupported");
+    expect((resolveStage!.detail as Record<string, unknown>)["code"]).toBe(code);
     // Must NOT have called instantiate
     expect(mockPodInstantiator.instantiate).not.toHaveBeenCalled();
     // Temp dir must be cleaned up even on rejection — only check dirs created during this test

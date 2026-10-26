@@ -327,7 +327,7 @@ export function projectionConflictWarnings(plan: Pick<ProjectionPlan, "conflicts
       // P20 PROTECT: the manifest tells us the target diverged from BOTH our last
       // write and the source — an operator edited it. filterProtectedProjections
       // holds the file back, so "not overwritten" is now TRUE (not just a warning).
-      return `projection conflict: ${reason} — PROTECTED: the target is NOT overwritten; re-run projection with --force to overwrite it, or fold the operator edit into the spec source`;
+      return `projection conflict: ${reason} — PROTECTED: the target is NOT overwritten; fold the operator edit into the spec source, or move the edited target aside before the next projection`;
     }
     // hash_conflict — the P17 fallback: no projection manifest for this target yet,
     // so an operator edit can't be told apart from a stale projection. We overwrite

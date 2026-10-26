@@ -26,7 +26,9 @@ const NOISE_KEYS = new Set([
 
 function shorten(s: string, max = 40): string {
   if (s.length <= max) return s;
-  return s.slice(0, max - 1) + "…";
+  // Back off one unit rather than cut an emoji's surrogate pair in half.
+  const last = s.charCodeAt(max - 2);
+  return s.slice(0, last >= 0xd800 && last <= 0xdbff ? max - 2 : max - 1) + "…";
 }
 
 function valuePreview(v: unknown): string | null {

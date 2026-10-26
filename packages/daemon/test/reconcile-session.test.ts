@@ -14,6 +14,14 @@ import type { ExpansionRequest } from "../src/domain/types.js";
 import { convergeOp, SUPPORTED_OP_KINDS, isSupportedOpKind } from "../src/domain/topology-converge.js";
 import { SeatIdentityReconciler } from "../src/domain/seat-identity-reconciler.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
+import { ClaimService } from "../src/domain/claim-service.js";
+import type { NativeProcessRow } from "../src/domain/native-process-lineage.js";
+import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
+import * as transcriptCapture from "../src/domain/transcript-capture.js";
+import { TranscriptStore } from "../src/domain/transcript-store.js";
+import { createDb } from "../src/db/connection.js";
+import { migrate } from "../src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 
 /** Fully-instrumented tmux adapter: records every call by method name. */
 function spyTmux(overrides?: Partial<Record<string, unknown>>) {
@@ -186,6 +194,32 @@ describe("ClaimService.reconcileSession (OPR.0.3.4.3)", () => {
     expect(result.result.continuity).toBe("unverified");
   });
 
+  describe("runtime drift for a pane whose command is its launcher", () => {
+    const started = "Sat Jan  1 12:00:00 2000";
+    const launchScript: NativeProcessRow = { pid: 900, ppid: 1, command: "/bin/sh /tmp/launch.sh", pgid: 900, tpgid: 901, executableName: "sh", startedAt: started };
+    const idleSh: NativeProcessRow = { pid: 900, ppid: 1, command: "/bin/sh", pgid: 900, tpgid: 900, executableName: "sh", startedAt: started };
+    async function drift(runtime: "claude-code" | "codex", rows: NativeProcessRow[]) {
+      const spy = spyTmux({ getPaneCommand: vi.fn(async () => "sh"), getPanePid: vi.fn(async () => 900) });
+      const rig = setup.rigRepo.createRig(`launcher-${runtime}`);
+      const node = setup.rigRepo.addNode(rig.id, "dev.impl", { runtime, cwd: "/work/repo", podId: null });
+      const sess = setup.sessionRegistry.registerSession(node.id, `dev-impl@launcher-${runtime}`);
+      setup.sessionRegistry.markDetached(sess.id);
+      setup.sessionRegistry.updateBinding(node.id, { tmuxSession: `dev-impl@launcher-${runtime}` });
+      const service = new ClaimService({ db, rigRepo: setup.rigRepo, sessionRegistry: setup.sessionRegistry,
+        discoveryRepo: setup.discoveryRepo, eventBus: setup.eventBus, tmuxAdapter: spy.adapter, listProcesses: () => rows });
+      const result = await service.reconcileSession({ sessionName: `dev-impl@launcher-${runtime}` });
+      expect(result.ok).toBe(true);
+      return result.ok ? result.result.projectionDrift.filter((entry) => entry.startsWith("runtime unverified")) : [];
+    }
+    it.each(["claude-code", "codex"] as const)("reports no runtime drift when a %s process holds the pane's foreground under an sh launcher", async (runtime) => {
+      const exe = runtime === "claude-code" ? "claude" : "codex";
+      expect(await drift(runtime, [launchScript, { pid: 901, ppid: 900, command: exe, pgid: 901, tpgid: 901, executableName: exe, startedAt: started }])).toEqual([]);
+    });
+    it.each(["claude-code", "codex"] as const)("keeps the unverified note for a %s node whose pane is only an idle shell", async (runtime) => {
+      expect(await drift(runtime, [idleSh])).toEqual([`runtime unverified: pane command "sh" does not confirm runtime "${runtime}"`]);
+    });
+  });
+
   it("session_not_found when no live tmux session has the canonical name (never adopts a ghost)", async () => {
     const spy = spyTmux({ hasSession: vi.fn(async () => false) });
     const localDb = createFullTestDb();
@@ -284,6 +318,197 @@ describe("ClaimService.reconcileSession (OPR.0.3.4.3)", () => {
   });
 });
 
+describe("binding-only missing-pane repair", () => {
+  let db: Database.Database;
+  let setup: ReturnType<typeof createTestApp>;
+  let tmux: TmuxAdapter;
+  let guard: SeatDeliveryGuard;
+  let nodeId: string;
+  let sessionId: string;
+  const sessionName = "worker@repair-fixture";
+
+  beforeEach(() => {
+    db = createDb(":memory:");
+    migrate(db, ALL_MIGRATIONS);
+    tmux = spyTmux({
+      probeSession: vi.fn(async () => ({ state: "present" })),
+      listSessions: vi.fn(async () => [{ name: sessionName, windows: 1, created: "123", attached: false }]),
+      listPanes: vi.fn(async () => [{ id: "%1" }]),
+    }).adapter;
+    setup = createTestApp(db, { tmux, transcriptStore: new TranscriptStore({ enabled: false }), appDeps: { terminalBearerToken: "repair-test-token" } });
+    const rig = setup.rigRepo.createRig("repair-fixture");
+    nodeId = setup.rigRepo.addNode(rig.id, "worker", { runtime: "claude-code", podId: null }).id;
+    sessionId = setup.sessionRegistry.registerSession(nodeId, sessionName).id;
+    setup.sessionRegistry.updateStatus(sessionId, "running");
+    setup.sessionRegistry.updateBinding(nodeId, { tmuxSession: sessionName });
+    db.prepare(`UPDATE sessions SET resume_type='codex_id', resume_token='retained-token',
+      resume_provenance='hook', restore_policy='relaunch_fresh' WHERE id=?`).run(sessionId);
+    db.prepare("UPDATE bindings SET updated_at='2000-01-01' WHERE node_id=?").run(nodeId);
+    guard = new SeatDeliveryGuard(db, name => resolveGuardTarget(db, name));
+    tmux.deliveryGuard = guard;
+    db.prepare(`INSERT INTO queue_items(qitem_id,ts_created,ts_updated,source_session,destination_session,state,body)
+      VALUES ('pending-work','2000-01-01','2000-01-01','sender@repair-fixture',?,'pending','retain obligation')`).run(sessionName);
+  });
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); db.close(); });
+
+  // Every domain table, not a selected list of fields that could overlook adoption side effects.
+  function stored() {
+    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as { name: string }[];
+    return Object.fromEntries(tables.map(({ name }) => [name, db.prepare(`SELECT * FROM "${name}"`).all()]));
+  }
+  function repair() {
+    const opts = { sessionName, repairMissingPane: true as const };
+    return setup.claimService.reconcileSession(opts);
+  }
+  function post(body: unknown = {}, token: string | null = "repair-test-token") {
+    return setup.app.request(`/api/sessions/${encodeURIComponent(sessionName)}/repair-missing-pane`, {
+      method: "POST", headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it.each([false, true])("fills only pane/timestamp; preserves all records and capture hooks (legacy tenure absent=%s)", async absent => {
+    if (absent) db.prepare("DELETE FROM occupant_tenures WHERE node_id=?").run(nodeId);
+    const capture = vi.spyOn(transcriptCapture, "startTmuxTranscriptCapture");
+    const before = stored();
+    const res = await post();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, result: { mode: "repair-missing-pane", sessionId, pane: "%1", continuity: "unverified" } });
+    const after = stored();
+    const binding = (after.bindings as Record<string, unknown>[])[0]!;
+    expect(binding.tmux_pane).toBe("%1");
+    expect(binding.updated_at).not.toBe("2000-01-01");
+    expect({ ...binding, tmux_pane: null, updated_at: "2000-01-01" }).toEqual((before.bindings as unknown[])[0]);
+    expect({ ...after, bindings: before.bindings }).toEqual(before);
+    expect(capture).not.toHaveBeenCalled();
+    for (const method of ["createSession", "killSession", "sendText", "sendKeys", "setSessionOption", "startPipePane", "stopPipePane"] as const) {
+      expect(tmux[method]).not.toHaveBeenCalled();
+    }
+    expect(tmux.listSessions).toHaveBeenCalledTimes(2);
+    expect(tmux.listPanes).toHaveBeenCalledTimes(2);
+    expect(tmux.getPanePid).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([null, "wrong-token"])("requires terminal auth (%s) before any observation/write", async token => {
+    const before = stored();
+    expect((await post({}, token)).status).toBe(401);
+    expect(stored()).toEqual(before);
+    expect(tmux.listPanes).not.toHaveBeenCalled();
+  });
+  it.each([null, [], { rigId: 7 }, { rigId: "r" }, { logicalId: "worker" }])("rejects malformed/disambiguation request %j", async body => {
+    const before = stored();
+    expect((await post(body)).status).toBe(400);
+    expect(stored()).toEqual(before);
+  });
+  it("refuses explicit rig/node mismatch without choosing a different seat", async () => {
+    const before = stored();
+    const res = await post({ rigId: "another-rig", logicalId: "worker" });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ ok: false, code: "node_mismatch" });
+    expect(stored()).toEqual(before);
+  });
+  it("preserves a token refreshed during observation", async () => {
+    tmux.getPanePid = vi.fn(async () => {
+      db.prepare("UPDATE sessions SET resume_token='newer-hook-token' WHERE id=?").run(sessionId);
+      return 4242;
+    });
+    expect(await repair()).toMatchObject({ ok: true, result: { sessionId } });
+    expect(db.prepare("SELECT resume_token, resume_provenance FROM sessions WHERE id=?").get(sessionId))
+      .toEqual({ resume_token: "newer-hook-token", resume_provenance: "hook" });
+  });
+
+  it.each(["unavailable", "absent", "no panes", "two panes", "two windows", "no pid", "changed pid", "changed pane", "changed session"])("does not write after %s observation", async mode => {
+    if (mode === "unavailable") tmux.probeSession = vi.fn(async () => ({ state: "transport_unavailable", cause: "fixture" }));
+    if (mode === "absent") tmux.probeSession = vi.fn(async () => ({ state: "absent" }));
+    if (mode === "no panes") tmux.listPanes = vi.fn(async () => []);
+    if (mode === "two panes") tmux.listPanes = vi.fn(async () => [{ id: "%1" }, { id: "%2" }] as never);
+    if (mode === "two windows") tmux.listSessions = vi.fn(async () => [{ name: sessionName, windows: 2, created: "123" }] as never);
+    if (mode === "no pid") tmux.getPanePid = vi.fn(async () => null);
+    if (mode === "changed pid") tmux.getPanePid = vi.fn().mockResolvedValueOnce(4242).mockResolvedValue(4243);
+    if (mode === "changed pane") tmux.listPanes = vi.fn().mockResolvedValueOnce([{ id: "%1" }]).mockResolvedValue([{ id: "%2" }]);
+    if (mode === "changed session") tmux.listSessions = vi.fn().mockResolvedValueOnce([{ name: sessionName, windows: 1, created: "123" }]).mockResolvedValue([{ name: sessionName, windows: 1, created: "124" }]);
+    const before = stored();
+    expect(await repair()).toMatchObject({ ok: false });
+    expect(stored()).toEqual(before);
+  });
+  it.each(["%1", "%stale"])("never overwrites a non-NULL pane %s", async pane => {
+    db.prepare("UPDATE bindings SET tmux_pane=? WHERE node_id=?").run(pane, nodeId);
+    const before = stored();
+    expect(await repair()).toMatchObject({ ok: false, code: "repair_not_applicable" });
+    expect(stored()).toEqual(before);
+  });
+  it.each(["detached", "claimed", "external", "missing binding"])("does not adopt an ineligible %s seat", async kind => {
+    if (kind === "detached") setup.sessionRegistry.markDetached(sessionId);
+    if (kind === "claimed") db.prepare("UPDATE sessions SET origin='claimed' WHERE id=?").run(sessionId);
+    if (kind === "external") db.prepare("UPDATE bindings SET attachment_type='external_cli' WHERE node_id=?").run(nodeId);
+    if (kind === "missing binding") db.prepare("DELETE FROM bindings WHERE node_id=?").run(nodeId);
+    const before = stored();
+    expect(await repair()).toMatchObject({ ok: false });
+    expect(stored()).toEqual(before);
+  });
+  it.each(["binding id", "session", "occupant", "target", "name collision"])("fences a concurrent %s change at commit", async kind => {
+    let expected: ReturnType<typeof stored>;
+    tmux.getPanePid = vi.fn(async () => {
+      if (kind === "binding id") db.prepare("UPDATE bindings SET id='replacement-binding' WHERE node_id=?").run(nodeId);
+      if (kind === "session") setup.sessionRegistry.registerSession(nodeId, sessionName);
+      if (kind === "occupant") db.prepare(`INSERT OR IGNORE INTO occupant_tenures(id,node_id,generation_ordinal,generation_uuid,kind)
+        VALUES ('replacement',?,99,'new-generation','adopt')`).run(nodeId);
+      if (kind === "target") db.prepare("UPDATE bindings SET tmux_session='replacement@repair-fixture' WHERE node_id=?").run(nodeId);
+      if (kind === "name collision" && !db.prepare("SELECT 1 FROM nodes WHERE logical_id='other'").get()) {
+        const other = setup.rigRepo.addNode(setup.rigRepo.listRigs()[0]!.id, "other", { runtime: "terminal", podId: null });
+        setup.sessionRegistry.updateBinding(other.id, { tmuxSession: sessionName });
+      }
+      expected = stored(); return 4242;
+    });
+    expect(await repair()).toMatchObject({ ok: false, code: "guard_target_changed" });
+    expect(stored()).toEqual(expected!);
+  });
+  it.each(["hold", "draft-aware"] as const)("does not change active %s protection", async mode => {
+    await guard.set(nodeId, { mode }, "person", "retain draft");
+    const before = stored();
+    expect(await repair()).toMatchObject({ ok: false, code: "typing_guard_enabled" });
+    expect(stored()).toEqual(before);
+  });
+  it.each([[1, 0], [0, 1]])("does not change pending legacy desired/effective protection %j/%j", async (desired, effective) => {
+    db.prepare(`INSERT INTO seat_delivery_guards(node_id,desired,effective,actor,reason,changed_at)
+      VALUES (?,?,?,'person','pending protection','2000-01-01')`).run(nodeId, desired, effective);
+    const before = stored();
+    expect(await repair()).toMatchObject({ ok: false, code: "typing_guard_enabled" });
+    expect(stored()).toEqual(before);
+  });
+  it("does not repair through a degraded adapter with no delivery guard", async () => {
+    tmux.deliveryGuard = undefined;
+    const before = stored();
+    expect(await repair()).toMatchObject({ ok: false });
+    expect(stored()).toEqual(before);
+  });
+  it.each(["human", "automatic", "pending protection"])("does not commit during %s work", async kind => {
+    let entered!: () => void, finish!: () => void;
+    const ready = new Promise<void>(r => { entered = r; }), done = new Promise<void>(r => { finish = r; });
+    const work = async () => { entered(); await done; };
+    const working = kind === "human" ? guard.humanInput(nodeId, work) : guard.operation(nodeId, work);
+    await ready;
+    try {
+      if (kind === "pending protection") expect(await guard.set(nodeId, true, "person", "draft", 1)).toMatchObject({ pending: true });
+      const before = stored();
+      expect(await repair()).toMatchObject({ ok: false, code: "guard_operation_in_progress" });
+      expect(stored()).toEqual(before);
+    } finally { finish(); await working; }
+  });
+  it("never commits a delayed observation after its five-second deadline", async () => {
+    vi.useFakeTimers();
+    let finish!: () => void;
+    const delayed = new Promise<void>(r => { finish = r; });
+    tmux.listPanes = vi.fn(async () => { await delayed; return [{ id: "%1" }] as never; });
+    const before = stored(), pending = repair();
+    try {
+      await vi.advanceTimersByTimeAsync(5001);
+      expect(await Promise.race([pending, Promise.resolve({ stillWaiting: true })])).toMatchObject({ ok: false, code: "repair_timed_out" });
+    } finally { finish(); await pending; }
+    expect(stored()).toEqual(before);
+  });
+});
+
 describe("reconcile_session on the converge spine (OPR.0.3.4.3)", () => {
   let db: Database.Database;
   let setup: ReturnType<typeof createTestApp>;
@@ -351,9 +576,9 @@ describe("POST /api/sessions/:sessionName/reconcile (OPR.0.3.4.3)", () => {
     });
   }
 
-  it("returns 200 with the reconcile result for a live detached seat", async () => {
+  it.each(["terminal", "codex"])("returns 200 with capture information for a live detached %s seat", async runtime => {
     const rig = setup.rigRepo.createRig("route-rig");
-    const node = setup.rigRepo.addNode(rig.id, "dev.impl", { runtime: "terminal", podId: null });
+    const node = setup.rigRepo.addNode(rig.id, "dev.impl", { runtime, podId: null });
     const sess = setup.sessionRegistry.registerSession(node.id, "dev-impl@route-rig");
     setup.sessionRegistry.markDetached(sess.id);
 
@@ -363,6 +588,10 @@ describe("POST /api/sessions/:sessionName/reconcile (OPR.0.3.4.3)", () => {
     expect(body.ok).toBe(true);
     expect(body.result.nodeId).toBe(node.id);
     expect(body.result.continuity).toBe("unverified");
+    expect(body.result.resumeMetadata).toMatchObject({
+      capture: { outcome: runtime === "terminal" ? "exempt" : "noop" }, status: runtime === "terminal" ? "not_applicable" : "missing",
+    });
+    if (runtime === "codex") expect(body.result.resumeMetadata.guidance).toContain("rig seat set-resume-token");
   });
 
   it("returns 404 for an unmapped session name", async () => {

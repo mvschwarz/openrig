@@ -478,7 +478,7 @@ describe("S19 MR3 — activity design language (role-level, palette-value-agnost
     const active = statusGlyph({ ...base, status: "running", startupStatus: "ready", agentActivity: { state: "running" } });
     const idle = statusGlyph({ ...base, status: "running", startupStatus: "ready", agentActivity: { state: "idle" } });
     const detached = statusGlyph({ ...base, status: "detached", startupStatus: null, agentActivity: null });
-    const attention = statusGlyph({ ...base, status: "running", startupStatus: "attention_required", agentActivity: null });
+    const attention = statusGlyph({ ...base, status: "running", startupStatus: "attention_required", needsAttention: true, agentActivity: null });
     // glyphs stay the honest 4-vocab
     expect(active.glyph).toBe("●");
     expect(idle.glyph).toBe("●");

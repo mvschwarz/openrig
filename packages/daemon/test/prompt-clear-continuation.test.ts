@@ -64,6 +64,7 @@ describe("original wake continuation after prompt clearing", () => {
         obligations: { items: [{ qitemId: id, state: repo.getById(id)!.state, summary: "work" }], held: [] },
       }] }),
       history: { listForJob: () => history, countForJob: () => history.length },
+      occupantGeneration: () => "fixture-generation",
       rows: {
         listTransitions: x => repo.listTransitions(x),
         appendNote: (x, note) => { repo.update({ qitemId: x, actorSession: "watchdog@system", transitionNote: note }); return { ok: true }; },
@@ -90,7 +91,8 @@ describe("original wake continuation after prompt clearing", () => {
       }
     }
     if (kind !== "claimed-normal") {
-      repo.recordNudgeAttempt(id, kind === "pending-retained" ? "retained:typing_guard" : "failed:fixture");
+      // A wake refused at a native prompt by draft-aware delivery: retained, and it can clear (so it keeps its retries).
+      repo.recordNudgeAttempt(id, kind === "pending-retained" ? "retained:draft_aware" : "failed:fixture");
       if (kind === "claimed-failed") repo.transitionLog.append({ qitemId: id, state: "in-progress", actorSession: "watchdog@system", transitionNote: "parked-owner wake delivery failed: fixture" });
     }
     const tick = async (second: number) => {
@@ -109,7 +111,13 @@ describe("original wake continuation after prompt clearing", () => {
     };
     const evaluate = async (second: number) => {
       const result = await policy.evaluate(job);
-      if (result.action === "send") wakes.push({ via: "policy", qitemId: id, second });
+      if (result.action === "send") {
+        wakes.push({ via: "policy", qitemId: id, second });
+        // A successful recipient attempt is recorded as the engine records it; a reserve is not delivery.
+        history.unshift({ historyId: `delivered-${second}`, jobId: job.jobId, evaluatedAt: at(second).toISOString(),
+          outcome: "sent", skipReason: null, deliveryTargetSession: seat, deliveryStatus: "ok", deliveryMessage: "wake",
+          evaluationNotes: result.notes ?? null });
+      }
       return result;
     };
     if (withRefusal) {

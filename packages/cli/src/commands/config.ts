@@ -11,7 +11,7 @@ function summarizeSettings(store: ConfigStore): Record<ValidKey, ResolvedSetting
 }
 
 // These settings remain boot-only; capture interval/line settings reload live.
-const BOOT_ONLY_KEYS = ["daemon.port", "daemon.host", "db.path"];
+const BOOT_ONLY_KEYS = ["daemon.port", "daemon.host", "daemon.db_conflict", "db.path"];
 const BOOT_ONLY_PREFIXES = ["transcripts.enabled", "transcripts.path"];
 
 function isBootOnlyKey(key: string): boolean {
@@ -70,6 +70,7 @@ Keys:
   context.root           addressable context library for 'rig context add' (default $OPENRIG_HOME/context)
   context.system_world   default System World, replacement manifest path, or disabled
   skills.root            versioned skill catalog (default $OPENRIG_HOME/skills)
+  skills.router_line.enabled  the person's yes to the seat-skills line (one line plus OpenRig's markers) in AGENTS.md / CLAUDE.md (default false)
   onboarding.default_pack.enabled  deliver the two-part fresh-seat mental-model pack (default on)
   health.context_pressure.*        context-pressure warning/critical percentages (defaults 95/99)
   files.allowlist        name:/abs/path,name:/abs/path
@@ -100,13 +101,28 @@ Keys:
   retention.*            enabled, transitions_days, watchdog_days,
                          watchdog_keep_per_job, batch_size
   launch.non_interruptive  accept harness first-launch warnings at full bypass for new rigs (default off)
+  terminal.inherit_tmux_environment  inherit stored tmux global values for new agents and successors (default off)
+                         POSIX launches otherwise start from daemon + seat environment, preserving shell startup.
+                         Turn on for custom setups that intentionally rely on tmux globals. Running agents are unchanged.
+                         If the scoped boundary is unavailable, launch continues with its previous environment and a diagnostic.
   terminal.status_bar    show the inner tmux status bar on launch (default off)
-  output.compact         short default output for queue writes, queue show, queue transitions and whoami peers; --full restores today's output (default off)
+  terminal.history_limit rows of tmux scrollback per pane in the ~/.tmux.conf block rig setup writes (2000-1000000; default 10000).
+                         To keep more: rig config set terminal.history_limit 50000, then rig setup. A running tmux server keeps
+                         its old limit until it restarts or you run tmux source-file ~/.tmux.conf; before tmux 3.7 that changes new panes only
+  output.compact         short default output for queue writes, queue show, queue transitions and whoami peers (default off)
+                         --full opts out: queue transitions returns the full log, queue show the complete record, and whoami the complete payload, not its usual identity projection. whoami --all-peers keeps that projection with every peer
   output.whoami_peers    with output.compact on, how many peers rig whoami --json lists, edge peers first; --all-peers lists all (default 8)
+  bundle.services_enabled Service-backed bundle packing, preview and target installs (default off)
   provider.usage_windows Codex and Claude usage windows in rig provider status (Codex read on request; Claude from its seats' status lines) (default off)
+  provider.selected      the providers chosen at rig setup --providers (claude, codex or claude,codex); kernel boot uses only these (default empty: every signed-in provider)
   usage.pi_cost_facts    Pi seats report model-priced cost from their persisted session entries to rig usage cost (default off)
-  usage.pi_openrouter_charge  with usage.pi_cost_facts on, Pi seats look up OpenRouter's actual charge for their requests, shown beside the estimate (default off; off stops new lookups and posts, outcomes recorded while it was on stay visible)
+  usage.pi_openrouter_charge  with usage.pi_cost_facts on, Pi seats look up OpenRouter's actual charge for their requests, shown beside the estimate (default off; changes take effect when a Pi seat next launches or resumes; earlier outcomes stay visible)
   transport.verify_input_box  with --verify, a send to a Claude Code or Codex seat (also queue wakes) reads verified only when the seat was proven idle before the paste and its input box showed the exact text before Enter and was empty after it, on the same pane process; a busy or unknown seat, and anything else, reads unconfirmed, not failed. Reporting only (default off)
+  transport.local_user_guard  on a Mac, the CLI refuses a local daemon whose reported user, checked with ps, isn't yours; an explicit OPENRIG_URL skips the check. A mitigation for reaching the wrong daemon, not authentication (default off)
+  decisions.enabled      typed decisions (OpenRouter + Jev) for the consumers in decisions.consumers, with OPENROUTER_API_KEY from the
+                         rig process that runs them; off makes no provider calls (default off). rig project decisions status shows the state
+  decisions.consumers    comma-separated consumers that may call (supported: stream; default none). An unknown name makes no calls
+  decisions.template_dir absolute folder of <name>.yaml templates that replace the shipped ones (default empty: shipped templates only)
 
 Precedence: CLI flag > environment variable > config file > default`)
     .action((opts: { json?: boolean; withSource?: boolean }) => {
@@ -152,7 +168,9 @@ Precedence: CLI flag > environment variable > config file > default`)
           console.log(JSON.stringify(store.resolveWithSource(key), null, 2));
           return;
         }
-        if (opts.showSource) {
+        // `--with-source` is the parent command's flag; commander accepts it on
+        // either side of `get`, and it asks for the same line as `--show-source`.
+        if (opts.showSource || cmd.opts<{ withSource?: boolean }>().withSource) {
           const r = store.resolveWithSource(key);
           console.log(`${r.value}\t(source: ${r.source})`);
           return;

@@ -1,20 +1,19 @@
 import type Database from "better-sqlite3";
-import type { AgentActivity, NodeInventoryEntry, NodeLifecycleState, RigLifecycleState } from "./types.js";
+import type { NodeInventoryEntry, NodeLifecycleState, RigLifecycleState } from "./types.js";
 import { identityVerdictConfirmsSessionMissing } from "./types.js";
 import {
   countAssignedWorkForEntry,
+  seatNeedsAttention,
+  arbitratedNeedsInputSignal,
+  hookOrPaneActivity,
   getNodeInventoryForAllRigs,
   readAssignedWorkBySession,
   type AssignedWorkCounts,
 } from "./node-inventory.js";
 import { archiveWhereClause, type RigArchiveFilter } from "./rig-repository.js";
 import type { SeatActivityService } from "./seat-activity-service.js";
+import type { SeatStructuralActivityService } from "./seat-structural-activity-service.js";
 import type { AgentActivityStore } from "./agent-activity-store.js";
-import type { ArbitratedSeatState, EvidenceRungId } from "./activity-taxonomy.js";
-
-/** The rungs that can answer the needs-input signal (the ones `arbitrate` consults,
- *  chrome > hooks > self-report). Sampling carries no needs-input evidence. */
-const NEEDS_INPUT_RUNGS: readonly EvidenceRungId[] = ["needs-input-chrome", "lifecycle-hooks", "self-report"];
 
 export interface PsEntry {
   rigId: string;
@@ -71,59 +70,7 @@ export interface PsEntry {
   attentionCount: number;
 }
 
-/**
- * OPR.0.4.4.21 — THE rig-rollup attention predicate (one predicate, one
- * count; mirrors + extends the CLI's per-node `needsAttention`). A seat
- * needs attention iff ANY of:
- *   - lifecycle `attention_required`
- *   - startup `attention_required`/`failed` — counted DIRECTLY from
- *     startupStatus; `latestError` may legitimately be null here
- *   - `needs_input`: the ARBITRATED seat state is the first answer when it has one
- *     (`arbitratedNeedsInput` — the same oracle the per-seat row renders, pane chrome
- *     included), and the hook store's live `needs_input` is the fallback when the
- *     arbitrated signal is `null` (stale hooks arrive as `unknown` and contribute
- *     nothing — never guessed). The rig total and the seat row must not disagree
- *     about the same seat.
- *   - a held seat (`heldReason` present)
- *   - a recorded startup error (`latestError` present)
- */
-export function seatNeedsAttention(
-  entry: NodeInventoryEntry,
-  activity: AgentActivity | null,
-  arbitratedNeedsInput: boolean | null = null,
-): boolean {
-  return entry.lifecycleState === "attention_required"
-    || entry.startupStatus === "attention_required"
-    || entry.startupStatus === "failed"
-    || (arbitratedNeedsInput ?? activity?.state === "needs_input")
-    || entry.heldReason != null
-    || entry.latestError != null;
-}
-
-/**
- * #180 review — the arbitrated needs-input answer is TRI-STATE; collapsing it to
- * `needsInput.count > 0` treats `count: 0` as a definite "no" even when no source said
- * "no". `count: 0` is also the default when no authoritative rung reported needs-input:
- * a Codex seat (hooks at `trial`), a generic/Pi/OMP seat (sampling floor only), a seat
- * with no declaration, or a Claude seat whose declared rungs have not reported (after a
- * daemon restart, or once its hook rung is downgraded). A live `PermissionRequest` in
- * the hook store must still count there. Rules:
- *   - count > 0                                    → true  (the service only reports a
- *     positive count from an authoritative source)
- *   - count is 0 AND needs-input evidence from an authoritative rung supplied it → false
- *     (an observed clear legitimately supersedes a stale hook)
- *   - otherwise                                    → null (let the hook store decide).
- *     A declared rung is a capability, not an observation that the seat is clear.
- */
-export function arbitratedNeedsInputSignal(
-  state: Pick<ArbitratedSeatState, "needsInput" | "needsInputEvidence"> | null,
-): boolean | null {
-  if (!state) return null;
-  if (state.needsInput.count > 0) return true;
-  const observedClear = state.needsInputEvidence != null
-    && NEEDS_INPUT_RUNGS.includes(state.needsInputEvidence.rung);
-  return observedClear ? false : null;
-}
+export { seatNeedsAttention, arbitratedNeedsInputSignal } from "./node-inventory.js";
 
 /**
  * Folds per-node lifecycle states into a rig-level lifecycle state.
@@ -201,13 +148,19 @@ export class PsProjectionService {
    *  predicate's `needs_input` signal. Optional: absent → the signal
    *  contributes false (honest degrade), never a guess. */
   private readonly agentActivity: AgentActivityStore | null;
+  /** The cached pane reading, so the count sees a prompt only the pane shows, as the seat row does. */
+  private readonly structuralActivity: Pick<SeatStructuralActivityService, "getStructuralActivity"> | null;
   private periodicSnapshotActive = false;
   private periodicSnapshotIntervalSeconds = 0;
 
-  constructor(deps: { db: Database.Database; seatActivity?: SeatActivityService; agentActivity?: AgentActivityStore }) {
+  constructor(deps: {
+    db: Database.Database; seatActivity?: SeatActivityService; agentActivity?: AgentActivityStore;
+    structuralActivity?: Pick<SeatStructuralActivityService, "getStructuralActivity">;
+  }) {
     this.db = deps.db;
     this.seatActivity = deps.seatActivity ?? null;
     this.agentActivity = deps.agentActivity ?? null;
+    this.structuralActivity = deps.structuralActivity ?? null;
   }
 
   setPeriodicSnapshotState(active: boolean, intervalSeconds: number): void {
@@ -314,8 +267,9 @@ export class PsProjectionService {
       // OPR.0.4.4.21 — attention fold, same inventory pass. `needs_input` is
       // read from the ARBITRATED seat state first — the same oracle the
       // per-seat row renders (`activityState` on node-inventory), which also
-      // sees pane chrome a hook-silent gated seat never reports. The hook
-      // store is the fallback when the arbitrated signal is `null` — service
+      // sees pane chrome a hook-silent gated seat never reports. The served
+      // activity (the hook store, else the cached pane reading, as the seat row
+      // reads it) is the fallback when the arbitrated signal is `null` — service
       // unwired, session not in the ladder, or a `count: 0` that no authoritative
       // needs-input evidence supplied (#180 review; discussion #879); `now` keeps its
       // staleness honest (stale hooks come back `unknown` and contribute
@@ -329,9 +283,14 @@ export class PsProjectionService {
           && typeof this.seatActivity.getSeatStateBySession === "function"
           ? this.seatActivity.getSeatStateBySession(session)
           : null;
-        const activity = this.agentActivity && session
+        const hook = this.agentActivity && session
           ? this.agentActivity.getLatestForNode({ sessionName: session, now: nowDate })
           : null;
+        // The row's served activity: a live hook, else the cached pane reading. A confirmed-missing session serves
+        // neither, as on the row.
+        const structural = this.structuralActivity && session ? this.structuralActivity.getStructuralActivity(session) : null;
+        const activity = identityVerdictConfirmsSessionMissing(node.identityVerdict) ? null
+          : hookOrPaneActivity(hook, structural)?.activity ?? hook;
         if (seatNeedsAttention(node, activity, arbitratedNeedsInputSignal(arbitrated))) attentionCount++;
       }
 

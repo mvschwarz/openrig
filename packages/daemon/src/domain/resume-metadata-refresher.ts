@@ -1,8 +1,7 @@
 import os from "node:os";
+import { shellQuote } from "../adapters/shell-quote.js";
 import fs from "node:fs";
 import nodePath from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import type { SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import {
@@ -10,6 +9,7 @@ import {
   defaultResolveHomeDirByPid,
   readCodexThreadIdFromCandidateHomes,
   type ResolveHomeDirByPid,
+  type CodexCaptureReporter,
 } from "./codex-thread-id.js";
 import {
   assessNativeResumeProbe,
@@ -20,10 +20,12 @@ import { runAsyncSite } from "./sync-site-wrap.js";
 import { isClaudeSidecarFromEarlierProcess, type ResumeTokenCaptureDeps } from "./resume-token-capture.js";
 import { observeClaudePaneRuntime, type NativeProcessLister } from "./native-process-lineage.js";
 import { validateResumeToken } from "./resume-token-validation.js";
-
-const execFileAsync = promisify(execFile);
+import { readProcessTable } from "./process-table.js";
+import type { HomeRuntime } from "./seat-runtime-home.js";
 
 export interface ResumeRefreshSession {
+  /** The seat, when known, so its own runtime home is read. */
+  nodeId?: string;
   sessionId: string;
   sessionName: string;
   runtime: string | null;
@@ -34,14 +36,18 @@ export interface ResumeRefreshSession {
 
 interface ResumeMetadataRefresherDeps {
   sessionRegistry: SessionRegistry;
+  /** A seat's own runtime home from its member or rig `env:`, when it declares one. */
+  seatHome?: (nodeId: string, runtime: HomeRuntime) => string | undefined;
   tmuxAdapter: TmuxAdapter;
   listProcesses?: () => Array<{ pid: number; ppid: number; command: string }> | Promise<Array<{ pid: number; ppid: number; command: string }>>;
-  readCodexThreadIdByPid?: (pid: number, identity?: string) => Promise<string | undefined> | string | undefined;
-  probeClaudeResume?: (sessionName: string, resumeToken: string, cwd?: string | null) => Promise<"resumable" | "not_resumable" | "inconclusive">;
+  readCodexThreadIdByPid?: (pid: number, identity?: string, report?: CodexCaptureReporter, home?: string) => Promise<string | undefined> | string | undefined;
+  /** `configDir` is the seat's own Claude config dir, passed only when it declares one. */
+  probeClaudeResume?: (sessionName: string, resumeToken: string, cwd?: string | null, configDir?: string) => Promise<"resumable" | "not_resumable" | "inconclusive">;
   resolveHomeDirByPid?: ResolveHomeDirByPid;
   sleep?: (ms: number) => Promise<void>;
   homeDir?: string;
   codexHome?: string;
+  log?: (line: string) => void;
   // OPR.0.4.3.20 FR-4 — the Claude status-line sidecar reader, for null-fill of a
   // Claude session's resume token from live state during snapshot refresh.
   // Optional + structurally typed (older wirings/tests omit it → Claude null-fill
@@ -57,21 +63,26 @@ interface ResumeMetadataRefresherDeps {
 }
 
 export class ResumeMetadataRefresher {
+  private readonly stopped = new AbortController();
+  private readonly captures = new Map<string, { sessionId: string; reasons: Set<string> }>();
+  private readonly log: (line: string) => void;
   private sessionRegistry: SessionRegistry;
   private tmuxAdapter: TmuxAdapter;
   private listProcesses: () => Array<{ pid: number; ppid: number; command: string }> | Promise<Array<{ pid: number; ppid: number; command: string }>>;
-  private readCodexThreadIdByPid: (pid: number, identity?: string) => Promise<string | undefined> | string | undefined;
-  private probeClaudeResume: (sessionName: string, resumeToken: string, cwd?: string | null) => Promise<"resumable" | "not_resumable" | "inconclusive">;
+  private readCodexThreadIdByPid: (pid: number, identity?: string, report?: CodexCaptureReporter, home?: string) => Promise<string | undefined> | string | undefined;
+  private probeClaudeResume: (sessionName: string, resumeToken: string, cwd?: string | null, configDir?: string) => Promise<"resumable" | "not_resumable" | "inconclusive">;
   private resolveHomeDirByPid: ResolveHomeDirByPid;
   private sleep: (ms: number) => Promise<void>;
   private homeDir: string;
   private contextUsageStore: ResumeMetadataRefresherDeps["contextUsageStore"] | null;
   private claudeProcessStartedAt: ResumeMetadataRefresherDeps["claudeProcessStartedAt"] | null;
   private claudeConfigDir: string;
+  private seatHome?: (nodeId: string, runtime: HomeRuntime) => string | undefined;
   private listClaudeProcesses: NativeProcessLister | undefined;
 
   constructor(deps: ResumeMetadataRefresherDeps) {
     this.sessionRegistry = deps.sessionRegistry;
+    this.log = deps.log ?? console.log;
     this.tmuxAdapter = deps.tmuxAdapter;
     this.listProcesses = deps.listProcesses ?? defaultListProcesses;
     this.resolveHomeDirByPid = deps.resolveHomeDirByPid ?? defaultResolveHomeDirByPid;
@@ -79,21 +90,29 @@ export class ResumeMetadataRefresher {
     // with bounded PID-home caching — zero `ps eww` for the common case (298
     // resolve_home spans, mean 8.24s, in one live slow-span sample). An injected
     // readCodexThreadIdByPid (tests, adoption paths) is untouched.
-    const threadIdResolver = new CodexThreadIdResolver({
-      defaultHome: deps.homeDir ?? os.homedir(),
-      codexHome: deps.codexHome,
-      resolveHomeDirByPid: this.resolveHomeDirByPid,
-    });
+    // One resolver per Codex home: a seat with its own CODEX_HOME logs its threads there.
+    const resolvers = new Map<string, CodexThreadIdResolver>();
+    const resolverFor = (home: string | undefined) => {
+      const selected = home ?? deps.codexHome;
+      let resolver = resolvers.get(selected ?? "");
+      if (!resolver) {
+        resolver = new CodexThreadIdResolver({ defaultHome: deps.homeDir ?? os.homedir(), codexHome: selected,
+          resolveHomeDirByPid: this.resolveHomeDirByPid });
+        resolvers.set(selected ?? "", resolver);
+      }
+      return resolver;
+    };
     // S10 follow-on: identity is REQUIRED on resolve(); an identity-less read routes EXPLICITLY
     // through the named ungated escape hatch — never a silent fallback (r1 owed item 3).
     this.readCodexThreadIdByPid = deps.readCodexThreadIdByPid
-      ?? ((pid, identity) => identity === undefined ? threadIdResolver.resolveUngatedLegacy(pid) : threadIdResolver.resolve(pid, identity));
-    this.probeClaudeResume = deps.probeClaudeResume ?? ((sessionName, resumeToken, cwd) => this.defaultProbeClaudeResume(sessionName, resumeToken, cwd));
+      ?? ((pid, identity, report, home) => identity === undefined ? resolverFor(home).resolveUngatedLegacy(pid, report) : resolverFor(home).resolve(pid, identity, report));
+    this.probeClaudeResume = deps.probeClaudeResume ?? ((sessionName, resumeToken, cwd, configDir) => this.defaultProbeClaudeResume(sessionName, resumeToken, cwd, configDir));
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.homeDir = deps.homeDir ?? os.homedir();
     this.contextUsageStore = deps.contextUsageStore ?? null;
     this.claudeProcessStartedAt = deps.claudeProcessStartedAt ?? null;
     this.claudeConfigDir = deps.claudeConfigDir ?? process.env.CLAUDE_CONFIG_DIR ?? nodePath.join(this.homeDir, ".claude");
+    this.seatHome = deps.seatHome;
     this.listClaudeProcesses = deps.listClaudeProcesses;
   }
 
@@ -136,7 +155,9 @@ export class ResumeMetadataRefresher {
     // on a recurring tick it multiplied `ps` spawns per seat, forever.
     const captureOpts = { attempts: fillNullOnly ? 1 : undefined, listProcesses: opts?.listProcesses };
     for (const session of sessions) {
+      if (this.stopped.signal.aborted) return;
       if (session.runtime === "codex") {
+        const sessionCaptureOpts = { ...captureOpts, sessionId: session.sessionId, nodeId: session.nodeId };
         if (session.resumeToken) {
           // OPR.0.4.3.20 FR-6.1 — lightweight equal-value freshness RE-STAMP on the
           // periodic (fill-null) path so a present-and-still-valid token does not age
@@ -144,7 +165,7 @@ export class ResumeMetadataRefresher {
           // SAME pure-read helper FR-3 uses (getPanePid → pid-keyed logs; NO probe/spawn,
           // NO `claude --resume`, NO launch) and refresh freshness ONLY on an EXACT match.
           if (fillNullOnly) {
-            const derived = await this.captureCodexThreadId(session.sessionName, captureOpts);
+            const derived = await this.captureCodexThreadId(session.sessionName, sessionCaptureOpts);
             if (derived && derived === session.resumeToken) {
               // Present + matching = genuine positive evidence; stamp freshness via the
               // FR-6 marker (never updateResumeToken → no token/provenance clobber).
@@ -156,7 +177,7 @@ export class ResumeMetadataRefresher {
           continue;
         }
 
-        const threadId = await this.captureCodexThreadId(session.sessionName, captureOpts);
+        const threadId = await this.captureCodexThreadId(session.sessionName, sessionCaptureOpts);
         // A fork's pending id: only its own new conversation may fill it, never one an earlier
         // row (its parent or predecessor) holds; that stays honestly pending.
         if (threadId && !this.sessionRegistry.isForkClaimingHeldToken(session.sessionId, "codex_id", threadId)) {
@@ -215,7 +236,11 @@ export class ResumeMetadataRefresher {
           }
           continue;
         }
-        const probe = await this.probeClaudeResume(session.sessionName, session.resumeToken, session.cwd ?? null);
+        // A seat with its own Claude config dir keeps its conversations there, so the probe looks there.
+        const seatHome = session.nodeId ? this.seatHome?.(session.nodeId, "claude-code") : undefined;
+        const probe = await (seatHome
+          ? this.probeClaudeResume(session.sessionName, session.resumeToken, session.cwd ?? null, seatHome)
+          : this.probeClaudeResume(session.sessionName, session.resumeToken, session.cwd ?? null));
         // OPR.0.4.3.20 FR-6 §2.1b — record the probe result WITHOUT clearing:
         // `not_resumable`/`inconclusive` marks the present token stale (the plan
         // surfaces it as `stale — re-verify`), `resumable` stamps freshness. The
@@ -236,7 +261,8 @@ export class ResumeMetadataRefresher {
       if (!first) return undefined;
       const started = Date.parse(first.process.startedAt ?? "");
       if (!Number.isFinite(started)) return undefined;
-      const configDir = nodePath.resolve(session.cwd ?? process.cwd(), this.claudeConfigDir);
+      const seatHome = session.nodeId ? this.seatHome?.(session.nodeId, "claude-code") : undefined;
+      const configDir = nodePath.resolve(session.cwd ?? process.cwd(), seatHome ?? this.claudeConfigDir);
       const file = nodePath.join(configDir, "sessions", `${first.process.pid}.json`);
       const fd = fs.openSync(file, "r");
       let record: { name?: unknown; sessionId?: unknown };
@@ -254,6 +280,19 @@ export class ResumeMetadataRefresher {
     } catch { return undefined; }
   }
 
+  /** Stop in-flight discovery before shutdown closes HTTP or the database. No wait on native probes. */
+  stop(): void { this.stopped.abort(); }
+
+  private captureState(sessionTarget: string, sessionId?: string) {
+    const id = sessionId ?? this.sessionRegistry.findResumeContextByName?.(sessionTarget)?.sessionId ?? sessionTarget;
+    let state = this.captures.get(sessionTarget);
+    if (!state || state.sessionId !== id) {
+      state = { sessionId: id, reasons: new Set<string>() };
+      this.captures.set(sessionTarget, state);
+    }
+    return state;
+  }
+
   /** Best-effort derive a Codex thread id from live pane state (getPanePid →
    *  codex descendant pids → pid-keyed logs sqlite). Async, returns undefined
    *  on timeout/absence. Public for reuse by adoption-boundary capture
@@ -261,44 +300,91 @@ export class ResumeMetadataRefresher {
   async captureCodexThreadId(
     sessionTarget: string,
     opts?: {
-      /** OPR.0.5.3.10 mini-req 2 — snapshot refresh passes 1: the retry loop is
-       *  for the adoption boundary racing a booting codex, never a recurring tick. */
       attempts?: number;
-      /** Cycle-scoped census override (one `ps` per tick, all seats). */
+      sessionId?: string;
+      /** The seat, so its own CODEX_HOME is searched when it declares one. */
+      nodeId?: string;
       listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
     },
   ): Promise<string | undefined> {
-    if (!this.tmuxAdapter.getPanePid) return undefined;
-    const attempts = Math.max(1, opts?.attempts ?? 8);
-    const listProcesses = opts?.listProcesses ?? this.listProcesses;
-
-    for (let attempt = 0; attempt < attempts; attempt++) {
-      const shellPid = await this.tmuxAdapter.getPanePid(sessionTarget);
-      if (shellPid) {
-        const rows = await listProcesses();
-        const codexPids = findCodexDescendantPids(rows, shellPid);
-        for (const codexPid of codexPids) {
-          // pid+start-time identity from the SAME census (r1's reuse guard).
-          const identity = (rows.find((r) => r.pid === codexPid) as { startedAt?: string } | undefined)?.startedAt;
-          const threadId = await this.readCodexThreadIdByPid(codexPid, identity);
-          if (threadId) return threadId;
+    const seatHome = opts?.nodeId ? this.seatHome?.(opts.nodeId, "codex") : undefined;
+    if (this.stopped.signal.aborted) return undefined;
+    const state = this.captureState(sessionTarget, opts?.sessionId);
+    const report = (reason: string, count?: number) => {
+      if (state.reasons.has(reason)) return;
+      state.reasons.add(reason);
+      // Native tokens and exception text are credential-class; never log either.
+      try { this.log(`[resume-capture] ${sessionTarget}: ${reason}${count === undefined ? "" : ` count=${count}`}`); } catch { /* Diagnostic sinks must not affect capture. */ }
+    };
+    const ctrl = new AbortController();
+    const cancel = () => ctrl.abort();
+    this.stopped.signal.addEventListener("abort", cancel, { once: true });
+    const timer = setTimeout(cancel, 2000); timer.unref();
+    let reason = "no_log_row";
+    let count: number | undefined;
+    const discover = async (): Promise<string | undefined> => {
+      if (!this.tmuxAdapter.getPanePid) { reason = "no_pane_pid"; return undefined; }
+      const attempts = Math.max(1, opts?.attempts ?? 8);
+      for (let attempt = 0; attempt < attempts && !ctrl.signal.aborted; attempt++) {
+        const shellPid = await this.tmuxAdapter.getPanePid(sessionTarget);
+        if (ctrl.signal.aborted) return undefined;
+        reason = "no_pane_pid"; count = undefined;
+        if (shellPid) {
+          const rows = await (opts?.listProcesses ?? this.listProcesses)();
+          if (ctrl.signal.aborted) return undefined;
+          const codexPids = findCodexDescendantPids(rows, shellPid);
+          reason = "no_codex_descendant";
+          for (const codexPid of codexPids) {
+            const identity = (rows.find((r) => r.pid === codexPid) as { startedAt?: string } | undefined)?.startedAt;
+            reason = "no_log_row"; count = undefined;
+            const threadId = await this.readCodexThreadIdByPid(codexPid, identity, diagnostic => {
+              reason = diagnostic.reason; count = diagnostic.count;
+            }, seatHome);
+            if (ctrl.signal.aborted) return undefined;
+            if (threadId) return threadId;
+          }
         }
+        report(reason, count);
+        if (attempt < attempts - 1) await this.sleep(250);
       }
-      if (attempt < attempts - 1) await this.sleep(250);
+      return undefined;
+    };
+    let onAbort!: () => void;
+    const cancelled = new Promise<undefined>(resolve => {
+      onAbort = () => resolve(undefined);
+      ctrl.signal.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+      const token = await Promise.race([discover(), cancelled]);
+      if (this.stopped.signal.aborted) { report("shutdown"); return undefined; }
+      if (token) { report("captured"); return token; }
+      report(ctrl.signal.aborted ? "probe_timeout" : reason, ctrl.signal.aborted ? undefined : count);
+      return undefined;
+    } catch (error) {
+      if (this.stopped.signal.aborted) return undefined;
+      // Report the redacted reason once, then let the failure reach the caller as it always did
+      // (teardown records "Resume metadata refresh failed"; adoption swallows it).
+      report("process_unreadable");
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      ctrl.signal.removeEventListener("abort", onAbort);
+      this.stopped.signal.removeEventListener("abort", cancel);
     }
-
-    return undefined;
   }
 
   private async defaultProbeClaudeResume(
     sessionName: string,
     resumeToken: string,
     cwd?: string | null,
+    configDir?: string,
   ): Promise<"resumable" | "not_resumable" | "inconclusive"> {
-    const command = buildNativeResumeCommand("claude-code", resumeToken, sessionName);
-    if (!command) {
+    const resume = buildNativeResumeCommand("claude-code", resumeToken, sessionName);
+    if (!resume) {
       return "not_resumable";
     }
+    // A leading assignment, as the classic launch uses, so an rc alias or function for `claude` still resolves.
+    const command = configDir ? `CLAUDE_CONFIG_DIR=${shellQuote(configDir)} ${resume}` : resume;
 
     const probeSession = `rigged-refresh-${sanitizeTmuxName(sessionName)}-${Date.now().toString(36)}`;
     const create = this.tmuxAdapter.deliveryGuard
@@ -387,31 +473,11 @@ export async function defaultListProcesses(): Promise<Array<{ pid: number; ppid:
  *  cached while 520 were live). The lenient variant keeps its contract for
  *  the direct per-call consumers that want best-effort. */
 export async function defaultListProcessesStrict(): Promise<Array<{ pid: number; ppid: number; command: string; startedAt: string }>> {
-  const output = await runAsyncSite("resume_metadata.list_processes", async () => {
-    // lstart = the process START TIME — the identity half of pid+start-time
-    // (r1's pid-reuse remedy): a reused pid changes lstart, so a consumer
-    // holding last cycle's identity can invalidate without any extra spawn.
-    // lstart is locale-formatted; the child-only C locale keeps the English date the parser expects.
-    const { stdout } = await execFileAsync("ps", ["-Ao", "pid,ppid,lstart,command"], { encoding: "utf-8", maxBuffer: 8 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } });
-    return stdout;
-  });
-  return output
-    .split("\n")
-    .slice(1)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      // lstart is a fixed 5-token block: "Sun Aug 23 18:52:01 2026".
-      const match = line.match(/^(\d+)\s+(\d+)\s+(\w{3}\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.*)$/);
-      if (!match) return null;
-      return {
-        pid: Number(match[1]),
-        ppid: Number(match[2]),
-        startedAt: match[3] ?? "",
-        command: match[4] ?? "",
-      };
-    })
-    .filter((row): row is { pid: number; ppid: number; command: string; startedAt: string } => row !== null);
+  // startedAt = the process START TIME — the identity half of pid+start-time
+  // (r1's pid-reuse remedy): a reused pid changes it, so a consumer
+  // holding last cycle's identity can invalidate without any extra spawn.
+  const rows = await runAsyncSite("resume_metadata.list_processes", readProcessTable);
+  return rows.map(({ pid, ppid, startedAt, command }) => ({ pid, ppid, startedAt, command }));
 }
 
 function findCodexDescendantPids(

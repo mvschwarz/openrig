@@ -3,10 +3,10 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { ExecFn } from "../adapters/tmux.js";
-import { runtimeProbeFailure } from "../adapters/preflight-exec.js";
+import { runtimeProbeFailure, runtimeProbeTimeout } from "../adapters/preflight-exec.js";
 import { piVersionNotice } from "../adapters/pi-readiness.js";
 import type { LegacyRigSpec as RigSpec, PreflightResult, RigSpec as PodRigSpec, RigSpecPod, RigSpecPodMember } from "./types.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
-import { deriveSessionName, validateSessionName, validateSessionComponents, VIRTUAL_DOMAIN_TOKENS } from "./session-name.js";
+import { deriveCanonicalSessionName, deriveSessionName, tmuxRenamedSessionError, validateSessionName, validateSessionComponents, VIRTUAL_DOMAIN_TOKENS } from "./session-name.js";
 
 const RUNTIME_COMMANDS: Record<string, string> = {
   "claude-code": "claude --version",
@@ -47,6 +47,9 @@ export class RigSpecPreflight {
       const sessionName = deriveSessionName(spec.name, node.id);
       if (!validateSessionName(sessionName)) {
         errors.push(`Derived session name '${sessionName}' is invalid for node '${node.id}'`);
+      } else {
+        const renamed = tmuxRenamedSessionError(sessionName);
+        if (renamed) errors.push(`${node.id}: ${renamed}`);
       }
     }
 
@@ -68,7 +71,8 @@ export class RigSpecPreflight {
     // tmux session name collision
     for (const node of spec.nodes) {
       const sessionName = deriveSessionName(spec.name, node.id);
-      if (validateSessionName(sessionName)) {
+      // A name tmux would rename is already refused above, and probing it fails ("can't find pane").
+      if (validateSessionName(sessionName) && !tmuxRenamedSessionError(sessionName)) {
         const exists = await this.tmuxAdapter.hasSession(sessionName);
         if (exists) {
           errors.push(`tmux session '${sessionName}' already exists for node '${node.id}'`);
@@ -107,7 +111,7 @@ export class RigSpecPreflight {
           if (node.runtime === "pi") warnings.push(piVersionNotice(output));
         } catch (err) {
           if (node.runtime === "pi") errors.push(...piAvailabilityFailure(err, warnings));
-          else errors.push(`Runtime '${node.runtime}' not available (${cmd} failed: ${runtimeProbeFailure(err)})`);
+          else errors.push(runtimeProbeTimeout(err) ?? `Runtime '${node.runtime}' not available (${cmd} failed: ${runtimeProbeFailure(err)})`);
         }
       }
     }
@@ -135,9 +139,14 @@ export class RigSpecPreflight {
 import { RigSpecCodec } from "./rigspec-codec.js";
 import { RigSpecSchema } from "./rigspec-schema.js";
 import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
-import { resolveNodeConfig, type ResolutionContext } from "./profile-resolver.js";
+import type { ResolutionContext, ResolutionResult } from "./profile-resolver.js";
+import { withNodeConfigResolver } from "./profile-resolution-worker.js";
+import { releaseScanCache } from "./skill-discovery.js";
+import { randomUUID } from "node:crypto";
 import { getOpenRigInstallCwdError, resolveAuthoredCwd, resolveLaunchCwd } from "./cwd-resolution.js";
 import nodePath from "node:path";
+import { loadCommunityHarnessPreset } from "./community-harness-presets.js";
+import { BUILT_IN_RUNTIMES } from "./built-in-runtimes.js";
 import { validateClaudeActivityHookDelivery, CLAUDE_ACTIVITY_HOOKS_RESOURCE_TYPE } from "./claude-activity-hooks.js";
 import {
   resolvePermissionPolicyAttachment,
@@ -147,7 +156,7 @@ import {
 
 // Slice 51-01 (OPR.0.5.1.1): `stub` is a first-class runtime (the deterministic node-script fake harness
 // through the real orchestrator) — admitted at the modern-pod preflight gate alongside the real runtimes.
-const SUPPORTED_RUNTIMES = new Set(["claude-code", "codex", "pi", "omp", "terminal", "stub"]);
+const SUPPORTED_RUNTIMES = BUILT_IN_RUNTIMES;
 
 // Default daemon-shipped asset paths for the managed Claude activity hooks — the SAME files the
 // ClaudeCodeAdapter is wired with in startup.ts (validation is the shared module either way).
@@ -168,6 +177,7 @@ export interface RigPreflightInput {
   externalQualifiedIds?: Iterable<string>;
   claudeActivityAssets?: { relayPath?: string; manifestPath?: string };
   inheritedPermissionPolicy?: PreflightSpecContext["inheritedPermissionPolicy"];
+  materializeOnly?: PreflightSpecContext["materializeOnly"];
 }
 
 /**
@@ -183,6 +193,9 @@ export interface PreflightSpecContext {
   systemSkills?: string[];
   systemWorldError?: string;
   rigNameOverride?: string;
+  /** True when no session is created after this preflight (materialize-only, `rig adopt`), so
+   *  a session name tmux would rename is not refused: no session is created under it. */
+  materializeOnly?: boolean;
   /** Effective persisted target-rig attachment for structured expansion.
    * Explicit member/fragment refs still win; this is the inherited fallback. */
   inheritedPermissionPolicy?: Pick<
@@ -266,6 +279,7 @@ export async function rigPreflight(input: RigPreflightInput & { exec?: (cmd: str
     skillsRoot: input.skillsRoot,
     rigNameOverride: input.rigNameOverride,
     inheritedPermissionPolicy: input.inheritedPermissionPolicy,
+    materializeOnly: input.materializeOnly,
     exec: input.exec,
     claudeActivityAssets: input.claudeActivityAssets,
   });
@@ -279,6 +293,20 @@ export async function rigPreflight(input: RigPreflightInput & { exec?: (cmd: str
  * with no YAML round-trip; rigPreflight(yaml) is the parse/normalize front over it.
  */
 export async function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: PreflightSpecContext): Promise<PreflightResult> {
+  // Members share raw skill scans of identical inputs within this preflight only (#1653). The worker's copy ends
+  // with the worker; the release covers the in-process fallback.
+  const scanScope = randomUUID();
+  try {
+    return await withNodeConfigResolver(resolve => preflightMembers(rigSpec, preflightCtx, context => resolve({ ...context, scanScope })));
+  } finally {
+    releaseScanCache(scanScope);
+  }
+}
+
+async function preflightMembers(
+  rigSpec: PodRigSpec, preflightCtx: PreflightSpecContext,
+  resolveNodeConfigAsync: (context: ResolutionContext) => Promise<ResolutionResult>,
+): Promise<PreflightResult> {
   const errors: string[] = [];
   // §6 reconciliation (PM ruling 2026-08-05): seed EMPTY so main's already-folded activity-hook /
   // collision warnings (pushed below during the checks) come FIRST; the incoming permission-policy
@@ -293,6 +321,8 @@ export async function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: 
       for (const err of nameErrors) {
         errors.push(`${pod.id}.${member.id}: ${err}`);
       }
+      const renamed = nameErrors.length === 0 && !preflightCtx.materializeOnly ? tmuxRenamedSessionError(deriveCanonicalSessionName(pod.id, member.id, effectiveRigName)) : null;
+      if (renamed) errors.push(`${pod.id}.${member.id}: ${renamed}`);
     }
   }
 
@@ -352,7 +382,7 @@ export async function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: 
         pod,
         rig: rigSpec,
       };
-      const configResult = resolveNodeConfig(ctx);
+      const configResult = await resolveNodeConfigAsync(ctx);
       if (!configResult.ok) {
         for (const err of configResult.errors) {
           errors.push(`${pod.id}.${member.id}: ${err}`);
@@ -382,9 +412,12 @@ export async function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: 
         }
       }
 
-      // Check runtime
+      // Check runtime: a built-in, or a community harness whose preset is installed and usable.
       if (!SUPPORTED_RUNTIMES.has(member.runtime)) {
-        errors.push(`${pod.id}.${member.id}: unsupported runtime "${member.runtime}"`);
+        const app = loadCommunityHarnessPreset(member.runtime);
+        if (!app.ok) {
+          errors.push(`${pod.id}.${member.id}: unsupported runtime "${member.runtime}": ${app.kind === "missing" ? "it isn't built in, and " : ""}${app.message}`);
+        }
       }
 
       // Check cwd (required, already validated by RigSpec schema, but double-check)
@@ -448,6 +481,11 @@ export async function verifyPiRuntimeAvailable(
 }
 
 function piAvailabilityFailure(err: unknown, warnings: string[]): string[] {
+  const timedOut = runtimeProbeTimeout(err);
+  if (timedOut) {
+    warnings.push(timedOut);
+    return [];
+  }
   const detail = runtimeProbeFailure(err);
   if (detail === "ENOENT" || detail.includes("executable not found on PATH")) {
     warnings.push(`Pi was not found on the daemon's PATH ('pi --version': ${detail}). The pane's shell may have a different PATH; launch will check Pi there. If it also cannot find Pi, install @earendil-works/pi-coding-agent and check 'command -v pi' in that shell.`);
@@ -464,6 +502,8 @@ export async function verifyOmpRuntimeAvailable(rigSpec: PodRigSpec, exec: ExecF
     await exec(RUNTIME_COMMANDS["omp"]!);
     return [];
   } catch (err) {
+    const timedOut = runtimeProbeTimeout(err);
+    if (timedOut) return [timedOut];
     return [`Runtime "omp" not available ('omp --version' failed: ${runtimeProbeFailure(err)}). If OMP is not installed, install Oh My Pi and ensure 'omp' is on PATH.`];
   }
 }

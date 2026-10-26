@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadHostBindings, recordHostObservation, describeBindingConflict } from "../src/host-bindings.js";
@@ -273,6 +273,33 @@ describe("F2 — concurrency guard: conflict records survive concurrent writers"
     expect(loaded.bindings["seed"]?.conflict?.hostId).toBe("host-CONTRA"); // the record SURVIVED the race
   }, 30_000);
 
+  it("a writer behind a slow holder waits for it, rather than writing over it unguarded", async () => {
+    const path = tmpPath();
+    const lockDir = `${path}.lock`;
+    const { spawn } = await import("node:child_process");
+    recordHostObservation({ alias: "seed", observedHostId: "host-orig", now: fixedNow, path });
+    // The holder does what a descheduled writer does on a loaded machine: takes the lock, loads, stalls 600 ms
+    // (past a short wait budget, well inside the stale threshold), then writes what it loaded plus its own binding.
+    const holder = spawn(process.execPath, ["-e", `
+      const fs = require("node:fs");
+      fs.mkdirSync(${JSON.stringify(lockDir)});
+      const file = JSON.parse(fs.readFileSync(${JSON.stringify(path)}, "utf-8"));
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 600);
+      file.bindings.holder = { hostId: "host-hold", firstObservedAt: "x", lastObservedAt: "x" };
+      fs.writeFileSync(${JSON.stringify(`${path}.tmp-holder`)}, JSON.stringify(file));
+      fs.renameSync(${JSON.stringify(`${path}.tmp-holder`)}, ${JSON.stringify(path)});
+      fs.rmdirSync(${JSON.stringify(lockDir)});
+    `], { stdio: "ignore" });
+    let done = false;
+    const exited = new Promise<number | null>((resolve) => holder.on("exit", (code) => { done = true; resolve(code); }));
+    while (!existsSync(lockDir) && !done) await new Promise((r) => setTimeout(r, 2));
+    recordHostObservation({ alias: "w1", observedHostId: "host-1111", now: fixedNow, path });
+    expect(await exited).toBe(0);
+    const loaded = loadHostBindings(path);
+    expect(loaded.bindings["holder"]?.hostId).toBe("host-hold");
+    expect(loaded.bindings["w1"]?.hostId).toBe("host-1111");
+  }, 10_000);
+
   it("a stale lock (crashed writer) is taken over, not waited on forever", () => {
     const path = tmpPath();
     const lockDir = `${path}.lock`;
@@ -293,5 +320,83 @@ describe("sidecar file hygiene", () => {
     const raw = readFileSync(path, "utf-8");
     expect(raw.endsWith("\n")).toBe(true);
     expect(JSON.parse(raw).version).toBe(1);
+  });
+});
+
+describe("observedUrl — the entry URL a binding was learned at (#1642)", () => {
+  const URL_A = "http://10.0.0.5:7433";
+  const URL_B = "http://10.0.0.6:7433";
+  const later = () => new Date("2026-08-22T03:00:00.000Z");
+
+  it("first contact stores the URL the self-id was observed at", () => {
+    const path = tmpPath();
+    recordHostObservation({ alias: "h", observedHostId: "host-aaaa", observedUrl: URL_A, now: fixedNow, path });
+    expect(loadHostBindings(path).bindings["h"]).toEqual({
+      hostId: "host-aaaa", firstObservedAt: "2026-08-21T02:00:00.000Z", lastObservedAt: "2026-08-21T02:00:00.000Z", observedUrl: URL_A,
+    });
+  });
+
+  it("reconfirming the same id backfills a legacy binding's URL and follows a moved entry", () => {
+    const path = tmpPath();
+    recordHostObservation({ alias: "h", observedHostId: "host-aaaa", now: fixedNow, path });
+    expect(loadHostBindings(path).bindings["h"]!.observedUrl).toBeUndefined();
+    recordHostObservation({ alias: "h", observedHostId: "host-aaaa", observedUrl: URL_A, now: later, path });
+    expect(loadHostBindings(path).bindings["h"]!.observedUrl).toBe(URL_A);
+    recordHostObservation({ alias: "h", observedHostId: "host-aaaa", observedUrl: URL_B, now: later, path });
+    expect(loadHostBindings(path).bindings["h"]!.observedUrl).toBe(URL_B);
+  });
+
+  it("a conflicting observation never attaches its URL to the stored identity", () => {
+    const path = tmpPath();
+    recordHostObservation({ alias: "h", observedHostId: "host-aaaa", observedUrl: URL_A, now: fixedNow, path });
+    const out = recordHostObservation({ alias: "h", observedHostId: "host-bbbb", observedUrl: URL_B, now: later, path });
+    expect(out.outcome).toBe("conflict");
+    const b = loadHostBindings(path).bindings["h"]!;
+    expect(b.hostId).toBe("host-aaaa");
+    expect(b.observedUrl).toBe(URL_A);
+    expect(b.conflict?.hostId).toBe("host-bbbb");
+  });
+
+  it("a conflicting observation leaves a legacy binding without a URL", () => {
+    const path = tmpPath();
+    recordHostObservation({ alias: "h", observedHostId: "host-aaaa", now: fixedNow, path });
+    recordHostObservation({ alias: "h", observedHostId: "host-bbbb", observedUrl: URL_B, now: later, path });
+    expect(loadHostBindings(path).bindings["h"]!.observedUrl).toBeUndefined();
+  });
+
+  it("reconfirming the original id while a conflict is recorded neither changes the URL nor clears the conflict", () => {
+    const path = tmpPath();
+    recordHostObservation({ alias: "h", observedHostId: "host-aaaa", observedUrl: URL_A, now: fixedNow, path });
+    recordHostObservation({ alias: "h", observedHostId: "host-bbbb", observedUrl: URL_B, now: later, path });
+    recordHostObservation({ alias: "h", observedHostId: "host-aaaa", observedUrl: URL_B, now: later, path });
+    const b = loadHostBindings(path).bindings["h"]!;
+    expect(b.observedUrl).toBe(URL_A);
+    expect(b.conflict?.hostId).toBe("host-bbbb");
+  });
+
+  it("the loader keeps a string observedUrl and drops any other value", () => {
+    const path = tmpPath();
+    writeFileSync(path, JSON.stringify({ version: 1, bindings: {
+      a: { hostId: "host-aaaa", firstObservedAt: "x", lastObservedAt: "x", observedUrl: URL_A },
+      b: { hostId: "host-bbbb", firstObservedAt: "x", lastObservedAt: "x", observedUrl: 7 },
+    } }));
+    const { bindings } = loadHostBindings(path);
+    expect(bindings["a"]!.observedUrl).toBe(URL_A);
+    expect("observedUrl" in bindings["b"]!).toBe(false);
+  });
+
+  it("doctor passes the entry URL it probed to the learner", async () => {
+    const { doctorLegs } = await import("../src/commands/host.js");
+    const calls: unknown[][] = [];
+    await doctorLegs({ id: "vm-a", transport: "http", url: URL_A } as const, {
+      run: async () => ({ ok: true as const, stdout: "", sshStderr: "", failedStep: null }),
+      tcpProbe: async () => "open" as const,
+      httpGet: async () => ({ status: 200, body: JSON.stringify({ selfHostId: "host-aaaa" }) }),
+      learnHostBinding: (...args: unknown[]) => {
+        calls.push(args);
+        return { outcome: "bound", binding: { hostId: "host-aaaa", firstObservedAt: "x", lastObservedAt: "x" } };
+      },
+    } as never);
+    expect(calls).toEqual([["vm-a", "host-aaaa", URL_A]]);
   });
 });

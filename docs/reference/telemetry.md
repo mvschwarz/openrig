@@ -21,6 +21,9 @@ An empty match set can still have more source records: check `page.hasMore` and
 `page.nextCursor`. The cursor binds the stream and filters; retain the same filter
 options when continuing. Do not use `--start` with `--cursor`.
 
+`rig mcp serve` offers the events read as the `rig_telemetry_events` tool, with the
+same parameters and envelope; its `rigId` also takes a rig name.
+
 ## HTTP and envelope
 
 These reads use the daemon's existing browser/access boundary:

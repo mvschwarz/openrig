@@ -42,23 +42,23 @@ describe("attributionFromSession — the stamped triple parses into the four fie
 describe("buildOutboundMessage — attribution header + loudness rule", () => {
   const q = { qitemId: "q1", summary: "Decide X", body: "b", destinationSession: "mike@external" };
 
-  it("the subject leads and one sender attribution preserves the full source identity", () => {
+  it("the sender leads, then the subject, and one sender attribution preserves the full source identity", () => {
     const m = buildOutboundMessage(q, {
       sourceLabel: "vm",
       attribution: { seat: "dev-driver@v-openrig-build", rig: "v-openrig-build", host: "host-84c37990", session: "dev-driver@v-openrig-build@host-84c37990" },
     });
-    expect((m.blocks[0] as { type: string }).type).toBe("section");
-    const first = m.blocks.at(-1) as { type: string; elements: { text: string }[] };
+    const first = m.blocks[0] as { type: string; elements: { text: string }[] };
     expect(first.type).toBe("context");
+    expect((m.blocks[1] as { type: string }).type).toBe("section");
     const line = first.elements[0]!.text;
     expect(line).toContain("dev-driver@v-openrig-build");
-    expect(line).toBe("from dev-driver@v-openrig-build@host-84c37990");
-    expect(m.text).toContain("from dev-driver@v-openrig-build@host-84c37990"); // notification fallback carries it too
+    expect(line).toBe("From dev-driver@v-openrig-build@host-84c37990");
+    expect(m.text.startsWith("From dev-driver@v-openrig-build@host-84c37990\n")).toBe(true); // notification fallback leads with it too
   });
 
   it("ESCALATION mentions the human by USER ID; routine stays quiet", () => {
     const loud = buildOutboundMessage(q, { sourceLabel: "vm", mentionUserId: "U012AB3CD" });
-    expect(loud.text.startsWith("<@U012AB3CD> :rotating_light: ")).toBe(true);
+    expect(loud.text.split("\n")[1]!.startsWith("<@U012AB3CD> :rotating_light: ")).toBe(true); // the ask's line, after the sender
     expect(JSON.stringify(loud.blocks)).toContain("<@U012AB3CD> :rotating_light:");
     const quiet = buildOutboundMessage(q, { sourceLabel: "vm" });
     expect(quiet.text).not.toContain("<@");

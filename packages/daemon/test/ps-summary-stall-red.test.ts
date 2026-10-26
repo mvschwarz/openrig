@@ -27,6 +27,8 @@ const CHILD = path.resolve(HERE, "fixtures/ps-stall-http-child.ts");
 // exact SQL signatures (normalized, lowercased) of the two per-node fold scans
 const STARTUP_SIG = "type in ('node.startup_challenged','node.startup_proof_skipped','node.startup_proof_verified','node.startup_proof_rejected')";
 const RESTORE_SIG = "type in ('restore.completed', 'restore.subset_completed', 'restore.outcome_reconciled')";
+// The held-seat read states RESTORE_SIG too (its partial index's condition); only the fold also reads restore.started.
+const RESTORE_FOLD_SIG = "type = 'restore.started'";
 
 function withPrepareTap(db: any) {
   const seen: string[] = [];
@@ -38,6 +40,7 @@ function withPrepareTap(db: any) {
   return { seen, restore: () => spy.mockRestore() };
 }
 const countHas = (seen: string[], frag: string) => seen.filter((s) => s.includes(frag)).length;
+const countRestoreFolds = (seen: string[]) => seen.filter((s) => s.includes(RESTORE_SIG) && s.includes(RESTORE_FOLD_SIG)).length;
 
 function waitExit(c: ChildProcess, ms: number): Promise<boolean> {
   return new Promise((res) => {
@@ -75,7 +78,7 @@ describe("slice-04 ps/summary event-loop regression", () => {
       expect(psRes.status).toBe(200);
       // /api/ps is already fleet-batched — the GREEN baseline for the two signatures.
       expect(countHas(tap.seen, STARTUP_SIG)).toBe(1);
-      expect(countHas(tap.seen, RESTORE_SIG)).toBe(1);
+      expect(countRestoreFolds(tap.seen)).toBe(1);
 
       tap.seen.length = 0;
       const sumRes = await app.request("/api/rigs/summary");
@@ -84,7 +87,7 @@ describe("slice-04 ps/summary event-loop regression", () => {
       // active rig (10 startup + 10 restore); the target fix must batch both to
       // exactly ONE fleet scan each — this pin asserts 1 + 1.
       expect(countHas(tap.seen, STARTUP_SIG)).toBe(1);
-      expect(countHas(tap.seen, RESTORE_SIG)).toBe(1);
+      expect(countRestoreFolds(tap.seen)).toBe(1);
     } finally {
       tap.restore();
       db.close();

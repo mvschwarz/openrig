@@ -356,8 +356,10 @@ describe("GET /api/provider/usage/hosts", () => {
 
 describe("POST /api/provider/usage/hosts/refresh", () => {
   it("a refresh slower than the 5 s read class still succeeds, and its reading reaches the view", async () => {
-    const a = await host("a", { codex: { delayMs: 6_000, secondaryUsed: 85 } });
-    const hub = await host("hub", { registry: [a.entry()] });
+    // Keep the scripted weekly window before its reset while the delay uses real timers.
+    const now = () => "2026-10-14T00:00:00.000Z";
+    const a = await host("a", { now, codex: { delayMs: 6_000, secondaryUsed: 85 } });
+    const hub = await host("hub", { now, registry: [a.entry()] });
     const started = Date.now();
     const { status, body } = await refreshVia(hub, { provider: "codex" });
     expect(Date.now() - started).toBeGreaterThan(5_000);
@@ -608,6 +610,11 @@ describe("round 3: every rendered field checked, failures kept to their host, a 
     ["window reason", firstWindow((w) => ({ ...w, levelReason: TRAP })), "rows"],
     ["window remaining percent missing", firstWindow(({ remainingPercent: _r, ...w }) => w), "rows"],
     ["disagreeing seat", firstWindow((w) => ({ ...w, disagreeingSeats: [{ seatSession: TRAP, usedPercent: 1, resetsAt: null, observedAt: NOW }] })), "rows"],
+    ["last observed exhaustion", withCodexRow((r) => ({ ...r, lastObservedExhausted: { at: TRAP, window: null, evidence: "at the limit" } })), "rows"],
+    ["window expectation", firstWindow((w) => ({ ...w, expectation: { expectedFullSince: TRAP, note: "planning" } })), "rows"],
+    ["retained", withCodexRow((r) => ({ ...r, retained: TRAP })), "rows"],
+    ["account history", withCodexRow((r) => ({ ...r, accountHistory: TRAP })), "rows"],
+    ["saved profile", withCodexRow((r) => ({ ...r, savedProfile: TRAP })), "rows"],
     ["seat account label", withSeat((x) => ({ ...x, configured: { ...(x["configured"] as Body), profileRef: TRAP } })), "seats"],
     ["seat registryNotes not a list", withSeat((x) => ({ ...x, registryNotes: 5 })), "seats"],
     ["seat differsFrom not a list", withSeat((x) => ({ ...x, observed: { ...(x["observed"] as Body), differsFrom: "dev-b@r" } })), "seats"],

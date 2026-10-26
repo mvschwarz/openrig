@@ -1,3 +1,5 @@
+import { tileAttachArgv } from "../src/domain/terminal/tile-attach.js";
+import { shellQuote } from "../src/adapters/shell-quote.js";
 // OPR.0.4.6.02 C2 — the terminal-provider ride core commit.
 //
 // Covers the plan's C2 test contract:
@@ -80,7 +82,7 @@ describe("view-composer partition vectors", () => {
   it("local live seat → tmux attach -t (no -r)", () => {
     const v = composeView("v", [member({ seat: "dev-a@rig" })], ctxWith([]));
     expect(v.opened).toHaveLength(1);
-    expect(v.opened[0]!.paneCommand).toBe("tmux attach -t 'dev-a@rig'");
+    expect(v.opened[0]!.paneCommand).toBe(tileAttachArgv("tmux", [], "dev-a@rig", false).map(shellQuote).join(" "));
     expect(v.opened[0]!.readOnly).toBe(false);
     expect(v.absent).toHaveLength(0);
     expect(v.degraded).toHaveLength(0);
@@ -88,19 +90,19 @@ describe("view-composer partition vectors", () => {
 
   it("view-only / cross-rig read-only seat → tmux attach -r -t", () => {
     const v = composeView("v", [member({ seat: "dev-a@rig", readOnly: true })], ctxWith([]));
-    expect(v.opened[0]!.paneCommand).toBe("tmux attach -r -t 'dev-a@rig'");
+    expect(v.opened[0]!.paneCommand).toBe(tileAttachArgv("tmux", [], "dev-a@rig", true).map(shellQuote).join(" "));
     expect(v.opened[0]!.readOnly).toBe(true);
   });
 
   it("ssh host → ssh '<user@target>' tmux attach -t (destination shell-quoted); read-only adds -r", () => {
     const rw = composeView("v", [member({ seat: "s@r", host: "vm1", tmuxSession: "s@r" })], ctxWith([SSH_HOST]));
-    expect(rw.opened[0]!.paneCommand).toBe("ssh 'admin@vm1.local' 'tmux attach -t '\"'\"'s@r'\"'\"''");
+    expect(rw.opened[0]!.paneCommand).toBe(`ssh ${shellQuote('admin@vm1.local')} ${shellQuote(tileAttachArgv("tmux", [], "s@r", false).map(shellQuote).join(" "))}`);
 
     const ro = composeView("v", [member({ seat: "s@r", host: "vm1", readOnly: true })], ctxWith([SSH_HOST]));
-    expect(ro.opened[0]!.paneCommand).toBe("ssh 'admin@vm1.local' 'tmux attach -r -t '\"'\"'s@r'\"'\"''");
+    expect(ro.opened[0]!.paneCommand).toBe(`ssh ${shellQuote('admin@vm1.local')} ${shellQuote(tileAttachArgv("tmux", [], "s@r", true).map(shellQuote).join(" "))}`);
 
     const nouser = composeView("v", [member({ seat: "s@r", host: "vm2" })], ctxWith([SSH_HOST_NO_USER]));
-    expect(nouser.opened[0]!.paneCommand).toBe("ssh '10.0.0.9' 'tmux attach -t '\"'\"'s@r'\"'\"''");
+    expect(nouser.opened[0]!.paneCommand).toBe(`ssh ${shellQuote('10.0.0.9')} ${shellQuote(tileAttachArgv("tmux", [], "s@r", false).map(shellQuote).join(" "))}`);
   });
 
   // Guard G1 — the ssh destination is STRUCTURED registry data injected into a
@@ -111,7 +113,7 @@ describe("view-composer partition vectors", () => {
     const v = composeView("v", [member({ seat: "s@r", host: "evil", tmuxSession: "s@r" })], ctxWith([NASTY]));
     expect(v.opened).toHaveLength(1);
     // single-quoted, embedded quote POSIX-escaped ('\'') — metacharacters are literal.
-    expect(v.opened[0]!.paneCommand).toBe("ssh 'u'\"'\"'x@a b; rm -rf /' 'tmux attach -t '\"'\"'s@r'\"'\"''");
+    expect(v.opened[0]!.paneCommand).toBe(`ssh ${shellQuote("u'x@a b; rm -rf /")} ${shellQuote(tileAttachArgv("tmux", [], "s@r", false).map(shellQuote).join(" "))}`);
     // the dangerous run never becomes its own shell word:
     expect(v.opened[0]!.paneCommand).not.toContain("; rm -rf / tmux");
   });
@@ -192,11 +194,13 @@ describe("view-composer partition vectors", () => {
     expect(() => chunkPanes([], 0)).toThrow();
   });
 
-  it("carries live Claude and Codex runtimes into Herdr tile hints but leaves terminal seats unchanged", () => {
+  it("carries known runtimes into Herdr tile hints but leaves terminal and unknown seats unchanged", () => {
     const members = deriveViewMembers([
       { canonicalSessionName: "claude@rig", attachmentType: "tmux", runtime: "claude-code" },
       { canonicalSessionName: "codex@rig", attachmentType: "tmux", runtime: "codex" },
+      { canonicalSessionName: "pi@rig", attachmentType: "tmux", runtime: "pi" },
       { canonicalSessionName: "operator@rig", attachmentType: "tmux", runtime: "terminal" },
+      { canonicalSessionName: "unknown@rig", attachmentType: "tmux", runtime: "unknown" },
     ]);
     const view = composeView("rig:rig", members, ctxWith([]));
     const grid = buildGridRoot(view.opened).root;
@@ -208,9 +212,11 @@ describe("view-composer partition vectors", () => {
     collect(grid);
 
     expect(panes.filter((pane) => pane.label).map((pane) => pane.command)).toEqual([
-      ["sh", "-c", "env HERDR_AGENT=claude tmux attach -t 'claude@rig'"],
-      ["sh", "-c", "env HERDR_AGENT=codex tmux attach -t 'codex@rig'"],
-      ["sh", "-c", "tmux attach -t 'operator@rig'"],
+      ["sh", "-c", `env HERDR_AGENT=claude ${tileAttachArgv("tmux", [], "claude@rig", false).map(shellQuote).join(" ")}`],
+      ["sh", "-c", `env HERDR_AGENT=codex ${tileAttachArgv("tmux", [], "codex@rig", false).map(shellQuote).join(" ")}`],
+      ["sh", "-c", `env HERDR_AGENT=pi ${tileAttachArgv("tmux", [], "pi@rig", false).map(shellQuote).join(" ")}`],
+      ["sh", "-c", tileAttachArgv("tmux", [], "operator@rig", false).map(shellQuote).join(" ")],
+      ["sh", "-c", tileAttachArgv("tmux", [], "unknown@rig", false).map(shellQuote).join(" ")],
     ]);
     expect(panes.at(-1)?.command).toEqual(["sh"]);
   });
@@ -498,11 +504,12 @@ describe("herdr adapter — socket ping probe + workspace.create → layout.appl
     // OPR.0.6.0.8: after the page is applied, its tab is focused (no blank-tab close here:
     // this create reply carries no default tab id).
     // #707: the applied page is followed by one pane.list read (this fake's reply has no panes, so nothing changes).
-    expect(requests.map((r) => r.method)).toEqual(["workspace.create", "layout.apply", "pane.list", "tab.focus"]);
-    expect(requests[0]!.params).toEqual({ focus: false, label: "v" });
-    expect(requests[2]!.params).toEqual({ workspace_id: "wG" });
-    expect(requests[3]!.params).toEqual({ tab_id: "wG:t2" });
-    expect(requests[1]!.params).toEqual({
+    // #1604: the open workspaces are read first, so a re-open can be numbered.
+    expect(requests.map((r) => r.method)).toEqual(["workspace.list", "workspace.create", "layout.apply", "pane.list", "tab.focus"]);
+    expect(requests[1]!.params).toEqual({ focus: false, label: "v" });
+    expect(requests[3]!.params).toEqual({ workspace_id: "wG" });
+    expect(requests[4]!.params).toEqual({ tab_id: "wG:t2" });
+    expect(requests[2]!.params).toEqual({
       workspace_id: "wG",
       tab_label: "openrig:v#tok",
       focus: true,
@@ -523,7 +530,7 @@ describe("herdr adapter — socket ping probe + workspace.create → layout.appl
       expect(r.method).not.toContain("--help");
       expect(r.method).not.toContain(" ");
     }
-    expect(requests.map((r) => r.method)).toEqual(["workspace.create", "layout.apply", "pane.list", "tab.focus"]);
+    expect(requests.map((r) => r.method)).toEqual(["workspace.list", "workspace.create", "layout.apply", "pane.list", "tab.focus"]);
   });
 
   it("a labeled workspace.create failure falls back ONCE to a bare create (uncaptured-param defense)", async () => {
@@ -541,8 +548,8 @@ describe("herdr adapter — socket ping probe + workspace.create → layout.appl
     expect(res.ok).toBe(true);
     expect(res.opened).toEqual(["a@r"]);
     // OPR.0.6.0.8: before the bare fallback it checks for a same-named workspace (none here).
-    expect(requests.map((r) => r.method)).toEqual(["workspace.create", "workspace.list", "workspace.create", "layout.apply"]);
-    expect((requests[3]!.params as Record<string, unknown>)["workspace_id"]).toBe("wH");
+    expect(requests.map((r) => r.method)).toEqual(["workspace.list", "workspace.create", "workspace.list", "workspace.create", "layout.apply"]);
+    expect((requests[4]!.params as Record<string, unknown>)["workspace_id"]).toBe("wH");
     expect(res.notes?.join(" ")).toContain('refused the workspace name "v"');
   });
 
@@ -577,6 +584,7 @@ describe("herdr adapter — socket ping probe + workspace.create → layout.appl
     const { transport } = fakeSocketTransport({
       respond: async (method) => {
         if (method === "workspace.create") return { type: "workspace_created", workspace_id: "wG" };
+        if (method !== "layout.apply") return { type: "ok" };
         applies += 1;
         if (applies === 2) throw new Error("herdr error: bad tree");
         return { type: "layout_apply" };

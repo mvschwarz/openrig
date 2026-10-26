@@ -112,10 +112,42 @@ describe("Claude identity: claude auth status on refresh, joined and labelled, n
       identity: { orgId: "org-1", email: "d***@example.test", limitId: "all models", orgName: "Example Org", subscriptionType: "team", source: "claude auth status orgId and email" },
       identityNote: `identity: the daemon's Claude login (claude auth status) as of the refresh at ${NOW}; windows: status-line readings from a@rig at their own times; not proven to be the same login`,
       latestFromSource: true,
-      currentAvailability: "known",
+      // Changed result: never "known" from this join; there's no sample-time seat-to-login link.
+      currentAvailability: "unknown",
+      unavailableReason: expect.stringContaining("no sample-time link"),
     });
     expect(row!.windows.map((w) => w.observedAt)).toEqual([at(-1), at(-1)]);
     expect(row).not.toHaveProperty("unresolved");
+  });
+
+  // Two hermetic source cases: the join had no sample-time link between a seat's window and the refreshed login, yet read
+  // currentAvailability "known".
+  it("the same reset on another login: a seat on a different login with the same reset is not attributed to the refreshed login; availability is unknown", async () => {
+    const reset = at(2 * 1440);
+    const mixed = () => [sample("a@rig", "weekly", 40, at(-10), reset), sample("b@rig", "weekly", 90, at(-1), reset)];
+    const w = windowsWith(mixed, [authOk({ email: "a***@example.test" })]);
+    await w.refresh();
+    const [row] = w.project(NOW);
+    // The freshest sample is seat b's, 90 % used, with the same reset as seat a's: nothing links it to login a.
+    expect(row!.windows[0]).toMatchObject({ usedPercent: 90, seatSession: "b@rig" });
+    expect(row).toMatchObject({ identity: { email: "a***@example.test" }, currentAvailability: "unknown",
+      unavailableReason: expect.stringContaining("no sample-time link") });
+  });
+
+  it("a seat still on an earlier login: after the daemon's login changes, a seat still on the old login doesn't make the new login's row known", async () => {
+    let live = [sample("a@rig", "weekly", 15, at(-6))];
+    const w = new ClaudeUsageWindows({ listSamples: () => live, now: () => NOW,
+      readIdentity: (() => { const reads = [authOk({ email: "a***@example.test" }, at(-6)), authOk({ email: "b***@example.test" }, NOW)]; let n = 0; return async () => reads[n++]!; })() });
+    await w.refresh(); // login a at -6, with seat a@rig at 15 %
+    live = [sample("a@rig", "weekly", 25, at(-1))]; // the seat still runs login a
+    await w.refresh(); // the daemon's login is now b
+    const [current, earlier] = w.project(NOW);
+    expect(current).toMatchObject({ identity: { email: "b***@example.test" }, currentAvailability: "unknown",
+      unavailableReason: expect.stringContaining("no sample-time link") });
+    expect(current!.windows[0]).toMatchObject({ usedPercent: 25, seatSession: "a@rig" });
+    // The frozen login-a row keeps its own refresh's reading, unchanged.
+    expect(earlier).toMatchObject({ identity: { email: "a***@example.test" }, currentAvailability: "unknown", latestFromSource: false });
+    expect(earlier!.windows[0]).toMatchObject({ usedPercent: 15, observedAt: at(-6) });
   });
 
   it("either organisation or email missing is unresolved", async () => {
@@ -138,7 +170,7 @@ describe("Claude identity: claude auth status on refresh, joined and labelled, n
       ["d***@example.test", 50, false, "stale"],
     ]);
     expect(rows[1]!.windows[0]!.freshnessReason).toBe("a later read exists");
-    expect(rows[1]!.identityNote).toBe(`identity: the daemon's Claude login as of the refresh at ${NOW}; a refresh at ${at(5)} reported another login; windows as they were at ${NOW} (from a@rig)`);
+    expect(rows[1]!.identityNote).toBe(`identity: the daemon's Claude login as of the refresh at ${NOW}; a refresh at ${at(5)} reported another login, or one it couldn't identify; windows as they were at ${NOW} (from a@rig)`);
   });
 
   it("switching back to the earlier login makes its row current again; one email in two organisations is two rows", async () => {

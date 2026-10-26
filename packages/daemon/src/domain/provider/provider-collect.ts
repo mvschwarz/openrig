@@ -13,6 +13,7 @@ import { assembleFourBlock, type RawSeatBinding } from "./provider-read-model.js
 import { claudeStatuslineSignals } from "./provider-signals.js";
 import type { FourBlockReadModel, ProviderAccount, ProviderSignal } from "./provider-types.js";
 import type { NodeLifecycleState } from "../types.js";
+import type { SeatRuntimeHome } from "../seat-runtime-home.js";
 
 /** One seat in the fleet (the universe to bind), sourced from node-inventory across rigs. */
 export interface ProviderSeat {
@@ -20,6 +21,8 @@ export interface ProviderSeat {
   rigName: string;
   runtime: string;
   lifecycleState: NodeLifecycleState;
+  /** The seat's own runtime home from its stored `env:`, when it declares one (seat-runtime-home.ts). */
+  runtimeHome?: SeatRuntimeHome;
 }
 
 export interface ProviderCollectDeps {
@@ -57,8 +60,9 @@ export function collectFourBlockReadModel(deps: ProviderCollectDeps): FourBlockR
     // Runtime-identity gate: bind ONLY when the LIVE inventory seat is actually a Codex seat. The
     // codex auth-seat-registry is keyed by session name, so a STALE row whose session name was
     // reused by a Claude seat must NOT bind that Claude seat to a Codex account — a Claude seat
-    // stays unbound (seat_with_no_account) regardless of any same-session registry row.
-    if (reg && seat.runtime === "codex") {
+    // stays unbound (seat_with_no_account) regardless of any same-session registry row. The registry lives in
+    // the daemon's CODEX_HOME, so it binds nothing for a seat that launches with its own.
+    if (reg && seat.runtime === "codex" && !seat.runtimeHome?.home) {
       return {
         accountId: reg.authProfile,
         seatSession: seat.seatSession,

@@ -18,8 +18,12 @@ import type { FleetSnapshot, LoadState, RowFlash } from "./types.js";
 
 /** one-shot flash window (ms) — matches renderScreen's flashActive window */
 export const FLASH_WINDOW_MS = 600;
-/** One passive whole-snapshot read per quiet daemon sample window. */
+/** One passive whole-snapshot read per quiet daemon sample window, while the activity stream isn't connected. */
 export const QUIET_REFRESH_MS = 30_000;
+/** The quiet window while the activity stream is connected: pushes report changes, so this only catches a missed one. */
+export const CONNECTED_QUIET_REFRESH_MS = 300_000;
+/** Activity pushes refresh at most once per this window; pushes inside it share one trailing refresh. */
+export const PUSH_REFRESH_FLOOR_MS = 15_000;
 
 export interface QuietTimerHandle {
   unref?: () => void;
@@ -42,12 +46,17 @@ export interface LiveRefresh {
    * releases in-flight, keeps the prior snapshot, and the next call retries */
   refresh: () => Promise<void>;
   invalidate: () => Promise<void>;
+  /** an activity push: refreshes now, or once at the end of the floor window when a refresh started inside it */
+  pushed: () => void;
   connectionStatus: (status: NonNullable<LoadState["connection"]>) => void;
   snapshot: () => FleetSnapshot;
   load: () => LoadState;
   flashes: () => RowFlash[];
   /** stop the quiet fallback during TUI shutdown */
   close: () => void;
+  /** stop the quiet fallback for good and say why (the daemon's build differs from this TUI's);
+   *  a refresh the operator asks for still runs */
+  stopBackground: (message: string) => void;
 }
 
 /** walk the snapshot topology and key every agent's served pane-activity
@@ -67,6 +76,8 @@ export function createLiveRefresh(deps: LiveRefreshDeps): LiveRefresh {
   let lastConfirmedAt: number | null = null;
   let snapshot = emptySnapshot();
   let load: LoadState = { inFlight: false, settled: false };
+  // One activity stream serves every page; its state must not travel with cached reads.
+  let connection: LoadState["connection"];
   let flashes: RowFlash[] = [];
   let scope = deps.scopeKey?.() ?? "";
   let generation = 0;
@@ -100,7 +111,10 @@ export function createLiveRefresh(deps: LiveRefreshDeps): LiveRefresh {
     runRefresh = singleFlight(() => expected === generation ? readPage() : Promise.resolve());
   }
   let quietTimer: QuietTimerHandle | null = null;
+  let pushTimer: QuietTimerHandle | null = null;
+  let lastReadAt: number | null = null;
   let closed = false;
+  let skew: string | undefined;
   let refresh: () => Promise<void>;
   const scheduleTimeout = deps.setTimeout ?? ((callback, delayMs) => setTimeout(callback, delayMs));
   const cancelTimeout = deps.clearTimeout ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
@@ -113,16 +127,19 @@ export function createLiveRefresh(deps: LiveRefreshDeps): LiveRefresh {
 
   function armQuietTimer(): void {
     clearQuietTimer();
-    if (closed) return;
+    if (closed || skew !== undefined) return;
     quietTimer = scheduleTimeout(() => {
       quietTimer = null;
       void refresh();
-    }, QUIET_REFRESH_MS);
+    }, connection === "connected" ? CONNECTED_QUIET_REFRESH_MS : QUIET_REFRESH_MS);
     quietTimer.unref?.();
   }
 
   const readPage = async () => {
     clearQuietTimer();
+    // A read that starts now reflects every push so far, so a waiting trailing refresh isn't needed.
+    if (pushTimer !== null) { cancelTimeout(pushTimer); pushTimer = null; }
+    lastReadAt = deps.now();
     syncScope();
     const startedGeneration = generation;
     const activePage = page;
@@ -172,22 +189,48 @@ export function createLiveRefresh(deps: LiveRefreshDeps): LiveRefresh {
     return runRefresh();
   };
 
+  const invalidate = () => { invalidation += 1; load.stale = true; return refresh(); };
+
   return {
     refresh,
-    invalidate: () => { invalidation += 1; load.stale = true; return refresh(); },
+    invalidate,
+    pushed: () => {
+      // The page isn't marked stale while it waits: it shows the last read until the trailing refresh runs.
+      if (closed || skew !== undefined || pushTimer !== null) return;
+      const wait = lastReadAt === null ? 0 : lastReadAt + PUSH_REFRESH_FLOOR_MS - deps.now();
+      if (wait <= 0) { void invalidate(); return; }
+      pushTimer = scheduleTimeout(() => { pushTimer = null; void invalidate(); }, wait);
+      pushTimer.unref?.();
+    },
     connectionStatus: (status) => {
-      load.connection = status;
-      if (status !== "connected") load.stale = true;
-      else void refresh();
+      connection = status;
+      if (status !== "connected") {
+        load.stale = true;
+        // Without the stream, the quiet window goes back to 30 s.
+        if (quietTimer !== null) armQuietTimer();
+      } else if (skew === undefined) void refresh();
       deps.onFrame();
     },
     snapshot: () => { syncScope(); return snapshot; },
-    load: () => { syncScope(); return { ...load, ...(lastConfirmedAt !== null && deps.now() - lastConfirmedAt > 60_000 ? { stale: true } : {}) }; },
+    // A read older than one quiet window plus 30 s is overdue: 60 s without the stream, as before, and 5.5 minutes
+    // while it's connected, so an idle page isn't called stale between its 5-minute reads. A drop marks it stale at once.
+    load: () => {
+      syncScope();
+      const overdueAfter = (connection === "connected" ? CONNECTED_QUIET_REFRESH_MS : QUIET_REFRESH_MS) + 30_000;
+      return { ...load, ...(connection !== undefined ? { connection } : {}), ...(skew !== undefined ? { skew } : {}), ...(lastConfirmedAt !== null && deps.now() - lastConfirmedAt > overdueAfter ? { stale: true } : {}) };
+    },
     flashes: () => [...flashes],
     close: () => {
       closed = true;
       controller.abort();
       clearQuietTimer();
+      if (pushTimer !== null) { cancelTimeout(pushTimer); pushTimer = null; }
+    },
+    stopBackground: (message) => {
+      skew = message;
+      clearQuietTimer();
+      if (pushTimer !== null) { cancelTimeout(pushTimer); pushTimer = null; }
+      deps.onFrame();
     },
   };
 }

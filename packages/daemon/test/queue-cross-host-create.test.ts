@@ -10,7 +10,7 @@
 //     identity matches (FR-5/Q-a), and a same-id/different-identity create is a
 //     structured qitem_id_reuse conflict, never a silent overwrite.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
@@ -261,6 +261,30 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
     expect(res.status).toBe(502);
     expect((await res.json()) as { failureClass: string }).toMatchObject({ failureClass: "unreachable" });
     expect(rowCount(db)).toBe(0);
+  });
+
+  it("origin answers too late: the outcome is unknown (indeterminate), never a failed write, and NOTHING is written locally", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const app = makeApp({
+        db,
+        bus,
+        // The write reaches the origin, which hasn't answered when the forward's deadline passes.
+        fetchImpl: ((_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+        })) as unknown as typeof fetch,
+      });
+      const pending = post(app, { ...BASE, hostId: "vps-b" });
+      await vi.advanceTimersByTimeAsync(10_000);
+      const res = await pending;
+      expect(res.status).toBe(502);
+      const body = (await res.json()) as { failureClass: string; outcome?: string; detail: string };
+      expect(body).toMatchObject({ error: "remote_queue_write_failed", hostId: "vps-b", failureClass: "unreachable", outcome: "indeterminate" });
+      expect(body.detail).toContain("the remote may still commit it");
+      expect(rowCount(db)).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("forwards a changed-body warning from the real receiver without duplicating or overwriting its row", async () => {

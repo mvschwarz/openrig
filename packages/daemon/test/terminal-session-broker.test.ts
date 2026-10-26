@@ -143,6 +143,31 @@ describe("TerminalSessionBroker", () => {
     expect(order.join("")).toBe("echo");
   });
 
+  it("drops input queued behind an in-flight write after final teardown", async () => {
+    let releaseFirst!: () => void;
+    let firstStarted!: () => void;
+    const firstStartedGate = new Promise<void>((resolve) => { firstStarted = resolve; });
+    const seen: string[] = [];
+    const sendText = vi.fn(async (_n: string, text: string) => {
+      seen.push(text);
+      if (text === "first") {
+        firstStarted();
+        await new Promise<void>((resolve) => { releaseFirst = resolve; });
+      }
+    });
+    const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({ sendText })));
+    await broker.attach(makeSub());
+
+    const first = broker.input({ type: "text", text: "first" });
+    await firstStartedGate;
+    const second = broker.input({ type: "text", text: "second" });
+    broker.dispose();
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    expect(seen).toEqual(["first"]);
+  });
+
   it("test 4: disconnecting one subscriber keeps the broker alive for the rest", async () => {
     const stopPipePane = vi.fn(async () => ({ ok: true as const }));
     const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({ stopPipePane }), { pollMs: 10 }));
@@ -716,6 +741,51 @@ describe("TerminalSessionBroker - per-subscriber scroll-back (OPR.0.4.0.39)", ()
     fs.appendFileSync(broker.pipeOutputPath!, "BACK-TO-LIVE-STREAM");
     await vi.waitFor(() => {
       expect(a.received.join("")).toContain("BACK-TO-LIVE-STREAM");
+    }, { timeout: 1000 });
+  });
+
+  it("holds live fanout until the scroll-to-bottom repaint completes", async () => {
+    let blockRepaint = false;
+    let releaseRepaint!: () => void;
+    let repaintStarted!: () => void;
+    const repaintGate = new Promise<void>((resolve) => { releaseRepaint = resolve; });
+    const repaintStartedGate = new Promise<void>((resolve) => { repaintStarted = resolve; });
+    const capturePaneScreen = vi.fn(async () => {
+      if (blockRepaint) {
+        repaintStarted();
+        await repaintGate;
+      }
+      return "CURRENT-SCREEN";
+    });
+    const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({
+      capturePaneContent: async () => "history-1\nhistory-2\nhistory-3",
+      capturePaneScreen,
+    }), { pollMs: 10, rows: 3 }));
+    const scrolled = makeSub();
+    const live = makeSub();
+    await broker.attach(scrolled);
+    await broker.attach(live);
+    await broker.scroll(scrolled, 2);
+
+    blockRepaint = true;
+    const repaint = broker.scroll(scrolled, 0);
+    await repaintStartedGate;
+    scrolled.received.length = 0;
+    live.received.length = 0;
+    fs.appendFileSync(broker.pipeOutputPath!, "LIVE-DURING-REPAINT");
+
+    await vi.waitFor(() => {
+      expect(live.received.join("")).toContain("LIVE-DURING-REPAINT");
+    }, { timeout: 1000 });
+    expect(scrolled.received.join("")).not.toContain("LIVE-DURING-REPAINT");
+
+    releaseRepaint();
+    await repaint;
+    expect(scrolled.received.join("")).toContain("CURRENT-SCREEN");
+
+    fs.appendFileSync(broker.pipeOutputPath!, "LIVE-AFTER-REPAINT");
+    await vi.waitFor(() => {
+      expect(scrolled.received.join("")).toContain("LIVE-AFTER-REPAINT");
     }, { timeout: 1000 });
   });
 

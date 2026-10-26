@@ -25,7 +25,6 @@ function fixture() {
   const rig = join(bin, "rig");
   writeFileSync(rig, `#!/bin/sh
 if [ "$1 $2" = "scope resolve-notes" ]; then
-  if [ "$FAIL_NOTES" = 1 ]; then printf 'resolver unavailable' >&2; exit 1; fi
   printf '%s' "$NOTES_RESULT"; exit 0
 fi
 if [ "$1 $2" = "stream emit" ]; then sleep "\${STREAM_DELAY:-0}"; printf '%s\\n' "$*" >> "$CALLS"; exit 0; fi
@@ -80,6 +79,8 @@ describe("managed refocus and trace results", () => {
       "From: peer@test\nThe build is done.", submit(buildPostCompactTurnBoundaryPrompt()), "Another peer update.",
       `A peer quotes an earlier restore:\n${submit(restore)}`,
       `<pasted_content id="fixture">\n${restore}\n</pasted_content id="other">`,
+      `<pasted_content id="fixture">\n${restore}`,
+      `<pasted_content id="fixture">\n${restore}\n</pasted_content id="fixture"> trailing text`,
     ]) {
       expect(f.run("UserPromptSubmit", prompt)).toBe("");
       expect(f.state()).toEqual(before);
@@ -168,21 +169,21 @@ describe("managed refocus and trace results", () => {
     expect(f.calls()).toEqual([]);
   });
 
-  it("retains real resolver failures and resets the episode when the resolver recovers", () => {
+  it("retains real trace failures and resets the episode when the trace recovers", () => {
     const f = fixture();
     f.run("PostCompact");
-    for (let n = 0; n < 3; n++) expect(f.run("UserPromptSubmit", "continue", { FAIL_NOTES: "1" })).toContain("NOTES RESOLUTION GAP");
+    for (let n = 0; n < 3; n++) expect(f.run("UserPromptSubmit", "continue", { OPENRIG_REFOCUS_WORK_NODE: resolve(f.root, "..") })).toContain("TRACE GAP — start is outside configured root");
     expect(f.state().pendingOn).toBe("PostCompact");
     expect(f.calls()).toHaveLength(1);
     f.run("UserPromptSubmit");
     expect(f.state().pendingOn).toBeUndefined();
   });
 
-  it("check mode reports actual resolution failure without changing standalone rendered output", () => {
+  it("check mode reports actual trace failure without changing standalone rendered output", () => {
     const f = fixture();
     const script = join(plugin, "skills/refocusing/scripts/trace-to-root.py");
     const run = (check: boolean) => spawnSync("python3", [script, "--trees", "work", ...(check ? ["--check"] : [])], {
-      env: { ...f.env, FAIL_NOTES: "1" }, encoding: "utf8", timeout: 5_000,
+      env: { ...f.env, OPENRIG_REFOCUS_WORK_NODE: resolve(f.root, "..") }, encoding: "utf8", timeout: 5_000,
     });
     const plain = run(false), checked = run(true);
     expect(plain.status).toBe(0);
@@ -193,8 +194,8 @@ describe("managed refocus and trace results", () => {
   it("confirms a slow stream receipt within the remaining hook budget", () => {
     const f = fixture();
     f.run("PostCompact");
-    for (let n = 0; n < 2; n++) f.run("UserPromptSubmit", "continue", { FAIL_NOTES: "1" });
-    f.run("UserPromptSubmit", "continue", { FAIL_NOTES: "1", STREAM_DELAY: "0.8" });
+    for (let n = 0; n < 2; n++) f.run("UserPromptSubmit", "continue", { OPENRIG_REFOCUS_WORK_NODE: resolve(f.root, "..") });
+    f.run("UserPromptSubmit", "continue", { OPENRIG_REFOCUS_WORK_NODE: resolve(f.root, ".."), STREAM_DELAY: "0.8" });
     const dir = join(f.root, "refocus");
     const file = readdirSync(dir).find((name) => name.endsWith(".health.json"))!;
     expect(JSON.parse(readFileSync(join(dir, file), "utf8")).reportedAt).toBeTruthy();

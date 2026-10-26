@@ -8,7 +8,7 @@ export type { ChatSearchResult };
 
 export interface AskDeps {
   psProjectionService: { getEntries(): PsEntry[] };
-  rigRepo: { findRigsByName(name: string): Rig[]; getRig(rigId: string): RigWithRelations | null };
+  rigRepo: { findRigsByName(name: string): Rig[]; findUnarchivedRigsByName(name: string): Rig[]; getRig(rigId: string): RigWithRelations | null };
   historyQuery: {
     search(rigName: string, question: string): Promise<SearchResult>;
     searchChat(rigId: string, question: string): ChatSearchResult[];
@@ -75,7 +75,12 @@ export class AskService {
 
   async ask(rigName: string, question: string, context?: { nodeId?: string; sessionName?: string; seat?: string; session?: string }): Promise<AskResult> {
     // Resolve rig
-    const rigs = this.deps.rigRepo.findRigsByName(rigName);
+    let rigs = this.deps.rigRepo.findRigsByName(rigName);
+    if (rigs.length > 1) {
+      // An archived rig of the same name counts only when no active one has it
+      const activeRigs = this.deps.rigRepo.findUnarchivedRigsByName(rigName);
+      if (activeRigs.length > 0) rigs = activeRigs;
+    }
 
     if (rigs.length === 0) {
       return {

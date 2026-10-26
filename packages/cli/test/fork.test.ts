@@ -51,6 +51,12 @@ const OK = {
 const OK_KEEP = { ...OK, image: { id: "agent-image:kept:1", name: "kept", version: "1", pinned: true } };
 const NO_TOKEN = { error: "resume_token_unavailable", message: "Could not discover a resume token ... No token was fabricated and no fresh seat was cold-started." };
 const CONFLICT = { ok: false, code: "member_conflict", message: 'Member "dev.forked" already exists in rig "dst". Pick a different member id, or remove the existing seat first.' };
+// The daemon's rig summary: the help examples' rig by name, and a name two rigs share.
+const RIGS = [
+  { id: "01RIGDELIVERY", name: "openrig-delivery", archivedAt: null },
+  { id: "01TWINA", name: "twin", archivedAt: null },
+  { id: "01TWINB", name: "twin", archivedAt: null },
+];
 
 describe("rig fork", () => {
   let server: http.Server;
@@ -59,7 +65,10 @@ describe("rig fork", () => {
 
   beforeAll(async () => {
     server = http.createServer((req, res) => {
-      if (req.method === "POST" && req.url?.includes("/agent-images/fork")) {
+      if (req.method === "GET" && req.url?.startsWith("/api/rigs/summary")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(RIGS));
+      } else if (req.method === "POST" && req.url?.includes("/agent-images/fork")) {
         let body = "";
         req.on("data", (c) => { body += c; });
         req.on("end", () => {
@@ -110,6 +119,30 @@ describe("rig fork", () => {
     prog.addCommand(forkCommand(runningDeps()));
     return prog;
   }
+
+  it("the help's own first example works as written: its rig name resolves to the rig's id", async () => {
+    const fork = forkCommand(runningDeps());
+    let help = "";
+    fork.configureOutput({ writeOut: (s) => { help += s; } });
+    fork.outputHelp();
+    const example = help.split("\n").map((line) => line.trim()).find((line) => line.startsWith("rig fork ") && line.includes("--rig openrig-delivery"))!;
+    capturedBody = null;
+    const { exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", ...example.split(/\s+/)]);
+    });
+    expect(exitCode).toBeUndefined();
+    expect(capturedBody).toMatchObject({ sourceSession: "dev-impl@openrig-delivery", rigId: "01RIGDELIVERY", pod: "dev" });
+  });
+
+  it("refuses a rig name two rigs share, before any fork request, and names both ids", async () => {
+    capturedBody = null;
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "fork", "dev-impl@src", "--rig", "twin", "--pod", "dev", "--member", "forked"]);
+    });
+    expect(exitCode).toBe(1);
+    expect(capturedBody).toBeNull();
+    expect(logs.join("\n")).toMatch(/'twin' matches 2 rigs.*01TWINA, 01TWINB/);
+  });
 
   it("default fork posts the composer body and reports the one-shot successor", async () => {
     const { logs, exitCode } = await captureLogs(async () => {

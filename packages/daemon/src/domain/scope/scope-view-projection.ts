@@ -6,6 +6,8 @@
 // `n`; it is not read here at all. The render never asserts a proven-green the store
 // does not enforce: `paired` means exactly "≥1 C1 drop cites this contract item".
 import * as path from "node:path";
+import YAML from "yaml";
+import { findFrontmatterBlock } from "../frontmatter.js";
 import { readSliceReadiness, readProofContract, type ScopeReadiness, type ProofPolicyRead } from "../proof/judgments.js";
 import { createHash } from "node:crypto";
 import { NODE_FILE_PRECEDENCE } from "./node-file.js";
@@ -71,9 +73,7 @@ export interface MissionScopes {
 }
 
 function extractFrontmatterRaw(content: string): string | null {
-  if (!content.startsWith("---")) return null;
-  const match = /^---\s*\n([\s\S]*?)\n---/.exec(content);
-  return match ? match[1]! : null;
+  return findFrontmatterBlock(content, { openingWhitespace: true })?.yaml ?? null;
 }
 
 function fmValue(fm: string, key: string): string | null {
@@ -81,9 +81,17 @@ function fmValue(fm: string, key: string): string | null {
   return m ? m[1]!.trim().replace(/^["']|["']$/g, "") : null;
 }
 
-/** Parse a YAML block list under `key:` — the C1 `evidences:` / `media:` shape. */
+/** Parse a YAML block list under `key:` — the C1 `evidences:` / `media:` shape. Read it
+ * as YAML first, as the Review composer does: `rig proof add` writes the header with
+ * YAML.stringify, which folds a long text ref onto continuation lines. */
 function fmList(fm: string, key: string): string[] {
-  const lines = fm.split("\n");
+  let doc: unknown;
+  try { doc = YAML.parse(fm); } catch { doc = undefined; }
+  if (doc && typeof doc === "object" && !Array.isArray(doc)) {
+    const value = (doc as Record<string, unknown>)[key];
+    return Array.isArray(value) ? value.map((e) => String(e)).filter((e) => e.trim().length > 0) : [];
+  }
+  const lines = fm.split(/\r?\n/);
   const out: string[] = [];
   let inKey = false;
   for (const line of lines) {
@@ -105,13 +113,14 @@ function sectionBody(content: string, heading: string): string {
   return section.text.split("\n").slice(1).join("\n").trim();
 }
 
-/** Numbered mini-requirement lines (top-level `N.` items; continuation lines folded in). */
+/** Numbered mini-requirement lines (top-level `N.` or `N)` items, as hasAuthoredNumberedItem
+ * reads them; continuation lines folded in). */
 function miniRequirements(content: string): string[] {
   const body = sectionBody(content, "Mini-requirements");
   const items: string[] = [];
   let current: string | null = null;
-  for (const line of body.split("\n")) {
-    const m = /^(\d+)\.\s+(.*)$/.exec(line);
+  for (const line of body.split(/\r?\n/)) {
+    const m = /^(\d+)[.)]\s+(.*)$/.exec(line);
     if (m) {
       if (current !== null) items.push(current.trim());
       current = m[2]!;
@@ -178,7 +187,7 @@ function specShaFromLockedArtifacts(fs: ScopeFsDeps, sliceDir: string, fm: strin
     entryPath = null;
     entryIsSpec = false;
   };
-  for (const line of fm.split("\n")) {
+  for (const line of fm.split(/\r?\n/)) {
     if (/^\s+-\s/.test(line)) closeEntry();
     const p = /^\s+(?:-\s+)?path:\s*(.+)$/.exec(line);
     if (p) entryPath = p[1]!.trim();
@@ -193,9 +202,10 @@ function specShaFromLockedArtifacts(fs: ScopeFsDeps, sliceDir: string, fm: strin
   return createHash("sha256").update(bytes).digest("hex").slice(0, 8);
 }
 
-/** `root`: a selected catalog project's root. It bounds the readiness (policy search and scope identity) exactly as
- *  `rig proof` does for that project, so the scopes view and proof agree; without it the nearest project.yaml is used. */
-export function projectSliceScope(fs: ScopeFsDeps, sliceDir: string, readPolicy?: ProofPolicyRead, root?: string): SliceScopeDetail | null {
+export type SliceScopeHeader = Pick<SliceScopeSummary, "dirName" | "id" | "displayName" | "status" | "stage" | "locks">;
+
+/** A slice's own node file, read once: the counts view's row, and where every projection starts. */
+export function projectSliceHeader(fs: ScopeFsDeps, sliceDir: string): (SliceScopeHeader & { content: string; fm: string }) | null {
   const readmePath = NODE_FILE_PRECEDENCE
     .map((n) => path.join(sliceDir, n))
     .find((p) => fs.exists(p));
@@ -203,6 +213,24 @@ export function projectSliceScope(fs: ScopeFsDeps, sliceDir: string, readPolicy?
   const content = fs.readFile(readmePath);
   if (!content) return null;
   const fm = extractFrontmatterRaw(content) ?? "";
+  const heading = /^# (.+)$/m.exec(content);
+  return {
+    content, fm,
+    dirName: path.basename(sliceDir),
+    id: fmValue(fm, "id"),
+    displayName: heading ? heading[1]!.trim() : path.basename(sliceDir),
+    status: fmValue(fm, "status"),
+    stage: fmValue(fm, "stage"),
+    locks: readLocks(fm),
+  };
+}
+
+/** `root`: a selected catalog project's root. It bounds the readiness (policy search and scope identity) exactly as
+ *  `rig proof` does for that project, so the scopes view and proof agree; without it the nearest project.yaml is used. */
+export function projectSliceScope(fs: ScopeFsDeps, sliceDir: string, readPolicy?: ProofPolicyRead, root?: string): SliceScopeDetail | null {
+  const header = projectSliceHeader(fs, sliceDir);
+  if (!header) return null;
+  const { content, fm } = header;
 
   const items = readProofContract(sliceDir, fs);
   const proofDir = path.join(sliceDir, "proof");
@@ -219,16 +247,15 @@ export function projectSliceScope(fs: ScopeFsDeps, sliceDir: string, readPolicy?
   const contract = pairContract(items, drops);
   const paired = contract.filter((c) => c.paired).length;
 
-  const heading = /^# (.+)$/m.exec(content);
   const progressPath = path.join(sliceDir, "PROGRESS.md");
   return {
     readiness: readSliceReadiness(sliceDir, fs, readPolicy, root),
-    dirName: path.basename(sliceDir),
-    id: fmValue(fm, "id"),
-    displayName: heading ? heading[1]!.trim() : path.basename(sliceDir),
-    status: fmValue(fm, "status"),
-    stage: fmValue(fm, "stage"),
-    locks: readLocks(fm),
+    dirName: header.dirName,
+    id: header.id,
+    displayName: header.displayName,
+    status: header.status,
+    stage: header.stage,
+    locks: header.locks,
     proof: { paired, total: items.length },
     intent: sectionBody(content, "Intent"),
     miniRequirements: miniRequirements(content),

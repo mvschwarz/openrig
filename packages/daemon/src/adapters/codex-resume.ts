@@ -1,14 +1,18 @@
-import { codexTeamWorkspaceArg, type PrepareCodexTeamWorkspace } from "../domain/codex-team-workspace.js";
+import { codexTeamWorkspaceArg, type PrepareCodexSeatFolder, type PrepareCodexTeamWorkspace } from "../domain/codex-team-workspace.js";
+import type { CodexGitAddDirResolver } from "../domain/codex-git-add-dirs.js";
 import { operationalLaunchArg } from "./kernel-authority.js";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { TmuxAdapter } from "./tmux.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import type { ResumeResult } from "./claude-resume.js";
 import { assessNativeResumeProbe, buildCodexResumeCore } from "../domain/native-resume-probe.js";
-import { runSyncSite } from "../domain/sync-site-wrap.js";
+import { verifyCodexPaneProcess, verifyPaneIdleShell, type NativeProcessLister } from "../domain/native-process-lineage.js";
+import { execRuntimeProbe } from "./runtime-probe-exec.js";
 import { shellQuote } from "./shell-quote.js";
 import { codexPostureArg } from "./yolo-mode.js";
 import { observeCodexSandbox } from "../domain/permission-drift.js";
+import { codexEnvelopeArgs } from "../domain/codex-rebuild-permissions.js";
+import { codexMemberEnvelope, observeCodexEnvelope, type CodexMemberPermissions } from "../domain/codex-member-permissions.js";
 import { unknownDaemonSupportMessage, type CodexDaemonSupportDetector } from "../domain/codex-daemon-support.js";
 import { codexNetworkDefaultArg, type CodexNetworkDefaultReader } from "../domain/codex-network-default.js";
 
@@ -19,6 +23,10 @@ export { type ResumeResult };
 
 interface CodexResumeOptions {
   prepareTeamWorkspace?: PrepareCodexTeamWorkspace;
+  /** The seat's own topology folder, ready to write (its LEARNED.md and recap). Absent: no seat folder is added. */
+  prepareSeatFolder?: PrepareCodexSeatFolder;
+  /** The git metadata dirs a resumed seat may write (#2000's rule). Absent: none are added. */
+  resolveGitAddDirs?: CodexGitAddDirResolver;
   seatLaunchEnvironment?: SeatLaunchEnvironment;
   launchPath?: string;
   codexHome?: string;
@@ -30,6 +38,11 @@ interface CodexResumeOptions {
   detectDaemonSupport?: CodexDaemonSupportDetector;
   /** #275: Codex's own answer on the plain floor's network default; absent keeps the existing invocation. */
   readNetworkDefault?: CodexNetworkDefaultReader;
+  /** Ensure the managed Codex config (hooks, trust) just before a resume, as a runtime-adapter launch does, in the
+   *  seat's own home when it has one. */
+  ensureManagedConfig?: (codexHome?: string) => Promise<void>;
+  /** Process rows for the idle-shell check; defaults to the OS listing. */
+  listProcesses?: NativeProcessLister;
 }
 
 export class CodexResumeAdapter {
@@ -64,22 +77,24 @@ export class CodexResumeAdapter {
     nonInterruptive?: boolean,
     kernelAuthority?: boolean,
     teamPermissionDefault?: boolean,
+    // The seat's own CODEX_HOME (member or rig `env:`). TRAILING; absent keeps the daemon's.
+    seatCodexHome?: string,
+    // The seat's own permission envelope, read live; it replaces the posture decision, as on the pod-aware path.
+    codexPermissions?: CodexMemberPermissions,
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: "Codex resume not available" };
     }
+    const codexHome = seatCodexHome ?? this.options.codexHome;
+
+    // Only a seat's own home is passed on, so a call for a seat without one is exactly as before.
+    await (seatCodexHome ? this.options.ensureManagedConfig?.(seatCodexHome) : this.options.ensureManagedConfig?.());
 
     if (codexConfigProfile?.trim()) {
       const { verifyCodexProfileLoads } = await import("../domain/codex-profile-preflight.js");
-      const execFn = this.options.exec ?? (async (cmd: string) => {
-        const { execSync } = await import("node:child_process");
-        return runSyncSite("codex.resume.profile_preflight", () =>
-          execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10_000,
-            ...(this.options.codexHome ? { cwd, env: { ...process.env, CODEX_HOME: this.options.codexHome, ...(this.options.launchPath ? { PATH: this.options.launchPath } : {}) } } : {}),
-          })
-        );
-      });
-      const probeResult = await verifyCodexProfileLoads(codexConfigProfile, execFn, undefined, this.options.codexHome);
+      const execFn = this.options.exec ?? ((cmd: string) => execRuntimeProbe("codex.resume.profile_preflight", cmd,
+        codexHome ? { cwd, env: { ...process.env, CODEX_HOME: codexHome, ...(this.options.launchPath ? { PATH: this.options.launchPath } : {}) } } : {}));
+      const probeResult = await verifyCodexProfileLoads(codexConfigProfile, execFn, undefined, codexHome);
       if (!probeResult.ok) {
         return {
           ok: false,
@@ -90,19 +105,31 @@ export class CodexResumeAdapter {
     }
 
     // #69: detect for the Codex the restored pane runs (its cwd, the launch PATH).
-    const daemonSupport = this.options.detectDaemonSupport ? await this.options.detectDaemonSupport(cwd) : undefined;
+    const daemonSupport = this.options.detectDaemonSupport
+      ? await (seatCodexHome ? this.options.detectDaemonSupport(cwd, seatCodexHome) : this.options.detectDaemonSupport(cwd)) : undefined;
     if (daemonSupport?.kind === "unknown") {
       return { ok: false, code: "resume_failed", message: unknownDaemonSupportMessage(daemonSupport.detail) };
     }
 
     const profileArg = codexConfigProfile ? ` -p ${shellQuote(codexConfigProfile)}` : "";
-    const posture = codexPostureArg(profileArg, process.env, resolvedPosture);
-    const appliedLaunch = observeCodexSandbox(posture);
-    const postureArg = posture + operationalLaunchArg("codex", { kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture });
-    const networkArg = await codexNetworkDefaultArg(this.options.readNetworkDefault, appliedLaunch, cwd, tmuxSessionName);
-    const workspaceArg = teamPermissionDefault && !codexConfigProfile?.trim()
+    const envelope = codexPermissions ? codexMemberEnvelope(codexPermissions) : undefined;
+    const posture = envelope ? profileArg + codexEnvelopeArgs(envelope) : codexPostureArg(profileArg, process.env, resolvedPosture);
+    const appliedLaunch = envelope ? observeCodexEnvelope(envelope) : observeCodexSandbox(posture);
+    const postureArg = posture + operationalLaunchArg("codex", envelope ? { nonInterruptive }
+      : { kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture });
+    const readNetworkDefault = this.options.readNetworkDefault;
+    const networkArg = envelope ? "" : await codexNetworkDefaultArg(seatCodexHome && readNetworkDefault ? ((dir: string) => readNetworkDefault(dir, seatCodexHome)) : readNetworkDefault,
+      appliedLaunch, cwd, tmuxSessionName);
+    const workspaceArg = !envelope && teamPermissionDefault && !codexConfigProfile?.trim()
       && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write"
       ? codexTeamWorkspaceArg(this.options.prepareTeamWorkspace, tmuxSessionName) : "";
+    // The seat's own writable roots, as a launch gets them: its git metadata dirs (so it can still commit) and its topology
+    // folder (its LEARNED.md and recap). Only on the plain workspace-write floor: a named profile here isn't checked for
+    // read-only, and Codex refuses a writable root under one, so it gets none. After the conversation id, so the resume
+    // proof reads the id even from a path with a space.
+    const plainFloor = !codexConfigProfile?.trim() && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write";
+    const ownRoots = plainFloor
+      ? [...(await this.options.resolveGitAddDirs?.(cwd) ?? []), this.options.prepareSeatFolder?.(tmuxSessionName)] : [];
     const cmd = buildCodexResumeCore(
       resumeToken ?? "",
       codexConfigProfile,
@@ -113,18 +140,19 @@ export class CodexResumeAdapter {
       `${postureArg}${networkArg}`,
       daemonSupport?.kind === "supported",
       effort,
-    );
+    ) + ownRoots.filter((root): root is string => !!root).map((root) => ` --add-dir ${shellQuote(root)}`).join("");
 
-    const launchEnv = [this.options.launchPath ? `PATH=${shellQuote(this.options.launchPath)}` : "", this.options.codexHome ? `CODEX_HOME=${shellQuote(this.options.codexHome)}` : ""].filter(Boolean);
+    const launchEnv = [this.options.launchPath ? `PATH=${shellQuote(this.options.launchPath)}` : "", codexHome ? `CODEX_HOME=${shellQuote(codexHome)}` : ""].filter(Boolean);
     const textResult = await this.tmux.sendShellCommand(tmuxSessionName, this.options.seatLaunchEnvironment
-      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { codexCwd: cwd, runtime: "codex" })
+      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { codexCwd: cwd, runtime: "codex", ...(seatCodexHome ? { codexHome: seatCodexHome } : {}) })
       : launchEnv.length ? `env ${launchEnv.join(" ")} ${cmd}` : cmd);
     if (!textResult.ok) {
       return { ok: false, code: "resume_failed", message: textResult.message };
     }
 
     const result = await this.verifyResume(tmuxSessionName);
-    return result.ok ? { ...result, appliedLaunch } : result;
+    const launchFacts = daemonSupport ? { ...appliedLaunch, daemonOptOut: daemonSupport.kind === "supported" } : appliedLaunch;
+    return result.ok ? { ...result, appliedLaunch: launchFacts } : result;
   }
 
   // Mirrors ClaudeResumeAdapter.verifyResume: poll the pane, run the native
@@ -137,15 +165,32 @@ export class CodexResumeAdapter {
     const maxWaitMs = this.options.maxWaitMs ?? 5_000;
     const sleepFn = this.options.sleep ?? sleep;
     const attempts = Math.max(1, Math.floor(maxWaitMs / Math.max(pollMs, 1)) + 1);
-
+    let idleShellRejected = false;
     for (let attempt = 0; attempt < attempts; attempt++) {
       const paneCommand = await this.tmux.getPaneCommand(tmuxSessionName);
       const paneContent = (await this.tmux.capturePaneContent(tmuxSessionName, 40)) ?? "";
-      const probe = assessNativeResumeProbe({
+      let probe = assessNativeResumeProbe({
         runtime: "codex",
         paneCommand,
         paneContent,
       });
+
+      if (probe.code === "returned_to_shell" || probe.code === "awaiting_runtime") {
+        const returnedToShell = probe.code === "returned_to_shell" && paneCommand && SHELL_COMMANDS.has(paneCommand);
+        const idleShell = returnedToShell && await verifyPaneIdleShell({ target: tmuxSessionName, tmux: this.tmux,
+          ...(this.options.listProcesses ? { listProcesses: this.options.listProcesses } : {}) });
+        // A failed proof records that the foreground changed or was occupied by a wrapper; a later stable shell
+        // sample must not erase that uncertainty for this resume attempt.
+        if (returnedToShell && !idleShell) idleShellRejected = true;
+        const process = idleShell ? null : await verifyCodexPaneProcess({ target: tmuxSessionName,
+          tmux: this.tmux as { getPanePid(target: string): Promise<number | null> }, listProcesses: this.options.listProcesses });
+        if (process) {
+          const currentPaneCommand = await this.tmux.getPaneCommand(tmuxSessionName);
+          const currentPaneContent = (await this.tmux.capturePaneContent(tmuxSessionName, 40)) ?? "";
+          probe = assessNativeResumeProbe({ runtime: "codex", paneCommand: currentPaneCommand,
+            paneContent: currentPaneContent, codexProcessVerified: true });
+        }
+      }
 
       if (probe.code === "no_saved_session") {
         return {
@@ -179,11 +224,27 @@ export class CodexResumeAdapter {
 
     const finalCommand = await this.tmux.getPaneCommand(tmuxSessionName);
     const finalContent = (await this.tmux.capturePaneContent(tmuxSessionName, 40)) ?? "";
-    const finalProbe = assessNativeResumeProbe({
+    let finalProbe = assessNativeResumeProbe({
       runtime: "codex",
       paneCommand: finalCommand,
       paneContent: finalContent,
     });
+    const finalIdleObservation = finalCommand && SHELL_COMMANDS.has(finalCommand)
+      ? await verifyPaneIdleShell({ target: tmuxSessionName, tmux: this.tmux,
+        ...(this.options.listProcesses ? { listProcesses: this.options.listProcesses } : {}) })
+      : false;
+    const finalIdleShell = finalIdleObservation && !idleShellRejected;
+
+    if (finalProbe.code === "returned_to_shell" || finalProbe.code === "awaiting_runtime") {
+      const process = finalIdleShell ? null : await verifyCodexPaneProcess({ target: tmuxSessionName,
+        tmux: this.tmux as { getPanePid(target: string): Promise<number | null> }, listProcesses: this.options.listProcesses });
+      if (process) {
+        const currentFinalCommand = await this.tmux.getPaneCommand(tmuxSessionName);
+        const currentFinalContent = (await this.tmux.capturePaneContent(tmuxSessionName, 40)) ?? "";
+        finalProbe = assessNativeResumeProbe({ runtime: "codex", paneCommand: currentFinalCommand,
+          paneContent: currentFinalContent, codexProcessVerified: true });
+      }
+    }
 
     // The final native observation can carry the same positive evidence as a
     // loop observation. Preserve it before the generic shell/timeout fallback.
@@ -209,10 +270,20 @@ export class CodexResumeAdapter {
     }
 
     if (finalCommand && SHELL_COMMANDS.has(finalCommand)) {
+      // A shell label alone isn't a return to the shell: a launch script still starting Codex holds the pane the
+      // same way. Only a proven, stable idle shell ends the resume; anything else keeps the launch for attention.
+      if (finalIdleShell) {
+        return {
+          ok: false,
+          code: "retry_fresh",
+          message: "Codex resume failed: pane returned to shell instead of entering Codex",
+        };
+      }
       return {
         ok: false,
-        code: "retry_fresh",
-        message: "Codex resume failed: pane returned to shell instead of entering Codex",
+        code: "attention_required",
+        message: "Codex resume could not be verified; launch retained: the pane shows a shell that isn't a proven idle shell, so a launch script may still be starting Codex.",
+        evidence: finalContent.split("\n").slice(-12).join("\n"),
       };
     }
 

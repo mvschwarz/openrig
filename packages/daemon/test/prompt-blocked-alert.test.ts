@@ -7,9 +7,10 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
-import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME, REFUSED_PREFIX } from "../src/domain/policies/parked-owner-consumer.js";
+import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME, REFUSED_PREFIX, RESERVE_PREFIX } from "../src/domain/policies/parked-owner-consumer.js";
 import type { PolicyJob } from "../src/domain/policies/types.js";
-import type { WatchdogHistoryEntry } from "../src/domain/watchdog-history-log.js";
+import { WatchdogHistoryLog, type WatchdogHistoryEntry } from "../src/domain/watchdog-history-log.js";
+import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { runWakeLadderTick, queueRecoveryOwnsWake, classifyPromptAfterRefusal } from "../src/domain/queue-wake-ladder.js";
 import { makeOperatorDeliveryEngine } from "../src/domain/gateway/operator-delivery-engine.js";
 import { buildSlackGatewayWire } from "../src/domain/gateway/slack/slack-subsystem.js";
@@ -49,7 +50,7 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
   });
   afterEach(() => { for (const w of wires.splice(0)) w.stop(); db.close(); rmSync(home, { recursive: true, force: true }); });
 
-  function engine(posts: unknown[], registered: boolean | (() => LoadResult) = true) {
+  function engine(posts: unknown[], registered: boolean | (() => LoadResult) = true, to?: string[]) {
     const load = typeof registered === "function" ? registered : () => registered ? registry : { ok: true as const, entities: [] };
     const secrets = join(home, "slack.env");
     writeFileSync(secrets, "SLACK_BOT_TOKEN=fixture-only\n", { mode: 0o600 });
@@ -70,7 +71,7 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     wires.push(wire); wire.startServices?.();
     return makeOperatorDeliveryEngine({ home, queueRepo: repo,
       registry: { loadHumanRegistry: load },
-      dispatch: (op, ref, payload, opts) => wire.dispatcher.dispatch(op, ref, payload, opts),
+      dispatch: (op, ref, payload, opts) => { to?.push(ref); return wire.dispatcher.dispatch(op, ref, payload, opts); },
     });
   }
 
@@ -286,6 +287,65 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(result.outcome).not.toBe("failed");
     await vi.waitFor(() => expect(posts).toHaveLength(1));
     expect(log).not.toHaveBeenCalled();
+  });
+
+  // A closed disposition is a terminal row whose valid JSON tags hold the alert tag and this exact episode tag as
+  // values. It keeps the episode final; anything short of that leaves the episode free to alert again.
+  function episodeKey(id: string) {
+    return notes(id).find(n => n.startsWith(REFUSED_PREFIX))!.slice(REFUSED_PREFIX.length).trim().split(";")[0]!.trim();
+  }
+  async function disposition(tagsText: string, rowState: string) {
+    const row = await repo.create({ sourceSession: "sender@fixture", destinationSession: "archive@fixture", body: "earlier disposition", nudge: false });
+    db.prepare("UPDATE queue_items SET tags = ?, state = ? WHERE qitem_id = ?").run(tagsText, rowState, row.qitemId);
+    return row.qitemId;
+  }
+  const exact = (key: string) => JSON.stringify(["wake-prompt-refusal", `prompt-episode:${key}`]);
+  const escaped = (tags: string[]) => `[${tags.map(t => `"${[...t].map(c => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`).join("")}"`).join(",")}]`;
+
+  it.each([
+    ["exact tags on a done row", exact, "done", false],
+    ["exact tags on a canceled row", exact, "canceled", false],
+    ["exact tags on a handed-off row", exact, "handed-off", false],
+    ["exact tags on a failed row", exact, "failed", false],
+    ["exact tags on a denied row", exact, "denied", false],
+    ["fully escaped tags", (k: string) => escaped(["wake-prompt-refusal", `prompt-episode:${k}`]), "done", false],
+    ["object-form tags", (k: string) => JSON.stringify({ alert: "wake-prompt-refusal", episode: `prompt-episode:${k}` }), "done", false],
+    ["both tags among others, with no recovery-for tag", (k: string) => JSON.stringify(["review", "wake-prompt-refusal", "prompt-destination:x@fixture", `prompt-episode:${k}`]), "done", false],
+    ["exact tags on a pending row", exact, "pending", true],
+    ["exact tags on an in-progress row", exact, "in-progress", true],
+    ["exact tags on a blocked row", exact, "blocked", true],
+    ["invalid JSON holding both strings", (k: string) => `["wake-prompt-refusal","prompt-episode:${k}"`, "done", true],
+    ["the episode tag without the alert tag", (k: string) => JSON.stringify(["review", `prompt-episode:${k}`]), "done", true],
+    ["a longer key sharing this key as a prefix", (k: string) => exact(`${k}0`), "done", true],
+    ["another attempt for the same obligation set", (k: string) => exact(`${k.split("#")[0]}#another-attempt`), "done", true],
+    ["the episode tag in another case", (k: string) => exact(k.toUpperCase()), "done", true],
+    ["the alert tag as an object key, not a value", (k: string) => JSON.stringify({ "wake-prompt-refusal": `prompt-episode:${k}` }), "done", true],
+    ["both tags nested one level down", (k: string) => JSON.stringify([["wake-prompt-refusal", `prompt-episode:${k}`]]), "done", true],
+  ])("closed-episode lookup: %s -> alerts again: %s", async (_label, tags, rowState, alertsAgain) => {
+    const row = await refusal();
+    const decoy = await disposition(tags(episodeKey(row.qitemId)), rowState);
+    await tick(engine([], false));
+    expect(alerts().filter(a => a.qitemId !== decoy)).toHaveLength(alertsAgain ? 1 : 0);
+  });
+
+  it("one closed-episode read per tick serves every open episode, and only the closed episode stays final", async () => {
+    const keys = [0, 1, 2].map(i => `${seat}|fixture${i}#1`);
+    for (const [i, key] of keys.entries()) {
+      const row = await repo.create({ sourceSession: "sender@fixture", destinationSession: seat, body: `episode work ${i}`, nudge: false });
+      repo.update({ qitemId: row.qitemId, actorSession: "watchdog@system", transitionNote: `${RESERVE_PREFIX} ${key}; obligations ${row.qitemId}` });
+      repo.update({ qitemId: row.qitemId, actorSession: "watchdog@system", transitionNote: `${REFUSED_PREFIX} ${key}; Refused: '${seat}' is at an interactive prompt` });
+    }
+    await disposition(exact(keys[0]!), "done");
+    const prepare = vi.spyOn(db, "prepare");
+    let lookups = -1;
+    try {
+      await tick(engine([], false));
+      lookups = prepare.mock.calls.filter(([sql]) => String(sql).includes("state NOT IN ('pending','in-progress','blocked')")).length;
+    } finally { prepare.mockRestore(); }
+    expect(lookups).toBe(1); // one per tick; the per-episode lookup ran once per open episode (3 here)
+    expect(alerts()).toHaveLength(1);
+    expect(alerts()[0]!.tags).toEqual(expect.arrayContaining([`prompt-episode:${keys[1]}`, `prompt-episode:${keys[2]}`]));
+    expect(alerts()[0]!.tags).not.toContain(`prompt-episode:${keys[0]}`);
   });
 
   it("an open prompt recovery owns the shared failed-class escalation", async () => {
@@ -545,6 +605,281 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?").run("[]", badId);
     await tick(port);
     expect(repo.getById(alert.qitemId)?.state).toBe("done");
+  });
+
+  // A two-hour reminder refused at the seat's prompt, recorded the way the watchdog engine records its attempts.
+  function reminder(outcomes: Array<"refused" | "sent">) {
+    const { jobId } = new WatchdogJobsRepository(db).register({ policy: "periodic-reminder", targetSession: seat, intervalSeconds: 7200,
+      specYaml: `policy: periodic-reminder\ntarget:\n  session: ${seat}\ninterval_seconds: 7200\nmessage: sweep\n`, registeredBySession: seat });
+    // Attempts are stamped in real time, in order, so a ladder tick's own records fall between them as they would.
+    const log = new WatchdogHistoryLog(db); let last = 0;
+    const record = (outcome: "refused" | "sent", kind = "selection_prompt") => log.record({ jobId, evaluatedAt: new Date(last = Math.max(Date.now(), last + 1)).toISOString(), outcome,
+      deliveryTargetSession: seat, deliveryStatus: outcome === "sent" ? "ok" : "failed",
+      evaluationNotes: outcome === "refused" ? { deliveryReason: `Refused: '${seat}' is at an interactive prompt (${kind}). No text was sent.` } : null });
+    outcomes.forEach(outcome => record(outcome));
+    return { jobId, record };
+  }
+
+  it("a reminder refused twice at the prompt reaches the seat's orchestrator, and the alert stands down once one lands", async () => {
+    const posts: unknown[] = []; const port = engine(posts); const wakes: string[] = [];
+    const opts = { resolveOrchestrator: () => "lead@fixture", attemptWake: async (_id: string, target: string) => { wakes.push(target); return "verified"; } };
+    const { jobId, record } = reminder(["refused"]);
+    await tick(port, opts);
+    expect(alerts()).toEqual([]);
+    record("refused");
+    await tick(port, opts);
+    expect(alerts()).toHaveLength(1);
+    expect(alerts()[0]?.destinationSession).toBe("lead@fixture");
+    expect(alerts()[0]?.body).toContain(jobId);
+    record("sent");
+    await tick(port, opts);
+    expect(alerts()).toEqual([]);
+    expect(wakes).toEqual(["lead@fixture"]); expect(posts).toEqual([]);
+  });
+
+  it("a seat with no orchestrator: its twice-refused reminder reaches a person, never the blocked seat", async () => {
+    const posts: unknown[] = []; const port = engine(posts);
+    const { jobId } = reminder(["refused", "refused"]);
+    await tick(port);
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(JSON.stringify(posts)).toContain(jobId);
+  });
+
+
+  const toLead = (wakes: string[]) => ({ resolveOrchestrator: () => "lead@fixture",
+    attemptWake: async (_id: string, target: string) => { wakes.push(target); return "verified"; } });
+
+  it.each([[49, false], [50, false], [51, false], [51, true]] as const)("%i refusals after a delivered reminder stay one episode (first alert closed by hand: %s)", async (count, closed) => {
+    const port = engine([]); const wakes: string[] = [];
+    const { record } = reminder(["sent", "refused", "refused"]);
+    await tick(port, toLead(wakes));
+    const [alert] = alerts();
+    if (closed) repo.update({ qitemId: alert!.qitemId, actorSession: "lead@fixture", state: "done", closureReason: "no-follow-on", transitionNote: "handled by hand" });
+    for (let i = 2; i < count; i++) record("refused");
+    await tick(port, toLead(wakes));
+    expect(alerts().map(a => a.qitemId)).toEqual(closed ? [] : [alert!.qitemId]);
+    expect(wakes).toEqual(["lead@fixture"]);
+  });
+
+  it("a prompt that clears and comes back between reminders raises a new alert after two new refusals", async () => {
+    const port = engine([]); const wakes: string[] = [];
+    const { record } = reminder(["refused", "refused"]);
+    await tick(port, toLead(wakes));
+    const [first] = alerts();
+    state = "clear"; await tick(port, toLead(wakes));
+    expect(alerts()).toEqual([]);
+    state = "blocked"; await tick(port, toLead(wakes));
+    record("refused"); await tick(port, toLead(wakes));
+    expect(alerts()).toEqual([]);
+    record("refused"); await tick(port, toLead(wakes));
+    expect(alerts()).toHaveLength(1);
+    expect(alerts()[0]?.qitemId).not.toBe(first!.qitemId);
+    expect(wakes).toEqual(["lead@fixture", "lead@fixture"]);
+  });
+
+  it("another job's alert retiring while the prompt stays blocked doesn't restart an episode closed by hand", async () => {
+    const port = engine([]); const wakes: string[] = [];
+    const a = reminder(["sent", "refused", "refused"]);
+    await tick(port, toLead(wakes));
+    const [closedByHand] = alerts();
+    repo.update({ qitemId: closedByHand!.qitemId, actorSession: "lead@fixture", state: "done", closureReason: "no-follow-on", transitionNote: "handled by hand" });
+    const b = reminder(["refused", "refused"]);
+    await tick(port, toLead(wakes));
+    expect(alerts()).toHaveLength(1);
+    new WatchdogJobsRepository(db).stop(b.jobId);
+    await tick(port, toLead(wakes));
+    expect(alerts()).toEqual([]);
+    a.record("refused"); a.record("refused");
+    await tick(port, toLead(wakes));
+    expect(alerts()).toEqual([]);
+    expect(wakes).toEqual(["lead@fixture", "lead@fixture"]);
+  });
+
+  it("a prompt alert routed to a fallback still records a cleared prompt, so the next blocked episode alerts", async () => {
+    const port = engine([]); const wakes: string[] = [];
+    const { record } = reminder(["sent", "refused", "refused"]);
+    await tick(port, toLead(wakes));
+    const [first] = alerts();
+    repo.routeToFallback(first!.qitemId, "backup@fixture", "lead removed");
+    state = "clear"; await tick(port, toLead(wakes));
+    expect(alerts()).toEqual([]);
+    state = "blocked"; record("refused"); record("refused");
+    await tick(port, toLead(wakes));
+    expect(alerts()).toHaveLength(1);
+    expect(wakes).toEqual(["lead@fixture", "lead@fixture"]);
+  });
+
+  it("a reminder that joins a seat's existing prompt alert is named on it, and nothing is sent again", async () => {
+    await refusal(); const port = engine([]); const wakes: string[] = [];
+    await tick(port, toLead(wakes));
+    const [alert] = alerts();
+    const { jobId } = reminder(["refused", "refused"]);
+    await tick(port, toLead(wakes));
+    expect(alerts().map(a => a.qitemId)).toEqual([alert!.qitemId]);
+    expect(notes(alert!.qitemId)).toContain(`wake-escalation watchdog reminders added: ${jobId}`);
+    expect(wakes).toEqual(["lead@fixture"]);
+  });
+
+  // #81: a Claude seat at a choice prompt no hook announces (its weekly usage-limit dialog) holds open rows. Its own
+  // evidence stays unknown, so before this only the transport's refusal knew, and nothing escalated.
+  const choiceRefusal = `Refused: '${seat}' is at an interactive prompt (selection_prompt). A message must not select or approve it.`;
+
+  it("#81: a choice prompt no hook announces reaches the registry's first human after one retry interval, never the seat", async () => {
+    const row = await refusal(1, choiceRefusal); state = "unknown";
+    const posts: unknown[] = []; const to: string[] = []; const port = engine(posts, true, to);
+    // Inside the interval: a prompt someone answers within seconds never escalates.
+    await tick(port, { now: new Date() });
+    expect(alerts()).toEqual([]);
+    await tick(port);
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    // The operator rung's only route is the human registry's first entry; the blocked seat is never typed into.
+    expect(to).toEqual(["human-owner@external"]);
+    expect(JSON.stringify(posts)).toContain("assigned work");
+    expect(repo.getById(row.qitemId)?.state).toBe("in-progress");
+    await tick(port); expect(posts).toHaveLength(1);
+  });
+
+  it("#81: other refusals with no evidence keep waiting for it, as before", async () => {
+    await refusal(); state = "unknown"; const posts: unknown[] = []; const port = engine(posts);
+    await tick(port); await tick(port);
+    expect(alerts()).toEqual([]); expect(posts).toEqual([]);
+  });
+
+  it("#81: a choice prompt with newer clearing evidence stays quiet past the interval", async () => {
+    await refusal(1, choiceRefusal); state = "clear"; const posts: unknown[] = []; const port = engine(posts);
+    await tick(port);
+    expect(alerts()).toEqual([]); expect(posts).toEqual([]);
+    expect(notes(episodeRows[0]!).some(note => note.includes("interactive prompt cleared"))).toBe(true);
+  });
+
+  // An open refused episode at `who`, as the parked-owner policy records it; `at` backdates its notes.
+  async function refusedEpisode(who: string, kind = "selection_prompt", at?: string, n = 1) {
+    const row = await repo.create({ sourceSession: "sender@fixture", destinationSession: who, body: `work held by ${who}`, summary: `work held by ${who}`, nudge: false });
+    const key = `${who}|fixture#${n}`;
+    for (const transitionNote of [`${RESERVE_PREFIX} ${key}; obligations ${row.qitemId}`,
+      `${REFUSED_PREFIX} ${key}; Refused: '${who}' is at an interactive prompt (${kind}). No text was sent.`]) {
+      repo.transitionLog.append({ qitemId: row.qitemId, state: "pending", actorSession: "watchdog@system", transitionNote });
+    }
+    if (at) db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = ? AND (transition_note LIKE ? OR transition_note LIKE ?)")
+      .run(at, row.qitemId, `${RESERVE_PREFIX}%`, `${REFUSED_PREFIX}%`);
+    return row;
+  }
+
+  it("#81: seats blocked at a prompt together (a shared usage limit) post to the person once; the next posts after that alert retires", async () => {
+    await refusedEpisode("first@fixture"); await refusedEpisode("second@fixture");
+    const posts: unknown[] = []; const to: string[] = []; const port = engine(posts, true, to);
+    const states: Record<string, "blocked" | "clear" | "unknown"> = { "first@fixture": "blocked", "second@fixture": "blocked" };
+    const read = { readPromptState: (dest: string) => states[dest] ?? "unknown" };
+    await tick(port, read); await tick(port, read);
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    const dispatched = alerts().filter(a => notes(a.qitemId).some(n => n.includes("operator dispatched-to-engine")));
+    const waiting = alerts().filter(a => notes(a.qitemId).some(n => n.includes("operator waiting on")));
+    expect(dispatched).toHaveLength(1); expect(waiting).toHaveLength(1);
+    expect(notes(waiting[0]!.qitemId).join("\n")).toContain(`operator waiting on ${dispatched[0]!.qitemId}`);
+    expect(to).toEqual(["human-owner@external"]);
+    const postedSeat = dispatched[0]!.tags!.find(t => t.startsWith("prompt-destination:"))!.slice("prompt-destination:".length);
+    states[postedSeat] = "clear";
+    await tick(port, read); await tick(port, read);
+    expect(repo.getById(dispatched[0]!.qitemId)?.state).toBe("done");
+    await vi.waitFor(() => expect(posts).toHaveLength(2));
+    expect(to).toEqual(["human-owner@external", "human-owner@external"]);
+  });
+
+  it("#81: a permission prompt never waits behind a posted choice-prompt alert", async () => {
+    await refusedEpisode("choice@fixture"); await refusedEpisode("approve@fixture", "permission_prompt");
+    const posts: unknown[] = []; const port = engine(posts);
+    const read = { readPromptState: () => "blocked" as const };
+    await tick(port, read); await tick(port, read);
+    await vi.waitFor(() => expect(posts).toHaveLength(2));
+    expect(alerts().some(a => notes(a.qitemId).some(n => n.includes("operator waiting on")))).toBe(false);
+  });
+
+  const ago = (base: number, seconds: number) => new Date(base - seconds * 1000).toISOString();
+
+  it.each(["selection_prompt", "permission_prompt"])("#81: a choice prompt cleared before a new %s refusal lends it no age", async kind => {
+    const base = Date.now(); const clearedAt = Date.parse(ago(base, 2));
+    await refusedEpisode("again@fixture", "selection_prompt", ago(base, 300), 1);
+    await refusedEpisode("again@fixture", kind, ago(base, 1), 2);
+    const posts: unknown[] = []; const port = engine(posts);
+    // Evidence at T-2s cleared the first prompt; the new refusal at T-1s has nothing newer.
+    await tick(port, { now: new Date(base), readPromptState: (_dest, refusedAt) => Date.parse(refusedAt) < clearedAt ? "clear" : "unknown" });
+    expect(alerts()).toEqual([]); expect(posts).toEqual([]);
+  });
+
+  it("#81: a choice prompt that never cleared keeps its age when new work's refusal arrives", async () => {
+    const base = Date.now();
+    await refusedEpisode("again@fixture", "selection_prompt", ago(base, 300), 1);
+    await refusedEpisode("again@fixture", "selection_prompt", ago(base, 1), 2);
+    const posts: unknown[] = []; const port = engine(posts);
+    await tick(port, { now: new Date(base), readPromptState: () => "unknown" });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+  });
+
+  const toOps = { humanRung: "explicit-only" as const, loadHumanRegistry: () => ({ ok: true as const, entities: [] }) };
+
+  it("#81: under explicit-only a choice-prompt alert stays with an agent operator seat; a permission prompt beside it still posts", async () => {
+    vi.stubEnv("OPENRIG_WORKSPACE_OPERATOR_SEAT_NAME", "ops@fixture");
+    try {
+      await refusedEpisode("choice@fixture"); await refusedEpisode("approve@fixture", "permission_prompt");
+      const posts: unknown[] = []; const port = engine(posts);
+      const opts = { ...toOps, readPromptState: () => "blocked" as const };
+      await tick(port, opts); await tick(port, opts);
+      await vi.waitFor(() => expect(posts).toHaveLength(1));
+      await tick(port, opts); expect(posts).toHaveLength(1);
+      expect(JSON.stringify(posts)).toContain("approve@fixture");
+      const alertFor = (dest: string) => alerts().find(a => a.tags?.includes(`prompt-destination:${dest}`))!;
+      expect(alertFor("choice@fixture").destinationSession).toBe("ops@fixture");
+      expect(alertFor("choice@fixture").tags).toContain("prompt-kind:choice");
+      expect(alertFor("approve@fixture").tags).not.toContain("prompt-kind:choice");
+      expect(notes(alertFor("choice@fixture").qitemId).join("\n")).toContain("human rung explicit-only; not posted to a person");
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("#81: a reminder refused twice at a choice prompt follows explicit-only too", async () => {
+    vi.stubEnv("OPENRIG_WORKSPACE_OPERATOR_SEAT_NAME", "ops@fixture");
+    try {
+      const posts: unknown[] = []; const port = engine(posts);
+      reminder(["refused", "refused"]);
+      await tick(port, toOps);
+      const [alert] = alerts();
+      expect(alert?.tags).toContain("prompt-kind:choice");
+      expect(notes(alert!.qitemId).join("\n")).toContain("human rung explicit-only; not posted to a person");
+      expect(new DispatchBuffer(home).pending()).toEqual([]);
+      expect(posts).toEqual([]);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("#81: a permission prompt that joins a choice alert the explicit-only floor kept from a person still posts, once", async () => {
+    vi.stubEnv("OPENRIG_WORKSPACE_OPERATOR_SEAT_NAME", "ops@fixture");
+    try {
+      await refusedEpisode("mixed@fixture", "selection_prompt", undefined, 1);
+      const posts: unknown[] = []; const port = engine(posts);
+      const opts = { ...toOps, readPromptState: () => "blocked" as const };
+      await tick(port, opts);
+      const [alert] = alerts();
+      expect(posts).toEqual([]);
+      await refusedEpisode("mixed@fixture", "permission_prompt", undefined, 2);
+      await tick(port, { ...opts, now: new Date(Date.now() + 240_000) });
+      await vi.waitFor(() => expect(posts).toHaveLength(1));
+      await tick(port, { ...opts, now: new Date(Date.now() + 360_000) }); expect(posts).toHaveLength(1);
+      expect(alerts().map(a => a.qitemId)).toEqual([alert!.qitemId]);
+      expect(alerts()[0]!.tags).not.toContain("prompt-kind:choice");
+      expect(notes(alert!.qitemId).join("\n")).toContain("explicit-only floor");
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("#81: a reminder whose latest refusal turns from a choice to a permission prompt still posts after the explicit-only floor", async () => {
+    vi.stubEnv("OPENRIG_WORKSPACE_OPERATOR_SEAT_NAME", "ops@fixture");
+    try {
+      const posts: unknown[] = []; const port = engine(posts);
+      const { record } = reminder(["refused", "refused"]);
+      await tick(port, toOps);
+      expect(posts).toEqual([]);
+      record("refused", "permission_prompt");
+      await tick(port, { ...toOps, now: new Date(Date.now() + 240_000) });
+      await vi.waitFor(() => expect(posts).toHaveLength(1));
+      expect(alerts()[0]!.tags).not.toContain("prompt-kind:choice");
+    } finally { vi.unstubAllEnvs(); }
   });
 
 });

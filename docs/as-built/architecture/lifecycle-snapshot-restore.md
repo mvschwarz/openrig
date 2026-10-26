@@ -37,8 +37,9 @@ All in `packages/daemon/src/domain/types.ts`. The spec/projection types live in
   `resumed`, `rebuilt`, `fresh`, `fresh-primed`, `awaiting-decision`,
   `failed`, `attention_required`, `operator_recovered`, `n-a`. The restore
   result itself, `RestoreNodeResult.status` (`types.ts:475`), has the same
-  values without `n-a`: **8**
+  values without `n-a`, plus `left_attached`: **9**
   (`grep -E '^  status: "resumed"' packages/daemon/src/domain/types.ts | grep -o '"[^"]*"' | wc -l`).
+  `left_attached` isn't a `NodeRestoreOutcome`; the inventory projects it as `n-a`.
   Where `restore-orchestrator.ts` sets each one:
   - `resumed` — `baseStatus = "resumed"` after a legacy resume (`:1030`); the
     status is returned only by `finishJoinedResume` (defined `:1320`, called
@@ -61,6 +62,10 @@ All in `packages/daemon/src/domain/types.ts`. The spec/projection types live in
     `:1292`, `:1300`).
   - `operator_recovered` — only from later reconciliation,
     `reconcileNodeRuntimeTruth` (`:1590`, event at `:1727`).
+  - `left_attached` — a seat joined with `rig attach` as an external CLI,
+    returned first in `restoreNodeWithCompensation`: nothing is launched and
+    its binding and claim stay as they were. It doesn't count against the
+    rollup, and its forecast in `restore-plan-preview.ts` is `leave-attached`.
 - **RestoreRigResult** (`types.ts:444`) — the rig-level rollup, **4** values
   (`grep '^export type RestoreRigResult' packages/daemon/src/domain/types.ts | grep -o '"[^"]*"' | wc -l`):
   `fully_restored`, `partially_restored`, `failed`, `not_attempted`.
@@ -145,15 +150,18 @@ Restore behavior, each point checked in `restore-orchestrator.ts`:
   prefilters missing optional artifacts into warnings; **hard-fails a node if
   a required startup file is missing** (`:1161` — status `"failed"`, error
   "Missing required startup files: …"). Before any mutation,
-  `validatePreRestore` (`restore-preconditions.ts:7`, called at
-  `restore-orchestrator.ts:271`) already blocks the whole restore when a node
-  that will consume replay is missing a required startup file
-  (`required_startup_file_missing`, `restore-preconditions.ts:151`; outcome
-  `pre_restore_validation_failed`, `restore-orchestrator.ts:291`). Its other
+  `validatePreRestore` (`restore-preconditions.ts:7`, called from
+  `RestoreOrchestrator.restore`) finds a node that will consume replay and is
+  missing a required startup file (`required_startup_file_missing`, or
+  `startup_owner_root_missing`). Restore holds only that node: it is not
+  launched and is reported `failed` ("Not launched: …" with the blocker's
+  message and remediation), and the rest of the rig restores. When every node
+  the restore would launch is held, or for any other blocker, the whole restore
+  stops before any mutation (outcome `pre_restore_validation_failed`). Its other
   blockers are `invalid_snapshot_data` (`restore-preconditions.ts:27`),
   `invalid_topology_roster` (`:78`), `checkpoint_missing_node_cwd` (`:91`),
-  `startup_owner_root_missing` (`:139`), `service_rig_root_missing` (`:187`)
-  and `service_compose_file_missing` (`:197`). The `/api/up` route returns
+  `service_rig_root_missing` (`:187`) and `service_compose_file_missing`
+  (`:197`). The `/api/up` route returns
   that outcome as HTTP 409 with `status: "not_attempted"`
   (`routes/up.ts:162`). A node that resumes its exact native session replays
   no startup files, actions, guidance or skills (`replayContained`,
@@ -256,10 +264,10 @@ cited here by number with the code that carries them):
 - **`rig seat continue <seat>`** — when a fresh launch stops at a native
   prompt before its startup context is delivered, the startup orchestrator
   fails it as `attention_required` and adds "run: rig seat continue
-  <session>" (`startup-orchestrator.ts:600`). The command
-  (`packages/cli/src/commands/seat.ts:633`) calls
-  `POST /api/seat/continue/:seatRef` (`routes/seat.ts:293`), which runs
-  `continueFreshStartup` (`seat-lifecycle-service.ts:395`): it re-checks the
+  <session>" (`startup-orchestrator.ts:822`). The command
+  (`packages/cli/src/commands/seat.ts:816`) calls
+  `POST /api/seat/continue/:seatRef` (`routes/seat.ts:367`), which runs
+  `continueStartup` (`seat-lifecycle-service.ts:723`): it re-checks the
   binding, pane and runtime, then delivers the pending context to the same
   conversation without relaunching. In a restore, a pod-aware seat in this
   state reports `attention_required` (`restore-orchestrator.ts:1265`). See

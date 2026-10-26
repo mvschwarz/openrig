@@ -59,6 +59,13 @@ describe("startup attention guidance", () => {
     expect(json.err).toBe("");
     expect(json.exit).toBeUndefined();
   });
+  it("names a seat's launch error on a partial fresh up (OPR.0.7.0.9)", async () => {
+    const error = "addition_missing: the agent file claude/missing.md is missing";
+    const r = await render({ status: "partial", rigId: "proof", stages: [{ stage: "import_rig", status: "failed", detail: {
+      nodes: [{ logicalId: "dev.ok", status: "launched" }, { logicalId: "dev.proof", status: "failed", error }] } }] }, 200);
+    expect(r.err).toContain(`dev.proof: failed: ${error}`);
+    expect(r.err).not.toContain("dev.ok");
+  });
   it("renders actual structured response and all affected members without spec advice", async () => {
     const body = attentionBody();
     const r = await render(body);

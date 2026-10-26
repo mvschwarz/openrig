@@ -8,8 +8,12 @@ import {
   WorkflowProjectorError,
   type WorkflowRuntime,
 } from "../domain/workflow-runtime.js";
+import { normalizeWorkflowScope, WorkflowScopeError, type WorkflowScope } from "../domain/workflow-scope.js";
+import { ProjectReadError } from "../domain/workspace/project-catalog.js";
+import { declaredProject } from "../domain/workspace/project-read.js";
 import { WorkflowSpecError } from "../domain/workflow-spec-cache.js";
 import { WorkflowHumanDestinationError } from "../domain/workflow-human-destination.js";
+import { requireSenderIdentity, resolveRecordedProvenance } from "./require-sender-identity.js";
 
 /**
  * Workflow runtime HTTP routes (PL-004 Phase D). Backs `rig workflow` CLI.
@@ -42,6 +46,9 @@ export function workflowRoutes(): Hono {
     c: { json: (body: unknown, status?: number) => Response },
     err: unknown,
   ): Response {
+    if (err instanceof WorkflowScopeError) {
+      return c.json({ error: err.code, message: err.message }, 400);
+    }
     if (err instanceof WorkflowHumanDestinationError) {
       return c.json({ error: err.code, message: err.message, ...err.details }, 409);
     }
@@ -202,20 +209,62 @@ export function workflowRoutes(): Hono {
         entryOwnerSession?: string;
         /** OPR.0.4.6.FAC1: overrides the spec's target.rig default. */
         targetRig?: string;
-      }>()
+        /** Scope stamped on every packet the instance creates (migration 110). One that cannot be applied is
+         *  ignored with an advisory; bare project/mission/slice/tags fields keep their old meaning: ignored. */
+        scope?: { project?: unknown; mission?: unknown; slice?: unknown; tags?: unknown };
+      } & Record<string, unknown>>()
       .catch(() => ({} as never));
     if (!body.specPath) return c.json({ error: "specPath is required" }, 400);
     if (!body.rootObjective) return c.json({ error: "rootObjective is required" }, 400);
     if (!body.createdBySession) return c.json({ error: "createdBySession is required" }, 400);
     try {
+      // A request can carry scope the route cannot apply: main accepted every such request, ignoring the key and
+      // creating one unscoped instance, so this route does too. The instance is created unscoped, nothing the scope
+      // named is recorded, and the response advisories say plainly that it was not applied. A scope that can be
+      // applied (validated here, project in the workspace catalog) is stamped on every packet.
+      let scope: WorkflowScope | null = null;
+      let scopeFailure: string | null = null;
+      if (body.scope !== undefined) {
+        try {
+          if (body.scope === null || typeof body.scope !== "object" || Array.isArray(body.scope)) {
+            throw new WorkflowScopeError("scope_invalid", "scope must be an object: { project?, mission?, slice?, tags? }");
+          }
+          scope = normalizeWorkflowScope({ project: body.scope.project, mission: body.scope.mission, slice: body.scope.slice, tags: body.scope.tags });
+          // The packets must show up under a project the workspace catalog declares (same lookup as the project reads).
+          if (scope?.project) declaredProject(c, scope.project);
+        } catch (err) {
+          if (err instanceof WorkflowScopeError || err instanceof ProjectReadError) {
+            scope = null;
+            scopeFailure = `${err.code}: ${err.message}`;
+          } else {
+            throw err;
+          }
+        }
+      }
+      const ignoredFields = ["project", "mission", "slice", "tags"].filter((field) => body[field] !== undefined);
       const result = await getRuntime(c).instantiate({
         specPath: body.specPath,
         rootObjective: body.rootObjective,
         createdBySession: body.createdBySession,
         entryOwnerSession: body.entryOwnerSession,
         targetRig: body.targetRig,
+        ...(scope ? { scope } : {}),
       });
-      return c.json(result, 201);
+      const notes: string[] = [];
+      if (ignoredFields.length > 0) {
+        notes.push(`Ignored request body fields: ${ignoredFields.join(", ")}. Send scope as an object ({ project, mission, slice, tags }) to apply it. `
+          + (scope ? "The instance carries the scope object's scope." : "The instance was created unscoped."));
+      }
+      if (scopeFailure) {
+        notes.push(`Scope not applied (${scopeFailure}). Instance ${result.instance.instanceId} was created unscoped: its packets carry no project, mission, slice or tag scope. `
+          + "Correct the scope and instantiate again for a scoped instance; that creates a second instance.");
+      }
+      if (notes.length === 0) return c.json(result, 201);
+      return c.json({
+        ...result,
+        advisories: [...(result.advisories ?? []), ...notes],
+        scopeIgnored: { fields: [...ignoredFields, ...(scopeFailure ? ["scope"] : [])], message: notes.join(" ") },
+      }, 201);
     } catch (err) {
       return errorResponse(c, err);
     }
@@ -237,7 +286,10 @@ export function workflowRoutes(): Hono {
     if (!body.instanceId) return c.json({ error: "instanceId is required" }, 400);
     if (!body.currentPacketId) return c.json({ error: "currentPacketId is required" }, 400);
     if (!body.exit) return c.json({ error: "exit is required" }, 400);
-    if (!body.actorSession) return c.json({ error: "actorSession is required" }, 400);
+    // The agent that projected the step is the caller: its transport identity supersedes a declared actorSession, which is
+    // used, labelled claimed, only when the caller has none.
+    const actor = requireSenderIdentity(c, { verb: "workflow project", bodyClaim: body.actorSession });
+    if (!actor.ok) return actor.response;
     try {
       const result = await getRuntime(c).project({
         instanceId: body.instanceId,
@@ -246,7 +298,8 @@ export function workflowRoutes(): Hono {
         resultNote: body.resultNote,
         blockedOn: body.blockedOn,
         closureEvidence: body.closureEvidence,
-        actorSession: body.actorSession,
+        actorSession: actor.session,
+        identityProvenance: resolveRecordedProvenance(c, actor),
         nextOwnerSession: body.nextOwnerSession,
       });
       return c.json(result);
@@ -331,13 +384,15 @@ export function workflowRoutes(): Hono {
       .json<{ packetId?: string; toSession?: string; actorSession?: string; reason?: string }>()
       .catch(() => ({}) as never);
     if (!body.toSession) return c.json({ error: "toSession is required" }, 400);
-    if (!body.actorSession) return c.json({ error: "actorSession is required" }, 400);
+    const actor = requireSenderIdentity(c, { verb: "workflow route", bodyClaim: body.actorSession });
+    if (!actor.ok) return actor.response;
     try {
       const result = await getRuntime(c).route({
         instanceId,
         packetId: body.packetId,
         toSession: body.toSession,
-        actorSession: body.actorSession,
+        actorSession: actor.session,
+        identityProvenance: resolveRecordedProvenance(c, actor),
         reason: body.reason,
       });
       return c.json(result);
@@ -351,13 +406,15 @@ export function workflowRoutes(): Hono {
     const body = await c.req
       .json<{ occurrenceId?: string; decision?: string; actorSession?: string }>()
       .catch(() => ({}) as never);
-    if (!body.actorSession) return c.json({ error: "actorSession is required" }, 400);
+    const actor = requireSenderIdentity(c, { verb: "workflow resume", bodyClaim: body.actorSession });
+    if (!actor.ok) return actor.response;
     try {
       const result = await getRuntime(c).resume({
         instanceId,
         occurrenceId: body.occurrenceId,
         decision: body.decision,
-        actorSession: body.actorSession,
+        actorSession: actor.session,
+        identityProvenance: resolveRecordedProvenance(c, actor),
       });
       return c.json(result);
     } catch (err) {
@@ -369,9 +426,11 @@ export function workflowRoutes(): Hono {
     const instanceId = c.req.param("instance_id");
     const body = await c.req.json<{ reason?: string; actorSession?: string }>().catch(() => ({} as never));
     if (!body.reason) return c.json({ error: "reason is required" }, 400);
-    if (!body.actorSession) return c.json({ error: "actorSession is required" }, 400);
+    const actor = requireSenderIdentity(c, { verb: "workflow abort", bodyClaim: body.actorSession });
+    if (!actor.ok) return actor.response;
     try {
-      return c.json(await getRuntime(c).abort({ instanceId, reason: body.reason, actorSession: body.actorSession }));
+      return c.json(await getRuntime(c).abort({ instanceId, reason: body.reason, actorSession: actor.session,
+        identityProvenance: resolveRecordedProvenance(c, actor) }));
     } catch (err) {
       return errorResponse(c, err);
     }
@@ -380,7 +439,7 @@ export function workflowRoutes(): Hono {
   app.get("/:instance_id/trace", (c) => {
     const instanceId = c.req.param("instance_id");
     try {
-      const result = getRuntime(c).continue(instanceId);
+      const result = getRuntime(c).continue(instanceId, { fullHistory: c.req.query("full") === "true" });
       return c.json(result);
     } catch (err) {
       return errorResponse(c, err);

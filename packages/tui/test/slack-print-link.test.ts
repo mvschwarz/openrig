@@ -23,7 +23,7 @@ function snapshot(tokens: "missing" | "resolved" | "unavailable", manifest = tru
       configuration: { enabled: false, channel: null, inboundDestination: null, outboundDestinations: [], postLevel: "NOTICE", interruptLevel: "ALERT", botToken: tokens, appToken: tokens },
       running: { state: "active", activatedAt: null, outboundReady: false, inboundReady: false, inboundState: "idle", applied: "matching" },
       state: "disabled", nextAction: tokens === "missing" ? "rig slack manifest --url" : "rig slack enable",
-      verification: { state: "none", at: null, actor: null }, registry: { state: "available", path: null }, humans: [],
+      registry: { state: "available", path: null }, humans: [],
     },
   } as FleetSnapshot;
 }

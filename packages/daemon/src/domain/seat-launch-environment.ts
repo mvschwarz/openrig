@@ -7,7 +7,7 @@ import { shellQuote } from "../adapters/shell-quote.js";
 // Explicit public launch metadata, not a prefix/denylist over credential names.
 // Provider keys and OPENRIG_ACTIVITY_HOOK_TOKEN keep their non-typed channel.
 export const SEAT_PUBLIC_ENV_KEYS = [
-  "OPENRIG_HOME", "OPENRIG_URL", "OPENRIG_HOST", "OPENRIG_PORT",
+  "OPENRIG_HOME", "OPENRIG_DB", "TMUX_TMPDIR", "OPENRIG_URL", "OPENRIG_HOST", "OPENRIG_PORT",
   "OPENRIG_NODE_ID", "OPENRIG_SESSION_NAME", "OPENRIG_RUNTIME",
   "OPENRIG_OCCUPANT_GENERATION", "OPENRIG_TRANSCRIPTS_LINES",
   "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS",
@@ -100,10 +100,16 @@ export class SeatLaunchEnvironment {
     return bin;
   }
 
-  async command(session: string, command: string, target: { codexCwd?: string; nodeId?: string; generation?: string; runtime?: string } = {}): Promise<string> {
+  async command(session: string, command: string, target: { codexCwd?: string; nodeId?: string; generation?: string; runtime?: string;
+    /** The seat's own CODEX_HOME when it declares one; it wins over the daemon's. */
+    codexHome?: string;
+    /** A Claude seat's own token step (claude-seat-token.ts), run before Claude in the staged subshell. A POSIX pane only:
+     *  a caller whose command comes back without it knows the token wasn't applied. */
+    claudeTokenStep?: string } = {}): Promise<string> {
+    const codexHome = target.codexHome ?? this.codexHome;
     const searchPath = this.sessionEnv.PATH;
     const codexEnv = target.codexCwd !== undefined
-      ? [searchPath ? `PATH=${shellQuote(searchPath)}` : "", this.codexHome ? `CODEX_HOME=${shellQuote(this.codexHome)}` : ""].filter(Boolean)
+      ? [searchPath ? `PATH=${shellQuote(searchPath)}` : "", codexHome ? `CODEX_HOME=${shellQuote(codexHome)}` : ""].filter(Boolean)
       : [];
     const fallback = codexEnv.length ? `env ${codexEnv.join(" ")} ${command}` : command;
     try {
@@ -136,13 +142,31 @@ export class SeatLaunchEnvironment {
       }
       const binDir = this.rigBin();
       const env = publicSeatEnvironment({ OPENRIG_TRANSCRIPTS_LINES: "", OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS: "", ...this.sessionEnv, ...identity });
-      if (target.codexCwd !== undefined && this.codexHome) env.CODEX_HOME = this.codexHome;
+      if (target.codexCwd !== undefined && codexHome) env.CODEX_HOME = codexHome;
       // Classic Claude may be an rc alias or function, not a PATH executable.
       // Its caller sources the staged command in a pane-shell subshell. Leading
       // assignments preserve shell lookup; /usr/bin/env would bypass it.
       if (target.runtime === "claude-code") {
         const assignments = Object.entries(env).map(([key, value]) => `${key}=${shellQuote(value)}`);
-        return `${assignments.join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${command}`;
+        const launch = `${assignments.join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${command}`;
+        // The token step is POSIX shell; another shell (fish, tcsh) gets the command without it.
+        const token = target.claudeTokenStep && ["bash", "zsh", "sh", "dash", "ksh", "mksh"].includes(shell) ? [target.claudeTokenStep] : [];
+        // ksh calls a function without exporting a leading assignment that isn't already
+        // exported, so it keeps the form above, where every assignment reaches Claude.
+        if (!["bash", "zsh", "sh", "dash"].includes(shell)) return [...token, launch].join("\n");
+        // A file command must replace the staging subshell so tmux observes
+        // Claude as the foreground process. Keep aliases/functions intact and
+        // pass the original leading assignments through a subshell-local function.
+        // The constant eval defers function-name parsing until alias lookup is ruled out.
+        return [
+          'if _openrig_claude_executable=$(command -v claude) && [ -f "$_openrig_claude_executable" ] && [ -x "$_openrig_claude_executable" ]; then',
+          '  case "$_openrig_claude_executable" in',
+          "    */*) eval 'claude() { exec \"$_openrig_claude_executable\" \"$@\"; }' ;;",
+          '  esac',
+          'fi',
+          ...token,
+          launch,
+        ].join("\n");
       }
       const assignments = Object.entries(env).map(([key, value]) => shellQuote(`${key}=${value}`));
       return `/usr/bin/env ${assignments.join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${command}`;

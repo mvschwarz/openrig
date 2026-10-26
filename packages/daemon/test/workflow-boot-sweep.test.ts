@@ -129,7 +129,7 @@ describe("runWorkflowBootSweep (FR-4)", () => {
     expect(result).toEqual({
       instancesSwept: 0,
       keepalivesArmed: 0,
-      lostNudgesReissued: 0,
+      lostNudgeRecoveryAttempts: 0,
       stuckSurfaced: 0,
       exceptionItemsCreated: 0,
     });
@@ -168,11 +168,11 @@ describe("runWorkflowBootSweep (FR-4)", () => {
     sentNudges.length = 0;
 
     const result = await sweep();
-    expect(result.lostNudgesReissued).toBe(1);
+    expect(result.lostNudgeRecoveryAttempts).toBe(1);
     expect(sentNudges.some((n) => n.session === "worker@rig")).toBe(true);
     // The nudge ledger is stamped again — a second sweep does NOT re-reissue.
     const again = await sweep();
-    expect(again.lostNudgesReissued).toBe(0);
+    expect(again.lostNudgeRecoveryAttempts).toBe(0);
   });
 
   it("surfaces a stuck instance (overdue-unclaimed — the first-class unclaimed-frontier case) with evidence in the log and a re-nudge", async () => {
@@ -213,7 +213,7 @@ describe("runWorkflowBootSweep (FR-4)", () => {
     const result = await sweep();
     expect(result.instancesSwept).toBe(1);
     expect(result.keepalivesArmed).toBe(0); // instantiate already armed it
-    expect(result.lostNudgesReissued).toBe(0); // instantiate's nudge stamped the ledger
+    expect(result.lostNudgeRecoveryAttempts).toBe(0); // instantiate's nudge stamped the ledger
     expect(result.stuckSurfaced).toBe(0);
   });
 });

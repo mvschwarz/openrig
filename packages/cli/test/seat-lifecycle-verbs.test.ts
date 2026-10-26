@@ -1,9 +1,13 @@
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 // S5 (OPR.0.5.4.7) — CLI surface for rig seat set-model / stop / clean: required
 // options, route paths + bodies posted, human output, refusal printing, --json
 // pass-through with non-zero exit.
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Command } from "commander";
 import { seatCommand } from "../src/commands/seat.js";
+import { DaemonTimeoutError } from "../src/client.js";
 import { STATE_FILE, type DaemonState, type LifecycleDeps } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
 
@@ -73,6 +77,36 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("terminal interaction policy", () => {
+  it("records the explicit preset and actor exceptions without changing native permissions", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const { logs, exitCode } = await captureLogs(() => makeCommand(makeDeps({ status: 200,
+      data: { ok: true, effect: "Saved for managed checks; no native permission change." } }, calls)).parseAsync([
+      "node", "rig", "seat", "set-terminal-policy", "reviewer@team", "--preset", "help-within-instructions",
+      "--helper", "helper@team", "--peer-model", "deny", "--openrig-compaction", "allow", "--reason", "Keep the review model",
+    ]));
+    expect(calls).toEqual([{ path: "/api/seat/set-terminal-policy/reviewer%40team", body: {
+      preset: "help-within-instructions", helpers: ["helper@team"],
+      exceptions: { peer: { model: "deny" }, openrig: { compaction: "allow" } },
+      rigDefault: false, reason: "Keep the review model", operator: undefined,
+    } }]);
+    expect(exitCode).toBeUndefined();
+    expect(logs.join("\n")).toContain("rig seat status 'reviewer@team'");
+  });
+
+  it("shows actor scope and enforcement limits in the ordinary seat account", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const { logs } = await captureLogs(() => makeCommand(makeDeps({ status: 200, data: {
+      seat_ref: "reviewer@team", terminalPolicy: { state: "planned", label: "Custom", source: "explicit",
+        instruction: "Keep the review model", rules: { peer: { compaction: "allow", model: "deny" } },
+        supported: { compaction: "managed", model: "saved setting; native effect unverified" } },
+    } }, calls)).parseAsync(["node", "rig", "seat", "status", "reviewer@team"]));
+    expect(logs.join("\n")).toContain("Terminal interaction (planned; managed checks): Custom [explicit]");
+    expect(logs.join("\n")).toContain("peer: compaction=allow; model/effort=deny");
+    expect(logs.join("\n")).toContain("Other interventions: guidance-only");
+  });
+});
+
 describe("#729 startup warnings", () => {
   it.each([[200, false], [200, true], [409, false], [409, true]] as const)("seat launch retains warnings and HTTP %s (json=%s)", async (status, json) => {
     const warning = "Startup submission unverified: capture unavailable";
@@ -94,7 +128,7 @@ describe("#729 startup warnings", () => {
 
 describe("default-path rig seat continue", () => {
   it.each([false, true])("names CLI inspection for an ambiguous continuation refusal (json=%s)", async json => {
-    const data = { ok: false, code: "continuation_unavailable", message: "No verified pending fresh-context delivery exists for this occupant. Refresh to inspect its actual state." };
+    const data = { ok: false, code: "continuation_unavailable", message: "No verified pending startup-context delivery exists for this occupant. Refresh to inspect its actual state." };
     const original = structuredClone(data);
     const calls: Array<{ path: string; body: unknown }> = [];
     const { logs, errors, exitCode } = await captureLogs(() => makeCommand(makeDeps({ status: 409, data }, calls)).parseAsync([
@@ -108,7 +142,7 @@ describe("default-path rig seat continue", () => {
       expect(JSON.parse(logs[0]!)).toEqual(original);
       expect(errors).toEqual([]);
     } else {
-      expect(errors.join("\n")).toContain("No verified pending fresh-context delivery exists");
+      expect(errors.join("\n")).toContain("No verified pending startup-context delivery exists");
       expect(errors.join("\n")).toContain("unknown whether context was already delivered or was never pending");
       expect(errors.join("\n")).toContain("rig seat status 'dev@fixture'");
       expect(errors.join("\n")).not.toContain("Refresh");
@@ -135,6 +169,25 @@ describe("default-path rig seat continue", () => {
 });
 
 describe("rig seat set-permissions", () => {
+  it("posts a rules file as an audited future-launch update, keeping mode separate", async () => {
+    const root = mkdtempSync(join(tmpdir(), "seat-rules-")), file = join(root, "rules.json");
+    const rules = { allow: ["Bash(node lane.mjs *)"], deny: ["Read(./private/**)"] };
+    writeFileSync(file, JSON.stringify(rules));
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const deps = makeDeps({ status: 200, data: { ok: true, changed: true, to: rules, effect: "Next managed launch only." } }, calls);
+    try {
+      const result = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "set-permissions", "dev-impl@seat-rig",
+        "--rules", file, "--reason", "Select lane", "--operator", "human@example.test"]).then(() => {}));
+      expect(result.exitCode).toBeUndefined();
+      expect(calls).toEqual([{ path: "/api/seat/set-permissions/dev-impl%40seat-rig", body: { rules, reason: "Select lane", operator: "human@example.test" } }]);
+      expect(result.logs.join(" ")).toContain("recorded and audited");
+      calls.splice(0);
+      const ambiguous = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "set-permissions", "dev-impl@seat-rig",
+        "--rules", file, "--mode", "full_bypass", "--reason", "No mixed update"]).then(() => {}));
+      expect(ambiguous.exitCode).toBe(1); expect(calls).toEqual([]);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   it("posts the explicit operator with the existing mode and reason", async () => {
     const calls: Array<{ path: string; body: unknown }> = [];
     const deps = makeDeps({ status: 200, data: { ok: true, changed: true, to: { mode: "floor" }, effect: "Future managed launches only." } }, calls);
@@ -146,6 +199,71 @@ describe("rig seat set-permissions", () => {
       body: { mode: "floor", reason: "future launch choice", operator: "human@example.test" } }]);
     expect(logs.join("\n")).toContain("Permission mode: floor");
     expect(exitCode).toBeUndefined();
+  });
+});
+
+describe("rig seat set-cwd", () => {
+  const args = ["node", "rig", "seat", "set-cwd", "planner@project", "--cwd", "/srv/remote/space dir/../planner", "--reason", "isolate planning"];
+
+  it("requires cwd and reason before contacting the daemon", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const deps = makeDeps({ status: 200, data: {} }, calls);
+    await expect(makeCommand(deps).parseAsync(args.slice(0, 5))).rejects.toThrow(/--cwd/);
+    await expect(makeCommand(deps).parseAsync(args.slice(0, 7))).rejects.toThrow(/--reason/);
+    expect(calls).toEqual([]);
+  });
+
+  it("forwards the daemon-host path unchanged and describes the future-launch effect", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const deps = makeDeps({ status: 200, data: { ok: true, seat: { logicalId: "planner", rigName: "project" },
+      from: "/srv/shared", to: "/srv/remote/planner", changed: true, effect: "next_launch", warnings: ["Retained local guidance"] } }, calls);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { logs, exitCode } = await captureLogs(() => makeCommand(deps).parseAsync([...args, "--operator", "operator@project"]).then(() => {}));
+    expect(calls).toEqual([{ path: "/api/seat/set-cwd/planner%40project", body: {
+      cwd: "/srv/remote/space dir/../planner", reason: "isolate planning", operator: "operator@project",
+    } }]);
+    expect(logs.join("\n")).toContain("/srv/remote/planner");
+    expect(logs.join("\n")).toContain("The running process keeps its current directory");
+    expect(logs.join("\n")).toContain("rig seat launch planner@project --fresh --stop");
+    expect(warn).toHaveBeenCalledWith("Warning: Retained local guidance");
+    expect(exitCode).toBeUndefined();
+  });
+
+  it.each([200, 409, 500])("preserves the daemon response in JSON, including a refused change (HTTP %s)", async status => {
+    const data = status === 200
+      ? { ok: true, changed: false, to: "/srv/remote/planner", effect: "next_launch", warnings: [] }
+      : { ok: false, code: status === 500 ? "cwd_check_failed" : "cwd_destination_conflict", message: "The working directory was not changed", warnings: ["Protected destination file: /srv/remote/planner/.claude/agents/reviewer.md"] };
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { logs, exitCode } = await captureLogs(() => makeCommand(makeDeps({ status, data }, calls)).parseAsync([...args, "--json"]).then(() => {}));
+    expect(logs).toHaveLength(1);
+    expect(JSON.parse(logs[0]!)).toEqual(data);
+    expect(warn).not.toHaveBeenCalled();
+    expect(exitCode).toBe(status === 200 ? undefined : status === 500 ? 2 : 1);
+  });
+
+  it("treats a timeout as an unknown outcome and directs the caller to status", async () => {
+    const post = vi.fn(async () => { throw new DaemonTimeoutError("directory change timed out"); });
+    const deps = { ...makeDeps({ status: 200, data: {} }, []), clientFactory: () => ({ post }) as never };
+    const { logs, exitCode } = await captureLogs(() => makeCommand(deps).parseAsync([...args, "--json"]).then(() => {}));
+    // set-cwd writes no startup files now, so it uses the default request deadline.
+    expect(post).toHaveBeenCalledExactlyOnceWith("/api/seat/set-cwd/planner%40project", expect.any(Object));
+    expect(JSON.parse(logs[0]!)).toMatchObject({ ok: false, code: "set_cwd_outcome_unknown", status: "unknown",
+      guidance: expect.stringContaining("rig seat status planner@project") });
+    expect(exitCode).toBe(1);
+  });
+
+  it("prints protected destination paths and recovery guidance for a conflict", async () => {
+    const protectedPath = "/srv/remote/planner/.claude/agents/reviewer.md";
+    const data = { ok: false, code: "cwd_destination_conflict", message: "Destination files conflict; cwd was not committed",
+      guidance: "Use a clean destination, or inspect and move/merge the reported files before retrying.",
+      warnings: [`Protected destination file: ${protectedPath}`] };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { errors, exitCode } = await captureLogs(() => makeCommand(makeDeps({ status: 409, data }, [])).parseAsync(args).then(() => {}));
+    expect(warn).toHaveBeenCalledWith(`Warning: Protected destination file: ${protectedPath}`);
+    expect(errors.join("\n")).toContain("cwd was not committed");
+    expect(errors.join("\n")).toContain("inspect and move/merge");
+    expect(exitCode).toBe(1);
   });
 });
 
@@ -361,6 +479,22 @@ describe("fresh launch preview", () => {
     expect(deps.lifecycleDeps.spawn).not.toHaveBeenCalled();
   });
 
+  it("OPR.0.7.0.9: the printed plan shows the seat's launch additions, as the seat view does", async () => {
+    const launchAdditions = { agent: "openrig:reviewer", agentPromptReplacesDefault: true, appendSystemPromptFile: "/s/additions/system-prompt.md",
+      pluginDirs: ["/s/additions/plugins/review"], missing: ["/s/gone"], refused: ["/s/linked is not inside this seat's storage"] };
+    const data = { ok: true, planOnly: true, complete: true, launchable: true, sessionName: "dev@fixture", currentOccupant: "absent",
+      startup: { projectionCount: 0, fileCount: 0, actionCount: 0 }, stopRequired: false, wouldStop: false, blockers: [], warnings: [], siblings: [],
+      launchAdditions };
+    const deps = makeDeps({ status: 200, data }, []);
+    const output = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "launch", "dev@fixture", "--fresh", "--plan"]).then(() => undefined));
+    const text = output.logs.join("\n");
+    expect(text).toContain("agent       openrig:reviewer (--agent; its prompt replaces Claude's default system prompt)");
+    expect(text).toContain("prompt      /s/additions/system-prompt.md (--append-system-prompt-file)");
+    expect(text).toContain("plugin dir  /s/additions/plugins/review (CLAUDE_CODE_PLUGIN_DIRS)");
+    expect(text).toContain("missing     /s/gone: not passed to the launch");
+    expect(text).toContain("refused     /s/linked is not inside this seat's storage: not passed to the launch");
+  });
+
   it("fails closed on an older daemon without ever posting to the launch endpoint", async () => {
     const calls: Array<{ path: string; body: unknown }> = [];
     const deps = makeDeps({ status: 404, data: { error: "Not Found" } }, calls);
@@ -388,9 +522,23 @@ describe("OPR.0.7.0.5 rig seat restart --keep-conversation", () => {
     ok: true, planOnly: outcome === undefined, ...(outcome ? { outcome } : {}), message: "Done.",
     seat: { logicalId: "dev.codex", rigName: "r" }, sessionName: "dev-codex@r", pane: "%1", paneShape: "shell_backed",
     conversationId: "tok", conversationProof: "argv", activity: { state: "working", detail: "Mid-turn." },
-    childProcesses: [{ pid: 9, name: "node" }], codexHome: "/h/.codex", billingRoute: { detail: "Unknown." },
+    childProcesses: [{ pid: 9, name: "node" }], codexHome: "/h/.codex",
     account: { credentialStore: { detail: "File-backed." }, authFile: { detail: "Stat only." }, startupGate: null },
     peers: [{ logicalId: "dev.peer", effect: "Not restarted; account unverified." }], warnings: [],
+  });
+
+  it("prints the --no-daemon launch evidence and a named startup gate's kind", async () => {
+    const data = { ...report("incomplete"), codexNoDaemonFlag: { present: true, detail: "Launch evidence: the running Codex was started with --no-daemon. This doesn't show whether an app-server process, its login or any lock is involved." },
+      account: { credentialStore: { detail: "File-backed." }, authFile: { detail: "Stat only." }, startupGate: "Codex is waiting for hook trust approval.", startupGateKind: "hook_trust_gate" },
+      remainingStep: "Codex is waiting for a hook review decision in the pane (dev-codex@r, pane %1). That decision is for the person or an authorised operator; once it's made, run the recovery command." };
+    const output = await captureLogs(() => makeCommand(makeDeps({ status: 200, data }, [])).parseAsync([
+      "node", "rig", "seat", "restart", "dev@r", "--keep-conversation", "--reason", "x"]).then(() => undefined));
+    const text = output.logs.join("\n");
+    expect(text).toContain("Launch evidence: the running Codex was started with --no-daemon.");
+    expect(text).not.toContain("Process mode");
+    expect(text).not.toContain("Billing route");
+    expect(text).toContain("Codex startup gate (hook_trust_gate): Codex is waiting for hook trust approval.");
+    expect(text).toContain("Remaining step: Codex is waiting for a hook review decision");
   });
 
   it("requires a reason before contacting the daemon, and refuses --plan with --verify", async () => {

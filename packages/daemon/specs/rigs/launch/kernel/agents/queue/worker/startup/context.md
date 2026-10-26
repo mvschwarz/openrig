@@ -7,7 +7,9 @@ classify stream-to-queue substrate.
 
 `rig whoami --json` to confirm identity, then `rig stream list
 --limit 20` to see what's already in the intake without a clear
-destination.
+destination. `rig project decisions status` says whether typed decisions
+are on for the `stream` consumer; when they are, `rig project wake
+--decide` takes the routine items and leaves you the rest (see your role).
 
 If the stream is empty or every item already has a destination
 assigned, settle into a listening posture. Confirm an actual configured wake

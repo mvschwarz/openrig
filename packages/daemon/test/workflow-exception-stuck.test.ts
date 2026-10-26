@@ -4,7 +4,7 @@
 // spec is uncached, and missed-item re-creation (the crash-surviving
 // guarantee's honest twin: one OPEN item per occurrence at all times).
 
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -131,6 +131,20 @@ describe("WF-5 FR-2 class (b): detection-time stuck exception items", () => {
     expect(exceptionRows(db)).toHaveLength(1);
   });
 
+  it("routes an overdue exception to its owner despite a Slack failure notice at the sender", async () => {
+    const f = await build();
+    const notice = () => f.queueRepo.create({ sourceSession: "ops@rig", destinationSession: "ops@rig",
+      body: "The human notice could not be delivered.", nudge: false,
+      tags: ["slack-undeliverable", `recovery-for:${f.packetId}`] });
+    await notice();
+    expect((await sweep(f)).exceptionItemsCreated).toBe(1);
+    expect(exceptionRows(db)).toHaveLength(1);
+    expect(exceptionRows(db)[0]!.destination_session).toBe("orch-lead@rig");
+    await notice();
+    expect((await sweep(f)).exceptionItemsCreated).toBe(0);
+    expect(exceptionRows(db)).toHaveLength(1);
+  });
+
   it("BOTH detection paths share the occurrence: keepalive evaluation after a sweep dedupes into the same single item", async () => {
     const f = await build();
     await sweep(f);
@@ -165,6 +179,7 @@ describe("WF-5 FR-2 class (b): detection-time stuck exception items", () => {
       resolveRoute: () => null,
       humanFallbackSeat: "human@host",
     });
+    const create = vi.spyOn(f.queueRepo, "create");
     await runWorkflowBootSweep({
       instanceStore: f.runtime.instanceStore,
       queueRepo: f.queueRepo,
@@ -175,6 +190,8 @@ describe("WF-5 FR-2 class (b): detection-time stuck exception items", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]!.destination_session).toBe("human@host");
     expect(rows[0]!.tier).toBe("human-gate");
+    // A stuck workflow routed to the person is an approval whose wait costs now: it alerts.
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ destinationSession: "human@host", humanAlert: true }));
   });
 
   it("a closed diagnostic is honored until a new underlying episode, without re-creating the same action", async () => {

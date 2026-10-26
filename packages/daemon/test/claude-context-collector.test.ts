@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, mkdtempSync, copyFileSync, chmodSync, statSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { execSync, spawnSync } from "node:child_process";
+import { execSync, spawn, spawnSync } from "node:child_process";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import { replaceFile } from "../src/adapters/replace-file.js";
@@ -42,6 +42,61 @@ describe("Claude Status Line Collector Script", () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  it("keeps simultaneous collectors for one seat from colliding on the temporary sidecar", async () => {
+    const contextDir = join(tmpDir, "context");
+    const providerUsageDir = join(tmpDir, "provider-usage");
+    const barrierDir = join(tmpDir, "barrier");
+    const hookPath = join(tmpDir, "rename-barrier.cjs");
+    mkdirSync(barrierDir, { recursive: true });
+    writeFileSync(hookPath, `
+      const fs = require("node:fs");
+      const path = require("node:path");
+      const barrierDir = process.env.OPENRIG_COLLECTOR_BARRIER;
+      const renameSync = fs.renameSync;
+      let waited = false;
+      fs.renameSync = function (from, to, ...args) {
+        if (!waited && barrierDir && path.basename(path.dirname(to)) === "context" && String(from).includes(".tmp")) {
+          waited = true;
+          fs.writeFileSync(path.join(barrierDir, process.pid + ".ready"), "ready");
+          const gate = new Int32Array(new SharedArrayBuffer(4));
+          const deadline = Date.now() + 10000;
+          while (fs.readdirSync(barrierDir).filter((name) => name.endsWith(".ready")).length < 2 && Date.now() < deadline) {
+            Atomics.wait(gate, 0, 0, 2);
+          }
+          if (fs.readdirSync(barrierDir).filter((name) => name.endsWith(".ready")).length < 2) throw new Error("barrier timed out");
+        }
+        return renameSync.call(fs, from, to, ...args);
+      };
+    `);
+
+    const run = (usedPercentage: number) => new Promise<{ status: number | null; stderr: string }>((resolve, reject) => {
+      const child = spawn(process.execPath, ["--require", hookPath, collectorPath, contextDir, providerUsageDir], {
+        env: {
+          ...process.env,
+          OPENRIG_COLLECTOR_BARRIER: barrierDir,
+        },
+        stdio: ["pipe", "ignore", "pipe"],
+      });
+      let stderr = "";
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+      child.on("error", reject);
+      child.on("close", (status) => resolve({ status, stderr }));
+      const input = JSON.parse(VALID_STATUS_LINE);
+      input.context_window.used_percentage = usedPercentage;
+      input.rate_limits.five_hour.used_percentage = usedPercentage;
+      child.stdin.end(JSON.stringify(input));
+    });
+
+    const results = await Promise.all([run(42), run(47)]);
+    expect(results.map((result) => result.status)).toEqual([0, 0]);
+    expect(readdirSync(barrierDir).filter((name) => name.endsWith(".ready"))).toHaveLength(2);
+    expect(results.map((result) => result.stderr)).toEqual(["", ""]);
+    const providerUsagePath = join(providerUsageDir, "dev-impl@test.json");
+    expect(existsSync(providerUsagePath)).toBe(true);
+    expect(JSON.parse(readFileSync(providerUsagePath, "utf-8")).seatSession).toBe("dev-impl@test");
+  });
+
   // T1: Parses valid status line and writes sidecar
   it("parses valid Claude status line JSON and writes sidecar file", () => {
     const outputPath = join(tmpDir, "context", "test.json");
@@ -77,6 +132,22 @@ describe("Claude Status Line Collector Script", () => {
 
     expect(existsSync(outputPath)).toBe(true);
     expect(existsSync(outputPath + ".tmp")).toBe(false);
+  });
+
+  it("cleans up its staged file when rename fails on repeated refreshes", () => {
+    const outputPath = join(tmpDir, "context", "blocked.json");
+    mkdirSync(outputPath, { recursive: true });
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const result = spawnSync("node", [collectorPath, outputPath], {
+        encoding: "utf-8",
+        input: VALID_STATUS_LINE,
+      });
+
+      expect(result.status).toBe(0);
+      expect(result.stderr).toContain("failed to collect Claude context status line");
+      expect(readdirSync(join(tmpDir, "context")).filter((name) => name.startsWith("blocked.json.tmp-"))).toEqual([]);
+    }
   });
 
   // T3: Malformed stdin — graceful exit, no output
@@ -266,14 +337,14 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
       written[settingsPath] = JSON.stringify({ statusLine: { type: "command", command: "node /old/.openrig/context-collector.cjs /old/ctx /old/prov", padding: 2 } });
       await deliver();
       const statusLine = JSON.parse(written[settingsPath]!).statusLine;
-      expect(statusLine.command).toBe(`node ${shellQuote("/project/.openrig/context-collector.cjs")} ${shellQuote(join(tmpDir, "state", "context-usage"))} ${shellQuote(join(tmpDir, "state", "provider-usage"))}`);
+      expect(statusLine.command).toBe(`${shellQuote(process.execPath)} ${shellQuote("/project/.openrig/context-collector.cjs")} ${shellQuote(join(tmpDir, "state", "context-usage"))} ${shellQuote(join(tmpDir, "state", "provider-usage"))}`);
       expect(statusLine.padding).toBe(2);
     });
 
     it("refreshes the three-token collector command OpenRig wrote before provider usage", async () => {
       written[settingsPath] = JSON.stringify({ statusLine: { type: "command", command: "node /project/.openrig/context-collector.cjs /old/state/context" } });
       await deliver();
-      expect(JSON.parse(written[settingsPath]!).statusLine.command).toBe(`node ${shellQuote("/project/.openrig/context-collector.cjs")} ${shellQuote(join(tmpDir, "state", "context-usage"))} ${shellQuote(join(tmpDir, "state", "provider-usage"))}`);
+      expect(JSON.parse(written[settingsPath]!).statusLine.command).toBe(`${shellQuote(process.execPath)} ${shellQuote("/project/.openrig/context-collector.cjs")} ${shellQuote(join(tmpDir, "state", "context-usage"))} ${shellQuote(join(tmpDir, "state", "provider-usage"))}`);
     });
 
     it("installs the collector into a status line that has no command", async () => {
@@ -301,6 +372,8 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
       "node /old/.openrig/context-collector.cjs /old/ctx\n~/bin/my-status.sh",
       "node /old/.openrig/context-collector.cjs /old/ctx\r\n~/bin/my-status.sh",
       "node /tools/.openrig/context-collector.cjs.backup",
+      `${shellQuote(process.execPath)} '/old/.openrig/context-collector.cjs' '/old/ctx' '/old/prov' 'extra'`,
+      "'/custom/wrapper' '/old/.openrig/context-collector.cjs' '/old/ctx' '/old/prov'",
     ])("keeps a user command that only contains the collector path: %j", async (command) => {
       const original = JSON.stringify({ statusLine: { type: "command", command, padding: 1 } }, null, 2);
       written[settingsPath] = original;
@@ -314,7 +387,7 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
       expect(written[settingsPath]).toContain("/project/.openrig/context-collector.cjs");
       expect(JSON.parse(written[settingsPath]!).statusLine).toEqual({
         type: "command",
-        command: `node ${shellQuote("/project/.openrig/context-collector.cjs")} ${shellQuote(join(tmpDir, "state", "context-usage"))} ${shellQuote(join(tmpDir, "state", "provider-usage"))}`,
+        command: `${shellQuote(process.execPath)} ${shellQuote("/project/.openrig/context-collector.cjs")} ${shellQuote(join(tmpDir, "state", "context-usage"))} ${shellQuote(join(tmpDir, "state", "provider-usage"))}`,
       });
     });
   });
@@ -500,7 +573,7 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     expect(Object.keys(mcpConfig.mcpServers)).toEqual(["existing"]);
   });
 
-  it("deliverStartup recovers from array-valued settings.local.json for context collector only", async () => {
+  it("deliverStartup leaves an array-valued settings.local.json (and .mcp.json) as they are", async () => {
     written["/project/.claude/settings.local.json"] = "[]";
     written["/project/.mcp.json"] = "[]";
 
@@ -513,9 +586,8 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
 
     await adapter.deliverStartup([], { cwd: "/project", tmuxSession: "dev-impl@test", nodeId: "n1" } as any);
 
-    const settings = JSON.parse(written["/project/.claude/settings.local.json"]!);
-    expect(settings.statusLine.type).toBe("command");
-    expect(settings.permissions).toBeUndefined();
+    // Valid JSON that isn't an object is the owner's: the status line isn't installed over it.
+    expect(written["/project/.claude/settings.local.json"]).toBe("[]");
     expect(written["/project/.mcp.json"]).toBe("[]");
   });
 

@@ -41,14 +41,14 @@
 
 import type Database from "better-sqlite3";
 import type { EventBus } from "../event-bus.js";
-import type { QueueRepository, QueueItem } from "../queue-repository.js";
+import { isTypedGateBlocker, type QueueRepository, type QueueItem } from "../queue-repository.js";
 import type { PersistedEvent } from "../types.js";
 import {
   MissionControlActionLog,
   MissionControlActionLogError,
   type MissionControlVerb,
 } from "./mission-control-action-log.js";
-import { isHumanSeatSession } from "../human-route-enforcer.js";
+import { humanAnswerText, formatHumanAnswers, unansweredQuestions, type HumanAnswers } from "../human-questions.js";
 
 export class MissionControlWriteContractError extends Error {
   constructor(
@@ -79,6 +79,9 @@ export interface MissionControlActionInput {
   /** OPR.0.4.4.19 FR-7 — required for `resolve`: the human's non-empty
    *  decision text. Lands durably in queue_transitions.transition_note. */
   decision?: string;
+  /** For `answer`: the question and option the person chose. Without them, `decision` is their typed answer. */
+  questionId?: string;
+  optionId?: string;
   /** Operator-supplied audit context. */
   auditNotes?: Record<string, unknown>;
   /**
@@ -98,6 +101,8 @@ export interface MissionControlActionResult {
   notifyAttempted: boolean;
   notifyResult: string | null;
   auditedAt: string;
+  /** For `answer`: recorded with questions still open, or answered (returned to the asker, and the ask closed). */
+  answer?: { outcome: "recorded" | "answered"; unanswered: string[]; message?: string };
 }
 
 interface WriteContractDeps {
@@ -134,6 +139,9 @@ export class MissionControlWriteContract {
     }
     if (input.verb === "resolve") {
       return this.resolveParked(input);
+    }
+    if (input.verb === "answer") {
+      return this.answerAsk(input);
     }
 
     const source = this.requireMutableQitem(input.qitemId);
@@ -354,8 +362,8 @@ export class MissionControlWriteContract {
    *      update (no state-machine change) + the existing nudge machinery.
    *   4. Resolution routes BACK to the parked owner — the qitem keeps its
    *      destination; no new potato owner is ever created here.
-   *   5. Enforcement symmetry: park required summary + evidence_ref;
-   *      resolve requires NON-EMPTY decision text, daemon-enforced.
+   *   5. Human parks required summary + evidence_ref; human and typed-gate
+   *      resolution requires NON-EMPTY decision/evidence text, daemon-enforced.
    *   6. The human acts on the surface/feed card; this is the ONE write
    *      path (POST /api/mission-control/action verb=resolve) — the CLI
    *      wrapper is a thin client of the same endpoint.
@@ -383,14 +391,22 @@ export class MissionControlWriteContract {
         { qitemId: input.qitemId },
       );
     }
-    if (source.state !== "blocked" || !isHumanSeatSession(source.blockedOn)) {
+    const humanPark = source.blockedOn !== null && this.queueRepo.isPersonAddress(source.blockedOn);
+    if (source.state !== "blocked" || (!humanPark && !isTypedGateBlocker(source.blockedOn))) {
       throw new MissionControlWriteContractError(
         "qitem_not_leg1_parked",
-        `verb=resolve requires a leg-1 parked qitem (state=blocked with a human-seat blocked_on); ` +
+        `verb=resolve requires state=blocked on a human seat or a well-formed external:, fold: or auth: gate; ` +
           `qitem ${input.qitemId} is state=${source.state}, blocked_on=${source.blockedOn ?? "null"}. ` +
           `Re-resolving an already-resolved item is a no-op error, not a double transition.`,
         { qitemId: input.qitemId, state: source.state, blockedOn: source.blockedOn },
       );
+    }
+
+    const someoneElse = humanPark ? this.queueRepo.askedSomeoneElse(input.actorSession, source.blockedOn) : null;
+    if (someoneElse) {
+      throw new MissionControlWriteContractError("answer_not_recorded",
+        `qitem ${input.qitemId} was asked of ${someoneElse}, not ${input.actorSession}, so ${input.actorSession} can't settle it.`,
+        { qitemId: input.qitemId, asked: someoneElse });
     }
 
     const evaluatedAt = this.now().toISOString();
@@ -399,17 +415,16 @@ export class MissionControlWriteContract {
     try {
       this.eventBus.withNotifyEnvelope((register) => {
         // Rail 2+3: blocked → in-progress; decision text = transition_note;
-        // actor_session = the resolving human/relay session. Emits
-        // queue.updated (the P2 refresh-after-action contract). blocked_on is
-        // deliberately retained as provenance of whom it was parked on — the
-        // attention query keys on state='blocked', so the resolved item drops
-        // out of attention regardless.
+        // actor_session = the resolving session. Only a human park records a
+        // human-decision ceremony; typed gates record satisfaction evidence. Emits
+        // queue.updated (the P2 refresh-after-action contract). The repository
+        // clears blocked_on on exit; the audit's beforeState retains the park.
         const updateResult = this.queueRepo.updateWithinTransaction({
           qitemId: input.qitemId,
           actorSession: input.actorSession,
           state: "in-progress",
-          transitionNote: decision,
-          ownerNotificationKind: "human-decision-resolved",
+          transitionNote: humanPark ? decision : `Blocker ${source.blockedOn} resolved: ${decision}`,
+          ownerNotificationKind: humanPark ? "human-decision-resolved" : undefined,
         });
         register(updateResult.persistedEvent);
 
@@ -456,7 +471,7 @@ export class MissionControlWriteContract {
           source.destinationSession,
           input.notify,
           input.actorSession,
-          `Decision resolved on ${input.qitemId}: ${decision} — unparked (blocked → in-progress); you still own it. Check your queue.`,
+          `${humanPark ? "Decision" : "Blocker"} resolved on ${input.qitemId}: ${decision} — unparked (blocked → in-progress); you still own it. Check your queue.`,
         );
         notifyAttempted = true;
         notifyResult = "attempted-best-effort";
@@ -476,6 +491,117 @@ export class MissionControlWriteContract {
       notifyResult,
       auditedAt: evaluatedAt,
     };
+  }
+
+  /**
+   * The person's answer to an ask addressed to them, with the meaning Slack's answers have: a choice (`questionId` +
+   * `optionId`) through recordHumanAnswer, which keeps a partial set pending and a complete one final, or their words
+   * (`decision`) through resolveDirectHumanReply, placed under the first unanswered question. Once it's answered, the
+   * asking seat gets one reply row and then the ask closes once, the order of Slack's own continuation, so a retry never
+   * leaves an ask closed with its answer not returned; the reply row's id comes from the ask, so a retry finds the same
+   * row, including a return from Slack before the shared ID existed. A committed return wins over a later attempt's
+   * words: finish its close and tell the person where their original answer went. No second reply or wake is created.
+   */
+  private async answerAsk(input: MissionControlActionInput): Promise<MissionControlActionResult> {
+    const ask = this.queueRepo.getById(input.qitemId);
+    if (!ask) {
+      throw new MissionControlWriteContractError("qitem_not_found", `qitem ${input.qitemId} not found`, { qitemId: input.qitemId });
+    }
+    if (ask.destinationSession !== input.actorSession || ask.humanIntent === "update" || !this.queueRepo.isPersonAddress(ask.destinationSession)) {
+      throw new MissionControlWriteContractError("answer_not_recorded",
+        `qitem ${input.qitemId} isn't an ask to ${input.actorSession}, so ${input.actorSession} can't answer it.`, { qitemId: input.qitemId });
+    }
+    const before = snapshotQitem(ask);
+    const questions = ask.humanQuestions ?? [];
+    const existing = this.queueRepo.getHumanAnswer(input.qitemId, input.actorSession);
+    if (existing && (ask.state === "pending" || ask.state === "done")) {
+      const decision = questions.length && unansweredQuestions(questions, ask.humanAnswers ?? {}).length === 0
+        ? formatHumanAnswers(questions, ask.humanAnswers ?? {}).join("; ") : humanAnswerText(existing.body);
+      if (ask.state === "pending" && !this.queueRepo.resolveDirectHumanReply({ qitemId: input.qitemId, actorSession: input.actorSession, decision })) {
+        throw new MissionControlWriteContractError("answer_not_closed", `The answer is already in ${existing.qitemId}, but ${input.qitemId} didn't close.`, { qitemId: input.qitemId });
+      }
+      return this.recordAnswer(input, before, decision, { outcome: "answered", unanswered: [],
+        message: `Already answered; the original answer went to ${existing.destinationSession} as ${existing.qitemId}. No new reply was sent.` }, existing.qitemId);
+    }
+    if (ask.state !== "pending") {
+      throw new MissionControlWriteContractError("qitem_already_terminal",
+        `qitem ${input.qitemId} is ${ask.state}, not waiting on an answer (it may already be answered), so nothing was recorded or sent.`,
+        { qitemId: input.qitemId, state: ask.state });
+    }
+    const chose = input.questionId !== undefined || input.optionId !== undefined;
+    const words = input.decision?.trim() ?? "";
+    // A complete set whose return didn't finish (it failed, or the process stopped): sending again returns exactly those
+    // recorded answers, never a bare close.
+    const resume = !chose && !words && questions.length > 0 && unansweredQuestions(questions, ask.humanAnswers ?? {}).length === 0;
+    const answersReply = (answers: HumanAnswers) => `${formatHumanAnswers(questions, answers).join("\n")}\n\n---\nAnswers (question id → option id): ${JSON.stringify(answers)}\nIn reply to: ${input.qitemId} (its humanAnswers field holds the same)`;
+    let reply: string;
+    if (chose) {
+      const recorded = this.queueRepo.recordHumanAnswer({ qitemId: input.qitemId, actorSession: input.actorSession,
+        questionId: input.questionId ?? "", optionId: input.optionId ?? "" });
+      if (recorded.status !== "recorded") {
+        throw new MissionControlWriteContractError("answer_not_recorded", `The answer wasn't recorded: ${recorded.reason}.`,
+          { qitemId: input.qitemId, reason: recorded.reason });
+      }
+      const [just] = formatHumanAnswers(recorded.questions.filter((q) => q.id === input.questionId), recorded.answers);
+      if (!recorded.complete) {
+        return this.recordAnswer(input, before, just ?? `answered ${input.questionId}`, {
+          outcome: "recorded", unanswered: unansweredQuestions(recorded.questions, recorded.answers).map((q) => q.question) });
+      }
+      reply = answersReply(recorded.answers);
+    } else if (resume) {
+      reply = answersReply(ask.humanAnswers ?? {});
+    } else {
+      if (!words) {
+        throw new MissionControlWriteContractError("decision_required",
+          "verb=answer needs a choice (questionId and optionId) or the person's words (decision)", { verb: input.verb });
+      }
+      const earlier = formatHumanAnswers(questions, ask.humanAnswers ?? {});
+      reply = `${words}\n\n---\n${earlier.length ? `Earlier answers: ${earlier.join("; ")}\n` : ""}In reply to: ${input.qitemId}${questions.length ? " (its humanAnswers field holds these words under its first unanswered question)" : ""}`;
+    }
+    let returned: QueueItem;
+    try {
+      returned = await this.queueRepo.createHumanAnswer({
+        sourceSession: input.actorSession, destinationSession: ask.sourceSession,
+        body: `${reply}\nAnswered by ${input.actorSession} in OpenRig.`,
+        summary: `${input.actorSession} answered: ${ask.summary ?? input.qitemId}`,
+        tags: ["human-answer", ...(ask.tags ?? []).filter((t) => /^(project|mission|slice):/.test(t))],
+        inboundReplyTo: input.qitemId, ...(input.notify === false ? { nudge: false } : {}),
+      });
+    } catch (error) {
+      throw new MissionControlWriteContractError("answer_not_closed",
+        `Returning the answer to ${ask.sourceSession} failed (${(error as Error).message}), so ${input.qitemId} wasn't closed. `
+        + (chose || resume ? "Its recorded answers stay on the row; open it again to send them." : "Nothing was recorded; answer again once that's fixed."),
+        { qitemId: input.qitemId });
+    }
+    const replyId = returned.qitemId;
+    const decision = chose || resume
+      ? formatHumanAnswers(questions, this.queueRepo.getById(input.qitemId)?.humanAnswers ?? {}).join("; ") : humanAnswerText(returned.body);
+    if (!this.queueRepo.resolveDirectHumanReply({ qitemId: input.qitemId, actorSession: input.actorSession, decision })
+      && this.queueRepo.getById(input.qitemId)?.state !== "done") {
+      throw new MissionControlWriteContractError("answer_not_closed",
+        `The answer went back to ${ask.sourceSession} as ${replyId}, but qitem ${input.qitemId} didn't close: it changed meanwhile.`,
+        { qitemId: input.qitemId, replyQitemId: replyId });
+    }
+    return this.recordAnswer(input, before, decision, { outcome: "answered", unanswered: [] }, replyId);
+  }
+
+  /** The audit row and event for one answer (its queue writes are the repository's own). */
+  private recordAnswer(input: MissionControlActionInput, before: Record<string, unknown>, reason: string,
+    answer: NonNullable<MissionControlActionResult["answer"]>, createdQitemId: string | null = null): MissionControlActionResult {
+    const evaluatedAt = this.now().toISOString();
+    const after = this.queueRepo.getById(input.qitemId);
+    let actionEntry: ReturnType<MissionControlActionLog["record"]> | null = null;
+    const persistedEvents: PersistedEvent[] = [];
+    this.db.transaction(() => {
+      actionEntry = this.actionLog.record({ actionVerb: "answer", qitemId: input.qitemId, actorSession: input.actorSession,
+        actedAt: evaluatedAt, beforeState: before, afterState: after ? snapshotQitem(after) : null, reason,
+        auditNotes: input.auditNotes ?? null, identityProvenance: input.identityProvenance ?? null });
+      persistedEvents.push(this.eventBus.persistWithinTransaction({ type: "mission_control.action_executed",
+        actionId: actionEntry.actionId, actionVerb: "answer", qitemId: input.qitemId, actorSession: input.actorSession }));
+    })();
+    for (const e of persistedEvents) this.eventBus.notifySubscribers(e);
+    return { actionId: actionEntry!.actionId, verb: "answer", qitemId: input.qitemId, closedQitem: after, createdQitemId,
+      notifyAttempted: false, notifyResult: null, auditedAt: evaluatedAt, answer };
   }
 
   private requireMutableQitem(qitemId: string): QueueItem {
@@ -560,6 +686,11 @@ function verbToClosure(input: MissionControlActionInput): ClosureMapping {
       throw new MissionControlWriteContractError(
         "internal_invariant",
         "resolve verb is non-closure and should have been routed to resolveParked",
+      );
+    case "answer":
+      throw new MissionControlWriteContractError(
+        "internal_invariant",
+        "answer verb should have been routed to answerAsk",
       );
   }
 }

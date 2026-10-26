@@ -9,13 +9,12 @@ describe("B8-1b — epistemic-matched precheck language (the ONE helper)", () =>
   beforeEach(() => { errSpy = vi.spyOn(console, "error").mockImplementation(() => {}); process.exitCode = undefined; });
   afterEach(() => { errSpy.mockRestore(); process.exitCode = undefined; });
 
-  it("UNVERIFIED renders may-be-busy-or-stopped — NEVER 'not running' (down ≠ busy)", () => {
-    const ok = daemonStatusGuard({ state: "unverified" } as DaemonStatus);
-    expect(ok).toBe(false);
-    const out = errSpy.mock.calls.map((c) => c.join(" ")).join("\n");
-    expect(out).toMatch(/did not respond|may be busy or stopped/i);
-    expect(out).not.toMatch(/not running/i);
-    expect(process.exitCode).toBe(1);
+  it("UNVERIFIED passes silently: a daemon that may be busy gets the real request, which decides", () => {
+    // Changed: this used to refuse with "did not respond". A busy daemon is not refused; the command's own
+    // request, under its normal timeout, reports what happened.
+    expect(daemonStatusGuard({ state: "unverified" } as DaemonStatus)).toBe(true);
+    expect(errSpy.mock.calls.length).toBe(0);
+    expect(process.exitCode).toBeUndefined();
   });
 
   it("STOPPED renders the not-running 3-part (positive evidence keeps the plain truth)", () => {
@@ -25,17 +24,23 @@ describe("B8-1b — epistemic-matched precheck language (the ONE helper)", () =>
     expect(out).toMatch(/not running/i);
   });
 
-  it("RUNNING+healthy passes silently; RUNNING+unhealthy renders unhealthy — not 'not running'", () => {
+  it("RUNNING passes silently whether or not its health check answered healthy (busy is not down)", () => {
+    // Changed: RUNNING+unhealthy used to refuse. Its process is alive; the real request decides.
     expect(daemonStatusGuard({ state: "running", healthy: true } as DaemonStatus)).toBe(true);
+    expect(daemonStatusGuard({ state: "running", healthy: false, reason: "unresponsive" } as DaemonStatus)).toBe(true);
+    expect(daemonStatusGuard({ state: "running", healthy: false, reason: "event-loop-starved" } as DaemonStatus)).toBe(true);
     expect(errSpy.mock.calls.length).toBe(0);
-    expect(daemonStatusGuard({ state: "running", healthy: false } as DaemonStatus)).toBe(false);
-    const out = errSpy.mock.calls.map((c) => c.join(" ")).join("\n");
-    expect(out).toMatch(/unhealthy|did not respond/i);
-    expect(out).not.toMatch(/not running/i);
   });
 
-  it("sibling hint renders when present (the wrong-home teaching line rides the guard)", () => {
-    daemonStatusGuard({ state: "unverified", siblingHint: { resolvedHome: "/a/.openrig", siblingHome: "/a/.openrig-vm" } } as DaemonStatus);
+  it("STALE, a refused probe and a probe the OS blocked still refuse", () => {
+    expect(daemonStatusGuard({ state: "stale" } as DaemonStatus)).toBe(false);
+    expect(daemonStatusGuard({ state: "running", healthy: false, reason: "unresponsive", probeErrorCode: "ECONNREFUSED" } as DaemonStatus)).toBe(false);
+    expect(daemonStatusGuard({ state: "unverified", probeErrorCode: "EPERM" } as DaemonStatus)).toBe(false);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("sibling hint still refuses and renders (the request could reach another home's daemon)", () => {
+    expect(daemonStatusGuard({ state: "unverified", siblingHint: { resolvedHome: "/a/.openrig", siblingHome: "/a/.openrig-vm" } } as DaemonStatus)).toBe(false);
     const out = errSpy.mock.calls.map((c) => c.join(" ")).join("\n");
     expect(out).toContain("/a/.openrig-vm");
   });
@@ -80,8 +85,8 @@ describe("B8-2 — send transport honesty (indeterminate ≠ failed)", () => {
     expect(out).not.toMatch(/was not sent/i);
   });
 
-  it("a connection REFUSAL keeps the hard 'not sent' truth", () => {
-    printTransportFailureForTest(new DaemonConnectionError("fetch failed: ECONNREFUSED"));
+  it.each(["ECONNREFUSED", "ENOTFOUND"])("a coded %s keeps the hard 'not sent' truth", (code) => {
+    printTransportFailureForTest(new DaemonConnectionError(`fetch failed: ${code}`, code));
     const out = errSpy2.mock.calls.map((c) => c.join(" ")).join("\n");
     expect(out).toMatch(/was not sent/i);
   });
