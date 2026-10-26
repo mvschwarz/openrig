@@ -335,6 +335,8 @@ describe("resolve verb (OPR.0.4.4.19 FR-7)", () => {
     expect(sentNudges).toHaveLength(1);
     expect(sentNudges[0]!.session).toBe("driver@rig");
     expect(sentNudges[0]!.text).toContain(decision);
+    expect(sentNudges[0]!.text).toContain("a response is not approval");
+    expect(sentNudges[0]!.text).toContain("attribution, not consent or authority");
     expect(result.createdQitemId).toBeNull(); // never a new potato
   });
 
@@ -351,6 +353,7 @@ describe("resolve verb (OPR.0.4.4.19 FR-7)", () => {
     expect(sentNudges).toHaveLength(1);
     expect(sentNudges[0]).toMatchObject({ session: "driver@rig" });
     expect(sentNudges[0]!.text).toContain(`Blocker resolved on ${created.qitemId}`);
+    expect(sentNudges[0]!.text).not.toContain("a response is not approval");
     expect(result.createdQitemId).toBeNull();
   });
 

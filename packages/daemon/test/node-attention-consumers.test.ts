@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
+import { readFileSync } from "node:fs";
+import { SessionRegistry } from "../src/domain/session-registry.js";
+import { SeatStructuralActivityService } from "../src/domain/seat-structural-activity-service.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { PsProjectionService } from "../src/domain/ps-projection.js";
@@ -30,12 +33,17 @@ describe("served seat attention across the rig, CLI and TUI", () => {
     { name: "after a daemon restart, with no arbitrated state yet", signal: null, hook: null, cause: "none", pane: true, restart: true, expected: true },
     { name: "an observed clear overrides the pane reading", signal: false, hook: null, cause: "none", pane: true, expected: false },
     { name: "a current running hook outranks the pane reading", signal: null, hook: "running", cause: "none", pane: true, expected: false },
-  ])("$name", async ({ signal, hook, cause, expected, pane = false, restart = false }) => {
+    { name: "an OpenClaw local turn was not recovered", signal: null, hook: null, cause: "none", pane: true, openclaw: true, expected: true },
+  ])("$name", async ({ signal, hook, cause, expected, pane = false, restart = false, openclaw = false }) => {
     const db = createFullTestDb(); closes.push(() => db.close());
     db.exec(`INSERT INTO rigs(id,name) VALUES('rig','team');
       INSERT INTO nodes(id,rig_id,logical_id,runtime) VALUES('node','rig','worker','codex');
       INSERT INTO bindings(id,node_id,tmux_session,tmux_pane) VALUES('binding','node','worker@team','%1');
       INSERT INTO sessions(id,node_id,session_name,status,startup_status) VALUES('session','node','worker@team','running','ready');`);
+    if (openclaw) {
+      db.prepare("UPDATE nodes SET runtime='openclaw'").run();
+      new SessionRegistry(db).recordCommunityHarnessSelection("session", "openclaw");
+    }
     if (cause === "attention_required" || cause === "failed") db.prepare("UPDATE sessions SET startup_status=?").run(cause);
     if (cause === "held") {
       db.exec("UPDATE sessions SET status='exited'");
@@ -50,8 +58,14 @@ describe("served seat attention across the rig, CLI and TUI", () => {
       activity: "working", needsInput: { count: signal ? 1 : 0, reason: signal ? "visible dialog" : null },
       needsInputEvidence: evidence, decidedBy: "window-sampling", seq: 1, lastSwap: null,
     }) } as unknown as SeatActivityService;
-    const structuralActivity = { getStructuralActivity: () => pane
-      ? { state: "attention", reason: "selection_prompt", evidence: "› 1. Yes, proceed", observedAt: new Date().toISOString() } : null };
+    const structuralActivity = openclaw
+      ? new SeatStructuralActivityService({ capturePaneContent: async () => readFileSync(new URL("./fixtures/openclaw-local-turn-refused.txt", import.meta.url), "utf8") })
+      : { getStructuralActivity: () => pane
+        ? { state: "attention", reason: "selection_prompt", evidence: "› 1. Yes, proceed", observedAt: new Date().toISOString() } : null };
+    if (structuralActivity instanceof SeatStructuralActivityService) {
+      await structuralActivity.pollSeat("worker@team", undefined, "openclaw", "openclaw");
+    }
+    const attentionReason = openclaw ? "OpenClaw turn not recovered; inspect the pane before retrying" : "selection_prompt";
     const activityStore = { getLatestForNode: () => hook == null ? null : ({
       state: hook, reason: "hook reason", evidenceSource: "runtime_hook", sampledAt: new Date().toISOString(), evidence: null,
     }) } as unknown as AgentActivityStore;
@@ -74,8 +88,8 @@ describe("served seat attention across the rig, CLI and TUI", () => {
     expect(cli).toMatchObject({ needsAttention: expected });
     if (pane && expected) {
       // The served activity and the attention flag tell the same truth, and the reason survives into the compact read.
-      expect(nodes[0].agentActivity).toMatchObject({ state: "needs_input", reason: "selection_prompt", evidenceSource: "pane_heuristic" });
-      expect(cli).toMatchObject({ agentActivity: { state: "needs_input", reason: "selection_prompt" } });
+      expect(nodes[0].agentActivity).toMatchObject({ state: "needs_input", reason: attentionReason, evidenceSource: "pane_heuristic" });
+      expect(cli).toMatchObject({ agentActivity: { state: "needs_input", reason: attentionReason } });
     }
     const stdout = vi.spyOn(console, "log").mockImplementation(() => {});
     vi.stubEnv("ATTENTION_FIXTURE_TOKEN", "fixture-only");
@@ -93,7 +107,8 @@ describe("served seat attention across the rig, CLI and TUI", () => {
       stdout.mockClear();
       await command.parseAsync(["node", "rig", "ps", "--host", "fixture", "--nodes", "--rig", "team"]);
       const row = stdout.mock.calls.map(call => String(call[0])).find(line => line.includes("worker@team"));
-      expect(row).toMatch(/\byes\b.*selection_prompt\s*$/);
+      expect(row).toMatch(/\byes\b/);
+      expect(row).toContain(attentionReason);
     }
     stdout.mockRestore();
     // The TUI's actual HTTP reader consumes the exact node response, not an independently authored node fixture.

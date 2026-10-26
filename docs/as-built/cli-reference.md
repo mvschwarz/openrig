@@ -376,7 +376,7 @@ the sections that were not read are `null`.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig mcp` | — | — |
-| `rig mcp serve` | — | `--port <port>`<br>`--http`<br>`--bind <host:port>` |
+| `rig mcp serve` | — | `--port <port>`<br>`--http`<br>`--bind <host:port>`<br>`--cloud-grants <url>`<br>`--cloud-grant-header-file <path>` |
 | `rig mcp token` | — | — |
 | `rig mcp token add <name>` | — | `--seat <session>` **required**<br>`--rig <name...>`<br>`--root <name...>`<br>`--workspace`<br>`--owner` |
 | `rig mcp token list` | — | `--json` |

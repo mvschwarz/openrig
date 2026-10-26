@@ -1,7 +1,8 @@
 # Merge this into each Hermes seat's config.yaml, in that seat's Hermes home ($OPENRIG_HOME/state/hermes/<node id> with
 # the example launcher), before the seat's first start.
 #
-# Hermes runs every tool command in one gateway per machine, with the gateway's environment. For each session it swaps
+# Hermes runs every tool command in its gateway (one per Hermes home, so one per seat with the example launcher), with
+# the gateway's environment. For each session it swaps
 # in the client's own values only for its toolchain names and the names listed here. Without this list, `rig` inside
 # Hermes runs as whichever seat started the gateway, or as no seat. With it, each seat runs `rig` as itself.
 # These are the seat's own OpenRig variables; none is a secret, and Hermes refuses credential-like names anyway.

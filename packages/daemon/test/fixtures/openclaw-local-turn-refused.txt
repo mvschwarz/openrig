@@ -1,0 +1,9 @@
+run error: Session
+ "agent:main:openrig-fixture" changed while
+ starting work. Retry.
+ local ready | error
+ agent main | session openrig-fixture |
+ openai/gpt-4o-mini | deliver:off | tokens 2.4k/128k (2%)
+────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────

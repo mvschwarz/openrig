@@ -118,7 +118,7 @@ export class SeatStructuralActivityService {
       this.latestBySession.delete(sessionName);
       return null;
     }
-    const c = communityHarnessPaneActivity(classifyPaneActivity(content), communityHarness);
+    const c = communityHarnessPaneActivity(classifyPaneActivity(content), communityHarness, content);
     const at = observedAt ?? this.now();
     const obs: StructuralObservation = {
       state: c.state,

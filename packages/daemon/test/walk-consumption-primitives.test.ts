@@ -483,7 +483,9 @@ describe("GET /api/sessions/:sessionName/generation-record — the consumption-b
     vi.mocked(CodexThreadIdResolver.prototype.resolve).mockImplementation(async pid => pid === 30 ? threadId : undefined);
     const response = await app.request(url);
     expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({ error: "record_identity_unverified" });
+    // Not a binding change: `rig walk` prints this message as it is.
+    expect(await response.json()).toMatchObject({ error: "record_identity_unverified",
+      message: "The Codex conversation in the pane for 'dev-codex@codex-rig' isn't the one its verified process owned, so no generation record is served." });
   });
 
   it.each(["pane", "binding", "occupant"])("Codex still refuses a %s change during wrapped-thread resolution", async (changed) => {
