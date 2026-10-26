@@ -227,4 +227,27 @@ describe("terminal preview width", () => {
       else delete (process.stdout as unknown as Record<string, unknown>)["isTTY"];
     }
   });
+
+  it("previews the kernel view for cmux without the wide TUI's width, as the cmux open sends none", async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(process.stdout, "columns");
+    const ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+    const requests: string[] = [];
+    try {
+      Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+      Object.defineProperty(process.stdout, "columns", { configurable: true, value: 160 });
+      const client = new DaemonClient({ baseUrl: "http://fixture", fetchImpl: (async url => {
+        requests.push(String(url));
+        return { ok: true, json: async () => ({}) } as Response;
+      }) as typeof fetch });
+      await client.previewTerminal("saved:kernel", "cmux");
+      await client.previewTerminal("saved:kernel", "herdr");
+      expect(requests.map(url => [new URL(url).searchParams.get("provider"), new URL(url).searchParams.get("viewportColumns")]))
+        .toEqual([["cmux", null], ["herdr", "160"]]);
+    } finally {
+      if (descriptor) Object.defineProperty(process.stdout, "columns", descriptor);
+      else delete (process.stdout as unknown as Record<string, unknown>)["columns"];
+      if (ttyDescriptor) Object.defineProperty(process.stdout, "isTTY", ttyDescriptor);
+      else delete (process.stdout as unknown as Record<string, unknown>)["isTTY"];
+    }
+  });
 });

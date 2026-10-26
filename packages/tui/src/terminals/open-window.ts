@@ -32,10 +32,15 @@ export function inRex(env: NodeJS.ProcessEnv): boolean {
 }
 
 /** cmux's markers on a terminal it runs: its socket and the surface. The daemon's own environment drops both, so a shared
- *  TUI is never read as running in cmux. A Herdr or Rex inside cmux keeps the view. */
+ *  TUI is never read as running in cmux. A Herdr or Rex inside cmux keeps the view. A tmux server started inside cmux keeps
+ *  the markers too, so a TUI in that tmux opens in cmux even when the tmux is attached from another terminal. */
 export function inCmux(env: NodeJS.ProcessEnv): boolean {
   return !!env["CMUX_SOCKET_PATH"] && !!env["CMUX_SURFACE_ID"] && !inHerdr(env) && !inRex(env);
 }
+
+/** Said with cmux_unavailable from inside cmux, where "install cmux" can't be the fix; cmux's default socket mode refuses
+ *  outside clients such as the daemon. */
+const CMUX_SOCKET_HINT = 'This TUI runs inside cmux, so cmux is installed; its socket is most likely refusing OpenRig. In cmux Settings > Automation, select "Automation mode" for Socket Control Mode, then try again. `rig doctor` checks this setting.';
 
 /**
  * The Herdr or Rex markers of the tmux client that was active last: a hint for which one the person is viewing, normally the
@@ -88,7 +93,8 @@ export async function openTerminalInWindow(view: string, endpoint: string, cliEn
   const viewed = await viewedFrom(viewer);
   const base = { ...process.env };
   if (viewed) for (const key of MARKER_KEYS) delete base[key];
-  const placement = inCmux(process.env) ? ["--provider", "cmux"] : ["--window"];
+  const cmux = inCmux(process.env);
+  const placement = cmux ? ["--provider", "cmux"] : ["--window"];
   const args = ["terminal", "open", ...placement, "--json", ...(expectedPlan !== undefined ? ["--expected-plan", expectedPlan] : []), "--", view];
   let stdout: string;
   let executionError: string | undefined;
@@ -112,7 +118,8 @@ export async function openTerminalInWindow(view: string, endpoint: string, cliEn
   if (executionError || (!result.opened.length && !(result.ok && result.reusedWorkspace))) {
     // Only a definite pre-launch failure can reveal passive recovery; unknown outcomes stay put.
     if (result.code === "terminal_window_failed" && result.windowAttempted === false && !result.window && !result.opened.length) onUnavailable?.();
-    throw new Error([result.error ?? executionError ?? "No terminals were confirmed open.", ...(result.notes ?? []),
+    throw new Error([result.error ?? executionError ?? "No terminals were confirmed open.",
+      ...(cmux && result.code === "cmux_unavailable" ? [CMUX_SOCKET_HINT] : []), ...(result.notes ?? []),
       ...result.absent.map(member => `Absent: ${member.seat} — ${member.reason}`),
       ...result.degraded.map(member => `Skipped: ${member.seat} — ${member.reason}`),
       ...(result.window ? [`Terminal: ${result.window.app} (${result.window.surface})`] : []),

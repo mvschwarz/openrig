@@ -257,17 +257,26 @@ console.log(${JSON.stringify(JSON.stringify(opened))});`);
       args: ["terminal", "open", "--provider", "cmux", "--json", "--expected-plan", "cmux-plan", "--", "saved:kernel"] }]);
   });
 
-  it("keeps a failed cmux open's attach commands, without the window recovery or a retry", async () => {
+  it("keeps a failed cmux open's attach commands and names cmux's socket setting, without the window recovery or a retry", async () => {
     ownEnv({ TERM_PROGRAM: "ghostty", ...cmuxMarkers });
     const f = child({ provider: "cmux", ok: false, opened: [], absent: [], degraded: [], pages: 0, code: "cmux_unavailable",
-      error: "cmux control socket is not answering", notes: ["In a new terminal on the daemon's host, attach directly using one of these commands:",
-        "operator: env -u TMUX tmux attach -t '=operator@kernel'"] }, 1);
+      error: "cmux is not connected — install cmux from https://cmux.io and run: cmux ping",
+      notes: ["In a new terminal on the daemon's host, attach directly using one of these commands:", "operator: env -u TMUX tmux attach -t '=operator@kernel'"] }, 1);
     let recoveries = 0;
     await expect(openTerminalInWindow("saved:kernel", "http://localhost:7433", f.entry, undefined, () => { recoveries++; }))
-      .rejects.toThrow(/cmux control socket is not answering[\s\S]*operator: env -u TMUX tmux attach/);
+      .rejects.toThrow(/cmux is not connected[\s\S]*"Automation mode" for Socket Control Mode[\s\S]*rig doctor[\s\S]*operator: env -u TMUX tmux attach/);
     expect(recoveries).toBe(0);
     expect(f.calls()).toHaveLength(1);
     expect(f.calls()[0].args.slice(0, 4)).toEqual(["terminal", "open", "--provider", "cmux"]);
+  });
+
+  it("adds the socket setting only for cmux_unavailable", async () => {
+    ownEnv({ TERM_PROGRAM: "ghostty", ...cmuxMarkers });
+    const f = child({ provider: "cmux", ok: false, opened: [], absent: [], degraded: [], pages: 0, code: "preview_changed",
+      error: "View membership, layout or provider session changed. Refresh the preview before Open; nothing was launched." }, 1);
+    const failure = await openTerminalInWindow("saved:kernel", "http://localhost:7433", f.entry, "stale-plan").catch((error: Error) => error);
+    expect(String(failure)).toContain("Refresh the preview");
+    expect(String(failure)).not.toContain("Socket Control Mode");
   });
 
   it("reads cmux's markers only with its socket and surface, and not inside Herdr or Rex", () => {
