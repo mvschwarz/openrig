@@ -21,6 +21,12 @@ import { humanAnswerText, formatHumanAnswers, unansweredQuestions, type RecordHu
 import { BotLimiter, DEFAULT_MAX_PER_HOUR, DEFAULT_COOLDOWN_MINUTES, type BotLookup, type NamedBot } from "./bot-inbox.js";
 import { envelopeChannel, type EnvelopeForwarder } from "./forwarding.js";
 
+/** On a row whose body OpenRig gave an attachments block (local copies, failed transfers): the block's exact length, so
+ *  a person-facing post can leave out that block, and only it (queue-access.ts). */
+export const SLACK_ATTACHMENTS_TAG_PREFIX = "slack-attachments:";
+/** How OpenRig's attachments block begins: copies stored, or only failed transfers. */
+export const SLACK_ATTACHMENTS_HEADINGS = ["Attachments (workspace-local copies):\n", "FILE TRANSFER FAILED: "] as const;
+
 export interface SlackEvent {
   type?: string;
   subtype?: string;
@@ -237,13 +243,14 @@ export class InboundRouter {
   }
 
   /** The row's summary names the person who actually wrote (their registered address); its tags stay as they were. */
-  private summaryOf(ev: SlackEvent, sender: string, transfer?: InboundFileResult | null, correlationQitemId?: string, envelope?: string): { summary: string; body: string } {
+  private summaryOf(ev: SlackEvent, sender: string, transfer?: InboundFileResult | null, correlationQitemId?: string, envelope?: string): { summary: string; body: string; attachmentsChars?: number } {
     const text = String(ev.text ?? "");
     const meta = `slack channel=${ev.channel} user=${ev.user} ts=${ev.ts}`;
     // OPR.0.5.6.2 — attachments ride the row BODY by LOCAL path (Slack owns
     // nothing; the media file is OUR copy). Failures are per-file and named:
     // the message always survives a failed transfer.
     const sections: string[] = [text];
+    let attachments: string | undefined;
     if (ev.recoveredAfterGap) {
       const posted = new Date(Number(ev.ts) * 1000).toISOString();
       const unapplied = ev.recoveredThreadReply && correlationQitemId
@@ -261,7 +268,8 @@ export class InboundRouter {
       for (const f of transfer.failed) {
         lines.push(`FILE TRANSFER FAILED: ${f.name} — ${f.error}`);
       }
-      sections.push(lines.join("\n"));
+      attachments = lines.join("\n");
+      sections.push(attachments);
     }
     // A shared channel's message carries who wrote and the channel's readable policy, for the agent answering it.
     if (envelope) sections.push(envelope);
@@ -270,6 +278,7 @@ export class InboundRouter {
     return {
       summary: `${ev.recoveredAfterGap ? "[Recovered after gap] " : ""}${sender} via Slack: ${headline.slice(0, 90)}`,
       body: `${sections.filter((s) => s.length > 0).join("\n\n")}\n\n---\nSource: ${meta}${correlationQitemId ? `\nIn reply to: ${correlationQitemId}` : ""}\nRouted by openrig slack-inbound. Default destination per config; re-route via queue as needed.`,
+      ...(attachments ? { attachmentsChars: attachments.length } : {}),
     };
   }
 
@@ -343,7 +352,7 @@ export class InboundRouter {
       if (!isCurrent()) return { landed: false, reason: "inactive" };
       // S10 — deterministic route (thread map) when wired; static destination otherwise.
       const route = this.deps.resolveRoute?.(ev) ?? { destination: this.deps.destination };
-      const { summary, body } = this.summaryOf(ev, who.source, transfer, route.correlationQitemId, who.sharedChannel?.envelope);
+      const { summary, body, attachmentsChars } = this.summaryOf(ev, who.source, transfer, route.correlationQitemId, who.sharedChannel?.envelope);
       // A person's top-level message (not a reply in a thread) becomes the root its answer lands under.
       const mintsRoot = Boolean(this.deps.mintThread && ev.channel && (!ev.thread_ts || ev.thread_ts === ev.ts));
       const correlated = route.correlationQitemId ? this.deps.queue.getQitem?.(route.correlationQitemId) : null;
@@ -367,7 +376,8 @@ export class InboundRouter {
           source: who.source, // the REGISTERED human's canonical ref (human-class), never a raw platform id
           destination: route.destination,
           priority: "routine",
-          tags: [...(route.tags ?? ["founder-slack", "inbound"]), ...(mintsRoot ? [SLACK_THREAD_ROOT_TAG] : []), ...(who.sharedChannel?.tags ?? [])],
+          tags: [...(route.tags ?? ["founder-slack", "inbound"]), ...(mintsRoot ? [SLACK_THREAD_ROOT_TAG] : []), ...(who.sharedChannel?.tags ?? []),
+            ...(attachmentsChars ? [`${SLACK_ATTACHMENTS_TAG_PREFIX}${attachmentsChars}`] : [])],
           summary,
           body,
           ...(route.correlationQitemId ? { inReplyTo: route.correlationQitemId } : {}),

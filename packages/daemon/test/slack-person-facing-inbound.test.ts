@@ -9,7 +9,7 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
-import { InboundRouter } from "../src/domain/gateway/slack/inbound.js";
+import { InboundRouter, type InboundFileResult } from "../src/domain/gateway/slack/inbound.js";
 import { makeInboundSenderResolver } from "../src/domain/gateway/slack/inbound-admission.js";
 import { makeQueuePorts } from "../src/domain/gateway/slack/queue-access.js";
 import { buildOutboundMessage } from "../src/domain/gateway/slack/message.js";
@@ -28,7 +28,7 @@ const AGENT_CONTEXT = ["Added by OpenRig", "Shared channel:", "Sent by:", "Polic
 const closes: Array<() => void> = [];
 afterEach(() => { for (const close of closes.splice(0).reverse()) close(); });
 
-async function fixture() {
+async function fixture(transfer: InboundFileResult = { stored: [], failed: [] }) {
   const home = mkdtempSync(join(tmpdir(), "person-facing-inbound-"));
   expect(addHumanFragment({ entityId: "ana", class: "human", displayName: "Ana", address: ANA,
     connectorBindings: [{ kind: "slack", connectorRef: "primary", secretsRef: "vault://slack/ana", role: "primary", handle: "UANA" }],
@@ -43,12 +43,13 @@ async function fixture() {
   const router = new InboundRouter({ queue: makeQueuePorts(repo), destination: "orchestrator@test-rig", seen: new SeenStore(join(home, "seen.jsonl")),
     deadLetter: new DeadLetterStore(join(home, "dead.jsonl")),
     resolveSender: makeInboundSenderResolver({ loadHumanRegistry, resolveSlackHandle }, home),
-    resolveRoute: () => ({ destination: SUPPORT, tags: ["founder-slack", "inbound"] }) });
+    resolveRoute: () => ({ destination: SUPPORT, tags: ["founder-slack", "inbound"] }),
+    files: { transfer: async () => transfer } });
   closes.push(() => { db.close(); rmSync(home, { recursive: true, force: true }); });
   const alerts = () => makeQueuePorts(repo, { loadHumanRegistry: registry, sharedChannels: () => sharedChannelAddresses(home) }).listHumanAlerts({});
   // The agent puts its question on the row, then parks the row on Ana: a new ask for her.
-  const askAna = async (user: string, channel: string, ts: string, text: string) => {
-    await router.route({ type: "message", user, channel, ts, text });
+  const askAna = async (user: string, channel: string, ts: string, text: string, files?: unknown[]) => {
+    await router.route({ type: "message", user, channel, ts, text, ...(files ? { files } : {}) });
     const row = repo.list({ limit: 100 }).find((item) => item.destinationSession === SUPPORT && item.body?.includes(text))!;
     repo.update({ qitemId: row.qitemId, actorSession: SUPPORT, summary: QUESTION, transitionNote: "the question for Ana" });
     repo.update({ qitemId: row.qitemId, actorSession: SUPPORT, state: "blocked", blockedOn: ANA, transitionNote: "asking Ana" });
@@ -104,6 +105,54 @@ describe("a person asked about a Slack message sees the question and the message
     for (const rendered of [ask.blocks, ask.fallback]) {
       expect(rendered).not.toContain("Source: slack");
       expect(rendered).not.toContain("Routed by openrig slack-inbound");
+    }
+  });
+
+  it("a stored attachment: OpenRig's block with its local copies is left out, and the row keeps it", async () => {
+    const f = await fixture({ stored: [{ name: "invoice.pdf", localPath: "/srv/openrig/slack-files/F1/invoice.pdf", mimetype: "application/pdf", bytes: 2048 }], failed: [] });
+    const ask = await f.askAna("UCUSTOMER", "CACME", "4.4", "Here's the invoice.", [{ id: "F1", name: "invoice.pdf" }]);
+    expect(ask.row.tags).toEqual(expect.arrayContaining([expect.stringMatching(/^slack-attachments:\d+$/)]));
+    expect(ask.alert.body).toBe("Here's the invoice.");
+    for (const rendered of [ask.blocks, ask.fallback]) {
+      expect(rendered).not.toContain("/srv/openrig/slack-files");
+      expect(rendered).not.toContain("workspace-local copies");
+    }
+    expect(ask.row.body).toContain("- /srv/openrig/slack-files/F1/invoice.pdf (invoice.pdf, application/pdf, 2048 bytes)");
+  });
+
+  it("a failed transfer: OpenRig's diagnostic is left out, and the row keeps it", async () => {
+    const f = await fixture({ stored: [], failed: [{ name: "photo.png", error: "download refused: 403 for https://files.slack.com/x" }] });
+    const ask = await f.askAna("UCUSTOMER", "CACME", "5.5", "A photo of the error.", [{ id: "F2", name: "photo.png" }]);
+    expect(ask.alert.body).toBe("A photo of the error.");
+    for (const rendered of [ask.blocks, ask.fallback]) expect(rendered).not.toContain("FILE TRANSFER FAILED");
+    expect(ask.row.body).toContain("FILE TRANSFER FAILED: photo.png — download refused: 403");
+  });
+
+  it("a customer who types an attachment heading and paths keeps them, with a real attachment beside them", async () => {
+    const typed = "Is this what you meant?\n\nAttachments (workspace-local copies):\n- /home/me/fake.pdf (fake.pdf, 1 bytes)\nFILE TRANSFER FAILED: x.png — my words";
+    const f = await fixture({ stored: [{ name: "real.pdf", localPath: "/srv/openrig/slack-files/F3/real.pdf", bytes: 7 }], failed: [] });
+    const ask = await f.askAna("UCUSTOMER", "CACME", "6.6", typed, [{ id: "F3", name: "real.pdf" }]);
+    expect(ask.alert.body).toBe(typed);
+    expect(ask.fallback).not.toContain("/srv/openrig/slack-files/F3");
+  });
+
+  it("a file-bearing message whose transfer gives no block carries no marker, and its words stay whole", async () => {
+    const f = await fixture({ stored: [], failed: [] });
+    const ask = await f.askAna("UCUSTOMER", "CACME", "7.7", "Files below.\n\nFILE TRANSFER FAILED: typed by me", [{ id: "F4", name: "x.bin" }]);
+    expect(ask.row.tags?.some((tag) => tag.startsWith("slack-attachments:"))).toBe(false);
+    expect(ask.alert.body).toBe("Files below.\n\nFILE TRANSFER FAILED: typed by me");
+  });
+
+  it("a marker can't remove the sender's words: one that doesn't fit OpenRig's block at the end leaves the body as it is", async () => {
+    const f = await fixture();
+    const words = "My question ends with FILE TRANSFER FAILED: nothing";
+    // 29 is exactly "FILE TRANSFER FAILED: nothing": OpenRig's heading, but inside the sentence, not a section of its own.
+    for (const marker of ["slack-attachments:29", "slack-attachments:30", "slack-attachments:999", "slack-attachments:-4", "slack-attachments:x"]) {
+      const row = await f.repo.create({ sourceSession: "acme-customers@external", destinationSession: SUPPORT,
+        body: `${words}\n\n---\nSource: slack channel=CACME user=U1 ts=8.8\nRouted by openrig slack-inbound. Default destination per config; re-route via queue as needed.`,
+        summary: "a message", tags: ["founder-slack", "inbound", marker], nudge: false });
+      f.repo.update({ qitemId: row.qitemId, actorSession: SUPPORT, state: "blocked", blockedOn: ANA, transitionNote: "asking Ana" });
+      expect((await f.alerts()).find((item) => item.qitemId === row.qitemId)?.body).toBe(words);
     }
   });
 
