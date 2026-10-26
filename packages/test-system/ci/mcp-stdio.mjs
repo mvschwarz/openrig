@@ -31,9 +31,16 @@ export function verifyMcpStdio(proof) {
     assert.deepEqual(JSON.parse(result.content[0].text), result.structuredContent);
   }
   assert.deepEqual(JSON.parse(proof.missing.content[0].text), proof.daemonError.body);
-  const lines = proof.instructions.split('\n');
-  assert.equal(lines.length, 4);
-  for (const [index, text] of ['OPENRIG_SESSION_NAME', 'rig_queue_create', 'not idle', 'reserved for a person'].entries()) {
+  verifyInstructions(proof.instructions);
+}
+
+/** The server's instructions, one marker per line, in order. */
+export const INSTRUCTION_MARKERS = ['OPENRIG_SESSION_NAME', 'rig_queue_create', 'not idle', 'reserved for a person', 'rig_queue_claim'];
+
+export function verifyInstructions(instructions) {
+  const lines = instructions.split('\n');
+  assert.equal(lines.length, INSTRUCTION_MARKERS.length);
+  for (const [index, text] of INSTRUCTION_MARKERS.entries()) {
     assert.ok(lines[index].includes(text), text);
   }
 }

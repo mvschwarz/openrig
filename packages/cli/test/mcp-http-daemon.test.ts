@@ -227,6 +227,58 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     expect(viaItem.text).not.toContain("ARTIFACT body");
   });
 
+  it("a hosted member works its own rows as its grant's seat, shows on the team with activity unknown, and keeps its record after revoke", async () => {
+    // The team has a lead with a node. The hosted member (a tool outside any terminal) has a roster entry and a grant, no node.
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-http-workspace-"));
+    const savedWorkspace = process.env.OPENRIG_WORKSPACE_ROOT;
+    process.env.OPENRIG_WORKSPACE_ROOT = workspace;
+    setSelfHostId("host-a");
+    try {
+      seat("team", "lead");
+      fs.mkdirSync(path.join(workspace, "rosters"));
+      fs.writeFileSync(path.join(workspace, "rosters", "team.json"), JSON.stringify({
+        version: 1, id: "team", name: "Team", purpose: "Ship the release", curator: { seat: "lead@team", host: "host-a" }, updated_at: "2026-10-26",
+        members: [{ seat: "grok@team", host: "host-a", capabilities: ["web research"], engagement: ["delegate"],
+          use_when: "A question needs current web sources", why: "Searches the web and cites it", caveat: "No terminal or files: answers in text only", hosted: true }],
+      }));
+      const token = await addGrant(tokenFile, { name: "grok", seat: "grok@team", rigs: ["team"], roots: [], workspace: false, owner: false });
+      const served = await listen();
+      const asGrok = await connect(served.url, token);
+
+      const task = await repo.create({ sourceSession: "lead@team", destinationSession: "grok@team", summary: "When did 0.7.2 ship?", body: "Find the publish date, with a source.", nudge: false } as never);
+      const listed = await asGrok("rig_queue_list", { owned: true });
+      expect(listed.isError).toBe(false);
+      expect(listed.structured.items.map((row: { qitemId: string }) => row.qitemId)).toEqual([task.qitemId]);
+      expect(repo.getById(task.qitemId)?.state, "listing it doesn't take it").toBe("pending");
+
+      expect((await asGrok("rig_queue_claim", { qitemId: task.qitemId })).isError).toBe(false);
+      const claim = repo.listTransitions(task.qitemId).find((t) => t.state === "in-progress");
+      expect(claim?.actorSession).toMatch(/^grok@team/);
+      const answered = await asGrok("rig_queue_update", { qitemId: task.qitemId, state: "done", closureReason: "no-follow-on", resolution: "It published on 2026-10-25 (npm)." });
+      expect(answered.isError).toBe(false);
+      expect(repo.getById(task.qitemId)).toMatchObject({ state: "done", resolution: "It published on 2026-10-25 (npm)." });
+
+      // Re-entry: a new connection with the same grant reaches the same work.
+      const again = await connect(served.url, token);
+      expect((await again("rig_queue_show", { qitemId: task.qitemId })).text).toContain("It published on 2026-10-25");
+
+      // The team shows it: a hosted member with its authored capabilities and limits, no pane, and activity unknown, never idle.
+      const team = await again("rig_team", { rigId: "team" });
+      expect(team.structured.seats.map((s: { session: string }) => s.session)).toEqual(["lead@team"]);
+      expect(team.structured.hostedMembers).toEqual([{ session: "grok@team", roster: "team", capabilities: ["web research"],
+        useWhen: "A question needs current web sources", caveat: "No terminal or files: answers in text only", pane: null, activity: "unknown" }]);
+
+      // Revoked: its next request is refused, and the work and its answer stay.
+      expect(await revokeGrant(tokenFile, "grok")).toBe(true);
+      expect((await post(served.url, { Authorization: `Bearer ${token}` })).status).toBe(401);
+      expect(repo.getById(task.qitemId)).toMatchObject({ state: "done", resolution: "It published on 2026-10-25 (npm)." });
+    } finally {
+      setSelfHostId(null);
+      if (savedWorkspace === undefined) delete process.env.OPENRIG_WORKSPACE_ROOT; else process.env.OPENRIG_WORKSPACE_ROOT = savedWorkspace;
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
   it("stops a revoked grant at its next request and keeps its records", async () => {
     const alice = await grant("alice");
     const served = await listen();

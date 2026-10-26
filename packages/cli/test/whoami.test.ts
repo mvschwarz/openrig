@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import http from "node:http";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Command } from "commander";
 import { whoamiCommand, resolveIdentitySource } from "../src/commands/whoami.js";
 import { DaemonClient } from "../src/client.js";
@@ -266,6 +270,21 @@ describe("Whoami CLI", () => {
     const result = resolveIdentitySource({}, mockTmuxExec);
 
     expect(result).toEqual({ sessionName: "fallback-session" });
+  });
+
+  it("prints nothing on the terminal when tmux has no identity for the pane", () => {
+    // Real tmux (or none) against an empty socket dir: every lookup fails, and none of it reaches the person.
+    const tmuxDir = mkdtempSync(join(tmpdir(), "whoami-tmux-"));
+    const env: NodeJS.ProcessEnv = { ...process.env, TMUX_PANE: "%999999", TMUX_TMPDIR: tmuxDir, NODE_NO_WARNINGS: "1" };
+    for (const key of ["TMUX", "OPENRIG_NODE_ID", "OPENRIG_SESSION_NAME", "RIGGED_NODE_ID", "RIGGED_SESSION_NAME"]) delete env[key];
+    const whoami = new URL("../src/commands/whoami.ts", import.meta.url).href;
+    try {
+      const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e",
+        `const { resolveIdentitySource } = await import(${JSON.stringify(whoami)}); console.log(JSON.stringify(resolveIdentitySource({})));`],
+        { env, encoding: "utf-8", timeout: 30_000 });
+      expect(child.stdout.trim()).toBe("null");
+      expect(child.stderr).toBe("");
+    } finally { rmSync(tmuxDir, { recursive: true, force: true }); }
   });
 
   it("human output includes rig, pod, session, peers, edges, transcript", async () => {

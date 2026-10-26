@@ -291,10 +291,11 @@ export class DaemonClient {
   rigNodes(rigId: string) {
     return this.get(`/api/rigs/${encodeURIComponent(rigId)}/nodes`);
   }
-  /** The existing per-seat effort report: requested, saved, emitted and observed. */
+  /** The existing per-seat effort report: requested, saved, emitted and observed.
+   * A refusal is an answer, so the page reader doesn't count it as a failed read. */
   async seatEffort(seatRef: string): Promise<unknown> {
     const route = `/api/seat/effort/${encodeURIComponent(seatRef)}`;
-    const res = await this.fetchImpl(`${this.baseUrl}${route}`, {
+    const res = await this.optionalFetchImpl(`${this.baseUrl}${route}`, {
       headers: this.headers,
       signal: AbortSignal.timeout(5_000),
     });

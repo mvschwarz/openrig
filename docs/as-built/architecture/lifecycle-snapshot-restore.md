@@ -389,6 +389,14 @@ daemon's `/api/transcripts/<session>/full`, `:156`), `read <packet-dir> [--json]
 cross-runtime v0 standard — Claude Code and Codex transcripts both supported
 via runtime parsers + redaction (`packages/cli/src/restore-packet/`).
 
+### Shared history inspection
+
+`GET /api/startup/:rigId/nodes/:nodeId/history` lists captured histories for one durable node in the current, policy-ranked restore snapshot. `POST` to the same path plus `/validate` with exactly `{ "snapshotId": "…", "historySessionId": "…" }` rechecks one listed choice. Both routes use startup's terminal bearer authentication. The CLI exposes the same server decisions with `rig seat history --rig <rig-id> --node-id <node-id> --json`; pass both `--snapshot-id` and `--history-session-id` to validate. These calls perform no snapshot capture, token refresh, launch, or database write.
+
+The list includes captured Claude and Codex rows that the current restore policy and native resume adapter can structurally attempt. Codex requires an explicit `codex_id` and token; implicit `codex_last` cannot name a particular history. Claude accepts `claude_id` and `claude_name` with tokens. The server checks exact rig and node membership, the snapshot's intended roster and runtime, and the node's current occupant compatibility. A change to a sibling node does not retarget or invalidate this node's list. A changed or pruned snapshot, removed history row, same-name replacement node, ambiguous current occupant, or incompatible source is refused; validation never substitutes another history.
+
+`tokenState` (`present`, `stale`, or `unverified` for listed rows) describes the saved verification record and its age. Eligibility means a future launch may **attempt** native resume. A stored row can share a native token with another row, and neither listing nor validation proves that a native conversation still exists. Launch prerequisites, native resume results, and applying a chosen history belong to the later startup flow.
+
 ## See also
 
 - `agent-spec-and-startup.md` — StartupOrchestrator persists the replay

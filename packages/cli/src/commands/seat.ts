@@ -388,6 +388,35 @@ export function seatCommand(depsOverride?: SeatDeps & { readStdin?: () => Promis
     console.log(JSON.stringify(result.data, null, json ? undefined : 2));
     if (result.status >= 400) process.exitCode = result.status >= 500 ? 2 : 1;
   };
+  cmd.command("history")
+    .requiredOption("--rig <id>", "Exact rig ID")
+    .requiredOption("--node-id <id>", "Exact durable node ID")
+    .option("--snapshot-id <id>", "Validate a reference returned by this list")
+    .option("--history-session-id <id>", "Validate a reference returned by this list")
+    .option("--json", "Print the daemon response as JSON")
+    .description("List or validate captured histories eligible for a resume attempt (read-only)")
+    .action(async (opts: { rig: string; nodeId: string; snapshotId?: string; historySessionId?: string; json?: boolean }) => {
+      if (!!opts.snapshotId !== !!opts.historySessionId) {
+        console.error("Supply both --snapshot-id and --history-session-id to validate a history.");
+        process.exitCode = 1;
+        return;
+      }
+      const deps = getDeps(); const daemon = await getDaemonStatus(deps.lifecycleDeps);
+      if (!daemonStatusGuard(daemon)) return;
+      const client = deps.clientFactory(getDaemonUrl(daemon));
+      const path = `/api/startup/${encodeURIComponent(opts.rig)}/nodes/${encodeURIComponent(opts.nodeId)}/history`;
+      const response = opts.snapshotId && opts.historySessionId
+        ? await client.post<Record<string, unknown>>(`${path}/validate`, { snapshotId: opts.snapshotId, historySessionId: opts.historySessionId }, { headers: terminalAuthHeaders() })
+        : await client.get<Record<string, unknown>>(path, { headers: terminalAuthHeaders() });
+      if (opts.json || response.status >= 400) console.log(JSON.stringify(response.data, null, 2));
+      else {
+        const body = response.data as { snapshotId?: string; history?: { historySessionId: string; resumeType: string; tokenState: string }; histories?: Array<{ historySessionId: string; resumeType: string; tokenState: string }> };
+        console.log(`Current snapshot: ${body.snapshotId ?? "none"}`);
+        for (const item of body.history ? [body.history] : body.histories ?? []) console.log(`${item.historySessionId}  ${item.resumeType}  token: ${item.tokenState}`);
+        if (!body.history && !body.histories?.length) console.log("No eligible captured histories.");
+      }
+      if (response.status >= 400) process.exitCode = response.status >= 500 ? 2 : 1;
+    });
   cmd.command("set-typing-guard").argument("<seat>")
     .option("--enabled <boolean>", "Compatibility: true selects hold; false selects off")
     .option("--mode <mode>", "off, draft-aware, openrig-urgent, urgent-only, sends-only or hold; choose this or --enabled")

@@ -99,16 +99,20 @@ export interface PreviewSessionRow {
 /** OPR.0.4.3.20 FR-6 — compute a seat's token state (read-only). A present token
  *  whose probe failed (`not_resumable`/`inconclusive`) OR whose last-verified age
  *  is past the freshness threshold is `stale` — surfaced, never silently nulled. */
-function tokenStateFor(
+export function tokenStateFor(
   latest: PreviewSessionRow | null,
   nowMs: number,
 ): { tokenState: ResumeTokenState; provenance: string | null; lastVerified: string | null } {
-  if (!latest || !latest.resumeToken) {
+  if (!latest || typeof latest.resumeToken !== "string" || !latest.resumeToken) {
     return { tokenState: "missing", provenance: null, lastVerified: null };
   }
-  const provenance = latest.resumeProvenance ?? null;
-  const lastVerified = latest.resumeLastVerified ?? null;
-  const probe = latest.resumeLastProbeStatus ?? null;
+  const provenance = typeof latest.resumeProvenance === "string" ? latest.resumeProvenance : null;
+  const lastVerified = typeof latest.resumeLastVerified === "string" ? latest.resumeLastVerified : null;
+  const probe = typeof latest.resumeLastProbeStatus === "string" ? latest.resumeLastProbeStatus : null;
+  if ((latest.resumeLastVerified != null && lastVerified === null)
+    || (latest.resumeLastProbeStatus != null && probe === null)) {
+    return { tokenState: "unverified", provenance, lastVerified: null };
+  }
   if (probe === "not_resumable" || probe === "inconclusive") {
     return { tokenState: "stale", provenance, lastVerified };
   }
@@ -146,7 +150,8 @@ export function leftAttachedReason(name: string): string {
  *  seat (operation B, `--fresh <seat>`) forecasts `fresh-primed` BEFORE any
  *  resume-token logic, exactly as apply mode deliberately skips the resume. */
 function intendedActionFor(
-  resolution: ActiveOccupantResolution<PreviewSessionRow>,
+  occupant: PreviewSessionRow | null,
+  ambiguity: Extract<ActiveOccupantResolution<PreviewSessionRow>, { kind: "ambiguous" }> | null,
   freshRequested: boolean,
   seat: RestoreSeatFacts,
   absentHistory: { logicalId: string; rigName: string; row: PreviewSessionRow | null; stoppedCurrent: boolean },
@@ -154,10 +159,10 @@ function intendedActionFor(
   // OPR.0.5.7.1 — a broken authoritative relation beats --fresh, exactly as
   // execution fails loudly before its fresh check: --fresh cannot override
   // A1 ambiguity.
-  if (resolution.kind === "ambiguous") {
+  if (ambiguity) {
     return {
       intendedAction: "awaiting-decision",
-      reason: activeOccupantAmbiguityError(resolution.candidateIds, resolution.detail),
+      reason: activeOccupantAmbiguityError(ambiguity.candidateIds, ambiguity.detail),
     };
   }
   if (freshRequested) {
@@ -166,17 +171,16 @@ function intendedActionFor(
       reason: "listed in --fresh — apply would deliberately skip the resume (operation B)",
     };
   }
-  if (resolution.kind === "none" && absentHistory.stoppedCurrent) {
+  if (!occupant && absentHistory.stoppedCurrent) {
     return { intendedAction: "awaiting-decision", reason: stoppedSnapshotReason(absentHistory.logicalId, absentHistory.rigName) };
   }
   // No occupant, but an earlier one left a resume token: apply stops for the same decision.
-  if (resolution.kind === "none" && absentHistory.row) {
+  if (!occupant && absentHistory.row) {
     return {
       intendedAction: "awaiting-decision",
       reason: absentSeatResumeHistoryError(absentHistory.logicalId, absentHistory.row.resumeType, absentHistory.rigName),
     };
   }
-  const occupant = resolution.kind === "resolved" ? resolution.session : null;
   const policy = effectiveRestorePolicy(seat, occupant?.restorePolicy);
   // As apply: a launch-only community harness (its preset declares no resume) forecasts a decision, not a resume.
   // The snapshot's saved runtime, as apply reads it.
@@ -198,6 +202,21 @@ function intendedActionFor(
   return { intendedAction: "fresh-primed" };
 }
 
+/** Classify one explicitly named captured history with the same pre-launch
+ * policy decision as the startup preview. This never changes occupancy. The
+ * caller must first verify the current snapshot and its authoritative active
+ * occupant relation, then supply the candidate from that snapshot. */
+export function classifyCapturedHistory(
+  candidate: PreviewSessionRow,
+  seat: RestoreSeatFacts,
+  options: { attached: boolean; adapterCanResume: boolean; nowMs?: number },
+): { eligible: boolean; tokenState: ResumeTokenState } {
+  const tokenState = tokenStateFor(candidate, options.nowMs ?? Date.now()).tokenState;
+  if (options.attached || !options.adapterCanResume || !candidate.resumeToken?.trim()) return { eligible: false, tokenState };
+  const action = intendedActionFor(candidate, null, false, seat, { logicalId: "", rigName: "", row: null, stoppedCurrent: false });
+  return { eligible: action.intendedAction === "resume-original", tokenState };
+}
+
 /** Gather the session rows the preview forecasts from — the snapshot's
  *  captured sessions when one exists, otherwise the live rows an
  *  auto-rehydrate capture WOULD snapshot (read-only SELECT; the capture
@@ -210,20 +229,7 @@ export function collectPreviewSessionRows(
 ): PreviewSessionRow[] {
   if (snapshot) {
     const { stoppedNodeIds } = assessSnapshotCurrentOccupants(db, rig, snapshot, preserveStoppedInitial);
-    return (snapshot.data.sessions ?? []).map((s) => ({
-      stoppedCurrent: stoppedNodeIds.has(s.nodeId),
-      nodeId: s.nodeId,
-      restorePolicy: s.restorePolicy ?? null,
-      resumeType: s.resumeType ?? null,
-      resumeToken: s.resumeToken ?? null,
-      communityHarness: s.communityHarness ?? null,
-      // OPR.0.4.3.20 FR-6 — degrade to null for snapshots serialized pre-45.
-      resumeProvenance: s.resumeProvenance ?? null,
-      resumeLastVerified: s.resumeLastVerified ?? null,
-      resumeLastProbeStatus: s.resumeLastProbeStatus ?? null,
-      id: s.id,
-      status: s.status ?? null,
-    }));
+    return capturedPreviewSessionRows(snapshot).map((s) => ({ ...s, stoppedCurrent: stoppedNodeIds.has(s.nodeId) }));
   }
   const nodeIds = rig.nodes.map((n) => n.id);
   if (nodeIds.length === 0) return [];
@@ -253,6 +259,23 @@ export function collectPreviewSessionRows(
   };
   const { stoppedNodeIds } = assessSnapshotCurrentOccupants(db, rig, { data }, preserveStoppedInitial);
   return sessions.map(session => ({ ...session, stoppedCurrent: stoppedNodeIds.has(session.nodeId) }));
+}
+
+/** Normalize saved rows once for both startup preview and history selection. */
+export function capturedPreviewSessionRows(snapshot: Snapshot): PreviewSessionRow[] {
+  return (snapshot.data.sessions ?? []).map((s) => ({
+      nodeId: s.nodeId,
+      restorePolicy: s.restorePolicy ?? null,
+      resumeType: s.resumeType ?? null,
+      resumeToken: s.resumeToken ?? null,
+      communityHarness: s.communityHarness ?? null,
+      // OPR.0.4.3.20 FR-6 — degrade to null for snapshots serialized pre-45.
+      resumeProvenance: s.resumeProvenance ?? null,
+      resumeLastVerified: s.resumeLastVerified ?? null,
+      resumeLastProbeStatus: s.resumeLastProbeStatus ?? null,
+      id: s.id,
+      status: s.status ?? null,
+  }));
 }
 
 /**
@@ -297,7 +320,8 @@ export function buildRestorePlanPreview(
       ? { intendedAction: "leave-attached" as const, reason: leftAttachedReason(node.binding?.externalSessionName ?? node.logicalId) }
       : runtimeError
       ? { intendedAction: "awaiting-decision" as const, reason: runtimeError }
-      : intendedActionFor(resolution, freshRequested, seat,
+      : intendedActionFor(resolution.kind === "resolved" ? resolution.session : null,
+        resolution.kind === "ambiguous" ? resolution : null, freshRequested, seat,
         { logicalId: node.logicalId, rigName: rig.rig.name, row: absentSeatResumeHistory(sessionRows, savedNodeId), stoppedCurrent });
     // OPR.0.4.3.20 FR-6 — per-seat token state (read-only), derived from the
     // RESOLVED occupant only — never from a historical row.

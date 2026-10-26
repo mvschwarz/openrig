@@ -161,7 +161,8 @@ function whoamiPeersBound(): number {
 
 type TmuxExecFn = (cmd: string) => string;
 
-const defaultTmuxExec: TmuxExecFn = (cmd: string) => execSync(cmd, { encoding: "utf-8" }).trim();
+// tmux's stderr (an unset @rigged_* option, no server) rides the thrown error; callers fall through.
+const defaultTmuxExec: TmuxExecFn = (cmd: string) => execSync(cmd, { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 
 function buildPartialWhoamiResult(source: { nodeId?: string; sessionName?: string }): Record<string, unknown> {
   return {

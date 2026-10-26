@@ -150,6 +150,13 @@ describe("FR-6 restore-plan token state", () => {
     expect(p.nodes[0]!.freshRequired).toBe(false);
   });
 
+  it("degrades malformed saved verification metadata to unverified without changing valid token rules", () => {
+    const rig = rigWith([{ id: "n1", logicalId: "a", runtime: "codex" }]);
+    const malformed = buildRestorePlanPreview(rig, null, [row("n1", { resumeType: "codex_id",
+      resumeLastProbeStatus: "resumable", resumeLastVerified: 123 as never })]);
+    expect(malformed.nodes[0]).toMatchObject({ intendedAction: "resume-original", tokenState: "unverified" });
+  });
+
   it("present: probe resumable + verified within the freshness threshold", () => {
     const rig = rigWith([{ id: "n1", logicalId: "a", runtime: "claude-code" }]);
     const p = buildRestorePlanPreview(rig, null, [row("n1", { resumeLastVerified: FRESH, resumeLastProbeStatus: "resumable" })], undefined, NOW);

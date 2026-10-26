@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createMcpServer } from "../src/mcp-server.js";
@@ -413,6 +416,66 @@ describe("MCP Server", () => {
     served = detail;
     expect((await team()).leadNote).toContain("doesn't report");
     await cleanup();
+  });
+
+  it("rig_team adds the rig's hosted members (marked hosted, on this host, not a node), and says when it can't tell", async () => {
+    const folder = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-rosters-"));
+    const member = (seat: string, host: string, extra: Record<string, unknown> = {}) =>
+      ({ seat, host, capabilities: ["web research"], engagement: ["delegate"], use_when: "Current sources", why: "Searches the web", hosted: true, ...extra });
+    fs.writeFileSync(path.join(folder, "a.json"), JSON.stringify({ version: 1, id: "research", name: "Research", purpose: "Find things",
+      curator: { seat: "dev-impl@my-rig", host: "host-a" }, updated_at: "2026-10-26",
+      members: [
+        member("grok@my-rig", "host-a", { caveat: "Text only" }),
+        member("dev-impl@my-rig", "host-a"), // a node with a session: a seat
+        member("dev-qa@my-rig", "host-a"), // a node not launched yet (no session): still a seat
+        member("old@my-rig", "host-a", { hosted: undefined }), // a stale entry not marked hosted
+        member("bot@my-rig", "host-b"), // another host's
+        member("grok@other-rig", "host-a"), // another rig's
+      ] }));
+    fs.writeFileSync(path.join(folder, "b.json"), "{ not json");
+    let hostSelfId: string | null = "host-a";
+    const getFn = vi.fn(async (p: string) => {
+      if (p.startsWith("/api/rigs/summary")) return { status: 200, data: [{ id: "rig-1", name: "my-rig" }] };
+      if (p === "/api/rigs/rig-1") return { status: 200, data: { rig: { id: "rig-1", name: "my-rig" }, nodes: [{ id: "n1", logicalId: "dev.impl" }, { id: "n2", logicalId: "dev.qa" }], edges: [], representative: null } };
+      if (p === "/api/rigs/rig-1/nodes") return { status: 200, data: [
+        { logicalId: "dev.impl", canonicalSessionName: "dev-impl@my-rig", hostSelfId, agentActivity: { state: "idle" }, activityState: null },
+        { logicalId: "dev.qa", canonicalSessionName: null, hostSelfId, activityState: null },
+      ] };
+      return { status: 404, data: {} };
+    });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const connectTo = async (rostersFolder: string) => {
+      const server = createMcpServer(mockClient({ get: getFn }), { rostersFolder: () => rostersFolder });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const client = new Client({ name: "test-client", version: "1.0.0" });
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      return { team: async () => (await client.callTool({ name: "rig_team", arguments: { rigId: "my-rig" } })).structuredContent as { hostedMembers: unknown[]; hostedMembersNote?: string },
+        close: async () => { await client.close(); await server.close(); } };
+    };
+    const blocked = path.join(folder, "a-file");
+    fs.writeFileSync(blocked, "not a folder");
+    const [here, unreachable] = [await connectTo(folder), await connectTo(path.join(blocked, "rosters"))];
+    try {
+      const found = await here.team();
+      expect(found.hostedMembers).toEqual([{ session: "grok@my-rig", roster: "research", capabilities: ["web research"], useWhen: "Current sources",
+        caveat: "Text only", pane: null, activity: "unknown" }]);
+      // A scoped caller gets a generic note; the file names and errors go to this server's log.
+      expect(found.hostedMembersNote).toBe("Some rosters couldn't be read, so hosted members may be missing.");
+      expect(log.mock.calls.flat().join(" ")).toContain("b.json");
+      // A folder that can't be inspected isn't "no rosters".
+      expect(await unreachable.team()).toMatchObject({ hostedMembers: [], hostedMembersNote: "Some rosters couldn't be read, so hosted members may be missing." });
+      // With this daemon's host id unknown (none on the nodes, none from health), it says so instead of listing none.
+      hostSelfId = null;
+      const unknown = await here.team();
+      expect(unknown.hostedMembers).toEqual([]);
+      expect(unknown.hostedMembersNote).toContain("host id isn't known");
+    } finally {
+      await here.close();
+      await unreachable.close();
+      log.mockRestore();
+      fs.rmSync(folder, { recursive: true, force: true });
+    }
   });
 
   it("the context reads return bounded summaries, cut long text and say so, and keep a route's hint as the message", async () => {

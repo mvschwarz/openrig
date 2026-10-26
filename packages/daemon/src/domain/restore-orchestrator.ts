@@ -287,6 +287,15 @@ export class RestoreOrchestrator {
     this.appliedLaunchStore = new AppliedLaunchObservationStore(deps.db);
   }
 
+  /** Read-only structural adapter check for a recorded native resume identity.
+   * Launch preparation and native existence checks remain on the execution path. */
+  canAttemptRecordedResume(runtime: string | null, resumeType: string | null, resumeToken: string | null): boolean {
+    if (typeof resumeToken !== "string" || !resumeToken.trim()) return false;
+    if (runtime === "codex") return resumeType === "codex_id" && this.codexResume.canResume(resumeType, resumeToken);
+    if (runtime === "claude-code") return this.claudeResume.canResume(resumeType, resumeToken);
+    return false;
+  }
+
   async restore(snapshotId: string, opts?: {
     adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>;
     fsOps?: { exists(path: string): boolean };
