@@ -303,7 +303,9 @@ your context, your compaction and your replacement — and it is the only thing 
   person received the escalation. **`overdue` and `undelivered` are the two halves of "is anything
   silently stuck", and a rig can be clean on one and rotten on the other.**
 - **`queue.wake_human_rung`** — when a seat can't be woken, the last escalation step posts to a
-  person. `rig config set queue.wake_human_rung explicit-only` (default `always`) keeps that post
+  person: the default person (`rig gateway default <id>`), or the only one registered. With several
+  registered and no default it reads `undeliverable:no-default-person` and posts to nobody.
+  `rig config set queue.wake_human_rung explicit-only` (default `always`) keeps that post
   for rows addressed to a person (an `@external` address or a registered human); the rest stop at
   `rig view show escalations`. A seat stuck at a prompt only a person can clear still reaches one,
   and an unreadable human registry posts everything. A seat held at a choice prompt that no hook
@@ -380,7 +382,8 @@ relay is a reason to inspect the available routing, not to surrender judgment to
   fallback, ambiguous human selection and unavailable reads remain distinct. An advisory
   before failure is not a requirement to keep every future role/model live. A failed read
   cannot establish no-match or silently route to a human. If human selection is needed,
-  inspect `rig gateway human list --json`; select `workspace.operator_seat_name` when ambiguous.
+  inspect `rig gateway human list --json`; when several people are registered, choose a default
+  with `rig gateway default <id>`, or name one in `workspace.operator_seat_name`, which is read first.
 - **`rig workflow show` / `trace`** — what this instance is, and every step, actor and exit that
   got it here.
 - **`rig workflow revise <instance>`** — compare the bound graph with current authored
