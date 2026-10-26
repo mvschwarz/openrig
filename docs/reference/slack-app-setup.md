@@ -182,6 +182,14 @@ rig slack channel-map remove pr@my-rig
   - **Answers come back to where the person asked.** A person's new message is the root of its
     answer: when the seat it reached replies with `--reply-to` that message's row, the answer and
     later updates land in the person's thread, in the channel they used.
+  - **One conversation, whoever writes.** Messages routed to the same continuing agent
+    conversation can use that conversation's earlier context, whoever sent them. A queue row
+    records who sent a message and which seat owns it; it doesn't start a separate agent
+    conversation. If people need separate conversations, route them to separate seats
+    (`--inbound` names the seat a channel's new messages reach). Separate channels help only when
+    their routing also keeps the conversations separate: new messages in a seat's own channel
+    still go to the inbound destination unless its entry names `--inbound`. A conversation shared
+    on purpose is fine.
   - Missed-message recovery (below) covers the default channel only.
 
 Invite the app to every mapped channel (`/invite @OpenRig`). `rig slack verify` checks
