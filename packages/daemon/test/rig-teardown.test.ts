@@ -69,8 +69,8 @@ describe("RigTeardownOrchestrator", () => {
   });
 
   it.skipIf(process.platform === "win32")("community contract: stop and down remove only their panes, leaving a sibling session untouched", async () => {
-    // macOS socket paths must fit sockaddr_un even when the suite's TMPDIR is long.
-    const socketDir = fs.mkdtempSync("/tmp/h1-stop-");
+    // Stay inside CI's IPC allowlist, with a short path for macOS sockaddr_un.
+    const socketDir = fs.mkdtempSync(path.join(os.tmpdir(), "h1-"));
     const socket = "community";
     const env = { ...process.env, TMUX_TMPDIR: socketDir };
     delete env.TMUX;
