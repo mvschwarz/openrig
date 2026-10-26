@@ -512,6 +512,25 @@ describe("an ask to a person is on Steering and the TUI; Slack gets it by their 
     expect(read.detail!.lines).toContain("Slack: posted (posted isn't read)");
   });
 
+  it("work for a hosted member, which nothing can wake, reaches the person: the sweep's finding is on Steering and posts to Slack", async () => {
+    registry = registryWith(); // the default subscription: every ask posts
+    const work = await repo.create({ sourceSession: "orch-lead@r", destinationSession: "grok@r", body: "hosted member work", nudge: false });
+    const wake = repo.classifyDestinationOf("grok@r");
+    expect(wake.class).toBe("unroutable");
+    if (wake.class === "unroutable") {
+      db.prepare("UPDATE queue_items SET last_nudge_attempt = ?, last_nudge_result = ? WHERE qitem_id = ?").run(new Date().toISOString(), wake.teaching, work.qitemId);
+    }
+    await runStuckSweep({ db, queueRepo: repo, status: createStuckSweepStatus(), resolveOrchestrator: () => null, unclaimedAgeMinutes: 60,
+      log: () => {}, isRegisteredHost: () => false, resolveOperatorSeat: () => `${HUMAN}@external`, resolveRecoveryAgentSeat: () => null });
+    const [finding] = repo.list({ limit: 500 }).filter((item) => (item.tags ?? []).includes(STUCK_SWEEP_FINDING_TAG));
+    expect(finding!.destinationSession).toBe(`${HUMAN}@external`);
+    expect(owner(finding!)).toMatchObject({ ownerNotificationKind: "human-required", ownerNotificationLevel: "ALERT" });
+    expect(onSteering()).toContain(finding!.qitemId);
+    await runGateway();
+    expect(posts).toHaveLength(1);
+    expect(JSON.stringify(posts)).toContain(`Stuck sweep: undelivered-wake on ${work.qitemId}`);
+  });
+
   it("--alert decides per item: an alerted ask handed to another person without --alert posts to them with no mention", async () => {
     registry = registryWith();
     const urgent = await ask({ alert: true });
