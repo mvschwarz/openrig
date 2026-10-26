@@ -54,6 +54,8 @@ describe("rig mcp serve --http --cloud-grants on the daemon's routes", () => {
   let cloudUrl: string;
   /** What the fake authority answers next: [HTTP status, body or raw text]. */
   let answer: () => [number, unknown];
+  /** A daemon route made to fail: its answer, or undefined to serve the request as usual. */
+  let broken: ((req: Request) => Response | undefined) | undefined;
   let asked: Array<{ headers: http.IncomingHttpHeaders; body: string }>;
   const closers: Array<() => Promise<void>> = [];
   const saved = { home: process.env.OPENRIG_HOME, session: process.env.OPENRIG_SESSION_NAME };
@@ -67,7 +69,9 @@ describe("rig mcp serve --http --cloud-grants on the daemon's routes", () => {
     process.env.OPENRIG_SESSION_NAME = "env-seat@elsewhere";
     repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
     setup = createTestApp(db, { appDeps: { queueRepo: repo, filesAllowlist: [{ name: "proof", canonicalPath: shared }] } });
-    daemon = await new Promise<ServerType>((resolve) => { const s = serve({ fetch: setup.app.fetch, port: 0, hostname: "127.0.0.1" }, () => resolve(s)); });
+    broken = undefined;
+    const fetchRoute = (...args: Parameters<typeof setup.app.fetch>) => broken?.(args[0]) ?? setup.app.fetch(...args);
+    daemon = await new Promise<ServerType>((resolve) => { const s = serve({ fetch: fetchRoute, port: 0, hostname: "127.0.0.1" }, () => resolve(s)); });
     daemonUrl = `http://127.0.0.1:${(daemon.address() as AddressInfo).port}`;
     setSelfHostId(INSTANCE);
     asked = [];
@@ -153,8 +157,8 @@ describe("rig mcp serve --http --cloud-grants on the daemon's routes", () => {
     expect(asked.length).toBe(before);
   });
 
-  it("records the Cloud grant's principal, with its grant id and version, on the rows its caller writes", async () => {
-    // This host's own daemon, provably: the id it minted (read from its database) is the id its /healthz answers with.
+  /** This host's own daemon, provably: the id it minted (read from its database) is the id its /healthz answers with. */
+  function thisHostsDaemon() {
     const identity = path.join(home, "identity.sqlite");
     const idDb = createDb(identity);
     idDb.exec("CREATE TABLE self_host_identity (singleton INTEGER PRIMARY KEY, host_id TEXT)");
@@ -162,6 +166,10 @@ describe("rig mcp serve --http --cloud-grants on the daemon's routes", () => {
     idDb.close();
     vi.stubEnv("OPENRIG_DB", identity);
     closers.push(async () => { vi.unstubAllEnvs(); });
+  }
+
+  it("records the Cloud grant's principal, with its grant id and version, on the rows its caller writes", async () => {
+    thisHostsDaemon();
     const asCustomer = await connect((await listen()).url);
     const created = await asCustomer("rig_queue_create", { destination: "lead@team-a", body: "attributed to the customer" });
     expect(created.isError).toBe(false);
@@ -210,6 +218,100 @@ describe("rig mcp serve --http --cloud-grants on the daemon's routes", () => {
       cloud = http.createServer();
       expect((await post(served.url, { Authorization: `Bearer ${KEY}` })).status).toBe(503);
       expect(rows()).toBe(0);
+    } finally {
+      quiet.mockRestore();
+    }
+  });
+
+  /** Seats created as `rig import --materialize-only` creates them, through the daemon's own route: nodes with no session
+   *  and no occupant. */
+  async function unlaunched(rigName: string, logicalIds: string[]) {
+    const pods = new Map<string, string[]>();
+    for (const id of logicalIds) {
+      const [pod, member] = id.split(".") as [string, string];
+      pods.set(pod, [...(pods.get(pod) ?? []), member]);
+    }
+    const spec = [`version: "0.2"`, `name: ${rigName}`, "pods:", ...[...pods].flatMap(([pod, members]) => [`  - id: ${pod}`, `    label: ${pod}`, "    members:",
+      ...members.flatMap((member) => [`      - id: ${member}`, '        agent_ref: "builtin:terminal"', "        profile: none", "        runtime: terminal", "        cwd: /tmp"]),
+      "    edges: []"]), "edges: []", ""].join("\n");
+    const res = await fetch(`${daemonUrl}/api/rigs/import/materialize`, { method: "POST", headers: { "Content-Type": "text/plain", "X-Rig-Root": "/tmp" }, body: spec });
+    expect(res.status).toBe(201);
+  }
+  /** A new rig of that name whose seats have no session, as a materialized rig's seats don't. */
+  function sessionless(rigName: string, ...logicalIds: string[]) {
+    const rig = setup.rigRepo.createRig(rigName);
+    for (const id of logicalIds) setup.rigRepo.addNode(rig.id, id, { role: "worker" });
+    return rig.id;
+  }
+  /** Cloud's active answer naming a seat in its own rig. */
+  const grantForSeat = (seat: string) => active({ seat, rigs: [seat.split("@")[1]] });
+  const count = (table: "sessions" | "nodes") => (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+
+  it("serves a seat that was created but never launched as the grant's seat, through a create and show, and creates or launches nothing", async () => {
+    thisHostsDaemon();
+    await unlaunched("cust-team", ["cus-vvmaexample02.caller", "workshop.lead"]);
+    const seat = "cus-vvmaexample02-caller@cust-team";
+    answer = () => [200, grantForSeat(seat)];
+    const before = { sessions: count("sessions"), nodes: count("nodes") };
+    const served = await listen();
+    expect((await post(served.url, { Authorization: `Bearer ${KEY}` })).status).toBe(200);
+    const asCustomer = await connect(served.url);
+    expect((await asCustomer.tools()).sort()).toEqual(["rig_artifact_read", "rig_queue_create", "rig_queue_list", "rig_queue_show"]);
+    const created = await asCustomer("rig_queue_create", { destination: "workshop-lead@cust-team", body: "please build it" });
+    expect(created.isError).toBe(false);
+    const shown = await asCustomer("rig_queue_show", { qitemId: created.structured.qitemId });
+    expect(shown.structured.item).toMatchObject({ qitemId: created.structured.qitemId, sourceSession: seat, destinationSession: "workshop-lead@cust-team" });
+    expect(db.prepare("SELECT identity_provenance AS p, identity_principal AS who FROM queue_transitions WHERE qitem_id = ?").get(created.structured.qitemId))
+      .toEqual({ p: "principal:v1", who: JSON.stringify({ source: "cloud", id: "cus_VVMAexample01", grant: "8977f2dc0000aaaa1111bbbb", version: 6 }) });
+    expect({ sessions: count("sessions"), nodes: count("nodes") }).toEqual(before);
+  });
+
+  it("a seat whoami doesn't know is here only as exactly one node of the one active rig of that name, and an unreadable registry is never the seat", async () => {
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const served = await listen();
+      const outcome = async (seat: string) => {
+        answer = () => [200, grantForSeat(seat)];
+        const res = await post(served.url, { Authorization: `Bearer ${KEY}` });
+        return [res.status, res.status === 200 ? "served" : ((await res.json()) as { error: string }).error];
+      };
+      const before = { sessions: count("sessions"), rows: rows() };
+      // No such node in the rig, no rig of that name, or only an archived rig's node: not here.
+      const rigOne = sessionless("rig-one", "cus-one.caller");
+      expect(await outcome("cus-one-other@rig-one")).toEqual([503, "seat_unavailable"]);
+      expect(await outcome("cus-one-caller@rig-none")).toEqual([503, "seat_unavailable"]);
+      setup.rigRepo.archiveRig(sessionless("rig-old", "cus-old.caller"));
+      expect(await outcome("cus-old-caller@rig-old")).toEqual([503, "seat_unavailable"]);
+      // An archived rig of the same name doesn't make the active one ambiguous.
+      sessionless("rig-old", "cus-old.caller");
+      expect(await outcome("cus-old-caller@rig-old")).toEqual([200, "served"]);
+      // Two active rigs of that name, or two nodes whose names derive alike: ambiguous, and neither is chosen.
+      sessionless("rig-two", "cus-two.caller");
+      sessionless("rig-two", "cus-two.caller");
+      expect(await outcome("cus-two-caller@rig-two")).toEqual([503, "grant_authority_unavailable"]);
+      sessionless("rig-dup", "cus-dup.caller", "cus.dup-caller");
+      expect(await outcome("cus-dup-caller@rig-dup")).toEqual([503, "grant_authority_unavailable"]);
+      // A rig list or node list that fails or reads malformed, or whoami failing, is refused: never the seat.
+      const failures: Array<[RegExp, () => Response]> = [
+        [/^\/api\/rigs\/summary$/, () => Response.json({ error: "down" }, { status: 500 })],
+        [/^\/api\/rigs\/summary$/, () => Response.json({ rigs: [] })],
+        // The real rig beside a malformed one, or the matching rig with no id or an archive mark of another kind: the list
+        // isn't whole, so it can't show the seat is there or unique.
+        [/^\/api\/rigs\/summary$/, () => Response.json([{ id: rigOne, name: "rig-one", archivedAt: null }, {}])],
+        [/^\/api\/rigs\/summary$/, () => Response.json([{ name: "rig-one", archivedAt: null }])],
+        [/^\/api\/rigs\/summary$/, () => Response.json([{ id: rigOne, name: "rig-one", archivedAt: 0 }])],
+        [/^\/api\/rigs\/[^/]+\/nodes$/, () => Response.json({ error: "down" }, { status: 500 })],
+        [/^\/api\/rigs\/[^/]+\/nodes$/, () => Response.json({ nodes: [] })],
+        [/^\/api\/rigs\/[^/]+\/nodes$/, () => Response.json([{ rigName: "rig-one" }])],
+        [/^\/api\/whoami$/, () => Response.json({ error: "down" }, { status: 500 })],
+      ];
+      for (const [route, response] of failures) {
+        broken = (req) => (route.test(new URL(req.url).pathname) ? response() : undefined);
+        expect(await outcome("cus-one-caller@rig-one"), String(route)).toEqual([503, "grant_authority_unavailable"]);
+      }
+      broken = undefined;
+      expect(await outcome("cus-one-caller@rig-one")).toEqual([200, "served"]);
+      expect({ sessions: count("sessions"), rows: rows() }).toEqual(before);
     } finally {
       quiet.mockRestore();
     }
