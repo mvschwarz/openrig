@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createMcpServer } from "../src/mcp-server.js";
+import { createMcpServer, type McpAccess } from "../src/mcp-server.js";
 import { DaemonClient, DaemonConnectionError, type DaemonResponse } from "../src/client.js";
 
 function mockClient(overrides?: {
@@ -999,6 +999,30 @@ describe("MCP Server", () => {
       expect(body.qitemId).toMatch(/^qitem-\d{14}-[0-9a-f]{16}$/);
       expect(body).not.toHaveProperty("sourceSession");
       await cleanup();
+    });
+
+    it("rig_queue_create drops OpenRig's provenance tags only from a Cloud customer's create and revision; other callers' pass as sent", async () => {
+      const sent = ["mission:m", "project:p", "custom", "founder-slack", "inbound", "shared-channel", "participant:acme", "slack-body:0123456789abcdef", "slack-attachments:39"];
+      const tagsSent = async (access?: McpAccess, revises?: string) => {
+        const postFn = vi.fn(async () => ({ status: 201, data: { qitemId: "qitem-1" } }));
+        const getFn = vi.fn(async () => ({ status: 200, data: { qitemId: "qitem-0", sourceSession: "cus-a1-caller@team", destinationSession: "lead@team" } }));
+        const server = createMcpServer(mockClient({ post: postFn, get: getFn }), { seat: "cus-a1-caller@team", access });
+        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+        const client = new Client({ name: "test-client", version: "1.0.0" });
+        await server.connect(serverTransport);
+        await client.connect(clientTransport);
+        const result = await client.callTool({ name: "rig_queue_create", arguments: { destination: "lead@team", body: "Do X", tags: sent, ...(revises ? { revises } : {}) } });
+        await client.close();
+        await server.close();
+        expect(result.isError).toBeUndefined();
+        return (postFn.mock.calls[0] as unknown as [string, Record<string, unknown>])[1].tags;
+      };
+      const work: McpAccess = { principal: "grok", owner: false, rigs: ["team"], roots: [], workspace: false };
+      const customer: McpAccess = { ...work, principal: "cus_A1", customer: { objects: { queue: ["create", "show", "list"] } } };
+      expect(await tagsSent()).toEqual(sent);
+      expect(await tagsSent(work)).toEqual(sent);
+      expect(await tagsSent(customer)).toEqual(["mission:m", "project:p", "custom"]);
+      expect(await tagsSent(customer, "qitem-0")).toEqual(["mission:m", "project:p", "custom"]);
     });
 
     it("rig_queue_create sends humanAlert only when alert is set, so an MCP-only agent can still raise a sign-in", async () => {
