@@ -27,23 +27,30 @@ export function buildTmuxControlFailure(message: string): { message: string; rea
 
 export type TmuxCaptureResult = { status: "pass" } | { status: "fail"; detail: string } | { status: "skipped"; detail: string };
 
+/** Each probe command's bound: a tmux that hangs instead of crashing must not hang the check that diagnoses it. */
+export const TMUX_CAPTURE_PROBE_TIMEOUT_MS = 5_000;
+
 /**
  * Whether this tmux can serve `capture-pane -p`, which OpenRig uses to read every agent's screen. A tmux whose server exits
  * on it fails every seat at launch (#980: Oracle Linux 10's packaged `next-3.4`, also outside OpenRig). It runs the
- * getting-started guide's check on a throwaway socket with no config, so the person's own sessions are never touched,
- * and always removes that server. A throwaway server that won't start is reported as not checked, not as a failure.
+ * getting-started guide's check on a throwaway socket with no config, so the person's own sessions are never touched.
+ * Every command is bounded, and the throwaway server always gets a cleanup attempt, even after a create that failed or
+ * timed out (it may have started anyway). A throwaway server that won't start is reported as not checked, not a failure.
  */
-export function probeTmuxCapture(exec: (cmd: string) => string, socket = `openrig-check-${process.pid}`): TmuxCaptureResult {
-  const tmux = `tmux -L ${socket} -f /dev/null`;
-  try { exec(`${tmux} new-session -d -s check`); }
-  catch (err) { return { status: "skipped", detail: errorMessage(err).trim() }; }
+export function probeTmuxCapture(exec: (cmd: string, opts: { timeoutMs: number }) => string,
+  socket = `openrig-check-${process.pid}`): TmuxCaptureResult {
+  const run = (args: string) => exec(`tmux -L ${socket} -f /dev/null ${args}`, { timeoutMs: TMUX_CAPTURE_PROBE_TIMEOUT_MS });
   try {
-    exec(`${tmux} capture-pane -p -t check`);
-    return { status: "pass" };
-  } catch (err) {
-    return { status: "fail", detail: errorMessage(err).trim() };
+    try { run("new-session -d -s check"); }
+    catch (err) { return { status: "skipped", detail: errorMessage(err).trim() }; }
+    try {
+      run("capture-pane -p -t check");
+      return { status: "pass" };
+    } catch (err) {
+      return { status: "fail", detail: errorMessage(err).trim() };
+    }
   } finally {
-    try { exec(`${tmux} kill-server`); } catch { /* the throwaway server already exited */ }
+    try { run("kill-server"); } catch { /* no throwaway server is left, or it already exited */ }
   }
 }
 
