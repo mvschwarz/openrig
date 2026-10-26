@@ -43,8 +43,9 @@ When a row needs a person's approval before the member can finish it, the member
 - **The row came from a seat, or from a shared channel:** the member asks as a new row, to that seat, or for a channel's row to its rig's
   lead (a shared channel takes correspondence and can't answer an ask). Then it sets its own row `blocked` on the new row's id. When the
   question closes, the member's row returns to pending.
-- **The ask must fit one Slack message:** a summary and row body too long for one message aren't posted, so a longer draft goes in
-  `evidenceRef`.
+- **Keep the question and action summary short.** A long row body continues as numbered thread replies, within the existing delivery
+  limits. Use an https `evidenceRef` for a longer approval draft. The summary and framing can still be too large, so nothing promises
+  unlimited delivery.
 
 Either way the row reads blocked, not done, while it waits, and the member finishes that same row. Nothing promises to wake the
 member, so it checks its rows again.
