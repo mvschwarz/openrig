@@ -114,7 +114,8 @@ async function driveEveryMethod(): Promise<RunCall[]> {
   await a.sendKeys(SESSION, ["Enter; rm -rf /", "C-c"]);
   await a.setWindowOption(SESSION, "@openrig x", "a b'c");
   await a.getWindowLocalOption(SESSION, "window-size");
-  await a.readCurrentWindow(SESSION, "@openrig-window-size-prior");
+  await a.readWindow(SESSION, "@openrig-window-size-prior");
+  await a.readWindow("@3", "@openrig-window-size-prior");
   await a.restoreWindowOption(SESSION, "window-size", "a b'c");
   await a.restoreWindowOption(SESSION, "window-size", null);
   await a.resizeWindow(SESSION, 120, 40);

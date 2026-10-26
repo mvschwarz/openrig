@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import * as fs from "node:fs";
+import { spawnSync } from "node:child_process";
 import {
   TerminalSessionBroker,
   TerminalBrokerRegistry,
@@ -800,12 +801,17 @@ describe("TerminalSessionBroker - per-subscriber scroll-back (OPR.0.4.0.39)", ()
 });
 
 // ---- the window's own sizing comes back when the broker lets go -------------
-// While a browser is subscribed the window is pinned (window-size manual). When the broker lets go, the window gets
-// back exactly what it had: its own value, or none so it inherits again, and native clients size it as before. The
-// window is named by its id, and what it had is recorded on the window, so a later broker gives back a lost pin.
+// While a browser is subscribed the window is pinned (window-size manual). When the last live holder lets go, the window
+// gets back exactly what it had: its own value, or none so it inherits again, and native clients size it as before. The
+// window is named by its id, and the pin is recorded on the window with its holders, so another live broker keeps it
+// and a later broker gives back a pin whose holders are gone.
 
 describe("TerminalSessionBroker - window sizing after the last viewer", () => {
-  /** One fake tmux window `@2`, the session's current window: its own window-size, the broker's record, every write. */
+  /** Holder tokens (`<pid>.<n>`) read as H. */
+  const norm = (value: string) => value.replace(/\b\d+\.\d+\b/g, "H");
+  const deadPid = spawnSync(process.execPath, ["-e", ""]).pid;
+
+  /** One fake tmux window `@2`, the session's current window: its own window-size, the pin record, every write. */
   function sizingTmux(own: string | null | undefined, overrides: Partial<BrokerTmux> = {}, recorded = "") {
     const window = { own, recorded };
     const calls: string[] = [];
@@ -816,10 +822,10 @@ describe("TerminalSessionBroker - window sizing after the last viewer", () => {
       return { ok: true as const };
     });
     const tmux = makeTmux({
-      readCurrentWindow: async () => ({ id: "@2", userOption: window.recorded }),
+      readWindow: async (target) => (target === "dev@rig" || target === "@2" ? { id: "@2", userOption: window.recorded } : null),
       getWindowLocalOption: async () => window.own,
       setWindowOption: async (target, option, value) => {
-        calls.push(`set:${target}:${option}=${value}`);
+        calls.push(norm(`set:${target}:${option}=${value}`));
         if (option === "window-size") window.own = value;
         else window.recorded = value;
         return { ok: true };
@@ -830,12 +836,17 @@ describe("TerminalSessionBroker - window sizing after the last viewer", () => {
     return { tmux, calls, window, restoreWindowOption };
   }
 
-  async function visit(tmux: BrokerTmux, extra: string[] = []): Promise<void> {
+  function broker(tmux: BrokerTmux, onEmpty?: () => void): TerminalSessionBroker {
+    return new TerminalSessionBroker("dev@rig", tmux, { pollMs: 10, onEmpty });
+  }
+
+  /** A viewer comes and goes; resolves once the broker is evicted. */
+  async function visit(tmux: BrokerTmux): Promise<void> {
     let empty = false;
-    const broker = new TerminalSessionBroker("dev@rig", tmux, { pollMs: 10, onEmpty: () => { extra.push("empty"); empty = true; } });
+    const b = broker(tmux, () => { empty = true; });
     const a = makeSub();
-    await broker.attach(a);
-    broker.detach(a);
+    await b.attach(a);
+    b.detach(a);
     await vi.waitFor(() => expect(empty).toBe(true));
   }
 
@@ -846,19 +857,19 @@ describe("TerminalSessionBroker - window sizing after the last viewer", () => {
     const resizeWindow = vi.fn(async () => ({ ok: true as const }));
     const { tmux, calls, window, restoreWindowOption } = sizingTmux(prior, { resizeWindow });
     const evicted: string[] = [];
-    const broker = new TerminalSessionBroker("dev@rig", tmux, { pollMs: 10, onEmpty: (n) => { calls.push("empty"); evicted.push(n); } });
+    const b = broker(tmux, () => { calls.push("empty"); evicted.push("dev@rig"); });
     const a = makeSub();
-    const b = makeSub();
-    await broker.attach(a);
-    await broker.attach(b);
+    const c = makeSub();
+    await b.attach(a);
+    await b.attach(c);
     expect(resizeWindow).toHaveBeenCalledWith("@2", 90, 27);
-    broker.detach(a);
+    b.detach(a);
     expect(restoreWindowOption).not.toHaveBeenCalled(); // a browser is still subscribed: still pinned
-    broker.detach(b);
+    b.detach(c);
     await vi.waitFor(() => expect(evicted).toEqual(["dev@rig"]));
     // Recorded on the window before the pin; given back, then the record dropped, before the registry lets a new broker read it.
     expect(calls).toEqual([
-      `set:@2:@openrig-window-size-prior=${prior ?? "inherit"}`,
+      `set:@2:@openrig-window-size-prior=${prior ?? "inherit"} H`,
       "set:@2:window-size=manual",
       `restore:@2:window-size=${prior}`,
       "restore:@2:@openrig-window-size-prior=null",
@@ -867,20 +878,63 @@ describe("TerminalSessionBroker - window sizing after the last viewer", () => {
     expect(window).toEqual({ own: prior, recorded: "" });
   });
 
+  it.each(["first", "second"])("two brokers on one window: the pin lasts until the last leaves, whichever leaves %s", async (order) => {
+    const { tmux, calls, window } = sizingTmux("largest");
+    const [first, second] = [broker(tmux), broker(tmux)];
+    const [a, c] = [makeSub(), makeSub()];
+    await first.attach(a);
+    await second.attach(c);
+    expect(norm(window.recorded)).toBe("largest H H");
+    const [leaves, stays] = order === "first" ? [[first, a], [second, c]] as const : [[second, c], [first, a]] as const;
+    leaves[0].detach(leaves[1]);
+    await vi.waitFor(() => expect(norm(window.recorded)).toBe("largest H"));
+    expect(window.own).toBe("manual"); // the other browser still watches: still pinned
+    expect(calls.filter((call) => call.startsWith("restore:"))).toEqual([]);
+    stays[0].detach(stays[1]);
+    await vi.waitFor(() => expect(window).toEqual({ own: "largest", recorded: "" }));
+  });
+
+  it("a pin held by a broker in another live daemon is kept; this broker only drops itself", async () => {
+    const { tmux, window, restoreWindowOption } = sizingTmux("manual", {}, `largest ${process.ppid}.7`);
+    await visit(tmux);
+    expect(restoreWindowOption).not.toHaveBeenCalled();
+    expect(window).toEqual({ own: "manual", recorded: `largest ${process.ppid}.7` });
+  });
+
   it.each([
     ["the window's own value", "largest", "largest" as string | null],
     ["none (inherited)", "inherit", null],
   ])("a pin a broker never gave back (a daemon restart or crash) is given back by the next broker: %s", async (_, record, prior) => {
     const { tmux, window } = sizingTmux(prior);
-    // The first broker's process ends before it can give anything back.
+    // The first broker's give-back never lands, as when its daemon stops.
     await visit({ ...tmux, restoreWindowOption: async () => ({ ok: true }) });
-    expect(window).toEqual({ own: "manual", recorded: record });
+    expect(norm(window.recorded)).toBe(`${record} H`);
+    expect(window.own).toBe("manual");
     await visit(tmux);
     expect(window).toEqual({ own: prior, recorded: "" });
   });
 
+  it("a pin whose holder's daemon is gone is given back by the next broker", async () => {
+    const { tmux, window } = sizingTmux("manual", {}, `largest ${deadPid}.1`);
+    await visit(tmux);
+    expect(window).toEqual({ own: "largest", recorded: "" });
+  });
+
+  it("a window that no longer lists this broker (a restarted tmux server reusing @2) is left alone", async () => {
+    const { tmux, window, restoreWindowOption } = sizingTmux("largest");
+    let empty = false;
+    const b = broker(tmux, () => { empty = true; });
+    const a = makeSub();
+    await b.attach(a);
+    Object.assign(window, { own: "smallest", recorded: "" }); // the new server's @2
+    b.detach(a);
+    await vi.waitFor(() => expect(empty).toBe(true));
+    expect(restoreWindowOption).not.toHaveBeenCalled();
+    expect(window).toEqual({ own: "smallest", recorded: "" });
+  });
+
   it("a window fixed by hand after a lost pin keeps what it has; the stale record is ignored", async () => {
-    const { tmux, window } = sizingTmux(null, {}, "largest");
+    const { tmux, window } = sizingTmux(null, {}, `largest ${deadPid}.1`);
     await visit(tmux);
     expect(window).toEqual({ own: null, recorded: "" });
   });
@@ -888,7 +942,11 @@ describe("TerminalSessionBroker - window sizing after the last viewer", () => {
   it("a give-back that fails keeps the record for the next broker", async () => {
     const { tmux, window } = sizingTmux("largest", { restoreWindowOption: async () => ({ ok: false, code: "unavailable", message: "busy" }) });
     await visit(tmux);
-    expect(window).toEqual({ own: "manual", recorded: "largest" });
+    expect(window.own).toBe("manual");
+    expect(norm(window.recorded)).toBe("largest H");
+    const next = sizingTmux("manual", {}, window.recorded); // its holder is no longer live
+    await visit(next.tmux);
+    expect(next.window).toEqual({ own: "largest", recorded: "" });
   });
 
   it("a window whose sizing couldn't be read is left as the broker set it", async () => {
@@ -898,28 +956,28 @@ describe("TerminalSessionBroker - window sizing after the last viewer", () => {
   });
 
   it("without a window id the session's window is pinned as before, and nothing is given back to another window", async () => {
-    const { tmux, calls, restoreWindowOption } = sizingTmux("largest", { readCurrentWindow: async () => null });
+    const { tmux, calls, restoreWindowOption } = sizingTmux("largest", { readWindow: async () => null });
     await visit(tmux);
     expect(calls).toEqual(["set:dev@rig:window-size=manual"]);
     expect(restoreWindowOption).not.toHaveBeenCalled();
   });
 
   it("a failed open gives the sizing back too", async () => {
-    const { tmux, restoreWindowOption } = sizingTmux(null, {
+    const { tmux, window } = sizingTmux(null, {
       startPipePane: async () => ({ ok: false, code: "session_not_found", message: "gone" }),
     });
     const a = makeSub();
-    await new TerminalSessionBroker("dev@rig", tmux, { pollMs: 10 }).attach(a);
+    await broker(tmux).attach(a);
     expect(a.closed[0]?.code).toBe(1011);
-    expect(restoreWindowOption).toHaveBeenCalledWith("@2", "window-size", null);
+    expect(window).toEqual({ own: null, recorded: "" });
   });
 
   it("a probe that couldn't reach tmux closes the viewers and still gives the sizing back, before eviction", async () => {
     let probes = 0;
     const { tmux, calls, window } = sizingTmux("largest", { hasSession: async () => probes++ === 0 });
-    const broker = new TerminalSessionBroker("dev@rig", tmux, { pollMs: 10, livenessMs: 10, onEmpty: () => calls.push("empty") });
+    const b = new TerminalSessionBroker("dev@rig", tmux, { pollMs: 10, livenessMs: 10, onEmpty: () => calls.push("empty") });
     const a = makeSub();
-    await broker.attach(a);
+    await b.attach(a);
     await vi.waitFor(() => expect(calls.at(-1)).toBe("empty"));
     expect(a.closed[0]?.code).toBe(1001);
     expect(calls.slice(-3)).toEqual(["restore:@2:window-size=largest", "restore:@2:@openrig-window-size-prior=null", "empty"]);
@@ -930,11 +988,9 @@ describe("TerminalSessionBroker - window sizing after the last viewer", () => {
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
     const { tmux, calls } = sizingTmux("largest");
-    const broker = new TerminalSessionBroker("dev@rig", { ...tmux, restoreWindowOption: async (...args) => { await held; return tmux.restoreWindowOption!(...args); } }, {
-      pollMs: 10, onEmpty: () => calls.push("empty"),
-    });
-    await broker.attach(makeSub());
-    const disposed = broker.dispose();
+    const b = broker({ ...tmux, restoreWindowOption: async (...args) => { await held; return tmux.restoreWindowOption!(...args); } }, () => calls.push("empty"));
+    await b.attach(makeSub());
+    const disposed = b.dispose();
     await new Promise((r) => setTimeout(r, 20));
     expect(calls).not.toContain("empty");
     release();
@@ -946,15 +1002,36 @@ describe("TerminalSessionBroker - window sizing after the last viewer", () => {
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
     const { tmux, calls, window } = sizingTmux("largest");
-    const broker = new TerminalSessionBroker("dev@rig", { ...tmux, getWindowLocalOption: async (...args) => { await held; return tmux.getWindowLocalOption!(...args); } }, { pollMs: 10 });
+    const b = broker({ ...tmux, getWindowLocalOption: async (...args) => { await held; return tmux.getWindowLocalOption!(...args); } });
     const a = makeSub();
-    const attached = broker.attach(a);
+    const attached = b.attach(a);
     await new Promise((r) => setTimeout(r, 20));
-    await broker.dispose();
+    const disposed = b.dispose();
     release();
-    await attached;
+    await Promise.all([attached, disposed]);
     expect(a.closed[0]?.code).toBe(1011);
     expect(calls).toEqual([]);
+    expect(window).toEqual({ own: "largest", recorded: "" });
+  });
+
+  it("a broker disposed while it records the pin finishes the pin, then gives it back before eviction", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const { tmux, calls, window } = sizingTmux("largest");
+    const b = broker({
+      ...tmux,
+      setWindowOption: async (target, option, value) => { if (option !== "window-size") await held; return tmux.setWindowOption(target, option, value); },
+    }, () => calls.push("empty"));
+    const a = makeSub();
+    const attached = b.attach(a);
+    await new Promise((r) => setTimeout(r, 20));
+    const disposed = b.dispose();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls).toEqual([]); // eviction waits for the open and its give-back
+    release();
+    await Promise.all([attached, disposed]);
+    expect(a.closed[0]?.code).toBe(1011);
+    expect(calls.at(-1)).toBe("empty");
     expect(window).toEqual({ own: "largest", recorded: "" });
   });
 });

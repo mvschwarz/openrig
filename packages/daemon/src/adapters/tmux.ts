@@ -1064,12 +1064,12 @@ export class TmuxAdapter {
     }
   }
 
-  /** A session's current window, read in one call: its immutable id (`@N`), which later commands can target after a
-   *  client switches windows, and the value of one of its user options (`@name`; "" when unset). Null when tmux can't
-   *  say, including when the session is gone. */
-  async readCurrentWindow(session: string, userOption: string): Promise<{ id: string; userOption: string } | null> {
+  /** The window a session name (its current window) or `@N` names, read in one call: its immutable id (`@N`), which
+   *  later commands can target after a client switches windows, and the value of one of its user options (`@name`; ""
+   *  when unset). Null when tmux can't say, including when the session or window is gone. */
+  async readWindow(target: string, userOption: string): Promise<{ id: string; userOption: string } | null> {
     if (!/^@[A-Za-z0-9_-]+$/.test(userOption)) return null;
-    const window = exactTarget(session, "window");
+    const window = exactTarget(target, "window");
     const format = `#{window_id}|#{${userOption}}`;
     try {
       const output = (await this.run(["tmux", "display-message", "-p", "-t", window, format],

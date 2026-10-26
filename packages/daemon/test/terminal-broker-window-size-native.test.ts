@@ -119,4 +119,49 @@ describe.skipIf(!available)("web terminal window sizing with a native client (re
     expect(await ownSizing("probe")).toBe("");
     await until(async () => (await size("probe")) === "150x45");
   });
+
+  it.each(["first", "second"])("two brokers on one window keep it pinned until the last leaves, whichever leaves %s", async (order) => {
+    const name = `two-${order}`;
+    await nativeSession(name, "largest");
+    const adapter = new TmuxAdapter(exec);
+    const empty = [false, false];
+    const brokers = [0, 1].map((i) => new TerminalSessionBroker(name, adapter, { pollMs: 20, livenessMs: 1000, onEmpty: () => { empty[i] = true; } }));
+    const browsers = [viewer(), viewer()];
+    await brokers[0].attach(browsers[0]);
+    await brokers[1].attach(browsers[1]);
+    const [leaving, staying] = order === "first" ? [0, 1] : [1, 0];
+    brokers[leaving].detach(browsers[leaving]);
+    await until(async () => empty[leaving]);
+    expect(await ownSizing(name)).toBe("manual"); // the other browser still watches
+    expect(await size(name)).toBe("90x27");
+    brokers[staying].detach(browsers[staying]);
+    await until(async () => empty[staying]);
+    expect(await ownSizing(name)).toBe("largest");
+    expect(await record(name)).toBe("");
+    await until(async () => (await size(name)) === "150x45");
+  });
+
+  it("after the tmux server restarts under a live broker, its give-back leaves the new server's window alone", async () => {
+    const sock = `${SOCK}-reborn`;
+    const t = async (...args: string[]): Promise<string> => (await pexec("tmux", ["-L", sock, ...args], { env })).stdout.trim();
+    const execOn = async (cmd: string): Promise<string> =>
+      (await pexec("sh", ["-c", cmd.startsWith("tmux ") ? `tmux -L ${sock} ${cmd.slice(5)}` : cmd], { env })).stdout;
+    try {
+      await t("new-session", "-d", "-s", "reborn", "-x", "120", "-y", "40");
+      let empty = false;
+      const broker = new TerminalSessionBroker("reborn", new TmuxAdapter(execOn), { pollMs: 20, livenessMs: 60000, onEmpty: () => { empty = true; } });
+      const browser = viewer();
+      await broker.attach(browser);
+      const pinned = await t("display-message", "-p", "-t", "=reborn:", "#{window_id}");
+      await t("kill-server");
+      await t("new-session", "-d", "-s", "reborn", "-x", "120", "-y", "40");
+      await t("set-option", "-w", "-t", "=reborn:", "window-size", "smallest");
+      expect(await t("display-message", "-p", "-t", "=reborn:", "#{window_id}")).toBe(pinned); // ids start again
+      broker.detach(browser);
+      await until(async () => empty);
+      expect(await t("show-options", "-w", "-v", "-t", pinned, "window-size")).toBe("smallest");
+    } finally {
+      await t("kill-server").catch(() => {});
+    }
+  });
 });
