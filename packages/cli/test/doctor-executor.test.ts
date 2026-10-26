@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { Command } from "commander";
 import { doctorCommand } from "../src/commands/doctor.js";
+import { TMUX_CAPTURE_PROBE_TIMEOUT_MS } from "../src/tmux-health.js";
 
 const fixture = vi.hoisted(() => ({ home: "", exec: vi.fn() }));
 vi.mock("node:child_process", async () => ({ ...await vi.importActual("node:child_process"), execSync: fixture.exec }));
@@ -45,12 +46,17 @@ afterEach(() => {
 });
 
 describe("doctor default executor", () => {
-  it("keeps existing probes unbounded while bounding only the new provider calls", async () => {
+  it("keeps existing probes unbounded while bounding only the new provider calls and the tmux capture probe", async () => {
     await new Command().addCommand(doctorCommand()).parseAsync(["node", "rig", "doctor", "--json"]);
     const body = JSON.parse(vi.mocked(console.log).mock.calls[0]![0] as string);
     expect(body.checks.find((check: { name: string }) => check.name === "tmux").status).toBe("pass");
     const calls = fixture.exec.mock.calls as Array<[string, { timeout?: number }]>;
-    const prior = calls.filter(([command]) => !/^(claude|codex) /.test(command));
+    // #980's capture probe runs on its own throwaway socket, and every one of its commands is bounded.
+    const capture = calls.filter(([command]) => command.includes(" -L openrig-check-"));
+    expect(capture.map(([command]) => command.replace(/openrig-check-\d+/, "openrig-check-N"))).toEqual([
+      "tmux -L openrig-check-N -f /dev/null new-session -d -s check", "tmux -L openrig-check-N -f /dev/null kill-server"]);
+    expect(capture.every(([,options]) => options.timeout === TMUX_CAPTURE_PROBE_TIMEOUT_MS)).toBe(true);
+    const prior = calls.filter(([command]) => !/^(claude|codex) /.test(command) && !command.includes(" -L openrig-check-"));
     expect(prior.some(([command]) => command === "tmux list-sessions")).toBe(true);
     expect(prior.every(([,options]) => !Object.hasOwn(options, "timeout"))).toBe(true);
     const auth = calls.filter(([command]) => /^(claude|codex) /.test(command));
